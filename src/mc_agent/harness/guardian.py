@@ -70,6 +70,11 @@ class GenerationGuard:
         for _ in range(5):
             page = self.bot.call("events", method="GET", params={"since": self.cursor, "limit": 100})
             rows = [e for e in page.get("events", []) if int(e.get("seq", 0)) > self.cursor]
+            rec_fn = getattr(self.bot.bot, "record_death_event", None)
+            if callable(rec_fn):
+                for ev in rows:
+                    if str(ev.get("type") or "").lower() == "death":
+                        rec_fn(ev.get("seq") if ev.get("seq") is not None else ev.get("t"))
             fresh.extend(rows)
             self.cursor = max([self.cursor, int(page.get("last_seq", 0))] + [int(e.get("seq", 0)) for e in rows])
             if not page.get("has_more") or not rows:
@@ -208,7 +213,13 @@ class GenerationGuard:
             or status.get("alive") is False
             or any(r != "needs_food" for r in reasons)
         )
-        post_status = self.bot.status()
+        try:
+            post_status = self.bot.status()
+        except (ApiError, httpx.HTTPError):
+            post_status = {**status, "ready": False, "alive": False, "busy": None}
+            if "death_or_connection_changed" not in reasons:
+                reasons.append("death_or_connection_changed")
+            replan = True
         if actions:
             try:
                 post_fresh = self._drain_events_pages()

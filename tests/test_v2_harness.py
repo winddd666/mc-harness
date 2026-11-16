@@ -2902,6 +2902,360 @@ def test_early_run_friction_fixes_max_tokens_stick_mine_dedup_and_mature(
     assert find_payloads[-1]["mature"] is True
 
 
+def test_death_loop_cooldown_recovery_guard_status_and_api_error_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mc_agent.errors import ApiError
+    from mc_agent.harness.agent import run_mc_agent
+    from mc_agent.harness.events import EventSink
+    from mc_agent.harness.guardian import GenerationGuard
+
+    clock = [500.0]
+    monkeypatch.setattr("mc_agent.bot.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.bot.time.sleep", lambda dt: clock.__setitem__(0, clock[0] + float(dt)))
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+
+    # 1) GenerationGuard.poll() degrades cleanly when post_status() hits not_connected after reflex
+    guard_calls = {"status": 0}
+
+    def guard_handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            guard_calls["status"] += 1
+            if guard_calls["status"] == 1:
+                return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "health": 10.0, "food": 20, "ready": True, "alive": True, "on_ground": True}})
+            return httpx.Response(200, json={"ok": False, "error": {"code": "not_connected", "message": "kicked"}})
+        if path == "/events":
+            return httpx.Response(200, json={"ok": True, "result": {"last_seq": 2, "events": [{"seq": 2, "type": "hurt", "health": 10.0, "source": "arrow", "source_entity": {"id": 99}}]}})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": "shield", "count": 1}]}})
+        if path in ("/look", "/posture"):
+            return httpx.Response(200, json={"ok": True, "result": {"blocking": True}})
+        raise AssertionError(path)
+
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(guard_handler)) as bot_g:
+        bot_g._last_event_seq = 1
+        guard = GenerationGuard(bot_g, EventSink(lambda _: None), checkpoint=lambda: None)
+        inc = guard.poll()
+    assert inc is not None
+    assert inc["status"]["ready"] is False
+    assert "death_or_connection_changed" in inc["reasons"]
+    assert inc["requires_replan"] is True
+
+    # 2) run_mc_agent auto-waits death_loop_cooldown and recovers without aborting the run
+    cd_state = {"kicked": True, "connects": 0}
+
+    def cd_handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/events":
+            return httpx.Response(200, json={"ok": True, "result": {"events": [], "last_seq": 0}})
+        if path == "/connect":
+            cd_state["connects"] += 1
+            if cd_state["connects"] == 1:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "death_loop_cooldown", "message": "cooldown", "cooldown_remaining_seconds": 3}})
+            cd_state["kicked"] = False
+            return httpx.Response(200, json={"ok": True, "result": {"connected": True}})
+        if path == "/status":
+            if cd_state["kicked"]:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_connected", "message": "bot not connected"}})
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "ready": True, "alive": True}})
+        if path == "/inventory":
+            if cd_state["kicked"]:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_connected", "message": "bot not connected"}})
+            return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": "iron_pickaxe", "count": 1}], "empty_slots": 35}})
+        raise AssertionError(path)
+
+    cd_turns = 0
+
+    def cd_chat(messages, tools=None, **kwargs):
+        nonlocal cd_turns
+        cd_turns += 1
+        if cd_turns == 1:
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "mc_inventory", "arguments": "{}"}}],
+            }
+        last_tool = next(m for m in reversed(messages) if m.get("role") == "tool")
+        assert '"iron_pickaxe"' in last_tool["content"]
+        return {"role": "assistant", "content": "冷却重连恢复，继续任务。"}
+
+    cd_events: list[dict[str, Any]] = []
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(cd_handler)) as bot_cd:
+        rep = run_mc_agent(
+            "test cooldown",
+            bot_cd,
+            chat_fn=cd_chat,
+            max_calls=4,
+            survival_guard=False,
+            include_initial_snapshot=False,
+            on_event=cd_events.append,
+        )
+    assert rep["status"] == "answered"
+    assert cd_state["connects"] == 2
+    assert any(e["type"] == "bot.cooldown_wait" and e["reason"] == "death_loop_cooldown" for e in cd_events)
+
+    # 3) Direct ApiError escaping run_mc_agent sets runtime_error in run.finished instead of leaving "running"
+    err_events: list[dict[str, Any]] = []
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(cd_handler)) as bot_err:
+        rep_err = run_mc_agent(
+            "fail api",
+            bot_err,
+            chat_fn=lambda *a, **kw: (_ for _ in ()).throw(ApiError("not_connected", "boom")),
+            max_calls=2,
+            survival_guard=False,
+            include_initial_snapshot=False,
+            on_event=err_events.append,
+        )
+    assert rep_err["status"] == "runtime_error"
+    finished_ev = [e for e in err_events if e["type"] == "run.finished"][-1]
+    assert finished_ev["status"] == "runtime_error"
+
+
+def test_target_drop_verification_cobble_cap_turn_away_and_jump_pickup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda _: None)
+
+    base_items = (
+        [{"name": "iron_pickaxe", "count": 1, "slot": 9}]
+        + [{"name": "cobblestone", "count": 64, "slot": 10 + i} for i in range(14)]
+        + [{"name": "cobblestone", "count": 4, "slot": 24}]
+        + [{"name": "stone_sword", "count": 1, "slot": 25 + i} for i in range(15)]
+    )
+    state_a: dict[str, Any] = {
+        "items": list(base_items),
+        "actions": [],
+        "drops": [],
+        "moves": [],
+        "controls": [],
+        "pickup_raw_iron": False,
+        "entities": [
+            {"id": 10, "item": "dirtx64", "pos": [0.5, 40.0, 0.5], "dist": 0.2},
+            {"id": 11, "item": "cobblestonex64", "pos": [0.5, 40.0, 0.5], "dist": 0.3},
+        ],
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        action = req.url.path.rsplit("/", 1)[-1]
+        body = json.loads(req.content) if req.content else {}
+        state_a["actions"].append((action, body))
+        if action == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 40.0, 0.5], "yaw": 0.0, "in_water": False, "alive": True}})
+        if action == "inventory":
+            items = list(state_a["items"])
+            return httpx.Response(200, json={"ok": True, "result": {"items": items, "empty_slots": max(0, 36 - len(items))}})
+        if action == "look":
+            return httpx.Response(200, json={"ok": True, "result": {"yaw": body["yaw"]}})
+        if action == "drop":
+            dname = body["item"]
+            dcnt = int(body["count"])
+            state_a["drops"].append((dname, dcnt))
+            rem = dcnt
+            new_items = []
+            for row in state_a["items"]:
+                if row["name"] == dname and rem > 0:
+                    take = min(rem, int(row["count"]))
+                    rem -= take
+                    left = int(row["count"]) - take
+                    if left > 0:
+                        new_items.append({**row, "count": left})
+                else:
+                    new_items.append(row)
+            state_a["items"] = new_items
+            return httpx.Response(200, json={"ok": True, "result": {"dropped": dname, "count": dcnt}})
+        if action == "equip":
+            return httpx.Response(200, json={"ok": True, "result": {"held": {"name": body["item"]}}})
+        if action == "find_blocks":
+            return httpx.Response(200, json={"ok": True, "result": {"blocks": [{"name": "iron_ore", "pos": [2, 41, 0], "dist": 2.0}]}})
+        if action == "dig":
+            return httpx.Response(200, json={"ok": True, "result": {"dug": "iron_ore", "gained": {"dirt": 1}}})
+        if action == "get_entities":
+            return httpx.Response(200, json={"ok": True, "result": {"entities": list(state_a["entities"])}})
+        if action == "move_to":
+            state_a["moves"].append(dict(body))
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 40.0, 0.5]}})
+        if action == "control":
+            state_a["controls"].append(dict(body))
+            if state_a["pickup_raw_iron"] and body.get("forward") and body.get("jump"):
+                state_a["items"].append({"name": "raw_iron", "count": 1, "slot": 20})
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1.5, 41.0, 0.5]}})
+        raise AssertionError(action)
+
+    # A) Cobble capped <=192 after turning away (look yaw=pi); incidental dirt does NOT yield ok=True
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot_mine:
+        skills_mine = MacroSkills(bot_mine)
+        res_a = skills_mine.mine_blocks(["iron_ore"], count=1, radius=16)
+
+    look_idx = next(i for i, (act, _) in enumerate(state_a["actions"]) if act == "look")
+    drop_idx = next(i for i, (act, _) in enumerate(state_a["actions"]) if act == "drop")
+    assert look_idx < drop_idx
+    assert abs(state_a["actions"][look_idx][1]["yaw"] - math.pi) < 1e-4
+    cobble_left = sum(int(r["count"]) for r in state_a["items"] if r["name"] == "cobblestone")
+    assert cobble_left <= 192
+    assert state_a["moves"] == []  # Auto-dropped clutter dirt/cobblestone at feet were skipped
+    assert res_a["ok"] is False
+    assert res_a["error"] == "no_drops_collected"
+    assert res_a["incidental_gained"] == {"dirt": 1}
+
+    # B) Elevated raw_iron in 1x1 alcove (dy=+1.2) skips closer dirtx64, jumps to collect, and returns ok=True
+    state_a["items"] = list(base_items)
+    state_a["drops"].clear()
+    state_a["moves"].clear()
+    state_a["controls"].clear()
+    state_a["pickup_raw_iron"] = True
+    state_a["entities"] = [
+        {"id": 20, "item": "dirtx64", "pos": [0.5, 40.0, 0.5], "dist": 0.2},
+        {"id": 21, "item": "raw_ironx1", "pos": [2.0, 41.2, 0.5], "dist": 1.9},
+    ]
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot_mine_b:
+        res_b = MacroSkills(bot_mine_b).mine_blocks(["iron_ore"], count=1, radius=16)
+    assert all(m.get("entity_id") != 20 for m in state_a["moves"])
+    assert any(c.get("forward") is True and c.get("jump") is True for c in state_a["controls"])
+    assert res_b["ok"] is True
+    assert res_b["target_gained"] == {"raw_iron": 1}
+
+
+def test_night_double_death_triggers_emergency_shelter_before_third_death(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mc_agent.harness.agent import run_mc_agent
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.bot.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda dt: clock.__setitem__(0, clock[0] + float(dt)))
+
+    world_state: dict[str, Any] = {
+        "pos": [0.5, 70.0, 0.5],
+        "on_ground": True,
+        "placed": [],
+        "dug": [],
+        "seq_calls": 0,
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        body = json.loads(req.content) if req.content else {}
+        if path == "/events":
+            since = int(req.url.params.get("since", 0)) if req.method == "GET" else int(body.get("since", 0))
+            world_state["seq_calls"] += 1
+            if since == 0 and world_state["seq_calls"] == 1:
+                return httpx.Response(200, json={"ok": True, "result": {"events": [], "last_seq": 0}})
+            if since < 2:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "result": {
+                            "last_seq": 2,
+                            "events": [
+                                {"seq": 1, "type": "death", "pos": [0, 70, 0], "cause": "mob_attack"},
+                                {"seq": 2, "type": "death", "pos": [1, 70, 1], "cause": "mob_attack"},
+                            ],
+                        },
+                    },
+                )
+            return httpx.Response(200, json={"ok": True, "result": {"events": [], "last_seq": 2}})
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "pos": list(world_state["pos"]),
+                        "health": 20,
+                        "food": 20,
+                        "is_day": False,
+                        "alive": True,
+                        "ready": True,
+                        "on_ground": world_state["on_ground"],
+                    },
+                },
+            )
+        if path == "/inventory":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "items": [
+                            {"name": "cobblestone", "count": 32, "slot": 9},
+                            {"name": "stone_pickaxe", "count": 1, "slot": 10},
+                        ],
+                        "empty_slots": 34,
+                    },
+                },
+            )
+        if path == "/get_entities":
+            return httpx.Response(200, json={"ok": True, "result": {"entities": []}})
+        if path == "/find_blocks":
+            return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
+        if path == "/advancements":
+            return httpx.Response(200, json={"ok": True, "result": {"advancements": [], "summary": {"completed": 0}}})
+        if path == "/get_block":
+            pt = tuple(int(v) for v in body["pos"])
+            if pt in world_state["placed"]:
+                return httpx.Response(200, json={"ok": True, "result": {"name": "cobblestone", "diggable": True}})
+            if pt in world_state["dug"]:
+                return httpx.Response(200, json={"ok": True, "result": {"name": "air", "diggable": False}})
+            if pt[1] >= 70:
+                return httpx.Response(200, json={"ok": True, "result": {"name": "air", "diggable": False}})
+            return httpx.Response(200, json={"ok": True, "result": {"name": "stone", "diggable": True}})
+        if path == "/control":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": list(world_state["pos"])}})
+        if path == "/equip":
+            return httpx.Response(200, json={"ok": True, "result": {"held": {"name": body["item"]}}})
+        if path == "/dig":
+            pt = tuple(int(v) for v in body["pos"])
+            world_state["dug"].append(pt)
+            if pt == (0, 69, 0):
+                world_state["pos"] = [0.5, 69.0, 0.5]
+            elif pt == (0, 68, 0):
+                world_state["pos"] = [0.5, 68.0, 0.5]
+            elif pt == (0, 67, 0):
+                world_state["pos"] = [0.5, 67.0, 0.5]
+            return httpx.Response(200, json={"ok": True, "result": {"dug": "stone"}})
+        if path == "/place":
+            world_state["placed"].append(tuple(int(v) for v in body["pos"]))
+            return httpx.Response(200, json={"ok": True, "result": {"placed": body["item"]}})
+        raise AssertionError(path)
+
+    turn_num = 0
+    seen_shelter_msg = False
+
+    def chat(messages, tools=None, **kwargs):
+        nonlocal turn_num, seen_shelter_msg
+        turn_num += 1
+        if turn_num == 1:
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "s1", "type": "function", "function": {"name": "mc_status", "arguments": "{}"}}],
+            }
+        seen_shelter_msg = any("[防死亡循环保护]" in str(m.get("content") or "") for m in messages)
+        return {"role": "assistant", "content": "已在掩体安全躲过 60s 连死窗口。"}
+
+    run_events: list[dict[str, Any]] = []
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot_s:
+        rep = run_mc_agent(
+            "survive night",
+            bot_s,
+            chat_fn=chat,
+            max_calls=4,
+            survival_guard=True,
+            include_initial_snapshot=False,
+            on_event=run_events.append,
+        )
+    assert rep["status"] == "answered"
+    assert seen_shelter_msg is True
+    shelter_evs = [e for e in run_events if e["type"] == "guardian.death_loop_shelter"]
+    assert len(shelter_evs) == 1
+    assert shelter_evs[0]["sheltered"] is True
+    assert shelter_evs[0]["held_s"] == 55.0
+    assert clock[0] >= 1055.0
+
+
 
 
 

@@ -22,29 +22,30 @@
 
 ## 2. Phase 1 底座收口待办（确定性代码层修复，0 LLM 开销）
 
-### 2.1 已在本地代码库修复并单测通过（待下次重启 `mc-console` 生效）
+> **Phase 1 状态**：✅ 已完成封存（Tag `phase1-frozen`，含所有底座卡死、掉落物精准核验、冷却重连与夜间防连死补丁，通过全量离线单测）。
+
+### 2.1 早盘热修复与限长调整（已合入并生效）
 - [x] 思考内容展示热修复：`mc-live`（`state.py` + `live/static/app.js`）输出 `[思考]` 区块并支持 `scripts/mc_services.sh restart-live`；`mc-console`（`console/static/app.js`）默认展开 `💭 模型思考规划`（`mc-live` 已重启上线 `b99a827960648379`）。
 - [x] 思考模式输出上限防截断：`QwenModel.chat(..., enable_thinking=True)` 时将 `max_tokens` 下限从 `2048` 提至 `4096`（[`src/mc_agent/harness/model.py`](../src/mc_agent/harness/model.py)）。
 - [x] `craft_gear("stick")` 原木转木板修复（[`src/mc_agent/skills/library.py`](../src/mc_agent/skills/library.py)）。
 - [x] `mine_blocks` 零目标提示明确化 + `_RepeatFailureGuard` 对 `mc_skill_mine_blocks` 忽略 `count`/`radius` 签名去重（[`src/mc_agent/harness/agent.py`](../src/mc_agent/harness/agent.py)）。
 - [x] `mc_find_blocks` 对非作物目标自动剥离 `mature` 参数（[`src/mc_agent/harness/mc_tools.py`](../src/mc_agent/harness/mc_tools.py)）。
 
-### 2.2 Run #2 新抓出的底座必修待办（优先落地）
+### 2.2 Run #2 新抓出的底座必修待办（已于 Phase 1 封存前全部完成）
 
-1. **`[P0] 断线与 `death_loop_cooldown` 自动等待重连（`agent.py` & `bot.py`）**
-   - [ ] 在 `run_mc_agent()` 主循环中显式捕获 `ApiError`（尤其是 `not_connected` 与 `death_loop_cooldown`）；
-   - [ ] 若为 `death_loop_cooldown`，自动休眠等待冷却到期（~5 分钟）再调 `bot.ensure_ready()` 恢复会话；若为一般 `not_connected`，遵守 ≥30s 间隔等待 `ensure_ready()`；
-   - [ ] 确保 `finally` 在未预料异常路径下正确更新 `report["status"] = "runtime_error"`，避免 `run.finished` 事件错写 `"running"`。
+1. **`[P0] 断线与 `death_loop_cooldown` 自动等待重连（`bot.py` / `guardian.py` / `mc_tools.py` / `agent.py`）**
+   - [x] 新增 `BotSession.ensure_connected_and_ready` 与 60 秒死亡去重窗口 `record_death_event` / `recent_deaths_in_window`；
+   - [x] `run_mc_agent()` 显式捕获 `ApiError` 并开启 `McToolset(wait_for_cooldown=True)`，自动等待 30s 重连间隔或 `death_loop_cooldown` 到期后重连继续；
+   - [x] `GenerationGuard.poll()` 捕获动作后 `status()` 断线异常平滑交回重决策，且 `finally` 兜底修正 `run.finished` 的 `status="runtime_error"`（不再错写 `"running"`）。
 
-2. **`[P0] 夜间重生点防连死保护（`guardian.py` / `library.py`）**
-   - [ ] 维护滚动 60 秒死亡时间戳窗口；
-   - [ ] 当处于夜晚露天重生（`is_day=False`）或 60s 内已累计死亡 ≥ 1–2 次时，优先触发 `dig_safety_bunker` 就地掩体避险或先钻入地下，阻止在出生点 60s 内连续送死触发第 3 死 5 分钟踢线冷却。
+2. **`[P0] 夜间重生点防连死保护（`library.py` & `agent.py`）**
+   - [x] 新增 `MacroSkills.emergency_death_loop_shelter`，当 60 秒滚动窗口内累计死亡 ≥ 2 次时自动建造封闭掩体并等待窗口安全清零，注入 `[防死亡循环保护]` 强制提示直接向下掘进；单次夜间死亡注入 `[夜间重生预警]`。
 
 3. **`[P1] 掉落物识别、定向拾取与防回吸 4 步根治（`src/mc_agent/skills/library.py`）**
-   - [ ] **按方块预期掉落物族校验真成功**：建立 `EXPECTED_BLOCK_DROPS`（如 `iron_ore / deepslate_iron_ore -> {"raw_iron", "iron_ore", "deepslate_iron_ore"}`、`diamond_ore / deepslate_diamond_ore -> {"diamond", ...}`）；`_dig_target_blocks` 将增益拆为 `target_gained` 与 `incidental_gained`，**仅当 `target_gained` 达标才返回 `ok: true`**，单块挖掘后若 `target_gained` 未增立即定向搜捡。
-   - [ ] **定向白名单拾取 + 刚丢杂物黑名单**：`_collect_nearby_items` 增加 `target_items` 白名单与按 `_HIGH_VALUE_DROPS` 价值排序（不再按距离前 `5` 死排导致脚边垃圾占满名额），并跳过本轮 `auto_dropped` 刚丢出的物品名称。
-   - [ ] **岩壁 `1×1` 凹槽卡物跳吸微操**：当目标高价值掉落物距离在 `1.0–2.4m` 且 `0 < dy <= 1.8` 未吸到时，调用 `look` 朝向掉落物执行 `control(forward=True, jump=True, ms=400)` 跳吸，或顺手挖掉凹槽上方挡头 1 格普通石块。
-   - [ ] **圆石封顶配额与背向丢弃**：将圆石 + 深板岩圆石保留上限收紧为 `192` 块（3 组），触发 Auto-Trash 时一次腾出 `min_free >= 8` 空槽，并在 `drop` 前先 `look` 转向背离前进/目标矿脉的一侧避免立即回吸。
+   - [x] **按方块预期掉落物族校验真成功**：建立 `EXPECTED_BLOCK_DROPS` 与 `_expected_drops_for_blocks`，`_dig_target_blocks` 将增益拆为 `target_gained` 与 `incidental_gained`，仅当 `target_gained` 入包才返回 `ok: true`，路过误吸杂物触发定向搜捡并在未获目标产物时准确返回 `no_drops_collected`。
+   - [x] **定向白名单拾取 + 刚丢杂物黑名单**：`_collect_nearby_items` 按 `target_items` 与价值排序，跳过 `auto_dropped` 刚丢出的物品与低优废石。
+   - [x] **岩壁 `1×1` 凹槽卡物跳吸微操**：对高台/矿窝（`0.75 < dy <= 1.85`、`hdist <= 2.4`）自动朝向掉落物执行 `control(forward=True, jump=True)` 跳吸。
+   - [x] **圆石封顶配额与背向丢弃**：清杂 `min_free=8`，将圆石 + 深板岩圆石总留存上限压回 `<= 192`（3 组），且首次 `drop` 前先调 `look(yaw=yaw + pi)` 背离当前面朝方向抛出避免回吸。
 
 ---
 

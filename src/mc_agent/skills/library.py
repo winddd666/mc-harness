@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any
+from typing import Any, Callable
 
 from ..bot import BotSession
 from ..errors import ApiError
@@ -93,6 +93,45 @@ ORE_COUNTERPARTS: dict[str, str] = {
     "emerald_ore": "deepslate_emerald_ore",
     "deepslate_emerald_ore": "emerald_ore",
 }
+
+EXPECTED_BLOCK_DROPS: dict[str, frozenset[str]] = {
+    "iron_ore": frozenset({"raw_iron", "iron_ore", "deepslate_iron_ore"}),
+    "deepslate_iron_ore": frozenset({"raw_iron", "iron_ore", "deepslate_iron_ore"}),
+    "diamond_ore": frozenset({"diamond", "diamond_ore", "deepslate_diamond_ore"}),
+    "deepslate_diamond_ore": frozenset({"diamond", "diamond_ore", "deepslate_diamond_ore"}),
+    "coal_ore": frozenset({"coal", "coal_ore", "deepslate_coal_ore"}),
+    "deepslate_coal_ore": frozenset({"coal", "coal_ore", "deepslate_coal_ore"}),
+    "copper_ore": frozenset({"raw_copper", "copper_ore", "deepslate_copper_ore"}),
+    "deepslate_copper_ore": frozenset({"raw_copper", "copper_ore", "deepslate_copper_ore"}),
+    "gold_ore": frozenset({"raw_gold", "gold_ore", "deepslate_gold_ore"}),
+    "deepslate_gold_ore": frozenset({"raw_gold", "gold_ore", "deepslate_gold_ore"}),
+    "nether_gold_ore": frozenset({"gold_nugget", "nether_gold_ore"}),
+    "lapis_ore": frozenset({"lapis_lazuli", "lapis_ore", "deepslate_lapis_ore"}),
+    "deepslate_lapis_ore": frozenset({"lapis_lazuli", "lapis_ore", "deepslate_lapis_ore"}),
+    "redstone_ore": frozenset({"redstone", "redstone_ore", "deepslate_redstone_ore"}),
+    "deepslate_redstone_ore": frozenset({"redstone", "redstone_ore", "deepslate_redstone_ore"}),
+    "emerald_ore": frozenset({"emerald", "emerald_ore", "deepslate_emerald_ore"}),
+    "deepslate_emerald_ore": frozenset({"emerald", "emerald_ore", "deepslate_emerald_ore"}),
+    "nether_quartz_ore": frozenset({"quartz", "nether_quartz_ore"}),
+    "stone": frozenset({"cobblestone", "stone"}),
+    "deepslate": frozenset({"cobbled_deepslate", "deepslate"}),
+    "grass_block": frozenset({"dirt", "grass_block"}),
+    "gravel": frozenset({"gravel", "flint"}),
+    "clay": frozenset({"clay_ball", "clay"}),
+    "glowstone": frozenset({"glowstone_dust", "glowstone"}),
+    "amethyst_cluster": frozenset({"amethyst_shard", "amethyst_cluster"}),
+}
+
+
+def _expected_drops_for_blocks(block_types: list[str] | tuple[str, ...]) -> frozenset[str]:
+    """Return expected inventory item names produced when harvesting `block_types`."""
+    expected: set[str] = set()
+    for raw_b in block_types:
+        b = str(raw_b).removeprefix("minecraft:").strip().lower()
+        if not b:
+            continue
+        expected.update(EXPECTED_BLOCK_DROPS.get(b, (b,)))
+    return frozenset(expected)
 
 # Recipes requiring a 3x3 crafting table.
 TABLE_RECIPES: set[str] = {
@@ -932,6 +971,8 @@ class MacroSkills:
         self,
         min_free: int = 3,
         inv_snapshot: dict[str, Any] | None = None,
+        *,
+        turn_away_yaw: float | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Drop low-value clutter deterministically when inventory is nearly full (< min_free empty slots)."""
         inv = inv_snapshot if isinstance(inv_snapshot, dict) else self.bot.inventory()
@@ -941,12 +982,12 @@ class MacroSkills:
         if empty_now >= min_free:
             return inv, []
 
+        max_drop_ops = 12
         dropped: list[dict[str, Any]] = []
         drop_ops = 0
+        turned_away = False
         for _pass_idx in range(2):
             empty_now = _compute_empty_slots(inv)
-            if empty_now >= min_free or drop_ops >= 8:
-                break
             rows = [
                 r
                 for r in (inv.get("items") or [])
@@ -960,6 +1001,10 @@ class MacroSkills:
                 per_item_counts[iname] = per_item_counts.get(iname, 0) + cnt
                 per_item_slots.setdefault(iname, []).append(cnt)
 
+            cobble_over_cap = any(per_item_counts.get(n, 0) > 192 for n in _TRASH_TIER4_COBBLE)
+            if (empty_now >= min_free and not cobble_over_cap) or drop_ops >= max_drop_ops:
+                break
+
             cobble_total = per_item_counts.get("cobblestone", 0) + per_item_counts.get("cobbled_deepslate", 0)
             tier2_keep = 0 if cobble_total >= 64 else 64
             plan_specs: list[tuple[str, int]] = [
@@ -972,9 +1017,14 @@ class MacroSkills:
             est_free = empty_now
             made_drop = False
             for name, keep in plan_specs:
-                if est_free >= min_free or drop_ops >= 8:
-                    break
+                is_cobble_cap = name in _TRASH_TIER4_COBBLE
                 total = per_item_counts.get(name, 0)
+                if drop_ops >= max_drop_ops or (est_free >= min_free and not (is_cobble_cap and total > keep)):
+                    if drop_ops >= max_drop_ops:
+                        break
+                    if est_free >= min_free and not any(per_item_counts.get(cn, 0) > 192 for cn in _TRASH_TIER4_COBBLE):
+                        break
+                    continue
                 excess = total - keep
                 if excess <= 0:
                     continue
@@ -983,11 +1033,25 @@ class MacroSkills:
                 # Avoid tiny remainder drops unless keeping=0 or freeing at least 1 full slot.
                 if keep > 0 and excess < smallest_slot and len(slot_list) <= 1:
                     continue
-                target_drop = excess if keep == 0 else min(excess, (min_free - est_free) * 64)
+                target_drop = (
+                    excess
+                    if (keep == 0 or is_cobble_cap)
+                    else min(excess, max(0, min_free - est_free) * 64)
+                )
                 if keep > 0 and target_drop < smallest_slot:
                     continue
                 remaining = target_drop
-                while remaining > 0 and drop_ops < 8 and est_free < min_free:
+                while (
+                    remaining > 0
+                    and drop_ops < max_drop_ops
+                    and (est_free < min_free or (is_cobble_cap and total > keep))
+                ):
+                    if turn_away_yaw is not None and not turned_away:
+                        turned_away = True
+                        try:
+                            self.bot.call("look", {"yaw": float(turn_away_yaw), "pitch": 0.0})
+                        except ApiError:
+                            pass
                     batch = min(64, remaining)
                     try:
                         self.bot.call("drop", {"item": name, "count": batch})
@@ -1000,6 +1064,7 @@ class MacroSkills:
                     made_drop = True
                     remaining -= batch
                     total -= batch
+                    per_item_counts[name] = total
                     slots_now = math.ceil(max(0, total) / 64)
                     if slots_now < len(slot_list):
                         est_free += len(slot_list) - slots_now
@@ -1653,6 +1718,8 @@ class MacroSkills:
         radius: int = 8,
         max_pickups: int = 5,
         fallback_coord: bool = True,
+        target_items: set[str] | frozenset[str] | None = None,
+        exclude_items: set[str] | frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Record bounded approach attempts, without claiming they prove item pickup."""
         attempts: list[dict[str, Any]] = []
@@ -1663,22 +1730,54 @@ class MacroSkills:
             return {"attempts": [], "skipped": [], "error": {"code": err.code, "message": err.message, **err.context}}
         cached_inv = getattr(self.bot, "_last_inventory", None)
         low_slots = isinstance(cached_inv, dict) and _compute_empty_slots(cached_inv) <= 6
-        for ent in (ents.get("entities") or [])[:max_pickups]:
+        trash_all = frozenset(
+            {
+                *_TRASH_TIER1_ZERO_KEEP,
+                *_TRASH_TIER2_DECOR_STONES,
+                *_TRASH_TIER2_LOOSE_BLOCKS,
+                *_TRASH_TIER3_DIRT,
+                *_TRASH_TIER4_COBBLE,
+            }
+        )
+        candidates: list[tuple[tuple[int, float], dict[str, Any]]] = []
+        for idx, ent in enumerate(ents.get("entities") or []):
             pos = ent.get("pos") or []
             row: dict[str, Any] = {"id": ent.get("id"), "item": ent.get("item"), "item_pos": pos}
             if len(pos) < 3 or ent.get("id") is None:
                 skipped.append({**row, "reason": "invalid_entity"})
                 continue
-            if low_slots and _normalize_drop_name(ent.get("item")) in _TRASH_TIER1_ZERO_KEEP:
+            norm = _normalize_drop_name(ent.get("item"))
+            in_target = bool(target_items and norm and norm in target_items)
+            if exclude_items and norm and norm in exclude_items and not in_target:
+                skipped.append({**row, "reason": "excluded_auto_dropped"})
+                continue
+            if target_items and norm and not in_target:
+                skipped.append({**row, "reason": "non_target_item"})
+                continue
+            if low_slots and norm in _TRASH_TIER1_ZERO_KEEP and not in_target:
                 skipped.append({**row, "reason": "ignored_clutter_low_slots"})
                 continue
             if abs(float(pos[1]) - bot_y) > 4.5:
                 skipped.append({**row, "reason": "height_difference", "height_difference": float(pos[1]) - bot_y})
                 continue
+            if in_target or norm in _HIGH_VALUE_DROPS:
+                tier = 0
+            elif norm in _MID_VALUE_DROPS or norm.endswith(("_log", "_stem")):
+                tier = 1
+            elif norm in trash_all:
+                tier = 3
+            else:
+                tier = 2
+            dist_val = float(ent.get("dist") if ent.get("dist") is not None else idx)
+            candidates.append(((tier, dist_val), row))
+
+        candidates.sort(key=lambda pair: pair[0])
+        for _rank_key, row in candidates[:max_pickups]:
+            pos = row["item_pos"]
             attempts.append(row)
             mpos: list[float] = []
             try:
-                mv = self.bot.call("move_to", {"entity_id": ent["id"], "range": 0.8, "timeout": 4000})
+                mv = self.bot.call("move_to", {"entity_id": row["id"], "range": 0.8, "timeout": 4000})
                 mpos = mv.get("pos") or []
                 row["pos"] = mpos
             except ApiError as err:
@@ -1698,31 +1797,49 @@ class MacroSkills:
                     if err.code in ("interrupted", "dead", "disconnected"):
                         return {"attempts": attempts, "skipped": skipped, "error": row["closer_error"]}
             cur_pos = row.get("pos") or mpos
-            if (
-                fallback_coord
-                and len(cur_pos) >= 3
-                and abs(float(pos[1]) - float(cur_pos[1])) <= 0.75
-                and 1.05 < math.dist(cur_pos[:3], pos[:3]) <= 2.35
-            ):
-                try:
-                    ctrl = self.bot.call(
-                        "control",
-                        {
-                            "forward": True,
-                            "sneak": True,
-                            "yaw": _yaw_toward(
-                                float(cur_pos[0]), float(cur_pos[2]), float(pos[0]), float(pos[2])
-                            ),
-                            "ms": 380,
-                            "stop_on": ["hurt", "death"],
-                        },
-                    )
-                    if isinstance(ctrl.get("pos"), list) and len(ctrl["pos"]) >= 3:
-                        row["pos"] = ctrl["pos"]
-                except ApiError as err:
-                    row["closer_error"] = {"code": err.code, "message": err.message, **err.context}
-                    if err.code in ("interrupted", "dead", "disconnected"):
-                        return {"attempts": attempts, "skipped": skipped, "error": row["closer_error"]}
+            if fallback_coord and len(cur_pos) >= 3:
+                dy_item = float(pos[1]) - float(cur_pos[1])
+                hdist_item = math.hypot(float(pos[0]) - float(cur_pos[0]), float(pos[2]) - float(cur_pos[2]))
+                if abs(dy_item) <= 0.75 and 1.05 < math.dist(cur_pos[:3], pos[:3]) <= 2.35:
+                    try:
+                        ctrl = self.bot.call(
+                            "control",
+                            {
+                                "forward": True,
+                                "sneak": True,
+                                "yaw": _yaw_toward(
+                                    float(cur_pos[0]), float(cur_pos[2]), float(pos[0]), float(pos[2])
+                                ),
+                                "ms": 380,
+                                "stop_on": ["hurt", "death"],
+                            },
+                        )
+                        if isinstance(ctrl.get("pos"), list) and len(ctrl["pos"]) >= 3:
+                            row["pos"] = ctrl["pos"]
+                    except ApiError as err:
+                        row["closer_error"] = {"code": err.code, "message": err.message, **err.context}
+                        if err.code in ("interrupted", "dead", "disconnected"):
+                            return {"attempts": attempts, "skipped": skipped, "error": row["closer_error"]}
+                elif 0.75 < dy_item <= 1.85 and hdist_item <= 2.4:
+                    try:
+                        ctrl = self.bot.call(
+                            "control",
+                            {
+                                "forward": True,
+                                "jump": True,
+                                "yaw": _yaw_toward(
+                                    float(cur_pos[0]), float(cur_pos[2]), float(pos[0]), float(pos[2])
+                                ),
+                                "ms": 420,
+                                "stop_on": ["hurt", "death"],
+                            },
+                        )
+                        if isinstance(ctrl.get("pos"), list) and len(ctrl["pos"]) >= 3:
+                            row["pos"] = ctrl["pos"]
+                    except ApiError as err:
+                        row["closer_error"] = {"code": err.code, "message": err.message, **err.context}
+                        if err.code in ("interrupted", "dead", "disconnected"):
+                            return {"attempts": attempts, "skipped": skipped, "error": row["closer_error"]}
             if row.get("pos"):
                 row["distance_after"] = round(math.dist(row["pos"][:3], pos[:3]), 2)
                 time.sleep(0.25)  # Allow server inventory packets to arrive before verification.
@@ -1787,8 +1904,18 @@ class MacroSkills:
         above_tol: float,
         inv_before: dict[str, int] | None = None,
         avoid_water: bool = False,
+        auto_dropped_names: set[str] | frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Shared candidate scan, vertical reachability ranking, blacklist handling, and drop rescue."""
+        expected_drops = _expected_drops_for_blocks(block_types)
+
+        def _target_gain_sum(gain_map: dict[str, int]) -> int:
+            return sum(
+                int(v)
+                for k, v in gain_map.items()
+                if str(k).removeprefix("minecraft:") in expected_drops and int(v) > 0
+            )
+
         gained: dict[str, int] = {}
         dug_count = 0
         protected_hits = 0
@@ -1846,14 +1973,20 @@ class MacroSkills:
                     esc = self.escape_water()
                     if esc.get("in_water"):
                         break
-                # Guard against repeatedly digging blocks whose drops fall out of reach
-                if dug_count >= 2 and sum(gained.values()) == 0:
+                # Guard against repeatedly digging blocks whose expected target drops fall out of reach
+                if dug_count >= 2 and _target_gain_sum(gained) == 0:
                     last_bot_pos = st.get("pos")
-                    last_drop_scan = self._collect_nearby_items(bot_y=bot_y, radius=12)
+                    last_drop_scan = self._collect_nearby_items(
+                        bot_y=bot_y,
+                        radius=12,
+                        target_items=expected_drops,
+                        exclude_items=auto_dropped_names,
+                    )
                     if inv_before is not None:
                         inv_delta = _positive_inv_delta(inv_before, _inventory_counts(self.bot))
-                        if inv_delta:
-                            gained = dict(inv_delta)
+                        for k, v in inv_delta.items():
+                            gained[k] = max(int(gained.get(k) or 0), int(v))
+                        if _target_gain_sum(gained) > 0:
                             continue
                     break
             except ApiError as err:
@@ -1899,16 +2032,21 @@ class MacroSkills:
                         "partial_error": {"code": err.code, "message": err.message, **err.context},
                     }
 
-        if dug_count > 0 and sum(gained.values()) == 0:
+        if dug_count > 0 and _target_gain_sum(gained) == 0:
             if last_drop_scan is None:
                 st = self.bot.status()
                 last_bot_pos = st.get("pos")
                 bot_y = float((last_bot_pos or [0, 64, 0])[1])
-                last_drop_scan = self._collect_nearby_items(bot_y=bot_y, radius=12)
+                last_drop_scan = self._collect_nearby_items(
+                    bot_y=bot_y,
+                    radius=12,
+                    target_items=expected_drops,
+                    exclude_items=auto_dropped_names,
+                )
             if inv_before is not None:
                 inv_delta = _positive_inv_delta(inv_before, _inventory_counts(self.bot))
-                if inv_delta:
-                    gained = dict(inv_delta)
+                for k, v in inv_delta.items():
+                    gained[k] = max(int(gained.get(k) or 0), int(v))
 
         if dug_count == 0 and water_skipped > 0:
             return {
@@ -1924,15 +2062,29 @@ class MacroSkills:
                 **self._avoidance_summary(),
             }
 
+        target_gained = {
+            k: int(v)
+            for k, v in gained.items()
+            if str(k).removeprefix("minecraft:") in expected_drops and int(v) > 0
+        }
+        incidental_gained = {
+            k: int(v)
+            for k, v in gained.items()
+            if str(k).removeprefix("minecraft:") not in expected_drops and int(v) > 0
+        }
+
         out: dict[str, Any] = {
-            "ok": dug_count >= count and bool(gained),
+            "ok": dug_count >= count and bool(target_gained),
             "requested_count": count,
             "dug_count": dug_count,
             "gained": gained,
+            "target_gained": target_gained,
             "water_skipped": water_skipped,
             **self._avoidance_summary(),
         }
-        if dug_count > 0 and not gained:
+        if incidental_gained:
+            out["incidental_gained"] = incidental_gained
+        if dug_count > 0 and not target_gained:
             out["error"] = "no_drops_collected"
             out["requires_replan"] = True
             drop_summary = _summarize_uncollected_drops(
@@ -1940,14 +2092,19 @@ class MacroSkills:
                 (last_drop_scan or {}).get("attempts") or [],
                 (last_drop_scan or {}).get("skipped") or [],
             )
+            inc_note = (
+                f"（途中仅误吸无关杂物 {incidental_gained}，目标预期产物 {sorted(expected_drops)} 均未入包）"
+                if incidental_gained
+                else ""
+            )
             if drop_summary is not None:
                 out["nearby_drops"] = drop_summary["items"]
                 out["nearest_unreachable_drop"] = drop_summary["nearest"]
                 out["approach_hint"] = drop_summary["approach_hint"]
-                out["message"] = f"连续挖掘 {dug_count} 格但掉落物均未入包！{drop_summary['approach_hint']}"
+                out["message"] = f"连续挖掘 {dug_count} 格但目标掉落物未入包！{inc_note}{drop_summary['approach_hint']}"
             else:
                 out["message"] = (
-                    f"连续挖掘 {dug_count} 格但掉落物均未拾取（可能掉入深坑或工具等级不匹配），"
+                    f"连续挖掘 {dug_count} 格但目标掉落物均未拾取{inc_note}（可能掉入深坑、被地形卡住或工具等级不匹配），"
                     "已停止继续损耗耐久，请移动到安全平层/斜坡挖掘或用 mc_get_entities 检查地面物品。"
                 )
         elif dug_count < count:
@@ -1970,17 +2127,29 @@ class MacroSkills:
         """Chop up to target_logs trees (or nether stems in the_nether) while blacklisting protected blocks."""
         target_logs = max(1, min(32, int(target_logs)))
         radius = max(4, min(64, int(radius)))
-        inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
-        inv_raw, auto_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
-        if auto_dropped:
-            counts = _inventory_counts_from_raw(inv_raw)
-        equipped = self._equip_if_present(AXE_PRIORITY)
-        dim = "overworld"
+        st0: dict[str, Any] = {}
         if callable(getattr(self.bot, "status", None)):
             try:
-                dim = normalize_dimension((self.bot.status() or {}).get("dimension"))
+                st0 = self.bot.status() or {}
             except Exception:
-                dim = "overworld"
+                st0 = {}
+        raw_yaw = st0.get("yaw")
+        away_yaw = (float(raw_yaw) + math.pi) if isinstance(raw_yaw, (int, float)) else None
+        inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
+        inv_raw, auto_dropped = self._ensure_free_slots(
+            min_free=8,
+            inv_snapshot=inv_raw,
+            turn_away_yaw=away_yaw,
+        )
+        if auto_dropped:
+            counts = _inventory_counts_from_raw(inv_raw)
+        auto_dropped_names = frozenset(
+            str(d["item"]).removeprefix("minecraft:")
+            for d in auto_dropped
+            if isinstance(d, dict) and d.get("item")
+        )
+        equipped = self._equip_if_present(AXE_PRIORITY)
+        dim = normalize_dimension(st0.get("dimension")) if st0 else "overworld"
         wood_targets = list(NETHER_STEM_TYPES) if dim == "the_nether" else list(LOG_TYPES)
         res = self._dig_target_blocks(
             block_types=wood_targets,
@@ -1990,6 +2159,7 @@ class MacroSkills:
             below_tol=1.5,
             above_tol=3.5,
             inv_before=counts,
+            auto_dropped_names=auto_dropped_names or None,
         )
         if res.get("error") == "protected_region":
             return res
@@ -2006,6 +2176,7 @@ class MacroSkills:
                     below_tol=1.5,
                     above_tol=3.5,
                     inv_before=counts,
+                    auto_dropped_names=auto_dropped_names or None,
                 )
                 if retry_res.get("error") == "protected_region":
                     return retry_res
@@ -2283,12 +2454,23 @@ class MacroSkills:
                 "blocked_types": blocked,
             }
 
-        inv_raw, auto_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
+        st = self.bot.status()
+        raw_yaw = st.get("yaw")
+        away_yaw = (float(raw_yaw) + math.pi) if isinstance(raw_yaw, (int, float)) else None
+        inv_raw, auto_dropped = self._ensure_free_slots(
+            min_free=8,
+            inv_snapshot=inv_raw,
+            turn_away_yaw=away_yaw,
+        )
         if auto_dropped:
             counts = _inventory_counts_from_raw(inv_raw)
             best_pick, best_tier = _best_pickaxe_in_inv(counts)
+        auto_dropped_names = frozenset(
+            str(d["item"]).removeprefix("minecraft:")
+            for d in auto_dropped
+            if isinstance(d, dict) and d.get("item")
+        )
 
-        st = self.bot.status()
         if bool(st.get("in_water")):
             esc = self.escape_water()
             if esc.get("in_water"):
@@ -2316,6 +2498,7 @@ class MacroSkills:
             above_tol=2.5,
             inv_before=counts,
             avoid_water=True,
+            auto_dropped_names=auto_dropped_names or None,
         )
         if res.get("error") == "protected_region":
             return res
@@ -2344,6 +2527,7 @@ class MacroSkills:
                     above_tol=2.5,
                     inv_before=counts,
                     avoid_water=True,
+                    auto_dropped_names=auto_dropped_names or None,
                 )
                 if int(alt_res.get("dug_count") or 0) > 0 or alt_res.get("error") != "no_targets_available":
                     res = {**alt_res, "auto_paired_types": alt_types}
@@ -2375,6 +2559,7 @@ class MacroSkills:
                     above_tol=2.5,
                     inv_before=counts,
                     avoid_water=True,
+                    auto_dropped_names=auto_dropped_names or None,
                 )
                 if int(res2.get("dug_count") or 0) > 0:
                     return {
@@ -4778,3 +4963,56 @@ class MacroSkills:
             geofence=geofence,
             threat_pos=t_pos if isinstance(t_pos, list) else None,
         )
+
+    def emergency_death_loop_shelter(
+        self,
+        *,
+        hold_until_mono: float,
+        stop_check: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Shelter underground/bunker until the rolling 60s 3-death kick window clears."""
+        st0 = self.bot.status()
+        pos0 = st0.get("pos") or [0.0, 64.0, 0.0]
+        enclosure = inspect_local_enclosure(self.bot, pos0)
+        sheltered = enclosure.get("structure") in {"sealed_bunker", "carved_shaft"}
+        bunker_res: dict[str, Any] = {"ok": True, "already_sheltered": sheltered, "structure": enclosure.get("structure")}
+        flee_res: dict[str, Any] | None = None
+
+        if not sheltered:
+            try:
+                self.descend_canopy()
+            except Exception:
+                pass
+            bunker_res = self.dig_safety_bunker(urgent=True)
+            sheltered = bool(
+                bunker_res.get("ok")
+                or (bunker_res.get("inside_shaft") and bunker_res.get("roof_placed"))
+            )
+            if not sheltered:
+                flee_res = self.flee_hostiles(distance=16.0, urgent=True)
+                bunker_res = self.dig_safety_bunker(urgent=True)
+                sheltered = bool(
+                    bunker_res.get("ok")
+                    or (bunker_res.get("inside_shaft") and bunker_res.get("roof_placed"))
+                )
+
+        held_s = 0.0
+        if sheltered:
+            wait_deadline = min(float(hold_until_mono), time.monotonic() + 55.0)
+            started = time.monotonic()
+            while True:
+                if stop_check is not None and stop_check():
+                    raise KeyboardInterrupt("防死亡循环掩体驻留期间收到停止信号")
+                rem = wait_deadline - time.monotonic()
+                if rem <= 0:
+                    break
+                time.sleep(min(0.25, rem))
+            held_s = round(max(0.0, time.monotonic() - started), 2)
+
+        return {
+            "ok": sheltered,
+            "sheltered": sheltered,
+            "held_s": held_s,
+            "bunker": bunker_res,
+            "flee": flee_res,
+        }

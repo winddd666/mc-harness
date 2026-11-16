@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import math
 import threading
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -77,10 +77,21 @@ _PASSABLE_SIGHT_BLOCKS: set[str] = {
 
 
 class McToolset:
-    def __init__(self, bot: BotSession, *, geofence: VoidGeofence | None = None) -> None:
+    def __init__(
+        self,
+        bot: BotSession,
+        *,
+        geofence: VoidGeofence | None = None,
+        wait_for_cooldown: bool = False,
+        stop_check: Callable[[], bool] | None = None,
+        on_cooldown_wait: Callable[[str, float], None] | None = None,
+    ) -> None:
         self.bot = bot
         self._state_lock = threading.Lock()
         self._reconnect_lock = threading.Lock()
+        self._wait_for_cooldown = bool(wait_for_cooldown)
+        self._stop_check = stop_check
+        self._on_cooldown_wait = on_cooldown_wait
         self._last_event_seq: int = int(getattr(bot, "_last_event_seq", 0) or 0)
         self._in_water: bool = False
         self._last_block_pos: list[int] | None = None
@@ -101,7 +112,20 @@ class McToolset:
     def _reconnect_once(self, *, quarantined: bool = False) -> None:
         with self._reconnect_lock:
             if quarantined and hasattr(self.bot, "recover_quarantine"):
-                self.bot.recover_quarantine(timeout_s=30.0)
+                try:
+                    self.bot.recover_quarantine(timeout_s=30.0)
+                    return
+                except DeathLoopCooldownError:
+                    if not (self._wait_for_cooldown and hasattr(self.bot, "ensure_connected_and_ready")):
+                        raise
+            if self._wait_for_cooldown and hasattr(self.bot, "ensure_connected_and_ready"):
+                self.bot.ensure_connected_and_ready(
+                    timeout_s=45.0,
+                    poll_interval_s=1.0,
+                    wait_for_cooldown=True,
+                    stop_check=self._stop_check,
+                    on_wait=self._on_cooldown_wait,
+                )
             else:
                 self.bot.wait_until_ready(timeout_s=30.0, poll_interval_s=1.0)
 
@@ -305,8 +329,23 @@ class McToolset:
     def _call_json(self, path: str, body: dict[str, Any] | None = None, *, method: str = "POST") -> str:
         try:
             result = self.bot.call(path, body, method=method)
-        except (AuthError, DeathLoopCooldownError) as exc:
+        except AuthError as exc:
             raise RuntimeError(f"MC API 会话不可继续：{exc}") from None
+        except DeathLoopCooldownError as exc:
+            if not self._wait_for_cooldown:
+                raise RuntimeError(f"MC API 会话不可继续：{exc}") from None
+            try:
+                self._reconnect_once(quarantined=False)
+                result = self.bot.call(path, body, method=method)
+            except (AuthError, DeathLoopCooldownError) as re_exc:
+                raise RuntimeError(f"MC API 会话不可继续：{re_exc}") from None
+            except BotNotReadyError:
+                return self._format_api_error(path, body or {}, exc)
+            except ApiError as retry_exc:
+                self.update_block_pos(retry_exc.context.get("pos") or retry_exc.context.get("from"))
+                return self._format_api_error(path, body or {}, retry_exc)
+            except httpx.HTTPError as retry_http_exc:
+                raise RuntimeError(f"MC API 网络请求异常（{type(retry_http_exc).__name__}）：{retry_http_exc}") from None
         except ApiError as exc:
             self.update_block_pos(exc.context.get("pos") or exc.context.get("from"))
             if exc.code not in ("not_connected", "action_quarantined"):
@@ -396,8 +435,22 @@ class McToolset:
     def _run_skill(self, fn) -> str:
         try:
             result = fn()
-        except (AuthError, DeathLoopCooldownError, SafetyEmergency) as exc:
+        except (AuthError, SafetyEmergency) as exc:
             raise RuntimeError(f"MC 技能触发紧急停机：{exc}") from None
+        except DeathLoopCooldownError as exc:
+            if not self._wait_for_cooldown:
+                raise RuntimeError(f"MC 技能触发紧急停机：{exc}") from None
+            try:
+                self._reconnect_once(quarantined=False)
+                result = fn()
+            except (AuthError, DeathLoopCooldownError, SafetyEmergency) as re_exc:
+                raise RuntimeError(f"MC 技能触发紧急停机：{re_exc}") from None
+            except BotNotReadyError:
+                return self._format_api_error("skill", {}, exc)
+            except ApiError as retry_exc:
+                return self._format_api_error("skill", {}, retry_exc)
+            except httpx.HTTPError as retry_http_exc:
+                raise RuntimeError(f"MC API 网络请求异常（{type(retry_http_exc).__name__}）：{retry_http_exc}") from None
         except ApiError as exc:
             if exc.code not in ("not_connected", "action_quarantined"):
                 return self._format_api_error("skill", {}, exc)
@@ -558,7 +611,11 @@ class McToolset:
                 since = self._last_event_seq
             try:
                 res = self.bot.events(since=since, limit=50)
-            except (AuthError, DeathLoopCooldownError):
+            except AuthError:
+                raise
+            except DeathLoopCooldownError:
+                if self._wait_for_cooldown:
+                    break
                 raise
             except (ApiError, httpx.HTTPError):
                 break
@@ -588,7 +645,11 @@ class McToolset:
                 since = self._last_event_seq
             try:
                 res = self.bot.events(since=since, limit=50)
-            except (AuthError, DeathLoopCooldownError):
+            except AuthError:
+                raise
+            except DeathLoopCooldownError:
+                if self._wait_for_cooldown:
+                    break
                 raise
             except (ApiError, httpx.HTTPError):
                 break
@@ -630,6 +691,9 @@ class McToolset:
                     src = ev.get("source") or ev.get("by") or ""
                     notes.append(f"[受伤 health={hp}{(' by ' + str(src)) if src else ''}]")
                 elif kind == "death":
+                    rec_fn = getattr(self.bot, "record_death_event", None)
+                    if callable(rec_fn):
+                        rec_fn(ev_seq if ev_seq is not None else ev.get("t"))
                     cause = ev.get("cause") or ev.get("message") or ""
                     pos = ev.get("pos")
                     notes.append(f"[死亡 pos={pos} {cause}]")

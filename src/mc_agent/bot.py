@@ -49,6 +49,37 @@ class BotSession:
         self._last_disconnect_mono: float | None = None
         self._recovering_quarantine: bool = False
         self._last_inventory: dict[str, Any] | None = None
+        self._seen_death_keys: set[Any] = set()
+        self._death_mono_times: list[float] = []
+
+    def record_death_event(
+        self,
+        death_key: Any,
+        *,
+        mono_ts: float | None = None,
+    ) -> list[float]:
+        """Record a deduplicated death timestamp and return deaths within the recent 60s window."""
+        now = time.monotonic() if mono_ts is None else float(mono_ts)
+        key = death_key if death_key is not None else round(now, 3)
+        if key not in self._seen_death_keys:
+            self._seen_death_keys.add(key)
+            self._death_mono_times.append(now)
+            if len(self._seen_death_keys) > 256:
+                self._seen_death_keys.clear()
+                self._seen_death_keys.add(key)
+        self._death_mono_times = [t for t in self._death_mono_times if now - t <= 120.0]
+        return [t for t in self._death_mono_times if now - t <= 60.0]
+
+    def recent_deaths_in_window(
+        self,
+        window_s: float = 60.0,
+        *,
+        now_mono: float | None = None,
+    ) -> list[float]:
+        """Return monotonically recorded death timestamps within `window_s` seconds."""
+        now = time.monotonic() if now_mono is None else float(now_mono)
+        self._death_mono_times = [t for t in self._death_mono_times if now - t <= 120.0]
+        return [t for t in self._death_mono_times if now - t <= window_s]
 
     @property
     def token(self) -> str:
@@ -304,6 +335,38 @@ class BotSession:
                     last_status=last_status,
                 )
             time.sleep(min(poll_interval_s, remaining))
+
+    def ensure_connected_and_ready(
+        self,
+        *,
+        timeout_s: float = 45.0,
+        poll_interval_s: float = 1.0,
+        wait_for_cooldown: bool = True,
+        stop_check: Callable[[], bool] | None = None,
+        on_wait: Callable[[str, float], None] | None = None,
+    ) -> dict[str, Any]:
+        """Wait for ready status, optionally sleeping through `death_loop_cooldown` before reconnecting."""
+        try:
+            return self.wait_until_ready(timeout_s=timeout_s, poll_interval_s=poll_interval_s)
+        except DeathLoopCooldownError as err:
+            if not wait_for_cooldown:
+                raise
+            raw_rem = err.cooldown_remaining_seconds if err.cooldown_remaining_seconds is not None else 300.0
+            wait_s = min(330.0, max(1.0, float(raw_rem) + 2.0))
+            if on_wait is not None:
+                on_wait("death_loop_cooldown", wait_s)
+            wait_deadline = time.monotonic() + wait_s
+            while True:
+                if stop_check is not None and stop_check():
+                    raise KeyboardInterrupt("等待死亡循环冷却期间收到停止信号")
+                rem = wait_deadline - time.monotonic()
+                if rem <= 0:
+                    break
+                time.sleep(min(0.25, rem))
+            if stop_check is not None and stop_check():
+                raise KeyboardInterrupt("等待死亡循环冷却期间收到停止信号")
+            self.connect(respect_reconnect_interval=False)
+            return self.wait_until_ready(timeout_s=timeout_s, poll_interval_s=poll_interval_s)
 
 
 @dataclasses.dataclass(slots=True)

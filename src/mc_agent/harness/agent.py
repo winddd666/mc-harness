@@ -15,7 +15,7 @@ from typing import Callable
 
 from ..bot import BotManager, BotSession
 from ..config import Settings
-from ..errors import McAgentError
+from ..errors import ApiError, McAgentError
 from .context import DEFAULT_TOOL_OUTPUT_CHARS, RequestContext, _parse_leading_json, extract_failed_coords
 from .control import RequestCancelled, RunTimedOut
 from .curriculum import CurriculumSupervisor, is_transient_stream_error_text
@@ -732,7 +732,30 @@ def run_mc_agent(
     inbox = InputInbox() if inbox is None else inbox
     deadline = (time.monotonic() + run_timeout_s) if run_timeout_s is not None else None
 
-    toolset = McToolset(bot, geofence=geofence)
+    def is_stopped() -> bool:
+        return bool(stop_check is not None and stop_check())
+
+    def check_deadline() -> None:
+        if is_stopped():
+            raise KeyboardInterrupt("用户手动停止当前任务")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise RunTimedOut(f"运行总时限已到（{run_timeout_s}s）")
+
+    def _safe_stop_check() -> bool:
+        check_deadline()
+        return False
+
+    toolset = McToolset(
+        bot,
+        geofence=geofence,
+        wait_for_cooldown=True,
+        stop_check=_safe_stop_check,
+        on_cooldown_wait=lambda reason, wait_s: events.emit(
+            "bot.cooldown_wait",
+            reason=reason,
+            wait_s=round(wait_s, 1),
+        ),
+    )
     if tool_profile == "compact":
         resolved_extras = (
             {str(t) for t in extra_tools}
@@ -797,15 +820,6 @@ def run_mc_agent(
     truncated_streak = 0
     transient_llm_streak = 0
     transient_llm_refunds = 0
-
-    def is_stopped() -> bool:
-        return bool(stop_check is not None and stop_check())
-
-    def check_deadline() -> None:
-        if is_stopped():
-            raise KeyboardInterrupt("用户手动停止当前任务")
-        if deadline is not None and time.monotonic() >= deadline:
-            raise RunTimedOut(f"运行总时限已到（{run_timeout_s}s）")
 
     def phase(name: str) -> None:
         report["phase"] = name
@@ -875,6 +889,8 @@ def run_mc_agent(
     last_task_version = 0
     had_incident = False
     disable_thinking_once = False
+    last_shelter_pair: tuple[float, float] | None = None
+    last_night_warn_death: float | None = None
     try:
         events.emit(
             "run.started", task=task, bot=bot.bot_username, model=model_name,
@@ -930,6 +946,60 @@ def run_mc_agent(
                     )
                 except Exception:
                     ephemeral_hud = None
+
+            if survival_guard and not force_final:
+                rec_win_fn = getattr(bot, "recent_deaths_in_window", None)
+                recent_deaths = rec_win_fn(60.0) if callable(rec_win_fn) else []
+                if len(recent_deaths) >= 2:
+                    pair = (recent_deaths[-2], recent_deaths[-1])
+                    if pair != last_shelter_pair:
+                        last_shelter_pair = pair
+                        shelter_res = toolset.skills.emergency_death_loop_shelter(
+                            hold_until_mono=recent_deaths[-2] + 62.0,
+                            stop_check=_safe_stop_check,
+                        )
+                        events.emit(
+                            "guardian.death_loop_shelter",
+                            recent_deaths=len(recent_deaths),
+                            **shelter_res,
+                        )
+                        had_incident = True
+                        messages.append(
+                            {
+                                "role": "user",
+                                "name": "runtime",
+                                "content": (
+                                    f"[防死亡循环保护] 60秒内已累计死亡 {len(recent_deaths)} 次，系统已执行就地掩体保护并等待安全窗口"
+                                    f"（sheltered={shelter_res.get('sheltered')}, held_s={shelter_res.get('held_s')}）。"
+                                    "请直接从当前位置向下掘进或整备工具，严禁夜间再露天硬冲出生点怪群！"
+                                ),
+                            }
+                        )
+                        if hud_mode == "ephemeral":
+                            try:
+                                ephemeral_hud = build_world_hud(
+                                    toolset,
+                                    task=task,
+                                    target_advancement=target_advancement,
+                                    geofence=toolset.geofence,
+                                    failed_coords=extract_failed_coords(messages),
+                                )
+                            except Exception:
+                                pass
+                elif (
+                    len(recent_deaths) == 1
+                    and ephemeral_hud
+                    and "夜晚" in ephemeral_hud
+                    and last_night_warn_death != recent_deaths[-1]
+                ):
+                    last_night_warn_death = recent_deaths[-1]
+                    messages.append(
+                        {
+                            "role": "user",
+                            "name": "runtime",
+                            "content": "[夜间重生预警] 当前为夜晚且刚才刚发生死亡；切勿在夜间地面停留硬刚，优先 mc_skill_bunker 掩体或迅速下探入地。",
+                        }
+                    )
 
             phase("generating")
             report["model_requests"] += 1
@@ -995,13 +1065,28 @@ def run_mc_agent(
                     inc_status = pending_guard_incident.get("status")
                     if isinstance(inc_status, dict) and inc_status.get("ready") is False:
                         try:
-                            ready_status = bot.wait_until_ready(timeout_s=10.0, poll_interval_s=0.5)
+                            if hasattr(bot, "ensure_connected_and_ready"):
+                                ready_status = bot.ensure_connected_and_ready(
+                                    timeout_s=30.0,
+                                    poll_interval_s=0.5,
+                                    wait_for_cooldown=True,
+                                    stop_check=_safe_stop_check,
+                                    on_wait=lambda reason, wait_s: events.emit(
+                                        "bot.cooldown_wait",
+                                        reason=reason,
+                                        wait_s=round(wait_s, 1),
+                                    ),
+                                )
+                            else:
+                                ready_status = bot.wait_until_ready(timeout_s=10.0, poll_interval_s=0.5)
                             if isinstance(ready_status, dict):
                                 pending_guard_incident["status"] = {
                                     k: ready_status.get(k)
                                     for k in ("pos", "health", "food", "ready", "alive", "busy", "in_water", "blocking")
                                 }
                                 toolset.update_block_pos(ready_status.get("pos"))
+                        except (KeyboardInterrupt, RunTimedOut):
+                            raise
                         except Exception:
                             pass
                     capture_notable_events()
@@ -1115,12 +1200,18 @@ def run_mc_agent(
     except RunTimedOut as exc:
         report["status"] = "timeout"
         report["error"] = str(exc)
-    except RuntimeError as exc:
+    except (ApiError, RuntimeError) as exc:
         report["status"] = "runtime_error"
         report["error"] = str(exc)
     except KeyboardInterrupt:
         report["status"] = "interrupted"
+    except Exception as exc:
+        report["status"] = "runtime_error"
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
+        if report.get("status") == "running":
+            report["status"] = "runtime_error"
         if guard is not None:
             report["guardian"] = dict(guard.stats)
         # A fatal action/network error bypasses the normal after_tools boundary.
