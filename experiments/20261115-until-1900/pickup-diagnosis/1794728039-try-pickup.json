@@ -1,0 +1,964 @@
+[
+  {
+    "time": 1794728030.5860615,
+    "action": "status",
+    "body": null,
+    "duration": 0.009146451950073242,
+    "ok": true,
+    "result": {
+      "username": "BeastBot_01",
+      "pos": [
+        -161.5,
+        75,
+        -374.6
+      ],
+      "yaw": 0.53,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 13.333332061767578,
+      "food": 17,
+      "saturation": 0,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 278,
+      "armor_points": 0,
+      "held": null,
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 2458,
+      "is_day": true,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 19780,
+        "name": "zombie",
+        "dist": 14.6
+      },
+      "last_death": {
+        "pos": [
+          -151.7,
+          72,
+          -383.3
+        ],
+        "t": 1794726338174,
+        "dropped_items_at": [
+          -151.7,
+          72,
+          -383.3
+        ]
+      }
+    }
+  },
+  {
+    "time": 1794728030.5952137,
+    "action": "inventory",
+    "body": null,
+    "duration": 0.004300832748413086,
+    "ok": true,
+    "result": {
+      "items": [],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": null,
+      "empty_slots": 36
+    }
+  },
+  {
+    "time": 1794728030.5995202,
+    "action": "get_entities",
+    "body": {
+      "radius": 16,
+      "types": [
+        "item"
+      ]
+    },
+    "duration": 0.004396915435791016,
+    "ok": true,
+    "result": {
+      "entities": [
+        {
+          "id": 22546,
+          "type": "other",
+          "name": "item",
+          "pos": [
+            -161.1,
+            74,
+            -371.1
+          ],
+          "dist": 3.7,
+          "item": "birch_logx2"
+        },
+        {
+          "id": 22772,
+          "type": "other",
+          "name": "item",
+          "pos": [
+            -173.5,
+            66,
+            -379.6
+          ],
+          "dist": 15.8,
+          "item": "rotten_fleshx2"
+        }
+      ]
+    }
+  },
+  {
+    "time": 1794728030.603924,
+    "action": "find_blocks",
+    "body": {
+      "types": [
+        "grass_block",
+        "dirt",
+        "birch_log",
+        "oak_log"
+      ],
+      "radius": 16,
+      "limit": 15
+    },
+    "duration": 0.10883045196533203,
+    "ok": true,
+    "result": {
+      "total": 830,
+      "blocks": [
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            76,
+            -372
+          ],
+          "dist": 2.9,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            74,
+            -377
+          ],
+          "dist": 3,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            73,
+            -372
+          ],
+          "dist": 3.3,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            73,
+            -377
+          ],
+          "dist": 3.4,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            72,
+            -372
+          ],
+          "dist": 4,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            72,
+            -377
+          ],
+          "dist": 4.1,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            75,
+            -373
+          ],
+          "dist": 4.8,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            71,
+            -372
+          ],
+          "dist": 4.8,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            74,
+            -373
+          ],
+          "dist": 4.9,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            76,
+            -373
+          ],
+          "dist": 4.9,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -163,
+            71,
+            -377
+          ],
+          "dist": 4.9,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            71,
+            -377
+          ],
+          "dist": 4.9,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -162,
+            70,
+            -375
+          ],
+          "dist": 5,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -161,
+            70,
+            -375
+          ],
+          "dist": 5,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -162,
+            70,
+            -374
+          ],
+          "dist": 5.1,
+          "properties": {
+            "snowy": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "time": 1794728030.7127657,
+    "action": "move_to",
+    "body": {
+      "entity_id": 22546,
+      "range": 0.3,
+      "timeout": 8000
+    },
+    "duration": 8.03516149520874,
+    "ok": false,
+    "error": {
+      "code": "timeout",
+      "message": "pathfinding timed out after 8000ms",
+      "pos": [
+        -162.6,
+        76,
+        -372.5
+      ],
+      "dist_left": 2.8,
+      "resets": 0
+    }
+  },
+  {
+    "time": 1794728038.7479324,
+    "action": "status",
+    "body": null,
+    "duration": 0.003988504409790039,
+    "ok": true,
+    "result": {
+      "username": "BeastBot_01",
+      "pos": [
+        -162.6,
+        76,
+        -372.5
+      ],
+      "yaw": -2.94,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 13.333332061767578,
+      "food": 17,
+      "saturation": 0,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 267,
+      "armor_points": 0,
+      "held": null,
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 2618,
+      "is_day": true,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 19780,
+        "name": "zombie",
+        "dist": 17.2
+      },
+      "last_death": {
+        "pos": [
+          -151.7,
+          72,
+          -383.3
+        ],
+        "t": 1794726338174,
+        "dropped_items_at": [
+          -151.7,
+          72,
+          -383.3
+        ]
+      }
+    }
+  },
+  {
+    "time": 1794728038.7519252,
+    "action": "inventory",
+    "body": null,
+    "duration": 0.003568887710571289,
+    "ok": true,
+    "result": {
+      "items": [],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": null,
+      "empty_slots": 36
+    }
+  },
+  {
+    "time": 1794728038.7554996,
+    "action": "move_to",
+    "body": {
+      "x": -161.1,
+      "y": 74,
+      "z": -371.1,
+      "range": 0.3,
+      "timeout": 8000
+    },
+    "duration": 0.09322714805603027,
+    "ok": true,
+    "result": {
+      "pos": [
+        -162.6,
+        76,
+        -372.5
+      ]
+    }
+  },
+  {
+    "time": 1794728039.5488837,
+    "action": "status",
+    "body": null,
+    "duration": 0.005145549774169922,
+    "ok": true,
+    "result": {
+      "username": "BeastBot_01",
+      "pos": [
+        -162.6,
+        76,
+        -372.5
+      ],
+      "yaw": -2.94,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 13.333332061767578,
+      "food": 17,
+      "saturation": 0,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 266,
+      "armor_points": 0,
+      "held": null,
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 2638,
+      "is_day": true,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 19780,
+        "name": "zombie",
+        "dist": 17.2
+      },
+      "last_death": {
+        "pos": [
+          -151.7,
+          72,
+          -383.3
+        ],
+        "t": 1794726338174,
+        "dropped_items_at": [
+          -151.7,
+          72,
+          -383.3
+        ]
+      }
+    }
+  },
+  {
+    "time": 1794728039.5540345,
+    "action": "inventory",
+    "body": null,
+    "duration": 0.003830432891845703,
+    "ok": true,
+    "result": {
+      "items": [],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": null,
+      "empty_slots": 36
+    }
+  },
+  {
+    "time": 1794728039.5578864,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        73,
+        -372
+      ]
+    },
+    "duration": 0.04167056083679199,
+    "ok": true,
+    "result": {
+      "name": "birch_log",
+      "pos": [
+        -162,
+        73,
+        -372
+      ],
+      "properties": {
+        "axis": "y"
+      },
+      "diggable": true,
+      "hardness": 2,
+      "harvest_tool_ok": true
+    }
+  },
+  {
+    "time": 1794728039.5995634,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        74,
+        -372
+      ]
+    },
+    "duration": 0.005466461181640625,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -162,
+        74,
+        -372
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728039.6050406,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        75,
+        -372
+      ]
+    },
+    "duration": 0.043871402740478516,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -162,
+        75,
+        -372
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728039.648919,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -163,
+        73,
+        -372
+      ]
+    },
+    "duration": 0.004466056823730469,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -163,
+        73,
+        -372
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728039.6533906,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -163,
+        74,
+        -372
+      ]
+    },
+    "duration": 0.04540657997131348,
+    "ok": true,
+    "result": {
+      "name": "birch_leaves",
+      "pos": [
+        -163,
+        74,
+        -372
+      ],
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 3
+      },
+      "diggable": true,
+      "hardness": 0.2,
+      "harvest_tool_ok": true
+    }
+  },
+  {
+    "time": 1794728039.6988022,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -163,
+        75,
+        -372
+      ]
+    },
+    "duration": 0.005417346954345703,
+    "ok": true,
+    "result": {
+      "name": "birch_leaves",
+      "pos": [
+        -163,
+        75,
+        -372
+      ],
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      },
+      "diggable": true,
+      "hardness": 0.2,
+      "harvest_tool_ok": true
+    }
+  },
+  {
+    "time": 1794728039.7042265,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -161,
+        73,
+        -372
+      ]
+    },
+    "duration": 0.044213294982910156,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -161,
+        73,
+        -372
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728039.7484462,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -161,
+        74,
+        -372
+      ]
+    },
+    "duration": 0.0058441162109375,
+    "ok": true,
+    "result": {
+      "name": "birch_leaves",
+      "pos": [
+        -161,
+        74,
+        -372
+      ],
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 3
+      },
+      "diggable": true,
+      "hardness": 0.2,
+      "harvest_tool_ok": true
+    }
+  },
+  {
+    "time": 1794728039.754296,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -161,
+        75,
+        -372
+      ]
+    },
+    "duration": 0.044594526290893555,
+    "ok": true,
+    "result": {
+      "name": "birch_leaves",
+      "pos": [
+        -161,
+        75,
+        -372
+      ],
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      },
+      "diggable": true,
+      "hardness": 0.2,
+      "harvest_tool_ok": true
+    }
+  },
+  {
+    "time": 1794728039.7988966,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        73,
+        -373
+      ]
+    },
+    "duration": 0.005295991897583008,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -162,
+        73,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728039.8041995,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        74,
+        -373
+      ]
+    },
+    "duration": 0.004769802093505859,
+    "ok": true,
+    "result": {
+      "name": "birch_leaves",
+      "pos": [
+        -162,
+        74,
+        -373
+      ],
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 3
+      },
+      "diggable": true,
+      "hardness": 0.2,
+      "harvest_tool_ok": true
+    }
+  },
+  {
+    "time": 1794728039.8089747,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        75,
+        -373
+      ]
+    },
+    "duration": 0.04105639457702637,
+    "ok": true,
+    "result": {
+      "name": "birch_leaves",
+      "pos": [
+        -162,
+        75,
+        -373
+      ],
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      },
+      "diggable": true,
+      "hardness": 0.2,
+      "harvest_tool_ok": true
+    }
+  },
+  {
+    "time": 1794728039.8500392,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        73,
+        -371
+      ]
+    },
+    "duration": 0.004401206970214844,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -162,
+        73,
+        -371
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728039.8544464,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        74,
+        -371
+      ]
+    },
+    "duration": 0.004092693328857422,
+    "ok": true,
+    "result": {
+      "name": "birch_leaves",
+      "pos": [
+        -162,
+        74,
+        -371
+      ],
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 3
+      },
+      "diggable": true,
+      "hardness": 0.2,
+      "harvest_tool_ok": true
+    }
+  },
+  {
+    "time": 1794728039.8585448,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        75,
+        -371
+      ]
+    },
+    "duration": 0.04086732864379883,
+    "ok": true,
+    "result": {
+      "name": "birch_leaves",
+      "pos": [
+        -162,
+        75,
+        -371
+      ],
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      },
+      "diggable": true,
+      "hardness": 0.2,
+      "harvest_tool_ok": true
+    }
+  }
+]

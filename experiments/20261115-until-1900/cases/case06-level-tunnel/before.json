@@ -1,0 +1,88 @@
+{
+  "runtime": {
+    "source_revision": "c71e3d3b05f524f2",
+    "loaded_at": "2026-11-15T09:28:31.082894+00:00",
+    "pid": 754239
+  },
+  "bot_username": "BeastBot_01",
+  "mc_api_base_url": "http://100.93.211.71:18900/api/v1",
+  "live_url": "http://127.0.0.1:8765",
+  "config": {
+    "provider": "nju",
+    "providers": [
+      "nju",
+      "deepseek",
+      "dashscope"
+    ],
+    "max_calls": 24,
+    "enable_thinking": false,
+    "run_timeout_s": 600.0,
+    "survival_guard": false,
+    "host": "127.0.0.1",
+    "port": 8770
+  },
+  "running": false,
+  "active_turn_id": null,
+  "connect_error": null,
+  "telemetry": {
+    "connected": true,
+    "ready": true,
+    "username": "BeastBot_01",
+    "pos": {
+      "x": -187.5,
+      "y": 55.0,
+      "z": -389.5
+    },
+    "dimension": "overworld",
+    "biome": "",
+    "is_day": false,
+    "time_of_day": 20269,
+    "health": 20,
+    "food": 20,
+    "armor": 0,
+    "held": {
+      "name": "dirt",
+      "count": 16,
+      "slot": 37
+    },
+    "inventory_total": 112,
+    "top_items": [
+      {
+        "name": "cobblestone",
+        "count": 86
+      },
+      {
+        "name": "dirt",
+        "count": 16
+      },
+      {
+        "name": "stick",
+        "count": 4
+      },
+      {
+        "name": "granite",
+        "count": 2
+      },
+      {
+        "name": "birch_planks",
+        "count": 1
+      },
+      {
+        "name": "stone_pickaxe",
+        "count": 1
+      },
+      {
+        "name": "wildflowers",
+        "count": 1
+      },
+      {
+        "name": "wooden_pickaxe",
+        "count": 1
+      }
+    ],
+    "updated_at": "2026-11-15T09:28:41.166956+00:00",
+    "error": null
+  },
+  "turns": [],
+  "history_count": 0
+}

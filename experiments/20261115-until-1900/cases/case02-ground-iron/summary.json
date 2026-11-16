@@ -1,0 +1,555 @@
+{
+  "run_id": "20261115-154521-609789",
+  "status": "runtime_error",
+  "error": "MC API 网络请求异常（ReadTimeout）：timed out",
+  "answer": null,
+  "actor_requests": 13,
+  "elapsed": 305.546,
+  "runtime": {
+    "source_revision": "5408efbebec81ac7",
+    "loaded_at": "2026-11-15T07:42:43.687436+00:00",
+    "pid": 711448
+  },
+  "death_notifications": 2,
+  "hurt_notifications": 11,
+  "model_seconds": 185.2651,
+  "tool_counts": {
+    "mc_skill_harvest_logs": 1,
+    "mc_skill_craft_gear": 3,
+    "mc_skill_mine_blocks": 2,
+    "mc_craft": 4,
+    "mc_skill_unstick": 1,
+    "mc_place": 2,
+    "mc_find_blocks": 1,
+    "mc_status": 1,
+    "mc_posture": 1
+  },
+  "tool_calls": [
+    {
+      "name": "mc_skill_harvest_logs",
+      "started": 38.2356,
+      "args": "{\"target_logs\":4}",
+      "seq": 186,
+      "duration": 24.518,
+      "result": {
+        "ok": true,
+        "dug_count": 4,
+        "gained": {
+          "birch_log": 6,
+          "dirt": 16
+        },
+        "water_skipped": 0,
+        "protected_blacklisted": 0,
+        "equipped_axe": null
+      }
+    },
+    {
+      "name": "mc_skill_craft_gear",
+      "started": 62.7541,
+      "args": "{\"item\":\"wooden_pickaxe\"}",
+      "seq": 188,
+      "duration": 7.696,
+      "result": {
+        "ok": true,
+        "crafted": "wooden_pickaxe",
+        "gained": 1,
+        "used_table": true,
+        "inventory": {
+          "birch_log": 3,
+          "dirt": 16,
+          "wooden_pickaxe": 1,
+          "stick": 2,
+          "birch_planks": 3
+        },
+        "equipped_slot": "hand"
+      }
+    },
+    {
+      "name": "mc_skill_mine_blocks",
+      "started": 70.45,
+      "args": "{\"block_types\":[\"stone\"],\"count\":8}",
+      "seq": 190,
+      "duration": 24.757,
+      "result": {
+        "ok": true,
+        "dug_count": 8,
+        "gained": {
+          "cobblestone": 7
+        },
+        "water_skipped": 0,
+        "protected_blacklisted": 0,
+        "pickaxe_used": "wooden_pickaxe"
+      }
+    },
+    {
+      "name": "mc_craft",
+      "started": 95.2075,
+      "args": "{\"item\":\"stone_pickaxe\"}",
+      "seq": 192,
+      "duration": 0.041,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "path_not_found",
+          "message": "No path to the goal!",
+          "from": [
+            -176.5,
+            66,
+            -374.5
+          ],
+          "to": [
+            -169,
+            71,
+            -378
+          ],
+          "kb_hint": "目标位置当前无可达路径（可能是坑洞落差/头顶遮挡/高墙）；可先调 mc_skill_unstick 脱困，或对目标点水平跑图时省略 y。"
+        }
+      }
+    },
+    {
+      "name": "mc_skill_unstick",
+      "started": 109.2165,
+      "args": "{}",
+      "seq": 326,
+      "duration": 2.465,
+      "result": {
+        "ok": true,
+        "foot_block_before": [
+          -177,
+          66,
+          -375
+        ],
+        "hitbox_xs": [
+          -177
+        ],
+        "hitbox_zs": [
+          -375
+        ],
+        "pos_before": [
+          -176.5,
+          66,
+          -374.5
+        ],
+        "pos_after": [
+          -175.3,
+          67.3,
+          -374.5
+        ],
+        "dug": [
+          {
+            "pos": [
+              -176,
+              67,
+              -375
+            ],
+            "block": "grass_block"
+          }
+        ],
+        "control": {
+          "ms": 901,
+          "pos": [
+            -175.3,
+            67.3,
+            -374.5
+          ],
+          "moved": 1.75,
+          "on_ground": false,
+          "in_water": false,
+          "yaw": -1.57,
+          "pitch": 0
+        }
+      }
+    },
+    {
+      "name": "mc_skill_mine_blocks",
+      "started": 121.4207,
+      "args": "{\"block_types\":[\"stone\"],\"count\":1}",
+      "seq": 373,
+      "duration": 3.224,
+      "result": {
+        "ok": true,
+        "dug_count": 1,
+        "gained": {
+          "cobblestone": 1
+        },
+        "water_skipped": 0,
+        "protected_blacklisted": 0,
+        "pickaxe_used": "wooden_pickaxe"
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 129.6835,
+      "args": "{\"item\":\"crafting_table\"}",
+      "seq": 415,
+      "duration": 0.009,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "missing_item",
+          "message": "no crafting_table in inventory",
+          "inventory": {
+            "birch_log": 3,
+            "dirt": 17,
+            "cobblestone": 8,
+            "wildflowers": 1,
+            "wooden_pickaxe": 1,
+            "stick": 2,
+            "birch_planks": 3
+          },
+          "kb_hint": "配方提示：crafting_table [2x2 背包即可] 需要 {'any_planks': 4}，可直接调用 mc_skill_craft_gear 自动备木板/木棍与工作台。"
+        }
+      }
+    },
+    {
+      "name": "mc_craft",
+      "started": 134.0357,
+      "args": "{\"item\":\"birch_planks\",\"count\":1}",
+      "seq": 481,
+      "duration": 0.51,
+      "result": {
+        "ok": true,
+        "result": {
+          "crafted": "birch_planks",
+          "gained": 4,
+          "used_table": false,
+          "inventory": {
+            "birch_log": 2,
+            "dirt": 17,
+            "cobblestone": 8,
+            "wildflowers": 1,
+            "wooden_pickaxe": 1,
+            "stick": 2,
+            "birch_planks": 7
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_craft",
+      "started": 170.8261,
+      "args": "{\"item\":\"crafting_table\"}",
+      "seq": 520,
+      "duration": 0.511,
+      "result": {
+        "ok": true,
+        "result": {
+          "crafted": "crafting_table",
+          "gained": 1,
+          "used_table": false,
+          "inventory": {
+            "birch_log": 2,
+            "dirt": 17,
+            "cobblestone": 8,
+            "wildflowers": 1,
+            "crafting_table": 1,
+            "wooden_pickaxe": 1,
+            "stick": 2,
+            "birch_planks": 3
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 203.9904,
+      "args": "{\"item\":\"crafting_table\"}",
+      "seq": 556,
+      "duration": 1.165,
+      "result": {
+        "ok": true,
+        "result": {
+          "placed": "crafting_table",
+          "pos": [
+            -177,
+            66,
+            -374
+          ],
+          "sneaked": true
+        }
+      }
+    },
+    {
+      "name": "mc_craft",
+      "started": 207.1981,
+      "args": "{\"item\":\"stone_pickaxe\"}",
+      "seq": 588,
+      "duration": 3.762,
+      "result": {
+        "ok": true,
+        "result": {
+          "crafted": "stone_pickaxe",
+          "gained": 1,
+          "used_table": true,
+          "inventory": {
+            "birch_log": 2,
+            "dirt": 17,
+            "cobblestone": 5,
+            "wildflowers": 1,
+            "wooden_pickaxe": 1,
+            "stone_pickaxe": 1,
+            "birch_planks": 3
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_find_blocks",
+      "started": 221.1308,
+      "args": "{\"radius\":32,\"types\":[\"iron_ore\", \"deepslate_iron_ore\"]}",
+      "seq": 647,
+      "duration": 0.096,
+      "result": {
+        "ok": true,
+        "result": {
+          "total": 1,
+          "blocks": [
+            {
+              "name": "iron_ore",
+              "pos": [
+                -157,
+                48,
+                -370
+              ],
+              "dist": 27.7,
+              "properties": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_status",
+      "started": 227.385,
+      "args": "{}",
+      "seq": 688,
+      "duration": 0.237,
+      "result": {
+        "ok": true,
+        "result": {
+          "username": "BeastBot_01",
+          "pos": [
+            -164.5,
+            75,
+            -386.5
+          ],
+          "yaw": 3.14,
+          "speed": 0,
+          "velocity": [
+            0,
+            0,
+            0
+          ],
+          "dimension": "overworld",
+          "gamemode": "survival",
+          "health": 20,
+          "food": 20,
+          "saturation": 5,
+          "xp_level": 0,
+          "xp_progress": 0,
+          "oxygen": 20,
+          "armor_points": 0,
+          "held": null,
+          "offhand": null,
+          "effects": [],
+          "on_fire": false,
+          "is_sleeping": false,
+          "in_water": false,
+          "submerged": false,
+          "in_lava": false,
+          "in_vehicle": null,
+          "sneaking": false,
+          "jumping": false,
+          "blocking": false,
+          "using_item": null,
+          "time_of_day": 20818,
+          "is_day": false,
+          "raining": false,
+          "thundering": false,
+          "biome": "",
+          "on_ground": true,
+          "alive": true,
+          "ready": true,
+          "busy": null,
+          "nearest_hostile": {
+            "id": 24316,
+            "name": "zombie",
+            "dist": 3.5
+          },
+          "last_death": {
+            "pos": [
+              -170.5,
+              71,
+              -377.4
+            ],
+            "t": 1794728944219,
+            "dropped_items_at": [
+              -170.5,
+              71,
+              -377.4
+            ]
+          },
+          "threat_assessment": {
+            "hostile_blocked_by_wall": false,
+            "safe_in_place": false,
+            "assessment_complete": false,
+            "nearby_hostiles": [
+              {
+                "id": 24316,
+                "name": "zombie",
+                "dist": 3.3,
+                "blocked_by_wall": false
+              },
+              {
+                "id": 19780,
+                "name": "zombie",
+                "dist": 9.3,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "grass_block",
+                  "pos": [
+                    -165,
+                    74,
+                    -387
+                  ]
+                }
+              },
+              {
+                "id": 24244,
+                "name": "creeper",
+                "dist": 20.2,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "birch_leaves",
+                  "pos": [
+                    -174,
+                    78,
+                    -395
+                  ]
+                }
+              },
+              {
+                "id": 20463,
+                "name": "enderman",
+                "dist": 21.1,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "grass_block",
+                  "pos": [
+                    -166,
+                    74,
+                    -389
+                  ]
+                }
+              },
+              {
+                "id": 24268,
+                "name": "zombie",
+                "dist": 22.5,
+                "blocked_by_wall": false
+              }
+            ],
+            "note": "附近有无遮挡或遮挡未确认的怪物；最近一只隔墙不能代表整体安全。优先保持掩体、举盾或封堵，受伤时暂停采集/合成。",
+            "dy": -1.6,
+            "hostiles_observed": 7,
+            "hostiles_checked": 5,
+            "all_checked_hostiles_occluded": false
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_posture",
+      "started": 238.7498,
+      "args": "{\"shield\":true}",
+      "seq": 738,
+      "duration": 0.013,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "missing_item",
+          "message": "no shield in inventory",
+          "inventory": {
+            "birch_log": 2,
+            "dirt": 17,
+            "cobblestone": 5,
+            "wildflowers": 1,
+            "wooden_pickaxe": 1,
+            "stone_pickaxe": 1,
+            "birch_planks": 3
+          },
+          "kb_hint": "材料或工作站不足时可用 mc_kb_lookup 查询官方 1.21.11 配方，或用 mc_skill_craft_gear 自动处理中间产物。"
+        }
+      }
+    },
+    {
+      "name": "mc_skill_craft_gear",
+      "started": 243.885,
+      "args": "{\"item\":\"shield\"}",
+      "seq": 797,
+      "duration": 4.114,
+      "result": {
+        "ok": false,
+        "error": "missing_ingredients",
+        "message": "could not craft shield",
+        "example_recipe_needs": {
+          "cherry_planks": 6,
+          "iron_ingot": 1
+        },
+        "inventory": {
+          "dirt": 17,
+          "cobblestone": 5,
+          "wildflowers": 1,
+          "wooden_pickaxe": 1,
+          "stone_pickaxe": 1,
+          "birch_planks": 7
+        }
+      }
+    },
+    {
+      "name": "mc_skill_craft_gear",
+      "started": 259.0198,
+      "args": "{\"item\":\"wooden_sword\"}",
+      "seq": 845,
+      "duration": 46.526,
+      "result": {
+        "text": "错误：工具执行中止，未取得正常结果。"
+      }
+    }
+  ],
+  "final_telemetry": {
+    "connected": false,
+    "ready": false,
+    "username": null,
+    "pos": null,
+    "dimension": null,
+    "biome": null,
+    "is_day": null,
+    "time_of_day": null,
+    "health": null,
+    "food": null,
+    "armor": null,
+    "held": null,
+    "inventory_total": 0,
+    "top_items": [],
+    "updated_at": "2026-11-15T07:50:31.391011+00:00",
+    "error": null
+  },
+  "authoritative_death_events": 3,
+  "authoritative_hurt_events": 19,
+  "api_terminal_events": [
+    {
+      "seq": 444,
+      "t": 1794728982166,
+      "type": "death_loop",
+      "deaths": 3,
+      "cooldown_until": 1794729282166
+    },
+    {
+      "seq": 445,
+      "t": 1794728982168,
+      "type": "disconnected",
+      "reason": "death loop protection"
+    }
+  ]
+}

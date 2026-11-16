@@ -1,0 +1,1634 @@
+{
+  "assisted": true,
+  "operation": "inspect",
+  "bounds": [
+    [
+      -172,
+      62,
+      -382
+    ],
+    [
+      -168,
+      66,
+      -378
+    ]
+  ],
+  "before": {
+    "status": {
+      "username": "BeastBot_01",
+      "pos": [
+        -166.5,
+        77,
+        -374.5
+      ],
+      "yaw": 3.14,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 20,
+      "food": 20,
+      "saturation": 5,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 314,
+      "armor_points": 0,
+      "held": {
+        "name": "crafting_table",
+        "count": 1,
+        "slot": 40
+      },
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 23119,
+      "is_day": false,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 25030,
+        "name": "creeper",
+        "dist": 6
+      }
+    },
+    "inventory": {
+      "items": [
+        {
+          "name": "dirt",
+          "count": 17,
+          "slot": 37
+        },
+        {
+          "name": "cobblestone",
+          "count": 5,
+          "slot": 38
+        },
+        {
+          "name": "wildflowers",
+          "count": 1,
+          "slot": 39
+        },
+        {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        {
+          "name": "stick",
+          "count": 4,
+          "slot": 41
+        },
+        {
+          "name": "wooden_pickaxe",
+          "count": 1,
+          "slot": 42,
+          "durability_used": 9
+        },
+        {
+          "name": "stone_pickaxe",
+          "count": 1,
+          "slot": 43
+        },
+        {
+          "name": "birch_planks",
+          "count": 1,
+          "slot": 44
+        }
+      ],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": {
+        "name": "crafting_table",
+        "count": 1,
+        "slot": 40
+      },
+      "empty_slots": 28
+    }
+  },
+  "original_blocks": [
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        62,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        62,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        62,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        62,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        62,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        63,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        63,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        63,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        63,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        63,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        64,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        64,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        64,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        64,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        64,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        65,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        65,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        65,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        65,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        65,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        66,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        66,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        66,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        66,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -172,
+        66,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        62,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        62,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        62,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        62,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        62,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        63,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        63,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        63,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        63,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        63,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        64,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        64,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        64,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        64,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        64,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        65,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        65,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        65,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        65,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        65,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        66,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        66,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        66,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        66,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -171,
+        66,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        62,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        62,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        62,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        62,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        62,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        63,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        63,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        63,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        63,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        63,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        64,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        64,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        64,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        64,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        64,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        65,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        65,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        65,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        65,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        65,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        66,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        66,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        66,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        66,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -170,
+        66,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        62,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        62,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        62,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        62,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        62,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        63,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        63,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        63,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        63,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        63,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        64,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        64,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        64,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        64,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        64,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        65,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        65,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        65,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        65,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        65,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        66,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        66,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        66,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        66,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -169,
+        66,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        62,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        62,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        62,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        62,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        62,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        63,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        63,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        63,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        63,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        63,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        64,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        64,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        64,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        64,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        64,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        65,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        65,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        65,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        65,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        65,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        66,
+        -382
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        66,
+        -381
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        66,
+        -380
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        66,
+        -379
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    },
+    {
+      "name": "stone",
+      "pos": [
+        -168,
+        66,
+        -378
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 1.5,
+      "harvest_tool_ok": false
+    }
+  ],
+  "granted_items": []
+}

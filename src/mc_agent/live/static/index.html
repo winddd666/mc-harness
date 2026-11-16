@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MC-Live 战术监看与远征回放台 · 1.21.11</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230d1520'/%3E%3Crect x='4' y='4' width='24' height='10' fill='%2322c55e'/%3E%3Crect x='4' y='14' width='24' height='14' fill='%23854d0e'/%3E%3Crect x='8' y='10' width='4' height='4' fill='%2315803d'/%3E%3Crect x='20' y='12' width='4' height='4' fill='%2315803d'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261115c" />
+</head>
+<body>
+  <div id="app-shell" class="hide-alerts">
+    <!-- ==================== TOP HEADER BAR ==================== -->
+    <header id="top-header">
+      <div class="header-left">
+        <div class="brand-lockup">
+          <span class="brand-cube" aria-hidden="true"></span>
+          <div class="brand-titles">
+            <span class="brand-name">MC-LIVE</span>
+            <span class="brand-sub">1.21.11 战术监看台</span>
+          </div>
+        </div>
+
+        <div class="mode-switch" role="tablist" aria-label="运行模式切换">
+          <button id="btn-mode-live" class="mode-btn active" data-mode="live" type="button">
+            <span class="live-dot"></span>🔴 实时监看 (Live)
+          </button>
+          <button id="btn-mode-replay" class="mode-btn" data-mode="replay" type="button">
+            ⏪ 历史回放 (Replay)
+          </button>
+        </div>
+
+        <div class="run-selector-wrap">
+          <label for="run-select" class="sr-only">选择远征日志</label>
+          <select id="run-select" title="选择远征阶段 / 历史事件日志">
+            <option value="">加载远征记录中...</option>
+          </select>
+          <button id="btn-refresh-runs" class="icon-btn" type="button" title="刷新运行日志列表">↻</button>
+        </div>
+      </div>
+
+      <!-- Replay Transport & Timeline Scrubber (Active in Replay Mode) -->
+      <div id="replay-controls" class="header-replay hidden" aria-label="历史回放控制栏">
+        <div class="transport-group">
+          <button id="btn-step-prev" class="transport-btn" type="button" title="上一步关键帧 (←)">⏮</button>
+          <button id="btn-play-pause" class="transport-btn primary" type="button" title="播放 / 暂停 (Space)">▶ 播放</button>
+          <button id="btn-step-next" class="transport-btn" type="button" title="下一步关键帧 (→)">⏭</button>
+        </div>
+        <div class="speed-group" role="group" aria-label="倍速选择">
+          <button class="speed-btn active" data-speed="1" type="button">1x</button>
+          <button class="speed-btn" data-speed="2" type="button">2x</button>
+          <button class="speed-btn" data-speed="5" type="button">5x</button>
+          <button class="speed-btn" data-speed="10" type="button">10x</button>
+        </div>
+        <div class="scrubber-wrap">
+          <input id="replay-scrubber" type="range" min="0" max="100" step="any" value="0" aria-label="回放时间轴" />
+          <span id="replay-time-label" class="mono-num">0.0s / 0.0s</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <div id="conn-pill" class="status-pill connecting" title="WebSocket 与 Bot 会话状态">
+          <span class="pill-dot"></span>
+          <span id="conn-pill-text">连接中...</span>
+        </div>
+        <div id="bot-name-badge" class="meta-badge" title="当前监看角色">
+          <span class="badge-icon">🤖</span>
+          <span id="bot-name-text">--</span>
+        </div>
+        <div id="server-tag-badge" class="meta-badge server-unknown" title="MC Agent API 目标服务器">
+          <span id="server-tag-text">待识别环境</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ==================== MAIN WORKSPACE ==================== -->
+    <main id="main-grid">
+      <!-- ==================== LEFT PANE (~52%): BOT VIEWPORT ==================== -->
+      <section id="left-pane" aria-label="Bot 视界窗口">
+        <div class="pane-tabbar">
+          <div class="view-tabs" role="tablist" aria-label="视界模式">
+            <button class="view-tab active" data-view="local_capture" type="button">
+              <span id="capture-dot" class="tab-dot offline"></span>🎬 实景游戏画面
+            </button>
+            <button class="view-tab" data-view="prismarine" type="button">
+              <span id="prismarine-dot" class="tab-dot offline"></span>🟢 Prismarine 备选 3D
+            </button>
+            <button class="view-tab" data-view="third_person" type="button">🧊 AI 体素 (第三视角)</button>
+            <button class="view-tab" data-view="first_person" type="button">🧊 AI 体素 (第一视角)</button>
+            <button class="view-tab" data-view="free_orbit" type="button">🧊 自由鸟瞰</button>
+            <button class="view-tab" data-view="radar_2d" type="button">📡 2D 战术雷达</button>
+          </div>
+          <div class="tabbar-right">
+            <div class="viewport-hint" id="viewport-hint">MC 客户端实景直播 · 局域网自动同步</div>
+            <button id="btn-toggle-alerts" class="overlay-toggle-btn" type="button" title="显示或隐藏受伤/死亡弹窗与 3D 自由鸟瞰/轨迹中的 ⚡受伤 / 💀死亡 标记（默认隐藏）">🔕 伤害提示: 关</button>
+            <button id="btn-toggle-overlays" class="overlay-toggle-btn active" type="button" title="显示或隐藏画面四角的坐标/状态叠加层">👁 叠加层</button>
+          </div>
+        </div>
+
+        <div id="viewport-stage" class="hide-alerts">
+          <!-- WebGL / 2D Radar Engine Container (owned by viewer3d.js) -->
+          <div id="viewer3d-container" class="viewport-layer hidden"></div>
+
+          <!-- Prismarine Real-View Embed Tab -->
+          <div id="prismarine-panel" class="viewport-layer alt-panel hidden">
+            <div id="prismarine-live-bar" class="capture-live-bar prismarine-live-bar hidden">
+              <span id="prismarine-live-status" class="capture-live-status">🟢 Prismarine 3D · 第三视角</span>
+              <div class="live-bar-actions">
+                <div class="camera-mode-group" role="group" aria-label="Prismarine 视角切换">
+                  <button id="btn-prismarine-first" class="mini-btn camera-mode-btn" data-prismarine-mode="first_person" type="button">👁 第一视角</button>
+                  <button id="btn-prismarine-third" class="mini-btn camera-mode-btn active" data-prismarine-mode="third_person" type="button">🎥 第三视角</button>
+                </div>
+                <button id="btn-prismarine-reload" class="mini-btn" type="button" title="重新加载 Prismarine 3D 预览">↻ 重载</button>
+              </div>
+            </div>
+            <div id="prismarine-unavailable" class="empty-card">
+              <div class="empty-icon">🛰️</div>
+              <h3>Prismarine 备选 3D 旁观未启用</h3>
+              <p id="prismarine-note">当前未检测到本地 Prismarine 旁观相机服务（默认自动回退零窗口 3D 体素视界）。</p>
+              <div class="empty-sub">
+                <span>支持本地测试服独立旁观 Bot 画面流嵌入；线上比赛服默认采用无碰撞零窗口 3D 体素与战术雷达。</span>
+                <div class="empty-actions">
+                  <button id="btn-recheck-prismarine" class="mini-btn" type="button">重新探测 /api/info</button>
+                </div>
+              </div>
+            </div>
+            <iframe id="prismarine-iframe" class="prismarine-frame hidden" title="Prismarine 实景旁观" referrerpolicy="no-referrer"></iframe>
+          </div>
+
+          <!-- Primary Server-Pushed Live Stream + Optional Browser Capture Fallback -->
+          <div id="capture-panel" class="viewport-layer alt-panel">
+            <div id="capture-live-bar" class="capture-live-bar hidden">
+              <span id="capture-live-status" class="capture-live-status">🟢 实景直播</span>
+              <div class="live-bar-actions">
+                <div id="capture-camera-toggle" class="camera-mode-group" role="group" aria-label="实景视角切换">
+                  <button id="btn-capture-first" class="mini-btn camera-mode-btn" data-camera-mode="first_person" type="button">👁 第一视角</button>
+                  <button id="btn-capture-third" class="mini-btn camera-mode-btn active" data-camera-mode="third_person" type="button">🎥 第三视角</button>
+                </div>
+                <button id="btn-switch-capture" class="mini-btn hidden" type="button">🔄 切换窗口</button>
+                <button id="btn-stop-capture" class="mini-btn danger hidden" type="button">⏹ 停止采集</button>
+              </div>
+            </div>
+            <div id="capture-placeholder" class="empty-card">
+              <div class="empty-icon">🎬</div>
+              <h3>🎬 等待实景游戏画面上线</h3>
+              <p id="capture-note">
+                服务端实时画面流（<code>beast_director</code> / 上游代理流）启动后将在此自动播放，局域网纯 HTTP 打开本页面即可免操作观看。
+              </p>
+              <div id="capture-wait-badge" class="capture-wait-badge">⏳ 正在等待服务端实景推流上线（就绪后自动播放，也可切换上方「🟢 Prismarine 备选 3D」或「🧊 AI 体素」）</div>
+              <div id="manual-capture-fallback" class="manual-capture-fallback hidden">
+                <div class="fallback-divider"><span>可选备选：本机浏览器窗口采集</span></div>
+                <label class="relay-check-row">
+                  <input id="chk-relay-lan" type="checkbox" checked />
+                  <span>同步推流给局域网队友（队友打开本页免开 MC 实时同看）</span>
+                </label>
+                <div class="empty-actions">
+                  <button id="btn-start-capture" class="mini-btn accent" type="button">🎥 选择本机 Minecraft 窗口采集</button>
+                </div>
+              </div>
+            </div>
+            <video id="local-capture-video" class="capture-video hidden" autoplay playsinline muted></video>
+            <img id="remote-capture-img" class="capture-video hidden" alt="MC 实景游戏画面直播流" />
+          </div>
+
+          <!-- FLOATING TACTICAL OVERLAYS -->
+          <!-- Top-Left: Coordinates, Dimension, Biome, Time, Compass, Speed -->
+          <div id="overlay-top-left" class="vp-overlay top-left">
+            <div class="hud-coord-row">
+              <span class="coord-label">XYZ</span>
+              <span id="ov-pos" class="coord-val mono-num">[--, --, --]</span>
+              <span id="ov-dim" class="dim-pill overworld">主世界</span>
+            </div>
+            <div class="hud-telemetry-chips">
+              <span id="ov-biome" class="ov-chip" title="当前生物群系">🌲 --</span>
+              <span id="ov-time" class="ov-chip" title="游戏内昼夜与时刻">☀️ --</span>
+              <span id="ov-compass" class="ov-chip mono-num" title="Mineflayer 朝向偏航角 (0=北-Z, -1.57=东+X)">🧭 N · 0°</span>
+              <span id="ov-speed" class="ov-chip mono-num" title="水平移动速度">⚡ 0.00 m/s</span>
+            </div>
+          </div>
+
+          <!-- Top-Right: Flashing Danger & Hazard Alerts -->
+          <div id="overlay-top-right" class="vp-overlay top-right" aria-live="polite"></div>
+
+          <!-- Bottom-Left: Active Underlying Lock / Macro Execution Badge -->
+          <div id="overlay-bottom-left" class="vp-overlay bottom-left">
+            <div id="ov-busy-badge" class="busy-pill idle">
+              <span class="busy-indicator"></span>
+              <span id="ov-busy-text">busy: idle (空闲)</span>
+            </div>
+            <div id="ov-posture-tags" class="posture-tags"></div>
+          </div>
+
+          <!-- Bottom-Right: Hurt Toggle + Voxel / Entity Counts -->
+          <div id="overlay-bottom-right" class="vp-overlay bottom-right">
+            <button id="btn-ov-hurt-toggle" class="scene-stats ov-hurt-toggle" type="button" title="点击显示或隐藏 3D 自由鸟瞰与轨迹中的 ⚡受伤 / 💀死亡 标记">🔕 伤害标记已隐</button>
+            <span id="ov-scene-stats" class="scene-stats mono-num">方块 0 · 实体 0</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== RIGHT PANE (~48%): 3-SECTION DASHBOARD + DRAWERS ==================== -->
+      <section id="right-pane" aria-label="智能体状态与决策面板">
+        <!-- SECTION A: Top Compact HUD -->
+        <div id="section-hud" class="right-section hud-section">
+          <div class="vitals-grid">
+            <div class="vital-item" title="生命值 (Health / 20)">
+              <div class="vital-head">
+                <span>❤️ 生命</span>
+                <span id="hud-hp-val" class="mono-num">-- / 20</span>
+              </div>
+              <div class="bar-track"><div id="hud-hp-bar" class="bar-fill hp" style="width: 0%"></div></div>
+            </div>
+
+            <div class="vital-item" title="饱食度 (Food / 20)">
+              <div class="vital-head">
+                <span>🍖 饱食</span>
+                <span id="hud-food-val" class="mono-num">-- / 20</span>
+              </div>
+              <div class="bar-track"><div id="hud-food-bar" class="bar-fill food" style="width: 0%"></div></div>
+            </div>
+
+            <div class="vital-item" title="氧气值 (1.21 满值 20；仅在水中/水下消耗)">
+              <div class="vital-head">
+                <span>🫧 氧气</span>
+                <span id="hud-oxy-val" class="mono-num">20 / 20</span>
+              </div>
+              <div class="bar-track"><div id="hud-oxy-bar" class="bar-fill oxy" style="width: 100%"></div></div>
+            </div>
+
+            <div class="vital-item" title="护甲值 (Armor / 20)">
+              <div class="vital-head">
+                <span>🛡️ 护甲</span>
+                <span id="hud-armor-val" class="mono-num">0 / 20</span>
+              </div>
+              <div class="bar-track"><div id="hud-armor-bar" class="bar-fill armor" style="width: 0%"></div></div>
+            </div>
+          </div>
+
+          <div class="hud-subrow">
+            <!-- Held & Offhand with mini durability -->
+            <div class="equip-strip">
+              <div id="hud-held-box" class="equip-pill" title="主手持有物品">
+                <span class="equip-tag">主手</span>
+                <span id="hud-held-name" class="equip-name">空手</span>
+                <div id="hud-held-dur-wrap" class="mini-dur hidden"><div id="hud-held-dur" class="mini-dur-fill"></div></div>
+              </div>
+              <div id="hud-offhand-box" class="equip-pill" title="副手持有物品">
+                <span class="equip-tag">副手</span>
+                <span id="hud-offhand-name" class="equip-name">无</span>
+                <div id="hud-offhand-dur-wrap" class="mini-dur hidden"><div id="hud-offhand-dur" class="mini-dur-fill"></div></div>
+              </div>
+            </div>
+
+            <!-- Rate-limit & Token/Cache telemetry -->
+            <div class="llm-strip">
+              <div id="hud-rpm-box" class="rpm-pill" title="24 RPM 共享限速等待状态 (model.rate_wait)">
+                <div class="rpm-top">
+                  <span>⏱ 24RPM</span>
+                  <span id="hud-rpm-val" class="mono-num">0.0s</span>
+                </div>
+                <div class="rpm-track"><div id="hud-rpm-bar" class="rpm-fill" style="width: 0%"></div></div>
+              </div>
+
+              <div id="hud-cache-badge" class="token-pill mono-num" title="Prompt Tokens 与 KV Cache 命中率 (cached_tokens / prompt_tokens)">
+                <span>🧠 Tokens --</span>
+                <span class="sep">·</span>
+                <span id="hud-kv-pct">KV --%</span>
+              </div>
+            </div>
+
+            <!-- Advancements Pill & Drawer Toggles -->
+            <div class="drawer-actions">
+              <button id="btn-adv-pill" class="adv-count-pill mono-num" type="button" title="点击展开 125 项进度与前沿攻略">
+                🏆 <span id="hud-adv-count">0</span> / 125
+              </button>
+              <button id="btn-drawer-inv" class="drawer-toggle-btn" type="button">🎒 背包详情</button>
+              <button id="btn-drawer-adv" class="drawer-toggle-btn" type="button">🗺️ 125 进度与前沿</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- SLIDE-OVER LIGHTWEIGHT DRAWERS (Anchored inside Right Pane below Section A) -->
+        <aside id="drawer-inventory" class="slide-drawer hidden" aria-label="背包与装备详情抽屉">
+          <div class="drawer-header">
+            <div class="drawer-title">
+              <span>🎒 背包与装备详情</span>
+              <span id="inv-summary-meta" class="drawer-meta mono-num">空槽 --</span>
+            </div>
+            <button class="drawer-close-btn" data-close-drawer="inventory" type="button">✕ 关闭</button>
+          </div>
+          <div class="drawer-body">
+            <div class="inv-section-label">护甲与双手槽位</div>
+            <div id="inv-equipment-grid" class="inv-equip-grid"></div>
+            <div class="inv-section-label">背包物品栏 (按槽位排序)</div>
+            <div id="inv-slots-grid" class="inv-slots-grid"></div>
+          </div>
+        </aside>
+
+        <aside id="drawer-advancements" class="slide-drawer hidden" aria-label="125 进度与前沿抽屉">
+          <div class="drawer-header">
+            <div class="drawer-title">
+              <span>🗺️ 1.21.11 全部 125 项进度与解锁前沿</span>
+              <span id="adv-summary-meta" class="drawer-meta mono-num">0 / 125 (0%)</span>
+            </div>
+            <button class="drawer-close-btn" data-close-drawer="advancements" type="button">✕ 关闭</button>
+          </div>
+          <div class="drawer-body">
+            <div class="adv-progress-banner">
+              <div class="bar-track tall"><div id="adv-total-bar" class="bar-fill adv" style="width: 0%"></div></div>
+              <div id="adv-cat-pills" class="adv-cat-pills"></div>
+            </div>
+            <div class="inv-section-label">🎯 立即可解锁前沿 (Frontier Playbooks &amp; How-To)</div>
+            <div id="adv-frontier-list" class="adv-frontier-list"></div>
+            <div class="inv-section-label">✅ 已解锁进度列表</div>
+            <div id="adv-completed-list" class="adv-completed-list"></div>
+          </div>
+        </aside>
+
+        <!-- SECTION B (~52% of right pane): AI 思考与工具调用瀑布流 -->
+        <div id="section-waterfall" class="right-section waterfall-section">
+          <!-- Task & Phase Banner -->
+          <div id="task-banner" class="task-banner">
+            <div class="task-banner-top">
+              <div class="task-meta-left">
+                <span id="wf-phase-badge" class="phase-badge idle">待命</span>
+                <span id="wf-turn-progress" class="turn-pill mono-num">轮次 0 / --</span>
+                <span id="wf-model-tag" class="model-pill mono-num">--</span>
+              </div>
+              <div class="task-meta-right">
+                <label class="autoscroll-toggle" title="新消息或回放推进时自动滚动到底部">
+                  <input id="chk-autoscroll" type="checkbox" checked />
+                  <span>自动滚动</span>
+                </label>
+                <button id="btn-toggle-task" class="text-link-btn" type="button">展开任务</button>
+              </div>
+            </div>
+            <div id="wf-task-text" class="task-text collapsed">暂无活动任务（可等待 mc-harness 运行或切换至「⏪ 历史回放」选择远征记录）</div>
+          </div>
+
+          <!-- Waterfall Feed -->
+          <div id="waterfall-list" class="waterfall-list" role="log" aria-live="off">
+            <div class="wf-empty">等待实时事件流或历史回放帧...</div>
+          </div>
+        </div>
+
+        <!-- SECTION C (~36% of right pane): XZ 平面轨迹 + Y 轴海拔联动窗口 -->
+        <div id="section-trajectory" class="right-section trajectory-section">
+          <div class="traj-toolbar">
+            <div class="dim-tabs" role="tablist" aria-label="维度轨迹过滤">
+              <button class="dim-tab active" data-dim="overworld" type="button">主世界 <span id="dim-cnt-overworld" class="dim-cnt">0</span></button>
+              <button class="dim-tab" data-dim="the_nether" type="button">下界 <span id="dim-cnt-nether" class="dim-cnt">0</span></button>
+              <button class="dim-tab" data-dim="the_end" type="button">末地 <span id="dim-cnt-end" class="dim-cnt">0</span></button>
+            </div>
+            <div id="traj-readout" class="traj-readout mono-num">北(-Z)上 · 东(+X)右</div>
+            <div class="traj-actions">
+              <button id="btn-traj-hurt" class="mini-btn" type="button" title="显示或隐藏轨迹与 3D 自由鸟瞰中的 ⚡受伤 / 💀死亡 标记">🔕 伤害已隐</button>
+              <button id="btn-traj-follow" class="mini-btn active" type="button" title="视角锁定跟随 Bot 当前坐标">居中跟随</button>
+              <button id="btn-traj-fit" class="mini-btn" type="button" title="缩放适配全部轨迹与语义标记">全局缩放</button>
+            </div>
+          </div>
+
+          <div class="traj-canvases">
+            <div class="xz-stage" id="xz-stage">
+              <canvas id="xz-canvas"></canvas>
+              <div class="xz-legend">
+                <span><i class="lg-dot prot">✖</i>保护区</span>
+                <span><i class="lg-dot station">🛠</i>工作站</span>
+                <span><i class="lg-dot hurt">⚡</i>受伤</span>
+                <span><i class="lg-dot death">💀</i>死亡/掉落</span>
+                <span><i class="lg-dot adv">🏆</i>进度</span>
+              </div>
+              <div id="traj-tooltip" class="traj-tooltip hidden"></div>
+            </div>
+            <div class="y-stage" id="y-stage">
+              <canvas id="y-canvas"></canvas>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Zero-CDN Local Scripts -->
+  <script src="/static/viewer3d.js?v=20261115c"></script>
+  <script src="/static/app.js?v=20261115c"></script>
+</body>
+</html>

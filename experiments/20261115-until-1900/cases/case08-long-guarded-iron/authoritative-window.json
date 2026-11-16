@@ -1,0 +1,291 @@
+{
+  "window_start_ms": 1794735650146.7668,
+  "window_end_ms": 1794736029880.338,
+  "counts": {
+    "hurt": 1,
+    "pickup": 38
+  },
+  "deaths": 0,
+  "hurts": 1,
+  "has_more": false,
+  "events": [
+    {
+      "seq": 232,
+      "t": 1794735747517,
+      "type": "hurt",
+      "health": 14.4,
+      "damage": 5.6,
+      "source": "player_explosion",
+      "source_entity": {
+        "id": 28847,
+        "name": "creeper"
+      }
+    },
+    {
+      "seq": 233,
+      "t": 1794735749664,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 234,
+      "t": 1794735750514,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 235,
+      "t": 1794735751443,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 236,
+      "t": 1794735764715,
+      "type": "pickup",
+      "item": "dirt",
+      "count": 1
+    },
+    {
+      "seq": 237,
+      "t": 1794735767213,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 238,
+      "t": 1794735769763,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 239,
+      "t": 1794735771513,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 240,
+      "t": 1794735774014,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 241,
+      "t": 1794735776414,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 242,
+      "t": 1794735788464,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 243,
+      "t": 1794735831915,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 244,
+      "t": 1794735834715,
+      "type": "pickup",
+      "item": "raw_copper",
+      "count": 3
+    },
+    {
+      "seq": 245,
+      "t": 1794735847115,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 7
+    },
+    {
+      "seq": 246,
+      "t": 1794735847115,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 247,
+      "t": 1794735848316,
+      "type": "pickup",
+      "item": "dirt",
+      "count": 1
+    },
+    {
+      "seq": 248,
+      "t": 1794735873113,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 249,
+      "t": 1794735874864,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 250,
+      "t": 1794735876013,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 251,
+      "t": 1794735877764,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 252,
+      "t": 1794735879715,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 253,
+      "t": 1794735924213,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 254,
+      "t": 1794735925916,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 255,
+      "t": 1794735928013,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 256,
+      "t": 1794735930068,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 257,
+      "t": 1794735931763,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 258,
+      "t": 1794735933913,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 259,
+      "t": 1794735935915,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 260,
+      "t": 1794735937614,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 261,
+      "t": 1794735939314,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 262,
+      "t": 1794735941814,
+      "type": "pickup",
+      "item": "granite",
+      "count": 1
+    },
+    {
+      "seq": 263,
+      "t": 1794735943513,
+      "type": "pickup",
+      "item": "granite",
+      "count": 1
+    },
+    {
+      "seq": 264,
+      "t": 1794735945613,
+      "type": "pickup",
+      "item": "granite",
+      "count": 1
+    },
+    {
+      "seq": 265,
+      "t": 1794735947614,
+      "type": "pickup",
+      "item": "granite",
+      "count": 1
+    },
+    {
+      "seq": 266,
+      "t": 1794735949313,
+      "type": "pickup",
+      "item": "granite",
+      "count": 1
+    },
+    {
+      "seq": 267,
+      "t": 1794735951414,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 268,
+      "t": 1794735953414,
+      "type": "pickup",
+      "item": "granite",
+      "count": 1
+    },
+    {
+      "seq": 269,
+      "t": 1794735955115,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 270,
+      "t": 1794735957265,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    }
+  ]
+}

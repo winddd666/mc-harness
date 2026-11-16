@@ -1,0 +1,345 @@
+[
+  {
+    "time": 1794730024.993051,
+    "action": "status",
+    "body": null,
+    "duration": 0.008473634719848633,
+    "ok": true,
+    "result": {
+      "username": "BeastBot_01",
+      "pos": [
+        -166.5,
+        77,
+        -374.5
+      ],
+      "yaw": 3.14,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 20,
+      "food": 20,
+      "saturation": 5,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 20,
+      "armor_points": 0,
+      "held": {
+        "name": "crafting_table",
+        "count": 1,
+        "slot": 40
+      },
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 18348,
+      "is_day": false,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 19780,
+        "name": "zombie",
+        "dist": 15.9
+      }
+    }
+  },
+  {
+    "time": 1794730025.001532,
+    "action": "inventory",
+    "body": null,
+    "duration": 0.005191802978515625,
+    "ok": true,
+    "result": {
+      "items": [
+        {
+          "name": "dirt",
+          "count": 17,
+          "slot": 37
+        },
+        {
+          "name": "cobblestone",
+          "count": 5,
+          "slot": 38
+        },
+        {
+          "name": "wildflowers",
+          "count": 1,
+          "slot": 39
+        },
+        {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        {
+          "name": "stick",
+          "count": 4,
+          "slot": 41
+        },
+        {
+          "name": "wooden_pickaxe",
+          "count": 1,
+          "slot": 42,
+          "durability_used": 9
+        },
+        {
+          "name": "stone_pickaxe",
+          "count": 1,
+          "slot": 43
+        },
+        {
+          "name": "birch_planks",
+          "count": 1,
+          "slot": 44
+        }
+      ],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": {
+        "name": "crafting_table",
+        "count": 1,
+        "slot": 40
+      },
+      "empty_slots": 28
+    }
+  },
+  {
+    "time": 1794730025.00673,
+    "action": "get_entities",
+    "body": {
+      "radius": 16,
+      "types": [
+        "item"
+      ]
+    },
+    "duration": 0.0044345855712890625,
+    "ok": true,
+    "result": {
+      "entities": []
+    }
+  },
+  {
+    "time": 1794730025.0111716,
+    "action": "find_blocks",
+    "body": {
+      "types": [
+        "grass_block",
+        "dirt",
+        "birch_log",
+        "oak_log"
+      ],
+      "radius": 16,
+      "limit": 15
+    },
+    "duration": 0.10854005813598633,
+    "ok": true,
+    "result": {
+      "total": 755,
+      "blocks": [
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            77,
+            -373
+          ],
+          "dist": 1.6,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            76,
+            -373
+          ],
+          "dist": 1.9,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            75,
+            -373
+          ],
+          "dist": 2.5,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            74,
+            -373
+          ],
+          "dist": 3.4,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -168,
+            75,
+            -377
+          ],
+          "dist": 3.5,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            76,
+            -372
+          ],
+          "dist": 5.2,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -172,
+            77,
+            -374
+          ],
+          "dist": 5.5,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -172,
+            76,
+            -374
+          ],
+          "dist": 5.6,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -172,
+            78,
+            -374
+          ],
+          "dist": 5.6,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -172,
+            75,
+            -374
+          ],
+          "dist": 5.9,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -172,
+            79,
+            -374
+          ],
+          "dist": 5.9,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -172,
+            74,
+            -374
+          ],
+          "dist": 6.3,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -172,
+            80,
+            -374
+          ],
+          "dist": 6.3,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -166,
+            71,
+            -377
+          ],
+          "dist": 6.5,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            73,
+            -372
+          ],
+          "dist": 6.5,
+          "properties": {
+            "axis": "y"
+          }
+        }
+      ]
+    }
+  }
+]

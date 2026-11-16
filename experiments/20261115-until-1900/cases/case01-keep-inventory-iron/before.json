@@ -1,0 +1,50 @@
+{
+  "runtime": {
+    "source_revision": "2a5b9b9a8e9fcd2d",
+    "loaded_at": "2026-11-15T07:24:43.751254+00:00",
+    "pid": 703314
+  },
+  "bot_username": "BeastBot_01",
+  "mc_api_base_url": "http://100.93.211.71:18900/api/v1",
+  "live_url": "http://127.0.0.1:8765",
+  "config": {
+    "provider": "nju",
+    "providers": [
+      "nju",
+      "deepseek",
+      "dashscope"
+    ],
+    "max_calls": 24,
+    "enable_thinking": false,
+    "run_timeout_s": 600.0,
+    "host": "127.0.0.1",
+    "port": 8770
+  },
+  "running": false,
+  "active_turn_id": null,
+  "connect_error": null,
+  "telemetry": {
+    "connected": true,
+    "ready": true,
+    "username": "BeastBot_01",
+    "pos": {
+      "x": -159.5,
+      "y": 76.0,
+      "z": -378.3
+    },
+    "dimension": "overworld",
+    "biome": "",
+    "is_day": false,
+    "time_of_day": 16858,
+    "health": 13.333332061767578,
+    "food": 17,
+    "armor": 0,
+    "held": null,
+    "inventory_total": 0,
+    "top_items": [],
+    "updated_at": "2026-11-15T07:25:50.166459+00:00",
+    "error": null
+  },
+  "turns": [],
+  "history_count": 0
+}

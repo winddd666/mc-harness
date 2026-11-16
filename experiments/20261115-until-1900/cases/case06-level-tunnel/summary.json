@@ -1,0 +1,218 @@
+{
+  "run_id": "20261115-172841-909318",
+  "status": "answered",
+  "error": null,
+  "answer": "**往返完成报告：**\n\n*   **状态**：成功完成。\n*   **最终位置**：`[-187.5, 55, -389.5]`（回到起点）。\n*   **向东**：实际前进 3 格，挖掘并入包 3 个花岗岩、3 个圆石。\n*   **向西**：实际返回 3 格，因路径已打通无新挖掘，无入包增量。\n*   **背包**：圆石 89，泥土 16，花岗岩 5，木镐 1，石镐 1，木棍 4，桦木木板 1。\n*   **安全**：全程无流体、落沙、受伤或矿石阻挡。",
+  "actor_requests": 3,
+  "elapsed": 131.2302,
+  "runtime": {
+    "source_revision": "c71e3d3b05f524f2",
+    "loaded_at": "2026-11-15T09:28:31.082894+00:00",
+    "pid": 754239
+  },
+  "survival_guard": true,
+  "guardian": {
+    "polls": 162,
+    "incidents": 0,
+    "actions": 0,
+    "cancelled_generations": 0
+  },
+  "death_notifications": 0,
+  "hurt_notifications": 0,
+  "model_seconds": 122.94189999999999,
+  "tool_counts": {
+    "mc_skill_tunnel": 2
+  },
+  "tool_calls": [
+    {
+      "name": "mc_skill_tunnel",
+      "started": 76.3168,
+      "args": "{\"direction\":\"east\",\"steps\":3,\"stop_on_ore\":true}",
+      "seq": 75,
+      "duration": 6.148,
+      "result": {
+        "ok": true,
+        "requires_replan": false,
+        "direction": "east",
+        "steps_requested": 3,
+        "steps_done": 3,
+        "stop_reason": "completed",
+        "dug": [
+          {
+            "pos": [
+              -187,
+              56,
+              -390
+            ],
+            "block": "granite"
+          },
+          {
+            "pos": [
+              -187,
+              55,
+              -390
+            ],
+            "block": "stone"
+          },
+          {
+            "pos": [
+              -186,
+              56,
+              -390
+            ],
+            "block": "granite"
+          },
+          {
+            "pos": [
+              -186,
+              55,
+              -390
+            ],
+            "block": "stone"
+          },
+          {
+            "pos": [
+              -185,
+              56,
+              -390
+            ],
+            "block": "granite"
+          },
+          {
+            "pos": [
+              -185,
+              55,
+              -390
+            ],
+            "block": "stone"
+          }
+        ],
+        "ore_at_face": [],
+        "pos_before": [
+          -187.5,
+          55,
+          -389.5
+        ],
+        "pos_after": [
+          -184.5,
+          55,
+          -389.5
+        ],
+        "gained": {
+          "cobblestone": 3,
+          "granite": 3
+        },
+        "inventory_after": {
+          "cobblestone": 89,
+          "dirt": 16,
+          "wildflowers": 1,
+          "granite": 5,
+          "stick": 4,
+          "wooden_pickaxe": 1,
+          "stone_pickaxe": 1,
+          "birch_planks": 1
+        },
+        "note": "仅 gained 是实际入包增量；挖掘数不是材料取得数。"
+      }
+    },
+    {
+      "name": "mc_skill_tunnel",
+      "started": 98.7175,
+      "args": "{\"direction\":\"west\",\"steps\":3,\"stop_on_ore\":true}",
+      "seq": 146,
+      "duration": 1.474,
+      "result": {
+        "ok": true,
+        "requires_replan": false,
+        "direction": "west",
+        "steps_requested": 3,
+        "steps_done": 3,
+        "stop_reason": "completed",
+        "dug": [],
+        "ore_at_face": [],
+        "pos_before": [
+          -184.5,
+          55,
+          -389.5
+        ],
+        "pos_after": [
+          -187.5,
+          55,
+          -389.5
+        ],
+        "gained": {},
+        "inventory_after": {
+          "cobblestone": 89,
+          "dirt": 16,
+          "wildflowers": 1,
+          "granite": 5,
+          "stick": 4,
+          "wooden_pickaxe": 1,
+          "stone_pickaxe": 1,
+          "birch_planks": 1
+        },
+        "note": "仅 gained 是实际入包增量；挖掘数不是材料取得数。"
+      }
+    }
+  ],
+  "final_telemetry": {
+    "connected": true,
+    "ready": true,
+    "username": "BeastBot_01",
+    "pos": {
+      "x": -187.5,
+      "y": 55.0,
+      "z": -389.5
+    },
+    "dimension": "overworld",
+    "biome": "",
+    "is_day": false,
+    "time_of_day": 22969,
+    "health": 20,
+    "food": 20,
+    "armor": 0,
+    "held": {
+      "name": "stone_pickaxe",
+      "count": 1,
+      "slot": 43,
+      "durability_used": 91
+    },
+    "inventory_total": 118,
+    "top_items": [
+      {
+        "name": "cobblestone",
+        "count": 89
+      },
+      {
+        "name": "dirt",
+        "count": 16
+      },
+      {
+        "name": "granite",
+        "count": 5
+      },
+      {
+        "name": "stick",
+        "count": 4
+      },
+      {
+        "name": "birch_planks",
+        "count": 1
+      },
+      {
+        "name": "stone_pickaxe",
+        "count": 1
+      },
+      {
+        "name": "wildflowers",
+        "count": 1
+      },
+      {
+        "name": "wooden_pickaxe",
+        "count": 1
+      }
+    ],
+    "updated_at": "2026-11-15T09:30:55.930014+00:00",
+    "error": null
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "runtime": {
+    "source_revision": "716f9f846fde688d",
+    "loaded_at": "2026-11-15T08:31:20.702607+00:00",
+    "pid": 732644
+  },
+  "bot_username": "BeastBot_01",
+  "mc_api_base_url": "http://100.93.211.71:18900/api/v1",
+  "live_url": "http://127.0.0.1:8765",
+  "config": {
+    "provider": "nju",
+    "providers": [
+      "nju",
+      "deepseek",
+      "dashscope"
+    ],
+    "max_calls": 24,
+    "enable_thinking": false,
+    "run_timeout_s": 600.0,
+    "survival_guard": false,
+    "host": "127.0.0.1",
+    "port": 8770
+  },
+  "running": false,
+  "active_turn_id": null,
+  "connect_error": "[death_loop_cooldown] bot is in death loop cooldown, 49s remaining",
+  "telemetry": {
+    "connected": false,
+    "ready": false,
+    "username": null,
+    "pos": null,
+    "dimension": null,
+    "biome": null,
+    "is_day": null,
+    "time_of_day": null,
+    "health": null,
+    "food": null,
+    "armor": null,
+    "held": null,
+    "inventory_total": 0,
+    "top_items": [],
+    "updated_at": "2026-11-15T08:31:20.846555+00:00",
+    "error": "[death_loop_cooldown] bot is in death loop cooldown, 49s remaining"
+  },
+  "turns": [],
+  "history_count": 0
+}

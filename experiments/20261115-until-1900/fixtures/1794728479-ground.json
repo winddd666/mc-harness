@@ -1,0 +1,14 @@
+{
+  "operation": "ground-fixture",
+  "assisted": true,
+  "results": [
+    {
+      "cmd": "gamerule keep_inventory",
+      "reply": "Gamerule keep_inventory is currently set to: true"
+    },
+    {
+      "cmd": "tp BeastBot_01 -162.5 71 -372.5",
+      "reply": "Teleported BeastBot_01 to -162.500000, 71.000000, -372.500000"
+    }
+  ]
+}

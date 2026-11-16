@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "mode": "started",
+  "turn_id": "20261115-172332-852566",
+  "turn": {
+    "turn_id": "20261115-172332-852566",
+    "prompt": "这是一次标注人工辅助的生存响应隔离实验，不是自主生存成功率测试。研究者仅开凿了封闭地下石室并传送你，没有发放物品；运行中可能施加一次轻微的可控伤害。服务器依然开启死亡不掉落，怪物和昼夜正常。\n\n请确认真实位置、生命、饱食和背包，然后用简短中文报告，不需要制作铁镐或离开小室。若收到运行时的新受伤/生存响应通知，放弃旧状态下的计划，按最新实际状态重新观察并报告。不要凭历史受伤记录推断正在持续受袭，不要主动死亡，不要挖出石室去追逐怪物。",
+    "created_at": "2026-11-15T09:23:32.852625+00:00",
+    "status": "running",
+    "phase": "preparing",
+    "phase_detail": "正在连接会话与加载最新状态快照...",
+    "actor_requests": 0,
+    "max_calls": 10,
+    "run_timeout_s": 180.0,
+    "survival_guard": true,
+    "runtime": {
+      "source_revision": "716f9f846fde688d",
+      "loaded_at": "2026-11-15T08:31:20.702607+00:00",
+      "pid": 732644
+    },
+    "provider": "nju",
+    "model": "nju",
+    "thinking": false,
+    "items": [],
+    "answer": null,
+    "error": null,
+    "run_file": "20261115-172332-852566.events.jsonl"
+  }
+}

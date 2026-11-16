@@ -1,0 +1,2172 @@
+{
+  "minecraft_version": "1.21.11",
+  "release_time": "2025-12-09T12:23:30+00:00",
+  "java_version": {
+    "component": "java-runtime-delta",
+    "majorVersion": 21
+  },
+  "total_advancements": 125,
+  "total_recipe_advancements": 1459,
+  "categories": {
+    "story": {
+      "count": 16,
+      "task": 15,
+      "goal": 1,
+      "challenge": 0
+    },
+    "nether": {
+      "count": 23,
+      "task": 15,
+      "goal": 1,
+      "challenge": 7
+    },
+    "end": {
+      "count": 9,
+      "task": 4,
+      "goal": 4,
+      "challenge": 1
+    },
+    "adventure": {
+      "count": 47,
+      "task": 32,
+      "goal": 4,
+      "challenge": 11
+    },
+    "husbandry": {
+      "count": 30,
+      "task": 24,
+      "goal": 0,
+      "challenge": 6
+    }
+  },
+  "advancements": [
+    {
+      "id": "minecraft:adventure/adventuring_time",
+      "category": "adventure",
+      "parent": "minecraft:adventure/sleep_in_bed",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 500,
+      "title_zh": "探索的时光",
+      "title_en": "Adventuring Time",
+      "description_zh": "发现所有的生物群系",
+      "description_en": "Discover every biome",
+      "requirements_count": 54,
+      "criteria_count": 54,
+      "triggers": [
+        "location"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/arbalistic",
+      "category": "adventure",
+      "parent": "minecraft:adventure/ol_betsy",
+      "frame": "challenge",
+      "hidden": true,
+      "xp_reward": 85,
+      "title_zh": "劲弩手",
+      "title_en": "Arbalistic",
+      "description_zh": "用弩一发击杀五种生物",
+      "description_en": "Kill five unique mobs with one crossbow shot",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "killed_by_arrow"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/avoid_vibration",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "潜行100级",
+      "title_en": "Sneak 100",
+      "description_zh": "在幽匿感测体或监守者周围潜行以防被它们探测到",
+      "description_en": "Sneak near a Sculk Sensor or Warden to prevent it from detecting you",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "avoid_vibration"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/blowback",
+      "category": "adventure",
+      "parent": "minecraft:adventure/minecraft_trials_edition",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 40,
+      "title_zh": "逆风翻盘",
+      "title_en": "Blowback",
+      "description_zh": "反弹旋风人的风弹来击杀旋风人",
+      "description_en": "Kill a Breeze with a deflected Breeze-shot Wind Charge",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_killed_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/brush_armadillo",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "这不是鳞甲么？",
+      "title_en": "Isn't It Scute?",
+      "description_zh": "用刷子从犰狳身上获得犰狳鳞甲",
+      "description_en": "Get Armadillo Scutes from an Armadillo using a Brush",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_interacted_with_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/bullseye",
+      "category": "adventure",
+      "parent": "minecraft:adventure/shoot_arrow",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 50,
+      "title_zh": "正中靶心",
+      "title_en": "Bullseye",
+      "description_zh": "从至少30米外射中标靶的靶心",
+      "description_en": "Hit the bullseye of a Target block from at least 30 meters away",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "target_hit"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/craft_decorated_pot_using_only_sherds",
+      "category": "adventure",
+      "parent": "minecraft:adventure/salvage_sherd",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "精修细补",
+      "title_en": "Careful Restoration",
+      "description_zh": "用4个陶片制作饰纹陶罐",
+      "description_en": "Make a Decorated Pot out of 4 Pottery Sherds",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "recipe_crafted"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/crafters_crafting_crafters",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "合成器合成合成器",
+      "title_en": "Crafters Crafting Crafters",
+      "description_zh": "靠近一个正在合成合成器的合成器",
+      "description_en": "Be near a Crafter when it crafts a Crafter",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "crafter_recipe_crafted"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/fall_from_world_height",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "上天入地",
+      "title_en": "Caves & Cliffs",
+      "description_zh": "从世界顶部（建筑高度限制处）自由落体，坠至世界底部并存活下来",
+      "description_en": "Free fall from the top of the world (build limit) to the bottom of the world and survive",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "fall_from_height"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/heart_transplanter",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "移心接木",
+      "title_en": "Heart Transplanter",
+      "description_zh": "将嘎枝之心以正确朝向放在两个苍白橡木原木方块中间",
+      "description_en": "Place a Creaking Heart with the correct alignment between two Pale Oak Log blocks",
+      "requirements_count": 1,
+      "criteria_count": 3,
+      "triggers": [
+        "placed_block"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/hero_of_the_village",
+      "category": "adventure",
+      "parent": "minecraft:adventure/voluntary_exile",
+      "frame": "challenge",
+      "hidden": true,
+      "xp_reward": 100,
+      "title_zh": "村庄英雄",
+      "title_en": "Hero of the Village",
+      "description_zh": "成功在袭击中保卫村庄",
+      "description_en": "Successfully defend a village from a raid",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "hero_of_the_village"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/honey_block_slide",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "胶着状态",
+      "title_en": "Sticky Situation",
+      "description_zh": "跳入蜂蜜块以缓冲摔落",
+      "description_en": "Jump into a Honey Block to break your fall",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "slide_down_block"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/kill_a_mob",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "怪物猎人",
+      "title_en": "Monster Hunter",
+      "description_zh": "杀死任意敌对性怪物",
+      "description_en": "Kill any hostile monster",
+      "requirements_count": 1,
+      "criteria_count": 41,
+      "triggers": [
+        "player_killed_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/kill_all_mobs",
+      "category": "adventure",
+      "parent": "minecraft:adventure/kill_a_mob",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 100,
+      "title_zh": "资深怪物猎人",
+      "title_en": "Monsters Hunted",
+      "description_zh": "杀死每一种敌对性怪物",
+      "description_en": "Kill one of every hostile monster",
+      "requirements_count": 41,
+      "criteria_count": 41,
+      "triggers": [
+        "player_killed_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/kill_mob_near_sculk_catalyst",
+      "category": "adventure",
+      "parent": "minecraft:adventure/kill_a_mob",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "它蔓延了",
+      "title_en": "It Spreads",
+      "description_zh": "在幽匿催发体附近杀死生物",
+      "description_en": "Kill a mob near a Sculk Catalyst",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "kill_mob_near_sculk_catalyst"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/lighten_up",
+      "category": "adventure",
+      "parent": "minecraft:adventure/minecraft_trials_edition",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "铜光焕发",
+      "title_en": "Lighten Up",
+      "description_zh": "用斧刮削铜灯来让它变得更亮",
+      "description_en": "Scrape a Copper Bulb with an Axe to make it brighter",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/lightning_rod_with_villager_no_fire",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "电涌保护器",
+      "title_en": "Surge Protector",
+      "description_zh": "在不引发火灾的前提下保护村民免受雷击",
+      "description_en": "Protect a Villager from an undesired shock without starting a fire",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "lightning_strike"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/minecraft_trials_edition",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "Minecraft：试炼版",
+      "title_en": "Minecraft: Trial(s) Edition",
+      "description_zh": "踏入试炼密室",
+      "description_en": "Step foot in a Trial Chamber",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "location"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/ol_betsy",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "扣下悬刀",
+      "title_en": "Ol' Betsy",
+      "description_zh": "用弩进行一次射击",
+      "description_en": "Shoot a Crossbow",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "shot_crossbow"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/overoverkill",
+      "category": "adventure",
+      "parent": "minecraft:adventure/minecraft_trials_edition",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 50,
+      "title_zh": "天赐良击",
+      "title_en": "Over-Overkill",
+      "description_zh": "使用重锤一击造成50颗心的伤害",
+      "description_en": "Deal 50 hearts of damage in a single hit using the Mace",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_hurt_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/play_jukebox_in_meadows",
+      "category": "adventure",
+      "parent": "minecraft:adventure/sleep_in_bed",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "音乐之声",
+      "title_en": "Sound of Music",
+      "description_zh": "用唱片机的音乐声为草甸增添生机",
+      "description_en": "Make the Meadows come alive with the sound of music from a Jukebox",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/read_power_of_chiseled_bookshelf",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "知识就是力量",
+      "title_en": "The Power of Books",
+      "description_zh": "使用红石比较器获取雕纹书架的信号强度",
+      "description_en": "Read the power signal of a Chiseled Bookshelf using a Comparator",
+      "requirements_count": 1,
+      "criteria_count": 2,
+      "triggers": [
+        "placed_block"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/revaulting",
+      "category": "adventure",
+      "parent": "minecraft:adventure/under_lock_and_key",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "宝经磨炼",
+      "title_en": "Revaulting",
+      "description_zh": "用不祥试炼钥匙解锁不祥宝库",
+      "description_en": "Unlock an Ominous Vault with an Ominous Trial Key",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/root",
+      "category": "adventure",
+      "parent": null,
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "冒险",
+      "title_en": "Adventure",
+      "description_zh": "冒险、探索与战斗",
+      "description_en": "Adventure, exploration and combat",
+      "requirements_count": 1,
+      "criteria_count": 2,
+      "triggers": [
+        "entity_killed_player",
+        "player_killed_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/salvage_sherd",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "探古寻源",
+      "title_en": "Respecting the Remnants",
+      "description_zh": "刷扫可疑的方块来获得陶片",
+      "description_en": "Brush a Suspicious block to obtain a Pottery Sherd",
+      "requirements_count": 2,
+      "criteria_count": 7,
+      "triggers": [
+        "inventory_changed",
+        "player_generates_container_loot"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/shoot_arrow",
+      "category": "adventure",
+      "parent": "minecraft:adventure/kill_a_mob",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "瞄准目标",
+      "title_en": "Take Aim",
+      "description_zh": "用弓箭射点什么",
+      "description_en": "Shoot something with an Arrow",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_hurt_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/sleep_in_bed",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "甜蜜的梦",
+      "title_en": "Sweet Dreams",
+      "description_zh": "在床上睡觉以改变你的重生点",
+      "description_en": "Sleep in a Bed to change your respawn point",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "slept_in_bed"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/sniper_duel",
+      "category": "adventure",
+      "parent": "minecraft:adventure/shoot_arrow",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 50,
+      "title_zh": "狙击手的对决",
+      "title_en": "Sniper Duel",
+      "description_zh": "从至少50米外射杀一只骷髅",
+      "description_en": "Kill a Skeleton from at least 50 meters away",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_killed_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/spear_many_mobs",
+      "category": "adventure",
+      "parent": "minecraft:adventure/kill_a_mob",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "生物串串香",
+      "title_en": "Mob Kabob",
+      "description_zh": "用矛在一次冲锋攻击内命中五只生物",
+      "description_en": "Hit five mobs in the same Charge attack using the Spear",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "spear_mobs"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/spyglass_at_dragon",
+      "category": "adventure",
+      "parent": "minecraft:adventure/spyglass_at_ghast",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "那是飞机吗？",
+      "title_en": "Is It a Plane?",
+      "description_zh": "透过望远镜观察末影龙",
+      "description_en": "Look at the Ender Dragon through a Spyglass",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "using_item"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/spyglass_at_ghast",
+      "category": "adventure",
+      "parent": "minecraft:adventure/spyglass_at_parrot",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "那是气球吗？",
+      "title_en": "Is It a Balloon?",
+      "description_zh": "透过望远镜观察恶魂",
+      "description_en": "Look at a Ghast through a Spyglass",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "using_item"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/spyglass_at_parrot",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "那是鸟吗？",
+      "title_en": "Is It a Bird?",
+      "description_zh": "透过望远镜观察鹦鹉",
+      "description_en": "Look at a Parrot through a Spyglass",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "using_item"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/summon_iron_golem",
+      "category": "adventure",
+      "parent": "minecraft:adventure/trade",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "招募援兵",
+      "title_en": "Hired Help",
+      "description_zh": "召唤一只铁傀儡来帮忙守卫村庄",
+      "description_en": "Summon an Iron Golem to help defend a village",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "summoned_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/throw_trident",
+      "category": "adventure",
+      "parent": "minecraft:adventure/kill_a_mob",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "抖包袱",
+      "title_en": "A Throwaway Joke",
+      "description_zh": "往什么东西扔出三叉戟。\n注：别把你唯一的武器也抖掉了。",
+      "description_en": "Throw a Trident at something.\nNote: Throwing away your only weapon is not a good idea.",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_hurt_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/totem_of_undying",
+      "category": "adventure",
+      "parent": "minecraft:adventure/kill_a_mob",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "超越生死",
+      "title_en": "Postmortal",
+      "description_zh": "利用不死图腾逃离死神",
+      "description_en": "Use a Totem of Undying to cheat death",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "used_totem"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/trade",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "成交！",
+      "title_en": "What a Deal!",
+      "description_zh": "成功与一名村民进行交易",
+      "description_en": "Successfully trade with a Villager",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "villager_trade"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/trade_at_world_height",
+      "category": "adventure",
+      "parent": "minecraft:adventure/trade",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "星际商人",
+      "title_en": "Star Trader",
+      "description_zh": "在建筑高度限制处与村民交易",
+      "description_en": "Trade with a Villager at the build height limit",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "villager_trade"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/trim_with_all_exclusive_armor_patterns",
+      "category": "adventure",
+      "parent": "minecraft:adventure/trim_with_any_armor_pattern",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 150,
+      "title_zh": "匠心独具",
+      "title_en": "Smithing with Style",
+      "description_zh": "将下列锻造模板都至少使用一次：尖塔、猪鼻、肋骨、监守、幽静、恼鬼、潮汐、向导",
+      "description_en": "Apply these smithing templates at least once: Spire, Snout, Rib, Ward, Silence, Vex, Tide, Wayfinder",
+      "requirements_count": 8,
+      "criteria_count": 8,
+      "triggers": [
+        "recipe_crafted"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/trim_with_any_armor_pattern",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "旧貌锻新颜",
+      "title_en": "Crafting a New Look",
+      "description_zh": "在锻造台中合成带有纹饰的盔甲",
+      "description_en": "Craft trimmed armor at a Smithing Table",
+      "requirements_count": 1,
+      "criteria_count": 18,
+      "triggers": [
+        "recipe_crafted"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/two_birds_one_arrow",
+      "category": "adventure",
+      "parent": "minecraft:adventure/ol_betsy",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 65,
+      "title_zh": "一箭双雕",
+      "title_en": "Two Birds, One Arrow",
+      "description_zh": "用一支穿透箭射杀两只幻翼",
+      "description_en": "Kill two Phantoms with a piercing Arrow",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "killed_by_arrow"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/under_lock_and_key",
+      "category": "adventure",
+      "parent": "minecraft:adventure/minecraft_trials_edition",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "珍藏密敛",
+      "title_en": "Under Lock and Key",
+      "description_zh": "用试炼钥匙解锁宝库",
+      "description_en": "Unlock a Vault with a Trial Key",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/use_lodestone",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "天涯共此石",
+      "title_en": "Country Lode, Take Me Home",
+      "description_zh": "对着磁石使用指南针",
+      "description_en": "Use a Compass on a Lodestone",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/very_very_frightening",
+      "category": "adventure",
+      "parent": "minecraft:adventure/throw_trident",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "魔女审判",
+      "title_en": "Very Very Frightening",
+      "description_zh": "雷击一名村民",
+      "description_en": "Strike a Villager with lightning",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "channeled_lightning"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/voluntary_exile",
+      "category": "adventure",
+      "parent": "minecraft:adventure/root",
+      "frame": "task",
+      "hidden": true,
+      "xp_reward": 0,
+      "title_zh": "自我放逐",
+      "title_en": "Voluntary Exile",
+      "description_zh": "杀死一名袭击队长。\n或许该考虑暂时远离村庄……",
+      "description_en": "Kill a raid captain.\nMaybe consider staying away from villages for the time being...",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_killed_entity"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/walk_on_powder_snow_with_leather_boots",
+      "category": "adventure",
+      "parent": "minecraft:adventure/sleep_in_bed",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "轻功雪上飘",
+      "title_en": "Light as a Rabbit",
+      "description_zh": "在细雪上行走……并且不陷进去",
+      "description_en": "Walk on Powder Snow... without sinking in it",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "location"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/who_needs_rockets",
+      "category": "adventure",
+      "parent": "minecraft:adventure/minecraft_trials_edition",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "还要啥火箭啊？",
+      "title_en": "Who Needs Rockets?",
+      "description_zh": "使用风弹将自己向上弹射8格",
+      "description_en": "Use a Wind Charge to launch yourself upward 8 blocks",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "fall_after_explosion"
+      ]
+    },
+    {
+      "id": "minecraft:adventure/whos_the_pillager_now",
+      "category": "adventure",
+      "parent": "minecraft:adventure/ol_betsy",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "现在谁才是掠夺者？",
+      "title_en": "Who's the Pillager Now?",
+      "description_zh": "让掠夺者也尝尝弩的滋味",
+      "description_en": "Give a Pillager a taste of their own medicine",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "killed_by_arrow"
+      ]
+    },
+    {
+      "id": "minecraft:end/dragon_breath",
+      "category": "end",
+      "parent": "minecraft:end/kill_dragon",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "你需要来点薄荷糖",
+      "title_en": "You Need a Mint",
+      "description_zh": "用玻璃瓶收集一些龙息",
+      "description_en": "Collect Dragon's Breath in a Glass Bottle",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:end/dragon_egg",
+      "category": "end",
+      "parent": "minecraft:end/kill_dragon",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "下一世代",
+      "title_en": "The Next Generation",
+      "description_zh": "获得龙蛋",
+      "description_en": "Hold the Dragon Egg",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:end/elytra",
+      "category": "end",
+      "parent": "minecraft:end/find_end_city",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "天空即为极限",
+      "title_en": "Sky's the Limit",
+      "description_zh": "找到鞘翅",
+      "description_en": "Find Elytra",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:end/enter_end_gateway",
+      "category": "end",
+      "parent": "minecraft:end/kill_dragon",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "远程折跃",
+      "title_en": "Remote Getaway",
+      "description_zh": "逃离这座岛屿",
+      "description_en": "Escape the island",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "enter_block"
+      ]
+    },
+    {
+      "id": "minecraft:end/find_end_city",
+      "category": "end",
+      "parent": "minecraft:end/enter_end_gateway",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "在游戏尽头的城市",
+      "title_en": "The City at the End of the Game",
+      "description_zh": "进去吧，又能发生什么呢？",
+      "description_en": "Go on in, what could happen?",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "location"
+      ]
+    },
+    {
+      "id": "minecraft:end/kill_dragon",
+      "category": "end",
+      "parent": "minecraft:end/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "解放末地",
+      "title_en": "Free the End",
+      "description_zh": "祝君好运",
+      "description_en": "Good luck",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_killed_entity"
+      ]
+    },
+    {
+      "id": "minecraft:end/levitate",
+      "category": "end",
+      "parent": "minecraft:end/find_end_city",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 50,
+      "title_zh": "这上面的风景不错",
+      "title_en": "Great View From Up Here",
+      "description_zh": "利用潜影贝的攻击向上飘浮50个方块",
+      "description_en": "Levitate up 50 blocks from the attacks of a Shulker",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "levitation"
+      ]
+    },
+    {
+      "id": "minecraft:end/respawn_dragon",
+      "category": "end",
+      "parent": "minecraft:end/kill_dragon",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "结束了…再一次…",
+      "title_en": "The End... Again...",
+      "description_zh": "复活末影龙",
+      "description_en": "Respawn the Ender Dragon",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "summoned_entity"
+      ]
+    },
+    {
+      "id": "minecraft:end/root",
+      "category": "end",
+      "parent": null,
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "末地",
+      "title_en": "The End",
+      "description_zh": "抑或是起点？",
+      "description_en": "Or the beginning?",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "changed_dimension"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/allay_deliver_cake_to_note_block",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/allay_deliver_item_to_player",
+      "frame": "task",
+      "hidden": true,
+      "xp_reward": 0,
+      "title_zh": "生日快乐歌",
+      "title_en": "Birthday Song",
+      "description_zh": "让悦灵向音符盒投掷一块蛋糕",
+      "description_en": "Have an Allay drop a Cake at a Note Block",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "allay_drop_item_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/allay_deliver_item_to_player",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": true,
+      "xp_reward": 0,
+      "title_zh": "找到一个好朋友",
+      "title_en": "You've Got a Friend in Me",
+      "description_zh": "让悦灵向你投掷物品",
+      "description_en": "Have an Allay deliver items to you",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "thrown_item_picked_up_by_player"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/axolotl_in_a_bucket",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/tactical_fishing",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "最萌捕食者",
+      "title_en": "The Cutest Predator",
+      "description_zh": "用铁桶捕获一只美西螈",
+      "description_en": "Catch an Axolotl in a Bucket",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "filled_bucket"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/balanced_diet",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/plant_seed",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 100,
+      "title_zh": "均衡饮食",
+      "title_en": "A Balanced Diet",
+      "description_zh": "尝遍天下食材，即便是对身体不好的",
+      "description_en": "Eat everything that is edible, even if it's not good for you",
+      "requirements_count": 40,
+      "criteria_count": 40,
+      "triggers": [
+        "consume_item"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/bred_all_animals",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/breed_an_animal",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 100,
+      "title_zh": "成双成对",
+      "title_en": "Two by Two",
+      "description_zh": "繁殖每种动物！",
+      "description_en": "Breed all the animals!",
+      "requirements_count": 26,
+      "criteria_count": 26,
+      "triggers": [
+        "bred_animals"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/breed_an_animal",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "我从哪儿来？",
+      "title_en": "The Parrots and the Bats",
+      "description_zh": "繁殖一对动物",
+      "description_en": "Breed two animals together",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "bred_animals"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/complete_catalogue",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/tame_an_animal",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 50,
+      "title_zh": "百猫全书",
+      "title_en": "A Complete Catalogue",
+      "description_zh": "驯服所有种类的猫！",
+      "description_en": "Tame all Cat variants!",
+      "requirements_count": 11,
+      "criteria_count": 11,
+      "triggers": [
+        "tame_animal"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/feed_snifflet",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/obtain_sniffer_egg",
+      "frame": "task",
+      "hidden": true,
+      "xp_reward": 0,
+      "title_zh": "小小嗅探兽",
+      "title_en": "Little Sniffs",
+      "description_zh": "喂食一只小嗅探兽",
+      "description_en": "Feed a Snifflet",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_interacted_with_entity"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/fishy_business",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "腥味十足的生意",
+      "title_en": "Fishy Business",
+      "description_zh": "钓到一条鱼",
+      "description_en": "Catch a fish",
+      "requirements_count": 1,
+      "criteria_count": 4,
+      "triggers": [
+        "fishing_rod_hooked"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/froglights",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/leash_all_frog_variants",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "相映生辉！",
+      "title_en": "With Our Powers Combined!",
+      "description_zh": "在你的物品栏中集齐所有种类的蛙明灯",
+      "description_en": "Have all Froglights in your inventory",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/kill_axolotl_target",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/axolotl_in_a_bucket",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "友谊的治愈力！",
+      "title_en": "The Healing Power of Friendship!",
+      "description_zh": "与美西螈并肩作战并赢得胜利",
+      "description_en": "Team up with an Axolotl and win a fight",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "effects_changed"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/leash_all_frog_variants",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/tadpole_in_a_bucket",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "呱呱队出动",
+      "title_en": "When the Squad Hops into Town",
+      "description_zh": "用拴绳拴住所有种类的青蛙",
+      "description_en": "Get each Frog variant on a Lead",
+      "requirements_count": 3,
+      "criteria_count": 3,
+      "triggers": [
+        "player_interacted_with_entity"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/make_a_sign_glow",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "眼前一亮！",
+      "title_en": "Glow and Behold!",
+      "description_zh": "让任意种类告示牌上的文本发光",
+      "description_en": "Make the text of any kind of sign glow",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/obtain_netherite_hoe",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/plant_seed",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 100,
+      "title_zh": "终极奉献",
+      "title_en": "Serious Dedication",
+      "description_zh": "用下界合金锭升级一把锄，然后重新考虑你的人生抉择",
+      "description_en": "Use a Netherite Ingot to upgrade a Hoe, and then reevaluate your life choices",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/obtain_sniffer_egg",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": true,
+      "xp_reward": 0,
+      "title_zh": "怪味蛋",
+      "title_en": "Smells Interesting",
+      "description_zh": "获得嗅探兽蛋",
+      "description_en": "Obtain a Sniffer Egg",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/place_dried_ghast_in_water",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "补水保湿！",
+      "title_en": "Stay Hydrated!",
+      "description_zh": "将失水恶魂方块放在水中",
+      "description_en": "Place a Dried Ghast block into water",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "placed_block"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/plant_any_sniffer_seed",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/feed_snifflet",
+      "frame": "task",
+      "hidden": true,
+      "xp_reward": 0,
+      "title_zh": "播种往事",
+      "title_en": "Planting the Past",
+      "description_zh": "种植任意嗅探兽种子",
+      "description_en": "Plant any Sniffer seed",
+      "requirements_count": 1,
+      "criteria_count": 2,
+      "triggers": [
+        "placed_block"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/plant_seed",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "开荒垦地",
+      "title_en": "A Seedy Place",
+      "description_zh": "种下种子，见证它的成长",
+      "description_en": "Plant a seed and watch it grow",
+      "requirements_count": 1,
+      "criteria_count": 7,
+      "triggers": [
+        "placed_block"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/remove_wolf_armor",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/tame_an_animal",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "华丽一剪",
+      "title_en": "Shear Brilliance",
+      "description_zh": "用剪刀移除狼身上的狼铠",
+      "description_en": "Remove Wolf Armor from a Wolf using Shears",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_sheared_equipment"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/repair_wolf_armor",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/tame_an_animal",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "完好如初",
+      "title_en": "Good as New",
+      "description_zh": "用犰狳鳞甲修复损坏的狼铠",
+      "description_en": "Fully repair damaged Wolf Armor using Armadillo Scutes",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_interacted_with_entity"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/ride_a_boat_with_a_goat",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "羊帆起航！",
+      "title_en": "Whatever Floats Your Goat!",
+      "description_zh": "与山羊同船共渡",
+      "description_en": "Get in a Boat and float with a Goat",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "started_riding"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/root",
+      "category": "husbandry",
+      "parent": null,
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "农牧业",
+      "title_en": "Husbandry",
+      "description_zh": "这个世界充满朋友与美食",
+      "description_en": "The world is full of friends and food",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "consume_item"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/safely_harvest_honey",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "与蜂共舞",
+      "title_en": "Bee Our Guest",
+      "description_zh": "利用营火，在不惊动蜜蜂的情况下，用玻璃瓶从蜂巢收集蜂蜜",
+      "description_en": "Use a Campfire to collect Honey from a Beehive using a Glass Bottle without aggravating the Bees",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/silk_touch_nest",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "举巢搬迁",
+      "title_en": "Total Beelocation",
+      "description_zh": "用精准采集移动住着3只蜜蜂的蜂巢或蜂箱",
+      "description_en": "Move a Bee Nest or Beehive, with 3 Bees inside, using Silk Touch",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "bee_nest_destroyed"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/tactical_fishing",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/fishy_business",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "战术性钓鱼",
+      "title_en": "Tactical Fishing",
+      "description_zh": "不用钓鱼竿抓住一条鱼！",
+      "description_en": "Catch a Fish... without a Fishing Rod!",
+      "requirements_count": 1,
+      "criteria_count": 4,
+      "triggers": [
+        "filled_bucket"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/tadpole_in_a_bucket",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "蚪到桶里来",
+      "title_en": "Bukkit Bukkit",
+      "description_zh": "用铁桶捕获一只蝌蚪",
+      "description_en": "Catch a Tadpole in a Bucket",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "filled_bucket"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/tame_an_animal",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "永恒的伙伴",
+      "title_en": "Best Friends Forever",
+      "description_zh": "驯服一只动物",
+      "description_en": "Tame an animal",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "tame_animal"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/wax_off",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/wax_on",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "脱蜡",
+      "title_en": "Wax Off",
+      "description_zh": "给铜质方块脱蜡！",
+      "description_en": "Scrape Wax off of a Copper block!",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/wax_on",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/safely_harvest_honey",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "涂蜡",
+      "title_en": "Wax On",
+      "description_zh": "将蜜脾涂到铜质方块上！",
+      "description_en": "Apply Honeycomb to a Copper block!",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:husbandry/whole_pack",
+      "category": "husbandry",
+      "parent": "minecraft:husbandry/tame_an_animal",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 50,
+      "title_zh": "群狼聚首",
+      "title_en": "The Whole Pack",
+      "description_zh": "驯服所有种类的狼",
+      "description_en": "Tame one of each Wolf variant",
+      "requirements_count": 9,
+      "criteria_count": 9,
+      "triggers": [
+        "tame_animal"
+      ]
+    },
+    {
+      "id": "minecraft:nether/all_effects",
+      "category": "nether",
+      "parent": "minecraft:nether/all_potions",
+      "frame": "challenge",
+      "hidden": true,
+      "xp_reward": 1000,
+      "title_zh": "为什么会变成这样呢？",
+      "title_en": "How Did We Get Here?",
+      "description_zh": "同时拥有所有状态效果",
+      "description_en": "Have every effect applied at the same time",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "effects_changed"
+      ]
+    },
+    {
+      "id": "minecraft:nether/all_potions",
+      "category": "nether",
+      "parent": "minecraft:nether/brew_potion",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 100,
+      "title_zh": "狂乱的鸡尾酒",
+      "title_en": "A Furious Cocktail",
+      "description_zh": "同时拥有所有药水效果",
+      "description_en": "Have every potion effect applied at the same time",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "effects_changed"
+      ]
+    },
+    {
+      "id": "minecraft:nether/brew_potion",
+      "category": "nether",
+      "parent": "minecraft:nether/obtain_blaze_rod",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "本地酿造厂",
+      "title_en": "Local Brewery",
+      "description_zh": "酿造一瓶药水",
+      "description_en": "Brew a Potion",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "brewed_potion"
+      ]
+    },
+    {
+      "id": "minecraft:nether/charge_respawn_anchor",
+      "category": "nether",
+      "parent": "minecraft:nether/obtain_crying_obsidian",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "锚没有九条命",
+      "title_en": "Not Quite \"Nine\" Lives",
+      "description_zh": "为重生锚充满能量",
+      "description_en": "Charge a Respawn Anchor to the maximum",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_used_on_block"
+      ]
+    },
+    {
+      "id": "minecraft:nether/create_beacon",
+      "category": "nether",
+      "parent": "minecraft:nether/summon_wither",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "带信标回家",
+      "title_en": "Bring Home the Beacon",
+      "description_zh": "建造并放置一个信标",
+      "description_en": "Construct and place a Beacon",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "construct_beacon"
+      ]
+    },
+    {
+      "id": "minecraft:nether/create_full_beacon",
+      "category": "nether",
+      "parent": "minecraft:nether/create_beacon",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "信标工程师",
+      "title_en": "Beaconator",
+      "description_zh": "让一座信标发挥最大功效",
+      "description_en": "Bring a Beacon to full power",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "construct_beacon"
+      ]
+    },
+    {
+      "id": "minecraft:nether/distract_piglin",
+      "category": "nether",
+      "parent": "minecraft:nether/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "金光闪闪！",
+      "title_en": "Oh Shiny",
+      "description_zh": "用金质物品让猪灵分神",
+      "description_en": "Distract Piglins with gold",
+      "requirements_count": 1,
+      "criteria_count": 2,
+      "triggers": [
+        "player_interacted_with_entity",
+        "thrown_item_picked_up_by_entity"
+      ]
+    },
+    {
+      "id": "minecraft:nether/explore_nether",
+      "category": "nether",
+      "parent": "minecraft:nether/ride_strider",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 500,
+      "title_zh": "热门景点",
+      "title_en": "Hot Tourist Destinations",
+      "description_zh": "探索所有下界生物群系",
+      "description_en": "Explore all Nether biomes",
+      "requirements_count": 5,
+      "criteria_count": 5,
+      "triggers": [
+        "location"
+      ]
+    },
+    {
+      "id": "minecraft:nether/fast_travel",
+      "category": "nether",
+      "parent": "minecraft:nether/root",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 100,
+      "title_zh": "曲速泡",
+      "title_en": "Subspace Bubble",
+      "description_zh": "利用下界移动对应主世界7千米的距离",
+      "description_en": "Use the Nether to travel 7 km in the Overworld",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "nether_travel"
+      ]
+    },
+    {
+      "id": "minecraft:nether/find_bastion",
+      "category": "nether",
+      "parent": "minecraft:nether/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "光辉岁月",
+      "title_en": "Those Were the Days",
+      "description_zh": "进入堡垒遗迹",
+      "description_en": "Enter a Bastion Remnant",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "location"
+      ]
+    },
+    {
+      "id": "minecraft:nether/find_fortress",
+      "category": "nether",
+      "parent": "minecraft:nether/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "阴森的要塞",
+      "title_en": "A Terrible Fortress",
+      "description_zh": "闯入下界要塞",
+      "description_en": "Break your way into a Nether Fortress",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "location"
+      ]
+    },
+    {
+      "id": "minecraft:nether/get_wither_skull",
+      "category": "nether",
+      "parent": "minecraft:nether/find_fortress",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "惊悚恐怖骷髅头",
+      "title_en": "Spooky Scary Skeleton",
+      "description_zh": "获得凋灵骷髅的头颅",
+      "description_en": "Obtain a Wither Skeleton's skull",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:nether/loot_bastion",
+      "category": "nether",
+      "parent": "minecraft:nether/find_bastion",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "战猪",
+      "title_en": "War Pigs",
+      "description_zh": "掠夺堡垒遗迹里的箱子",
+      "description_en": "Loot a Chest in a Bastion Remnant",
+      "requirements_count": 1,
+      "criteria_count": 4,
+      "triggers": [
+        "player_generates_container_loot"
+      ]
+    },
+    {
+      "id": "minecraft:nether/netherite_armor",
+      "category": "nether",
+      "parent": "minecraft:nether/obtain_ancient_debris",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 100,
+      "title_zh": "残骸裹身",
+      "title_en": "Cover Me in Debris",
+      "description_zh": "获得一整套下界合金盔甲",
+      "description_en": "Get a full suit of Netherite armor",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:nether/obtain_ancient_debris",
+      "category": "nether",
+      "parent": "minecraft:nether/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "深藏不露",
+      "title_en": "Hidden in the Depths",
+      "description_zh": "获得远古残骸",
+      "description_en": "Obtain Ancient Debris",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:nether/obtain_blaze_rod",
+      "category": "nether",
+      "parent": "minecraft:nether/find_fortress",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "与火共舞",
+      "title_en": "Into Fire",
+      "description_zh": "让烈焰人从烈焰棒中解放吧",
+      "description_en": "Relieve a Blaze of its rod",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:nether/obtain_crying_obsidian",
+      "category": "nether",
+      "parent": "minecraft:nether/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "谁在切洋葱？",
+      "title_en": "Who is Cutting Onions?",
+      "description_zh": "获得哭泣的黑曜石",
+      "description_en": "Obtain Crying Obsidian",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:nether/return_to_sender",
+      "category": "nether",
+      "parent": "minecraft:nether/root",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 50,
+      "title_zh": "见鬼去吧",
+      "title_en": "Return to Sender",
+      "description_zh": "用一团火球干掉一只恶魂",
+      "description_en": "Destroy a Ghast with a fireball",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_killed_entity"
+      ]
+    },
+    {
+      "id": "minecraft:nether/ride_strider",
+      "category": "nether",
+      "parent": "minecraft:nether/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "画船添足",
+      "title_en": "This Boat Has Legs",
+      "description_zh": "手持诡异菌钓竿骑乘炽足兽",
+      "description_en": "Ride a Strider with a Warped Fungus on a Stick",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "item_durability_changed"
+      ]
+    },
+    {
+      "id": "minecraft:nether/ride_strider_in_overworld_lava",
+      "category": "nether",
+      "parent": "minecraft:nether/ride_strider",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "温暖如家",
+      "title_en": "Feels Like Home",
+      "description_zh": "带炽足兽在主世界的熔岩湖上来一场长——途旅行",
+      "description_en": "Take a Strider for a loooong ride on a lava lake in the Overworld",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "ride_entity_in_lava"
+      ]
+    },
+    {
+      "id": "minecraft:nether/root",
+      "category": "nether",
+      "parent": null,
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "下界",
+      "title_en": "Nether",
+      "description_zh": "记得带夏装",
+      "description_en": "Bring summer clothes",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "changed_dimension"
+      ]
+    },
+    {
+      "id": "minecraft:nether/summon_wither",
+      "category": "nether",
+      "parent": "minecraft:nether/get_wither_skull",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "凋零山庄",
+      "title_en": "Withering Heights",
+      "description_zh": "召唤凋灵",
+      "description_en": "Summon the Wither",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "summoned_entity"
+      ]
+    },
+    {
+      "id": "minecraft:nether/uneasy_alliance",
+      "category": "nether",
+      "parent": "minecraft:nether/return_to_sender",
+      "frame": "challenge",
+      "hidden": false,
+      "xp_reward": 100,
+      "title_zh": "脆弱的同盟",
+      "title_en": "Uneasy Alliance",
+      "description_zh": "从下界救出一只恶魂，将其安全地带到主世界……然后干掉它",
+      "description_en": "Rescue a Ghast from the Nether, bring it safely home to the Overworld... and then kill it",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "player_killed_entity"
+      ]
+    },
+    {
+      "id": "minecraft:story/cure_zombie_villager",
+      "category": "story",
+      "parent": "minecraft:story/enter_the_nether",
+      "frame": "goal",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "僵尸科医生",
+      "title_en": "Zombie Doctor",
+      "description_zh": "弱化并治疗一名僵尸村民",
+      "description_en": "Weaken and then cure a Zombie Villager",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "cured_zombie_villager"
+      ]
+    },
+    {
+      "id": "minecraft:story/deflect_arrow",
+      "category": "story",
+      "parent": "minecraft:story/obtain_armor",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "不吃这套，谢谢",
+      "title_en": "Not Today, Thank You",
+      "description_zh": "用盾牌反弹一个弹射物",
+      "description_en": "Deflect a projectile with a Shield",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "entity_hurt_player"
+      ]
+    },
+    {
+      "id": "minecraft:story/enchant_item",
+      "category": "story",
+      "parent": "minecraft:story/mine_diamond",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "附魔师",
+      "title_en": "Enchanter",
+      "description_zh": "用附魔台附魔一样物品",
+      "description_en": "Enchant an item at an Enchanting Table",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "enchanted_item"
+      ]
+    },
+    {
+      "id": "minecraft:story/enter_the_end",
+      "category": "story",
+      "parent": "minecraft:story/follow_ender_eye",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "结束了？",
+      "title_en": "The End?",
+      "description_zh": "进入末地传送门",
+      "description_en": "Enter the End Portal",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "changed_dimension"
+      ]
+    },
+    {
+      "id": "minecraft:story/enter_the_nether",
+      "category": "story",
+      "parent": "minecraft:story/form_obsidian",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "勇往直下",
+      "title_en": "We Need to Go Deeper",
+      "description_zh": "建造、激活并进入一座下界传送门",
+      "description_en": "Build, light and enter a Nether Portal",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "changed_dimension"
+      ]
+    },
+    {
+      "id": "minecraft:story/follow_ender_eye",
+      "category": "story",
+      "parent": "minecraft:story/enter_the_nether",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "隔墙有眼",
+      "title_en": "Eye Spy",
+      "description_zh": "跟随末影之眼",
+      "description_en": "Follow an Eye of Ender",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "location"
+      ]
+    },
+    {
+      "id": "minecraft:story/form_obsidian",
+      "category": "story",
+      "parent": "minecraft:story/lava_bucket",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "冰桶挑战",
+      "title_en": "Ice Bucket Challenge",
+      "description_zh": "获得一块黑曜石",
+      "description_en": "Obtain a block of Obsidian",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:story/iron_tools",
+      "category": "story",
+      "parent": "minecraft:story/smelt_iron",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "这不是铁镐么？",
+      "title_en": "Isn't It Iron Pick",
+      "description_zh": "升级你的镐",
+      "description_en": "Upgrade your Pickaxe",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:story/lava_bucket",
+      "category": "story",
+      "parent": "minecraft:story/smelt_iron",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "热腾腾的",
+      "title_en": "Hot Stuff",
+      "description_zh": "用铁桶装点熔岩",
+      "description_en": "Fill a Bucket with lava",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:story/mine_diamond",
+      "category": "story",
+      "parent": "minecraft:story/iron_tools",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "钻石！",
+      "title_en": "Diamonds!",
+      "description_zh": "获得钻石",
+      "description_en": "Acquire diamonds",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:story/mine_stone",
+      "category": "story",
+      "parent": "minecraft:story/root",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "石器时代",
+      "title_en": "Stone Age",
+      "description_zh": "用你的新镐挖掘石头",
+      "description_en": "Mine Stone with your new Pickaxe",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:story/obtain_armor",
+      "category": "story",
+      "parent": "minecraft:story/smelt_iron",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "整装上阵",
+      "title_en": "Suit Up",
+      "description_zh": "用铁盔甲来保护你自己",
+      "description_en": "Protect yourself with a piece of iron armor",
+      "requirements_count": 1,
+      "criteria_count": 4,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:story/root",
+      "category": "story",
+      "parent": null,
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "Minecraft",
+      "title_en": "Minecraft",
+      "description_zh": "游戏的核心与故事",
+      "description_en": "The heart and story of the game",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:story/shiny_gear",
+      "category": "story",
+      "parent": "minecraft:story/mine_diamond",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "钻石护体",
+      "title_en": "Cover Me with Diamonds",
+      "description_zh": "钻石盔甲能救人",
+      "description_en": "Diamond armor saves lives",
+      "requirements_count": 1,
+      "criteria_count": 4,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:story/smelt_iron",
+      "category": "story",
+      "parent": "minecraft:story/upgrade_tools",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "来硬的",
+      "title_en": "Acquire Hardware",
+      "description_zh": "冶炼出一块铁锭",
+      "description_en": "Smelt an Iron Ingot",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    },
+    {
+      "id": "minecraft:story/upgrade_tools",
+      "category": "story",
+      "parent": "minecraft:story/mine_stone",
+      "frame": "task",
+      "hidden": false,
+      "xp_reward": 0,
+      "title_zh": "获得升级",
+      "title_en": "Getting an Upgrade",
+      "description_zh": "制作一把更好的镐",
+      "description_en": "Construct a better Pickaxe",
+      "requirements_count": 1,
+      "criteria_count": 1,
+      "triggers": [
+        "inventory_changed"
+      ]
+    }
+  ]
+}

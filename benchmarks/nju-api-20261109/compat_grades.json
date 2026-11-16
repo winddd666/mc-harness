@@ -1,0 +1,30 @@
+[
+  {
+    "name": "coords",
+    "passed": true
+  },
+  {
+    "name": "parallel_reads",
+    "passed": true
+  },
+  {
+    "name": "forced_tool",
+    "passed": true
+  },
+  {
+    "name": "tool_choice_none",
+    "passed": true
+  },
+  {
+    "name": "required_tool",
+    "passed": true
+  },
+  {
+    "name": "json_schema",
+    "passed": true
+  },
+  {
+    "name": "tool_error_recovery",
+    "passed": true
+  }
+]

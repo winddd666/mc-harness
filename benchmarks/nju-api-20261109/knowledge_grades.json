@@ -1,0 +1,170 @@
+[
+  {
+    "name": "wood_pick_recipe",
+    "prompt": "制作一把木镐，需要多少块木板、多少根木棍？工作台是否必要？",
+    "expected": {
+      "planks": 3,
+      "sticks": 2,
+      "crafting_table_required": true
+    },
+    "actual": {
+      "planks": 3,
+      "sticks": 2,
+      "crafting_table_required": false
+    },
+    "passed": false,
+    "status": 200
+  },
+  {
+    "name": "wood_resource_budget",
+    "prompt": "仅用橡木原木从零制作一张工作台、一把木镐，木棍也要合成，不回收工作台。最少消耗几块原木？每块原木4木板，2木板合成4木棍。",
+    "expected": {
+      "minimum_logs": 3
+    },
+    "actual": {
+      "minimum_logs": 3
+    },
+    "passed": true,
+    "status": 200
+  },
+  {
+    "name": "diamond_tool",
+    "prompt": "无附魔的木镐和铁镐分别挖钻石矿石，能否掉落钻石？",
+    "expected": {
+      "wooden_pickaxe": false,
+      "iron_pickaxe": true
+    },
+    "actual": {
+      "wooden_pickaxe": false,
+      "iron_pickaxe": true
+    },
+    "passed": true,
+    "status": 200
+  },
+  {
+    "name": "obsidian_tool",
+    "prompt": "无附魔铁镐与钻石镐分别挖黑曜石，能否掉落黑曜石方块？",
+    "expected": {
+      "iron_pickaxe": false,
+      "diamond_pickaxe": true
+    },
+    "actual": {
+      "iron_pickaxe": false,
+      "diamond_pickaxe": true
+    },
+    "passed": true,
+    "status": 200
+  },
+  {
+    "name": "fuel",
+    "prompt": "连续熔炼17个生铁，最多利用每份燃料，至少需要多少个煤炭？",
+    "expected": {
+      "coal": 3
+    },
+    "actual": {
+      "coal": 2
+    },
+    "passed": false,
+    "status": 200
+  },
+  {
+    "name": "nether_coords",
+    "prompt": "仅计算维度缩放：主世界 x=800,z=-240 对应下界目标 x,z 是多少？忽略传送门搜索与安全落点。",
+    "expected": {
+      "x": 100,
+      "z": -30
+    },
+    "actual": {
+      "x": 100,
+      "z": -30
+    },
+    "passed": true,
+    "status": 200
+  },
+  {
+    "name": "nether_water",
+    "prompt": "在下界正常右键倒水桶到地面（不是炼药锅），会形成可流动的水吗？",
+    "expected": {
+      "flowing_water": false
+    },
+    "actual": {
+      "flowing_water": false
+    },
+    "passed": true,
+    "status": 200
+  },
+  {
+    "name": "nether_bed",
+    "prompt": "原版下界右键床尝试睡觉，会正常设定重生点吗？会爆炸吗？",
+    "expected": {
+      "sets_spawn": false,
+      "explodes": true
+    },
+    "actual": {
+      "sets_spawn": false,
+      "explodes": true
+    },
+    "passed": true,
+    "status": 200
+  },
+  {
+    "name": "coordinates",
+    "prompt": "从 (10,64,-5) 向东走3格、向北走2格、向上1格，最后的 x,y,z 是多少？",
+    "expected": {
+      "x": 13,
+      "y": 65,
+      "z": -7
+    },
+    "actual": {
+      "x": 13,
+      "y": 65,
+      "z": -7
+    },
+    "passed": true,
+    "status": 200
+  },
+  {
+    "name": "furnace_recipe",
+    "prompt": "合成普通熔炉需要多少圆石？圆石、黑石、深板岩圆石能否各自独立作为配方材料？",
+    "expected": {
+      "count": 8,
+      "cobblestone": true,
+      "blackstone": true,
+      "cobbled_deepslate": true
+    },
+    "actual": {
+      "count": 8,
+      "cobblestone": true,
+      "blackstone": true,
+      "cobbled_deepslate": true
+    },
+    "passed": true,
+    "status": 200
+  },
+  {
+    "name": "shield_recipe",
+    "prompt": "原版 Java 版合成1个盾牌需要多少木板和铁锭？",
+    "expected": {
+      "planks": 6,
+      "iron_ingots": 1
+    },
+    "actual": {
+      "planks": 6,
+      "iron_ingots": 1
+    },
+    "passed": true,
+    "status": 200
+  },
+  {
+    "name": "stone_drop",
+    "prompt": "没有精准采集附魔，木镐挖普通石头，正常掉落物是什么？请用minecraft命名空间ID。",
+    "expected": {
+      "drop": "minecraft:cobblestone"
+    },
+    "actual": {
+      "drop": "minecraft:cobblestone"
+    },
+    "passed": true,
+    "status": 200
+  }
+]

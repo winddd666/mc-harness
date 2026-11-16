@@ -1,0 +1,7 @@
+{
+  "status": 500,
+  "passed": false,
+  "actual": "",
+  "error": "{\"error\":{\"message\":\"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj\",\"type\":\"server_error\",\"param\":\"\",\"code\":500}}",
+  "limitation": "Synthetic color grid only; not gameplay or Minecraft perception validation."
+}

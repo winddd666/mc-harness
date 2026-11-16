@@ -1,0 +1,76 @@
+{
+  "run_id": "20261115-172332-852566",
+  "status": "answered",
+  "error": null,
+  "answer": "【状态确认】\n位置：[-187.5, 58, -389.5]（封闭地下石室，上方有石顶遮盖）。\n生命：20/20（满血，无受伤）。\n饱食：20/20（满饱食）。\n背包：有21+64=85个圆石、17个泥土、4根木棍、1把耐久9%的木镐、1把耐久82%的石镐、1块白桦木板。无护甲，手持为空。\n威胁评估：周围5只怪物（骷髅、苦力怕、蜘蛛、僵尸）均被石墙阻挡射线，当前安全。\n\n【报告】\n已确认真实位置在封闭地下石室，生命与饱食均满。背包内有基础建材（圆石、泥土）、少量工具（木镐、石镐）及木棍。当前无受伤，周围怪物被石墙阻挡，处于安全掩体内。按指令不制作铁镐，不离开小室。",
+  "actor_requests": 1,
+  "elapsed": 30.6456,
+  "runtime": {
+    "source_revision": "716f9f846fde688d",
+    "loaded_at": "2026-11-15T08:31:20.702607+00:00",
+    "pid": 732644
+  },
+  "survival_guard": true,
+  "guardian": {
+    "polls": 39,
+    "incidents": 0,
+    "actions": 0,
+    "cancelled_generations": 0
+  },
+  "death_notifications": 0,
+  "hurt_notifications": 0,
+  "model_seconds": 29.9505,
+  "tool_counts": {},
+  "tool_calls": [],
+  "final_telemetry": {
+    "connected": true,
+    "ready": true,
+    "username": "BeastBot_01",
+    "pos": {
+      "x": -187.5,
+      "y": 58.0,
+      "z": -389.5
+    },
+    "dimension": "overworld",
+    "biome": "",
+    "is_day": false,
+    "time_of_day": 14769,
+    "health": 20,
+    "food": 20,
+    "armor": 0,
+    "held": null,
+    "inventory_total": 110,
+    "top_items": [
+      {
+        "name": "cobblestone",
+        "count": 85
+      },
+      {
+        "name": "dirt",
+        "count": 17
+      },
+      {
+        "name": "stick",
+        "count": 4
+      },
+      {
+        "name": "birch_planks",
+        "count": 1
+      },
+      {
+        "name": "stone_pickaxe",
+        "count": 1
+      },
+      {
+        "name": "wildflowers",
+        "count": 1
+      },
+      {
+        "name": "wooden_pickaxe",
+        "count": 1
+      }
+    ],
+    "updated_at": "2026-11-15T09:24:06.223030+00:00",
+    "error": null
+  }
+}

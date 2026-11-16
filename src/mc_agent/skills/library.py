@@ -1,0 +1,4780 @@
+"""L1 deterministic macro skills: spawn-protection blacklist, tree chopping, crafting, tiered mining, smelting, bed spawn."""
+
+from __future__ import annotations
+
+import math
+import time
+from typing import Any
+
+from ..bot import BotSession
+from ..errors import ApiError
+from ..kb import assess_world_target, normalize_dimension, resolve_item_alias
+from .safety import check_and_stabilize
+from .crafting import material_shortage, explain_craft_error
+
+LOG_TYPES: tuple[str, ...] = (
+    "oak_log",
+    "birch_log",
+    "spruce_log",
+    "dark_oak_log",
+    "acacia_log",
+    "jungle_log",
+    "cherry_log",
+    "mangrove_log",
+    "pale_oak_log",
+)
+
+NETHER_STEM_TYPES: tuple[str, ...] = (
+    "crimson_stem",
+    "warped_stem",
+)
+
+AXE_PRIORITY: tuple[str, ...] = (
+    "netherite_axe",
+    "diamond_axe",
+    "iron_axe",
+    "stone_axe",
+    "wooden_axe",
+    "golden_axe",
+)
+
+PICKAXE_TIERS: dict[str, int] = {
+    "wooden_pickaxe": 1,
+    "golden_pickaxe": 1,
+    "stone_pickaxe": 2,
+    "iron_pickaxe": 3,
+    "diamond_pickaxe": 4,
+    "netherite_pickaxe": 5,
+}
+
+BLOCK_MIN_PICKAXE_TIER: dict[str, int] = {
+    "stone": 1,
+    "cobblestone": 1,
+    "deepslate": 1,
+    "cobbled_deepslate": 1,
+    "andesite": 1,
+    "diorite": 1,
+    "granite": 1,
+    "coal_ore": 1,
+    "deepslate_coal_ore": 1,
+    "nether_quartz_ore": 1,
+    "iron_ore": 2,
+    "deepslate_iron_ore": 2,
+    "copper_ore": 2,
+    "deepslate_copper_ore": 2,
+    "lapis_ore": 2,
+    "deepslate_lapis_ore": 2,
+    "gold_ore": 3,
+    "deepslate_gold_ore": 3,
+    "redstone_ore": 3,
+    "deepslate_redstone_ore": 3,
+    "diamond_ore": 3,
+    "deepslate_diamond_ore": 3,
+    "emerald_ore": 3,
+    "deepslate_emerald_ore": 3,
+    "obsidian": 4,
+}
+
+ORE_COUNTERPARTS: dict[str, str] = {
+    "coal_ore": "deepslate_coal_ore",
+    "deepslate_coal_ore": "coal_ore",
+    "iron_ore": "deepslate_iron_ore",
+    "deepslate_iron_ore": "iron_ore",
+    "copper_ore": "deepslate_copper_ore",
+    "deepslate_copper_ore": "copper_ore",
+    "lapis_ore": "deepslate_lapis_ore",
+    "deepslate_lapis_ore": "lapis_ore",
+    "gold_ore": "deepslate_gold_ore",
+    "deepslate_gold_ore": "gold_ore",
+    "redstone_ore": "deepslate_redstone_ore",
+    "deepslate_redstone_ore": "redstone_ore",
+    "diamond_ore": "deepslate_diamond_ore",
+    "deepslate_diamond_ore": "diamond_ore",
+    "emerald_ore": "deepslate_emerald_ore",
+    "deepslate_emerald_ore": "emerald_ore",
+}
+
+# Recipes requiring a 3x3 crafting table.
+TABLE_RECIPES: set[str] = {
+    "wooden_pickaxe",
+    "wooden_axe",
+    "wooden_sword",
+    "wooden_shovel",
+    "wooden_hoe",
+    "stone_pickaxe",
+    "stone_axe",
+    "stone_sword",
+    "stone_shovel",
+    "stone_hoe",
+    "iron_pickaxe",
+    "iron_axe",
+    "iron_sword",
+    "iron_shovel",
+    "iron_hoe",
+    "diamond_pickaxe",
+    "diamond_axe",
+    "diamond_sword",
+    "diamond_shovel",
+    "diamond_hoe",
+    "furnace",
+    "chest",
+    "shield",
+    "bucket",
+    "iron_helmet",
+    "iron_chestplate",
+    "iron_leggings",
+    "iron_boots",
+    "diamond_helmet",
+    "diamond_chestplate",
+    "diamond_leggings",
+    "diamond_boots",
+    "bow",
+    "fishing_rod",
+    "shears",
+    "flint_and_steel",
+    "stonecutter",
+    "blast_furnace",
+    "smoker",
+    "campfire",
+    "oak_boat",
+    "birch_boat",
+    "spruce_boat",
+    "white_bed",
+}
+
+DEFAULT_EQUIP_SLOTS: dict[str, str] = {
+    "shield": "off-hand",
+    "iron_helmet": "head",
+    "iron_chestplate": "torso",
+    "iron_leggings": "legs",
+    "iron_boots": "feet",
+    "diamond_helmet": "head",
+    "diamond_chestplate": "torso",
+    "diamond_leggings": "legs",
+    "diamond_boots": "feet",
+    "wooden_pickaxe": "hand",
+    "stone_pickaxe": "hand",
+    "iron_pickaxe": "hand",
+    "diamond_pickaxe": "hand",
+    "wooden_sword": "hand",
+    "stone_sword": "hand",
+    "iron_sword": "hand",
+    "diamond_sword": "hand",
+    "wooden_axe": "hand",
+    "stone_axe": "hand",
+    "iron_axe": "hand",
+    "diamond_axe": "hand",
+    "wooden_shovel": "hand",
+    "stone_shovel": "hand",
+    "iron_shovel": "hand",
+    "diamond_shovel": "hand",
+    "wooden_hoe": "hand",
+    "stone_hoe": "hand",
+    "iron_hoe": "hand",
+    "diamond_hoe": "hand",
+}
+
+# Material requirements (planks_needed, sticks_needed) for plank/stick auto-crafting helpers.
+TOOL_WOOD_NEEDS: dict[str, tuple[int, int]] = {
+    "crafting_table": (4, 0),
+    "chest": (8, 0),
+    "wooden_pickaxe": (3, 2),
+    "wooden_axe": (3, 2),
+    "wooden_sword": (2, 1),
+    "wooden_shovel": (1, 2),
+    "wooden_hoe": (2, 2),
+    "stone_pickaxe": (0, 2),
+    "stone_axe": (0, 2),
+    "stone_sword": (0, 1),
+    "stone_shovel": (0, 2),
+    "stone_hoe": (0, 2),
+    "iron_pickaxe": (0, 2),
+    "iron_axe": (0, 2),
+    "iron_sword": (0, 1),
+    "iron_shovel": (0, 2),
+    "iron_hoe": (0, 2),
+    "diamond_pickaxe": (0, 2),
+    "diamond_axe": (0, 2),
+    "diamond_sword": (0, 1),
+    "diamond_shovel": (0, 2),
+    "diamond_hoe": (0, 2),
+    "shield": (6, 0),
+    "oak_boat": (5, 0),
+    "campfire": (0, 3),
+    "torch": (0, 1),
+}
+
+
+def _inventory_counts_from_raw(inv: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in inv.get("items") or []:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        cnt = int(row.get("count") or 0)
+        if name and cnt > 0:
+            norm = str(name).removeprefix("minecraft:")
+            counts[norm] = counts.get(norm, 0) + cnt
+    for eq in (inv.get("armor") or {}).values():
+        if isinstance(eq, dict) and eq.get("name"):
+            norm = str(eq["name"]).removeprefix("minecraft:")
+            counts[norm] = counts.get(norm, 0) + int(eq.get("count") or 1)
+    offhand = inv.get("offhand")
+    if isinstance(offhand, dict) and offhand.get("name"):
+        norm = str(offhand["name"]).removeprefix("minecraft:")
+        counts[norm] = counts.get(norm, 0) + int(offhand.get("count") or 1)
+    return counts
+
+
+def _inventory_snapshot_and_counts(bot: BotSession) -> tuple[dict[str, Any], dict[str, int]]:
+    inv = bot.inventory()
+    if not isinstance(inv, dict):
+        return {}, {}
+    return inv, _inventory_counts_from_raw(inv)
+
+
+def _inventory_counts(bot: BotSession) -> dict[str, int]:
+    return _inventory_counts_from_raw(bot.inventory())
+
+
+def _log_to_planks_name(log_name: str) -> str:
+    if log_name.endswith("_stem"):
+        return log_name.removesuffix("_stem") + "_planks"
+    return log_name.removesuffix("_log") + "_planks"
+
+
+def _total_planks(counts: dict[str, int]) -> int:
+    return sum(v for k, v in counts.items() if k.endswith("_planks"))
+
+
+def _best_pickaxe_in_inv(counts: dict[str, int]) -> tuple[str | None, int]:
+    best_name: str | None = None
+    best_tier = 0
+    for name, tier in PICKAXE_TIERS.items():
+        if counts.get(name, 0) > 0 and tier > best_tier:
+            best_name = name
+            best_tier = tier
+    return best_name, best_tier
+
+
+MELEE_WEAPONS_PRIORITY: tuple[str, ...] = (
+    "netherite_sword",
+    "diamond_sword",
+    "iron_sword",
+    "stone_sword",
+    "netherite_axe",
+    "diamond_axe",
+    "iron_axe",
+    "stone_axe",
+    "wooden_sword",
+    "wooden_axe",
+)
+
+SAFE_MELEE_MOBS: frozenset[str] = frozenset(
+    {"zombie", "zombie_villager", "husk", "drowned", "spider", "cave_spider", "silverfish"}
+)
+
+
+def best_melee_weapon_in_inv(counts: dict[str, int]) -> str | None:
+    """Return the highest-DPS melee sword/axe present in inventory counts."""
+    for name in MELEE_WEAPONS_PRIORITY:
+        if counts.get(name, 0) > 0:
+            return name
+    return None
+
+
+PASSABLE_SIGHT_BLOCKS: set[str] = {
+    "air",
+    "cave_air",
+    "void_air",
+    "water",
+    "flowing_water",
+    "short_grass",
+    "tall_grass",
+    "fern",
+    "large_fern",
+    "torch",
+    "wall_torch",
+    "vine",
+    "snow",
+    "leaf_litter",
+    "sugar_cane",
+    "dandelion",
+    "poppy",
+    "dead_bush",
+    "wildflowers",
+    "bush",
+    "firefly_bush",
+    "open_eyeblossom",
+    "closed_eyeblossom",
+    "glass",
+    "glass_pane",
+    "bamboo",
+    "cobweb",
+    "sweet_berry_bush",
+    "azalea",
+    "flowering_azalea",
+    "scaffolding",
+    "kelp",
+    "seagrass",
+    "tall_seagrass",
+    "pointed_dripstone",
+    "ladder",
+    "iron_bars",
+    "chain",
+}
+PASSABLE_WALK_BLOCKS: set[str] = PASSABLE_SIGHT_BLOCKS - {"glass", "glass_pane", "bamboo", "iron_bars"}
+NON_WALL_SIGHT_SUFFIXES: tuple[str, ...] = (
+    "_leaves",
+    "_fence",
+    "_fence_gate",
+    "_trapdoor",
+    "_door",
+    "_sapling",
+    "_banner",
+    "_carpet",
+    "_sign",
+    "_hanging_sign",
+)
+
+
+def is_passable_sight_block(bname: str) -> bool:
+    """Return True if projectiles/sight/mob awareness can pass through or around this non-wall block."""
+    norm = str(bname or "").removeprefix("minecraft:").strip()
+    return norm in PASSABLE_SIGHT_BLOCKS or norm.endswith(NON_WALL_SIGHT_SUFFIXES)
+SHAFT_SEAL_BLOCKS: tuple[str, ...] = (
+    "cobblestone",
+    "cobbled_deepslate",
+    "dirt",
+    "granite",
+    "diorite",
+    "andesite",
+    "tuff",
+)
+
+
+def cardinal_bearing(dx: float, dz: float) -> str:
+    """Map a horizontal offset vector (dx, dz) to the dominant cardinal direction."""
+    if abs(dx) >= abs(dz):
+        return "east" if dx >= 0 else "west"
+    return "south" if dz >= 0 else "north"
+
+
+def _cached_block_name(
+    bot: Any,
+    x: int,
+    y: int,
+    z: int,
+    block_cache: dict[tuple[int, int, int], str] | None = None,
+) -> str:
+    key = (int(x), int(y), int(z))
+    if block_cache is not None and key in block_cache:
+        return block_cache[key]
+    try:
+        res = bot.call("get_block", {"pos": [key[0], key[1], key[2]]})
+    except ApiError:
+        return "unknown"
+    raw = str(res.get("name") or res.get("block") or "").removeprefix("minecraft:").strip()
+    name = raw or "unknown"
+    if block_cache is not None:
+        block_cache[key] = name
+    return name
+
+
+def ray_wall_blocker(
+    bot: Any,
+    start_xyz: tuple[float, float, float],
+    end_xyz: tuple[float, float, float],
+    block_cache: dict[tuple[int, int, int], str] | None = None,
+) -> dict[str, Any] | None:
+    """Cast a 3D eye-to-body ray and return the first solid blocker dict, or None if clear/unknown."""
+    sx, sy, sz = float(start_xyz[0]), float(start_xyz[1]) + 1.62, float(start_xyz[2])
+    ex, ey, ez = float(end_xyz[0]), float(end_xyz[1]) + 1.0, float(end_xyz[2])
+    dist = math.sqrt((ex - sx) ** 2 + (ey - sy) ** 2 + (ez - sz) ** 2)
+    if dist < 1.0:
+        return None
+
+    bx, by, bz = math.floor(start_xyz[0]), math.floor(start_xyz[1]), math.floor(start_xyz[2])
+    hx, hy, hz = math.floor(end_xyz[0]), math.floor(end_xyz[1]), math.floor(end_xyz[2])
+    skip_cells = {(bx, by, bz), (bx, by + 1, bz), (hx, hy, hz), (hx, hy + 1, hz)}
+
+    steps = max(2, int(math.ceil(dist * 2.0)))
+    visited: set[tuple[int, int, int]] = set()
+    probes: list[tuple[int, int, int]] = []
+    for idx in range(1, steps):
+        t = idx / steps
+        cell = (
+            math.floor(sx + (ex - sx) * t),
+            math.floor(sy + (ey - sy) * t),
+            math.floor(sz + (ez - sz) * t),
+        )
+        if cell in skip_cells or cell in visited:
+            continue
+        visited.add(cell)
+        probes.append(cell)
+        if len(probes) >= 18:
+            break
+
+    for vx, vy, vz in probes:
+        bname = _cached_block_name(bot, vx, vy, vz, block_cache)
+        if bname == "unknown":
+            return None
+        if not is_passable_sight_block(bname):
+            return {"name": bname, "pos": [vx, vy, vz]}
+    return None
+
+
+def inspect_local_enclosure(
+    bot: Any,
+    pos: list[float] | tuple[float, ...],
+    block_cache: dict[tuple[int, int, int], str] | None = None,
+) -> dict[str, Any]:
+    """Classify local 3D geometry as sealed_bunker, carved_shaft, open_cave, surface, or unknown."""
+    cache = block_cache if block_cache is not None else {}
+    bx, by, bz = math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2]))
+
+    ceiling_dy: int | None = None
+    ceiling_block: str | None = None
+    overhead_known = False
+    for dy in (2, 3, 4):
+        b = _cached_block_name(bot, bx, by + dy, bz, cache)
+        if b != "unknown":
+            overhead_known = True
+        if b != "unknown" and b not in PASSABLE_WALK_BLOCKS and not b.endswith("_leaves"):
+            ceiling_dy = dy
+            ceiling_block = b
+            break
+    roofed = ceiling_dy is not None
+
+    complete = overhead_known
+    solid_wall_dirs: list[str] = []
+    up_open_dirs: list[str] = []
+    flat_or_down_dirs: list[str] = []
+    open_other_dirs: list[str] = []
+
+    for d_name, (dx, dz) in (("north", (0, -1)), ("south", (0, 1)), ("east", (1, 0)), ("west", (-1, 0))):
+        b0 = _cached_block_name(bot, bx + dx, by, bz + dz, cache)
+        b1 = _cached_block_name(bot, bx + dx, by + 1, bz + dz, cache)
+        if "unknown" in (b0, b1):
+            complete = False
+        elif b0 not in PASSABLE_WALK_BLOCKS and b1 not in PASSABLE_WALK_BLOCKS:
+            solid_wall_dirs.append(d_name)
+        elif b0 not in PASSABLE_WALK_BLOCKS and b1 in PASSABLE_WALK_BLOCKS:
+            b2 = _cached_block_name(bot, bx + dx, by + 2, bz + dz, cache)
+            if b2 in PASSABLE_WALK_BLOCKS:
+                up_open_dirs.append(d_name)
+            else:
+                open_other_dirs.append(d_name)
+        else:
+            flat_or_down_dirs.append(d_name)
+
+    open_dirs = up_open_dirs + flat_or_down_dirs + open_other_dirs
+    if not complete:
+        structure = "unknown"
+        label_zh = "未知地形"
+    elif roofed and len(solid_wall_dirs) == 4:
+        structure = "sealed_bunker"
+        label_zh = "封闭掩体"
+    elif roofed and len(solid_wall_dirs) >= 2:
+        open_desc = "/".join(f"{d}上行" if d in up_open_dirs else d for d in open_dirs) or "无"
+        structure = "carved_shaft"
+        label_zh = f"探矿穴({len(solid_wall_dirs)}面岩壁,开:{open_desc})"
+    elif roofed:
+        structure = "open_cave"
+        label_zh = "宽敞矿洞"
+    else:
+        structure = "surface"
+        label_zh = "露天"
+
+    return {
+        "complete": complete,
+        "structure": structure,
+        "roofed": roofed,
+        "ceiling_dy": ceiling_dy,
+        "ceiling_block": ceiling_block,
+        "solid_wall_dirs": solid_wall_dirs,
+        "up_open_dirs": up_open_dirs,
+        "open_dirs": open_dirs,
+        "label_zh": label_zh,
+    }
+
+
+def assess_hostile_occlusion(
+    bot: Any,
+    pos: list[float] | tuple[float, ...],
+    *,
+    radius: int = 20,
+    fallback_nearest: dict[str, Any] | None = None,
+    block_cache: dict[tuple[int, int, int], str] | None = None,
+) -> dict[str, Any]:
+    """Separate truly unoccluded nearby hostiles from wall-occluded mobs via 3D raycasts."""
+    cache = block_cache if block_cache is not None else {}
+    px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+
+    complete = True
+    try:
+        raw_list = bot.call("get_entities", {"radius": radius, "types": ["hostile"]}).get("entities") or []
+    except ApiError:
+        complete = False
+        raw_list = []
+
+    merged: list[dict[str, Any]] = [e for e in raw_list if isinstance(e, dict)]
+    seen_ids = {e.get("id") for e in merged if e.get("id") is not None}
+    if isinstance(fallback_nearest, dict) and fallback_nearest.get("name"):
+        fn_pos = fallback_nearest.get("pos")
+        fn_id = fallback_nearest.get("id")
+        if fn_id is None or fn_id not in seen_ids:
+            if isinstance(fn_pos, (list, tuple)) and len(fn_pos) >= 3:
+                merged.append(fallback_nearest)
+            else:
+                complete = False
+
+    candidates: list[tuple[float, dict[str, Any], tuple[float, float, float]]] = []
+    for ent in merged:
+        epos = ent.get("pos")
+        if not isinstance(epos, (list, tuple)) or len(epos) < 3:
+            complete = False
+            continue
+        try:
+            ex, ey, ez = float(epos[0]), float(epos[1]), float(epos[2])
+        except (TypeError, ValueError):
+            complete = False
+            continue
+        if not all(math.isfinite(v) for v in (ex, ey, ez)):
+            complete = False
+            continue
+        candidates.append((math.dist((px, py, pz), (ex, ey, ez)), ent, (ex, ey, ez)))
+
+    candidates.sort(key=lambda row: row[0])
+    if len(candidates) > 5:
+        complete = False
+
+    unoccluded: list[dict[str, Any]] = []
+    occluded: list[dict[str, Any]] = []
+    for dist3d, ent, (ex, ey, ez) in candidates[:5]:
+        blocker = ray_wall_blocker(bot, (px, py, pz), (ex, ey, ez), block_cache=cache)
+        entry = {
+            "id": ent.get("id"),
+            "name": str(ent.get("name") or "").removeprefix("minecraft:"),
+            "dist": round(dist3d, 1),
+            "dy": round(ey - py, 1),
+            "bearing": cardinal_bearing(ex - px, ez - pz),
+            "pos": [ex, ey, ez],
+            "blocked_by_wall": blocker is not None,
+            "blocker": blocker,
+        }
+        if blocker is not None:
+            occluded.append(entry)
+        else:
+            unoccluded.append(entry)
+
+    return {
+        "complete": complete,
+        "unoccluded": unoccluded,
+        "occluded": occluded,
+        "checked": len(unoccluded) + len(occluded),
+    }
+
+
+def _is_protected_err(err: ApiError) -> bool:
+    return err.code == "protected_region"
+
+
+_TRANSIENT_BLOCK_ERRORS = (
+    "no_path",
+    "path_not_found",
+    "timeout",
+    "unreachable",
+    "too_far",
+    "out_of_reach",
+    "not_loaded",
+    "dig_failed",
+    "stalled",
+    "dig_unconfirmed",
+)
+
+
+def _positive_inv_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    return {k: after[k] - before.get(k, 0) for k in after if after[k] > before.get(k, 0)}
+
+
+_TRASH_TIER1_ZERO_KEEP: tuple[str, ...] = (
+    "wildflowers",
+    "leaf_litter",
+    "short_grass",
+    "tall_grass",
+    "fern",
+    "large_fern",
+    "dead_bush",
+    "dandelion",
+    "poppy",
+    "oxeye_daisy",
+    "cornflower",
+    "azure_bluet",
+    "lily_of_the_valley",
+    "blue_orchid",
+    "allium",
+    "kelp",
+    "seagrass",
+    "rotten_flesh",
+    "poisonous_potato",
+    "spider_eye",
+    "wheat_seeds",
+    "beetroot_seeds",
+    "melon_seeds",
+    "pumpkin_seeds",
+    "oak_sapling",
+    "birch_sapling",
+    "spruce_sapling",
+    "dark_oak_sapling",
+    "jungle_sapling",
+    "acacia_sapling",
+    "cherry_sapling",
+    "pale_oak_sapling",
+    "egg",
+    "feather",
+    "snowball",
+)
+
+_TRASH_TIER2_DECOR_STONES: tuple[str, ...] = (
+    "diorite",
+    "granite",
+    "andesite",
+    "tuff",
+    "calcite",
+    "dripstone_block",
+    "netherrack",
+)
+
+_TRASH_TIER2_LOOSE_BLOCKS: tuple[str, ...] = (
+    "sand",
+    "red_sand",
+    "gravel",
+)
+
+_TRASH_TIER3_DIRT: tuple[str, ...] = (
+    "dirt",
+    "coarse_dirt",
+    "mud",
+)
+
+_TRASH_TIER4_COBBLE: tuple[str, ...] = (
+    "cobblestone",
+    "cobbled_deepslate",
+)
+
+_UNSTACKABLE_ITEMS: frozenset[str] = frozenset(
+    {
+        *PICKAXE_TIERS.keys(),
+        *AXE_PRIORITY,
+        *MELEE_WEAPONS_PRIORITY,
+        "wooden_shovel",
+        "stone_shovel",
+        "iron_shovel",
+        "diamond_shovel",
+        "netherite_shovel",
+        "wooden_hoe",
+        "stone_hoe",
+        "iron_hoe",
+        "diamond_hoe",
+        "netherite_hoe",
+        "iron_helmet",
+        "iron_chestplate",
+        "iron_leggings",
+        "iron_boots",
+        "diamond_helmet",
+        "diamond_chestplate",
+        "diamond_leggings",
+        "diamond_boots",
+        "shield",
+        "bow",
+        "fishing_rod",
+        "shears",
+        "flint_and_steel",
+        "bucket",
+        "water_bucket",
+        "lava_bucket",
+    }
+)
+
+_CRAFT_SLOT_INPUTS: dict[str, dict[str, int]] = {
+    "crafting_table": {"_planks_any": 4},
+    "stick": {"_planks_any": 2},
+    "furnace": {"cobblestone": 8},
+    "chest": {"_planks_any": 8},
+    "shield": {"_planks_any": 6, "iron_ingot": 1},
+    "bucket": {"iron_ingot": 3},
+    "torch": {"coal": 1, "stick": 1},
+    "wooden_pickaxe": {"_planks_any": 3, "stick": 2},
+    "stone_pickaxe": {"cobblestone": 3, "stick": 2},
+    "iron_pickaxe": {"iron_ingot": 3, "stick": 2},
+    "diamond_pickaxe": {"diamond": 3, "stick": 2},
+    "wooden_sword": {"_planks_any": 2, "stick": 1},
+    "stone_sword": {"cobblestone": 2, "stick": 1},
+    "iron_sword": {"iron_ingot": 2, "stick": 1},
+    "diamond_sword": {"diamond": 2, "stick": 1},
+    "wooden_axe": {"_planks_any": 3, "stick": 2},
+    "stone_axe": {"cobblestone": 3, "stick": 2},
+    "iron_axe": {"iron_ingot": 3, "stick": 2},
+    "diamond_axe": {"diamond": 3, "stick": 2},
+    "wooden_shovel": {"_planks_any": 1, "stick": 2},
+    "stone_shovel": {"cobblestone": 1, "stick": 2},
+    "iron_shovel": {"iron_ingot": 1, "stick": 2},
+    "diamond_shovel": {"diamond": 1, "stick": 2},
+    "wooden_hoe": {"_planks_any": 2, "stick": 2},
+    "stone_hoe": {"cobblestone": 2, "stick": 2},
+    "iron_hoe": {"iron_ingot": 2, "stick": 2},
+    "diamond_hoe": {"diamond": 2, "stick": 2},
+    "iron_helmet": {"iron_ingot": 5},
+    "iron_chestplate": {"iron_ingot": 8},
+    "iron_leggings": {"iron_ingot": 7},
+    "iron_boots": {"iron_ingot": 4},
+    "diamond_helmet": {"diamond": 5},
+    "diamond_chestplate": {"diamond": 8},
+    "diamond_leggings": {"diamond": 7},
+    "diamond_boots": {"diamond": 4},
+}
+
+
+def _compute_empty_slots(inv: dict[str, Any] | None) -> int:
+    if not isinstance(inv, dict):
+        return 36
+    raw_empty = inv.get("empty_slots")
+    if isinstance(raw_empty, int) and not isinstance(raw_empty, bool):
+        return max(0, raw_empty)
+    occupied = sum(
+        1
+        for row in (inv.get("items") or [])
+        if isinstance(row, dict) and row.get("name") and int(row.get("count") or 0) > 0
+    )
+    return max(0, 36 - occupied)
+
+
+def _is_stackable_item(item: str) -> bool:
+    norm = str(item or "").removeprefix("minecraft:")
+    if norm in _UNSTACKABLE_ITEMS or norm.endswith(("_bed", "_boat", "_pickaxe", "_sword", "_axe", "_shovel", "_hoe", "_helmet", "_chestplate", "_leggings", "_boots")):
+        return False
+    return True
+
+
+def _can_fit_item_in_inventory(inv: dict[str, Any] | None, item: str, count: int = 1, *, check_craft_inputs: bool = True) -> bool:
+    """Return True if adding `count` of `item` (or crafting it) will fit without hanging a 36/36 full inventory."""
+    if _compute_empty_slots(inv) >= 1:
+        return True
+    if not isinstance(inv, dict):
+        return False
+    norm = str(item or "").removeprefix("minecraft:")
+    rows = [r for r in (inv.get("items") or []) if isinstance(r, dict) and r.get("name") and int(r.get("count") or 0) > 0]
+    if _is_stackable_item(norm):
+        spare = sum(
+            max(0, 64 - int(r.get("count") or 0))
+            for r in rows
+            if str(r.get("name")).removeprefix("minecraft:") == norm
+        )
+        if spare >= max(1, int(count)):
+            return True
+    if not check_craft_inputs:
+        return False
+
+    bag_counts: dict[str, int] = {}
+    for r in rows:
+        iname = str(r["name"]).removeprefix("minecraft:")
+        bag_counts[iname] = bag_counts.get(iname, 0) + int(r.get("count") or 0)
+
+    if norm.endswith("_planks"):
+        stem = norm.removesuffix("_planks")
+        log_name = f"{stem}_stem" if stem in ("crimson", "warped") else f"{stem}_log"
+        need_logs = max(1, math.ceil(max(1, int(count)) / 4))
+        if 0 < bag_counts.get(log_name, 0) <= need_logs:
+            return True
+        return False
+
+    recipe = _CRAFT_SLOT_INPUTS.get(norm)
+    if recipe is None:
+        return False
+    batches = max(1, math.ceil(max(1, int(count)) / 4)) if norm in ("stick", "torch") else max(1, int(count))
+    total_planks = sum(v for k, v in bag_counts.items() if k.endswith("_planks"))
+    for ing, per_batch in recipe.items():
+        need = per_batch * batches
+        if ing == "_planks_any":
+            if 0 < total_planks <= need:
+                return True
+        elif 0 < bag_counts.get(ing, 0) <= need:
+            return True
+    return False
+
+
+def _yaw_toward(px: float, pz: float, tx: float, tz: float) -> float:
+    """Compute Mineflayer yaw (rad, forward=(-sin, -cos)) pointing toward (tx, tz)."""
+    return math.atan2(-(tx - px), -(tz - pz))
+
+
+_HIGH_VALUE_DROPS: frozenset[str] = frozenset({
+    "diamond",
+    "raw_iron",
+    "iron_ingot",
+    "iron_ore",
+    "deepslate_iron_ore",
+    "raw_gold",
+    "gold_ingot",
+    "iron_pickaxe",
+    "diamond_pickaxe",
+})
+_MID_VALUE_DROPS: frozenset[str] = frozenset({
+    "coal",
+    "charcoal",
+    "raw_copper",
+    "lapis_lazuli",
+    "redstone",
+})
+
+
+def _normalize_drop_name(raw_name: Any) -> str:
+    """Normalize dropped item labels like 'minecraft:raw_ironx2' -> 'raw_iron'."""
+    name = str(raw_name or "").strip().removeprefix("minecraft:")
+    if "x" in name:
+        stem, suffix = name.rsplit("x", 1)
+        if stem and suffix.isdigit():
+            return stem
+    return name
+
+
+def _summarize_uncollected_drops(
+    bot_pos: list[float] | None,
+    attempts: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Build directional recovery guidance for ground items that were skipped or stopped out of reach."""
+    candidates: list[dict[str, Any]] = []
+    for row in skipped:
+        pos = row.get("item_pos")
+        if row.get("reason") == "height_difference" and isinstance(pos, list) and len(pos) >= 3:
+            candidates.append(row)
+    for row in attempts:
+        pos = row.get("item_pos")
+        if not (isinstance(pos, list) and len(pos) >= 3):
+            continue
+        dist_after = row.get("distance_after")
+        if (
+            row.get("approach_error")
+            or row.get("closer_error")
+            or dist_after is None
+            or float(dist_after) > 1.35
+        ):
+            candidates.append(row)
+    if not candidates:
+        return None
+
+    bp = bot_pos if isinstance(bot_pos, list) and len(bot_pos) >= 3 else [0.0, 64.0, 0.0]
+    cx, cy, cz = float(bp[0]), float(bp[1]), float(bp[2])
+
+    def _rank(row: dict[str, Any]) -> tuple[int, float]:
+        norm = _normalize_drop_name(row.get("item"))
+        if norm in _HIGH_VALUE_DROPS:
+            tier = 0
+        elif norm in _MID_VALUE_DROPS or norm.endswith(("_log", "_stem")):
+            tier = 1
+        else:
+            tier = 2
+        p = row["item_pos"]
+        return (tier, math.dist([cx, cy, cz], [float(p[0]), float(p[1]), float(p[2])]))
+
+    candidates.sort(key=_rank)
+    best = candidates[0]
+    tx, ty, tz = (round(float(v), 1) for v in best["item_pos"][:3])
+    dx, dy, dz = tx - cx, ty - cy, tz - cz
+    bearing = cardinal_bearing(dx, dz)
+    if dy <= -2.0:
+        steps_down = min(10, max(3, int(abs(dy) + 1)))
+        approach_hint = (
+            f"地面掉落物 {best.get('item')} 掉落在下方低处 [{tx},{ty},{tz}](相对朝向={bearing}, dy={dy:+.1f})；"
+            f"请朝 {bearing} 调 mc_skill_staircase(direction='{bearing}', vertical='down', steps={steps_down}, stop_on_ore=False) "
+            "安全下探到该高度后再调 mc_skill_collect_drops 拾取，切勿继续在悬崖上方挖掘以免更多掉落物坠坑。"
+        )
+    elif dy >= 2.0:
+        steps_up = min(10, max(3, int(abs(dy) + 1)))
+        approach_hint = (
+            f"地面掉落物 {best.get('item')} 位于上方高处 [{tx},{ty},{tz}](相对朝向={bearing}, dy={dy:+.1f})；"
+            f"请朝 {bearing} 调 mc_skill_staircase(direction='{bearing}', vertical='up', steps={steps_up}, stop_on_ore=False) "
+            "上行接近后再调 mc_skill_collect_drops 拾取。"
+        )
+    else:
+        approach_hint = (
+            f"地面掉落物 {best.get('item')} 位于同层附近 [{tx},{ty},{tz}](相对朝向={bearing}, dy={dy:+.1f}) "
+            "但被边缘地形卡住未入包；请微调站位或清理脚边阻挡方块后再调 mc_skill_collect_drops。"
+        )
+    return {
+        "nearest": {
+            "item": best.get("item"),
+            "pos": [tx, ty, tz],
+            "bearing": bearing,
+            "dy": round(dy, 1),
+        },
+        "items": [
+            {"item": r.get("item"), "pos": [round(float(v), 1) for v in r["item_pos"][:3]]}
+            for r in candidates[:5]
+        ],
+        "approach_hint": approach_hint,
+    }
+
+
+class MacroSkills:
+    """Stateful skills with permanent protection and separate expiring failure records."""
+
+    def __init__(self, bot: BotSession) -> None:
+        self.bot = bot
+        self.protected_positions: set[tuple[int, int, int]] = set()
+        self.temporary_avoidance: dict[tuple[int, int, int], dict[str, Any]] = {}
+        self.failed_stair_dirs: dict[tuple[int, int, int, str], dict[str, tuple[float, str]]] = {}
+        self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
+
+    def _ensure_free_slots(
+        self,
+        min_free: int = 3,
+        inv_snapshot: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Drop low-value clutter deterministically when inventory is nearly full (< min_free empty slots)."""
+        inv = inv_snapshot if isinstance(inv_snapshot, dict) else self.bot.inventory()
+        if not isinstance(inv, dict):
+            return {}, []
+        empty_now = _compute_empty_slots(inv)
+        if empty_now >= min_free:
+            return inv, []
+
+        dropped: list[dict[str, Any]] = []
+        drop_ops = 0
+        for _pass_idx in range(2):
+            empty_now = _compute_empty_slots(inv)
+            if empty_now >= min_free or drop_ops >= 8:
+                break
+            rows = [
+                r
+                for r in (inv.get("items") or [])
+                if isinstance(r, dict) and r.get("name") and int(r.get("count") or 0) > 0
+            ]
+            per_item_counts: dict[str, int] = {}
+            per_item_slots: dict[str, list[int]] = {}
+            for r in rows:
+                iname = str(r["name"]).removeprefix("minecraft:")
+                cnt = int(r.get("count") or 0)
+                per_item_counts[iname] = per_item_counts.get(iname, 0) + cnt
+                per_item_slots.setdefault(iname, []).append(cnt)
+
+            cobble_total = per_item_counts.get("cobblestone", 0) + per_item_counts.get("cobbled_deepslate", 0)
+            tier2_keep = 0 if cobble_total >= 64 else 64
+            plan_specs: list[tuple[str, int]] = [
+                *((name, 0) for name in _TRASH_TIER1_ZERO_KEEP),
+                *((name, tier2_keep) for name in _TRASH_TIER2_DECOR_STONES),
+                *((name, tier2_keep) for name in _TRASH_TIER2_LOOSE_BLOCKS),
+                *((name, 64) for name in _TRASH_TIER3_DIRT),
+                *((name, 192) for name in _TRASH_TIER4_COBBLE),
+            ]
+            est_free = empty_now
+            made_drop = False
+            for name, keep in plan_specs:
+                if est_free >= min_free or drop_ops >= 8:
+                    break
+                total = per_item_counts.get(name, 0)
+                excess = total - keep
+                if excess <= 0:
+                    continue
+                slot_list = per_item_slots.get(name) or [excess]
+                smallest_slot = min(slot_list)
+                # Avoid tiny remainder drops unless keeping=0 or freeing at least 1 full slot.
+                if keep > 0 and excess < smallest_slot and len(slot_list) <= 1:
+                    continue
+                target_drop = excess if keep == 0 else min(excess, (min_free - est_free) * 64)
+                if keep > 0 and target_drop < smallest_slot:
+                    continue
+                remaining = target_drop
+                while remaining > 0 and drop_ops < 8 and est_free < min_free:
+                    batch = min(64, remaining)
+                    try:
+                        self.bot.call("drop", {"item": name, "count": batch})
+                    except ApiError as err:
+                        if err.code in ("interrupted", "dead", "disconnected"):
+                            return self.bot.inventory(), dropped
+                        break
+                    drop_ops += 1
+                    dropped.append({"item": name, "count": batch})
+                    made_drop = True
+                    remaining -= batch
+                    total -= batch
+                    slots_now = math.ceil(max(0, total) / 64)
+                    if slots_now < len(slot_list):
+                        est_free += len(slot_list) - slots_now
+                        slot_list = [64] * slots_now
+            if not made_drop:
+                break
+            inv = self.bot.inventory()
+            if not isinstance(inv, dict):
+                return {}, dropped
+        return inv, dropped
+
+    def _safe_craft(
+        self,
+        item: str,
+        count: int = 1,
+        *,
+        inv_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Auto-clear clutter if full, fail fast when still un-fittable at empty_slots=0, else craft."""
+        inv_now, dropped = self._ensure_free_slots(min_free=2, inv_snapshot=inv_snapshot)
+        if _compute_empty_slots(inv_now) == 0 and not _can_fit_item_in_inventory(inv_now, item, count):
+            raise ApiError(
+                code="inventory_full",
+                message=(
+                    f"背包 36 格已满(empty_slots=0)且无可自动丢弃的杂物，直接合成 {item} x{count} "
+                    "会导致 Mineflayer 无法存放产物而触发 30s 超时；请先消耗、放置或丢弃至少 1 格物品再重试。"
+                ),
+                context={"item": item, "count": count, "empty_slots": 0},
+            )
+        res = self.bot.call("craft", {"item": item, "count": count})
+        if dropped and isinstance(res, dict):
+            return {**res, "auto_dropped": dropped}
+        return res
+
+    def _record_failed_stair_dir(
+        self,
+        cell: tuple[int, int, int, str],
+        d_key: str,
+        reason: str = "failed",
+        ttl_s: float = 180.0,
+    ) -> None:
+        bucket = self.failed_stair_dirs.setdefault(cell, {})
+        bucket[d_key] = (time.monotonic() + ttl_s, reason)
+
+    def _active_failed_stair_dirs(self, cell: tuple[int, int, int, str]) -> dict[str, str]:
+        bucket = self.failed_stair_dirs.get(cell)
+        if not bucket:
+            return {}
+        now = time.monotonic()
+        expired = [k for k, (exp, _) in bucket.items() if exp <= now]
+        for k in expired:
+            del bucket[k]
+        return {k: reason for k, (_, reason) in bucket.items()}
+
+    def _record_failed_tunnel_dir(
+        self,
+        cell: tuple[int, int, int],
+        d_key: str,
+        reason: str = "failed",
+        ttl_s: float = 180.0,
+    ) -> None:
+        bucket = self.failed_tunnel_dirs.setdefault(cell, {})
+        bucket[d_key] = (time.monotonic() + ttl_s, reason)
+
+    def _active_failed_tunnel_dirs(self, cell: tuple[int, int, int]) -> dict[str, str]:
+        bucket = self.failed_tunnel_dirs.get(cell)
+        if not bucket:
+            return {}
+        now = time.monotonic()
+        expired = [k for k, (exp, _) in bucket.items() if exp <= now]
+        for k in expired:
+            del bucket[k]
+        return {k: reason for k, (_, reason) in bucket.items()}
+
+    def _probe_cached_block(
+        self,
+        pt: tuple[int, int, int],
+        probe_cache: dict[tuple[int, int, int], str] | None = None,
+    ) -> str:
+        if probe_cache is not None and pt in probe_cache:
+            return probe_cache[pt]
+        res = self.bot.call("get_block", {"pos": [pt[0], pt[1], pt[2]]})
+        raw = res.get("name") or res.get("block")
+        val = str(raw).removeprefix("minecraft:") if raw else "unknown"
+        if probe_cache is not None:
+            probe_cache[pt] = val
+        return val
+
+    def _probe_viable_tunnel_dirs(
+        self,
+        bx: int,
+        by: int,
+        bz: int,
+        *,
+        probe_cache: dict[tuple[int, int, int], str] | None = None,
+        exclude_dirs: set[str] | None = None,
+        inv_counts: dict[str, int] | None = None,
+    ) -> list[str]:
+        """Probe 2-3 steps ahead for safe horizontal tunnel directions matching tunnel.py rules."""
+        from . import tunnel as _tunnel_mod
+
+        dirs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
+        cache = probe_cache if probe_cache is not None else {}
+        counts = inv_counts if inv_counts is not None else _inventory_counts(self.bot)
+        pick, pick_tier = _best_pickaxe_in_inv(counts)
+        if not pick:
+            return []
+
+        air_set = _tunnel_mod.AIR
+        fluid_set = _tunnel_mod.FLUID
+        ground_or_ore = _tunnel_mod.GROUND | _tunnel_mod.ORE
+        falling_set = {"gravel", "sand", "red_sand", "suspicious_gravel", "suspicious_sand"}
+        failed_tunnel = self._active_failed_tunnel_dirs((bx, by, bz))
+        excluded = set(exclude_dirs or ())
+
+        def _step_safe(tx: int, tz: int) -> tuple[bool, bool]:
+            floor = self._probe_cached_block((tx, by - 1, tz), cache)
+            if floor not in ground_or_ore:
+                return False, False
+            faces = [(tx, by, tz), (tx, by + 1, tz)]
+            f_names = [self._probe_cached_block(p, cache) for p in faces]
+            for bname in f_names:
+                if bname not in (air_set | ground_or_ore):
+                    return False, False
+                if bname not in air_set and BLOCK_MIN_PICKAXE_TIER.get(bname, 1) > pick_tier:
+                    return False, False
+            # Regardless of whether the face block is air or solid, check all 6 neighbors of both face blocks.
+            neighbors = {
+                (px + ax, py + ay, pz + az)
+                for px, py, pz in faces
+                for ax, ay, az in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+            }
+            for nb in sorted(neighbors):
+                nb_name = self._probe_cached_block(nb, cache)
+                if nb_name in fluid_set or nb_name in falling_set:
+                    return False, False
+            has_solid = any(b not in air_set for b in f_names)
+            return True, has_solid
+
+        viable: list[str] = []
+        for odir, (odx, odz) in dirs.items():
+            if odir in excluded or odir in failed_tunnel:
+                continue
+            try:
+                ok1, dig1 = _step_safe(bx + odx, bz + odz)
+                if not ok1:
+                    continue
+                ok2, dig2 = _step_safe(bx + 2 * odx, bz + 2 * odz)
+                if not ok2:
+                    continue
+                if not dig1 and not dig2:
+                    ok3, _ = _step_safe(bx + 3 * odx, bz + 3 * odz)
+                    if not ok3:
+                        continue
+                viable.append(odir)
+            except ApiError:
+                continue
+        return viable
+
+    def _probe_viable_up_stair_dirs(
+        self,
+        bx: int,
+        by: int,
+        bz: int,
+        *,
+        probe_cache: dict[tuple[int, int, int], str] | None = None,
+        exclude_dirs: set[str] | None = None,
+        inv_counts: dict[str, int] | None = None,
+    ) -> list[str]:
+        """Probe which 4 cardinal directions can safely perform dig_staircase(vertical='up')."""
+        dirs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
+        cache = probe_cache if probe_cache is not None else {}
+        counts = inv_counts if inv_counts is not None else _inventory_counts(self.bot)
+        air_set = {"air", "cave_air", "void_air"}
+        fluids = {"water", "lava", "flowing_water", "flowing_lava"}
+        fluid_or_bedrock = fluids | {"bedrock"}
+        non_solid = air_set | fluids | {
+            "short_grass",
+            "tall_grass",
+            "leaf_litter",
+            "dandelion",
+            "poppy",
+            "oak_sapling",
+        }
+        has_filler = any(
+            counts.get(c, 0) >= 1
+            for c in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
+        ) or any(cnt >= 1 and name.endswith("_planks") for name, cnt in counts.items())
+
+        def _non_air_has_adj_fluid(cells: list[tuple[int, int, int]]) -> bool:
+            for cx, cy, cz in cells:
+                if self._probe_cached_block((cx, cy, cz), cache) in air_set:
+                    continue
+                for ax, ay, az in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                    if self._probe_cached_block((cx + ax, cy + ay, cz + az), cache) in fluids:
+                        return True
+            return False
+
+        try:
+            head_here = self._probe_cached_block((bx, by + 1, bz), cache)
+            if head_here in fluid_or_bedrock:
+                return []
+            if _non_air_has_adj_fluid([(bx, by + 1, bz), (bx, by + 2, bz)]):
+                return []
+            if self._probe_cached_block((bx, by + 2, bz), cache) in fluid_or_bedrock:
+                return []
+            if self._probe_cached_block((bx, by + 3, bz), cache) in fluids:
+                return []
+        except ApiError:
+            return []
+
+        failed_up = self._active_failed_stair_dirs((bx, by, bz, "up"))
+        excluded = set(exclude_dirs or ())
+        viable_up: list[str] = []
+        for odir, (odx, odz) in dirs.items():
+            if odir in excluded or odir in failed_up:
+                continue
+            nx, nz = bx + odx, bz + odz
+            try:
+                if any(self._probe_cached_block(p, cache) in fluid_or_bedrock for p in ((nx, by + 1, nz), (nx, by + 2, nz))):
+                    continue
+                if self._probe_cached_block((nx, by + 3, nz), cache) in fluids:
+                    continue
+                if _non_air_has_adj_fluid([(nx, by + 1, nz), (nx, by + 2, nz)]):
+                    continue
+                step_sup = self._probe_cached_block((nx, by, nz), cache)
+                if step_sup in fluid_or_bedrock:
+                    continue
+                is_non_solid = step_sup in non_solid or step_sup.endswith(("_leaves", "_sapling", "_carpet", "_banner"))
+                if is_non_solid and not has_filler:
+                    continue
+                viable_up.append(odir)
+            except ApiError:
+                continue
+        return viable_up
+
+    def _probe_viable_down_stair_dirs(
+        self,
+        bx: int,
+        by: int,
+        bz: int,
+        *,
+        probe_cache: dict[tuple[int, int, int], str] | None = None,
+        exclude_dirs: set[str] | None = None,
+        inv_counts: dict[str, int] | None = None,
+    ) -> list[str]:
+        """Probe which 4 cardinal directions can safely perform dig_staircase(vertical='down')."""
+        dirs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
+        cache = probe_cache if probe_cache is not None else {}
+        counts = inv_counts if inv_counts is not None else _inventory_counts(self.bot)
+        air_set = {"air", "cave_air", "void_air"}
+        fluids = {"water", "lava", "flowing_water", "flowing_lava"}
+        fluid_or_bedrock = fluids | {"bedrock"}
+        non_solid = air_set | fluids | {
+            "short_grass",
+            "tall_grass",
+            "leaf_litter",
+            "dandelion",
+            "poppy",
+            "oak_sapling",
+        }
+        has_filler = any(
+            counts.get(c, 0) >= 1
+            for c in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
+        ) or any(cnt >= 1 and name.endswith("_planks") for name, cnt in counts.items())
+
+        def _non_air_has_adj_fluid(cells: list[tuple[int, int, int]]) -> bool:
+            for cx, cy, cz in cells:
+                if self._probe_cached_block((cx, cy, cz), cache) in air_set:
+                    continue
+                for ax, ay, az in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                    if self._probe_cached_block((cx + ax, cy + ay, cz + az), cache) in fluids:
+                        return True
+            return False
+
+        failed_down = self._active_failed_stair_dirs((bx, by, bz, "down"))
+        excluded = set(exclude_dirs or ())
+        viable_down: list[str] = []
+        for odir, (odx, odz) in dirs.items():
+            if odir in excluded or odir in failed_down:
+                continue
+            nx, nz = bx + odx, bz + odz
+            try:
+                dig_cells = [(nx, by + 1, nz), (nx, by, nz), (nx, by - 1, nz)]
+                if any(self._probe_cached_block(p, cache) in fluid_or_bedrock for p in dig_cells):
+                    continue
+                if self._probe_cached_block((nx, by + 2, nz), cache) in fluids:
+                    continue
+                if _non_air_has_adj_fluid(dig_cells):
+                    continue
+                step_sup = self._probe_cached_block((nx, by - 2, nz), cache)
+                if step_sup in fluid_or_bedrock:
+                    continue
+                is_non_solid = step_sup in non_solid or step_sup.endswith(("_leaves", "_sapling", "_carpet", "_banner"))
+                if is_non_solid and not has_filler:
+                    continue
+                viable_down.append(odir)
+            except ApiError:
+                continue
+        return viable_down
+
+    def _enrich_ecology_unavailable(
+        self,
+        res: dict[str, Any],
+        *,
+        targets: list[str] | tuple[str, ...],
+        radius: int,
+        counts: dict[str, int] | None = None,
+    ) -> dict[str, Any] | None:
+        """Enrich an empty local search with world ecology diagnostics and staircase directions."""
+        if not callable(getattr(self.bot, "status", None)):
+            return None
+        try:
+            st = self.bot.status() or {}
+        except Exception:
+            return None
+        dim = normalize_dimension(st.get("dimension"))
+        biome = str(st.get("biome") or "")
+        pos = st.get("pos")
+        has_pos = isinstance(pos, (list, tuple)) and len(pos) >= 3
+        px, py, pz = ([int(math.floor(float(v))) for v in pos[:3]] if has_pos else [0, 64, 0])
+        check = assess_world_target(
+            list(targets),
+            dimension=dim,
+            y=(py if has_pos else None),
+            biome=biome,
+            radius=radius,
+            mode="find",
+        )
+        if check.get("available") is not False:
+            return None
+
+        out: dict[str, Any] = {
+            **res,
+            "requires_replan": True,
+            "ecology_check": check,
+        }
+        if has_pos:
+            out["pos"] = [px, py, pz]
+        if check.get("family_id") == "surface_trees" and check.get("verdict") == "below_generation_band":
+            out["underground_no_trees"] = True
+
+        action_hint = ""
+        dir_needed = check.get("direction_needed")
+        probe_cache: dict[tuple[int, int, int], str] = {}
+        if has_pos and dir_needed == "up":
+            up_dirs = self._probe_viable_up_stair_dirs(px, py, pz, probe_cache=probe_cache, inv_counts=counts)
+            vpillar = False if up_dirs else self._probe_viable_pillar_up(px, py, pz, probe_cache=probe_cache, inv_counts=counts)
+            out["viable_up_directions"] = up_dirs
+            out["viable_pillar_up"] = vpillar
+            rec_y = int(check.get("recommended_y") or 66)
+            steps_up = min(20, max(12, rec_y - py))
+            if up_dirs:
+                action_hint = (
+                    f"请先调 mc_skill_staircase(direction='{up_dirs[0]}', vertical='up', steps={steps_up}) "
+                    f"向上返回目标高度带(可选上行: {','.join(up_dirs)})。"
+                )
+            elif vpillar:
+                action_hint = f"请先调 mc_skill_staircase(vertical='pillar', steps={min(10, steps_up)}) 原地垫脚直上脱困。"
+            else:
+                action_hint = "请先调 mc_skill_staircase(vertical='up', steps=16) 或 mc_skill_unstick 脱困。"
+        elif has_pos and dir_needed == "down":
+            down_dirs = self._probe_viable_down_stair_dirs(px, py, pz, probe_cache=probe_cache, inv_counts=counts)
+            out["viable_down_directions"] = down_dirs
+            rec_y = int(check.get("recommended_y") or 0)
+            steps_down = min(16, max(6, py - rec_y))
+            if down_dirs:
+                action_hint = (
+                    f"请调 mc_skill_staircase(direction='{down_dirs[0]}', vertical='down', steps={steps_down}, stop_on_ore=True) "
+                    f"斜向下探接近 Y={rec_y}(可选下探: {','.join(down_dirs)})。"
+                )
+            else:
+                action_hint = f"请调 mc_skill_staircase(vertical='down', steps={steps_down}, stop_on_ore=True) 下探至 Y={rec_y} 附近。"
+
+        out["message"] = f"{check['hint']} {action_hint}".strip()
+        return out
+
+    def _probe_viable_pillar_up(
+        self,
+        bx: int,
+        by: int,
+        bz: int,
+        *,
+        probe_cache: dict[tuple[int, int, int], str] | None = None,
+        inv_counts: dict[str, int] | None = None,
+    ) -> bool:
+        """Probe whether 1x1 straight-up pillar climbing (dig overhead + jump + place underfoot) is safe."""
+        if "pillar" in self._active_failed_stair_dirs((bx, by, bz, "pillar")):
+            return False
+        cache = probe_cache if probe_cache is not None else {}
+        counts = inv_counts if inv_counts is not None else _inventory_counts(self.bot)
+        has_filler = any(
+            counts.get(c, 0) >= 1
+            for c in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite", "tuff", "stone")
+        ) or any(cnt >= 1 and name.endswith("_planks") for name, cnt in counts.items())
+        if not has_filler:
+            return False
+
+        air_set = {"air", "cave_air", "void_air"}
+        fluids = {"water", "lava", "flowing_water", "flowing_lava"}
+        fluid_or_bedrock = fluids | {"bedrock"}
+        falling_set = {"gravel", "sand", "red_sand", "suspicious_gravel", "suspicious_sand"}
+        hazard_set = fluids | falling_set
+        _, pick_tier = _best_pickaxe_in_inv(counts)
+
+        try:
+            for cy in (by + 1, by + 2):
+                bname = self._probe_cached_block((bx, cy, bz), cache)
+                if bname in fluid_or_bedrock or bname == "unknown":
+                    return False
+            top3 = self._probe_cached_block((bx, by + 3, bz), cache)
+            if top3 in hazard_set:
+                return False
+            overhead = self._probe_cached_block((bx, by + 2, bz), cache)
+            if overhead not in air_set:
+                req_tier = BLOCK_MIN_PICKAXE_TIER.get(overhead, 0)
+                if req_tier > pick_tier:
+                    return False
+                for ax, ay, az in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                    nb = self._probe_cached_block((bx + ax, by + 2 + ay, bz + az), cache)
+                    if nb in hazard_set:
+                        return False
+            return True
+        except ApiError:
+            return False
+
+    def _avoid_temporarily(self, pos: tuple[int, int, int], reason: str, seconds: float = 15.0) -> None:
+        self.temporary_avoidance[pos] = {"reason": reason, "until": time.monotonic() + seconds}
+
+    def _is_block_avoided(self, pos: tuple[int, int, int]) -> bool:
+        record = self.temporary_avoidance.get(pos)
+        if record and record["until"] <= time.monotonic():
+            del self.temporary_avoidance[pos]
+            record = None
+        return pos in self.protected_positions or record is not None
+
+    def _avoidance_summary(self) -> dict[str, Any]:
+        for pos in list(self.temporary_avoidance):
+            self._is_block_avoided(pos)
+        return {
+            "protected_blacklisted": len(self.protected_positions),
+            "temporarily_avoided": len(self.temporary_avoidance),
+            "temporary_reasons": sorted({r["reason"] for r in self.temporary_avoidance.values()}),
+        }
+
+    def _block_info(self, pos_xyz: list[int]) -> tuple[str, bool]:
+        res = self.bot.call("get_block", {"pos": pos_xyz})
+        raw = res.get("name") or res.get("block") or "air"
+        return str(raw).removeprefix("minecraft:"), bool(res.get("diggable", False))
+
+    def _is_water_covered(self, pos: tuple[int, int, int]) -> bool:
+        water_names = {"water", "flowing_water"}
+        for dy in (1, 2):
+            try:
+                name, _ = self._block_info([pos[0], pos[1] + dy, pos[2]])
+            except ApiError:
+                return False
+            if name in water_names:
+                return True
+        return False
+
+    def _equip_if_present(self, candidates: tuple[str, ...], slot: str = "hand") -> str | None:
+        counts = _inventory_counts(self.bot)
+        for item in candidates:
+            if counts.get(item, 0) > 0:
+                try:
+                    self.bot.call("equip", {"item": item, "slot": slot})
+                    return item
+                except ApiError:
+                    return None
+        return None
+
+    def _ensure_planks_and_sticks(self, planks_needed: int, sticks_needed: int) -> dict[str, int]:
+        counts = _inventory_counts(self.bot)
+        # Convert sticks shortage -> additional planks needed (2 planks -> 4 sticks)
+        cur_sticks = counts.get("stick", 0)
+        extra_stick_crafts = math.ceil(max(0, sticks_needed - cur_sticks) / 4)
+        total_planks_needed = planks_needed + extra_stick_crafts * 2
+
+        cur_planks = _total_planks(counts)
+        if cur_planks < total_planks_needed:
+            logs_to_craft = math.ceil((total_planks_needed - cur_planks) / 4)
+            for log_name in (*LOG_TYPES, *NETHER_STEM_TYPES):
+                avail_logs = counts.get(log_name, 0)
+                if avail_logs <= 0 or logs_to_craft <= 0:
+                    continue
+                use_logs = min(avail_logs, logs_to_craft)
+                plank_name = _log_to_planks_name(log_name)
+                try:
+                    self._safe_craft(plank_name, use_logs * 4)
+                    logs_to_craft -= use_logs
+                except ApiError as err:
+                    if err.code == "inventory_full":
+                        raise
+            counts = _inventory_counts(self.bot)
+
+        if sticks_needed > counts.get("stick", 0) and _total_planks(counts) >= 2:
+            need_crafts = math.ceil((sticks_needed - counts.get("stick", 0)) / 4)
+            try:
+                self._safe_craft("stick", need_crafts * 4)
+            except ApiError as err:
+                if err.code == "inventory_full":
+                    raise
+            counts = _inventory_counts(self.bot)
+
+        return counts
+
+    def _carve_and_place_table(
+        self,
+        px: int,
+        py: int,
+        pz: int,
+        item: str = "crafting_table",
+    ) -> dict[str, Any] | None:
+        """Carve a 1-block wall pocket over a solid floor and place a utility block there."""
+        air_set = {"air", "cave_air", "void_air"}
+        fluid_or_bedrock = {"water", "lava", "flowing_water", "flowing_lava", "bedrock"}
+        non_solid = air_set | fluid_or_bedrock | {"short_grass", "tall_grass", "leaf_litter"}
+
+        def _blk_name(pos_xyz: list[int]) -> str:
+            res = self.bot.call("get_block", {"pos": pos_xyz})
+            return str(res.get("name") or res.get("block") or "air").removeprefix("minecraft:")
+
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            floor_pos = [px + dx, py - 1, pz + dz]
+            wall_pos = [px + dx, py, pz + dz]
+            try:
+                if _blk_name(floor_pos) in non_solid:
+                    continue
+                w_name = _blk_name(wall_pos)
+                if w_name in fluid_or_bedrock:
+                    continue
+                if w_name not in air_set:
+                    if w_name in BLOCK_MIN_PICKAXE_TIER or "stone" in w_name or "deepslate" in w_name:
+                        self._equip_if_present(tuple(PICKAXE_TIERS))
+                    self.bot.call("dig", {"pos": wall_pos, "collect": True, "stop_on": ["death"]})
+                placed = self.bot.call("place", {"item": item, "pos": wall_pos})
+                return {"ok": True, "reused": False, "carved_pocket": wall_pos, **placed}
+            except ApiError:
+                continue
+        return None
+
+    def ensure_crafting_table(self, *, force_recarve: bool = False) -> dict[str, Any]:
+        """Reuse a nearby same-level crafting_table or craft & place one (carving a wall pocket if needed)."""
+        st = self.bot.status()
+        if bool(st.get("in_water")):
+            self.escape_water()
+            st = self.bot.status()
+        px, py, pz = [int(math.floor(v)) for v in (st.get("pos") or [0, 64, 0])]
+
+        if not force_recarve:
+            found = self.bot.call("find_blocks", {"radius": 8, "types": ["crafting_table"], "limit": 5})
+            blocks = [
+                b
+                for b in (found.get("blocks") or [])
+                if b.get("pos")
+                and abs(int(b["pos"][1]) - py) <= 2
+                and float(b.get("dist", 99)) <= 4.5
+            ]
+            if blocks:
+                nearest = min(blocks, key=lambda b: float(b.get("dist", 999)))
+                pos = nearest.get("pos")
+                if float(nearest.get("dist", 99)) > 3.2 and pos:
+                    try:
+                        self.bot.call("move_to", {"x": pos[0], "y": pos[1], "z": pos[2], "range": 2.0})
+                        return {"ok": True, "reused": True, "pos": pos}
+                    except ApiError:
+                        pass
+                else:
+                    return {"ok": True, "reused": True, "pos": pos}
+
+        inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
+        if counts.get("crafting_table", 0) < 1:
+            inv_raw, _ = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
+            try:
+                counts = self._ensure_planks_and_sticks(4, 0)
+            except ApiError as err:
+                return {"ok": False, "error": err.code, "requires_replan": True, "message": err.message, **err.context}
+            if _total_planks(counts) < 4:
+                dim = normalize_dimension(st.get("dimension"))
+                biome = str(st.get("biome") or "")
+                wood_targets = list(NETHER_STEM_TYPES) if dim == "the_nether" else list(LOG_TYPES)
+                base_err: dict[str, Any] = {
+                    "ok": False,
+                    "error": "missing_ingredients",
+                    "message": (
+                        f"合成工作台需要至少 4 块木板或 1 块原木；当前位于下界({dim})，请先采集 {', '.join(NETHER_STEM_TYPES)} 菌柄合成木板。"
+                        if dim == "the_nether"
+                        else "合成工作台需要至少 4 块木板或 1 块原木。"
+                    ),
+                }
+                wood_check = assess_world_target(wood_targets, dimension=dim, y=py, biome=biome, mode="find")
+                if not wood_check.get("available"):
+                    probe_cache: dict[tuple[int, int, int], str] = {}
+                    up_dirs = (
+                        self._probe_viable_up_stair_dirs(px, py, pz, probe_cache=probe_cache, inv_counts=counts)
+                        if wood_check.get("direction_needed") == "up"
+                        else []
+                    )
+                    vpillar = (
+                        False
+                        if up_dirs or wood_check.get("direction_needed") != "up"
+                        else self._probe_viable_pillar_up(px, py, pz, probe_cache=probe_cache, inv_counts=counts)
+                    )
+                    up_hint = (
+                        f"请先调 mc_skill_staircase(direction='{up_dirs[0]}', vertical='up', steps=16) 返回目标高度带"
+                        if up_dirs
+                        else (
+                            "请先调 mc_skill_staircase(vertical='pillar', steps=8) 原地垫脚升层"
+                            if vpillar
+                            else ""
+                        )
+                    )
+                    return {
+                        "ok": False,
+                        "error": "missing_ingredients",
+                        "requires_replan": True,
+                        "pos": [px, py, pz],
+                        "ecology_check": wood_check,
+                        "underground_no_wood": wood_check.get("verdict") == "below_generation_band",
+                        "viable_up_directions": up_dirs,
+                        "viable_pillar_up": vpillar,
+                        "message": f"合成工作台需要至少 4 块木板或 1 块原木；{wood_check['hint']} {up_hint}".strip(),
+                    }
+                return base_err
+            try:
+                self._safe_craft("crafting_table", 1)
+            except ApiError as err:
+                return {"ok": False, "error": err.code, "requires_replan": True, "message": err.message, **err.context}
+
+        # Place nearby using auto-placement first, then fallback open offsets, then wall-pocket carving
+        try:
+            placed = self.bot.call("place", {"item": "crafting_table"})
+            return {"ok": True, "reused": False, **placed}
+        except ApiError as err:
+            for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (1, 1, 0)):
+                try:
+                    placed = self.bot.call("place", {"item": "crafting_table", "pos": [px + dx, py + dy, pz + dz]})
+                    return {"ok": True, "reused": False, **placed}
+                except ApiError:
+                    continue
+            pocket = self._carve_and_place_table(px, py, pz)
+            if pocket is not None:
+                return pocket
+            return {"ok": False, "error": err.code, "message": err.message}
+
+    def _collect_nearby_items(
+        self,
+        *,
+        bot_y: float,
+        radius: int = 8,
+        max_pickups: int = 5,
+        fallback_coord: bool = True,
+    ) -> dict[str, Any]:
+        """Record bounded approach attempts, without claiming they prove item pickup."""
+        attempts: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        try:
+            ents = self.bot.call("get_entities", {"radius": radius, "types": ["item"]})
+        except ApiError as err:
+            return {"attempts": [], "skipped": [], "error": {"code": err.code, "message": err.message, **err.context}}
+        cached_inv = getattr(self.bot, "_last_inventory", None)
+        low_slots = isinstance(cached_inv, dict) and _compute_empty_slots(cached_inv) <= 6
+        for ent in (ents.get("entities") or [])[:max_pickups]:
+            pos = ent.get("pos") or []
+            row: dict[str, Any] = {"id": ent.get("id"), "item": ent.get("item"), "item_pos": pos}
+            if len(pos) < 3 or ent.get("id") is None:
+                skipped.append({**row, "reason": "invalid_entity"})
+                continue
+            if low_slots and _normalize_drop_name(ent.get("item")) in _TRASH_TIER1_ZERO_KEEP:
+                skipped.append({**row, "reason": "ignored_clutter_low_slots"})
+                continue
+            if abs(float(pos[1]) - bot_y) > 4.5:
+                skipped.append({**row, "reason": "height_difference", "height_difference": float(pos[1]) - bot_y})
+                continue
+            attempts.append(row)
+            mpos: list[float] = []
+            try:
+                mv = self.bot.call("move_to", {"entity_id": ent["id"], "range": 0.8, "timeout": 4000})
+                mpos = mv.get("pos") or []
+                row["pos"] = mpos
+            except ApiError as err:
+                row["approach_error"] = {"code": err.code, "message": err.message, **err.context}
+                if err.code in ("interrupted", "dead", "disconnected"):
+                    return {"attempts": attempts, "skipped": skipped, "error": row["approach_error"]}
+            # The current API clamps entity goals to >=2 blocks. A successful
+            # move may still be outside pickup reach, including vertically.
+            needs_closer = len(mpos) < 3 or math.dist(mpos[:3], pos[:3]) > 1.0
+            if fallback_coord and needs_closer and abs(float(pos[1]) - bot_y) <= 2.5:
+                try:
+                    mv = self.bot.call("move_to", {"x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2]),
+                                                    "range": 0.3, "timeout": 4000})
+                    row["pos"] = mv.get("pos") or []
+                except ApiError as err:
+                    row["closer_error"] = {"code": err.code, "message": err.message, **err.context}
+                    if err.code in ("interrupted", "dead", "disconnected"):
+                        return {"attempts": attempts, "skipped": skipped, "error": row["closer_error"]}
+            cur_pos = row.get("pos") or mpos
+            if (
+                fallback_coord
+                and len(cur_pos) >= 3
+                and abs(float(pos[1]) - float(cur_pos[1])) <= 0.75
+                and 1.05 < math.dist(cur_pos[:3], pos[:3]) <= 2.35
+            ):
+                try:
+                    ctrl = self.bot.call(
+                        "control",
+                        {
+                            "forward": True,
+                            "sneak": True,
+                            "yaw": _yaw_toward(
+                                float(cur_pos[0]), float(cur_pos[2]), float(pos[0]), float(pos[2])
+                            ),
+                            "ms": 380,
+                            "stop_on": ["hurt", "death"],
+                        },
+                    )
+                    if isinstance(ctrl.get("pos"), list) and len(ctrl["pos"]) >= 3:
+                        row["pos"] = ctrl["pos"]
+                except ApiError as err:
+                    row["closer_error"] = {"code": err.code, "message": err.message, **err.context}
+                    if err.code in ("interrupted", "dead", "disconnected"):
+                        return {"attempts": attempts, "skipped": skipped, "error": row["closer_error"]}
+            if row.get("pos"):
+                row["distance_after"] = round(math.dist(row["pos"][:3], pos[:3]), 2)
+                time.sleep(0.25)  # Allow server inventory packets to arrive before verification.
+        return {"attempts": attempts, "skipped": skipped}
+
+    def collect_drops(self, radius: int = 12, max_pickups: int = 8) -> dict[str, Any]:
+        """Collect nearby ground item entities and report actual inventory delta."""
+        inv_raw, inv_before = _inventory_snapshot_and_counts(self.bot)
+        inv_raw, auto_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
+        if auto_dropped:
+            inv_before = _inventory_counts_from_raw(inv_raw)
+        st = self.bot.status()
+        bot_y = float((st.get("pos") or [0, 64, 0])[1])
+        approaches = self._collect_nearby_items(
+            bot_y=bot_y,
+            radius=max(2, min(32, radius)),
+            max_pickups=max(1, min(20, max_pickups)),
+            fallback_coord=True,
+        )
+        inv_after = _inventory_counts(self.bot)
+        gained = _positive_inv_delta(inv_before, inv_after)
+        state_after = self.bot.status()
+        attempts = approaches["attempts"]
+        out: dict[str, Any] = {
+            "ok": bool(gained) and not approaches.get("error"),
+            "attempted_pickups": len(attempts),
+            "attempts": attempts,
+            "skipped": approaches["skipped"],
+            "moved_to": [row for row in attempts if row.get("pos")],
+            "gained": gained,
+            "inventory": inv_after,
+            "pos_after": state_after.get("pos"),
+            "health": state_after.get("health"),
+        }
+        if auto_dropped:
+            out["auto_dropped"] = auto_dropped
+        if approaches.get("error"):
+            out["error"] = approaches["error"]["code"]
+            out["details"] = approaches["error"]
+        elif not gained:
+            out["error"] = "no_drops_collected" if attempts else ("drops_unreachable" if approaches["skipped"] else "no_drops_found")
+            base_msg = "未确认任何物品入包；走近成功不代表拾取成功。请检查高差、障碍与实际背包，改变站位或路线后再试，勿据此继续合成。"
+            drop_summary = _summarize_uncollected_drops(
+                state_after.get("pos") or st.get("pos"), attempts, approaches["skipped"]
+            )
+            if drop_summary is not None:
+                out["nearest_unreachable_drop"] = drop_summary["nearest"]
+                out["approach_hint"] = drop_summary["approach_hint"]
+                out["message"] = f"{base_msg} {drop_summary['approach_hint']}"
+            else:
+                out["message"] = base_msg
+        return out
+
+    def _dig_target_blocks(
+        self,
+        *,
+        block_types: list[str],
+        count: int,
+        radius: int,
+        protected_msg: str,
+        below_tol: float,
+        above_tol: float,
+        inv_before: dict[str, int] | None = None,
+        avoid_water: bool = False,
+    ) -> dict[str, Any]:
+        """Shared candidate scan, vertical reachability ranking, blacklist handling, and drop rescue."""
+        gained: dict[str, int] = {}
+        dug_count = 0
+        protected_hits = 0
+        water_skipped = 0
+        last_drop_scan: dict[str, Any] | None = None
+        last_bot_pos: list[float] | None = None
+
+        for _ in range(count * 3):
+            if dug_count >= count:
+                break
+            for apos in list(self.temporary_avoidance):
+                self._is_block_avoided(apos)
+            scan_limit = min(60, 30 + len(self.temporary_avoidance))
+            found = self.bot.call(
+                "find_blocks",
+                {"radius": max(4, min(64, radius)), "types": block_types, "limit": scan_limit},
+            )
+            candidates = [
+                b
+                for b in (found.get("blocks") or [])
+                if not self._is_block_avoided(tuple(b.get("pos") or ()))
+            ]
+            if not candidates:
+                break
+            st = self.bot.status()
+            bot_y = float((st.get("pos") or [0, 64, 0])[1])
+            candidates.sort(
+                key=lambda b: (
+                    (
+                        max(0.0, (bot_y - below_tol) - float(b["pos"][1]))
+                        + max(0.0, float(b["pos"][1]) - (bot_y + above_tol))
+                    )
+                    * 4.5
+                    + float(b.get("dist", 99))
+                )
+            )
+            target = None
+            for cand in candidates:
+                cpos = tuple(cand["pos"])
+                if avoid_water and float(cand["pos"][1]) < bot_y - 0.5 and self._is_water_covered(cpos):
+                    self._avoid_temporarily(cpos, "water_covered", 30.0)
+                    water_skipped += 1
+                    continue
+                target = cand
+                break
+            if target is None:
+                continue
+            pos = tuple(target["pos"])
+            try:
+                res = self.bot.call("dig", {"pos": list(pos), "collect": True})
+                dug_count += 1
+                for k, v in (res.get("gained") or {}).items():
+                    gained[k] = gained.get(k, 0) + int(v)
+                if avoid_water and bool(self.bot.status().get("in_water")):
+                    esc = self.escape_water()
+                    if esc.get("in_water"):
+                        break
+                # Guard against repeatedly digging blocks whose drops fall out of reach
+                if dug_count >= 2 and sum(gained.values()) == 0:
+                    last_bot_pos = st.get("pos")
+                    last_drop_scan = self._collect_nearby_items(bot_y=bot_y, radius=12)
+                    if inv_before is not None:
+                        inv_delta = _positive_inv_delta(inv_before, _inventory_counts(self.bot))
+                        if inv_delta:
+                            gained = dict(inv_delta)
+                            continue
+                    break
+            except ApiError as err:
+                if _is_protected_err(err):
+                    self.protected_positions.add(pos)
+                    protected_hits += 1
+                    if protected_hits >= 3 and dug_count == 0:
+                        return {
+                            "ok": False,
+                            "error": "protected_region",
+                            "message": protected_msg,
+                            **self._avoidance_summary(),
+                        }
+                elif err.code in _TRANSIENT_BLOCK_ERRORS:
+                    avoid_secs = (
+                        90.0
+                        if err.code == "out_of_reach" and float(pos[1]) > bot_y + above_tol
+                        else 15.0
+                    )
+                    self._avoid_temporarily(pos, err.code, seconds=avoid_secs)
+                elif err.code == "interrupted":
+                    self._avoid_temporarily(pos, err.code, 3.0)
+                    esc = None
+                    if bool(self.bot.status().get("in_water")):
+                        esc = self.escape_water()
+                    out_err: dict[str, Any] = {
+                        "ok": False,
+                        "requires_replan": True,
+                        "dug_count": dug_count,
+                        "gained": gained,
+                        "partial_error": {"code": err.code, "message": err.message, **err.context},
+                        **self._avoidance_summary(),
+                    }
+                    if esc is not None:
+                        out_err["water_escape"] = esc
+                    return out_err
+                else:
+                    return {
+                        "ok": False,
+                        "requires_replan": True,
+                        "dug_count": dug_count,
+                        "gained": gained,
+                        "partial_error": {"code": err.code, "message": err.message, **err.context},
+                    }
+
+        if dug_count > 0 and sum(gained.values()) == 0:
+            if last_drop_scan is None:
+                st = self.bot.status()
+                last_bot_pos = st.get("pos")
+                bot_y = float((last_bot_pos or [0, 64, 0])[1])
+                last_drop_scan = self._collect_nearby_items(bot_y=bot_y, radius=12)
+            if inv_before is not None:
+                inv_delta = _positive_inv_delta(inv_before, _inventory_counts(self.bot))
+                if inv_delta:
+                    gained = dict(inv_delta)
+
+        if dug_count == 0 and water_skipped > 0:
+            return {
+                "ok": False,
+                "error": "underwater_targets_skipped",
+                "message": (
+                    f"周围扫描到的 {water_skipped} 处目标均位于水下，已暂时跳过 30 秒；"
+                    "请远离当前水域并在干燥地面用 mc_skill_staircase(vertical='down', stop_on_ore=True) 下矿或寻找旱地露头矿。"
+                ),
+                "dug_count": 0,
+                "gained": gained,
+                "water_skipped": water_skipped,
+                **self._avoidance_summary(),
+            }
+
+        out: dict[str, Any] = {
+            "ok": dug_count >= count and bool(gained),
+            "requested_count": count,
+            "dug_count": dug_count,
+            "gained": gained,
+            "water_skipped": water_skipped,
+            **self._avoidance_summary(),
+        }
+        if dug_count > 0 and not gained:
+            out["error"] = "no_drops_collected"
+            out["requires_replan"] = True
+            drop_summary = _summarize_uncollected_drops(
+                last_bot_pos,
+                (last_drop_scan or {}).get("attempts") or [],
+                (last_drop_scan or {}).get("skipped") or [],
+            )
+            if drop_summary is not None:
+                out["nearby_drops"] = drop_summary["items"]
+                out["nearest_unreachable_drop"] = drop_summary["nearest"]
+                out["approach_hint"] = drop_summary["approach_hint"]
+                out["message"] = f"连续挖掘 {dug_count} 格但掉落物均未入包！{drop_summary['approach_hint']}"
+            else:
+                out["message"] = (
+                    f"连续挖掘 {dug_count} 格但掉落物均未拾取（可能掉入深坑或工具等级不匹配），"
+                    "已停止继续损耗耐久，请移动到安全平层/斜坡挖掘或用 mc_get_entities 检查地面物品。"
+                )
+        elif dug_count < count:
+            out["error"] = "partial_collection" if dug_count else "no_targets_available"
+            if (
+                dug_count == 0
+                and not self.protected_positions
+                and not self.temporary_avoidance
+            ):
+                out["message"] = (
+                    f"半径 {radius} 格内未扫描到任何匹配目标方块（{', '.join(block_types)}），"
+                    "请先水平移动或使用 mc_skill_staircase 改变海拔后再探测，勿原地仅修改 count 重试。"
+                )
+            else:
+                out["message"] = f"本次只挖掘 {dug_count}/{count} 格；请按 gained 检查实际入包量。临时避让与保护区分别报告，改变站位或等待冷却后可重试临时失败。"
+            out["requires_replan"] = True
+        return out
+
+    def harvest_logs(self, target_logs: int = 4, radius: int = 32) -> dict[str, Any]:
+        """Chop up to target_logs trees (or nether stems in the_nether) while blacklisting protected blocks."""
+        target_logs = max(1, min(32, int(target_logs)))
+        radius = max(4, min(64, int(radius)))
+        inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
+        inv_raw, auto_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
+        if auto_dropped:
+            counts = _inventory_counts_from_raw(inv_raw)
+        equipped = self._equip_if_present(AXE_PRIORITY)
+        dim = "overworld"
+        if callable(getattr(self.bot, "status", None)):
+            try:
+                dim = normalize_dimension((self.bot.status() or {}).get("dimension"))
+            except Exception:
+                dim = "overworld"
+        wood_targets = list(NETHER_STEM_TYPES) if dim == "the_nether" else list(LOG_TYPES)
+        res = self._dig_target_blocks(
+            block_types=wood_targets,
+            count=target_logs,
+            radius=radius,
+            protected_msg="周围原木被服务端明确拒绝为 protected_region，请离开该保护区域后再砍树。",
+            below_tol=1.5,
+            above_tol=3.5,
+            inv_before=counts,
+        )
+        if res.get("error") == "protected_region":
+            return res
+        if res.get("dug_count", 0) == 0 and res.get("error") == "no_targets_available":
+            enriched = self._enrich_ecology_unavailable(res, targets=wood_targets, radius=radius, counts=counts)
+            if enriched is not None:
+                return {**enriched, "equipped_axe": equipped}
+            if radius < 32:
+                retry_res = self._dig_target_blocks(
+                    block_types=wood_targets,
+                    count=target_logs,
+                    radius=32,
+                    protected_msg="周围原木被服务端明确拒绝为 protected_region，请离开该保护区域后再砍树。",
+                    below_tol=1.5,
+                    above_tol=3.5,
+                    inv_before=counts,
+                )
+                if retry_res.get("error") == "protected_region":
+                    return retry_res
+                res = retry_res
+
+        if int(res.get("dug_count") or 0) == 0 and self.temporary_avoidance:
+            reach_entries = [
+                (pos_k, rec)
+                for pos_k, rec in self.temporary_avoidance.items()
+                if rec.get("reason") in {"out_of_reach", "path_not_found", "no_path"}
+            ]
+            if reach_entries:
+                try:
+                    cur_p = (self.bot.status() or {}).get("pos") or [0.0, 64.0, 0.0]
+                    cx, cy, cz = float(cur_p[0]), float(cur_p[1]), float(cur_p[2])
+                    px, py, pz = math.floor(cx), math.floor(cy), math.floor(cz)
+                    tx, ty, tz = min(
+                        (pos_k for pos_k, _ in reach_entries),
+                        key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2,
+                    )
+                    dx, dy, dz = tx - cx, float(ty) - cy, tz - cz
+                    bearing = cardinal_bearing(dx, dz)
+                    probe_cache: dict[tuple[int, int, int], str] = {}
+                    up_dirs = self._probe_viable_up_stair_dirs(
+                        px,
+                        py,
+                        pz,
+                        probe_cache=probe_cache,
+                        inv_counts=counts,
+                    )
+                    vpillar = (
+                        False
+                        if up_dirs
+                        else self._probe_viable_pillar_up(
+                            px,
+                            py,
+                            pz,
+                            probe_cache=probe_cache,
+                            inv_counts=counts,
+                        )
+                    )
+                    best_up = bearing if bearing in up_dirs else (up_dirs[0] if up_dirs else bearing)
+                    ux, uz = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}.get(best_up, (0, -1))
+                    esc_x, esc_z = px + ux * 24, pz + uz * 24
+                    steps_up = max(3, min(8, int(abs(dy) + 1)))
+                    if dy >= 2.0:
+                        if up_dirs:
+                            approach_hint = (
+                                f"当前处于低洼/凹坑(y={py})或周围原木仅剩高处残冠（最近原木位于[{tx},{ty},{tz}], 相对朝向={bearing}, dy={dy:+.1f}），"
+                                f"直接砍树或原地 mc_skill_unstick 无法够到！请立即调用 "
+                                f"mc_skill_staircase(direction='{best_up}', vertical='up', steps={steps_up}) 爬出低坑登顶平层，"
+                                f"或调用 mc_move_to(x={esc_x}, z={esc_z})(省略y) 水平转移24格寻找整棵新树；"
+                                "严禁原地重复 mc_skill_harvest_logs 或 mc_skill_unstick！"
+                            )
+                        elif vpillar:
+                            approach_hint = (
+                                f"周围原木仅剩高处目标（最近位于[{tx},{ty},{tz}], dy={dy:+.1f}）且四向阶梯受阻，"
+                                f"请先用 mc_skill_staircase(direction='pillar', vertical='pillar', steps={min(6, steps_up)}) 垫脚升层，"
+                                f"或调用 mc_move_to(x={esc_x}, z={esc_z})(省略y) 水平转移24格寻找整棵新树；"
+                                "严禁原地重复 mc_skill_harvest_logs 或 mc_skill_unstick！"
+                            )
+                        else:
+                            approach_hint = (
+                                f"周围原木均为高处残冠或地形阻挡不可达（最近位于[{tx},{ty},{tz}], 相对朝向={bearing}, dy={dy:+.1f}），"
+                                f"请调用 mc_move_to(x={esc_x}, z={esc_z})(省略y) 水平转移24格以上换一片树林；"
+                                "严禁原地重复 mc_skill_harvest_logs 或 mc_skill_unstick！"
+                            )
+                    else:
+                        approach_hint = (
+                            f"周围原木均被地形/树干遮挡或超距不可达（最近位于[{tx},{ty},{tz}], 相对朝向={bearing}, dy={dy:+.1f}），"
+                            f"请朝 {best_up} 调 mc_skill_staircase(direction='{best_up}', vertical='up', steps=4) 跨越地形，"
+                            f"或调用 mc_move_to(x={esc_x}, z={esc_z})(省略y) 水平转移24格换一片树林；"
+                            "严禁原地重复 mc_skill_harvest_logs 或 mc_skill_unstick！"
+                        )
+                    res["requires_replan"] = True
+                    res["nearest_unreachable_target"] = {
+                        "pos": [tx, ty, tz],
+                        "bearing": bearing,
+                        "dy": round(dy, 1),
+                    }
+                    res["viable_up_directions"] = up_dirs
+                    res["viable_pillar_up"] = vpillar
+                    res["approach_hint"] = approach_hint
+                    res["message"] = approach_hint
+                except Exception:
+                    pass
+        out_logs: dict[str, Any] = {
+            **res,
+            "equipped_axe": equipped,
+        }
+        if auto_dropped:
+            out_logs["auto_dropped"] = auto_dropped
+        return out_logs
+
+    def craft_gear(
+        self,
+        item: str,
+        count: int = 1,
+        equip_slot: str | None = None,
+    ) -> dict[str, Any]:
+        """Auto-craft intermediate planks/sticks, ensure crafting_table when needed, craft item, and optionally equip."""
+        item = resolve_item_alias(item)
+        count = max(1, min(64, count))
+        inv_raw, initial = _inventory_snapshot_and_counts(self.bot)
+        if item in (
+            "iron_pickaxe",
+            "diamond_pickaxe",
+            "diamond_helmet",
+            "diamond_chestplate",
+            "diamond_leggings",
+            "diamond_boots",
+        ):
+            plan = material_shortage(item, count, initial)
+            if plan and plan["missing_materials"]:
+                non_wood_missing = {k: v for k, v in plan["missing_materials"].items() if k != "stick"}
+                if non_wood_missing:
+                    return {
+                        "ok": False,
+                        "error": "missing_ingredients",
+                        "requires_replan": True,
+                        "inventory": initial,
+                        **plan,
+                    }
+        inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
+        planks_per, sticks_per = TOOL_WOOD_NEEDS.get(item, (0, 0))
+        planks_needed = math.ceil(count / 4) * 2 if item == "stick" else planks_per * count
+        sticks_needed = math.ceil(count / 4) if item == "torch" else sticks_per * count
+        extra_table_planks = 4 if item in TABLE_RECIPES else 0
+        # Only pre-craft sticks/planks up front if we might need them; let server check exact 3x3 items.
+        try:
+            prepared = self._ensure_planks_and_sticks(planks_needed, sticks_needed)
+        except ApiError as err:
+            return {
+                "ok": False,
+                "error": err.code,
+                "requires_replan": True,
+                "message": err.message,
+                **err.context,
+            }
+        if item == "stick" and _total_planks(prepared) < planks_needed:
+            return {
+                "ok": False,
+                "error": "missing_ingredients",
+                "requires_replan": True,
+                "inventory": prepared,
+                "missing_materials": {"planks_or_log": planks_needed - _total_planks(prepared)},
+                "message": (
+                    f"合成 {count} 个 stick 需要至少 {planks_needed} 块木板（可用原木自动合成），"
+                    f"当前可用木板仅 {_total_planks(prepared)}。"
+                ),
+            }
+        plan = material_shortage(item, count, prepared)
+        if plan and plan["missing_materials"]:
+            return {"ok": False, "error": "missing_ingredients", "requires_replan": True,
+                    "inventory": prepared, **plan}
+
+        if item in TABLE_RECIPES:
+            table_res = self.ensure_crafting_table()
+            if not table_res.get("ok"):
+                return table_res
+            # Re-ensure planks if crafting table consumed some
+            if extra_table_planks and planks_per > 0:
+                try:
+                    self._ensure_planks_and_sticks(planks_per * count, sticks_needed)
+                except ApiError as err:
+                    return {
+                        "ok": False,
+                        "error": err.code,
+                        "requires_replan": True,
+                        "message": err.message,
+                        **err.context,
+                    }
+
+        try:
+            craft_res = self._safe_craft(item, count)
+        except ApiError as err:
+            if err.code == "inventory_full":
+                return {
+                    "ok": False,
+                    "error": err.code,
+                    "requires_replan": True,
+                    "message": err.message,
+                    **err.context,
+                }
+            if item in TABLE_RECIPES and (
+                "windowOpen" in err.message
+                or err.code in ("path_not_found", "need_crafting_table", "out_of_reach")
+            ):
+                try:
+                    nearby_tables = self.bot.call(
+                        "find_blocks",
+                        {"radius": 5, "types": ["crafting_table"], "limit": 4},
+                    ).get("blocks", [])
+                    for blk in sorted(
+                        nearby_tables,
+                        key=lambda b: float(b.get("dist", 99.0)),
+                    )[:2]:
+                        bpos = blk.get("pos")
+                        if isinstance(bpos, list) and len(bpos) == 3:
+                            try:
+                                self.bot.call("dig", {"pos": bpos, "stop_on": ["death"]})
+                            except ApiError:
+                                pass
+                    if _inventory_counts(self.bot).get("crafting_table", 0) < 1:
+                        inv_now = self._ensure_planks_and_sticks(4, 0)
+                        if _total_planks(inv_now) >= 4:
+                            self._safe_craft("crafting_table", 1)
+                    if _inventory_counts(self.bot).get("crafting_table", 0) >= 1:
+                        pos = self.bot.status()["pos"]
+                        px, py, pz = math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2])
+                        self._carve_and_place_table(px, py, pz)
+                    craft_res = self._safe_craft(item, count)
+                except ApiError as retry_err:
+                    return {
+                        "ok": False,
+                        "error": retry_err.code,
+                        "requires_replan": retry_err.code == "inventory_full",
+                        "message": retry_err.message,
+                        **retry_err.context,
+                    }
+            else:
+                return {
+                    "ok": False,
+                    "error": err.code,
+                    "message": err.message,
+                    **{k: v for k, v in explain_craft_error(item, count, {"code": err.code, **err.context}).items() if k != "code"},
+                }
+
+        slot = equip_slot or DEFAULT_EQUIP_SLOTS.get(item)
+        equipped_res = None
+        if slot:
+            try:
+                equipped_res = self.bot.call("equip", {"item": item, "slot": slot})
+            except ApiError:
+                equipped_res = None
+
+        out_craft: dict[str, Any] = {
+            "ok": True,
+            **craft_res,
+            "equipped_slot": slot if equipped_res else None,
+        }
+        if pre_dropped:
+            merged_drops = list(pre_dropped)
+            if isinstance(out_craft.get("auto_dropped"), list):
+                merged_drops.extend(out_craft["auto_dropped"])
+            out_craft["auto_dropped"] = merged_drops
+        return out_craft
+
+    def mine_blocks(
+        self,
+        block_types: list[str],
+        count: int = 3,
+        radius: int = 32,
+    ) -> dict[str, Any]:
+        """Validate pickaxe tier against Minecraft harvest rules, equip best pickaxe, and dig count blocks."""
+        if not block_types:
+            return {"ok": False, "error": "bad_args", "message": "block_types 不能为空。"}
+        count = max(1, min(32, int(count)))
+        radius = max(4, min(64, int(radius)))
+        req_tier = max((BLOCK_MIN_PICKAXE_TIER.get(b, 0) for b in block_types), default=0)
+
+        inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
+        best_pick, best_tier = _best_pickaxe_in_inv(counts)
+        if req_tier > 0 and best_tier < req_tier:
+            tier_names = {1: "wooden_pickaxe(木镐)", 2: "stone_pickaxe(石镐)", 3: "iron_pickaxe(铁镐)", 4: "diamond_pickaxe(钻石镐)"}
+            allowed = [b for b in block_types if BLOCK_MIN_PICKAXE_TIER.get(b, 0) <= best_tier]
+            blocked = {b: BLOCK_MIN_PICKAXE_TIER[b] for b in block_types if BLOCK_MIN_PICKAXE_TIER.get(b, 0) > best_tier}
+            return {
+                "ok": False,
+                "error": "tool_tier_insufficient",
+                "message": f"本次混合请求包含工具等级不足的目标 {list(blocked)}，当前最高 {best_pick or '无镐'}。当前允许 {allowed}，可单独请求这些类型；其余至少需要 {tier_names.get(req_tier, req_tier)}。本次没有执行挖掘。",
+                "required_tier": req_tier,
+                "current_pickaxe": best_pick,
+                "allowed_types": allowed,
+                "blocked_types": blocked,
+            }
+
+        inv_raw, auto_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
+        if auto_dropped:
+            counts = _inventory_counts_from_raw(inv_raw)
+            best_pick, best_tier = _best_pickaxe_in_inv(counts)
+
+        st = self.bot.status()
+        if bool(st.get("in_water")):
+            esc = self.escape_water()
+            if esc.get("in_water"):
+                return {
+                    "ok": False,
+                    "error": "in_water",
+                    "message": "角色当前仍在水中，水下挖掘极慢且易溺水中断；请先脱离水体登上干燥地面再挖矿。",
+                    "water_escape": esc,
+                }
+            counts = _inventory_counts(self.bot)
+            best_pick, _ = _best_pickaxe_in_inv(counts)
+
+        if best_pick:
+            try:
+                self.bot.call("equip", {"item": best_pick, "slot": "hand"})
+            except ApiError:
+                pass
+
+        res = self._dig_target_blocks(
+            block_types=block_types,
+            count=count,
+            radius=radius,
+            protected_msg="目标方块处于保护区，请向远离出生点移动后再挖掘。",
+            below_tol=1.5,
+            above_tol=2.5,
+            inv_before=counts,
+            avoid_water=True,
+        )
+        if res.get("error") == "protected_region":
+            return res
+
+        if (
+            int(res.get("dug_count") or 0) == 0
+            and res.get("error") == "no_targets_available"
+            and not self.temporary_avoidance
+        ):
+            alt_types = list(
+                dict.fromkeys(
+                    alt
+                    for b in block_types
+                    if (alt := ORE_COUNTERPARTS.get(b))
+                    and alt not in block_types
+                    and BLOCK_MIN_PICKAXE_TIER.get(alt, 0) <= best_tier
+                )
+            )
+            if alt_types:
+                alt_res = self._dig_target_blocks(
+                    block_types=alt_types,
+                    count=count,
+                    radius=radius,
+                    protected_msg="目标方块处于保护区，请向远离出生点移动后再挖掘。",
+                    below_tol=1.5,
+                    above_tol=2.5,
+                    inv_before=counts,
+                    avoid_water=True,
+                )
+                if int(alt_res.get("dug_count") or 0) > 0 or alt_res.get("error") != "no_targets_available":
+                    res = {**alt_res, "auto_paired_types": alt_types}
+
+        # 若近距（<=10m、同层|dy|<=2）有暴露矿石但因隔墙/寻路失败暂避导致 0 挖掘，先水平破墙再清障重试一次
+        has_reach_failure = any(
+            rec.get("reason") in {"path_not_found", "out_of_reach"}
+            for rec in self.temporary_avoidance.values()
+        )
+        effective_types = list(res.get("auto_paired_types") or block_types)
+        if int(res.get("dug_count") or 0) == 0 and has_reach_failure:
+            tunnel_attempt = self._approach_occluded_ore(block_types=effective_types, radius=min(12, radius))
+            if tunnel_attempt is not None:
+                if int(tunnel_attempt.get("steps_done") or 0) > 0 or tunnel_attempt.get("stop_reason") in {
+                    "ore_at_face",
+                    "ore_detected",
+                }:
+                    for pos_k in [
+                        k for k, v in self.temporary_avoidance.items()
+                        if v.get("reason") in {"path_not_found", "out_of_reach"}
+                    ]:
+                        del self.temporary_avoidance[pos_k]
+                res2 = self._dig_target_blocks(
+                    block_types=effective_types,
+                    count=count,
+                    radius=radius,
+                    protected_msg="目标方块处于保护区，请向远离出生点移动后再挖掘。",
+                    below_tol=1.5,
+                    above_tol=2.5,
+                    inv_before=counts,
+                    avoid_water=True,
+                )
+                if int(res2.get("dug_count") or 0) > 0:
+                    return {
+                        **res2,
+                        "pickaxe_used": best_pick,
+                        "occluded_tunnel": tunnel_attempt,
+                    }
+                res["occluded_tunnel"] = tunnel_attempt
+
+        if int(res.get("dug_count") or 0) == 0 and self.temporary_avoidance:
+            reach_entries = [
+                (pos_k, rec)
+                for pos_k, rec in self.temporary_avoidance.items()
+                if rec.get("reason") in {"out_of_reach", "path_not_found", "no_path"}
+            ]
+            if reach_entries:
+                try:
+                    cur_p = self.bot.status().get("pos") or [0.0, 64.0, 0.0]
+                    cx, cy, cz = float(cur_p[0]), float(cur_p[1]), float(cur_p[2])
+                    tx, ty, tz = min(
+                        (pos_k for pos_k, _ in reach_entries),
+                        key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2,
+                    )
+                    dx, dy, dz = tx - cx, float(ty) - cy, tz - cz
+                    bearing = cardinal_bearing(dx, dz)
+                    if dy <= -3.0:
+                        approach_hint = (
+                            f"最近不可达矿石位于[{tx},{ty},{tz}](相对朝向={bearing}, dy={dy:+.1f})，"
+                            f"请朝 {bearing} 调 mc_skill_staircase(direction='{bearing}', vertical='down', steps={min(10, max(3, int(abs(dy) + 1)))}, stop_on_ore=True) 下探接近后再挖！"
+                        )
+                    elif dy >= 3.0:
+                        approach_hint = (
+                            f"最近不可达矿石位于[{tx},{ty},{tz}](相对朝向={bearing}, dy={dy:+.1f})，"
+                            f"请朝 {bearing} 调 mc_skill_staircase(direction='{bearing}', vertical='up', steps={min(10, max(3, int(abs(dy) + 1)))}, stop_on_ore=True) 上行接近后再挖！"
+                        )
+                    else:
+                        approach_hint = (
+                            f"最近不可达矿石位于[{tx},{ty},{tz}](相对朝向={bearing}, dy={dy:+.1f})，"
+                            f"请朝 {bearing} 调 mc_skill_tunnel(direction='{bearing}', steps={min(8, max(2, int(max(abs(dx), abs(dz)) + 1)))}, stop_on_ore=True) 开矿道接近后再挖！"
+                        )
+                    res["nearest_unreachable_target"] = {
+                        "pos": [tx, ty, tz],
+                        "bearing": bearing,
+                        "dy": round(dy, 1),
+                    }
+                    res["approach_hint"] = approach_hint
+                except Exception:
+                    pass
+
+        if (
+            int(res.get("dug_count") or 0) == 0
+            and res.get("error") == "no_targets_available"
+            and "nearest_unreachable_target" not in res
+        ):
+            enriched = self._enrich_ecology_unavailable(res, targets=block_types, radius=radius, counts=counts)
+            if enriched is not None:
+                res = enriched
+
+        out_mine: dict[str, Any] = {
+            **res,
+            "pickaxe_used": best_pick,
+        }
+        if auto_dropped:
+            out_mine["auto_dropped"] = auto_dropped
+        return out_mine
+
+    def _approach_occluded_ore(self, *, block_types: list[str], radius: int = 12) -> dict[str, Any] | None:
+        """当同层近距目标被石墙隔开时，朝主水平轴短距开矿道接近。"""
+        try:
+            st = self.bot.status()
+            if st.get("in_water"):
+                return None
+            pos = st.get("pos") or [0.0, 64.0, 0.0]
+            bx, by, bz = math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2]))
+            found = self.bot.call("find_blocks", {"radius": max(4, radius), "types": block_types, "limit": 8})
+        except Exception:
+            return None
+        cands = []
+        for b in found.get("blocks") or []:
+            if not isinstance(b, dict) or not isinstance(b.get("pos"), list) or len(b["pos"]) < 3:
+                continue
+            pos_t = (int(b["pos"][0]), int(b["pos"][1]), int(b["pos"][2]))
+            if pos_t in self.protected_positions:
+                continue
+            avoid = self.temporary_avoidance.get(pos_t)
+            if avoid is not None and avoid.get("reason") not in {"path_not_found", "out_of_reach"}:
+                continue
+            if abs(pos_t[1] - by) <= 2 and float(b.get("dist", 99.0)) <= float(radius):
+                cands.append(b)
+        if not cands:
+            return None
+        nearest = min(cands, key=lambda b: float(b.get("dist", 99.0)))
+        tx, _ty, tz = int(nearest["pos"][0]), int(nearest["pos"][1]), int(nearest["pos"][2])
+        dx, dz = tx - bx, tz - bz
+        if abs(dx) + abs(dz) <= 1:
+            return None
+        if abs(dx) >= abs(dz):
+            direction = "east" if dx > 0 else "west"
+            steps = min(4, max(1, abs(dx) - 1))
+        else:
+            direction = "south" if dz > 0 else "north"
+            steps = min(4, max(1, abs(dz) - 1))
+        try:
+            return self.dig_level_tunnel(direction=direction, steps=steps, stop_on_ore=True)
+        except Exception:
+            return None
+
+    def smelt_items(
+        self,
+        input_item: str,
+        count: int = 1,
+        fuel_item: str | None = None,
+        wait_timeout_s: float = 95.0,
+    ) -> dict[str, Any]:
+        """Ensure nearby furnace, compute exact ceil(n/8) coal/charcoal or wood fallback, smelt, guard health, and collect output."""
+        inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
+        avail_in = counts.get(input_item, 0)
+        if avail_in < 1:
+            return {"ok": False, "error": "missing_ingredients", "message": f"背包没有 {input_item}。"}
+        smelt_n = min(max(1, count), avail_in)
+        inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
+        if pre_dropped:
+            counts = _inventory_counts_from_raw(inv_raw)
+
+        # Locate or build+place furnace
+        found = self.bot.call("find_blocks", {"radius": 8, "types": ["furnace"], "limit": 5})
+        furnaces = found.get("blocks") or []
+        furnace_pos = None
+        if furnaces:
+            nearest = min(furnaces, key=lambda b: float(b.get("dist", 99)))
+            furnace_pos = nearest["pos"]
+            if float(nearest.get("dist", 99)) > 4.0:
+                try:
+                    self.bot.call("move_to", {"x": furnace_pos[0], "y": furnace_pos[1], "z": furnace_pos[2], "range": 2.5})
+                except ApiError:
+                    furnace_pos = None
+        if furnace_pos is None:
+            if counts.get("furnace", 0) < 1:
+                cg = self.craft_gear("furnace", 1)
+                if not cg.get("ok"):
+                    return cg
+            try:
+                placed = self.bot.call("place", {"item": "furnace"})
+                furnace_pos = placed.get("pos")
+            except ApiError as err:
+                st_f = self.bot.status()
+                fpos = st_f.get("pos") or [0, 64, 0]
+                fx, fy, fz = math.floor(float(fpos[0])), math.floor(float(fpos[1])), math.floor(float(fpos[2]))
+                for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (1, 1, 0)):
+                    try:
+                        placed = self.bot.call("place", {"item": "furnace", "pos": [fx + dx, fy + dy, fz + dz]})
+                        furnace_pos = placed.get("pos") or [fx + dx, fy + dy, fz + dz]
+                        break
+                    except ApiError:
+                        continue
+                if furnace_pos is None:
+                    pocket = self._carve_and_place_table(fx, fy, fz, item="furnace")
+                    if pocket is not None:
+                        furnace_pos = pocket.get("pos") or pocket.get("carved_pocket")
+                    else:
+                        return {"ok": False, "error": err.code, "message": err.message, **err.context}
+
+        target = {"pos": furnace_pos} if furnace_pos else {"block": "furnace"}
+        counts = _inventory_counts(self.bot)
+
+        # Pick fuel & calculate exact fuel count, reserving smelt_n items if fuel matches input_item.
+        chosen_fuel = fuel_item
+        fuel_count = 0
+        if chosen_fuel:
+            per_fuel = 8.0 if chosen_fuel in ("coal", "charcoal") else 1.5
+            avail_fuel = counts.get(chosen_fuel, 0) - (smelt_n if chosen_fuel == input_item else 0)
+            fuel_count = min(max(0, avail_fuel), math.ceil(smelt_n / per_fuel))
+        else:
+            for cand, per_fuel in (
+                ("coal", 8.0),
+                ("charcoal", 8.0),
+                *((p, 1.5) for p in sorted(counts) if p.endswith("_planks")),
+                *((l, 1.5) for l in LOG_TYPES),
+            ):
+                avail_fuel = counts.get(cand, 0) - (smelt_n if cand == input_item else 0)
+                if avail_fuel <= 0:
+                    continue
+                if cand in LOG_TYPES:
+                    plank = _log_to_planks_name(cand)
+                    try:
+                        self._safe_craft(plank, 4)
+                        counts = _inventory_counts(self.bot)
+                        if counts.get(plank, 0) > 0:
+                            chosen_fuel = plank
+                            fuel_count = min(counts[plank], math.ceil(smelt_n / 1.5))
+                            break
+                    except ApiError:
+                        pass
+                chosen_fuel = cand
+                fuel_count = min(avail_fuel, math.ceil(smelt_n / per_fuel))
+                break
+            if (not chosen_fuel or fuel_count < 1) and input_item in LOG_TYPES and counts.get(input_item, 0) >= 2:
+                # Convert 1 log into 4 planks for furnace fuel (smelts up to 6 items) while keeping >=1 log to smelt.
+                if smelt_n >= counts.get(input_item, 0):
+                    smelt_n = counts[input_item] - 1
+                plank = _log_to_planks_name(input_item)
+                try:
+                    self._safe_craft(plank, 4)
+                    counts = _inventory_counts(self.bot)
+                except ApiError:
+                    pass
+                if counts.get(plank, 0) > 0:
+                    chosen_fuel = plank
+                    fuel_count = min(counts[plank], math.ceil(smelt_n / 1.5))
+
+        if not chosen_fuel or fuel_count < 1:
+            return {"ok": False, "error": "missing_fuel", "message": "背包没有煤炭、木炭、木板或原木燃料。"}
+
+        self.bot.call(
+            "window/act",
+            {
+                "target": target,
+                "ops": [
+                    {"op": "put", "item": input_item, "count": smelt_n, "to": "input"},
+                    {"op": "put", "item": chosen_fuel, "count": fuel_count, "to": "fuel"},
+                ],
+            },
+        )
+
+        # Poll window/view while running L0 health/hunger/water guard
+        deadline = time.monotonic() + max(15.0, wait_timeout_s)
+        while time.monotonic() < deadline:
+            check_and_stabilize(self.bot, raise_on_low_health=False)
+            view = self.bot.call("window/view", {"target": target})
+            sections = view.get("sections") or {}
+            inputs_left = sum(int(x.get("count") or 0) for x in (sections.get("input") or []))
+            outputs = sections.get("output") or []
+            out_total = sum(int(x.get("count") or 0) for x in outputs)
+            info = view.get("info") or {}
+            burning = bool(info.get("burning"))
+            if out_total >= smelt_n or (inputs_left == 0 and not burning):
+                break
+            time.sleep(2.5)
+
+        collected: list[dict[str, Any]] = []
+        view = self.bot.call("window/view", {"target": target})
+        outputs_to_take = [
+            o for o in ((view.get("sections") or {}).get("output") or []) if int(o.get("count") or 0) > 0
+        ]
+        if outputs_to_take:
+            inv_take, take_dropped = self._ensure_free_slots(min_free=2)
+            if take_dropped:
+                pre_dropped.extend(take_dropped)
+            for out_item in outputs_to_take:
+                cnt = int(out_item.get("count") or 0)
+                out_name = str(out_item.get("name") or "").removeprefix("minecraft:")
+                if _compute_empty_slots(inv_take) == 0 and not _can_fit_item_in_inventory(
+                    inv_take, out_name, cnt, check_craft_inputs=False
+                ):
+                    return {
+                        "ok": False,
+                        "error": "inventory_full",
+                        "requires_replan": True,
+                        "furnace_pos": furnace_pos,
+                        "pending_output": {"name": out_name, "count": cnt},
+                        "message": (
+                            f"熔炉产物 {out_name} x{cnt} 已就绪，但背包 36 格已满(empty_slots=0)且无法自动清出空槽；"
+                            "请先消耗、放置或丢弃至少 1 格物品再取出，切勿重复开炉强行取物触发 30s 超时。"
+                        ),
+                    }
+        for out_item in outputs_to_take:
+            cnt = int(out_item.get("count") or 0)
+            self.bot.call(
+                "window/act",
+                {"target": target, "ops": [{"op": "take", "from": "output", "count": cnt}]},
+            )
+            collected.append({"name": out_item.get("name"), "count": cnt})
+
+        out_smelt: dict[str, Any] = {
+            "ok": True,
+            "furnace_pos": furnace_pos,
+            "input": input_item,
+            "requested_count": smelt_n,
+            "fuel": {"item": chosen_fuel, "count": fuel_count},
+            "collected": collected,
+        }
+        if pre_dropped:
+            out_smelt["auto_dropped"] = pre_dropped
+        return out_smelt
+
+    def bind_bed_spawn(self, x: int, y: int, z: int) -> dict[str, Any]:
+        """Move near a bed and interact reliably day or night to set respawn point."""
+        self.bot.call("move_to", {"x": x, "y": y, "z": z, "range": 2.5})
+        st = self.bot.status()
+        payload: dict[str, Any] = {"pos": [x, y, z]}
+        if st.get("is_day"):
+            counts = _inventory_counts(self.bot)
+            for hand_item in ("stick", "wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "stone_sword", "iron_sword", "bone"):
+                if counts.get(hand_item, 0) > 0:
+                    payload["item"] = hand_item
+                    break
+        res = self.bot.call("interact", payload)
+        return {"ok": True, "bed_pos": [x, y, z], **res}
+
+    def escape_water(self) -> dict[str, Any]:
+        """Float to the water surface, carve an upper notch over a solid shoreline step if needed, and hop onto dry land."""
+        st = self.bot.status()
+        if not bool(st.get("in_water")):
+            return {
+                "ok": True,
+                "in_water": False,
+                "already_dry": True,
+                "pos_after": st.get("pos"),
+                "dug": [],
+                "control": {},
+            }
+
+        if not bool(st.get("jumping")):
+            try:
+                self.bot.call(
+                    "posture",
+                    {
+                        "sneak": False,
+                        "shield": False,
+                        "jump": True,
+                    },
+                )
+            except ApiError:
+                pass
+
+        water_names = {"water", "flowing_water"}
+        fluids = {"water", "flowing_water", "lava", "flowing_lava"}
+        passable = {
+            "air",
+            "cave_air",
+            "void_air",
+            "short_grass",
+            "tall_grass",
+            "fern",
+            "large_fern",
+            "leaf_litter",
+            "snow",
+            "vine",
+            "dead_bush",
+            "dandelion",
+            "poppy",
+        }
+        dug: list[dict[str, Any]] = []
+        mv_res: dict[str, Any] = {}
+        pick_equipped = False
+
+        def _try_dig_above(cx: int, cy: int, cz: int) -> bool:
+            nonlocal pick_equipped
+            if self._is_block_avoided((cx, cy, cz)):
+                return False
+            try:
+                bname, diggable = self._block_info([cx, cy, cz])
+            except ApiError:
+                return False
+            if bname in passable:
+                return True
+            if bname in fluids or bname == "bedrock" or not diggable:
+                return False
+            if not pick_equipped and (
+                bname in BLOCK_MIN_PICKAXE_TIER or "stone" in bname or "ore" in bname or "deepslate" in bname
+            ):
+                pick_equipped = self._equip_if_present(tuple(PICKAXE_TIERS)) is not None
+            try:
+                self.bot.call("dig", {"pos": [cx, cy, cz], "collect": True, "stop_on": ["death"]})
+                dug.append({"pos": [cx, cy, cz], "block": bname})
+                return True
+            except ApiError as err:
+                if _is_protected_err(err):
+                    self.protected_positions.add((cx, cy, cz))
+                else:
+                    self._avoid_temporarily((cx, cy, cz), err.code)
+                return False
+
+        def _step_onto_adjacent_bank() -> tuple[dict[str, Any], dict[str, Any]]:
+            nonlocal mv_res
+            cur = self.bot.status()
+            pos = cur.get("pos") or [0.0, 64.0, 0.0]
+            px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+            bx, by, bz = math.floor(px), math.floor(py), math.floor(pz)
+
+            # Float to water surface layer wy if currently submerged
+            wy = by
+            for _ in range(4):
+                try:
+                    above_name, _ = self._block_info([bx, wy + 1, bz])
+                except ApiError:
+                    break
+                if above_name in water_names:
+                    try:
+                        self.bot.call("control", {"jump": True, "ms": 450, "stop_on": ["death"]})
+                    except ApiError:
+                        pass
+                    wy += 1
+                else:
+                    break
+
+            cur = self.bot.status()
+            pos = cur.get("pos") or [px, float(wy), pz]
+            px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+            bx, bz = math.floor(px), math.floor(pz)
+            wy = max(wy, math.floor(py))
+
+            # Clear any non-fluid roof/wall overlapping the bot above water surface (never dig wy itself)
+            xs = sorted({math.floor(px - 0.35), bx, math.floor(px + 0.35)})
+            zs = sorted({math.floor(pz - 0.35), bz, math.floor(pz + 0.35)})
+            for cy in (wy + 1, wy + 2):
+                for cx in xs:
+                    for cz in zs:
+                        _try_dig_above(cx, cy, cz)
+
+            # Inspect 4 cardinal banks around (bx, wy, bz), preserving solid step (ex, wy, ez)
+            candidates: list[tuple[int, int, int, int, str, str]] = []
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                ex, ez = bx + dx, bz + dz
+                try:
+                    bm1, _ = self._block_info([ex, wy - 1, ez])
+                    b0, _ = self._block_info([ex, wy, ez])
+                    b1, d1 = self._block_info([ex, wy + 1, ez])
+                    b2, d2 = self._block_info([ex, wy + 2, ez])
+                except ApiError:
+                    continue
+                if b1 in (fluids | {"bedrock"}) or b2 in (fluids | {"bedrock"}):
+                    continue
+                is_step_a = b0 not in (passable | fluids)
+                is_step_b = b0 in passable and bm1 not in (passable | fluids)
+                if not (is_step_a or is_step_b):
+                    continue
+                need_dig = (0 if b1 in passable else 1) + (0 if b2 in passable else 1)
+                if b1 not in passable and (not d1 or self._is_block_avoided((ex, wy + 1, ez))):
+                    continue
+                if b2 not in passable and (not d2 or self._is_block_avoided((ex, wy + 2, ez))):
+                    continue
+                candidates.append((need_dig, 0 if is_step_a else 1, ex, ez, b1, b2))
+
+            candidates.sort(key=lambda item: (item[0], item[1]))
+            after_cur = cur
+            for _, _, ex, ez, b1, b2 in candidates:
+                if b1 not in passable and not _try_dig_above(ex, wy + 1, ez):
+                    continue
+                if b2 not in passable and not _try_dig_above(ex, wy + 2, ez):
+                    continue
+                cur2 = self.bot.status()
+                p2 = cur2.get("pos") or [px, float(wy), pz]
+                yaw = _yaw_toward(float(p2[0]), float(p2[2]), ex + 0.5, ez + 0.5)
+                try:
+                    mv_res = self.bot.call(
+                        "control",
+                        {"forward": True, "jump": True, "yaw": yaw, "ms": 1150, "stop_on": ["death"]},
+                    )
+                except ApiError as err:
+                    mv_res = {"error": err.code, "message": err.message}
+                after_cur = self.bot.status()
+                if not bool(after_cur.get("in_water")):
+                    return mv_res, after_cur
+            return mv_res, after_cur
+
+        mv_res, st_after = _step_onto_adjacent_bank()
+
+        if bool(st_after.get("in_water")):
+            pos_now = st_after.get("pos") or st.get("pos") or [0.0, 64.0, 0.0]
+            by_now = math.floor(float(pos_now[1]))
+            shore_blocks: list[dict[str, Any]] = []
+            try:
+                found = self.bot.call(
+                    "find_blocks",
+                    {
+                        "radius": 16,
+                        "types": [
+                            "grass_block",
+                            "dirt",
+                            "sand",
+                            "gravel",
+                            "stone",
+                            "cobblestone",
+                            "andesite",
+                            "diorite",
+                            "granite",
+                            "clay",
+                            "mud",
+                        ],
+                        "limit": 30,
+                    },
+                )
+                shore_blocks = list(found.get("blocks") or [])
+            except ApiError:
+                shore_blocks = []
+
+            shore_blocks.sort(key=lambda b: float(b.get("dist", 99)))
+            dry_targets: list[list[int]] = []
+            for blk in shore_blocks:
+                bpos = blk.get("pos")
+                if not isinstance(bpos, list) or len(bpos) < 3:
+                    continue
+                if abs(int(bpos[1]) - by_now) > 3:
+                    continue
+                if not self._is_water_covered((int(bpos[0]), int(bpos[1]), int(bpos[2]))):
+                    dry_targets.append([int(bpos[0]), int(bpos[1]), int(bpos[2])])
+                    if len(dry_targets) >= 3:
+                        break
+
+            for tx, _ty, tz in dry_targets:
+                try:
+                    mv_res = self.bot.call(
+                        "move_to",
+                        {"x": tx + 0.5, "z": tz + 0.5, "range": 1.2, "stop_on": ["death"]},
+                    )
+                except ApiError:
+                    cur3 = self.bot.status()
+                    p3 = cur3.get("pos") or pos_now
+                    yaw3 = _yaw_toward(float(p3[0]), float(p3[2]), tx + 0.5, tz + 0.5)
+                    try:
+                        mv_res = self.bot.call(
+                            "control",
+                            {"forward": True, "jump": True, "yaw": yaw3, "ms": 1800, "stop_on": ["death"]},
+                        )
+                    except ApiError as err:
+                        mv_res = {"error": err.code, "message": err.message}
+                st_after = self.bot.status()
+                if not bool(st_after.get("in_water")):
+                    break
+                mv_res, st_after = _step_onto_adjacent_bank()
+                if not bool(st_after.get("in_water")):
+                    break
+
+        st_after = self.bot.status()
+        still_in_water = bool(st_after.get("in_water"))
+        if not still_in_water and bool(st_after.get("jumping")):
+            try:
+                self.bot.call(
+                    "posture",
+                    {
+                        "sneak": bool(st_after.get("sneaking")),
+                        "shield": bool(st_after.get("blocking")),
+                        "jump": False,
+                    },
+                )
+            except ApiError:
+                pass
+            st_after = self.bot.status()
+            still_in_water = bool(st_after.get("in_water"))
+
+        return {
+            "ok": not still_in_water,
+            "in_water": still_in_water,
+            "pos_after": st_after.get("pos"),
+            "dug": dug,
+            "control": mv_res,
+        }
+
+    def descend_canopy(self) -> dict[str, Any]:
+        """当站在高处树冠(*_leaves)上方时，安全向下清理树叶/原木直到落地，防止直接边缘跳落摔伤。"""
+        st = self.bot.status()
+        pos_before = st.get("pos") or [0.0, 64.0, 0.0]
+        bx, by, bz = (
+            math.floor(float(pos_before[0])),
+            math.floor(float(pos_before[1])),
+            math.floor(float(pos_before[2])),
+        )
+        try:
+            below_name, _ = self._block_info([bx, by - 1, bz])
+        except ApiError:
+            return {"ok": False, "on_canopy": False}
+        if not below_name.endswith("_leaves"):
+            return {"ok": False, "on_canopy": False, "below": below_name}
+
+        air_set = {"air", "cave_air", "void_air"}
+        fluids = {"water", "lava", "flowing_water", "flowing_lava"}
+        dug: list[dict[str, Any]] = []
+        # 确认下方 2..16 格中存在空气或树干（即使站在树干列上方也能安全向下挖开下树）且不直接落入岩浆
+        has_tree_or_air = False
+        for dy in range(2, 16):
+            try:
+                bn, _ = self._block_info([bx, by - dy, bz])
+            except ApiError:
+                break
+            if bn in {"lava", "flowing_lava"}:
+                return {"ok": False, "on_canopy": True, "reason": "lava_below"}
+            if bn in air_set or bn.endswith(("_log", "_stem")):
+                has_tree_or_air = True
+                break
+        if not has_tree_or_air:
+            return {"ok": False, "on_canopy": False, "below": below_name}
+
+        for _ in range(10):
+            cur = self.bot.status()
+            p = cur.get("pos") or pos_before
+            cx, cy, cz = math.floor(float(p[0])), math.floor(float(p[1])), math.floor(float(p[2]))
+            try:
+                under, diggable = self._block_info([cx, cy - 1, cz])
+            except ApiError:
+                break
+            if not (under.endswith("_leaves") or under.endswith("_log")) or not diggable:
+                break
+            # 若脚下仅 1 层树叶下方就是 >5 格深的悬空落差，先探明下方落差，避免一脚摔重伤
+            drop_air = 0
+            unsafe_drop = False
+            for d in range(2, 9):
+                try:
+                    bname, _ = self._block_info([cx, cy - d, cz])
+                except ApiError:
+                    break
+                if bname in {"lava", "flowing_lava"}:
+                    unsafe_drop = True
+                    break
+                if bname in air_set or bname.endswith("_leaves"):
+                    drop_air += 1
+                else:
+                    break
+            if unsafe_drop or drop_air >= 5:
+                break
+            try:
+                self.bot.call("dig", {"pos": [cx, cy - 1, cz], "collect": True, "stop_on": ["hurt", "death"]})
+                dug.append({"pos": [cx, cy - 1, cz], "block": under})
+                time.sleep(0.25)
+            except ApiError:
+                break
+
+        st_after = self.bot.status()
+        return {
+            "ok": bool(dug),
+            "on_canopy": True,
+            "dug": dug,
+            "pos_before": pos_before,
+            "pos_after": st_after.get("pos") or pos_before,
+        }
+
+    def unstick(self) -> dict[str, Any]:
+        """Clear blocks overlapping the bot's 0.6x1.8 floor()-aligned hitbox and step out of pits/corners, canopy, or water."""
+        st = self.bot.status()
+        pos_before = st.get("pos") or [0.0, 64.0, 0.0]
+        px, py, pz = float(pos_before[0]), float(pos_before[1]), float(pos_before[2])
+        bx, by, bz = math.floor(px), math.floor(py), math.floor(pz)
+
+        xs = sorted({math.floor(px - 0.38), bx, math.floor(px + 0.38)})
+        zs = sorted({math.floor(pz - 0.38), bz, math.floor(pz + 0.38)})
+        if bool(st.get("in_water")):
+            esc = self.escape_water()
+            return {
+                "ok": True,
+                "foot_block_before": [bx, by, bz],
+                "hitbox_xs": xs,
+                "hitbox_zs": zs,
+                "pos_before": pos_before,
+                "pos_after": esc.get("pos_after", pos_before),
+                "dug": esc.get("dug", []),
+                "control": esc.get("control", {}),
+                "escaped_water": esc.get("ok", False),
+                "in_water": esc.get("in_water", False),
+            }
+
+        canopy = self.descend_canopy()
+        if canopy.get("on_canopy") and canopy.get("dug"):
+            return {
+                "ok": True,
+                "descended_canopy": True,
+                "foot_block_before": [bx, by, bz],
+                "pos_before": pos_before,
+                "pos_after": canopy.get("pos_after", pos_before),
+                "dug": canopy.get("dug", []),
+            }
+
+        skip_names = {"air", "cave_air", "void_air", "water", "lava", "bedrock"}
+        dug: list[dict[str, Any]] = []
+        pick_equipped = False
+
+        def _try_dig_if_solid(cx: int, cy: int, cz: int, *, retries: int = 1) -> None:
+            nonlocal pick_equipped
+            for _attempt in range(retries):
+                try:
+                    blk = self.bot.call("get_block", {"pos": [cx, cy, cz]})
+                except ApiError:
+                    return
+                bname = str(blk.get("name") or "air")
+                if bname in skip_names or not blk.get("diggable", False):
+                    return
+                if self._is_block_avoided((cx, cy, cz)):
+                    return
+                if not pick_equipped and (
+                    bname in BLOCK_MIN_PICKAXE_TIER or "stone" in bname or "ore" in bname or "deepslate" in bname
+                ):
+                    pick_equipped = self._equip_if_present(tuple(PICKAXE_TIERS)) is not None
+                try:
+                    self.bot.call("dig", {"pos": [cx, cy, cz], "collect": True, "stop_on": ["death"]})
+                    dug.append({"pos": [cx, cy, cz], "block": bname})
+                except ApiError as err:
+                    if _is_protected_err(err):
+                        self.protected_positions.add((cx, cy, cz))
+                    else:
+                        self._avoid_temporarily((cx, cy, cz), err.code)
+                    return
+
+        # 1. Clear full horizontal hitbox footprint at head (by+1) and feet (by), plus overhead (by+2)
+        for cy in (by + 1, by):
+            for cx in xs:
+                for cz in zs:
+                    _try_dig_if_solid(cx, cy, cz, retries=2)
+        _try_dig_if_solid(bx, by + 2, bz, retries=2)
+
+        # 2. Clear one cardinal 3-high escape slot and nudge out with control()
+        mv_res: dict[str, Any] = {}
+        exit_yaw = -math.pi / 2
+        for dx, dz, yaw in (
+            (1, 0, -math.pi / 2),
+            (0, -1, 0.0),
+            (-1, 0, math.pi / 2),
+            (0, 1, math.pi),
+        ):
+            ex, ez = bx + dx, bz + dz
+            _try_dig_if_solid(ex, by + 1, ez)
+            _try_dig_if_solid(ex, by + 2, ez)
+            _try_dig_if_solid(ex, by, ez)
+            exit_yaw = yaw
+            break
+
+        try:
+            mv_res = self.bot.call(
+                "control",
+                {"forward": True, "jump": True, "yaw": exit_yaw, "ms": 900, "stop_on": []},
+            )
+        except ApiError as err:
+            mv_res = {"error": err.code, "message": err.message}
+
+        st_after = self.bot.status()
+        pos_after = st_after.get("pos") or pos_before
+        return {
+            "ok": True,
+            "foot_block_before": [bx, by, bz],
+            "hitbox_xs": xs,
+            "hitbox_zs": zs,
+            "pos_before": pos_before,
+            "pos_after": pos_after,
+            "dug": dug,
+            "control": mv_res,
+        }
+
+    def dig_safety_bunker(self, *, urgent: bool = False) -> dict[str, Any]:
+        """Dig a 1x3 vertical shaft under the bot and seal the top to block night mobs."""
+        st = self.bot.status()
+        pos = st.get("pos") or [0.0, 64.0, 0.0]
+        bx, by, bz = math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2]))
+
+        fluid_or_bedrock = {"water", "lava", "flowing_water", "flowing_lava", "bedrock"}
+        non_solid_floor = {"air", "cave_air", "void_air", "water", "lava", "flowing_water", "flowing_lava"}
+
+        def _block_name(pos_xyz: list[int]) -> str:
+            res = self.bot.call("get_block", {"pos": pos_xyz})
+            raw = res.get("name") or res.get("block") or "air"
+            return str(raw).removeprefix("minecraft:")
+
+        floor_pos = [bx, by - 4, bz]
+        floor_block = _block_name(floor_pos)
+        if floor_block in non_solid_floor:
+            return {
+                "ok": False,
+                "reason": "unsafe_floor",
+                "floor_pos": floor_pos,
+                "floor_block": floor_block,
+            }
+
+        shaft_positions = [[bx, by - 1, bz], [bx, by - 2, bz], [bx, by - 3, bz]]
+        shaft_blocks: list[tuple[list[int], str]] = []
+        for s_pos in shaft_positions:
+            b_name = _block_name(s_pos)
+            if b_name in fluid_or_bedrock:
+                return {
+                    "ok": False,
+                    "reason": "unsafe_shaft_block",
+                    "block_pos": s_pos,
+                    "block": b_name,
+                }
+            shaft_blocks.append((s_pos, b_name))
+
+        if urgent:
+            if st.get("on_ground") is not True:
+                return {"ok": False, "reason": "not_grounded"}
+            # Never open a fluid pocket or an existing cave beside an emergency shaft.
+            for cy in (by - 1, by - 2, by - 3):
+                for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    neighbor = [bx + dx, cy, bz + dz]
+                    name = _block_name(neighbor)
+                    if name in non_solid_floor:
+                        return {"ok": False, "reason": "unsafe_open_side", "block_pos": neighbor, "block": name}
+
+        roof_candidates = ("dirt", "cobblestone", "cobbled_deepslate", "andesite", "diorite", "granite")
+
+        def _pick_roof_item(inv: dict[str, int]) -> str | None:
+            for cand in roof_candidates:
+                if inv.get(cand, 0) >= 1:
+                    return cand
+            for name, cnt in sorted(inv.items()):
+                if cnt >= 1 and name.endswith("_planks"):
+                    return name
+            return None
+
+        counts = _inventory_counts(self.bot)
+        crafted_planks: str | None = None
+        if _pick_roof_item(counts) is None:
+            if urgent:
+                return {"ok": False, "reason": "no_roof_block"}
+            for log_name in (*LOG_TYPES, *NETHER_STEM_TYPES):
+                if counts.get(log_name, 0) >= 1:
+                    planks_name = _log_to_planks_name(log_name)
+                    try:
+                        self.bot.call("craft", {"item": planks_name, "count": 4})
+                        crafted_planks = planks_name
+                    except ApiError as exc:
+                        return {
+                            "ok": False,
+                            "reason": "no_roof_block_craft_failed",
+                            "error": exc.code,
+                            "message": exc.message,
+                        }
+                    counts = _inventory_counts(self.bot)
+                    break
+
+        if _pick_roof_item(counts) is None:
+            return {"ok": False, "reason": "no_roof_block"}
+
+        # A bot straddling the edge remains supported by its neighbor when
+        # the nominal foot block is dug. Center it before opening the shaft.
+        body_t = (st.get("last_death") or {}).get("t")
+        for _ in range(5):
+            actual = self.bot.status()
+            cur = actual.get("pos") or pos
+            if (math.floor(cur[0]), math.floor(cur[1]), math.floor(cur[2])) != (bx, by, bz) or (actual.get("last_death") or {}).get("t") != body_t:
+                return {"ok": False, "requires_replan": True, "reason": "position_changed_before_dig", "pos_after": cur}
+            if max(abs(cur[0] - bx - 0.5), abs(cur[2] - bz - 0.5)) <= 0.16:
+                break
+            try:
+                result = self.bot.call("control", {
+                    "forward": True, "sneak": True,
+                    "yaw": _yaw_toward(cur[0], cur[2], bx + 0.5, bz + 0.5),
+                    "ms": 120, "stop_on": ["hurt", "death"],
+                })
+                if result.get("interrupted_by"):
+                    return {"ok": False, "requires_replan": True, "reason": "centering_interrupted", "interrupted_by": result["interrupted_by"]}
+                time.sleep(0.1)
+            except ApiError as exc:
+                return {"ok": False, "requires_replan": True, "reason": "centering_failed", "error": exc.code, "message": exc.message}
+        else:
+            return {"ok": False, "requires_replan": True, "reason": "centering_not_confirmed", "pos_after": self.bot.status().get("pos")}
+
+        if urgent and any(name in BLOCK_MIN_PICKAXE_TIER for _, name in shaft_blocks):
+            best, tier = _best_pickaxe_in_inv(counts)
+            if best is None or any(BLOCK_MIN_PICKAXE_TIER.get(name, 0) > tier for _, name in shaft_blocks):
+                return {"ok": False, "reason": "missing_shaft_tool"}
+            self.bot.call("equip", {"item": best, "slot": "hand"})
+
+        dug: list[dict[str, Any]] = []
+        for s_pos, b_name in shaft_blocks:
+            if b_name in {"air", "cave_air", "void_air"}:
+                continue
+            try:
+                # An urgent bunker already has roof material. Chasing drops
+                # between each dig can add eight seconds per block.
+                self.bot.call("dig", {"pos": s_pos, "collect": not urgent, "stop_on": ["hurt", "death"]})
+                dug.append({"pos": s_pos, "block": b_name})
+                # The dig response is not evidence the bot fell into its hole.
+                # Never close the roof over an empty shaft next to the bot.
+                for _ in range(10):
+                    fell = self.bot.status()
+                    fallen_pos = fell.get("pos") or pos
+                    if fell.get("alive") is False or (fell.get("last_death") or {}).get("t") != body_t:
+                        break
+                    if abs(float(fallen_pos[1]) - s_pos[1]) <= 0.2 and max(abs(fallen_pos[0] - bx - 0.5), abs(fallen_pos[2] - bz - 0.5)) <= 0.2 and fell.get("on_ground") is not False:
+                        break
+                    time.sleep(0.1)
+                if fell.get("alive") is False or (fell.get("last_death") or {}).get("t") != body_t or abs(float(fallen_pos[1]) - s_pos[1]) > 0.2 or max(abs(fallen_pos[0] - bx - 0.5), abs(fallen_pos[2] - bz - 0.5)) > 0.2:
+                    return {"ok": False, "requires_replan": True, "reason": "shaft_entry_not_confirmed", "dug": dug, "pos_after": fallen_pos}
+            except ApiError as exc:
+                return {
+                    "ok": False,
+                    "reason": "protected" if _is_protected_err(exc) else "dig_failed",
+                    "failed_pos": s_pos,
+                    "error": exc.code,
+                    "message": exc.message,
+                    "dug": dug,
+                }
+
+        counts_after = _inventory_counts(self.bot)
+        roof_item = _pick_roof_item(counts_after)
+        roof_pos = [bx, by - 1, bz]
+        roof_placed = False
+        roof_error: dict[str, str] | None = None
+        if roof_item:
+            try:
+                self.bot.call("place", {"item": roof_item, "pos": roof_pos})
+                roof_placed = _block_name(roof_pos) == roof_item
+            except ApiError as exc:
+                roof_error = {"code": exc.code, "message": exc.message}
+
+        st_after = self.bot.status()
+        final_pos = st_after.get("pos") or pos
+        inside = abs(float(final_pos[1]) - (by - 3)) <= 0.2 and max(abs(final_pos[0] - bx - 0.5), abs(final_pos[2] - bz - 0.5)) <= 0.2
+        return {
+            "ok": roof_placed and inside,
+            "requires_replan": not (roof_placed and inside),
+            "inside_shaft": inside,
+            "origin": [bx, by, bz],
+            "floor_pos": floor_pos,
+            "floor_block": floor_block,
+            "crafted_planks": crafted_planks,
+            "dug": dug,
+            "roof_pos": roof_pos,
+            "roof_item": roof_item,
+            "roof_placed": roof_placed,
+            "roof_error": roof_error,
+            "pos_after": st_after.get("pos"),
+        }
+
+    def dig_level_tunnel(self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> dict[str, Any]:
+        from .tunnel import dig_level_tunnel
+
+        res = dig_level_tunnel(self.bot, direction, steps, stop_on_ore)
+        d_key = str(direction).strip().lower()
+        stop_reason = str(res.get("stop_reason") or "")
+        terrain_failures = {
+            "unsafe_or_unknown_floor",
+            "fluid_adjacent",
+            "falling_material_adjacent",
+            "unsupported_face_block",
+            "insufficient_pickaxe_tier",
+            "dig_not_confirmed",
+            "support_changed",
+            "movement_not_confirmed",
+        }
+        if res.get("ok") is False and stop_reason in terrain_failures:
+            def _floor3(raw_pos: Any) -> tuple[int, int, int] | None:
+                if not isinstance(raw_pos, (list, tuple)) or len(raw_pos) < 3:
+                    return None
+                try:
+                    return (
+                        math.floor(float(raw_pos[0])),
+                        math.floor(float(raw_pos[1])),
+                        math.floor(float(raw_pos[2])),
+                    )
+                except (TypeError, ValueError):
+                    return None
+
+            start_cell = _floor3(res.get("pos_before"))
+            end_cell = _floor3(res.get("pos_after")) or start_cell
+            blk = res.get("blocker")
+            reason_label = (
+                f"{stop_reason}:{blk.get('block')}"
+                if isinstance(blk, dict) and blk.get("block")
+                else stop_reason
+            )
+            if end_cell is not None:
+                if d_key in {"north", "south", "east", "west"}:
+                    self._record_failed_tunnel_dir(end_cell, d_key, reason_label)
+                    if not res.get("dug") and start_cell is not None and start_cell != end_cell:
+                        self._record_failed_tunnel_dir(start_cell, d_key, f"dead_end->{reason_label}")
+                inv_after = res.get("inventory_after") if isinstance(res.get("inventory_after"), dict) else None
+                probe_cache: dict[tuple[int, int, int], str] = {}
+                vtun = self._probe_viable_tunnel_dirs(
+                    end_cell[0],
+                    end_cell[1],
+                    end_cell[2],
+                    probe_cache=probe_cache,
+                    exclude_dirs={d_key} if d_key in {"north", "south", "east", "west"} else None,
+                    inv_counts=inv_after,
+                )
+                vup = self._probe_viable_up_stair_dirs(
+                    end_cell[0],
+                    end_cell[1],
+                    end_cell[2],
+                    probe_cache=probe_cache,
+                    inv_counts=inv_after,
+                )
+                res["viable_tunnel_directions"] = vtun
+                res["viable_up_directions"] = vup
+                orig_hint = str(res.get("hint") or "").strip()
+                base_hint = orig_hint.rstrip("。")
+                for suffix_phrase in ("，请换方向", "或换方向"):
+                    if base_hint.endswith(suffix_phrase):
+                        base_hint = base_hint[: -len(suffix_phrase)]
+                if vtun:
+                    up_opt = (
+                        f"；也可改调 mc_skill_staircase(direction='{vup[0]}', vertical='up', steps=6) 向上升层"
+                        if vup
+                        else ""
+                    )
+                    res["hint"] = (
+                        f"{base_hint}；当前坐标{list(end_cell)}实测可行水平开挖方向: {','.join(vtun)}"
+                        f"（可改调 mc_skill_tunnel(direction='{vtun[0]}', steps=6)）{up_opt}。"
+                    ).lstrip("；")
+                elif vup:
+                    res["hint"] = (
+                        f"{base_hint}；当前坐标{list(end_cell)}水平四向均无法继续平推(viable_tunnel_directions=[])，"
+                        f"严禁继续原地调用 mc_skill_tunnel！请改调 mc_skill_staircase(direction='{vup[0]}', vertical='up', steps=6) 向上退回上层再分支(可选上行方向: {','.join(vup)})。"
+                    ).lstrip("；")
+                else:
+                    vpillar = self._probe_viable_pillar_up(
+                        end_cell[0],
+                        end_cell[1],
+                        end_cell[2],
+                        probe_cache=probe_cache,
+                        inv_counts=inv_after,
+                    )
+                    res["viable_pillar_up"] = vpillar
+                    if vpillar:
+                        res["hint"] = (
+                            f"{base_hint}；当前坐标{list(end_cell)}水平四向与斜向阶梯上行均受阻"
+                            "(viable_tunnel_directions=[], viable_up_directions=[])，但头顶正上方安全且有垫脚方块(viable_pillar_up=true)，"
+                            "请改调 mc_skill_staircase(vertical='pillar', steps=4) 原地垂直挖顶垫脚直上脱困！"
+                        ).lstrip("；")
+                    else:
+                        res["hint"] = (
+                            f"{base_hint}；当前坐标{list(end_cell)}水平通道与常规向上阶梯均受阻(viable_tunnel_directions=[], viable_up_directions=[], viable_pillar_up=false)，"
+                            "严禁继续原地重复调用 mc_skill_tunnel/mc_skill_staircase；请调 mc_move_to 沿已挖矿道退回或确认头顶安全后用 mc_dig/mc_place 脱困。"
+                        ).lstrip("；")
+
+            head_order = (
+                "ok",
+                "requires_replan",
+                "direction",
+                "steps_requested",
+                "steps_done",
+                "stop_reason",
+                "blocker",
+                "last_error",
+                "viable_tunnel_directions",
+                "viable_up_directions",
+                "viable_pillar_up",
+                "hint",
+            )
+            ordered: dict[str, Any] = {}
+            for k in head_order:
+                if k in res:
+                    ordered[k] = res[k]
+            for k, v in res.items():
+                if k not in ordered:
+                    ordered[k] = v
+            return ordered
+        return res
+
+    def _dig_pillar_up(self, steps: int = 4, stop_on_ore: bool = True) -> dict[str, Any]:
+        """Dig 1x1 overhead safely and jump-place underfoot blocks to climb straight up."""
+        steps = max(1, min(12, int(steps)))
+        air_set = {"air", "cave_air", "void_air"}
+        fluids = {"water", "lava", "flowing_water", "flowing_lava"}
+        fluid_or_bedrock = fluids | {"bedrock"}
+        falling_set = {"gravel", "sand", "red_sand", "suspicious_gravel", "suspicious_sand"}
+        hazard_set = fluids | falling_set
+        ore_types = ["iron_ore", "deepslate_iron_ore", "coal_ore", "deepslate_coal_ore", "copper_ore"]
+        iron_names = {"iron_ore", "deepslate_iron_ore"}
+        filler_candidates = (
+            "cobblestone",
+            "cobbled_deepslate",
+            "dirt",
+            "andesite",
+            "diorite",
+            "granite",
+            "tuff",
+            "stone",
+        )
+
+        def _bname(pos_xyz: list[int]) -> str:
+            res = self.bot.call("get_block", {"pos": pos_xyz})
+            return str(res.get("name") or res.get("block") or "air").removeprefix("minecraft:")
+
+        def _pick_filler() -> str | None:
+            counts = _inventory_counts(self.bot)
+            for cand in filler_candidates:
+                if counts.get(cand, 0) >= 1:
+                    return cand
+            for name, cnt in sorted(counts.items()):
+                if cnt >= 1 and name.endswith("_planks"):
+                    return name
+            return None
+
+        def _confirm_pillar_surface(cur: list[float]) -> dict[str, Any] | None:
+            cx, cy, cz = (math.floor(float(v)) for v in cur)
+            below = _bname([cx, cy - 1, cz])
+            surface_ground = {"grass_block", "podzol", "mycelium", "sand", "red_sand", "snow_block"}
+            if below in surface_ground and all(_bname([cx, cy + dy, cz]) in air_set for dy in (0, 1)):
+                return {"floor": below, "pos": list(cur), "basis": "standing_on_surface_ground"}
+            try:
+                surf = self.bot.call("find_blocks", {"radius": 5, "types": ["grass_block", "podzol", "sand"], "limit": 8})
+            except ApiError:
+                return None
+            same_level = [b for b in surf.get("blocks", []) if b.get("pos") and abs(float(b["pos"][1]) + 1 - cy) <= 1]
+            if same_level and all(_bname([cx, cy + dy, cz]) in air_set for dy in range(2, 14)):
+                return {"floor": below, "pos": list(cur), "basis": "same_level_surface_and_clear_column"}
+            return None
+
+        st0 = self.bot.status()
+        pos_before = st0.get("pos") or [0.0, 64.0, 0.0]
+        last_death = (st0.get("last_death") or {}).get("t")
+        min_hp = st0.get("health")
+        steps_done = 0
+        dug_count = 0
+        placed_count = 0
+        stop_reason = "completed"
+        blocker_info: dict[str, Any] | None = None
+        last_error: dict[str, Any] | None = None
+        ores_nearby: list[dict[str, Any]] = []
+        surface_evidence: dict[str, Any] | None = None
+
+        try:
+            for step_idx in range(steps):
+                st = self.bot.status()
+                if st.get("alive") is False or (st.get("last_death") or {}).get("t") != last_death:
+                    stop_reason = "died"
+                    break
+                if st.get("ready") is False:
+                    stop_reason = "not_ready"
+                    break
+                if st.get("in_water") or st.get("in_lava"):
+                    stop_reason = "entered_fluid"
+                    break
+                hp_now = st.get("health")
+                if isinstance(min_hp, (int, float)) and isinstance(hp_now, (int, float)) and hp_now < min_hp:
+                    stop_reason = "hurt"
+                    break
+                if isinstance(hp_now, (int, float)):
+                    min_hp = hp_now
+
+                pos = st.get("pos") or pos_before
+                px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+                bx, by, bz = math.floor(px), math.floor(py), math.floor(pz)
+
+                hit_col: dict[str, Any] | None = None
+                for sc in ([bx, by + 1, bz], [bx, by + 2, bz]):
+                    sb = _bname(sc)
+                    if sb in fluid_or_bedrock:
+                        hit_col = {"pos": sc, "block": sb, "relation": "in_path"}
+                        stop_reason = "fluid_or_bedrock"
+                        break
+                if hit_col is not None:
+                    blocker_info = hit_col
+                    break
+
+                top3_pos = [bx, by + 3, bz]
+                top3 = _bname(top3_pos)
+                if top3 in fluids:
+                    blocker_info = {"pos": top3_pos, "block": top3, "relation": "overhead_fluid"}
+                    stop_reason = "fluid_or_bedrock"
+                    break
+                if top3 in falling_set:
+                    blocker_info = {"pos": top3_pos, "block": top3, "relation": "falling_block"}
+                    stop_reason = "falling_material_adjacent"
+                    break
+
+                dig_abort = False
+                for tpos in ([bx, by + 1, bz], [bx, by + 2, bz]):
+                    tname = _bname(tpos)
+                    if tname in air_set:
+                        continue
+                    for ax, az in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nb_pos = [tpos[0] + ax, tpos[1], tpos[2] + az]
+                        nb_name = _bname(nb_pos)
+                        if nb_name in fluids:
+                            blocker_info = {"pos": nb_pos, "block": nb_name, "relation": "adjacent_fluid", "target": tpos}
+                            stop_reason = "fluid_or_bedrock"
+                            dig_abort = True
+                            break
+                        if nb_name in falling_set:
+                            blocker_info = {"pos": nb_pos, "block": nb_name, "relation": "falling_block", "target": tpos}
+                            stop_reason = "falling_material_adjacent"
+                            dig_abort = True
+                            break
+                    if dig_abort:
+                        break
+                    req_tier = BLOCK_MIN_PICKAXE_TIER.get(tname, 0)
+                    pick_name, pick_tier = _best_pickaxe_in_inv(_inventory_counts(self.bot))
+                    if req_tier > pick_tier:
+                        blocker_info = {
+                            "pos": tpos,
+                            "block": tname,
+                            "relation": "insufficient_pickaxe_tier",
+                            "required_tier": req_tier,
+                            "current_pickaxe": pick_name,
+                            "current_tier": pick_tier,
+                        }
+                        stop_reason = "insufficient_pickaxe_tier"
+                        dig_abort = True
+                        break
+                    if req_tier > 0 or any(tag in tname for tag in ("stone", "ore", "deepslate", "granite", "diorite", "andesite", "tuff")):
+                        self._equip_if_present(tuple(PICKAXE_TIERS))
+                    try:
+                        self.bot.call("dig", {"pos": tpos, "collect": True, "stop_on": ["hurt", "death"]})
+                    except ApiError as err:
+                        last_error = {"code": err.code, "message": err.message, "pos": tpos}
+                        stop_reason = "dig_failed"
+                        dig_abort = True
+                        break
+                    if _bname(tpos) not in air_set:
+                        last_error = {"code": "dig_not_confirmed", "message": f"挖掘 {tpos} 后仍非空气", "pos": tpos}
+                        stop_reason = "dig_failed"
+                        dig_abort = True
+                        break
+                    dug_count += 1
+                if dig_abort:
+                    break
+
+                filler = _pick_filler()
+                if not filler:
+                    stop_reason = "missing_step_support"
+                    break
+
+                if max(abs(px - (bx + 0.5)), abs(pz - (bz + 0.5))) > 0.28:
+                    try:
+                        self.bot.call("move_to", {"x": bx + 0.5, "y": by, "z": bz + 0.5, "range": 0.2, "timeout": 1500})
+                    except ApiError:
+                        pass
+
+                placed_ok = False
+                self.bot.call("posture", {"sneak": False, "shield": False, "jump": True})
+                try:
+                    for attempt in range(14):
+                        time.sleep(0.05)
+                        st_j = self.bot.status()
+                        if st_j.get("alive") is False or st_j.get("ready") is False:
+                            stop_reason = "not_ready" if st_j.get("ready") is False else "died"
+                            break
+                        jpos = st_j.get("pos") or [bx + 0.5, by, bz + 0.5]
+                        if float(jpos[1]) < by + 1.0 and attempt < 2:
+                            continue
+                        try:
+                            self.bot.call("place", {"item": filler, "pos": [bx, by, bz]})
+                            placed_ok = True
+                            placed_count += 1
+                            break
+                        except ApiError as perr:
+                            if perr.code == "blocked_by_self":
+                                continue
+                            last_error = {"code": perr.code, "message": perr.message, "pos": [bx, by, bz]}
+                            break
+                finally:
+                    try:
+                        self.bot.call("posture", {"sneak": False, "shield": False, "jump": False})
+                    except ApiError:
+                        pass
+                if not placed_ok:
+                    if stop_reason == "completed":
+                        stop_reason = "place_failed"
+                    break
+
+                settled_up = False
+                cur_pos = [bx + 0.5, float(by), bz + 0.5]
+                for _ in range(8):
+                    time.sleep(0.05)
+                    st_after_step = self.bot.status()
+                    raw_p = st_after_step.get("pos") or cur_pos
+                    cur_pos = [float(raw_p[0]), float(raw_p[1]), float(raw_p[2])]
+                    if math.floor(cur_pos[1]) >= by + 1:
+                        settled_up = True
+                        break
+                if not settled_up:
+                    stop_reason = "movement_not_confirmed"
+                    break
+
+                steps_done += 1
+                if steps_done >= 2:
+                    surface_evidence = _confirm_pillar_surface(cur_pos)
+                    if surface_evidence:
+                        stop_reason = "reached_surface"
+                        break
+
+                if stop_on_ore and (steps_done % 2 == 0 or step_idx == steps - 1):
+                    try:
+                        found_ores = self.bot.call("find_blocks", {"radius": 8, "types": ore_types, "limit": 10})
+                        ores_nearby = found_ores.get("blocks") or []
+                        if any(b.get("name") in iron_names for b in ores_nearby):
+                            stop_reason = "iron_ore_found"
+                            break
+                    except ApiError:
+                        pass
+        except ApiError as exc:
+            stop_reason = "api_error"
+            last_error = {"code": exc.code, "message": exc.message, **exc.context}
+
+        st_end = self.bot.status()
+        end_pos = st_end.get("pos") or pos_before
+        ok = steps_done > 0 and stop_reason in {"completed", "iron_ore_found", "reached_surface"}
+        out_pillar: dict[str, Any] = {
+            "ok": ok,
+            "requires_replan": not ok,
+            "direction": "pillar",
+            "vertical": "pillar",
+            "steps_requested": steps,
+            "steps_done": steps_done,
+            "dug_count": dug_count,
+            "placed_count": placed_count,
+            "stop_reason": stop_reason,
+            "pos_before": pos_before,
+            "pos_after": end_pos,
+        }
+        if blocker_info is not None:
+            out_pillar["blocker"] = blocker_info
+        if last_error is not None:
+            out_pillar["last_error"] = last_error
+
+        if not ok and steps_done == 0:
+            ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
+            self._record_failed_stair_dir((ebx, eby, ebz, "pillar"), "pillar", stop_reason)
+            probe_cache_p: dict[tuple[int, int, int], str] = {}
+            inv_p = _inventory_counts(self.bot)
+            up_dirs = self._probe_viable_up_stair_dirs(ebx, eby, ebz, probe_cache=probe_cache_p, inv_counts=inv_p)
+            tunnel_dirs = self._probe_viable_tunnel_dirs(ebx, eby, ebz, probe_cache=probe_cache_p, inv_counts=inv_p)
+            out_pillar["viable_up_directions"] = up_dirs
+            out_pillar["viable_tunnel_directions"] = tunnel_dirs
+            detail_p = (
+                f"{stop_reason}({blocker_info['relation']}:{blocker_info['block']}@{blocker_info['pos']})"
+                if blocker_info
+                else (
+                    f"{stop_reason}({last_error['code']}@{last_error.get('pos')})"
+                    if last_error and last_error.get("code")
+                    else stop_reason
+                )
+            )
+            if up_dirs:
+                out_pillar["hint"] = (
+                    f"原地垂直垫脚直上遇到{detail_p}；实测可改走斜向阶梯上行方向: {','.join(up_dirs)}"
+                    f"（请调 mc_skill_staircase(direction='{up_dirs[0]}', vertical='up', steps=6)）。"
+                )
+            elif tunnel_dirs:
+                out_pillar["hint"] = (
+                    f"原地垂直垫脚直上遇到{detail_p}；实测可改走水平矿道方向: {','.join(tunnel_dirs)}"
+                    f"（请调 mc_skill_tunnel(direction='{tunnel_dirs[0]}', steps=6)）。"
+                )
+            else:
+                out_pillar["hint"] = (
+                    f"原地垂直垫脚直上遇到{detail_p}；当前坐标[{ebx},{eby},{ebz}]斜向上行与水平矿道也受阻，"
+                    "请调 mc_move_to 退回安全矿道或先用原子工具清理周围障碍。"
+                )
+
+        if surface_evidence is not None:
+            out_pillar["surface_evidence"] = surface_evidence
+        out_pillar["ores_nearby"] = ores_nearby
+        return out_pillar
+
+    def dig_staircase(
+        self,
+        direction: str | None = None,
+        steps: int = 12,
+        vertical: str = "down",
+        stop_on_ore: bool | None = None,
+    ) -> dict[str, Any]:
+        """Dig a safe 3-high stepped staircase downward, upward, or straight-up pillar."""
+        dirs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
+        d_key = str(direction or "").strip().lower()
+        v_key = str(vertical or "down").strip().lower()
+        if stop_on_ore is None:
+            stop_on_ore = v_key == "down"
+        if v_key == "pillar" or d_key == "pillar":
+            return self._dig_pillar_up(steps=steps, stop_on_ore=stop_on_ore)
+        if v_key not in {"down", "up"}:
+            return {
+                "ok": False,
+                "error": "bad_args",
+                "message": "direction 必须是 north/south/east/west，vertical 必须是 down/up/pillar。",
+            }
+        if not d_key or d_key in {"down", "up"}:
+            chosen_dir = "north"
+            try:
+                st_probe = self.bot.status() or {}
+                p_probe = st_probe.get("pos") or []
+                if isinstance(p_probe, (list, tuple)) and len(p_probe) >= 3:
+                    px, py, pz = math.floor(float(p_probe[0])), math.floor(float(p_probe[1])), math.floor(float(p_probe[2]))
+                    cands = (
+                        self._probe_viable_down_stair_dirs(px, py, pz)
+                        if v_key == "down"
+                        else self._probe_viable_up_stair_dirs(px, py, pz)
+                    )
+                    if cands:
+                        chosen_dir = cands[0]
+            except ApiError:
+                pass
+            d_key = chosen_dir
+        if d_key not in dirs:
+            return {
+                "ok": False,
+                "error": "bad_args",
+                "message": "direction 必须是 north/south/east/west，vertical 必须是 down/up/pillar。",
+            }
+
+        dx, dz = dirs[d_key]
+        steps = max(1, min(25, int(steps)))
+        air_set = {"air", "cave_air", "void_air"}
+        fluids = {"water", "lava", "flowing_water", "flowing_lava"}
+        fluid_or_bedrock = fluids | {"bedrock"}
+        non_solid = air_set | fluids | {
+            "short_grass",
+            "tall_grass",
+            "leaf_litter",
+            "dandelion",
+            "poppy",
+            "oak_sapling",
+        }
+        ore_types = [
+            "iron_ore",
+            "deepslate_iron_ore",
+            "diamond_ore",
+            "deepslate_diamond_ore",
+            "gold_ore",
+            "deepslate_gold_ore",
+            "coal_ore",
+            "deepslate_coal_ore",
+            "copper_ore",
+        ]
+        stop_ore_names = {
+            "iron_ore",
+            "deepslate_iron_ore",
+            "diamond_ore",
+            "deepslate_diamond_ore",
+        }
+        surface_evidence: dict[str, Any] | None = None
+
+        def _filter_actionable_ores(
+            blocks: list[dict[str, Any]], cur_xyz: list[float]
+        ) -> list[dict[str, Any]]:
+            cx = float(cur_xyz[0]) if len(cur_xyz) >= 3 else 0.0
+            cy = float(cur_xyz[1]) if len(cur_xyz) >= 3 else 64.0
+            cz = float(cur_xyz[2]) if len(cur_xyz) >= 3 else 0.0
+            kept: list[dict[str, Any]] = []
+            for blk in blocks:
+                if blk.get("name") not in stop_ore_names:
+                    continue
+                bpos = blk.get("pos")
+                if isinstance(bpos, list) and len(bpos) >= 3:
+                    ox, oy, oz = int(bpos[0]), int(bpos[1]), int(bpos[2])
+                    if self._is_block_avoided((ox, oy, oz)):
+                        continue
+                    forward_dot = (float(ox) - cx) * dx + (float(oz) - cz) * dz
+                    if forward_dot < -1.5:
+                        continue
+                    if v_key == "down" and float(oy) > cy + 2.5:
+                        continue
+                    if v_key == "up" and float(oy) < cy - 2.5:
+                        continue
+                kept.append(blk)
+            return kept
+
+        def _block_name(pos_xyz: list[int]) -> str:
+            res = self.bot.call("get_block", {"pos": pos_xyz})
+            return str(res.get("name") or res.get("block") or "air").removeprefix("minecraft:")
+
+        def _is_non_solid_support(bname: str) -> bool:
+            return bname in non_solid or bname.endswith(("_leaves", "_sapling", "_carpet", "_banner"))
+
+        def _find_adjacent_fluid(
+            targets: list[list[int]],
+            cache: dict[tuple[int, int, int], str] | None = None,
+        ) -> dict[str, Any] | None:
+            def _cached_block(pt: tuple[int, int, int]) -> str:
+                if cache is not None and pt in cache:
+                    return cache[pt]
+                val = _block_name([pt[0], pt[1], pt[2]])
+                if cache is not None:
+                    cache[pt] = val
+                return val
+
+            for pos_item in targets:
+                px, py, pz = int(pos_item[0]), int(pos_item[1]), int(pos_item[2])
+                if _cached_block((px, py, pz)) in air_set:
+                    continue
+                for ax, ay, az in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                    nb = (px + ax, py + ay, pz + az)
+                    bname = _cached_block(nb)
+                    if bname in fluids:
+                        return {
+                            "pos": [nb[0], nb[1], nb[2]],
+                            "block": bname,
+                            "relation": "adjacent_fluid",
+                            "target": [px, py, pz],
+                        }
+            return None
+
+        def _equip_best_pick() -> None:
+            best_pick, _ = _best_pickaxe_in_inv(_inventory_counts(self.bot))
+            if best_pick:
+                try:
+                    self.bot.call("equip", {"item": best_pick, "slot": "hand"})
+                except ApiError:
+                    pass
+
+        def _pick_step_filler() -> str | None:
+            counts = _inventory_counts(self.bot)
+            for cand in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite"):
+                if counts.get(cand, 0) >= 1:
+                    return cand
+            for name, cnt in sorted(counts.items()):
+                if cnt >= 1 and name.endswith("_planks"):
+                    return name
+            return None
+
+        def _settled_position(cur: list[float]) -> list[float]:
+            for _ in range(6):
+                time.sleep(0.1)
+                settled = self.bot.status()
+                cur = settled.get("pos") or cur
+                if settled.get("on_ground") is not False:
+                    break
+            return [float(cur[0]), float(cur[1]), float(cur[2])]
+
+        def _advance_step(tx: int, ty: int, tz: int, bx: int, by: int, bz: int, *, jump: bool) -> list[float]:
+            fx, fy, fz = tx + 0.5, float(ty), tz + 0.5
+            try:
+                mv = self.bot.call("move_to", {"x": fx, "y": ty, "z": fz, "range": 0.5})
+                cur = mv.get("pos") or self.bot.status().get("pos") or [bx + 0.5, float(by), bz + 0.5]
+            except ApiError:
+                cur = self.bot.status().get("pos") or [bx + 0.5, float(by), bz + 0.5]
+
+            if math.floor(float(cur[0])) == bx and math.floor(float(cur[2])) == bz:
+                try:
+                    self.bot.call("look", {"x": fx, "y": fy, "z": fz})
+                except ApiError:
+                    pass
+                ctrl_body: dict[str, Any] = {
+                    "forward": True,
+                    "ms": 550 if jump else 420,
+                    "stop_on": ["hurt", "death"],
+                }
+                if jump:
+                    ctrl_body["jump"] = True
+                try:
+                    ctrl = self.bot.call("control", ctrl_body)
+                    cur = ctrl.get("pos") or self.bot.status().get("pos") or cur
+                except ApiError:
+                    cur = self.bot.status().get("pos") or cur
+            # Control results can be captured at the jump apex. Confirm the
+            # settled position instead of counting a jump that lands back below.
+            return _settled_position(cur)
+
+        def _confirm_surface(cur: list[float]) -> dict[str, Any] | None:
+            cx, cy, cz = (math.floor(float(v)) for v in cur)
+            below = _block_name([cx, cy - 1, cz])
+            surface_ground = {"grass_block", "podzol", "mycelium", "sand", "red_sand", "snow_block"}
+            if below in surface_ground and all(_block_name([cx, cy + dy, cz]) in air_set for dy in (0, 1)):
+                return {"floor": below, "pos": list(cur), "basis": "standing_on_surface_ground"}
+            # Nearby roots/grass above the ceiling do not mean the bot reached
+            # that level. Stone steps need a same-level surface and an open sky column.
+            surf = self.bot.call("find_blocks", {"radius": 5, "types": ["grass_block", "podzol", "sand"], "limit": 8})
+            same_level = [b for b in surf.get("blocks", []) if b.get("pos") and abs(float(b["pos"][1]) + 1 - cy) <= 1]
+            if same_level and all(_block_name([cx, cy + dy, cz]) in air_set for dy in range(2, 14)):
+                return {"floor": below, "pos": list(cur), "basis": "same_level_surface_and_clear_column"}
+            return None
+
+        _equip_best_pick()
+        st0 = self.bot.status()
+        pos_before = st0.get("pos") or [0.0, 64.0, 0.0]
+        steps_done = 0
+        dug_count = 0
+        placed_count = 0
+        stop_reason = "completed"
+        ores_nearby: list[dict[str, Any]] = []
+        matched_ores: list[dict[str, Any]] = []
+        last_error: dict[str, Any] | None = None
+        blocker_info: dict[str, Any] | None = None
+        b0x, b0y, b0z = (
+            math.floor(float(pos_before[0])),
+            math.floor(float(pos_before[1])),
+            math.floor(float(pos_before[2])),
+        )
+
+        if v_key == "down":
+            if _block_name([b0x, b0y - 1, b0z]).endswith("_leaves"):
+                self.descend_canopy()
+                st0 = self.bot.status()
+                cur_p = st0.get("pos") or pos_before
+                c0x, c0y, c0z = (
+                    math.floor(float(cur_p[0])),
+                    math.floor(float(cur_p[1])),
+                    math.floor(float(cur_p[2])),
+                )
+                b0x, b0y, b0z = c0x, c0y, c0z
+                if _block_name([c0x, c0y - 1, c0z]).endswith("_leaves"):
+                    stop_reason = "on_tree_canopy"
+
+        for step_idx in range(steps if stop_reason == "completed" else 0):
+            if step_idx > 0 and step_idx % 6 == 0:
+                _equip_best_pick()
+
+            st = self.bot.status()
+            pos = st.get("pos") or pos_before
+            bx, by, bz = math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2]))
+            nx, nz = bx + dx, bz + dz
+
+            head_here = _block_name([bx, by + 1, bz])
+            if head_here in fluid_or_bedrock:
+                blocker_info = {"pos": [bx, by + 1, bz], "block": head_here, "relation": "overhead"}
+                stop_reason = "fluid_or_bedrock"
+                break
+            if head_here not in air_set:
+                adj_head = _find_adjacent_fluid([[bx, by + 1, bz]])
+                if adj_head is not None:
+                    blocker_info = adj_head
+                    stop_reason = "fluid_or_bedrock"
+                    break
+                try:
+                    self.bot.call("dig", {"pos": [bx, by + 1, bz], "collect": True, "stop_on": ["death"]})
+                    dug_count += 1
+                except ApiError as err:
+                    last_error = {"code": err.code, "message": err.message, "pos": [bx, by + 1, bz]}
+                    stop_reason = "dig_failed"
+                    break
+
+            if v_key == "down":
+                safety_coords = [[nx, by + 2, nz], [nx, by + 1, nz], [nx, by, nz], [nx, by - 1, nz]]
+                hit_safety = None
+                for sc in safety_coords:
+                    sb = _block_name(sc)
+                    if sb in fluid_or_bedrock:
+                        hit_safety = {"pos": sc, "block": sb, "relation": "in_path"}
+                        break
+                if hit_safety is not None:
+                    blocker_info = hit_safety
+                    stop_reason = "fluid_or_bedrock"
+                    break
+                support_blk = _block_name([nx, by - 2, nz])
+                if support_blk in fluids:
+                    blocker_info = {"pos": [nx, by - 2, nz], "block": support_blk, "relation": "floor_fluid"}
+                    stop_reason = "fluid_or_bedrock"
+                    break
+                if _is_non_solid_support(support_blk):
+                    blocker_info = {"pos": [nx, by - 2, nz], "block": support_blk, "relation": "missing_floor_support"}
+                    stop_reason = "cave_or_drop_ahead"
+                    break
+                down_targets = [[nx, by + 1, nz], [nx, by, nz], [nx, by - 1, nz]]
+                adj_down = _find_adjacent_fluid(down_targets, {})
+                if adj_down is not None:
+                    blocker_info = adj_down
+                    stop_reason = "fluid_or_bedrock"
+                    break
+
+                dig_failed = False
+                for idx, dpos in enumerate(down_targets):
+                    if _block_name(dpos) not in air_set:
+                        try:
+                            self.bot.call("dig", {"pos": dpos, "collect": True})
+                            dug_count += 1
+                        except ApiError as err:
+                            last_error = {"code": err.code, "message": err.message, "pos": dpos}
+                            dig_failed = True
+                            break
+                        if idx >= 1 and _block_name(dpos) not in air_set:
+                            try:
+                                self.bot.call("dig", {"pos": dpos, "collect": True, "stop_on": ["death"]})
+                                dug_count += 1
+                            except ApiError as err:
+                                last_error = {"code": err.code, "message": err.message, "pos": dpos}
+                                dig_failed = True
+                                break
+                if dig_failed:
+                    stop_reason = "dig_failed"
+                    break
+
+                cur = _advance_step(nx, by - 1, nz, bx, by, bz, jump=False)
+                if math.floor(cur[0]) == bx and math.floor(cur[2]) == bz:
+                    xs = sorted({math.floor(cur[0] - 0.3), math.floor(cur[0] + 0.3)})
+                    zs = sorted({math.floor(cur[2] - 0.3), math.floor(cur[2] + 0.3)})
+                    for hx in xs:
+                        for hz in zs:
+                            for hy in (by, by + 1):
+                                hpos = [hx, hy, hz]
+                                hb = _block_name(hpos)
+                                if hb not in air_set and hb not in fluid_or_bedrock:
+                                    try:
+                                        self.bot.call("dig", {"pos": hpos, "collect": True, "stop_on": ["death"]})
+                                        dug_count += 1
+                                    except ApiError:
+                                        pass
+                    try:
+                        mv2 = self.bot.call("move_to", {"x": nx + 0.5, "y": by - 1, "z": nz + 0.5, "range": 0.5})
+                        cur = mv2.get("pos") or self.bot.status().get("pos") or cur
+                    except ApiError:
+                        cur = self.bot.status().get("pos") or cur
+                    cur = _settled_position(cur)
+                if math.floor(float(cur[1])) != by - 1 or math.dist([float(cur[0]), float(cur[2])], [nx + 0.5, nz + 0.5]) > 0.85:
+                    stop_reason = "movement_not_confirmed"
+                    break
+            else:
+                hit_up = None
+                for sc in ([bx, by + 2, bz], [nx, by + 1, nz], [nx, by + 2, nz]):
+                    sb = _block_name(sc)
+                    if sb in fluid_or_bedrock:
+                        hit_up = {"pos": sc, "block": sb, "relation": "in_path"}
+                        break
+                if hit_up is not None:
+                    blocker_info = hit_up
+                    stop_reason = "fluid_or_bedrock"
+                    break
+                for sc in ([bx, by + 3, bz], [nx, by + 3, nz]):
+                    sb = _block_name(sc)
+                    if sb in fluids:
+                        hit_up = {"pos": sc, "block": sb, "relation": "overhead_fluid"}
+                        break
+                if hit_up is not None:
+                    blocker_info = hit_up
+                    stop_reason = "fluid_or_bedrock"
+                    break
+                up_targets = [[bx, by + 2, bz], [nx, by + 2, nz], [nx, by + 1, nz]]
+                adj_up = _find_adjacent_fluid(up_targets, {})
+                if adj_up is not None:
+                    blocker_info = adj_up
+                    stop_reason = "fluid_or_bedrock"
+                    break
+
+                dig_failed = False
+                for dpos in up_targets:
+                    if _block_name(dpos) not in air_set:
+                        try:
+                            self.bot.call("dig", {"pos": dpos, "collect": True})
+                            dug_count += 1
+                        except ApiError as err:
+                            last_error = {"code": err.code, "message": err.message, "pos": dpos}
+                            dig_failed = True
+                            break
+                if dig_failed:
+                    stop_reason = "dig_failed"
+                    break
+
+                if _block_name([nx, by, nz]) in non_solid:
+                    filler = _pick_step_filler()
+                    if not filler:
+                        stop_reason = "missing_step_support"
+                        break
+                    try:
+                        self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
+                        placed_count += 1
+                    except ApiError:
+                        stop_reason = "missing_step_support"
+                        break
+
+                cur = _advance_step(nx, by + 1, nz, bx, by, bz, jump=True)
+                if math.floor(float(cur[1])) != by + 1 or math.dist([float(cur[0]), float(cur[2])], [nx + 0.5, nz + 0.5]) > 0.85:
+                    stop_reason = "movement_not_confirmed"
+                    break
+
+                steps_done += 1
+                if step_idx >= 1:
+                    surface_evidence = _confirm_surface(cur)
+                    if surface_evidence:
+                        stop_reason = "reached_surface"
+                        break
+
+                if stop_on_ore and steps_done % 3 == 0:
+                    found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
+                    ores_nearby = found_ores.get("blocks") or []
+                    matched_ores = _filter_actionable_ores(ores_nearby, cur)
+                    if matched_ores:
+                        stop_reason = "ore_detected"
+                        break
+                continue
+
+            steps_done += 1
+            if stop_on_ore and steps_done % 3 == 0:
+                found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
+                ores_nearby = found_ores.get("blocks") or []
+                matched_ores = _filter_actionable_ores(ores_nearby, cur)
+                if matched_ores:
+                    stop_reason = "ore_detected"
+                    break
+
+        st_end = self.bot.status()
+        if stop_on_ore and stop_reason == "completed":
+            found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
+            ores_nearby = found_ores.get("blocks") or []
+            matched_ores = _filter_actionable_ores(ores_nearby, st_end.get("pos") or pos_before)
+            if matched_ores:
+                stop_reason = "ore_detected"
+
+        out_stair: dict[str, Any] = {
+            "ok": stop_reason in {"completed", "ore_detected", "reached_surface"} and (steps_done > 0 or stop_reason == "ore_detected"),
+            "requires_replan": stop_reason not in {"completed", "ore_detected", "reached_surface"},
+            "direction": d_key,
+            "vertical": v_key,
+            "steps_requested": steps,
+            "steps_done": steps_done,
+            "dug_count": dug_count,
+            "stop_reason": stop_reason,
+            "pos_before": pos_before,
+            "pos_after": st_end.get("pos"),
+        }
+        if matched_ores:
+            out_stair["ores_detected"] = [
+                {"name": b.get("name"), "pos": b.get("pos"), "dist": b.get("dist")}
+                for b in matched_ores[:5]
+            ]
+            if stop_reason == "ore_detected":
+                detected_names = list(dict.fromkeys(str(b.get("name")) for b in matched_ores if b.get("name")))
+                if detected_names:
+                    out_stair["hint"] = (
+                        f"前方阶梯视野内探测到暴露矿脉 {', '.join(detected_names[:3])}；"
+                        f"如需开采请调 mc_skill_mine_blocks(block_types={detected_names[:2]}, count=6)；"
+                        f"若仅需继续沿 {d_key} 下探而不在此矿停驻，请传 stop_on_ore=False。"
+                    )
+        if placed_count > 0:
+            out_stair["placed_count"] = placed_count
+        if blocker_info is not None:
+            out_stair["blocker"] = blocker_info
+        if last_error is not None:
+            out_stair["last_error"] = last_error
+        end_pos = st_end.get("pos") or pos_before
+        ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
+        if stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "dig_failed", "movement_not_confirmed", "missing_step_support"}:
+            reason_label = (
+                f"{stop_reason}:{last_error['code']}"
+                if last_error and last_error.get("code")
+                else (f"{stop_reason}:{blocker_info['block']}" if blocker_info else stop_reason)
+            )
+            self._record_failed_stair_dir((ebx, eby, ebz, v_key), d_key, reason_label)
+            if steps_done > 0 and dug_count == 0 and (ebx, eby, ebz) != (b0x, b0y, b0z):
+                self._record_failed_stair_dir((b0x, b0y, b0z, v_key), d_key, f"dead_end->{reason_label}")
+
+        if v_key == "down" and stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy", "dig_failed", "movement_not_confirmed"}:
+            probe_cache: dict[tuple[int, int, int], str] = {}
+
+            def _probe_block(px: int, py: int, pz: int) -> str:
+                pt = (px, py, pz)
+                if pt not in probe_cache:
+                    probe_cache[pt] = _block_name([px, py, pz])
+                return probe_cache[pt]
+
+            viable_dirs: list[str] = []
+            direction_status: dict[str, str] = {}
+            if stop_reason == "on_tree_canopy":
+                for odir in dirs:
+                    direction_status[odir] = "blocked(on_tree_canopy)"
+            else:
+                failed_dirs = self._active_failed_stair_dirs((ebx, eby, ebz, "down"))
+                for odir, (odx, odz) in dirs.items():
+                    if odir == d_key:
+                        if blocker_info:
+                            direction_status[odir] = (
+                                f"blocked({blocker_info['relation']}:{blocker_info['block']}@{blocker_info['pos']})"
+                            )
+                        elif last_error:
+                            direction_status[odir] = (
+                                f"failed({stop_reason}:{last_error.get('code')}@{last_error.get('pos')})"
+                            )
+                        else:
+                            direction_status[odir] = f"failed({stop_reason})"
+                        continue
+                    if odir in failed_dirs:
+                        direction_status[odir] = f"failed_recently({failed_dirs[odir]})"
+                        continue
+                    try:
+                        support_blk = _probe_block(ebx + odx, eby - 2, ebz + odz)
+                        if support_blk in fluid_or_bedrock:
+                            direction_status[odir] = f"blocked(floor:{support_blk}@[{ebx + odx},{eby - 2},{ebz + odz}])"
+                            continue
+                        if _is_non_solid_support(support_blk):
+                            direction_status[odir] = f"blocked(cave_drop:{support_blk}@[{ebx + odx},{eby - 2},{ebz + odz}])"
+                            continue
+                        hit_path = None
+                        for ky in (2, 1, 0, -1):
+                            fb = _probe_block(ebx + odx, eby + ky, ebz + odz)
+                            if fb in fluid_or_bedrock:
+                                hit_path = f"blocked(in_path:{fb}@[{ebx + odx},{eby + ky},{ebz + odz}])"
+                                break
+                        if hit_path is not None:
+                            direction_status[odir] = hit_path
+                            continue
+                        adj = _find_adjacent_fluid(
+                            [[ebx + odx, eby + 1, ebz + odz], [ebx + odx, eby, ebz + odz], [ebx + odx, eby - 1, ebz + odz]],
+                            probe_cache,
+                        )
+                        if adj is not None:
+                            direction_status[odir] = f"blocked(adjacent_fluid:{adj['block']}@{adj['pos']})"
+                            continue
+                        direction_status[odir] = "viable"
+                        viable_dirs.append(odir)
+                    except ApiError:
+                        direction_status[odir] = "unknown(probe_error)"
+                        continue
+            out_stair["direction_status"] = direction_status
+            out_stair["viable_directions"] = viable_dirs
+            if blocker_info:
+                detail_desc = f"{stop_reason}({blocker_info['relation']}:{blocker_info['block']}@{blocker_info['pos']})"
+            elif last_error and last_error.get("code"):
+                detail_desc = f"{stop_reason}({last_error['code']}@{last_error.get('pos')})"
+            else:
+                detail_desc = stop_reason
+            if viable_dirs:
+                out_stair["hint"] = (
+                    f"前方({d_key})遇到{detail_desc}，禁止继续朝{d_key}重试；"
+                    f"实测可换向安全下探: {','.join(viable_dirs)}。"
+                )
+            else:
+                out_stair["all_directions_blocked"] = True
+                try:
+                    roof_blk = _probe_block(ebx, eby + 2, ebz)
+                except ApiError:
+                    roof_blk = "air"
+                is_underground = (eby < 62) or (roof_blk not in air_set and not is_passable_sight_block(roof_blk))
+                if is_underground:
+                    inv_now = _inventory_counts(self.bot)
+                    tunnel_dirs = self._probe_viable_tunnel_dirs(
+                        ebx,
+                        eby,
+                        ebz,
+                        probe_cache=probe_cache,
+                        exclude_dirs={d_key} if stop_reason == "dig_failed" else None,
+                        inv_counts=inv_now,
+                    )
+                    up_dirs = self._probe_viable_up_stair_dirs(
+                        ebx,
+                        eby,
+                        ebz,
+                        probe_cache=probe_cache,
+                        inv_counts=inv_now,
+                    )
+                    out_stair["viable_tunnel_directions"] = tunnel_dirs
+                    out_stair["viable_up_directions"] = up_dirs
+                    if tunnel_dirs:
+                        up_hint = (
+                            f"mc_skill_staircase(direction='{up_dirs[0]}', vertical='up', steps=6)"
+                            if up_dirs
+                            else "mc_skill_staircase(vertical='up', steps=4)"
+                        )
+                        out_stair["hint"] = (
+                            f"前方({d_key})遇到{detail_desc}；当前地下坐标[{ebx},{eby},{ebz}]四面均无法继续阶梯下探(viable_directions=[])，"
+                            f"严禁在当前位置换方向继续调 mc_skill_staircase！请改调 mc_skill_tunnel(direction='{tunnel_dirs[0]}', steps=6) "
+                            f"水平开矿道转移后再下探，或调 {up_hint} 沿原矿道退回上层再分支下探！"
+                        )
+                    elif up_dirs:
+                        out_stair["hint"] = (
+                            f"前方({d_key})遇到{detail_desc}；当前地下坐标[{ebx},{eby},{ebz}]四面下探与水平通道均已堵死"
+                            "(viable_directions=[], viable_tunnel_directions=[])，严禁在原地重试下探或调用 mc_skill_tunnel！"
+                            f"请改调 mc_skill_staircase(direction='{up_dirs[0]}', vertical='up', steps=6) 沿安全方向向上退回上层(可选上行方向: {','.join(up_dirs)})！"
+                        )
+                    else:
+                        vpillar = self._probe_viable_pillar_up(
+                            ebx,
+                            eby,
+                            ebz,
+                            probe_cache=probe_cache,
+                            inv_counts=inv_now,
+                        )
+                        out_stair["viable_pillar_up"] = vpillar
+                        if vpillar:
+                            out_stair["hint"] = (
+                                f"前方({d_key})遇到{detail_desc}；当前地下坐标[{ebx},{eby},{ebz}]四面下探、水平通道与斜向阶梯上行均受阻"
+                                "(viable_directions=[], viable_tunnel_directions=[], viable_up_directions=[])，"
+                                "但头顶正上方安全且有垫脚方块(viable_pillar_up=true)，请改调 mc_skill_staircase(vertical='pillar', steps=4) 原地垂直挖顶垫脚直上脱困！"
+                            )
+                        else:
+                            out_stair["hint"] = (
+                                f"前方({d_key})遇到{detail_desc}；当前地下坐标[{ebx},{eby},{ebz}]四面下探、水平通道与常规向上阶梯均受阻"
+                                "(viable_directions=[], viable_tunnel_directions=[], viable_up_directions=[], viable_pillar_up=false)，"
+                                "严禁继续原地循环调用 mc_skill_staircase 或 mc_skill_tunnel！请先调 mc_move_to 沿已挖矿道走出死胡同，或用 mc_get_block 确认安全后以 mc_dig / mc_place 垫脚向上开路脱困！"
+                            )
+                else:
+                    out_stair["hint"] = (
+                        f"前方({d_key})遇到{detail_desc}；当前坐标[{ebx},{eby},{ebz}]四面下方均为空洞/悬崖/树冠(viable_directions=[])，原地4个方向全部无法阶梯下探！"
+                        "严禁在当前位置换方向继续调 mc_skill_staircase！请先调 mc_skill_unstick 下树/脱困，或调 mc_move_to(只传x,z省略y) 水平走开 12-20 格到平坦实心陆地后再下探！"
+                    )
+        elif v_key == "up" and stop_reason in {"fluid_or_bedrock", "dig_failed", "movement_not_confirmed", "missing_step_support"}:
+            probe_cache_up: dict[tuple[int, int, int], str] = {}
+            up_inv = _inventory_counts(self.bot)
+            up_dirs = self._probe_viable_up_stair_dirs(
+                ebx,
+                eby,
+                ebz,
+                probe_cache=probe_cache_up,
+                exclude_dirs={d_key},
+                inv_counts=up_inv,
+            )
+            tunnel_dirs = self._probe_viable_tunnel_dirs(
+                ebx,
+                eby,
+                ebz,
+                probe_cache=probe_cache_up,
+                inv_counts=up_inv,
+            )
+            out_stair["viable_up_directions"] = up_dirs
+            out_stair["viable_tunnel_directions"] = tunnel_dirs
+            detail_up = (
+                f"{stop_reason}({blocker_info['relation']}:{blocker_info['block']}@{blocker_info['pos']})"
+                if blocker_info
+                else (
+                    f"{stop_reason}({last_error['code']}@{last_error.get('pos')})"
+                    if last_error and last_error.get("code")
+                    else stop_reason
+                )
+            )
+            if up_dirs:
+                out_stair["hint"] = (
+                    f"向上({d_key})遇到{detail_up}，禁止继续朝{d_key}上挖；实测可行向上阶梯方向: {','.join(up_dirs)}"
+                    f"（请调 mc_skill_staircase(direction='{up_dirs[0]}', vertical='up', steps=6)）"
+                    + (f"，或平推方向: {','.join(tunnel_dirs)}。" if tunnel_dirs else "。")
+                )
+            elif tunnel_dirs:
+                out_stair["hint"] = (
+                    f"向上({d_key})遇到{detail_up}，当前位置无安全上挖方向(viable_up_directions=[])；"
+                    f"实测可平推绕避方向: {','.join(tunnel_dirs)}（请改调 mc_skill_tunnel(direction='{tunnel_dirs[0]}', steps=6) 后再上探）。"
+                )
+            else:
+                vpillar = self._probe_viable_pillar_up(
+                    ebx,
+                    eby,
+                    ebz,
+                    probe_cache=probe_cache_up,
+                    inv_counts=up_inv,
+                )
+                out_stair["viable_pillar_up"] = vpillar
+                if vpillar:
+                    out_stair["hint"] = (
+                        f"向上({d_key})遇到{detail_up}，当前坐标[{ebx},{eby},{ebz}]斜向上挖与水平通道均受阻"
+                        "(viable_up_directions=[], viable_tunnel_directions=[])，但头顶正上方安全且有垫脚方块(viable_pillar_up=true)，"
+                        "请改调 mc_skill_staircase(vertical='pillar', steps=4) 原地垂直挖顶垫脚直上脱困！"
+                    )
+                else:
+                    out_stair["hint"] = (
+                        f"向上({d_key})遇到{detail_up}，当前坐标[{ebx},{eby},{ebz}]上挖与水平通道均受阻"
+                        "(viable_up_directions=[], viable_tunnel_directions=[], viable_pillar_up=false)，禁止继续重复调用 mc_skill_staircase/mc_skill_tunnel；"
+                        "请先调 mc_move_to 沿既有矿道走出死胡同，或用 mc_get_block 确认安全后以 mc_dig / mc_place 脱困。"
+                    )
+        elif stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy"}:
+            out_stair["hint"] = f"前方({d_key})遇到{stop_reason}，禁止原地继续朝{d_key}重试，请换其他方向！"
+        if surface_evidence is not None:
+            out_stair["surface_evidence"] = surface_evidence
+        out_stair["ores_nearby"] = ores_nearby
+        return out_stair
+
+    def _try_seal_shaft_threat(
+        self,
+        pos0: list[float] | tuple[float, ...],
+        enclosure: dict[str, Any],
+        threat_pos: list[float] | tuple[float, ...] | None,
+        counts: dict[str, int] | None = None,
+    ) -> dict[str, Any] | None:
+        """Inside a carved shaft, seal a 1-wide open corridor facing an active threat instead of fleeing outside."""
+        if enclosure.get("structure") != "carved_shaft":
+            return None
+        if not isinstance(threat_pos, (list, tuple)) or len(threat_pos) < 3:
+            return None
+        inv_counts = counts if counts is not None else _inventory_counts(self.bot)
+        filler = next((b for b in SHAFT_SEAL_BLOCKS if inv_counts.get(b, 0) >= 2), None)
+        if filler is None:
+            return None
+
+        t_dir = cardinal_bearing(float(threat_pos[0]) - float(pos0[0]), float(threat_pos[2]) - float(pos0[2]))
+        open_dirs = enclosure.get("open_dirs") or []
+        if t_dir not in open_dirs:
+            return None
+
+        dir_vecs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
+        sdx, sdz = dir_vecs[t_dir]
+        px, pz = float(pos0[0]), float(pos0[2])
+        h_dist = math.hypot(float(threat_pos[0]) - px, float(threat_pos[2]) - pz)
+        pbx, pbz = math.floor(px), math.floor(pz)
+        target_col = (pbx + sdx, pbz + sdz)
+        overlaps_target = abs(px - (target_col[0] + 0.5)) < 0.75 and abs(pz - (target_col[1] + 0.5)) < 0.75
+
+        if h_dist < 2.1 or overlaps_target:
+            opp_vec = (-sdx, -sdz)
+            retreat_dir = next((d for d in open_dirs if d != t_dir), None)
+            if retreat_dir is not None:
+                rdx, rdz = dir_vecs[retreat_dir]
+            else:
+                rdx, rdz = opp_vec
+            try:
+                self.bot.call(
+                    "control",
+                    {
+                        "forward": True,
+                        "sprint": True,
+                        "jump": retreat_dir in (enclosure.get("up_open_dirs") or []),
+                        "yaw": _yaw_toward(px, pz, px + rdx * 5.0, pz + rdz * 5.0),
+                        "ms": 550,
+                        "stop_on": ["death"],
+                    },
+                )
+            except ApiError:
+                pass
+
+        st_cur = self.bot.status()
+        if st_cur.get("alive") is False:
+            return None
+        cpos = st_cur.get("pos") or pos0
+        cx, cy, cz = float(cpos[0]), float(cpos[1]), float(cpos[2])
+        bx, by, bz = math.floor(cx), math.floor(cy), math.floor(cz)
+        tx, tz = bx + sdx, bz + sdz
+        if abs(cx - (tx + 0.5)) < 0.75 and abs(cz - (tz + 0.5)) < 0.75:
+            return None
+
+        b0 = _cached_block_name(self.bot, tx, by, tz, None)
+        b1 = _cached_block_name(self.bot, tx, by + 1, tz, None)
+        if b0 in PASSABLE_WALK_BLOCKS:
+            targets = [[tx, by, tz], [tx, by + 1, tz]]
+        elif b1 in PASSABLE_WALK_BLOCKS:
+            targets = [[tx, by + 1, tz], [tx, by + 2, tz]]
+        else:
+            return None
+
+        for cell in targets:
+            cur_blk = _cached_block_name(self.bot, cell[0], cell[1], cell[2], None)
+            if cur_blk != "unknown" and cur_blk not in PASSABLE_WALK_BLOCKS:
+                continue
+            try:
+                self.bot.call("place", {"item": filler, "pos": cell})
+            except ApiError:
+                pass
+
+        for cell in targets:
+            fresh_blk = _cached_block_name(self.bot, cell[0], cell[1], cell[2], None)
+            if fresh_blk == "unknown" or fresh_blk in PASSABLE_WALK_BLOCKS:
+                return None
+
+        return {
+            "ok": True,
+            "mode": "seal_shaft",
+            "structure": "carved_shaft",
+            "sealed_direction": t_dir,
+            "filler": filler,
+            "placed_positions": targets,
+            "moved_dist": round(math.hypot(cx - float(pos0[0]), cz - float(pos0[2])), 1),
+            "pos_before": [round(float(pos0[0]), 1), round(float(pos0[1]), 1), round(float(pos0[2]), 1)],
+            "pos_after": cpos,
+            "requires_replan": True,
+            "note": f"已用 {filler} 封堵探矿穴 {t_dir} 侧来敌通道，保留当前探矿穴无需返回地表。",
+        }
+
+    def flee_hostiles(
+        self,
+        *,
+        distance: float = 14.0,
+        urgent: bool = False,
+        geofence: Any | None = None,
+        threat_pos: list[float] | None = None,
+    ) -> dict[str, Any]:
+        """Hold/seal inside a carved shaft when safe or sealable, else sprint-jump flee with death-only stop."""
+        target_d = max(8.0, min(22.0, float(distance)))
+        st0 = self.bot.status()
+        if st0.get("alive") is False:
+            return {"ok": False, "mode": "flee", "error": "dead", "requires_replan": True}
+
+        pos0 = st0.get("pos") or [0.0, 64.0, 0.0]
+        px, py, pz = float(pos0[0]), float(pos0[1]), float(pos0[2])
+
+        block_cache: dict[tuple[int, int, int], str] = {}
+        enclosure = inspect_local_enclosure(self.bot, pos0, block_cache=block_cache)
+        threat = assess_hostile_occlusion(
+            self.bot,
+            pos0,
+            radius=18,
+            fallback_nearest=st0.get("nearest_hostile"),
+            block_cache=block_cache,
+        )
+
+        if (
+            not urgent
+            and enclosure.get("structure") in {"sealed_bunker", "carved_shaft"}
+            and threat["complete"]
+            and len(threat["unoccluded"]) == 0
+            and threat_pos is None
+        ):
+            return {
+                "ok": True,
+                "mode": "hold_in_shaft",
+                "structure": enclosure["structure"],
+                "moved_dist": 0.0,
+                "occluded_hostiles": [
+                    {
+                        "name": o["name"],
+                        "dist": o["dist"],
+                        "bearing": o["bearing"],
+                        "blocker": (o.get("blocker") or {}).get("name"),
+                    }
+                    for o in threat["occluded"][:3]
+                ],
+                "pos_before": [round(px, 1), round(py, 1), round(pz, 1)],
+                "pos_after": [round(px, 1), round(py, 1), round(pz, 1)],
+                "requires_replan": False,
+                "note": "当前位于封闭掩体/探矿穴内且周边怪物均被岩层阻隔（无视线接触），原地保留探矿穴，切勿弃坑逃跑。",
+            }
+
+        resolved_threat_pos: list[float] | None = None
+        if isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3:
+            resolved_threat_pos = [float(threat_pos[0]), float(threat_pos[1]), float(threat_pos[2])]
+        elif threat["unoccluded"]:
+            resolved_threat_pos = list(threat["unoccluded"][0]["pos"])
+        else:
+            nh = st0.get("nearest_hostile")
+            if isinstance(nh, dict) and isinstance(nh.get("pos"), (list, tuple)) and len(nh["pos"]) >= 3:
+                resolved_threat_pos = [float(nh["pos"][0]), float(nh["pos"][1]), float(nh["pos"][2])]
+            elif threat["occluded"]:
+                resolved_threat_pos = list(threat["occluded"][0]["pos"])
+
+        if enclosure.get("structure") == "carved_shaft" and resolved_threat_pos is not None:
+            sealed = self._try_seal_shaft_threat(pos0, enclosure, resolved_threat_pos)
+            if sealed is not None:
+                return sealed
+            target_d = min(target_d, 8.0)
+
+        hx: float | None = resolved_threat_pos[0] if resolved_threat_pos is not None else None
+        hz: float | None = resolved_threat_pos[2] if resolved_threat_pos is not None else None
+
+        if hx is not None and hz is not None:
+            dx, dz = px - hx, pz - hz
+            norm = math.hypot(dx, dz)
+            ux, uz = (dx / norm, dz / norm) if norm > 1e-4 else (0.0, -1.0)
+        else:
+            ux, uz = 0.0, -1.0
+
+        def _rotated_vecs() -> list[tuple[float, float]]:
+            out: list[tuple[float, float]] = []
+            for deg in (0, 45, -45, 90, -90, 135, -135, 180):
+                rad = math.radians(deg)
+                c, s = math.cos(rad), math.sin(rad)
+                out.append((ux * c - uz * s, ux * s + uz * c))
+            return out
+
+        rotated = _rotated_vecs()
+        gf_enabled = geofence is not None and bool(getattr(geofence, "enabled", False))
+        if gf_enabled:
+            allowed = [
+                (rx, rz)
+                for rx, rz in rotated
+                if geofence.check_point(px + rx * target_d, pz + rz * target_d, action="mc_skill_flee") is None
+            ]
+            if not allowed:
+                short_d = min(target_d, 6.0)
+                allowed = [
+                    (rx, rz)
+                    for rx, rz in rotated
+                    if geofence.check_point(px + rx * short_d, pz + rz * short_d, action="mc_skill_flee") is None
+                ]
+            candidates = allowed or rotated
+        else:
+            candidates = rotated
+
+        rx0, rz0 = candidates[0]
+        try:
+            self.bot.call(
+                "control",
+                {
+                    "forward": True,
+                    "sprint": True,
+                    "jump": True,
+                    "yaw": _yaw_toward(px, pz, px + rx0 * 10.0, pz + rz0 * 10.0),
+                    "ms": 1200,
+                    "stop_on": ["death"],
+                },
+            )
+        except ApiError:
+            pass
+
+        st_mid = self.bot.status()
+        if st_mid.get("alive") is False:
+            return {"ok": False, "mode": "flee", "error": "dead", "requires_replan": True}
+
+        mid_pos = st_mid.get("pos") or pos0
+        moved = math.hypot(float(mid_pos[0]) - px, float(mid_pos[2]) - pz)
+        nh_mid = st_mid.get("nearest_hostile")
+        nh_mid_dist = float(nh_mid.get("dist", 99.0)) if isinstance(nh_mid, dict) else 99.0
+
+        if nh_mid_dist < 9.0 or moved < 4.5:
+            mv_ok = False
+            for rx, rz in candidates[:2]:
+                try:
+                    self.bot.call(
+                        "move_to",
+                        {
+                            "x": round(px + rx * target_d, 1),
+                            "z": round(pz + rz * target_d, 1),
+                            "range": 2.0,
+                            "stop_on": ["death"],
+                            "timeout": 2800 if urgent else 7000,
+                        },
+                    )
+                    mv_ok = True
+                    break
+                except ApiError:
+                    continue
+            if not mv_ok:
+                rx1, rz1 = candidates[1] if len(candidates) > 1 else candidates[0]
+                cur = self.bot.status().get("pos") or mid_pos
+                cx, cz = float(cur[0]), float(cur[2])
+                try:
+                    self.bot.call(
+                        "control",
+                        {
+                            "forward": True,
+                            "sprint": True,
+                            "jump": True,
+                            "yaw": _yaw_toward(cx, cz, cx + rx1 * 10.0, cz + rz1 * 10.0),
+                            "ms": 900,
+                            "stop_on": ["death"],
+                        },
+                    )
+                except ApiError:
+                    pass
+
+        st_end = self.bot.status()
+        end_pos = st_end.get("pos") or mid_pos
+        moved_dist = round(math.hypot(float(end_pos[0]) - px, float(end_pos[2]) - pz), 1)
+        nh_after = st_end.get("nearest_hostile")
+        nh_end_dist = float(nh_after.get("dist", 99.0)) if isinstance(nh_after, dict) else 99.0
+        return {
+            "ok": bool(st_end.get("alive", True)) and (nh_end_dist >= 7.0 or moved_dist >= 4.5),
+            "mode": "flee",
+            "moved_dist": moved_dist,
+            "nearest_hostile_after": nh_after,
+            "pos_before": [round(px, 1), round(py, 1), round(pz, 1)],
+            "pos_after": end_pos,
+            "requires_replan": True,
+        }
+
+    def defend_or_flee(
+        self,
+        *,
+        attacker: dict[str, Any] | None = None,
+        counts: dict[str, int] | None = None,
+        health: float | None = None,
+        urgent: bool = False,
+        geofence: Any | None = None,
+    ) -> dict[str, Any]:
+        """Counter-attack a lone unoccluded melee zombie/spider when well-armed, else seal shaft or sprint-flee."""
+        if counts is None:
+            counts = _inventory_counts(self.bot)
+        st0 = self.bot.status()
+        pos0 = st0.get("pos") or [0.0, 64.0, 0.0]
+        if health is None:
+            hp = float(st0.get("health") or 0.0)
+        else:
+            hp = float(health)
+
+        threat = assess_hostile_occlusion(self.bot, pos0, radius=12, fallback_nearest=attacker)
+        unoccluded = threat["unoccluded"]
+        occluded = threat["occluded"]
+
+        best_weapon = best_melee_weapon_in_inv(counts)
+        danger_mobs = {"creeper", "enderman", "warden", "witch"}
+        danger_mob_near = any(
+            str(e.get("name") or "").removeprefix("minecraft:") in danger_mobs and float(e.get("dist", 99.0)) <= 8.0
+            for e in unoccluded
+        )
+        close_unblocked = [e for e in unoccluded if float(e.get("dist", 99.0)) <= 6.5]
+
+        target: dict[str, Any] | None = None
+        target_occluded = False
+        att_id = attacker.get("id") if isinstance(attacker, dict) else None
+        if att_id is not None:
+            match_u = next((e for e in unoccluded if e.get("id") == att_id), None)
+            if match_u is not None:
+                target = match_u
+            else:
+                match_o = next((e for e in occluded if e.get("id") == att_id), None)
+                if match_o is not None:
+                    target = match_o
+                    target_occluded = True
+                elif not threat["complete"]:
+                    target = attacker
+        elif len(close_unblocked) == 1:
+            target = close_unblocked[0]
+
+        t_id = target.get("id") if isinstance(target, dict) else None
+        t_name = str(target.get("name") or "").removeprefix("minecraft:") if isinstance(target, dict) else ""
+        t_dist = float(target.get("dist", 3.0)) if isinstance(target, dict) else 99.0
+        t_pos = target.get("pos") if isinstance(target, dict) else None
+
+        can_counter = (
+            best_weapon is not None
+            and hp >= 11.0
+            and not danger_mob_near
+            and len(close_unblocked) <= 1
+            and t_id is not None
+            and not target_occluded
+            and t_name in SAFE_MELEE_MOBS
+            and t_dist <= 5.5
+        )
+        if can_counter:
+            try:
+                self.bot.call("equip", {"item": best_weapon, "slot": "hand"})
+            except ApiError:
+                pass
+            try:
+                atk_res = self.bot.call(
+                    "attack",
+                    {"entity_id": int(t_id), "timeout": 4200 if urgent else 12000},
+                )
+                st_after = self.bot.status()
+                nh_after = st_after.get("nearest_hostile")
+                nh_after_dist = float(nh_after.get("dist", 99.0)) if isinstance(nh_after, dict) else 99.0
+                killed = bool(atk_res.get("killed")) or not (
+                    isinstance(nh_after, dict) and nh_after.get("id") == t_id
+                )
+                if killed or nh_after_dist >= 6.0:
+                    return {
+                        "ok": True,
+                        "mode": "counter_attack",
+                        "weapon": best_weapon,
+                        "target": t_name,
+                        "entity_id": int(t_id),
+                        "killed": killed,
+                        "attack": atk_res,
+                        "pos_after": st_after.get("pos"),
+                        "requires_replan": True,
+                    }
+            except ApiError:
+                pass
+
+        return self.flee_hostiles(
+            distance=14.0 if not can_counter else 12.0,
+            urgent=urgent,
+            geofence=geofence,
+            threat_pos=t_pos if isinstance(t_pos, list) else None,
+        )

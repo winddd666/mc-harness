@@ -1,0 +1,14 @@
+{
+  "credential_modes": {
+    ".env.beast": "0o600",
+    ".state-beast/tokens.json": "0o600",
+    "api/config.json": "0o600",
+    "leaves/server.properties": "0o600"
+  },
+  "rule": [
+    {
+      "cmd": "gamerule keep_inventory",
+      "reply": "Gamerule keep_inventory is currently set to: true"
+    }
+  ]
+}

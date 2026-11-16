@@ -1,0 +1,412 @@
+{
+  "assisted": true,
+  "target": [
+    -188.9,
+    58,
+    -388.9
+  ],
+  "started_at": 1794735559.8942344,
+  "note": "Existing prepared room; corner teleport only, no health/effect/item grants.",
+  "before": {
+    "status": {
+      "username": "BeastBot_01",
+      "pos": [
+        -165.5,
+        74,
+        -385.5
+      ],
+      "yaw": 3.14,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 20,
+      "food": 20,
+      "saturation": 5,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 20,
+      "armor_points": 0,
+      "held": {
+        "name": "dirt",
+        "count": 16,
+        "slot": 37
+      },
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 9049,
+      "is_day": true,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 7.7
+      },
+      "last_death": {
+        "pos": [
+          -188.9,
+          58,
+          -390.9
+        ],
+        "t": 1794735502169,
+        "dropped_items_at": [
+          -188.9,
+          58,
+          -390.9
+        ]
+      }
+    },
+    "inventory": {
+      "items": [
+        {
+          "name": "cobblestone",
+          "count": 33,
+          "slot": 36
+        },
+        {
+          "name": "dirt",
+          "count": 16,
+          "slot": 37
+        },
+        {
+          "name": "cobblestone",
+          "count": 64,
+          "slot": 38
+        },
+        {
+          "name": "wildflowers",
+          "count": 1,
+          "slot": 39
+        },
+        {
+          "name": "granite",
+          "count": 15,
+          "slot": 40
+        },
+        {
+          "name": "stick",
+          "count": 4,
+          "slot": 41
+        },
+        {
+          "name": "wooden_pickaxe",
+          "count": 1,
+          "slot": 42,
+          "durability_used": 9
+        },
+        {
+          "name": "stone_pickaxe",
+          "count": 1,
+          "slot": 43,
+          "durability_used": 111
+        },
+        {
+          "name": "birch_planks",
+          "count": 1,
+          "slot": 44
+        }
+      ],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": {
+        "name": "dirt",
+        "count": 16,
+        "slot": 37
+      },
+      "empty_slots": 27
+    }
+  },
+  "teleport": {
+    "commands": [
+      {
+        "cmd": "tp BeastBot_01 -188.9 58 -388.9",
+        "reply": "Teleported BeastBot_01 to -188.900000, 58.000000, -388.900000"
+      }
+    ]
+  },
+  "positioned": {
+    "username": "BeastBot_01",
+    "pos": [
+      -188.9,
+      58,
+      -388.9
+    ],
+    "yaw": 3.14,
+    "speed": 0,
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "dimension": "overworld",
+    "gamemode": "survival",
+    "health": 19,
+    "food": 20,
+    "saturation": 5,
+    "xp_level": 0,
+    "xp_progress": 0,
+    "oxygen": 20,
+    "armor_points": 0,
+    "held": {
+      "name": "dirt",
+      "count": 16,
+      "slot": 37
+    },
+    "offhand": null,
+    "effects": [],
+    "on_fire": false,
+    "is_sleeping": false,
+    "in_water": false,
+    "submerged": false,
+    "in_lava": false,
+    "in_vehicle": null,
+    "sneaking": false,
+    "jumping": false,
+    "blocking": false,
+    "using_item": null,
+    "time_of_day": 9069,
+    "is_day": true,
+    "raining": false,
+    "thundering": false,
+    "biome": "",
+    "on_ground": true,
+    "alive": true,
+    "ready": true,
+    "busy": null,
+    "nearest_hostile": {
+      "id": 28847,
+      "name": "creeper",
+      "dist": 9.1
+    },
+    "last_death": {
+      "pos": [
+        -188.9,
+        58,
+        -390.9
+      ],
+      "t": 1794735502169,
+      "dropped_items_at": [
+        -188.9,
+        58,
+        -390.9
+      ]
+    }
+  },
+  "result": {
+    "ok": true,
+    "requires_replan": false,
+    "inside_shaft": true,
+    "origin": [
+      -189,
+      58,
+      -389
+    ],
+    "floor_pos": [
+      -189,
+      54,
+      -389
+    ],
+    "floor_block": "granite",
+    "crafted_planks": null,
+    "dug": [
+      {
+        "pos": [
+          -189,
+          57,
+          -389
+        ],
+        "block": "stone"
+      },
+      {
+        "pos": [
+          -189,
+          56,
+          -389
+        ],
+        "block": "stone"
+      },
+      {
+        "pos": [
+          -189,
+          55,
+          -389
+        ],
+        "block": "stone"
+      }
+    ],
+    "roof_pos": [
+      -189,
+      57,
+      -389
+    ],
+    "roof_item": "dirt",
+    "roof_placed": true,
+    "roof_error": null,
+    "pos_after": [
+      -188.6,
+      55,
+      -388.6
+    ]
+  },
+  "duration": 4.086209600995062,
+  "after": {
+    "status": {
+      "username": "BeastBot_01",
+      "pos": [
+        -188.6,
+        55,
+        -388.6
+      ],
+      "yaw": -1.72,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 20,
+      "food": 20,
+      "saturation": 3,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 20,
+      "armor_points": 0,
+      "held": {
+        "name": "dirt",
+        "count": 15,
+        "slot": 37
+      },
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 9149,
+      "is_day": true,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 28847,
+        "name": "creeper",
+        "dist": 11.5
+      },
+      "last_death": {
+        "pos": [
+          -188.9,
+          58,
+          -390.9
+        ],
+        "t": 1794735502169,
+        "dropped_items_at": [
+          -188.9,
+          58,
+          -390.9
+        ]
+      }
+    },
+    "inventory": {
+      "items": [
+        {
+          "name": "cobblestone",
+          "count": 36,
+          "slot": 36
+        },
+        {
+          "name": "dirt",
+          "count": 15,
+          "slot": 37
+        },
+        {
+          "name": "cobblestone",
+          "count": 64,
+          "slot": 38
+        },
+        {
+          "name": "wildflowers",
+          "count": 1,
+          "slot": 39
+        },
+        {
+          "name": "granite",
+          "count": 15,
+          "slot": 40
+        },
+        {
+          "name": "stick",
+          "count": 4,
+          "slot": 41
+        },
+        {
+          "name": "wooden_pickaxe",
+          "count": 1,
+          "slot": 42,
+          "durability_used": 9
+        },
+        {
+          "name": "stone_pickaxe",
+          "count": 1,
+          "slot": 43,
+          "durability_used": 114
+        },
+        {
+          "name": "birch_planks",
+          "count": 1,
+          "slot": 44
+        }
+      ],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": {
+        "name": "dirt",
+        "count": 15,
+        "slot": 37
+      },
+      "empty_slots": 27
+    }
+  },
+  "ended_at": 1794735565.0324392
+}

@@ -1,0 +1,18 @@
+{
+  "at": 1794735378.6459801,
+  "observer_only": true,
+  "commands": [
+    {
+      "cmd": "effect give BeastCam minecraft:night_vision infinite 0 true",
+      "reply": "Applied effect Night Vision to BeastCam"
+    },
+    {
+      "cmd": "data get entity BeastCam active_effects",
+      "reply": "BeastCam has the following entity data: [{show_particles: 0b, id: \"minecraft:night_vision\", duration: -1, show_icon: 0b}]"
+    },
+    {
+      "cmd": "gamerule keep_inventory",
+      "reply": "Gamerule keep_inventory is currently set to: true"
+    }
+  ]
+}

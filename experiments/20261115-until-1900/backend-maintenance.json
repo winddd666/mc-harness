@@ -1,0 +1,50 @@
+{
+  "phase": "complete",
+  "updated_at": "2026-11-15T08:06:24.860339+00:00",
+  "preflight": {
+    "api": {
+      "pid": 421096,
+      "cwd": "/home/xia/mc-beast/api",
+      "argv": [
+        "/home/xia/mc-beast/runtime/node-v22.14.0-linux-x64/bin/node",
+        "/home/xia/mc-beast/api/src/index.js",
+        "/home/xia/mc-beast/api/config.json"
+      ]
+    },
+    "cooldown_until": 1794729282166,
+    "source_hashes_verified": true,
+    "secret_modes_verified": true
+  },
+  "api_pid": 433797,
+  "stopped_viewer_pids": [
+    422698,
+    422711
+  ],
+  "backup": "/home/xia/mc-beast/api/backups/20261115-action-lifecycle",
+  "remote_cache_updated": true,
+  "local_cache_mode": "0o600",
+  "mc_live_pid": 433813,
+  "runtime": {
+    "source_revision": "1e67662e3ad7dfdd",
+    "loaded_at": "2026-11-15T08:06:24.348980+00:00",
+    "pid": 721512
+  },
+  "telemetry": {
+    "connected": false,
+    "ready": false,
+    "username": null,
+    "pos": null,
+    "dimension": null,
+    "biome": null,
+    "is_day": null,
+    "time_of_day": null,
+    "health": null,
+    "food": null,
+    "armor": null,
+    "held": null,
+    "inventory_total": 0,
+    "top_items": [],
+    "updated_at": "2026-11-15T08:06:24.387597+00:00",
+    "error": null
+  }
+}

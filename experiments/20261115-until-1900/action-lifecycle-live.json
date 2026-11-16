@@ -1,0 +1,1192 @@
+{
+  "verified": true,
+  "rows": [
+    {
+      "action": "status",
+      "time": 1794730167.1181943,
+      "elapsed": 0.007857338001485914,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "oxygen": 20,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21188,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": true,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730167.1288292,
+      "elapsed": 0.007869453009334393,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "oxygen": 20,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": true,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21188,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": true,
+        "busy": "control",
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "disconnect",
+      "time": 1794730167.1337323,
+      "elapsed": 0.004896205005934462,
+      "ok": true,
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "action": "control",
+      "time": 1794730167.1357312,
+      "elapsed": 0.016299454000545666,
+      "ok": false,
+      "error": {
+        "code": "interrupted",
+        "message": "action cancelled: disconnected",
+        "cause": "disconnected",
+        "requires_replan": true
+      }
+    },
+    {
+      "action": "connect",
+      "time": 1794730167.1493928,
+      "elapsed": 0.01332292398728896,
+      "ok": true,
+      "result": {
+        "ok": true,
+        "reconnect": true
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730167.164248,
+      "elapsed": 0.014847762999124825,
+      "ok": false,
+      "error": {
+        "code": "not_connected",
+        "message": "bot not connected"
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730167.4201205,
+      "elapsed": 0.005664419993991032,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": null,
+        "velocity": null,
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21202,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": null,
+        "on_ground": false,
+        "alive": true,
+        "ready": false,
+        "busy": null
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730167.6754868,
+      "elapsed": 0.005273518007015809,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": null,
+        "velocity": null,
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21202,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": false,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730167.9314635,
+      "elapsed": 0.005789995004306547,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": null,
+        "velocity": null,
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21202,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": false,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730168.1898022,
+      "elapsed": 0.008120907994452864,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": null,
+        "velocity": null,
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21219,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": false,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730168.4452147,
+      "elapsed": 0.005310697000822984,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21219,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730168.701548,
+      "elapsed": 0.006168913998408243,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21219,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730168.9574447,
+      "elapsed": 0.005770555988419801,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21219,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730169.2141562,
+      "elapsed": 0.006599519008887,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21239,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730169.4708087,
+      "elapsed": 0.005301957004121505,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21239,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730169.729156,
+      "elapsed": 0.008239399990998209,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21239,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730169.9877882,
+      "elapsed": 0.008504730998538435,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21239,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730170.245299,
+      "elapsed": 0.007381090996204875,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21259,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730170.5011394,
+      "elapsed": 0.0057424740080023184,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21259,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730170.7589996,
+      "elapsed": 0.007745391005300917,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21259,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730171.014785,
+      "elapsed": 0.005649283004458994,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21259,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": false,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "status",
+      "time": 1794730171.2717469,
+      "elapsed": 0.0068744979944312945,
+      "ok": true,
+      "result": {
+        "username": "BeastBot_01",
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "yaw": 3.14,
+        "speed": 0,
+        "velocity": [
+          0,
+          0,
+          0
+        ],
+        "dimension": "overworld",
+        "gamemode": "survival",
+        "health": 20,
+        "food": 20,
+        "saturation": 5,
+        "xp_level": 0,
+        "xp_progress": 0,
+        "armor_points": 0,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "offhand": null,
+        "effects": [],
+        "on_fire": false,
+        "is_sleeping": false,
+        "in_water": false,
+        "submerged": false,
+        "in_lava": false,
+        "in_vehicle": null,
+        "sneaking": false,
+        "jumping": false,
+        "blocking": false,
+        "using_item": null,
+        "time_of_day": 21279,
+        "is_day": false,
+        "raining": false,
+        "thundering": false,
+        "biome": "",
+        "on_ground": true,
+        "alive": true,
+        "ready": true,
+        "busy": null,
+        "nearest_hostile": {
+          "id": 19780,
+          "name": "zombie",
+          "dist": 16.7
+        }
+      }
+    },
+    {
+      "action": "control",
+      "time": 1794730171.3790932,
+      "elapsed": 0.10733901600178797,
+      "ok": true,
+      "result": {
+        "ms": 100,
+        "pos": [
+          -166.5,
+          77,
+          -374.5
+        ],
+        "moved": 0,
+        "on_ground": true,
+        "in_water": false,
+        "yaw": 3.14,
+        "pitch": 0
+      }
+    },
+    {
+      "action": "inventory",
+      "time": 1794730171.3835268,
+      "elapsed": 0.004428554995683953,
+      "ok": true,
+      "result": {
+        "items": [
+          {
+            "name": "dirt",
+            "count": 17,
+            "slot": 37
+          },
+          {
+            "name": "cobblestone",
+            "count": 5,
+            "slot": 38
+          },
+          {
+            "name": "wildflowers",
+            "count": 1,
+            "slot": 39
+          },
+          {
+            "name": "crafting_table",
+            "count": 1,
+            "slot": 40
+          },
+          {
+            "name": "stick",
+            "count": 4,
+            "slot": 41
+          },
+          {
+            "name": "wooden_pickaxe",
+            "count": 1,
+            "slot": 42,
+            "durability_used": 9
+          },
+          {
+            "name": "stone_pickaxe",
+            "count": 1,
+            "slot": 43
+          },
+          {
+            "name": "birch_planks",
+            "count": 1,
+            "slot": 44
+          }
+        ],
+        "armor": {
+          "head": null,
+          "chest": null,
+          "legs": null,
+          "feet": null
+        },
+        "offhand": null,
+        "held": {
+          "name": "crafting_table",
+          "count": 1,
+          "slot": 40
+        },
+        "empty_slots": 28
+      }
+    }
+  ],
+  "disconnect_response_seconds": 0.0070353949995478615,
+  "same_token_reused": true
+}

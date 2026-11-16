@@ -1,0 +1,41 @@
+{
+  "8770": {
+    "running": false,
+    "active_turn_id": null,
+    "runtime": {
+      "source_revision": "df9b93f12ac8e251",
+      "loaded_at": "2026-11-15T09:48:18.245457+00:00",
+      "pid": 765217
+    }
+  },
+  "8765": {
+    "online": true,
+    "ready": true,
+    "runtime": {
+      "source_revision": "df9b93f12ac8e251",
+      "loaded_at": "2026-11-15T09:48:18.285499+00:00",
+      "pid": 765216
+    }
+  },
+  "material_preflight": {
+    "crafting_table": {
+      "ok": false,
+      "missing_materials": {
+        "any_planks": 3
+      },
+      "required_materials": {
+        "any_planks": 4
+      }
+    },
+    "iron_pickaxe": {
+      "ok": false,
+      "missing_materials": {
+        "iron_ingot": 3
+      },
+      "required_materials": {
+        "iron_ingot": 3,
+        "stick": 2
+      }
+    }
+  }
+}

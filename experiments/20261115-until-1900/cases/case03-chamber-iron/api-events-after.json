@@ -1,0 +1,1442 @@
+{
+  "since": 0,
+  "last_seq": 147,
+  "total": 147,
+  "has_more": false,
+  "events": [
+    {
+      "seq": 1,
+      "t": 1794729983551,
+      "type": "chat",
+      "text": "BeastBot_01 joined the game"
+    },
+    {
+      "seq": 2,
+      "t": 1794729983560,
+      "type": "spawn",
+      "pos": [
+        -166.5,
+        77,
+        -374.5
+      ]
+    },
+    {
+      "seq": 3,
+      "t": 1794729983560,
+      "type": "server_confirmed",
+      "via": "spawn"
+    },
+    {
+      "seq": 4,
+      "t": 1794730167105,
+      "type": "disconnected",
+      "reason": "disconnect.quitting"
+    },
+    {
+      "seq": 5,
+      "t": 1794730167240,
+      "type": "chat",
+      "text": "BeastBot_01 joined the game"
+    },
+    {
+      "seq": 6,
+      "t": 1794730167272,
+      "type": "spawn",
+      "pos": [
+        -166.5,
+        77,
+        -374.5
+      ]
+    },
+    {
+      "seq": 7,
+      "t": 1794730167272,
+      "type": "server_confirmed",
+      "via": "spawn"
+    },
+    {
+      "seq": 8,
+      "t": 1794730365714,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 9,
+      "t": 1794730367313,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 10,
+      "t": 1794730368463,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 11,
+      "t": 1794730370013,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 12,
+      "t": 1794730371364,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 13,
+      "t": 1794730372513,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 14,
+      "t": 1794730374114,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 15,
+      "t": 1794730375614,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 16,
+      "t": 1794730376814,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 17,
+      "t": 1794730377966,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 18,
+      "t": 1794730379664,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 19,
+      "t": 1794730380813,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 20,
+      "t": 1794730382363,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 21,
+      "t": 1794730390863,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 22,
+      "t": 1794730392013,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 23,
+      "t": 1794730393614,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 24,
+      "t": 1794730395263,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 25,
+      "t": 1794730396463,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 26,
+      "t": 1794730398014,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 27,
+      "t": 1794730399364,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 28,
+      "t": 1794730400513,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 29,
+      "t": 1794730402113,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 30,
+      "t": 1794730403514,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 31,
+      "t": 1794730404664,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 32,
+      "t": 1794730405814,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 33,
+      "t": 1794730407464,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 34,
+      "t": 1794730408714,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 35,
+      "t": 1794730409863,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 36,
+      "t": 1794730411564,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 37,
+      "t": 1794730412714,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 38,
+      "t": 1794730414314,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 39,
+      "t": 1794730415713,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 40,
+      "t": 1794730416863,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 41,
+      "t": 1794730418013,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 42,
+      "t": 1794730419764,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 43,
+      "t": 1794730420917,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 44,
+      "t": 1794730422464,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 45,
+      "t": 1794730462167,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 46,
+      "t": 1794730463317,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 47,
+      "t": 1794730464465,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 48,
+      "t": 1794730465613,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 49,
+      "t": 1794730466765,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 50,
+      "t": 1794730498964,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 51,
+      "t": 1794730498964,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 52,
+      "t": 1794730500763,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 53,
+      "t": 1794730501914,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 54,
+      "t": 1794730503064,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 55,
+      "t": 1794730504715,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 56,
+      "t": 1794730505864,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 57,
+      "t": 1794730507014,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 58,
+      "t": 1794730508663,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 59,
+      "t": 1794730509814,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 60,
+      "t": 1794730510964,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 61,
+      "t": 1794730512613,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 62,
+      "t": 1794730513767,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 63,
+      "t": 1794730514915,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 64,
+      "t": 1794730516515,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 65,
+      "t": 1794730517664,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 66,
+      "t": 1794730518815,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 67,
+      "t": 1794730520463,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 68,
+      "t": 1794730521613,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 69,
+      "t": 1794730522765,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 70,
+      "t": 1794730524414,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 71,
+      "t": 1794730525568,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 72,
+      "t": 1794730526714,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 73,
+      "t": 1794730528314,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 74,
+      "t": 1794730529464,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 75,
+      "t": 1794730530618,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 76,
+      "t": 1794730532214,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 77,
+      "t": 1794730533363,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 78,
+      "t": 1794730534515,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 79,
+      "t": 1794730536181,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 80,
+      "t": 1794730537416,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 81,
+      "t": 1794730538567,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 82,
+      "t": 1794730540214,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 83,
+      "t": 1794730541369,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 84,
+      "t": 1794730735613,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 85,
+      "t": 1794730876213,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 86,
+      "t": 1794730884913,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 87,
+      "t": 1794730892213,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 88,
+      "t": 1794730901765,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 89,
+      "t": 1794730922264,
+      "type": "pickup",
+      "item": "cobblestone",
+      "count": 1
+    },
+    {
+      "seq": 90,
+      "t": 1794730938216,
+      "type": "hurt",
+      "health": 18,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25376,
+        "name": "skeleton",
+        "dist": 12
+      }
+    },
+    {
+      "seq": 91,
+      "t": 1794730939214,
+      "type": "hurt",
+      "health": 17.5,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25376,
+        "name": "skeleton",
+        "dist": 12
+      }
+    },
+    {
+      "seq": 92,
+      "t": 1794730940213,
+      "type": "hurt",
+      "health": 16.3,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11.5
+      }
+    },
+    {
+      "seq": 93,
+      "t": 1794730941214,
+      "type": "hurt",
+      "health": 14.8,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11.1
+      }
+    },
+    {
+      "seq": 94,
+      "t": 1794730942214,
+      "type": "hurt",
+      "health": 13.2,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11.2
+      }
+    },
+    {
+      "seq": 95,
+      "t": 1794730943214,
+      "type": "hurt",
+      "health": 11.2,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11.2
+      }
+    },
+    {
+      "seq": 96,
+      "t": 1794730944213,
+      "type": "hurt",
+      "health": 9.2,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11.2
+      }
+    },
+    {
+      "seq": 97,
+      "t": 1794730945214,
+      "type": "hurt",
+      "health": 7.2,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11.1
+      }
+    },
+    {
+      "seq": 98,
+      "t": 1794730946213,
+      "type": "hurt",
+      "health": 6.2,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11
+      }
+    },
+    {
+      "seq": 99,
+      "t": 1794730947214,
+      "type": "hurt",
+      "health": 4.2,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11
+      }
+    },
+    {
+      "seq": 100,
+      "t": 1794730948213,
+      "type": "hurt",
+      "health": 2.2,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11
+      }
+    },
+    {
+      "seq": 101,
+      "t": 1794730949213,
+      "type": "hurt",
+      "health": 0.2,
+      "damage": 2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11
+      }
+    },
+    {
+      "seq": 102,
+      "t": 1794730950222,
+      "type": "chat",
+      "text": "BeastBot_01 drowned"
+    },
+    {
+      "seq": 103,
+      "t": 1794730950223,
+      "type": "hurt",
+      "health": 0,
+      "damage": 1.2,
+      "source": "drown",
+      "likely_attacker": {
+        "id": 25286,
+        "name": "skeleton",
+        "dist": 11
+      }
+    },
+    {
+      "seq": 104,
+      "t": 1794730950223,
+      "type": "death",
+      "pos": [
+        -169.7,
+        46,
+        -372.3
+      ],
+      "dropped_items_at": [
+        -169.7,
+        46,
+        -372.3
+      ]
+    },
+    {
+      "seq": 105,
+      "t": 1794730950264,
+      "type": "spawn",
+      "pos": [
+        -164.5,
+        71,
+        -375.5
+      ]
+    },
+    {
+      "seq": 106,
+      "t": 1794730953072,
+      "type": "hurt",
+      "health": 2,
+      "damage": 18,
+      "source": "player_explosion",
+      "source_entity": {
+        "id": 25030,
+        "name": "creeper"
+      },
+      "likely_attacker": {
+        "id": 19780,
+        "name": "zombie",
+        "dist": 12.6
+      }
+    },
+    {
+      "seq": 107,
+      "t": 1794731097265,
+      "type": "pickup",
+      "item": "birch_log",
+      "count": 1
+    },
+    {
+      "seq": 108,
+      "t": 1794731132316,
+      "type": "hurt",
+      "health": 4.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26924,
+        "name": "zombie",
+        "dist": 1.5
+      }
+    },
+    {
+      "seq": 109,
+      "t": 1794731132864,
+      "type": "hurt",
+      "health": 1.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26924,
+        "name": "zombie",
+        "dist": 0.8
+      }
+    },
+    {
+      "seq": 110,
+      "t": 1794731133866,
+      "type": "chat",
+      "text": "BeastBot_01 was slain by Zombie"
+    },
+    {
+      "seq": 111,
+      "t": 1794731133866,
+      "type": "hurt",
+      "health": 0,
+      "damage": 1.3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26924,
+        "name": "zombie",
+        "dist": 1.4
+      }
+    },
+    {
+      "seq": 112,
+      "t": 1794731133866,
+      "type": "death",
+      "pos": [
+        -166.6,
+        71,
+        -376.7
+      ],
+      "dropped_items_at": [
+        -166.6,
+        71,
+        -376.7
+      ]
+    },
+    {
+      "seq": 113,
+      "t": 1794731133924,
+      "type": "spawn",
+      "pos": [
+        -157.5,
+        81,
+        -388.5
+      ]
+    },
+    {
+      "seq": 114,
+      "t": 1794731158814,
+      "type": "hurt",
+      "health": 17,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26915,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 2.2
+      }
+    },
+    {
+      "seq": 115,
+      "t": 1794731211413,
+      "type": "hurt",
+      "health": 17,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 27000,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 1.9
+      }
+    },
+    {
+      "seq": 116,
+      "t": 1794731212365,
+      "type": "hurt",
+      "health": 14.3,
+      "damage": 2.8,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 27000,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 1.5
+      }
+    },
+    {
+      "seq": 117,
+      "t": 1794731213226,
+      "type": "hurt",
+      "health": 11.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26915,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 0.6
+      }
+    },
+    {
+      "seq": 118,
+      "t": 1794731214065,
+      "type": "hurt",
+      "health": 8.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26915,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 0.8
+      }
+    },
+    {
+      "seq": 119,
+      "t": 1794731215065,
+      "type": "hurt",
+      "health": 5.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26915,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 0.7
+      }
+    },
+    {
+      "seq": 120,
+      "t": 1794731215914,
+      "type": "hurt",
+      "health": 2.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 0.9
+      }
+    },
+    {
+      "seq": 121,
+      "t": 1794731216384,
+      "type": "chat",
+      "text": "BeastBot_01 was slain by Zombie"
+    },
+    {
+      "seq": 122,
+      "t": 1794731216385,
+      "type": "hurt",
+      "health": 0,
+      "damage": 2.3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 27000,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 1.4
+      }
+    },
+    {
+      "seq": 123,
+      "t": 1794731216385,
+      "type": "death",
+      "pos": [
+        -147.8,
+        71,
+        -378.4
+      ],
+      "dropped_items_at": [
+        -147.8,
+        71,
+        -378.4
+      ]
+    },
+    {
+      "seq": 124,
+      "t": 1794731216413,
+      "type": "spawn",
+      "pos": [
+        -150.5,
+        71,
+        -381.5
+      ]
+    },
+    {
+      "seq": 125,
+      "t": 1794731216917,
+      "type": "hurt",
+      "health": 17,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26924,
+        "name": "zombie",
+        "dist": 1.6
+      }
+    },
+    {
+      "seq": 126,
+      "t": 1794731217915,
+      "type": "hurt",
+      "health": 15.5,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 0.5
+      }
+    },
+    {
+      "seq": 127,
+      "t": 1794731219272,
+      "type": "hurt",
+      "health": 13.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26915,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 1.4
+      }
+    },
+    {
+      "seq": 128,
+      "t": 1794731220121,
+      "type": "hurt",
+      "health": 10.8,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 27000,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 1
+      }
+    },
+    {
+      "seq": 129,
+      "t": 1794731220817,
+      "type": "hurt",
+      "health": 8,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 0.7
+      }
+    },
+    {
+      "seq": 130,
+      "t": 1794731221818,
+      "type": "hurt",
+      "health": 5.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 0.6
+      }
+    },
+    {
+      "seq": 131,
+      "t": 1794731222866,
+      "type": "hurt",
+      "health": 2.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 0.6
+      }
+    },
+    {
+      "seq": 132,
+      "t": 1794731223866,
+      "type": "chat",
+      "text": "BeastBot_01 was slain by Zombie"
+    },
+    {
+      "seq": 133,
+      "t": 1794731223866,
+      "type": "hurt",
+      "health": 0,
+      "damage": 2.3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 0.6
+      }
+    },
+    {
+      "seq": 134,
+      "t": 1794731223867,
+      "type": "death",
+      "pos": [
+        -150.7,
+        71,
+        -385.7
+      ],
+      "dropped_items_at": [
+        -150.7,
+        71,
+        -385.7
+      ]
+    },
+    {
+      "seq": 135,
+      "t": 1794731223913,
+      "type": "spawn",
+      "pos": [
+        -151.5,
+        72,
+        -386.5
+      ]
+    },
+    {
+      "seq": 136,
+      "t": 1794731224921,
+      "type": "hurt",
+      "health": 17,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26826,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 27000,
+        "name": "zombie",
+        "dist": 1.5
+      }
+    },
+    {
+      "seq": 137,
+      "t": 1794731226267,
+      "type": "hurt",
+      "health": 15.5,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26924,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26924,
+        "name": "zombie",
+        "dist": 1
+      }
+    },
+    {
+      "seq": 138,
+      "t": 1794731226967,
+      "type": "hurt",
+      "health": 13.3,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26915,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26924,
+        "name": "zombie",
+        "dist": 1.3
+      }
+    },
+    {
+      "seq": 139,
+      "t": 1794731227468,
+      "type": "hurt",
+      "health": 10.7,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26826,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 0.7
+      }
+    },
+    {
+      "seq": 140,
+      "t": 1794731227986,
+      "type": "hurt",
+      "health": 7.8,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 27000,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 0.6
+      }
+    },
+    {
+      "seq": 141,
+      "t": 1794731228468,
+      "type": "hurt",
+      "health": 5,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26915,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 0.6
+      }
+    },
+    {
+      "seq": 142,
+      "t": 1794731228970,
+      "type": "hurt",
+      "health": 2.2,
+      "damage": 3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 27000,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 0.7
+      }
+    },
+    {
+      "seq": 143,
+      "t": 1794731229470,
+      "type": "chat",
+      "text": "BeastBot_01 was slain by Zombie"
+    },
+    {
+      "seq": 144,
+      "t": 1794731229470,
+      "type": "hurt",
+      "health": 0,
+      "damage": 2.3,
+      "source": "mob_attack",
+      "source_entity": {
+        "id": 26915,
+        "name": "zombie"
+      },
+      "likely_attacker": {
+        "id": 26915,
+        "name": "zombie",
+        "dist": 0.6
+      }
+    },
+    {
+      "seq": 145,
+      "t": 1794731229470,
+      "type": "death",
+      "pos": [
+        -153.7,
+        72,
+        -388.7
+      ],
+      "dropped_items_at": [
+        -153.7,
+        72,
+        -388.7
+      ]
+    },
+    {
+      "seq": 146,
+      "t": 1794731229470,
+      "type": "death_loop",
+      "deaths": 3,
+      "cooldown_until": 1794731529470
+    },
+    {
+      "seq": 147,
+      "t": 1794731229472,
+      "type": "disconnected",
+      "reason": "death loop protection"
+    }
+  ]
+}

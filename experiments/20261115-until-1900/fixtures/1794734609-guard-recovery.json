@@ -1,0 +1,148 @@
+{
+  "assisted": true,
+  "connected": {
+    "ok": true,
+    "ms": 6,
+    "result": {
+      "ok": true,
+      "reconnect": true
+    }
+  },
+  "teleports": [
+    {
+      "cmd": "execute as BeastBot_01 run tp @s -187.5 58 -389.5",
+      "reply": ""
+    },
+    {
+      "cmd": "execute as BeastBot_01 run tp @s -187.5 58 -389.5",
+      "reply": "Teleported BeastBot_01 to -187.500000, 58.000000, -389.500000"
+    }
+  ],
+  "status": {
+    "ok": true,
+    "ms": 0,
+    "result": {
+      "username": "BeastBot_01",
+      "pos": [
+        -187.5,
+        58,
+        -389.5
+      ],
+      "yaw": 3.14,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 20,
+      "food": 20,
+      "saturation": 5,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 20,
+      "armor_points": 0,
+      "held": null,
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 14029,
+      "is_day": false,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 26794,
+        "name": "skeleton",
+        "dist": 20
+      },
+      "last_death": {
+        "pos": [
+          -146.9,
+          70.3,
+          -388.3
+        ],
+        "t": 1794734606218,
+        "dropped_items_at": [
+          -146.9,
+          70.3,
+          -388.3
+        ]
+      }
+    }
+  },
+  "inventory": {
+    "ok": true,
+    "ms": 1,
+    "result": {
+      "items": [
+        {
+          "name": "cobblestone",
+          "count": 21,
+          "slot": 36
+        },
+        {
+          "name": "dirt",
+          "count": 17,
+          "slot": 37
+        },
+        {
+          "name": "cobblestone",
+          "count": 64,
+          "slot": 38
+        },
+        {
+          "name": "wildflowers",
+          "count": 1,
+          "slot": 39
+        },
+        {
+          "name": "stick",
+          "count": 4,
+          "slot": 41
+        },
+        {
+          "name": "wooden_pickaxe",
+          "count": 1,
+          "slot": 42,
+          "durability_used": 9
+        },
+        {
+          "name": "stone_pickaxe",
+          "count": 1,
+          "slot": 43,
+          "durability_used": 82
+        },
+        {
+          "name": "birch_planks",
+          "count": 1,
+          "slot": 44
+        }
+      ],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": null,
+      "empty_slots": 28
+    }
+  }
+}

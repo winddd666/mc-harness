@@ -1,0 +1,12 @@
+{
+  "reason": "goal_service_usageLimited",
+  "at": 1794736029.8356426,
+  "expected_run": "20261115-174049-472472",
+  "active_run": "20261115-174049-472472",
+  "response": {
+    "ok": true,
+    "running": true,
+    "stopping": true,
+    "turn_id": "20261115-174049-472472"
+  }
+}

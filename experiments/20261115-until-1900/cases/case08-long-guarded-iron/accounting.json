@@ -1,0 +1,59 @@
+[
+  {
+    "run": "20261115-174049-472472.events.jsonl",
+    "elapsed_s": 380.389,
+    "status": "interrupted",
+    "error": null,
+    "source_revision": "b8918af89b485d17",
+    "requests_started": 17,
+    "requests_finished": 17,
+    "generation_wall_s_including_cancelled": 265.212,
+    "generation_fraction": 0.6972,
+    "generation_median_s": 13.23,
+    "generation_max_s": 45.274,
+    "first_delta_median_s": 7.006,
+    "first_delta_max_s": 40.392,
+    "cancelled_generations": 2,
+    "tools": {
+      "mc_advancement_frontier": 1,
+      "mc_get_entities": 1,
+      "mc_skill_craft_gear": 1,
+      "mc_kb_lookup": 2,
+      "mc_find_blocks": 2,
+      "mc_skill_staircase": 5,
+      "mc_skill_unstick": 1,
+      "mc_dig": 1,
+      "mc_inventory": 1,
+      "mc_craft": 1
+    },
+    "tool_seconds": {
+      "mc_advancement_frontier": 0.02,
+      "mc_get_entities": 0.02,
+      "mc_skill_craft_gear": 1.167,
+      "mc_kb_lookup": 0.004,
+      "mc_find_blocks": 0.247,
+      "mc_skill_staircase": 75.46,
+      "mc_skill_unstick": 22.853,
+      "mc_dig": 0.009,
+      "mc_inventory": 0.005,
+      "mc_craft": 14.555
+    },
+    "failure_codes": {
+      "missing_ingredients": 1,
+      "dig_unconfirmed": 1,
+      "missing_step_support": 2,
+      "tool_tier_insufficient": 1,
+      "interrupted": 1
+    },
+    "notable_deaths": 0,
+    "notable_hurts": 1,
+    "material_milestones": {
+      "stone_pickaxe": {
+        "first_observed_s": 0.6554,
+        "count": 1,
+        "source": "initial"
+      }
+    },
+    "limits": "Milestones are observations, not proof of production. Initial inventory is inherited. Missing inventory observations do not prove absence. Generation time includes synchronous guard actions; use tool/guardian events to separate them."
+  }
+]

@@ -1,0 +1,157 @@
+[
+  {
+    "run": "20261115-161125-277956.events.jsonl",
+    "elapsed_s": 969.3572,
+    "status": "runtime_error",
+    "error": "MC API 会话不可继续：[death_loop_cooldown] bot is in death loop cooldown, 275s remaining",
+    "source_revision": "1e67662e3ad7dfdd",
+    "requests_started": 62,
+    "requests_finished": 62,
+    "generation_wall_s_including_cancelled": 819.615,
+    "generation_fraction": 0.8455,
+    "generation_median_s": 9.099,
+    "generation_max_s": 43.23,
+    "first_delta_median_s": 6.355,
+    "first_delta_max_s": 38.155,
+    "cancelled_generations": 0,
+    "tools": {
+      "mc_place": 10,
+      "mc_craft": 4,
+      "mc_skill_harvest_logs": 2,
+      "mc_skill_staircase": 4,
+      "mc_find_blocks": 5,
+      "mc_dig": 12,
+      "mc_move_to": 9,
+      "mc_skill_unstick": 2,
+      "mc_control": 3,
+      "mc_inventory": 6,
+      "mc_status": 4,
+      "mc_skill_stabilize": 1,
+      "mc_skill_collect_drops": 2,
+      "mc_posture": 1,
+      "mc_attack": 1
+    },
+    "tool_seconds": {
+      "mc_place": 3.204,
+      "mc_craft": 6.685,
+      "mc_skill_harvest_logs": 0.859,
+      "mc_skill_staircase": 96.607,
+      "mc_find_blocks": 0.329,
+      "mc_dig": 26.847,
+      "mc_move_to": 3.092,
+      "mc_skill_unstick": 7.623,
+      "mc_control": 0.633,
+      "mc_inventory": 0.086,
+      "mc_status": 0.246,
+      "mc_skill_stabilize": 0.015,
+      "mc_skill_collect_drops": 2.38,
+      "mc_posture": 0.069,
+      "mc_attack": 0.015
+    },
+    "failure_codes": {
+      "missing_ingredients": 2,
+      "no_targets_available": 2,
+      "cave_or_drop_ahead": 1,
+      "out_of_reach": 1,
+      "path_not_found": 5,
+      "occupied": 5,
+      "nothing_to_dig": 1,
+      "interrupted": 2,
+      "no_drops_collected": 1,
+      "missing_item": 2,
+      "not_ready": 1
+    },
+    "notable_deaths": 5,
+    "notable_hurts": 41,
+    "material_milestones": {
+      "crafting_table": {
+        "first_observed_s": 0.6112,
+        "count": 1,
+        "source": "initial"
+      },
+      "stone_pickaxe": {
+        "first_observed_s": 0.6112,
+        "count": 1,
+        "source": "initial"
+      }
+    },
+    "limits": "Milestones are observations, not proof of production. Initial inventory is inherited. Missing inventory observations do not prove absence. Generation time includes synchronous guard actions; use tool/guardian events to separate them."
+  },
+  {
+    "run": "20261115-172841-909318.events.jsonl",
+    "elapsed_s": 131.2302,
+    "status": "answered",
+    "error": null,
+    "source_revision": "c71e3d3b05f524f2",
+    "requests_started": 3,
+    "requests_finished": 3,
+    "generation_wall_s_including_cancelled": 122.942,
+    "generation_fraction": 0.9368,
+    "generation_median_s": 31.028,
+    "generation_max_s": 75.669,
+    "first_delta_median_s": 23.22,
+    "first_delta_max_s": 69.498,
+    "cancelled_generations": 0,
+    "tools": {
+      "mc_skill_tunnel": 2
+    },
+    "tool_seconds": {
+      "mc_skill_tunnel": 7.622
+    },
+    "failure_codes": {},
+    "notable_deaths": 0,
+    "notable_hurts": 0,
+    "material_milestones": {
+      "stone_pickaxe": {
+        "first_observed_s": 0.6461,
+        "count": 1,
+        "source": "initial"
+      }
+    },
+    "limits": "Milestones are observations, not proof of production. Initial inventory is inherited. Missing inventory observations do not prove absence. Generation time includes synchronous guard actions; use tool/guardian events to separate them."
+  },
+  {
+    "run": "20261115-173213-658777.events.jsonl",
+    "elapsed_s": 66.0006,
+    "status": "runtime_error",
+    "error": "MC 技能触发紧急停机：low_health=4.842080593109131",
+    "source_revision": "e09c7ffe7d8eafb6",
+    "requests_started": 5,
+    "requests_finished": 5,
+    "generation_wall_s_including_cancelled": 35.856,
+    "generation_fraction": 0.5433,
+    "generation_median_s": 6.16,
+    "generation_max_s": 12.345,
+    "first_delta_median_s": 4.045,
+    "first_delta_max_s": 9.463,
+    "cancelled_generations": 1,
+    "tools": {
+      "mc_skill_craft_gear": 1,
+      "mc_find_blocks": 1,
+      "mc_skill_harvest_logs": 1,
+      "mc_skill_staircase": 1,
+      "mc_skill_stabilize": 1
+    },
+    "tool_seconds": {
+      "mc_skill_craft_gear": 1.168,
+      "mc_find_blocks": 0.122,
+      "mc_skill_harvest_logs": 1.503,
+      "mc_skill_staircase": 26.659,
+      "mc_skill_stabilize": 0.008
+    },
+    "failure_codes": {
+      "missing_ingredients": 1,
+      "no_targets_available": 1
+    },
+    "notable_deaths": 0,
+    "notable_hurts": 1,
+    "material_milestones": {
+      "stone_pickaxe": {
+        "first_observed_s": 0.6487,
+        "count": 1,
+        "source": "initial"
+      }
+    },
+    "limits": "Milestones are observations, not proof of production. Initial inventory is inherited. Missing inventory observations do not prove absence. Generation time includes synchronous guard actions; use tool/guardian events to separate them."
+  }
+]

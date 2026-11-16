@@ -1,0 +1,40 @@
+[
+  {
+    "name": "wood_pick_recipe",
+    "variant": "same_messages_without_response_format",
+    "expected": {
+      "planks": 3,
+      "sticks": 2,
+      "crafting_table_required": true
+    },
+    "actual": {
+      "planks": 3,
+      "sticks": 2,
+      "crafting_table_required": false
+    },
+    "passed": false
+  },
+  {
+    "name": "wood_pick_recipe",
+    "variant": "free_text",
+    "actual": "制作一把木镐需要 **4 块木板** 和 **2 根木棍**。工作台是**必要**的，因为木镐无法在快捷栏中直接合成，必须在工作台上进行制作。",
+    "status": 200
+  },
+  {
+    "name": "fuel",
+    "variant": "same_messages_without_response_format",
+    "expected": {
+      "coal": 3
+    },
+    "actual": {
+      "coal": 2
+    },
+    "passed": false
+  },
+  {
+    "name": "fuel",
+    "variant": "free_text",
+    "actual": "在 Minecraft 1.21 中，每块煤炭可以熔炼 8 个物品。要熔炼 17 个生铁，需要 17 ÷ 8 = 2.125 份燃料。由于燃料必须整块使用，因此至少需要 3 块煤炭。",
+    "status": 200
+  }
+]

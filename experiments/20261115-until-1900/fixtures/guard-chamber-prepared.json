@@ -1,0 +1,297 @@
+{
+  "assisted": true,
+  "verified_all_stone": true,
+  "verified_tag": "minecraft:base_stone_overworld",
+  "verified_volume": 125,
+  "center": [
+    -188,
+    58,
+    -390
+  ],
+  "attempts": [
+    {
+      "center": [
+        -182,
+        58,
+        -386
+      ],
+      "all_stone": false,
+      "tests": [
+        {
+          "cmd": "execute if block -184 57 -388 #minecraft:base_stone_overworld if block -184 57 -387 #minecraft:base_stone_overworld if block -184 57 -386 #minecraft:base_stone_overworld if block -184 57 -385 #minecraft:base_stone_overworld if block -184 57 -384 #minecraft:base_stone_overworld if block -184 58 -388 #minecraft:base_stone_overworld if block -184 58 -387 #minecraft:base_stone_overworld if block -184 58 -386 #minecraft:base_stone_overworld if block -184 58 -385 #minecraft:base_stone_overworld if block -184 58 -384 #minecraft:base_stone_overworld if block -184 59 -388 #minecraft:base_stone_overworld if block -184 59 -387 #minecraft:base_stone_overworld if block -184 59 -386 #minecraft:base_stone_overworld if block -184 59 -385 #minecraft:base_stone_overworld if block -184 59 -384 #minecraft:base_stone_overworld if block -184 60 -388 #minecraft:base_stone_overworld if block -184 60 -387 #minecraft:base_stone_overworld if block -184 60 -386 #minecraft:base_stone_overworld if block -184 60 -385 #minecraft:base_stone_overworld if block -184 60 -384 #minecraft:base_stone_overworld if block -184 61 -388 #minecraft:base_stone_overworld if block -184 61 -387 #minecraft:base_stone_overworld if block -184 61 -386 #minecraft:base_stone_overworld if block -184 61 -385 #minecraft:base_stone_overworld if block -184 61 -384 #minecraft:base_stone_overworld run time query gametime",
+          "reply": "The time is 1060207"
+        },
+        {
+          "cmd": "execute if block -183 57 -388 #minecraft:base_stone_overworld if block -183 57 -387 #minecraft:base_stone_overworld if block -183 57 -386 #minecraft:base_stone_overworld if block -183 57 -385 #minecraft:base_stone_overworld if block -183 57 -384 #minecraft:base_stone_overworld if block -183 58 -388 #minecraft:base_stone_overworld if block -183 58 -387 #minecraft:base_stone_overworld if block -183 58 -386 #minecraft:base_stone_overworld if block -183 58 -385 #minecraft:base_stone_overworld if block -183 58 -384 #minecraft:base_stone_overworld if block -183 59 -388 #minecraft:base_stone_overworld if block -183 59 -387 #minecraft:base_stone_overworld if block -183 59 -386 #minecraft:base_stone_overworld if block -183 59 -385 #minecraft:base_stone_overworld if block -183 59 -384 #minecraft:base_stone_overworld if block -183 60 -388 #minecraft:base_stone_overworld if block -183 60 -387 #minecraft:base_stone_overworld if block -183 60 -386 #minecraft:base_stone_overworld if block -183 60 -385 #minecraft:base_stone_overworld if block -183 60 -384 #minecraft:base_stone_overworld if block -183 61 -388 #minecraft:base_stone_overworld if block -183 61 -387 #minecraft:base_stone_overworld if block -183 61 -386 #minecraft:base_stone_overworld if block -183 61 -385 #minecraft:base_stone_overworld if block -183 61 -384 #minecraft:base_stone_overworld run time query gametime",
+          "reply": ""
+        },
+        {
+          "cmd": "execute if block -182 57 -388 #minecraft:base_stone_overworld if block -182 57 -387 #minecraft:base_stone_overworld if block -182 57 -386 #minecraft:base_stone_overworld if block -182 57 -385 #minecraft:base_stone_overworld if block -182 57 -384 #minecraft:base_stone_overworld if block -182 58 -388 #minecraft:base_stone_overworld if block -182 58 -387 #minecraft:base_stone_overworld if block -182 58 -386 #minecraft:base_stone_overworld if block -182 58 -385 #minecraft:base_stone_overworld if block -182 58 -384 #minecraft:base_stone_overworld if block -182 59 -388 #minecraft:base_stone_overworld if block -182 59 -387 #minecraft:base_stone_overworld if block -182 59 -386 #minecraft:base_stone_overworld if block -182 59 -385 #minecraft:base_stone_overworld if block -182 59 -384 #minecraft:base_stone_overworld if block -182 60 -388 #minecraft:base_stone_overworld if block -182 60 -387 #minecraft:base_stone_overworld if block -182 60 -386 #minecraft:base_stone_overworld if block -182 60 -385 #minecraft:base_stone_overworld if block -182 60 -384 #minecraft:base_stone_overworld if block -182 61 -388 #minecraft:base_stone_overworld if block -182 61 -387 #minecraft:base_stone_overworld if block -182 61 -386 #minecraft:base_stone_overworld if block -182 61 -385 #minecraft:base_stone_overworld if block -182 61 -384 #minecraft:base_stone_overworld run time query gametime",
+          "reply": ""
+        },
+        {
+          "cmd": "execute if block -181 57 -388 #minecraft:base_stone_overworld if block -181 57 -387 #minecraft:base_stone_overworld if block -181 57 -386 #minecraft:base_stone_overworld if block -181 57 -385 #minecraft:base_stone_overworld if block -181 57 -384 #minecraft:base_stone_overworld if block -181 58 -388 #minecraft:base_stone_overworld if block -181 58 -387 #minecraft:base_stone_overworld if block -181 58 -386 #minecraft:base_stone_overworld if block -181 58 -385 #minecraft:base_stone_overworld if block -181 58 -384 #minecraft:base_stone_overworld if block -181 59 -388 #minecraft:base_stone_overworld if block -181 59 -387 #minecraft:base_stone_overworld if block -181 59 -386 #minecraft:base_stone_overworld if block -181 59 -385 #minecraft:base_stone_overworld if block -181 59 -384 #minecraft:base_stone_overworld if block -181 60 -388 #minecraft:base_stone_overworld if block -181 60 -387 #minecraft:base_stone_overworld if block -181 60 -386 #minecraft:base_stone_overworld if block -181 60 -385 #minecraft:base_stone_overworld if block -181 60 -384 #minecraft:base_stone_overworld if block -181 61 -388 #minecraft:base_stone_overworld if block -181 61 -387 #minecraft:base_stone_overworld if block -181 61 -386 #minecraft:base_stone_overworld if block -181 61 -385 #minecraft:base_stone_overworld if block -181 61 -384 #minecraft:base_stone_overworld run time query gametime",
+          "reply": ""
+        },
+        {
+          "cmd": "execute if block -180 57 -388 #minecraft:base_stone_overworld if block -180 57 -387 #minecraft:base_stone_overworld if block -180 57 -386 #minecraft:base_stone_overworld if block -180 57 -385 #minecraft:base_stone_overworld if block -180 57 -384 #minecraft:base_stone_overworld if block -180 58 -388 #minecraft:base_stone_overworld if block -180 58 -387 #minecraft:base_stone_overworld if block -180 58 -386 #minecraft:base_stone_overworld if block -180 58 -385 #minecraft:base_stone_overworld if block -180 58 -384 #minecraft:base_stone_overworld if block -180 59 -388 #minecraft:base_stone_overworld if block -180 59 -387 #minecraft:base_stone_overworld if block -180 59 -386 #minecraft:base_stone_overworld if block -180 59 -385 #minecraft:base_stone_overworld if block -180 59 -384 #minecraft:base_stone_overworld if block -180 60 -388 #minecraft:base_stone_overworld if block -180 60 -387 #minecraft:base_stone_overworld if block -180 60 -386 #minecraft:base_stone_overworld if block -180 60 -385 #minecraft:base_stone_overworld if block -180 60 -384 #minecraft:base_stone_overworld if block -180 61 -388 #minecraft:base_stone_overworld if block -180 61 -387 #minecraft:base_stone_overworld if block -180 61 -386 #minecraft:base_stone_overworld if block -180 61 -385 #minecraft:base_stone_overworld if block -180 61 -384 #minecraft:base_stone_overworld run time query gametime",
+          "reply": ""
+        }
+      ]
+    },
+    {
+      "center": [
+        -188,
+        58,
+        -390
+      ],
+      "all_stone": true,
+      "tests": [
+        {
+          "cmd": "execute if block -190 57 -392 #minecraft:base_stone_overworld if block -190 57 -391 #minecraft:base_stone_overworld if block -190 57 -390 #minecraft:base_stone_overworld if block -190 57 -389 #minecraft:base_stone_overworld if block -190 57 -388 #minecraft:base_stone_overworld if block -190 58 -392 #minecraft:base_stone_overworld if block -190 58 -391 #minecraft:base_stone_overworld if block -190 58 -390 #minecraft:base_stone_overworld if block -190 58 -389 #minecraft:base_stone_overworld if block -190 58 -388 #minecraft:base_stone_overworld if block -190 59 -392 #minecraft:base_stone_overworld if block -190 59 -391 #minecraft:base_stone_overworld if block -190 59 -390 #minecraft:base_stone_overworld if block -190 59 -389 #minecraft:base_stone_overworld if block -190 59 -388 #minecraft:base_stone_overworld if block -190 60 -392 #minecraft:base_stone_overworld if block -190 60 -391 #minecraft:base_stone_overworld if block -190 60 -390 #minecraft:base_stone_overworld if block -190 60 -389 #minecraft:base_stone_overworld if block -190 60 -388 #minecraft:base_stone_overworld if block -190 61 -392 #minecraft:base_stone_overworld if block -190 61 -391 #minecraft:base_stone_overworld if block -190 61 -390 #minecraft:base_stone_overworld if block -190 61 -389 #minecraft:base_stone_overworld if block -190 61 -388 #minecraft:base_stone_overworld run time query gametime",
+          "reply": "The time is 1060210"
+        },
+        {
+          "cmd": "execute if block -189 57 -392 #minecraft:base_stone_overworld if block -189 57 -391 #minecraft:base_stone_overworld if block -189 57 -390 #minecraft:base_stone_overworld if block -189 57 -389 #minecraft:base_stone_overworld if block -189 57 -388 #minecraft:base_stone_overworld if block -189 58 -392 #minecraft:base_stone_overworld if block -189 58 -391 #minecraft:base_stone_overworld if block -189 58 -390 #minecraft:base_stone_overworld if block -189 58 -389 #minecraft:base_stone_overworld if block -189 58 -388 #minecraft:base_stone_overworld if block -189 59 -392 #minecraft:base_stone_overworld if block -189 59 -391 #minecraft:base_stone_overworld if block -189 59 -390 #minecraft:base_stone_overworld if block -189 59 -389 #minecraft:base_stone_overworld if block -189 59 -388 #minecraft:base_stone_overworld if block -189 60 -392 #minecraft:base_stone_overworld if block -189 60 -391 #minecraft:base_stone_overworld if block -189 60 -390 #minecraft:base_stone_overworld if block -189 60 -389 #minecraft:base_stone_overworld if block -189 60 -388 #minecraft:base_stone_overworld if block -189 61 -392 #minecraft:base_stone_overworld if block -189 61 -391 #minecraft:base_stone_overworld if block -189 61 -390 #minecraft:base_stone_overworld if block -189 61 -389 #minecraft:base_stone_overworld if block -189 61 -388 #minecraft:base_stone_overworld run time query gametime",
+          "reply": "The time is 1060210"
+        },
+        {
+          "cmd": "execute if block -188 57 -392 #minecraft:base_stone_overworld if block -188 57 -391 #minecraft:base_stone_overworld if block -188 57 -390 #minecraft:base_stone_overworld if block -188 57 -389 #minecraft:base_stone_overworld if block -188 57 -388 #minecraft:base_stone_overworld if block -188 58 -392 #minecraft:base_stone_overworld if block -188 58 -391 #minecraft:base_stone_overworld if block -188 58 -390 #minecraft:base_stone_overworld if block -188 58 -389 #minecraft:base_stone_overworld if block -188 58 -388 #minecraft:base_stone_overworld if block -188 59 -392 #minecraft:base_stone_overworld if block -188 59 -391 #minecraft:base_stone_overworld if block -188 59 -390 #minecraft:base_stone_overworld if block -188 59 -389 #minecraft:base_stone_overworld if block -188 59 -388 #minecraft:base_stone_overworld if block -188 60 -392 #minecraft:base_stone_overworld if block -188 60 -391 #minecraft:base_stone_overworld if block -188 60 -390 #minecraft:base_stone_overworld if block -188 60 -389 #minecraft:base_stone_overworld if block -188 60 -388 #minecraft:base_stone_overworld if block -188 61 -392 #minecraft:base_stone_overworld if block -188 61 -391 #minecraft:base_stone_overworld if block -188 61 -390 #minecraft:base_stone_overworld if block -188 61 -389 #minecraft:base_stone_overworld if block -188 61 -388 #minecraft:base_stone_overworld run time query gametime",
+          "reply": "The time is 1060210"
+        },
+        {
+          "cmd": "execute if block -187 57 -392 #minecraft:base_stone_overworld if block -187 57 -391 #minecraft:base_stone_overworld if block -187 57 -390 #minecraft:base_stone_overworld if block -187 57 -389 #minecraft:base_stone_overworld if block -187 57 -388 #minecraft:base_stone_overworld if block -187 58 -392 #minecraft:base_stone_overworld if block -187 58 -391 #minecraft:base_stone_overworld if block -187 58 -390 #minecraft:base_stone_overworld if block -187 58 -389 #minecraft:base_stone_overworld if block -187 58 -388 #minecraft:base_stone_overworld if block -187 59 -392 #minecraft:base_stone_overworld if block -187 59 -391 #minecraft:base_stone_overworld if block -187 59 -390 #minecraft:base_stone_overworld if block -187 59 -389 #minecraft:base_stone_overworld if block -187 59 -388 #minecraft:base_stone_overworld if block -187 60 -392 #minecraft:base_stone_overworld if block -187 60 -391 #minecraft:base_stone_overworld if block -187 60 -390 #minecraft:base_stone_overworld if block -187 60 -389 #minecraft:base_stone_overworld if block -187 60 -388 #minecraft:base_stone_overworld if block -187 61 -392 #minecraft:base_stone_overworld if block -187 61 -391 #minecraft:base_stone_overworld if block -187 61 -390 #minecraft:base_stone_overworld if block -187 61 -389 #minecraft:base_stone_overworld if block -187 61 -388 #minecraft:base_stone_overworld run time query gametime",
+          "reply": "The time is 1060210"
+        },
+        {
+          "cmd": "execute if block -186 57 -392 #minecraft:base_stone_overworld if block -186 57 -391 #minecraft:base_stone_overworld if block -186 57 -390 #minecraft:base_stone_overworld if block -186 57 -389 #minecraft:base_stone_overworld if block -186 57 -388 #minecraft:base_stone_overworld if block -186 58 -392 #minecraft:base_stone_overworld if block -186 58 -391 #minecraft:base_stone_overworld if block -186 58 -390 #minecraft:base_stone_overworld if block -186 58 -389 #minecraft:base_stone_overworld if block -186 58 -388 #minecraft:base_stone_overworld if block -186 59 -392 #minecraft:base_stone_overworld if block -186 59 -391 #minecraft:base_stone_overworld if block -186 59 -390 #minecraft:base_stone_overworld if block -186 59 -389 #minecraft:base_stone_overworld if block -186 59 -388 #minecraft:base_stone_overworld if block -186 60 -392 #minecraft:base_stone_overworld if block -186 60 -391 #minecraft:base_stone_overworld if block -186 60 -390 #minecraft:base_stone_overworld if block -186 60 -389 #minecraft:base_stone_overworld if block -186 60 -388 #minecraft:base_stone_overworld if block -186 61 -392 #minecraft:base_stone_overworld if block -186 61 -391 #minecraft:base_stone_overworld if block -186 61 -390 #minecraft:base_stone_overworld if block -186 61 -389 #minecraft:base_stone_overworld if block -186 61 -388 #minecraft:base_stone_overworld run time query gametime",
+          "reply": "The time is 1060210"
+        }
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "cmd": "fill -189 58 -391 -187 60 -389 minecraft:air",
+      "reply": "Successfully filled 27 block(s)"
+    }
+  ],
+  "original_blocks": [
+    {
+      "pos": [
+        -189,
+        58,
+        -391
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -189,
+        58,
+        -390
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -189,
+        58,
+        -389
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -189,
+        59,
+        -391
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -189,
+        59,
+        -390
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -189,
+        59,
+        -389
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -189,
+        60,
+        -391
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -189,
+        60,
+        -390
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -189,
+        60,
+        -389
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -188,
+        58,
+        -391
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -188,
+        58,
+        -390
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -188,
+        58,
+        -389
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -188,
+        59,
+        -391
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -188,
+        59,
+        -390
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -188,
+        59,
+        -389
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -188,
+        60,
+        -391
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -188,
+        60,
+        -390
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -188,
+        60,
+        -389
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -187,
+        58,
+        -391
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -187,
+        58,
+        -390
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -187,
+        58,
+        -389
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -187,
+        59,
+        -391
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -187,
+        59,
+        -390
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -187,
+        59,
+        -389
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -187,
+        60,
+        -391
+      ],
+      "name": "granite"
+    },
+    {
+      "pos": [
+        -187,
+        60,
+        -390
+      ],
+      "name": "stone"
+    },
+    {
+      "pos": [
+        -187,
+        60,
+        -389
+      ],
+      "name": "stone"
+    }
+  ]
+}

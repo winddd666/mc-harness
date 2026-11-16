@@ -1,0 +1,34 @@
+[
+  {
+    "concurrency": 1,
+    "requests": 5,
+    "wall_s": 22.345807123929262,
+    "successful_http": 5,
+    "completion_tokens": 1280,
+    "aggregate_output_tps": 57.28143955155227
+  },
+  {
+    "concurrency": 2,
+    "requests": 2,
+    "wall_s": 4.457607538904995,
+    "successful_http": 2,
+    "completion_tokens": 512,
+    "aggregate_output_tps": 114.85982010111462
+  },
+  {
+    "concurrency": 4,
+    "requests": 4,
+    "wall_s": 3.8034691298380494,
+    "successful_http": 4,
+    "completion_tokens": 1024,
+    "aggregate_output_tps": 269.22789828022127
+  },
+  {
+    "concurrency": 8,
+    "requests": 8,
+    "wall_s": 4.911059015896171,
+    "successful_http": 8,
+    "completion_tokens": 2048,
+    "aggregate_output_tps": 417.0179982303227
+  }
+]

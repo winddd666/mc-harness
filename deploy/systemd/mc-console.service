@@ -1,0 +1,16 @@
+[Unit]
+Description=Minecraft Agent Codex-Style Web Console (:8770)
+After=network-online.target mc-live-proxy.service
+Wants=mc-live-proxy.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/xzq/projects/mc
+ExecStart=/home/xzq/projects/mc/.venv/bin/mc-console --env-file /home/xzq/projects/mc/.env.beast --bot BeastBot_01 --provider nju --host 127.0.0.1 --port 8770 --live-url http://127.0.0.1:8765 --survival-guard --hud-mode ephemeral --context-mode sliding --tool-profile compact --max-calls 400 --run-timeout-s 14400
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

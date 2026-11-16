@@ -1,0 +1,1166 @@
+[
+  {
+    "time": 1794728454.969295,
+    "action": "status",
+    "body": null,
+    "duration": 0.010502338409423828,
+    "ok": true,
+    "result": {
+      "username": "BeastBot_01",
+      "pos": [
+        -162.6,
+        76,
+        -372.5
+      ],
+      "yaw": -2.94,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 13.333332061767578,
+      "food": 17,
+      "saturation": 0,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 311,
+      "armor_points": 0,
+      "held": null,
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 10938,
+      "is_day": true,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 19780,
+        "name": "zombie",
+        "dist": 17.3
+      },
+      "last_death": {
+        "pos": [
+          -151.7,
+          72,
+          -383.3
+        ],
+        "t": 1794726338174,
+        "dropped_items_at": [
+          -151.7,
+          72,
+          -383.3
+        ]
+      }
+    }
+  },
+  {
+    "time": 1794728454.9798033,
+    "action": "inventory",
+    "body": null,
+    "duration": 0.0046541690826416016,
+    "ok": true,
+    "result": {
+      "items": [],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": null,
+      "empty_slots": 36
+    }
+  },
+  {
+    "time": 1794728454.9844623,
+    "action": "get_entities",
+    "body": {
+      "radius": 16,
+      "types": [
+        "item"
+      ]
+    },
+    "duration": 0.004625082015991211,
+    "ok": true,
+    "result": {
+      "entities": []
+    }
+  },
+  {
+    "time": 1794728454.9890938,
+    "action": "find_blocks",
+    "body": {
+      "types": [
+        "grass_block",
+        "dirt",
+        "birch_log",
+        "oak_log"
+      ],
+      "radius": 16,
+      "limit": 15
+    },
+    "duration": 0.09798669815063477,
+    "ok": true,
+    "result": {
+      "total": 793,
+      "blocks": [
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            76,
+            -372
+          ],
+          "dist": 0.7,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            73,
+            -372
+          ],
+          "dist": 3.1,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            76,
+            -373
+          ],
+          "dist": 3.5,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            75,
+            -373
+          ],
+          "dist": 3.6,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            77,
+            -373
+          ],
+          "dist": 3.6,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            74,
+            -373
+          ],
+          "dist": 4,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            72,
+            -372
+          ],
+          "dist": 4.1,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            76,
+            -369
+          ],
+          "dist": 4.3,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            75,
+            -369
+          ],
+          "dist": 4.4,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            77,
+            -369
+          ],
+          "dist": 4.4,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            73,
+            -373
+          ],
+          "dist": 4.6,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            74,
+            -369
+          ],
+          "dist": 4.8,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            78,
+            -369
+          ],
+          "dist": 4.8,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            71,
+            -372
+          ],
+          "dist": 5.1,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            72,
+            -373
+          ],
+          "dist": 5.3,
+          "properties": {
+            "axis": "y"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "time": 1794728455.0870876,
+    "action": "find_blocks",
+    "body": {
+      "types": [
+        "grass_block"
+      ],
+      "radius": 24,
+      "limit": 20
+    },
+    "duration": 0.07533574104309082,
+    "ok": true,
+    "result": {
+      "total": 1611,
+      "blocks": [
+        {
+          "name": "grass_block",
+          "pos": [
+            -163,
+            70,
+            -373
+          ],
+          "dist": 6,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -162,
+            70,
+            -373
+          ],
+          "dist": 6,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -164,
+            70,
+            -373
+          ],
+          "dist": 6.2,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -163,
+            70,
+            -374
+          ],
+          "dist": 6.2,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -164,
+            70,
+            -372
+          ],
+          "dist": 6.2,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -162,
+            70,
+            -374
+          ],
+          "dist": 6.2,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -161,
+            70,
+            -373
+          ],
+          "dist": 6.2,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -164,
+            70,
+            -374
+          ],
+          "dist": 6.4,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -161,
+            70,
+            -374
+          ],
+          "dist": 6.4,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -165,
+            70,
+            -373
+          ],
+          "dist": 6.5,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -163,
+            70,
+            -375
+          ],
+          "dist": 6.5,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -165,
+            70,
+            -372
+          ],
+          "dist": 6.5,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -162,
+            70,
+            -375
+          ],
+          "dist": 6.5,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -160,
+            70,
+            -373
+          ],
+          "dist": 6.5,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -165,
+            70,
+            -374
+          ],
+          "dist": 6.6,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -164,
+            70,
+            -375
+          ],
+          "dist": 6.7,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -163,
+            71,
+            -377
+          ],
+          "dist": 6.7,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -161,
+            70,
+            -375
+          ],
+          "dist": 6.7,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -160,
+            70,
+            -374
+          ],
+          "dist": 6.7,
+          "properties": {
+            "snowy": false
+          }
+        },
+        {
+          "name": "grass_block",
+          "pos": [
+            -164,
+            71,
+            -377
+          ],
+          "dist": 6.9,
+          "properties": {
+            "snowy": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "time": 1794728455.162436,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -163,
+        71,
+        -373
+      ]
+    },
+    "duration": 0.006432056427001953,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -163,
+        71,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.1688735,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -163,
+        72,
+        -373
+      ]
+    },
+    "duration": 0.005298614501953125,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -163,
+        72,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.17418,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        71,
+        -373
+      ]
+    },
+    "duration": 0.005238533020019531,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -162,
+        71,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.1794255,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        72,
+        -373
+      ]
+    },
+    "duration": 0.005521535873413086,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -162,
+        72,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.1849544,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -164,
+        71,
+        -373
+      ]
+    },
+    "duration": 0.005213499069213867,
+    "ok": true,
+    "result": {
+      "name": "short_grass",
+      "pos": [
+        -164,
+        71,
+        -373
+      ],
+      "properties": {},
+      "diggable": true,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.1901727,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -164,
+        72,
+        -373
+      ]
+    },
+    "duration": 0.00638270378112793,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -164,
+        72,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.1965623,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -163,
+        71,
+        -374
+      ]
+    },
+    "duration": 0.004939556121826172,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -163,
+        71,
+        -374
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2015073,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -163,
+        72,
+        -374
+      ]
+    },
+    "duration": 0.004450559616088867,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -163,
+        72,
+        -374
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.205965,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -164,
+        71,
+        -372
+      ]
+    },
+    "duration": 0.0047605037689208984,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -164,
+        71,
+        -372
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2107317,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -164,
+        72,
+        -372
+      ]
+    },
+    "duration": 0.004301309585571289,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -164,
+        72,
+        -372
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2150397,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        71,
+        -374
+      ]
+    },
+    "duration": 0.004383563995361328,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -162,
+        71,
+        -374
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2194283,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -162,
+        72,
+        -374
+      ]
+    },
+    "duration": 0.004961729049682617,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -162,
+        72,
+        -374
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2243965,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -161,
+        71,
+        -373
+      ]
+    },
+    "duration": 0.005104541778564453,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -161,
+        71,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.229506,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -161,
+        72,
+        -373
+      ]
+    },
+    "duration": 0.004932403564453125,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -161,
+        72,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2344456,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -164,
+        71,
+        -374
+      ]
+    },
+    "duration": 0.004648685455322266,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -164,
+        71,
+        -374
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2390988,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -164,
+        72,
+        -374
+      ]
+    },
+    "duration": 0.0041925907135009766,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -164,
+        72,
+        -374
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2432976,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -161,
+        71,
+        -374
+      ]
+    },
+    "duration": 0.004986286163330078,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -161,
+        71,
+        -374
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2482889,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -161,
+        72,
+        -374
+      ]
+    },
+    "duration": 0.004959821701049805,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -161,
+        72,
+        -374
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2532556,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -165,
+        71,
+        -373
+      ]
+    },
+    "duration": 0.00444340705871582,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -165,
+        71,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2577038,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -165,
+        72,
+        -373
+      ]
+    },
+    "duration": 0.008028507232666016,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -165,
+        72,
+        -373
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2657397,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -163,
+        71,
+        -375
+      ]
+    },
+    "duration": 0.004578113555908203,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -163,
+        71,
+        -375
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.270323,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -163,
+        72,
+        -375
+      ]
+    },
+    "duration": 0.004990816116333008,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -163,
+        72,
+        -375
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2753227,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -165,
+        71,
+        -372
+      ]
+    },
+    "duration": 0.004956245422363281,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -165,
+        71,
+        -372
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  },
+  {
+    "time": 1794728455.2802844,
+    "action": "get_block",
+    "body": {
+      "pos": [
+        -165,
+        72,
+        -372
+      ]
+    },
+    "duration": 0.005353689193725586,
+    "ok": true,
+    "result": {
+      "name": "air",
+      "pos": [
+        -165,
+        72,
+        -372
+      ],
+      "properties": {},
+      "diggable": false,
+      "hardness": 0,
+      "harvest_tool_ok": false
+    }
+  }
+]

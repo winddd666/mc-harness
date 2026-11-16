@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mc-agent"
+version = "0.1.0"
+description = "Minecraft Agent API v1.3 client, authentication, skin-station bot provisioning, and harness"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.14.5",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+mc-bot = "mc_agent.cli:main"
+mc-harness = "mc_agent.harness.agent:main"
+mc-live = "mc_agent.live.server:main"
+mc-console = "mc_agent.console.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mc_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]

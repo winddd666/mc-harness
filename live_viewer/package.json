@@ -1,0 +1,16 @@
+{
+  "name": "mc-live-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phase 0 compatibility probe and optional Prismarine-Viewer WebGL stream server for mc-live (Minecraft 1.21.11)",
+  "main": "cam_server.js",
+  "scripts": {
+    "probe": "node probe_1_21_11.js",
+    "reachability": "node reachability_check.js",
+    "start": "node cam_server.js"
+  },
+  "dependencies": {
+    "mineflayer": "^4.25.0",
+    "prismarine-viewer": "^1.33.0"
+  }
+}

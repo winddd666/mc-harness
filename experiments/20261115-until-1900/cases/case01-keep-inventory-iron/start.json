@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "mode": "started",
+  "turn_id": "20261115-152552-112171",
+  "turn": {
+    "turn_id": "20261115-152552-112171",
+    "prompt": "本轮已开启死亡不掉落。目标是独立制作并装备一把铁镐（iron_pickaxe）。先依据当前真实状态和背包决定缺少哪些前置材料，先完成石镐和熔炉，再获取铁矿、燃料、铁锭并合成铁镐。优先保障生存，真实受伤时暂停生产并避险；死亡重生后检查保留的背包，重新评估环境和剩余步骤。以实际工具回执、背包与装备确认进度，成功后停止；无法推进时如实说明具体阻塞，不得宣称完成。",
+    "created_at": "2026-11-15T07:25:52.112224+00:00",
+    "status": "running",
+    "phase": "preparing",
+    "phase_detail": "正在连接会话与加载最新状态快照...",
+    "actor_requests": 0,
+    "max_calls": 70,
+    "run_timeout_s": 1200.0,
+    "runtime": {
+      "source_revision": "2a5b9b9a8e9fcd2d",
+      "loaded_at": "2026-11-15T07:24:43.751254+00:00",
+      "pid": 703314
+    },
+    "provider": "nju",
+    "model": "nju",
+    "thinking": false,
+    "items": [],
+    "answer": null,
+    "error": null,
+    "run_file": "20261115-152552-112171.events.jsonl"
+  }
+}

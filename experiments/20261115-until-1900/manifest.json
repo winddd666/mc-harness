@@ -1,0 +1,54 @@
+{
+  "deadline": "2026-11-15T19:00:00+08:00",
+  "goal": "Explore harness weaknesses with long NJU trajectories and varied scenarios; keepInventory enabled",
+  "phase": "usage-limited-checkpoint",
+  "baseline_run": "20261115-145600-335360",
+  "baseline_tests": 51,
+  "keep_inventory": true,
+  "current_tests": 99,
+  "completed_runs": [
+    "20261115-152552-112171",
+    "20261115-154521-609789",
+    "20261115-161125-277956"
+  ],
+  "next_case": "long-iron-continuation",
+  "review": "docs/process-review-20261115.md",
+  "node_tests": 7,
+  "backend_patch": "server_patches/action-lifecycle",
+  "active_run": null,
+  "active_case": null,
+  "console_revision": "df9b93f12ac8e251",
+  "backend_lifecycle_live_verified": true,
+  "pending_guard_pilot": false,
+  "guard_pilot": {
+    "run_id": "20261115-172425-289834",
+    "controlled_damage": 2,
+    "old_generation_cancelled": true,
+    "bunker_confirmed": true,
+    "limitations": "封闭石室、受控轻伤，不是持续围攻验收"
+  },
+  "bunker_edge_live": {
+    "verified": true,
+    "path": "bunker-edge-live-south.json",
+    "duration_s": 4.086,
+    "actual_y": 55
+  },
+  "controlled_respawn": {
+    "verified": true,
+    "path": "controlled-respawn.json",
+    "assisted": true
+  },
+  "goal_status": "usageLimited",
+  "deadline_reached": false,
+  "checkpoint_at": "2026-11-15T09:49:17.528919+00:00",
+  "latest_run": "20261115-174049-472472",
+  "longest_completed_observation_s": 969.3572,
+  "iron_pickaxe_obtained": false,
+  "pending": [
+    "继续至19:00的原时限目标未完成",
+    "材料缺口提示后的NJU长轨迹",
+    "工具耐久与备用镐规划",
+    "阶梯邻接流体与支撑失败的完整原因",
+    "阻塞工具和任务间闲置的持续生存控制"
+  ]
+}

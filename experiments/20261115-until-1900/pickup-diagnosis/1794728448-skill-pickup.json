@@ -1,0 +1,329 @@
+[
+  {
+    "time": 1794728448.4144793,
+    "action": "status",
+    "body": null,
+    "duration": 0.009813547134399414,
+    "ok": true,
+    "result": {
+      "username": "BeastBot_01",
+      "pos": [
+        -162.6,
+        76,
+        -372.5
+      ],
+      "yaw": -2.94,
+      "speed": 0,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "dimension": "overworld",
+      "gamemode": "survival",
+      "health": 13.333332061767578,
+      "food": 17,
+      "saturation": 0,
+      "xp_level": 0,
+      "xp_progress": 0,
+      "oxygen": 311,
+      "armor_points": 0,
+      "held": null,
+      "offhand": null,
+      "effects": [],
+      "on_fire": false,
+      "is_sleeping": false,
+      "in_water": false,
+      "submerged": false,
+      "in_lava": false,
+      "in_vehicle": null,
+      "sneaking": false,
+      "jumping": false,
+      "blocking": false,
+      "using_item": null,
+      "time_of_day": 10818,
+      "is_day": true,
+      "raining": false,
+      "thundering": false,
+      "biome": "",
+      "on_ground": true,
+      "alive": true,
+      "ready": true,
+      "busy": null,
+      "nearest_hostile": {
+        "id": 19780,
+        "name": "zombie",
+        "dist": 17.3
+      },
+      "last_death": {
+        "pos": [
+          -151.7,
+          72,
+          -383.3
+        ],
+        "t": 1794726338174,
+        "dropped_items_at": [
+          -151.7,
+          72,
+          -383.3
+        ]
+      }
+    }
+  },
+  {
+    "time": 1794728448.4242992,
+    "action": "inventory",
+    "body": null,
+    "duration": 0.0038535594940185547,
+    "ok": true,
+    "result": {
+      "items": [],
+      "armor": {
+        "head": null,
+        "chest": null,
+        "legs": null,
+        "feet": null
+      },
+      "offhand": null,
+      "held": null,
+      "empty_slots": 36
+    }
+  },
+  {
+    "time": 1794728448.428158,
+    "action": "get_entities",
+    "body": {
+      "radius": 16,
+      "types": [
+        "item"
+      ]
+    },
+    "duration": 0.004541873931884766,
+    "ok": true,
+    "result": {
+      "entities": []
+    }
+  },
+  {
+    "time": 1794728448.4327083,
+    "action": "find_blocks",
+    "body": {
+      "types": [
+        "grass_block",
+        "dirt",
+        "birch_log",
+        "oak_log"
+      ],
+      "radius": 16,
+      "limit": 15
+    },
+    "duration": 0.10988211631774902,
+    "ok": true,
+    "result": {
+      "total": 793,
+      "blocks": [
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            76,
+            -372
+          ],
+          "dist": 0.7,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            73,
+            -372
+          ],
+          "dist": 3.1,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            76,
+            -373
+          ],
+          "dist": 3.5,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            75,
+            -373
+          ],
+          "dist": 3.6,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            77,
+            -373
+          ],
+          "dist": 3.6,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            74,
+            -373
+          ],
+          "dist": 4,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            72,
+            -372
+          ],
+          "dist": 4.1,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            76,
+            -369
+          ],
+          "dist": 4.3,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            75,
+            -369
+          ],
+          "dist": 4.4,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            77,
+            -369
+          ],
+          "dist": 4.4,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            73,
+            -373
+          ],
+          "dist": 4.6,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            74,
+            -369
+          ],
+          "dist": 4.8,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -160,
+            78,
+            -369
+          ],
+          "dist": 4.8,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -162,
+            71,
+            -372
+          ],
+          "dist": 5.1,
+          "properties": {
+            "axis": "y"
+          }
+        },
+        {
+          "name": "birch_log",
+          "pos": [
+            -166,
+            72,
+            -373
+          ],
+          "dist": 5.3,
+          "properties": {
+            "axis": "y"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "time": 1794728448.5644398,
+    "action": "skill_collect_drops",
+    "result": {
+      "ok": false,
+      "attempted_pickups": 0,
+      "attempts": [],
+      "skipped": [],
+      "moved_to": [],
+      "gained": {},
+      "inventory": {},
+      "pos_after": [
+        -162.6,
+        76,
+        -372.5
+      ],
+      "health": 13.333332061767578,
+      "error": "no_drops_found",
+      "message": "未确认任何物品入包；走近成功不代表拾取成功。请检查高差、障碍与实际背包，改变站位或路线后再试，勿据此继续合成。"
+    }
+  }
+]

@@ -1,0 +1,314 @@
+{
+  "run_id": "20261115-173213-658777",
+  "status": "runtime_error",
+  "error": "MC 技能触发紧急停机：low_health=4.842080593109131",
+  "answer": null,
+  "actor_requests": 5,
+  "elapsed": 66.0006,
+  "runtime": {
+    "source_revision": "e09c7ffe7d8eafb6",
+    "loaded_at": "2026-11-15T09:31:47.142570+00:00",
+    "pid": 756196
+  },
+  "survival_guard": true,
+  "guardian": {
+    "polls": 47,
+    "incidents": 1,
+    "actions": 1,
+    "cancelled_generations": 1
+  },
+  "death_notifications": 0,
+  "hurt_notifications": 1,
+  "model_seconds": 29.9249,
+  "cancelled_generation_seconds": 5.93,
+  "tool_counts": {
+    "mc_skill_craft_gear": 1,
+    "mc_find_blocks": 1,
+    "mc_skill_harvest_logs": 1,
+    "mc_skill_staircase": 1,
+    "mc_skill_stabilize": 1
+  },
+  "tool_calls": [
+    {
+      "name": "mc_skill_craft_gear",
+      "started": 8.4751,
+      "args": "{\"item\":\"crafting_table\"}",
+      "seq": 85,
+      "duration": 1.168,
+      "result": {
+        "ok": false,
+        "error": "missing_ingredients",
+        "message": "could not craft crafting_table: server placed no result",
+        "example_recipe_needs": {
+          "cherry_planks": 4
+        },
+        "inventory": {
+          "cobblestone": 89,
+          "dirt": 16,
+          "wildflowers": 1,
+          "granite": 5,
+          "stick": 4,
+          "wooden_pickaxe": 1,
+          "stone_pickaxe": 1,
+          "birch_planks": 1
+        }
+      }
+    },
+    {
+      "name": "mc_find_blocks",
+      "started": 9.6429,
+      "args": "{\"limit\":10,\"radius\":32,\"types\":[\"iron_ore\", \"deepslate_iron_ore\"]}",
+      "seq": 87,
+      "duration": 0.122,
+      "result": {
+        "ok": true,
+        "result": {
+          "total": 7,
+          "blocks": [
+            {
+              "name": "iron_ore",
+              "pos": [
+                -169,
+                43,
+                -401
+              ],
+              "dist": 24.9,
+              "properties": {}
+            },
+            {
+              "name": "iron_ore",
+              "pos": [
+                -168,
+                43,
+                -400
+              ],
+              "dist": 25.2,
+              "properties": {}
+            },
+            {
+              "name": "iron_ore",
+              "pos": [
+                -168,
+                42,
+                -401
+              ],
+              "dist": 26.1,
+              "properties": {}
+            },
+            {
+              "name": "iron_ore",
+              "pos": [
+                -167,
+                44,
+                -402
+              ],
+              "dist": 26.4,
+              "properties": {}
+            },
+            {
+              "name": "iron_ore",
+              "pos": [
+                -166,
+                43,
+                -402
+              ],
+              "dist": 27.6,
+              "properties": {}
+            },
+            {
+              "name": "iron_ore",
+              "pos": [
+                -184,
+                43,
+                -364
+              ],
+              "dist": 28.4,
+              "properties": {}
+            },
+            {
+              "name": "iron_ore",
+              "pos": [
+                -185,
+                43,
+                -363
+              ],
+              "dist": 29.2,
+              "properties": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_skill_harvest_logs",
+      "started": 13.37,
+      "args": "{\"target_logs\":4}",
+      "seq": 125,
+      "duration": 1.503,
+      "result": {
+        "ok": false,
+        "requested_count": 4,
+        "dug_count": 0,
+        "gained": {},
+        "water_skipped": 0,
+        "protected_blacklisted": 0,
+        "temporarily_avoided": 12,
+        "temporary_reasons": [
+          "out_of_reach"
+        ],
+        "error": "no_targets_available",
+        "message": "本次只挖掘 0/4 格；请按 gained 检查实际入包量。临时避让与保护区分别报告，改变站位或等待冷却后可重试临时失败。",
+        "requires_replan": true,
+        "equipped_axe": null
+      }
+    },
+    {
+      "name": "mc_skill_staircase",
+      "started": 27.2249,
+      "args": "{\"direction\":\"north\",\"steps\":8,\"vertical\":\"up\"}",
+      "seq": 165,
+      "duration": 26.659,
+      "result": {
+        "ok": true,
+        "requires_replan": false,
+        "direction": "north",
+        "vertical": "up",
+        "steps_requested": 8,
+        "steps_done": 8,
+        "stop_reason": "completed",
+        "pos_before": [
+          -187.5,
+          55,
+          -389.5
+        ],
+        "pos_after": [
+          -187.5,
+          63,
+          -397.5
+        ],
+        "ores_nearby": [
+          {
+            "name": "copper_ore",
+            "pos": [
+              -186,
+              64,
+              -400
+            ],
+            "dist": 3.1,
+            "properties": {}
+          },
+          {
+            "name": "copper_ore",
+            "pos": [
+              -193,
+              62,
+              -402
+            ],
+            "dist": 7.2,
+            "properties": {}
+          },
+          {
+            "name": "copper_ore",
+            "pos": [
+              -193,
+              62,
+              -403
+            ],
+            "dist": 7.8,
+            "properties": {}
+          },
+          {
+            "name": "copper_ore",
+            "pos": [
+              -194,
+              62,
+              -402
+            ],
+            "dist": 8,
+            "properties": {}
+          },
+          {
+            "name": "copper_ore",
+            "pos": [
+              -194,
+              62,
+              -403
+            ],
+            "dist": 8.6,
+            "properties": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "mc_skill_stabilize",
+      "started": 65.9878,
+      "args": "{}",
+      "seq": 228,
+      "duration": 0.008,
+      "result": {
+        "text": "错误：工具执行中止，未取得正常结果。"
+      }
+    }
+  ],
+  "final_telemetry": {
+    "connected": true,
+    "ready": true,
+    "username": "BeastBot_01",
+    "pos": {
+      "x": -188.9,
+      "y": 63.0,
+      "z": -398.1
+    },
+    "dimension": "overworld",
+    "biome": "",
+    "is_day": true,
+    "time_of_day": 1889,
+    "health": 5.842080593109131,
+    "food": 17,
+    "armor": 0,
+    "held": {
+      "name": "dirt",
+      "count": 16,
+      "slot": 37
+    },
+    "inventory_available": true,
+    "inventory_total": 136,
+    "top_items": [
+      {
+        "name": "cobblestone",
+        "count": 97
+      },
+      {
+        "name": "dirt",
+        "count": 16
+      },
+      {
+        "name": "granite",
+        "count": 15
+      },
+      {
+        "name": "stick",
+        "count": 4
+      },
+      {
+        "name": "birch_planks",
+        "count": 1
+      },
+      {
+        "name": "stone_pickaxe",
+        "count": 1
+      },
+      {
+        "name": "wildflowers",
+        "count": 1
+      },
+      {
+        "name": "wooden_pickaxe",
+        "count": 1
+      }
+    ],
+    "updated_at": "2026-11-15T09:33:21.792356+00:00",
+    "error": null
+  }
+}

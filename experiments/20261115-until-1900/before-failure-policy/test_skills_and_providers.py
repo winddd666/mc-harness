@@ -1,0 +1,1243 @@
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+
+from mc_agent.bot import BotSession
+from mc_agent.config import should_trust_env
+from mc_agent.harness.agent import run_mc_agent
+from mc_agent.harness.context import RequestContext
+from mc_agent.harness.model import (
+    DEEPSEEK_DEFAULT_MODEL,
+    QwenSpec,
+    _stream_message,
+    resolve_qwen_endpoint,
+)
+from mc_agent.skills import MacroSkills, SafetyEmergency, check_and_stabilize, compute_advancement_frontier
+
+
+def test_deepseek_provider_and_direct_routing(monkeypatch, tmp_path) -> None:
+    assert should_trust_env("https://api.deepseek.com/chat/completions") is False
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test-placeholder")
+    empty_env = tmp_path / ".env"
+    empty_env.write_text("", encoding="utf-8")
+
+    ds = resolve_qwen_endpoint(
+        QwenSpec(provider="deepseek", dotenv_path=str(empty_env), fallback_dotenv_path=None)
+    )
+    assert ds.endpoint == "https://api.deepseek.com/chat/completions"
+    assert ds.model == DEEPSEEK_DEFAULT_MODEL
+    assert ds.rpm_budget == 0
+    assert ds.extra_body(enable_thinking=False) == {"thinking": {"type": "disabled"}}
+    assert ds.extra_body(enable_thinking=True) == {"thinking": {"type": "enabled"}}
+
+    monkeypatch.setenv("NJU_API_KEY", "nju-test-placeholder")
+    nju = resolve_qwen_endpoint(
+        QwenSpec(provider="nju", dotenv_path=str(empty_env), fallback_dotenv_path=None)
+    )
+    assert nju.endpoint == "https://api.nju-aia.com/v1/chat/completions"
+    assert nju.model == "default"
+    assert nju.rpm_budget == 24
+    assert nju.extra_body(enable_thinking=False) == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_request_context_quantized_kv_prefix() -> None:
+    ctx = RequestContext(tool_output_chars=400, archive_after_tools=4, archive_step=4)
+    big = "X" * 1200
+    history: list[dict] = [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"}]
+
+    for i in range(7):
+        history.append({"role": "tool", "tool_call_id": f"t{i}", "content": f"#{i}:" + big})
+        built = ctx.build(history, record=False)
+        # Fewer than 4+4 tools: tool #0 stays at full tool_output_chars=400 cap, no step shift yet
+        assert len(built[2]["content"]) <= 400
+        assert "旧轮次工具输出已折叠" not in built[2]["content"]
+
+    # 8th tool triggers quantised folding of tools 0..3
+    history.append({"role": "tool", "tool_call_id": "t7", "content": "#7:" + big})
+    built8 = ctx.build(history, record=False)
+    for idx in range(2, 6):
+        assert "旧轮次工具输出已折叠" in built8[idx]["content"]
+    snap_prefix = [built8[idx]["content"] for idx in range(6)]
+
+    # Adding 9th tool must keep tools 0..3 byte-identical for KV cache stability
+    history.append({"role": "tool", "tool_call_id": "t8", "content": "#8:" + big})
+    built9 = ctx.build(history, record=False)
+    assert [built9[idx]["content"] for idx in range(6)] == snap_prefix
+
+
+def test_stream_reasoning_and_event_drain() -> None:
+    lines = [
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"step1 "}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{"reasoning_content":"step2","content":"好的"}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        "",
+        "data: [DONE]",
+        "",
+    ]
+    msg = _stream_message(lines, None)
+    assert msg["content"] == "好的"
+    assert msg["reasoning_content"] == "step1 step2"
+
+    seq_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seq_calls
+        path = request.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {"username": "5Ease_Bot", "ready": True, "pos": [0, 64, 0]}})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": [], "empty_slots": 36}})
+        if path == "/find_blocks":
+            return httpx.Response(200, json={"ok": True, "result": {"total": 0, "blocks": []}})
+        if path == "/events":
+            seq_calls += 1
+            if seq_calls == 1:
+                return httpx.Response(200, json={"ok": True, "result": {"last_seq": 10, "events": [{"seq": 9, "type": "chat", "text": "<old> stale"}]}})
+            if seq_calls == 2:
+                return httpx.Response(200, json={"ok": True, "result": {"last_seq": 12, "events": [{"seq": 11, "type": "chat", "text": "<Alice> 来西边矿洞"}]}})
+            return httpx.Response(200, json={"ok": True, "result": {"last_seq": 12, "events": []}})
+        raise AssertionError(f"Unexpected path: {path}")
+
+    bot = BotSession("tok", bot_username="5Ease_Bot", transport=httpx.MockTransport(handler))
+    turn = 0
+
+    def fake_chat(messages, tools=None, *, stream=False, on_event=None, control=None):
+        nonlocal turn
+        turn += 1
+        if turn == 1:
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "s1", "type": "function", "function": {"name": "mc_status", "arguments": "{}"}}],
+            }
+        tool_msgs = [m for m in messages if m["role"] == "tool"]
+        assert any("不可信玩家公屏消息" in m["content"] and "来西边矿洞" in m["content"] for m in tool_msgs)
+        assert not any("stale" in m["content"] for m in tool_msgs)
+        return {"role": "assistant", "content": "已收到队友聊天提示。"}
+
+    report = run_mc_agent("测试事件同步", bot, chat_fn=fake_chat, max_calls=4, stream=False, on_event=lambda _: None)
+    assert report["status"] == "answered"
+
+
+def test_macro_skills_protection_tier_safety_and_frontier() -> None:
+    dug_calls: list[list[int]] = []
+    posture_calls: list[dict] = []
+    used_items: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "pos": [10, 64, 10],
+                        "health": 20,
+                        "food": 12,
+                        "in_water": True,
+                        "submerged": True,
+                        "oxygen": 10,
+                        "jumping": False,
+                        "on_ground": False,
+                        "alive": True,
+                        "ready": True,
+                    },
+                },
+            )
+        if path == "/inventory":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "items": [
+                            {"name": "wooden_pickaxe", "count": 1, "slot": 36},
+                            {"name": "bread", "count": 3, "slot": 37},
+                        ]
+                    },
+                },
+            )
+        if path == "/equip":
+            return httpx.Response(200, json={"ok": True, "result": {"held": {"name": body["item"]}}})
+        if path == "/find_blocks":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "total": 2,
+                        "blocks": [
+                            {"name": "oak_log", "pos": [1, 64, 1], "dist": 12.0},
+                            {"name": "oak_log", "pos": [60, 64, 60], "dist": 70.0},
+                        ],
+                    },
+                },
+            )
+        if path == "/dig":
+            dug_calls.append(body["pos"])
+            if body["pos"] == [1, 64, 1]:
+                return httpx.Response(
+                    200,
+                    json={"ok": False, "error": {"code": "dig_unconfirmed", "message": "protected"}},
+                )
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"dug": "oak_log", "gained": {"oak_log": 1}}},
+            )
+        if path == "/posture":
+            posture_calls.append(body)
+            return httpx.Response(200, json={"ok": True, "result": body})
+        if path == "/use_item":
+            used_items.append(body["item"])
+            return httpx.Response(200, json={"ok": True, "result": {"used": {body["item"]: 1}}})
+        if path == "/advancements":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"advancements": [{"id": "minecraft:story/root", "status": "completed"}]}},
+            )
+        raise AssertionError(f"Unexpected path: {path}")
+
+    bot = BotSession("tok", bot_username="5Ease_Bot", transport=httpx.MockTransport(handler))
+    skills = MacroSkills(bot)
+
+    # 1. Pickaxe tier gate blocks wooden_pickaxe from attempting iron_ore
+    tier_err = skills.mine_blocks(["iron_ore"], count=1)
+    assert tier_err["ok"] is False
+    assert tier_err["error"] == "tool_tier_insufficient"
+    assert not dug_calls
+
+    # 2. Protected dig blacklists [1, 64, 1] and falls back to [60, 64, 60]
+    chop = skills.harvest_logs(target_logs=1)
+    assert chop["ok"] is True
+    assert chop["dug_count"] == 1
+    assert (1, 64, 1) in skills.protected_positions
+
+    # 3. L0 safety triggers water float + auto-eat bread
+    stab = check_and_stabilize(bot)
+    assert "posture_water_float" in stab["actions"]
+    assert "ate:bread" in stab["actions"]
+    assert posture_calls and posture_calls[0]["jump"] is True
+    assert used_items == ["bread"]
+
+    # 4. Advancement frontier lists story/mine_stone after story/root
+    frontier = compute_advancement_frontier(bot, limit=15)
+    assert frontier["completed_count"] == 1
+    assert any(row["id"] == "minecraft:story/mine_stone" for row in frontier["frontier"])
+
+    # 5. Low health raises SafetyEmergency
+    danger_bot = BotSession(
+        "tok",
+        bot_username="5Ease_Bot",
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json={"ok": True, "result": {"health": 4.0, "food": 20, "in_water": False, "in_lava": False, "alive": True}},
+            )
+        ),
+    )
+    with pytest.raises(SafetyEmergency):
+        check_and_stabilize(danger_bot)
+
+
+def test_mine_blocks_out_of_reach_ranking_and_drop_collection() -> None:
+    dug_positions: list[list[int]] = []
+    moved_to: list[dict] = []
+    cobble = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal cobble
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.0, 100.0, 0.0], "health": 20, "food": 20}})
+        if path == "/inventory":
+            items = [{"name": "wooden_pickaxe", "count": 1, "slot": 36}]
+            if cobble > 0:
+                items.append({"name": "cobblestone", "count": cobble, "slot": 37})
+            return httpx.Response(200, json={"ok": True, "result": {"items": items}})
+        if path == "/equip":
+            return httpx.Response(200, json={"ok": True, "result": {"held": {"name": body["item"]}}})
+        if path == "/find_blocks":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "blocks": [
+                            {"name": "stone", "pos": [0, 80, 0], "dist": 20.0},
+                            {"name": "stone", "pos": [2, 100, 0], "dist": 2.0},
+                            {"name": "stone", "pos": [3, 100, 0], "dist": 3.0},
+                        ]
+                    },
+                },
+            )
+        if path == "/dig":
+            dug_positions.append(body["pos"])
+            if body["pos"] == [2, 100, 0]:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "out_of_reach", "message": "blocked"}})
+            return httpx.Response(200, json={"ok": True, "result": {"dug": "stone", "gained": {}}})
+        if path == "/get_entities":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {"entities": [{"id": 9001, "type": "item", "item": "cobblestonex1", "pos": [3.0, 100.0, 0.0]}]},
+                },
+            )
+        if path == "/move_to":
+            moved_to.append(body)
+            cobble += 1
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [3.0, 100.0, 0.0]}})
+        raise AssertionError(f"Unexpected path: {path}")
+
+    bot = BotSession("tok", bot_username="5Ease_Bot", transport=httpx.MockTransport(handler))
+    skills = MacroSkills(bot)
+    res = skills.mine_blocks(["stone"], count=1, radius=24)
+    assert res["ok"] is True
+    assert res["dug_count"] == 1
+    assert res["gained"].get("cobblestone") == 1
+    # [0, 80, 0] is penalized vertically; [2, 100, 0] is tried first, blacklisted on out_of_reach, then [3, 100, 0] succeeds
+    assert dug_positions == [[2, 100, 0], [3, 100, 0]]
+    assert (2, 100, 0) in skills.protected_positions
+    assert moved_to and moved_to[0]["entity_id"] == 9001
+
+
+def test_collect_drops_smelt_charcoal_reservation_and_toolset_registration() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    window_ops: list[dict] = []
+    crafted: list[dict] = []
+    inv_items: list[dict] = [
+        {"name": "oak_log", "count": 4, "slot": 36},
+        {"name": "white_bed", "count": 1, "slot": 37},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal inv_items
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.0, 64.0, 0.0], "health": 20, "food": 20, "is_day": True}})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": list(inv_items)}})
+        if path == "/find_blocks":
+            return httpx.Response(200, json={"ok": True, "result": {"blocks": [{"name": "furnace", "pos": [1, 64, 0], "dist": 1.2}]}})
+        if path == "/craft":
+            crafted.append(body)
+            if body.get("item") == "oak_planks":
+                inv_items = [
+                    {"name": "oak_log", "count": 3, "slot": 36},
+                    {"name": "oak_planks", "count": 4, "slot": 38},
+                ]
+            return httpx.Response(200, json={"ok": True, "result": {"crafted": body["item"], "gained": body.get("count", 1)}})
+        if path == "/window/act":
+            window_ops.append(body)
+            return httpx.Response(200, json={"ok": True, "result": {"done": True}})
+        if path == "/window/view":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"sections": {"input": [], "output": [{"name": "charcoal", "count": 3}]}, "info": {"burning": False}}},
+            )
+        if path == "/get_entities":
+            return httpx.Response(200, json={"ok": True, "result": {"entities": [{"id": 501, "type": "item", "item": "cobblestonex2", "pos": [2.0, 64.0, 0.0]}]}})
+        if path == "/move_to":
+            if body.get("entity_id") == 501:
+                inv_items = [*inv_items, {"name": "cobblestone", "count": 2, "slot": 39}]
+                return httpx.Response(200, json={"ok": True, "result": {"pos": [2.0, 64.0, 0.0]}})
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.0, 64.0, 0.0]}})
+        raise AssertionError(f"Unexpected path: {path}")
+
+    bot = BotSession("tok", bot_username="5Ease_Bot", transport=httpx.MockTransport(handler))
+    skills = MacroSkills(bot)
+    smelt_res = skills.smelt_items("oak_log", count=3)
+    assert smelt_res["ok"] is True
+    assert smelt_res["fuel"]["item"] == "oak_planks"
+    assert smelt_res["fuel"]["count"] == 2
+    assert crafted and crafted[0]["item"] == "oak_planks"
+    assert window_ops[0]["ops"][0] == {"op": "put", "item": "oak_log", "count": 3, "to": "input"}
+    assert window_ops[0]["ops"][1] == {"op": "put", "item": "oak_planks", "count": 2, "to": "fuel"}
+
+    drops_res = skills.collect_drops()
+    assert drops_res["ok"] is True
+    assert drops_res["gained"].get("cobblestone") == 2
+
+    names = {s["function"]["name"] for s in McToolset(bot).registry().schemas()}
+    assert "mc_skill_collect_drops" in names
+    assert "mc_skill_bind_bed" in names
+    assert "mc_skill_unstick" in names
+
+
+def test_unstick_uses_floor_on_negative_coords_and_clears_hitbox() -> None:
+    solid_blocks = {
+        (-4, 103, -6): "dirt",
+        (-4, 102, -5): "dirt",
+        (-3, 103, -5): "dirt",
+    }
+    dug_coords: list[tuple[int, int, int]] = []
+    controls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [-3.3, 102.0, -5.3], "health": 20, "food": 20}})
+        if path == "/get_block":
+            pos = tuple(body["pos"])
+            name = solid_blocks.get(pos, "air")
+            return httpx.Response(200, json={"ok": True, "result": {"name": name, "diggable": name != "air"}})
+        if path == "/dig":
+            pos = tuple(body["pos"])
+            dug_coords.append(pos)
+            solid_blocks.pop(pos, None)
+            return httpx.Response(200, json={"ok": True, "result": {"dug": "dirt", "gained": {"dirt": 1}}})
+        if path == "/control":
+            controls.append(body)
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [-2.2, 102.0, -5.3], "moved": 1.1}})
+        raise AssertionError(f"Unexpected path: {path}")
+
+    bot = BotSession("tok", bot_username="5Ease_Bot", transport=httpx.MockTransport(handler))
+    res = MacroSkills(bot).unstick()
+    assert res["ok"] is True
+    assert res["foot_block_before"] == [-4, 102, -6]
+    assert res["hitbox_xs"] == [-4, -3]
+    assert res["hitbox_zs"] == [-6, -5]
+    # (-4, 103, -6) and (-4, 102, -5) must be cleared because floor(-3.3) == -4 and floor(-5.3) == -6!
+    assert (-4, 103, -6) in dug_coords
+    assert (-4, 102, -5) in dug_coords
+    assert (-3, 103, -5) in dug_coords
+    assert controls and controls[0]["jump"] is True
+
+
+def test_kb_lookup_jit_hints_and_path_not_found_recovery() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+    from mc_agent.kb import build_jit_error_hint, lookup_kb
+
+    # 1. Alias resolution & recipe/ore queries
+    res_bed = lookup_kb("bed", category="recipe")
+    assert res_bed["resolved_alias"] == "white_bed"
+    assert res_bed["results"][0]["id"] == "white_bed"
+    assert res_bed["results"][0]["table_3x3"] is True
+
+    res_iron = lookup_kb("铁矿", category="ore")
+    assert any(r["id"] == "iron_ore" and "16" in r["peak_y"] for r in res_iron["results"])
+
+    # 2. JIT error hints
+    h_use = build_jit_error_hint("use_item", {"item": "water_bucket"}, "need_block_target", "need block")
+    assert h_use and "mc_interact" in h_use
+    h_move = build_jit_error_hint("move_to", {"x": 50, "y": 102, "z": -10}, "path_not_found", "No path")
+    assert h_move and "省略 y" in h_move
+    h_rec = build_jit_error_hint("craft", {"item": "steak"}, "no_recipe", "unknown")
+    assert h_rec and "cooked_beef" in h_rec
+
+    # 3. Toolset integrates JIT hint on ApiError + mc_kb_lookup + frontier playbooks + path_not_found blacklist
+    dug_pos: list[list[int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.0, 64.0, 0.0], "health": 20, "food": 20}})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": []}})
+        if path == "/use_item":
+            return httpx.Response(200, json={"ok": False, "error": {"code": "need_block_target", "message": "need block"}})
+        if path == "/find_blocks":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "blocks": [
+                            {"name": "oak_log", "pos": [10, 64, 0], "dist": 10.0},
+                            {"name": "oak_log", "pos": [3, 64, 0], "dist": 12.0},
+                        ]
+                    },
+                },
+            )
+        if path == "/dig":
+            dug_pos.append(body["pos"])
+            if body["pos"] == [10, 64, 0]:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "path_not_found", "message": "No path"}})
+            return httpx.Response(200, json={"ok": True, "result": {"dug": "oak_log", "gained": {"oak_log": 1}}})
+        if path == "/advancements":
+            return httpx.Response(200, json={"ok": True, "result": {"advancements": [{"id": "minecraft:story/root", "status": "completed"}]}})
+        raise AssertionError(f"Unexpected path: {path}")
+
+    bot = BotSession("tok", bot_username="5Ease_Bot", transport=httpx.MockTransport(handler))
+    ts = McToolset(bot)
+    assert "mc_kb_lookup" in {s["function"]["name"] for s in ts.registry().schemas()}
+
+    use_err = json.loads(ts.mc_use_item("bucket"))
+    assert use_err["ok"] is False
+    assert "mc_interact" in use_err["error"]["kb_hint"]
+
+    # harvest_logs skips [10, 64, 0] after path_not_found and chops [3, 64, 0]
+    chop = ts.skills.harvest_logs(target_logs=1)
+    assert chop["ok"] is True
+    assert dug_pos == [[10, 64, 0], [3, 64, 0]]
+    assert (10, 64, 0) in ts.skills.protected_positions
+
+    frontier = compute_advancement_frontier(bot, limit=10)
+    mine_stone = next(row for row in frontier["frontier"] if row["id"] == "minecraft:story/mine_stone")
+    assert mine_stone.get("difficulty") == "easy"
+    assert "how_to" in mine_stone
+
+
+def test_dig_safety_bunker_and_registration() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    state: dict[str, Any] = {
+        "pos": [59.5, 112.0, -25.5],
+        "items": [{"name": "oak_log", "count": 2, "slot": 0}],
+        "blocks": {
+            (59, 108, -26): "water",
+            (59, 111, -26): "stone",
+            (59, 110, -26): "stone",
+            (59, 109, -26): "stone",
+        },
+        "dug": [],
+        "placed": [],
+        "crafted": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode()) if request.content else {}
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"pos": list(state["pos"]), "health": 10.0, "food": 18, "alive": True, "ready": True}},
+            )
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": list(state["items"])}})
+        if path == "/get_block":
+            key = tuple(int(v) for v in body["pos"])
+            return httpx.Response(200, json={"ok": True, "result": {"name": state["blocks"].get(key, "air"), "pos": list(key)}})
+        if path == "/craft":
+            item = body["item"]
+            cnt = int(body.get("count", 1))
+            state["crafted"].append((item, cnt))
+            if item == "oak_planks":
+                state["items"] = [
+                    {"name": "oak_log", "count": 1, "slot": 0},
+                    {"name": "oak_planks", "count": 4, "slot": 1},
+                ]
+            return httpx.Response(200, json={"ok": True, "result": {"item": item, "count": cnt}})
+        if path == "/dig":
+            key = tuple(int(v) for v in body["pos"])
+            state["dug"].append(list(key))
+            state["blocks"][key] = "air"
+            state["pos"][1] = float(key[1])
+            return httpx.Response(200, json={"ok": True, "result": {"ok": True}})
+        if path == "/place":
+            key = tuple(int(v) for v in body["pos"])
+            state["placed"].append((body["item"], list(key)))
+            state["blocks"][key] = body["item"]
+            return httpx.Response(200, json={"ok": True, "result": {"ok": True}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    bot = BotSession(
+        "tok-bunker",
+        bot_username="5Ease_Bot",
+        base_url="http://mc.local/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        skills = MacroSkills(bot)
+        unsafe = skills.dig_safety_bunker()
+        assert unsafe["ok"] is False
+        assert unsafe["reason"] == "unsafe_floor"
+        assert unsafe["floor_pos"] == [59, 108, -26]
+        assert state["dug"] == []
+
+        state["blocks"][(59, 108, -26)] = "stone"
+        ok_res = skills.dig_safety_bunker()
+        assert ok_res["ok"] is True
+        assert ok_res["floor_pos"] == [59, 108, -26]
+        assert ok_res["crafted_planks"] == "oak_planks"
+        assert state["dug"] == [[59, 111, -26], [59, 110, -26], [59, 109, -26]]
+        assert state["placed"] == [("oak_planks", [59, 111, -26])]
+        assert ok_res["roof_placed"] is True
+        assert ok_res["pos_after"] == [59.5, 109.0, -25.5]
+
+        names = [s["function"]["name"] for s in McToolset(bot).registry().schemas()]
+        assert "mc_skill_bunker" in names
+    finally:
+        bot.close()
+
+
+def test_staircase_up_down_and_tight_table_pocket() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    state: dict[str, Any] = {
+        "pos": [-2.3, 95.0, -2.7],
+        "items": [
+            {"name": "stone_pickaxe", "count": 1, "slot": 0},
+            {"name": "cobblestone", "count": 5, "slot": 1},
+            {"name": "stick", "count": 4, "slot": 2},
+            {"name": "crafting_table", "count": 1, "slot": 3},
+        ],
+        "blocks": {},
+        "dug": [],
+        "placed": [],
+        "mode": "down",
+        "pocket_carved": False,
+    }
+
+    # Pre-seed stone underground, air corridor for up filler check, and tight walls around [-3, 95, -3]
+    def _default_block(key: tuple[int, int, int]) -> str:
+        if key in state["blocks"]:
+            return state["blocks"][key]
+        x, y, z = key
+        if state["mode"] == "up" and y >= 94 and z <= -4 and (x, y, z) in {(-3, 93, -3)}:
+            return "air"
+        if state["mode"] == "up" and y == 92 and z == -5:
+            return "air"  # missing step support at nx=-3, by=92, nz=-5 when stepping up
+        if y <= 100:
+            return "stone"
+        return "air"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode()) if request.content else {}
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"pos": list(state["pos"]), "health": 20.0, "food": 20, "alive": True, "ready": True}},
+            )
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": list(state["items"])}})
+        if path == "/equip":
+            return httpx.Response(200, json={"ok": True, "result": {"held": {"name": body["item"]}}})
+        if path == "/get_block":
+            key = tuple(int(v) for v in body["pos"])
+            return httpx.Response(200, json={"ok": True, "result": {"name": _default_block(key), "pos": list(key)}})
+        if path == "/dig":
+            key = tuple(int(v) for v in body["pos"])
+            state["dug"].append(list(key))
+            state["blocks"][key] = "air"
+            return httpx.Response(200, json={"ok": True, "result": {"dug": "stone", "gained": {"cobblestone": 1}}})
+        if path == "/move_to":
+            state["pos"] = [float(body["x"]), float(body["y"]), float(body["z"])]
+            return httpx.Response(200, json={"ok": True, "result": {"pos": list(state["pos"])}})
+        if path == "/place":
+            pos = body.get("pos")
+            if pos is None:
+                return httpx.Response(400, json={"ok": False, "error": {"code": "no_support", "message": "tight pocket"}})
+            key = tuple(int(v) for v in pos)
+            if body["item"] == "crafting_table" and _default_block(key) != "air":
+                return httpx.Response(400, json={"ok": False, "error": {"code": "occupied", "message": "wall occupied"}})
+            if body["item"] == "crafting_table":
+                state["pocket_carved"] = True
+            state["placed"].append((body["item"], list(key)))
+            state["blocks"][key] = body["item"]
+            return httpx.Response(200, json={"ok": True, "result": {"placed": body["item"], "pos": list(key)}})
+        if path == "/find_blocks":
+            types = set(body.get("types") or [])
+            if "crafting_table" in types:
+                # Unreachable crafting_table 5 blocks above current y=95 -> must be ignored!
+                return httpx.Response(
+                    200,
+                    json={"ok": True, "result": {"blocks": [{"name": "crafting_table", "pos": [-3, 100, -3], "dist": 5.0}]}},
+                )
+            if "iron_ore" in types:
+                # Detect iron_ore once bot descends to y <= 92 (after 3 downward steps)
+                if state["mode"] == "down" and state["pos"][1] <= 92.0:
+                    return httpx.Response(
+                        200,
+                        json={"ok": True, "result": {"blocks": [{"name": "iron_ore", "pos": [-3, 92, -7], "dist": 2.1}]}},
+                    )
+                return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
+            if "grass_block" in types:
+                # Detect surface after 2 upward steps (from y=92 up to y=94)
+                if state["mode"] == "up" and state["pos"][1] >= 94.0:
+                    return httpx.Response(
+                        200,
+                        json={"ok": True, "result": {"blocks": [{"name": "grass_block", "pos": [-3, 94, -5], "dist": 1.5}]}},
+                    )
+                return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
+            return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
+        if path == "/craft":
+            return httpx.Response(200, json={"ok": True, "result": {"crafted": body["item"], "gained": 1}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    bot = BotSession(
+        "tok-stair",
+        bot_username="5Ease_Bot",
+        base_url="http://mc.local/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        skills = MacroSkills(bot)
+        # (c) Distant Y=100 table ignored; open placements blocked -> carves pocket at [-2, 95, -3]
+        state["blocks"][(-3, 95, -3)] = "air"
+        state["blocks"][(-3, 96, -3)] = "air"
+        table_res = skills.ensure_crafting_table()
+        assert table_res["ok"] is True
+        assert table_res["reused"] is False
+        assert table_res["carved_pocket"] == [-2, 95, -3]
+        assert [-2, 95, -3] in state["dug"]
+        assert ("crafting_table", [-2, 95, -3]) in state["placed"]
+
+        # (a) dig_staircase down stops at step 3 on iron_ore detection
+        state["pos"] = [-2.3, 95.0, -2.7]
+        state["dug"].clear()
+        down_res = skills.dig_staircase(direction="north", steps=8, vertical="down", stop_on_ore=True)
+        assert down_res["ok"] is True
+        assert down_res["steps_done"] == 3
+        assert down_res["stop_reason"] == "ore_detected"
+        assert down_res["pos_after"] == [-2.5, 92.0, -5.5]
+        # First step at [-3, 95, -3] heading north -> [-3, 96, -4], [-3, 95, -4], [-3, 94, -4]
+        assert state["dug"][:3] == [[-3, 96, -4], [-3, 95, -4], [-3, 94, -4]]
+
+        # (b) dig_staircase up places filler cobblestone step at [-3, 92, -5] and exits on surface
+        state["mode"] = "up"
+        state["blocks"].clear()
+        state["placed"].clear()
+        # Ensure step 1 sky check sees air at [-3, 96, -4] -> then grass_block triggers reached_surface
+        state["blocks"][(-3, 96, -4)] = "air"
+        up_res = skills.dig_staircase(direction="south", steps=6, vertical="up", stop_on_ore=False)
+        assert up_res["ok"] is True
+        assert up_res["steps_done"] == 2
+        assert up_res["stop_reason"] == "reached_surface"
+        assert ("cobblestone", [-3, 92, -5]) in state["placed"]
+
+        # (d) Toolset registration
+        names = [s["function"]["name"] for s in McToolset(bot).registry().schemas()]
+        assert "mc_skill_staircase" in names
+    finally:
+        bot.close()
+
+
+def test_unstick_ignores_suffocation_hurt_and_harvest_logs_inv_delta() -> None:
+    state: dict[str, Any] = {
+        "pos": [-2.3, 96.0, -1.5],
+        "gravel_hits": 0,
+        "dig_bodies": [],
+        "items": [],
+        "logs_dug": 0,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode()) if request.content else {}
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"pos": list(state["pos"]), "health": 10.0, "food": 20, "alive": True, "ready": True}},
+            )
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": list(state["items"])}})
+        if path == "/get_block":
+            key = tuple(int(v) for v in body["pos"])
+            if key == (-3, 96, -2):
+                # Gravel refills the cell once after the first dig, then clears on the second dig
+                name = "gravel" if state["gravel_hits"] < 2 else "air"
+                return httpx.Response(200, json={"ok": True, "result": {"name": name, "diggable": name != "air"}})
+            return httpx.Response(200, json={"ok": True, "result": {"name": "air", "diggable": False}})
+        if path == "/dig":
+            state["dig_bodies"].append(body)
+            pos = tuple(int(v) for v in body["pos"])
+            if pos == (-3, 96, -2):
+                # Suffocation hurt would interrupt unless stop_on=["death"]
+                if body.get("stop_on") != ["death"]:
+                    return httpx.Response(409, json={"ok": False, "error": {"code": "interrupted", "cause": "hurt"}})
+                state["gravel_hits"] += 1
+                return httpx.Response(200, json={"ok": True, "result": {"dug": "gravel", "gained": {}}})
+            state["logs_dug"] += 1
+            return httpx.Response(200, json={"ok": True, "result": {"dug": "oak_log", "gained": {}}})
+        if path == "/control":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [-1.2, 96.0, -1.5], "moved": 1.1}})
+        if path == "/find_blocks":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "blocks": [
+                            {"name": "oak_log", "pos": [-2, 97, -2], "dist": 1.4},
+                            {"name": "oak_log", "pos": [-2, 98, -2], "dist": 2.2},
+                        ]
+                    },
+                },
+            )
+        if path == "/get_entities":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"entities": [{"id": 701, "name": "item", "item": "oak_logx2", "pos": [-2.0, 96.0, -2.0]}]}},
+            )
+        if path == "/move_to":
+            # Moving over item entity silently puts 2 oak_log in inventory
+            state["items"] = [{"name": "oak_log", "count": 2, "slot": 0}]
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [-2.0, 96.0, -2.0]}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    bot = BotSession(
+        "tok-suff",
+        bot_username="5Ease_Bot",
+        base_url="http://mc.local/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        skills = MacroSkills(bot)
+        u_res = skills.unstick()
+        assert u_res["ok"] is True
+        assert state["gravel_hits"] == 2
+        assert all(d.get("stop_on") == ["death"] for d in state["dig_bodies"])
+
+        h_res = skills.harvest_logs(target_logs=2, radius=16)
+        assert h_res["ok"] is True
+        assert h_res["gained"] == {"oak_log": 2}
+    finally:
+        bot.close()
+
+
+def test_text_tool_calls_fallback_and_window_open_adjacent_table_recovery() -> None:
+    import io
+
+    from mc_agent.harness.model import _extract_text_tool_calls, _stream_message
+
+    sse_text = (
+        "先查桶的合成配方。\n\ntool_calls:\n"
+        '```json\n[{"name": "mc_kb_lookup", "arguments": {"query": "bucket"}}]\n```'
+    )
+    chunk1 = json.dumps({"choices": [{"delta": {"content": sse_text}, "finish_reason": None}]})
+    chunk2 = json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    raw_sse = "\n".join([f"data: {chunk1}", "", f"data: {chunk2}", "", "data: [DONE]", ""]).encode("utf-8")
+    events: list[dict[str, Any]] = []
+    msg = _stream_message(io.BytesIO(raw_sse), events.append)
+    assert msg["role"] == "assistant"
+    assert msg["content"] == "先查桶的合成配方。"
+    assert len(msg["tool_calls"]) == 1
+    assert msg["tool_calls"][0]["function"]["name"] == "mc_kb_lookup"
+    assert json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"query": "bucket"}
+
+    # Normal non-mc prose JSON code block must NOT be parsed as tool_calls
+    prose = '示例：\n```json\n{"status": "ok"}\n```'
+    cleaned_prose, extracted_none = _extract_text_tool_calls(prose)
+    assert cleaned_prose == prose
+    assert extracted_none == []
+
+    state: dict[str, Any] = {
+        "pos": [0.5, 101.0, -2.5],
+        "items": [
+            {"name": "cobblestone", "count": 6, "slot": 0},
+            {"name": "stick", "count": 4, "slot": 1},
+            {"name": "oak_planks", "count": 4, "slot": 2},
+        ],
+        "dug": [],
+        "placed": [],
+        "blocks": {},
+        "buried_tables": {
+            (-1, 101, -3): 1.8,
+            (-2, 101, -3): 2.7,
+            (3, 101, -2): 3.0,
+        },
+        "stone_pick_attempts": 0,
+        "table_crafts": 0,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode()) if request.content else {}
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"pos": list(state["pos"]), "health": 20.0, "food": 20, "alive": True, "ready": True}},
+            )
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": list(state["items"])}})
+        if path == "/find_blocks":
+            if "crafting_table" in set(body.get("types") or []):
+                blocks = [
+                    {"name": "crafting_table", "pos": list(k), "dist": d}
+                    for k, d in sorted(state["buried_tables"].items(), key=lambda kv: kv[1])
+                ]
+                return httpx.Response(200, json={"ok": True, "result": {"blocks": blocks}})
+            return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
+        if path == "/get_block":
+            key = tuple(int(v) for v in body["pos"])
+            if key in state["blocks"]:
+                name = state["blocks"][key]
+            elif key[1] <= 100 or key == (1, 101, -3):
+                name = "stone"
+            else:
+                name = "air"
+            return httpx.Response(200, json={"ok": True, "result": {"name": name, "pos": list(key)}})
+        if path == "/dig":
+            key = tuple(int(v) for v in body["pos"])
+            if key in state["buried_tables"]:
+                assert body.get("stop_on") == ["death"]
+            state["dug"].append(list(key))
+            state["buried_tables"].pop(key, None)
+            state["blocks"][key] = "air"
+            return httpx.Response(200, json={"ok": True, "result": {"dug": "block", "gained": {}}})
+        if path == "/move_to":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": list(state["pos"])}})
+        if path == "/place":
+            key = tuple(int(v) for v in body["pos"])
+            state["placed"].append((body["item"], list(key)))
+            state["blocks"][key] = body["item"]
+            state["items"] = [it for it in state["items"] if it["name"] != body["item"]]
+            return httpx.Response(200, json={"ok": True, "result": {"placed": body["item"], "pos": list(key)}})
+        if path == "/craft":
+            if body["item"] == "crafting_table":
+                state["table_crafts"] += 1
+                state["items"] = [it for it in state["items"] if it["name"] != "oak_planks"]
+                state["items"].append({"name": "crafting_table", "count": 1, "slot": 3})
+                return httpx.Response(200, json={"ok": True, "result": {"crafted": "crafting_table", "gained": 1}})
+            if body["item"] == "stone_pickaxe":
+                state["stone_pick_attempts"] += 1
+                if state["stone_pick_attempts"] == 1:
+                    return httpx.Response(
+                        400,
+                        json={"ok": False, "error": {"code": "craft_timeout", "message": "Event windowOpen did not fire within 20000ms"}},
+                    )
+                state["items"].append({"name": "stone_pickaxe", "count": 1, "slot": 4})
+                return httpx.Response(200, json={"ok": True, "result": {"crafted": "stone_pickaxe", "gained": 1}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    bot = BotSession(
+        "tok-table",
+        bot_username="5Ease_Bot",
+        base_url="http://mc.local/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        skills = MacroSkills(bot)
+        res = skills.craft_gear("stone_pickaxe", count=1)
+        assert res["ok"] is True
+        assert state["stone_pick_attempts"] == 2
+        assert state["table_crafts"] == 1
+        assert [-1, 101, -3] in state["dug"]
+        assert [-2, 101, -3] in state["dug"]
+        assert [3, 101, -2] not in state["dug"]
+        assert any(item == "crafting_table" for item, _ in state["placed"])
+    finally:
+        bot.close()
+
+
+def test_water_escape_and_underwater_mining_protection() -> None:
+    state: dict[str, Any] = {
+        "pos": [-169.3, 62.5, -390.7],
+        "in_water": True,
+        "submerged": False,
+        "on_ground": False,
+        "jumping": False,
+        "oxygen": 230,
+        "blocks": {
+            # East/West/North around [-170, 62, -391] are open water
+            (-169, 62, -391): "water",
+            (-171, 62, -391): "water",
+            (-170, 62, -392): "water",
+            # South bank has solid stone base at y=62 and dirt blocking head at y=63
+            (-170, 61, -390): "stone",
+            (-170, 62, -390): "stone",
+            (-170, 63, -390): "dirt",
+            (-170, 64, -390): "air",
+            # Underwater ore covered by water
+            (-168, 59, -393): "iron_ore",
+            (-168, 60, -393): "water",
+            (-168, 61, -393): "water",
+            # Dry ore
+            (-160, 63, -390): "iron_ore",
+            (-160, 64, -390): "air",
+            # Hurt-interrupted ore
+            (-160, 62, -389): "iron_ore",
+            (-160, 63, -389): "air",
+        },
+        "dug": [],
+        "controls": [],
+        "postures": [],
+        "items": [
+            {"name": "stone_pickaxe", "count": 1, "slot": 0},
+        ],
+        "fail_interrupted_on": None,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode()) if request.content else {}
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "pos": list(state["pos"]),
+                        "health": 16.0,
+                        "food": 20,
+                        "alive": True,
+                        "ready": True,
+                        "in_water": state["in_water"],
+                        "submerged": state["submerged"],
+                        "on_ground": state["on_ground"],
+                        "jumping": state["jumping"],
+                        "oxygen": state["oxygen"],
+                    },
+                },
+            )
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": list(state["items"])}})
+        if path == "/equip":
+            return httpx.Response(200, json={"ok": True, "result": {"held": {"name": body["item"]}}})
+        if path == "/posture":
+            state["postures"].append(dict(body))
+            state["jumping"] = bool(body.get("jump", False))
+            return httpx.Response(200, json={"ok": True, "result": dict(body)})
+        if path == "/get_block":
+            key = tuple(int(v) for v in body["pos"])
+            name = state["blocks"].get(key, "air")
+            diggable = name not in {"air", "water", "flowing_water", "bedrock"}
+            return httpx.Response(200, json={"ok": True, "result": {"name": name, "diggable": diggable}})
+        if path == "/dig":
+            key = tuple(int(v) for v in body["pos"])
+            state["dug"].append(key)
+            if state["fail_interrupted_on"] == key:
+                state["pos"] = [-169.3, 62.5, -390.7]
+                state["in_water"] = True
+                state["on_ground"] = False
+                return httpx.Response(
+                    409,
+                    json={"ok": False, "error": {"code": "interrupted", "message": "stopped because of hurt"}},
+                )
+            bname = state["blocks"].pop(key, "stone")
+            gained = {"raw_iron": 1} if bname == "iron_ore" else {}
+            if gained:
+                state["items"].append({"name": "raw_iron", "count": 1, "slot": 1})
+            return httpx.Response(200, json={"ok": True, "result": {"dug": bname, "gained": gained}})
+        if path == "/control":
+            state["controls"].append(dict(body))
+            if body.get("forward") and body.get("jump"):
+                state["pos"] = [-169.5, 63.0, -389.5]
+                state["in_water"] = False
+                state["on_ground"] = True
+            return httpx.Response(200, json={"ok": True, "result": {"pos": list(state["pos"]), "moved": 1.2}})
+        if path == "/find_blocks":
+            dists = {
+                (-168, 59, -393): 2.0,
+                (-160, 63, -390): 18.0,
+                (-160, 62, -389): 20.0,
+            }
+            avail = [
+                {"name": "iron_ore", "pos": list(k), "dist": dists[k]}
+                for k in ((-168, 59, -393), (-160, 63, -390), (-160, 62, -389))
+                if state["blocks"].get(k) == "iron_ore"
+            ]
+            return httpx.Response(200, json={"ok": True, "result": {"blocks": avail}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    bot = BotSession(
+        "tok-water",
+        bot_username="5Ease_Bot",
+        base_url="http://mc.local/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        # 1. check_and_stabilize triggers float on 300-tick oxygen scale (oxygen=230 < 240)
+        stab = check_and_stabilize(bot)
+        assert "posture_water_float" in stab["actions"]
+        assert state["jumping"] is True
+
+        # 2. unstick() in water keeps solid bank step (-170, 62, -390), digs (-170, 63, -390), hops onto dry land & resets jump
+        skills = MacroSkills(bot)
+        u_res = skills.unstick()
+        assert u_res["ok"] is True
+        assert u_res["escaped_water"] is True
+        assert u_res["in_water"] is False
+        assert (-170, 62, -390) not in state["dug"]
+        assert (-170, 63, -390) in state["dug"]
+        assert state["controls"] and abs(abs(state["controls"][0]["yaw"]) - 3.14159) < 0.35
+        assert state["postures"][-1]["jump"] is False
+
+        # 3. mine_blocks() skips water-covered [-168, 59, -393] (blacklisting it) and mines dry [-160, 63, -390]
+        state["dug"].clear()
+        state["pos"] = [-166.5, 61.0, -392.5]
+        state["in_water"] = False
+        state["on_ground"] = True
+        m_res = skills.mine_blocks(["iron_ore"], count=1, radius=16)
+        assert m_res["ok"] is True
+        assert (-168, 59, -393) in skills.protected_positions
+        assert (-168, 59, -393) not in state["dug"]
+        assert (-160, 63, -390) in state["dug"]
+
+        # 4. interrupted error blacklists [-160, 62, -389] and escapes water if knocked in
+        state["dug"].clear()
+        state["blocks"].pop((-160, 63, -390), None)
+        state["fail_interrupted_on"] = (-160, 62, -389)
+        m_err = skills.mine_blocks(["iron_ore"], count=1, radius=16)
+        assert m_err["ok"] is False
+        assert m_err["partial_error"]["code"] == "interrupted"
+        assert (-160, 62, -389) in skills.protected_positions
+        assert m_err.get("water_escape", {}).get("in_water") is False
+    finally:
+        bot.close()
+
+
+def test_event_cursor_pagination_wall_los_and_dig_tier_guard() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    all_events = [
+        {"seq": i, "type": "hurt" if i % 2 else "death", "health": 0, "cause": "arrow", "pos": [-150, 72, -390]}
+        for i in range(1, 71)
+    ]
+    event_queries: list[int] = []
+    dug_calls: list[list[int]] = []
+    equipped: list[str] = []
+    placed_calls: list[dict] = []
+    state: dict[str, Any] = {
+        "pos": [-166.3, 63.0, -392.1],
+        "held": None,
+        "items": [
+            {"name": "raw_iron", "count": 2, "slot": 0},
+            {"name": "furnace", "count": 1, "slot": 1},
+            {"name": "coal", "count": 1, "slot": 2},
+        ],
+        "blocks": {
+            # Roofed air pocket ceiling
+            (-167, 65, -393): "stone",
+            (-167, 66, -393): "stone",
+            # Solid wall around (-167, 63, -393) blocking path toward skeleton at (-166.5, 72, -382.5)
+            (-167, 64, -392): "stone",
+            (-167, 65, -392): "stone",
+            (-167, 66, -391): "stone",
+            # Target ore & closed pocket walls for carved furnace
+            (-165, 63, -392): "iron_ore",
+            (-166, 62, -393): "stone",
+            (-166, 63, -393): "stone",
+        },
+        "window_ops": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode()) if request.content else {}
+        if path == "/events":
+            since = int(request.url.params.get("since", "0"))
+            limit = int(request.url.params.get("limit", "50"))
+            event_queries.append(since)
+            page = [ev for ev in all_events if ev["seq"] > since][:limit]
+            page_last = page[-1]["seq"] if page else 70
+            return httpx.Response(200, json={"ok": True, "result": {"last_seq": page_last, "events": page}})
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "pos": list(state["pos"]),
+                        "health": 20.0,
+                        "food": 20,
+                        "alive": True,
+                        "ready": True,
+                        "in_water": False,
+                        "nearest_hostile": {"id": 88, "name": "skeleton", "dist": 12.6},
+                    },
+                },
+            )
+        if path == "/get_entities":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "entities": [
+                            {"id": 88, "type": "hostile", "name": "skeleton", "pos": [-166.5, 72.0, -382.5], "dist": 12.6}
+                        ]
+                    },
+                },
+            )
+        if path == "/get_block":
+            key = tuple(int(v) for v in body["pos"])
+            name = state["blocks"].get(key)
+            if name is None:
+                # Default rock layer above/around pocket unless open air in pocket
+                name = "stone" if key[1] >= 65 or key in {(-167, 62, -393), (-166, 62, -393)} else "air"
+            return httpx.Response(200, json={"ok": True, "result": {"name": name, "diggable": name != "air"}})
+        if path == "/inventory":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"items": list(state["items"]), "held": state["held"]}},
+            )
+        if path == "/equip":
+            equipped.append(body["item"])
+            state["held"] = {"name": body["item"], "count": 1}
+            return httpx.Response(200, json={"ok": True, "result": {"held": state["held"]}})
+        if path == "/dig":
+            key = tuple(int(v) for v in body["pos"])
+            dug_calls.append(list(key))
+            bname = state["blocks"].pop(key, "stone")
+            state["blocks"][key] = "air"
+            return httpx.Response(200, json={"ok": True, "result": {"dug": bname, "gained": {}}})
+        if path == "/place":
+            placed_calls.append(dict(body))
+            if "pos" not in body:
+                return httpx.Response(400, json={"ok": False, "error": {"code": "no_surface", "message": "enclosed"}})
+            key = tuple(int(v) for v in body["pos"])
+            cur_blk = state["blocks"].get(key, "air")
+            if key != (-166, 63, -393) or cur_blk != "air":
+                return httpx.Response(400, json={"ok": False, "error": {"code": "blocked", "message": "solid"}})
+            state["blocks"][key] = body["item"]
+            return httpx.Response(200, json={"ok": True, "result": {"placed": body["item"], "pos": list(key)}})
+        if path == "/find_blocks":
+            return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
+        if path == "/window/act":
+            state["window_ops"].append(body)
+            return httpx.Response(200, json={"ok": True, "result": {"done": True}})
+        if path == "/window/view":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"sections": {"input": [], "output": [{"name": "iron_ingot", "count": 2}]}, "info": {"burning": False}}},
+            )
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    bot = BotSession(
+        "tok-pocket",
+        bot_username="BeastBot_01",
+        base_url="http://mc.local/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        # 1. Event pagination drains all 70 stale death/hurt events and persists cursor across toolsets
+        ts1 = McToolset(bot)
+        assert ts1.sync_event_cursor() == 70
+        assert event_queries == [0, 50]
+        assert ts1.drain_notable_events() == ""
+
+        ts2 = McToolset(bot)
+        assert ts2.sync_event_cursor() == 70
+        assert event_queries[-1] == 70
+
+        # 2. mc_status() enriches roofed pocket enclosure and ray-marched wall barrier assessment
+        st = json.loads(ts2.mc_status())["result"]
+        assert st["enclosure"]["roofed_pocket"] is True
+        assert st["threat_assessment"]["hostile_blocked_by_wall"] is True
+        assert st["threat_assessment"]["safe_in_place"] is False
+        assert st["threat_assessment"]["all_checked_hostiles_occluded"] is True
+
+        # 3. mc_dig blocks bare-hand iron_ore mining and auto-equips stone_pickaxe once present
+        no_pick = json.loads(ts2.mc_dig(-165, 63, -392))
+        assert no_pick["ok"] is False
+        assert no_pick["error"]["code"] == "tool_tier_insufficient"
+        assert not dug_calls
+
+        state["items"].append({"name": "stone_pickaxe", "count": 1, "slot": 3})
+        with_pick = json.loads(ts2.mc_dig(-165, 63, -392))
+        assert with_pick["ok"] is True
+        assert equipped == ["stone_pickaxe"]
+        assert dug_calls == [[-165, 63, -392]]
+
+        # 4. smelt_items carves a furnace pocket in a closed stone room when direct place fails
+        smelt_res = ts2.skills.smelt_items("raw_iron", count=2)
+        assert smelt_res["ok"] is True
+        assert [-166, 63, -393] in dug_calls
+        assert any(p.get("item") == "furnace" and p.get("pos") == [-166, 63, -393] for p in placed_calls)
+    finally:
+        bot.close()

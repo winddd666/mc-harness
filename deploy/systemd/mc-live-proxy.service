@@ -1,0 +1,16 @@
+[Unit]
+Description=Minecraft Live Spectator Proxy & LAN Viewer Forwarder (:8765 / :8766)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/xzq/projects/mc
+ExecStart=/home/xzq/projects/mc/.venv/bin/mc-live --env-file /home/xzq/projects/mc/.env.beast --bot BeastBot_01 --upstream-live-url http://100.93.211.71:18765 --viewer-url http://127.0.0.1:8766 --viewer-proxy-target 100.93.211.71:8766 --viewer-proxy-port 8766 --host 0.0.0.0 --port 8765
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

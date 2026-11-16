@@ -1,0 +1,15 @@
+# Generation-time guard pilot
+
+Enable per console command with `survival_guard:true`, or use `mc-harness --survival-guard` / `scripts/experiment_session.py --survival-guard`. The default remains disabled until live pilot results justify wider use. Run metadata and the saved report record the policy.
+
+The parent process already checks model-request control while the HTTP/model worker is in flight. The guard runs synchronously at this boundary every 0.75 seconds, consumes status and its own events cursor, and never races the tool scheduler for mutation. Shared viewer/event cursors remain separate. It forces cached-token use with no reauthentication. Observation calls have two-second network budgets; defensive API calls have eight-second budgets. User stop/deadline checks surround every API call.
+
+Fresh hurt or body/connection changes invalidate pending generation. Available shields are faced toward the observed attacker and raised; water gets buoyancy; food is used where appropriate. Without a shield, a grounded dry bot may attempt a three-block emergency shaft only after confirming a solid floor, closed dry sides, a suitable tool and existing roof material. This variant does not chase drops or craft during the emergency. A refused/failed response is recorded as such; it is never an assurance of safety.
+
+`guardian.action.*` and `guardian.incident` events record outcomes and latest state. Console shows a notice, replay can update position/health before the next ordinary tool result, and the model receives a fresh runtime observation after its old response is discarded.
+
+Current limits: no protection during a blocking tool, between tasks, or while API readiness is unavailable; no general combat/pathfinding policy; floating cannot prove a water escape; a bunker may be infeasible on a canopy or open cave. An unshielded bot with no feasible cover can still die. A network-ambiguous defensive action ends the task rather than issuing competing mutations. This is a pilot to measure response and failure modes, not a claim that continuous survival is solved.
+
+Offline evidence: tests cover mid-generation hurt/cancellation, actual shield action, historical event exclusion, respawn body semantics, floating while preserving an existing shield, urgent-shaft preflight, and replay state updates. Live controlled injury, water and composite runs must be recorded separately.
+
+Live pilot `20261115-172425-289834` (case05): a labeled two-HP generic injury while a real NJU worker was in flight triggered a verified three-block shaft and dirt roof in 3.279 seconds, cancelled the old generation, and replanned at the actual new Y55 location. No items were granted. This establishes the control chain in a protected chamber, not survival against sustained enemies. The final model answer reused stale inventory quantities; incidents now also carry `inventory_after`, and replay applies it. The pilot also revealed unnecessary digging when already inside cover; that policy cost remains unresolved. Case04 had no injury because the research injection script failed its worker-detection precondition, so it is only a no-injury baseline.

@@ -1,0 +1,87 @@
+{
+  "runtime": {
+    "source_revision": "1e67662e3ad7dfdd",
+    "loaded_at": "2026-11-15T08:06:24.348980+00:00",
+    "pid": 721512
+  },
+  "bot_username": "BeastBot_01",
+  "mc_api_base_url": "http://100.93.211.71:18900/api/v1",
+  "live_url": "http://127.0.0.1:8765",
+  "config": {
+    "provider": "nju",
+    "providers": [
+      "nju",
+      "deepseek",
+      "dashscope"
+    ],
+    "max_calls": 24,
+    "enable_thinking": false,
+    "run_timeout_s": 600.0,
+    "host": "127.0.0.1",
+    "port": 8770
+  },
+  "running": false,
+  "active_turn_id": null,
+  "connect_error": null,
+  "telemetry": {
+    "connected": true,
+    "ready": true,
+    "username": "BeastBot_01",
+    "pos": {
+      "x": -169.5,
+      "y": 63.0,
+      "z": -379.5
+    },
+    "dimension": "overworld",
+    "biome": "",
+    "is_day": false,
+    "time_of_day": 23519,
+    "health": 20,
+    "food": 20,
+    "armor": 0,
+    "held": {
+      "name": "crafting_table",
+      "count": 1,
+      "slot": 40
+    },
+    "inventory_total": 31,
+    "top_items": [
+      {
+        "name": "dirt",
+        "count": 17
+      },
+      {
+        "name": "cobblestone",
+        "count": 5
+      },
+      {
+        "name": "stick",
+        "count": 4
+      },
+      {
+        "name": "birch_planks",
+        "count": 1
+      },
+      {
+        "name": "crafting_table",
+        "count": 1
+      },
+      {
+        "name": "stone_pickaxe",
+        "count": 1
+      },
+      {
+        "name": "wildflowers",
+        "count": 1
+      },
+      {
+        "name": "wooden_pickaxe",
+        "count": 1
+      }
+    ],
+    "updated_at": "2026-11-15T08:11:24.131770+00:00",
+    "error": null
+  },
+  "turns": [],
+  "history_count": 0
+}

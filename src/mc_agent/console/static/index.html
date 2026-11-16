@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MC-CODEX · 智能体指令控制台</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20261115a" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand-group">
+          <span class="brand-badge">MC-CODEX</span>
+          <div class="bot-pill" id="bot-pill" title="Bot 在线与游戏就绪状态">
+            <span class="status-dot" id="bot-dot"></span>
+            <span id="bot-name">BeastBot_01</span>
+            <span class="bot-state-text" id="bot-state-text">连接中</span>
+            <button type="button" class="mini-btn hidden" id="reconnect-btn" title="尝试重新连接 Bot">重连</button>
+          </div>
+          <div class="vitals-group" id="vitals-group">
+            <span class="vital-chip mono" id="vital-pos" title="当前方块坐标">XYZ —</span>
+            <span class="vital-chip" id="vital-hp" title="生命值">❤️ —</span>
+            <span class="vital-chip" id="vital-food" title="饥饿值">🍖 —</span>
+            <span class="vital-chip" id="vital-held" title="当前手持物品">🗡 —</span>
+            <button type="button" class="vital-chip vital-inv-btn" id="inv-toggle-btn" title="查看背包主要物品">
+              🎒 <span id="vital-inv-count">0</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="controls-group">
+          <label class="ctrl-field" title="选择大模型提供方">
+            <span>模型</span>
+            <select id="cfg-provider">
+              <option value="nju">nju (竞赛)</option>
+              <option value="deepseek">deepseek</option>
+              <option value="dashscope">dashscope</option>
+            </select>
+          </label>
+          <label class="ctrl-field" title="单次指令允许的最大模型调用轮数">
+            <span>步数</span>
+            <input id="cfg-max-calls" type="number" min="1" max="600" value="24" />
+          </label>
+          <label class="ctrl-toggle" title="是否开启模型显式思考模式">
+            <input id="cfg-thinking" type="checkbox" />
+            <span>思考</span>
+          </label>
+          <button type="button" class="top-btn" id="clear-btn" title="清空当前对话上下文与记录">🧹 新会话</button>
+          <a class="top-btn top-btn-live" id="live-link" href="http://127.0.0.1:8765" target="_blank" rel="noopener noreferrer" title="打开只读旁观直播窗口 (mc-live)">
+            🎬 直播画面
+          </a>
+        </div>
+      </div>
+
+      <div class="inv-popover hidden" id="inv-popover">
+        <div class="inv-popover-header">
+          <span>当前背包摘要</span>
+          <span class="mono muted" id="inv-dim">—</span>
+        </div>
+        <div class="inv-items-grid" id="inv-items-grid"></div>
+      </div>
+    </header>
+
+    <main class="stream-wrap" id="stream-wrap">
+      <div class="stream-inner">
+        <section class="empty-state" id="empty-state">
+          <div class="empty-hero">
+            <div class="empty-icon">›_</div>
+            <h1>向 <span class="mono" id="hero-bot-name">BeastBot_01</span> 下达 Minecraft 指令</h1>
+            <p>
+              本控制台仅监听本机回环地址，与局域网同学观看的只读 <code>mc-live</code> 直播页完全隔离；
+              每次指令会自动写入标准 <code>runs/*.events.jsonl</code>，直播间同步可见每一步动作。
+            </p>
+          </div>
+          <div class="starter-grid" id="starter-grid">
+            <button type="button" class="starter-card" data-prompt="检查当前背包与附近石头/煤炭露头，采集圆石合成熔炉，烧制木炭并制作火把插在身旁照明。">
+              <div class="starter-title">⛏ 采石熔炉与火把</div>
+              <div class="starter-desc">采集圆石合成熔炉，烧制木炭制作火把照明。</div>
+            </button>
+            <button type="button" class="starter-card" data-prompt="巡视周边地面寻找羊群和食物来源，收集羊毛与木板合成床，安放并绑定重生点，若夜晚临近则优先安全度夜。">
+              <div class="starter-title">🐑 寻羊做床绑定重生点</div>
+              <div class="starter-desc">寻找羊群与食物，合成床并绑定出生点防止意外掉落。</div>
+            </button>
+            <button type="button" class="starter-card" data-prompt="扫描附近山崖或洞口露出的铁矿脉，开采至少 6 块粗铁后熔炼铁锭，升级铁镐、铁剑与盾牌并装备。">
+              <div class="starter-title">🪨 探矿采集并升级铁套</div>
+              <div class="starter-desc">寻找铁矿石并熔炼，打造铁镐、铁剑与盾牌。</div>
+            </button>
+            <button type="button" class="starter-card" data-prompt="调用 mc_advancement_frontier 查看当前待解锁的生存进度，挑选 2 个当前条件下最容易完成的进度立即完成并汇报。">
+              <div class="starter-title">🏆 推进当前生存进度</div>
+              <div class="starter-desc">查看待解锁进度列表，优先挑 2 个最快解锁的推进。</div>
+            </button>
+          </div>
+        </section>
+
+        <div class="turns-list" id="turns-list"></div>
+      </div>
+
+      <button type="button" class="jump-bottom-btn hidden" id="jump-bottom-btn">↓ 最新输出</button>
+    </main>
+
+    <footer class="composer-wrap">
+      <div class="composer-inner">
+        <div class="run-banner hidden" id="run-banner">
+          <div class="run-banner-left">
+            <span class="pulse-dot"></span>
+            <span class="run-phase" id="run-phase-text">准备中...</span>
+          </div>
+          <div class="run-banner-right">
+            <span class="mono" id="run-step-text">0 / 24 轮</span>
+            <span class="muted hide-sm">· 运行中发送可排队追加或按 ⚡ 插队</span>
+          </div>
+        </div>
+
+        <form class="composer-box" id="composer-form">
+          <textarea
+            id="prompt-input"
+            rows="1"
+            placeholder="输入给 Bot 的指令（Enter 发送，Shift+Enter 换行；任务进行中输入 /now 指令 可立即插队打断）"
+            autocomplete="off"
+            spellcheck="false"
+          ></textarea>
+          <div class="composer-actions" id="composer-actions">
+            <button type="submit" class="btn btn-primary" id="send-btn">发送指令 ↵</button>
+            <button type="button" class="btn btn-queue hidden" id="queue-btn" title="在当前轮结束后安全追加到下一轮上下文 (Enter)">⏳ 排队追加 ↵</button>
+            <button type="button" class="btn btn-urgent hidden" id="urgent-btn" title="立即打断当前思考/工具批次并转向新指令 (Ctrl+Enter)">⚡ 立即插队</button>
+            <button type="button" class="btn btn-stop hidden" id="stop-btn" title="立即停止当前任务和 Bot 移动/挖掘">⏹ 停止</button>
+          </div>
+        </form>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/app.js?v=20261115a"></script>
+</body>
+</html>

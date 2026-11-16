@@ -1,0 +1,3078 @@
+{
+  "run_id": "20261115-161125-277956",
+  "status": "runtime_error",
+  "error": "MC API 会话不可继续：[death_loop_cooldown] bot is in death loop cooldown, 275s remaining",
+  "answer": null,
+  "actor_requests": 62,
+  "elapsed": 969.3572,
+  "runtime": {
+    "source_revision": "1e67662e3ad7dfdd",
+    "loaded_at": "2026-11-15T08:06:24.348980+00:00",
+    "pid": 721512
+  },
+  "death_notifications": 5,
+  "hurt_notifications": 41,
+  "model_seconds": 819.6051,
+  "tool_counts": {
+    "mc_place": 10,
+    "mc_craft": 4,
+    "mc_skill_harvest_logs": 2,
+    "mc_skill_staircase": 4,
+    "mc_find_blocks": 5,
+    "mc_dig": 12,
+    "mc_move_to": 9,
+    "mc_skill_unstick": 2,
+    "mc_control": 3,
+    "mc_inventory": 6,
+    "mc_status": 4,
+    "mc_skill_stabilize": 1,
+    "mc_skill_collect_drops": 2,
+    "mc_posture": 1,
+    "mc_attack": 1
+  },
+  "tool_calls": [
+    {
+      "name": "mc_place",
+      "started": 43.8436,
+      "args": "{\"item\":\"crafting_table\"}",
+      "seq": 169,
+      "duration": 1.044,
+      "result": {
+        "ok": true,
+        "result": {
+          "placed": "crafting_table",
+          "pos": [
+            -171,
+            63,
+            -381
+          ],
+          "sneaked": true
+        }
+      }
+    },
+    {
+      "name": "mc_craft",
+      "started": 48.8893,
+      "args": "{\"item\":\"birch_planks\",\"count\":1}",
+      "seq": 190,
+      "duration": 1.158,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "missing_ingredients",
+          "message": "could not craft birch_planks: server placed no result",
+          "example_recipe_needs": {
+            "birch_log": 1
+          },
+          "inventory": {
+            "dirt": 17,
+            "cobblestone": 5,
+            "wildflowers": 1,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "stone_pickaxe": 1,
+            "birch_planks": 1
+          },
+          "kb_hint": "材料或工作站不足时可用 mc_kb_lookup 查询官方 1.21.11 配方，或用 mc_skill_craft_gear 自动处理中间产物。"
+        }
+      }
+    },
+    {
+      "name": "mc_skill_harvest_logs",
+      "started": 61.7325,
+      "args": "{\"target_logs\":1,\"radius\":16}",
+      "seq": 219,
+      "duration": 0.165,
+      "result": {
+        "ok": false,
+        "requested_count": 1,
+        "dug_count": 0,
+        "gained": {},
+        "water_skipped": 0,
+        "protected_blacklisted": 0,
+        "temporarily_avoided": 3,
+        "temporary_reasons": [
+          "path_not_found"
+        ],
+        "error": "no_targets_available",
+        "message": "本次只挖掘 0/1 格；请按 gained 检查实际入包量。临时避让与保护区分别报告，改变站位或等待冷却后可重试临时失败。",
+        "requires_replan": true,
+        "equipped_axe": null
+      }
+    },
+    {
+      "name": "mc_skill_staircase",
+      "started": 79.2749,
+      "args": "{\"direction\":\"south\",\"steps\":5,\"stop_on_ore\":true,\"vertical\":\"down\"}",
+      "seq": 285,
+      "duration": 18.128,
+      "result": {
+        "ok": true,
+        "direction": "south",
+        "vertical": "down",
+        "steps_requested": 5,
+        "steps_done": 5,
+        "stop_reason": "completed",
+        "pos_before": [
+          -169.5,
+          63,
+          -379.5
+        ],
+        "pos_after": [
+          -169.5,
+          58,
+          -374.4
+        ],
+        "ores_nearby": []
+      }
+    },
+    {
+      "name": "mc_skill_staircase",
+      "started": 104.4547,
+      "args": "{\"direction\":\"south\",\"steps\":10,\"stop_on_ore\":true,\"vertical\":\"down\"}",
+      "seq": 327,
+      "duration": 33.016,
+      "result": {
+        "ok": true,
+        "direction": "south",
+        "vertical": "down",
+        "steps_requested": 10,
+        "steps_done": 8,
+        "stop_reason": "cave_or_drop_ahead",
+        "pos_before": [
+          -169.5,
+          58,
+          -374.4
+        ],
+        "pos_after": [
+          -169.5,
+          50,
+          -366.3
+        ],
+        "ores_nearby": [
+          {
+            "name": "copper_ore",
+            "pos": [
+              -167,
+              45,
+              -375
+            ],
+            "dist": 9.9,
+            "properties": {}
+          },
+          {
+            "name": "copper_ore",
+            "pos": [
+              -166,
+              45,
+              -375
+            ],
+            "dist": 10.2,
+            "properties": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "mc_skill_staircase",
+      "started": 145.2631,
+      "args": "{\"direction\":\"south\",\"steps\":10,\"stop_on_ore\":true,\"vertical\":\"down\"}",
+      "seq": 377,
+      "duration": 0.052,
+      "result": {
+        "ok": false,
+        "direction": "south",
+        "vertical": "down",
+        "steps_requested": 10,
+        "steps_done": 0,
+        "stop_reason": "cave_or_drop_ahead",
+        "pos_before": [
+          -169.5,
+          50,
+          -366.3
+        ],
+        "pos_after": [
+          -169.5,
+          50,
+          -366.3
+        ],
+        "ores_nearby": []
+      }
+    },
+    {
+      "name": "mc_find_blocks",
+      "started": 156.0455,
+      "args": "{\"radius\":16,\"types\":[\"iron_ore\", \"deepslate_iron_ore\", \"coal_ore\", \"cobblestone\"]}",
+      "seq": 449,
+      "duration": 0.064,
+      "result": {
+        "ok": true,
+        "result": {
+          "total": 4,
+          "blocks": [
+            {
+              "name": "iron_ore",
+              "pos": [
+                -157,
+                48,
+                -370
+              ],
+              "dist": 13.2,
+              "properties": {}
+            },
+            {
+              "name": "coal_ore",
+              "pos": [
+                -183,
+                56,
+                -364
+              ],
+              "dist": 15,
+              "properties": {}
+            },
+            {
+              "name": "coal_ore",
+              "pos": [
+                -183,
+                56,
+                -363
+              ],
+              "dist": 15.1,
+              "properties": {}
+            },
+            {
+              "name": "iron_ore",
+              "pos": [
+                -184,
+                43,
+                -364
+              ],
+              "dist": 16.3,
+              "properties": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 164.5142,
+      "args": "{\"x\":-157,\"y\":48,\"z\":-370}",
+      "seq": 491,
+      "duration": 0.027,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "out_of_reach",
+          "message": "cannot reach iron_ore at (-157, 48, -370)",
+          "pos": [
+            -169.5,
+            50,
+            -366.3
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_move_to",
+      "started": 170.45,
+      "args": "{\"x\":-157,\"z\":-370}",
+      "seq": 524,
+      "duration": 0.063,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "path_not_found",
+          "message": "No path to the goal!",
+          "pos": [
+            -169.5,
+            50,
+            -366.3
+          ],
+          "ms": 54,
+          "kb_hint": "目标位置当前无可达路径（可能是坑洞落差/头顶遮挡/高墙）；可先调 mc_skill_unstick 脱困，或对目标点水平跑图时省略 y。"
+        }
+      }
+    },
+    {
+      "name": "mc_skill_unstick",
+      "started": 175.8063,
+      "args": "{}",
+      "seq": 556,
+      "duration": 6.669,
+      "result": {
+        "ok": true,
+        "foot_block_before": [
+          -170,
+          50,
+          -367
+        ],
+        "hitbox_xs": [
+          -170
+        ],
+        "hitbox_zs": [
+          -367,
+          -366
+        ],
+        "pos_before": [
+          -169.5,
+          50,
+          -366.3
+        ],
+        "pos_after": [
+          -168.3,
+          51,
+          -366.3
+        ],
+        "dug": [
+          {
+            "pos": [
+              -170,
+              51,
+              -366
+            ],
+            "block": "stone"
+          },
+          {
+            "pos": [
+              -170,
+              50,
+              -366
+            ],
+            "block": "stone"
+          },
+          {
+            "pos": [
+              -169,
+              51,
+              -367
+            ],
+            "block": "stone"
+          },
+          {
+            "pos": [
+              -169,
+              52,
+              -367
+            ],
+            "block": "stone"
+          },
+          {
+            "pos": [
+              -169,
+              50,
+              -367
+            ],
+            "block": "stone"
+          }
+        ],
+        "control": {
+          "ms": 905,
+          "pos": [
+            -168.3,
+            51,
+            -366.3
+          ],
+          "moved": 1.54,
+          "on_ground": false,
+          "in_water": false,
+          "yaw": -1.57,
+          "pitch": -0.83
+        }
+      }
+    },
+    {
+      "name": "mc_move_to",
+      "started": 187.4419,
+      "args": "{\"x\":-157,\"z\":-370}",
+      "seq": 591,
+      "duration": 0.018,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "path_not_found",
+          "message": "No path to the goal!",
+          "pos": [
+            -168.3,
+            50,
+            -366.3
+          ],
+          "ms": 12,
+          "kb_hint": "目标位置当前无可达路径（可能是坑洞落差/头顶遮挡/高墙）；可先调 mc_skill_unstick 脱困，或对目标点水平跑图时省略 y。"
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 194.2061,
+      "args": "{\"x\":-183,\"y\":56,\"z\":-364}",
+      "seq": 635,
+      "duration": 0.071,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "path_not_found",
+          "message": "No path to the goal!",
+          "from": [
+            -168.3,
+            50,
+            -366.3
+          ],
+          "to": [
+            -183,
+            56,
+            -364
+          ],
+          "kb_hint": "目标位置当前无可达路径（可能是坑洞落差/头顶遮挡/高墙）；可先调 mc_skill_unstick 脱困，或对目标点水平跑图时省略 y。"
+        }
+      }
+    },
+    {
+      "name": "mc_skill_staircase",
+      "started": 211.2099,
+      "args": "{\"direction\":\"north\",\"steps\":15,\"stop_on_ore\":false,\"vertical\":\"up\"}",
+      "seq": 687,
+      "duration": 45.412,
+      "result": {
+        "ok": true,
+        "direction": "north",
+        "vertical": "up",
+        "steps_requested": 15,
+        "steps_done": 12,
+        "stop_reason": "reached_surface",
+        "pos_before": [
+          -168.3,
+          50,
+          -366.3
+        ],
+        "pos_after": [
+          -168.5,
+          62,
+          -378.5
+        ],
+        "ores_nearby": []
+      }
+    },
+    {
+      "name": "mc_skill_harvest_logs",
+      "started": 262.1613,
+      "args": "{\"target_logs\":2,\"radius\":32}",
+      "seq": 725,
+      "duration": 0.694,
+      "result": {
+        "ok": false,
+        "requested_count": 2,
+        "dug_count": 0,
+        "gained": {},
+        "water_skipped": 0,
+        "protected_blacklisted": 0,
+        "temporarily_avoided": 6,
+        "temporary_reasons": [
+          "path_not_found"
+        ],
+        "error": "no_targets_available",
+        "message": "本次只挖掘 0/2 格；请按 gained 检查实际入包量。临时避让与保护区分别报告，改变站位或等待冷却后可重试临时失败。",
+        "requires_replan": true,
+        "equipped_axe": null
+      }
+    },
+    {
+      "name": "mc_find_blocks",
+      "started": 302.0611,
+      "args": "{\"radius\":32,\"types\":[\"birch_log\", \"oak_log\", \"spruce_log\"]}",
+      "seq": 785,
+      "duration": 0.061,
+      "result": {
+        "ok": true,
+        "result": {
+          "total": 346,
+          "blocks": [
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                71,
+                -374
+              ],
+              "dist": 10.7,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                72,
+                -374
+              ],
+              "dist": 11.5,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                73,
+                -374
+              ],
+              "dist": 12.4,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -160,
+                71,
+                -377
+              ],
+              "dist": 12.5,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                74,
+                -381
+              ],
+              "dist": 12.7,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -168,
+                75,
+                -377
+              ],
+              "dist": 13.1,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -160,
+                72,
+                -377
+              ],
+              "dist": 13.2,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                74,
+                -374
+              ],
+              "dist": 13.3,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -166,
+                74,
+                -373
+              ],
+              "dist": 13.4,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                75,
+                -381
+              ],
+              "dist": 13.7,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -159,
+                72,
+                -380
+              ],
+              "dist": 13.9,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -160,
+                73,
+                -377
+              ],
+              "dist": 14,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                75,
+                -374
+              ],
+              "dist": 14.2,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -166,
+                75,
+                -373
+              ],
+              "dist": 14.3,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -162,
+                73,
+                -372
+              ],
+              "dist": 14.3,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                70,
+                -367
+              ],
+              "dist": 14.4,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -167,
+                76,
+                -382
+              ],
+              "dist": 14.5,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                76,
+                -381
+              ],
+              "dist": 14.6,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -159,
+                73,
+                -380
+              ],
+              "dist": 14.6,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -160,
+                74,
+                -377
+              ],
+              "dist": 14.8,
+              "properties": {
+                "axis": "y"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_move_to",
+      "started": 310.5455,
+      "args": "{\"x\":-172,\"z\":-374}",
+      "seq": 843,
+      "duration": 1.963,
+      "result": {
+        "ok": true,
+        "result": {
+          "pos": [
+            -169.5,
+            57.9,
+            -373.5
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 318.7234,
+      "args": "{\"x\":-172,\"y\":71,\"z\":-374}",
+      "seq": 877,
+      "duration": 0.043,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "path_not_found",
+          "message": "No path to the goal!",
+          "from": [
+            -169.5,
+            57,
+            -373.5
+          ],
+          "to": [
+            -172,
+            71,
+            -374
+          ],
+          "kb_hint": "目标位置当前无可达路径（可能是坑洞落差/头顶遮挡/高墙）；可先调 mc_skill_unstick 脱困，或对目标点水平跑图时省略 y。"
+        }
+      }
+    },
+    {
+      "name": "mc_move_to",
+      "started": 331.7524,
+      "args": "{\"x\":-172,\"z\":-374,\"y\":71}",
+      "seq": 927,
+      "duration": 0.052,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "path_not_found",
+          "message": "No path to the goal!",
+          "from": [
+            -169.5,
+            57,
+            -373.5
+          ],
+          "to": [
+            -172,
+            71,
+            -374
+          ],
+          "kb_hint": "mc_move_to 传了 y 坐标容易导致跨地形无路径！水平跑图请省略 y（只传 x, z）；若感觉被地形/坑洞卡住，先调用 mc_skill_unstick。"
+        }
+      }
+    },
+    {
+      "name": "mc_move_to",
+      "started": 340.5016,
+      "args": "{\"x\":-172,\"z\":-374}",
+      "seq": 968,
+      "duration": 0.024,
+      "result": {
+        "ok": true,
+        "result": {
+          "pos": [
+            -169.5,
+            57,
+            -373.5
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_skill_unstick",
+      "started": 347.8875,
+      "args": "{}",
+      "seq": 1053,
+      "duration": 0.954,
+      "result": {
+        "ok": true,
+        "foot_block_before": [
+          -170,
+          57,
+          -374
+        ],
+        "hitbox_xs": [
+          -170
+        ],
+        "hitbox_zs": [
+          -374
+        ],
+        "pos_before": [
+          -169.5,
+          57,
+          -373.5
+        ],
+        "pos_after": [
+          -168.3,
+          58,
+          -373.5
+        ],
+        "dug": [],
+        "control": {
+          "ms": 900,
+          "pos": [
+            -168.3,
+            58,
+            -373.5
+          ],
+          "moved": 1.58,
+          "on_ground": false,
+          "in_water": false,
+          "yaw": -1.57,
+          "pitch": 0
+        }
+      }
+    },
+    {
+      "name": "mc_find_blocks",
+      "started": 356.0595,
+      "args": "{\"radius\":8,\"types\":[\"stone\", \"cobblestone\", \"dirt\"]}",
+      "seq": 1110,
+      "duration": 0.053,
+      "result": {
+        "ok": true,
+        "result": {
+          "total": 190,
+          "blocks": [
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                57,
+                -374
+              ],
+              "dist": 0.6,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                57,
+                -373
+              ],
+              "dist": 0.6,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                56,
+                -373
+              ],
+              "dist": 1.1,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                58,
+                -373
+              ],
+              "dist": 1.1,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                58,
+                -374
+              ],
+              "dist": 1.2,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -169,
+                56,
+                -374
+              ],
+              "dist": 1.3,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                57,
+                -372
+              ],
+              "dist": 1.5,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -169,
+                57,
+                -375
+              ],
+              "dist": 1.7,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                56,
+                -372
+              ],
+              "dist": 1.8,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                58,
+                -375
+              ],
+              "dist": 1.9,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -169,
+                58,
+                -372
+              ],
+              "dist": 1.9,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -170,
+                56,
+                -374
+              ],
+              "dist": 2,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                59,
+                -374
+              ],
+              "dist": 2.1,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -169,
+                55,
+                -373
+              ],
+              "dist": 2.2,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -169,
+                59,
+                -373
+              ],
+              "dist": 2.2,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -170,
+                57,
+                -375
+              ],
+              "dist": 2.3,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -170,
+                58,
+                -372
+              ],
+              "dist": 2.5,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                59,
+                -375
+              ],
+              "dist": 2.5,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -168,
+                55,
+                -372
+              ],
+              "dist": 2.5,
+              "properties": {}
+            },
+            {
+              "name": "stone",
+              "pos": [
+                -169,
+                57,
+                -371
+              ],
+              "dist": 2.6,
+              "properties": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_control",
+      "started": 365.099,
+      "args": "{\"forward\":true,\"jump\":true,\"ms\":200}",
+      "seq": 1169,
+      "duration": 0.208,
+      "result": {
+        "ok": true,
+        "result": {
+          "ms": 200,
+          "pos": [
+            -168.3,
+            58.2,
+            -373.5
+          ],
+          "moved": 1.17,
+          "on_ground": false,
+          "in_water": false,
+          "yaw": -1.57,
+          "pitch": 0
+        }
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 374.5343,
+      "args": "{\"item\":\"cobblestone\",\"x\":-168,\"y\":59,\"z\":-373}",
+      "seq": 1222,
+      "duration": 0.009,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "occupied",
+          "message": "stone already at target"
+        }
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 414.9257,
+      "args": "{\"item\":\"cobblestone\",\"x\":-168,\"y\":58,\"z\":-374}",
+      "seq": 1264,
+      "duration": 0.009,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "occupied",
+          "message": "stone already at target"
+        }
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 427.4691,
+      "args": "{\"item\":\"cobblestone\",\"x\":-168,\"y\":59,\"z\":-374}",
+      "seq": 1304,
+      "duration": 0.011,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "occupied",
+          "message": "stone already at target"
+        }
+      }
+    },
+    {
+      "name": "mc_inventory",
+      "started": 439.8104,
+      "args": "{}",
+      "seq": 1345,
+      "duration": 0.009,
+      "result": {
+        "ok": true,
+        "result": {
+          "items": [
+            {
+              "name": "cobblestone",
+              "count": 17,
+              "slot": 36
+            },
+            {
+              "name": "dirt",
+              "count": 17,
+              "slot": 37
+            },
+            {
+              "name": "cobblestone",
+              "count": 64,
+              "slot": 38
+            },
+            {
+              "name": "wildflowers",
+              "count": 1,
+              "slot": 39
+            },
+            {
+              "name": "stick",
+              "count": 4,
+              "slot": 41
+            },
+            {
+              "name": "wooden_pickaxe",
+              "count": 1,
+              "slot": 42,
+              "durability_used": 9
+            },
+            {
+              "name": "stone_pickaxe",
+              "count": 1,
+              "slot": 43,
+              "durability_used": 76
+            },
+            {
+              "name": "birch_planks",
+              "count": 1,
+              "slot": 44
+            }
+          ],
+          "armor": {
+            "head": null,
+            "chest": null,
+            "legs": null,
+            "feet": null
+          },
+          "offhand": null,
+          "held": {
+            "name": "stone_pickaxe",
+            "count": 1,
+            "slot": 43,
+            "durability_used": 76
+          },
+          "empty_slots": 28
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 449.1598,
+      "args": "{\"x\":-168,\"y\":57,\"z\":-374}",
+      "seq": 1426,
+      "duration": 1.255,
+      "result": {
+        "ok": true,
+        "result": {
+          "dug": "stone",
+          "dig_ms": 651,
+          "tool": "stone_pickaxe",
+          "gained": {
+            "cobblestone": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_move_to",
+      "started": 455.9806,
+      "args": "{\"x\":-172,\"z\":-374}",
+      "seq": 1462,
+      "duration": 0.296,
+      "result": {
+        "ok": true,
+        "result": {
+          "pos": [
+            -169.4,
+            57,
+            -373.5
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 472.7642,
+      "args": "{\"x\":-169,\"y\":58,\"z\":-374}",
+      "seq": 1535,
+      "duration": 0.016,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "nothing_to_dig",
+          "message": "block at (-169, 58, -374) is air"
+        }
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 480.523,
+      "args": "{\"item\":\"cobblestone\",\"x\":-169,\"y\":58,\"z\":-374}",
+      "seq": 1578,
+      "duration": 1.302,
+      "result": {
+        "ok": true,
+        "result": {
+          "placed": "cobblestone",
+          "pos": [
+            -169,
+            58,
+            -374
+          ],
+          "sneaked": true
+        }
+      }
+    },
+    {
+      "name": "mc_control",
+      "started": 486.8859,
+      "args": "{\"forward\":true,\"jump\":true,\"ms\":200}",
+      "seq": 1616,
+      "duration": 0.215,
+      "result": {
+        "ok": true,
+        "result": {
+          "ms": 205,
+          "pos": [
+            -169.3,
+            58.2,
+            -373.5
+          ],
+          "moved": 1.17,
+          "on_ground": false,
+          "in_water": false,
+          "yaw": -1.56,
+          "pitch": -0.09
+        }
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 515.639,
+      "args": "{\"item\":\"cobblestone\",\"x\":-169,\"y\":59,\"z\":-374}",
+      "seq": 1673,
+      "duration": 0.304,
+      "result": {
+        "ok": true,
+        "result": {
+          "placed": "cobblestone",
+          "pos": [
+            -169,
+            59,
+            -374
+          ],
+          "sneaked": true
+        }
+      }
+    },
+    {
+      "name": "mc_control",
+      "started": 529.9725,
+      "args": "{\"forward\":true,\"jump\":true,\"ms\":200}",
+      "seq": 1703,
+      "duration": 0.21,
+      "result": {
+        "ok": true,
+        "result": {
+          "ms": 201,
+          "pos": [
+            -169.3,
+            58.2,
+            -373.5
+          ],
+          "moved": 1.17,
+          "on_ground": false,
+          "in_water": false,
+          "yaw": -1.56,
+          "pitch": 0.44
+        }
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 542.258,
+      "args": "{\"item\":\"cobblestone\",\"x\":-169,\"y\":60,\"z\":-374}",
+      "seq": 1745,
+      "duration": 0.009,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "occupied",
+          "message": "stone already at target"
+        }
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 554.9318,
+      "args": "{\"item\":\"cobblestone\",\"x\":-169,\"y\":60,\"z\":-373}",
+      "seq": 1786,
+      "duration": 0.009,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "occupied",
+          "message": "stone already at target"
+        }
+      }
+    },
+    {
+      "name": "mc_find_blocks",
+      "started": 561.2534,
+      "args": "{\"radius\":8,\"types\":[\"air\"]}",
+      "seq": 1828,
+      "duration": 0.051,
+      "result": {
+        "ok": true,
+        "result": {
+          "total": 68,
+          "blocks": [
+            {
+              "name": "air",
+              "pos": [
+                -169,
+                57,
+                -374
+              ],
+              "dist": 0.6,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -169,
+                57,
+                -373
+              ],
+              "dist": 0.6,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                57,
+                -374
+              ],
+              "dist": 0.9,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                57,
+                -373
+              ],
+              "dist": 0.9,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -169,
+                56,
+                -373
+              ],
+              "dist": 1.2,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -169,
+                58,
+                -373
+              ],
+              "dist": 1.2,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                58,
+                -374
+              ],
+              "dist": 1.3,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                56,
+                -373
+              ],
+              "dist": 1.3,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                58,
+                -373
+              ],
+              "dist": 1.3,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -168,
+                57,
+                -374
+              ],
+              "dist": 1.4,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -169,
+                57,
+                -372
+              ],
+              "dist": 1.5,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                57,
+                -372
+              ],
+              "dist": 1.6,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -169,
+                58,
+                -375
+              ],
+              "dist": 1.8,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -169,
+                56,
+                -372
+              ],
+              "dist": 1.8,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                58,
+                -375
+              ],
+              "dist": 1.9,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                56,
+                -372
+              ],
+              "dist": 1.9,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                59,
+                -374
+              ],
+              "dist": 2.2,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -169,
+                59,
+                -375
+              ],
+              "dist": 2.5,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -169,
+                55,
+                -372
+              ],
+              "dist": 2.5,
+              "properties": {}
+            },
+            {
+              "name": "air",
+              "pos": [
+                -170,
+                59,
+                -375
+              ],
+              "dist": 2.6,
+              "properties": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 589.0627,
+      "args": "{\"x\":-169,\"y\":56,\"z\":-374}",
+      "seq": 1901,
+      "duration": 2.255,
+      "result": {
+        "ok": true,
+        "result": {
+          "dug": "stone",
+          "dig_ms": 626,
+          "tool": "stone_pickaxe",
+          "gained": {
+            "cobblestone": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 598.0692,
+      "args": "{\"x\":-169,\"y\":55,\"z\":-374}",
+      "seq": 1940,
+      "duration": 1.776,
+      "result": {
+        "ok": true,
+        "result": {
+          "dug": "stone",
+          "dig_ms": 626,
+          "tool": "stone_pickaxe",
+          "gained": {
+            "cobblestone": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 605.8275,
+      "args": "{\"x\":-169,\"y\":54,\"z\":-374}",
+      "seq": 1978,
+      "duration": 1.169,
+      "result": {
+        "ok": true,
+        "result": {
+          "dug": "stone",
+          "dig_ms": 652,
+          "tool": "stone_pickaxe",
+          "gained": {
+            "cobblestone": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 615.3932,
+      "args": "{\"x\":-169,\"y\":53,\"z\":-374}",
+      "seq": 2016,
+      "duration": 1.169,
+      "result": {
+        "ok": true,
+        "result": {
+          "dug": "stone",
+          "dig_ms": 651,
+          "tool": "stone_pickaxe",
+          "gained": {
+            "cobblestone": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 635.9058,
+      "args": "{\"x\":-169,\"y\":52,\"z\":-374}",
+      "seq": 2054,
+      "duration": 1.143,
+      "result": {
+        "ok": true,
+        "result": {
+          "dug": "stone",
+          "dig_ms": 626,
+          "tool": "stone_pickaxe",
+          "gained": {
+            "cobblestone": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 654.0676,
+      "args": "{\"x\":-169,\"y\":51,\"z\":-374}",
+      "seq": 2092,
+      "duration": 0.877,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "interrupted",
+          "message": "stopped because of hurt (The goal was changed before it could be completed!)",
+          "from": [
+            -169.4,
+            48.1,
+            -372.6
+          ],
+          "to": [
+            -169,
+            51,
+            -374
+          ],
+          "inner_code": "path_not_found",
+          "cause": "hurt",
+          "health": 16.33333396911621,
+          "pos": [
+            -169.4,
+            48.1,
+            -372.6
+          ],
+          "nearest_hostile": {
+            "id": 25286,
+            "name": "skeleton",
+            "dist": 11.5
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_status",
+      "started": 673.8836,
+      "args": "{}",
+      "seq": 2142,
+      "duration": 0.081,
+      "result": {
+        "ok": true,
+        "result": {
+          "username": "BeastBot_01",
+          "pos": [
+            -165.7,
+            71,
+            -376.7
+          ],
+          "yaw": 3.14,
+          "speed": 0,
+          "velocity": [
+            0,
+            0,
+            0
+          ],
+          "dimension": "overworld",
+          "gamemode": "survival",
+          "health": 5.336133003234863,
+          "food": 20,
+          "saturation": 0,
+          "xp_level": 0,
+          "xp_progress": 0,
+          "oxygen": 20,
+          "armor_points": 0,
+          "held": {
+            "name": "stone_pickaxe",
+            "count": 1,
+            "slot": 43,
+            "durability_used": 82
+          },
+          "offhand": null,
+          "effects": [],
+          "on_fire": false,
+          "is_sleeping": false,
+          "in_water": false,
+          "submerged": false,
+          "in_lava": false,
+          "in_vehicle": null,
+          "sneaking": false,
+          "jumping": false,
+          "blocking": false,
+          "using_item": null,
+          "time_of_day": 13039,
+          "is_day": false,
+          "raining": false,
+          "thundering": false,
+          "biome": "",
+          "on_ground": true,
+          "alive": true,
+          "ready": true,
+          "busy": null,
+          "nearest_hostile": {
+            "id": 19780,
+            "name": "zombie",
+            "dist": 10.2
+          },
+          "last_death": {
+            "pos": [
+              -169.7,
+              46,
+              -372.3
+            ],
+            "t": 1794730950223,
+            "dropped_items_at": [
+              -169.7,
+              46,
+              -372.3
+            ]
+          },
+          "enclosure": {
+            "roofed_pocket": true,
+            "ceiling_block": "birch_leaves",
+            "note": "上方有遮盖，但不代表四周封闭；确认无新受伤和无遮挡近敌后，可在掩体内就地合成/熔炼。"
+          },
+          "threat_assessment": {
+            "hostile_blocked_by_wall": true,
+            "safe_in_place": false,
+            "assessment_complete": true,
+            "nearby_hostiles": [
+              {
+                "id": 19780,
+                "name": "zombie",
+                "dist": 10.2,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "grass_block",
+                  "pos": [
+                    -166,
+                    71,
+                    -378
+                  ]
+                }
+              },
+              {
+                "id": 26497,
+                "name": "zombie",
+                "dist": 26.1,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "grass_block",
+                  "pos": [
+                    -167,
+                    71,
+                    -379
+                  ]
+                }
+              },
+              {
+                "id": 20463,
+                "name": "enderman",
+                "dist": 28.0,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "grass_block",
+                  "pos": [
+                    -167,
+                    71,
+                    -379
+                  ]
+                }
+              }
+            ],
+            "note": "已检查怪物的当前射线均有遮挡，可保持现有掩体；仍需留意未检查实体、绕路和新受伤，勿据此认定绝对安全或盲目冲向地表。",
+            "dy": -6.0,
+            "blocking_block": {
+              "name": "grass_block",
+              "pos": [
+                -166,
+                71,
+                -378
+              ]
+            },
+            "hostiles_observed": 3,
+            "hostiles_checked": 3,
+            "all_checked_hostiles_occluded": true
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_inventory",
+      "started": 673.8851,
+      "args": "{}",
+      "seq": 2143,
+      "duration": 0.015,
+      "result": {
+        "ok": true,
+        "result": {
+          "items": [
+            {
+              "name": "cobblestone",
+              "count": 21,
+              "slot": 36
+            },
+            {
+              "name": "dirt",
+              "count": 17,
+              "slot": 37
+            },
+            {
+              "name": "cobblestone",
+              "count": 64,
+              "slot": 38
+            },
+            {
+              "name": "wildflowers",
+              "count": 1,
+              "slot": 39
+            },
+            {
+              "name": "stick",
+              "count": 4,
+              "slot": 41
+            },
+            {
+              "name": "wooden_pickaxe",
+              "count": 1,
+              "slot": 42,
+              "durability_used": 9
+            },
+            {
+              "name": "stone_pickaxe",
+              "count": 1,
+              "slot": 43,
+              "durability_used": 82
+            },
+            {
+              "name": "birch_planks",
+              "count": 1,
+              "slot": 44
+            }
+          ],
+          "armor": {
+            "head": null,
+            "chest": null,
+            "legs": null,
+            "feet": null
+          },
+          "offhand": null,
+          "held": {
+            "name": "stone_pickaxe",
+            "count": 1,
+            "slot": 43,
+            "durability_used": 82
+          },
+          "empty_slots": 28
+        }
+      }
+    },
+    {
+      "name": "mc_skill_stabilize",
+      "started": 687.8333,
+      "args": "{}",
+      "seq": 2239,
+      "duration": 0.015,
+      "result": {
+        "ok": true,
+        "health": 7.336133003234863,
+        "food": 17,
+        "pos": [
+          -165.7,
+          71,
+          -376.7
+        ],
+        "in_water": false,
+        "actions": []
+      }
+    },
+    {
+      "name": "mc_find_blocks",
+      "started": 693.403,
+      "args": "{\"radius\":32,\"types\":[\"birch_log\", \"oak_log\", \"spruce_log\"]}",
+      "seq": 2303,
+      "duration": 0.1,
+      "result": {
+        "ok": true,
+        "result": {
+          "total": 428,
+          "blocks": [
+            {
+              "name": "birch_log",
+              "pos": [
+                -168,
+                75,
+                -377
+              ],
+              "dist": 4.6,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -166,
+                74,
+                -373
+              ],
+              "dist": 4.8,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -166,
+                75,
+                -373
+              ],
+              "dist": 5.5,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -160,
+                71,
+                -377
+              ],
+              "dist": 5.7,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -160,
+                73,
+                -377
+              ],
+              "dist": 6.1,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -166,
+                76,
+                -373
+              ],
+              "dist": 6.2,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -160,
+                74,
+                -377
+              ],
+              "dist": 6.5,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                71,
+                -374
+              ],
+              "dist": 6.8,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                72,
+                -374
+              ],
+              "dist": 6.9,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                73,
+                -374
+              ],
+              "dist": 7.1,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -166,
+                77,
+                -373
+              ],
+              "dist": 7.1,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -167,
+                76,
+                -382
+              ],
+              "dist": 7.4,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                74,
+                -374
+              ],
+              "dist": 7.5,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -159,
+                72,
+                -380
+              ],
+              "dist": 7.6,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -159,
+                73,
+                -380
+              ],
+              "dist": 7.8,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -162,
+                76,
+                -372
+              ],
+              "dist": 7.8,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                75,
+                -374
+              ],
+              "dist": 7.9,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -159,
+                74,
+                -380
+              ],
+              "dist": 8.1,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                74,
+                -381
+              ],
+              "dist": 8.2,
+              "properties": {
+                "axis": "y"
+              }
+            },
+            {
+              "name": "birch_log",
+              "pos": [
+                -172,
+                76,
+                -374
+              ],
+              "dist": 8.5,
+              "properties": {
+                "axis": "y"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_move_to",
+      "started": 704.4938,
+      "args": "{\"x\":-168,\"z\":-377}",
+      "seq": 2360,
+      "duration": 0.043,
+      "result": {
+        "ok": true,
+        "result": {
+          "pos": [
+            -165.5,
+            71,
+            -376.7
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_dig",
+      "started": 718.0965,
+      "args": "{\"x\":-168,\"y\":75,\"z\":-377}",
+      "seq": 2394,
+      "duration": 17.044,
+      "result": {
+        "ok": true,
+        "result": {
+          "dug": "birch_log",
+          "dig_ms": 3026,
+          "tool": "hand",
+          "gained": {}
+        }
+      }
+    },
+    {
+      "name": "mc_inventory",
+      "started": 755.0336,
+      "args": "{}",
+      "seq": 2429,
+      "duration": 0.01,
+      "result": {
+        "ok": true,
+        "result": {
+          "items": [
+            {
+              "name": "cobblestone",
+              "count": 21,
+              "slot": 36
+            },
+            {
+              "name": "dirt",
+              "count": 17,
+              "slot": 37
+            },
+            {
+              "name": "cobblestone",
+              "count": 64,
+              "slot": 38
+            },
+            {
+              "name": "wildflowers",
+              "count": 1,
+              "slot": 39
+            },
+            {
+              "name": "stick",
+              "count": 4,
+              "slot": 41
+            },
+            {
+              "name": "wooden_pickaxe",
+              "count": 1,
+              "slot": 42,
+              "durability_used": 9
+            },
+            {
+              "name": "stone_pickaxe",
+              "count": 1,
+              "slot": 43,
+              "durability_used": 82
+            },
+            {
+              "name": "birch_planks",
+              "count": 1,
+              "slot": 44
+            }
+          ],
+          "armor": {
+            "head": null,
+            "chest": null,
+            "legs": null,
+            "feet": null
+          },
+          "offhand": null,
+          "held": null,
+          "empty_slots": 28
+        }
+      }
+    },
+    {
+      "name": "mc_skill_collect_drops",
+      "started": 779.1215,
+      "args": "{\"radius\":8}",
+      "seq": 2463,
+      "duration": 1.658,
+      "result": {
+        "ok": false,
+        "attempted_pickups": 1,
+        "attempts": [
+          {
+            "id": 26751,
+            "item": "birch_logx1",
+            "item_pos": [
+              -167.1,
+              71,
+              -376.1
+            ],
+            "pos": [
+              -165.5,
+              71.2,
+              -376.4
+            ],
+            "distance_after": 1.64
+          }
+        ],
+        "skipped": [],
+        "moved_to": [
+          {
+            "id": 26751,
+            "item": "birch_logx1",
+            "item_pos": [
+              -167.1,
+              71,
+              -376.1
+            ],
+            "pos": [
+              -165.5,
+              71.2,
+              -376.4
+            ],
+            "distance_after": 1.64
+          }
+        ],
+        "gained": {},
+        "inventory": {
+          "cobblestone": 85,
+          "dirt": 17,
+          "wildflowers": 1,
+          "stick": 4,
+          "wooden_pickaxe": 1,
+          "stone_pickaxe": 1,
+          "birch_planks": 1
+        },
+        "pos_after": [
+          -165.5,
+          71,
+          -376.4
+        ],
+        "health": 7.336133003234863,
+        "error": "no_drops_collected",
+        "message": "未确认任何物品入包；走近成功不代表拾取成功。请检查高差、障碍与实际背包，改变站位或路线后再试，勿据此继续合成。"
+      }
+    },
+    {
+      "name": "mc_move_to",
+      "started": 806.9558,
+      "args": "{\"entity_id\":26751}",
+      "seq": 2520,
+      "duration": 0.008,
+      "result": {
+        "ok": true,
+        "result": {
+          "pos": [
+            -165.5,
+            71,
+            -376.4
+          ]
+        }
+      }
+    },
+    {
+      "name": "mc_skill_collect_drops",
+      "started": 811.7869,
+      "args": "{\"radius\":4}",
+      "seq": 2543,
+      "duration": 0.722,
+      "result": {
+        "ok": true,
+        "attempted_pickups": 1,
+        "attempts": [
+          {
+            "id": 26751,
+            "item": "birch_logx1",
+            "item_pos": [
+              -167.1,
+              71,
+              -376.1
+            ],
+            "pos": [
+              -167.4,
+              71,
+              -376.5
+            ],
+            "distance_after": 0.5
+          }
+        ],
+        "skipped": [],
+        "moved_to": [
+          {
+            "id": 26751,
+            "item": "birch_logx1",
+            "item_pos": [
+              -167.1,
+              71,
+              -376.1
+            ],
+            "pos": [
+              -167.4,
+              71,
+              -376.5
+            ],
+            "distance_after": 0.5
+          }
+        ],
+        "gained": {
+          "birch_log": 1
+        },
+        "inventory": {
+          "cobblestone": 85,
+          "dirt": 17,
+          "wildflowers": 1,
+          "birch_log": 1,
+          "stick": 4,
+          "wooden_pickaxe": 1,
+          "stone_pickaxe": 1,
+          "birch_planks": 1
+        },
+        "pos_after": [
+          -167.4,
+          71,
+          -376.5
+        ],
+        "health": 7.336133003234863
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 819.0489,
+      "args": "{\"item\":\"crafting_table\"}",
+      "seq": 2627,
+      "duration": 0.01,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "missing_item",
+          "message": "no crafting_table in inventory",
+          "inventory": {
+            "cobblestone": 85,
+            "dirt": 17,
+            "wildflowers": 1,
+            "birch_log": 1,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "stone_pickaxe": 1,
+            "birch_planks": 1
+          },
+          "kb_hint": "配方提示：crafting_table [2x2 背包即可] 需要 {'any_planks': 4}，可直接调用 mc_skill_craft_gear 自动备木板/木棍与工作台。"
+        }
+      }
+    },
+    {
+      "name": "mc_craft",
+      "started": 824.7759,
+      "args": "{\"item\":\"birch_planks\",\"count\":4}",
+      "seq": 2673,
+      "duration": 0.521,
+      "result": {
+        "ok": true,
+        "result": {
+          "crafted": "birch_planks",
+          "gained": 4,
+          "used_table": false,
+          "inventory": {
+            "cobblestone": 85,
+            "dirt": 17,
+            "wildflowers": 1,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "stone_pickaxe": 1,
+            "birch_planks": 5
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_craft",
+      "started": 830.7869,
+      "args": "{\"item\":\"crafting_table\",\"count\":1}",
+      "seq": 2711,
+      "duration": 0.516,
+      "result": {
+        "ok": true,
+        "result": {
+          "crafted": "crafting_table",
+          "gained": 1,
+          "used_table": false,
+          "inventory": {
+            "cobblestone": 85,
+            "dirt": 17,
+            "wildflowers": 1,
+            "crafting_table": 1,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "stone_pickaxe": 1,
+            "birch_planks": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_place",
+      "started": 836.021,
+      "args": "{\"item\":\"crafting_table\"}",
+      "seq": 2738,
+      "duration": 0.496,
+      "result": {
+        "ok": true,
+        "result": {
+          "placed": "crafting_table",
+          "pos": [
+            -169,
+            71,
+            -376
+          ],
+          "sneaked": true
+        }
+      }
+    },
+    {
+      "name": "mc_craft",
+      "started": 858.1357,
+      "args": "{\"item\":\"iron_pickaxe\",\"count\":1}",
+      "seq": 2791,
+      "duration": 4.49,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "missing_ingredients",
+          "message": "could not craft iron_pickaxe",
+          "example_recipe_needs": {
+            "iron_ingot": 3,
+            "stick": 2
+          },
+          "inventory": {
+            "cobblestone": 85,
+            "dirt": 17,
+            "wildflowers": 1,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "stone_pickaxe": 1,
+            "birch_planks": 1
+          },
+          "kb_hint": "配方提示：iron_pickaxe [需靠近工作台(3x3)] 需要 {'iron_ingot': 3, 'stick': 2}，可直接调用 mc_skill_craft_gear 自动备木板/木棍与工作台。"
+        }
+      }
+    },
+    {
+      "name": "mc_status",
+      "started": 887.2889,
+      "args": "{}",
+      "seq": 2860,
+      "duration": 0.08,
+      "result": {
+        "ok": true,
+        "result": {
+          "username": "BeastBot_01",
+          "pos": [
+            -151.5,
+            74,
+            -384.6
+          ],
+          "yaw": 1.87,
+          "speed": 0,
+          "velocity": [
+            0,
+            0,
+            0
+          ],
+          "dimension": "overworld",
+          "gamemode": "survival",
+          "health": 20,
+          "food": 20,
+          "saturation": 1,
+          "xp_level": 0,
+          "xp_progress": 0,
+          "oxygen": 20,
+          "armor_points": 0,
+          "held": null,
+          "offhand": null,
+          "effects": [],
+          "on_fire": false,
+          "is_sleeping": false,
+          "in_water": false,
+          "submerged": false,
+          "in_lava": false,
+          "in_vehicle": null,
+          "sneaking": false,
+          "jumping": false,
+          "blocking": false,
+          "using_item": null,
+          "time_of_day": 17299,
+          "is_day": false,
+          "raining": false,
+          "thundering": false,
+          "biome": "",
+          "on_ground": true,
+          "alive": true,
+          "ready": true,
+          "busy": null,
+          "nearest_hostile": {
+            "id": 26915,
+            "name": "zombie",
+            "dist": 2.2
+          },
+          "last_death": {
+            "pos": [
+              -166.6,
+              71,
+              -376.7
+            ],
+            "t": 1794731133866,
+            "dropped_items_at": [
+              -166.6,
+              71,
+              -376.7
+            ]
+          },
+          "threat_assessment": {
+            "hostile_blocked_by_wall": false,
+            "safe_in_place": false,
+            "assessment_complete": false,
+            "nearby_hostiles": [
+              {
+                "id": 26915,
+                "name": "zombie",
+                "dist": 2.1,
+                "blocked_by_wall": false
+              },
+              {
+                "id": 26924,
+                "name": "zombie",
+                "dist": 2.4,
+                "blocked_by_wall": false
+              },
+              {
+                "id": 19780,
+                "name": "zombie",
+                "dist": 13.3,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "birch_leaves",
+                  "pos": [
+                    -153,
+                    75,
+                    -385
+                  ]
+                }
+              },
+              {
+                "id": 26826,
+                "name": "zombie",
+                "dist": 14.3,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "birch_leaves",
+                  "pos": [
+                    -153,
+                    75,
+                    -384
+                  ]
+                }
+              },
+              {
+                "id": 24967,
+                "name": "enderman",
+                "dist": 23.5,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "grass_block",
+                  "pos": [
+                    -154,
+                    72,
+                    -390
+                  ]
+                }
+              }
+            ],
+            "note": "附近有无遮挡或遮挡未确认的怪物；最近一只隔墙不能代表整体安全。优先保持掩体、举盾或封堵，受伤时暂停采集/合成。",
+            "dy": -2.0,
+            "hostiles_observed": 6,
+            "hostiles_checked": 5,
+            "all_checked_hostiles_occluded": false
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_inventory",
+      "started": 887.2901,
+      "args": "{}",
+      "seq": 2861,
+      "duration": 0.012,
+      "result": {
+        "ok": true,
+        "result": {
+          "items": [
+            {
+              "name": "cobblestone",
+              "count": 21,
+              "slot": 36
+            },
+            {
+              "name": "dirt",
+              "count": 17,
+              "slot": 37
+            },
+            {
+              "name": "cobblestone",
+              "count": 64,
+              "slot": 38
+            },
+            {
+              "name": "wildflowers",
+              "count": 1,
+              "slot": 39
+            },
+            {
+              "name": "stick",
+              "count": 4,
+              "slot": 41
+            },
+            {
+              "name": "wooden_pickaxe",
+              "count": 1,
+              "slot": 42,
+              "durability_used": 9
+            },
+            {
+              "name": "stone_pickaxe",
+              "count": 1,
+              "slot": 43,
+              "durability_used": 82
+            },
+            {
+              "name": "birch_planks",
+              "count": 1,
+              "slot": 44
+            }
+          ],
+          "armor": {
+            "head": null,
+            "chest": null,
+            "legs": null,
+            "feet": null
+          },
+          "offhand": null,
+          "held": null,
+          "empty_slots": 28
+        }
+      }
+    },
+    {
+      "name": "mc_posture",
+      "started": 916.5951,
+      "args": "{\"shield\":true}",
+      "seq": 2910,
+      "duration": 0.069,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "missing_item",
+          "message": "no shield in inventory",
+          "inventory": {
+            "cobblestone": 85,
+            "dirt": 17,
+            "wildflowers": 1,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "stone_pickaxe": 1,
+            "birch_planks": 1
+          },
+          "kb_hint": "材料或工作站不足时可用 mc_kb_lookup 查询官方 1.21.11 配方，或用 mc_skill_craft_gear 自动处理中间产物。"
+        }
+      }
+    },
+    {
+      "name": "mc_move_to",
+      "started": 925.5252,
+      "args": "{\"x\":-150,\"z\":-390}",
+      "seq": 2947,
+      "duration": 0.623,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "interrupted",
+          "message": "stopped because of hurt (The goal was changed before it could be completed!)",
+          "pos": [
+            -150.2,
+            72.4,
+            -384.5
+          ],
+          "ms": 614,
+          "inner_code": "path_not_found",
+          "cause": "hurt",
+          "health": 17,
+          "nearest_hostile": {
+            "id": 27000,
+            "name": "zombie",
+            "dist": 1.9
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_attack",
+      "started": 932.3092,
+      "args": "{\"entity_id\":26915}",
+      "seq": 2988,
+      "duration": 0.015,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "not_ready",
+          "message": "world is still loading (after login, respawn or dimension change); retry in a moment"
+        }
+      }
+    },
+    {
+      "name": "mc_status",
+      "started": 941.0149,
+      "args": "{}",
+      "seq": 3065,
+      "duration": 0.063,
+      "result": {
+        "ok": true,
+        "result": {
+          "username": "BeastBot_01",
+          "pos": [
+            -152.5,
+            72,
+            -387.6
+          ],
+          "yaw": 3.14,
+          "speed": 0,
+          "velocity": [
+            0,
+            0,
+            0
+          ],
+          "dimension": "overworld",
+          "gamemode": "survival",
+          "health": 15.5,
+          "food": 20,
+          "saturation": 3,
+          "xp_level": 0,
+          "xp_progress": 0,
+          "oxygen": 20,
+          "armor_points": 0,
+          "held": null,
+          "offhand": null,
+          "effects": [],
+          "on_fire": false,
+          "is_sleeping": false,
+          "in_water": false,
+          "submerged": false,
+          "in_lava": false,
+          "in_vehicle": null,
+          "sneaking": false,
+          "jumping": false,
+          "blocking": false,
+          "using_item": null,
+          "time_of_day": 18379,
+          "is_day": false,
+          "raining": false,
+          "thundering": false,
+          "biome": "",
+          "on_ground": true,
+          "alive": true,
+          "ready": false,
+          "busy": null,
+          "nearest_hostile": {
+            "id": 26924,
+            "name": "zombie",
+            "dist": 1
+          },
+          "last_death": {
+            "pos": [
+              -150.7,
+              71,
+              -385.7
+            ],
+            "t": 1794731223867,
+            "dropped_items_at": [
+              -150.7,
+              71,
+              -385.7
+            ]
+          },
+          "threat_assessment": {
+            "hostile_blocked_by_wall": false,
+            "safe_in_place": false,
+            "assessment_complete": false,
+            "nearby_hostiles": [
+              {
+                "id": 26924,
+                "name": "zombie",
+                "dist": 1.0,
+                "blocked_by_wall": false
+              },
+              {
+                "id": 26915,
+                "name": "zombie",
+                "dist": 1.5,
+                "blocked_by_wall": false
+              },
+              {
+                "id": 27000,
+                "name": "zombie",
+                "dist": 2.6,
+                "blocked_by_wall": false
+              },
+              {
+                "id": 26826,
+                "name": "zombie",
+                "dist": 2.7,
+                "blocked_by_wall": false
+              },
+              {
+                "id": 19780,
+                "name": "zombie",
+                "dist": 11.2,
+                "blocked_by_wall": true,
+                "blocking_block": {
+                  "name": "grass_block",
+                  "pos": [
+                    -155,
+                    72,
+                    -388
+                  ]
+                }
+              }
+            ],
+            "note": "附近有无遮挡或遮挡未确认的怪物；最近一只隔墙不能代表整体安全。优先保持掩体、举盾或封堵，受伤时暂停采集/合成。",
+            "dy": 0.0,
+            "hostiles_observed": 7,
+            "hostiles_checked": 5,
+            "all_checked_hostiles_occluded": false
+          }
+        }
+      }
+    },
+    {
+      "name": "mc_inventory",
+      "started": 941.0162,
+      "args": "{}",
+      "seq": 3066,
+      "duration": 0.011,
+      "result": {
+        "ok": true,
+        "result": {
+          "items": [
+            {
+              "name": "cobblestone",
+              "count": 21,
+              "slot": 36
+            },
+            {
+              "name": "dirt",
+              "count": 17,
+              "slot": 37
+            },
+            {
+              "name": "cobblestone",
+              "count": 64,
+              "slot": 38
+            },
+            {
+              "name": "wildflowers",
+              "count": 1,
+              "slot": 39
+            },
+            {
+              "name": "stick",
+              "count": 4,
+              "slot": 41
+            },
+            {
+              "name": "wooden_pickaxe",
+              "count": 1,
+              "slot": 42,
+              "durability_used": 9
+            },
+            {
+              "name": "stone_pickaxe",
+              "count": 1,
+              "slot": 43,
+              "durability_used": 82
+            },
+            {
+              "name": "birch_planks",
+              "count": 1,
+              "slot": 44
+            }
+          ],
+          "armor": {
+            "head": null,
+            "chest": null,
+            "legs": null,
+            "feet": null
+          },
+          "offhand": null,
+          "held": null,
+          "empty_slots": 28
+        }
+      }
+    },
+    {
+      "name": "mc_status",
+      "started": 969.3181,
+      "args": "{}",
+      "seq": 3144,
+      "duration": 0.022,
+      "result": {
+        "text": "错误：工具执行中止，未取得正常结果。"
+      }
+    },
+    {
+      "name": "mc_inventory",
+      "started": 969.3195,
+      "args": "{}",
+      "seq": 3145,
+      "duration": 0.029,
+      "result": {
+        "text": "错误：工具执行中止。"
+      }
+    }
+  ],
+  "final_telemetry": {
+    "connected": false,
+    "ready": false,
+    "username": null,
+    "pos": null,
+    "dimension": null,
+    "biome": null,
+    "is_day": null,
+    "time_of_day": null,
+    "health": null,
+    "food": null,
+    "armor": null,
+    "held": null,
+    "inventory_total": 0,
+    "top_items": [],
+    "updated_at": "2026-11-15T08:27:35.792396+00:00",
+    "error": null
+  },
+  "authoritative_death_events": 5,
+  "authoritative_hurt_events": 41,
+  "hurt_sources": {
+    "drown": 13,
+    "player_explosion": 1,
+    "mob_attack": 27
+  },
+  "model_wall_time_fraction": 0.8455
+}

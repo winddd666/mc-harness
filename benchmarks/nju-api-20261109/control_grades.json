@@ -1,0 +1,60 @@
+[
+  {
+    "name": "wood_pick_recipe",
+    "mode": "fast_repeat",
+    "expected": {
+      "planks": 3,
+      "sticks": 2,
+      "crafting_table_required": true
+    },
+    "actual": {
+      "planks": 3,
+      "sticks": 2,
+      "crafting_table_required": false
+    },
+    "passed": false,
+    "completion_tokens": 22,
+    "elapsed_s": 1.385362
+  },
+  {
+    "name": "wood_pick_recipe",
+    "mode": "thinking",
+    "expected": {
+      "planks": 3,
+      "sticks": 2,
+      "crafting_table_required": true
+    },
+    "actual": {
+      "planks": 3,
+      "sticks": 2,
+      "crafting_table_required": false
+    },
+    "passed": false,
+    "completion_tokens": 920,
+    "elapsed_s": 11.984311
+  },
+  {
+    "name": "fuel",
+    "mode": "fast_repeat",
+    "expected": {
+      "coal": 3
+    },
+    "actual": {
+      "coal": 2
+    },
+    "passed": false,
+    "completion_tokens": 10,
+    "elapsed_s": 0.984268
+  },
+  {
+    "name": "fuel",
+    "mode": "thinking",
+    "expected": {
+      "coal": 3
+    },
+    "actual": "",
+    "passed": false,
+    "completion_tokens": 2048,
+    "elapsed_s": 27.292014
+  }
+]

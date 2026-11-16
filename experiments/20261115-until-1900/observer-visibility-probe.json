@@ -1,0 +1,9 @@
+{
+  "observer_only": true,
+  "commands": [
+    {
+      "cmd": "effect give BeastCam minecraft:night_vision 600 0 true",
+      "reply": "Applied effect Night Vision to BeastCam"
+    }
+  ]
+}

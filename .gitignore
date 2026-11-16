@@ -1,0 +1,19 @@
+# Virtual environment & Python cache
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local secrets & runtime state (tokens, cookies, agent trajectories, backups)
+.env
+.env.*
+!.env.example
+.state/
+.state-*/
+runs/
+backups/
+
+# Large frontend / browser tool caches and unredacted report PDFs
+node_modules/
+.playwright-mcp/
+docs/bug-report-v1.3.1.pdf

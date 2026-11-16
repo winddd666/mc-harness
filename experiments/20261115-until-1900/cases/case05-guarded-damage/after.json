@@ -1,0 +1,169 @@
+{
+  "runtime": {
+    "source_revision": "716f9f846fde688d",
+    "loaded_at": "2026-11-15T08:31:20.702607+00:00",
+    "pid": 732644
+  },
+  "bot_username": "BeastBot_01",
+  "mc_api_base_url": "http://100.93.211.71:18900/api/v1",
+  "live_url": "http://127.0.0.1:8765",
+  "config": {
+    "provider": "nju",
+    "providers": [
+      "nju",
+      "deepseek",
+      "dashscope"
+    ],
+    "max_calls": 10,
+    "enable_thinking": false,
+    "run_timeout_s": 600.0,
+    "survival_guard": false,
+    "host": "127.0.0.1",
+    "port": 8770
+  },
+  "running": false,
+  "active_turn_id": null,
+  "connect_error": null,
+  "telemetry": {
+    "connected": true,
+    "ready": true,
+    "username": "BeastBot_01",
+    "pos": {
+      "x": -187.5,
+      "y": 55.0,
+      "z": -389.5
+    },
+    "dimension": "overworld",
+    "biome": "",
+    "is_day": false,
+    "time_of_day": 15609,
+    "health": 20,
+    "food": 20,
+    "armor": 0,
+    "held": {
+      "name": "dirt",
+      "count": 16,
+      "slot": 37
+    },
+    "inventory_total": 112,
+    "top_items": [
+      {
+        "name": "cobblestone",
+        "count": 86
+      },
+      {
+        "name": "dirt",
+        "count": 16
+      },
+      {
+        "name": "stick",
+        "count": 4
+      },
+      {
+        "name": "granite",
+        "count": 2
+      },
+      {
+        "name": "birch_planks",
+        "count": 1
+      },
+      {
+        "name": "stone_pickaxe",
+        "count": 1
+      },
+      {
+        "name": "wildflowers",
+        "count": 1
+      },
+      {
+        "name": "wooden_pickaxe",
+        "count": 1
+      }
+    ],
+    "updated_at": "2026-11-15T09:24:48.434426+00:00",
+    "error": null
+  },
+  "turns": [
+    {
+      "turn_id": "20261115-172332-852566",
+      "prompt": "这是一次标注人工辅助的生存响应隔离实验，不是自主生存成功率测试。研究者仅开凿了封闭地下石室并传送你，没有发放物品；运行中可能施加一次轻微的可控伤害。服务器依然开启死亡不掉落，怪物和昼夜正常。\n\n请确认真实位置、生命、饱食和背包，然后用简短中文报告，不需要制作铁镐或离开小室。若收到运行时的新受伤/生存响应通知，放弃旧状态下的计划，按最新实际状态重新观察并报告。不要凭历史受伤记录推断正在持续受袭，不要主动死亡，不要挖出石室去追逐怪物。",
+      "created_at": "2026-11-15T09:23:32.852625+00:00",
+      "status": "answered",
+      "phase": "finished",
+      "phase_detail": "",
+      "actor_requests": 1,
+      "max_calls": 10,
+      "run_timeout_s": 180.0,
+      "survival_guard": true,
+      "runtime": {
+        "source_revision": "716f9f846fde688d",
+        "loaded_at": "2026-11-15T08:31:20.702607+00:00",
+        "pid": 732644
+      },
+      "provider": "nju",
+      "model": "default",
+      "thinking": false,
+      "items": [
+        {
+          "id": "msg_1",
+          "kind": "assistant_text",
+          "request": 1,
+          "text": "【状态确认】\n位置：[-187.5, 58, -389.5]（封闭地下石室，上方有石顶遮盖）。\n生命：20/20（满血，无受伤）。\n饱食：20/20（满饱食）。\n背包：有21+64=85个圆石、17个泥土、4根木棍、1把耐久9%的木镐、1把耐久82%的石镐、1块白桦木板。无护甲，手持为空。\n威胁评估：周围5只怪物（骷髅、苦力怕、蜘蛛、僵尸）均被石墙阻挡射线，当前安全。\n\n【报告】\n已确认真实位置在封闭地下石室，生命与饱食均满。背包内有基础建材（圆石、泥土）、少量工具（木镐、石镐）及木棍。当前无受伤，周围怪物被石墙阻挡，处于安全掩体内。按指令不制作铁镐，不离开小室。",
+          "reasoning": null,
+          "streaming": false
+        }
+      ],
+      "answer": "【状态确认】\n位置：[-187.5, 58, -389.5]（封闭地下石室，上方有石顶遮盖）。\n生命：20/20（满血，无受伤）。\n饱食：20/20（满饱食）。\n背包：有21+64=85个圆石、17个泥土、4根木棍、1把耐久9%的木镐、1把耐久82%的石镐、1块白桦木板。无护甲，手持为空。\n威胁评估：周围5只怪物（骷髅、苦力怕、蜘蛛、僵尸）均被石墙阻挡射线，当前安全。\n\n【报告】\n已确认真实位置在封闭地下石室，生命与饱食均满。背包内有基础建材（圆石、泥土）、少量工具（木镐、石镐）及木棍。当前无受伤，周围怪物被石墙阻挡，处于安全掩体内。按指令不制作铁镐，不离开小室。",
+      "error": null,
+      "run_file": "20261115-172332-852566.events.jsonl"
+    },
+    {
+      "turn_id": "20261115-172425-289834",
+      "prompt": "这是一次标注人工辅助的生存响应隔离实验，不是自主生存成功率测试。研究者仅开凿了封闭地下石室并传送你，没有发放物品；运行中可能施加一次轻微的可控伤害。服务器依然开启死亡不掉落，怪物和昼夜正常。\n\n请确认真实位置、生命、饱食和背包，然后用简短中文报告，不需要制作铁镐或离开小室。若收到运行时的新受伤/生存响应通知，放弃旧状态下的计划，按最新实际状态重新观察并报告。不要凭历史受伤记录推断正在持续受袭，不要主动死亡，不要挖出石室去追逐怪物。",
+      "created_at": "2026-11-15T09:24:25.289887+00:00",
+      "status": "answered",
+      "phase": "finished",
+      "phase_detail": "",
+      "actor_requests": 2,
+      "max_calls": 10,
+      "run_timeout_s": 180.0,
+      "survival_guard": true,
+      "runtime": {
+        "source_revision": "716f9f846fde688d",
+        "loaded_at": "2026-11-15T08:31:20.702607+00:00",
+        "pid": 732644
+      },
+      "provider": "nju",
+      "model": "default",
+      "thinking": false,
+      "items": [
+        {
+          "id": "msg_2",
+          "kind": "assistant_text",
+          "request": 1,
+          "text": "【状态确认】\n位置：[-187.5, 58, -389.5]（封闭地下石室，上方有石顶",
+          "reasoning": null,
+          "streaming": false
+        },
+        {
+          "id": "guardian_3",
+          "kind": "notice",
+          "text": "生存响应：emergency_bunker 成功；HP=20。响应不代表整体安全。",
+          "created_at": "2026-11-15T09:24:36.155563+00:00"
+        },
+        {
+          "id": "msg_4",
+          "kind": "assistant_text",
+          "request": 2,
+          "text": "【状态确认】\n位置：[-187.5, 55, -389.5]（紧急掩体内部，脚踩石层，头顶泥土封顶）。\n生命：20/20（满血，无受伤）。\n饱食：20/20（满饱食）。\n背包：21圆石、17泥土、1野花、4木棍、1木镐、1石镐、1白桦木板。\n威胁评估：紧急掩体已自动构建完成，隔绝了外部怪物。\n\n【报告】\n已确认真实位置在紧急掩体内，生命与饱食均满。背包内有基础建材（圆石、泥土）、少量工具（木镐、石镐）和木棍。已执行紧急掩体宏技能，当前处于安全封闭空间。",
+          "reasoning": null,
+          "streaming": false
+        }
+      ],
+      "answer": "【状态确认】\n位置：[-187.5, 55, -389.5]（紧急掩体内部，脚踩石层，头顶泥土封顶）。\n生命：20/20（满血，无受伤）。\n饱食：20/20（满饱食）。\n背包：21圆石、17泥土、1野花、4木棍、1木镐、1石镐、1白桦木板。\n威胁评估：紧急掩体已自动构建完成，隔绝了外部怪物。\n\n【报告】\n已确认真实位置在紧急掩体内，生命与饱食均满。背包内有基础建材（圆石、泥土）、少量工具（木镐、石镐）和木棍。已执行紧急掩体宏技能，当前处于安全封闭空间。",
+      "error": null,
+      "run_file": "20261115-172425-289834.events.jsonl"
+    }
+  ],
+  "history_count": 2
+}

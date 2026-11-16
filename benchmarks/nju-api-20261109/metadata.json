@@ -1,0 +1,21 @@
+{
+  "base_url": "https://api.nju-aia.com/v1",
+  "requested_model": "default",
+  "returned_model": "qwen3.6-35b-a3b",
+  "direct_model_status": 403,
+  "models_list": [
+    "default"
+  ],
+  "rate_limit_message": "1分钟内最多请求30次，包括失败次数",
+  "measurement_host": "Connected network execution environment, not the user local workstation",
+  "python": "3.12.3",
+  "httpx": "0.28.1",
+  "scope": "Bounded synthetic Minecraft Java Edition 1.21 text/tool harness; not a live Minecraft server",
+  "preflight": {
+    "models_status": 200,
+    "models_elapsed_s": 0.572,
+    "direct_model_elapsed_s": 0.15,
+    "default_nonstream_status": 200,
+    "default_nonstream_elapsed_s": 4.739
+  }
+}
