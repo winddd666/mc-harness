@@ -328,9 +328,49 @@ Collar @ [1955,23,-2813]  根节点
 - 工具门控：DFS 唯一采矿原语；staircase/unstick/move_to 开放给模型下树与移动；屏蔽 mine_blocks/tunnel/mc_dig/harvest_logs。
 - 预算：每点 40 轮 / 8 分钟；驱动 `/tmp/opencode/llm_dfs_multi.py` + worker `/tmp/opencode/llm_dfs_single.py`，顺序执行。
 
-### 10.2 结果（运行中，待补）
+### 10.2 诊断：定位并修复「陈旧起点」bug
+- 首跑发现每个"远距离起点"的 `pos_before` 都是上一个测试的结束坐标（如 kitD 显示 `[3481.5,-54,436.5]`，即 LocC v4 终点）——传送看似失效。
+- **根因**：上一轮 harness 退出时 `stop`/`logout` 使 Bot 处于 `not_connected`；setup 用独立 token store 探测 `/status` 时抛 `not_connected` 被吞掉，误判"未落地"；而 harness 开局读到的 `/status` 是**断开前的缓存位置**（权威位置已由 RCON `spreadplayers` 改到新点）。
+- **修复**（worker `llm_dfs_single.py`）：传送后改用 **RCON `data get entity Pos`（权威坐标）** 验证落地，不再依赖滞后的 API status；harness 的 `open_bot(wait_ready=True)` 内部遇 `not_connected` 会自动 `POST /connect` 重连并上报真实新位置。
+- **验证**：修复后 kitD 第 1 轮 `pos_before=[5116.5,63,-3584.5]`，确认在新起点开局 ✅。
 
-（结果待补）
+### 10.3 三点结果（运行中，逐点回填）
+
+**kitG `(-1000,1000)`**（`runs/llm-dfs-kit-kitG-20261117.json`，事件 `20261117-140944`，500s/40 轮超时）：
+- 工具调用：**DFS ×4**、staircase ×4、unstick ×1。DFS 确为采矿主力。
+- 开局落树冠 Y=83 → unstick 下树 → staircase 开局下探 → 进入地下后切 DFS。
+- DFS 成效：第 4 次 `target=iron, target_y=30` → **`target_gained=6, raw_iron:6`**，`mined_ores` 8 处，`catch_placed=1`（悬空矿垫石）、建 Collar/Spine 节点树、双镐分流生效。
+- 未达钻石：8 分钟预算内未走完「烧铁→3 锭→合铁镐→钻石」全链（资源经济问题）。
+
+**kitH `(-1000,-1000)`**（`runs/llm-dfs-kit-kitH-20261117.json`，事件 `20261117-141821`，495s）：
+- 工具调用：**DFS ×5**、staircase ×4、unstick ×1。DFS 为采矿主力。
+- 成效：**`coal:16`，`target_gained=16`，DF S 返回 `quota_reached`** —— 单次 DFS 就挖够 16 块煤、达成模型设的配额（最成功的一点）。
+- 模型主动试 diamond 被 `insufficient_pickaxe_tier` 守门正确拦截（理解需先升镐）。
+
+**kitI `(-2000,-2000)`**（`runs/llm-dfs-kit-kitI-20261117.json`，事件 `20261117-142645`，508s）：
+- 工具调用：**DFS ×3**、staircase ×6、unstick ×1。DFS 仍在使用。
+- 成效：未采到目标矿（`target_gained=0`），遇 `cave_or_drop_ahead`（洞穴破口）与 3 次 `completed` 切片，8 分钟预算内下潜但未撞上目标矿脉。
+
+**三点横向对比（核心：DFS 是否在用 + 采矿成效）**：
+
+| 点 | 坐标 | DFS 次数 | staircase | 采矿成果 | 备注 |
+|---|---|---:|---:|---|---|
+| kitG | (-1000,1000) | 4 | 4 | **raw_iron 6** | DFS 挖到铁，`catch_placed=1` |
+| kitH | (-1000,-1000) | 5 | 4 | **coal 16（`quota_reached`）** | DFS 达配额，最佳 |
+| kitI | (-2000,-2000) | 3 | 6 | 0（遇洞穴） | DFS 在用但地形不利 |
+
+**结论**：
+1. **DFS 被稳定使用**：三点 DFS 调用 4/5/3 次，是唯一采矿原语（mine_blocks/tunnel/mc_dig 被门控屏蔽）。
+2. **分工符合设计**：staircase/unstick 用于下树冠+开局下探（每点 unstick ×1 下树），进入地下后 DFS 承担正式采矿。
+3. **采矿成效实证**：kitG 挖到 6 粗铁、kitH 挖到 16 煤并达成配额——DFS 的 Vein Hook + Catch-Block + 雷达 + 双镐分流在真实自然地形中工作正常。
+4. **多次 DFS 是设计使然**：单次 `mine_dfs` 默认 32s 时间切片，返回 `time_slice_progress`，需多次续接累计推进（引擎拓扑跨调用保存在 `self.nodes`）。kitG 前 3 片铺垫、第 4 片出矿即为例证。
+5. **仍未达钻石**：8 分钟预算只够走到「挖到铁/煤」，未完成烧铁→3 锭→合铁镐→下钻层全链——资源经济与预算问题，非逻辑缺陷。
+
+### 10.4 环境诊断记录（本轮踩坑）
+- 初版坐标（5120,-3584 / -4608,3072 / 2048,4480）落虚空/水域，Bot 死亡重生主岛或 `spreadplayers` 报 "too many entities for space" → 改用 RCON 预探测筛出的 3 个可落地实心坐标。
+- 陈旧起点 bug：API `/status` 位置缓存滞后 + Bot 处 `not_connected` → 改用 RCON 权威坐标验证落地 + 主岛重生守卫。
+- 双进程争抢动作锁导致 `busy: running dig` → 清理残留进程后恢复正常。
+- 以上均为测试脚手架问题，非 DFS 引擎缺陷。
 
 ---
 
