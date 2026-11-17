@@ -1231,8 +1231,24 @@ class MiningDFSEngine:
         return False
 
     def _clear_incidental_obstruction_only(self, target_wp: tuple[int, int, int]) -> int:
-        """During lossless backtrack, clear only loose falling debris at the waypoint itself."""
+        """During lossless backtrack, clear loose debris AND self-placed seal/bridge blocks at the waypoint.
+
+        Sealing a cave breach or laying a catch/bridge block can place solid blocks right on a
+        future return waypoint. Those are ours, so remove them on the way back instead of
+        declaring backtrack_blocked. Never dig natural stone/ore here.
+        """
         dug = 0
+        # Self-placed seal / catch / bridge blocks can sit exactly on the return waypoint.
+        self_placed = self.sealed_positions | {tuple(p) for p in self.catch_blocks_placed} | {tuple(p) for p in self.bridge_blocks_placed}
+        for pt in (target_wp, (target_wp[0], target_wp[1] + 1, target_wp[2])):
+            if pt not in self_placed:
+                continue
+            try:
+                self.bot.call("dig", {"pos": [pt[0], pt[1], pt[2]], "collect": False, "stop_on": ["hurt", "death"]})
+                self.sealed_positions.discard(pt)
+                dug += 1
+            except ApiError:
+                pass
         for dy in (1, 0):
             pt = (target_wp[0], target_wp[1] + dy, target_wp[2])
             try:
