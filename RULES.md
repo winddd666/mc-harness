@@ -1,10 +1,10 @@
 # Minecraft Agent 挑战赛初赛规则（草案 v2）
 
-> 草案，会根据实际情况改动喵。
+> **状态：草案。** 计分方式和赛制已基本确定；岛屿半径、世界种子和岛的位置尚未确定，因此本文中依赖岛上地形的条目（"岛上有……时计分"）要等最终计分表公布后才定下是否计分。最终计分表将在赛前统一公布，届时以最终计分表为准。
 
 ## 一、活动目标
 
-参赛者设计一个能通过赛事 API（见 [API.md](API.md)）自主游玩 Minecraft 的智能 Agent。在规定时间内，Agent 自行观察环境、制定计划并执行操作，尽可能多地完成计分 advancement，获得更高的总分。
+参赛者设计一个能通过赛事 API（本仓库，见 [API.md](API.md)）自主游玩 Minecraft 的智能 Agent。在规定时间内，Agent 自行观察环境、制定计划并执行操作，尽可能多地完成计分 advancement，获得更高的总分。
 
 ## 二、比赛时间
 
@@ -126,7 +126,7 @@ Minecraft Java 1.21.11 共有 125 个非配方原版 advancement，下表列出�
 
 | Advancement | 英文名 | 难度 | 分值 | 计分条件 |
 |---|---|---:|---:|---|
-| `minecraft:story/cure_zombie_villager` | Zombie Doctor | 4 | 60 | 岛上有下界要塞时计分（不出意外，应该是要保证有要塞的） |
+| `minecraft:story/cure_zombie_villager` | Zombie Doctor | 4 | 60 | 岛上有下界要塞时计分 |
 | `minecraft:story/enter_the_end` | The End? | 4 | 60 | 岛上有下界要塞时计分 |
 | `minecraft:story/follow_ender_eye` | Eye Spy | 4 | 60 | 岛上有下界要塞时计分 |
 | `minecraft:story/shiny_gear` | Cover Me with Diamonds | 4 | 60 | 计分 |
@@ -153,7 +153,7 @@ Minecraft Java 1.21.11 共有 125 个非配方原版 advancement，下表列出�
 | `minecraft:nether/summon_wither` | Withering Heights | 5 | 100 | 岛上有下界要塞时计分 |
 | `minecraft:nether/uneasy_alliance` | Uneasy Alliance | 5 | 100 | 计分 |
 | `minecraft:nether/create_beacon` | Bring Home the Beacon | 4 | 60 | 岛上有下界要塞时计分 |
-| `minecraft:nether/fast_travel` | Subspace Bubble | 4 | — | 如果岛不够大就不计分 |
+| `minecraft:nether/fast_travel` | Subspace Bubble | 4 | — | 不计分：要在下界走约 875 格，岛外是虚空，会越出自己的区域 |
 | `minecraft:nether/get_wither_skull` | Spooky Scary Skeleton | 4 | 60 | 岛上有下界要塞时计分 |
 | `minecraft:nether/obtain_ancient_debris` | Hidden in the Depths | 4 | 60 | 计分 |
 | `minecraft:nether/ride_strider_in_overworld_lava` | Feels Like Home | 4 | 60 | 岛上有主世界 50 格以上的岩浆湖时计分 |
@@ -163,7 +163,7 @@ Minecraft Java 1.21.11 共有 125 个非配方原版 advancement，下表列出�
 | `minecraft:nether/find_fortress` | A Terrible Fortress | 3 | 30 | 岛上有下界要塞时计分 |
 | `minecraft:nether/loot_bastion` | War Pigs | 3 | 30 | 岛上有堡垒遗迹时计分 |
 | `minecraft:nether/obtain_blaze_rod` | Into Fire | 3 | 30 | 岛上有下界要塞时计分 |
-| `minecraft:nether/return_to_sender` | Return to Sender | 3 | — | 按目前API无法完成 |
+| `minecraft:nether/return_to_sender` | Return to Sender | 3 | — | 不计分：API 缺反弹飞行物动作 |
 | `minecraft:nether/ride_strider` | This Boat Has Legs | 3 | 30 | 计分 |
 | `minecraft:nether/brew_potion` | Local Brewery | 2 | 15 | 岛上有下界要塞时计分 |
 | `minecraft:nether/obtain_crying_obsidian` | Who is Cutting Onions? | 2 | 15 | 计分 |
@@ -175,20 +175,20 @@ Minecraft Java 1.21.11 共有 125 个非配方原版 advancement，下表列出�
 |---|---|---:|---:|---|
 | `minecraft:end/elytra` | Sky's the Limit | 4 | 60 | 计分 |
 | `minecraft:end/find_end_city` | The City at the End of the Game | 4 | 60 | 计分 |
-| `minecraft:end/kill_dragon` | Free the End | 4 | — | 不计分，按照规则没有末影龙的存在 |
+| `minecraft:end/kill_dragon` | Free the End | 4 | — | 不计分：共用末地只有一条龙，先到先得 |
 | `minecraft:end/levitate` | Great View From Up Here | 4 | 60 | 计分 |
-| `minecraft:end/respawn_dragon` | The End... Again... | 4 | — | 不计分 |
-| `minecraft:end/dragon_breath` | You Need a Mint | 3 | — | 不计分 |
-| `minecraft:end/dragon_egg` | The Next Generation | 3 | — | 不计分 |
+| `minecraft:end/respawn_dragon` | The End... Again... | 4 | — | 不计分：复活的龙影响所有人 |
+| `minecraft:end/dragon_breath` | You Need a Mint | 3 | — | 不计分：需要活着的龙 |
+| `minecraft:end/dragon_egg` | The Next Generation | 3 | — | 不计分：只有一个龙蛋 |
 | `minecraft:end/enter_end_gateway` | Remote Getaway | 3 | 30 | 计分 |
 
 ### adventure
 
 | Advancement | 英文名 | 难度 | 分值 | 计分条件 |
 |---|---|---:|---:|---|
-| `minecraft:adventure/adventuring_time` | Adventuring Time | 5 | — | 不计分：54 个群系，岛上不够 |
+| `minecraft:adventure/adventuring_time` | Adventuring Time | 5 | — | 不计分：54 个群系，岛上远远不够 |
 | `minecraft:adventure/arbalistic` | Arbalistic | 5 | 100 | 计分 |
-| `minecraft:adventure/kill_all_mobs` | Monsters Hunted | 5 | — | 岛上做不到 |
+| `minecraft:adventure/kill_all_mobs` | Monsters Hunted | 5 | — | 不计分：包括末影龙、林地府邸的唤魔者等，岛上做不到 |
 | `minecraft:adventure/trim_with_all_exclusive_armor_patterns` | Smithing with Style | 5 | — | 不计分：要林地府邸、远古城市、海底神殿、末地城等 |
 | `minecraft:adventure/very_very_frightening` | Very Very Frightening | 5 | — | 不计分：依赖雷暴，天气随机 |
 | `minecraft:adventure/blowback` | Blowback | 4 | — | 不计分：API 缺反弹动作 |

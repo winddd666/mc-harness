@@ -966,6 +966,7 @@ class MacroSkills:
         self.temporary_avoidance: dict[tuple[int, int, int], dict[str, Any]] = {}
         self.failed_stair_dirs: dict[tuple[int, int, int, str], dict[str, tuple[float, str]]] = {}
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
+        self._mining_dfs: Any = None
 
     def _ensure_free_slots(
         self,
@@ -1607,13 +1608,79 @@ class MacroSkills:
                 continue
         return None
 
-    def ensure_crafting_table(self, *, force_recarve: bool = False) -> dict[str, Any]:
+    def _record_utility_in_ledger(self, block_name: str, pos: Any) -> None:
+        if self._mining_dfs is not None and isinstance(pos, (list, tuple)) and len(pos) >= 3:
+            self._mining_dfs.ledger.record_utility(block_name, [int(pos[0]), int(pos[1]), int(pos[2])])
+
+    def _navigate_to_distant_table(self, table_pos: list[int], *, cur_hp: float = 20.0) -> bool:
+        """Navigate along active MiningDFS waypoints (if any) and move_to reach a placed crafting_table."""
+        tx, ty, tz = int(table_pos[0]), int(table_pos[1]), int(table_pos[2])
+        if self._mining_dfs is not None and self._mining_dfs.nodes:
+            nearest_nid = min(
+                self._mining_dfs.nodes.keys(),
+                key=lambda nid: math.dist(self._mining_dfs.nodes[nid].anchor, (tx, ty, tz)),
+            )
+            if math.dist(self._mining_dfs.nodes[nearest_nid].anchor, (tx, ty, tz)) <= 16.0:
+                try:
+                    self._mining_dfs._navigate_to_node(nearest_nid, min_hp_ref=[cur_hp])
+                except ApiError:
+                    pass
+        try:
+            st_mid = self.bot.status()
+            p_mid = st_mid.get("pos") or [9999.0, 9999.0, 9999.0]
+            if math.dist((float(p_mid[0]), float(p_mid[1]), float(p_mid[2])), (tx + 0.5, ty + 0.5, tz + 0.5)) <= 3.8:
+                return True
+        except ApiError:
+            pass
+        try:
+            self.bot.call("move_to", {"x": tx + 0.5, "y": ty, "z": tz + 0.5, "range": 2.2})
+        except ApiError:
+            try:
+                self.bot.call("move_to", {"x": tx + 0.5, "z": tz + 0.5, "range": 2.2})
+            except ApiError:
+                pass
+        try:
+            st_after = self.bot.status()
+            p_after = st_after.get("pos") or [9999.0, 9999.0, 9999.0]
+            return math.dist((float(p_after[0]), float(p_after[1]), float(p_after[2])), (tx + 0.5, ty + 0.5, tz + 0.5)) <= 4.8
+        except ApiError:
+            return False
+
+    @staticmethod
+    def _has_non_wood_table_recipe_ready(target_item: str | None, counts: dict[str, int]) -> bool:
+        if not target_item:
+            return False
+        cobble = counts.get("cobblestone", 0) + counts.get("cobbled_deepslate", 0) + counts.get("blackstone", 0)
+        sticks = counts.get("stick", 0)
+        reqs: dict[str, bool] = {
+            "stone_pickaxe": cobble >= 3 and sticks >= 2,
+            "stone_axe": cobble >= 3 and sticks >= 2,
+            "stone_sword": cobble >= 2 and sticks >= 1,
+            "stone_shovel": cobble >= 1 and sticks >= 2,
+            "stone_hoe": cobble >= 2 and sticks >= 2,
+            "furnace": cobble >= 8,
+            "iron_pickaxe": counts.get("iron_ingot", 0) >= 3 and sticks >= 2,
+            "iron_axe": counts.get("iron_ingot", 0) >= 3 and sticks >= 2,
+            "iron_sword": counts.get("iron_ingot", 0) >= 2 and sticks >= 1,
+            "iron_shovel": counts.get("iron_ingot", 0) >= 1 and sticks >= 2,
+            "diamond_pickaxe": counts.get("diamond", 0) >= 3 and sticks >= 2,
+            "diamond_sword": counts.get("diamond", 0) >= 2 and sticks >= 1,
+        }
+        return bool(reqs.get(target_item, False))
+
+    def ensure_crafting_table(
+        self,
+        *,
+        force_recarve: bool = False,
+        target_item: str | None = None,
+    ) -> dict[str, Any]:
         """Reuse a nearby same-level crafting_table or craft & place one (carving a wall pocket if needed)."""
         st = self.bot.status()
         if bool(st.get("in_water")):
             self.escape_water()
             st = self.bot.status()
         px, py, pz = [int(math.floor(v)) for v in (st.get("pos") or [0, 64, 0])]
+        cur_hp = float(st.get("health") if isinstance(st.get("health"), (int, float)) else 20.0)
 
         if not force_recarve:
             found = self.bot.call("find_blocks", {"radius": 8, "types": ["crafting_table"], "limit": 5})
@@ -1627,6 +1694,7 @@ class MacroSkills:
             if blocks:
                 nearest = min(blocks, key=lambda b: float(b.get("dist", 999)))
                 pos = nearest.get("pos")
+                self._record_utility_in_ledger("crafting_table", pos)
                 if float(nearest.get("dist", 99)) > 3.2 and pos:
                     try:
                         self.bot.call("move_to", {"x": pos[0], "y": pos[1], "z": pos[2], "range": 2.0})
@@ -1644,6 +1712,60 @@ class MacroSkills:
             except ApiError as err:
                 return {"ok": False, "error": err.code, "requires_replan": True, "message": err.message, **err.context}
             if _total_planks(counts) < 4:
+                # Out of wood to build a new crafting_table: check wider 32-block radius & WorldLedger for an already-placed table!
+                distant_candidates: list[list[int]] = []
+                if not force_recarve:
+                    try:
+                        wide_found = self.bot.call("find_blocks", {"radius": 32, "types": ["crafting_table"], "limit": 8})
+                        for wb in sorted(wide_found.get("blocks") or [], key=lambda b: float(b.get("dist", 999))):
+                            wpos = wb.get("pos")
+                            if isinstance(wpos, list) and len(wpos) >= 3:
+                                pt_list = [int(wpos[0]), int(wpos[1]), int(wpos[2])]
+                                self._record_utility_in_ledger("crafting_table", pt_list)
+                                if pt_list not in distant_candidates:
+                                    distant_candidates.append(pt_list)
+                    except ApiError:
+                        pass
+                    if self._mining_dfs is not None:
+                        ledger_tbl = self._mining_dfs.ledger.nearest_utility("crafting_table", (px, py, pz), max_dist=48.0)
+                        if ledger_tbl is not None and list(ledger_tbl) not in distant_candidates:
+                            try:
+                                b_chk = self.bot.call("get_block", {"pos": list(ledger_tbl)})
+                                if str(b_chk.get("name") or b_chk.get("block") or "").removeprefix("minecraft:") == "crafting_table":
+                                    distant_candidates.append(list(ledger_tbl))
+                            except ApiError:
+                                pass
+
+                for cand_pos in distant_candidates[:2]:
+                    if self._navigate_to_distant_table(cand_pos, cur_hp=cur_hp):
+                        return {"ok": True, "reused": True, "pos": cand_pos}
+
+                if distant_candidates:
+                    return {
+                        "ok": False,
+                        "error": "need_crafting_table",
+                        "requires_replan": True,
+                        "pos": [px, py, pz],
+                        "nearest_crafting_table": distant_candidates[0],
+                        "message": (
+                            f"包内无富余木板新建工作台，但附近已放置有现成 crafting_table 位于 {distant_candidates[0]}；"
+                            "无需回地表砍树，请先调 mc_skill_mine_dfs(action='return_collar') 或 mc_move_to 靠近该工作台后再合成。"
+                        ),
+                    }
+
+                if self._has_non_wood_table_recipe_ready(target_item, counts):
+                    return {
+                        "ok": False,
+                        "error": "need_crafting_table",
+                        "requires_replan": True,
+                        "pos": [px, py, pz],
+                        "item": target_item,
+                        "message": (
+                            f"合成 {target_item} 的原料已在背包中齐备，但 32 格内未发现已放置的 crafting_table 且包内无 4 块木板新建工作台；"
+                            "请返回之前放有 crafting_table 的井口/基地合成，或补充 1 块原木制作工作台。"
+                        ),
+                    }
+
                 dim = normalize_dimension(st.get("dimension"))
                 biome = str(st.get("biome") or "")
                 wood_targets = list(NETHER_STEM_TYPES) if dim == "the_nether" else list(LOG_TYPES)
@@ -1698,16 +1820,19 @@ class MacroSkills:
         # Place nearby using auto-placement first, then fallback open offsets, then wall-pocket carving
         try:
             placed = self.bot.call("place", {"item": "crafting_table"})
+            self._record_utility_in_ledger("crafting_table", placed.get("pos"))
             return {"ok": True, "reused": False, **placed}
         except ApiError as err:
             for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (1, 1, 0)):
                 try:
                     placed = self.bot.call("place", {"item": "crafting_table", "pos": [px + dx, py + dy, pz + dz]})
+                    self._record_utility_in_ledger("crafting_table", placed.get("pos") or [px + dx, py + dy, pz + dz])
                     return {"ok": True, "reused": False, **placed}
                 except ApiError:
                     continue
             pocket = self._carve_and_place_table(px, py, pz)
             if pocket is not None:
+                self._record_utility_in_ledger("crafting_table", pocket.get("pos") or pocket.get("carved_pocket"))
                 return pocket
             return {"ok": False, "error": err.code, "message": err.message}
 
@@ -2334,7 +2459,7 @@ class MacroSkills:
                     "inventory": prepared, **plan}
 
         if item in TABLE_RECIPES:
-            table_res = self.ensure_crafting_table()
+            table_res = self.ensure_crafting_table(target_item=item)
             if not table_res.get("ok"):
                 return table_res
             # Re-ensure planks if crafting table consumed some
@@ -2363,7 +2488,7 @@ class MacroSkills:
                 }
             if item in TABLE_RECIPES and (
                 "windowOpen" in err.message
-                or err.code in ("path_not_found", "need_crafting_table", "out_of_reach")
+                or err.code in ("path_not_found", "need_crafting_table", "out_of_reach", "no_window")
             ):
                 try:
                     nearby_tables = self.bot.call(
@@ -5016,3 +5141,30 @@ class MacroSkills:
             "bunker": bunker_res,
             "flee": flee_res,
         }
+
+    @property
+    def mining_dfs(self) -> Any:
+        if self._mining_dfs is None:
+            from .mining_dfs import MiningDFSEngine
+
+            self._mining_dfs = MiningDFSEngine(self)
+        return self._mining_dfs
+
+    def mine_dfs(
+        self,
+        target: str = "iron",
+        goal_count: int = 6,
+        target_y: int | None = None,
+        action: str = "explore",
+        geofence: Any = None,
+        max_duration_s: float = 32.0,
+    ) -> dict[str, Any]:
+        """Run path-compressed MiningDFS underground exploration, vein harvesting, or collar backtrack."""
+        return self.mining_dfs.run(
+            target=target,
+            goal_count=goal_count,
+            target_y=target_y,
+            action=action,
+            geofence=geofence,
+            max_duration_s=max_duration_s,
+        )

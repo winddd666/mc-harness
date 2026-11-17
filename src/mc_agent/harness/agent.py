@@ -37,7 +37,7 @@ MC_SYSTEM_PROMPT = """你是运行在 Minecraft Java 版 1.21.11 生存服务器
 核心规则与提速铁律（严格遵守）：
 1. 【优先宏技能 + 连招批处理（极重要，严禁机械单步往返）】：
    - 砍树（`mc_skill_harvest_logs`）、合工作台与工具/盾牌/护甲（`mc_skill_craft_gear`）、带等级校验挖矿（`mc_skill_mine_blocks`）、熔炉烧铁/肉/木炭（`mc_skill_smelt`）、拾取地面掉落物（`mc_skill_collect_drops`）、床绑定重生点（`mc_skill_bind_bed`）、夜间紧急挖掩体封顶（`mc_skill_bunker`）、安全阶梯下矿/重返地表（`mc_skill_staircase`）、保命进食浮水（`mc_skill_stabilize`）、查待解锁进度（`mc_advancement_frontier`）**优先用 `mc_skill_*` 宏技能一步完成**，底层微操/跑图/建筑再配合原子工具。
-   - **禁止用逐格手挖 `mc_dig` + `mc_control` 磨蹭修楼梯**！需要出坑返回地表直接用 `mc_skill_staircase(vertical='up')`；先用 `mc_find_blocks(radius=64)` 扫山崖/洞口露头矿脉，若无露头再用 `mc_skill_staircase(vertical='down', stop_on_ore=True)` 下矿层。
+   - **禁止用逐格手挖 `mc_dig` + `mc_control` 磨蹭修楼梯**！需要地下找铁/找钻石/深矿探索优先直接调用 **`mc_skill_mine_dfs(target='iron', goal_count=6)`**（路径压缩下井、自动双镐切换、遇洞封堵转角、鱼骨分叉采矿与悬空矿垫石）；需要无损伤返回井口直接调 `mc_skill_mine_dfs(action='return_collar')`。零星露头矿或出坑返回地表可用 `mc_skill_mine_blocks` / `mc_skill_staircase(vertical='up')`。
    - 寻路不会自动挖墙。已知矿石被石墙隔开时，按目标坐标选 north/south/east/west，用 `mc_skill_tunnel` 同层开短矿道；高差用阶梯先调整。不要反复对同一隔墙坐标 `mc_move_to` 或原地扫描。矿道遇矿面会返回 `ore_at_face`，此时用采矿技能；实际入包按 gained 核对。
    - 调度器会严格按顺序串行执行同一轮返回的多个动作 `tool_calls`；一旦某一步返回 `"ok": false`，调度器会自动跳过本轮后续动作交还你重决策。
    - 因此，目标明确的多步连续动作**必须在同一轮一次性合并调用**！典型连招：
@@ -71,7 +71,7 @@ MC_SYSTEM_PROMPT = """你是运行在 Minecraft Java 版 1.21.11 生存服务器
 MC_COMPACT_SYSTEM_PROMPT = """你是 MC 1.21.11 竞赛生存智能体。每轮末尾附最新 `[实时HUD]`（格坐标/HP/饱食/耐久/暴露方块/缺口），勿空转查状态。
 铁律：
 1. 调工具前仅输出<=20字当前真实意图（禁复读旧口号/手写JSON；思考模式仅在think内<=120字核对HUD与缺口），直接发 `tool_calls`。
-2. 优先宏技能：`mc_skill_harvest_logs`、`mc_skill_craft_gear`、`mc_skill_mine_blocks`、`mc_skill_smelt`、`mc_skill_collect_drops`、`mc_skill_staircase`、`mc_skill_tunnel`、`mc_skill_unstick`（树冠/卡死/水上脱困）、`mc_skill_bunker`、`mc_skill_flee`；禁止胡乱挖泥土/装饰石或盲调`mc_craft`寻路旧台。
+2. 优先宏技能：`mc_skill_harvest_logs`、`mc_skill_craft_gear`、`mc_skill_mine_dfs`（地下下井找矿/双镐切换/遇洞转角/零挖返井口）、`mc_skill_mine_blocks`、`mc_skill_smelt`、`mc_skill_collect_drops`、`mc_skill_staircase`、`mc_skill_tunnel`、`mc_skill_unstick`（树冠/卡死/水上脱困）、`mc_skill_bunker`、`mc_skill_flee`；禁止胡乱挖泥土/装饰石或盲调`mc_craft`寻路旧台。
 3. 敌情与保坑：HUD标`隔墙怪`(岩壁阻隔)且未掉血时安全，严禁调`mc_skill_flee`弃坑回地表，继续就地采矿/熔炼并避开该方向掘进！仅当`近敌(无遮挡!)`或刚受击：单只僵尸/蜘蛛且有剑/斧且HP>=12调`mc_attack(entity_id)`反杀；苦力怕/骷髅/群怪/无剑斧调`mc_skill_flee`(探矿穴内自动封堵保坑，露天冲刺逃离)。
 4. 硬规：仅真实入包才算取得材料；3x3 配方直接用`mc_skill_craft_gear`就地建台合装；镐级(stone/coal=木,iron/copper=石,diamond=铁,obsidian=钻)；`mc_move_to` 禁传 y；`in_water` 禁强挖先 `mc_skill_unstick`；勿重试失败坐标；虚空岛禁越界。
 5. 目标确认达成后停用工具并简述结果。"""
@@ -206,6 +206,8 @@ class _RepeatFailureGuard:
     def _tool_streak_limit(tool_name: str) -> int:
         if tool_name == "mc_skill_harvest_logs":
             return 2
+        if tool_name == "mc_skill_mine_dfs":
+            return 8
         return 5 if tool_name in {"mc_skill_staircase", "mc_skill_tunnel"} else 3
 
     @staticmethod
@@ -272,6 +274,12 @@ class _RepeatFailureGuard:
                 raw_types = [raw_types]
             payload = {
                 "block_types": sorted(str(b).strip().lower() for b in raw_types),
+            }
+            return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        if tool_name == "mc_skill_mine_dfs":
+            payload = {
+                "action": str(kwargs.get("action", "explore")).strip().lower(),
+                "target": str(kwargs.get("target", "iron")).strip().lower(),
             }
             return json.dumps(payload, sort_keys=True, ensure_ascii=False)
         if tool_name == "mc_skill_harvest_logs":

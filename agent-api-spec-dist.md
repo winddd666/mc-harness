@@ -7,7 +7,9 @@
 - **Base URL**：`http://<部署地址>:18900/api/v1`（端口见 `config.json` 的 `http.port`；对公网开放时请放在 HTTPS 反向代理后面）
 - **协议**：HTTP + JSON
 - **认证**：Bearer Token（`/auth/login` 换取；账号体系由部署方的认证适配器决定，见 `docs/ADAPTERS.md`）
+- **自己本机部署开源版时**：服务器内部处理很快（`status` / `get_block` 约 1 ms，`/control` 只比 `ms` 多 1–2 ms，`/control` 带 `"wait": false` 时约 1 ms，`/posture` 约 55 ms）。如果你测到的延迟大很多，先查客户端：**用 `127.0.0.1` 而不是 `localhost`**（1.3.12 前服务只监听 IPv4，Windows 上 `localhost` 先试 IPv6，每个新连接白等约 0.25 s（Node fetch）到 2 s（Python））；**复用连接**（Python 用 `requests.Session()`，不要每次新建）；bot 本身到游戏服务器的网络延迟也会体现在动作效果上
 - **并发**：每个 token 对应一个独立的 bot 实例
+- **性能隔离**：每个 bot 跑在服务端自己的进程里，别的 bot 在寻路、大范围查找方块时不影响你的请求延迟（23 个 bot 同时满负荷实测：`status` p99 约 50 ms）
 - **动作互斥**：同一时间只能执行一个动作，重复调用返回 `busy`
 
 ---
@@ -190,9 +192,9 @@ GET /status
 
 | 字段 | 说明 |
 |---|---|
-| `ready` | **可以调用动作接口了**：就绪适配器确认已在目标服务器且存活，且周围区块和实体已经到齐（进服后约 2–3 秒；之前 `get_entities` 可能是空的） |
+| `ready` | **可以调用动作接口了**：就绪适配器确认已在目标服务器且存活，且周围区块和实体已经到齐（进服后约 2–3 秒；之前 `get_entities` 可能是空的）。死亡重生、切换维度后同样会先变 `false`、等新世界到齐再变回 `true`（约 2–4 秒），这期间动作接口返回 `not_ready` |
 | `busy` | 正在执行的动作名，空闲为 `null` |
-| `speed` | 当前水平速度（格/秒，3 位小数），按 bot **上一个物理 tick 的实际位移**算。参考：步行约 4.3、疾跑约 5.6、站着 0 |
+| `speed` | 当前水平速度（格/秒，3 位小数），按 bot **上一个物理 tick 的实际位移**算。参考：步行约 4.3、疾跑约 5.6、站着 0；为 `null` 的情况同 `velocity` |
 | `velocity` | 上一个物理 tick 的实际位移 `[vx, vy, vz]` × 20（格/秒），Y 正值向上；下落、被击退、被水流冲时都会体现。刚传送 / 上下载具后的第一个 tick、骑乘中、还没有物理数据时为 `null` |
 | `xp_progress` | 当前等级内的经验进度 0–1（配合 `xp_level` 判断离 30 级还差多少） |
 | `armor_points` | 当前护甲值（0–20），按护甲属性或装备换算 |
@@ -204,6 +206,7 @@ GET /status
 | `in_lava` | 是否站在岩浆里 |
 | `in_vehicle` | `{"id","name"}` 或 `null` |
 | `sneaking` / `jumping` / `blocking` | 当前姿态，与 `/posture` 对应（`jumping` 为持续按住跳跃，水里即踩水浮面） |
+| `held_controls` | `/control` `wait:false` 正在按住的键：`{"keys": ["forward"], "release_in_ms": 120}`；没有时为 `null` |
 | `using_item` | 正在使用物品时返回 `{"name","elapsed_ms"}` |
 | `nearest_hostile` | 24 格内最近的敌对生物，没有则省略 |
 | `last_death` | 最近一次死亡的位置、时间、死亡信息 |
@@ -263,7 +266,7 @@ POST /find_blocks
 }}}
 ```
 
-约束：只返回**暴露方块**（至少一面邻接空气或透明方块），不提供矿透能力。
+约束：只返回**暴露方块**（至少一面邻接空气或透明方块），不提供矿透能力。范围是以 bot 为球心、半径 `radius` 的球；指定类型时最多统计最近的 10000 个，摘要模式最多统计最近的 4000 个（`scanned`）。半径 64 通常在 0.1 s 左右，扫描期间同一个 bot 的其它请求照常响应。
 
 ### 3.4 查询单个方块
 
@@ -387,6 +390,8 @@ POST /dig  {"pos": [100, 64, -200], "collect": true}
 
 `gained` 是"物品名 → 数量"的对象。没有合适工具时会附 `warning`。
 
+目标不在眼睛 5 格内时会先走过去（包括斜下方、要下到槽里才够得着的方块）；走到了还够不着返回 `out_of_reach`（附 `pos`）。
+
 只有收到**服务端**发来的这一格方块变化才算挖掉（`dig_ms` 含等待确认的时间）。服务端没确认时返回 `dig_unconfirmed`（方块还在，本地缓存也会恢复成原方块），附 `pos`、`eye_dist`（眼睛到方块中心的距离）、`on_ground`、`ping_ms` 方便排查——最常见的原因是服务端认为 bot 离得太远（两边位置不同步）；服务端明确把方块改回原样时返回 `protected_region`。
 
 ### 4.3 放置方块
@@ -402,6 +407,8 @@ POST /place  {"item": "cobblestone", "pos": [100, 65, -200]}
 ```
 
 若参照方块弹出了界面（说明这个位置应该走窗口接口），会自动关窗并返回 `use_window_api`。
+
+**睡莲、蛙卵**只能放在水面上：`pos` 传水面上方那格（下面必须是水源），按原版视线判定对着水使用，返回 `sneaked: false`；下面不是水源返回 `no_support`。
 
 ### 4.4 交互（方块或实体）
 
@@ -425,6 +432,25 @@ POST /interact  {"entity_id": 42}                        // 实体：上船 / �
 
 **床**：夜里睡着返回 `{"slept": true}`；已经睡着再点一次是起床，返回 `{"woke": true}`（返回时服务端已确认下床；2 s 内没下床返回 `cannot_sleep`）。
 白天（或入睡失败）**仍会发一次原生右键包**，返回 `{"slept": false, "interacted": true, "daytime": true}`——这样白天也能把重生点绑到床上，而不是本地 `cannot_sleep` 一个包都不发。
+
+**桶**（`bucket`、`water_bucket`、`lava_bucket`）、**玻璃瓶**、**睡莲**、**蛙卵**对着液体用时按原版视线判定：bot 先瞄准再使用。
+
+| 操作 | `pos` 传什么 |
+|---|---|
+| 空桶装水 / 装岩浆 | **液体源方块本身**；传旁边的固体方块返回 `cannot_interact` |
+| 倒出 | **承载方块**：液体出现在它朝向 bot 的那一面（bot 站得比它高时就是顶面）。也可以直接传**目标空气格**，此时倒在它下面那块的顶面上 |
+| 玻璃瓶装水 | **水源方块本身**（也可以传水面上方那格）；水不变，`gained: {"potion": 1}`，背包里这瓶的 `potion` 为 `"water"` |
+| 放睡莲 / 蛙卵 | **水源方块本身**（也可以传水面上方那格）；出现在水面上方，`target` 即该格。也可以用 `/place` |
+| 炼药锅 | 桶倒进 / 舀出、玻璃瓶取水都是普通右键方块：`pos` 传**炼药锅本身**，返回普通的方块变化（`before` / `after`） |
+
+```
+POST /interact  {"pos": [100, 63, -200], "item": "bucket"}         // 装起 (100,63,-200) 的水
+POST /interact  {"pos": [104, 63, -200], "item": "water_bucket"}   // 倒在 (104,63,-200) 上面，水出现在 (104,64,-200)
+POST /interact  {"pos": [100, 63, -200], "item": "glass_bottle"}   // 从 (100,63,-200) 的水装一瓶水
+POST /interact  {"pos": [102, 64, -200], "item": "water_bucket"}   // (102,64,-200) 是炼药锅：倒满它
+```
+
+返回 `{"block", "target", "before", "after", "changed", "used", "gained"}`：`target` 是液体实际消失 / 出现的那格。
 
 **实体**返回：
 
@@ -462,7 +488,7 @@ POST /use_item  {"item": "oak_boat", "target": {"pos": [14, 64, 10]}}
 
 | 物品 | 行为 | `result` |
 |---|---|---|
-| 食物、药水、牛奶桶、蜂蜜瓶 | 吃完 / 喝完 | `used`、`food_before`、`food`、`health_before`、`health`、`effects` |
+| 食物、药水、牛奶桶、蜂蜜瓶 | 吃完 / 喝完。饱食度满时普通食物返回 `not_hungry`；金苹果、附魔金苹果、紫颂果照原版随时能吃；药水、牛奶桶、蜂蜜瓶不检查饱食度 | `used`、`food_before`、`food`、`health_before`、`health`、`effects` |
 | 盾牌 | 举盾保持 `ms` | `used`、`blocked_ms` |
 | 末影珍珠 | 投掷 | `used`、`thrown`、`teleported`、`pos` |
 | 末影之眼 | 投掷并读出方位 | `used`、`thrown`、`landed_at`、`eye_vector`、`bearing_deg` |
@@ -476,7 +502,7 @@ POST /use_item  {"item": "oak_boat", "target": {"pos": [14, 64, 10]}}
 
 钓鱼在 `timeout` 内一条都没钓到时返回 `timeout`（附 `casts`、`false_bites`、`bobber_y`、`base_y`、`in_water`）；第一竿连浮标都没出现返回 `cannot_use`。被 `stop_on` 打断后不会再抛下一竿。
 
-**限制**：打火石、水桶、种子、骨粉、锄头必须对着方块用，会返回 `need_block_target`，请改调 `/interact` 并带上 `item`。其它没有空放行为的物品返回 `cannot_use`。
+**限制**：打火石、桶、种子、骨粉、锄头、玻璃瓶、睡莲、蛙卵必须对着方块用，会返回 `need_block_target`，请改调 `/interact` 并带上 `item`。其它没有空放行为的物品返回 `cannot_use`。
 
 ### 4.6 攻击
 
@@ -532,7 +558,7 @@ POST /craft  {"item": "crafting_table", "count": 1}
 {"ok": true, "result": {"crafted": "crafting_table", "gained": 1, "used_table": false, "inventory": {"oak_planks": 0}}}
 ```
 
-失败：`missing_ingredients`（附 `example_recipe_needs`、`inventory`）、`need_crafting_table`、`no_recipe`。
+失败：`missing_ingredients`（附 `example_recipe_needs`、`inventory`）、`need_crafting_table`、`no_recipe`；工作台 5 秒内没打开返回 `no_window`（附 `table` 坐标、`pos`、`eye_dist`）；背包满、产物放不进去返回 `inventory_full`（附已做出的 `gained`、`empty_slots`、`inventory`；材料留在背包里，腾出一格再调即可）。
 
 ### 4.9 界面（窗口）
 
@@ -557,9 +583,116 @@ POST /window/act   {"target": {"pos": [x, y, z]}, "ops": [{"op": "take", "from":
 }}
 ```
 
-`act` 支持 4 种操作：`put`（`item`、`count`、`to`、`slot`、`potion`、`enchanted`、`custom_name`）、`take`（`from`、`item`、`count`）、`select`（`option`、`times`）、`text`（`value`）。
+- `sections`：按名字划分的区域，不需要知道槽位编号。玩家背包不在这里，用 `/inventory` 查看。
+- `info`：只读状态，例如熔炉进度、铁砧花费。
+- `options`：可以 `select` 的选项，例如附魔台的三个附魔、村民的交易。
+- 界面不会跨调用保持打开。想"先看再做"就先 `view` 再 `act`；附魔台、切石机等的选项要放好物品后才出现，所以 `put` 和 `select` 要写在**同一次** `act` 里。
 
-某步失败时停止并返回 `error.failed_op`、`error.done`、`error.window`。完整界面表（箱子、熔炉、工作台、附魔台、铁砧、砂轮、锻造台、切石机、织布机、酿造台、信标、村民）与 v1.2 相同。
+#### `act` 的操作（4 种）
+
+| op | 参数 | 作用 |
+|---|---|---|
+| `put` | `item`, `count?`, `to`, `slot?`, `potion?`, `enchanted?`, `custom_name?` | 从背包放进区域 `to`；`count` 省略则放全部。`slot` 指定区域内第几格（工作台按行 0–8）；`potion` 按药水种类挑；`enchanted` / `custom_name` 在同名多件时指定用哪件，不指定时优先放无附魔、未改名、耐久最好的那件 |
+| `take` | `from`, `item?`, `count?` | 从区域取回背包；对成品区（`output`）取就是领取成品，铁砧会扣经验。只取背包放得下的量：放下了一部分时成功并带 `inventory_full: true`，一个都放不下时报 `inventory_full`，东西留在原处（成品区只能整组取，放不下整组就不取） |
+| `select` | `option`, `times?` | 选 `options` 里的第几项（从 0 开始）；村民交易可用 `times` 连续做多次，次数用完或付不起时提前结束 |
+| `text` | `value` | 文本输入（铁砧改名，最长 50 字符） |
+
+```json
+POST /window/act
+{
+  "target": {"block": "furnace"},
+  "ops": [
+    {"op": "take", "from": "output"},
+    {"op": "put", "item": "raw_iron", "count": 8, "to": "input"},
+    {"op": "put", "item": "coal", "count": 1, "to": "fuel"}
+  ]
+}
+```
+
+**Response 200**
+```json
+{
+  "ok": true,
+  "result": {
+    "done": [
+      {"op": "take", "took": {"iron_ingot": 3}, "from": "output"},
+      {"op": "put", "put": "raw_iron", "count": 8, "to": "input"},
+      {"op": "put", "put": "coal", "count": 1, "to": "fuel"}
+    ],
+    "window": { "...": "执行完后的界面描述" }
+  }
+}
+```
+
+**某一步失败时**：停止执行，界面照常关闭，返回已完成的步骤、失败的是第几步、失败时的界面：
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "section_full",
+    "message": "input is occupied by 1 cobblestone; take it out first",
+    "failed_op": 0,
+    "done": [],
+    "window": { "...": "失败时的界面描述" }
+  }
+}
+```
+
+`act` 返回 `{"done": [...每一步的结果], "window": {...执行完后的界面}}`。某一步失败时停止执行，界面照常关闭，返回 `error.failed_op`（第几步，从 0 开始）、`error.done`（已完成的步骤）、`error.window`（失败时的界面）。
+
+#### 各界面的区域与选项
+
+| 界面 | `window` | sections | options / info |
+|---|---|---|---|
+| 箱子、木桶、陷阱箱、末影箱、漏斗、投掷器、发射器、潜影盒 | `generic_9x3` 等 | `container` | — |
+| 熔炉、高炉、烟熏炉 | `furnace` 等 | `input` `fuel` `output` | info：`burning`、`progress`（0–1）、`fuel_left`（0–1） |
+| 工作台 | `crafting` | `grid`（`slot` 0–8，从左上按行）`output` | 合成建议直接用 `/craft` |
+| 附魔台 | `enchantment` | `item` `lapis` | options：`index`、`level_required`、`lapis_cost`、`hint`（`{enchantment, level}`，提示的附魔）、`available` |
+| 铁砧 | `anvil` | `left` `right` `output` | info：`repair_cost`（等级）；用 `text` 改名 |
+| 砂轮 | `grindstone` | `top` `bottom` `output` | — |
+| 锻造台 | `smithing` | `template` `base` `addition` `output` | — |
+| 切石机 | `stonecutter` | `input` `output` | options：`index`、`get`（`{name, count}`）、`available`，放入原料后才有；info：`selected` |
+| 织布机 | `loom` | `banner` `dye` `pattern` `output` | options：`index`、`pattern`（放了旗帜和染料后才有；放了图案物品时只有一项 `from_pattern_item`） |
+| 酿造台 | `brewing_stand` | `bottles`（3 格）`ingredient` `fuel` | info：`brew_time_left`（秒）、`fuel_left`；`put` 药水时可用 `potion` 指定种类 |
+| 信标 | `beacon` | `payment` | info：`beacon_level`、`primary`、`secondary`；options：`index`、`primary`、`secondary?`、`min_level`、`available`（需先放好付款） |
+| 村民、流浪商人 | `merchant` | `payment1` `payment2` `output` | options：`index`、`give`、`get`、`uses`、`max_uses`、`available`；info：`villager_level`、`villager_xp` |
+
+**示例**
+
+```json
+// 附魔：放剑和 3 个青金石，选第 3 个选项，取回剑
+{"target": {"block": "enchanting_table"}, "ops": [
+  {"op": "put", "item": "iron_sword", "to": "item"},
+  {"op": "put", "item": "lapis_lazuli", "count": 3, "to": "lapis"},
+  {"op": "select", "option": 2},
+  {"op": "take", "from": "item"}
+]}
+
+// 村民交易：第 0 号交易做 4 次（服务器自动从背包付款）
+{"target": {"entity_id": 812}, "ops": [{"op": "select", "option": 0, "times": 4}]}
+
+// 铁砧改名
+{"target": {"block": "anvil"}, "ops": [
+  {"op": "put", "item": "iron_sword", "to": "left"},
+  {"op": "text", "value": "Agent Blade"},
+  {"op": "take", "from": "output"}
+]}
+```
+
+**界面相关错误码**
+
+| code | 含义 |
+|---|---|
+| `no_window` | 目标不会打开界面（例如对草方块调用） |
+| `unsupported_window` | 界面类型暂不支持 |
+| `bad_section` | 区域名不存在，或往成品区放东西；message 会列出可用区域 |
+| `section_full` | 放不进去：区域被其他物品占着（message 会说是什么），或该槽位不接受这种物品 |
+| `no_output` | 成品区是空的 |
+| `bad_option` | 选项编号越界 |
+| `option_unavailable` | 选项当前不可用：等级/青金石/付款不够、交易次数已用完；或服务器拒绝交出成品（经验不足） |
+| `window_closed` | 执行中服务器关闭了界面 |
+| `not_found` | `{"block": ...}` 在 32 格内找不到 |
+
 
 ### 4.10 装备
 
@@ -579,7 +712,7 @@ POST /posture  {}
 ```
 
 - **全量设置**：每次调用表达"我现在要的姿态"，没写的字段就是 `false`；`{}` 表示全部复位。
-- **不占动作锁**：可以在 `move_to` 执行中途调用。
+- **不占动作锁**：可以在 `move_to` 执行中途调用。约 55 ms 返回（等一个游戏 tick 让潜行 / 跳跃发出去；举盾是立即发的）。
 - `sneak`：搭桥（`posture{sneak:true}` → `place` → `move_to` 循环）、经过 sculk sensor、原地潜行。
 - `shield`：副手自动装备盾牌（背包里没有则 `missing_item`），举盾会取消疾跑。
 - `jump`：**持续按住跳跃**。在水里等于自动踩水浮面（`posture{jump:true}` 之后可以一直停在水面，不会沉底溺亡）；陆地上会持续起跳，配合 `place` 可以原地垫高。
@@ -635,10 +768,14 @@ POST /stop
 ```
 
 ```json
-{"ok": true, "result": {"stopped": true}}
+{"ok": true, "result": {"stopped": true, "action": "move_to", "released": true, "wait_ms": 21}}
 ```
 
 清空寻路、停止挖掘、松开按键、放下物品，然后按当前姿态恢复（潜行仍然保持）。
+
+**返回时动作锁已经释放**：`/stop` 会等正在执行的动作真正退出（通常几十毫秒，最多 5 秒）再返回，紧接着发的下一个动作不会撞 `busy`。`action` 是被停掉的动作名（没有动作在跑时为 `null`）；`released: false` 只在等满 5 秒仍未退出时出现。
+
+被停掉的那个动作：有部分结果的照常 `ok: true` 并带 `interrupted_by: "stop"`（例如 `/control`）；否则返回 `interrupted`，`cause: "stop"`，`inner_code` 是停下时的原始错误（例如寻路被取消的 `path_not_found`）。被打断的原因由 `cause` 区分：`stop`（主动停止）、`hurt`、`death` 等。
 
 ---
 
@@ -648,23 +785,25 @@ POST /stop
 |---|---|
 | `invalid_credentials` / `no_profile` / `rate_limited` | 认证相关（`rate_limited` 也用于 `/chat` 限频） |
 | `unauthorized` / `invalid_token` | Token 缺失或失效 |
-| `not_connected` | Bot 未连接 |
+| `not_connected` | Bot 未连接；动作执行中途被 `/disconnect`、踢出或断线也返回它 |
 | `wrong_server` | 还没就绪（不在目标服务器上） |
-| `not_ready` | 数据（如进度）还没下发 |
+| `not_ready` | 数据（如进度）还没下发；或登录 / 重生 / 切维度后世界还在加载（稍等重试） |
 | `death_loop_cooldown` | 死亡循环保护中 |
 | `busy` | 有动作正在执行 |
 | `dead` | 已死亡，等待重生 |
-| `interrupted` | 动作被打断（附 `cause`、`nearest_hostile`、`inner_code`） |
+| `interrupted` | 动作被打断（附 `cause`：`stop` / `hurt` / …，以及 `nearest_hostile`、`inner_code`） |
 | `path_not_found` / `timeout` | 寻路失败 / 超时 |
 | `out_of_reach` / `out_of_range` | 够不到 / 没有可用弹道 |
-| `no_such_entity` | 实体不存在或已消失 |
+| `no_such_entity` | 实体不在 bot 的实体列表里（消息写作 `entity N not visible`，但**不检查视线**，墙后的目标照样会寻路过去）：已死亡（死亡动画约 1 s 后移除）/ 消失、超出服务端实体追踪范围（取决于服务器的 `entity-tracking-range`，Spigot/Paper 默认生物与玩家都是 48 格）、或 id 来自上次登录 / 重生 / 切维度之前（这些情况 id 全部作废）。请用 `get_entities` 重新取 id，不要长期缓存 |
 | `missing_item` / `missing_ammo` / `missing_ingredients` | 缺物品 / 缺弹药 / 缺材料 |
+| `inventory_full` | `craft` 的产物 / `window/act` `take` 的物品放不进背包（没有空格，也没有能叠加的同种堆）；物品不会被扔到地上 |
 | `need_crafting_table` / `need_furnace` / `no_recipe` | 合成相关 |
 | `no_support` / `occupied` / `place_failed` / `blocked_by_self` | 放置相关 |
 | `protected_region` | 服务端把改动回滚了 |
 | `nothing_to_dig` / `undiggable` | 挖掘相关 |
 | `dig_unconfirmed` | 挖完了但服务端没确认破坏，方块还在（见 4.2） |
 | `use_window_api` | 该目标有界面，应用 `window/*` |
+| `no_window` | 目标没有打开界面（`window/*`；`craft` 打不开工作台） |
 | `cannot_interact` / `cannot_use` / `need_block_target` | 交互或使用物品失败 |
 | `not_hungry` | 饱食度已满 |
 | `not_in_vehicle` / `dismount_failed` | 载具相关 |
@@ -678,6 +817,8 @@ POST /stop
 POST /control  {"forward": true, "jump": true, "yaw": 1.57, "ms": 400}
 POST /control  {"hit": true, "yaw": 1.57, "pitch": -0.2}
 POST /control  {"jump": true, "hit": 1, "hit_interval_ms": 450, "ms": 500}
+POST /control  {"forward": true, "sprint": true, "yaw": 0.8, "ms": 200, "wait": false}
+POST /control  {"wait": false}
 ```
 
 不经过 mineflayer-pathfinder 的原生按键控制：后端 `setControlState` 按住指定键 `ms` 毫秒后自动松开，返回位移。用于 A* 处理不了的中间态：
@@ -695,6 +836,7 @@ POST /control  {"jump": true, "hit": 1, "hit_interval_ms": 450, "ms": 500}
 | `hit` | 可选，`true` = 挥 1 下，整数 1–20 = 挥 N 下；第一下在开始时立即挥出 |
 | `hit_interval_ms` | 两下之间的间隔，50–5000；默认按手持物品的原版攻击冷却（空手及非工具物品 250 / 剑 625 / 镐 833 / 锹 1000 / 斧 1000–1250、锄 250–1000 按材质 / 三叉戟 909 / 重锤 1667）。比冷却短也会照发，但原版伤害会按冷却进度打折 |
 | `ms` | 按住时长，50–3000；默认 300，只给 `hit` 时默认刚好够挥完（`(hit-1)×间隔+50`）。给了 `ms` 但不够挥完会返回 `bad_args`（附 `required_ms`） |
+| `wait` | 默认 `true`：按满 `ms` 再返回。`false`：**按下就返回**（服务端约 1 ms），键在后台按住 `ms` 后自动松开——见下面"实时操控" |
 
 方向键和 `hit` 至少给一个。每一下按原版左键判定：从眼睛沿视线找 **3 格**内最近的实体判定箱（被方块挡住的不算；掉落物、经验球、箭等原版打不到的实体会跳过；船、矿车、末影水晶都能打到），命中就攻击，否则只挥手——**不会挖方块**，挖掘请用 `/dig`。`hits[].entity` 只说明攻击包发给了谁，伤害由服务端按原版规则结算：同一目标受击后有 0.5 秒无敌帧（间隔 < 500ms 时中间那几下通常不掉血），冷却没转满伤害打折，下落中命中才是暴击。
 
@@ -707,7 +849,16 @@ POST /control  {"jump": true, "hit": 1, "hit_interval_ms": 450, "ms": 500}
 
 没命中时那一下是 `{"t_ms": 0, "entity": null, "block": {"name": "stone", "pos": [445, 63, 218]}}`（视线 3 格内没有方块则没有 `block`）。
 
-动作锁语义与其它动作一致（会抢占 `busy`，默认 `stop_on` 含 `hurt`——近身对打时建议传 `"stop_on": []`）；结束时会重放当前 `/posture`。
+动作锁语义与其它动作一致（会占用动作锁，有别的动作在跑时返回 `busy`，要先 `/stop`；默认 `stop_on` 含 `hurt`——近身对打时建议传 `"stop_on": []`）；结束时会重放当前 `/posture`。
+
+**实时操控（`"wait": false`）**：按下指定键、转好视角、挥出第一下就立刻返回，不等 `ms`。适合 agent 按自己的节奏（例如每 50–100 ms 一次）连续发指令，像玩家按住键一样操控：
+
+- 键在后台按住 `ms` 毫秒后自动松开；`hit` 大于 1 时后面几下按间隔在后台挥出。返回 `{"held": ["forward", "sprint"], "release_in_ms": 200, "pos": …, "on_ground": …, "yaw": …, "pitch": …}`（有 `hit` 时另带第一下的 `hits` 和 `scheduled_hits`）。
+- **新的 `/control` 立刻接管**：先松开上一次留下的键（以及没挥完的几下），再按新的。想一直走就在松开前续上，例如每 100 ms 发一次 `ms: 200`。
+- `{"wait": false}` 什么键都不给 = 立刻全部松开（返回 `released`）。`/stop`、死亡、开始任何其它动作（`move_to`、`dig`……）也会先松开。
+- 只在设置按键的那一刻占用动作锁，返回后锁就释放了：按住期间可以调 `/look`、`/posture`、观察接口，也可以开始别的动作（会先松开按键）。
+- `/status.held_controls` 显示当前按住的键和剩余毫秒（没有时为 `null`）。
+- 键的效果从下一个物理 tick（≤ 50 ms）开始；客户端到 API 的网络往返（校内约 0.1 s，公网 0.5–1 s）仍然要算上，所以离 API 越近越"实时"。
 
 ### 4.17 主动转向
 
@@ -797,6 +948,13 @@ curl -s -X POST http://127.0.0.1:18900/api/v1/posture \
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.3.14 | 2026-11-16 | 新增 `/control` `"wait": false`（实时操控）：按下就返回（服务端约 1 ms，以前要等满 `ms`），键在后台按住 `ms` 后松开，下一个 `/control` 立刻接管；`{"wait": false}` 空调用立即松开；`/status` 新增 `held_controls` |
+| 1.3.13 | 2026-11-16 | 23 个 bot 压测后的修复：① **每个 bot 一个进程**——以前所有 bot 共用一个 Node 线程，任何一个 bot 寻路或大范围 `find_blocks` 都会拖慢所有人，23 个 bot 同时干活时 `status` p99 4.5 s、`control` p99 4 s；现在同样负载下 `status` p99 3 ms、`control`（ms=100）p99 106 ms，全部 bot 满负荷重计算时 `status` p99 约 50 ms；② 后端在线人数超过 13 时，服务器 RCON `list` 只列前 13 个名字，之后的 bot 会被误判为"不在后端"而反复 `/server`、断线重登（在线人数在 20–23 之间跳）——现在被截断时逐个确认；③ `find_blocks` 改为直接按方块状态扫描并分段让出：半径 64 从约 0.4–3.6 s 降到约 0.1 s；以前的实现按区块"八面体"遍历，会漏掉对角方向、但仍在半径内的方块，现在结果更完整（数量会比以前多）；④ 重连途中调用 `get_block` / `find_blocks` / `get_entities` / `inventory` 返回 `not_ready`，以前是 `internal`；⑤ 寻路每个 tick 最多计算 20 ms（以前 40 ms） |
+| 1.3.12 | 2026-11-15 | 延迟：① 服务监听 `127.0.0.1` 或 `0.0.0.0` 时额外监听 `[::1]`——以前 Windows 客户端用 `http://localhost:...` 时每个新连接先在 IPv6 上白等（实测 Python 2 s、Node 20+ fetch 约 0.25 s）；② `/posture` 固定等待 150 ms → 55 ms（一个 tick），服务器端实测每次都已看到潜行状态 |
+| 1.3.11 | 2026-11-15 | 修复背包满时物品被扔到地上：① `/window/act` `take` 从箱子 / 熔炉成品槽等取东西，以前把东西扔到地上并报 `missing_item` / `no_output` "nothing to take"（取 2 个也会把整组 5 个扔掉），现在只取放得下的量（部分成功带 `inventory_full: true`），一个都放不下时报 `inventory_full`、东西留在原处；② `/dig` 没有合适工具时会先把手上的东西收进背包，背包满时会把手上整组扔掉（实测 64 钻石），现在直接拿着它挖 |
+| 1.3.10 | 2026-11-14 | 修复：① `/dig` 挖**斜下方**的方块（例如脚下往外 1 格、往下 3 格、往前 3 格）原地 1 ms 返回 `out_of_reach`——"已经够得着"的判断按脚到方块角算，实际挖掘按眼睛到方块中心算，两者不一致；现在会先走过去；② `/interact` 用**玻璃瓶**对着水装水、放**睡莲 / 蛙卵**完全无效（`changed: false`）——现在和桶一样按视线判定，`/place` 也能放睡莲；③ 1.3.8 起**桶对炼药锅**会把水倒在炼药锅上面、空桶舀不出炼药锅里的水——炼药锅恢复为普通右键方块；④ 动作执行中途被 `/disconnect` 或断线时返回 `internal "Cannot read properties of null"`，现在返回 `not_connected`；⑤ `/craft` 打不开工作台时要等 20 s 才返回 `internal "Event windowOpen did not fire"`，现在 5 s 返回 `no_window` 并附坐标与距离；⑥ 背包满时 `/craft` 空转约 30 s 后报 `missing_ingredients "could not craft X: null"`（产物取不出来却当作成功，重试 64 轮），现在约 1 s 返回 `inventory_full` |
+| 1.3.9 | 2026-11-14 | 修复：手持**附魔工具**时 `/dig`（以及会顺路挖方块的寻路）返回 `internal`：`enchantments is not iterable`。1.21 物品组件下 prismarine-item 的 `item.enchants` 是对象而不是数组，mineflayer 算挖掘时间时遍历它就崩；附魔头盔则被静默忽略。现在附魔从物品组件读取，效率附魔也正确计入挖掘时间（效率 V 铁镐挖石头约 0.13 s，普通铁镐约 0.45 s） |
+| 1.3.8 | 2026-11-14 | 修复：① `/stop` 不等动作退出就返回，`/control` 会继续按满 `ms`，紧接着的下一个动作撞 `busy`——现在 `/stop` 返回时锁已释放，返回值新增 `action`、`released`、`wait_ms`，被停掉的动作 `cause: "stop"`；② 死亡重生、切换维度后 `ready` 不变 `false`，约 0.25 s 内 `get_block` 返回 `not_loaded`、`get_entities` 为空——现在重新等世界到齐，期间动作接口返回 `not_ready`；③ `/interact` 用桶装水 / 倒水完全无效（返回 `changed: false`）——现在按原版视线判定，坐标约定见 4.4。文档：4.9 补全界面表；4.5 写明满饱食度时哪些物品仍可使用 |
 | 1.3.7 | 2026-11-13 | `/status` 新增 `speed`（水平速度，格/秒）与 `velocity`（三轴速度，格/秒），骑乘时为 `null`（社区贡献 PR #1） |
 | 1.3.6 | 2026-11-13 | 修复：① `/dig` 在服务端**没接受**破坏时也报成功（mineflayer 挖完先把本地方块改成空气，服务端拒绝时不回滚）——现在只认服务端发来的方块变化，否则返回新错误码 `dig_unconfirmed` 并恢复本地缓存；② bot **挤不动**（原版由客户端自己算实体挤压，mineflayer 没实现）——现在会被重叠的生物 / 玩家 / 船 / 矿车推开；③ `ready` 变 `true` 时周围实体还没到齐、`get_entities` 可能为空——现在 `ready` 会等区块和实体到齐（进服约 2–3 s）；④ 手持非工具物品时默认挥击间隔误算成 500ms（应为 250ms），斧 / 锄按材质区分；⑤ 刚进服时 `/status` 偶发 `internal` 错误；⑥ 进服第 4 秒的内部位置校正会把速度清零，恰好在那时挨打时击退被吞 |
 | 1.3.5 | 2026-11-13 | 修复：agent 挨打**不会被击退**（1.21.9+ 的速度包改了编码，mineflayer 仍按旧格式换算，速度被缩小 8000 倍，bot 原地不动）。现在被打会像原版玩家一样被推开约 2 格；其他实体的速度也变成真值，`/shoot` 的移动目标提前量随之生效（只用水平速度） |

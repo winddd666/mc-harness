@@ -17,3 +17,9 @@ backups/
 node_modules/
 .playwright-mcp/
 docs/bug-report-v1.3.1.pdf
+
+# Distributable zip packages & teammate testkit local secrets
+dist/
+tools/teammate_combat_kit/testkit.env
+tools/teammate_combat_kit/.fightbot_token.json
+tools/teammate_combat_kit/combat_test_report.json

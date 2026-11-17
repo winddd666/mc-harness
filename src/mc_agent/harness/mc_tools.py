@@ -16,13 +16,15 @@ import httpx
 
 from ..bot import BotSession
 from ..errors import ApiError, AuthError, BotNotReadyError, DeathLoopCooldownError
-from ..kb import assess_world_target, build_jit_error_hint, lookup_kb, normalize_dimension
+from ..kb import assess_world_target, build_jit_error_hint, lookup_kb, normalize_dimension, resolve_item_alias
 from ..skills import MacroSkills, SafetyEmergency, check_and_stabilize, compute_advancement_frontier
 from ..skills.library import (
     BLOCK_MIN_PICKAXE_TIER,
+    TABLE_RECIPES,
     _best_pickaxe_in_inv,
     _can_fit_item_in_inventory,
     _compute_empty_slots,
+    _inventory_counts,
     best_melee_weapon_in_inv,
     is_passable_sight_block,
 )
@@ -47,6 +49,7 @@ COMPACT_CORE_TOOLS: tuple[str, ...] = (
     "mc_skill_collect_drops",
     "mc_skill_staircase",
     "mc_skill_tunnel",
+    "mc_skill_mine_dfs",
     "mc_skill_bunker",
     "mc_skill_flee",
     "mc_skill_unstick",
@@ -832,6 +835,7 @@ class McToolset:
 
     def mc_craft(self, item: str, count: int = 1) -> str:
         cnt = max(1, min(64, int(count)))
+        resolved = resolve_item_alias(item)
         cached_inv = getattr(self.bot, "_last_inventory", None)
         if isinstance(cached_inv, dict) and _compute_empty_slots(cached_inv) < 2:
             inv_now, _ = self.skills._ensure_free_slots(min_free=2)
@@ -853,7 +857,33 @@ class McToolset:
                     },
                     ensure_ascii=False,
                 )
-        return self._call_json("craft", {"item": item, "count": cnt})
+        raw = self._call_json("craft", {"item": item, "count": cnt})
+        if resolved in TABLE_RECIPES:
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict) and not parsed.get("ok"):
+                err_obj = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
+                err_code = str(err_obj.get("code") or "")
+                if err_code in {"need_crafting_table", "no_window", "path_not_found", "out_of_reach"}:
+                    try:
+                        counts_now = _inventory_counts(self.bot)
+                    except ApiError:
+                        counts_now = {}
+                    if counts_now.get("crafting_table", 0) >= 1:
+                        tbl_res = self.skills.ensure_crafting_table(
+                            force_recarve=(err_code in {"no_window", "path_not_found", "out_of_reach"}),
+                            target_item=resolved,
+                        )
+                        if tbl_res.get("ok"):
+                            return self._call_json("craft", {"item": item, "count": cnt})
+                    elif err_code in {"no_window", "path_not_found"} and isinstance(err_obj.get("table"), list) and len(err_obj["table"]) >= 3:
+                        tpos = [int(err_obj["table"][0]), int(err_obj["table"][1]), int(err_obj["table"][2])]
+                        self.skills._record_utility_in_ledger("crafting_table", tpos)
+                        if self.skills._navigate_to_distant_table(tpos):
+                            return self._call_json("craft", {"item": item, "count": cnt})
+        return raw
 
     def mc_equip(self, item: str, slot: str = "hand") -> str:
         return self._call_json("equip", {"item": item, "slot": slot})
@@ -965,6 +995,7 @@ class McToolset:
         x: float | None = None,
         y: float | None = None,
         z: float | None = None,
+        charge_ms: int | None = None,
     ) -> str:
         payload: dict[str, Any] = {"weapon": weapon}
         if entity_id is not None:
@@ -976,6 +1007,8 @@ class McToolset:
                 {"ok": False, "error": {"code": "bad_args", "message": "shoot 需要提供 entity_id 或 (x, y, z)"}},
                 ensure_ascii=False,
             )
+        if charge_ms is not None:
+            payload["charge_ms"] = max(200, min(5000, int(charge_ms)))
         return self._call_json("shoot", payload)
 
     def mc_window_view(
@@ -1034,9 +1067,10 @@ class McToolset:
         hit: int | None = None,
         hit_interval_ms: int | None = None,
         ms: int | None = None,
+        wait: bool | None = None,
         stop_on: list[str] | None = None,
     ) -> str:
-        payload = {}
+        payload: dict[str, Any] = {}
         for key, enabled in (
             ("forward", forward),
             ("back", back),
@@ -1058,6 +1092,8 @@ class McToolset:
             payload["hit_interval_ms"] = max(50, min(5000, hit_interval_ms))
         if ms is not None:
             payload["ms"] = max(50, min(3000, ms))
+        if wait is not None:
+            payload["wait"] = bool(wait)
         if stop_on is not None:
             payload["stop_on"] = stop_on
         return self._call_json("control", payload)
@@ -1229,6 +1265,23 @@ class McToolset:
         if blocked is not None:
             return blocked
         return self._run_skill(lambda: self.skills.dig_level_tunnel(direction, steps, stop_on_ore))
+
+    def mc_skill_mine_dfs(
+        self,
+        target: str = "iron",
+        goal_count: int = 6,
+        target_y: int | None = None,
+        action: str = "explore",
+    ) -> str:
+        return self._run_skill(
+            lambda: self.skills.mine_dfs(
+                target=target,
+                goal_count=goal_count,
+                target_y=target_y,
+                action=action,
+                geofence=self.geofence,
+            )
+        )
 
     def mc_kb_lookup(self, query: str, category: str = "all") -> str:
         res = lookup_kb(query, category=category)
@@ -1424,6 +1477,7 @@ class McToolset:
                         "x": Parameter("X", kind="number", required=False),
                         "y": Parameter("Y", kind="number", required=False),
                         "z": Parameter("Z", kind="number", required=False),
+                        "charge_ms": Parameter("蓄力时长ms(200-5000)", kind="integer", required=False),
                     },
                     handler=self.mc_shoot,
                     concurrency="exclusive",
@@ -1515,6 +1569,7 @@ class McToolset:
                         "hit": Parameter("左键挥砍次数(1-20)", kind="integer", required=False),
                         "hit_interval_ms": Parameter("连挥间隔ms(50-5000)", kind="integer", required=False),
                         "ms": Parameter("按住时长ms(50-3000)", kind="integer", required=False),
+                        "wait": Parameter("实时操控：false按下即返且后台保持ms，空参立即松开", kind="boolean", required=False),
                         "stop_on": Parameter("打断条件列表，传[]防受击中断", kind="string_array", required=False),
                     },
                     handler=self.mc_control,
@@ -1669,6 +1724,18 @@ class McToolset:
                     handler=self.mc_skill_tunnel,
                     concurrency="exclusive",
                 ),
+                Tool(
+                    name="mc_skill_mine_dfs",
+                    description="路径压缩地下探矿DFS（实心地面开井Collar->Switchback转角->64格矿脉雷达引导Spine鱼骨开巷）：自动双镐分流、悬空矿Catch-Block托盘、邻域流体与破口封堵、自挖空腔垫石穿越及零挖掘航点回溯。",
+                    parameters={
+                        "target": Parameter("目标矿种:iron/diamond/coal/gold/copper/redstone/lapis", required=False),
+                        "goal_count": Parameter("目标入包数量，默认6", kind="integer", required=False),
+                        "target_y": Parameter("指定开采Y层，省略按矿种预设", kind="integer", required=False),
+                        "action": Parameter("explore/return_collar/reset/status，默认explore（reset会重置当前矿井并尝试换点；遇shaft_exhausted建议先mc_move_to平移16格以上再explore）", required=False),
+                    },
+                    handler=self.mc_skill_mine_dfs,
+                    concurrency="exclusive",
+                ),
         ]
         if profile == "compact":
             allowed = set(COMPACT_CORE_TOOLS)
@@ -1718,6 +1785,7 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_skill_flee": "无遮挡遇险时封堵矿道或冲刺逃离",
     "mc_skill_staircase": "阶梯升降",
     "mc_skill_tunnel": "水平矿道",
+    "mc_skill_mine_dfs": "路径压缩探矿DFS/返井口",
 }
 
 _SELF_EVIDENT_PARAMS: frozenset[str] = frozenset(
@@ -1727,6 +1795,7 @@ _SELF_EVIDENT_PARAMS: frozenset[str] = frozenset(
         "right", "sprint", "yaw", "pitch", "ms", "collect", "mature",
         "ignore_hurt", "max_pickups", "target_logs", "stop_on_ore",
         "interval_ms", "timeout_ms", "hit", "hit_interval_ms", "stop_on",
+        "wait", "charge_ms", "goal_count", "target_y",
         "item", "count", "range", "max_hits", "block", "block_types",
         "input_item", "fuel_item", "slot", "equip_slot", "types", "distance",
     }
@@ -1741,6 +1810,8 @@ _COMPACT_PARAM_DESC: dict[tuple[str, str], str] = {
     ("mc_skill_staircase", "direction"): "north/south/east/west",
     ("mc_skill_staircase", "vertical"): "down/up/pillar",
     ("mc_skill_tunnel", "direction"): "north/south/east/west",
+    ("mc_skill_mine_dfs", "target"): "iron/diamond/coal/gold",
+    ("mc_skill_mine_dfs", "action"): "explore/return_collar/reset(换点重开)",
 }
 
 

@@ -696,10 +696,10 @@ def test_compact_tool_schemas_fit_sub_3k_budget() -> None:
             .with_tools(ctx.result_tool(compact=True))
             .schemas()
         )
-        assert len(s_core) == 19
-        assert len(s_ext) == 23
-        assert len(json.dumps(s_core, ensure_ascii=False)) < 4700
-        assert len(json.dumps(s_ext, ensure_ascii=False)) < 5800
+        assert len(s_core) == 20
+        assert len(s_ext) == 24
+        assert len(json.dumps(s_core, ensure_ascii=False)) < 5150
+        assert len(json.dumps(s_ext, ensure_ascii=False)) < 6250
 
         compact_by_name = {sc["function"]["name"]: sc["function"] for sc in s_core}
         assert "mc_attack" in compact_by_name
@@ -3254,6 +3254,60 @@ def test_night_double_death_triggers_emergency_shelter_before_third_death(
     assert shelter_evs[0]["sheltered"] is True
     assert shelter_evs[0]["held_s"] == 55.0
     assert clock[0] >= 1055.0
+
+
+def test_v1314_control_wait_and_shoot_charge_passthrough() -> None:
+    recorded: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        recorded.append((path, body))
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "pos": [10.0, 64.0, 10.0],
+                        "ready": True,
+                        "held_controls": {"keys": ["forward"], "remaining_ms": 250},
+                    },
+                },
+            )
+        if path == "/control":
+            if body == {"wait": False}:
+                return httpx.Response(
+                    200,
+                    json={"ok": True, "result": {"held": [], "released": ["forward"], "pos": [10.0, 64.0, 10.0]}},
+                )
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"held": ["forward"], "release_in_ms": body.get("ms", 300)}},
+            )
+        if path == "/shoot":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"fired": True, "weapon": body.get("weapon"), "charge_ms": body.get("charge_ms")}},
+            )
+        raise AssertionError(f"unexpected path: {path}")
+
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot_s:
+        ts = McToolset(bot_s)
+        res_start = json.loads(ts.mc_control(forward=True, ms=400, wait=False))
+        assert res_start["ok"] is True
+        res_stop = json.loads(ts.mc_control(wait=False))
+        assert res_stop["ok"] is True
+        st_res = json.loads(ts.mc_status())
+        assert st_res["result"]["held_controls"] == {"keys": ["forward"], "remaining_ms": 250}
+        res_shoot = json.loads(ts.mc_shoot(entity_id=1, weapon="bow", charge_ms=1000))
+        assert res_shoot["ok"] is True
+
+    control_calls = [body for path, body in recorded if path == "/control"]
+    assert control_calls == [{"forward": True, "ms": 400, "wait": False}, {"wait": False}]
+    shoot_calls = [body for path, body in recorded if path == "/shoot"]
+    assert shoot_calls == [{"weapon": "bow", "entity_id": 1, "charge_ms": 1000}]
+
 
 
 
