@@ -3004,12 +3004,24 @@ class MiningDFSEngine:
                 # Within 48 blocks of Collar (e.g. respawned nearby or walked to smelt/craft): walk back & descend 0-dig!
                 ok_nav, err_nav = self._navigate_to_node(active.node_id, min_hp_ref=min_hp_ref)
                 if not ok_nav:
-                    return {
-                        "ok": False,
-                        "requires_replan": True,
-                        "stop_reason": err_nav or "resume_navigation_failed",
-                        "tree": self.snapshot(),
-                    }
+                    # LLM may have deliberately moved the bot with staircase/unstick to escape a
+                    # stuck mine or fetch supplies. If walking back to the old active node fails,
+                    # do NOT hard-return (that forced the model into a reset loop). Instead archive
+                    # the old shaft to WorldLedger and open a fresh Collar at the current position.
+                    self._archive_current_shaft_to_ledger(mark_exhausted=False)
+                    self._clear_active_tree_only()
+                    solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
+                        cur_pos, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
+                    )
+                    if anchor_err is not None and not viable_dirs:
+                        return {
+                            "ok": False,
+                            "requires_replan": True,
+                            "stop_reason": anchor_err,
+                            "message": "当前站位无法开新井（脚下非实心地面），请先用 staircase/unstick 下到实心地面再调用 DFS。",
+                            "tree": self.snapshot(),
+                        }
+                    self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
 
         mined_ores: list[list[int]] = []
         breaches_sealed = 0
