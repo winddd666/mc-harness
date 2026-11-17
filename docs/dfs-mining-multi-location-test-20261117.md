@@ -406,7 +406,7 @@ Collar @ [1955,23,-2813]  根节点
 4. **两端均未达钻石**：受 API 故障中断（非逻辑问题），预算远未用尽；未能最终验证「加食物+深层提示 40min 能否挖到钻石」，需在网络稳定后续跑。
 5. **并发可行**：两 Bot 独立动作锁/token/state，无 `busy` 冲突，仅共享 MC API 后端——后端抖动时两端同时受影响。
 
-### 11.5 网络恢复后的完整并发复跑（realA4 / realC4，40min）
+### 11.4 网络恢复后的完整并发复跑（realA4 / realC4，40min）
 > 16:04 网络恢复后重跑并发：realA4=MineDFS_01 `(2500,-2500)` 原提示词；realC4=MineDFS_02 `(-4000,-4000)` 深层提示词。相同补给（含面包）、从头开始、240 轮/40min。
 
 **realA4（原提示词）— 跑满 40min/84 轮，未达钻石**：
@@ -424,7 +424,7 @@ Collar @ [1955,23,-2813]  根节点
 3. **合成/熔炉偶发服务端异常**（`no result` / `missing_ingredients`）。
 这些都在确定性脚本层，非 LLM 战略问题——模型全程正确规划了「铁→烧→镐→钻」链。
 
-### 11.6 待办
+### 11.5 待办
 - 网络稳定后续跑 realC（深层提示）至满预算，验证能否达成钻石。
 - 根治提示词缺陷（§11.2 的 Bug A/B/C）：在 `MC_COMPACT_SYSTEM_PROMPT` 和 DFS 工具描述里明确「钻石优先 target_y=-54」「深矿优先 DFS 而非 staircase」——用户本轮要求先不改提示词，故仅记录。
 - **用户提出的提示词/工具策略反思（后话，待专门讨论）**：
@@ -466,3 +466,70 @@ uv run python /tmp/opencode/dfs_multi_locations_v2.py 2>&1 | tee /tmp/opencode/d
 - `runs/natural-diamond-dfs-locC-v2-20261117.json` — `backtrack_blocked` 秒退 23 切片，2 个雷达矿点
 - v2 逐切片日志：`/tmp/opencode/dfs_multi_locations_v2.log`
 - v1 基线对照：本报告第 5 节（同坐标 3 份 JSON）
+
+## 附录 E：本次测试全部轨迹总索引（供其他模型逐条核验）
+
+> 所有轨迹落盘于 `runs/`。`*.json` 为结构化摘要（起点/补给/预算/终止状态/事件日志名），`*.events.jsonl` 为逐轮完整事件流（思考文本、工具调用、tool result、背包快照）。
+
+### E.1 纯脚本 DFS 测试（零 LLM）
+| 文件 | 内容 | 结果 |
+|---|---|---|
+| `runs/natural-diamond-dfs-locA-20261117.json` | v1 LocA 树冠困死 | Y=75，2 切片 |
+| `runs/natural-diamond-dfs-locB-20261117.json` | v1 LocB 树冠困死 | Y=67，1 切片 |
+| `runs/natural-diamond-dfs-locC-20261117.json` | v1 LocC 钻石层耗尽 | Y=-54，22 切片 |
+| `runs/natural-diamond-dfs-loc{A,B,C}-v2-20261117.json` | v2 复测 | §8.2 |
+| `runs/natural-diamond-dfs-locC-v4-20261117.json` | 4 处修复后 LocC 回归 | Y=-54，0 卡死，§9.5 |
+| `runs/natural-diamond-dfs-20261116.json` | 11-16 历史成功基线 | 342s 采到 1 钻 |
+
+### E.2 LLM 闭环实验（逐轮事件流）
+| 事件日志 / 摘要 | 实验 | 关键结论 |
+|---|---|---|
+| `20261117-104230-566011.events.jsonl` | 跑偏版（无门控） | staircase×36 / mine_blocks×16，DFS 0 次真实调用 |
+| `20261117-105241-222376.events.jsonl` | 纠正版（DFS 门控） | 战略链满分，伪枯竭拖死，§6 |
+| `20261117-121929-381701.events.jsonl` | 宽松版树冠 | staircase 下树→DFS 挖到 6 铁 |
+| `20261117-125314-409090.events.jsonl` | 严格版树冠沙盘 | LLM 下树→DFS 实心地面开井→深潜 80 格，§9.4 |
+| `20261117-135817-963612.events.jsonl` | kitD（落虚空） | 传送失效/重生主岛，§10.2 |
+| `20261117-140944-939979.events.jsonl` | kitG | DFS×4，raw_iron 6 |
+| `20261117-141821-196107.events.jsonl` | kitH | DFS×5，coal 16 `quota_reached` |
+| `20261117-142645-247875.events.jsonl` | kitI | DFS×3，遇洞穴 0 成果 |
+| `20261117-150015-766068.events.jsonl` | realA（20min） | 合出铁镐✅，浅层找钻失败，§11.2 |
+| `20261117-154828-429735.events.jsonl` | realC2（深层提示，并发） | 合出铁镐✅，API 故障中断，§11.3 |
+| `20261117-154629-106462.events.jsonl` | realA3（原提示，并发） | 断连中断，14 轮 |
+| `20261117-160431-186764.events.jsonl` | realA4（40min 完整） | DFS×42，探测到钻石矿但未合出铁镐，§11.4 |
+
+### E.3 摘要 JSON 汇总
+`llm-diamond-chain-20261117.json`、`llm-dfs-tree-20261117.json`、`llm-dfs-strict-tree-20261117.json`、`llm-dfs-kit-{kitD,kitG,kitH,kitI,realA,realA3,realA4}-20261117.json`、`llm-dfs-conc-realC2-20261117.json`。
+
+### E.4 驱动脚本（均在 `/tmp/opencode/`，运行时 monkeypatch，零源码改动）
+`dfs_multi_locations.py`、`dfs_multi_locations_v2.py`、`dfs_locC_recheck.py`、`llm_dfs_chain_test.py`、`llm_dfs_tree_test.py`、`llm_dfs_strict_tree.py`、`tree_arena_setup.py`、`build_safe_arenas.py`、`llm_dfs_single.py`、`concurrent_worker.py`、`llm_dfs_multi.py`、`concurrent_restore.py`。
+
+## 附录 F：中途错误与踩坑时间线（完整）
+
+> 本次测试迭代长、环境噪音多。以下逐条记录中途遇到的错误、根因与处置，供后续复现避坑。
+
+### F.1 测试脚手架/环境类错误
+1. **陈旧起点 bug**：多起点测试首轮 `pos_before` 总是上一个测试的结束坐标。根因=上一轮 harness 退出后 Bot 处 `not_connected`，API `/status` 位置是缓存滞后值。处置=改用 **RCON `data get entity Pos`（权威坐标）** 验证落地 + 主岛重生守卫。§10.2
+2. **远坐标落虚空/死亡重生**：kitD `(5120,-3584)` 等坐标 `spreadplayers` 报 "too many entities for space" 或落地后掉洞重生回主岛 `(-158,-374)`。澄清=主世界底部有基岩挖不穿，"跳回主岛"实为**死亡重生**（世界 spawn 在主岛），非掉出世界。处置=用 RCON 预探测筛出可落地实心坐标。§10.4
+3. **双进程争抢动作锁**：误留两组 worker 同时跑同一 Bot，导致持续 `busy: running dig`。处置=按 PID 精确清理残留（注意 `pkill -f` 会匹配 shell 自身）。
+4. **人工沙盘污染**：曾建石台沙盘，用户明确要求"真实情境不要沙盘"，已 `fill air` 拆除并改回真实自然地形。
+5. **误发破坏性命令**：调试中一度写出 `setblock ~ ~ ~ air`（会挖掉 Bot 脚下方块），在注释阶段拦下未执行，改用只读 `get_block`/RCON Pos。
+
+### F.2 MC API / 服务端类错误（非代码问题）
+6. **API 瞬时断连**：realA3 `runtime_error: Server disconnected without sending a response`（第14轮）；realA4 也曾网络重启。恢复后 `curl` health 返回 401/0.06s 正常。
+7. **生存守护读不到状态**：realC2 `生存守护连续三次无法读取真实状态`，提前终止（第10轮）。
+8. **`could not craft furnace: server placed no result`**：realA4 末段 smelt 时服务端放置熔炉无返回（服务端异常）。
+9. **Bot 特定动作死锁**：realC4 反复卡在 `staircase(south,steps=12)` 无返回，harness 超时自救后又卡，第 12→15 轮耗时 15 分钟。
+10. **realC4 worker 无输出**：结果文件缺失、nohup 日志空，推测 setup 阶段或 MineDFS_02 会话早期异常退出，本轮无有效数据。
+
+### F.3 模型/引擎行为类错误（核心发现，非"错误"而是待改进点）
+11. **浅层找钻石**：原提示词下模型把 diamond `target_y` 设为 8/11/12/16（知识库 `y_range=-64~16` 合法但稀少），40min 空耗。知识库 `peak_y=-59` 未被采用。§11.2
+12. **staircase 绕过 DFS 门控**：屏蔽 mine_blocks/tunnel/mc_dig 后，staircase 成漏洞——realB 纯 staircase 挖 75 格、0 次 DFS。§11.3
+13. **DFS 采铁效率极低**：realA4 42 次 DFS 仅得 3 块粗铁、1 锭，始终合不出铁镐。§11.4
+14. **深层 spine 分支爆炸**：DFS 节点树暴涨到 3295 节点仍无产出，路径压缩在深层退化。§11.4
+15. **`ecology_check below_generation_band` 误伤**：地下 Y=-3 调 `craft_gear(stone_pickaxe)` 被误判"需原木"拒绝（石镐本只需圆石+木棍）。§6.4
+16. **补镐链断裂**：工作台远在 19.4 格外 `no_window` + `path_not_found` + 上述 ecology 误判，二次补镐失败。§6.4
+
+### F.4 处置原则
+- 环境/服务端类错误（F.1/F.2）：只记录、不改被测代码；通过重启/重探坐标/换 Bot 规避。
+- 引擎/提示词类问题（F.3）：4 处确定性 bug 已修并提交（§9）；提示词/工具暴露策略问题按用户要求保留待专门讨论（§11.5）。
+- 全程每步 git 提交，工作树保持干净。
