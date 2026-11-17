@@ -11,9 +11,10 @@ import httpx
 
 from mc_agent.bot import BotSession
 from mc_agent.harness.geofence import VoidGeofence
+from mc_agent.harness.hud import compute_goal_gap_hint
 from mc_agent.harness.mc_tools import McToolset
 from mc_agent.skills.library import PICKAXE_TIERS, MacroSkills
-from mc_agent.skills.mining_dfs import MiningDFSEngine
+from mc_agent.skills.mining_dfs import MiningDFSEngine, normalize_dfs_strategy
 
 
 class _MockMineWorld:
@@ -27,11 +28,16 @@ class _MockMineWorld:
         surface_y: int = 80,
         simulate_best_harvest_tool: bool = False,
         track_durability: bool = False,
+        simulate_realistic_reach_and_pockets: bool = False,
     ) -> None:
         self.pos = list(start_pos)
         self.surface_y = surface_y
         self.simulate_best_harvest_tool = simulate_best_harvest_tool
         self.track_durability = track_durability
+        self.simulate_realistic_reach_and_pockets = simulate_realistic_reach_and_pockets
+        self.stuck_pocket_ores: set[tuple[int, int, int]] = set()
+        self.fail_next_craft_no_result: bool = False
+        self.visited_blocks: list[tuple[int, int, int]] = []
         self.blocks: dict[tuple[int, int, int], str] = {}
         self.items: list[dict[str, Any]] = [
             dict(r)
@@ -229,8 +235,22 @@ class _MockMineWorld:
             found.sort(key=lambda r: r["dist"])
             return httpx.Response(200, json={"ok": True, "result": {"blocks": found[: int(body.get("limit", 20))]}})
         if path == "/get_entities":
+            req_types = set(body.get("types") or [])
+            hostile_names = {"zombie", "skeleton", "creeper", "spider", "witch", "enderman"}
             ents = []
             for e in self.entities:
+                ename = str(e.get("name") or "")
+                etype = str(e.get("type") or "")
+                if req_types:
+                    matched = False
+                    if "item" in req_types and (ename == "item" or etype == "item"):
+                        matched = True
+                    if "hostile" in req_types and (ename in hostile_names or etype == "hostile"):
+                        matched = True
+                    if ename in req_types or etype in req_types:
+                        matched = True
+                    if not matched:
+                        continue
                 d = math.dist(self.pos, e["pos"])
                 ents.append({**e, "dist": round(d, 2)})
             return httpx.Response(200, json={"ok": True, "result": {"entities": ents}})
@@ -262,6 +282,31 @@ class _MockMineWorld:
             bn = self.block_at(pt)
             if bn in {"air", "cave_air"}:
                 return httpx.Response(200, json={"ok": False, "error": {"code": "nothing_to_dig", "message": "air"}})
+            if bn == "bedrock":
+                return httpx.Response(200, json={"ok": False, "error": {"code": "dig_failed", "message": "unbreakable bedrock"}})
+            if self.simulate_realistic_reach_and_pockets:
+                eye = (self.pos[0], self.pos[1] + 1.62, self.pos[2])
+                dist_eye = math.dist(eye, (pt[0] + 0.5, pt[1] + 0.5, pt[2] + 0.5))
+                if dist_eye > 4.75:
+                    return httpx.Response(200, json={"ok": False, "error": {"code": "out_of_reach", "message": "too far"}})
+                bx_f, by_f, bz_f = math.floor(self.pos[0]), math.floor(self.pos[1]), math.floor(self.pos[2])
+                if max(abs(pt[0] - bx_f), abs(pt[2] - bz_f)) >= 2 or abs(pt[1] - by_f) >= 3:
+                    passable_los = {"air", "cave_air", "tall_grass", "short_grass", "torch", "wall_torch"}
+                    has_los_face = False
+                    for sx in ({0} if pt[0] == bx_f else ({-1} if pt[0] > bx_f else {1})):
+                        if sx != 0 and self.block_at((pt[0] + sx, pt[1], pt[2])) in passable_los:
+                            has_los_face = True
+                    for sz in ({0} if pt[2] == bz_f else ({-1} if pt[2] > bz_f else {1})):
+                        if sz != 0 and self.block_at((pt[0], pt[1], pt[2] + sz)) in passable_los:
+                            has_los_face = True
+                    for sy in ({0} if pt[1] == by_f else ({-1} if pt[1] > by_f else {1})):
+                        if sy != 0 and self.block_at((pt[0], pt[1] + sy, pt[2])) in passable_los:
+                            has_los_face = True
+                    if not has_los_face:
+                        return httpx.Response(
+                            200,
+                            json={"ok": False, "error": {"code": "out_of_reach", "message": "occluded by solid rock"}},
+                        )
             used_row = None
             is_leaf = bn.endswith("_leaves")
             if not is_leaf:
@@ -287,7 +332,18 @@ class _MockMineWorld:
                         self.held = None
                 elif self.held and self.held.get("slot") == used_row.get("slot"):
                     self.held["durability"] = list(dur)
-            if body.get("collect", True) and not is_leaf:
+            if pt in self.stuck_pocket_ores and bn.endswith("_ore"):
+                if body.get("collect", True):
+                    self._add_item("cobbled_deepslate", 1)
+                self.entities.append(
+                    {
+                        "id": 900 + len(self.entities),
+                        "name": "item",
+                        "item": f"{self._drop_name_for(bn)}x1",
+                        "pos": [pt[0] + 0.5, pt[1] + 0.25, pt[2] + 0.5],
+                    }
+                )
+            elif body.get("collect", True) and not is_leaf:
                 below = self.block_at((pt[0], pt[1] - 1, pt[2]))
                 if below in {"air", "cave_air"} and bn.endswith("_ore"):
                     self.entities.append(
@@ -300,6 +356,22 @@ class _MockMineWorld:
                     )
                 else:
                     self._add_item(self._drop_name_for(bn), 1)
+            elif not body.get("collect", True) and not is_leaf and bn.endswith("_ore"):
+                self.entities.append(
+                    {
+                        "id": 900 + len(self.entities),
+                        "name": "item",
+                        "item": f"{self._drop_name_for(bn)}x1",
+                        "pos": [pt[0] + 0.5, pt[1] + 0.15, pt[2] + 0.5],
+                    }
+                )
+            passable_drop = {"air", "cave_air"}
+            for ent in self.entities:
+                if ent.get("name") == "item":
+                    ex, ey, ez = math.floor(ent["pos"][0]), math.floor(ent["pos"][1]), math.floor(ent["pos"][2])
+                    while self.block_at((ex, ey - 1, ez)) in passable_drop and ey > -64:
+                        ey -= 1
+                        ent["pos"][1] = ey + 0.15
             self._settle_gravity_at_current_xz()
             return httpx.Response(200, json={"ok": True, "result": {"dug": bn}})
         if path == "/place":
@@ -331,19 +403,45 @@ class _MockMineWorld:
             return httpx.Response(200, json={"ok": True, "result": {"placed": item, "pos": list(pt)}})
         if path == "/move_to":
             passable = {"air", "cave_air", "tall_grass", "short_grass", "fern", "torch", "wall_torch", "snow"}
-            if "pos" in body:
+            if "entity_id" in body:
+                ent = next((e for e in self.entities if e.get("id") == body["entity_id"]), None)
+                if ent is None:
+                    return httpx.Response(200, json={"ok": False, "error": {"code": "path_not_found", "message": "no entity"}})
+                ex, ey, ez = float(ent["pos"][0]), float(ent["pos"][1]), float(ent["pos"][2])
+                eb_x, eb_y, eb_z = math.floor(ex), math.floor(ey), math.floor(ez)
+                cands_g: list[tuple[float, int, int, int]] = []
+                for dx_e in (-1, 0, 1):
+                    for dz_e in (-1, 0, 1):
+                        for dy_e in (-1, 0, 1):
+                            gx_c, gy_c, gz_c = eb_x + dx_e, eb_y + dy_e, eb_z + dz_e
+                            if (
+                                self.block_at((gx_c, gy_c, gz_c)) in passable
+                                and self.block_at((gx_c, gy_c + 1, gz_c)) in passable
+                                and self.block_at((gx_c, gy_c - 1, gz_c))
+                                not in passable | {"lava", "water", "flowing_lava", "flowing_water"}
+                            ):
+                                d_e = math.dist((gx_c + 0.5, float(gy_c), gz_c + 0.5), (ex, ey, ez))
+                                cands_g.append((d_e, gx_c, gy_c, gz_c))
+                if not cands_g:
+                    return httpx.Response(200, json={"ok": False, "error": {"code": "path_not_found", "message": "blocked"}})
+                cands_g.sort(key=lambda r: r[0])
+                _, gx, gy_sel, gz = cands_g[0]
+                candidate_ys = [gy_sel]
+            elif "pos" in body:
                 tx, ty, tz = (float(v) for v in body["pos"][:3])
+                gx, gz = math.floor(tx), math.floor(tz)
                 candidate_ys = [math.floor(ty)]
             elif "y" in body:
                 tx, ty, tz = float(body["x"]), float(body["y"]), float(body["z"])
+                gx, gz = math.floor(tx), math.floor(tz)
                 candidate_ys = [math.floor(ty)]
             else:
                 tx, tz = float(body["x"]), float(body["z"])
+                gx, gz = math.floor(tx), math.floor(tz)
                 base_y = math.floor(self.pos[1])
                 candidate_ys = [base_y + dy for dy in (0, -1, 1, -2, 2, -3, -4, -5, -6, 3, 4)]
                 if self.surface_y not in candidate_ys:
                     candidate_ys.append(self.surface_y)
-            gx, gz = math.floor(tx), math.floor(tz)
             for gy in candidate_ys:
                 if (
                     self.block_at((gx, gy, gz)) in passable
@@ -351,17 +449,34 @@ class _MockMineWorld:
                     and self.block_at((gx, gy - 1, gz)) not in passable | {"lava", "water", "flowing_lava", "flowing_water"}
                 ):
                     self.pos = [gx + 0.5, float(gy), gz + 0.5]
+                    self.visited_blocks.append((gx, gy, gz))
+                    pickup_r = 1.38 if self.simulate_realistic_reach_and_pockets else 2.2
                     kept = []
                     for e in self.entities:
-                        if e.get("name") == "item" and math.dist(self.pos, e["pos"]) <= 2.2:
-                            it_name = e["item"].split("x")[0]
-                            self._add_item(it_name, 1)
+                        if e.get("name") == "item":
+                            ix, iy, iz = math.floor(e["pos"][0]), math.floor(e["pos"][1]), math.floor(e["pos"][2])
+                            blocked_pocket = (
+                                self.simulate_realistic_reach_and_pockets
+                                and iy > gy
+                                and self.block_at((ix, gy, iz)) not in passable
+                            )
+                            if not blocked_pocket and math.dist(self.pos, e["pos"]) <= pickup_r:
+                                it_name = e["item"].split("x")[0]
+                                self._add_item(it_name, 1)
+                            else:
+                                kept.append(e)
                         else:
                             kept.append(e)
                     self.entities = kept
                     return httpx.Response(200, json={"ok": True, "result": {"pos": list(self.pos)}})
             return httpx.Response(200, json={"ok": False, "error": {"code": "path_not_found", "message": "blocked"}})
         if path == "/craft":
+            if self.fail_next_craft_no_result:
+                self.fail_next_craft_no_result = False
+                return httpx.Response(
+                    200,
+                    json={"ok": False, "error": {"code": "craft_failed", "message": "craft failed: server placed no result"}},
+                )
             item = str(body["item"])
             cnt = int(body.get("count", 1))
             tables = [pt for pt, bn in self.blocks.items() if bn == "crafting_table"]
@@ -394,6 +509,13 @@ class _MockMineWorld:
                         return httpx.Response(200, json={"ok": False, "error": {"code": "missing_ingredients", "message": "missing"}})
                     for _ in range(cnt):
                         self._add_row({"name": "stone_pickaxe", "count": 1, "durability": [131, 131]})
+                    self.craft_log.append((item, cnt))
+                    return httpx.Response(200, json={"ok": True, "result": {"crafted": item, "gained": cnt, "used_table": True}})
+                if item == "furnace":
+                    cob_ok = self._consume_item("cobblestone", 8 * cnt) or self._consume_item("cobbled_deepslate", 8 * cnt)
+                    if not cob_ok:
+                        return httpx.Response(200, json={"ok": False, "error": {"code": "missing_ingredients", "message": "missing"}})
+                    self._add_item("furnace", cnt)
                     self.craft_log.append((item, cnt))
                     return httpx.Response(200, json={"ok": True, "result": {"crafted": item, "gained": cnt, "used_table": True}})
             return httpx.Response(200, json={"ok": False, "error": {"code": "no_recipe", "message": item}})
@@ -809,3 +931,473 @@ def test_underground_resupply_collar_return_craft_gear_table_reuse_and_mc_craft_
         raw_mc_craft = json.loads(ts.mc_craft("stone_pickaxe", 1))
         assert raw_mc_craft["ok"] is True
         assert raw_mc_craft["result"]["crafted"] == "stone_pickaxe"
+
+
+# ---- Dual-Strategy (fishbone vs radar) & Deep Trajectory Audit Regression Tests ----
+
+
+def test_dual_strategy_fishbone_ignores_distant_cave_while_radar_triages_hostiles_and_extracts_surgically(
+    monkeypatch: Any,
+) -> None:
+    """Compare `fishbone` vs `v5` (bug-fixed v4) vs `radar` (with hostile triage + LocC-v4 surgical parapet)."""
+    monkeypatch.setenv("MC_DFS_STRATEGY", "fishbone")
+    assert normalize_dfs_strategy(None) == "fishbone"
+    monkeypatch.setenv("MC_DFS_STRATEGY", "v5")
+    assert normalize_dfs_strategy(None) == "v5"
+    monkeypatch.setenv("MC_DFS_STRATEGY", "radar")
+    assert normalize_dfs_strategy(None) == "radar"
+
+    # 1) Conservative `fishbone`: mines corridor-adjacent diamond, completely ignores 15-block distant cave diamond
+    fb_world = _MockMineWorld(
+        start_pos=(0.5, -54.0, 0.5),
+        surface_y=70,
+        simulate_realistic_reach_and_pockets=True,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [131, 131]},
+            {"name": "iron_pickaxe", "count": 1, "slot": 10, "durability": [250, 250]},
+            {"name": "cobbled_deepslate", "count": 32, "slot": 11},
+        ],
+    )
+    # Distant exposed cave diamond 15 blocks east (should NOT be chased by fishbone)
+    fb_world.blocks[(16, -54, -2)] = "cave_air"
+    fb_world.blocks[(16, -53, -2)] = "cave_air"
+    fb_world.blocks[(15, -54, -2)] = "deepslate_diamond_ore"
+    # Corridor-adjacent diamond right beside the north Spine at (1, -54, -3)
+    fb_world.blocks[(1, -54, -3)] = "deepslate_diamond_ore"
+
+    with BotSession("tok", bot_username="FishboneBot", transport=httpx.MockTransport(fb_world.handler)) as bot_fb:
+        skills_fb = MacroSkills(bot_fb)
+        res_fb = skills_fb.mine_dfs(
+            target="diamond",
+            goal_count=1,
+            target_y=-54,
+            strategy="fishbone",
+            max_duration_s=20.0,
+        )
+
+    assert res_fb["ok"] is True
+    assert res_fb["strategy"] == "fishbone"
+    assert res_fb["tree"]["strategy"] == "fishbone"
+    assert res_fb["tree"]["radar_targets"] == []
+    assert fb_world._count("diamond") >= 1
+    assert fb_world.block_at((15, -54, -2)) == "deepslate_diamond_ore"
+
+    # 1.5) Moderate `v5` (bug-fixed original v4):
+    #      - Uses 64-block single-point radar to steer east toward (15, -54, -2) when reachable at Y=-54!
+    #      - Does NOT perform cluster locking (`locked_cluster is None`) or surgical pocket breaching (`surgical_extractions == 0`).
+    v5_world = _MockMineWorld(
+        start_pos=(0.5, -54.0, 0.5),
+        surface_y=70,
+        simulate_realistic_reach_and_pockets=True,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [131, 131]},
+            {"name": "iron_pickaxe", "count": 1, "slot": 10, "durability": [250, 250]},
+            {"name": "cobbled_deepslate", "count": 32, "slot": 11},
+        ],
+    )
+    v5_world.blocks[(14, -54, -2)] = "cave_air"
+    v5_world.blocks[(14, -53, -2)] = "cave_air"
+    v5_world.blocks[(13, -54, -2)] = "deepslate_diamond_ore"
+
+    with BotSession("tok", bot_username="V5Bot", transport=httpx.MockTransport(v5_world.handler)) as bot_v5:
+        skills_v5 = MacroSkills(bot_v5)
+        res_v5 = skills_v5.mine_dfs(
+            target="diamond",
+            goal_count=1,
+            target_y=-54,
+            strategy="v5",
+            max_duration_s=20.0,
+        )
+
+    assert res_v5["ok"] is True
+    assert res_v5["strategy"] == "v5"
+    assert res_v5["tree"]["strategy"] == "v5"
+    assert res_v5["radar_summary"]["ever_seen_count"] >= 1
+    assert res_v5["radar_summary"]["locked_cluster"] is None
+    assert res_v5["tree"]["surgical_extractions"] == 0
+    assert v5_world._count("diamond") >= 1
+    assert min((pt[0] for pt, _, _ in v5_world.dig_log), default=0) >= -4
+
+    # 2) Aggressive `radar`:
+    #    - West cluster (-10, -54, 0) has 2 diamonds exposed to cave_air (-11, -54, 0) WITH a zombie right inside!
+    #    - North-East target (3, -56, -3) replicates LocC-v4 ([3484, -56, 427] from [3481, -54, 424]):
+    #      occluded behind 2 solid deepslate blocks & 2m below Y=-54, backed by natural `cave_air` on its far side (x=4),
+    #      with 0 hostiles nearby.
+    rd_world = _MockMineWorld(
+        start_pos=(0.5, -54.0, 0.5),
+        surface_y=70,
+        simulate_realistic_reach_and_pockets=True,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [131, 131]},
+            {"name": "iron_pickaxe", "count": 1, "slot": 10, "durability": [250, 250]},
+            {"name": "cobbled_deepslate", "count": 32, "slot": 11},
+        ],
+    )
+    # Dangerous monster-guarded west cluster
+    rd_world.blocks[(-11, -54, 0)] = "cave_air"
+    rd_world.blocks[(-11, -53, 0)] = "cave_air"
+    rd_world.blocks[(-10, -54, 0)] = "deepslate_diamond_ore"
+    rd_world.blocks[(-10, -54, -1)] = "deepslate_diamond_ore"
+    rd_world.entities.append({"id": 501, "name": "zombie", "type": "hostile", "pos": [-11.5, -54.0, 0.5]})
+
+    # Safe mob-free cave-backed occluded diamond replicating LocC-v4 geometry:
+    cave_cells = {(4, -56, -3), (4, -55, -3), (4, -54, -3), (5, -56, -3), (5, -55, -3)}
+    for cpt in cave_cells:
+        rd_world.blocks[cpt] = "cave_air"
+    rd_world.blocks[(3, -56, -3)] = "deepslate_diamond_ore"
+
+    with BotSession("tok", bot_username="RadarBot", transport=httpx.MockTransport(rd_world.handler)) as bot_rd:
+        skills_rd = MacroSkills(bot_rd)
+        res_rd = skills_rd.mine_dfs(
+            target="diamond",
+            goal_count=1,
+            target_y=-54,
+            strategy="radar",
+            max_duration_s=25.0,
+        )
+
+    assert res_rd["ok"] is True
+    assert res_rd["strategy"] == "radar"
+    assert rd_world._count("diamond") >= 1
+    # Must avoid the zombie-guarded west cluster completely
+    assert min((pt[0] for pt, _, _ in rd_world.dig_log), default=0) >= -2
+    # Must NEVER step into natural `cave_air` cells at x>=4!
+    assert all(vpt[0] < 4 for vpt in rd_world.visited_blocks)
+
+
+def test_radar_stair_up_homing_reaches_overhead_ore_cluster() -> None:
+    """Radar strategy climbs upward via `stair_up` when the locked exposed ore cluster is >=3 blocks above Spine."""
+    world = _MockMineWorld(
+        start_pos=(0.5, -54.0, 0.5),
+        surface_y=70,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [131, 131]},
+            {"name": "iron_pickaxe", "count": 1, "slot": 10, "durability": [250, 250]},
+            {"name": "cobbled_deepslate", "count": 32, "slot": 11},
+        ],
+    )
+    # Overhead diamond cluster at Y=-49 (5 blocks above Y=-54), exposed on its north face to a tiny cave pocket
+    world.blocks[(0, -49, -7)] = "cave_air"
+    world.blocks[(0, -48, -7)] = "cave_air"
+    world.blocks[(0, -49, -6)] = "deepslate_diamond_ore"
+
+    with BotSession("tok", bot_username="RadarClimber", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        res = skills.mine_dfs(target="diamond", goal_count=1, target_y=-54, strategy="radar", max_duration_s=25.0)
+
+    assert res["ok"] is True
+    assert res["stop_reason"] == "quota_reached"
+    assert world._count("diamond") >= 1
+    assert any(n.get("edge_kind") == "stair_up" for n in res["tree"]["nodes"])
+
+
+def test_zero_displacement_stair_down_never_spins_duplicate_spine_nodes() -> None:
+    """Regression for realA4 (3295 nodes) & realA (152 nodes): starting at <=target_y with deeper radar ore never spins."""
+    world = _MockMineWorld(
+        start_pos=(0.5, 15.0, 0.5),
+        surface_y=70,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [131, 131]},
+            {"name": "cobblestone", "count": 32, "slot": 10},
+        ],
+    )
+    # Carve starting pocket at (0, 15, 0) where anchor_y=15 is already <= target_y=16
+    world.blocks[(0, 15, 0)] = "air"
+    world.blocks[(0, 16, 0)] = "air"
+    # Deeper radar ore at (0, 6, -10), while all 4 directions around (0, 15, 0) are boxed in by bedrock at 2 blocks out
+    # so stair_down / spine quickly hit bedrock and return 0 steps on blocked faces.
+    world.blocks[(0, 6, -11)] = "cave_air"
+    world.blocks[(0, 6, -10)] = "iron_ore"
+    for dx in range(-2, 3):
+        for dy in range(12, 18):
+            for dz in range(-2, 3):
+                if abs(dx) == 2 or abs(dz) == 2:
+                    world.blocks[(dx, dy, dz)] = "bedrock"
+
+    with BotSession("tok", bot_username="NoSpinBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        res = skills.mine_dfs(target="iron", goal_count=2, target_y=16, strategy="radar", max_duration_s=10.0)
+
+    assert res["stop_reason"] == "shaft_exhausted"
+    # Node count must remain tiny (never exploding to hundreds/thousands of duplicate Spine nodes)
+    assert res["tree"]["node_count"] <= 16
+    anchors = [tuple(n["anchor"]) for n in res["tree"]["nodes"]]
+    assert len(anchors) == len(set(anchors))
+
+
+def test_collar_hitbox_ledge_snap_prevents_false_no_solid_collar_ground() -> None:
+    """Regression for realB & realC2: standing on hitbox ledge (floor(x) over air, x-1 solid) snaps onto solid block."""
+    world = _MockMineWorld(
+        start_pos=(10.05, 26.0, -20.05),
+        surface_y=70,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [131, 131]},
+            {"name": "cobblestone", "count": 16, "slot": 10},
+        ],
+    )
+    # Make (10, 25, -21) and surrounding pit air so floor(pos)=(10, 26, -21) has NO solid block under it,
+    # while adjacent (9, 25, -21) is solid stone with 2-block headroom (9, 26..27, -21) = air!
+    for x in (10, 11):
+        for y in range(20, 28):
+            for z in (-22, -21, -20):
+                world.blocks[(x, y, z)] = "air"
+    world.blocks[(9, 25, -21)] = "stone"
+    world.blocks[(9, 26, -21)] = "air"
+    world.blocks[(9, 27, -21)] = "air"
+    # Put iron ore along the first north descent from snapped Collar (9, 26, -21) -> (9, 23, -24)
+    world.blocks[(9, 23, -24)] = "iron_ore"
+
+    with BotSession("tok", bot_username="LedgeBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        res = skills.mine_dfs(target="iron", goal_count=1, target_y=23, strategy="fishbone", max_duration_s=15.0)
+
+    assert res["ok"] is True
+    assert res["stop_reason"] == "quota_reached"
+    assert world._count("raw_iron") >= 1
+
+
+def test_verified_target_drop_rejects_cobble_trash_and_opens_1x1_pocket_base() -> None:
+    """Regression for realA4 2252.5s: cobble pickup is NOT counted as ore; stuck upper 1x1 wall drop opens base block."""
+    world = _MockMineWorld(
+        start_pos=(0.5, 74.0, 0.5),
+        surface_y=80,
+        simulate_realistic_reach_and_pockets=True,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [131, 131]},
+            {"name": "cobblestone", "count": 16, "slot": 10},
+        ],
+    )
+    # Pre-open 1 step north at (0, 74..75, -1) and place upper wall ore at (1, 75, -1) over solid base (1, 74, -1)
+    world.blocks[(0, 74, -1)] = "air"
+    world.blocks[(0, 75, -1)] = "air"
+    world.blocks[(1, 75, -1)] = "iron_ore"
+    world.blocks[(1, 74, -1)] = "stone"
+    world.stuck_pocket_ores.add((1, 75, -1))
+
+    with BotSession("tok", bot_username="DropVerifyBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        res = skills.mine_dfs(target="iron", goal_count=1, target_y=74, strategy="fishbone", max_duration_s=15.0)
+
+    assert res["ok"] is True
+    assert res["stop_reason"] == "quota_reached"
+    assert res["target_gained"] >= 1
+    assert world._count("raw_iron") >= 1
+    # Confirm lower pocket block (1, 74, -1) was opened so the bot could actually collect the trapped raw_iron!
+    assert any(pt == (1, 74, -1) for pt, _, _ in world.dig_log)
+
+
+def test_shallow_diamond_y_clamp_hud_mine_dfs_guidance_and_craft_no_result_retry() -> None:
+    """Verify LLM shallow diamond Y clamp (-30<y<=16 -> -54), HUD mine_dfs hints, and craft_gear 'no result' retry."""
+    # 1) HUD guidance checks
+    hint_iron = compute_goal_gap_hint(
+        {"stone_pickaxe": 1, "cobblestone": 12},
+        task="生存探险",
+        target_advancement=None,
+    )
+    assert "mc_skill_mine_dfs(target='iron')" in hint_iron
+    assert "mc_skill_staircase" not in hint_iron
+
+    hint_diamond = compute_goal_gap_hint(
+        {"iron_pickaxe": 1, "stone_pickaxe": 1},
+        task="从当前状态出发挖到钻石（diamond >= 1）",
+        target_advancement=None,
+    )
+    assert "target_y=-54" in hint_diamond
+    assert "mc_skill_mine_dfs" in hint_diamond
+
+    # 2) McToolset shallow diamond target_y=12 clamp + craft_gear "server placed no result" self-heal
+    world = _MockMineWorld(
+        start_pos=(0.5, -52.0, 0.5),
+        surface_y=70,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [131, 131]},
+            {"name": "iron_pickaxe", "count": 1, "slot": 10, "durability": [250, 250]},
+            {"name": "cobbled_deepslate", "count": 24, "slot": 11},
+            {"name": "crafting_table", "count": 1, "slot": 12},
+        ],
+    )
+    world.blocks[(0, -54, -3)] = "deepslate_diamond_ore"
+    world.fail_next_craft_no_result = True
+
+    with BotSession("tok", bot_username="ClampBot", transport=httpx.MockTransport(world.handler)) as bot:
+        ts = McToolset(bot)
+        # Passing shallow target_y=12 to LLM tool must clamp to -54 and mine the Y=-54 diamond!
+        dfs_out = json.loads(ts.mc_skill_mine_dfs(target="diamond", goal_count=1, target_y=12))
+        assert dfs_out["ok"] is True
+        assert dfs_out["clamped_shallow_diamond_y_from"] == 12
+        assert dfs_out["target_y"] == -54
+        assert world._count("diamond") >= 1
+
+        # Craft furnace when first `/craft` fails with "craft failed: server placed no result"
+        craft_res = ts.skills.craft_gear("furnace", count=1)
+        assert craft_res["ok"] is True
+        assert world._count("furnace") >= 1
+
+
+
+def test_fishbone_scan_strategy_properties() -> None:
+    """fishbone_scan = fishbone safety skeleton + read-only widened ore reach in target band."""
+    from mc_agent.skills.mining_dfs import normalize_dfs_strategy, SCAN_BAND
+
+    # alias resolution
+    assert normalize_dfs_strategy("fishbone_scan") == "fishbone_scan"
+    assert normalize_dfs_strategy("fbscan") == "fishbone_scan"
+    assert normalize_dfs_strategy("scan") == "fishbone_scan"
+    # must not collide with existing strategies
+    assert normalize_dfs_strategy("fishbone") == "fishbone"
+    assert normalize_dfs_strategy("radar") == "radar"
+    assert normalize_dfs_strategy("v5") == "v5"
+
+    world = _MockMineWorld(start_pos=(0.5, 80.0, 0.5), surface_y=80)
+    with BotSession("tok", bot_username="ScanBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        eng = skills.mining_dfs
+        eng._refresh_strategy("fishbone_scan")
+        assert eng.strategy == "fishbone_scan"
+        # safety skeleton preserved: NOT radar-aggressive, NOT surgical (no 1x1 breach-through)
+        assert eng.radar_enabled is False
+        assert eng.surgical_enabled is False
+        # target-band gate: within +-SCAN_BAND of target_y is "in band"
+        eng.target_y = -54
+        assert abs((-54) - eng.target_y) <= SCAN_BAND          # anchor on target layer -> in band
+        assert abs((-30) - eng.target_y) > SCAN_BAND           # transit layer -> not in band
+
+
+def test_fishbone_spine_descends_when_target_deepened() -> None:
+    """fishbone/fishbone_scan spine must schedule a stair_down when target_y moves deeper mid-shaft.
+
+    Regression: the pure-fishbone skeleton only emitted branch_leaf/spine_forward, so raising
+    the target depth (e.g. iron layer -> diamond layer) made the tree tunnel sideways on the
+    stale layer forever instead of descending.
+    """
+    from mc_agent.skills.mining_dfs import SPINE_DESCEND_MIN_DELTA
+
+    anchor = (0, 16, 0)
+
+    for strategy in ("fishbone", "fishbone_scan"):
+        world = _MockMineWorld(start_pos=(0.5, 80.0, 0.5), surface_y=80)
+        with BotSession("tok", bot_username="SpineBot", transport=httpx.MockTransport(world.handler)) as bot:
+            eng = MacroSkills(bot).mining_dfs
+            eng._refresh_strategy(strategy)
+            assert eng.radar_enabled is False  # skeleton has no native vertical branch
+
+            # on-layer target: unchanged fishbone behaviour, no descent branch
+            eng.target_y = 16
+            flat = eng._spine_branches("north", anchor, geofence=None)
+            assert [b.kind for b in flat] == ["branch_leaf", "branch_leaf", "spine_forward"]
+
+            # deepened target: descent must be scheduled first so pending-order digs down
+            eng.target_y = -54
+            deep = eng._spine_branches("north", anchor, geofence=None)
+            assert deep[0].kind == "stair_down"
+            assert deep[0].branch_target_y == -54
+            assert 0 < deep[0].steps <= 16
+            assert deep[0].steps <= anchor[1] - eng.target_y
+            # horizontal branches still present after the descent
+            assert "spine_forward" in [b.kind for b in deep]
+
+            # tiny depth differences are ignored to avoid needless vertical churn
+            eng.target_y = 16 - SPINE_DESCEND_MIN_DELTA
+            assert "stair_down" not in [b.kind for b in eng._spine_branches("north", anchor, geofence=None)]
+
+
+def test_fishbone_transit_keeps_bonus_wall_ores() -> None:
+    """While descending to a deep layer, fishbone must keep harvesting wall iron/coal.
+
+    Regression: target=diamond + an iron pickaxe used to switch the vein hook to
+    "target ores only", so the descent ignored deepslate_iron_ore on the walls and the
+    pickaxe died with too few ingots to craft a replacement.
+    """
+    from mc_agent.skills.mining_dfs import SCAN_BAND, _should_focus_target_only
+
+    def focus(strategy: str, anchor_y: int, target_y: int, *, max_tier: int = 3, min_tier: int = 3) -> bool:
+        return _should_focus_target_only(
+            strategy=strategy,
+            min_target_tier=min_tier,
+            max_tier=max_tier,
+            anchor_y=anchor_y,
+            target_y=target_y,
+        )
+
+    # fishbone_scan: narrow focus ONLY on the target layer itself
+    assert focus("fishbone_scan", -54, -54) is True
+    assert focus("fishbone_scan", -54 + SCAN_BAND, -54) is True
+    # transit layers keep scanning iron/coal so the pickaxe can always be recrafted
+    assert focus("fishbone_scan", 16, -54) is False
+    assert focus("fishbone_scan", -30, -54) is False
+    assert focus("fishbone_scan", -54 - SCAN_BAND - 1, -54) is False
+
+    # plain fishbone never narrows to target-only
+    assert focus("fishbone", -54, -54) is False
+
+    # radar family keeps its ore-steered focus everywhere
+    assert focus("radar", 16, -54) is True
+    assert focus("v5", 16, -54) is True
+
+    # without a matching-tier pickaxe nothing is filtered out
+    assert focus("fishbone_scan", -54, -54, max_tier=2) is False
+    assert focus("fishbone_scan", -54, -54, min_tier=2) is False
+
+
+def test_pickaxe_low_hint_tells_model_how_many_stone_picks_it_can_craft() -> None:
+    """On pickaxe_low the model must be told the exact recraft headroom, not just 'low'."""
+    from mc_agent.skills.mining_dfs import _pickaxe_low_hint, _stone_pickaxe_headroom
+
+    # scan6's real inventory when it stalled at Y=-48: stone is abundant, logs untouched
+    inv = {"cobbled_deepslate": 248, "cobblestone": 139, "oak_log": 30, "stick": 2}
+    n, stone, sticks = _stone_pickaxe_headroom(inv)
+    assert stone == 387
+    assert sticks == 2 + 2 * (4 * 30)   # 2 sticks + 30 logs -> 120 planks -> 240 sticks
+    assert n == 121                      # stick-limited, stone-limited would be 129
+
+    hint = _pickaxe_low_hint(inv)
+    assert "121" in hint
+    assert "stone_pickaxe" in hint
+
+    # stone rich but no wood -> tell it to make planks/sticks first
+    no_wood_hint = _pickaxe_low_hint({"cobblestone": 9})
+    assert "oak_planks" in no_wood_hint and "stick" in no_wood_hint
+
+    # no stone at all -> dig some first
+    assert "石料不足" in _pickaxe_low_hint({"oak_log": 8})
+
+    # zero-material edge case must not claim a positive count
+    n0, _, _ = _stone_pickaxe_headroom({})
+    assert n0 == 0
+
+
+def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -> None:
+    """Rock digging must auto-craft a stone burner pick instead of stopping at pickaxe_low."""
+    world = _MockMineWorld(
+        start_pos=(0.5, 80.0, 0.5),
+        surface_y=80,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [40, 131]},
+            {"name": "cobblestone", "count": 30, "slot": 10},
+            {"name": "oak_log", "count": 4, "slot": 11},
+            {"name": "crafting_table", "count": 1, "slot": 12},
+        ],
+    )
+    with BotSession("tok", bot_username="RecraftBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        eng = skills.mining_dfs
+        crafted: list[str] = []
+
+        def fake_craft(item: str, count: int = 1, equip_slot: str | None = None) -> dict[str, Any]:
+            crafted.append(item)
+            return {"ok": True, "crafted": item, "gained": count}
+
+        monkeypatch.setattr(skills, "craft_gear", fake_craft)
+        counts = {"cobblestone": 30, "oak_log": 4, "crafting_table": 1}
+        assert eng._try_recraft_burner_pickaxe(counts) is True
+        assert crafted == ["stone_pickaxe"]
+        assert eng.recrafted_picks == 1
+
+        # no stone -> must not even attempt a craft
+        assert eng._try_recraft_burner_pickaxe({"cobblestone": 1, "oak_log": 4}) is False
+        assert crafted == ["stone_pickaxe"]
+
+        # craft failure must not be counted as a recraft
+        monkeypatch.setattr(skills, "craft_gear", lambda *a, **k: {"ok": False, "error": "missing_ingredients"})
+        assert eng._try_recraft_burner_pickaxe(counts) is False
+        assert eng.recrafted_picks == 1

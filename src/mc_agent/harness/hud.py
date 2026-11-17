@@ -289,6 +289,16 @@ def compute_goal_gap_hint(
                     return f"{base_msg}；当前y={bot_y}高于钻石层(Y=-64~16)需下探至Y=-54"
         return base_msg
 
+    if "钻石" in task or "diamond" in task_low:
+        if not (has_iron_pick or has_diamond_pick):
+            return (
+                f"挖钻石需先备iron_pickaxe(现有diamond={diamonds},铁锭={iron},生铁={raw_iron},煤={coal})；"
+                "先调mc_skill_mine_dfs(target='iron')凑3铁烧锭合铁镐"
+            )
+        return (
+            f"已备铁镐+(当前diamond={diamonds})；直接调mc_skill_mine_dfs(target='diamond',target_y=-54)去深层Y=-54探钻，禁在浅层Y=8~16盲挖"
+        )
+
     if adv == "story/enchant_item" or "enchant" in task_low or "附魔" in task:
         return (
             f"附魔台=2diamond(现有{diamonds})+4obsidian(现有{obsidian})+1book(现有{counts.get('book', 0)})，"
@@ -302,7 +312,7 @@ def compute_goal_gap_hint(
             return f"已有{raw_iron}生铁(铁锭={iron},煤/木炭={coal})，直接mc_skill_smelt('raw_iron', count={raw_iron})"
         return (
             f"当前最高stone_pickaxe，升级iron_pickaxe需3铁锭(现有铁锭={iron},生铁={raw_iron},煤={coal})；"
-            "优先采露头iron_ore或用mc_skill_staircase(vertical='down',stop_on_ore=True)探铁"
+            "优先采露头iron_ore或调mc_skill_mine_dfs(target='iron')下井探铁"
         )
 
     return (
@@ -348,6 +358,12 @@ def build_world_hud(
         flags.append("潜行中")
 
     blocks = (found or {}).get("blocks") or []
+    wm = getattr(toolset, "world_memory", None)
+    if wm is not None and blocks:
+        try:
+            wm.observe_blocks(blocks, dim=dim)
+        except Exception:
+            pass
     counts, inv_summary = _summarize_inventory(inv)
     # 检测高空树冠站位（脚下紧邻树叶且高度>=66）
     near_leaves = sum(
@@ -480,6 +496,19 @@ def build_world_hud(
     line4 = f"缺口提示: {gap_hint}"
 
     lines = ["[实时HUD（刚采样，勿再空转查status/inventory）]", line1, line2, line3, line4]
+    if wm is not None:
+        try:
+            mem_line = wm.format_hud_line(
+                dim=dim,
+                pos=(px, py, pz),
+                current_biome=biome,
+                local_visible_names=set(by_type.keys()),
+                max_chars=84,
+            )
+            if mem_line:
+                lines.append(mem_line)
+        except Exception:
+            pass
     if failed_coords:
         lines.append("近期失败坐标(禁止重试或沿序列递推): " + ", ".join(failed_coords[-5:]))
     return "\n".join(lines)

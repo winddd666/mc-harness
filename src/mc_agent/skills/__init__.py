@@ -2,7 +2,7 @@
 
 from .advancements import compute_advancement_frontier, load_advancements_catalog
 from .library import MacroSkills
-from .mining_dfs import MiningDFSEngine, WorldLedger
+from .mining_dfs import MiningDFSEngine, WorldLedger, normalize_dfs_strategy
 from .safety import SafetyEmergency, check_and_stabilize
 
 __all__ = [
@@ -13,4 +13,5 @@ __all__ = [
     "check_and_stabilize",
     "compute_advancement_frontier",
     "load_advancements_catalog",
+    "normalize_dfs_strategy",
 ]

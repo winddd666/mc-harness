@@ -32,6 +32,7 @@ from ..skills.crafting import explain_craft_error
 from ..skills.safety import SAFE_FOOD_PRIORITY
 from .geofence import VoidGeofence
 from .tool_registry import Parameter, Tool, ToolRegistry
+from .world_memory import WorldMemory, default_memory_path_for_bot
 
 COMPACT_CORE_TOOLS: tuple[str, ...] = (
     "mc_find_blocks",
@@ -85,6 +86,7 @@ class McToolset:
         bot: BotSession,
         *,
         geofence: VoidGeofence | None = None,
+        world_memory: WorldMemory | None = None,
         wait_for_cooldown: bool = False,
         stop_check: Callable[[], bool] | None = None,
         on_cooldown_wait: Callable[[str, float], None] | None = None,
@@ -101,7 +103,13 @@ class McToolset:
         self._last_dimension: str = "overworld"
         self._last_biome: str = ""
         self.geofence = geofence if geofence is not None else VoidGeofence.from_env()
+        self.world_memory = (
+            world_memory
+            if world_memory is not None
+            else WorldMemory(default_memory_path_for_bot(bot))
+        )
         self.skills = MacroSkills(bot)
+        self.skills.world_memory = self.world_memory
 
     def _set_last_event_seq(self, seq: int) -> None:
         with self._state_lock:
@@ -149,6 +157,10 @@ class McToolset:
                     ]
                 except (TypeError, ValueError):
                     pass
+        try:
+            self.world_memory.observe_status(st)
+        except Exception:
+            pass
 
     def _cached_env(self, *, fetch_if_missing: bool = False) -> tuple[str, list[int] | None, str]:
         with self._state_lock:
@@ -523,15 +535,41 @@ class McToolset:
             if not norm_types or any(t in self._CROP_BLOCK_TYPES for t in norm_types):
                 payload["mature"] = mature
         raw = self._call_json("find_blocks", payload)
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return raw
+        res_obj = parsed.get("result") if isinstance(parsed, dict) else None
+        blocks = res_obj.get("blocks") if isinstance(res_obj, dict) else None
+        if parsed.get("ok") is True and isinstance(blocks, list) and blocks:
+            dim_obs, _, _ = self._cached_env(fetch_if_missing=False)
+            self.world_memory.observe_blocks(blocks, dim=dim_obs)
         if types:
-            try:
-                parsed = json.loads(raw)
-            except ValueError:
-                return raw
-            res_obj = parsed.get("result") if isinstance(parsed, dict) else None
-            blocks = res_obj.get("blocks") if isinstance(res_obj, dict) else None
             if parsed.get("ok") is True and isinstance(blocks, list) and len(blocks) == 0:
                 dim, pos, biome = self._cached_env(fetch_if_missing=True)
+                if pos is not None:
+                    def _verify_live(pt: tuple[int, int, int]) -> str | None:
+                        try:
+                            return self._get_block_name(pt[0], pt[1], pt[2])
+                        except Exception:
+                            return None
+
+                    mem_hits = self.world_memory.query_pois(
+                        types,
+                        origin=pos,
+                        dim=dim,
+                        limit=3,
+                        verify_fn=_verify_live,
+                        verify_radius=32.0,
+                    )
+                    if mem_hits:
+                        res_obj["memory_blocks"] = mem_hits
+                        res_obj["memory_hint"] = (
+                            f"当前 {radius}m 内未扫到目标，但记忆库已探明最近 {mem_hits[0]['name']} "
+                            f"位于 {mem_hits[0]['pos']}（距此 {mem_hits[0]['dist']}m，{mem_hits[0]['bearing']}），"
+                            "可直接调 mc_skill_mine_blocks 或 mc_move_to(x, z) 分段前往。"
+                        )
+                        return json.dumps(parsed, ensure_ascii=False)
                 check = assess_world_target(
                     types,
                     dimension=dim,
@@ -557,7 +595,16 @@ class McToolset:
         raw = self._call_json("get_entities", payload)
         try:
             parsed = json.loads(raw)
-            ents = (parsed.get("result") or {}).get("entities") or []
+            res_ent = parsed.get("result") if isinstance(parsed, dict) else None
+            ents = (res_ent or {}).get("entities") or []
+            dim_ent, pos_ent, _ = self._cached_env(fetch_if_missing=False)
+            if ents:
+                self.world_memory.observe_entities(ents, dim=dim_ent)
+            elif types and isinstance(res_ent, dict) and pos_ent is not None:
+                hab_hits = self.world_memory.query_habitats(types, origin=pos_ent, dim=dim_ent, limit=3)
+                if hab_hits:
+                    res_ent["memory_habitats"] = hab_hits
+                    return json.dumps(parsed, ensure_ascii=False)
             near_hostiles = [
                 ent
                 for ent in ents
@@ -699,6 +746,11 @@ class McToolset:
                         rec_fn(ev_seq if ev_seq is not None else ev.get("t"))
                     cause = ev.get("cause") or ev.get("message") or ""
                     pos = ev.get("pos")
+                    drop_pos = ev.get("dropped_items_at") or pos
+                    try:
+                        self.world_memory.record_death(drop_pos, dim=self._last_dimension)
+                    except Exception:
+                        pass
                     notes.append(f"[死亡 pos={pos} {cause}]")
                 elif kind in ("respawn", "spawn"):
                     notes.append(f"[已重生 pos={ev.get('pos')}]")
@@ -743,7 +795,44 @@ class McToolset:
         # 水中自动保护：防止溺水扣血打断自己的游上岸动作
         if ignore_hurt or self._is_in_water():
             payload["stop_on"] = ["death"]
-        return self._call_json("move_to", payload)
+        raw = self._call_json("move_to", payload)
+        if entity_id is None and x is not None and z is not None:
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict) and parsed.get("ok") is False:
+                err_obj = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
+                err_code = str(err_obj.get("code") or "")
+                try:
+                    st_mv = self.bot.status()
+                    self._update_status_cache(st_mv)
+                except Exception:
+                    pass
+                dim_m, cur_p, _ = self._cached_env(fetch_if_missing=True)
+                dist_m = math.hypot(float(x) - cur_p[0], float(z) - cur_p[2]) if cur_p is not None else 0.0
+                if dist_m > 36.0 and err_code in {"path_not_found", "no_path", "timeout", "action_timeout", "stalled"}:
+                    try:
+                        seg_res = self.skills.navigate_segmented(
+                            float(x),
+                            float(z),
+                            y=y,
+                            range_m=range,
+                            geofence=self.geofence,
+                            ignore_hurt=(ignore_hurt or self._is_in_water()),
+                        )
+                        if seg_res.get("ok"):
+                            self.update_block_pos(seg_res.get("pos") or (seg_res.get("result") or {}).get("pos"))
+                            return json.dumps({"ok": True, "result": seg_res}, ensure_ascii=False)
+                    except ApiError:
+                        pass
+                # If moving onto a remembered POI failed with path_not_found, cool down that POI for 300s
+                if err_code in {"path_not_found", "no_path"}:
+                    tx_i, tz_i = math.floor(float(x)), math.floor(float(z))
+                    for (edim, ex, ey, ez) in list(self.world_memory.pois.keys()):
+                        if edim == dim_m and abs(ex - tx_i) <= 1 and abs(ez - tz_i) <= 1 and (y is None or abs(ey - math.floor(float(y))) <= 2):
+                            self.world_memory.mark_unreachable((ex, ey, ez), dim=dim_m, reason=err_code, cooldown_s=300.0)
+        return raw
 
     def mc_dig(self, x: int, y: int, z: int, collect: bool = True) -> str:
         blocked = self.geofence.check_point(float(x), float(z), action="mc_dig")
@@ -786,7 +875,14 @@ class McToolset:
                     self.bot.call("equip", {"item": best_pick, "slot": "hand"})
                 except ApiError:
                     pass
-        return self._call_json("dig", {"pos": [x, y, z], "collect": collect})
+        raw_dig = self._call_json("dig", {"pos": [x, y, z], "collect": collect})
+        try:
+            parsed_dig = json.loads(raw_dig)
+            if isinstance(parsed_dig, dict) and parsed_dig.get("ok") is True:
+                self.world_memory.remove_poi([x, y, z], dim=self._last_dimension)
+        except Exception:
+            pass
+        return raw_dig
 
     def _check_dimension_physics(self, item: str | None) -> str | None:
         if not item:
@@ -831,7 +927,17 @@ class McToolset:
                 {"ok": False, "error": {"code": "bad_args", "message": "放置坐标需同时提供 x, y, z，或全部省略自动选落点"}},
                 ensure_ascii=False,
             )
-        return self._call_json("place", payload)
+        raw_place = self._call_json("place", payload)
+        try:
+            parsed_pl = json.loads(raw_place)
+            if isinstance(parsed_pl, dict) and parsed_pl.get("ok") is True:
+                res_pl = parsed_pl.get("result") if isinstance(parsed_pl.get("result"), dict) else {}
+                p_xyz = res_pl.get("pos") or ([x, y, z] if (x is not None and y is not None and z is not None) else None)
+                if isinstance(p_xyz, (list, tuple)) and len(p_xyz) >= 3:
+                    self.world_memory.record_poi(item, [int(p_xyz[0]), int(p_xyz[1]), int(p_xyz[2])], dim=self._last_dimension)
+        except Exception:
+            pass
+        return raw_place
 
     def mc_craft(self, item: str, count: int = 1) -> str:
         cnt = max(1, min(64, int(count)))
@@ -1022,7 +1128,20 @@ class McToolset:
         target = _build_window_target(block, entity_id, x, y, z)
         if isinstance(target, str):
             return target
-        return self._call_json("window/view", {"target": target})
+        raw = self._call_json("window/view", {"target": target})
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and parsed.get("ok") is True and isinstance(parsed.get("result"), dict):
+                fb_pos = [x, y, z] if (x is not None and y is not None and z is not None) else None
+                self.world_memory.update_container_from_window(
+                    parsed["result"],
+                    fallback_pos=fb_pos,
+                    fallback_block=block,
+                    dim=self._last_dimension,
+                )
+        except Exception:
+            pass
+        return raw
 
     def mc_window_act(
         self,
@@ -1036,7 +1155,20 @@ class McToolset:
         target = _build_window_target(block, entity_id, x, y, z)
         if isinstance(target, str):
             return target
-        return self._call_json("window/act", {"target": target, "ops": ops})
+        raw = self._call_json("window/act", {"target": target, "ops": ops})
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and parsed.get("ok") is True and isinstance(parsed.get("result"), dict):
+                fb_pos = [x, y, z] if (x is not None and y is not None and z is not None) else None
+                self.world_memory.update_container_from_window(
+                    parsed["result"],
+                    fallback_pos=fb_pos,
+                    fallback_block=block,
+                    dim=self._last_dimension,
+                )
+        except Exception:
+            pass
+        return raw
 
     def mc_posture(self, sneak: bool = False, shield: bool = False, jump: bool = False) -> str:
         return self._call_json("posture", {"sneak": sneak, "shield": shield, "jump": jump})
@@ -1273,15 +1405,28 @@ class McToolset:
         target_y: int | None = None,
         action: str = "explore",
     ) -> str:
-        return self._run_skill(
-            lambda: self.skills.mine_dfs(
+        norm_target = str(target or "").strip().lower().removeprefix("minecraft:")
+        eff_target_y = target_y
+        clamped_from: int | None = None
+        if norm_target in {"diamond", "diamond_ore", "deepslate_diamond_ore"} and target_y is not None:
+            ty_int = int(target_y)
+            if -30 < ty_int <= 16:
+                clamped_from = ty_int
+                eff_target_y = -54
+
+        def _invoke() -> dict[str, Any]:
+            res = self.skills.mine_dfs(
                 target=target,
                 goal_count=goal_count,
-                target_y=target_y,
+                target_y=eff_target_y,
                 action=action,
                 geofence=self.geofence,
             )
-        )
+            if clamped_from is not None and isinstance(res, dict):
+                res["clamped_shallow_diamond_y_from"] = clamped_from
+            return res
+
+        return self._run_skill(_invoke)
 
     def mc_kb_lookup(self, query: str, category: str = "all") -> str:
         res = lookup_kb(query, category=category)
@@ -1703,11 +1848,11 @@ class McToolset:
                 ),
                 Tool(
                     name="mc_skill_staircase",
-                    description="安全阶梯升降宏技能：沿 north/south/east/west 挖掘3格高阶梯向下下矿(vertical='down'，探测到铁矿自动停下)或向上修台阶重返地表(vertical='up')，严禁在坑里逐格手挖阶梯。",
+                    description="阶梯升降辅助技能：主要用于向上修台阶重返地表(vertical='up'/'pillar')或短距地形升降；正规地下下井探铁/探钻请优先调用 mc_skill_mine_dfs。",
                     parameters={
                         "direction": Parameter("前进方向：north(-Z)/south(+Z)/east(+X)/west(-X)", required=False),
                         "steps": Parameter("阶梯步数(1-25)，每步改变1格Y高度", kind="integer", required=False),
-                        "vertical": Parameter("'down' 向下探矿、'up' 斜向阶梯上行 或 'pillar' 原地挖顶垫脚直上", required=False),
+                        "vertical": Parameter("'up' 斜向阶梯返地表、'pillar' 原地垫脚直上 或 'down' 短距下行", required=False),
                         "stop_on_ore": Parameter("遇到暴露 iron_ore/deepslate_iron_ore 是否立刻停下（默认true）", kind="boolean", required=False),
                     },
                     handler=self.mc_skill_staircase,

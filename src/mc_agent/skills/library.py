@@ -967,6 +967,101 @@ class MacroSkills:
         self.failed_stair_dirs: dict[tuple[int, int, int, str], dict[str, tuple[float, str]]] = {}
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
         self._mining_dfs: Any = None
+        self.world_memory: Any = None
+
+    def _get_world_memory(self) -> Any:
+        if self.world_memory is None:
+            from ..harness.world_memory import WorldMemory
+
+            self.world_memory = WorldMemory()
+        return self.world_memory
+
+    def navigate_segmented(
+        self,
+        x: float,
+        z: float,
+        *,
+        y: float | None = None,
+        range_m: float = 2.5,
+        step_m: float = 24.0,
+        geofence: Any = None,
+        ignore_hurt: bool = False,
+    ) -> dict[str, Any]:
+        """Relay long-distance navigation (>36m) in ~24m segments with ±35 deg detour fallback."""
+        st0 = self.bot.status()
+        pos0 = st0.get("pos") or [0.0, 64.0, 0.0]
+        cx, cy, cz = float(pos0[0]), float(pos0[1]), float(pos0[2])
+        total_hdist = math.hypot(float(x) - cx, float(z) - cz)
+        stop_on = ["death"] if (ignore_hurt or st0.get("in_water")) else ["hurt", "death"]
+
+        if total_hdist <= 36.0:
+            payload: dict[str, Any] = {"x": float(x), "z": float(z), "range": range_m, "stop_on": stop_on}
+            if y is not None:
+                payload["y"] = float(y)
+            res = self.bot.call("move_to", payload)
+            return {"ok": True, "segmented": False, "segments_done": 1, "result": res}
+
+        # Try direct first in case chunks are already loaded and unobstructed
+        try:
+            direct_payload: dict[str, Any] = {"x": float(x), "z": float(z), "range": range_m, "stop_on": stop_on}
+            if y is not None:
+                direct_payload["y"] = float(y)
+            res_d = self.bot.call("move_to", direct_payload)
+            return {"ok": True, "segmented": False, "segments_done": 1, "result": res_d}
+        except ApiError as direct_err:
+            if direct_err.code in {"hurt", "death", "interrupted"}:
+                raise
+            last_err = direct_err
+
+        max_hops = min(18, max(3, int(math.ceil(total_hdist / max(10.0, step_m))) + 3))
+        segs_done = 0
+        for _ in range(max_hops):
+            st_cur = self.bot.status()
+            p_cur = st_cur.get("pos") or [cx, cy, cz]
+            cx, cy, cz = float(p_cur[0]), float(p_cur[1]), float(p_cur[2])
+            rem = math.hypot(float(x) - cx, float(z) - cz)
+            if rem <= max(range_m + 1.0, 3.5):
+                return {"ok": True, "segmented": True, "segments_done": segs_done, "pos": p_cur}
+
+            if rem <= step_m + 4.0:
+                hop_targets = [(float(x), float(z), y, range_m)]
+            else:
+                base_ang = math.atan2(float(z) - cz, float(x) - cx)
+                hop_targets = [
+                    (cx + math.cos(base_ang + ang_off) * step_m, cz + math.sin(base_ang + ang_off) * step_m, None, 3.0)
+                    for ang_off in (0.0, 0.61, -0.61)
+                ]
+
+            advanced = False
+            for hx, hz, hy, hr in hop_targets:
+                if geofence is not None and geofence.check_point(hx, hz, action="navigate_segmented") is not None:
+                    continue
+                hop_payload: dict[str, Any] = {"x": round(hx, 2), "z": round(hz, 2), "range": hr, "stop_on": stop_on}
+                if hy is not None:
+                    hop_payload["y"] = float(hy)
+                try:
+                    self.bot.call("move_to", hop_payload)
+                    st_after = self.bot.status()
+                    p_after = st_after.get("pos") or [cx, cy, cz]
+                    if math.hypot(float(p_after[0]) - cx, float(p_after[2]) - cz) >= 1.5 or math.hypot(
+                        float(x) - float(p_after[0]), float(z) - float(p_after[2])
+                    ) <= max(range_m + 1.0, 3.5):
+                        segs_done += 1
+                        advanced = True
+                        break
+                except ApiError as hop_err:
+                    if hop_err.code in {"hurt", "death", "interrupted"}:
+                        raise
+                    last_err = hop_err
+                    continue
+            if not advanced:
+                raise last_err
+
+        st_fin = self.bot.status()
+        p_fin = st_fin.get("pos") or [cx, cy, cz]
+        if math.hypot(float(x) - float(p_fin[0]), float(z) - float(p_fin[2])) <= max(range_m + 2.0, 4.5):
+            return {"ok": True, "segmented": True, "segments_done": segs_done, "pos": p_fin}
+        raise last_err
 
     def _ensure_free_slots(
         self,
@@ -1726,6 +1821,16 @@ class MacroSkills:
                                     distant_candidates.append(pt_list)
                     except ApiError:
                         pass
+                    if self.world_memory is not None:
+                        wm_hits = self.world_memory.query_pois(
+                            ["crafting_table"],
+                            origin=(px, py, pz),
+                            dim=normalize_dimension(st.get("dimension")),
+                            limit=2,
+                        )
+                        for wh in wm_hits:
+                            if wh["dist"] <= 48.0 and wh["pos"] not in distant_candidates:
+                                distant_candidates.append(list(wh["pos"]))
                     if self._mining_dfs is not None:
                         ledger_tbl = self._mining_dfs.ledger.nearest_utility("crafting_table", (px, py, pz), max_dist=48.0)
                         if ledger_tbl is not None and list(ledger_tbl) not in distant_candidates:
@@ -2396,6 +2501,23 @@ class MacroSkills:
             out_logs["auto_dropped"] = auto_dropped
         return out_logs
 
+    def _attach_shortage_memory_hint(self, out_short: dict[str, Any], missing_keys: Any) -> dict[str, Any]:
+        if self.world_memory is not None:
+            try:
+                st_m = self.bot.status()
+                mem_tip = self.world_memory.shortage_memory_hint(
+                    missing_keys,
+                    origin=st_m.get("pos"),
+                    dim=normalize_dimension(st_m.get("dimension")),
+                )
+                if mem_tip:
+                    out_short["memory_hint"] = mem_tip
+                    if "message" in out_short:
+                        out_short["message"] = f"{out_short['message']}（{mem_tip}）"
+            except Exception:
+                pass
+        return out_short
+
     def craft_gear(
         self,
         item: str,
@@ -2418,13 +2540,16 @@ class MacroSkills:
             if plan and plan["missing_materials"]:
                 non_wood_missing = {k: v for k, v in plan["missing_materials"].items() if k != "stick"}
                 if non_wood_missing:
-                    return {
-                        "ok": False,
-                        "error": "missing_ingredients",
-                        "requires_replan": True,
-                        "inventory": initial,
-                        **plan,
-                    }
+                    return self._attach_shortage_memory_hint(
+                        {
+                            "ok": False,
+                            "error": "missing_ingredients",
+                            "requires_replan": True,
+                            "inventory": initial,
+                            **plan,
+                        },
+                        non_wood_missing.keys(),
+                    )
         inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         planks_per, sticks_per = TOOL_WOOD_NEEDS.get(item, (0, 0))
         planks_needed = math.ceil(count / 4) * 2 if item == "stick" else planks_per * count
@@ -2455,8 +2580,16 @@ class MacroSkills:
             }
         plan = material_shortage(item, count, prepared)
         if plan and plan["missing_materials"]:
-            return {"ok": False, "error": "missing_ingredients", "requires_replan": True,
-                    "inventory": prepared, **plan}
+            return self._attach_shortage_memory_hint(
+                {
+                    "ok": False,
+                    "error": "missing_ingredients",
+                    "requires_replan": True,
+                    "inventory": prepared,
+                    **plan,
+                },
+                plan["missing_materials"].keys(),
+            )
 
         if item in TABLE_RECIPES:
             table_res = self.ensure_crafting_table(target_item=item)
@@ -2488,9 +2621,12 @@ class MacroSkills:
                 }
             if item in TABLE_RECIPES and (
                 "windowOpen" in err.message
+                or "server placed no result" in err.message
                 or err.code in ("path_not_found", "need_crafting_table", "out_of_reach", "no_window")
             ):
                 try:
+                    if "server placed no result" in err.message:
+                        self._ensure_free_slots(min_free=6)
                     nearby_tables = self.bot.call(
                         "find_blocks",
                         {"radius": 5, "types": ["crafting_table"], "limit": 4},
@@ -2738,6 +2874,29 @@ class MacroSkills:
             int(res.get("dug_count") or 0) == 0
             and res.get("error") == "no_targets_available"
             and "nearest_unreachable_target" not in res
+            and self.world_memory is not None
+        ):
+            from ..harness.world_memory import is_tracked_poi_block
+
+            mem_targets = [b for b in block_types if is_tracked_poi_block(b)]
+            if mem_targets:
+                mem_recall = self._recall_and_mine_memory_poi(
+                    mem_targets=mem_targets,
+                    count=count,
+                    radius=radius,
+                    best_pick=best_pick,
+                    inv_before=counts,
+                    auto_dropped_names=auto_dropped_names or None,
+                )
+                if mem_recall is not None:
+                    if auto_dropped:
+                        mem_recall["auto_dropped"] = auto_dropped
+                    return mem_recall
+
+        if (
+            int(res.get("dug_count") or 0) == 0
+            and res.get("error") == "no_targets_available"
+            and "nearest_unreachable_target" not in res
         ):
             enriched = self._enrich_ecology_unavailable(res, targets=block_types, radius=radius, counts=counts)
             if enriched is not None:
@@ -2750,6 +2909,100 @@ class MacroSkills:
         if auto_dropped:
             out_mine["auto_dropped"] = auto_dropped
         return out_mine
+
+    def _recall_and_mine_memory_poi(
+        self,
+        *,
+        mem_targets: list[str],
+        count: int,
+        radius: int,
+        best_pick: str | None,
+        inv_before: dict[str, int],
+        auto_dropped_names: frozenset[str] | None,
+    ) -> dict[str, Any] | None:
+        """Recall nearest known non-ore POI from WorldMemory, relay-navigate, lazily prune/cool bad points, and mine."""
+        wm = self.world_memory
+        if wm is None:
+            return None
+
+        def _probe_live(pt: tuple[int, int, int]) -> str | None:
+            try:
+                b = self.bot.call("get_block", {"pos": [pt[0], pt[1], pt[2]]})
+                return str(b.get("name") or b.get("block") or "air").removeprefix("minecraft:")
+            except ApiError:
+                return None
+
+        target_clean_set = {str(t).removeprefix("minecraft:").strip().lower() for t in mem_targets}
+        recalled_log: list[dict[str, Any]] = []
+
+        for _attempt in range(4):
+            try:
+                st_now = self.bot.status()
+            except ApiError:
+                break
+            cur_pos = st_now.get("pos") or [0.0, 64.0, 0.0]
+            dim_now = normalize_dimension(st_now.get("dimension"))
+            hits = wm.query_pois(
+                mem_targets,
+                origin=cur_pos,
+                dim=dim_now,
+                limit=1,
+                verify_fn=_probe_live,
+                verify_radius=32.0,
+            )
+            if not hits:
+                break
+            cand = hits[0]
+            cpos = cand["pos"]
+            dist_c = float(cand["dist"])
+
+            if dist_c > 12.0:
+                try:
+                    self.navigate_segmented(float(cpos[0]) + 0.5, float(cpos[2]) + 0.5, range_m=2.5)
+                except ApiError as nav_err:
+                    if nav_err.code in {"hurt", "death", "interrupted"}:
+                        raise
+                    wm.mark_unreachable(cpos, dim=dim_now, reason=nav_err.code, cooldown_s=300.0)
+                    recalled_log.append({"pos": cpos, "status": "cooled_unreachable", "reason": nav_err.code})
+                    continue
+
+            live_after_nav = _probe_live((int(cpos[0]), int(cpos[1]), int(cpos[2])))
+            if live_after_nav is not None and live_after_nav.lower() not in target_clean_set:
+                wm.remove_poi(cpos, dim=dim_now)
+                recalled_log.append({"pos": cpos, "status": "removed_stale", "actual": live_after_nav})
+                continue
+
+            if best_pick:
+                try:
+                    self.bot.call("equip", {"item": best_pick, "slot": "hand"})
+                except ApiError:
+                    pass
+
+            dig_res = self._dig_target_blocks(
+                block_types=mem_targets,
+                count=count,
+                radius=max(16, min(32, radius)),
+                protected_msg="目标方块处于保护区，请向远离出生点移动后再挖掘。",
+                below_tol=2.5,
+                above_tol=3.0,
+                inv_before=inv_before,
+                avoid_water=True,
+                auto_dropped_names=auto_dropped_names,
+            )
+            if int(dig_res.get("dug_count") or 0) > 0 and dig_res.get("ok"):
+                wm.remove_poi(cpos, dim=dim_now)
+                return {
+                    **dig_res,
+                    "pickaxe_used": best_pick,
+                    "recalled_from_memory": cand,
+                    "memory_attempts": recalled_log,
+                }
+
+            # Reached vicinity, block still exists, yet digging could not reach it (e.g. walled off by bedrock) -> cool down 300s!
+            wm.mark_unreachable(cpos, dim=dim_now, reason=str(dig_res.get("error") or "unreachable"), cooldown_s=300.0)
+            recalled_log.append({"pos": cpos, "status": "cooled_dig_blocked", "reason": dig_res.get("error")})
+
+        return None
 
     def _approach_occluded_ore(self, *, block_types: list[str], radius: int = 12) -> dict[str, Any] | None:
         """当同层近距目标被石墙隔开时，朝主水平轴短距开矿道接近。"""
@@ -2982,6 +3235,11 @@ class MacroSkills:
                     payload["item"] = hand_item
                     break
         res = self.bot.call("interact", payload)
+        if self.world_memory is not None:
+            try:
+                self.world_memory.record_bed_spawn([x, y, z], dim=normalize_dimension(st.get("dimension")))
+            except Exception:
+                pass
         return {"ok": True, "bed_pos": [x, y, z], **res}
 
     def escape_water(self) -> dict[str, Any]:
@@ -5158,6 +5416,7 @@ class MacroSkills:
         action: str = "explore",
         geofence: Any = None,
         max_duration_s: float = 32.0,
+        strategy: str | None = None,
     ) -> dict[str, Any]:
         """Run path-compressed MiningDFS underground exploration, vein harvesting, or collar backtrack."""
         return self.mining_dfs.run(
@@ -5167,4 +5426,5 @@ class MacroSkills:
             action=action,
             geofence=geofence,
             max_duration_s=max_duration_s,
+            strategy=strategy,
         )
