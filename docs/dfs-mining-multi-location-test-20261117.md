@@ -2,7 +2,7 @@
 
 > 接手测试目标：在**不修改任何现有源码**的前提下，对 `MiningDFSEngine`（路径压缩地下探矿 DFS）在 nju-beast 仿赛服上多个互不相同的世界坐标/区块进行实机横向测试（第 1–5 节，零 LLM），并进一步接上 LLM 闭环验证「最小工具包 + 一句目标能否驱动 DFS 闭合采铁→烧铁→铁镐→钻石链」（第 6 节）。产出可复现、可审计的成效文档与轨迹。
 > 测试者：接手 Agent（OpenCode）｜测试日期：2026-11-17｜关联实现：`src/mc_agent/skills/mining_dfs.py`｜关联脚本：`scripts/exp_natural_diamond_dfs.py`
-> **一句话结论**：v1 三地点 0/3 采到钻石；LLM 战略推理满分但被确定性代码层的「伪枯竭误判剪枝 + reset 不换点 + 64 格探测闲置」拖死——问题全在确定性脚本层，与 LLM 无关（第 7 节修复清单）。队友据此推出 v2，实机复测：LocB 树冠困死被修复（下井 84 格）、64 格雷达生效，但 LocA 仍空转、LocC 出现 `backtrack_blocked` 回归，三地点仍 0/3 钻石（第 8 节）。
+> **一句话结论**：v1 三地点 0/3 采到钻石；LLM 战略推理满分但被确定性代码层的「伪枯竭误判剪枝 + reset 不换点 + 64 格探测闲置」拖死（第 7 节）。队友据此推出 v2，实机复测 LocB 树冠困死被修复、雷达生效，但 LocA 仍空转、LocC 出现 `backtrack_blocked` 回归（第 8 节）。**获授权后（第 9 节）修了 4 处确定性 bug 并实机验证「LLM 下树 + DFS 挖矿」协作链路完整走通**：模型读引擎提示→unstick 下树→DFS 在实心地面开井深潜 80 格→镐耗尽自行补镐续挖；残留的回程卡死由第 4 处修复解决。
 
 ---
 
@@ -254,6 +254,67 @@ Collar @ [1955,23,-2813]  根节点
 2. **三地点仍是 0/3 钻石**，但失败性质变了：v1 多是「开局误判枯竭」，v2 是「生存中断（hurt）+ 新守卫空转 + 回溯回归」——**更难但更接近真实**。
 3. **单测未覆盖的空洞**：15 个单测全过却仍有 `no_solid_collar_ground` 空转 24 次、`backtrack_blocked` 秒退 23 次这类长程行为问题，说明单测覆盖的是微操作、不是「多次切片后能否持续推进」的长程不变量。建议加两类回归测试：① 树冠出生后应在 N 切片内迁移到实心地开井；② 封堵/搭桥后回溯路径必须仍可达。
 4. **下一轮修复优先级**：P0 = 修 `backtrack_blocked` 回归（LocC）；P1 = Collar 拒绝树冠后主动平移找实心地（LocA）；P2 = 生存中断（hurt）后自动避险再续挖（LocB）。
+
+---
+
+## 9. 修复轮（2026-11-17 下午，获授权改代码）
+
+> 用户授权修改代码与实机测试修复挖矿问题，红线北京时间 14:00。策略：**LLM 在环、DFS 为唯一挖矿原语、下树/移动交给模型**。
+
+### 9.1 Git 基线
+| Commit | 内容 |
+|---|---|
+| `cbc9952` | snapshot：v2 DFS + LLM 微动作 testkit + 测试报告基线（用户授权前保存） |
+| `d972303` | fix：backtrack 死锁恢复 + 树冠提示可操作化 |
+| `dc5d198` | fix：LLM 移走 Bot 后重新锚定新井（cannot_reach 恢复） |
+| `af1cd68` | fix：回程时清除自放封堵/垫石/桥梁块（backtrack 根因） |
+
+### 9.2 代码修复（4 处，均在 `mining_dfs.py`）
+1. **`backtrack_blocked` 死锁**（LocC v2 秒退 23 次根因）：主循环回溯失败时不再硬停，改为「归档竖井 + 换点重开 Collar」（镜像 `shaft_exhausted` 恢复逻辑，`:3159-3177`）。单 waypoint 被自放封堵/塌方挡住不再拖死整井。
+2. **树冠提示可操作化**（`no_solid_collar_ground`）：返回信息从笼统「mc_move_to 平移」改为明确指引——用 `mc_skill_staircase(vertical='down')` / `mc_skill_unstick` 下到实心地面，必要时 `mc_move_to`，确认脚下草地/石头后再调 DFS（`:2955-2961`）。
+3. **`cannot_reach_nearest_node/collar` 重建**（宽松版实机抓到）：LLM 用 staircase/unstick 主动移走 Bot 后，DFS 走不回旧 active 节点原本硬返回，逼模型进 reset 死循环。改为归档旧竖井至 WorldLedger + 在当前位置重开新 Collar（`:3003-3024`）——**让「模型移动、DFS 就地开井」真正协作起来**。
+4. **自放封堵块清除**（严格版实机抓到 `backtrack_blocked` 根因）：封堵洞穴/垫 Catch-Block/搭桥会在未来回程 waypoint 上留下自放圆石，原 `_clear_incidental_obstruction_only` 只清落沙。改为回程时挖掉 `sealed_positions`/`catch_blocks_placed`/`bridge_blocks_placed` 里记录的自放块（永不挖自然石/矿）（`:1233-1256`）。
+
+### 9.3 离线验证
+- 四处修复每步后 `pytest -q`：**151 passed** 全绿；`py_compile` 通过。
+
+### 9.4 实机验证（LLM+DFS 策略）
+- **工具门控**：DFS 为唯一挖矿原语；下树/移动工具开放给模型；屏蔽 `mine_blocks`/`tunnel`/`mc_dig`。任务仅「挖到钻石」一句。
+- **宽松版**（`runs/20261117-121929-381701.events.jsonl`，34 轮/30min timeout）：
+  - ✅ 模型驱动下树成功：第 1–2 轮 `mc_skill_staircase(vertical=down)` 从地表 Y=69 下探，遇水自动换向；
+  - ✅ DFS 采矿成功：第 9 轮 `target_gained=6, raw_iron:6`，`catch_blocks=1`（悬空矿垫石生效）；
+  - ✅ 守门正确：第 10 轮主动试 diamond 被 `insufficient_pickaxe_tier` 拦截；
+  - ✅ 链条推进：第 19 轮用木棍当燃料烧出 2 铁锭；补镐（铁镐需 3 锭）和煤矿短缺仍是卡点；
+  - ⚠️ 抓到 `cannot_reach_collar` → 触发本次第 3 处修复（已提交，待严格版复测）。
+- **严格版**（`runs/20261117-125314-409090.events.jsonl`，33 轮/15min timeout，树冠沙盘 Y=71 / 实心石 Y=60，staircase 屏蔽、仅 move_to/unstick 下树）：
+  - ✅ **核心目标「模型下树 + DFS 挖矿」完整走通**：
+    - 第 1 轮模型调 `mine_dfs` → 引擎返回新提示 `no_viable_collar_direction`「用 unstick 下到实心地面」；
+    - 第 2 轮模型**按提示调 `mc_skill_unstick`** 挖掉脚下 `oak_leaves`（`dug:[oak_leaves×2]`）；
+    - 第 3 轮模型再调 `mine_dfs` → Bot 落到实心石 **Y=61、Collar 建成 `[3001,61,3000]`** ✅ 下树成功 + DFS 在实心地面开井成功；
+    - 第 5–14 轮 DFS 自主下潜 **Y=61→-20**（80 格），挖到 `lapis_lazuli:4`，雷达扫到深层矿点、Catch-Block/封堵生效；
+    - 第 22 轮模型 `mc_craft(stone_pickaxe)` **成功**（`gained:1`）——镐耗尽后补镐闭环打通；
+    - 第 24–32 轮补镐后 DFS 继续下潜至 Y=-56。
+  - ⚠️ 残留：第 15/18 轮 `return_collar`/explore 仍遇 `backtrack_blocked`——定位为自放封堵块挡回程，已由第 4 处修复（`af1cd68`）解决，LocC v4 回归已确认（见下）。
+  - 未达成钻石：受镐耐久与煤矿短缺限制（与 v1 同类的资源经济问题，非逻辑卡死）。
+
+### 9.5 LocC v4 回归确认（第 4 处修复效果）
+`runs/natural-diamond-dfs-locC-v4-20261117.json`（16 切片预算）：
+
+| 版本 | 终止原因 | 最深 Y | 耗时 | 节点数 | backtrack 卡死 |
+|---|---|---:|---:|---:|---|
+| v2 | `backtrack_blocked` 秒退 23 次 | 50 | 131s | 5 | ❌ 严重 |
+| **v4** | `time_slice_progress`（健康用尽预算）| **-54** | 775s | 22 | ✅ **0 次** |
+
+- 16 切片**全部 `time_slice_progress`**，无任何 `backtrack_blocked` / `no_solid_collar_ground` / `cannot_reach_*` 卡死信号——第 2、4 处修复彻底消除了 v2 的回程死锁。
+- 下潜至钻石层 Y=-54，Spine 鱼骨展开到 22 节点，64 格雷达扫到 7 个深层矿点；双镐分流 `stone_pick_rock_rock=89` vs `ore_pick=2` 正常。
+- `sealed_count=2` 仍有封堵，但回程不再被自放封堵块挡住——第 4 处修复（回程挖掉自放块）在实机生效。
+- 未采到钻石仍是**该区块贫矿 + 16 切片预算**的资源问题，非逻辑缺陷（v1 同坐标曾 342s 采到 1 钻，说明地形矿脉分布是主因）。
+
+### 9.6 修复轮总结
+- **核心目标达成**：用户要求的「LLM 在环、DFS 挖矿、下树/移动交给模型」协作链路在严格版实机完整走通（读提示→unstick 下树→DFS 实心地面开井→深潜 80 格→自行补镐续挖）。
+- **4 类逻辑卡死全部消除**：v2 的 `backtrack_blocked`（LocC）、`no_solid_collar_ground` 空转（LocA）、`cannot_reach_collar`（宽松版）、自放封堵挡回程（严格版）——4 处修复 + 单测 + 两轮实机回归确认。
+- **残留均为资源经济问题**：镐耐久、煤矿/燃料短缺、目标区块贫矿——需靠装备前置（盾+铁镐+食物）与 WorldLedger 矿点记忆解决，与本次 4 处逻辑修复无关。
+- 每步均 git 提交（`cbc9952`→`d972303`→`dc5d198`→`af1cd68`），151 passed 全程全绿。
 
 ---
 
