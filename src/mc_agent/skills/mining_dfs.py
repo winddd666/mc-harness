@@ -2954,7 +2954,11 @@ class MiningDFSEngine:
                         "ok": False,
                         "requires_replan": True,
                         "stop_reason": anchor_err,
-                        "message": "当前脚下为树冠/悬空地形且周围 20 格未找到安全实心地面开井点，请先 mc_move_to 平移至实心陆地后再探索。",
+                        "message": (
+                            "当前脚下为树冠/悬空地形，DFS 无法开井（周围 20 格无安全实心地面）。"
+                            "请先脱离树冠：用 mc_skill_staircase(vertical='down') 或 mc_skill_unstick 向下挖到实心地面，"
+                            "必要时用 mc_move_to 平移到开阔实心陆地，确认脚下为草地/石头后再调用 mc_skill_mine_dfs 重新开井。"
+                        ),
                         "pos_before": st0.get("pos"),
                         "pos_after": self.bot.status().get("pos"),
                         "tree": self.snapshot(),
@@ -3155,6 +3159,22 @@ class MiningDFSEngine:
                     break
                 ok_bt, err_bt = self._walk_waypoints(node.edge_from_parent.waypoints, reverse=True, min_hp_ref=min_hp_ref)
                 if not ok_bt:
+                    # Backtrack path blocked by self-placed seal/bridge or cave-in. Instead of a
+                    # hard stop (which used to spin for the whole slice on repeated calls), archive
+                    # this shaft and try one fresh Collar relocation. Mirrors the shaft_exhausted
+                    # recovery above so a single blocked waypoint cannot deadlock the whole mine.
+                    self._archive_current_shaft_to_ledger(mark_exhausted=False)
+                    if auto_relocations_this_slice < 1 and time.monotonic() + 8.0 < deadline:
+                        auto_relocations_this_slice += 1
+                        cur_now = _floor_pos(self.bot.status()["pos"])
+                        self._clear_active_tree_only()
+                        new_site = self._relocate_to_fresh_collar_site(
+                            cur_now, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
+                        )
+                        new_dirs = self._probe_collar_dirs(new_site, geofence=geofence)
+                        if new_site != cur_now and new_dirs:
+                            self._init_collar(new_site, target_y=self.target_y, geofence=geofence, viable_dirs=new_dirs)
+                            continue
                     stop_reason = err_bt or "backtrack_failed"
                     break
                 self.active_node_id = node.parent_id
