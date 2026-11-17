@@ -241,6 +241,8 @@ SCAN_BAND = 3  # |anchor.y - target_y| <= SCAN_BAND counts as "in target band"
 SPINE_DESCEND_MIN_DELTA = 4
 # Craft a burner stone pickaxe below this total durability so the iron pick stays for ore.
 RECRAFT_PICK_DURABILITY = 100
+# Main DFS loop is deadline-bounded; bail out after this many iterations with zero progress.
+MAX_IDLE_ITERATIONS = 4
 EXHAUSTED_COLLAR_MIN_SEP = 14.0
 UNREACHABLE_ORE_COOLDOWN_S = 300.0
 
@@ -3652,6 +3654,24 @@ class MiningDFSEngine:
                         )
                     )
                     break
+            else:
+                # Symmetric case: the shaft overshot below target_y (e.g. diamond layer -> iron layer).
+                # Without a stair_up the skeleton would stay buried and never reach the requested layer.
+                rise = self.target_y - anchor[1]
+                if rise > SPINE_DESCEND_MIN_DELTA:
+                    for d in (forward_dir, left_d, right_d):
+                        dx, dz = DIRECTIONS[d]
+                        if self._geofence_blocked(geofence, anchor[0] + dx * 3, anchor[2] + dz * 3, action="mine_dfs_spine_climb") is not None:
+                            continue
+                        out_fb.append(
+                            BranchSpec(
+                                kind="stair_up",
+                                direction=d,
+                                steps=min(16, max(3, rise)),
+                                branch_target_y=self.target_y,
+                            )
+                        )
+                        break
             for kind, d, ln in raw_specs:
                 dx, dz = DIRECTIONS[d]
                 if self._geofence_blocked(geofence, anchor[0] + dx * ln, anchor[2] + dz * ln, action="mine_dfs_spine") is not None:
@@ -4069,7 +4089,44 @@ class MiningDFSEngine:
                 break
 
         # Priority 2: main DFS loop
+        idle_streak = 0
+        last_excavated = len(self.excavated_positions)
+        last_node_count = len(self.nodes)
+        last_active_node = self.active_node_id
         while stop_reason != "quota_reached" and time.monotonic() < deadline:
+            # Spin guard: this loop is deadline-bounded only, so an iteration that neither
+            # excavates, nor grows the tree, nor switches nodes would burn the whole slice
+            # doing nothing (observed live as a 32s no-op call).
+            if (
+                len(self.excavated_positions) == last_excavated
+                and len(self.nodes) == last_node_count
+                and self.active_node_id == last_active_node
+            ):
+                idle_streak += 1
+                if idle_streak >= MAX_IDLE_ITERATIONS:
+                    idle_streak = 0
+                    # Stuck tree: try one in-slice relocation to a fresh collar before giving up,
+                    # otherwise the next LLM round would hit the same dead end again.
+                    if auto_relocations_this_slice < 1 and time.monotonic() + 8.0 < deadline:
+                        auto_relocations_this_slice += 1
+                        self._archive_current_shaft_to_ledger(mark_exhausted=True)
+                        self._clear_active_tree_only()
+                        cur_now = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])
+                        new_site = self._relocate_to_fresh_collar_site(
+                            cur_now, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
+                        )
+                        new_dirs = self._probe_collar_dirs(new_site, geofence=geofence)
+                        if new_site != cur_now and new_dirs:
+                            self._init_collar(new_site, target_y=self.target_y, geofence=geofence, viable_dirs=new_dirs)
+                            continue
+                    stop_reason = "no_progress"
+                    break
+            else:
+                idle_streak = 0
+            last_excavated = len(self.excavated_positions)
+            last_node_count = len(self.nodes)
+            last_active_node = self.active_node_id
+
             if self.active_node_id is None or self.active_node_id not in self.nodes:
                 stop_reason = "shaft_exhausted"
                 break
@@ -4545,6 +4602,11 @@ class MiningDFSEngine:
             out_res["returned_to_collar_for_resupply"] = True
         if stop_reason == "pickaxe_low":
             out_res["message"] = _pickaxe_low_hint(counts_after)
+        if stop_reason == "no_progress":
+            out_res["message"] = (
+                "在原地连续多次既没挖到方块也没推进矿井节点（可能卡在死胡同反复重试），已提前结束本轮而不是空耗时间。"
+                "建议直接 mc_skill_mine_dfs(action='reset') 换点，或换目标层（如先 target='iron'）再继续。"
+            )
         if stop_reason == "shaft_exhausted":
             out_res["message"] = "当前矿井分支与偏移重试均已穷尽；下次调用 reset 或 explore 将换点重开，建议先用 mc_move_to 移动 16 格以上到新区域。"
         return out_res

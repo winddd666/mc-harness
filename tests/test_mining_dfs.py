@@ -1118,7 +1118,7 @@ def test_zero_displacement_stair_down_never_spins_duplicate_spine_nodes() -> Non
         skills = MacroSkills(bot)
         res = skills.mine_dfs(target="iron", goal_count=2, target_y=16, strategy="radar", max_duration_s=10.0)
 
-    assert res["stop_reason"] == "shaft_exhausted"
+    assert res["stop_reason"] in {"shaft_exhausted", "no_progress"}
     # Node count must remain tiny (never exploding to hundreds/thousands of duplicate Spine nodes)
     assert res["tree"]["node_count"] <= 16
     anchors = [tuple(n["anchor"]) for n in res["tree"]["nodes"]]
@@ -1299,6 +1299,26 @@ def test_fishbone_spine_descends_when_target_deepened() -> None:
             # tiny depth differences are ignored to avoid needless vertical churn
             eng.target_y = 16 - SPINE_DESCEND_MIN_DELTA
             assert "stair_down" not in [b.kind for b in eng._spine_branches("north", anchor, geofence=None)]
+
+
+def test_fishbone_spine_climbs_when_target_raised() -> None:
+    """Symmetric gap: a shaft that overshot below target_y must be able to stair_up back to it."""
+    world = _MockMineWorld(start_pos=(0.5, 80.0, 0.5), surface_y=80)
+    with BotSession("tok", bot_username="ClimbBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng._refresh_strategy("fishbone")
+
+        anchor = (0, -54, 0)
+        eng.target_y = -54
+        assert not [b for b in eng._spine_branches("north", anchor, geofence=None) if b.kind == "stair_up"]
+
+        # diamond layer -> iron layer: must climb, otherwise the skeleton stays buried forever
+        eng.target_y = 16
+        deep = eng._spine_branches("north", anchor, geofence=None)
+        assert deep[0].kind == "stair_up"
+        assert deep[0].branch_target_y == 16
+        assert 0 < deep[0].steps <= 16
+        assert deep[0].steps <= 16 - anchor[1]
 
 
 def test_fishbone_transit_keeps_bonus_wall_ores() -> None:
