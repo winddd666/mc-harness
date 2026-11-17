@@ -318,6 +318,22 @@ Collar @ [1955,23,-2813]  根节点
 
 ---
 
+## 10. 三起点固定补给测试（LLM+DFS，32 原木 + 2 石镐 + 1 工作台）
+
+> 用户追加：给 3 个距离较远的起点**相同配置**（32 原木 / 2 石镐 / 1 工作台），沿用已验证的 LLM+DFS 策略（DFS 唯一挖矿原语、下树/移动交给模型），任务仅「挖到钻石」。
+
+### 10.1 实验设置
+- 起点（互不相同的远距离自然区块）：kitD `(5120,-3584)`、kitE `(-4608,3072)`、kitF `(2048,4480)`。
+- 补给：`32× oak_log + 2× stone_pickaxe + 1× crafting_table`（+ 饱和/瞬回效果排除饥饿噪声）。原木旨在验证「充足木料能否打通补镐/燃料/工作台链」。
+- 工具门控：DFS 唯一采矿原语；staircase/unstick/move_to 开放给模型下树与移动；屏蔽 mine_blocks/tunnel/mc_dig/harvest_logs。
+- 预算：每点 40 轮 / 8 分钟；驱动 `/tmp/opencode/llm_dfs_multi.py` + worker `/tmp/opencode/llm_dfs_single.py`，顺序执行。
+
+### 10.2 结果（运行中，待补）
+
+（结果待补）
+
+---
+
 ## 附录 A：复现命令
 ```bash
 cd /home/xzq/projects/mc
