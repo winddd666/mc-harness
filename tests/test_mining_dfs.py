@@ -1629,3 +1629,24 @@ def test_three_fluid_aborts_mark_shaft_as_water_trap() -> None:
         # a real setback like hurt resets the streak
         assert eng._note_fluid_abort("hurt") is False
         assert eng.fluid_aborts == 0
+
+
+def test_entry_gate_recrafts_before_reporting_pickaxe_low(monkeypatch) -> None:
+    """No pickaxe at call entry must trigger an in-place recraft, not an immediate pickaxe_low bail."""
+    world = _MockMineWorld(
+        start_pos=(0.5, 20.0, 0.5),
+        surface_y=70,
+        inventory_items=[
+            {"name": "cobblestone", "count": 64, "slot": 10},
+            {"name": "oak_log", "count": 8, "slot": 11},
+        ],
+    )
+    with BotSession("tok", bot_username="GateBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        eng = skills.mining_dfs
+        calls = []
+        monkeypatch.setattr(skills, "craft_gear",
+                            lambda item, count=1, equip_slot=None: (calls.append(item) or {"ok": True}))
+        res = eng.run(target="iron", goal_count=1, target_y=16, action="explore", max_duration_s=5.0)
+    assert calls == ["stone_pickaxe"]          # recraft attempted at the gate
+    assert res.get("stop_reason") != "pickaxe_low" or calls

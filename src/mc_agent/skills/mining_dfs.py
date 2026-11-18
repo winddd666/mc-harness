@@ -4093,6 +4093,11 @@ class MiningDFSEngine:
 
         inv0, counts0 = _inventory_snapshot_and_counts(self.bot)
         picks0, max_tier0, total_rem0 = _pickaxe_inventory_summary(inv0)
+        if (not picks0 or total_rem0 <= 6) and self._try_recraft_burner_pickaxe(counts0):
+            # Entry gate used to bail out before any recraft attempt, which made the model walk back
+            # to the collar, find no tools there either, and loop (live: 3x returned_to_collar).
+            inv0, counts0 = _inventory_snapshot_and_counts(self.bot)
+            picks0, max_tier0, total_rem0 = _pickaxe_inventory_summary(inv0)
         if not picks0 or total_rem0 <= 6:
             return {
                 "ok": False,
