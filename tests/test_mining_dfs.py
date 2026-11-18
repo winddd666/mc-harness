@@ -1497,3 +1497,26 @@ def test_flee_hostiles_prefers_shaft_retreat_over_free_pathfinding(monkeypatch) 
 
     assert res["mode"] == "retreat_shaft"
     assert res["hops"] == 1
+
+
+def test_retreat_walls_off_threat_side_before_walking(monkeypatch) -> None:
+    """Being hit by an adjacent mob must seal the threat side first (walking away only trades hits)."""
+    world = _MockMineWorld(start_pos=(0.5, 30.0, 0.5), surface_y=30)
+    with BotSession("tok", bot_username="RetreatBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = _fake_shaft_engine(MacroSkills(bot).mining_dfs)
+        sealed: list[list] = []
+        monkeypatch.setattr(
+            eng, "_walk_waypoints",
+            lambda wps, reverse=False, min_hp_ref=None: (True, None),
+        )
+        monkeypatch.setattr(
+            eng, "_seal_breach",
+            lambda coords, cache, allow_corridor=False: (sealed.append(list(coords)) or [list(c) for c in coords]),
+        )
+        res = eng.retreat_into_shaft(max_hops=1, threat_pos=(0.5, 30.0, 12.5))
+
+    assert res["ok"] is True
+    wall = sealed[0]                      # first seal call is the threat-facing wall
+    assert len(wall) == 9                 # 3 columns x 3 high
+    assert all(c[2] == 1 for c in wall)   # +z side, i.e. toward the threat
+    assert res["sealed_first"] == 9

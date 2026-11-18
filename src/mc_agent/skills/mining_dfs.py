@@ -2965,12 +2965,30 @@ class MiningDFSEngine:
         self.recrafted_picks += 1
         return True
 
+    def _seal_toward_threat(
+        self,
+        pos: tuple[int, int, int],
+        threat_pos: tuple[float, float, float],
+    ) -> int:
+        """Wall off the corridor cell facing the threat so melee mobs lose line of sight."""
+        dx = float(threat_pos[0]) - float(pos[0])
+        dz = float(threat_pos[2]) - float(pos[2])
+        step = (1 if dx > 0 else -1, 0) if abs(dx) >= abs(dz) else (0, 1 if dz > 0 else -1)
+        if abs(dx) < 0.5 and abs(dz) < 0.5:
+            return 0
+        cols: list[tuple[int, int, int]] = []
+        for dy in (-1, 0, 1):
+            base = (pos[0] + step[0], pos[1] + dy, pos[2] + step[1])
+            cols.extend([(base[0], base[1] + k, base[2]) for k in (0, 1, 2)])
+        return len(self._seal_breach(cols, {}, allow_corridor=True))
+
     def retreat_into_shaft(
         self,
         *,
         min_hp_ref: list[float] | None = None,
         max_hops: int = 3,
         seal_behind: bool = True,
+        threat_pos: tuple[float, float, float] | None = None,
     ) -> dict[str, Any]:
         """Threat response that never leaves our own tunnel: back up the tree and seal the choke point.
 
@@ -2995,6 +3013,12 @@ class MiningDFSEngine:
         hp_ref = min_hp_ref if min_hp_ref is not None else [float(st.get("health") or 20.0)]
         hops = 0
         sealed = 0
+        # Break line of sight FIRST: against an adjacent mob, walking backwards while being hit
+        # just trades hits until death (observed live). Wall off the threat side, then retreat.
+        sealed_first = 0
+        if threat_pos is not None:
+            sealed_first = self._seal_toward_threat(pos, threat_pos)
+            sealed += sealed_first
         cur = self.nodes.get(self.active_node_id) if self.active_node_id is not None else None
         while hops < max(1, int(max_hops)) and cur is not None and cur.node_id != self.collar_node_id:
             parent = self.nodes.get(cur.parent_id) if cur.parent_id is not None else None
@@ -3020,6 +3044,7 @@ class MiningDFSEngine:
             "mode": "retreat_shaft",
             "structure": "carved_shaft",
             "hops": hops,
+            "sealed_first": sealed_first,
             "sealed": sealed,
             "pos_before": [round(float(v), 1) for v in pos],
             "pos_after": st_end.get("pos"),
