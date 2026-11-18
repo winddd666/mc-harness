@@ -41,11 +41,23 @@ class _GuardSession:
 
 
 class GenerationGuard:
-    def __init__(self, bot, events, *, checkpoint: Callable, interval_s: float = 0.75, geofence: Any | None = None):
+    def __init__(
+        self,
+        bot,
+        events,
+        *,
+        checkpoint: Callable,
+        interval_s: float = 0.75,
+        geofence: Any | None = None,
+        skills: Any | None = None,
+    ):
         self.bot = _GuardSession(bot, checkpoint)
         self.events = events
         self.interval_s = interval_s
         self.geofence = geofence
+        # Sharing the live MacroSkills instance lets reflexes see the MiningDFS shaft state
+        # (retreat along our own corridor) instead of a fresh, empty engine.
+        self.skills = skills
         self.last_poll = float("-inf")
         self.last_reaction = float("-inf")
         self.previous_health: float | None = None
@@ -54,6 +66,10 @@ class GenerationGuard:
         self.failures = 0
         self.disconnected = False
         self.stats = {"polls": 0, "incidents": 0, "actions": 0, "cancelled_generations": 0}
+
+    def _skills(self):
+        """Live MacroSkills (with MiningDFS shaft state) when wired, else a throwaway binding."""
+        return self.skills if self.skills is not None else MacroSkills(self.bot)
 
     def _action(self, name: str, operation: Callable) -> dict[str, Any]:
         started = time.monotonic()
@@ -154,7 +170,7 @@ class GenerationGuard:
         if needs_float:
             # Floating in place only delays drowning (live: 7 straight water_float reflexes, then
             # 10 drown ticks and death). Climb out onto dry land instead.
-            actions.append(self._action("escape_water", lambda: MacroSkills(self.bot).escape_water()))
+            actions.append(self._action("escape_water", lambda: self._skills().escape_water()))
         def _already(name: str) -> bool:
             return any(a.get("action") == name for a in actions)
 
@@ -163,7 +179,7 @@ class GenerationGuard:
             # branch requires dry land, and needs_float is false on shallow ground. Climb out first
             # (live: skeleton shot a bot stuck in shallow water down 4.3 -> 1.3 -> 0 hp).
             if not _already("escape_water"):
-                actions.append(self._action("escape_water", lambda: MacroSkills(self.bot).escape_water()))
+                actions.append(self._action("escape_water", lambda: self._skills().escape_water()))
         elif hurt and has_shield:
             attacker = (hurts[-1].get("source_entity") or hurts[-1].get("likely_attacker")) if hurts else status.get("nearest_hostile")
             if attacker and attacker.get("id") is not None:
@@ -177,7 +193,7 @@ class GenerationGuard:
             if hurt_src in IN_WALL_HURT_SOURCES:
                 # Suffocating inside a block: carve ourselves out instead of digging a bunker
                 # (a bunker needs a pickaxe, which a death may already have taken away).
-                actions.append(self._action("unstick_in_wall", lambda: MacroSkills(self.bot).unstick()))
+                actions.append(self._action("unstick_in_wall", lambda: self._skills().unstick()))
             else:
                 raw_dist = (attacker or status.get("nearest_hostile") or {}).get("dist", 99.0)
                 try:
@@ -190,13 +206,13 @@ class GenerationGuard:
                     or (nh_dist <= 4.5)
                 )
                 if not melee_or_airborne:
-                    bunker = self._action("emergency_bunker", lambda: MacroSkills(self.bot).dig_safety_bunker(urgent=True))
+                    bunker = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
                     actions.append(bunker)
                     if not bunker["ok"]:
                         actions.append(
                             self._action(
                                 "combat_or_flee",
-                                lambda: MacroSkills(self.bot).defend_or_flee(
+                                lambda: self._skills().defend_or_flee(
                                     attacker=attacker,
                                     counts=counts,
                                     health=health,
@@ -209,7 +225,7 @@ class GenerationGuard:
                     actions.append(
                         self._action(
                             "combat_or_flee",
-                            lambda: MacroSkills(self.bot).defend_or_flee(
+                            lambda: self._skills().defend_or_flee(
                                 attacker=attacker,
                                 counts=counts,
                                 health=health,

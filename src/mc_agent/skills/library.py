@@ -5114,6 +5114,14 @@ class MacroSkills:
                 "note": "当前位于封闭掩体/探矿穴内且周边怪物均被岩层阻隔（无视线接触），原地保留探矿穴，切勿弃坑逃跑。",
             }
 
+        # Skeleton/creeper at depth: never leave our own tunnel. Retreat along the recorded
+        # waypoints and seal the choke behind instead of free-pathfinding into open cave air.
+        eng = self._mining_dfs
+        if eng is not None and getattr(eng, "nodes", None):
+            retreat = eng.retreat_into_shaft(min_hp_ref=[float(st0.get("health") or 20.0)])
+            if retreat.get("ok"):
+                return retreat
+
         resolved_threat_pos: list[float] | None = None
         if isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3:
             resolved_threat_pos = [float(threat_pos[0]), float(threat_pos[1]), float(threat_pos[2])]

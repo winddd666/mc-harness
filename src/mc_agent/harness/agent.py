@@ -939,7 +939,11 @@ def run_mc_agent(
             messages[-1]["content"] = f"{messages[-1]['content']}\n[期间新事件] {compact_notable}"
         events.emit("mc.notable_events", call_id=call_id, text=compact_notable)
 
-    guard = GenerationGuard(bot, events, checkpoint=check_deadline, geofence=toolset.geofence) if survival_guard else None
+    guard = (
+        GenerationGuard(bot, events, checkpoint=check_deadline, geofence=toolset.geofence, skills=toolset.skills)
+        if survival_guard
+        else None
+    )
     budget_warned = False
     chat_owner = getattr(chat_fn, "__self__", None)
     global_thinking = bool(getattr(getattr(chat_owner, "spec", None), "enable_thinking", False))

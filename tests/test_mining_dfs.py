@@ -1421,3 +1421,79 @@ def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -
         monkeypatch.setattr(skills, "craft_gear", lambda *a, **k: {"ok": False, "error": "missing_ingredients"})
         assert eng._try_recraft_burner_pickaxe(counts) is False
         assert eng.recrafted_picks == 1
+
+
+def _fake_shaft_engine(eng):
+    """Attach a tiny 2-node shaft (collar -> spine) to a live engine for retreat tests."""
+    from mc_agent.skills.mining_dfs import ShaftEdge, ShaftNode
+
+    collar = ShaftNode(node_id=1, kind="collar", anchor=(0, 20, 0), parent_id=None,
+                       edge_from_parent=None, branches=[])
+    child = ShaftNode(node_id=2, kind="spine", anchor=(0, 30, 0), parent_id=1,
+                      edge_from_parent=ShaftEdge("stair_down", "south",
+                                                 [(0, 20, 0), (0, 25, 0), (0, 30, 0)]),
+                      branches=[])
+    eng.nodes = {1: collar, 2: child}
+    eng.collar_node_id = 1
+    eng.active_node_id = 2
+    eng.known_corridor_positions = {(0, 30, 0), (0, 25, 0), (0, 20, 0)}
+    return eng
+
+
+def test_retreat_into_shaft_walks_back_and_seals_behind(monkeypatch) -> None:
+    """Threat response must stay inside our own tunnel: back up one node and plug the choke."""
+    world = _MockMineWorld(start_pos=(0.5, 30.0, 0.5), surface_y=30)
+    with BotSession("tok", bot_username="RetreatBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = _fake_shaft_engine(MacroSkills(bot).mining_dfs)
+        walked: list[tuple[list, bool]] = []
+        sealed: list[list] = []
+        monkeypatch.setattr(
+            eng, "_walk_waypoints",
+            lambda wps, reverse=False, min_hp_ref=None: (walked.append((list(wps), reverse)) or (True, None)),
+        )
+        monkeypatch.setattr(
+            eng, "_seal_breach",
+            lambda coords, cache, allow_corridor=False: (sealed.append(list(coords)) or [list(c) for c in coords]),
+        )
+
+        res = eng.retreat_into_shaft(max_hops=1)
+
+    assert res["ok"] is True
+    assert res["mode"] == "retreat_shaft"
+    assert res["hops"] == 1
+    assert res["sealed"] == 3
+    assert eng.active_node_id == 1                    # handed back to the collar node
+    assert walked and walked[0][1] is True            # walked the edge in reverse
+    assert sealed and sealed[0] == [(0, 30, 0), (0, 31, 0), (0, 32, 0)]  # plugged the branch cross-section
+
+
+def test_retreat_into_shaft_refuses_when_not_inside_own_corridor() -> None:
+    """Standing in open cave air must NOT be treated as our shaft (caller falls back to flee)."""
+    world = _MockMineWorld(start_pos=(0.5, 30.0, 0.5), surface_y=30)
+    with BotSession("tok", bot_username="RetreatBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = _fake_shaft_engine(MacroSkills(bot).mining_dfs)
+        eng.known_corridor_positions = {(40, -20, 40)}
+        eng.nodes[1].anchor = (40, -20, 40)
+        eng.nodes[2].anchor = (45, -20, 40)
+        res = eng.retreat_into_shaft()
+    assert res["ok"] is False
+    assert res["reason"] == "not_in_shaft"
+
+
+def test_flee_hostiles_prefers_shaft_retreat_over_free_pathfinding(monkeypatch) -> None:
+    """flee_hostiles must route into the shaft retreat when the engine has a live tree."""
+    world = _MockMineWorld(start_pos=(0.5, 30.0, 0.5), surface_y=30)
+    with BotSession("tok", bot_username="RetreatBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+
+        class _StubEngine:
+            nodes = {1: object()}
+
+            def retreat_into_shaft(self, **kwargs):
+                return {"ok": True, "mode": "retreat_shaft", "hops": 1, "sealed": 2}
+
+        skills._mining_dfs = _StubEngine()
+        res = skills.flee_hostiles(distance=14.0)
+
+    assert res["mode"] == "retreat_shaft"
+    assert res["hops"] == 1

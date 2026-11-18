@@ -2965,6 +2965,72 @@ class MiningDFSEngine:
         self.recrafted_picks += 1
         return True
 
+    def retreat_into_shaft(
+        self,
+        *,
+        min_hp_ref: list[float] | None = None,
+        max_hops: int = 3,
+        seal_behind: bool = True,
+    ) -> dict[str, Any]:
+        """Threat response that never leaves our own tunnel: back up the tree and seal the choke point.
+
+        Skeleton mining only stays safe inside the corridor it carved. Free pathfinding flee at
+        depth tends to run into open cave air, so prefer retreating along recorded waypoints.
+        Returns ok=False when the bot is not inside its own shaft (caller should flee normally).
+        """
+        if not self.nodes or self.collar_node_id is None:
+            return {"ok": False, "mode": "retreat_shaft", "reason": "no_shaft"}
+        st = self.bot.status()
+        pos = _floor_pos(st.get("pos") or [0, 64, 0])
+        inside = any(
+            max(abs(pos[0] - c[0]), abs(pos[1] - c[1]), abs(pos[2] - c[2])) <= 1
+            for c in self.known_corridor_positions
+        ) or any(
+            max(abs(pos[0] - n.anchor[0]), abs(pos[1] - n.anchor[1]), abs(pos[2] - n.anchor[2])) <= 2
+            for n in self.nodes.values()
+        )
+        if not inside:
+            return {"ok": False, "mode": "retreat_shaft", "reason": "not_in_shaft", "pos": list(pos)}
+
+        hp_ref = min_hp_ref if min_hp_ref is not None else [float(st.get("health") or 20.0)]
+        hops = 0
+        sealed = 0
+        cur = self.nodes.get(self.active_node_id) if self.active_node_id is not None else None
+        while hops < max(1, int(max_hops)) and cur is not None and cur.node_id != self.collar_node_id:
+            parent = self.nodes.get(cur.parent_id) if cur.parent_id is not None else None
+            if parent is None:
+                break
+            ok_walk, err = self._walk_waypoints(
+                cur.edge_from_parent.waypoints, reverse=True, min_hp_ref=hp_ref
+            )
+            if not ok_walk:
+                if hops == 0:
+                    return {"ok": False, "mode": "retreat_shaft", "reason": err or "retreat_blocked", "pos": list(pos)}
+                break
+            self.active_node_id = parent.node_id
+            hops += 1
+            if seal_behind:
+                choke = [(cur.anchor[0], cur.anchor[1] + dy, cur.anchor[2]) for dy in (0, 1, 2)]
+                sealed += len(self._seal_breach(choke, {}, allow_corridor=True))
+            cur = parent
+
+        st_end = self.bot.status()
+        return {
+            "ok": hops > 0,
+            "mode": "retreat_shaft",
+            "structure": "carved_shaft",
+            "hops": hops,
+            "sealed": sealed,
+            "pos_before": [round(float(v), 1) for v in pos],
+            "pos_after": st_end.get("pos"),
+            "requires_replan": hops > 0,
+            "note": (
+                "沿自建巷道后退并封堵来路：始终留在鱼骨巷道内，不进入未知洞穴。"
+                if hops > 0
+                else "已在井口节点，无需继续后退。"
+            ),
+        }
+
     def _pickaxe_redline_threshold(self, cur_y: int, counts_now: dict[str, int]) -> int:
         if self.collar_node_id in self.nodes:
             collar_y = self.nodes[self.collar_node_id].anchor[1]
