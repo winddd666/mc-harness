@@ -791,6 +791,8 @@ class MiningDFSEngine:
         self.ever_seen_radar_ores: set[tuple[int, int, int]] = set()
         self.recrafted_picks: int = 0
         self.fluid_aborts: int = 0
+        # Set when a water/cave-trap shaft is abandoned while we are still deep underground.
+        self.fluid_abandoned_deep: bool = False
         self.locked_cluster: dict[str, Any] | None = None
         self._last_radar_anchor: tuple[int, int, int] | None = None
         self.sealed_positions: set[tuple[int, int, int]] = set()
@@ -892,6 +894,29 @@ class MiningDFSEngine:
             self.ledger.record_exhausted_collar(active_anc)
             if had_collar is None:
                 had_collar = active_anc
+
+        if had_collar is not None:
+            try:
+                st_chk = self.bot.status()
+                if st_chk.get("pos"):
+                    now_y = _floor_pos(st_chk["pos"])[1]
+                    if now_y <= had_collar[1] - 6:
+                        # Underground reset would orphan the tree with no surface anchor and no
+                        # shaft to climb (live s03: explore -> no_progress loop at y=8).
+                        return {
+                            "ok": False,
+                            "requires_replan": True,
+                            "action": "reset",
+                            "strategy": self.strategy,
+                            "stop_reason": "reset_needs_surface",
+                            "message": (
+                                f"你当前在 y={now_y}，距井口 (y={had_collar[1]}) 太远，不能就地重置。"
+                                "请先 action='return_collar' 返回地表，再重置或换点。"
+                            ),
+                            "tree": self.snapshot(),
+                        }
+            except (ApiError, ValueError, KeyError):
+                pass
 
         self._clear_active_tree_only()
         self.deferred_ores.clear()
@@ -3120,10 +3145,24 @@ class MiningDFSEngine:
         min_hp_ref: list[float],
         auto_relocations: int,
     ) -> tuple[bool, int]:
-        """Archive a water-logged shaft and open a fresh collar elsewhere."""
+        """Archive a water-logged shaft and open a fresh collar elsewhere.
+
+        Only works at surface level: from depth -50 the candidate scan finds no solid, dry
+        surface stand, so the caller is told to climb out first and reopen there.
+        """
+        cur_now = _floor_pos(self.bot.status()["pos"])
+        collar_y: int | None = None
+        if self.collar_node_id in self.nodes:
+            collar_y = self.nodes[self.collar_node_id].anchor[1]
+        if collar_y is not None and cur_now[1] <= collar_y - 6:
+            # Live s03: 3 cave breeches at y=8 -> relocation failed -> model reset the tree
+            # underground -> explore had no collar and spun on no_progress.
+            self.fluid_abandoned_deep = True
+            self._archive_current_shaft_to_ledger(mark_exhausted=True)
+            self._clear_active_tree_only()
+            return False, auto_relocations
         self._archive_current_shaft_to_ledger(mark_exhausted=True)
         if auto_relocations < 1 and time.monotonic() + 8.0 < deadline:
-            cur_now = _floor_pos(self.bot.status()["pos"])
             self._clear_active_tree_only()
             new_site = self._relocate_to_fresh_collar_site(
                 cur_now, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
@@ -3794,6 +3833,7 @@ class MiningDFSEngine:
         node = self._create_node(kind="collar", anchor=anchor, parent_id=None, edge_from_parent=None, branches=branches)
         self.collar_node_id = node.node_id
         self.fluid_aborts = 0
+        self.fluid_abandoned_deep = False
         return node
 
     def _spine_branches(self, forward_dir: str, anchor: tuple[int, int, int], geofence: Any) -> list[BranchSpec]:
@@ -4767,6 +4807,12 @@ class MiningDFSEngine:
             stop_reason = "quota_reached"
 
         returned_collar_on_low = False
+        if stop_reason == "shaft_exhausted" and self.fluid_abandoned_deep:
+            out_res["message"] = (
+                "本井连续遇到水/洞穴中止，已归档废弃；但你仍在地下深处。"
+                "请先调用 action='return_collar' 沿自建巷道返回地表（不要 action='reset'），"
+                "到地表后再次 explore 会自动在新井口重新开井。"
+            )
         if stop_reason == "pickaxe_low":
             returned_collar_on_low = self._maybe_return_collar_for_resupply(counts_after, min_hp_ref=min_hp_ref)
 

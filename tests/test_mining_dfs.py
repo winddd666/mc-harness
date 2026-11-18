@@ -1650,3 +1650,37 @@ def test_entry_gate_recrafts_before_reporting_pickaxe_low(monkeypatch) -> None:
         res = eng.run(target="iron", goal_count=1, target_y=16, action="explore", max_duration_s=5.0)
     assert calls == ["stone_pickaxe"]          # recraft attempted at the gate
     assert res.get("stop_reason") != "pickaxe_low" or calls
+
+
+def test_fluid_trap_deep_underground_does_not_try_surface_relocation() -> None:
+    """Live s03: 3 cave breeches at y=8 -> relocation found no surface stand -> orphaned tree."""
+    import time as _time
+
+    world = _MockMineWorld(start_pos=(0.5, 8.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="DeepBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        node = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                edge_from_parent=None, branches=[])
+        eng.collar_node_id = node.node_id
+        moved, auto = eng._force_relocate_on_fluid(
+            geofence=None, deadline=_time.monotonic() + 100.0,
+            min_hp_ref=[20.0], auto_relocations=0,
+        )
+    assert (moved, auto) == (False, 0)
+    assert eng.fluid_abandoned_deep is True
+    assert eng.collar_node_id is None                     # archived, must climb out first
+
+
+def test_reset_is_refused_while_deep_below_the_collar() -> None:
+    """Underground reset used to clear the tree with no surface anchor -> no_progress spin."""
+    world = _MockMineWorld(start_pos=(0.5, 8.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="DeepResetBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        node = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                edge_from_parent=None, branches=[])
+        eng.collar_node_id = node.node_id
+        res = eng.reset(geofence=None)
+        assert eng.collar_node_id == node.node_id        # tree kept intact
+    assert res["ok"] is False
+    assert res["stop_reason"] == "reset_needs_surface"
+    assert "return_collar" in res["message"]
