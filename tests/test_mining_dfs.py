@@ -1776,3 +1776,13 @@ def test_drop_reachability_requires_standing_next_to_the_ore() -> None:
         cache2 = dict(solid)
         cache2[(3, 16, 0)] = "air"
         assert eng._drop_cell_reachable((4, 16, 0), (2, 16, 0), cache2) is True
+
+
+def test_drowning_counts_toward_water_trap_abandonment() -> None:
+    """Live s12: 3 successful escapes still left fluid_aborts at 0, so the pool was never abandoned."""
+    world = _MockMineWorld(start_pos=(0.5, 17.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="WetBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        assert eng._note_fluid_abort("in_water") is False
+        assert eng._note_fluid_abort("fluid_or_bedrock") is False
+        assert eng._note_fluid_abort("in_water") is True     # 3rd water-related abort

@@ -255,6 +255,9 @@ IDLE_CALLS_BEFORE_RELOCATE = 3
 DROP_PICKUP_RADIUS_MANHATTAN = 2
 FLUID_ABORT_REASONS = frozenset({
     "fluid_or_bedrock", "unsafe_floor_or_cave", "falling_material_adjacent", "cave_breach_sealed",
+    # Drowning is the same hazard from the player's side (live s12: 3 escapes, still 0 counted,
+    # so the shaft was never marked as a water trap and the bot kept digging back into the pool).
+    "in_water",
 })
 EXHAUSTED_COLLAR_MIN_SEP = 14.0
 UNREACHABLE_ORE_COOLDOWN_S = 300.0
@@ -4235,6 +4238,22 @@ class MiningDFSEngine:
                     pass
                 st_w = self.bot.status()
                 if st_w.get("in_water"):
+                    if self._note_fluid_abort("in_water"):
+                        self._archive_current_shaft_to_ledger(mark_exhausted=True)
+                        self._clear_active_tree_only()
+                        return {
+                            "ok": False,
+                            "requires_replan": True,
+                            "action": act,
+                            "strategy": self.strategy,
+                            "stop_reason": "shaft_exhausted",
+                            "water_escape": esc,
+                            "message": (
+                                "这口井已连续 3 次因溺水/水患中止，判定为水淹矿井并归档。"
+                                + self._surface_climb_hint()
+                            ),
+                            "tree": self.snapshot(),
+                        }
                     return {
                         "ok": False,
                         "requires_replan": True,
