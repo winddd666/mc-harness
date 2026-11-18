@@ -5980,3 +5980,18 @@ class MacroSkills:
             max_duration_s=max_duration_s,
             strategy=strategy,
         )
+
+    def ensure_items(
+        self,
+        targets: dict[str, int] | list[dict[str, Any]],
+        *,
+        max_duration_s: float = 180.0,
+        equip_slots: dict[str, str] | None = None,
+        geofence: Any = None,
+        stop_check: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Deterministically resolve objective vanilla recipes, smelting, and harvest tiers with 0 LLM calls."""
+        from .ensure import PhysicalPrerequisiteResolver
+
+        resolver = PhysicalPrerequisiteResolver(self, geofence=geofence, stop_check=stop_check)
+        return resolver.ensure_items(targets, max_duration_s=max_duration_s, equip_slots=equip_slots)

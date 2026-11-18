@@ -794,6 +794,7 @@ def run_mc_agent(
     geofence: VoidGeofence | None = None,
     target_advancement: str | None = None,
     system_prompt_override: str | None = None,
+    toolset: McToolset | None = None,
 ) -> dict:
     """基于 nano-agent 有界循环驱动单个 Minecraft Bot 完成任务。"""
     if max_calls < 1:
@@ -828,17 +829,25 @@ def run_mc_agent(
         check_deadline()
         return False
 
-    toolset = McToolset(
-        bot,
-        geofence=geofence,
-        wait_for_cooldown=True,
-        stop_check=_safe_stop_check,
-        on_cooldown_wait=lambda reason, wait_s: events.emit(
-            "bot.cooldown_wait",
-            reason=reason,
-            wait_s=round(wait_s, 1),
-        ),
-    )
+    def _on_cd_wait(reason: str, wait_s: float) -> None:
+        events.emit("bot.cooldown_wait", reason=reason, wait_s=round(wait_s, 1))
+
+    owns_toolset = toolset is None
+    if toolset is None:
+        toolset = McToolset(
+            bot,
+            geofence=geofence,
+            wait_for_cooldown=True,
+            stop_check=_safe_stop_check,
+            on_cooldown_wait=_on_cd_wait,
+        )
+    else:
+        toolset.rebind_runtime_hooks(
+            geofence=geofence,
+            wait_for_cooldown=True,
+            stop_check=_safe_stop_check,
+            on_cooldown_wait=_on_cd_wait,
+        )
     if tool_profile == "compact":
         resolved_extras = (
             {str(t) for t in extra_tools}
@@ -1331,6 +1340,8 @@ def run_mc_agent(
                 item["status"] = "pending"
                 report["input_messages"].append(item)
                 events.emit("input.pending", input_id=item["id"], reason=report["status"])
+        if not owns_toolset:
+            toolset.rebind_runtime_hooks(stop_check=None, on_cooldown_wait=None)
         phase("finished")
         events.emit(
             "run.finished",
@@ -1390,8 +1401,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--curriculum", action="store_true", help="启用 RULES.md 8 小时计分课程自主循环")
     parser.add_argument("--curriculum-hours", type=float, default=8.0, help="课程总运行时长（小时，默认 8.0）")
-    parser.add_argument("--episode-max-calls", type=int, default=18, help="课程单局最大模型轮数（默认 18）")
-    parser.add_argument("--episode-timeout-s", type=float, default=420.0, help="课程单局超时秒数（默认 420）")
+    parser.add_argument("--episode-max-calls", type=int, default=None, help="固定覆盖单局最大模型轮数（省略则按目标档位 8~45 轮动态分配）")
+    parser.add_argument("--episode-timeout-s", type=float, default=None, help="固定覆盖单局超时秒数（省略则按目标档位 180~1800s 动态分配）")
+    parser.add_argument("--no-pre-ensure", action="store_true", help="关闭课程单局前的 0-LLM 物理硬前置自动备料")
+    parser.add_argument("--no-island-recon", action="store_true", help="关闭铁器成型后的单次有界地表环岛摸底")
     parser.add_argument("--island-center-x", type=float, default=None, help="虚空岛中心 X 坐标")
     parser.add_argument("--island-center-z", type=float, default=None, help="虚空岛中心 Z 坐标")
     parser.add_argument("--island-radius", type=float, default=None, help="虚空岛水平安全半径（>0 开启电子围栏）")
@@ -1484,6 +1497,8 @@ def main(argv: list[str] | None = None) -> int:
                     episode_timeout_s=args.episode_timeout_s,
                     tool_output_chars=args.tool_output_chars,
                     geofence=geofence,
+                    enable_pre_ensure=not args.no_pre_ensure,
+                    enable_island_recon=not args.no_island_recon,
                 )
                 summary = supervisor.run()
                 if args.disconnect_after:

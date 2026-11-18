@@ -136,6 +136,22 @@ class McToolset:
         self.skills = MacroSkills(bot)
         self.skills.world_memory = self.world_memory
 
+    def rebind_runtime_hooks(
+        self,
+        *,
+        geofence: VoidGeofence | None = None,
+        wait_for_cooldown: bool | None = None,
+        stop_check: Callable[[], bool] | None = None,
+        on_cooldown_wait: Callable[[str, float], None] | None = None,
+    ) -> None:
+        """Rebind per-episode timeout/cooldown callbacks on a persistent shared McToolset."""
+        if geofence is not None:
+            self.geofence = geofence
+        if wait_for_cooldown is not None:
+            self._wait_for_cooldown = bool(wait_for_cooldown)
+        self._stop_check = stop_check
+        self._on_cooldown_wait = on_cooldown_wait
+
     def _set_last_event_seq(self, seq: int) -> None:
         with self._state_lock:
             if seq > self._last_event_seq:
@@ -1564,6 +1580,21 @@ class McToolset:
         count = max(1, min(64, int(count)))
         return self._run_skill(lambda: self.skills.craft_gear(item=item, count=count, equip_slot=equip_slot))
 
+    def mc_skill_ensure_items(
+        self,
+        items: list[dict[str, Any]],
+        max_duration_s: int = 150,
+    ) -> str:
+        dur = max(10, min(600, int(max_duration_s)))
+        return self._run_skill(
+            lambda: self.skills.ensure_items(
+                items,
+                max_duration_s=float(dur),
+                geofence=self.geofence,
+                stop_check=self._stop_check,
+            )
+        )
+
     def mc_skill_mine_blocks(self, block_types: list[str], count: int = 3, radius: int = 32) -> str:
         count = max(1, min(32, int(count)))
         radius = max(4, min(64, int(radius)))
@@ -2284,6 +2315,16 @@ class McToolset:
                     handler=self.mc_skill_mine_dfs,
                     concurrency="exclusive",
                 ),
+                Tool(
+                    name="mc_skill_ensure_items",
+                    description="纯物理硬前置递归备料器（0策略门禁）：先查背包/穿戴与记忆库箱子库存，再按原版配方、熔炼与最低采集镐级自动递归砍树/挖石/DFS采矿/烧炼/合成；遇看脸掉落物或受击危险立即干净返回。",
+                    parameters={
+                        "items": Parameter("目标物品列表 [{item, count}]", kind="object_array"),
+                        "max_duration_s": Parameter("最大执行秒数，默认150", kind="integer", required=False),
+                    },
+                    handler=self.mc_skill_ensure_items,
+                    concurrency="exclusive",
+                ),
         ]
         if profile == "compact":
             allowed = set(COMPACT_CORE_TOOLS)
@@ -2341,6 +2382,7 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_skill_staircase": "阶梯升降",
     "mc_skill_tunnel": "水平矿道",
     "mc_skill_mine_dfs": "路径压缩探矿DFS/返井口",
+    "mc_skill_ensure_items": "递归备齐配方/烧炼/镐级材料",
 }
 
 _SELF_EVIDENT_PARAMS: frozenset[str] = frozenset(

@@ -94,12 +94,12 @@
 
 > **说明**：凡涉及硬/软前置边界、跨阶段状态流转、虚空岛空间巡航策略、互斥动作锁时序及双并发协调的模块，统一留在本区主攻把关。
 
-- [ ] **`[L3-Sched-1]` 课程持久单会话化与动态轮数预算**（[`src/mc_agent/harness/curriculum.py`](../src/mc_agent/harness/curriculum.py) & [`agent.py`](../src/mc_agent/harness/agent.py)）
-  - `CurriculumSupervisor` 全场共享唯一持久 `McToolset`（跨集保留 `WorldMemory` 与 `MiningDFS` 矿井树），按目标体量动态分配轮数上限（短交互 8 轮 / 深潜与下界 35~40 轮）。
-- [ ] **`[L3-Sched-2]` 独立 `ensure_items` 0-LLM 物理硬前置递归器**（新增 `src/mc_agent/skills/ensure.py`）
-  - **仅编码客观原版配方与工具等级硬定律**（绝不掺杂主观软前置门禁；闲置富余材料可顺手整备但不卡主线），自动递归跑通基础材料链并在切片间调 `check_and_stabilize` 保障生存续跑。
-- [ ] **`[L3-Sched-3]` `select_next_target` 联动 `WorldMemory` + 套餐合并 + 环岛摸底**（[`src/mc_agent/harness/curriculum.py`](../src/mc_agent/harness/curriculum.py)）
-  - 合并同层矿井需求套餐（如深层一次备齐钻靴+钻镐+附魔台）；看脸支线（`trade`/`lava_bucket`/`breed_an_animal`）绑定 `WorldMemory` 探明后解锁提权；铁器成型后执行一次圆形虚空岛环岛侦察。
+- [x] **`[L3-Sched-1]` 课程持久单会话化与动态轮数预算**（[`src/mc_agent/harness/curriculum.py`](../src/mc_agent/harness/curriculum.py) & [`agent.py`](../src/mc_agent/harness/agent.py)）
+  - `CurriculumSupervisor` 全场共享唯一持久 `McToolset`（跨集保留 `WorldMemory` 与 `MiningDFS` 矿井树），按 `micro/short/medium/deep/expedition` 5 档动态分配 `8~45` 轮与 `180~1800s` 预算，并对真实钻石/黑曜石/区块增量实行免 Strike 保护。
+- [x] **`[L3-Sched-2]` 独立 `ensure_items` 0-LLM 物理硬前置递归器**（[`src/mc_agent/skills/ensure.py`](../src/mc_agent/skills/ensure.py)）
+  - **仅编码客观原版配方、熔炼对与采集镐级硬定律**（0 主观软门禁），优先计入副手/护甲与 `WorldMemory` 基地仓箱提货、自动走回 28m 内既有熔炉/工作台复用，并在步间调用 `check_and_stabilize` 守护生存、遇看脸材料或近敌受击立即干净交回。
+- [x] **`[L3-Sched-3]` `select_next_target` 联动 `WorldMemory` + 套餐合并 + 环岛摸底**（[`src/mc_agent/harness/curriculum.py`](../src/mc_agent/harness/curriculum.py)）
+  - 联合盘点背包+穿戴+`WorldMemory.containers` 库存并注入取箱提示；`Y=-54` 钻石套餐支持先合 `diamond_boots` 锁 75 分再同层顺采钻镐/附魔台钻料；`trade`/`lava_bucket`/`form_obsidian`/`sleep_in_bed`/`breed_an_animal` 绑定 `WorldMemory` 探明后动态提权；铁器成型支持单次有界地表环岛摸底。
 - [ ] **`[L3-Explore]` 基地自动归仓策略与虚空岛广域巡航开图技能**（[`src/mc_agent/skills/library.py`](../src/mc_agent/skills/library.py) & [`world_memory.py`](../src/mc_agent/harness/world_memory.py)）
   - 包满/远征前返 `home` 分类归仓与提货；结合 `unexplored_directions` 与 `VoidGeofence` 安全边界的环岛开图巡航。
 - [ ] **`[L3-Router]` 按场景动态裁剪工具集 `SceneRouter`（延后储备）**
