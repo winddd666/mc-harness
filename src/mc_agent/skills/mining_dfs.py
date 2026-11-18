@@ -245,6 +245,11 @@ RECRAFT_PICK_DURABILITY = 100
 MAX_IDLE_ITERATIONS = 4
 # Also bail when a whole stretch of wall clock passes with zero progress (slow APIs).
 MAX_IDLE_SECONDS = 20.0
+# Three consecutive fluid/hazard aborts on one shaft means an aquifer/cave field: relocate.
+FLUID_ABORT_LIMIT = 3
+FLUID_ABORT_REASONS = frozenset({
+    "fluid_or_bedrock", "unsafe_floor_or_cave", "falling_material_adjacent", "cave_breach_sealed",
+})
 EXHAUSTED_COLLAR_MIN_SEP = 14.0
 UNREACHABLE_ORE_COOLDOWN_S = 300.0
 
@@ -785,6 +790,7 @@ class MiningDFSEngine:
         self.radar_targets: list[tuple[int, int, int]] = []
         self.ever_seen_radar_ores: set[tuple[int, int, int]] = set()
         self.recrafted_picks: int = 0
+        self.fluid_aborts: int = 0
         self.locked_cluster: dict[str, Any] | None = None
         self._last_radar_anchor: tuple[int, int, int] | None = None
         self.sealed_positions: set[tuple[int, int, int]] = set()
@@ -3016,6 +3022,20 @@ class MiningDFSEngine:
             cols.extend([(base[0], base[1] + k, base[2]) for k in (0, 1, 2)])
         return len(self._seal_breach(cols, {}, allow_corridor=True))
 
+    def is_inside_shaft(self, pos: tuple[int, int, int] | None = None) -> bool:
+        """True when the bot stands in its own carved works (corridor, vein pocket or node)."""
+        if pos is None:
+            st = self.bot.status()
+            pos = _floor_pos(st.get("pos") or [0, 64, 0])
+        for group in (self.known_corridor_positions, self.excavated_positions):
+            for c in group:
+                if max(abs(pos[0] - c[0]), abs(pos[1] - c[1]), abs(pos[2] - c[2])) <= 1:
+                    return True
+        for n in self.nodes.values():
+            if max(abs(pos[0] - n.anchor[0]), abs(pos[1] - n.anchor[1]), abs(pos[2] - n.anchor[2])) <= 2:
+                return True
+        return False
+
     def retreat_into_shaft(
         self,
         *,
@@ -3034,17 +3054,7 @@ class MiningDFSEngine:
             return {"ok": False, "mode": "retreat_shaft", "reason": "no_shaft"}
         st = self.bot.status()
         pos = _floor_pos(st.get("pos") or [0, 64, 0])
-        inside = any(
-            max(abs(pos[0] - c[0]), abs(pos[1] - c[1]), abs(pos[2] - c[2])) <= 1
-            for c in self.known_corridor_positions
-        ) or any(
-            # Vein pockets are excavated but not on the corridor centerline; they are still ours.
-            max(abs(pos[0] - c[0]), abs(pos[1] - c[1]), abs(pos[2] - c[2])) <= 1
-            for c in self.excavated_positions
-        ) or any(
-            max(abs(pos[0] - n.anchor[0]), abs(pos[1] - n.anchor[1]), abs(pos[2] - n.anchor[2])) <= 2
-            for n in self.nodes.values()
-        )
+        inside = self.is_inside_shaft(pos)
         if not inside:
             return {"ok": False, "mode": "retreat_shaft", "reason": "not_in_shaft", "pos": list(pos)}
 
@@ -3093,6 +3103,36 @@ class MiningDFSEngine:
                 else "已在井口节点，无需继续后退。"
             ),
         }
+
+    def _note_fluid_abort(self, reason: str) -> bool:
+        """Count aquifer/hazard aborts; True once this shaft looks like a water/cave trap."""
+        if reason in FLUID_ABORT_REASONS:
+            self.fluid_aborts += 1
+        elif reason not in {"time_slice", "completed", "reached_target_y"}:
+            self.fluid_aborts = 0
+        return self.fluid_aborts >= FLUID_ABORT_LIMIT
+
+    def _force_relocate_on_fluid(
+        self,
+        *,
+        geofence: Any,
+        deadline: float,
+        min_hp_ref: list[float],
+        auto_relocations: int,
+    ) -> tuple[bool, int]:
+        """Archive a water-logged shaft and open a fresh collar elsewhere."""
+        self._archive_current_shaft_to_ledger(mark_exhausted=True)
+        if auto_relocations < 1 and time.monotonic() + 8.0 < deadline:
+            cur_now = _floor_pos(self.bot.status()["pos"])
+            self._clear_active_tree_only()
+            new_site = self._relocate_to_fresh_collar_site(
+                cur_now, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
+            )
+            new_dirs = self._probe_collar_dirs(new_site, geofence=geofence)
+            if new_site != cur_now and new_dirs:
+                self._init_collar(new_site, target_y=self.target_y, geofence=geofence, viable_dirs=new_dirs)
+                return True, auto_relocations + 1
+        return False, auto_relocations
 
     def _pickaxe_redline_threshold(self, cur_y: int, counts_now: dict[str, int]) -> int:
         if self.collar_node_id in self.nodes:
@@ -3753,6 +3793,7 @@ class MiningDFSEngine:
             branches.append(BranchSpec(kind="stair_down", direction="north", steps=depth, branch_target_y=eff_y))
         node = self._create_node(kind="collar", anchor=anchor, parent_id=None, edge_from_parent=None, branches=branches)
         self.collar_node_id = node.node_id
+        self.fluid_aborts = 0
         return node
 
     def _spine_branches(self, forward_dir: str, anchor: tuple[int, int, int], geofence: Any) -> list[BranchSpec]:
@@ -4470,6 +4511,18 @@ class MiningDFSEngine:
                 end_anchor = tuple(edge_res["end_anchor"])
                 reached_band = (end_anchor[1] >= eff_y - 1) if is_up else (end_anchor[1] <= eff_y + 2)
 
+                if self._note_fluid_abort(er):
+                    next_branch.status = "pruned"
+                    next_branch.prune_reason = er
+                    moved, auto_relocations_this_slice = self._force_relocate_on_fluid(
+                        geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref,
+                        auto_relocations=auto_relocations_this_slice,
+                    )
+                    if moved:
+                        continue
+                    stop_reason = "shaft_exhausted"
+                    break
+
                 if er == "quota_reached":
                     next_branch.status = "completed"
                     if steps_done > 0 and end_anchor != node.anchor:
@@ -4605,6 +4658,18 @@ class MiningDFSEngine:
                 catch_placed += int(edge_res["catch_placed"])
                 deferred_added += int(edge_res["deferred_added"])
                 mined_ores.extend(edge_res["mined_ores"])
+
+                if self._note_fluid_abort(er):
+                    next_branch.status = "pruned"
+                    next_branch.prune_reason = er
+                    moved, auto_relocations_this_slice = self._force_relocate_on_fluid(
+                        geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref,
+                        auto_relocations=auto_relocations_this_slice,
+                    )
+                    if moved:
+                        continue
+                    stop_reason = "shaft_exhausted"
+                    break
 
                 if er == "quota_reached":
                     next_branch.status = "completed"

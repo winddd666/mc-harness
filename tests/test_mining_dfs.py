@@ -822,7 +822,7 @@ def test_mining_dfs_64_block_radar_steers_spine_toward_distant_diamond() -> None
 
     with BotSession("tok", bot_username="Miner", transport=httpx.MockTransport(world.handler)) as bot:
         skills = MacroSkills(bot)
-        res = skills.mine_dfs(target="diamond", goal_count=1, target_y=-54, max_duration_s=25.0)
+        res = skills.mine_dfs(target="diamond", goal_count=1, target_y=-54, max_duration_s=25.0, strategy="radar")
 
     assert res["ok"] is True
     assert res["stop_reason"] == "quota_reached"
@@ -940,6 +940,8 @@ def test_dual_strategy_fishbone_ignores_distant_cave_while_radar_triages_hostile
     monkeypatch: Any,
 ) -> None:
     """Compare `fishbone` vs `v5` (bug-fixed v4) vs `radar` (with hostile triage + LocC-v4 surgical parapet)."""
+    monkeypatch.delenv("MC_DFS_STRATEGY", raising=False)
+    assert normalize_dfs_strategy(None) == "fishbone_scan"
     monkeypatch.setenv("MC_DFS_STRATEGY", "fishbone")
     assert normalize_dfs_strategy(None) == "fishbone"
     monkeypatch.setenv("MC_DFS_STRATEGY", "v5")
@@ -1610,3 +1612,20 @@ def test_restore_skips_shaft_saved_for_a_different_target_layer() -> None:
         eng.target_y = 16
         assert eng._try_restore_saved_shaft((0, 20, 0), min_hp_ref=[20.0]) is False
         assert not eng.nodes
+
+
+def test_three_fluid_aborts_mark_shaft_as_water_trap() -> None:
+    """Aquifers used to cost whole runs (6 drown deaths): 3 hazard aborts must force a new shaft."""
+    world = _MockMineWorld(start_pos=(0.5, 40.0, 0.5), surface_y=40)
+    with BotSession("tok", bot_username="WaterBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        assert eng._note_fluid_abort("fluid_or_bedrock") is False
+        assert eng._note_fluid_abort("unsafe_floor_or_cave") is False
+        assert eng._note_fluid_abort("fluid_or_bedrock") is True        # 3rd hazard abort
+
+        eng.fluid_aborts = 2
+        # neutral outcomes keep the streak (still exploring the same wet layer)
+        assert eng._note_fluid_abort("completed") is False
+        # a real setback like hurt resets the streak
+        assert eng._note_fluid_abort("hurt") is False
+        assert eng.fluid_aborts == 0
