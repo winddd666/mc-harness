@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import threading
+import time
 from typing import Any, Callable
 
 import httpx
@@ -33,6 +34,30 @@ from ..skills.safety import SAFE_FOOD_PRIORITY
 from .geofence import VoidGeofence
 from .tool_registry import Parameter, Tool, ToolRegistry
 from .world_memory import WorldMemory, default_memory_path_for_bot
+
+_BED_BLOCK_TYPES: tuple[str, ...] = tuple(
+    f"{color}_bed"
+    for color in (
+        "white", "orange", "magenta", "light_blue", "yellow", "lime",
+        "pink", "gray", "light_gray", "cyan", "purple", "blue",
+        "brown", "green", "red", "black",
+    )
+)
+
+
+def _normalize_find_block_types(types: list[str] | tuple[str, ...]) -> list[str]:
+    """Expand common colloquial block aliases; APIs reject unknown IDs like `bed`."""
+    out: list[str] = []
+    for raw in types:
+        name = str(raw).removeprefix("minecraft:").strip().lower()
+        if not name:
+            continue
+        if name in {"bed", "beds"}:
+            out.extend(_BED_BLOCK_TYPES)
+        else:
+            out.append(name)
+    return list(dict.fromkeys(out))
+
 
 COMPACT_CORE_TOOLS: tuple[str, ...] = (
     "mc_find_blocks",
@@ -378,7 +403,22 @@ class McToolset:
             except httpx.HTTPError as retry_http_exc:
                 raise RuntimeError(f"MC API 网络请求异常（{type(retry_http_exc).__name__}）：{retry_http_exc}") from None
         except httpx.HTTPError as exc:
-            raise RuntimeError(f"MC API 网络请求异常（{type(exc).__name__}）：{exc}") from None
+            # A timed-out action may still be running server-side. Recover the
+            # quarantined session and retry the same request once.
+            try:
+                self._reconnect_once(quarantined=True)
+                result = self.bot.call(path, body, method=method)
+            except (AuthError, DeathLoopCooldownError) as re_exc:
+                raise RuntimeError(f"MC API 会话不可继续：{re_exc}") from None
+            except BotNotReadyError:
+                return self._format_api_error(path, body or {}, exc)
+            except ApiError as retry_exc:
+                self.update_block_pos(retry_exc.context.get("pos") or retry_exc.context.get("from"))
+                return self._format_api_error(path, body or {}, retry_exc)
+            except httpx.HTTPError as retry_http_exc:
+                raise RuntimeError(
+                    f"MC API 网络请求异常（{type(retry_http_exc).__name__}）：{retry_http_exc}"
+                ) from None
 
         if path == "status" and isinstance(result, dict):
             self._update_status_cache(result)
@@ -529,6 +569,7 @@ class McToolset:
         limit = max(1, min(60, limit))
         payload: dict[str, Any] = {"radius": radius, "limit": limit}
         if types:
+            types = _normalize_find_block_types(types)
             payload["types"] = types
         if mature is not None:
             norm_types = [str(t).removeprefix("minecraft:").strip().lower() for t in (types or [])]
@@ -777,14 +818,7 @@ class McToolset:
     ) -> str:
         range = max(0.2, min(16.0, float(range)))
         payload: dict[str, Any] = {"range": range}
-        if entity_id is not None:
-            payload["entity_id"] = entity_id
-        else:
-            if x is None or z is None:
-                return json.dumps(
-                    {"ok": False, "error": {"code": "bad_args", "message": "需要提供 (x, z) 坐标或 entity_id"}},
-                    ensure_ascii=False,
-                )
+        if x is not None and z is not None:
             blocked = self.geofence.check_point(float(x), float(z), action="mc_move_to")
             if blocked is not None:
                 return json.dumps(blocked, ensure_ascii=False)
@@ -792,11 +826,18 @@ class McToolset:
             payload["z"] = z
             if y is not None:
                 payload["y"] = y
+        elif entity_id is not None:
+            payload["entity_id"] = entity_id
+        else:
+            return json.dumps(
+                {"ok": False, "error": {"code": "bad_args", "message": "需要提供 (x, z) 坐标或 entity_id"}},
+                ensure_ascii=False,
+            )
         # 水中自动保护：防止溺水扣血打断自己的游上岸动作
         if ignore_hurt or self._is_in_water():
             payload["stop_on"] = ["death"]
         raw = self._call_json("move_to", payload)
-        if entity_id is None and x is not None and z is not None:
+        if x is not None and z is not None:
             try:
                 parsed = json.loads(raw)
             except ValueError:
@@ -820,6 +861,7 @@ class McToolset:
                             range_m=range,
                             geofence=self.geofence,
                             ignore_hurt=(ignore_hurt or self._is_in_water()),
+                            skip_direct=True,
                         )
                         if seg_res.get("ok"):
                             self.update_block_pos(seg_res.get("pos") or (seg_res.get("result") or {}).get("pos"))
@@ -1132,7 +1174,11 @@ class McToolset:
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict) and parsed.get("ok") is True and isinstance(parsed.get("result"), dict):
-                fb_pos = [x, y, z] if (x is not None and y is not None and z is not None) else None
+                fb_pos = (
+                    [x, y, z]
+                    if (x is not None and y is not None and z is not None)
+                    else self.skills._resolve_nearby_container_pos(block)
+                )
                 self.world_memory.update_container_from_window(
                     parsed["result"],
                     fallback_pos=fb_pos,
@@ -1159,7 +1205,11 @@ class McToolset:
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict) and parsed.get("ok") is True and isinstance(parsed.get("result"), dict):
-                fb_pos = [x, y, z] if (x is not None and y is not None and z is not None) else None
+                fb_pos = (
+                    [x, y, z]
+                    if (x is not None and y is not None and z is not None)
+                    else self.skills._resolve_nearby_container_pos(block)
+                )
                 self.world_memory.update_container_from_window(
                     parsed["result"],
                     fallback_pos=fb_pos,
@@ -1169,6 +1219,250 @@ class McToolset:
         except Exception:
             pass
         return raw
+
+    def mc_skill_container(
+        self,
+        items: list[dict[str, Any]],
+        action: str = "put",
+        block: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> str:
+        return self._run_skill(
+            lambda: self.skills.container_batch(
+                items,
+                action=action,
+                block=block,
+                x=x,
+                y=y,
+                z=z,
+                dim=self._last_dimension,
+            )
+        )
+
+    def mc_skill_enchant(
+        self,
+        item: str,
+        option: int,
+        lapis_count: int | None = None,
+        take: bool = True,
+        block: str | None = "enchanting_table",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+        verify: bool = True,
+        reconnect_on_stale: bool = True,
+    ) -> str:
+        def _do_enchant() -> dict[str, Any]:
+            before = self._item_enchant_state(item) if (verify and take) else None
+            result = self.skills.enchant_item_once(
+                item,
+                option,
+                lapis_count=lapis_count,
+                take=take,
+                block=block,
+                x=x,
+                y=y,
+                z=z,
+            )
+            if verify and take and result.get("ok") and before is not None:
+                time.sleep(0.5)
+                after = self._item_enchant_state(item)
+                verified = bool(after is not None and after[1] > before[1])
+                result["inventory_verified"] = verified
+                if not verified and reconnect_on_stale:
+                    try:
+                        self._reset_window_session()
+                    except Exception as exc:  # noqa: BLE001
+                        result["window_reset_error"] = f"{type(exc).__name__}: {exc}"
+                        result["requires_replan"] = True
+                    else:
+                        refreshed = self._item_enchant_state(item)
+                        if refreshed is not None and refreshed[1] > before[1]:
+                            # The enchant did land; only the client window was stale.
+                            result["inventory_verified"] = True
+                            result["reconnected_for_sync"] = True
+                        else:
+                            # Genuine failure: retry exactly once on the fresh session.
+                            retry = self.skills.enchant_item_once(
+                                item,
+                                option,
+                                lapis_count=lapis_count,
+                                take=take,
+                                block=block,
+                                x=x,
+                                y=y,
+                                z=z,
+                            )
+                            time.sleep(0.5)
+                            after_retry = self._item_enchant_state(item)
+                            retry_ok = bool(
+                                retry.get("ok") and after_retry is not None and after_retry[1] > before[1]
+                            )
+                            retry["inventory_verified"] = retry_ok
+                            retry["retried_after_reconnect"] = True
+                            if not retry_ok:
+                                retry["stale_window"] = True
+                                retry["requires_replan"] = True
+                            result = retry
+            return result
+
+        return self._run_skill(_do_enchant)
+
+    def _item_enchant_state(self, item: str) -> tuple[int, int] | None:
+        """Return (total_count, enchanted_count) for one item, or None if unreadable."""
+        try:
+            inv = self.bot.call("inventory", {})
+        except (ApiError, httpx.HTTPError):
+            return None
+        want = resolve_item_alias(item)
+        total = 0
+        enchanted = 0
+        for row in inv.get("items") or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").removeprefix("minecraft:")
+            if name != want:
+                continue
+            count = int(row.get("count") or 0)
+            total += count
+            if row.get("enchantments"):
+                enchanted += count
+        return total, enchanted
+
+    def _reset_window_session(self) -> None:
+        """Disconnect + reconnect to clear a stale mineflayer window/inventory snapshot."""
+        try:
+            self.bot.disconnect()
+        except ApiError as exc:
+            if exc.code != "not_connected":
+                raise
+        time.sleep(2.0)
+        try:
+            self.bot.connect(respect_reconnect_interval=False)
+        except ApiError:
+            # Strict competition server enforces >=30s reconnect interval; fall back gracefully.
+            self.bot.connect(respect_reconnect_interval=True)
+        st = self.bot.wait_until_ready(timeout_s=35.0)
+        if isinstance(st, dict):
+            self._update_status_cache(st)
+
+    def mc_skill_trade(
+        self,
+        entity_id: int,
+        option: int | None = None,
+        get_item: str | None = None,
+        times: int = 1,
+    ) -> str:
+        return self._run_skill(
+            lambda: self.skills.merchant_trade(
+                entity_id=entity_id,
+                option=option,
+                get_item=get_item,
+                times=times,
+            )
+        )
+
+    def mc_skill_brew(
+        self,
+        ingredient_item: str,
+        bottles: list[dict[str, Any]] | None = None,
+        fuel_item: str | None = None,
+        wait: bool = True,
+        block: str | None = "brewing_stand",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> str:
+        return self._run_skill(
+            lambda: self.skills.brew_once(
+                ingredient_item,
+                bottles=bottles,
+                fuel_item=fuel_item,
+                wait=wait,
+                block=block,
+                x=x,
+                y=y,
+                z=z,
+            )
+        )
+
+    def mc_skill_anvil(
+        self,
+        left_item: str,
+        right_item: str | None = None,
+        left_enchanted: bool | None = None,
+        right_enchanted: bool | None = None,
+        text: str | None = None,
+        take: bool = True,
+        block: str | None = "anvil",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> str:
+        return self._run_skill(
+            lambda: self.skills.anvil_operate(
+                left_item,
+                right_item=right_item,
+                left_enchanted=left_enchanted,
+                right_enchanted=right_enchanted,
+                text=text,
+                take=take,
+                block=block,
+                x=x,
+                y=y,
+                z=z,
+            )
+        )
+
+    def mc_skill_smithing(
+        self,
+        template_item: str,
+        base_item: str,
+        addition_item: str,
+        take: bool = True,
+        block: str | None = "smithing_table",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> str:
+        return self._run_skill(
+            lambda: self.skills.smithing_apply(
+                template_item,
+                base_item,
+                addition_item,
+                take=take,
+                block=block,
+                x=x,
+                y=y,
+                z=z,
+            )
+        )
+
+    def mc_skill_stonecutter(
+        self,
+        input_item: str,
+        option: int,
+        count: int | None = None,
+        take: bool = True,
+        block: str | None = "stonecutter",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> str:
+        return self._run_skill(
+            lambda: self.skills.stonecutter_cut(
+                input_item,
+                option,
+                count=count,
+                take=take,
+                block=block,
+                x=x,
+                y=y,
+                z=z,
+            )
+        )
 
     def mc_posture(self, sneak: bool = False, shield: bool = False, jump: bool = False) -> str:
         return self._call_json("posture", {"sneak": sneak, "shield": shield, "jump": jump})
@@ -1404,6 +1698,7 @@ class McToolset:
         goal_count: int = 6,
         target_y: int | None = None,
         action: str = "explore",
+        max_duration_s: float = 32.0,
     ) -> str:
         norm_target = str(target or "").strip().lower().removeprefix("minecraft:")
         eff_target_y = target_y
@@ -1421,6 +1716,7 @@ class McToolset:
                 target_y=eff_target_y,
                 action=action,
                 geofence=self.geofence,
+                max_duration_s=max(20.0, min(90.0, float(max_duration_s))),
             )
             if clamped_from is not None and isinstance(res, dict):
                 res["clamped_shallow_diamond_y_from"] = clamped_from
@@ -1654,6 +1950,115 @@ class McToolset:
                     handler=self.mc_window_act,
                     concurrency="exclusive",
                 ),
+                # ---- L2 窗口原子封装（无策略；给定参数即执行） ----
+                Tool(
+                    name="mc_skill_container",
+                    description="原子容器批量存取：对箱子/木桶一次 put 或 take 多组物品，并同步 WorldMemory 容器快照。",
+                    parameters={
+                        "items": Parameter("物品数组，如[{'item':'cobblestone','count':64}]", kind="object_array"),
+                        "action": Parameter("put 存入 / take 取出，默认put", required=False),
+                        "block": Parameter("方块名，如'chest'", required=False),
+                        "x": Parameter("X", kind="integer", required=False),
+                        "y": Parameter("Y", kind="integer", required=False),
+                        "z": Parameter("Z", kind="integer", required=False),
+                    },
+                    handler=self.mc_skill_container,
+                    concurrency="exclusive",
+                ),
+                Tool(
+                    name="mc_skill_enchant",
+                    description="附魔台单次连招：同一次window/act放物品+青金石+选option并取回；默认校验落包，窗口状态陈旧时自动重连刷新。",
+                    parameters={
+                        "item": Parameter("待附魔物品英文ID"),
+                        "option": Parameter("附魔选项索引(0-2)", kind="integer"),
+                        "lapis_count": Parameter("青金石数量，省略=option+1", kind="integer", required=False),
+                        "take": Parameter("是否取回附魔物品，默认true", kind="boolean", required=False),
+                        "block": Parameter("方块名，默认'enchanting_table'", required=False),
+                        "x": Parameter("X", kind="integer", required=False),
+                        "y": Parameter("Y", kind="integer", required=False),
+                        "z": Parameter("Z", kind="integer", required=False),
+                        "verify": Parameter("校验附魔物品是否真的落包，默认true", kind="boolean", required=False),
+                        "reconnect_on_stale": Parameter("落包校验失败时自动重连刷新窗口状态，默认true", kind="boolean", required=False),
+                    },
+                    handler=self.mc_skill_enchant,
+                    concurrency="exclusive",
+                ),
+                Tool(
+                    name="mc_skill_trade",
+                    description="村民/流浪商人交易：先读options，再按option索引或get_item匹配执行select(times)。",
+                    parameters={
+                        "entity_id": Parameter("村民/流浪商人实体ID", kind="integer"),
+                        "option": Parameter("交易选项索引，省略则按get_item匹配", kind="integer", required=False),
+                        "get_item": Parameter("想要的产物英文ID", required=False),
+                        "times": Parameter("连续交易次数，默认1", kind="integer", required=False),
+                    },
+                    handler=self.mc_skill_trade,
+                    concurrency="exclusive",
+                ),
+                Tool(
+                    name="mc_skill_brew",
+                    description="酿造台单次投料：bottles/ingredient/fuel，必要时轮询brew_time_left至0。",
+                    parameters={
+                        "ingredient_item": Parameter("酿造原料英文ID，如'nether_wart'"),
+                        "bottles": Parameter("瓶子数组，如[{'item':'potion','potion':'water'}]", kind="object_array", required=False),
+                        "fuel_item": Parameter("燃料英文ID，如'blaze_powder'", required=False),
+                        "wait": Parameter("是否等待酿造完成，默认true", kind="boolean", required=False),
+                        "block": Parameter("方块名，默认'brewing_stand'", required=False),
+                        "x": Parameter("X", kind="integer", required=False),
+                        "y": Parameter("Y", kind="integer", required=False),
+                        "z": Parameter("Z", kind="integer", required=False),
+                    },
+                    handler=self.mc_skill_brew,
+                    concurrency="exclusive",
+                ),
+                Tool(
+                    name="mc_skill_anvil",
+                    description="铁砧单次连招：放left/right、可选改名text、取output。",
+                    parameters={
+                        "left_item": Parameter("左槽物品英文ID"),
+                        "right_item": Parameter("右槽材料英文ID", required=False),
+                        "text": Parameter("改名文本(<=50字符)", required=False),
+                        "take": Parameter("是否取回产物，默认true", kind="boolean", required=False),
+                        "block": Parameter("方块名，默认'anvil'", required=False),
+                        "x": Parameter("X", kind="integer", required=False),
+                        "y": Parameter("Y", kind="integer", required=False),
+                        "z": Parameter("Z", kind="integer", required=False),
+                    },
+                    handler=self.mc_skill_anvil,
+                    concurrency="exclusive",
+                ),
+                Tool(
+                    name="mc_skill_smithing",
+                    description="锻造台单次连招：template/base/addition三槽投料并取output。",
+                    parameters={
+                        "template_item": Parameter("锻造模板英文ID"),
+                        "base_item": Parameter("基础物品英文ID"),
+                        "addition_item": Parameter("追加材料英文ID"),
+                        "take": Parameter("是否取回产物，默认true", kind="boolean", required=False),
+                        "block": Parameter("方块名，默认'smithing_table'", required=False),
+                        "x": Parameter("X", kind="integer", required=False),
+                        "y": Parameter("Y", kind="integer", required=False),
+                        "z": Parameter("Z", kind="integer", required=False),
+                    },
+                    handler=self.mc_skill_smithing,
+                    concurrency="exclusive",
+                ),
+                Tool(
+                    name="mc_skill_stonecutter",
+                    description="切石机单次连招：放input、select选项并取output。",
+                    parameters={
+                        "input_item": Parameter("原料英文ID，如'stone'"),
+                        "option": Parameter("切石选项索引", kind="integer"),
+                        "count": Parameter("投入原料数量，省略=全部", kind="integer", required=False),
+                        "take": Parameter("是否取回产物，默认true", kind="boolean", required=False),
+                        "block": Parameter("方块名，默认'stonecutter'", required=False),
+                        "x": Parameter("X", kind="integer", required=False),
+                        "y": Parameter("Y", kind="integer", required=False),
+                        "z": Parameter("Z", kind="integer", required=False),
+                    },
+                    handler=self.mc_skill_stonecutter,
+                    concurrency="exclusive",
+                ),
                 Tool(
                     name="mc_posture",
                     description="持久潜行sneak、举盾shield或持续跳跃jump（水里浮面）全量开关，不占动作锁。",
@@ -1877,6 +2282,7 @@ class McToolset:
                         "goal_count": Parameter("目标入包数量，默认6", kind="integer", required=False),
                         "target_y": Parameter("指定开采Y层，省略按矿种预设", kind="integer", required=False),
                         "action": Parameter("explore/return_collar/climb_out/reset/status，默认explore（climb_out=一次调用内自动探测方向并连续爬回地表，深井废弃后用它，别一格一格叫staircase；reset会重置当前矿井并尝试换点；遇shaft_exhausted建议先mc_move_to平移16格以上再explore）", required=False),
+                        "max_duration_s": Parameter("单次调用最长作业秒数（20-90，默认32）。保持默认即可；提效调参留待后续专项", kind="number", required=False),
                     },
                     handler=self.mc_skill_mine_dfs,
                     concurrency="exclusive",
@@ -1909,6 +2315,13 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_shoot": "射箭/弩/三叉戟",
     "mc_window_view": "看容器或交易窗",
     "mc_window_act": "操作容器/炉/附魔/交易",
+    "mc_skill_container": "容器批量存取",
+    "mc_skill_enchant": "附魔台单次连招",
+    "mc_skill_trade": "村民按选项交易",
+    "mc_skill_brew": "酿造台投料并等待",
+    "mc_skill_anvil": "铁砧合成/改名",
+    "mc_skill_smithing": "锻造台升级",
+    "mc_skill_stonecutter": "切石机切料",
     "mc_posture": "切换sneak/shield/jump",
     "mc_dismount": "下船/下马",
     "mc_drop": "丢弃物品",
@@ -1943,6 +2356,9 @@ _SELF_EVIDENT_PARAMS: frozenset[str] = frozenset(
         "wait", "charge_ms", "goal_count", "target_y",
         "item", "count", "range", "max_hits", "block", "block_types",
         "input_item", "fuel_item", "slot", "equip_slot", "types", "distance",
+        "action", "option", "get_item", "times", "left_item", "right_item",
+        "text", "take", "template_item", "base_item", "addition_item",
+        "bottles", "wait", "ingredient_item",
     }
 )
 
