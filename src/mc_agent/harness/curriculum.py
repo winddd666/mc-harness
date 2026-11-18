@@ -948,6 +948,8 @@ def _can_attempt_target(adv_id: str, counts: dict[str, int], *, has_iron_or_bett
         return has_diamond_pick or has_bucket or counts.get("obsidian", 0) >= 10
     if adv_id == "minecraft:story/iron_tools":
         return iron_equiv >= 3 or has_iron_or_better
+    if adv_id == "minecraft:husbandry/make_a_sign_glow":
+        return counts.get("glow_ink_sac", 0) >= 1 or has_iron_or_better
     return True
 
 
@@ -1083,8 +1085,10 @@ def _enrich_target_with_world_memory(
             boosted = True
         elif glow_hits:
             g0 = glow_hits[0]
-            notes.append(f"[记忆库提权：已探明 glow_squid 位于 {g0['approx_pos']}（{g0['dist']}m），前往击杀拾取 glow_ink_sac 并涂亮木告示牌]")
-            boosted = True
+            gy = float((g0.get("approx_pos") or [0, 0, 0])[1])
+            if float(g0.get("dist", 999.0)) <= 28.0 and gy >= 42.0:
+                notes.append(f"[记忆库提权：已探明浅层 glow_squid 位于 {g0['approx_pos']}（{g0['dist']}m），前往击杀拾取 glow_ink_sac 并涂亮木告示牌]")
+                boosted = True
 
     if not notes and not extra_add and not boosted and task_override is None:
         return target, False
@@ -1247,10 +1251,10 @@ def select_next_target(
                         tier=0,
                         budget_class="micro",
                         task=(
-                            f"执行一次紧凑地表环岛摸底探索（严禁挖矿或下潜）：沿未探索方向({dir_hint})将当前 x/z 偏置 90~140 格调 mc_move_to(x=..., z=..., range=4)"
-                            "（注意 range 是到达容差固定填 4，严禁填 100！严守虚空岛边界），"
-                            "每到一处必须调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])（必须传 types 列表！）"
-                            "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后立即汇报收工。"
+                            f"执行一次紧凑地表环岛摸底探索（严禁挖矿、严禁入海）：沿未探索方向({dir_hint})将当前 x/z 偏置 60~90 格调 mc_move_to(x=..., z=..., range=4)"
+                            "（注意 range 是到达容差固定填 4，严禁填 100！若途中进入水域 in_water=true 必须立即退回出发陆地坐标，严禁停留在水面！），"
+                            "每到一处陆地调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])（必须传 types 列表！）"
+                            "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后回到干燥陆地汇报收工。"
                         ),
                         extra_tools=("mc_interact", "mc_attack", "mc_kb_lookup"),
                         advancement_id=None,
@@ -1291,10 +1295,10 @@ def select_next_target(
                 tier=1,
                 budget_class="micro",
                 task=(
-                    f"执行一次紧凑地表环岛摸底探索（严禁挖矿或下潜）：沿未探索方向({dir_hint})将当前 x/z 偏置 90~140 格调 mc_move_to(x=..., z=..., range=4)"
-                    "（注意 range 是到达容差固定填 4，严禁填 100！严守虚空岛边界），"
-                    "每到一处必须调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])（必须传 types 列表！）"
-                    "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后立即汇报收工。"
+                    f"执行一次紧凑地表环岛摸底探索（严禁挖矿、严禁入海）：沿未探索方向({dir_hint})将当前 x/z 偏置 60~90 格调 mc_move_to(x=..., z=..., range=4)"
+                    "（注意 range 是到达容差固定填 4，严禁填 100！若途中进入水域 in_water=true 必须立即退回出发陆地坐标，严禁停留在水面！），"
+                    "每到一处陆地调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])（必须传 types 列表！）"
+                    "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后回到干燥陆地汇报收工。"
                 ),
                 extra_tools=("mc_interact", "mc_attack", "mc_kb_lookup"),
                 advancement_id=None,
@@ -1504,6 +1508,7 @@ class CurriculumSupervisor:
         self.suspended_episode: SuspendedEpisode | None = None
         self._pending_preempt_key: str | None = None
         self.recon_completed: bool = False
+        self._last_dry_pos: list[float] | None = None
         self.strikes: dict[str, int] = {}
         self.cooldowns: dict[str, float] = {}
         self.episodes: list[dict[str, Any]] = []
@@ -1615,6 +1620,35 @@ class CurriculumSupervisor:
                 self.toolset._update_status_cache(st)
                 cur_pos = [float(st["pos"][0]), float(st["pos"][1]), float(st["pos"][2])] if isinstance(st.get("pos"), (list, tuple)) and len(st["pos"]) >= 3 else None
                 cur_dim = normalize_dimension(st.get("dimension"))
+
+                # Re-anchor `VoidGeofence` if server teleported or respawned the bot > 400m away (e.g. obstructed spawnpoint -> World Spawn)!
+                if self.geofence is not None and self.geofence.enabled and cur_dim == "overworld" and cur_pos is not None:
+                    if math.hypot(cur_pos[0] - self.geofence.center_x, cur_pos[2] - self.geofence.center_z) > 400.0:
+                        self.geofence = dataclasses.replace(self.geofence, center_x=cur_pos[0], center_z=cur_pos[2])
+                        self.toolset.geofence = self.geofence
+                        self._last_dry_pos = None
+
+                # Track dry-land anchor & auto-recover to shore if previous episode left the bot floating in ocean/river!
+                if cur_dim == "overworld" and cur_pos is not None:
+                    if not bool(st.get("in_water")) and float(cur_pos[1]) >= 63.0:
+                        self._last_dry_pos = list(cur_pos)
+                    elif bool(st.get("in_water")) and self._last_dry_pos is not None:
+                        try:
+                            self.toolset.skills.escape_water()
+                            st_w = self.bot.status()
+                            if bool(st_w.get("in_water")):
+                                self.toolset.skills.navigate_segmented(
+                                    self._last_dry_pos[0],
+                                    self._last_dry_pos[2],
+                                    range_m=3.0,
+                                    geofence=self.geofence,
+                                )
+                                st = self.bot.status()
+                                self.toolset._update_status_cache(st)
+                                if isinstance(st.get("pos"), (list, tuple)) and len(st["pos"]) >= 3:
+                                    cur_pos = [float(st["pos"][0]), float(st["pos"][1]), float(st["pos"][2])]
+                        except Exception:
+                            pass
 
                 # Soft ready collection: harvest any finished nearby furnace jobs between episodes!
                 if self.enable_async_world_jobs:

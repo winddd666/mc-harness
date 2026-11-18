@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import math
 import threading
 import time
 from typing import Any, Callable
@@ -137,6 +138,8 @@ class GenerationGuard:
         self.failures = 0
         self.disconnected = False
         self._in_reflex = False
+        self._pre_hurt_suppress_block: tuple[int, int, int] | None = None
+        self._pre_hurt_suppress_until: float = float("-inf")
         self.stats = {
             "polls": 0,
             "incidents": 0,
@@ -242,7 +245,49 @@ class GenerationGuard:
         nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
         if not nh_name:
             return None
-        if nh_name == "creeper" and nh_dist <= 4.5:
+        is_creeper = nh_name == "creeper" and nh_dist <= 4.5
+        is_melee = nh_name in LONE_COUNTERKILL_MOBS and nh_dist <= 3.3
+        is_ranged = nh_name in RANGED_MOBS and nh_dist <= 13.5
+        if not (is_creeper or is_melee or is_ranged):
+            return None
+
+        pos = status.get("pos")
+        cur_blk: tuple[int, int, int] | None = None
+        if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+            cur_blk = (int(math.floor(float(pos[0]))), int(math.floor(float(pos[1]))), int(math.floor(float(pos[2]))))
+            if (
+                self._pre_hurt_suppress_block == cur_blk
+                and time.monotonic() < self._pre_hurt_suppress_until
+                and not (is_creeper and nh_dist <= 2.3)
+            ):
+                return None
+
+        # Live `/status` omits `nearest_hostile.pos`: resolve 3D entity coords via `get_entities` so `has_los` works on all mobs!
+        if nh_pos is None:
+            try:
+                ent_resp = self.bot.call("get_entities", {"radius": 16})
+                for th in (ent_resp or {}).get("entities") or []:
+                    if not isinstance(th, dict):
+                        continue
+                    th_nm = str(th.get("name") or "").removeprefix("minecraft:").strip().lower()
+                    if (nh_id is not None and th.get("id") == nh_id) or (nh_id is None and th_nm == nh_name):
+                        tpos = th.get("pos")
+                        if isinstance(tpos, (list, tuple)) and len(tpos) >= 3:
+                            nh_pos = list(tpos)
+                            break
+            except Exception:
+                nh_pos = None
+
+        # Never fire `pre_hurt_*` through solid bunker walls! Real damage still triggers `guard_poll_hurt` unconditionally.
+        if isinstance(pos, (list, tuple)) and len(pos) >= 3 and isinstance(nh_pos, (list, tuple)) and len(nh_pos) >= 3:
+            self.combat_env.invalidate_block_cache()
+            los = self.combat_env.has_los(pos, nh_pos)
+            if not los.get("clear"):
+                return None
+        elif is_ranged:
+            return None
+
+        if is_creeper:
             return {
                 "source": "pre_hurt_creeper",
                 "primary_entity_id": nh_id,
@@ -250,7 +295,7 @@ class GenerationGuard:
                 "primary_pos": nh_pos,
                 "distance": nh_dist,
             }
-        if nh_name in LONE_COUNTERKILL_MOBS and nh_dist <= 3.3:
+        if is_melee:
             return {
                 "source": "pre_hurt_melee",
                 "primary_entity_id": nh_id,
@@ -258,19 +303,13 @@ class GenerationGuard:
                 "primary_pos": nh_pos,
                 "distance": nh_dist,
             }
-        if nh_name in RANGED_MOBS and nh_dist <= 13.5 and nh_pos is not None:
-            pos = status.get("pos")
-            if isinstance(pos, (list, tuple)) and len(pos) >= 3:
-                los = self.combat_env.has_los(pos, nh_pos)
-                if los.get("clear"):
-                    return {
-                        "source": "pre_hurt_ranged",
-                        "primary_entity_id": nh_id,
-                        "primary_type": nh_name,
-                        "primary_pos": nh_pos,
-                        "distance": nh_dist,
-                    }
-        return None
+        return {
+            "source": "pre_hurt_ranged",
+            "primary_entity_id": nh_id,
+            "primary_type": nh_name,
+            "primary_pos": nh_pos,
+            "distance": nh_dist,
+        }
 
     def poll(self) -> dict[str, Any] | None:
         if self._in_reflex:
@@ -309,6 +348,8 @@ class GenerationGuard:
         food = status.get("food")
         needs_food = isinstance(food, (int, float)) and (food <= 16 or (isinstance(health, (int, float)) and health < 18 and food < 20))
         hurt = bool(hurts) or dropped
+        if hurt:
+            self._pre_hurt_suppress_until = float("-inf")
 
         pre_trigger = None if (hurt or deaths or disconnected or not ready) else self._detect_pre_hurt_trigger(status)
         critical_override = bool(
@@ -364,12 +405,26 @@ class GenerationGuard:
             nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
 
             if pre_trigger is not None and not in_lava and not in_water:
-                actions.append(
-                    self._action(
-                        "subcortical_combat",
-                        lambda: self.combat_slot.handle(self.combat_env, pre_trigger),
-                    )
+                sc_out = self._action(
+                    "subcortical_combat",
+                    lambda: self.combat_slot.handle(self.combat_env, pre_trigger),
                 )
+                actions.append(sc_out)
+                sc_res = sc_out.get("result") if isinstance(sc_out, dict) else None
+                if isinstance(sc_res, dict):
+                    st_after_sc = sc_res.get("status_after") if isinstance(sc_res.get("status_after"), dict) else status
+                    pos_sc = st_after_sc.get("pos") or status.get("pos")
+                    pos_before_sc = status.get("pos")
+                    if isinstance(pos_sc, (list, tuple)) and len(pos_sc) >= 3:
+                        blk_sc = (int(math.floor(float(pos_sc[0]))), int(math.floor(float(pos_sc[1]))), int(math.floor(float(pos_sc[2]))))
+                        blk_b = (
+                            (int(math.floor(float(pos_before_sc[0]))), int(math.floor(float(pos_before_sc[1]))), int(math.floor(float(pos_before_sc[2]))))
+                            if isinstance(pos_before_sc, (list, tuple)) and len(pos_before_sc) >= 3
+                            else None
+                        )
+                        if sc_res.get("mode") in {"cover_pocket", "cover_or_flee"} or sc_res.get("latched_guard") or blk_sc == blk_b:
+                            self._pre_hurt_suppress_block = blk_sc
+                            self._pre_hurt_suppress_until = now + 15.0
             elif hurt and in_water:
                 if not _already("escape_water"):
                     actions.append(self._action("escape_water", lambda: self._skills().escape_water()))

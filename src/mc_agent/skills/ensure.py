@@ -592,8 +592,9 @@ class PhysicalPrerequisiteResolver:
                 return "threat_interrupted"
 
             now_g = time.monotonic()
-            urgent_fluid = bool(st.get("in_lava") or st.get("in_water"))
-            if urgent_fluid or ((hp <= 12.0 or food <= 12) and (now_g - last_stab_mono[0] >= 15.0)):
+            in_lava = bool(st.get("in_lava"))
+            in_water = bool(st.get("in_water"))
+            if in_lava or ((in_water or hp <= 12.0 or food <= 12) and (now_g - last_stab_mono[0] >= 10.0)):
                 last_stab_mono[0] = now_g
                 try:
                     stab = check_and_stabilize(self.bot)

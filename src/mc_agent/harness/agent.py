@@ -1208,6 +1208,22 @@ def run_mc_agent(
             ephemeral_hud = None
             if hud_mode == "ephemeral":
                 try:
+                    if toolset.geofence is not None and toolset.geofence.enabled:
+                        st_gf = toolset.cached_status() or {}
+                        p_gf = st_gf.get("pos")
+                        d_gf = str(st_gf.get("dimension") or "overworld").removeprefix("minecraft:")
+                        if d_gf == "overworld" and isinstance(p_gf, (list, tuple)) and len(p_gf) >= 3:
+                            if math.hypot(float(p_gf[0]) - toolset.geofence.center_x, float(p_gf[2]) - toolset.geofence.center_z) > 400.0:
+                                new_gf = VoidGeofence(
+                                    center_x=float(p_gf[0]),
+                                    center_z=float(p_gf[2]),
+                                    radius=toolset.geofence.radius,
+                                    margin=toolset.geofence.margin,
+                                )
+                                toolset.geofence = new_gf
+                                if guard is not None:
+                                    guard.geofence = new_gf
+                                    guard.combat_env.geofence = new_gf
                     failed_coords = extract_failed_coords(messages)
                     ephemeral_hud = build_world_hud(
                         toolset,

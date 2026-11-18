@@ -962,3 +962,67 @@ def test_agent_smelt_fuel_prep_move_range_clamp_and_mine_dfs_compaction(tmp_path
     assert dfs_out["tree"]["total_nodes"] == 20
     assert len(dfs_out["tree"]["nodes"]) == 4
 
+
+def test_bunker_wall_blocks_pre_hurt_melee_and_respawn_reanchors_geofence(tmp_path: Path) -> None:
+    """1) Spider behind solid bunker wall (`has_los=False`, `status.nearest_hostile` omitting `pos`) MUST NOT fire `pre_hurt_melee`;
+    2) Respawning >400m away at World Spawn MUST automatically re-anchor `VoidGeofence`."""
+    from mc_agent.harness.events import EventSink
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.guardian import GenerationGuard
+
+    world = _Phase2World()
+    world.pos = [0.5, 64.0, 0.5]
+    # Build 2-high stone wall between bot (0.5, 64, 0.5) and spider (3.0, 64, 0.5)
+    world.blocks[(1, 64, 0)] = "stone"
+    world.blocks[(1, 65, 0)] = "stone"
+    world.entities = [{"id": 77, "type": "hostile", "name": "spider", "pos": [3.0, 64.0, 0.5], "dist": 2.5}]
+
+    orig_handler = world.handler
+
+    def live_style_status_handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/status"):
+            resp = orig_handler(req)
+            data = resp.json()
+            # Mimic real `mc-agent-api` `/status`: `nearest_hostile` has NO `pos` field!
+            data["result"]["nearest_hostile"] = {"id": 77, "name": "spider", "dist": 2.5}
+            return httpx.Response(200, json=data)
+        return orig_handler(req)
+
+    with BotSession("tok", bot_username="BunkerBot", transport=httpx.MockTransport(live_style_status_handler)) as bot:
+        guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, interval_s=0.0)
+        guard.prime()
+        # Behind stone wall -> `has_los` is False -> MUST NOT cancel generation!
+        assert guard.poll() is None
+
+        # Remove stone wall -> `has_los` is True -> `pre_hurt_melee` fires!
+        world.blocks.pop((1, 64, 0), None)
+        world.blocks.pop((1, 65, 0), None)
+        inc = guard.poll()
+        assert inc is not None
+        assert "pre_hurt_melee" in inc["reasons"]
+
+        # Now simulate respawning 8,000m away at World Spawn `(-170, 64, -380)` with old geofence at `(-7800, 2770)`!
+        world.entities = []
+        world.pos = [-170.0, 64.0, -380.0]
+        world.add_item("iron_pickaxe", 1)
+        old_gf = VoidGeofence(center_x=-7800.0, center_z=2770.0, radius=220.0, margin=8.0)
+
+        def noop_chat(messages: list[dict[str, Any]], tools: Any = None, **kwargs: Any) -> dict[str, Any]:
+            return {"role": "assistant", "content": "ok"}
+
+        ts = McToolset(bot, geofence=old_gf, world_memory=WorldMemory())
+        sup = CurriculumSupervisor(
+            bot,
+            chat_fn=noop_chat,
+            runs_dir=tmp_path / "runs",
+            duration_s=30.0,
+            geofence=old_gf,
+            toolset=ts,
+            enable_pre_ensure=False,
+        )
+        sup.run(max_episodes=1)
+        assert abs(sup.geofence.center_x - (-170.0)) < 1.0
+        assert abs(sup.geofence.center_z - (-380.0)) < 1.0
+        assert abs(ts.geofence.center_x - (-170.0)) < 1.0
+
+
