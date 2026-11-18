@@ -1601,7 +1601,12 @@ class MiningDFSEngine:
                 self.dug_during_return += repaired
                 if self._move_exact(wp):
                     continue
-            return False, "backtrack_blocked"
+            try:
+                feet = self._get_block_name((wp[0], wp[1], wp[2]))
+                head = self._get_block_name((wp[0], wp[1] + 1, wp[2]))
+            except ApiError:
+                feet, head = "?", "?"
+            return False, f"backtrack_blocked@{wp[0]},{wp[1]},{wp[2]}(feet={feet},head={head})"
         return True, None
 
     def _find_node_path(self, start_id: int, goal_id: int) -> list[tuple[list[tuple[int, int, int]], bool, int]]:
