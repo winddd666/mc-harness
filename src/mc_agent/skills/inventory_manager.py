@@ -583,6 +583,8 @@ def plan_garbage_drops(
         name = row["name"]
         if name in prot or is_important_item(name):
             continue
+        if _beneficial_enchantments(row) or row.get("custom_name"):
+            continue
         if name not in TIER1_ZERO_KEEP:
             continue
         if name == "rotten_flesh" and hunger < 16:
@@ -604,7 +606,12 @@ def plan_garbage_drops(
             for row in rows:
                 if row["slot"] in dropped_slots:
                     continue
-                if row["name"] in BUILDING_BLOCK_PRIORITY and row["name"] not in prot:
+                if (
+                    row["name"] in BUILDING_BLOCK_PRIORITY
+                    and row["name"] not in prot
+                    and not _beneficial_enchantments(row)
+                    and not row.get("custom_name")
+                ):
                     by_name.setdefault(row["name"], []).append(row)
             for name in BUILDING_BLOCK_PRIORITY:
                 if need <= 0 or pool_excess <= 0:
@@ -877,9 +884,9 @@ class InventoryManager:
             # Walk a couple of blocks away from the pile we just threw (we are already facing away)
             # so the vanilla pickup radius cannot suck the junk straight back in.
             if turned and plan.get("drops"):
-                for _ in range(2):
+                for _ in range(4):
                     try:
-                        self.bot.call("control", {"forward": True, "ms": 420, "stop_on": ["death"]})
+                        self.bot.call("control", {"forward": True, "ms": 450, "stop_on": ["death"]})
                     except ApiError:
                         break
             inv = self._inventory()

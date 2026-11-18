@@ -18,18 +18,18 @@
 | 容器自愈 + 多炉分拆 | `src/mc_agent/harness/world_memory.py`、`src/mc_agent/skills/library.py`、`src/mc_agent/harness/mc_tools.py` |
 | 离线单测 | `tests/test_movement_terrain.py`（17）、`tests/test_inventory_manager.py`（19）、`tests/test_window_and_smelt_split.py`（14） |
 | 实机脚本 | `scripts/l2_pack_live_test.py`（RCON/连接/场地公共层）、`scripts/l2_move_live_test.py`（M1–M26）、`scripts/l2_inv_window_live_test.py`（INV/WIN/SM）、`scripts/l2_soak_live_test.py`（自然地形长跑） |
-| 实机数据 | `runs/l2-move-full6.json`（30 关）、`runs/l2-inv-window-full4.json`（20 组）、`runs/l2-soak-forest*.json`、`runs/l2-soak-shore2.json`、`runs/l2-live-pack-20261119-033813.json` |
+| 实机数据 | `runs/l2-move-full9.json`（31 关）、`runs/l2-inv-window-full6.json`（21 组）、`runs/l2-soak-forest*.json`、`runs/l2-soak-shore2.json`、`runs/l2-live-pack-20261119-044404.json` |
 
 ## 2. 离线单测
 
 ```
 PYTHONPATH=.worktrees/l2-live-pack/src .venv/bin/pytest .worktrees/l2-live-pack/tests -q
-251 passed, 1 skipped      （新增 51 条：movement 17 / inventory 20 / window+smelt 14）
+253 passed, 1 skipped      （新增 53 条：movement 17 / inventory 22 / window+smelt 14）
 ```
 
 覆盖：面包屑采样/维度隔离/瞬移断段/倒序回退、软陷阱 `stop_on=["death"]`、细雪优先桶舀、木门/栅栏门、船顶跳岸、`navigate_segmented` 最多两次恢复与 wall/unstick 兜底；99+ 重要物、燃料白名单、保护栈、四级清杂、满包回吸防护、穿甲升阶、双视图、满箱自建箱；窗口空箱自愈、`ApiError.context` 快照、挖箱双表销账、`conversion_jobs` 持久化、双/三炉并联与 `done[].took` 记账、`smelt_items` 向后兼容。
 
-## 3. 实机移动关卡（M1–M27/M29/M30 + M5b，单次全跑 30/30 PASS，0 死亡）
+## 3. 实机移动关卡（M1–M27/M29/M30/M31 + M5b，单次全跑 31/31 PASS，0 死亡）
 
 | 关卡 | 场景 | 耗时 | 血量 | 关键证据 |
 |---|---|---|---|---|
@@ -63,6 +63,7 @@ PYTHONPATH=.worktrees/l2-live-pack/src .venv/bin/pytest .worktrees/l2-live-pack/
 | M27 | 河中 `recover()` 宽水诊断 | 13.5s | 20→20 | 浮面→3 格外放船→33m 渡河→上岸，`diagnosis=wide_water` |
 | M29 | 无船无木料渡水 | — | — | 明确 `missing_item`，0 移动 |
 | M30 | 陆地目标（无水） | — | — | 明确 `no_water`，0 移动 |
+| M31 | 河中连续 3 次宽水恢复 | 152.4s | 20→20 | 3 次 `recover()` 均 `wide_water→渡船→上岸` |
 
 ## 4. 自然地形长跑（0 LLM，持续导航）
 
@@ -75,7 +76,7 @@ PYTHONPATH=.worktrees/l2-live-pack/src .venv/bin/pytest .worktrees/l2-live-pack/
 
 唯一失败点为森林边缘的**浮冰/冰面水塘**：`packed_ice` 边缘 + 悬空，路径 `stalled`，两次 `dig_level_tunnel` 无效后按契约返回阻塞原因（不死亡、不乱挖）。冰面水塘策略（优先绕行或 `escape_water`）列入后续。
 
-## 5. 实机物品栏 / 容器 / 熔炉（20 组全部 PASS）
+## 5. 实机物品栏 / 容器 / 熔炉（21 组全部 PASS）
 
 | 组 | 场景 | 实测结论 |
 |---|---|---|
@@ -99,6 +100,7 @@ PYTHONPATH=.worktrees/l2-live-pack/src .venv/bin/pytest .worktrees/l2-live-pack/
 | INV10 | 下界金甲规则 | 钻靴+金靴同槽时仍保留并穿上金靴，铁胸甲不受影响 |
 | INV11 | 归仓保留随身装备 | 只存钻石/绿宝石；铁镐/盾/面包 8/圆石 64/水桶全部留在身上 |
 | INV12 | 满包工具汰弱留强 | 木镐与多余石镐被淘汰，铁镐+2 石镐保留（Tier3） |
+| SM7 | 熔炼中熔炉被拆 | `no_window`（"air did not open a GUI"），账本按契约销账为 `{}` |
 
 ## 6. 实机服务端怪癖与修复（已写回代码）
 
@@ -145,8 +147,8 @@ PYTHONPATH=/home/xzq/projects/mc/.worktrees/l2-live-pack/src \
 
 # 实机（0 LLM；自动建场/清理；Token 复用 .state-move-test）
 cd /home/xzq/projects/mc/.worktrees/l2-live-pack
-PYTHONPATH=$PWD/src /home/xzq/projects/mc/.venv/bin/python scripts/l2_move_live_test.py --only all --report runs/l2-move-full6.json
-PYTHONPATH=$PWD/src /home/xzq/projects/mc/.venv/bin/python scripts/l2_inv_window_live_test.py --only all --report runs/l2-inv-window-full4.json
+PYTHONPATH=$PWD/src /home/xzq/projects/mc/.venv/bin/python scripts/l2_move_live_test.py --only all --report runs/l2-move-full9.json
+PYTHONPATH=$PWD/src /home/xzq/projects/mc/.venv/bin/python scripts/l2_inv_window_live_test.py --only all --report runs/l2-inv-window-full6.json
 PYTHONPATH=$PWD/src /home/xzq/projects/mc/.venv/bin/python scripts/l2_soak_live_test.py --minutes 10 --biome forest --report runs/l2-soak-forest.json
 PYTHONPATH=$PWD/src /home/xzq/projects/mc/.venv/bin/python scripts/l2_soak_live_test.py --minutes 5 --biome stony_shore --report runs/l2-soak-shore2.json
 ```

@@ -1251,42 +1251,9 @@ class TerrainNavigator:
                             if st_chk.get("on_ground") and not st_chk.get("in_water"):
                                 break
                 st = self.bot.status()
-                if st.get("in_water") and self.skills is not None and hasattr(self.skills, "escape_water"):
-                    # reuse the proven L0 escape-water routine before hand-rolled swimming
-                    try:
-                        self.skills.escape_water()
-                    except ApiError:
-                        pass
-                    except Exception:  # noqa: BLE001
-                        pass
-                    st = self.bot.status()
-                if st.get("in_water"):
-                    sh = shore or self._shore_along(float(x), float(z))
-                    if sh is not None:
-                        self._swim_to_bank(sh, max_bursts=16)
-                    st = self.bot.status()
-                if st.get("in_water"):
-                    # last-resort swim toward the requested destination (the far bank)
-                    try:
-                        self.bot.call(
-                            "move_to",
-                            {"x": float(x), "z": float(z), "range": 1.0, "stop_on": ["death"], "timeout": 10000},
-                            timeout_s=18.0,
-                        )
-                    except ApiError:
-                        pass
-                    except Exception:  # noqa: BLE001
-                        pass
-                    try:
-                        self.bot.call("posture", {"jump": True})
-                    except ApiError:
-                        pass
-                    for _ in range(8):
-                        st = self.bot.status()
-                        if st.get("on_ground") and not st.get("in_water"):
-                            break
-                        self._face(float(x), float(z), float((st.get("pos") or [0, 64, 0])[1]) + 1.0)
-                        self._step_forward(ms=420, jump=True)
+                if st.get("in_water") or not st.get("on_ground"):
+                    self._get_ashore(float(x), float(z))
+                st = self.bot.status()
                 try:
                     self.bot.call("posture", {})
                 except ApiError:
@@ -1303,24 +1270,21 @@ class TerrainNavigator:
             # do one final ashore pass after the recovery.
             st = self.bot.status()
             if st.get("in_water"):
-                if self.skills is not None and hasattr(self.skills, "escape_water"):
-                    try:
-                        self.skills.escape_water()
-                    except ApiError:
-                        pass
-                    except Exception:  # noqa: BLE001
-                        pass
-                st = self.bot.status()
-                if st.get("in_water"):
-                    sh = self._shore_along(float(x), float(z))
-                    if sh is not None:
-                        self._swim_to_bank(sh, max_bursts=14)
+                self._get_ashore(float(x), float(z))
+            st = self.bot.status()
         finally:
             try:
                 self.bot.call("posture", {})
             except ApiError:
                 pass
 
+        # final stabilization: the boat attack / a late wave can push us back into the shallows
+        for _ in range(2):
+            st = self.bot.status()
+            if not st.get("in_water"):
+                break
+            self._get_ashore(float(x), float(z))
+            time.sleep(0.4)
         st = self.bot.status()
         return {
             "ok": bool(dismount_ok) and not st.get("in_vehicle") and not st.get("in_water"),
@@ -1360,6 +1324,59 @@ class TerrainNavigator:
             return bool(st.get("ready"))
         except Exception:  # noqa: BLE001
             return False
+
+    def _get_ashore(self, tx: float, tz: float) -> bool:
+        """Deterministic multi-strategy shore exit: escape_water -> bank swim -> jump bursts."""
+        st = self.bot.status()
+        if not st.get("in_water"):
+            return True
+        pos0 = st.get("pos") or [0.0, 64.0, 0.0]
+        close = self._nearest_solid_shore(float(pos0[0]), float(pos0[2]), float(pos0[1]))
+        if close is not None and math.dist(close, [float(v) for v in pos0[:3]]) <= 4.0:
+            # a bank is right next to us: do NOT run the general escape_water (it may swim away)
+            self._swim_to_bank(close, max_bursts=10)
+            if not self.bot.status().get("in_water"):
+                return True
+        if self.skills is not None and hasattr(self.skills, "escape_water"):
+            try:
+                self.skills.escape_water()
+            except ApiError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+        st = self.bot.status()
+        if not st.get("in_water"):
+            return True
+        shore = self._nearest_solid_shore(
+            float((st.get("pos") or [0, 0, 0])[0]),
+            float((st.get("pos") or [0, 0, 0])[2]),
+            float((st.get("pos") or [0, 0, 0])[1]),
+        ) or self._shore_along(tx, tz) or self._find_far_shore()
+        if shore is not None:
+            self._swim_to_bank(shore, max_bursts=20)
+        st = self.bot.status()
+        if not st.get("in_water"):
+            return True
+        try:
+            self.bot.call("posture", {"jump": True})
+        except ApiError:
+            pass
+        try:
+            for _ in range(14):
+                st = self.bot.status()
+                if not st.get("in_water"):
+                    return True
+                pos = st.get("pos") or [0.0, 64.0, 0.0]
+                near = self._nearest_solid_shore(float(pos[0]), float(pos[2]), float(pos[1]))
+                tgt = near or shore or [int(tx), int(pos[1]), int(tz)]
+                self._face(tgt[0] + 0.5, tgt[2] + 0.5, float(tgt[1]) + 1.0)
+                self._step_forward(ms=650, jump=True)
+        finally:
+            try:
+                self.bot.call("posture", {})
+            except ApiError:
+                pass
+        return not self.bot.status().get("in_water")
 
     def _find_far_shore(self, *, max_r: int = 36) -> list[int] | None:
         """Coarse 8-direction scan for a standable bank when swimming in a wide water body."""

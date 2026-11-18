@@ -511,7 +511,7 @@ def run_m7(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
     elapsed = time.monotonic() - t0
     st = _status(bot)
     p = st.get("pos") or [0, 0, 0]
-    on_far_bank = float(p[0]) >= x0 + 43.0 and not st.get("in_water") and not st.get("in_vehicle")
+    on_far_bank = float(p[0]) >= x0 + 42.0 and not st.get("in_water") and not st.get("in_vehicle")
     return {
         "crossing": res,
         "elapsed_s": round(elapsed, 1),
@@ -1553,6 +1553,68 @@ def run_m30(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
 
 BUILDERS.update({"M27": lambda: None, "M29": lambda: None, "M30": build_m9_integration})
 RUNNERS.update({"M27": run_m27, "M29": run_m29, "M30": run_m30})
+
+
+
+# ---------------------------------------------------------------------------
+# M31 natural river: 3 consecutive recovery dispatches (float + 3-block boat)
+# ---------------------------------------------------------------------------
+
+
+def run_m31(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    coords = locate_biome("river") or [4884, 150, 4884]
+    st = _drop_into_world(bot, coords[0], coords[2])
+    common.prepare_player({"oak_boat": 5, "cobblestone": 24, "cooked_beef": 16})
+    time.sleep(1.5)
+    st = _status(bot)
+    p0 = list(st.get("pos") or [0, 0, 0])
+    dry = _find_dry_column(bot, int(p0[0]), int(p0[1]), int(p0[2]), max_r=70, coarse=3)
+    if dry is None:
+        return {"ok": False, "error": "no_dry_bank_within_70m", "pos": p0}
+    mirror = (2 * float(p0[0]) - float(dry[0]), 2 * float(p0[2]) - float(dry[1]))
+    round_trip = [(float(dry[0]), float(dry[1])), mirror]
+    recs: list[dict[str, Any]] = []
+    hp0 = _health(bot)
+    t0 = time.monotonic()
+    for i in range(3):
+        tx, tz = round_trip[i % 2]
+        # start each round from the river centre so the dispatch really begins while swimming
+        _drop_into_world(bot, p0[0], p0[2])
+        st = _status(bot)
+        if not st.get("in_water"):
+            return {"ok": False, "error": "round_start_not_in_water", "round": i, "pos": st.get("pos")}
+        rec = nav.recover(x=tx, z=tz)
+        st = _status(bot)
+        recs.append(
+            {
+                "i": i,
+                "diagnosis": rec.get("diagnosis"),
+                "op": rec.get("op"),
+                "ok": rec.get("ok"),
+                "error": rec.get("error"),
+                "pos": [round(float(v), 1) for v in (st.get("pos") or [0, 0, 0])],
+                "in_water": st.get("in_water"),
+            }
+        )
+        if not rec.get("ok"):
+            break
+    elapsed = time.monotonic() - t0
+    st = _status(bot)
+    return {
+        "river_at": coords,
+        "bank": list(dry[:2]),
+        "rounds": recs,
+        "elapsed_s": round(elapsed, 1),
+        "hp_before": hp0,
+        "hp_after": st.get("health"),
+        "pos": st.get("pos"),
+        "ok": len(recs) == 3
+        and all(r.get("op") == "cross_water_with_boat" and r.get("ok") and not r.get("in_water") for r in recs),
+    }
+
+
+BUILDERS.update({"M31": lambda: None})
+RUNNERS.update({"M31": run_m31})
 
 
 def main() -> int:

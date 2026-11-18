@@ -864,6 +864,42 @@ def group_inv12(s: common.Session) -> dict[str, Any]:
 GROUPS.update({"INV10": group_inv10, "INV11": group_inv11, "INV12": group_inv12})
 
 
+
+# ---------------------------------------------------------------------------
+# SM7: furnace destroyed while smelting -> the ledger must be written off
+# ---------------------------------------------------------------------------
+
+
+def group_sm7(s: common.Session) -> dict[str, Any]:
+    x, z = LAB_X, LAB_Z
+    _build_lab()
+    pos = [x + 2, Y, z + 12]
+    _place_block(*pos, "furnace")
+    _tp(x + 2.5, Y, z + 14.0)
+    common.prepare_player({"cobblestone": 4, "coal": 2})
+    time.sleep(0.8)
+    started = s.skills.smelt_start("cobblestone", count=4)
+    ledger_before = s.world_memory.get_in_conversion_counts()
+    # destroy the furnace 3s into the burn
+    time.sleep(3)
+    _place_block(*pos, "air")
+    time.sleep(0.5)
+    collected = s.skills.smelt_collect(wait_remaining_s=8.0)
+    ledger_after = s.world_memory.get_in_conversion_counts()
+    return {
+        "checks": {
+            "SM7_start": {k: started.get(k) for k in ("ok", "error", "furnace_count")},
+            "SM7_ledger_before": ledger_before,
+            "SM7_collect": {k: collected.get(k) for k in ("ok", "collected", "failures", "jobs_remaining")},
+            "SM7_ledger_after": ledger_after,
+        },
+        "ok": bool(started.get("ok")) and ledger_before == {"stone": 4} and ledger_after == {},
+    }
+
+
+GROUPS.update({"SM7": group_sm7})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="all")

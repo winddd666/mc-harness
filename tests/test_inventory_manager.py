@@ -11,6 +11,7 @@ from mc_agent.errors import ApiError
 from mc_agent.harness.world_memory import WorldMemory
 from mc_agent.skills.inventory_manager import (
     BUILDING_BLOCK_PRIORITY,
+    FOOD_HUNGER_VALUES,
     IMPORTANT_ITEMS,
     InventoryManager,
     ProtectionStack,
@@ -425,3 +426,80 @@ def test_tier4_never_evicts_the_best_tools_or_spare_armor() -> None:
     assert names.count("stone_pickaxe") <= 1
     assert "iron_chestplate" not in names
     assert "wooden_pickaxe" in names
+
+
+def test_plan_garbage_drops_fuzz_invariants() -> None:
+    """200 random bags: never drop protected/important/enchanted items, food-safe, slot bookkeeping."""
+    import random
+
+    rng = random.Random(20261119)
+    pool = [
+        "cobblestone", "cobbled_deepslate", "dirt", "tuff", "sand", "gravel", "netherrack",
+        "oak_leaves", "short_grass", "cobweb", "string", "flint", "kelp", "bread",
+        "cooked_beef", "apple", "diamond", "emerald", "iron_ingot", "coal", "stick",
+        "wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe", "stone_sword",
+        "iron_sword", "leather_helmet", "iron_chestplate", "shield", "water_bucket",
+        "music_disc_cat", "oak_bed", "shulker_box", "crafting_table", "furnace", "coal_block",
+        "white_wool", "red_wool", "bowl", "torch", "oak_planks", "ancient_debris",
+    ]
+    durable = {
+        "wooden_pickaxe": [12, 59], "stone_pickaxe": [80, 131], "iron_pickaxe": [200, 250],
+        "diamond_pickaxe": [1200, 1561], "stone_sword": [100, 131], "iron_sword": [200, 250],
+    }
+    for _case in range(200):
+        n = rng.randint(0, 36)
+        items: list[dict[str, Any]] = []
+        for i in range(n):
+            name = rng.choice(pool)
+            row: dict[str, Any] = {"name": name, "count": rng.choice([1, 1, 2, 16, 64]), "slot": i}
+            if name in durable:
+                row["count"] = 1
+                row["durability"] = durable[name]
+            if rng.random() < 0.05:
+                row["enchantments"] = [{"name": "efficiency", "level": 2}]
+            if rng.random() < 0.03:
+                row["custom_name"] = "KeepMe"
+            items.append(row)
+        inv = {"items": items, "empty_slots": 36 - n}
+        min_free = rng.choice([2, 4, 8, 16, 34])
+        protected = set(rng.sample(["cobblestone", "dirt", "stick", "iron_ingot"], k=rng.randint(0, 2)))
+        plan = plan_garbage_drops(inv, min_free=min_free, protected=protected)
+        drops = plan["drops"]
+        dropped_slots = {d["slot"] for d in drops}
+        assert plan["freed_slots"] == len(dropped_slots)
+        for d in drops:
+            assert d["item"] not in protected, d
+            assert not is_important_item(d["item"]), d
+            row = items[d["slot"]]
+            assert row["name"] == d["item"]
+            assert 0 < d["count"] <= row["count"]
+            assert not row.get("enchantments"), d
+            assert not row.get("custom_name"), d
+        if plan["food_score"] < 16:
+            assert all(d["item"] not in FOOD_HUNGER_VALUES for d in drops), drops
+        # never drop more slots than exist
+        assert len(dropped_slots) <= len(items)
+
+
+def test_window_sync_fuzz_empty_and_partial_snapshots() -> None:
+    import random
+
+    from mc_agent.harness.world_memory import WorldMemory
+
+    rng = random.Random(77)
+    wm = WorldMemory()
+    pos = [5, 64, 5]
+    wm.update_container(pos, {"redstone": 1}, block_name="chest")
+    names = ["stone", "coal", "iron_ingot", "diamond", "bread"]
+    for _ in range(120):
+        slots = [
+            {"name": rng.choice(names), "count": rng.randint(1, 64)}
+            for _ in range(rng.randint(0, 5))
+        ]
+        payload = {"window": "generic_9x3", "target": "chest", "pos": pos, "sections": {"container": slots}}
+        assert wm.update_container_from_window(payload, fallback_pos=pos, fallback_block="chest")
+        got = wm.containers[("overworld", 5, 64, 5)]["items"]
+        want: dict[str, int] = {}
+        for row in slots:
+            want[row["name"]] = want.get(row["name"], 0) + row["count"]
+        assert got == want
