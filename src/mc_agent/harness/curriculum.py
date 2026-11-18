@@ -473,9 +473,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "4) 穿好钻石靴后在主控允许的 150s 顺采窗口内可在同井顺采额外至多 5 颗钻石备钻镐与附魔台。"
         ),
         post_ensure_task=(
-            "铁镐与备用石镐已齐备：直接调 mc_skill_mine_dfs(target='diamond', target_y=-54, goal_count=4) 深潜采钻；"
-            "凑满首 4 颗 diamond 立即调 mc_skill_craft_gear('diamond_boots', equip_slot='feet') 穿戴锁分；"
-            "若在 Y=-54 同一矿井连续探挖超过 8 次仍 0 钻产出（如陷入繁茂粘土层或贫矿带），可调 mc_skill_mine_dfs(action='reset') 重开新支脉。"
+            "铁镐与备用石镐已齐备：直接持续调用 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=4) 深潜采钻"
+            "（注意从地表/中层下探至 Y=-54 约需连续 10~12 次 explore 时间片，到达 Y=-54 后继续调 explore 会自动展开鱼骨支巷，严禁在深层调 reset 或 climb_out！）；"
+            "一旦包内凑满首 4 颗 diamond，立即就地调 mc_skill_craft_gear('diamond_boots', equip_slot='feet') 穿戴锁住 75 分。"
         ),
         advancement_id="minecraft:story/shiny_gear",
     ),
@@ -1807,6 +1807,20 @@ class CurriculumSupervisor:
                         eff_pre_ensure = {"diamond_pickaxe": 1, "stone_pickaxe": 1}
                     elif owned_bs.get("iron_ingot", 0) >= 3:
                         eff_pre_ensure = {"iron_pickaxe": 1, "stone_pickaxe": 1}
+                    elif self.enable_pre_ensure and cur_pos is not None and float(cur_pos[1]) >= 58.0:
+                        try:
+                            near_bs_trees = self.bot.call(
+                                "find_blocks",
+                                {
+                                    "radius": 36,
+                                    "types": ["oak_log", "spruce_log", "birch_log", "dark_oak_log", "acacia_log", "jungle_log", "cherry_log"],
+                                    "limit": 1,
+                                },
+                            )
+                            if (near_bs_trees or {}).get("blocks"):
+                                eff_pre_ensure = {"any_log": 5, "stone_pickaxe": 1}
+                        except Exception:
+                            pass
                 elif base_playbook.key == "bootstrap_iron_age":
                     # Promote `bootstrap_iron_age` pre_ensure to `iron_pickaxe` if >=3 iron in bag/72m chest or exposed within 28m!
                     bag_i, chest_i, _ = _combined_available_counts(

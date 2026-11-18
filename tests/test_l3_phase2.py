@@ -960,7 +960,7 @@ def test_agent_smelt_fuel_prep_move_range_clamp_and_mine_dfs_compaction(tmp_path
     assert smelt_plank_counts[0] >= 5  # Auto-crafted planks from `birch_log` before `smelt`!
     dfs_out = json.loads(tool_msgs[-1])
     assert dfs_out["tree"]["total_nodes"] == 20
-    assert len(dfs_out["tree"]["nodes"]) == 4
+    assert len(dfs_out["tree"]["nodes"]) == 3
 
 
 def test_bunker_wall_blocks_pre_hurt_melee_and_respawn_reanchors_geofence(tmp_path: Path) -> None:

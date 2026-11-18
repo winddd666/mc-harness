@@ -648,17 +648,23 @@ class _RepeatFailureGuard:
             if not isinstance(parsed, dict):
                 return raw
 
-            # Compact huge `mc_skill_mine_dfs` spine node arrays so output fits inline without wasting LLM turns on `read_tool_result`!
+            # Compact huge `mc_skill_mine_dfs` spine node arrays so output (<1200 chars) fits inline without wasting LLM turns on `read_tool_result`!
             if tool.name == "mc_skill_mine_dfs" and isinstance(parsed.get("tree"), dict):
-                nodes_list = parsed["tree"].get("nodes")
-                if isinstance(nodes_list, list) and len(nodes_list) > 6:
-                    parsed["tree"] = {
-                        **parsed["tree"],
-                        "total_nodes": len(nodes_list),
-                        "nodes_omitted": len(nodes_list) - 4,
-                        "nodes": nodes_list[-4:],
-                    }
-                    raw = json.dumps(parsed, ensure_ascii=False)
+                tree_d = dict(parsed["tree"])
+                nodes_list = tree_d.get("nodes")
+                if isinstance(nodes_list, list) and len(nodes_list) > 3:
+                    tree_d["total_nodes"] = len(nodes_list)
+                    tree_d["nodes_omitted"] = len(nodes_list) - 3
+                    tree_d["nodes"] = nodes_list[-3:]
+                ex_cols = tree_d.get("exhausted_collars")
+                if isinstance(ex_cols, list) and len(ex_cols) > 2:
+                    tree_d["exhausted_collars"] = ex_cols[-2:]
+                parsed["tree"] = tree_d
+                m_ores = parsed.get("mined_ores")
+                if isinstance(m_ores, list) and len(m_ores) > 4:
+                    parsed["mined_ores_total"] = len(m_ores)
+                    parsed["mined_ores"] = m_ores[-4:]
+                raw = json.dumps(parsed, ensure_ascii=False)
 
             res_obj = parsed.get("result") if isinstance(parsed.get("result"), dict) else {}
             pos_after_raw = parsed.get("pos_after") or res_obj.get("pos_after") or res_obj.get("pos") or parsed.get("pos")
