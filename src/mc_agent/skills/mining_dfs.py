@@ -946,7 +946,7 @@ class MiningDFSEngine:
                         "message": (
                             f"你当前在 y={now_y}，比本局最高井口 (y={ref_y}) 低 20 格以上，不能就地重置。"
                             "如果只是这条支巷挖干了，直接 action='explore' 会继续开支巷；"
-                            "如果要换井，请先 action='return_collar' 回到地表再重置。"
+                            "如果要换井：" + self._surface_climb_hint()
                         ),
                         "tree": self.snapshot(),
                     }
@@ -2528,6 +2528,20 @@ class MiningDFSEngine:
                 except ApiError:
                     continue
         return False
+
+    def _surface_climb_hint(self) -> str:
+        """Tell the model exactly how high to climb before calling explore again."""
+        if self.collar_ceiling_y is None:
+            return (
+                "请先用 mc_skill_staircase(vertical='up') 爬回地表（或用 action='return_collar' "
+                "走自建巷道），再 explore 开新井。"
+            )
+        need_y = int(self.collar_ceiling_y) - 20
+        return (
+            f"请连续调用 mc_skill_staircase(vertical='up') 直到 y>={need_y}"
+            f"（地表基准 y={self.collar_ceiling_y}），中途不要反复调用 explore；"
+            "到高度后再 explore 开新井，或用 action='return_collar' 走自建巷道。"
+        )
 
     def _mine_vein_ore_cell(
         self,
@@ -4313,8 +4327,7 @@ class MiningDFSEngine:
                     "stop_reason": "needs_surface_climb",
                     "message": (
                         f"当前 y={cur_pos[1]}，比本局最高井口 (y={self.collar_ceiling_y}) 低 20 格以上，"
-                        "不能在地下就地开新井。请先用 mc_skill_staircase(vertical='up') 或 "
-                        "action='return_collar' 回到地表，再 explore 开新井。"
+                        "不能在地下就地开新井。" + self._surface_climb_hint()
                     ),
                     "tree": self.snapshot(),
                 }
@@ -4387,8 +4400,7 @@ class MiningDFSEngine:
                             "stop_reason": "needs_surface_climb",
                             "message": (
                                 f"回撤到当前节点失败，且你已在地下 y={cur_pos[1]}"
-                                f"（最高井口 y={self.collar_ceiling_y}）。"
-                                "请先沿自建巷道 action='return_collar'，或用 staircase(vertical='up') 爬回地表。"
+                                f"（最高井口 y={self.collar_ceiling_y}）。" + self._surface_climb_hint()
                             ),
                             "tree": self.snapshot(),
                         }
