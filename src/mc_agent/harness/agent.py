@@ -17,7 +17,7 @@ from ..bot import BotManager, BotSession
 from ..config import Settings
 from ..errors import ApiError, McAgentError
 from .context import DEFAULT_TOOL_OUTPUT_CHARS, RequestContext, _parse_leading_json, extract_failed_coords
-from .control import RequestCancelled, RunTimedOut
+from .control import RequestCancelled, RunDisconnected, RunTimedOut
 from .curriculum import CurriculumSupervisor, is_transient_stream_error_text
 from .events import EventSink, JsonlEvents, request_model
 from .geofence import VoidGeofence
@@ -885,6 +885,10 @@ def run_mc_agent(
             return True
         if guard is not None:
             incident = guard.poll()
+            if getattr(guard, "disconnected", False):
+                raise RunDisconnected(
+                    "Bot 与服务器连接中断（连续多次读不到真实状态）；可用 mc-bot login 恢复后重新开跑。"
+                )
             if incident is not None and incident.get("requires_replan", True):
                 pending_guard_incident = incident
                 return True
@@ -1252,6 +1256,9 @@ def run_mc_agent(
         report["status"] = "limit_reached"
     except RunTimedOut as exc:
         report["status"] = "timeout"
+        report["error"] = str(exc)
+    except RunDisconnected as exc:
+        report["status"] = "disconnected"
         report["error"] = str(exc)
     except (ApiError, RuntimeError) as exc:
         report["status"] = "runtime_error"

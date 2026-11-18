@@ -52,6 +52,7 @@ class GenerationGuard:
         self.previous_ready: bool | None = None
         self.cursor = int(getattr(bot, "_last_event_seq", 0) or 0)
         self.failures = 0
+        self.disconnected = False
         self.stats = {"polls": 0, "incidents": 0, "actions": 0, "cancelled_generations": 0}
 
     def _action(self, name: str, operation: Callable) -> dict[str, Any]:
@@ -101,7 +102,8 @@ class GenerationGuard:
             if self.failures == 1:
                 self.events.emit("guardian.observation_failed", error=type(error).__name__, code=getattr(error, "code", None))
             if self.failures >= 3:
-                raise RuntimeError("生存守护连续三次无法读取真实状态，停止使用旧观察继续执行。") from None
+                # 掉线是可观测的运行结果，不是程序 bug：标记后由主循环以 status="disconnected" 收尾。
+                self.disconnected = True
             return None
 
         health = status.get("health")

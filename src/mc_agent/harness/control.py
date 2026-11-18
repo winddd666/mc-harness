@@ -9,6 +9,10 @@ class RunTimedOut(RuntimeError):
     """The configured task wall clock budget has expired."""
 
 
+class RunDisconnected(Exception):
+    """Bot 与服务器连接中断（生存守护连续多次读不到真实状态）。"""
+
+
 def check_control(control):
     if control is not None and control():
         raise RequestCancelled("立即处理新输入，已取消本次模型请求。")

@@ -303,3 +303,19 @@ def test_tool_api_error_becomes_receipt_and_run_keeps_going(monkeypatch):
     assert attempts["n"] == 3
     assert json.loads(raw)["ok"] is True
 
+
+def test_guardian_marks_disconnected_instead_of_raising():
+    """Three consecutive status-read failures are a disconnect, not a program bug."""
+    from mc_agent.errors import ApiError
+
+    class _DeadBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            raise ApiError("not_connected", "socket closed")
+
+    guard = GenerationGuard(_DeadBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    for _ in range(3):
+        guard.last_poll = float("-inf")
+        assert guard.poll() is None
+    assert guard.disconnected is True
