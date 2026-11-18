@@ -205,6 +205,9 @@ class WorldMemory:
         # Layer 2: Storage Containers ((dim, x, y, z) -> {"block": str, "items": {item: count}, "updated_at": float})
         self.containers: dict[tuple[str, int, int, int], dict[str, Any]] = {}
 
+        # Layer 2b: In-flight furnace conversion jobs (wall-clock persisted so a restart keeps the ledger)
+        self.conversion_jobs: dict[str, dict[str, Any]] = {}
+
         # Layer 3: Non-Ore Scarce POIs (LRU OrderedDict keyed by (dim, x, y, z))
         self.pois: OrderedDict[tuple[str, int, int, int], POIEntry] = OrderedDict()
 
@@ -280,6 +283,36 @@ class WorldMemory:
                     "updated_at": now_m,
                 }
 
+        wall_now = time.time()
+        for row in raw.get("conversion_jobs") or []:
+            if not isinstance(row, dict):
+                continue
+            job_id = str(row.get("id") or "").strip()
+            p = row.get("pos")
+            if not job_id or not isinstance(p, list) or len(p) < 3:
+                continue
+            try:
+                ready_at = float(row.get("ready_at") or 0.0)
+            except (TypeError, ValueError):
+                ready_at = 0.0
+            remaining = int(row.get("remaining", row.get("count") or 0) or 0)
+            if remaining <= 0 or ready_at + 1800.0 < wall_now:
+                continue
+            self.conversion_jobs[job_id] = {
+                "id": job_id,
+                "kind": str(row.get("kind") or "furnace"),
+                "dim": str(row.get("dim") or "overworld"),
+                "pos": [int(p[0]), int(p[1]), int(p[2])],
+                "input_item": _clean_name(row.get("input_item") or ""),
+                "output_item": _clean_name(row.get("output_item") or ""),
+                "count": int(row.get("count") or remaining),
+                "remaining": remaining,
+                "furnace_count": int(row.get("furnace_count") or 1),
+                "per_item_s": float(row.get("per_item_s") or 10.0),
+                "started_at": float(row.get("started_at") or wall_now),
+                "ready_at": ready_at,
+            }
+
         for row in raw.get("pois") or []:
             if not isinstance(row, dict):
                 continue
@@ -340,6 +373,23 @@ class WorldMemory:
                 for k, v in self.containers.items()
             ],
             "pois": [e.to_dict() for e in self.pois.values()],
+            "conversion_jobs": [
+                {
+                    "id": j["id"],
+                    "kind": j.get("kind", "furnace"),
+                    "dim": j.get("dim", "overworld"),
+                    "pos": list(j.get("pos") or []),
+                    "input_item": j.get("input_item", ""),
+                    "output_item": j.get("output_item", ""),
+                    "count": int(j.get("count") or 0),
+                    "remaining": int(j.get("remaining") or 0),
+                    "furnace_count": int(j.get("furnace_count") or 1),
+                    "per_item_s": float(j.get("per_item_s") or 10.0),
+                    "started_at": float(j.get("started_at") or 0.0),
+                    "ready_at": float(j.get("ready_at") or 0.0),
+                }
+                for j in self.conversion_jobs.values()
+            ],
             "biomes": [
                 {"dim": dim, "biome": b, "points": pts}
                 for (dim, b), pts in self.biomes.items()
@@ -633,6 +683,150 @@ class WorldMemory:
         blk = _clean_name(fallback_block or "")
         self.update_container(pos, counts, block_name=(blk if blk in CONTAINER_BLOCKS else "chest"), dim=dim)
         return True
+
+    def invalidate_container(
+        self,
+        pos: list[int] | tuple[int, int, int],
+        *,
+        dim: str = "overworld",
+        block_name: str | None = None,
+        auto_save: bool = True,
+    ) -> dict[str, Any]:
+        """Remove a broken container from both the `containers` and `pois` tables."""
+        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+            return {"container_removed": False, "poi_removed": False}
+        norm_dim = normalize_dimension(dim)
+        key = (norm_dim, int(pos[0]), int(pos[1]), int(pos[2]))
+        container_removed = self.containers.pop(key, None) is not None
+        poi_removed = self.pois.pop(key, None) is not None
+        # In-flight jobs pointing at a destroyed furnace are dead weight.
+        dead_jobs = [
+            jid
+            for jid, job in self.conversion_jobs.items()
+            if tuple(job.get("pos") or ()) == (key[1], key[2], key[3]) and str(job.get("dim") or "overworld") == norm_dim
+        ]
+        for jid in dead_jobs:
+            self.conversion_jobs.pop(jid, None)
+        if container_removed or poi_removed or dead_jobs:
+            self._dirty = True
+            if auto_save:
+                self.save()
+        return {
+            "container_removed": container_removed,
+            "poi_removed": poi_removed,
+            "jobs_removed": dead_jobs,
+            "pos": [key[1], key[2], key[3]],
+            "dim": norm_dim,
+            "block": block_name,
+        }
+
+    # ---- In-flight conversion (furnace) ledger ----
+
+    def register_conversion_job(
+        self,
+        *,
+        pos: list[int] | tuple[int, int, int],
+        input_item: str,
+        output_item: str,
+        count: int,
+        dim: str = "overworld",
+        furnaces: int = 1,
+        per_item_s: float = 10.0,
+        ready_at: float | None = None,
+        kind: str = "furnace",
+        auto_save: bool = True,
+    ) -> dict[str, Any]:
+        """Register one non-blocking conversion job (multi-furnace aware) and persist it."""
+        norm_dim = normalize_dimension(dim)
+        pt = [int(pos[0]), int(pos[1]), int(pos[2])]
+        wall_now = time.time()
+        n = max(1, int(count))
+        job_id = f"{kind}-{int(wall_now * 1000)}-{len(self.conversion_jobs) + 1}"
+        eta = float(ready_at) if ready_at is not None else wall_now + per_item_s * math.ceil(n / max(1, int(furnaces))) + 5.0
+        job = {
+            "id": job_id,
+            "kind": kind,
+            "dim": norm_dim,
+            "pos": pt,
+            "input_item": _clean_name(input_item),
+            "output_item": _clean_name(output_item),
+            "count": n,
+            "remaining": n,
+            "furnace_count": max(1, int(furnaces)),
+            "per_item_s": float(per_item_s),
+            "started_at": wall_now,
+            "ready_at": eta,
+        }
+        self.conversion_jobs[job_id] = job
+        self._dirty = True
+        if auto_save:
+            self.save()
+        return dict(job)
+
+    def get_conversion_jobs(self, *, dim: str | None = None, include_expired: bool = False) -> list[dict[str, Any]]:
+        wall_now = time.time()
+        out: list[dict[str, Any]] = []
+        expired: list[str] = []
+        for jid, job in self.conversion_jobs.items():
+            if dim is not None and str(job.get("dim") or "overworld") != normalize_dimension(dim):
+                continue
+            if not include_expired and float(job.get("ready_at") or 0.0) + 1800.0 < wall_now:
+                expired.append(jid)
+                continue
+            out.append(dict(job))
+        for jid in expired:
+            self.conversion_jobs.pop(jid, None)
+            self._dirty = True
+        return out
+
+    def get_in_conversion_counts(self, *, dim: str | None = None) -> dict[str, int]:
+        """Output-item counts currently sitting inside furnaces (not yet in the bag)."""
+        counts: dict[str, int] = {}
+        for job in self.get_conversion_jobs(dim=dim):
+            out_name = _clean_name(job.get("output_item") or "")
+            remaining = int(job.get("remaining") or 0)
+            if out_name and remaining > 0:
+                counts[out_name] = counts.get(out_name, 0) + remaining
+        return counts
+
+    def complete_conversion_job(
+        self,
+        job_id: str | None = None,
+        *,
+        pos: list[int] | tuple[int, int, int] | None = None,
+        dim: str | None = None,
+        collected: int | None = None,
+        auto_save: bool = True,
+    ) -> dict[str, Any]:
+        """Book the collected output; drop the job when nothing remains."""
+        target: dict[str, Any] | None = None
+        if job_id:
+            target = self.conversion_jobs.get(str(job_id))
+        elif pos is not None:
+            norm_dim = normalize_dimension(dim or "overworld")
+            for job in self.conversion_jobs.values():
+                if tuple(job.get("pos") or ()) == tuple(int(v) for v in pos[:3]) and str(job.get("dim")) == norm_dim:
+                    target = job
+                    break
+        if target is None:
+            return {"ok": False, "reason": "job_not_found", "job_id": job_id, "pos": list(pos) if pos else None}
+        take = int(collected if collected is not None else target.get("remaining") or 0)
+        target["remaining"] = max(0, int(target.get("remaining") or 0) - max(0, take))
+        finished = target["remaining"] <= 0
+        if finished:
+            self.conversion_jobs.pop(target["id"], None)
+        self._dirty = True
+        if auto_save:
+            self.save()
+        return {
+            "ok": True,
+            "job_id": target["id"],
+            "collected": take,
+            "remaining": target["remaining"],
+            "output_item": target.get("output_item"),
+            "pos": target.get("pos"),
+            "finished": finished,
+        }
 
     def observe_entities(self, entities: Iterable[dict[str, Any]], *, dim: str = "overworld") -> int:
         norm_dim = normalize_dimension(dim)

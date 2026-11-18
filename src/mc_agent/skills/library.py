@@ -12,6 +12,9 @@ from ..kb import assess_world_target, normalize_dimension, resolve_item_alias
 from .safety import check_and_stabilize
 from .crafting import material_shortage, explain_craft_error
 
+# Maximum local-recovery attempts inside `navigate_segmented` before returning a structured block.
+MAX_LOCAL_RECOVERY_ATTEMPTS = 2
+
 LOG_TYPES: tuple[str, ...] = (
     "oak_log",
     "birch_log",
@@ -848,6 +851,102 @@ def _yaw_toward(px: float, pz: float, tx: float, tz: float) -> float:
     return math.atan2(-(tx - px), -(tz - pz))
 
 
+_CONTAINER_TYPES: tuple[str, ...] = (
+    "chest",
+    "barrel",
+    "trapped_chest",
+    "shulker_box",
+    "hopper",
+    "dispenser",
+    "dropper",
+)
+
+# input item -> furnace output (1.21 vanilla)
+SMELT_OUTPUTS: dict[str, str] = {
+    "cobblestone": "stone",
+    "cobbled_deepslate": "deepslate",
+    "sand": "glass",
+    "red_sand": "glass",
+    "clay_ball": "brick",
+    "clay": "terracotta",
+    "raw_iron": "iron_ingot",
+    "raw_gold": "gold_ingot",
+    "raw_copper": "copper_ingot",
+    "iron_ore": "iron_ingot",
+    "gold_ore": "gold_ingot",
+    "copper_ore": "copper_ingot",
+    "deepslate_iron_ore": "iron_ingot",
+    "deepslate_gold_ore": "gold_ingot",
+    "deepslate_copper_ore": "copper_ingot",
+    "nether_gold_ore": "gold_ingot",
+    "ancient_debris": "netherite_scrap",
+    "netherrack": "nether_brick",
+    "porkchop": "cooked_porkchop",
+    "beef": "cooked_beef",
+    "chicken": "cooked_chicken",
+    "mutton": "cooked_mutton",
+    "rabbit": "cooked_rabbit",
+    "cod": "cooked_cod",
+    "salmon": "cooked_salmon",
+    "potato": "baked_potato",
+    "kelp": "dried_kelp",
+    "cactus": "green_dye",
+    "sea_pickle": "lime_dye",
+    "wet_sponge": "sponge",
+    "chorus_fruit": "popped_chorus_fruit",
+    "oak_log": "charcoal",
+    "spruce_log": "charcoal",
+    "birch_log": "charcoal",
+    "jungle_log": "charcoal",
+    "acacia_log": "charcoal",
+    "dark_oak_log": "charcoal",
+    "mangrove_log": "charcoal",
+    "cherry_log": "charcoal",
+    "pale_oak_log": "charcoal",
+}
+
+
+def _window_item_entries(items: Any) -> list[dict[str, Any]]:
+    """Normalise `{"coal": 3}` / `["coal"]` / `[{"item": "coal", ...}]` into window ops."""
+    entries: list[dict[str, Any]] = []
+    if isinstance(items, dict):
+        for name, cnt in items.items():
+            clean = str(name or "").removeprefix("minecraft:").strip().lower()
+            if clean and int(cnt or 0) > 0:
+                entries.append({"item": clean, "count": int(cnt)})
+        return entries
+    if isinstance(items, (list, tuple)):
+        for row in items:
+            if isinstance(row, str):
+                clean = row.removeprefix("minecraft:").strip().lower()
+                if clean:
+                    entries.append({"item": clean, "count": 1})
+                continue
+            if not isinstance(row, dict):
+                continue
+            name = row.get("item") or row.get("name")
+            clean = str(name or "").removeprefix("minecraft:").strip().lower()
+            if not clean:
+                continue
+            entry: dict[str, Any] = {"item": clean, "count": max(1, int(row.get("count") or 1))}
+            for key in ("slot", "potion", "enchanted", "custom_name"):
+                if key in row:
+                    entry[key] = row[key]
+            entries.append(entry)
+    return entries
+
+
+def _merge_counts(target: dict[str, int], extra: dict[str, int]) -> dict[str, int]:
+    for name, cnt in extra.items():
+        target[name] = target.get(name, 0) + int(cnt)
+    return target
+
+
+def _clean_block(raw: Any) -> str:
+    return str(raw or "").removeprefix("minecraft:").strip().lower()
+
+
+
 _HIGH_VALUE_DROPS: frozenset[str] = frozenset({
     "diamond",
     "raw_iron",
@@ -968,6 +1067,16 @@ class MacroSkills:
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
         self._mining_dfs: Any = None
         self.world_memory: Any = None
+        self._terrain_nav: Any = None
+        self.inventory_manager: Any = None
+
+    def _get_terrain_nav(self) -> Any:
+        """Lazily build the L2 local-terrain navigator (breadcrumbs + 5 primitives)."""
+        if self._terrain_nav is None:
+            from .movement import TerrainNavigator
+
+            self._terrain_nav = TerrainNavigator(self.bot, skills=self)
+        return self._terrain_nav
 
     def _get_world_memory(self) -> Any:
         if self.world_memory is None:
@@ -999,6 +1108,8 @@ class MacroSkills:
             if y is not None:
                 payload["y"] = float(y)
             res = self.bot.call("move_to", payload)
+            nav = self._get_terrain_nav()
+            nav.note_status()
             return {"ok": True, "segmented": False, "segments_done": 1, "result": res}
 
         # Try direct first in case chunks are already loaded and unobstructed
@@ -1015,13 +1126,21 @@ class MacroSkills:
 
         max_hops = min(18, max(3, int(math.ceil(total_hdist / max(10.0, step_m))) + 3))
         segs_done = 0
+        nav = self._get_terrain_nav()
+        recoveries: list[dict[str, Any]] = []
         for _ in range(max_hops):
             st_cur = self.bot.status()
             p_cur = st_cur.get("pos") or [cx, cy, cz]
             cx, cy, cz = float(p_cur[0]), float(p_cur[1]), float(p_cur[2])
             rem = math.hypot(float(x) - cx, float(z) - cz)
             if rem <= max(range_m + 1.0, 3.5):
-                return {"ok": True, "segmented": True, "segments_done": segs_done, "pos": p_cur}
+                return {
+                    "ok": True,
+                    "segmented": True,
+                    "segments_done": segs_done,
+                    "pos": p_cur,
+                    "recoveries": recoveries,
+                }
 
             if rem <= step_m + 4.0:
                 hop_targets = [(float(x), float(z), y, range_m)]
@@ -1055,7 +1174,38 @@ class MacroSkills:
                     last_err = hop_err
                     continue
             if not advanced:
-                raise last_err
+                if len(recoveries) < MAX_LOCAL_RECOVERY_ATTEMPTS:
+                    rec = nav.recover(x=float(x), z=float(z), y=y, attempt=len(recoveries) + 1)
+                    recoveries.append(
+                        {
+                            "op": rec.get("op"),
+                            "diagnosis": rec.get("diagnosis"),
+                            "ok": bool(rec.get("ok")),
+                            "error": rec.get("error"),
+                        }
+                    )
+                    if rec.get("ok"):
+                        segs_done += 1
+                        nav.note_status()
+                    if rec.get("ok") or len(recoveries) < MAX_LOCAL_RECOVERY_ATTEMPTS:
+                        continue
+                raise ApiError(
+                    code=last_err.code,
+                    message=(
+                        f"{last_err.message}（navigate_segmented 已完成 {segs_done} 段，"
+                        f"局部恢复 {len(recoveries)} 次仍不通）"
+                    ),
+                    http_status=last_err.http_status,
+                    ms=last_err.ms,
+                    context={
+                        **dict(last_err.context or {}),
+                        "segments_done": segs_done,
+                        "recoveries": recoveries,
+                        "blocked_reason": (recoveries[-1] if recoveries else "no_recovery"),
+                        "pos": self.bot.status().get("pos"),
+                    },
+                )
+            nav.note_status()
 
         st_fin = self.bot.status()
         p_fin = st_fin.get("pos") or [cx, cy, cz]
@@ -3044,6 +3194,655 @@ class MacroSkills:
             return self.dig_level_tunnel(direction=direction, steps=steps, stop_on_ore=True)
         except Exception:
             return None
+
+    # ---- L2 Window-Sync: container snapshots, error self-healing, natural chest probing ----
+
+    def _window_target(
+        self,
+        *,
+        block: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> dict[str, Any] | None:
+        if x is not None and y is not None and z is not None:
+            return {"pos": [int(x), int(y), int(z)]}
+        if block:
+            return {"block": str(block).removeprefix("minecraft:")}
+        return None
+
+    def _current_dim(self, dim: str | None = None) -> str:
+        if dim:
+            return normalize_dimension(dim)
+        try:
+            return normalize_dimension(self.bot.status().get("dimension"))
+        except ApiError:
+            return "overworld"
+
+    def _resolve_nearby_container_pos(self, block: str | None = None, *, radius: int = 16) -> list[int] | None:
+        names = [str(block).removeprefix("minecraft:")] if block else list(_CONTAINER_TYPES)
+        try:
+            found = self.bot.call("find_blocks", {"radius": max(4, min(48, int(radius))), "types": names, "limit": 8})
+        except ApiError:
+            return None
+        blocks = [b for b in (found.get("blocks") or []) if isinstance(b, dict) and isinstance(b.get("pos"), list)]
+        if not blocks:
+            return None
+        nearest = min(blocks, key=lambda b: float(b.get("dist") or 99))
+        return [int(v) for v in nearest["pos"][:3]]
+
+    def _container_block_at(self, pos: list[int]) -> str | None:
+        try:
+            res = self.bot.call("get_block", {"pos": [int(pos[0]), int(pos[1]), int(pos[2])]})
+        except ApiError:
+            return None
+        return str(res.get("name") or res.get("block") or "").removeprefix("minecraft:").strip().lower()
+
+    def _sync_container_window(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        pos: list[int] | None = None,
+        block: str | None = None,
+        dim: str | None = None,
+    ) -> bool:
+        """Overwrite `WorldMemory.containers` from any payload carrying a `window` snapshot.
+
+        An empty `sections.container: []` must clear the cached phantom contents (`{}`).
+        """
+        if not isinstance(payload, dict):
+            return False
+        window = payload.get("window") if isinstance(payload.get("window"), dict) else payload
+        resolved_pos = pos
+        if resolved_pos is None:
+            raw = payload.get("pos") or (payload.get("target") or {}).get("pos") if isinstance(payload.get("target"), dict) else payload.get("pos")
+            if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+                resolved_pos = [int(raw[0]), int(raw[1]), int(raw[2])]
+        if resolved_pos is None and block:
+            resolved_pos = self._resolve_nearby_container_pos(block)
+        mem = self._get_world_memory()
+        try:
+            synced = bool(
+                mem.update_container_from_window(
+                    window,
+                    fallback_pos=resolved_pos,
+                    fallback_block=block,
+                    dim=self._current_dim(dim),
+                )
+            )
+        except TypeError:
+            synced = bool(mem.update_container_from_window(window, fallback_pos=resolved_pos, fallback_block=block))
+        if synced and resolved_pos is not None:
+            live = self._container_block_at(resolved_pos)
+            if live in ("air", "cave_air", "void_air"):
+                mem.invalidate_container(resolved_pos, dim=self._current_dim(dim), block_name=block)
+                synced = False
+        return synced
+
+    def _window_api_error(
+        self,
+        err: ApiError,
+        *,
+        pos: list[int] | None = None,
+        block: str | None = None,
+        dim: str | None = None,
+    ) -> dict[str, Any]:
+        """Self-heal container cache from a failed `window/act` payload (context.window)."""
+        ctx = dict(getattr(err, "context", None) or {})
+        window = ctx.get("window") if isinstance(ctx.get("window"), dict) else None
+        synced = False
+        if window is not None:
+            synced = self._sync_container_window(window, pos=pos, block=block, dim=dim)
+        elif pos is not None and err.code in ("no_window", "not_found", "window_closed"):
+            live = self._container_block_at(pos)
+            if live in ("air", "cave_air", "void_air"):
+                self._get_world_memory().invalidate_container(
+                    pos, dim=self._current_dim(dim), block_name=block
+                )
+        return {
+            "ok": False,
+            "error": err.code,
+            "message": err.message,
+            "failed_op": ctx.get("failed_op"),
+            "done": ctx.get("done"),
+            "window": window,
+            "container_pos": pos,
+            "memory_synced": synced,
+            "context_keys": sorted(ctx.keys()),
+        }
+
+    def container_batch(
+        self,
+        items: Any,
+        *,
+        action: str = "put",
+        block: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+        dim: str | None = None,
+    ) -> dict[str, Any]:
+        """Batch `put`/`take` on the `container` section of a chest/barrel window."""
+        if action not in ("put", "take"):
+            return {"ok": False, "error": "bad_args", "message": "action 必须是 put 或 take。"}
+        entries = _window_item_entries(items)
+        if not entries:
+            return {"ok": False, "error": "bad_args", "message": "items 不能为空。"}
+        target = self._window_target(block=block, x=x, y=y, z=z)
+        if target is None:
+            return {"ok": False, "error": "bad_args", "message": "需要 block 或 (x, y, z)。"}
+
+        ops: list[dict[str, Any]] = []
+        for entry in entries:
+            op: dict[str, Any] = {
+                "op": action,
+                "item": entry["item"],
+                "count": entry["count"],
+                "to" if action == "put" else "from": "container",
+            }
+            if action == "put":
+                for key in ("slot", "potion", "enchanted", "custom_name"):
+                    if key in entry:
+                        op[key] = entry[key]
+            ops.append(op)
+
+        pos = [int(x), int(y), int(z)] if x is not None and y is not None and z is not None else None
+        try:
+            result = self.bot.call("window/act", {"target": target, "ops": ops})
+        except ApiError as err:
+            if pos is None:
+                pos = self._resolve_nearby_container_pos(block)
+            return self._window_api_error(err, pos=pos, block=block, dim=dim)
+
+        if pos is None:
+            pos = self._resolve_nearby_container_pos(block)
+        synced = self._sync_container_window(result, pos=pos, block=block, dim=dim)
+        return {
+            "ok": True,
+            "action": action,
+            "ops": ops,
+            "done": result.get("done"),
+            "window": result.get("window"),
+            "container_pos": pos,
+            "memory_synced": synced,
+        }
+
+    def container_deposit(
+        self,
+        items: Any,
+        *,
+        block: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+        dim: str | None = None,
+    ) -> dict[str, Any]:
+        return self.container_batch(items, action="put", block=block, x=x, y=y, z=z, dim=dim)
+
+    def container_withdraw(
+        self,
+        items: Any,
+        *,
+        block: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+        dim: str | None = None,
+    ) -> dict[str, Any]:
+        return self.container_batch(items, action="take", block=block, x=x, y=y, z=z, dim=dim)
+
+    def probe_unknown_nearby_containers(
+        self,
+        radius: float = 8.0,
+        max_probes: int = 2,
+        *,
+        dim: str | None = None,
+        skip_dungeon: bool = True,
+    ) -> dict[str, Any]:
+        """Passively build cache entries for nearby chests that are not known yet."""
+        mem = self._get_world_memory()
+        norm_dim = self._current_dim(dim)
+        probed: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        try:
+            found = self.bot.call(
+                "find_blocks",
+                {"radius": max(4, min(32, int(radius))), "types": ["chest", "barrel", "trapped_chest"], "limit": 8},
+            )
+        except ApiError as err:
+            return {"ok": False, "error": err.code, "probed": [], "skipped": []}
+        spawners: list[list[int]] = []
+        if skip_dungeon:
+            try:
+                sp = self.bot.call("find_blocks", {"radius": 16, "types": ["spawner"], "limit": 8})
+                spawners = [
+                    [int(v) for v in b["pos"][:3]]
+                    for b in (sp.get("blocks") or [])
+                    if isinstance(b, dict) and isinstance(b.get("pos"), list)
+                ]
+            except ApiError:
+                spawners = []
+        for blk in found.get("blocks") or []:
+            if len(probed) >= max(1, int(max_probes)):
+                break
+            if not isinstance(blk, dict) or not isinstance(blk.get("pos"), list):
+                continue
+            pos = [int(v) for v in blk["pos"][:3]]
+            key = (norm_dim, pos[0], pos[1], pos[2])
+            if key in getattr(mem, "containers", {}):
+                skipped.append({"pos": pos, "reason": "already_cached"})
+                continue
+            if skip_dungeon and any(
+                math.dist(pos, sp) <= 6.0 for sp in spawners
+            ):
+                skipped.append({"pos": pos, "reason": "dungeon_spawner"})
+                continue
+            try:
+                view = self.bot.call("window/view", {"target": {"pos": pos}})
+            except ApiError as err:
+                skipped.append({"pos": pos, "reason": f"view:{err.code}"})
+                continue
+            synced = self._sync_container_window(view, pos=pos, block=_clean_block(blk.get("name")), dim=norm_dim)
+            probed.append({"pos": pos, "block": _clean_block(blk.get("name")), "synced": synced})
+        return {"ok": bool(probed), "probed": probed, "skipped": skipped, "dim": norm_dim}
+
+    # ---- L2 Smelt-Split: non-blocking multi-furnace start/collect ----
+
+    def _safe_fuel_counts(self) -> dict[str, int]:
+        from .inventory_manager import is_safe_fuel
+
+        counts = _inventory_counts(self.bot)
+        protected = set()
+        if self.inventory_manager is not None:
+            try:
+                protected = set(self.inventory_manager.active_protected())
+            except (AttributeError, TypeError):
+                protected = set()
+        return {name: cnt for name, cnt in counts.items() if cnt > 0 and is_safe_fuel(name, protected)}
+
+    def _choose_smelt_fuel(
+        self,
+        *,
+        smelt_n: int,
+        fuel_item: str | None,
+        counts: dict[str, int],
+        input_item: str,
+    ) -> tuple[str | None, int, float]:
+        from .inventory_manager import SUPPORTED_FUELS, is_safe_fuel
+
+        protected = set()
+        if self.inventory_manager is not None:
+            try:
+                protected = set(self.inventory_manager.active_protected())
+            except (AttributeError, TypeError):
+                protected = set()
+        order = ["coal", "charcoal", "coal_block", "dried_kelp_block", "stick", "bamboo"]
+        order += [n for n in SUPPORTED_FUELS if n not in order and n.endswith("_planks")]
+        if fuel_item:
+            clean = str(fuel_item).removeprefix("minecraft:")
+            if is_safe_fuel(clean, protected) and counts.get(clean, 0) > 0:
+                order = [clean] + [n for n in order if n != clean]
+        for cand in order:
+            if not is_safe_fuel(cand, protected):
+                continue
+            avail = int(counts.get(cand, 0)) - (smelt_n if cand == input_item else 0)
+            if avail <= 0:
+                continue
+            per = float(SUPPORTED_FUELS.get(cand) or (1.5 if cand.endswith("_planks") else 1.5))
+            need = max(1, math.ceil(smelt_n / max(0.25, per)))
+            if avail < need:
+                continue
+            return cand, need, per
+        # second pass: accept partial fuel (a partial batch still smelts fewer items)
+        for cand in order:
+            if not is_safe_fuel(cand, protected):
+                continue
+            avail = int(counts.get(cand, 0)) - (smelt_n if cand == input_item else 0)
+            if avail <= 0:
+                continue
+            per = float(SUPPORTED_FUELS.get(cand) or 1.5)
+            return cand, min(avail, max(1, math.ceil(smelt_n / max(0.25, per)))), per
+        return None, 0, 0.0
+
+    def smelt_start(
+        self,
+        input_item: str,
+        count: int = 1,
+        fuel_item: str | None = None,
+        *,
+        allow_multi_furnace: bool = True,
+        per_item_s: float = 10.0,
+    ) -> dict[str, Any]:
+        """Non-blocking furnace start: split the batch across 2-3 parallel furnaces and return at once."""
+        clean_input = str(input_item or "").removeprefix("minecraft:").strip().lower()
+        if not clean_input:
+            return {"ok": False, "error": "bad_args", "message": "input_item 不能为空。"}
+        output_item = SMELT_OUTPUTS.get(clean_input, clean_input)
+        counts = _inventory_counts(self.bot)
+        avail_in = int(counts.get(clean_input, 0))
+        if avail_in < 1:
+            return {"ok": False, "error": "missing_ingredients", "message": f"背包没有 {clean_input}。"}
+        smelt_n = min(max(1, int(count)), avail_in)
+        self._ensure_free_slots(min_free=3)
+        counts = _inventory_counts(self.bot)
+
+        if fuel_item:
+            from .inventory_manager import is_safe_fuel
+
+            protected_fuel = set()
+            if self.inventory_manager is not None:
+                try:
+                    protected_fuel = set(self.inventory_manager.active_protected())
+                except (AttributeError, TypeError):
+                    protected_fuel = set()
+            requested = str(fuel_item).removeprefix("minecraft:").strip().lower()
+            if not is_safe_fuel(requested, protected_fuel):
+                return {
+                    "ok": False,
+                    "error": "missing_fuel",
+                    "message": (
+                        f"拒绝把 {requested} 当燃料：安全白名单仅允许煤/木炭/煤块/干海带块/竹/木棍/未保护木板，"
+                        "严禁烧床、木工具、工作台、箱子、船、弓弩、盾牌、烈焰棒。"
+                    ),
+                }
+        fuel, fuel_total, _per_fuel = self._choose_smelt_fuel(
+            smelt_n=smelt_n, fuel_item=fuel_item, counts=counts, input_item=clean_input
+        )
+        if not fuel or fuel_total < 1:
+            return {
+                "ok": False,
+                "error": "missing_fuel",
+                "message": "背包没有安全燃料（煤/木炭/煤块/干海带块/竹/木棍/木板），禁止烧床/工具/工作台/船/烈焰棒。",
+            }
+
+        desired_k = min(3, max(1, smelt_n // 6)) if (allow_multi_furnace and smelt_n >= 8) else 1
+        st = self.bot.status()
+        try:
+            found = self.bot.call("find_blocks", {"radius": 8, "types": ["furnace"], "limit": 6})
+        except ApiError:
+            found = {}
+        existing: list[list[int]] = []
+        for blk in found.get("blocks") or []:
+            if isinstance(blk, dict) and isinstance(blk.get("pos"), list):
+                pos = [int(v) for v in blk["pos"][:3]]
+                if pos not in existing:
+                    existing.append(pos)
+        existing.sort(key=lambda p: math.dist(p, st.get("pos") or [0, 64, 0]))
+
+        furnaces: list[dict[str, Any]] = []
+        placed_new: list[list[int]] = []
+        try:
+            for pos in existing[:desired_k]:
+                furnaces.append({"pos": pos, "source": "existing"})
+            need_new = max(0, desired_k - len(furnaces))
+            if need_new > 0:
+                # keep >=16 cobblestone after crafting furnaces
+                cobble = int(counts.get("cobblestone", 0))
+                can_craft = min(need_new, max(0, (cobble - 16) // 8))
+                if can_craft > 0:
+                    try:
+                        self._safe_craft("furnace", can_craft)
+                    except ApiError as craft_err:
+                        if craft_err.code == "need_crafting_table":
+                            # craft_gear builds/borrows a crafting table (live bot usually has planks)
+                            try:
+                                cg = self.craft_gear("furnace", can_craft)
+                                if not isinstance(cg, dict) or not cg.get("ok"):
+                                    can_craft = 0
+                            except ApiError:
+                                can_craft = 0
+                        else:
+                            can_craft = 0
+                owned_furnaces = int(_inventory_counts(self.bot).get("furnace", 0))
+                to_place = min(need_new, owned_furnaces)
+                for _ in range(to_place):
+                    pos = self._place_furnace_near(placed_new)
+                    if pos is None:
+                        break
+                    placed_new.append(pos)
+                    furnaces.append({"pos": pos, "source": "placed"})
+            if not furnaces:
+                return {
+                    "ok": False,
+                    "error": "need_furnace",
+                    "message": "附近没有熔炉，且圆石不足（扣合炉消耗后需保底 >=16 圆石）无法补造。",
+                }
+
+            k = len(furnaces)
+            base = smelt_n // k
+            extra = smelt_n % k
+            shares = [base + (1 if i < extra else 0) for i in range(k)]
+            jobs: list[dict[str, Any]] = []
+            now = time.time()
+            remaining_fuel = fuel_total
+            for idx, fur in enumerate(furnaces):
+                part = shares[idx]
+                if part <= 0:
+                    continue
+                per = float(_per_fuel or 1.5)
+                fuel_need = max(1, math.ceil(part / max(0.25, per)))
+                fuel_need = min(fuel_need, max(0, remaining_fuel))
+                if fuel_need < 1:
+                    continue
+                remaining_fuel -= fuel_need
+                try:
+                    self.bot.call(
+                        "window/act",
+                        {
+                            "target": {"pos": fur["pos"]},
+                            "ops": [
+                                {"op": "put", "item": clean_input, "count": part, "to": "input"},
+                                {"op": "put", "item": fuel, "count": fuel_need, "to": "fuel"},
+                            ],
+                        },
+                    )
+                except ApiError as err:
+                    jobs.append(
+                        {
+                            "pos": fur["pos"],
+                            "error": err.code,
+                            "message": err.message,
+                            "input_count": part,
+                        }
+                    )
+                    continue
+                ready_at = now + per_item_s * part + 5.0
+                job = self._get_world_memory().register_conversion_job(
+                    pos=fur["pos"],
+                    input_item=clean_input,
+                    output_item=output_item,
+                    count=part,
+                    dim=self._current_dim(),
+                    furnaces=1,
+                    per_item_s=per_item_s,
+                    ready_at=ready_at,
+                )
+                jobs.append(
+                    {
+                        "pos": fur["pos"],
+                        "source": fur["source"],
+                        "job_id": job["id"],
+                        "input_count": part,
+                        "fuel": {"item": fuel, "count": fuel_need},
+                        "ready_at": ready_at,
+                        "estimated_wait_s": round(per_item_s * part + 5.0, 1),
+                    }
+                )
+        except ApiError as err:
+            if err.code in ("hurt", "death", "interrupted"):
+                raise
+            return {"ok": False, "error": err.code, "message": err.message}
+
+        ok_jobs = [j for j in jobs if "job_id" in j]
+        total_ready = max((j["ready_at"] for j in ok_jobs), default=time.time())
+        return {
+            "ok": bool(ok_jobs),
+            "input": clean_input,
+            "output_item": output_item,
+            "requested_count": smelt_n,
+            "furnace_count": len(ok_jobs),
+            "furnaces": ok_jobs,
+            "failures": [j for j in jobs if "job_id" not in j],
+            "fuel": {"item": fuel, "total": fuel_total},
+            "estimated_wait_s": round(max((j["estimated_wait_s"] for j in ok_jobs), default=0.0), 1),
+            "ready_at": total_ready,
+            "in_conversion_counts": self._get_world_memory().get_in_conversion_counts(),
+            "non_blocking": True,
+        }
+
+    def _place_furnace_near(self, placed: list[list[int]]) -> list[int] | None:
+        st = self.bot.status()
+        p = st.get("pos") or [0, 64, 0]
+        bx, by, bz = math.floor(float(p[0])), math.floor(float(p[1])), math.floor(float(p[2]))
+        offsets = [(1, 0), (-1, 0), (0, 1), (0, -1), (2, 0), (0, 2), (-2, 0), (0, -2)]
+        for dx, dz in offsets:
+            cell = [bx + dx, by, bz + dz]
+            if cell in placed:
+                continue
+            try:
+                below = self.bot.call("get_block", {"pos": [cell[0], cell[1] - 1, cell[2]]})
+                here = self.bot.call("get_block", {"pos": cell})
+            except ApiError:
+                continue
+            below_name = str(below.get("name") or "air").removeprefix("minecraft:")
+            here_name = str(here.get("name") or "air").removeprefix("minecraft:")
+            if below_name in ("air", "water", "lava") or here_name not in ("air", "cave_air"):
+                continue
+            try:
+                res = self.bot.call("place", {"item": "furnace", "pos": cell})
+                pos = res.get("pos") if isinstance(res, dict) else None
+                return [int(v) for v in (pos or cell)[:3]]
+            except ApiError:
+                continue
+        return None
+
+    def smelt_collect(
+        self,
+        furnaces: Any = None,
+        furnace_pos: Any = None,
+        *,
+        wait_remaining_s: float = 15.0,
+        dim: str | None = None,
+    ) -> dict[str, Any]:
+        """Collect finished furnace outputs by coordinate and settle the conversion ledger."""
+        mem = self._get_world_memory()
+        norm_dim = self._current_dim(dim)
+        targets: list[dict[str, Any]] = []
+        raw_positions: list[list[int]] = []
+        if furnace_pos is not None:
+            raw_positions.append([int(v) for v in list(furnace_pos)[:3]])
+        if isinstance(furnaces, (list, tuple)):
+            for row in furnaces:
+                if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)):
+                    raw_positions.append([int(v) for v in row["pos"][:3]])
+                elif isinstance(row, (list, tuple)) and len(row) >= 3:
+                    raw_positions.append([int(v) for v in row[:3]])
+        jobs = mem.get_conversion_jobs(dim=norm_dim)
+        if not raw_positions:
+            raw_positions = [[int(v) for v in j["pos"][:3]] for j in jobs]
+        for pos in raw_positions:
+            job = next(
+                (
+                    j
+                    for j in jobs
+                    if [int(v) for v in j.get("pos", [])[:3]] == pos
+                ),
+                None,
+            )
+            targets.append({"pos": pos, "job": job})
+        if not targets:
+            return {"ok": True, "collected": [], "in_conversion_counts": {}, "reason": "no_jobs"}
+
+        wall_deadline = time.time() + max(0.0, float(wait_remaining_s))
+        collected: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for tgt in targets:
+            pos = tgt["pos"]
+            job = tgt["job"]
+            try:
+                self.bot.call("move_to", {"x": pos[0] + 0.5, "z": pos[2] + 0.5, "range": 2.5, "stop_on": ["death"]})
+            except ApiError:
+                pass
+            # short wait for tail-end smelting (never blocks longer than wait_remaining_s)
+            take_ops: list[dict[str, Any]] = []
+            got: dict[str, int] = {}
+            while True:
+                try:
+                    view = self.bot.call("window/view", {"target": {"pos": pos}})
+                except ApiError as err:
+                    failures.append({"pos": pos, "error": err.code, "message": err.message})
+                    # Furnace was broken/replaced: write the job off so the ledger cannot go stale.
+                    if err.code in ("no_window", "not_found", "blocked", "cannot_interact") and job is not None:
+                        try:
+                            block_name = self._container_block_at(pos)
+                        except Exception:  # noqa: BLE001
+                            block_name = None
+                        if block_name != "furnace":
+                            mem.complete_conversion_job(
+                                job.get("id"), collected=int(job.get("remaining") or 0)
+                            )
+                    break
+                sections = view.get("sections") or {}
+                outputs = [o for o in (sections.get("output") or []) if int(o.get("count") or 0) > 0]
+                inputs_left = sum(int(x.get("count") or 0) for x in (sections.get("input") or []))
+                burning = bool((view.get("info") or {}).get("burning"))
+                out_total = sum(int(o.get("count") or 0) for o in outputs)
+                job_remaining = int((job or {}).get("remaining") or 0)
+                # Only take when the batch is really finished (or the caller's wait budget expired):
+                # a mid-batch "not burning" gap must not trigger a premature partial take.
+                finished = inputs_left == 0 and not burning
+                complete_enough = job_remaining > 0 and out_total >= job_remaining and inputs_left == 0
+                if outputs and (finished or complete_enough):
+                    for out in outputs:
+                        cnt = int(out.get("count") or 0)
+                        name = _clean_block(out.get("name") or ((job or {}).get("output_item") or ""))
+                        take_ops.append({"op": "take", "from": "output", "count": cnt})
+                        got[name] = got.get(name, 0) + cnt
+                    break
+                if not burning and inputs_left == 0 and not outputs:
+                    break
+                if time.time() >= wall_deadline:
+                    if outputs and (inputs_left == 0 or out_total >= job_remaining):
+                        for out in outputs:
+                            cnt = int(out.get("count") or 0)
+                            name = _clean_block(out.get("name") or "")
+                            take_ops.append({"op": "take", "from": "output", "count": cnt})
+                            got[name] = got.get(name, 0) + cnt
+                    break
+                time.sleep(1.0)
+            if not take_ops:
+                if job is not None:
+                    failures.append({"pos": pos, "error": "no_output_yet", "job_id": job.get("id")})
+                continue
+            inv_now, dropped = self._ensure_free_slots(min_free=2)
+            if dropped:
+                got.setdefault("_auto_dropped", 0)
+            try:
+                res = self.bot.call("window/act", {"target": {"pos": pos}, "ops": take_ops})
+            except ApiError as err:
+                failures.append({"pos": pos, "error": err.code, "message": err.message, "got": got})
+                continue
+            taken: dict[str, int] = {}
+            for step in res.get("done") or []:
+                if isinstance(step, dict) and isinstance(step.get("took"), dict) and step["took"]:
+                    _merge_counts(taken, {k: int(v) for k, v in step["took"].items()})
+            if not taken:
+                # some servers report the take without a `took` map; fall back to the planned amounts
+                taken = dict(got)
+            if job is not None:
+                mem.complete_conversion_job(
+                    job.get("id"),
+                    collected=sum(int(v) for k, v in taken.items() if not str(k).startswith("_")),
+                )
+            collected.append({"pos": pos, "took": taken, "job_id": (job or {}).get("id")})
+
+        return {
+            "ok": bool(collected) or not failures,
+            "collected": collected,
+            "failures": failures,
+            "in_conversion_counts": mem.get_in_conversion_counts(),
+            "jobs_remaining": len(mem.get_conversion_jobs(dim=norm_dim)),
+        }
 
     def smelt_items(
         self,

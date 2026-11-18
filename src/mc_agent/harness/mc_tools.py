@@ -879,6 +879,10 @@ class McToolset:
         try:
             parsed_dig = json.loads(raw_dig)
             if isinstance(parsed_dig, dict) and parsed_dig.get("ok") is True:
+                # Broken block is now air: drop both the container cache and its POI entry.
+                self.world_memory.invalidate_container(
+                    [x, y, z], dim=self._last_dimension, block_name=bname or None
+                )
                 self.world_memory.remove_poi([x, y, z], dim=self._last_dimension)
         except Exception:
             pass
@@ -1129,18 +1133,12 @@ class McToolset:
         if isinstance(target, str):
             return target
         raw = self._call_json("window/view", {"target": target})
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict) and parsed.get("ok") is True and isinstance(parsed.get("result"), dict):
-                fb_pos = [x, y, z] if (x is not None and y is not None and z is not None) else None
-                self.world_memory.update_container_from_window(
-                    parsed["result"],
-                    fallback_pos=fb_pos,
-                    fallback_block=block,
-                    dim=self._last_dimension,
-                )
-        except Exception:
-            pass
+        self._sync_window_payload(
+            raw,
+            block=block,
+            pos=[x, y, z] if (x is not None and y is not None and z is not None) else None,
+            entity_id=entity_id,
+        )
         return raw
 
     def mc_window_act(
@@ -1156,19 +1154,75 @@ class McToolset:
         if isinstance(target, str):
             return target
         raw = self._call_json("window/act", {"target": target, "ops": ops})
+        self._sync_window_payload(
+            raw,
+            block=block,
+            pos=[x, y, z] if (x is not None and y is not None and z is not None) else None,
+            entity_id=entity_id,
+        )
+        return raw
+
+    def _sync_window_payload(
+        self,
+        raw: str,
+        *,
+        block: str | None = None,
+        pos: list[int] | None = None,
+        entity_id: int | None = None,
+    ) -> None:
+        """Sync WorldMemory.containers from window payloads on BOTH ok and error branches."""
+        if block == "furnace" or entity_id is not None:
+            return
         try:
             parsed = json.loads(raw)
-            if isinstance(parsed, dict) and parsed.get("ok") is True and isinstance(parsed.get("result"), dict):
-                fb_pos = [x, y, z] if (x is not None and y is not None and z is not None) else None
-                self.world_memory.update_container_from_window(
-                    parsed["result"],
-                    fallback_pos=fb_pos,
-                    fallback_block=block,
-                    dim=self._last_dimension,
-                )
+        except (TypeError, ValueError):
+            return
+        if not isinstance(parsed, dict):
+            return
+        res = parsed.get("result") if isinstance(parsed.get("result"), dict) else None
+        err = parsed.get("error") if isinstance(parsed.get("error"), dict) else None
+        payload: dict[str, Any] | None = None
+        if res is not None:
+            inner = res.get("window")
+            if isinstance(inner, dict):
+                payload = inner
+                if not payload.get("pos") and isinstance(res.get("pos"), (list, tuple)):
+                    payload = {**payload, "pos": res["pos"]}
+            elif isinstance(inner, str):
+                payload = res
+        elif err is not None and isinstance(err.get("window"), dict):
+            payload = err["window"]
+        if payload is None:
+            if err is not None and pos is not None and err.get("code") in {"no_window", "not_found", "window_closed"}:
+                try:
+                    live = str(self._get_block_name(*pos) or "").removeprefix("minecraft:")
+                except Exception:
+                    live = ""
+                if live in {"air", "cave_air", "void_air", ""}:
+                    self.world_memory.invalidate_container(pos, dim=self._last_dimension, block_name=block)
+            return
+        fb_pos = pos
+        if fb_pos is None:
+            target_info = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+            raw_pos = payload.get("pos") or target_info.get("pos")
+            if isinstance(raw_pos, (list, tuple)) and len(raw_pos) >= 3:
+                fb_pos = [int(raw_pos[0]), int(raw_pos[1]), int(raw_pos[2])]
+        try:
+            self.world_memory.update_container_from_window(
+                payload,
+                fallback_pos=fb_pos,
+                fallback_block=block,
+                dim=self._last_dimension,
+            )
         except Exception:
             pass
-        return raw
+        if fb_pos is not None:
+            try:
+                live = str(self._get_block_name(*fb_pos) or "").removeprefix("minecraft:")
+            except Exception:
+                live = ""
+            if live in {"air", "cave_air", "void_air"}:
+                self.world_memory.invalidate_container(fb_pos, dim=self._last_dimension, block_name=block)
 
     def mc_posture(self, sneak: bool = False, shield: bool = False, jump: bool = False) -> str:
         return self._call_json("posture", {"sneak": sneak, "shield": shield, "jump": jump})
