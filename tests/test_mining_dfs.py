@@ -1866,7 +1866,7 @@ def test_climb_out_prefers_walking_the_shaft_over_new_stairs(monkeypatch) -> Non
         def fake_status():
             return {"pos": [0.5, float(world.pos[1]), 0.5], "health": 20.0, "food": 20.0, "alive": True}
 
-        def fake_nav(goal_node_id, min_hp_ref):
+        def fake_nav(goal_node_id, min_hp_ref, deadline=None):
             world.pos = [0.5, 64.0, 0.5]          # walk all the way home
             return True, None
 

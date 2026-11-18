@@ -1660,9 +1660,14 @@ class MiningDFSEngine:
         *,
         reverse: bool = False,
         min_hp_ref: list[float],
+        deadline: float | None = None,
     ) -> tuple[bool, str | None]:
         ordered = list(reversed(waypoints)) if reverse else list(waypoints)
         for wp in ordered:
+            if deadline is not None and time.monotonic() >= deadline:
+                # Live n0211: a 60-waypoint walk held one tool call for 3+ minutes with the bot
+                # unattended. Abort on the slice boundary and report it instead.
+                return False, "walk_time_slice"
             st = self.bot.status()
             if st.get("alive") is False or st.get("ready") is False:
                 return False, "not_ready"
@@ -1758,6 +1763,7 @@ class MiningDFSEngine:
         goal_node_id: int,
         *,
         min_hp_ref: list[float],
+        deadline: float | None = None,
     ) -> tuple[bool, str | None]:
         if self.active_node_id is None or self.active_node_id not in self.nodes or goal_node_id not in self.nodes:
             return False, "no_active_tree"
@@ -1807,7 +1813,7 @@ class MiningDFSEngine:
 
         segments = self._find_node_path(self.active_node_id, goal_node_id)
         for waypoints, rev, dest_id in segments:
-            ok, err = self._walk_waypoints(waypoints, reverse=rev, min_hp_ref=min_hp_ref)
+            ok, err = self._walk_waypoints(waypoints, reverse=rev, min_hp_ref=min_hp_ref, deadline=deadline)
             if not ok:
                 return False, err
             self.active_node_id = dest_id
@@ -2710,7 +2716,9 @@ class MiningDFSEngine:
         walked = False
         walk_gain = 0
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
-            ok_walk, _err_walk = self._navigate_to_node(self.collar_node_id, min_hp_ref=hp_ref)
+            ok_walk, _err_walk = self._navigate_to_node(
+                self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
+            )
             walked = bool(ok_walk)
             if not walked:
                 y_part = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
@@ -2731,7 +2739,9 @@ class MiningDFSEngine:
         if not walked:
             cur_now = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])
             if self._try_restore_saved_shaft(cur_now, min_hp_ref=hp_ref, allow_retired=True):
-                ok_walk, _err_walk = self._navigate_to_node(self.collar_node_id, min_hp_ref=hp_ref)
+                ok_walk, _err_walk = self._navigate_to_node(
+                    self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
+                )
                 if ok_walk:
                     walked = True
                     # Travel only: do not keep this retired tree as the mining tree.
