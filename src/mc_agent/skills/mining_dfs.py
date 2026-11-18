@@ -243,22 +243,24 @@ SPINE_DESCEND_MIN_DELTA = 4
 RECRAFT_PICK_DURABILITY = 100
 # Main DFS loop is deadline-bounded; bail out after this many iterations with zero progress.
 MAX_IDLE_ITERATIONS = 4
+# Also bail when a whole stretch of wall clock passes with zero progress (slow APIs).
+MAX_IDLE_SECONDS = 20.0
 EXHAUSTED_COLLAR_MIN_SEP = 14.0
 UNREACHABLE_ORE_COOLDOWN_S = 300.0
 
 
 def normalize_dfs_strategy(raw: str | None = None) -> str:
-    """Resolve DFS strategy ('fishbone' baseline | 'v5' bug-fixed v4 | 'radar' full cluster+surgical)."""
-    val = str(raw if raw is not None else os.environ.get("MC_DFS_STRATEGY", "radar")).strip().lower()
+    """Resolve DFS strategy (default 'fishbone_scan'; also supports 'fishbone', 'v5', 'radar')."""
+    val = str(raw if raw is not None else os.environ.get("MC_DFS_STRATEGY", "fishbone_scan")).strip().lower()
     if val in {"fishbone", "conservative", "classic", "strip"}:
         return "fishbone"
-    if val in {"fishbone_scan", "fishbone_plus", "fbscan", "scan"}:
+    if val in {"fishbone_scan", "fishbone_plus", "fbscan", "scan", ""}:
         return "fishbone_scan"
     if val in {"v5", "v4_fixed", "patched_v4", "moderate"}:
         return "v5"
-    if val in {"radar", "aggressive", "guided", "surgical", ""}:
+    if val in {"radar", "aggressive", "guided", "surgical"}:
         return "radar"
-    return "radar"
+    return "fishbone_scan"
 
 
 @dataclasses.dataclass
@@ -4213,6 +4215,7 @@ class MiningDFSEngine:
 
         # Priority 2: main DFS loop
         idle_streak = 0
+        idle_since = time.monotonic()
         last_excavated = len(self.excavated_positions)
         last_node_count = len(self.nodes)
         last_active_node = self.active_node_id
@@ -4226,8 +4229,12 @@ class MiningDFSEngine:
                 and self.active_node_id == last_active_node
             ):
                 idle_streak += 1
-                if idle_streak >= MAX_IDLE_ITERATIONS:
+                # Wall clock matters too: with a slow/rate-limited API one iteration can take
+                # 10s, so a 4-iteration threshold may never fit inside a 32s slice (live: five
+                # consecutive no-op calls each burned the full slice).
+                if idle_streak >= MAX_IDLE_ITERATIONS or (time.monotonic() - idle_since) >= MAX_IDLE_SECONDS:
                     idle_streak = 0
+                    idle_since = time.monotonic()
                     # Stuck tree: try one in-slice relocation to a fresh collar before giving up,
                     # otherwise the next LLM round would hit the same dead end again.
                     if auto_relocations_this_slice < 1 and time.monotonic() + 8.0 < deadline:
@@ -4246,6 +4253,7 @@ class MiningDFSEngine:
                     break
             else:
                 idle_streak = 0
+                idle_since = time.monotonic()
             last_excavated = len(self.excavated_positions)
             last_node_count = len(self.nodes)
             last_active_node = self.active_node_id
