@@ -408,3 +408,20 @@ def test_stash_creates_new_chest_when_the_only_chest_is_full() -> None:
     assert res["ok"] is True
     assert skills.calls == 2
     assert res["new_chest"] == [2, 64, 0]  # bot.place returns this position in the fake
+
+
+def test_tier4_never_evicts_the_best_tools_or_spare_armor() -> None:
+    items = [
+        _row("wooden_pickaxe", 1, 0, durability=[59, 59]),
+        _row("iron_pickaxe", 1, 1, durability=[250, 250]),
+        _row("stone_pickaxe", 1, 2, durability=[131, 131]),
+        _row("stone_pickaxe", 1, 3, durability=[131, 131]),
+        _row("iron_chestplate", 1, 4),
+    ] + [_row("stick", 1, 5 + i) for i in range(31)]
+    inv = {"items": items, "empty_slots": 0}
+    plan = plan_garbage_drops(inv, min_free=35)
+    names = [d["item"] for d in plan["drops"]]
+    assert "iron_pickaxe" not in names
+    assert names.count("stone_pickaxe") <= 1
+    assert "iron_chestplate" not in names
+    assert "wooden_pickaxe" in names

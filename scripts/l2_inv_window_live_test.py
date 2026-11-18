@@ -732,6 +732,138 @@ def group_sm6(s: common.Session) -> dict[str, Any]:
 GROUPS.update({"SM6": group_sm6})
 
 
+
+# ---------------------------------------------------------------------------
+# INV10: nether rule keeps one golden armor piece even if iron is better
+# ---------------------------------------------------------------------------
+
+
+def group_inv10(s: common.Session) -> dict[str, Any]:
+    x, z = LAB_X, LAB_Z
+    _build_lab()
+    _tp(x + 0.5, Y, z + 0.5)
+    common.prepare_player(
+        {
+            "leather_helmet": 1,
+            "leather_chestplate": 1,
+            "iron_chestplate": 1,
+            "golden_boots": 1,
+            "diamond_boots": 1,
+        }
+    )
+    time.sleep(0.6)
+    for item, alias in (("leather_helmet", "head"), ("leather_chestplate", "torso")):
+        s.bot.call("equip", {"item": item, "slot": alias})
+    mgr = InventoryManager(s.bot)
+    res = mgr.auto_equip_best(dimension="the_nether")
+    inv = s.bot.inventory()
+    armor = inv.get("armor") or {}
+    gold_worn = any(
+        isinstance(v, dict) and "golden" in str(v.get("name")) for v in armor.values()
+    )
+    return {
+        "checks": {
+            "INV10_equipped": res.get("equipped"),
+            "INV10_armor": {k: (v or {}).get("name") if isinstance(v, dict) else v for k, v in armor.items()},
+            "INV10_gold_worn": gold_worn,
+        },
+        "ok": gold_worn and (armor.get("chest") or {}).get("name") == "iron_chestplate",
+    }
+
+
+# ---------------------------------------------------------------------------
+# INV11: stash deposits valuables but keeps the on-body combat/utility loadout
+# ---------------------------------------------------------------------------
+
+
+def group_inv11(s: common.Session) -> dict[str, Any]:
+    x, z = LAB_X, LAB_Z
+    _build_lab()
+    s.world_memory.containers.clear()
+    _place_block(x + 2, Y, z + 6, "chest")
+    _tp(x + 3.5, Y, z + 6.5)
+    items = {
+        "diamond": 6,
+        "emerald": 4,
+        "iron_pickaxe": 1,
+        "shield": 1,
+        "bread": 8,
+        "cobblestone": 64,
+        "water_bucket": 1,
+    }
+    filler = {n: 1 for n in (
+        "oak_leaves", "short_grass", "fern", "dead_bush", "poisonous_potato", "wheat_seeds",
+        "kelp", "seagrass", "cobweb", "string", "flint", "gunpowder", "brown_mushroom",
+        "sugar_cane", "tuff", "calcite", "diorite", "andesite", "granite", "netherrack",
+        "basalt", "blackstone", "end_stone", "stick", "bowl", "torch", "gravel",
+    )}
+    filler.update(items)
+    common.prepare_player(filler)
+    time.sleep(0.8)
+    mgr = InventoryManager(s.bot, world_memory=s.world_memory, skills=s.skills)
+    res = mgr.stash_surplus_nearby(radius=16.0)
+    counts = _counts(s.bot)
+    return {
+        "checks": {
+            "INV11_result": {k: res.get(k) for k in ("ok", "target", "deposited")},
+            "INV11_left": {k: counts.get(k) for k in ("diamond", "emerald", "iron_pickaxe", "shield", "bread", "cobblestone", "water_bucket")},
+        },
+        "ok": bool(res.get("ok"))
+        and counts.get("diamond", 0) == 0
+        and counts.get("emerald", 0) == 0
+        and counts.get("iron_pickaxe", 0) == 1
+        and counts.get("shield", 0) == 1
+        and counts.get("cobblestone", 0) == 64
+        and counts.get("bread", 0) == 8,
+    }
+
+
+# ---------------------------------------------------------------------------
+# INV12: live tool thinning (wooden + extra stone picks dropped, iron kept)
+# ---------------------------------------------------------------------------
+
+
+def group_inv12(s: common.Session) -> dict[str, Any]:
+    x, z = LAB_X, LAB_Z
+    _build_lab()
+    _tp(x + 0.5, Y, z + 0.5)
+    items = {
+        "wooden_pickaxe": 1,
+        "iron_pickaxe": 1,
+        "stone_pickaxe": 3,
+    }
+    filler = {n: 1 for n in (
+        "oak_leaves", "short_grass", "fern", "dead_bush", "poisonous_potato", "wheat_seeds",
+        "kelp", "seagrass", "cobweb", "string", "flint", "gunpowder", "brown_mushroom",
+        "sugar_cane", "tuff", "calcite", "diorite", "andesite", "granite", "netherrack",
+        "basalt", "blackstone", "end_stone", "stick", "bowl", "torch", "gravel", "sand",
+        "dirt", "coal",
+    )}
+    filler.update(items)
+    common.prepare_player(filler)
+    time.sleep(0.8)
+    mgr = InventoryManager(s.bot, world_memory=s.world_memory, skills=s.skills)
+    plan = mgr.plan(min_free=34)
+    res = mgr.free_slots(min_free=34)
+    counts = _counts(s.bot)
+    tiers = [d["tier"] for d in plan.get("drops") or []]
+    return {
+        "checks": {
+            "INV12_plan": plan.get("drops"),
+            "INV12_tiers": tiers,
+            "INV12_left": {k: counts.get(k) for k in ("wooden_pickaxe", "iron_pickaxe", "stone_pickaxe")},
+            "INV12_empty": s.bot.inventory().get("empty_slots"),
+        },
+        "ok": counts.get("wooden_pickaxe", 0) == 0
+        and counts.get("iron_pickaxe", 0) == 1
+        and 1 <= int(counts.get("stone_pickaxe") or 0) <= 2
+        and 3 in tiers,
+    }
+
+
+GROUPS.update({"INV10": group_inv10, "INV11": group_inv11, "INV12": group_inv12})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="all")

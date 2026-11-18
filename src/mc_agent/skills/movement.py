@@ -1027,22 +1027,6 @@ class TerrainNavigator:
                 "message": "背包没有船，木板/原木也不足以合成。",
             }
 
-        if st.get("in_water") and not st.get("on_ground"):
-            # Placing a boat while swimming can hang the server-side use_item; swim out first.
-            cp0 = st.get("pos") or [0.0, 64.0, 0.0]
-            self._swim_to_bank(
-                self._nearest_solid_shore(float(cp0[0]), float(cp0[2]), float(cp0[1])),
-                max_bursts=30,
-            )
-            st = self.bot.status()
-            if st.get("in_water") and not st.get("on_ground"):
-                return {
-                    "ok": False,
-                    "error": "cannot_reach_bank",
-                    "op": "cross_water_with_boat",
-                    "message": "在开阔水域中无法先游到岸边，拒绝在游泳态放船（服务端会挂起 use_item）。",
-                    "pos": st.get("pos"),
-                }
         bx, by, bz = _floor_pos(st)
         dx, dz = _dominant_axis(float(x) - (bx + 0.5), float(z) - (bz + 0.5))
         # water cell in front of the feet (boats float on the surface block)
@@ -1054,11 +1038,19 @@ class TerrainNavigator:
                 launch_candidates.append(pt)
 
         if st.get("in_water"):
-            # already swimming: place the boat on the topmost water block next to us. Cell distance
-            # matters: placing into our own cell or 2 blocks away hangs the server-side use_item.
+            # Float to the surface first: placing a boat from 2+ blocks underwater hangs use_item.
+            try:
+                self.bot.call("posture", {"jump": True})
+                time.sleep(1.0)
+            except ApiError:
+                pass
+            st = self.bot.status()
+            bx, by, bz = _floor_pos(st)
+            # Already swimming: place the boat 3-5 blocks away (own/1-2 block cells hang the
+            # server-side use_item). This works from water and avoids a long swim to a far bank.
             surf = self._water_surface_y(bx, by, bz)
             if surf is not None:
-                for r in (2, 3, 4):
+                for r in (3, 4, 5):
                     for ddx, ddz in ((dx, dz), (1, 0), (-1, 0), (0, 1), (0, -1)):
                         cand = (bx + ddx * r, surf, bz + ddz * r)
                         if self._block(cand) in WATER_BLOCKS and self._block((cand[0], cand[1] + 1, cand[2])) in AIR_BLOCKS:
@@ -1077,6 +1069,26 @@ class TerrainNavigator:
                             if above in AIR_BLOCKS:
                                 _push_launch(cell)
                                 break
+        if not launch_candidates and st.get("in_water"):
+            # no open water nearby: swim to a bank, then rescan once
+            shore = self._nearest_solid_shore(float(bx), float(bz), float(by)) or self._find_far_shore()
+            self._swim_to_bank(shore, max_bursts=30)
+            st = self.bot.status()
+            bx, by, bz = _floor_pos(st)
+            if not st.get("in_water"):
+                for radius_set in ((3, 4, 5), (2, 1)):
+                    for ddx, ddz in dirs:
+                        for r in radius_set:
+                            for oy in (0, -1, -2, -3, -4):
+                                cell = (bx + ddx * r, by + oy, bz + ddz * r)
+                                name = self._block(cell)
+                                if name in WATER_BLOCKS and self._block((cell[0], cell[1] + 1, cell[2])) in AIR_BLOCKS:
+                                    _push_launch(cell)
+                                    break
+                        if launch_candidates:
+                            break
+                    if launch_candidates:
+                        break
         if not launch_candidates:
             return {
                 "ok": False,
@@ -1088,25 +1100,30 @@ class TerrainNavigator:
         boat_id: int | None = None
         used_launch: list[int] | None = None
         last_error: str | None = None
-        for launch in launch_candidates[:4]:
-            try:
-                used = self.bot.call("use_item", {"item": boat, "target": {"pos": launch}}, timeout_s=15.0)
-                ent = used.get("entity") if isinstance(used, dict) else None
-                if isinstance(ent, dict):
-                    boat_id = int(ent.get("id") or 0) or None
-                if boat_id is not None:
-                    used_launch = launch
-                    break
-                last_error = "no_entity"
-            except ApiError as err:
-                last_error = f"use_item:{err.code}"
-                if err.code == "busy":
+        for _pass in range(2):
+            if boat_id is not None:
+                break
+            for launch in launch_candidates[:4]:
+                try:
+                    used = self.bot.call("use_item", {"item": boat, "target": {"pos": launch}}, timeout_s=15.0)
+                    ent = used.get("entity") if isinstance(used, dict) else None
+                    if isinstance(ent, dict):
+                        boat_id = int(ent.get("id") or 0) or None
+                    if boat_id is not None:
+                        used_launch = launch
+                        break
+                    last_error = "no_entity"
+                except ApiError as err:
+                    last_error = f"use_item:{err.code}"
+                    if err.code == "busy":
+                        self.release_stuck_action()
+                        time.sleep(1.5)
+                    continue
+                except Exception as err:  # noqa: BLE001 - hung placement: /stop releases the action lock
+                    last_error = f"use_item_timeout:{type(err).__name__}"
                     self.release_stuck_action()
-                continue
-            except Exception as err:  # noqa: BLE001 - hung placement: /stop releases the action lock
-                last_error = f"use_item_timeout:{type(err).__name__}"
-                self.release_stuck_action()
-                continue
+                    time.sleep(1.5)
+                    continue
         if boat_id is None:
             return {
                 "ok": False,
@@ -1344,6 +1361,25 @@ class TerrainNavigator:
         except Exception:  # noqa: BLE001
             return False
 
+    def _find_far_shore(self, *, max_r: int = 36) -> list[int] | None:
+        """Coarse 8-direction scan for a standable bank when swimming in a wide water body."""
+        st = self.bot.status()
+        p = st.get("pos") or [0.0, 64.0, 0.0]
+        bx, by, bz = math.floor(float(p[0])), math.floor(float(p[1])), math.floor(float(p[2]))
+        dirs = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
+        for r in range(4, max_r + 1, 4):
+            for ax, az in dirs:
+                x, z = bx + ax * r, bz + az * r
+                for dy in (0, 1, 2):
+                    feet = self._block((x, by + dy, z))
+                    if feet not in AIR_BLOCKS and feet not in PASSABLE_PLANTS:
+                        continue
+                    below = self._block((x, by + dy - 1, z))
+                    if below in AIR_BLOCKS or below in WATER_BLOCKS or below in LAVA_BLOCKS:
+                        continue
+                    return [x, by + dy, z]
+        return None
+
     def _swim_to_bank(self, shore: list[int] | None, *, max_bursts: int = 14) -> bool:
         if not shore:
             return False
@@ -1365,17 +1401,20 @@ class TerrainNavigator:
                 pass
             for _ in range(max_bursts):
                 st = self.bot.status()
-                if st.get("on_ground") and not st.get("in_water"):
+                if not st.get("in_water"):
                     return True
-                self._face(shore[0] + 0.5, shore[2] + 0.5, float(shore[1]) + 1.0)
-                self._step_forward(ms=420, jump=True)
+                pos = st.get("pos") or [0.0, 64.0, 0.0]
+                near = self._nearest_solid_shore(float(pos[0]), float(pos[2]), float(pos[1]))
+                tgt = near or shore
+                self._face(tgt[0] + 0.5, tgt[2] + 0.5, float(tgt[1]) + 1.0)
+                self._step_forward(ms=600, jump=True)
         finally:
             try:
                 self.bot.call("posture", {})
             except ApiError:
                 pass
         st = self.bot.status()
-        return bool(st.get("on_ground")) and not st.get("in_water")
+        return not st.get("in_water")
 
     def _shore_along(self, tx: float, tz: float, *, max_r: int = 14) -> list[int] | None:
         """Standable cell along the straight line to (tx, tz) — used when the ring scan misses."""

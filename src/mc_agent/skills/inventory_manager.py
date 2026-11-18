@@ -537,6 +537,45 @@ def plan_garbage_drops(
         counts[row["name"]] = counts.get(row["name"], 0) + row["count"]
     hunger = _hunger_score(counts, food_values)
 
+    # --- Pre-compute the tool/armor rows that must survive Tier 4 --------
+    def _tool_rank(row: dict[str, Any]) -> tuple[int, float]:
+        return (TOOL_TIERS.get(_material_of(row["name"]), 0), _durability_score(row))
+
+    def _armor_rank(row: dict[str, Any]) -> tuple[int, int, float]:
+        return (
+            ARMOR_TIERS.get(_material_of(row["name"]), 0),
+            1 if _beneficial_enchantments(row) else 0,
+            _durability_score(row),
+        )
+
+    tool_groups: dict[str, list[dict[str, Any]]] = {}
+    armor_best: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if _is_hard_protected(row):
+            continue
+        kind = _tool_kind(row["name"])
+        if kind:
+            tool_groups.setdefault(kind, []).append(row)
+            continue
+        for suffix, part in (("_helmet", "head"), ("_chestplate", "chest"), ("_leggings", "legs"), ("_boots", "feet")):
+            if row["name"].endswith(suffix):
+                cur = armor_best.get(part)
+                if cur is None or _armor_rank(row) > _armor_rank(cur):
+                    armor_best[part] = row
+                break
+
+    tool_keep_ids: set[int] = set()
+    for kind, cands in tool_groups.items():
+        cands.sort(key=_tool_rank, reverse=True)
+        if kind == "pickaxe":
+            mains = [r for r in cands if TOOL_TIERS.get(_material_of(r["name"]), 0) >= 3]
+            stones = [r for r in cands if _material_of(r["name"]) == "stone"]
+            keep = mains[:2] + stones[:2]
+        else:
+            keep = cands[:1]
+        tool_keep_ids.update(id(r) for r in keep)
+    tool_keep_ids.update(id(r) for r in armor_best.values())
+
     # --- Tier 1: zero-keep clutter -------------------------------------
     for row in rows:
         if need <= 0:
@@ -663,7 +702,7 @@ def plan_garbage_drops(
                 continue
             if _is_hard_protected(row) or row["name"] in PROTECTED_LOADOUT:
                 continue
-            if _gain_equipment(row, inv):
+            if id(row) in tool_keep_ids or _gain_equipment(row, inv):
                 continue
             if keep_food and row["name"] in FOOD_HUNGER_VALUES:
                 continue

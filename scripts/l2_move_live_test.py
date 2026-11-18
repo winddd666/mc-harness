@@ -1467,6 +1467,94 @@ BUILDERS.update({"M26": lambda: None})
 RUNNERS.update({"M26": run_m26})
 
 
+
+# ---------------------------------------------------------------------------
+# M27 natural river via navigate_segmented (wide_water recovery, not the bare primitive)
+# ---------------------------------------------------------------------------
+
+
+def run_m27(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    """Wide-water diagnosis through the recovery dispatcher (pathfinder can swim, so call recover)."""
+    coords = locate_biome("river") or [4884, 150, 4884]
+    st = _drop_into_world(bot, coords[0], coords[2])
+    common.prepare_player({"oak_boat": 3, "cobblestone": 24, "cooked_beef": 16})
+    time.sleep(2.0)
+    st = _status(bot)
+    p0 = list(st.get("pos") or [0, 0, 0])
+    dry = _find_dry_column(bot, int(p0[0]), int(p0[1]), int(p0[2]), max_r=70, coarse=3)
+    if dry is None:
+        return {"ok": False, "error": "no_dry_bank_within_70m", "pos": p0}
+    target = (2 * float(p0[0]) - float(dry[0]), 2 * float(p0[2]) - float(dry[1]))
+    hp0 = _health(bot)
+    t0 = time.monotonic()
+    rec = nav.recover(x=float(target[0]), z=float(target[1]))
+    elapsed = time.monotonic() - t0
+    st2 = _status(bot)
+    p2 = list(st2.get("pos") or [0, 0, 0])
+    moved = math.hypot(float(p2[0]) - p0[0], float(p2[2]) - p0[2])
+    return {
+        "river_at": coords,
+        "start": p0,
+        "dry_bank": list(dry[:2]),
+        "target": [round(target[0], 1), round(target[1], 1)],
+        "diagnosis": rec.get("diagnosis"),
+        "op": rec.get("op"),
+        "crossing_ok": rec.get("ok"),
+        "error": rec.get("error"),
+        "moved_m": round(moved, 1),
+        "elapsed_s": round(elapsed, 1),
+        "hp_before": hp0,
+        "hp_after": st2.get("health"),
+        "pos": p2,
+        "in_water_after": st2.get("in_water"),
+        "ok": rec.get("diagnosis") == "wide_water"
+        and rec.get("op") == "cross_water_with_boat"
+        and moved >= 15.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M29 boat crossing without any boat or logs -> explicit missing_item
+# ---------------------------------------------------------------------------
+
+
+def run_m29(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 2, _z0() + 40
+    _tp(x0 + 2.5, Y + 1, z + 12.0)
+    common.prepare_player({"cobblestone": 8})
+    time.sleep(0.6)
+    res = nav.cross_water_with_boat(x0 + 40.0, z + 12.0)
+    st = _status(bot)
+    return {
+        "crossing": {k: res.get(k) for k in ("ok", "error", "message")},
+        "pos": st.get("pos"),
+        "ok": res.get("ok") is False and res.get("error") == "missing_item",
+    }
+
+
+# ---------------------------------------------------------------------------
+# M30 target on dry land (no water ahead) -> explicit no_water
+# ---------------------------------------------------------------------------
+
+
+def run_m30(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 100, _z0() + 4
+    _tp(x0 + 1.5, Y, z + 1.5)
+    common.prepare_player({"oak_boat": 1})
+    time.sleep(0.6)
+    res = nav.cross_water_with_boat(x0 + 20.0, z + 1.5)
+    st = _status(bot)
+    return {
+        "crossing": {k: res.get(k) for k in ("ok", "error", "message")},
+        "pos": st.get("pos"),
+        "ok": res.get("ok") is False and res.get("error") == "no_water",
+    }
+
+
+BUILDERS.update({"M27": lambda: None, "M29": lambda: None, "M30": build_m9_integration})
+RUNNERS.update({"M27": run_m27, "M29": run_m29, "M30": run_m30})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="all")
