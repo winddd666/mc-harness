@@ -1742,3 +1742,15 @@ def test_deep_empty_tree_asks_for_a_climb_instead_of_opening_fake_collar() -> No
     assert res["stop_reason"] == "needs_surface_climb"
     assert res["requires_replan"] is True
     assert eng.collar_node_id is None                 # no fake underground collar planted
+
+
+def test_reset_on_empty_tree_is_refused_not_a_free_ok() -> None:
+    """Live s07/s08: empty-tree reset returned ok:true and the model pressed it 250+ times."""
+    world = _MockMineWorld(start_pos=(0.5, 62.0, 0.5), surface_y=62)
+    with BotSession("tok", bot_username="EmptyResetBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        assert not eng.nodes
+        res = eng.reset(geofence=None)
+    assert res["ok"] is False
+    assert res["stop_reason"] == "nothing_to_reset"
+    assert "explore" in res["message"]

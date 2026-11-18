@@ -887,6 +887,22 @@ class MiningDFSEngine:
         return False
 
     def reset(self, *, geofence: Any = None) -> dict[str, Any]:
+        if not self.nodes and self.collar_node_id is None:
+            # Live s07/s08: an empty tree made reset a free "ok" no-op, so the model pressed it
+            # 250+ times at ~3.5s/turn (it was drowning and looking for any way out).
+            return {
+                "ok": False,
+                "requires_replan": True,
+                "action": "reset",
+                "strategy": self.strategy,
+                "stop_reason": "nothing_to_reset",
+                "message": (
+                    "当前没有可重置的矿井（空间树为空），reset 不会改变任何状态。"
+                    "若被困或在水里：先用 mc_skill_unstick，或 mc_skill_staircase(vertical='up') 爬到岸上，"
+                    "再直接 explore 开新井。"
+                ),
+                "tree": self.snapshot(),
+            }
         had_collar: tuple[int, int, int] | None = None
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
             had_collar = self.nodes[self.collar_node_id].anchor
@@ -4128,8 +4144,28 @@ class MiningDFSEngine:
         if st0.get("in_water"):
             esc = self.skills.escape_water()
             if esc.get("in_water"):
-                return {"ok": False, "requires_replan": True, "strategy": self.strategy, "stop_reason": "in_water", "water_escape": esc}
-            st0 = self.bot.status()
+                # Second attempt: unstick nudges the hitbox/jumps out of shallow water.
+                try:
+                    self.skills.unstick()
+                except (ApiError, ValueError, KeyError):
+                    pass
+                st_w = self.bot.status()
+                if st_w.get("in_water"):
+                    return {
+                        "ok": False,
+                        "requires_replan": True,
+                        "strategy": self.strategy,
+                        "stop_reason": "in_water",
+                        "water_escape": esc,
+                        "message": (
+                            "当前仍在水中，挖矿无法开始（reset 无效）。请先用 "
+                            "mc_skill_staircase(vertical='up') 或 mc_skill_flee 离开水域/爬上岸，"
+                            "然后直接 explore。"
+                        ),
+                    }
+                st0 = st_w
+            else:
+                st0 = self.bot.status()
 
         cur_pos = _floor_pos(st0.get("pos") or [0, 64, 0])
         min_hp_ref = [float(st0.get("health") if isinstance(st0.get("health"), (int, float)) else 20.0)]
