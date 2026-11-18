@@ -2596,9 +2596,25 @@ class MiningDFSEngine:
 
         # 1) Preferred: walk our own corridor (no digging at all).
         walked = False
+        walk_gain = 0
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
             ok_walk, _err_walk = self._navigate_to_node(self.collar_node_id, min_hp_ref=hp_ref)
             walked = bool(ok_walk)
+            if not walked:
+                y_part = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
+                walk_gain = int(y_part) - int(start_y)
+                if walk_gain >= 3:
+                    # The corridor walk is working, it just ran out of slice. Report progress so
+                    # the next climb_out continues walking instead of switching to new stairs.
+                    return {
+                        "start_y": start_y,
+                        "end_y": y_part,
+                        "climbed": walk_gain,
+                        "target_y": target_y,
+                        "reached": y_part >= target_y,
+                        "attempts": 0,
+                        "method": "walk",
+                    }
         # 2) Borrow the route of a previously retired shaft near us (travel only).
         if not walked:
             cur_now = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])
@@ -4378,7 +4394,7 @@ class MiningDFSEngine:
         if act in {"climb_out", "climb"}:
             # Climbing needs a bigger slice than a mining tick: one 8-step staircase alone eats
             # ~25s, so a 32s budget produced "attempts: 1, climbed: 8" (live s15).
-            budget = min(90.0, max(float(max_duration_s), 60.0))
+            budget = min(120.0, max(float(max_duration_s), 90.0))
             climb = self._climb_out(deadline=time.monotonic() + budget)
             ok_climb = bool(climb["reached"])
             return {
