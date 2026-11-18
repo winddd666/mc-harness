@@ -3892,11 +3892,13 @@ class MacroSkills:
                 continue
             try:
                 self._equip_if_present(tuple(PICKAXE_TIERS))
+                # Deliberately do NOT stop on "hurt": an arrow landing mid-dig is exactly the
+                # situation we are escaping, and aborting here would leave us still exposed.
                 for cell in (feet, head):
-                    self.bot.call("dig", {"pos": cell, "collect": True, "stop_on": ["hurt", "death"]})
+                    self.bot.call("dig", {"pos": cell, "collect": True, "stop_on": ["death"]})
                 self.bot.call("move_to", {
                     "x": feet[0] + 0.5, "y": feet[1], "z": feet[2] + 0.5,
-                    "range": 0.8, "timeout": 2500, "stop_on": ["hurt", "death"],
+                    "range": 0.8, "timeout": 2500, "stop_on": ["death"],
                 })
                 sealed = []
                 for cell in (feet, head):
