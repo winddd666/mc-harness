@@ -253,8 +253,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         points=60,
         tier=1,
         budget_class="deep",
-        pre_ensure=(("diamond_boots", 1),),
-        pre_equip=(("diamond_boots", "feet"),),
+        # Keep deep Y=-54 mining inside `run_mc_agent` where background GenerationGuard runs continuously!
+        pre_ensure=(),
+        pre_equip=(),
         task=(
             "执行 Y=-54 鱼骨深潜钻石套餐（目标 story/mine_diamond 15分 + story/shiny_gear 60分，并顺手备后续钻镐/附魔台钻料）："
             "1) 确认包内有 iron_pickaxe 与备用 stone_pickaxe；"
@@ -270,7 +271,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         points=15,
         tier=2,
         budget_class="deep",
-        pre_ensure=(("diamond", 1),),
+        pre_ensure=(),
         task=(
             "持有 iron_pickaxe 调 mc_skill_mine_dfs(target='diamond', target_y=-54, goal_count=4) 寻找并挖掘 diamond_ore，确保钻石真实入包解锁 story/mine_diamond。"
         ),
@@ -285,10 +286,10 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("lodestone", 1), ("compass", 1)),
         task=(
             "解锁 adventure/use_lodestone(15分)：在 1.21.11 中磁石(lodestone)仅需 1 铁锭 + 8 个錾制石砖(chiseled_stone_bricks)，指南针(compass)需 4 铁锭 + 1 红石；"
-            "先收集 8 圆石烧成 stone 再合 stone_bricks -> stone_brick_slab -> chiseled_stone_bricks，"
+            "若走工作台合成需收集 12 圆石烧成 12 stone -> 12 stone_bricks -> 18 stone_brick_slab -> 8 chiseled_stone_bricks（或造切石机用 8 stone 1:1 切出），"
             "与 5 铁锭、1 红石合出 lodestone 与 compass，放下 lodestone 后手持 compass 调 mc_interact(x,y,z,item='compass')。"
         ),
-        extra_tools=("mc_interact", "mc_kb_lookup"),
+        extra_tools=("mc_interact", "mc_skill_ensure_items", "mc_kb_lookup"),
         advancement_id="minecraft:adventure/use_lodestone",
     ),
     "minecraft:story/lava_bucket": CurriculumTarget(
@@ -1096,46 +1097,78 @@ class CurriculumSupervisor:
 
             pre_ensure_res: dict[str, Any] | None = None
             satisfied_by_zero_llm = False
-            if self.enable_pre_ensure and target.pre_ensure:
-                try:
-                    pre_slice_s = min(ep_timeout * 0.45, 240.0)
-                    pre_ensure_res = self.toolset.skills.ensure_items(
-                        dict(target.pre_ensure),
-                        max_duration_s=max(10.0, pre_slice_s),
-                        equip_slots=dict(target.pre_equip) if target.pre_equip else None,
-                        geofence=self.geofence,
-                        stop_check=_is_stopped,
-                    )
-                    if pre_ensure_res.get("ok") and target.advancement_id:
-                        adv_chk = self.bot.advancements(include_recipes=False)
-                        done_chk = {
-                            (str(r["id"]) if ":" in str(r["id"]) else f"minecraft:{r['id']}")
-                            for r in (adv_chk.get("advancements") or [])
-                            if isinstance(r, dict) and r.get("status") == "completed" and r.get("id")
-                        }
-                        if target.advancement_id in done_chk:
-                            satisfied_by_zero_llm = True
-                except Exception:
-                    pre_ensure_res = None
+            eff_task = target.task
 
-            if satisfied_by_zero_llm:
-                report: dict[str, Any] = {
-                    "status": "answered",
-                    "actor_requests": 0,
-                    "model_requests": 0,
-                    "zero_llm_pre_ensure": pre_ensure_res,
-                    "task": target.task,
-                }
-            else:
-                rem_ep_timeout = max(0.5, min(ep_timeout, deadline_mono - time.monotonic()))
-                with JsonlEvents(ep_events_path) as listener:
-                    def _sink(evt: dict[str, Any]) -> None:
-                        listener(evt)
-                        if self.on_episode_event is not None:
-                            self.on_episode_event(evt)
+            with JsonlEvents(ep_events_path) as listener:
+                def _sink(evt: dict[str, Any]) -> None:
+                    listener(evt)
+                    if self.on_episode_event is not None:
+                        self.on_episode_event(evt)
 
+                if self.enable_pre_ensure and target.pre_ensure:
+                    try:
+                        pre_slice_s = min(ep_timeout * 0.35, 90.0)
+                        _sink(
+                            {
+                                "type": "curriculum.pre_ensure.started",
+                                "episode": ep_index,
+                                "target": target.key,
+                                "items": dict(target.pre_ensure),
+                            }
+                        )
+                        pre_ensure_res = self.toolset.skills.ensure_items(
+                            dict(target.pre_ensure),
+                            max_duration_s=max(10.0, pre_slice_s),
+                            equip_slots=dict(target.pre_equip) if target.pre_equip else None,
+                            geofence=self.geofence,
+                            stop_check=_is_stopped,
+                        )
+                        _sink(
+                            {
+                                "type": "curriculum.pre_ensure.completed",
+                                "episode": ep_index,
+                                "target": target.key,
+                                "ok": pre_ensure_res.get("ok"),
+                                "steps_executed": pre_ensure_res.get("steps_executed", 0),
+                                "remaining_deficit": pre_ensure_res.get("remaining_deficit", {}),
+                            }
+                        )
+                        if pre_ensure_res.get("ok") and target.advancement_id:
+                            adv_chk = self.bot.advancements(include_recipes=False)
+                            done_chk = {
+                                (str(r["id"]) if ":" in str(r["id"]) else f"minecraft:{r['id']}")
+                                for r in (adv_chk.get("advancements") or [])
+                                if isinstance(r, dict) and r.get("status") == "completed" and r.get("id")
+                            }
+                            if target.advancement_id in done_chk:
+                                satisfied_by_zero_llm = True
+                        if not satisfied_by_zero_llm and pre_ensure_res.get("steps_executed", 0) > 0:
+                            if pre_ensure_res.get("ok"):
+                                eff_task = (
+                                    f"[开局0-LLM自动备料已完成：{dict(target.pre_ensure)} 已入包/穿戴，请直接执行剩余放置/交互步骤]\n"
+                                    + target.task
+                                )
+                            else:
+                                eff_task = (
+                                    f"[开局0-LLM自动备料进展：已执行 {pre_ensure_res.get('steps_executed')} 步，"
+                                    f"剩余缺口={pre_ensure_res.get('remaining_deficit')}，原因={pre_ensure_res.get('stop_reason')}]\n"
+                                    + target.task
+                                )
+                    except Exception:
+                        pre_ensure_res = None
+
+                if satisfied_by_zero_llm:
+                    report: dict[str, Any] = {
+                        "status": "answered",
+                        "actor_requests": 0,
+                        "model_requests": 0,
+                        "zero_llm_pre_ensure": pre_ensure_res,
+                        "task": eff_task,
+                    }
+                else:
+                    rem_ep_timeout = max(0.5, min(ep_timeout, deadline_mono - time.monotonic()))
                     report = run_mc_agent(
-                        target.task,
+                        eff_task,
                         self.bot,
                         chat_fn=self.chat_fn,
                         model_name=self.model_name,
@@ -1155,8 +1188,8 @@ class CurriculumSupervisor:
                         target_advancement=target.advancement_id,
                         toolset=self.toolset,
                     )
-                if pre_ensure_res is not None:
-                    report["pre_ensure"] = pre_ensure_res
+                    if pre_ensure_res is not None:
+                        report["pre_ensure"] = pre_ensure_res
 
             if target.key == "island_recon_sweep":
                 self.recon_completed = True

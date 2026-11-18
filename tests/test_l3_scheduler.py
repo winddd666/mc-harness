@@ -249,9 +249,7 @@ class _MockSurvivalWorld:
             return httpx.Response(200, json={"ok": True, "result": {"dug": bn, "pos": list(pt)}})
         if path == "/craft":
             item = body["item"]
-            want_total = int(body.get("count", 1))
-            cur_have = self.count_item(item)
-            delta = max(1, want_total - cur_have)
+            delta = max(1, int(body.get("count", 1)))
             if item == "oak_planks":
                 logs = max(1, (delta + 3) // 4)
                 self.consume_item("oak_log", logs)

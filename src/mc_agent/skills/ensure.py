@@ -536,12 +536,12 @@ class PhysicalPrerequisiteResolver:
             if not log_type:
                 return "material_unavailable"
             plank_name = log_type.replace("_log", "_planks").replace("_stem", "_planks")
-            want_total_plank = counts_after_log.get(plank_name, 0) + logs_needed * 4
+            craft_plank_n = logs_needed * 4
             try:
-                self.bot.call("craft", {"item": plank_name, "count": want_total_plank})
-                steps_log.append({"step": "craft", "item": plank_name, "count": logs_needed * 4, "ok": True})
+                self.skills._safe_craft(plank_name, craft_plank_n)
+                steps_log.append({"step": "craft", "item": plank_name, "count": craft_plank_n, "ok": True})
             except ApiError:
-                res_cg = self.skills.craft_gear(item=plank_name, count=logs_needed * 4)
+                res_cg = self.skills.craft_gear(item=plank_name, count=craft_plank_n)
                 steps_log.append({"step": "craft_gear", "item": plank_name, "ok": bool(res_cg.get("ok"))})
             return None if effective_item_count(item, total_owned_counts(self.bot.inventory())) >= target_count else "craft_incomplete"
 
@@ -549,20 +549,39 @@ class PhysicalPrerequisiteResolver:
         if item in SMELT_SOURCES:
             raw_in, yield_per = SMELT_SOURCES[item]
             raw_needed = math.ceil(deficit / max(1, yield_per))
-            cur_raw = effective_item_count(raw_in, counts)
+            # Special case: smelting `stone` specifically requires true `cobblestone` (not `cobbled_deepslate`)
+            cur_raw = counts.get("cobblestone", 0) if item == "stone" else effective_item_count(raw_in, counts)
             if cur_raw < raw_needed:
-                r_raw = self._satisfy_item(
-                    raw_in,
-                    raw_needed,
-                    deadline=deadline,
-                    depth=depth + 1,
-                    visited=branch_visited,
-                    steps_log=steps_log,
-                    hunt_missing=hunt_missing,
-                    guard_fn=guard_fn,
-                )
-                if r_raw is not None:
-                    return r_raw
+                if item == "stone":
+                    r_pick_st = self._ensure_pickaxe_tier(
+                        1,
+                        deadline=deadline,
+                        depth=depth + 1,
+                        visited=branch_visited,
+                        steps_log=steps_log,
+                        hunt_missing=hunt_missing,
+                        guard_fn=guard_fn,
+                    )
+                    if r_pick_st is not None:
+                        return r_pick_st
+                    need_cb = raw_needed - counts.get("cobblestone", 0)
+                    res_cb0 = self.skills.mine_blocks(block_types=["stone", "cobblestone"], count=need_cb, radius=32)
+                    steps_log.append({"step": "mine_cobblestone_for_stone", "need": need_cb, "ok": bool(res_cb0.get("ok"))})
+                    if total_owned_counts(self.bot.inventory()).get("cobblestone", 0) < raw_needed:
+                        return "material_unavailable"
+                else:
+                    r_raw = self._satisfy_item(
+                        raw_in,
+                        raw_needed,
+                        deadline=deadline,
+                        depth=depth + 1,
+                        visited=branch_visited,
+                        steps_log=steps_log,
+                        hunt_missing=hunt_missing,
+                        guard_fn=guard_fn,
+                    )
+                    if r_raw is not None:
+                        return r_raw
             counts_mid = total_owned_counts(self.bot.inventory())
             fuel_cnt = effective_item_count("coal_or_charcoal", counts_mid)
             planks_or_logs = effective_item_count("any_planks", counts_mid) + effective_item_count("any_log", counts_mid) * 4

@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from ..bot import BotSession
 from ..errors import ApiError
-from ..kb import assess_world_target, normalize_dimension, resolve_item_alias
+from ..kb import RECIPES_1_21, assess_world_target, normalize_dimension, resolve_item_alias
 from .safety import check_and_stabilize
 from .crafting import material_shortage, explain_craft_error
 
@@ -133,7 +133,7 @@ def _expected_drops_for_blocks(block_types: list[str] | tuple[str, ...]) -> froz
         expected.update(EXPECTED_BLOCK_DROPS.get(b, (b,)))
     return frozenset(expected)
 
-# Recipes requiring a 3x3 crafting table.
+# Recipes requiring a 3x3 crafting table (auto-synced with RECIPES_1_21 + extra objective 3x3 items).
 TABLE_RECIPES: set[str] = {
     "wooden_pickaxe",
     "wooden_axe",
@@ -168,6 +168,7 @@ TABLE_RECIPES: set[str] = {
     "diamond_leggings",
     "diamond_boots",
     "bow",
+    "crossbow",
     "fishing_rod",
     "shears",
     "flint_and_steel",
@@ -179,6 +180,14 @@ TABLE_RECIPES: set[str] = {
     "birch_boat",
     "spruce_boat",
     "white_bed",
+    "stone_brick_slab",
+    "dropper",
+    "crafter",
+    "iron_block",
+    "gold_block",
+    "diamond_block",
+    "hay_block",
+    *{k for k, v in RECIPES_1_21.items() if v.get("table_3x3")},
 }
 
 DEFAULT_EQUIP_SLOTS: dict[str, str] = {
