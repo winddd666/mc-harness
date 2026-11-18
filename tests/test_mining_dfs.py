@@ -1545,3 +1545,68 @@ def test_flee_reports_respawn_instead_of_fake_success(monkeypatch) -> None:
     assert res["ok"] is False
     assert res["moved_dist"] > 64
     assert "死亡重生" in res["note"]
+
+
+def test_fishbone_scan_harvests_wall_pocket_diamond_and_deep_reset_relocates() -> None:
+    """fishbone_scan extracts a target-band diamond 2-3 blocks behind the corridor wall, and deep reset records active_anchor."""
+    world = _MockMineWorld(
+        start_pos=(0.5, -54.0, 0.5),
+        surface_y=70,
+        inventory_items=[
+            {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [131, 131]},
+            {"name": "iron_pickaxe", "count": 1, "slot": 10, "durability": [250, 250]},
+            {"name": "cobblestone", "count": 64, "slot": 11},
+        ],
+    )
+    # Block east/south/west at start so spine heads north along x=0, z=0..-4;
+    # place an exposed diamond 3 blocks east of (0, -54, -2) behind 2 blocks of solid rock at (1..2, -54, -2),
+    # exposed on its far side (4, -54, -2) so anti-xray find_blocks sees (3, -54, -2)!
+    for dpos in ((1, -54, 0), (-1, -54, 0), (0, -54, 1)):
+        world.blocks[dpos] = "bedrock"
+    world.blocks[(3, -54, -2)] = "deepslate_diamond_ore"
+    world.blocks[(4, -54, -2)] = "air"
+    world.blocks[(4, -53, -2)] = "air"
+
+    with BotSession("tok", bot_username="ScanMiner", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        res = skills.mine_dfs(
+            target="diamond",
+            goal_count=1,
+            target_y=-54,
+            strategy="fishbone_scan",
+            max_duration_s=25.0,
+        )
+        assert res["ok"] is True
+        assert res["target_gained"] >= 1
+        assert [3, -54, -2] in res["mined_ores"]
+
+        # Simulate deep shaft where collar was far away at (0, 16, 0) while active_node is at current deep pos
+        eng = skills.mining_dfs
+        eng.nodes[eng.collar_node_id].anchor = (0, 16, 0)
+        cur_deep = (math.floor(world.pos[0]), math.floor(world.pos[1]), math.floor(world.pos[2]))
+        eng.nodes[eng.active_node_id].anchor = cur_deep
+        rst = skills.mine_dfs(action="reset", strategy="fishbone_scan")
+        assert rst["ok"] is True
+        assert cur_deep in eng.exhausted_collars
+        assert rst.get("relocated_to") is not None
+
+
+
+def test_restore_skips_shaft_saved_for_a_different_target_layer() -> None:
+    """A ledger shaft saved for -54 must not be reused when the caller asks for iron at 16."""
+    from mc_agent.skills.mining_dfs import ShaftNode
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    with BotSession("tok", bot_username="RestoreBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        node = ShaftNode(node_id=1, kind="collar", anchor=(0, 20, 0), parent_id=None,
+                         edge_from_parent=None, branches=[])
+        eng.ledger.saved_shafts = [{
+            "collar_anchor": [0, 20, 0],
+            "collar_node_id": 1,
+            "target_y": -54,
+            "nodes": [node.to_dict()],
+        }]
+        eng.target_y = 16
+        assert eng._try_restore_saved_shaft((0, 20, 0), min_hp_ref=[20.0]) is False
+        assert not eng.nodes

@@ -877,6 +877,13 @@ class MiningDFSEngine:
             if had_collar not in self.exhausted_collars:
                 self.exhausted_collars.append(had_collar)
             self.ledger.record_exhausted_collar(had_collar)
+        if self.active_node_id is not None and self.active_node_id in self.nodes:
+            active_anc = self.nodes[self.active_node_id].anchor
+            if active_anc not in self.exhausted_collars:
+                self.exhausted_collars.append(active_anc)
+            self.ledger.record_exhausted_collar(active_anc)
+            if had_collar is None:
+                had_collar = active_anc
 
         self._clear_active_tree_only()
         self.deferred_ores.clear()
@@ -2066,19 +2073,19 @@ class MiningDFSEngine:
         dir_order = sorted(
             ("north", "east", "south", "west"),
             key=lambda d: -(
-                (cur_pos[0] + DIRECTIONS[d][0] * 12 - ex_ref[0]) ** 2
-                + (cur_pos[2] + DIRECTIONS[d][1] * 12 - ex_ref[2]) ** 2
+                (cur_pos[0] + DIRECTIONS[d][0] * 16 - ex_ref[0]) ** 2
+                + (cur_pos[2] + DIRECTIONS[d][1] * 16 - ex_ref[2]) ** 2
             ),
         )
         hp_ref = min_hp_ref if min_hp_ref is not None else [20.0]
-        dl = deadline if deadline is not None else (time.monotonic() + 18.0)
+        dl = deadline if deadline is not None else (time.monotonic() + 22.0)
         for d in dir_order:
             dx, dz = DIRECTIONS[d]
-            if self._geofence_blocked(geofence, cur_pos[0] + dx * 12, cur_pos[2] + dz * 12, action="collar_relocate_drift") is not None:
+            if self._geofence_blocked(geofence, cur_pos[0] + dx * 16, cur_pos[2] + dz * 16, action="collar_relocate_drift") is not None:
                 continue
             drift = self._dig_level_edge(
                 direction=d,
-                steps=12,
+                steps=16,
                 target_blocks=(),
                 parent_node_id=0,
                 geofence=geofence,
@@ -2217,6 +2224,13 @@ class MiningDFSEngine:
                 best_sh = sh
 
         if best_sh is None:
+            return False
+
+        # Never reuse a shaft saved for a different target layer: its pending stair_down edges
+        # still carry the old branch_target_y (live: restored -54 shaft ignored target=iron(16)
+        # and dove 130 blocks past the iron layer in a single call).
+        saved_ty_raw = best_sh.get("target_y")
+        if saved_ty_raw is not None and abs(int(saved_ty_raw) - int(self.target_y)) > SCAN_BAND:
             return False
 
         raw_nodes = best_sh.get("nodes") or []
@@ -2498,7 +2512,8 @@ class MiningDFSEngine:
         safe_auto_collect = not (outer_cave_faces and hostile_near)
 
         dug = False
-        max_peel = 2 if self.surgical_enabled else 1
+        _scan_band_cell = self.strategy == "fishbone_scan" and abs(anchor[1] - self.target_y) <= SCAN_BAND
+        max_peel = 2 if (self.surgical_enabled or _scan_band_cell) else 1
         try:
             self.bot.call("dig", {"pos": [pt[0], pt[1], pt[2]], "collect": safe_auto_collect, "stop_on": ["hurt", "death"]})
             dug = True
@@ -2506,8 +2521,8 @@ class MiningDFSEngine:
             if (
                 err.code == "out_of_reach"
                 and bname in target_set
-                and abs(pt[1] - anchor[1]) <= (3 if self.radar_enabled else 2)
-                and (abs(pt[0] - anchor[0]) + abs(pt[2] - anchor[2])) <= (5 if self.surgical_enabled else (4 if self.radar_enabled else 3))
+                and abs(pt[1] - anchor[1]) <= (3 if (self.radar_enabled or _scan_band_cell) else 2)
+                and (abs(pt[0] - anchor[0]) + abs(pt[2] - anchor[2])) <= (5 if (self.surgical_enabled or _scan_band_cell) else (4 if self.radar_enabled else 3))
             ):
                 peel_pts = self._find_peel_blockers(anchor, pt, cache, max_blocks=max_peel)
                 if peel_pts:
@@ -2844,7 +2859,7 @@ class MiningDFSEngine:
             breaches_sealed += seal_delta
             if (
                 not ok_ore
-                and self.surgical_enabled
+                and (self.surgical_enabled or _scan_band)
                 and bname in target_set
                 and pt not in self.mined_ore_positions
                 and min(abs(pt[0] - anchor[0]), abs(pt[2] - anchor[2])) <= 1
@@ -2944,18 +2959,35 @@ class MiningDFSEngine:
                     cleared_any = True
         return self._move_exact(step_pt) if cleared_any else False
 
+    def _should_recraft_burner_pickaxe(
+        self,
+        chosen_rock: dict[str, Any] | None,
+        total_rem: int,
+    ) -> bool:
+        """Recraft a stone burner pickaxe when durability is low OR when no stone/wooden pick remains and we would burn iron/diamond on rock."""
+        if total_rem <= RECRAFT_PICK_DURABILITY:
+            return True
+        if chosen_rock is not None and int(chosen_rock.get("tier", 1)) >= 3:
+            return True
+        return False
+
     def _try_recraft_burner_pickaxe(self, counts_now: dict[str, int]) -> bool:
         """Craft one stone pickaxe from collected stone/wood so rock digging never eats the iron pick.
 
         Returns True when a fresh pickaxe is now in the inventory.
         """
-        affordable, _, _ = _stone_pickaxe_headroom(counts_now)
-        if affordable <= 0:
+        affordable, stone, _ = _stone_pickaxe_headroom(counts_now)
+        if affordable <= 0 or stone < 3:
             return False
-        # Only craft in place when we actually carry a table; otherwise keep the existing
-        # "walk back to the collar to resupply" route (cheaper than guessing a lost table).
-        if int(counts_now.get("crafting_table", 0)) < 1:
-            return False
+        has_table = int(counts_now.get("crafting_table", 0)) >= 1
+        if not has_table:
+            planks_equiv = sum(int(v) for k, v in counts_now.items() if k.endswith("_planks")) + 4 * sum(
+                int(v) for k, v in counts_now.items() if k.endswith(("_log", "_stem"))
+            )
+            sticks = int(counts_now.get("stick", 0))
+            need_planks = 4 + (0 if sticks >= 2 else 2)
+            if planks_equiv < need_planks:
+                return False
         try:
             res = self.skills.craft_gear(item="stone_pickaxe", count=1)
         except (ApiError, ValueError, KeyError, TypeError):
@@ -3118,7 +3150,7 @@ class MiningDFSEngine:
                 inv_raw, _ = self.skills._ensure_free_slots(min_free=6, inv_snapshot=inv_raw)
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
             chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
-            if total_rem <= RECRAFT_PICK_DURABILITY and self._try_recraft_burner_pickaxe(counts_now):
+            if self._should_recraft_burner_pickaxe(chosen_rock, total_rem) and self._try_recraft_burner_pickaxe(counts_now):
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
                 chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
             redline = self._pickaxe_redline_threshold(by, counts_now)
@@ -3336,7 +3368,7 @@ class MiningDFSEngine:
                 inv_raw, _ = self.skills._ensure_free_slots(min_free=6, inv_snapshot=inv_raw)
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
             chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
-            if total_rem <= RECRAFT_PICK_DURABILITY and self._try_recraft_burner_pickaxe(counts_now):
+            if self._should_recraft_burner_pickaxe(chosen_rock, total_rem) and self._try_recraft_burner_pickaxe(counts_now):
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
                 chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
             if chosen_rock is None or total_rem <= self._pickaxe_redline_threshold(by, counts_now):
@@ -3481,7 +3513,7 @@ class MiningDFSEngine:
                 inv_raw, _ = self.skills._ensure_free_slots(min_free=6, inv_snapshot=inv_raw)
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
             chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
-            if total_rem <= RECRAFT_PICK_DURABILITY and self._try_recraft_burner_pickaxe(counts_now):
+            if self._should_recraft_burner_pickaxe(chosen_rock, total_rem) and self._try_recraft_burner_pickaxe(counts_now):
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
                 chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
             redline = self._pickaxe_redline_threshold(by, counts_now)
