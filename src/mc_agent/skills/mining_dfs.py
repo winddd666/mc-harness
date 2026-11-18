@@ -422,9 +422,11 @@ class WorldLedger:
         pt = (int(anchor[0]), int(anchor[1]), int(anchor[2]))
         if pt not in self.exhausted_collars:
             self.exhausted_collars.append(pt)
-        self.saved_shafts = [
-            s for s in self.saved_shafts if tuple(s.get("collar_anchor") or ()) != pt
-        ]
+        # Keep the saved shaft: its waypoints are the walkable route home. It is only "retired"
+        # for mining, not for travel (live s12: losing the route forced a 120-block re-dig).
+        for sh in self.saved_shafts:
+            if tuple(sh.get("collar_anchor") or ()) == pt:
+                sh["retired"] = True
 
     def record_ore(self, pt: tuple[int, int, int], block_name: str, required_tier: int) -> None:
         pos = (int(pt[0]), int(pt[1]), int(pt[2]))
@@ -470,7 +472,7 @@ class WorldLedger:
 
     def upsert_shaft(self, shaft_data: dict[str, Any]) -> None:
         anc = tuple(int(v) for v in shaft_data["collar_anchor"])
-        if anc in self.exhausted_collars:
+        if anc in self.exhausted_collars and not shaft_data.get("retired"):
             return
         filtered = [
             s for s in self.saved_shafts if tuple(s.get("collar_anchor") or ()) != anc
@@ -869,21 +871,24 @@ class MiningDFSEngine:
         if self.collar_node_id is None or self.collar_node_id not in self.nodes:
             return
         collar_anc = self.nodes[self.collar_node_id].anchor
-        if mark_exhausted or not self._tree_has_pending_branches():
-            if collar_anc not in self.exhausted_collars:
-                self.exhausted_collars.append(collar_anc)
+        exhausted = mark_exhausted or not self._tree_has_pending_branches()
+        if exhausted and collar_anc not in self.exhausted_collars:
+            self.exhausted_collars.append(collar_anc)
+        # Always persist the node graph + waypoints. For an exhausted shaft this is the
+        # "route home" we can walk later without re-digging stairs.
+        self.ledger.upsert_shaft(
+            {
+                "collar_anchor": list(collar_anc),
+                "target_y": self.target_y,
+                "collar_node_id": self.collar_node_id,
+                "active_node_id": self.active_node_id,
+                "next_node_id": self.next_node_id,
+                "nodes": [n.to_dict() for n in self.nodes.values()],
+                "retired": bool(exhausted),
+            }
+        )
+        if exhausted:
             self.ledger.record_exhausted_collar(collar_anc)
-        else:
-            self.ledger.upsert_shaft(
-                {
-                    "collar_anchor": list(collar_anc),
-                    "target_y": self.target_y,
-                    "collar_node_id": self.collar_node_id,
-                    "active_node_id": self.active_node_id,
-                    "next_node_id": self.next_node_id,
-                    "nodes": [n.to_dict() for n in self.nodes.values()],
-                }
-            )
         self.ledger.save()
 
     def _tree_has_pending_branches(self) -> bool:
@@ -2288,6 +2293,7 @@ class MiningDFSEngine:
         cur_pos: tuple[int, int, int],
         *,
         min_hp_ref: list[float],
+        allow_retired: bool = False,
     ) -> bool:
         best_sh: dict[str, Any] | None = None
         best_d = 36.0
@@ -2296,7 +2302,7 @@ class MiningDFSEngine:
             if not isinstance(anc_raw, list) or len(anc_raw) < 3:
                 continue
             anc = (int(anc_raw[0]), int(anc_raw[1]), int(anc_raw[2]))
-            if anc in self.exhausted_collars:
+            if anc in self.exhausted_collars and not allow_retired:
                 continue
             hd = math.hypot(cur_pos[0] - anc[0], cur_pos[2] - anc[2])
             if hd <= best_d and abs(cur_pos[1] - anc[1]) <= 20:
@@ -2310,7 +2316,11 @@ class MiningDFSEngine:
         # still carry the old branch_target_y (live: restored -54 shaft ignored target=iron(16)
         # and dove 130 blocks past the iron layer in a single call).
         saved_ty_raw = best_sh.get("target_y")
-        if saved_ty_raw is not None and abs(int(saved_ty_raw) - int(self.target_y)) > SCAN_BAND:
+        if (
+            not allow_retired
+            and saved_ty_raw is not None
+            and abs(int(saved_ty_raw) - int(self.target_y)) > SCAN_BAND
+        ):
             return False
 
         raw_nodes = best_sh.get("nodes") or []

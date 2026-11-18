@@ -14,6 +14,7 @@ from mc_agent.harness.geofence import VoidGeofence
 from mc_agent.harness.hud import compute_goal_gap_hint
 from mc_agent.harness.mc_tools import McToolset
 from mc_agent.skills.library import PICKAXE_TIERS, MacroSkills
+from mc_agent.skills.mining_dfs import ShaftEdge
 from mc_agent.skills.mining_dfs import MiningDFSEngine, normalize_dfs_strategy
 
 
@@ -1825,3 +1826,24 @@ def test_sealing_cave_breaches_does_not_condemn_a_healthy_shaft() -> None:
         for _ in range(6):
             assert eng._note_fluid_abort("cave_breach_sealed") is False
         assert eng.fluid_aborts == 0
+
+
+def test_retired_shaft_keeps_its_walkable_route() -> None:
+    """Live s12: record_exhausted_collar deleted the shaft, so the 120-block route was re-dug."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="RouteBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        tip = eng._create_node(kind="spine", anchor=(0, 20, 0), parent_id=collar.node_id,
+                               edge_from_parent=ShaftEdge("stair_down", "north",
+                                                          [(0, y, 0) for y in range(64, 19, -1)]),
+                               branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.active_node_id = tip.node_id
+        eng._archive_current_shaft_to_ledger(mark_exhausted=True)
+
+        saved = [s for s in eng.ledger.saved_shafts if tuple(s["collar_anchor"]) == (0, 64, 0)]
+        assert saved, "exhausted shaft must keep its node graph"
+        assert saved[0]["retired"] is True
+        assert len(saved[0]["nodes"]) >= 2
