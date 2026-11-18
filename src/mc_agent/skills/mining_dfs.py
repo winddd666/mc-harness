@@ -2645,14 +2645,14 @@ class MiningDFSEngine:
         """Tell the model exactly how high to climb before calling explore again."""
         if self.collar_ceiling_y is None:
             return (
-                "请先用 mc_skill_staircase(vertical='up') 爬回地表（或用 action='return_collar' "
-                "走自建巷道），再 explore 开新井。"
+                "请直接调用一次 action='climb_out'（优先走自建巷道，其次挖台阶），"
+                "它会连续爬回地表，不要一格一格叫 staircase。"
             )
         need_y = int(self.collar_ceiling_y) - 20
         return (
-            f"请连续调用 mc_skill_staircase(vertical='up') 直到 y>={need_y}"
-            f"（地表基准 y={self.collar_ceiling_y}），中途不要反复调用 explore；"
-            "到高度后再 explore 开新井，或用 action='return_collar' 走自建巷道。"
+            f"请直接调用一次 action='climb_out'（一次调用内自动探测方向、优先走自建巷道，"
+            f"目标 y>={need_y}，地表基准 y={self.collar_ceiling_y}）；"
+            "它会连续爬到高度并就地开新井，不要再用 staircase 一格一格爬、也不要反复调用 explore。"
         )
 
     def _mine_vein_ore_cell(

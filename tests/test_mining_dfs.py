@@ -1686,7 +1686,7 @@ def test_reset_is_refused_while_deep_below_the_collar() -> None:
         assert eng.collar_node_id == node.node_id        # tree kept intact
     assert res["ok"] is False
     assert res["stop_reason"] == "reset_needs_surface"
-    assert "return_collar" in res["message"]
+    assert "climb_out" in res["message"]
 
 
 def test_reset_refused_when_a_deep_second_collar_tries_to_move_again() -> None:
