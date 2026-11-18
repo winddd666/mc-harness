@@ -395,3 +395,36 @@ def test_hurt_while_standing_in_shallow_water_still_escapes(monkeypatch):
     assert "water_float" not in incident["reasons"]  # shallow ground: not a float emergency
     assert [a["action"] for a in incident["actions"]] == ["escape_water"]
     assert escaped == ["escape_water"]
+
+
+def test_disconnected_guard_finishes_run_with_disconnected_status(monkeypatch):
+    """A dropped connection must end the run as status='disconnected', never 'runtime_error'."""
+
+    def _poll(self):
+        self.disconnected = True
+        return None
+
+    monkeypatch.setattr(GenerationGuard, "poll", _poll)
+
+    def handle(request):
+        action = request.url.path.rsplit("/", 1)[-1]
+        if action == "status":
+            result = {"pos": [0.5, 64, 0.5], "health": 20, "food": 20, "alive": True, "ready": True}
+        elif action == "inventory":
+            result = {"items": []}
+        elif action == "events":
+            result = {"events": [], "last_seq": 0}
+        else:
+            result = {"ok": True}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def chat(messages, tools=None, *, control=None, **kwargs):
+        check_control(control)
+        return {"role": "assistant", "content": "不应到这里。"}
+
+    with BotSession("cached", transport=httpx.MockTransport(handle)) as bot:
+        report = run_mc_agent("guard", bot, chat_fn=chat, max_calls=3, survival_guard=True,
+                              include_initial_snapshot=False)
+
+    assert report["status"] == "disconnected"
+    assert "连接中断" in (report.get("error") or "")
