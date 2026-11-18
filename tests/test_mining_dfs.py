@@ -1815,3 +1815,13 @@ def test_climb_out_action_reports_progress_and_target(monkeypatch) -> None:
     assert res["climb"]["reached"] is True
     assert res["climb"]["climbed"] >= 24
     assert calls
+
+
+def test_sealing_cave_breaches_does_not_condemn_a_healthy_shaft() -> None:
+    """Live s11: cave-heavy terrain hit 3 seals in a row and the shaft was abandoned at y=54."""
+    world = _MockMineWorld(start_pos=(0.5, 54.0, 0.5), surface_y=61)
+    with BotSession("tok", bot_username="CaveBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        for _ in range(6):
+            assert eng._note_fluid_abort("cave_breach_sealed") is False
+        assert eng.fluid_aborts == 0

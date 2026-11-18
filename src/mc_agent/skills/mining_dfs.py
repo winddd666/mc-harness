@@ -254,7 +254,12 @@ IDLE_CALLS_BEFORE_RELOCATE = 3
 # nothing else stops us from shattering an ore behind a wall and losing the drop forever.
 DROP_PICKUP_RADIUS_MANHATTAN = 2
 FLUID_ABORT_REASONS = frozenset({
-    "fluid_or_bedrock", "unsafe_floor_or_cave", "falling_material_adjacent", "cave_breach_sealed",
+    # NOTE: "cave_breach_sealed" is deliberately NOT here. Sealing a breach is a *success* — the
+    # engine handled it. Counting it made cave-riddled terrain kill a healthy shaft every ~3
+    # breaches (live s11: 1/37 hits, 5 resets at y≈54, never reached the target layer).
+    "fluid_or_bedrock",
+    "unsafe_floor_or_cave",
+    "falling_material_adjacent",
     # Drowning is the same hazard from the player's side (live s12: 3 escapes, still 0 counted,
     # so the shaft was never marked as a water trap and the bot kept digging back into the pool).
     "in_water",
