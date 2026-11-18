@@ -4676,7 +4676,11 @@ class MiningDFSEngine:
             if self.collar_node_id is None or self.collar_node_id not in self.nodes:
                 return {"ok": False, "requires_replan": True, "strategy": self.strategy, "stop_reason": "no_collar_recorded", "tree": self.snapshot()}
             dug_before = self.dug_during_return
-            ok_ret, err_ret = self._navigate_to_node(self.collar_node_id, min_hp_ref=min_hp_ref)
+            ok_ret, err_ret = self._navigate_to_node(
+                self.collar_node_id,
+                min_hp_ref=min_hp_ref,
+                deadline=time.monotonic() + max_duration_s,
+            )
             st_after = self.bot.status()
             return {
                 "ok": ok_ret,
