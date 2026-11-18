@@ -155,7 +155,16 @@ class GenerationGuard:
             # Floating in place only delays drowning (live: 7 straight water_float reflexes, then
             # 10 drown ticks and death). Climb out onto dry land instead.
             actions.append(self._action("escape_water", lambda: MacroSkills(self.bot).escape_water()))
-        if hurt and has_shield:
+        def _already(name: str) -> bool:
+            return any(a.get("action") == name for a in actions)
+
+        if hurt and in_water:
+            # Standing in water while being hit used to produce NO reflex at all: the melee/flee
+            # branch requires dry land, and needs_float is false on shallow ground. Climb out first
+            # (live: skeleton shot a bot stuck in shallow water down 4.3 -> 1.3 -> 0 hp).
+            if not _already("escape_water"):
+                actions.append(self._action("escape_water", lambda: MacroSkills(self.bot).escape_water()))
+        elif hurt and has_shield:
             attacker = (hurts[-1].get("source_entity") or hurts[-1].get("likely_attacker")) if hurts else status.get("nearest_hostile")
             if attacker and attacker.get("id") is not None:
                 actions.append(self._action("face_attacker", lambda: self.bot.call("look", {"entity_id": attacker["id"]})))

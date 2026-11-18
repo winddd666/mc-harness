@@ -361,3 +361,37 @@ def test_water_reflex_escapes_to_dry_land_instead_of_floating_in_place(monkeypat
     action_names = [a["action"] for a in incident["actions"]]
     assert action_names == ["escape_water"]
     assert escaped == ["escape_water"]
+
+
+def test_hurt_while_standing_in_shallow_water_still_escapes(monkeypatch):
+    """Live: in_water + hurt produced actions=[] (melee branch needs dry land, needs_float false)."""
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    escaped = []
+    monkeypatch.setattr(
+        MacroSkills,
+        "escape_water",
+        lambda self: escaped.append("escape_water") or {"ok": True, "in_water": False},
+    )
+
+    class _ShallowBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [0.5, 16.0, 0.5], "health": 4.3, "food": 20.0, "alive": True, "ready": True,
+                        "in_water": True, "submerged": False, "on_ground": True, "jumping": False, "oxygen": 280}
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "health": 4.3, "source": "arrow"}], "last_seq": 1}
+            if action == "inventory":
+                return {"items": [], "offhand": {}}
+            return {"ok": True}
+
+    guard = GenerationGuard(_ShallowBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.last_poll = float("-inf")
+    incident = guard.poll()
+
+    assert incident is not None
+    assert "water_float" not in incident["reasons"]  # shallow ground: not a float emergency
+    assert [a["action"] for a in incident["actions"]] == ["escape_water"]
+    assert escaped == ["escape_water"]
