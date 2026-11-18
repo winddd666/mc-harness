@@ -530,20 +530,26 @@ class PhysicalPrerequisiteResolver:
             blks = (found or {}).get("blocks") or []
             if blks:
                 return True
-            found_far = self.bot.call("find_blocks", {"radius": 28, "types": [block_name], "limit": 1})
+            found_far = self.bot.call("find_blocks", {"radius": 32, "types": [block_name], "limit": 1})
             far_blks = (found_far or {}).get("blocks") or []
             target_pos = far_blks[0].get("pos") if (far_blks and isinstance(far_blks[0], dict)) else None
-            if target_pos is None:
-                st = self.bot.status()
-                pos = st.get("pos")
-                if isinstance(pos, (list, tuple)) and len(pos) >= 3:
-                    wm = self.skills._get_world_memory()
-                    mem_hits = wm.query_pois([block_name], origin=pos, dim=normalize_dimension(st.get("dimension")), limit=1)
-                    if mem_hits and float(mem_hits[0].get("dist", 999.0)) <= 28.0:
-                        target_pos = mem_hits[0]["pos"]
+            st = self.bot.status()
+            pos = st.get("pos")
+            if target_pos is None and isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                wm = self.skills._get_world_memory()
+                mem_hits = wm.query_pois([block_name], origin=pos, dim=normalize_dimension(st.get("dimension")), limit=1)
+                if mem_hits and float(mem_hits[0].get("dist", 999.0)) <= 64.0 and abs(float(mem_hits[0]["pos"][1]) - float(pos[1])) <= 12.0:
+                    target_pos = mem_hits[0]["pos"]
             if isinstance(target_pos, list) and len(target_pos) >= 3:
-                self.bot.call("move_to", {"x": float(target_pos[0]) + 0.5, "z": float(target_pos[2]) + 0.5, "range": 2.5})
-                return True
+                self.skills.navigate_segmented(
+                    float(target_pos[0]) + 0.5,
+                    float(target_pos[2]) + 0.5,
+                    range_m=2.6,
+                    geofence=self.geofence,
+                )
+                chk = self.bot.call("find_blocks", {"radius": 6, "types": [block_name], "limit": 1})
+                if (chk or {}).get("blocks"):
+                    return True
         except Exception:
             return False
         return False
@@ -946,18 +952,19 @@ class PhysicalPrerequisiteResolver:
         # 2) Wildcard planks: craft from any owned or harvested logs
         if item == "any_planks":
             logs_needed = max(1, math.ceil(deficit / 4))
-            r_log = self._satisfy_item(
-                "any_log",
-                effective_item_count("any_log", counts) + logs_needed,
-                deadline=deadline,
-                depth=depth + 1,
-                visited=branch_visited,
-                steps_log=steps_log,
-                hunt_missing=hunt_missing,
-                guard_fn=guard_fn,
-            )
-            if r_log is not None:
-                return r_log
+            if effective_item_count("any_log", counts) < logs_needed:
+                r_log = self._satisfy_item(
+                    "any_log",
+                    logs_needed,
+                    deadline=deadline,
+                    depth=depth + 1,
+                    visited=branch_visited,
+                    steps_log=steps_log,
+                    hunt_missing=hunt_missing,
+                    guard_fn=guard_fn,
+                )
+                if r_log is not None:
+                    return r_log
             counts_after_log = total_owned_counts(self.bot.inventory())
             log_type = next(
                 (k for k, v in counts_after_log.items() if k.endswith(("_log", "_stem")) and v > 0),
@@ -1234,6 +1241,12 @@ class PhysicalPrerequisiteResolver:
             pos = st.get("pos") or [0.0, 64.0, 0.0]
             dim = normalize_dimension(st.get("dimension"))
             if dim == "overworld" and float(pos[1]) < 52.0:
+                counts_pre_asc = total_owned_counts(self.bot.inventory())
+                # Never dig blind staircases from deep underground without a pickaxe or inside `pre_ensure` (`allow_underground_dfs=False`)!
+                if highest_pickaxe_tier(counts_pre_asc) <= 0 or (not self.allow_underground_dfs and float(pos[1]) < 42.0):
+                    rem_logs = max(1, target_count - effective_item_count(item, counts_pre_asc))
+                    hunt_missing[item] = max(hunt_missing.get(item, 0), rem_logs)
+                    return "requires_world_hunt"
                 for _ in range(4):
                     abort_u = guard_fn()
                     if abort_u is not None:
@@ -1241,6 +1254,8 @@ class PhysicalPrerequisiteResolver:
                     st_u = self.bot.status()
                     py_u = float((st_u.get("pos") or [0.0, 64.0, 0.0])[1])
                     if py_u >= 58.0:
+                        break
+                    if highest_pickaxe_tier(total_owned_counts(self.bot.inventory())) <= 0:
                         break
                     dirs = self.skills._probe_viable_up_stair_dirs(
                         math.floor(float(st_u["pos"][0])),

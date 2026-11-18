@@ -248,6 +248,26 @@ class _Phase2World:
             elif item == "diamond_boots":
                 self.consume_item("diamond", 4)
                 self.add_item("diamond_boots", 1)
+            elif item.endswith("_planks"):
+                log_nm = item.replace("_planks", "_log")
+                batches = max(1, (delta + 3) // 4)
+                if not self.consume_item(log_nm, batches):
+                    return httpx.Response(400, json={"ok": False, "error": "missing_ingredient", "message": log_nm})
+                self.add_item(item, 4 * batches)
+            elif item == "stick":
+                batches = max(1, (delta + 3) // 4)
+                plank_nm = next((r["name"] for r in self.items if r["name"].endswith("_planks") and r["count"] >= 2 * batches), None)
+                if not plank_nm or not self.consume_item(plank_nm, 2 * batches):
+                    return httpx.Response(400, json={"ok": False, "error": "missing_ingredient", "message": "planks"})
+                self.add_item("stick", 4 * batches)
+            elif item == "diamond_pickaxe":
+                has_table = any(
+                    bn == "crafting_table" and ((pt[0] - self.pos[0]) ** 2 + (pt[1] - self.pos[1]) ** 2 + (pt[2] - self.pos[2]) ** 2) ** 0.5 <= 5.5
+                    for pt, bn in self.blocks.items()
+                )
+                if not has_table or not self.consume_item("diamond", 3) or not self.consume_item("stick", 2):
+                    return httpx.Response(400, json={"ok": False, "error": "no_table_or_ing", "message": item})
+                self.add_item("diamond_pickaxe", 1)
             else:
                 return httpx.Response(400, json={"ok": False, "error": "no_recipe", "message": item})
             return httpx.Response(200, json={"ok": True, "result": {"crafted": item, "count": self.count_item(item)}})
@@ -543,6 +563,7 @@ def test_single_level_surface_preempt_pause_dnd_underground_and_clean_resume(tmp
 
         # 2) Clear memory; run `make_a_sign_glow` at Y=64 -> Turn 1 spots villager at 12m -> PAUSE -> Ep 2 runs `trade` -> Ep 3 RESUME `make_a_sign_glow`!
         ts.world_memory = WorldMemory()
+        ts.world_memory.observe_entities([{"type": "passive", "name": "glow_squid", "pos": [65.0, 50.0, 65.0]}], dim="overworld")
         world.entities = [{"id": 77, "type": "passive", "name": "villager", "pos": [12.5, 64.0, 0.5], "dist": 12.0}]
         # Also put a lava pool at (15, 64, 0) + bucket so we verify Ep 2 (`is_preempt_branch=True`) does NOT nested-pause a 2nd level!
         world.blocks[(15, 64, 0)] = "lava"
@@ -832,5 +853,41 @@ def test_ensure_items_throttles_stabilize_when_hungry_without_food() -> None:
     assert len(stab_steps) == 1
 
 
+def test_deep_underground_no_pickaxe_never_punches_deepslate_and_reuses_memory_table() -> None:
+    """At Y=-54 with 0 pickaxes, `ensure_items` must NEVER call `dig_staircase` bare-handed, and must reuse a WorldMemory crafting_table within 64m."""
+    world = _Phase2World()
+    world.pos = [0.0, -54.0, 0.0]
+    world.add_item("diamond", 3)
+    world.add_item("birch_log", 1)  # Only 4 planks: enough for sticks ONLY if existing crafting_table is reused!
+    world.blocks[(42, -54, 0)] = "crafting_table"
 
+    wm = WorldMemory()
+    wm.record_poi("crafting_table", [42, -54, 0], dim="overworld")
 
+    stair_calls = {"n": 0}
+    with BotSession("tok", bot_username="DeepBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        skills.world_memory = wm
+
+        def _forbid_stair(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            stair_calls["n"] += 1
+            return {"ok": False}
+
+        skills.dig_staircase = _forbid_stair  # type: ignore[method-assign]
+        res = PhysicalPrerequisiteResolver(skills, allow_underground_dfs=False).ensure_items(
+            {"diamond_pickaxe": 1},
+            max_duration_s=20.0,
+        )
+        assert res["ok"] is True
+        assert world.count_item("diamond_pickaxe") == 1
+        assert stair_calls["n"] == 0
+
+        # Now empty all wood & pickaxes at Y=-54 -> must return `requires_world_hunt` immediately without calling `dig_staircase`!
+        world.items = []
+        res_empty = PhysicalPrerequisiteResolver(skills, allow_underground_dfs=False).ensure_items(
+            {"stone_pickaxe": 1},
+            max_duration_s=20.0,
+        )
+        assert res_empty["ok"] is False
+        assert res_empty["stop_reason"] == "requires_world_hunt"
+        assert stair_calls["n"] == 0

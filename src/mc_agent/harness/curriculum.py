@@ -538,7 +538,10 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "持 diamond_pickaxe 挖掘现成 obsidian（或用水桶浇静止岩浆生成后再用 diamond_pickaxe 挖取入包）。"
         ),
         post_ensure_task=(
-            "解锁 story/form_obsidian(15分)：背包已有 diamond_pickaxe，寻找现成 obsidian（或水浇静止岩浆生成 obsidian）并调 mc_skill_mine_blocks(['obsidian'], count=1) 将黑曜石挖入背包。"
+            "解锁 story/form_obsidian(15分)：背包已备好 diamond_pickaxe！先调 mc_find_blocks(types=['obsidian', 'lava', 'water'], radius=48) 搜索："
+            "1) 若已有现成 obsidian，走近安全侧调 mc_skill_mine_blocks(['obsidian'], count=1) 挖入背包；"
+            "2) 若只有静止 lava 而无现成 obsidian：若附近有 water，用铁锭合 bucket 对 water 装水浇在静止 lava 旁侧方块硬化为 obsidian 后挖入背包；"
+            "若当前在深层地下(Y<45)且 48m 内既无 obsidian 也无 water，可先用 bucket 舀一桶 lava_bucket 带走，再调 mc_skill_staircase(direction='north', steps=16, vertical='up') 分段回到地表水源(Y>=58)旁浇铸采集。"
         ),
         extra_tools=("mc_interact",),
         advancement_id="minecraft:story/form_obsidian",
@@ -547,7 +550,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         key="minecraft:husbandry/make_a_sign_glow",
         title="30分：发光墨囊涂亮木告示牌",
         points=30,
-        tier=1,
+        tier=2,
         budget_class="medium",
         task=(
             "解锁 husbandry/make_a_sign_glow(30分)：寻找地下水池或海沟中的 glow_squid 击杀拾取 glow_ink_sac，"
@@ -607,7 +610,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         key="minecraft:story/deflect_arrow",
         title="15分：举盾弹反骷髅箭矢",
         points=15,
-        tier=1,
+        tier=2,
         budget_class="short",
         pre_ensure=(("shield", 1),),
         pre_equip=(("shield", "off-hand"),),
@@ -627,9 +630,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         tier=2,
         budget_class="micro",
         pre_ensure=(("iron_boots", 1),),
-        pre_equip=(("iron_boots", "feet"),),
-        task="用现有铁锭调 mc_skill_craft_gear('iron_boots', equip_slot='feet')（仅需4铁锭），立得 story/obtain_armor。",
-        post_ensure_task="iron_boots 已合成，确认穿戴在 feet 槽位即可完成 story/obtain_armor。",
+        pre_equip=(),
+        task="用现有铁锭调 mc_skill_craft_gear('iron_boots')（仅需4铁锭入包即触发 story/obtain_armor）。",
+        post_ensure_task="iron_boots 已合成入包，检查进度即可完成 story/obtain_armor。",
         advancement_id="minecraft:story/obtain_armor",
     ),
     "minecraft:adventure/sleep_in_bed": CurriculumTarget(
@@ -1064,6 +1067,23 @@ def _enrich_target_with_world_memory(
         if (bag_counts.get("iron_ingot", 0) + chest_counts.get("iron_ingot", 0)) >= 4:
             boosted = True
 
+    elif adv_id == "minecraft:story/deflect_arrow":
+        skel_hits = world_memory.query_habitats(["skeleton"], origin=pos, dim=norm_dim, limit=1)
+        if skel_hits:
+            sk0 = skel_hits[0]
+            notes.append(f"[记忆库提权：已知 skeleton 活动点位于 {sk0['approx_pos']}（{sk0['dist']}m），副手持盾前往弹反一箭]")
+            boosted = True
+
+    elif adv_id == "minecraft:husbandry/make_a_sign_glow":
+        glow_hits = world_memory.query_habitats(["glow_squid"], origin=pos, dim=norm_dim, limit=1)
+        if (bag_counts.get("glow_ink_sac", 0) + chest_counts.get("glow_ink_sac", 0)) >= 1:
+            notes.append("[物资就绪：包/箱内已有 glow_ink_sac，直接合成木告示牌放置并调 mc_interact(item='glow_ink_sac') 立拿 30 分]")
+            boosted = True
+        elif glow_hits:
+            g0 = glow_hits[0]
+            notes.append(f"[记忆库提权：已探明 glow_squid 位于 {g0['approx_pos']}（{g0['dist']}m），前往击杀拾取 glow_ink_sac 并涂亮木告示牌]")
+            boosted = True
+
     if not notes and not extra_add and not boosted and task_override is None:
         return target, False
 
@@ -1203,6 +1223,36 @@ def select_next_target(
                 dim=cur_dim,
             )
             return pb0, frontier_data
+        # Run 1 fast daytime surface recon right after stone_pickaxe (while guaranteed at surface Y>=54!) before plunging underground!
+        if (
+            enable_island_recon
+            and not recon_done
+            and world_memory is not None
+            and cur_dim == "overworld"
+            and (origin_pos is None or float(origin_pos[1]) >= 52.0)
+            and not _is_cooled("island_recon_sweep")
+        ):
+            has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
+            has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
+            if not (has_villager_mem and has_lava_mem):
+                unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
+                dir_hint = "/".join(unexp[:3]) if unexp else "east/north/west/south"
+                return (
+                    CurriculumTarget(
+                        key="island_recon_sweep",
+                        title="环岛摸底侦察：扫描村庄/岩浆池/动物聚落充实 WorldMemory",
+                        points=20,
+                        tier=0,
+                        budget_class="micro",
+                        task=(
+                            f"执行一次紧凑地表环岛摸底探索（严禁挖矿或下潜）：优先沿未探索方向({dir_hint})用 mc_move_to 分段推进 100~180m（严守虚空岛边界），"
+                            "沿途调用 mc_find_blocks(radius=32) 与 mc_get_entities(radius=32) 扫描记录村庄、箱子、地表岩浆池、水源鱼群、甘蔗、南瓜及牛羊群，探明后立即汇报收工。"
+                        ),
+                        extra_tools=("mc_interact", "mc_attack", "mc_kb_lookup"),
+                        advancement_id=None,
+                    ),
+                    frontier_data,
+                )
         if not has_iron_or_better and not _is_cooled("bootstrap_iron_age"):
             pb1, _ = _enrich_target_with_world_memory(
                 CURRICULUM_PLAYBOOKS["bootstrap_iron_age"],
@@ -1279,6 +1329,9 @@ def select_next_target(
                 enriched_pb,
                 task=f"[后台熔炉保活围栏：请保持在熔炉 {list(l_pos)} 周围 {int(l_rad)}m 内顺手执行，勿远航或跨维度]\n" + enriched_pb.task,
             )
+        if key == "minecraft:story/deflect_arrow" and not is_day_now and enriched_pb.tier == 2:
+            enriched_pb = dataclasses.replace(enriched_pb, tier=1)
+            mem_boosted = True
         is_uncond = 0 if (adv_id in UNCONDITIONAL_ADVANCEMENTS or mem_boosted) else 1
         sort_key = (enriched_pb.tier, is_uncond, -enriched_pb.points, key)
         candidates.append((sort_key, enriched_pb))
@@ -1674,6 +1727,14 @@ class CurriculumSupervisor:
                     explicit_timeout_s=self._explicit_timeout_s,
                 )
             ep_timeout = min(raw_ep_timeout, max(0.5, remaining_s))
+            if (
+                is_preempt_branch
+                and self.suspended_episode is not None
+                and self.suspended_episode.waiting_job_id
+                and self.suspended_episode.waiting_job_id in self.world_jobs.jobs
+            ):
+                job_rem_s = max(0.0, self.world_jobs.jobs[self.suspended_episode.waiting_job_id].ready_at - time.monotonic())
+                ep_timeout = min(ep_timeout, max(45.0, job_rem_s + 40.0))
 
             ep_stem = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             ep_events_path = self.runs_dir / f"{ep_stem}.events.jsonl"
@@ -1693,7 +1754,13 @@ class CurriculumSupervisor:
 
                 # 1) 0-LLM `pre_ensure` (wrapped with Subcortical Reflex preemption & objective completion check!)
                 eff_pre_ensure = dict(base_playbook.pre_ensure)
-                if base_playbook.key == "bootstrap_iron_age":
+                if base_playbook.key == "bootstrap_stone_age":
+                    owned_bs = total_owned_counts(inv_before)
+                    if owned_bs.get("diamond", 0) >= 3:
+                        eff_pre_ensure = {"diamond_pickaxe": 1, "stone_pickaxe": 1}
+                    elif owned_bs.get("iron_ingot", 0) >= 3:
+                        eff_pre_ensure = {"iron_pickaxe": 1, "stone_pickaxe": 1}
+                elif base_playbook.key == "bootstrap_iron_age":
                     # Promote `bootstrap_iron_age` pre_ensure to `iron_pickaxe` if >=3 iron in bag/72m chest or exposed within 28m!
                     bag_i, chest_i, _ = _combined_available_counts(
                         inv_before, self.toolset.world_memory, origin=cur_pos, dim=cur_dim, world_jobs=self.world_jobs
@@ -1722,19 +1789,19 @@ class CurriculumSupervisor:
                     self.enable_pre_ensure
                     and base_playbook.key in {"bootstrap_iron_age", "minecraft:story/shiny_gear", "minecraft:story/mine_diamond"}
                     and cur_pos is not None
-                    and float(cur_pos[1]) >= 54.0
+                    and float(cur_pos[1]) >= 52.0
                 ):
                     owned_pre = total_owned_counts(inv_before)
                     wood_units = sum(v for k, v in owned_pre.items() if k.endswith(("_log", "_stem"))) * 4 + sum(
                         v for k, v in owned_pre.items() if k.endswith("_planks")
                     ) + owned_pre.get("stick", 0) // 2
-                    want_logs = 8 if base_playbook.key != "bootstrap_iron_age" else 6
-                    if wood_units < 16 or owned_pre.get("crafting_table", 0) < 1:
+                    want_logs = 12
+                    if wood_units < 36 or owned_pre.get("crafting_table", 0) < 2:
                         try:
                             near_trees = self.bot.call(
                                 "find_blocks",
                                 {
-                                    "radius": 36,
+                                    "radius": 40,
                                     "types": [
                                         "oak_log",
                                         "spruce_log",
@@ -1750,9 +1817,8 @@ class CurriculumSupervisor:
                             )
                             if (near_trees or {}).get("blocks"):
                                 eff_pre_ensure["any_log"] = max(int(eff_pre_ensure.get("any_log", 0)), want_logs)
-                                eff_pre_ensure["crafting_table"] = max(int(eff_pre_ensure.get("crafting_table", 0)), 1)
-                                if base_playbook.key == "minecraft:story/shiny_gear":
-                                    eff_pre_ensure["stone_pickaxe"] = max(int(eff_pre_ensure.get("stone_pickaxe", 0)), 2)
+                                eff_pre_ensure["crafting_table"] = max(int(eff_pre_ensure.get("crafting_table", 0)), 2)
+                                eff_pre_ensure["stone_pickaxe"] = max(int(eff_pre_ensure.get("stone_pickaxe", 0)), 2)
                         except Exception:
                             pass
 
@@ -1784,7 +1850,7 @@ class CurriculumSupervisor:
                             allow_underground_dfs=False,
                             world_jobs=self.world_jobs if self.enable_async_world_jobs else None,
                             parent_target_key=base_playbook.key,
-                            async_smelt_threshold_s=25.0,
+                            async_smelt_threshold_s=45.0,
                         )
                         try:
                             with pre_guard._intercept_bot_calls(enable_creeper_watcher=True):
