@@ -587,6 +587,40 @@ class _RepeatFailureGuard:
                         ensure_ascii=False,
                     )
 
+            # Pre-call guards:
+            # 1) Clamp `mc_move_to` arrival tolerance `range > 12m` (LLM confusing travel distance with GoalNear radius!)
+            if tool.name == "mc_move_to" and isinstance(kwargs.get("range"), (int, float)) and float(kwargs["range"]) > 12.0:
+                kwargs = {**kwargs, "range": 4.0}
+            # 2) Auto-convert owned logs into planks before `mc_skill_smelt` when coal+planks cannot finish the requested batch!
+            elif tool.name == "mc_skill_smelt" and not kwargs.get("fuel_item"):
+                try:
+                    smelt_cnt = max(1, int(kwargs.get("count", 1) or 1))
+                    inv_sm = self.toolset.bot.inventory()
+                    cnt_sm: dict[str, int] = {}
+                    for r_sm in inv_sm.get("items") or []:
+                        if isinstance(r_sm, dict):
+                            nm_s = str(r_sm.get("name") or "").removeprefix("minecraft:")
+                            c_s = int(r_sm.get("count") or 0)
+                            if nm_s and c_s > 0:
+                                cnt_sm[nm_s] = cnt_sm.get(nm_s, 0) + c_s
+                    coal_n = cnt_sm.get("coal", 0) + cnt_sm.get("charcoal", 0)
+                    planks_n = sum(v for k, v in cnt_sm.items() if k.endswith("_planks"))
+                    if coal_n * 8 + int(planks_n * 1.5) < smelt_cnt:
+                        in_it = str(kwargs.get("input_item") or "").removeprefix("minecraft:")
+                        need_planks = max(2, math.ceil(smelt_cnt / 1.5) - planks_n)
+                        for log_k, log_v in list(cnt_sm.items()):
+                            if not log_k.endswith(("_log", "_stem")):
+                                continue
+                            spare = log_v - (smelt_cnt if log_k == in_it else 0)
+                            if spare <= 0:
+                                continue
+                            conv_logs = min(spare, max(1, math.ceil(need_planks / 4)))
+                            plank_nm = log_k.replace("_log", "_planks").replace("_stem", "_planks")
+                            self.toolset.skills._safe_craft(plank_nm, conv_logs * 4)
+                            break
+                except Exception:
+                    pass
+
             raw = ""
             last_exc: Exception | None = None
             for attempt in range(len(self._API_RETRY_DELAYS) + 1):
@@ -613,6 +647,18 @@ class _RepeatFailureGuard:
             parsed = self._parse_json(raw)
             if not isinstance(parsed, dict):
                 return raw
+
+            # Compact huge `mc_skill_mine_dfs` spine node arrays so output fits inline without wasting LLM turns on `read_tool_result`!
+            if tool.name == "mc_skill_mine_dfs" and isinstance(parsed.get("tree"), dict):
+                nodes_list = parsed["tree"].get("nodes")
+                if isinstance(nodes_list, list) and len(nodes_list) > 6:
+                    parsed["tree"] = {
+                        **parsed["tree"],
+                        "total_nodes": len(nodes_list),
+                        "nodes_omitted": len(nodes_list) - 4,
+                        "nodes": nodes_list[-4:],
+                    }
+                    raw = json.dumps(parsed, ensure_ascii=False)
 
             res_obj = parsed.get("result") if isinstance(parsed.get("result"), dict) else {}
             pos_after_raw = parsed.get("pos_after") or res_obj.get("pos_after") or res_obj.get("pos") or parsed.get("pos")

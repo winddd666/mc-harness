@@ -473,7 +473,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "4) 穿好钻石靴后在主控允许的 150s 顺采窗口内可在同井顺采额外至多 5 颗钻石备钻镐与附魔台。"
         ),
         post_ensure_task=(
-            "铁镐与备用石镐已齐备：直接调 mc_skill_mine_dfs(target='diamond', target_y=-54, goal_count=4) 深潜采钻；凑满首 4 颗 diamond 立即调 mc_skill_craft_gear('diamond_boots', equip_slot='feet') 穿戴锁分。"
+            "铁镐与备用石镐已齐备：直接调 mc_skill_mine_dfs(target='diamond', target_y=-54, goal_count=4) 深潜采钻；"
+            "凑满首 4 颗 diamond 立即调 mc_skill_craft_gear('diamond_boots', equip_slot='feet') 穿戴锁分；"
+            "若在 Y=-54 同一矿井连续探挖超过 8 次仍 0 钻产出（如陷入繁茂粘土层或贫矿带），可调 mc_skill_mine_dfs(action='reset') 重开新支脉。"
         ),
         advancement_id="minecraft:story/shiny_gear",
     ),
@@ -1245,8 +1247,10 @@ def select_next_target(
                         tier=0,
                         budget_class="micro",
                         task=(
-                            f"执行一次紧凑地表环岛摸底探索（严禁挖矿或下潜）：优先沿未探索方向({dir_hint})用 mc_move_to 分段推进 100~180m（严守虚空岛边界），"
-                            "沿途调用 mc_find_blocks(radius=32) 与 mc_get_entities(radius=32) 扫描记录村庄、箱子、地表岩浆池、水源鱼群、甘蔗、南瓜及牛羊群，探明后立即汇报收工。"
+                            f"执行一次紧凑地表环岛摸底探索（严禁挖矿或下潜）：沿未探索方向({dir_hint})将当前 x/z 偏置 90~140 格调 mc_move_to(x=..., z=..., range=4)"
+                            "（注意 range 是到达容差固定填 4，严禁填 100！严守虚空岛边界），"
+                            "每到一处必须调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])（必须传 types 列表！）"
+                            "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后立即汇报收工。"
                         ),
                         extra_tools=("mc_interact", "mc_attack", "mc_kb_lookup"),
                         advancement_id=None,
@@ -1287,8 +1291,10 @@ def select_next_target(
                 tier=1,
                 budget_class="micro",
                 task=(
-                    f"执行一次紧凑地表环岛摸底探索（严禁挖矿或下潜）：优先沿未探索方向({dir_hint})用 mc_move_to 分段推进 100~180m（严守虚空岛边界），"
-                    "沿途调用 mc_find_blocks(radius=32) 与 mc_get_entities(radius=32) 扫描记录村庄、箱子、地表岩浆池、水源鱼群、甘蔗、南瓜及牛羊群（若有剑/斧可顺手猎取 2~3 块生肉备粮），探明后立即汇报收工。"
+                    f"执行一次紧凑地表环岛摸底探索（严禁挖矿或下潜）：沿未探索方向({dir_hint})将当前 x/z 偏置 90~140 格调 mc_move_to(x=..., z=..., range=4)"
+                    "（注意 range 是到达容差固定填 4，严禁填 100！严守虚空岛边界），"
+                    "每到一处必须调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])（必须传 types 列表！）"
+                    "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后立即汇报收工。"
                 ),
                 extra_tools=("mc_interact", "mc_attack", "mc_kb_lookup"),
                 advancement_id=None,
@@ -1728,6 +1734,13 @@ class CurriculumSupervisor:
                 )
             ep_timeout = min(raw_ep_timeout, max(0.5, remaining_s))
             if (
+                resumed_ep is None
+                and base_playbook.budget_class == "deep"
+                and self._explicit_timeout_s is None
+                and self.duration_s <= 4200.0
+            ):
+                ep_timeout = min(ep_timeout, max(540.0, self.duration_s * 0.30))
+            if (
                 is_preempt_branch
                 and self.suspended_episode is not None
                 and self.suspended_episode.waiting_job_id
@@ -1817,6 +1830,7 @@ class CurriculumSupervisor:
                             )
                             if (near_trees or {}).get("blocks"):
                                 eff_pre_ensure["any_log"] = max(int(eff_pre_ensure.get("any_log", 0)), want_logs)
+                                eff_pre_ensure["any_planks"] = max(int(eff_pre_ensure.get("any_planks", 0)), 8)
                                 eff_pre_ensure["crafting_table"] = max(int(eff_pre_ensure.get("crafting_table", 0)), 2)
                                 eff_pre_ensure["stone_pickaxe"] = max(int(eff_pre_ensure.get("stone_pickaxe", 0)), 2)
                         except Exception:
@@ -2139,6 +2153,15 @@ class CurriculumSupervisor:
 
             if progress_made:
                 self.strikes.pop(target.key, None)
+                # Prevent an unfinished `deep` slice (`shiny_gear`/`mine_diamond`) from monopolizing back-to-back slices when
+                # the bot already accumulated diamonds/iron that can immediately cash in +35~65 pts on fast deterministic targets!
+                if (
+                    base_playbook.budget_class == "deep"
+                    and not objective_verified
+                    and report.get("status") in {"timeout", "budget_exhausted"}
+                    and (diamond_after >= 3 or iron_after >= 3)
+                ):
+                    self.cooldowns[target.key] = max(self.cooldowns.get(target.key, 0.0), time.monotonic() + 240.0)
             elif not transient_api_err and not is_pause_yield and target.key != "furnace_leash_prep":
                 cnt = self.strikes.get(target.key, 0) + 1
                 self.strikes[target.key] = cnt

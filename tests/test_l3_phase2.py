@@ -891,3 +891,74 @@ def test_deep_underground_no_pickaxe_never_punches_deepslate_and_reuses_memory_t
         assert res_empty["ok"] is False
         assert res_empty["stop_reason"] == "requires_world_hunt"
         assert stair_calls["n"] == 0
+
+
+def test_agent_smelt_fuel_prep_move_range_clamp_and_mine_dfs_compaction(tmp_path: Path) -> None:
+    """`agent.py` clamps `mc_move_to(range=150)` -> 4.0, auto-converts owned logs into planks before `mc_skill_smelt`, and compacts `mine_dfs` nodes."""
+    from mc_agent.harness.agent import run_mc_agent
+    world = _Phase2World()
+    world.add_item("raw_iron", 6)
+    world.add_item("birch_planks", 1)  # Only 1.5 items of fuel without converting `birch_log`!
+    world.add_item("birch_log", 4)
+    world.blocks[(2, 64, 0)] = "furnace"
+
+    seen_ranges: list[float] = []
+    smelt_plank_counts: list[int] = []
+    orig_handler = world.handler
+
+    def spy_handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/move_to") and req.content:
+            b = json.loads(req.content.decode("utf-8"))
+            seen_ranges.append(float(b.get("range", 1.0)))
+        return orig_handler(req)
+
+    with BotSession("tok", bot_username="WrapBot", transport=httpx.MockTransport(spy_handler)) as bot:
+        ts = McToolset(bot, world_memory=WorldMemory())
+
+        def spy_smelt(**kw: Any) -> dict[str, Any]:
+            smelt_plank_counts.append(world.count_item("birch_planks"))
+            return {"ok": True, "collected": [{"name": "iron_ingot", "count": 6}]}
+
+        def spy_dfs(**kw: Any) -> dict[str, Any]:
+            nodes = [{"node_id": i, "anchor": [0, -54, -i * 3]} for i in range(1, 21)]
+            return {"ok": True, "stop_reason": "time_slice_progress", "tree": {"nodes": nodes}}
+
+        ts.skills.smelt_items = spy_smelt  # type: ignore[method-assign]
+        ts.skills.mine_dfs = spy_dfs  # type: ignore[method-assign]
+
+        step = {"n": 0}
+        tool_msgs: list[str] = []
+
+        def fake_chat(messages: list[dict[str, Any]], tools: Any = None, **kwargs: Any) -> dict[str, Any]:
+            step["n"] += 1
+            for m in messages:
+                if m.get("role") == "tool":
+                    tool_msgs.append(str(m.get("content") or ""))
+            if step["n"] == 1:
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "t1", "type": "function", "function": {"name": "mc_move_to", "arguments": json.dumps({"x": 50, "z": 0, "range": 150})}},
+                        {"id": "t2", "type": "function", "function": {"name": "mc_skill_smelt", "arguments": json.dumps({"input_item": "raw_iron", "count": 6})}},
+                        {"id": "t3", "type": "function", "function": {"name": "mc_skill_mine_dfs", "arguments": json.dumps({"target": "diamond", "target_y": -54})}},
+                    ],
+                }
+            return {"role": "assistant", "content": "done"}
+
+        run_mc_agent(
+            "test wrappers",
+            bot,
+            chat_fn=fake_chat,
+            max_calls=3,
+            run_timeout_s=20.0,
+            survival_guard=False,
+            toolset=ts,
+        )
+
+    assert seen_ranges == [4.0]
+    assert smelt_plank_counts[0] >= 5  # Auto-crafted planks from `birch_log` before `smelt`!
+    dfs_out = json.loads(tool_msgs[-1])
+    assert dfs_out["tree"]["total_nodes"] == 20
+    assert len(dfs_out["tree"]["nodes"]) == 4
+
