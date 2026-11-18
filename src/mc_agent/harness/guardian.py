@@ -152,9 +152,9 @@ class GenerationGuard:
         offhand = inv.get("offhand") or {}
         has_shield = counts.get("shield", 0) > 0 or offhand.get("name") == "shield"
         if needs_float:
-            actions.append(self._action("water_float", lambda: self.bot.call("posture", {
-                "jump": True, "sneak": bool(status.get("sneaking")), "shield": bool(status.get("blocking")),
-            })))
+            # Floating in place only delays drowning (live: 7 straight water_float reflexes, then
+            # 10 drown ticks and death). Climb out onto dry land instead.
+            actions.append(self._action("escape_water", lambda: MacroSkills(self.bot).escape_water()))
         if hurt and has_shield:
             attacker = (hurts[-1].get("source_entity") or hurts[-1].get("likely_attacker")) if hurts else status.get("nearest_hostile")
             if attacker and attacker.get("id") is not None:

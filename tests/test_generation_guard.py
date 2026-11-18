@@ -69,9 +69,14 @@ def test_hurt_during_model_wait_raises_shield_and_discards_stale_response(monkey
 
 
 @pytest.mark.parametrize("mode", ["historical", "respawn", "water"])
-def test_guard_ignores_old_damage_and_keeps_water_and_respawn_semantics(mode):
+def test_guard_ignores_old_damage_and_keeps_water_and_respawn_semantics(mode, monkeypatch):
     actions = []
     state = {"jumping": False}
+    escaped = []
+    # Water reflex now climbs out onto dry land instead of juggling in place.
+    monkeypatch.setattr(
+        MacroSkills, "escape_water", lambda self: escaped.append("escape_water") or {"ok": True, "in_water": False}
+    )
 
     def handle(request):
         action = request.url.path.rsplit("/", 1)[-1]
@@ -106,7 +111,8 @@ def test_guard_ignores_old_damage_and_keeps_water_and_respawn_semantics(mode):
         assert incident["reasons"] == ["death_or_connection_changed"]
         assert not actions  # Do not dig a new spawn's feet due to an old body's damage.
     else:
-        assert actions == [{"jump": True, "sneak": False, "shield": True}]
+        assert escaped == ["escape_water"]
+        assert actions == []  # no more in-place posture juggling that only delays drowning
         assert incident["requires_replan"] is True
 
 
@@ -319,3 +325,39 @@ def test_guardian_marks_disconnected_instead_of_raising():
         guard.last_poll = float("-inf")
         assert guard.poll() is None
     assert guard.disconnected is True
+
+
+def test_water_reflex_escapes_to_dry_land_instead_of_floating_in_place(monkeypatch):
+    """Live: 7 straight water_float reflexes then 10 drown ticks = death. The reflex must climb out."""
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    escaped = []
+
+    monkeypatch.setattr(
+        MacroSkills,
+        "escape_water",
+        lambda self: escaped.append("escape_water") or {"ok": True, "in_water": False, "escaped": True},
+    )
+
+    class _WaterBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [0.5, 60.0, 0.5], "health": 8.0, "food": 20.0, "alive": True, "ready": True,
+                        "in_water": True, "submerged": True, "on_ground": False, "jumping": False}
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {"items": [], "offhand": {}}
+            return {"ok": True}
+
+    guard = GenerationGuard(_WaterBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.last_poll = float("-inf")
+    incident = guard.poll()
+
+    assert incident is not None
+    assert "water_float" in incident["reasons"]
+    action_names = [a["action"] for a in incident["actions"]]
+    assert action_names == ["escape_water"]
+    assert escaped == ["escape_water"]
