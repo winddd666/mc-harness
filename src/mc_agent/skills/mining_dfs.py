@@ -1526,6 +1526,44 @@ class MiningDFSEngine:
                 return True
         return False
 
+    def _step_to(self, cell: tuple[int, int, int]) -> bool:
+        """One-cell traversal that also handles step-ups, gaps and 1-block drops.
+
+        Live n0112: repeated `backtrack_blocked@...,(feet=air,head=air)` — nothing obstructed,
+        move_exact simply cannot jump a gap or a 1-block ledge, so the whole route was abandoned.
+        """
+        if self._move_exact(cell):
+            return True
+        if self._hop_up_to(cell):
+            return True
+        try:
+            st = self.bot.status()
+            pos = st.get("pos") or [0.0, 64.0, 0.0]
+        except (ApiError, TypeError, ValueError):
+            return False
+        dx = cell[0] + 0.5 - float(pos[0])
+        dz = cell[2] + 0.5 - float(pos[2])
+        if max(abs(dx), abs(dz)) > 1.6:
+            return False
+        yaw = math.atan2(-dx, dz)
+        for jump in (True, False):
+            try:
+                self.bot.call(
+                    "control",
+                    {"forward": True, "jump": jump, "yaw": yaw, "ms": 650, "stop_on": ["death"]},
+                )
+            except ApiError:
+                continue
+            try:
+                st2 = self.bot.status()
+                p2 = st2.get("pos") or [0.0, 64.0, 0.0]
+                now = (math.floor(float(p2[0])), math.floor(float(p2[1])), math.floor(float(p2[2])))
+            except (ApiError, TypeError, ValueError):
+                continue
+            if now == cell or (now[0] == cell[0] and now[2] == cell[2]):
+                return True
+        return False
+
     def _hop_up_to(self, cell: tuple[int, int, int], *, ms: int = 700) -> bool:
         """Jump-step onto an air cell one block higher (move_exact cannot jump).
 
@@ -1641,7 +1679,7 @@ class MiningDFSEngine:
             if len(hops) > 1:
                 stepped_all = True
                 for hop in hops[1:]:
-                    if not self._move_exact(hop) and not self._hop_up_to(hop):
+                    if not self._step_to(hop):
                         stepped_all = False
                         break
                 if stepped_all:
@@ -1671,7 +1709,11 @@ class MiningDFSEngine:
                 head = self._get_block_name((wp[0], wp[1] + 1, wp[2]))
             except ApiError:
                 feet, head = "?", "?"
-            return False, f"backtrack_blocked@{wp[0]},{wp[1]},{wp[2]}(feet={feet},head={head})"
+            return (
+                False,
+                f"backtrack_blocked@{wp[0]},{wp[1]},{wp[2]}"
+                f"(feet={feet},head={head},from={cur[0]},{cur[1]},{cur[2]})",
+            )
         return True, None
 
     def _find_node_path(self, start_id: int, goal_id: int) -> list[tuple[list[tuple[int, int, int]], bool, int]]:
