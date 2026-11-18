@@ -2682,7 +2682,7 @@ class MiningDFSEngine:
         fell_back_to_pillar = False
         while time.monotonic() < deadline and attempts < max_attempts:
             cur_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
-            if cur_y >= target_y:
+            if cur_y >= target_y - 2:
                 break
             moved = 0
             for d in [x for x in dirs if x not in stuck_dirs]:
@@ -2739,7 +2739,7 @@ class MiningDFSEngine:
             "end_y": end_y,
             "climbed": end_y - start_y,
             "target_y": target_y,
-            "reached": end_y >= target_y,
+            "reached": end_y >= target_y - 2,
             "attempts": attempts,
             "method": method if not walked else f"{method}+stair",
         }
