@@ -559,3 +559,85 @@ def test_harness_accepts_completion_when_goal_item_is_present():
                               include_initial_snapshot=False)
     assert report["status"] == "answered"
     assert requests["n"] == 1
+
+
+def test_arrow_hit_digs_cover_pocket_instead_of_sprinting_away(monkeypatch):
+    """Live s03: 6 arrows (20 -> 0 hp) while sprint-fleeing in a straight line down a cave."""
+
+    class _ArrowSkills:
+        class _Eng:
+            nodes = {}
+
+            def is_inside_shaft(self):
+                return False
+
+        mining_dfs = _Eng()
+
+        def dig_cover_pocket(self):
+            return {"ok": True, "mode": "cover_pocket", "sealed": [True, True]}
+
+        def defend_or_flee(self, **kwargs):
+            return {"ok": True, "mode": "flee"}
+
+    class _ShotBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [0.5, 23.0, 0.5], "health": 16.0, "food": 20.0, "alive": True,
+                        "ready": True, "in_water": False, "on_ground": True,
+                        "nearest_hostile": {"name": "skeleton", "dist": 9.0}}
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "health": 16.0, "source": "arrow"}],
+                        "last_seq": 1}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 40}], "offhand": {}}
+            return {"ok": True}
+
+    guard = GenerationGuard(_ShotBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.skills = _ArrowSkills()
+    guard.last_poll = float("-inf")
+    incident = guard.poll()
+
+    assert incident is not None
+    assert [a["action"] for a in incident["actions"]] == ["dig_cover"]
+    assert incident["actions"][0]["ok"] is True
+
+
+def test_arrow_hit_falls_back_to_flee_when_no_wall_for_cover():
+    class _NoCoverSkills:
+        class _Eng:
+            nodes = {}
+
+            def is_inside_shaft(self):
+                return False
+
+        mining_dfs = _Eng()
+
+        def dig_cover_pocket(self):
+            return {"ok": False, "reason": "no_solid_wall"}
+
+        def defend_or_flee(self, **kwargs):
+            return {"ok": True, "mode": "flee"}
+
+    class _ShotBot2:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [0.5, 23.0, 0.5], "health": 16.0, "food": 20.0, "alive": True,
+                        "ready": True, "in_water": False, "on_ground": True}
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "health": 16.0, "source": "arrow"}],
+                        "last_seq": 1}
+            if action == "inventory":
+                return {"items": [], "offhand": {}}
+            return {"ok": True}
+
+    guard = GenerationGuard(_ShotBot2(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.skills = _NoCoverSkills()
+    guard.last_poll = float("-inf")
+    incident = guard.poll()
+
+    assert incident is not None
+    assert [a["action"] for a in incident["actions"]] == ["dig_cover", "combat_or_flee"]

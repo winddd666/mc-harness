@@ -22,6 +22,9 @@ IN_WALL_HURT_SOURCES = frozenset({"in_wall", "suffocation", "cramming", "inside_
 # At or below this health, stop trying to walk away while being hit: seal up in place instead.
 LOW_HP_BUNKER_MAX = 10.0
 
+# Ranged damage: sprinting away in open cave air just makes the firing line longer.
+RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "skeleton"})
+
 
 class _GuardSession:
     def __init__(self, bot, checkpoint):
@@ -207,6 +210,24 @@ class GenerationGuard:
                 # Suffocating inside a block: carve ourselves out instead of digging a bunker
                 # (a bunker needs a pickaxe, which a death may already have taken away).
                 actions.append(self._action("unstick_in_wall", lambda: self._skills().unstick()))
+            elif not has_shield and hurt_src in RANGED_HURT_SOURCES:
+                # Live s03: skeleton in an open cave landed 6 arrows (20 -> 0 hp) while the bot
+                # sprint-fled in a straight line. Break line of sight instead of outrunning arrows.
+                cover = self._action("dig_cover", lambda: self._skills().dig_cover_pocket())
+                actions.append(cover)
+                if not cover["ok"]:
+                    actions.append(
+                        self._action(
+                            "combat_or_flee",
+                            lambda: self._skills().defend_or_flee(
+                                attacker=attacker,
+                                counts=counts,
+                                health=health,
+                                urgent=True,
+                                geofence=self.geofence,
+                            ),
+                        )
+                    )
             else:
                 raw_dist = (attacker or status.get("nearest_hostile") or {}).get("dist", 99.0)
                 try:
