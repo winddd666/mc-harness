@@ -1526,6 +1526,41 @@ class MiningDFSEngine:
                 return True
         return False
 
+    def _hop_up_to(self, cell: tuple[int, int, int], *, ms: int = 700) -> bool:
+        """Jump-step onto an air cell one block higher (move_exact cannot jump).
+
+        Live s19: the route block was reported as feet=air,head=air — nothing was obstructing,
+        the bot simply refused a 1-block step-up, which aborted the whole walk home.
+        """
+        try:
+            st = self.bot.status()
+            pos = st.get("pos") or [0.0, 64.0, 0.0]
+            cur = (math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2])))
+        except (ApiError, TypeError, ValueError):
+            return False
+        if cell[1] - cur[1] != 1 or max(abs(cell[0] - cur[0]), abs(cell[2] - cur[2])) > 1:
+            return False
+        try:
+            if self._get_block_name(cell) not in PASSABLE_BLOCKS:
+                return False
+        except ApiError:
+            return False
+        yaw = math.atan2(-(cell[0] + 0.5 - float(pos[0])), cell[2] + 0.5 - float(pos[2]))
+        try:
+            self.bot.call(
+                "control",
+                {"forward": True, "jump": True, "yaw": yaw, "ms": ms, "stop_on": ["death"]},
+            )
+        except ApiError:
+            return False
+        try:
+            st2 = self.bot.status()
+            p2 = st2.get("pos") or [0.0, 64.0, 0.0]
+            now = (math.floor(float(p2[0])), math.floor(float(p2[1])), math.floor(float(p2[2])))
+        except (ApiError, TypeError, ValueError):
+            return False
+        return now == cell or (now[0] == cell[0] and now[2] == cell[2] and now[1] >= cell[1])
+
     def _clear_route_obstruction(self, target_wp: tuple[int, int, int]) -> int:
         """Re-open a recorded corridor cell: dig solid fill, but refuse if it is now flooded/bedrock.
 
@@ -1606,7 +1641,7 @@ class MiningDFSEngine:
             if len(hops) > 1:
                 stepped_all = True
                 for hop in hops[1:]:
-                    if not self._move_exact(hop):
+                    if not self._move_exact(hop) and not self._hop_up_to(hop):
                         stepped_all = False
                         break
                 if stepped_all:
