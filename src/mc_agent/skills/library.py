@@ -5247,14 +5247,23 @@ class MacroSkills:
         moved_dist = round(math.hypot(float(end_pos[0]) - px, float(end_pos[2]) - pz), 1)
         nh_after = st_end.get("nearest_hostile")
         nh_end_dist = float(nh_after.get("dist", 99.0)) if isinstance(nh_after, dict) else 99.0
+        # A 7000-block "flee" is a death/respawn teleport, not a successful escape: never report it
+        # as ok, or the model believes it got away when in fact it lost its gear.
+        respawned = moved_dist > 64.0 or st_end.get("alive") is False
         return {
-            "ok": bool(st_end.get("alive", True)) and (nh_end_dist >= 7.0 or moved_dist >= 4.5),
-            "mode": "flee",
+            "ok": False if respawned else (bool(st_end.get("alive", True)) and (nh_end_dist >= 7.0 or moved_dist >= 4.5)),
+            "mode": "respawned" if respawned else "flee",
             "moved_dist": moved_dist,
+            "respawned": respawned,
             "nearest_hostile_after": nh_after,
             "pos_before": [round(px, 1), round(py, 1), round(pz, 1)],
             "pos_after": end_pos,
             "requires_replan": True,
+            **(
+                {"note": "检测到位置瞬移超过 64 格：这是死亡重生，不是逃跑成功。装备已掉落，先确认背包再决定重挖还是重做工具。"}
+                if respawned
+                else {}
+            ),
         }
 
     def defend_or_flee(

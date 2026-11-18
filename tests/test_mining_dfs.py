@@ -1520,3 +1520,28 @@ def test_retreat_walls_off_threat_side_before_walking(monkeypatch) -> None:
     assert len(wall) == 9                 # 3 columns x 3 high
     assert all(c[2] == 1 for c in wall)   # +z side, i.e. toward the threat
     assert res["sealed_first"] == 9
+
+
+def test_flee_reports_respawn_instead_of_fake_success(monkeypatch) -> None:
+    """A 7000-block 'flee' is a death respawn; it must not look like a successful escape."""
+    world = _MockMineWorld(start_pos=(0.5, 30.0, 0.5), surface_y=30)
+    with BotSession("tok", bot_username="FleeBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        # status(): first call = pre-flee, last call = teleported to world spawn after death
+        calls = {"n": 0}
+
+        def fake_status():
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                return {"pos": [0.5, 30.0, 0.5], "health": 12.0, "alive": True, "nearest_hostile": {"name": "zombie", "dist": 3.0}}
+            return {"pos": [-152.0, 69.0, -379.0], "health": 20.0, "alive": True, "nearest_hostile": None}
+
+        monkeypatch.setattr(skills.bot, "status", fake_status)
+        monkeypatch.setattr(skills.bot, "inventory", lambda *a, **k: {"items": [], "offhand": {}})
+        monkeypatch.setattr(skills.bot, "call", lambda *a, **k: {"ok": True})
+        res = skills.flee_hostiles(distance=14.0)
+
+    assert res["mode"] == "respawned"
+    assert res["ok"] is False
+    assert res["moved_dist"] > 64
+    assert "死亡重生" in res["note"]
