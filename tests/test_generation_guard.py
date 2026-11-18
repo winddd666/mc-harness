@@ -457,3 +457,187 @@ def test_tool_transport_error_becomes_receipt_not_run_failure(monkeypatch):
     assert out["ok"] is False
     assert out["error"]["code"] == "network_error"
     assert out["requires_replan"] is True
+
+
+def test_low_hp_inside_own_shaft_bunkers_instead_of_running(monkeypatch):
+    """59% of live deaths were mob/arrow chip damage: at low HP in our tunnel, seal and hold."""
+
+    class _ShardSkills:
+        class _Eng:
+            nodes = {1: object()}
+
+            def is_inside_shaft(self):
+                return True
+
+        mining_dfs = _Eng()
+
+        def dig_safety_bunker(self, urgent=False):
+            return {"ok": True, "inside_shaft": True, "roof_placed": True}
+
+        def defend_or_flee(self, **kwargs):
+            return {"ok": True, "mode": "flee"}
+
+    class _HurtBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [0.5, -50.0, 0.5], "health": 7.0, "food": 20.0, "alive": True,
+                        "ready": True, "in_water": False, "on_ground": True,
+                        "nearest_hostile": {"name": "zombie", "dist": 3.0}}
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "health": 7.0, "source": "mob_attack"}],
+                        "last_seq": 1}
+            if action == "inventory":
+                return {"items": [], "offhand": {}}
+            return {"ok": True}
+
+    guard = GenerationGuard(_HurtBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.skills = _ShardSkills()
+    guard.last_poll = float("-inf")
+    incident = guard.poll()
+
+    assert incident is not None
+    assert [a["action"] for a in incident["actions"]] == ["emergency_bunker"]
+    assert incident["actions"][0]["ok"] is True
+
+
+def _goal_bot(inventory_items):
+    class _Bot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [0.5, 64.0, 0.5], "health": 20.0, "food": 20.0, "alive": True,
+                        "ready": True, "on_ground": True, "in_water": False}
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {"items": inventory_items, "offhand": {}}
+            return {"ok": True}
+
+    return _Bot()
+
+
+def test_harness_nudges_model_that_claims_done_with_zero_goal_items():
+    """Live m13: answered with diamond=0. The harness must challenge it exactly once."""
+    events = []
+    requests = {"n": 0}
+
+    def chat(messages, tools=None, *, control=None, **kwargs):
+        requests["n"] += 1
+        return {"role": "assistant", "content": "任务完成，已挖到钻石。"}
+
+    guard = GenerationGuard(_goal_bot([]), EventSink(lambda _: None), checkpoint=lambda: None)
+    with BotSession("cached", transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"ok": True, "result": {}}))) as bot:
+        report = run_mc_agent("挖到钻石", bot, chat_fn=chat, max_calls=6, survival_guard=False,
+                              include_initial_snapshot=False, on_event=events.append)
+
+    assert report["status"] == "answered"
+    assert requests["n"] == 2                              # nudge once, then accept
+    assert any(e["type"] == "harness.goal_unmet" for e in events)
+
+
+def test_harness_accepts_completion_when_goal_item_is_present():
+    requests = {"n": 0}
+
+    def chat(messages, tools=None, *, control=None, **kwargs):
+        requests["n"] += 1
+        return {"role": "assistant", "content": "任务完成，钻石已入包。"}
+
+    def handle(request):
+        action = request.url.path.rsplit("/", 1)[-1]
+        if action == "inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": "diamond", "count": 2}]}})
+        if action == "status":
+            return httpx.Response(200, json={"ok": True, "result": {
+                "pos": [0.5, 64.0, 0.5], "health": 20.0, "food": 20.0, "alive": True, "ready": True}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("cached", transport=httpx.MockTransport(handle)) as bot:
+        report = run_mc_agent("挖到钻石", bot, chat_fn=chat, max_calls=4, survival_guard=False,
+                              include_initial_snapshot=False)
+    assert report["status"] == "answered"
+    assert requests["n"] == 1
+
+
+def test_arrow_hit_digs_cover_pocket_instead_of_sprinting_away(monkeypatch):
+    """Live s03: 6 arrows (20 -> 0 hp) while sprint-fleeing in a straight line down a cave."""
+
+    class _ArrowSkills:
+        class _Eng:
+            nodes = {}
+
+            def is_inside_shaft(self):
+                return False
+
+        mining_dfs = _Eng()
+
+        def dig_cover_pocket(self):
+            return {"ok": True, "mode": "cover_pocket", "sealed": [True, True]}
+
+        def defend_or_flee(self, **kwargs):
+            return {"ok": True, "mode": "flee"}
+
+    class _ShotBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [0.5, 23.0, 0.5], "health": 16.0, "food": 20.0, "alive": True,
+                        "ready": True, "in_water": False, "on_ground": True,
+                        "nearest_hostile": {"name": "skeleton", "dist": 9.0}}
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "health": 16.0, "source": "arrow"}],
+                        "last_seq": 1}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 40}], "offhand": {}}
+            return {"ok": True}
+
+    guard = GenerationGuard(_ShotBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.skills = _ArrowSkills()
+    guard.last_poll = float("-inf")
+    incident = guard.poll()
+
+    assert incident is not None
+    assert [a["action"] for a in incident["actions"]] == ["dig_cover"]
+    assert incident["actions"][0]["ok"] is True
+
+
+def test_arrow_hit_falls_back_to_flee_when_no_wall_for_cover():
+    class _NoCoverSkills:
+        class _Eng:
+            nodes = {}
+
+            def is_inside_shaft(self):
+                return False
+
+        mining_dfs = _Eng()
+
+        def dig_cover_pocket(self):
+            return {"ok": False, "reason": "no_solid_wall"}
+
+        def defend_or_flee(self, **kwargs):
+            return {"ok": True, "mode": "flee"}
+
+    class _ShotBot2:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [0.5, 23.0, 0.5], "health": 16.0, "food": 20.0, "alive": True,
+                        "ready": True, "in_water": False, "on_ground": True}
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "health": 16.0, "source": "arrow"}],
+                        "last_seq": 1}
+            if action == "inventory":
+                return {"items": [], "offhand": {}}
+            return {"ok": True}
+
+    guard = GenerationGuard(_ShotBot2(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.skills = _NoCoverSkills()
+    guard.last_poll = float("-inf")
+    incident = guard.poll()
+
+    assert incident is not None
+    assert [a["action"] for a in incident["actions"]] == ["dig_cover", "combat_or_flee"]

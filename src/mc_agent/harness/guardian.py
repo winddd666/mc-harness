@@ -19,6 +19,12 @@ from ..skills.safety import SAFE_FOOD_PRIORITY
 # already have been dropped on death, which is how a death loop turns into a fatal API error.
 IN_WALL_HURT_SOURCES = frozenset({"in_wall", "suffocation", "cramming", "inside_block"})
 
+# At or below this health, stop trying to walk away while being hit: seal up in place instead.
+LOW_HP_BUNKER_MAX = 10.0
+
+# Ranged damage: sprinting away in open cave air just makes the firing line longer.
+RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "skeleton"})
+
 
 class _GuardSession:
     def __init__(self, bot, checkpoint):
@@ -70,6 +76,16 @@ class GenerationGuard:
     def _skills(self):
         """Live MacroSkills (with MiningDFS shaft state) when wired, else a throwaway binding."""
         return self.skills if self.skills is not None else MacroSkills(self.bot)
+
+    def _inside_own_shaft(self) -> bool:
+        """Only bunker-in-place when we are inside our own carved tunnel (never in open cave air)."""
+        eng = getattr(self.skills, "mining_dfs", None) if self.skills is not None else None
+        if eng is None or not getattr(eng, "nodes", None):
+            return False
+        try:
+            return bool(eng.is_inside_shaft())
+        except Exception:
+            return False
 
     def _action(self, name: str, operation: Callable) -> dict[str, Any]:
         started = time.monotonic()
@@ -194,6 +210,24 @@ class GenerationGuard:
                 # Suffocating inside a block: carve ourselves out instead of digging a bunker
                 # (a bunker needs a pickaxe, which a death may already have taken away).
                 actions.append(self._action("unstick_in_wall", lambda: self._skills().unstick()))
+            elif not has_shield and hurt_src in RANGED_HURT_SOURCES:
+                # Live s03: skeleton in an open cave landed 6 arrows (20 -> 0 hp) while the bot
+                # sprint-fled in a straight line. Break line of sight instead of outrunning arrows.
+                cover = self._action("dig_cover", lambda: self._skills().dig_cover_pocket())
+                actions.append(cover)
+                if not cover["ok"]:
+                    actions.append(
+                        self._action(
+                            "combat_or_flee",
+                            lambda: self._skills().defend_or_flee(
+                                attacker=attacker,
+                                counts=counts,
+                                health=health,
+                                urgent=True,
+                                geofence=self.geofence,
+                            ),
+                        )
+                    )
             else:
                 raw_dist = (attacker or status.get("nearest_hostile") or {}).get("dist", 99.0)
                 try:
@@ -205,7 +239,26 @@ class GenerationGuard:
                     or (hurt_src in {"mob_attack", "player_explosion", "entity_explosion"})
                     or (nh_dist <= 4.5)
                 )
-                if not melee_or_airborne:
+                hp_val = float(health) if isinstance(health, (int, float)) else 20.0
+                if melee_or_airborne and hp_val <= LOW_HP_BUNKER_MAX and self._inside_own_shaft():
+                    # Low HP in our own tunnel: walking backwards just trades hits until death
+                    # (live: 7 mob_attack ticks during a 3-hop retreat). Seal up and outlast them.
+                    bunker = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
+                    actions.append(bunker)
+                    if not bunker["ok"]:
+                        actions.append(
+                            self._action(
+                                "combat_or_flee",
+                                lambda: self._skills().defend_or_flee(
+                                    attacker=attacker,
+                                    counts=counts,
+                                    health=health,
+                                    urgent=True,
+                                    geofence=self.geofence,
+                                ),
+                            )
+                        )
+                elif not melee_or_airborne:
                     bunker = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
                     actions.append(bunker)
                     if not bunker["ok"]:

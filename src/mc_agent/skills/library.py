@@ -4394,6 +4394,75 @@ class MacroSkills:
             "pos_after": st_after.get("pos"),
         }
 
+    def dig_cover_pocket(self) -> dict[str, Any]:
+        """Step into a 1x2 wall pocket and seal it behind us to break a shooter's line of sight.
+
+        Live s03: a skeleton in an open cave put 6 arrows into a fleeing bot (20 -> 0 hp).
+        Running away in open air only extends the firing line; a sealed pocket ends it.
+        """
+        fluid_or_bedrock = {"water", "lava", "flowing_water", "flowing_lava", "bedrock"}
+        _solid_pref = ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite", "netherrack")
+
+        def _blk(pos_xyz: list[int]) -> str:
+            res = self.bot.call("get_block", {"pos": pos_xyz})
+            return str(res.get("name") or res.get("block") or "air").removeprefix("minecraft:")
+
+        counts = _inventory_counts(self.bot)
+        filler = next((name for name in _solid_pref if counts.get(name, 0) >= 2), None)
+        if filler is None:
+            filler = next((name for name, cnt in sorted(counts.items())
+                           if cnt >= 2 and name.endswith(("_planks", "_log", "_stem"))), None)
+        if filler is None:
+            return {"ok": False, "requires_replan": True, "reason": "no_filler_block"}
+
+        st = self.bot.status()
+        pos = st.get("pos") or [0.0, 64.0, 0.0]
+        bx, by, bz = math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2]))
+
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            feet = [bx + dx, by, bz + dz]
+            head = [bx + dx, by + 1, bz + dz]
+            back_deep = [bx + dx * 2, by, bz + dz * 2]
+            try:
+                feet_name, head_name, deep_name = _blk(feet), _blk(head), _blk(back_deep)
+            except ApiError:
+                continue
+            if feet_name in fluid_or_bedrock or head_name in fluid_or_bedrock or deep_name in fluid_or_bedrock:
+                continue
+            if feet_name == "air" or head_name == "air" or "bedrock" in (feet_name, head_name):
+                continue
+            try:
+                self._equip_if_present(tuple(PICKAXE_TIERS))
+                # Deliberately do NOT stop on "hurt": an arrow landing mid-dig is exactly the
+                # situation we are escaping, and aborting here would leave us still exposed.
+                for cell in (feet, head):
+                    self.bot.call("dig", {"pos": cell, "collect": True, "stop_on": ["death"]})
+                self.bot.call("move_to", {
+                    "x": feet[0] + 0.5, "y": feet[1], "z": feet[2] + 0.5,
+                    "range": 0.8, "timeout": 2500, "stop_on": ["death"],
+                })
+                sealed = []
+                for cell in (feet, head):
+                    try:
+                        self.bot.call("place", {"item": filler, "pos": cell})
+                        sealed.append(_blk(cell) == filler)
+                    except ApiError:
+                        sealed.append(False)
+                st_now = self.bot.status()
+                return {
+                    "ok": all(sealed),
+                    "requires_replan": not all(sealed),
+                    "mode": "cover_pocket",
+                    "direction": [dx, dz],
+                    "pocket": [feet, head],
+                    "filler": filler,
+                    "sealed": sealed,
+                    "pos_after": st_now.get("pos"),
+                }
+            except ApiError:
+                continue
+        return {"ok": False, "requires_replan": True, "reason": "no_solid_wall"}
+
     def dig_level_tunnel(self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> dict[str, Any]:
         from .tunnel import dig_level_tunnel
 

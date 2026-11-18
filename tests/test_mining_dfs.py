@@ -14,6 +14,7 @@ from mc_agent.harness.geofence import VoidGeofence
 from mc_agent.harness.hud import compute_goal_gap_hint
 from mc_agent.harness.mc_tools import McToolset
 from mc_agent.skills.library import PICKAXE_TIERS, MacroSkills
+from mc_agent.skills.mining_dfs import ShaftEdge
 from mc_agent.skills.mining_dfs import MiningDFSEngine, normalize_dfs_strategy
 
 
@@ -1587,10 +1588,12 @@ def test_fishbone_scan_harvests_wall_pocket_diamond_and_deep_reset_relocates() -
         eng.nodes[eng.collar_node_id].anchor = (0, 16, 0)
         cur_deep = (math.floor(world.pos[0]), math.floor(world.pos[1]), math.floor(world.pos[2]))
         eng.nodes[eng.active_node_id].anchor = cur_deep
+        # Contract changed on purpose (2026-11-18): a reset 38 blocks below the collar is refused
+        # instead of silently clearing the tree (live s01 burned 8 such resets in one run).
         rst = skills.mine_dfs(action="reset", strategy="fishbone_scan")
-        assert rst["ok"] is True
-        assert cur_deep in eng.exhausted_collars
-        assert rst.get("relocated_to") is not None
+        assert rst["ok"] is False
+        assert rst["stop_reason"] == "reset_needs_surface"
+        assert eng.collar_node_id is not None        # tree preserved, no silent wipe
 
 
 
@@ -1612,3 +1615,279 @@ def test_restore_skips_shaft_saved_for_a_different_target_layer() -> None:
         eng.target_y = 16
         assert eng._try_restore_saved_shaft((0, 20, 0), min_hp_ref=[20.0]) is False
         assert not eng.nodes
+
+
+def test_three_fluid_aborts_mark_shaft_as_water_trap() -> None:
+    """Aquifers used to cost whole runs (6 drown deaths): 3 hazard aborts must force a new shaft."""
+    world = _MockMineWorld(start_pos=(0.5, 40.0, 0.5), surface_y=40)
+    with BotSession("tok", bot_username="WaterBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        assert eng._note_fluid_abort("fluid_or_bedrock") is False
+        assert eng._note_fluid_abort("unsafe_floor_or_cave") is False
+        assert eng._note_fluid_abort("fluid_or_bedrock") is True        # 3rd hazard abort
+
+        eng.fluid_aborts = 2
+        # neutral outcomes keep the streak (still exploring the same wet layer)
+        assert eng._note_fluid_abort("completed") is False
+        # a real setback like hurt resets the streak
+        assert eng._note_fluid_abort("hurt") is False
+        assert eng.fluid_aborts == 0
+
+
+def test_entry_gate_recrafts_before_reporting_pickaxe_low(monkeypatch) -> None:
+    """No pickaxe at call entry must trigger an in-place recraft, not an immediate pickaxe_low bail."""
+    world = _MockMineWorld(
+        start_pos=(0.5, 20.0, 0.5),
+        surface_y=70,
+        inventory_items=[
+            {"name": "cobblestone", "count": 64, "slot": 10},
+            {"name": "oak_log", "count": 8, "slot": 11},
+        ],
+    )
+    with BotSession("tok", bot_username="GateBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        eng = skills.mining_dfs
+        calls = []
+        monkeypatch.setattr(skills, "craft_gear",
+                            lambda item, count=1, equip_slot=None: (calls.append(item) or {"ok": True}))
+        res = eng.run(target="iron", goal_count=1, target_y=16, action="explore", max_duration_s=5.0)
+    assert calls == ["stone_pickaxe"]          # recraft attempted at the gate
+    assert res.get("stop_reason") != "pickaxe_low" or calls
+
+
+def test_fluid_trap_deep_underground_does_not_try_surface_relocation() -> None:
+    """Live s03: 3 cave breeches at y=8 -> relocation found no surface stand -> orphaned tree."""
+    import time as _time
+
+    world = _MockMineWorld(start_pos=(0.5, 8.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="DeepBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        node = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                edge_from_parent=None, branches=[])
+        eng.collar_node_id = node.node_id
+        moved, auto = eng._force_relocate_on_fluid(
+            geofence=None, deadline=_time.monotonic() + 100.0,
+            min_hp_ref=[20.0], auto_relocations=0,
+        )
+    assert (moved, auto) == (False, 0)
+    assert eng.fluid_abandoned_deep is True
+    assert eng.collar_node_id is None                     # archived, must climb out first
+
+
+def test_reset_is_refused_while_deep_below_the_collar() -> None:
+    """Underground reset used to clear the tree with no surface anchor -> no_progress spin."""
+    world = _MockMineWorld(start_pos=(0.5, 8.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="DeepResetBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        node = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                edge_from_parent=None, branches=[])
+        eng.collar_node_id = node.node_id
+        res = eng.reset(geofence=None)
+        assert eng.collar_node_id == node.node_id        # tree kept intact
+    assert res["ok"] is False
+    assert res["stop_reason"] == "reset_needs_surface"
+    assert "climb_out" in res["message"]
+
+
+def test_reset_refused_when_a_deep_second_collar_tries_to_move_again() -> None:
+    """Live s01: 8 resets at y=-54 churned corridors and wasted the whole 40 min budget."""
+    world = _MockMineWorld(start_pos=(0.5, -54.0, 0.5), surface_y=99)
+    with BotSession("tok", bot_username="ThrashBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        surface = eng._create_node(kind="collar", anchor=(0, 99, 0), parent_id=None,
+                                   edge_from_parent=None, branches=[])
+        eng.collar_ceiling_y = 99                       # we already opened a surface collar
+        deep = eng._create_node(kind="collar", anchor=(0, -54, 0), parent_id=None,
+                                edge_from_parent=None, branches=[])
+        eng.collar_node_id = deep.node_id
+        res = eng.reset(geofence=None)
+        assert eng.collar_node_id == deep.node_id       # tree kept
+    assert res["stop_reason"] == "reset_needs_surface"
+    assert "explore" in res["message"]
+    assert surface.node_id in eng.nodes
+
+
+def test_shaft_exhausted_message_is_built_after_result_dict_exists() -> None:
+    """Regression: s04 crashed with UnboundLocalError because out_res was written too early."""
+    import pathlib as _pl
+
+    src = _pl.Path("src/mc_agent/skills/mining_dfs.py").read_text(encoding="utf-8")
+    created = src.index("out_res: dict[str, Any] = {")
+    used = src.index('if stop_reason == "shaft_exhausted" and self.fluid_abandoned_deep:')
+    assert used > created
+
+
+def test_manual_reset_clears_the_hazard_streak() -> None:
+    """Live s03: stale fluid_aborts made reset -> explore return shaft_exhausted instantly, x6."""
+    world = _MockMineWorld(start_pos=(0.5, 64.0, 0.5), surface_y=71)
+    with BotSession("tok", bot_username="StreakBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.fluid_aborts = 3
+        eng.fluid_abandoned_deep = True
+        eng.collar_ceiling_y = 71
+        node = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                edge_from_parent=None, branches=[])
+        eng.collar_node_id = node.node_id
+        res = eng.reset(geofence=None)                 # allowed: we are at the collar level
+    assert res["ok"] is True
+    assert eng.fluid_aborts == 0
+    assert eng.fluid_abandoned_deep is False
+
+
+def test_deep_empty_tree_asks_for_a_climb_instead_of_opening_fake_collar() -> None:
+    """Live s01/s03: a deep "collar" at y=-54 made later resets look legitimate forever."""
+    world = _MockMineWorld(start_pos=(0.5, 8.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="DeepCollarBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64                     # we did open a surface collar earlier
+        eng.idle_calls = 3
+        res = eng.run(target="iron", goal_count=4, target_y=16, action="explore", max_duration_s=6.0)
+    assert res["stop_reason"] == "needs_surface_climb"
+    assert res["requires_replan"] is True
+    assert eng.collar_node_id is None                 # no fake underground collar planted
+
+
+def test_reset_on_empty_tree_is_refused_not_a_free_ok() -> None:
+    """Live s07/s08: empty-tree reset returned ok:true and the model pressed it 250+ times."""
+    world = _MockMineWorld(start_pos=(0.5, 62.0, 0.5), surface_y=62)
+    with BotSession("tok", bot_username="EmptyResetBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        assert not eng.nodes
+        res = eng.reset(geofence=None)
+    assert res["ok"] is False
+    assert res["stop_reason"] == "nothing_to_reset"
+    assert "explore" in res["message"]
+
+
+def test_drop_reachability_requires_standing_next_to_the_ore() -> None:
+    """The dig API ignores reach, so the engine must gate on pickup range by itself."""
+    world = _MockMineWorld(start_pos=(0.5, 16.0, 0.5), surface_y=16)
+    with BotSession("tok", bot_username="ReachBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        cache = {}
+
+        # face-adjacent ore: always fine
+        assert eng._drop_cell_reachable((1, 16, 0), (0, 16, 0), cache) is True
+
+        # 4 blocks away behind solid stone: not collectable
+        solid = {(x, 16, 0): "stone" for x in range(-6, 7)}
+        assert eng._drop_cell_reachable((4, 16, 0), (0, 16, 0), dict(solid)) is False
+
+        # 2 blocks away but one neighbour is open and one step from us -> we can walk next to it
+        cache2 = dict(solid)
+        cache2[(3, 16, 0)] = "air"
+        assert eng._drop_cell_reachable((4, 16, 0), (2, 16, 0), cache2) is True
+
+
+def test_drowning_counts_toward_water_trap_abandonment() -> None:
+    """Live s12: 3 successful escapes still left fluid_aborts at 0, so the pool was never abandoned."""
+    world = _MockMineWorld(start_pos=(0.5, 17.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="WetBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        assert eng._note_fluid_abort("in_water") is False
+        assert eng._note_fluid_abort("fluid_or_bedrock") is False
+        assert eng._note_fluid_abort("in_water") is True     # 3rd water-related abort
+
+
+def test_climb_out_action_reports_progress_and_target(monkeypatch) -> None:
+    """One call must own probe+repeat; the model should not spend a turn per blocked direction."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="ClimbBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64                     # target = 44
+        calls: list[str] = []
+
+        def fake_status():
+            return {"pos": [0.5, float(world.pos[1]), 0.5], "health": 20.0, "food": 20.0, "alive": True}
+
+        def fake_stair(direction=None, steps=0, vertical="down", stop_on_ore=None):
+            if direction in {"north", "south", "east", "west"}:
+                calls.append(direction)
+                world.pos = [world.pos[0], min(64.0, world.pos[1] + 4.0), world.pos[2]]
+                return {"ok": True, "steps_done": 4}
+            return {"ok": False}
+
+        monkeypatch.setattr(eng.bot, "status", fake_status)
+        monkeypatch.setattr(eng.skills, "dig_staircase", fake_stair)
+        res = eng.run(action="climb_out", target_y=16, max_duration_s=20.0)
+
+    assert res["action"] == "climb_out"
+    assert res["climb"]["target_y"] == 44
+    assert res["climb"]["reached"] is True
+    assert res["climb"]["climbed"] >= 24
+    assert calls
+
+
+def test_sealing_cave_breaches_does_not_condemn_a_healthy_shaft() -> None:
+    """Live s11: cave-heavy terrain hit 3 seals in a row and the shaft was abandoned at y=54."""
+    world = _MockMineWorld(start_pos=(0.5, 54.0, 0.5), surface_y=61)
+    with BotSession("tok", bot_username="CaveBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        for _ in range(6):
+            assert eng._note_fluid_abort("cave_breach_sealed") is False
+        assert eng.fluid_aborts == 0
+
+
+def test_retired_shaft_keeps_its_walkable_route() -> None:
+    """Live s12: record_exhausted_collar deleted the shaft, so the 120-block route was re-dug."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="RouteBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        tip = eng._create_node(kind="spine", anchor=(0, 20, 0), parent_id=collar.node_id,
+                               edge_from_parent=ShaftEdge("stair_down", "north",
+                                                          [(0, y, 0) for y in range(64, 19, -1)]),
+                               branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.active_node_id = tip.node_id
+        eng._archive_current_shaft_to_ledger(mark_exhausted=True)
+
+        saved = [s for s in eng.ledger.saved_shafts if tuple(s["collar_anchor"]) == (0, 64, 0)]
+        assert saved, "exhausted shaft must keep its node graph"
+        assert saved[0]["retired"] is True
+        assert len(saved[0]["nodes"]) >= 2
+
+
+def test_climb_out_prefers_walking_the_shaft_over_new_stairs(monkeypatch) -> None:
+    """Walking our own corridor must win over re-digging stairs (s12: 27 turns of staircase)."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="WalkHomeBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        tip = eng._create_node(kind="spine", anchor=(0, 20, 0), parent_id=collar.node_id,
+                               edge_from_parent=ShaftEdge("stair_down", "north", [(0, 40, 0)]),
+                               branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.active_node_id = tip.node_id
+        eng.collar_ceiling_y = 64
+
+        def fake_status():
+            return {"pos": [0.5, float(world.pos[1]), 0.5], "health": 20.0, "food": 20.0, "alive": True}
+
+        def fake_nav(goal_node_id, min_hp_ref):
+            world.pos = [0.5, 64.0, 0.5]          # walk all the way home
+            return True, None
+
+        stairs: list[str] = []
+        monkeypatch.setattr(eng.bot, "status", fake_status)
+        monkeypatch.setattr(eng, "_navigate_to_node", fake_nav)
+        monkeypatch.setattr(eng.skills, "dig_staircase",
+                            lambda **kw: (stairs.append(kw.get("direction")), {"ok": True})[1])
+        res = eng.run(action="climb_out", target_y=16, max_duration_s=20.0)
+
+    assert res["climb"]["method"] == "walk"
+    assert res["climb"]["reached"] is True
+    assert stairs == []                            # never dug a single stair
+
+
+def test_corridor_repair_digs_fill_but_refuses_flooded_cells() -> None:
+    """A filled-in corridor cell must be re-opened instead of abandoning the route."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    world.blocks[(0, 20, -1)] = "stone"
+    world.blocks[(0, 20, -3)] = "water"
+    with BotSession("tok", bot_username="RepairBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        assert eng._clear_route_obstruction((0, 20, -1)) >= 1      # solid fill -> dug
+        assert eng._clear_route_obstruction((0, 20, -3)) == -1     # flooded -> give up

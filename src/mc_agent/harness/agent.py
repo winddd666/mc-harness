@@ -13,7 +13,7 @@ import time
 import httpx
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from ..bot import BotManager, BotSession
 from ..config import Settings
@@ -772,6 +772,44 @@ class _RepeatFailureGuard:
         return replace(tool, handler=_guarded)
 
 
+# Task goal nouns the harness can verify when the model claims completion.
+_TASK_GOAL_ITEMS: tuple[tuple[str, str], ...] = (
+    ("钻石", "diamond"), ("diamond", "diamond"),
+    ("绿宝石", "emerald"), ("emerald", "emerald"),
+    ("青金石", "lapis_lazuli"), ("lapis", "lapis_lazuli"),
+    ("红石", "redstone"), ("redstone", "redstone"),
+    ("铁锭", "iron_ingot"), ("金锭", "gold_ingot"), ("煤", "coal"), ("coal", "coal"),
+)
+
+
+def _last_goal_item(task: str) -> str | None:
+    """The last (usually final) goal item mentioned in the task text."""
+    low = str(task or "").lower()
+    best: str | None = None
+    best_pos = -1
+    for kw, item in _TASK_GOAL_ITEMS:
+        pos = low.rfind(kw.lower())
+        if pos > best_pos:
+            best_pos, best = pos, item
+    return best
+
+
+def _unmet_goal_items(toolset: Any, task: str) -> list[str]:
+    """Return the goal items that are still completely absent from the inventory."""
+    item = _last_goal_item(task)
+    if not item:
+        return []
+    try:
+        inv = toolset.bot.inventory()
+    except Exception:
+        return []
+    for row in inv.get("items") or []:
+        name = str(row.get("name") or "").removeprefix("minecraft:")
+        if name == item and int(row.get("count") or 0) > 0:
+            return []
+    return [item]
+
+
 def run_mc_agent(
     task: str,
     bot: BotSession,
@@ -891,6 +929,7 @@ def run_mc_agent(
         {"role": "user", "content": initial_user_content},
     ]
 
+    goal_checked = False
     report = {
         "runtime": runtime_info(),
         "survival_guard": survival_guard,
@@ -1263,6 +1302,21 @@ def run_mc_agent(
                     return report
                 if not inbox.seal_if_empty():
                     if apply_input("before_delivery") or not inbox.seal_if_empty():
+                        continue
+                if not goal_checked:
+                    goal_checked = True
+                    unmet = _unmet_goal_items(toolset, task)
+                    if unmet:
+                        # Live: the model declared "任务完成" with 0 diamonds in the bag.
+                        events.emit("harness.goal_unmet", items=unmet, task_version=request_version)
+                        messages.append({
+                            "role": "user",
+                            "name": "runtime",
+                            "content": (
+                                f"[Harness 目标校验] 你准备结束任务，但背包里仍然是 {', '.join(unmet)} = 0，目标未达成。"
+                                "请继续执行；若确实无法继续（例如工具/地形受限），请明确说明原因并给出下一步可行方案，不要谎报完成。"
+                            ),
+                        })
                         continue
                 report["status"] = "answered"
                 report["answer"] = content

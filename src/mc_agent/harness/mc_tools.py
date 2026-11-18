@@ -2310,7 +2310,7 @@ class McToolset:
                         "target": Parameter("目标矿种:iron/diamond/coal/gold/copper/redstone/lapis", required=False),
                         "goal_count": Parameter("目标入包数量，默认6", kind="integer", required=False),
                         "target_y": Parameter("指定开采Y层，省略按矿种预设", kind="integer", required=False),
-                        "action": Parameter("explore/return_collar/reset/status，默认explore（reset会重置当前矿井并尝试换点；遇shaft_exhausted建议先mc_move_to平移16格以上再explore）", required=False),
+                        "action": Parameter("explore/return_collar/climb_out/reset/status，默认explore（climb_out=一次调用内自动探测方向并连续爬回地表，深井废弃后用它，别一格一格叫staircase；reset会重置当前矿井并尝试换点；遇shaft_exhausted建议先mc_move_to平移16格以上再explore）", required=False),
                     },
                     handler=self.mc_skill_mine_dfs,
                     concurrency="exclusive",
@@ -2411,7 +2411,7 @@ _COMPACT_PARAM_DESC: dict[tuple[str, str], str] = {
     ("mc_skill_staircase", "vertical"): "down/up/pillar",
     ("mc_skill_tunnel", "direction"): "north/south/east/west",
     ("mc_skill_mine_dfs", "target"): "iron/diamond/coal/gold",
-    ("mc_skill_mine_dfs", "action"): "explore/return_collar/reset(换点重开)",
+    ("mc_skill_mine_dfs", "action"): "explore/return_collar/climb_out(自动爬回地表)/reset(换点重开)",
 }
 
 
