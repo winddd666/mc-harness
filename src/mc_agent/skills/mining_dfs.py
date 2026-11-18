@@ -4491,6 +4491,37 @@ class MiningDFSEngine:
             return {"ok": True, "action": "status", "strategy": self.strategy, "tree": self.snapshot()}
 
         profile = _resolve_target_profile(target, target_y)
+        if (
+            self.nodes
+            and self.collar_node_id in self.nodes
+            and abs(int(profile["target_y"]) - int(self.target_y)) >= 12
+            and int(profile["target_y"]) > int(self.target_y)
+        ):
+            try:
+                cur_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+            except (ApiError, TypeError, ValueError):
+                cur_y = int(self.target_y)
+            # Live s20: the model switched target diamond(-54) -> iron(16) while standing at
+            # y=-54, so the engine obediently climbed 20 blocks back up and the descent was lost.
+            if cur_y > int(self.target_y) + 8:
+                skip_guard = True
+            else:
+                skip_guard = False
+            if not skip_guard:
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "action": act,
+                    "strategy": self.strategy,
+                    "stop_reason": "layer_switch_upward_refused",
+                    "message": (
+                        f"你当前在 y={cur_y}，这条井的目标层已经是 y={self.target_y}；"
+                    f"把目标改到更浅的 y={profile['target_y']} 会让引擎掉头往上挖、白白废掉已下的深度。"
+                        "若确实要换层：先 action='return_collar' 或 'climb_out' 回到地表，再以新目标开井；"
+                        "否则请继续用原目标层（不要把 target 改小/改浅）。"
+                    ),
+                    "tree": self.snapshot(),
+                }
         self.target_y = profile["target_y"]
         target_blocks = profile["target_blocks"]
         expected_items = profile["expected_items"]

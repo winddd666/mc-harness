@@ -1901,3 +1901,19 @@ def test_waypoint_walk_interpolates_long_hops() -> None:
     assert len(hops) == 36
     assert hops[0] == (0, 63, 0) and hops[-1] == (0, 28, 0)
     assert all(abs(hops[i + 1][1] - hops[i][1]) == 1 for i in range(len(hops) - 1))
+
+
+def test_upward_layer_switch_is_refused_on_an_existing_shaft() -> None:
+    """Live s20: switching diamond(-54) back to iron(16) made the engine climb 20 blocks up."""
+    world = _MockMineWorld(start_pos=(0.5, -54.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="LayerBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.active_node_id = collar.node_id
+        eng.collar_ceiling_y = 64
+        eng.target_y = -54
+        res = eng.run(target="iron", goal_count=4, target_y=16, action="explore", max_duration_s=6.0)
+    assert res["stop_reason"] == "layer_switch_upward_refused"
+    assert res["requires_replan"] is True
