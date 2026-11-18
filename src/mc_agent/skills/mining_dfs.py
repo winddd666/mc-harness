@@ -3038,6 +3038,10 @@ class MiningDFSEngine:
             max(abs(pos[0] - c[0]), abs(pos[1] - c[1]), abs(pos[2] - c[2])) <= 1
             for c in self.known_corridor_positions
         ) or any(
+            # Vein pockets are excavated but not on the corridor centerline; they are still ours.
+            max(abs(pos[0] - c[0]), abs(pos[1] - c[1]), abs(pos[2] - c[2])) <= 1
+            for c in self.excavated_positions
+        ) or any(
             max(abs(pos[0] - n.anchor[0]), abs(pos[1] - n.anchor[1]), abs(pos[2] - n.anchor[2])) <= 2
             for n in self.nodes.values()
         )
