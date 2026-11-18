@@ -816,4 +816,21 @@ def test_collect_job_preserves_world_job_when_furnace_unreachable_on_api_error()
         assert world.count_item("stone") == 6
 
 
+def test_ensure_items_throttles_stabilize_when_hungry_without_food() -> None:
+    """When `food <= 12` and bag has no food, recursive `_satisfy_item` calls must throttle `stabilize` instead of spamming 9+ times."""
+    world = _Phase2World()
+    world.food = 10  # Hungry, no food in inventory
+    world.add_item("stone_pickaxe", 1)
+
+    with BotSession("tok", bot_username="HungryBot", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        res = PhysicalPrerequisiteResolver(skills, allow_underground_dfs=False).ensure_items(
+            {"iron_pickaxe": 1, "bucket": 1},
+            max_duration_s=15.0,
+        )
+    stab_steps = [s for s in res.get("steps", []) if s.get("step") == "stabilize"]
+    assert len(stab_steps) == 1
+
+
+
 

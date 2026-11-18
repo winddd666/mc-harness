@@ -1227,7 +1227,7 @@ def select_next_target(
         ow_chunks = sum(1 for (d, _, _) in world_memory.visited_chunks if d == "overworld")
         has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
         has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
-        if ow_chunks < 16 and not (has_villager_mem and has_lava_mem):
+        if ow_chunks < 16 and not (has_villager_mem and has_lava_mem) and (origin_pos is None or float(origin_pos[1]) >= 52.0):
             unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
             dir_hint = "/".join(unexp[:3]) if unexp else "east/north/west/south"
             recon_target = CurriculumTarget(
@@ -1235,15 +1235,15 @@ def select_next_target(
                 title="环岛摸底侦察：扫描村庄/岩浆池/动物聚落充实 WorldMemory",
                 points=20,
                 tier=1,
-                budget_class="short",
+                budget_class="micro",
                 task=(
-                    f"执行一次有界地表环岛摸底探索（严禁挖矿或不要下潜）：优先沿未探索方向({dir_hint})用 mc_move_to 分段推进 120~240m（严守虚空岛边界），"
-                    "沿途调用 mc_find_blocks(radius=32) 与 mc_get_entities(radius=32) 扫描记录村庄、箱子、地表岩浆池、甘蔗、南瓜及牛羊群，探明后即可结束汇报。"
+                    f"执行一次紧凑地表环岛摸底探索（严禁挖矿或下潜）：优先沿未探索方向({dir_hint})用 mc_move_to 分段推进 100~180m（严守虚空岛边界），"
+                    "沿途调用 mc_find_blocks(radius=32) 与 mc_get_entities(radius=32) 扫描记录村庄、箱子、地表岩浆池、水源鱼群、甘蔗、南瓜及牛羊群（若有剑/斧可顺手猎取 2~3 块生肉备粮），探明后立即汇报收工。"
                 ),
-                extra_tools=("mc_interact", "mc_kb_lookup"),
+                extra_tools=("mc_interact", "mc_attack", "mc_kb_lookup"),
                 advancement_id=None,
             )
-            candidates.append(((1, 0, -20, "island_recon_sweep"), recon_target))
+            candidates.append(((1, 0, -65, "island_recon_sweep"), recon_target))
 
     for key, pb in CURRICULUM_PLAYBOOKS.items():
         if key.startswith("bootstrap_"):
@@ -1715,6 +1715,46 @@ class CurriculumSupervisor:
                             pass
                     if avail_iron >= 3:
                         eff_pre_ensure = {"stone_pickaxe": 1, "iron_pickaxe": 1}
+
+                # Surface-to-underground wood & portable crafting_table reserve:
+                # Prevents running out of sticks/tables at Y=16 or Y=-54 and wasting 10+ mins climbing back up!
+                if (
+                    self.enable_pre_ensure
+                    and base_playbook.key in {"bootstrap_iron_age", "minecraft:story/shiny_gear", "minecraft:story/mine_diamond"}
+                    and cur_pos is not None
+                    and float(cur_pos[1]) >= 54.0
+                ):
+                    owned_pre = total_owned_counts(inv_before)
+                    wood_units = sum(v for k, v in owned_pre.items() if k.endswith(("_log", "_stem"))) * 4 + sum(
+                        v for k, v in owned_pre.items() if k.endswith("_planks")
+                    ) + owned_pre.get("stick", 0) // 2
+                    want_logs = 8 if base_playbook.key != "bootstrap_iron_age" else 6
+                    if wood_units < 16 or owned_pre.get("crafting_table", 0) < 1:
+                        try:
+                            near_trees = self.bot.call(
+                                "find_blocks",
+                                {
+                                    "radius": 36,
+                                    "types": [
+                                        "oak_log",
+                                        "spruce_log",
+                                        "birch_log",
+                                        "dark_oak_log",
+                                        "acacia_log",
+                                        "jungle_log",
+                                        "cherry_log",
+                                        "mangrove_log",
+                                    ],
+                                    "limit": 2,
+                                },
+                            )
+                            if (near_trees or {}).get("blocks"):
+                                eff_pre_ensure["any_log"] = max(int(eff_pre_ensure.get("any_log", 0)), want_logs)
+                                eff_pre_ensure["crafting_table"] = max(int(eff_pre_ensure.get("crafting_table", 0)), 1)
+                                if base_playbook.key == "minecraft:story/shiny_gear":
+                                    eff_pre_ensure["stone_pickaxe"] = max(int(eff_pre_ensure.get("stone_pickaxe", 0)), 2)
+                        except Exception:
+                            pass
 
                 if self.enable_pre_ensure and eff_pre_ensure:
                     try:

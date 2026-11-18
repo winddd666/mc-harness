@@ -855,12 +855,25 @@ class CombatEnv:
             try:
                 self.bot.call(
                     "move_to",
-                    {"x": round(goal_x, 1), "z": round(goal_z, 1), "range": 2.5, "timeout": 3500, "stop_on": ["death"]},
+                    {"x": round(goal_x, 1), "z": round(goal_z, 1), "range": 2.0, "timeout": 5500, "stop_on": ["death"]},
                 )
             except ApiError:
                 pass
 
         st_end = self.bot.status()
+        nh_end = st_end.get("nearest_hostile")
+        if (
+            urgent
+            and isinstance(nh_end, dict)
+            and nh_end.get("name")
+            and float(nh_end.get("dist", 99.0)) <= 5.5
+        ):
+            try:
+                self.bot.call("look", {"yaw": chosen_yaw, "pitch": 0.0})
+                self.bot.call("control", {"forward": True, "sprint": True, "jump": True, "ms": 750})
+                st_end = self.bot.status()
+            except ApiError:
+                pass
         pos_end = st_end.get("pos") or pos0
         moved = round(math.hypot(float(pos_end[0]) - float(pos0[0]), float(pos_end[2]) - float(pos0[2])), 2)
         return {

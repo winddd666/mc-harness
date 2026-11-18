@@ -567,6 +567,7 @@ class PhysicalPrerequisiteResolver:
 
         st0 = self.bot.status()
         hp_floor = float(st0.get("health") or 20.0)
+        last_stab_mono = [0.0]
 
         def _guard() -> str | None:
             if self.stop_check is not None and self.stop_check():
@@ -584,7 +585,10 @@ class PhysicalPrerequisiteResolver:
             if hp < hp_floor - 1.5 and nh_dist <= 12.0:
                 return "threat_interrupted"
 
-            if st.get("in_lava") or st.get("in_water") or hp <= 12.0 or food <= 12:
+            now_g = time.monotonic()
+            urgent_fluid = bool(st.get("in_lava") or st.get("in_water"))
+            if urgent_fluid or ((hp <= 12.0 or food <= 12) and (now_g - last_stab_mono[0] >= 15.0)):
+                last_stab_mono[0] = now_g
                 try:
                     stab = check_and_stabilize(self.bot)
                     steps_log.append({"step": "stabilize", "ok": bool(stab.get("ok", True))})
