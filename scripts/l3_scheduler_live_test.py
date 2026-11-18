@@ -65,6 +65,11 @@ def setup_arena() -> list[dict[str, str]]:
         f"fill {bx - 12} {fy - 2} {bz - 12} {bx + 42} {fy} {bz + 16} minecraft:dirt",
         f"fill {bx - 12} {fy} {bz - 12} {bx + 42} {fy} {bz + 16} minecraft:grass_block",
         f"fill {bx - 12} {by} {bz - 12} {bx + 42} {by + 8} {bz + 16} minecraft:air",
+        # Invisible barrier walls: prevent a failed pathfinding call from walking off the sky island.
+        f"fill {bx - 12} {by} {bz - 12} {bx + 42} {by + 4} {bz - 12} minecraft:barrier",
+        f"fill {bx - 12} {by} {bz + 16} {bx + 42} {by + 4} {bz + 16} minecraft:barrier",
+        f"fill {bx - 12} {by} {bz - 12} {bx - 12} {by + 4} {bz + 16} minecraft:barrier",
+        f"fill {bx + 42} {by} {bz - 12} {bx + 42} {by + 4} {bz + 16} minecraft:barrier",
         f"kill @e[type=!player,x={bx},y={by},z={bz},distance=..60]",
         "time set day",
         "weather clear",
@@ -131,6 +136,7 @@ def main() -> int:
     from mc_agent.config import Settings
     from mc_agent.errors import ApiError
     from mc_agent.harness.curriculum import CurriculumSupervisor, score_completed_advancements
+    from mc_agent.harness.geofence import VoidGeofence
     from mc_agent.harness.mc_tools import McToolset
     from mc_agent.harness.model import QwenModel, QwenSpec
     from mc_agent.skills import total_owned_counts
@@ -179,6 +185,10 @@ def main() -> int:
 
         toolset = McToolset(bot)
         toolset._update_status_cache(st)
+        # Keep all live-test movement inside the sky arena; a single typo/`y=150`
+        # target cannot walk the bot off the island into the water below.
+        arena_geofence = VoidGeofence(center_x=BASE[0], center_z=BASE[2], radius=50.0, margin=2.0)
+        toolset.geofence = arena_geofence
 
         if args.phase in ("all", "a"):
             # A1: View nearby chest WITHOUT x/y/z -> verify coordinate auto-resolution into WorldMemory!
@@ -196,7 +206,7 @@ def main() -> int:
             ens = toolset.skills.ensure_items(
                 {"lodestone": 1, "compass": 1, "iron_boots": 1},
                 equip_slots={"iron_boots": "feet"},
-                max_duration_s=240.0,
+                max_duration_s=360.0,
             )
             dt = round(time.monotonic() - t0, 2)
             inv_after_a2 = bot.inventory()
@@ -213,6 +223,7 @@ def main() -> int:
                     "elapsed_s": dt,
                     "ensure_ok": ens.get("ok"),
                     "steps_executed": ens.get("steps_executed"),
+                    "steps": ens.get("steps"),
                     "remaining_deficit": ens.get("remaining_deficit"),
                     "owned_subset": {k: owned_a2.get(k, 0) for k in ("lodestone", "compass", "iron_boots", "wooden_pickaxe")},
                     "armor": inv_after_a2.get("armor"),
@@ -246,8 +257,11 @@ def main() -> int:
         if args.phase in ("all", "b"):
             # Grant an iron_pickaxe so Stage 0 bootstrap is satisfied and Stage 1 targets run directly;
             # walk slightly east to scan the lava basin & villager into persistent WorldMemory!
-            rcon_batch([f"give {BOT} minecraft:iron_pickaxe 1"])
+            rcon_batch([f"give {BOT} minecraft:iron_pickaxe 1", f"give {BOT} minecraft:emerald 3"])
             time.sleep(0.8)
+            # Sync chest contents into WorldMemory so select_next_target can inject
+            # [仓储提示] and unlock mc_skill_container for the trade episode.
+            toolset.mc_window_view(block="chest")
             toolset.mc_find_blocks(radius=40, types=["lava", "lectern", "chest"], limit=20)
             toolset.mc_get_entities(radius=45)
 
@@ -265,8 +279,9 @@ def main() -> int:
                     chat_fn=qwen.chat,
                     model_name=f"{qwen.model}@{qwen.base_url}",
                     runs_dir=RUNS_DIR,
-                    duration_s=900.0,
+                    duration_s=1800.0,
                     toolset=toolset,
+                    geofence=arena_geofence,
                     enable_pre_ensure=True,
                     enable_island_recon=False,
                 )

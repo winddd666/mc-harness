@@ -402,6 +402,18 @@ class PhysicalPrerequisiteResolver:
         steps_log: list[dict[str, Any]],
     ) -> int:
         if item.startswith("any_") or item == "coal_or_charcoal":
+            # Wildcards map to several concrete stack names; query each one.
+            if item == "any_log":
+                candidates = [k for k in ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log", "mangrove_log", "cherry_log", "pale_oak_log", "crimson_stem", "warped_stem")]
+            elif item == "any_planks":
+                candidates = [f"{p}_planks" for p in ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak", "crimson", "warped")]
+            elif item == "coal_or_charcoal":
+                candidates = ["coal", "charcoal"]
+            else:
+                candidates = []
+        else:
+            candidates = [item]
+        if not candidates:
             return 0
         try:
             st = self.bot.status()
@@ -410,39 +422,45 @@ class PhysicalPrerequisiteResolver:
                 return 0
             dim = normalize_dimension(st.get("dimension"))
             wm = self.skills._get_world_memory()
-            hits = wm.query_container_item(item, origin=pos, dim=dim)
         except Exception:
             return 0
 
         withdrawn = 0
-        for h in hits:
-            if withdrawn >= deficit or float(h.get("dist", 999.0)) > 72.0:
+        for candidate in candidates:
+            if withdrawn >= deficit:
                 break
-            cpos = h["pos"]
-            take_n = min(deficit - withdrawn, int(h.get("count", 0)))
-            if take_n <= 0:
-                continue
             try:
-                if float(h.get("dist", 0.0)) > 4.5:
-                    self.skills.navigate_segmented(
-                        float(cpos[0]) + 0.5,
-                        float(cpos[2]) + 0.5,
-                        range_m=3.0,
-                        geofence=self.geofence,
-                    )
-                res = self.skills.container_withdraw(
-                    {item: take_n},
-                    block=str(h.get("block") or "chest"),
-                    x=int(cpos[0]),
-                    y=int(cpos[1]),
-                    z=int(cpos[2]),
-                    dim=dim,
-                )
-                if res.get("ok"):
-                    withdrawn += take_n
-                    steps_log.append({"step": "chest_withdraw", "item": item, "count": take_n, "pos": cpos, "ok": True})
+                hits = wm.query_container_item(candidate, origin=pos, dim=dim)
             except Exception:
                 continue
+            for h in hits:
+                if withdrawn >= deficit or float(h.get("dist", 999.0)) > 72.0:
+                    break
+                cpos = h["pos"]
+                take_n = min(deficit - withdrawn, int(h.get("count", 0)))
+                if take_n <= 0:
+                    continue
+                try:
+                    if float(h.get("dist", 0.0)) > 4.5:
+                        self.skills.navigate_segmented(
+                            float(cpos[0]) + 0.5,
+                            float(cpos[2]) + 0.5,
+                            range_m=3.0,
+                            geofence=self.geofence,
+                        )
+                    res = self.skills.container_withdraw(
+                        {candidate: take_n},
+                        block=str(h.get("block") or "chest"),
+                        x=int(cpos[0]),
+                        y=int(cpos[1]),
+                        z=int(cpos[2]),
+                        dim=dim,
+                    )
+                    if res.get("ok"):
+                        withdrawn += take_n
+                        steps_log.append({"step": "chest_withdraw", "item": candidate, "count": take_n, "pos": cpos, "ok": True})
+                except Exception:
+                    continue
         return withdrawn
 
     def _ensure_pickaxe_tier(
@@ -585,15 +603,15 @@ class PhysicalPrerequisiteResolver:
             counts_mid = total_owned_counts(self.bot.inventory())
             fuel_cnt = effective_item_count("coal_or_charcoal", counts_mid)
             planks_or_logs = effective_item_count("any_planks", counts_mid) + effective_item_count("any_log", counts_mid) * 4
-            # Ensure furnace stone (8 cobblestone) only if NO furnace in inventory AND NO furnace nearby on ground
+            # Ensure a furnace if none in inventory/nearby; smelt_items alone may fail
+            # when no crafting table/planks are available to build one.
             if (
                 counts_mid.get("furnace", 0) == 0
-                and effective_item_count("cobblestone", counts_mid) < 8
                 and not self._has_nearby_station("furnace", radius=8)
             ):
-                r_fstone = self._satisfy_item(
-                    "cobblestone",
-                    8,
+                r_furnace = self._satisfy_item(
+                    "furnace",
+                    1,
                     deadline=deadline,
                     depth=depth + 1,
                     visited=branch_visited,
@@ -601,8 +619,8 @@ class PhysicalPrerequisiteResolver:
                     hunt_missing=hunt_missing,
                     guard_fn=guard_fn,
                 )
-                if r_fstone is not None:
-                    return r_fstone
+                if r_furnace is not None:
+                    return r_furnace
             if fuel_cnt < math.ceil(raw_needed / 8) and planks_or_logs < max(2, raw_needed):
                 r_fuel = self._satisfy_item(
                     "coal_or_charcoal",
@@ -631,9 +649,20 @@ class PhysicalPrerequisiteResolver:
             smelt_res = self.skills.smelt_items(
                 input_item=actual_input,
                 count=raw_needed,
-                wait_timeout_s=min(95.0, max(15.0, deadline - time.monotonic())),
+                wait_timeout_s=min(180.0, max(20.0, deadline - time.monotonic())),
             )
-            steps_log.append({"step": "smelt", "input": actual_input, "output": item, "count": raw_needed, "ok": bool(smelt_res.get("ok"))})
+            steps_log.append(
+                {
+                    "step": "smelt",
+                    "input": actual_input,
+                    "output": item,
+                    "count": raw_needed,
+                    "ok": bool(smelt_res.get("ok")),
+                    "collected": smelt_res.get("collected"),
+                    "fuel": smelt_res.get("fuel"),
+                    "requested_count": smelt_res.get("requested_count"),
+                }
+            )
             return None if effective_item_count(item, total_owned_counts(self.bot.inventory())) >= target_count else "smelt_incomplete"
 
         # 4) Craftable recipe in RECIPES_1_21 / EXTRA_OBJECTIVE_RECIPES
@@ -679,6 +708,25 @@ class PhysicalPrerequisiteResolver:
                     )
                     if r_tb is not None:
                         return r_tb
+            # Top-up pass: recursive ingredient craft / table placement may consume
+            # materials reserved for the final recipe (e.g. sticks/table eat planks
+            # before a wooden_pickaxe). Re-check every ingredient once before crafting.
+            for ing_name, ing_per in ingredients.items():
+                need_ing_total = int(ing_per) * batches
+                counts_top = total_owned_counts(self.bot.inventory())
+                if effective_item_count(ing_name, counts_top) < need_ing_total:
+                    r_top = self._satisfy_item(
+                        ing_name,
+                        need_ing_total,
+                        deadline=deadline,
+                        depth=depth + 1,
+                        visited=branch_visited,
+                        steps_log=steps_log,
+                        hunt_missing=hunt_missing,
+                        guard_fn=guard_fn,
+                    )
+                    if r_top is not None:
+                        return r_top
             abort_c = guard_fn()
             if abort_c is not None:
                 return abort_c

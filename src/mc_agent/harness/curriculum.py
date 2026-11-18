@@ -1107,7 +1107,7 @@ class CurriculumSupervisor:
 
                 if self.enable_pre_ensure and target.pre_ensure:
                     try:
-                        pre_slice_s = min(ep_timeout * 0.35, 90.0)
+                        pre_slice_s = min(ep_timeout * 0.6, 300.0)
                         _sink(
                             {
                                 "type": "curriculum.pre_ensure.started",
