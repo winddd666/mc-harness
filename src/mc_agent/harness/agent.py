@@ -20,12 +20,13 @@ from ..config import Settings
 from ..errors import ApiError, McAgentError
 from .context import DEFAULT_TOOL_OUTPUT_CHARS, RequestContext, _parse_leading_json, extract_failed_coords
 from .control import RequestCancelled, RunDisconnected, RunTimedOut
-from .curriculum import CurriculumSupervisor, is_transient_stream_error_text
+from .curriculum import CurriculumSupervisor, is_transient_llm_error_text, is_transient_stream_error_text
 from .events import EventSink, JsonlEvents, request_model
 from .geofence import VoidGeofence
 from .hud import build_world_hud
 from .mc_tools import McToolset
 from ..runtime import runtime_info
+from ..skills import total_owned_counts
 from .model import OutputTruncatedError, QwenModel, QwenSpec
 from .runtime_input import InputInbox, StdinInput
 from .scheduler import ToolScheduler
@@ -619,6 +620,61 @@ class _RepeatFailureGuard:
             if pos_after_blk is not None:
                 self.toolset.update_block_pos(pos_after_blk)
 
+            # Enrich `blocked_by_self` on `mc_place` and catch zero-effect `mc_interact` on empty `air` / zero-move `mc_move_to`!
+            if tool.name == "mc_place" and parsed.get("ok") is False:
+                err_d = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
+                if err_d.get("code") == "blocked_by_self":
+                    parsed["hint"] = (
+                        "目标格正是你当前站立的脚下格！请直接调 mc_place(item=...) 不传 x/y/z（系统会自动在身旁空格放置并返回 placed 坐标），"
+                        "或传入距离自身 >=1 格的相邻坐标(如 x+1 或 z+1)，切勿传 HUD 显示的自身坐标！"
+                    )
+                    raw = json.dumps(parsed, ensure_ascii=False)
+            elif (
+                tool.name == "mc_interact"
+                and parsed.get("ok") is not False
+                and "entity_id" not in kwargs
+                and str(res_obj.get("block") or "").removeprefix("minecraft:") == "air"
+                and res_obj.get("changed") is False
+                and not res_obj.get("used")
+                and not res_obj.get("gained")
+            ):
+                parsed = {
+                    "ok": False,
+                    "requires_replan": True,
+                    "error": {
+                        "code": "interacted_with_air",
+                        "target_pos": [kwargs.get("x"), kwargs.get("y"), kwargs.get("z")],
+                        "message": (
+                            f"目标格 {[kwargs.get('x'), kwargs.get('y'), kwargs.get('z')]} 是空气(air)，未放置任何方块且交互未生效！"
+                            "若此前 mc_place 失败，请先调 mc_place(item=...)（不传 x/y/z 自动选身旁空格），再对返回的 placed pos 调 mc_interact。"
+                        ),
+                    },
+                }
+                res_obj = {}
+                raw = json.dumps(parsed, ensure_ascii=False)
+            elif (
+                tool.name == "mc_move_to"
+                and parsed.get("ok") is not False
+                and pos_before_blk is not None
+                and pos_after_blk == pos_before_blk
+                and float(kwargs.get("range", 1.0) or 1.0) >= 1.0
+            ):
+                # Allow 1 no-op arrival, block if repeated identically without moving
+                parsed = {
+                    "ok": False,
+                    "requires_replan": True,
+                    "pos_before": list(pos_before_blk),
+                    "pos_after": list(pos_after_blk),
+                    "error": {
+                        "code": "movement_not_confirmed",
+                        "message": (
+                            f"当前站位已在目标 range={kwargs.get('range', 1.0)}m 半径内，未发生实际位移；"
+                            "若需让出脚下方块请指定 3 格以外坐标并设 range=0.5，或直接调 mc_place(item=...) 不传 x/y/z。"
+                        ),
+                    },
+                }
+                raw = json.dumps(parsed, ensure_ascii=False)
+
             def _pos_num(val: Any) -> bool:
                 return isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0
 
@@ -795,7 +851,7 @@ def _last_goal_item(task: str) -> str | None:
 
 
 def _unmet_goal_items(toolset: Any, task: str) -> list[str]:
-    """Return the goal items that are still completely absent from the inventory."""
+    """Return the goal items that are still completely absent from inventory + offhand + armor."""
     item = _last_goal_item(task)
     if not item:
         return []
@@ -803,10 +859,9 @@ def _unmet_goal_items(toolset: Any, task: str) -> list[str]:
         inv = toolset.bot.inventory()
     except Exception:
         return []
-    for row in inv.get("items") or []:
-        name = str(row.get("name") or "").removeprefix("minecraft:")
-        if name == item and int(row.get("count") or 0) > 0:
-            return []
+    owned = total_owned_counts(inv if isinstance(inv, dict) else {})
+    if owned.get(item, 0) > 0:
+        return []
     return [item]
 
 
@@ -833,6 +888,8 @@ def run_mc_agent(
     target_advancement: str | None = None,
     system_prompt_override: str | None = None,
     toolset: McToolset | None = None,
+    episode_gate: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    combat_controller: Any | None = None,
 ) -> dict:
     """基于 nano-agent 有界循环驱动单个 Minecraft Bot 完成任务。"""
     if max_calls < 1:
@@ -1025,10 +1082,33 @@ def run_mc_agent(
         events.emit("mc.notable_events", call_id=call_id, text=compact_notable)
 
     guard = (
-        GenerationGuard(bot, events, checkpoint=check_deadline, geofence=toolset.geofence, skills=toolset.skills)
+        GenerationGuard(
+            bot,
+            events,
+            checkpoint=check_deadline,
+            geofence=toolset.geofence,
+            skills=toolset.skills,
+            combat_controller=combat_controller,
+        )
         if survival_guard
         else None
     )
+
+    if guard is not None:
+        def _wrap_reflex_tool(tool: Any) -> Any:
+            if getattr(tool, "concurrency", None) != "exclusive":
+                return tool
+            inner_h = tool.handler
+
+            def _reflex_handler(**kwargs: Any) -> str:
+                return guard.run_tool_with_reflex(tool.name, lambda: inner_h(**kwargs))
+
+            return replace(tool, handler=_reflex_handler)
+
+        registry = registry.map_tools(_wrap_reflex_tool)
+
+    run_started_mono = time.monotonic()
+    episode_step = 0
     budget_warned = False
     chat_owner = getattr(chat_fn, "__self__", None)
     global_thinking = bool(getattr(getattr(chat_owner, "spec", None), "enable_thinking", False))
@@ -1264,7 +1344,8 @@ def run_mc_agent(
                 raise
             except RuntimeError as exc:
                 check_deadline()
-                if not is_transient_stream_error_text(str(exc)) or transient_llm_streak >= 3:
+                err_s = str(exc)
+                if not is_transient_stream_error_text(err_s) or transient_llm_streak >= 3:
                     raise
                 transient_llm_streak += 1
                 if transient_llm_refunds < 4:
@@ -1281,12 +1362,28 @@ def run_mc_agent(
                     request=report["actor_requests"],
                     streak=transient_llm_streak,
                     wait_s=backoff_s,
-                    error=str(exc),
+                    error=err_s,
                 )
-                wait_steps = max(1, int(math.ceil(backoff_s / 0.1)))
+                wait_steps = max(1, int(math.ceil(backoff_s / 0.15)))
+                cancelled_in_backoff = False
                 for _ in range(wait_steps):
-                    check_deadline()
+                    if control():
+                        cancelled_in_backoff = True
+                        break
                     time.sleep(backoff_s / wait_steps)
+                if cancelled_in_backoff and pending_guard_incident is not None:
+                    had_incident = True
+                    capture_notable_events()
+                    slim_inc = {k: v for k, v in pending_guard_incident.items() if k != "inventory_after"} if hud_mode == "ephemeral" else pending_guard_incident
+                    messages.append(
+                        {
+                            "role": "user",
+                            "name": "runtime",
+                            "content": "[模型等待期间的真实生存事件] " + json.dumps(slim_inc, ensure_ascii=False),
+                        }
+                    )
+                    pending_guard_incident = None
+                    apply_input("model_cancelled")
                 continue
 
             messages.append(message)
@@ -1303,7 +1400,7 @@ def run_mc_agent(
                 if not inbox.seal_if_empty():
                     if apply_input("before_delivery") or not inbox.seal_if_empty():
                         continue
-                if not goal_checked:
+                if not goal_checked and episode_gate is None and target_advancement is None:
                     goal_checked = True
                     unmet = _unmet_goal_items(toolset, task)
                     if unmet:
@@ -1324,6 +1421,7 @@ def run_mc_agent(
                 return report
 
             phase("executing_tools")
+            episode_step += 1
             results: dict[str, str] = {}
             committed = 0
 
@@ -1335,13 +1433,21 @@ def run_mc_agent(
                     messages.append({"role": "tool", "tool_call_id": cid, "content": results[cid]})
                     committed += 1
 
-            ToolScheduler(
+            raw_tool_outputs = ToolScheduler(
                 registry,
                 events,
                 urgent=lambda: is_stopped() or (deadline is not None and time.monotonic() >= deadline) or inbox.urgent(),
                 on_result=on_result,
             ).run(calls)
             check_deadline()
+            if guard is not None:
+                boundary_note = guard.stabilize_after_tools(raw_tool_outputs)
+                if boundary_note:
+                    had_incident = True
+                    if messages and messages[-1].get("role") == "tool":
+                        messages[-1]["content"] = f"{messages[-1]['content']}\n{boundary_note}"
+                    else:
+                        messages.append({"role": "user", "name": "runtime", "content": boundary_note})
             capture_notable_events()
             repeat_notice = repeat_guard.consume_notice()
             if repeat_notice:
@@ -1356,6 +1462,62 @@ def run_mc_agent(
                 else:
                     messages.append({"role": "user", "name": "runtime", "content": repeat_notice})
             apply_input("after_tools")
+
+            if episode_gate is not None:
+                parsed_last_calls: list[dict[str, Any]] = []
+                for c_item in calls:
+                    fn_obj = c_item.get("function") or {}
+                    c_name = str(fn_obj.get("name") or "")
+                    c_out_raw = results.get(c_item.get("id", ""), "")
+                    parsed_last_calls.append(
+                        {
+                            "name": c_name,
+                            "arguments": fn_obj.get("arguments", ""),
+                            "result_parsed": _parse_leading_json(c_out_raw),
+                            "result_raw": c_out_raw[:400],
+                        }
+                    )
+                feedback_frame = {
+                    "episode_step": episode_step,
+                    "elapsed_s": round(time.monotonic() - run_started_mono, 2),
+                    "actor_requests": report["actor_requests"],
+                    "remaining_calls": max(0, (max_calls + transient_llm_refunds) - report["actor_requests"]),
+                    "last_calls": parsed_last_calls,
+                    "toolset": toolset,
+                    "had_incident": had_incident,
+                }
+                directive = episode_gate(feedback_frame)
+                if isinstance(directive, dict):
+                    d_action = str(directive.get("action") or "continue").lower()
+                    d_reason = str(directive.get("reason") or "")
+                    if d_action == "complete":
+                        report["status"] = "goal_satisfied"
+                        report["gate_reason"] = d_reason or "goal_satisfied"
+                        events.emit("episode.gate", action="complete", reason=report["gate_reason"], step=episode_step)
+                        return report
+                    if d_action == "pause":
+                        report["status"] = "paused"
+                        report["gate_reason"] = d_reason or "preempted"
+                        report["pause_payload"] = directive.get("payload")
+                        report["remaining_calls"] = max(1, max_calls - report["actor_requests"])
+                        events.emit("episode.gate", action="pause", reason=report["gate_reason"], step=episode_step)
+                        return report
+                    if d_action == "abort":
+                        report["status"] = "aborted"
+                        report["gate_reason"] = d_reason or "aborted"
+                        events.emit("episode.gate", action="abort", reason=report["gate_reason"], step=episode_step)
+                        return report
+                    runtime_note = str(directive.get("runtime_note") or "").strip()
+                    if runtime_note:
+                        note_line = f"[主控调度提示] {runtime_note}"
+                        if (
+                            messages
+                            and messages[-1].get("role") == "user"
+                            and str(messages[-1].get("content") or "").startswith("[主控调度提示]")
+                        ):
+                            messages[-1]["content"] = note_line
+                        else:
+                            messages.append({"role": "user", "name": "runtime", "content": note_line})
 
         report["status"] = "limit_reached"
     except RunTimedOut as exc:

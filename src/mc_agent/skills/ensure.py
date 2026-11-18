@@ -1,4 +1,4 @@
-"""Deterministic 0-LLM physical hard-prerequisite resolver (`ensure_items`).
+"""Deterministic 0-LLM physical hard-prerequisite resolver (`ensure_items`) & async furnace helpers.
 
 Design boundaries (strict):
 1. Encodes ONLY objective Minecraft 1.21.11 hard laws:
@@ -7,10 +7,11 @@ Design boundaries (strict):
    - Minimum pickaxe harvest tiers (`tier 1..4` for stone/iron/diamond/obsidian).
 2. Zero subjective tactical gates: never forces shields, beds, armor sets, or food quotas
    unless explicitly requested by the caller.
-3. Checks inventory + equipped offhand/armor FIRST, then nearby `WorldMemory` storage chests,
-   before harvesting/mining/smelting/crafting.
-4. Bounded wall-clock budget + between-step survival check (`check_and_stabilize`) so a long
-   material chain never starves, drowns, or ignores fresh combat damage.
+3. Checks inventory + equipped offhand/armor FIRST, then nearby `WorldMemory` storage chests
+   (within 72m) and active `WorldJobRegistry` furnace conversions, before gathering/smelting/crafting.
+4. By default (`allow_underground_dfs=False`), NEVER opens long unguarded underground `mine_dfs`
+   shafts inside `pre_ensure`; missing underground ores return `requires_world_hunt` in `< 0.5s`
+   so the main Harness loop (with full Subcortical Reflex & `episode_gate`) handles deep mining.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from ..errors import ApiError
 from ..kb import RECIPES_1_21, normalize_dimension, resolve_item_alias
 from .safety import check_and_stabilize
 
-# Objective smelting input -> (raw_input_item, yield_per_input)
+# Objective smelting output -> (raw_input_item, yield_per_input)
 SMELT_SOURCES: dict[str, tuple[str, int]] = {
     "iron_ingot": ("raw_iron", 1),
     "gold_ingot": ("raw_gold", 1),
@@ -35,6 +36,14 @@ SMELT_SOURCES: dict[str, tuple[str, int]] = {
     "terracotta": ("clay", 1),
     "brick": ("clay_ball", 1),
 }
+
+# Safe fuels ONLY (never burn beds, wooden tools, crafting tables, boats, or blaze rods!)
+SAFE_FURNACE_FUELS: tuple[tuple[str, float], ...] = (
+    ("coal", 8.0),
+    ("charcoal", 8.0),
+    ("coal_block", 80.0),
+    ("dried_kelp_block", 20.0),
+)
 
 # Minimum pickaxe tier required by vanilla harvest physics
 TIER_TO_PICKAXE: dict[int, str] = {
@@ -53,8 +62,6 @@ PICKAXE_TO_TIER: dict[str, int] = {
     "netherite_pickaxe": 5,
 }
 
-# Deterministic world-gatherable raw resources:
-# item -> {"kind": "logs"|"blocks"|"dfs", "min_tier": int, ...}
 GATHER_SOURCES: dict[str, dict[str, Any]] = {
     "any_log": {"kind": "logs", "min_tier": 0},
     "oak_log": {"kind": "logs", "min_tier": 0},
@@ -130,7 +137,6 @@ GATHER_SOURCES: dict[str, dict[str, Any]] = {
     "clay_ball": {"kind": "blocks_only", "blocks": ["clay"], "min_tier": 0},
 }
 
-# Extra objective vanilla recipes not always spelled out in small-model RECIPES_1_21
 EXTRA_OBJECTIVE_RECIPES: dict[str, dict[str, Any]] = {
     "stone_bricks": {"table_3x3": False, "yield_count": 4, "ingredients": {"stone": 4}},
     "stone_brick_slab": {"table_3x3": True, "yield_count": 6, "ingredients": {"stone_bricks": 3}},
@@ -167,7 +173,7 @@ def total_owned_counts(inv: dict[str, Any]) -> dict[str, int]:
 
     armor = inv.get("armor")
     if isinstance(armor, dict):
-        for slot_key in ("head", "torso", "legs", "feet"):
+        for slot_key in ("head", "chest", "torso", "legs", "feet"):
             piece = armor.get(slot_key)
             if isinstance(piece, dict) and piece.get("name"):
                 anm = str(piece["name"]).removeprefix("minecraft:")
@@ -189,7 +195,24 @@ def effective_item_count(item: str, counts: dict[str, int]) -> int:
         return sum(
             v
             for k, v in counts.items()
-            if k.endswith("_slab") and any(k.startswith(p) for p in ("oak_", "spruce_", "birch_", "jungle_", "acacia_", "dark_oak_", "cherry_", "mangrove_", "bamboo_", "crimson_", "warped_", "pale_oak_"))
+            if k.endswith("_slab")
+            and any(
+                k.startswith(p)
+                for p in (
+                    "oak_",
+                    "spruce_",
+                    "birch_",
+                    "jungle_",
+                    "acacia_",
+                    "dark_oak_",
+                    "cherry_",
+                    "mangrove_",
+                    "bamboo_",
+                    "crimson_",
+                    "warped_",
+                    "pale_oak_",
+                )
+            )
         )
     if key == "coal_or_charcoal":
         return counts.get("coal", 0) + counts.get("charcoal", 0)
@@ -214,6 +237,270 @@ def _lookup_objective_recipe(item: str) -> dict[str, Any] | None:
     return None
 
 
+def _select_safe_fuel(counts: dict[str, int], *, input_item: str, smelt_n: int) -> tuple[str | None, float, int]:
+    """Choose a strictly safe furnace fuel `(fuel_name, items_per_fuel, total_avail)`."""
+    for fname, per_f in SAFE_FURNACE_FUELS:
+        avail = counts.get(fname, 0) - (smelt_n if fname == input_item else 0)
+        if avail > 0:
+            return fname, per_f, avail
+    for k in sorted(counts):
+        if k.endswith("_planks"):
+            avail = counts.get(k, 0) - (smelt_n if k == input_item else 0)
+            if avail > 0:
+                return k, 1.5, avail
+    if counts.get("stick", 0) >= 2 and input_item != "stick":
+        return "stick", 0.5, counts["stick"]
+    return None, 0.0, 0
+
+
+def start_smelt_batch_nonblocking(
+    skills: Any,
+    *,
+    input_item: str,
+    output_item: str,
+    count: int,
+    allow_multi_furnace: bool = True,
+) -> dict[str, Any]:
+    """Ignite 1..3 furnaces in parallel and return immediately (`0` sleep!).
+
+    Automatically delegates to `skills.smelt_start(...)` once `l2-live-pack` is merged.
+    """
+    if hasattr(skills, "smelt_start"):
+        res = skills.smelt_start(input_item, count=count, allow_multi_furnace=allow_multi_furnace)
+        if isinstance(res, dict) and res.get("ok"):
+            res.setdefault("output_item", output_item)
+        return res
+
+    bot = skills.bot
+    inv = bot.inventory()
+    counts = total_owned_counts(inv)
+    avail_in = counts.get(input_item, 0)
+    if avail_in < 1:
+        return {"ok": False, "error": "missing_ingredients", "message": f"背包没有 {input_item}。"}
+    smelt_n = min(max(1, int(count)), avail_in)
+
+    desired_k = min(3, max(1, smelt_n // 6)) if (allow_multi_furnace and smelt_n >= 8) else 1
+    furnace_positions: list[list[int]] = []
+    try:
+        found = bot.call("find_blocks", {"radius": 8, "types": ["furnace"], "limit": 5})
+        for b in (found or {}).get("blocks") or []:
+            if isinstance(b, dict) and isinstance(b.get("pos"), list) and len(b["pos"]) >= 3:
+                p = [int(b["pos"][0]), int(b["pos"][1]), int(b["pos"][2])]
+                if p not in furnace_positions:
+                    furnace_positions.append(p)
+                if len(furnace_positions) >= desired_k:
+                    break
+    except Exception:
+        pass
+
+    st = bot.status()
+    pos = st.get("pos") or [0.0, 64.0, 0.0]
+    bx, by, bz = math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2]))
+    offsets = [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (1, 0, 1), (-1, 0, -1), (1, 0, -1), (-1, 0, 1)]
+
+    while len(furnace_positions) < desired_k:
+        counts = total_owned_counts(bot.inventory())
+        if counts.get("furnace", 0) < 1:
+            # Reserve cobblestone if smelting cobblestone -> stone!
+            cobble_reserve = smelt_n if input_item == "cobblestone" else 0
+            if counts.get("cobblestone", 0) - 8 < cobble_reserve:
+                if furnace_positions:
+                    break
+                return {"ok": False, "error": "missing_furnace", "message": "缺少熔炉且圆石不足。"}
+            cg = skills.craft_gear("furnace", 1)
+            if not cg.get("ok"):
+                if furnace_positions:
+                    break
+                return cg
+
+        placed_pos: list[int] | None = None
+        for dx, dy, dz in offsets:
+            cand = [bx + dx, by + dy, bz + dz]
+            if cand in furnace_positions:
+                continue
+            try:
+                pl = bot.call("place", {"item": "furnace", "pos": cand})
+                p_out = pl.get("pos") or cand
+                placed_pos = [int(p_out[0]), int(p_out[1]), int(p_out[2])]
+                break
+            except ApiError:
+                continue
+        if placed_pos is None:
+            try:
+                pl0 = bot.call("place", {"item": "furnace"})
+                p_out0 = pl0.get("pos")
+                if isinstance(p_out0, list) and len(p_out0) >= 3:
+                    placed_pos = [int(p_out0[0]), int(p_out0[1]), int(p_out0[2])]
+            except ApiError:
+                pass
+        if placed_pos is None:
+            break
+        furnace_positions.append(placed_pos)
+
+    if not furnace_positions:
+        return {"ok": False, "error": "place_furnace_failed", "message": "无法放置或定位熔炉。"}
+
+    counts = total_owned_counts(bot.inventory())
+    fuel_name, per_fuel, fuel_avail = _select_safe_fuel(counts, input_item=input_item, smelt_n=smelt_n)
+    if fuel_name is None:
+        # Convert 1 log into 4 planks safely if logs exist
+        log_k = next((k for k, v in counts.items() if k.endswith(("_log", "_stem")) and v > (1 if k == input_item else 0)), None)
+        if log_k:
+            plank_nm = log_k.replace("_log", "_planks").replace("_stem", "_planks")
+            try:
+                skills._safe_craft(plank_nm, 4)
+                counts = total_owned_counts(bot.inventory())
+                fuel_name, per_fuel, fuel_avail = _select_safe_fuel(counts, input_item=input_item, smelt_n=smelt_n)
+            except Exception:
+                pass
+    if fuel_name is None or fuel_avail < 1:
+        return {"ok": False, "error": "missing_fuel", "message": "缺少安全熔炉燃料。"}
+
+    k_eff = min(len(furnace_positions), smelt_n)
+    base_chunk = smelt_n // k_eff
+    rem_chunk = smelt_n % k_eff
+    furnaces_started: list[dict[str, Any]] = []
+    fuel_remaining = fuel_avail
+    max_chunk = 0
+    now_mono = time.monotonic()
+
+    for idx in range(k_eff):
+        chunk_n = base_chunk + (1 if idx < rem_chunk else 0)
+        if chunk_n <= 0 or fuel_remaining <= 0:
+            continue
+        f_need = min(fuel_remaining, max(1, math.ceil(chunk_n / max(0.25, per_fuel))))
+        fpos = furnace_positions[idx]
+        try:
+            st_cur = bot.status()
+            cpos = st_cur.get("pos") or pos
+            if math.hypot(float(cpos[0]) - fpos[0], float(cpos[2]) - fpos[2]) > 4.2:
+                bot.call("move_to", {"x": fpos[0], "y": fpos[1], "z": fpos[2], "range": 2.5})
+            bot.call(
+                "window/act",
+                {
+                    "target": {"pos": fpos},
+                    "ops": [
+                        {"op": "put", "item": input_item, "count": chunk_n, "to": "input"},
+                        {"op": "put", "item": fuel_name, "count": f_need, "to": "fuel"},
+                    ],
+                },
+            )
+            fuel_remaining -= f_need
+            max_chunk = max(max_chunk, chunk_n)
+            furnaces_started.append(
+                {
+                    "pos": fpos,
+                    "count": chunk_n,
+                    "fuel": {"item": fuel_name, "count": f_need},
+                    "ready_at": round(now_mono + 10.0 * chunk_n + 2.0, 2),
+                }
+            )
+        except ApiError:
+            continue
+
+    if not furnaces_started:
+        return {"ok": False, "error": "ignite_failed", "message": "向熔炉投料失败。"}
+
+    est_wait_s = round(10.0 * max_chunk + 2.0, 2)
+    total_started = sum(int(f["count"]) for f in furnaces_started)
+    return {
+        "ok": True,
+        "input": input_item,
+        "output_item": output_item,
+        "requested_count": total_started,
+        "furnace_pos": furnaces_started[0]["pos"],
+        "furnaces": furnaces_started,
+        "estimated_wait_s": est_wait_s,
+        "ready_at": now_mono + est_wait_s,
+    }
+
+
+def collect_smelt_batch(
+    skills: Any,
+    furnaces: list[dict[str, Any]],
+    *,
+    wait_remaining_s: float = 12.0,
+) -> dict[str, Any]:
+    """Collect finished outputs from one or more furnace positions."""
+    if hasattr(skills, "smelt_collect"):
+        return skills.smelt_collect(furnaces, wait_remaining_s=wait_remaining_s)
+
+    bot = skills.bot
+    collected: list[dict[str, Any]] = []
+    remaining_furnaces: list[dict[str, Any]] = []
+    still_burning = False
+    had_error = False
+
+    for f_entry in furnaces:
+        fpos = f_entry.get("pos") if isinstance(f_entry, dict) else f_entry
+        if not isinstance(fpos, (list, tuple)) or len(fpos) < 3:
+            continue
+        pos_list = [int(fpos[0]), int(fpos[1]), int(fpos[2])]
+        try:
+            st = bot.status()
+            cpos = st.get("pos") or pos_list
+            dist_xz = math.hypot(float(cpos[0]) - (pos_list[0] + 0.5), float(cpos[2]) - (pos_list[2] + 0.5))
+            dy = float(pos_list[1]) - float(cpos[1])
+            if dist_xz > 4.0 or abs(dy) >= 1.5:
+                try:
+                    skills.navigate_segmented(float(pos_list[0]) + 0.5, float(pos_list[2]) + 0.5, range_m=2.6)
+                except Exception:
+                    pass
+                st2 = bot.status()
+                cpos2 = st2.get("pos") or cpos
+                if math.hypot(float(cpos2[0]) - (pos_list[0] + 0.5), float(cpos2[2]) - (pos_list[2] + 0.5)) > 4.5 or (float(pos_list[1]) - float(cpos2[1])) >= 1.5:
+                    try:
+                        skills.unstick()
+                        skills.navigate_segmented(float(pos_list[0]) + 0.5, float(pos_list[2]) + 0.5, range_m=2.6)
+                    except Exception:
+                        bot.call("move_to", {"x": pos_list[0], "z": pos_list[2], "range": 2.5})
+            deadline = time.monotonic() + max(0.0, float(wait_remaining_s))
+            while True:
+                view = bot.call("window/view", {"target": {"pos": pos_list}})
+                sections = (view or {}).get("sections") or {}
+                inputs_left = sum(int(x.get("count") or 0) for x in (sections.get("input") or []))
+                info = (view or {}).get("info") or {}
+                burning = bool(info.get("burning"))
+                if inputs_left == 0 or not burning or time.monotonic() >= deadline:
+                    if inputs_left > 0 and burning:
+                        still_burning = True
+                    break
+                time.sleep(2.0)
+
+            view_end = bot.call("window/view", {"target": {"pos": pos_list}})
+            outputs = [
+                o
+                for o in (((view_end or {}).get("sections") or {}).get("output") or [])
+                if isinstance(o, dict) and int(o.get("count") or 0) > 0
+            ]
+            for out_row in outputs:
+                cnt = int(out_row.get("count") or 0)
+                bot.call(
+                    "window/act",
+                    {"target": {"pos": pos_list}, "ops": [{"op": "take", "from": "output", "count": cnt}]},
+                )
+                collected.append(
+                    {
+                        "name": str(out_row.get("name") or "").removeprefix("minecraft:"),
+                        "count": cnt,
+                        "pos": pos_list,
+                    }
+                )
+            if still_burning:
+                remaining_furnaces.append(f_entry if isinstance(f_entry, dict) else {"pos": pos_list})
+        except ApiError:
+            had_error = True
+            remaining_furnaces.append(f_entry if isinstance(f_entry, dict) else {"pos": pos_list})
+            continue
+
+    return {
+        "ok": (len(collected) > 0 or not still_burning) and not had_error,
+        "collected": collected,
+        "still_burning": still_burning,
+        "remaining_furnaces": remaining_furnaces,
+    }
+
+
 class PhysicalPrerequisiteResolver:
     """Bounded, survival-guarded recursive physical material resolver."""
 
@@ -223,11 +510,19 @@ class PhysicalPrerequisiteResolver:
         *,
         geofence: Any = None,
         stop_check: Callable[[], bool] | None = None,
+        allow_underground_dfs: bool = False,
+        world_jobs: Any | None = None,
+        parent_target_key: str | None = None,
+        async_smelt_threshold_s: float = 25.0,
     ) -> None:
         self.skills = skills
         self.bot = skills.bot
         self.geofence = geofence
         self.stop_check = stop_check
+        self.allow_underground_dfs = bool(allow_underground_dfs)
+        self.world_jobs = world_jobs
+        self.parent_target_key = parent_target_key
+        self.async_smelt_threshold_s = max(10.0, float(async_smelt_threshold_s))
 
     def _has_nearby_station(self, block_name: str, radius: int = 7) -> bool:
         try:
@@ -235,7 +530,6 @@ class PhysicalPrerequisiteResolver:
             blks = (found or {}).get("blocks") or []
             if blks:
                 return True
-            # Recall a station within 28m (either visible or in WorldMemory) and walk back to reuse it!
             found_far = self.bot.call("find_blocks", {"radius": 28, "types": [block_name], "limit": 1})
             far_blks = (found_far or {}).get("blocks") or []
             target_pos = far_blks[0].get("pos") if (far_blks and isinstance(far_blks[0], dict)) else None
@@ -269,6 +563,7 @@ class PhysicalPrerequisiteResolver:
         deadline = started + max(5.0, float(max_duration_s))
         steps_log: list[dict[str, Any]] = []
         hunt_missing: dict[str, int] = {}
+        spawned_job_id: str | None = None
 
         st0 = self.bot.status()
         hp_floor = float(st0.get("health") or 20.0)
@@ -286,7 +581,6 @@ class PhysicalPrerequisiteResolver:
             nh = st.get("nearest_hostile")
             nh_dist = float(nh.get("dist", 999.0)) if isinstance(nh, dict) and nh.get("name") else 999.0
 
-            # Fresh combat hit with close hostile -> hand control back immediately
             if hp < hp_floor - 1.5 and nh_dist <= 12.0:
                 return "threat_interrupted"
 
@@ -320,10 +614,13 @@ class PhysicalPrerequisiteResolver:
             )
             if err_reason is not None and err_reason not in {"satisfied"}:
                 stop_reason = err_reason
+                if err_reason == "waiting_for_world_job":
+                    last_step = steps_log[-1] if steps_log else {}
+                    spawned_job_id = last_step.get("job_id")
+                    break
                 if err_reason in {"interrupted", "time_budget_slice", "threat_interrupted", "not_ready"}:
                     break
 
-        # Optional deterministic equip at the end (e.g., diamond_boots -> feet, shield -> off-hand)
         if equip_slots:
             inv_eq = self.bot.inventory()
             owned_eq = total_owned_counts(inv_eq)
@@ -353,6 +650,8 @@ class PhysicalPrerequisiteResolver:
             "steps": steps_log[-16:],
             "elapsed_s": round(time.monotonic() - started, 2),
         }
+        if spawned_job_id:
+            out["waiting_job_id"] = spawned_job_id
         if not ok:
             eff_stop = stop_reason or ("requires_world_hunt" if hunt_missing else "material_unavailable")
             out["stop_reason"] = eff_stop
@@ -402,11 +701,40 @@ class PhysicalPrerequisiteResolver:
         steps_log: list[dict[str, Any]],
     ) -> int:
         if item.startswith("any_") or item == "coal_or_charcoal":
-            # Wildcards map to several concrete stack names; query each one.
             if item == "any_log":
-                candidates = [k for k in ("oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log", "mangrove_log", "cherry_log", "pale_oak_log", "crimson_stem", "warped_stem")]
+                candidates = [
+                    k
+                    for k in (
+                        "oak_log",
+                        "spruce_log",
+                        "birch_log",
+                        "jungle_log",
+                        "acacia_log",
+                        "dark_oak_log",
+                        "mangrove_log",
+                        "cherry_log",
+                        "pale_oak_log",
+                        "crimson_stem",
+                        "warped_stem",
+                    )
+                ]
             elif item == "any_planks":
-                candidates = [f"{p}_planks" for p in ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak", "crimson", "warped")]
+                candidates = [
+                    f"{p}_planks"
+                    for p in (
+                        "oak",
+                        "spruce",
+                        "birch",
+                        "jungle",
+                        "acacia",
+                        "dark_oak",
+                        "mangrove",
+                        "cherry",
+                        "pale_oak",
+                        "crimson",
+                        "warped",
+                    )
+                ]
             elif item == "coal_or_charcoal":
                 candidates = ["coal", "charcoal"]
             else:
@@ -441,13 +769,26 @@ class PhysicalPrerequisiteResolver:
                 if take_n <= 0:
                     continue
                 try:
-                    if float(h.get("dist", 0.0)) > 4.5:
+                    if float(h.get("dist", 0.0)) > 4.2 or abs(float(pos[1]) - float(cpos[1])) >= 1.5:
                         self.skills.navigate_segmented(
                             float(cpos[0]) + 0.5,
                             float(cpos[2]) + 0.5,
-                            range_m=3.0,
+                            range_m=2.8,
                             geofence=self.geofence,
                         )
+                        st_chk = self.bot.status()
+                        p_chk = st_chk.get("pos") or pos
+                        if math.hypot(float(p_chk[0]) - (cpos[0] + 0.5), float(p_chk[2]) - (cpos[2] + 0.5)) > 4.6 or (float(cpos[1]) - float(p_chk[1])) >= 1.5:
+                            try:
+                                self.skills.unstick()
+                                self.skills.navigate_segmented(
+                                    float(cpos[0]) + 0.5,
+                                    float(cpos[2]) + 0.5,
+                                    range_m=2.8,
+                                    geofence=self.geofence,
+                                )
+                            except Exception:
+                                pass
                     res = self.skills.container_withdraw(
                         {candidate: take_n},
                         block=str(h.get("block") or "chest"),
@@ -458,7 +799,42 @@ class PhysicalPrerequisiteResolver:
                     )
                     if res.get("ok"):
                         withdrawn += take_n
-                        steps_log.append({"step": "chest_withdraw", "item": candidate, "count": take_n, "pos": cpos, "ok": True})
+                        steps_log.append(
+                            {"step": "chest_withdraw", "item": candidate, "count": take_n, "pos": cpos, "ok": True}
+                        )
+                    else:
+                        # Self-heal WorldMemory on `missing_item` / stale chest snapshot!
+                        ctx_dict = res.get("context") if isinstance(res.get("context"), dict) else {}
+                        err_win = res.get("window") if isinstance(res.get("window"), dict) else ctx_dict.get("window")
+                        err_code = str(res.get("error") or "")
+                        if isinstance(err_win, dict):
+                            wm.update_container_from_window(
+                                err_win,
+                                fallback_pos=cpos,
+                                fallback_block=str(h.get("block") or "chest"),
+                                dim=dim,
+                            )
+                        elif err_code == "missing_item":
+                            ckey = (dim, int(cpos[0]), int(cpos[1]), int(cpos[2]))
+                            cmeta = wm.containers.get(ckey)
+                            if isinstance(cmeta, dict) and isinstance(cmeta.get("items"), dict):
+                                cmeta["items"].pop(candidate, None)
+                        elif err_code in {
+                            "block_not_found",
+                            "no_target_block",
+                            "not_a_container",
+                            "invalid_target",
+                        }:
+                            wm.containers.pop((dim, int(cpos[0]), int(cpos[1]), int(cpos[2])), None)
+                        steps_log.append(
+                            {
+                                "step": "chest_withdraw_failed_synced",
+                                "item": candidate,
+                                "pos": cpos,
+                                "error": res.get("error"),
+                                "ok": False,
+                            }
+                        )
                 except Exception:
                     continue
         return withdrawn
@@ -517,7 +893,39 @@ class PhysicalPrerequisiteResolver:
             return None
 
         deficit = target_count - have
-        # 1) Check storage chests in WorldMemory first!
+
+        # 0) Check active `WorldJobRegistry` furnace jobs first (collect if ready, else yield!)
+        if self.world_jobs is not None and hasattr(self.world_jobs, "find_jobs_for_output"):
+            try:
+                st_j = self.bot.status()
+                pos_j = st_j.get("pos") or [0.0, 64.0, 0.0]
+                dim_j = normalize_dimension(st_j.get("dimension"))
+                matching_jobs = self.world_jobs.find_jobs_for_output(item, origin=pos_j, dim=dim_j, max_dist=96.0)
+                for mjob in matching_jobs:
+                    rem_wait = float(mjob.ready_at) - time.monotonic()
+                    if rem_wait <= 12.0:
+                        self.world_jobs.collect_job(self.skills, mjob.job_id, wait_remaining_s=max(2.0, rem_wait + 3.0))
+                        steps_log.append({"step": "collect_world_job", "job_id": mjob.job_id, "item": item, "ok": True})
+                    else:
+                        steps_log.append(
+                            {
+                                "step": "awaiting_world_job",
+                                "job_id": mjob.job_id,
+                                "item": item,
+                                "remaining_s": round(rem_wait, 1),
+                                "ok": True,
+                            }
+                        )
+                        return "waiting_for_world_job"
+                counts = total_owned_counts(self.bot.inventory())
+                have = effective_item_count(item, counts)
+                if have >= target_count:
+                    return None
+                deficit = target_count - have
+            except Exception:
+                pass
+
+        # 1) Check storage chests in WorldMemory within 72m!
         got_chest = self._try_withdraw_from_memory_chest(item, deficit, steps_log=steps_log)
         if got_chest > 0:
             counts = total_owned_counts(self.bot.inventory())
@@ -567,7 +975,6 @@ class PhysicalPrerequisiteResolver:
         if item in SMELT_SOURCES:
             raw_in, yield_per = SMELT_SOURCES[item]
             raw_needed = math.ceil(deficit / max(1, yield_per))
-            # Special case: smelting `stone` specifically requires true `cobblestone` (not `cobbled_deepslate`)
             cur_raw = counts.get("cobblestone", 0) if item == "stone" else effective_item_count(raw_in, counts)
             if cur_raw < raw_needed:
                 if item == "stone":
@@ -600,18 +1007,22 @@ class PhysicalPrerequisiteResolver:
                     )
                     if r_raw is not None:
                         return r_raw
+
             counts_mid = total_owned_counts(self.bot.inventory())
             fuel_cnt = effective_item_count("coal_or_charcoal", counts_mid)
             planks_or_logs = effective_item_count("any_planks", counts_mid) + effective_item_count("any_log", counts_mid) * 4
-            # Ensure a furnace if none in inventory/nearby; smelt_items alone may fail
-            # when no crafting table/planks are available to build one.
-            if (
-                counts_mid.get("furnace", 0) == 0
-                and not self._has_nearby_station("furnace", radius=8)
-            ):
+            want_furnaces = 2 if (self.world_jobs is not None and raw_needed >= 8) else 1
+            nearby_furnaces = 0
+            try:
+                fb_f = self.bot.call("find_blocks", {"radius": 8, "types": ["furnace"], "limit": want_furnaces})
+                nearby_furnaces = len((fb_f or {}).get("blocks") or [])
+            except Exception:
+                nearby_furnaces = 1 if self._has_nearby_station("furnace", radius=8) else 0
+            need_furnace_items = max(0, want_furnaces - nearby_furnaces)
+            if counts_mid.get("furnace", 0) < need_furnace_items:
                 r_furnace = self._satisfy_item(
                     "furnace",
-                    1,
+                    need_furnace_items,
                     deadline=deadline,
                     depth=depth + 1,
                     visited=branch_visited,
@@ -619,7 +1030,7 @@ class PhysicalPrerequisiteResolver:
                     hunt_missing=hunt_missing,
                     guard_fn=guard_fn,
                 )
-                if r_furnace is not None:
+                if r_furnace is not None and (nearby_furnaces + total_owned_counts(self.bot.inventory()).get("furnace", 0)) < 1:
                     return r_furnace
             if fuel_cnt < math.ceil(raw_needed / 8) and planks_or_logs < max(2, raw_needed):
                 r_fuel = self._satisfy_item(
@@ -634,18 +1045,56 @@ class PhysicalPrerequisiteResolver:
                 )
                 if r_fuel is not None:
                     return r_fuel
+
             counts_pre_smelt = total_owned_counts(self.bot.inventory())
             actual_input = raw_in
             if raw_in == "any_log":
                 actual_input = next((k for k, v in counts_pre_smelt.items() if k.endswith("_log") and v > 0), "oak_log")
-            elif raw_in == "cobblestone" and counts_pre_smelt.get("cobblestone", 0) < raw_needed:
-                # Vanilla stone smelting specifically requires cobblestone (not cobbled_deepslate)
-                if item == "stone" and counts_pre_smelt.get("cobblestone", 0) < raw_needed:
-                    res_cb = self.skills.mine_blocks(block_types=["stone", "cobblestone"], count=raw_needed, radius=32)
-                    steps_log.append({"step": "mine_cobblestone_for_stone", "ok": bool(res_cb.get("ok"))})
+            elif raw_in == "cobblestone" and item == "stone" and counts_pre_smelt.get("cobblestone", 0) < raw_needed:
+                top_up_cb = raw_needed - counts_pre_smelt.get("cobblestone", 0)
+                res_cb = self.skills.mine_blocks(block_types=["stone", "cobblestone"], count=top_up_cb, radius=32)
+                steps_log.append({"step": "mine_cobblestone_for_stone", "need": top_up_cb, "ok": bool(res_cb.get("ok"))})
+
             abort_s = guard_fn()
             if abort_s is not None:
                 return abort_s
+
+            # Async WorldJob path when `world_jobs` is wired and estimated burn >= threshold (default 25s -> >=3 items)!
+            est_single_s = 10.0 * raw_needed + 2.0
+            if self.world_jobs is not None and est_single_s >= self.async_smelt_threshold_s:
+                batch_res = start_smelt_batch_nonblocking(
+                    self.skills,
+                    input_item=actual_input,
+                    output_item=item,
+                    count=raw_needed,
+                    allow_multi_furnace=True,
+                )
+                if batch_res.get("ok"):
+                    st_sm = self.bot.status()
+                    dim_sm = normalize_dimension(st_sm.get("dimension"))
+                    job = self.world_jobs.register_furnace_job(
+                        dim=dim_sm,
+                        furnaces=batch_res["furnaces"],
+                        input_item=actual_input,
+                        output_item=item,
+                        total_count=int(batch_res["requested_count"]),
+                        ready_at=float(batch_res["ready_at"]),
+                        parent_target_key=self.parent_target_key,
+                    )
+                    steps_log.append(
+                        {
+                            "step": "async_smelt_started",
+                            "job_id": job.job_id,
+                            "input": actual_input,
+                            "output": item,
+                            "count": batch_res["requested_count"],
+                            "furnace_count": len(batch_res["furnaces"]),
+                            "estimated_wait_s": batch_res["estimated_wait_s"],
+                            "ok": True,
+                        }
+                    )
+                    return "waiting_for_world_job"
+
             smelt_res = self.skills.smelt_items(
                 input_item=actual_input,
                 count=raw_needed,
@@ -673,7 +1122,6 @@ class PhysicalPrerequisiteResolver:
             ingredients: dict[str, int] = dict(recipe.get("ingredients") or {})
             for ing_name, ing_per in ingredients.items():
                 counts_ing = total_owned_counts(self.bot.inventory())
-                # If `craft_gear` can synthesize `stick` / `any_planks` directly from owned logs, still satisfy recursively so wood is harvested if short
                 need_ing_total = int(ing_per) * batches
                 if effective_item_count(ing_name, counts_ing) < need_ing_total:
                     r_ing = self._satisfy_item(
@@ -708,9 +1156,7 @@ class PhysicalPrerequisiteResolver:
                     )
                     if r_tb is not None:
                         return r_tb
-            # Top-up pass: recursive ingredient craft / table placement may consume
-            # materials reserved for the final recipe (e.g. sticks/table eat planks
-            # before a wooden_pickaxe). Re-check every ingredient once before crafting.
+            # Top-up pass: ingredient sub-crafts/table placement may consume planks needed for final craft
             for ing_name, ing_per in ingredients.items():
                 need_ing_total = int(ing_per) * batches
                 counts_top = total_owned_counts(self.bot.inventory())
@@ -737,7 +1183,7 @@ class PhysicalPrerequisiteResolver:
                 return None
             return "craft_incomplete"
 
-        # 5) Gatherable world resource (logs / stone / ores / surface blocks)
+        # 5) Gatherable world resource (logs / stone / exposed ores / surface blocks)
         gather = GATHER_SOURCES.get(item)
         if gather is not None:
             min_tier = int(gather.get("min_tier", 0))
@@ -758,6 +1204,7 @@ class PhysicalPrerequisiteResolver:
                 gather_spec=gather,
                 deadline=deadline,
                 steps_log=steps_log,
+                hunt_missing=hunt_missing,
                 guard_fn=guard_fn,
             )
 
@@ -773,6 +1220,7 @@ class PhysicalPrerequisiteResolver:
         gather_spec: dict[str, Any],
         deadline: float,
         steps_log: list[dict[str, Any]],
+        hunt_missing: dict[str, int],
         guard_fn: Callable[[], str | None],
     ) -> str | None:
         kind = str(gather_spec["kind"])
@@ -781,7 +1229,6 @@ class PhysicalPrerequisiteResolver:
             st = self.bot.status()
             pos = st.get("pos") or [0.0, 64.0, 0.0]
             dim = normalize_dimension(st.get("dimension"))
-            # If underground in overworld, climb up before trying to harvest trees!
             if dim == "overworld" and float(pos[1]) < 52.0:
                 for _ in range(4):
                     abort_u = guard_fn()
@@ -820,7 +1267,6 @@ class PhysicalPrerequisiteResolver:
                 steps_log.append({"step": "mine_stone", "need": rem_b, "ok": bool(mb.get("ok"))})
                 if effective_item_count(item, total_owned_counts(self.bot.inventory())) >= target_count:
                     return None
-                # Fallback if surface grass covers all stone: dig a short 4-step staircase down
                 st_res = self.skills.dig_staircase(direction="north", steps=4, vertical="down", stop_on_ore=False)
                 steps_log.append({"step": "stair_for_stone", "ok": bool(st_res.get("ok"))})
             return None if effective_item_count(item, total_owned_counts(self.bot.inventory())) >= target_count else "material_unavailable"
@@ -836,14 +1282,19 @@ class PhysicalPrerequisiteResolver:
             rem_c2 = target_count - effective_item_count(item, counts_c2)
             if rem_c2 <= 0:
                 return None
-            # Burn logs into charcoal if trees/logs are readily available
             if effective_item_count("any_log", counts_c2) >= rem_c2 + 1:
                 log_k = next((k for k, v in counts_c2.items() if k.endswith("_log") and v > 0), "oak_log")
-                sm_c = self.skills.smelt_items(input_item=log_k, count=rem_c2, wait_timeout_s=min(60.0, max(12.0, deadline - time.monotonic())))
+                sm_c = self.skills.smelt_items(
+                    input_item=log_k,
+                    count=rem_c2,
+                    wait_timeout_s=min(60.0, max(12.0, deadline - time.monotonic())),
+                )
                 steps_log.append({"step": "smelt_charcoal", "count": rem_c2, "ok": bool(sm_c.get("ok"))})
                 if effective_item_count(item, total_owned_counts(self.bot.inventory())) >= target_count:
                     return None
-            # Otherwise run one bounded fishbone_scan slice for coal
+            if not self.allow_underground_dfs:
+                hunt_missing[item] = max(hunt_missing.get(item, 0), rem_c2)
+                return "requires_world_hunt"
             dfs_c = self.skills.mine_dfs(
                 target="coal",
                 goal_count=rem_c2,
@@ -859,13 +1310,22 @@ class PhysicalPrerequisiteResolver:
             rem_o = target_count - effective_item_count(item, counts_o)
             if rem_o <= 0:
                 return None
-            # Quick check for exposed ore nearby (only when standing near a plausible Y band for diamond)
             st_o = self.bot.status()
             cur_y = float((st_o.get("pos") or [0.0, 64.0, 0.0])[1])
             if item != "diamond" or cur_y <= 16.0:
                 mb_o = self.skills.mine_blocks(block_types=list(gather_spec["blocks"]), count=min(8, rem_o), radius=28)
                 if mb_o.get("ok"):
                     steps_log.append({"step": f"mine_exposed_{item}", "ok": True})
+            counts_after_exposed = total_owned_counts(self.bot.inventory())
+            rem_after_exposed = target_count - effective_item_count(item, counts_after_exposed)
+            if rem_after_exposed <= 0:
+                return None
+
+            # Hard boundary: NEVER run unguarded underground `mine_dfs` inside `pre_ensure`!
+            if not self.allow_underground_dfs:
+                hunt_missing[item] = max(hunt_missing.get(item, 0), rem_after_exposed)
+                return "requires_world_hunt"
+
             while time.monotonic() < deadline:
                 abort_d = guard_fn()
                 if abort_d is not None:
@@ -892,7 +1352,6 @@ class PhysicalPrerequisiteResolver:
                     }
                 )
                 if sr in {"pickaxe_low", "insufficient_pickaxe_tier"}:
-                    # Auto-resupply burner stone pickaxe if materials allow, else stop cleanly
                     counts_pk = total_owned_counts(self.bot.inventory())
                     if effective_item_count("cobblestone", counts_pk) >= 3 and (
                         effective_item_count("any_planks", counts_pk) + effective_item_count("any_log", counts_pk) * 4 >= 2
@@ -921,7 +1380,6 @@ class PhysicalPrerequisiteResolver:
                     break
             return None if effective_item_count("flint", total_owned_counts(self.bot.inventory())) >= target_count else "requires_world_hunt"
 
-        # blocks_only (obsidian / sand / sugar_cane / pumpkin / clay)
         rem_blk = target_count - effective_item_count(item, total_owned_counts(self.bot.inventory()))
         if rem_blk <= 0:
             return None

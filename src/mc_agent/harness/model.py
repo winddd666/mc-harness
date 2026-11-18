@@ -9,12 +9,14 @@
 from __future__ import annotations
 
 import collections
+from collections.abc import Callable
 import dataclasses
 import json
 import math
 import os
 import pathlib
 import queue
+import random
 import re
 import threading
 import time
@@ -211,23 +213,22 @@ class RpmLimiter:
         self._lock = threading.Lock()
         self._times: collections.deque[float] = collections.deque()
 
-    def acquire(self) -> float:
+    def acquire(self, *, control: Callable[[], bool] | None = None) -> float:
         if self.rpm_budget <= 0:
             return 0.0
         started = time.monotonic()
-        with self._lock:
-            now = time.monotonic()
-            while self._times and now - self._times[0] >= self.window_s:
-                self._times.popleft()
-            if len(self._times) >= self.rpm_budget:
+        while True:
+            check_control(control)
+            with self._lock:
+                now = time.monotonic()
+                while self._times and now - self._times[0] >= self.window_s:
+                    self._times.popleft()
+                if len(self._times) < self.rpm_budget:
+                    self._times.append(now)
+                    return time.monotonic() - started
                 wait_s = max(0.0, self._times[0] + self.window_s - now)
-                if wait_s > 0:
-                    time.sleep(wait_s)
-            now = time.monotonic()
-            while self._times and now - self._times[0] >= self.window_s:
-                self._times.popleft()
-            self._times.append(now)
-        return time.monotonic() - started
+            if wait_s > 0:
+                time.sleep(min(0.15, wait_s))
 
 
 def _sse_data(response):
@@ -521,7 +522,7 @@ def _is_concurrency_limit_429(status_code: int, detail: str) -> bool:
 
 
 def _concurrency_retry_delay_s(attempt: int, retry_after_header: str | None = None) -> float:
-    schedule = (6.0, 10.0, 15.0, 20.0)
+    schedule = (6.0, 10.0, 15.0, 20.0, 22.0, 25.0, 28.0)
     base = schedule[min(max(0, attempt), len(schedule) - 1)]
     if retry_after_header:
         try:
@@ -591,7 +592,7 @@ def _chat_direct(
             on_event(evt)
 
     standard_max_attempts = 3
-    concurrency_max_attempts = 5
+    concurrency_max_attempts = 8
     try:
         for attempt in range(concurrency_max_attempts):
             if cancel_event is not None and cancel_event.is_set():
@@ -838,7 +839,7 @@ class QwenModel:
                 check_control(control)
                 time.sleep(step_s)
             check_control(control)
-        wait_s = self._limiter.acquire()
+        wait_s = self._limiter.acquire(control=control)
         if wait_s > 0 and on_event is not None:
             on_event({"type": "rate_wait", "wait_s": round(wait_s, 3)})
         req_spec = self.spec

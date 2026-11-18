@@ -1,16 +1,20 @@
 """Deterministic L0/L1 skill stack and 1.21.11 advancement frontier planner."""
 
 from .advancements import compute_advancement_frontier, load_advancements_catalog
+from .combat_env import CombatControllerSlot, CombatEnv, SubcorticalInstinctController
 from .ensure import PhysicalPrerequisiteResolver, effective_item_count, highest_pickaxe_tier, total_owned_counts
 from .library import MacroSkills
 from .mining_dfs import MiningDFSEngine, WorldLedger, normalize_dfs_strategy
 from .safety import SafetyEmergency, check_and_stabilize
 
 __all__ = [
+    "CombatControllerSlot",
+    "CombatEnv",
     "MacroSkills",
     "MiningDFSEngine",
     "PhysicalPrerequisiteResolver",
     "SafetyEmergency",
+    "SubcorticalInstinctController",
     "WorldLedger",
     "check_and_stabilize",
     "compute_advancement_frontier",
