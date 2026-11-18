@@ -1729,3 +1729,16 @@ def test_manual_reset_clears_the_hazard_streak() -> None:
     assert res["ok"] is True
     assert eng.fluid_aborts == 0
     assert eng.fluid_abandoned_deep is False
+
+
+def test_deep_empty_tree_asks_for_a_climb_instead_of_opening_fake_collar() -> None:
+    """Live s01/s03: a deep "collar" at y=-54 made later resets look legitimate forever."""
+    world = _MockMineWorld(start_pos=(0.5, 8.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="DeepCollarBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64                     # we did open a surface collar earlier
+        eng.idle_calls = 3
+        res = eng.run(target="iron", goal_count=4, target_y=16, action="explore", max_duration_s=6.0)
+    assert res["stop_reason"] == "needs_surface_climb"
+    assert res["requires_replan"] is True
+    assert eng.collar_node_id is None                 # no fake underground collar planted

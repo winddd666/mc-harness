@@ -247,6 +247,8 @@ MAX_IDLE_ITERATIONS = 4
 MAX_IDLE_SECONDS = 20.0
 # Three consecutive fluid/hazard aborts on one shaft means an aquifer/cave field: relocate.
 FLUID_ABORT_LIMIT = 3
+# Three consecutive "ok but nothing happened" calls mean the shaft is a dead end.
+IDLE_CALLS_BEFORE_RELOCATE = 3
 FLUID_ABORT_REASONS = frozenset({
     "fluid_or_bedrock", "unsafe_floor_or_cave", "falling_material_adjacent", "cave_breach_sealed",
 })
@@ -795,6 +797,8 @@ class MiningDFSEngine:
         self.fluid_abandoned_deep: bool = False
         # Highest collar ever opened this run = the surface datum we must not reset away from.
         self.collar_ceiling_y: int | None = None
+        # Consecutive explore calls that returned "ok" without moving or gaining anything.
+        self.idle_calls: int = 0
         self.locked_cluster: dict[str, Any] | None = None
         self._last_radar_anchor: tuple[int, int, int] | None = None
         self.sealed_positions: set[tuple[int, int, int]] = set()
@@ -4186,7 +4190,29 @@ class MiningDFSEngine:
 
         # Tree initialization, WorldLedger shaft restoration, or resume from Collar / current node
         if self.collar_node_id is None or self.collar_node_id not in self.nodes:
-            if not self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref):
+            # Restore exactly once: this call mutates state, so it must not sit inside a boolean.
+            restored = self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref)
+            if (
+                not restored
+                and self.collar_ceiling_y is not None
+                and cur_pos[1] <= int(self.collar_ceiling_y) - 20
+            ):
+                # Live s01/s03: after a deep reset this path opened a "collar" at y=-54,
+                # so every later reset looked legitimate and the run churned underground.
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "action": act,
+                    "strategy": self.strategy,
+                    "stop_reason": "needs_surface_climb",
+                    "message": (
+                        f"当前 y={cur_pos[1]}，比本局最高井口 (y={self.collar_ceiling_y}) 低 20 格以上，"
+                        "不能在地下就地开新井。请先用 mc_skill_staircase(vertical='up') 或 "
+                        "action='return_collar' 回到地表，再 explore 开新井。"
+                    ),
+                    "tree": self.snapshot(),
+                }
+            if not restored:
                 solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
                     cur_pos,
                     geofence=geofence,
@@ -4199,13 +4225,7 @@ class MiningDFSEngine:
                         "requires_replan": True,
                         "strategy": self.strategy,
                         "stop_reason": anchor_err,
-                        "message": (
-                            "当前脚下为树冠/悬空地形，DFS 无法开井（周围 20 格无安全实心地面）。"
-                            "请先脱离树冠：用 mc_skill_unstick 向下清理树叶落到实心地面，"
-                            "必要时用 mc_move_to 平移到开阔实心陆地，确认脚下为草地/石头后再调用 mc_skill_mine_dfs 重新开井。"
-                        ),
-                        "pos_before": st0.get("pos"),
-                        "pos_after": self.bot.status().get("pos"),
+                        "message": "当前站位无法开新井（脚下非实心地面），请先用 unstick 下到实心地面再调用 DFS。",
                         "tree": self.snapshot(),
                     }
                 self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
@@ -4247,6 +4267,25 @@ class MiningDFSEngine:
             elif math.dist(cur_pos, active.anchor) > 3.5:
                 ok_nav, err_nav = self._navigate_to_node(active.node_id, min_hp_ref=min_hp_ref)
                 if not ok_nav:
+                    if (
+                        self.collar_ceiling_y is not None
+                        and cur_pos[1] <= int(self.collar_ceiling_y) - 20
+                    ):
+                        # Same trap as the reset path: re-initialising here plants a fake
+                        # underground "collar", after which every deep reset looks legitimate.
+                        return {
+                            "ok": False,
+                            "requires_replan": True,
+                            "action": act,
+                            "strategy": self.strategy,
+                            "stop_reason": "needs_surface_climb",
+                            "message": (
+                                f"回撤到当前节点失败，且你已在地下 y={cur_pos[1]}"
+                                f"（最高井口 y={self.collar_ceiling_y}）。"
+                                "请先沿自建巷道 action='return_collar'，或用 staircase(vertical='up') 爬回地表。"
+                            ),
+                            "tree": self.snapshot(),
+                        }
                     self._archive_current_shaft_to_ledger(mark_exhausted=False)
                     self._clear_active_tree_only()
                     solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
@@ -4262,6 +4301,30 @@ class MiningDFSEngine:
                             "tree": self.snapshot(),
                         }
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
+
+        if self.idle_calls >= IDLE_CALLS_BEFORE_RELOCATE:
+            # Live s05: 9 consecutive explore calls returned ok=true with gained={} and an
+            # unchanged position; the model had no signal and kept retrying the same dead node.
+            self.idle_calls = 0
+            # Do NOT clear the tree first: the helper needs the collar y to decide whether a
+            # surface relocation is even physically possible from here.
+            moved, _ = self._force_relocate_on_fluid(
+                geofence=geofence, deadline=time.monotonic() + 10.0,
+                min_hp_ref=min_hp_ref, auto_relocations=0,
+            )
+            if not moved:
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "action": act,
+                    "strategy": self.strategy,
+                    "stop_reason": "shaft_exhausted",
+                    "message": (
+                        "连续 3 次调用都没有挖到东西也没移动，这条矿井已判定空转并归档。"
+                        "请先 action='return_collar' 返回地表再 explore 开新井。"
+                    ),
+                    "tree": self.snapshot(),
+                }
 
         mined_ores: list[list[int]] = []
         breaches_sealed = 0
@@ -4836,6 +4899,10 @@ class MiningDFSEngine:
         st_end = self.bot.status()
 
         ok = stop_reason in {"quota_reached", "time_slice_progress"}
+        if stop_reason == "time_slice_progress" and not gained_delta and st0.get("pos") == st_end.get("pos"):
+            self.idle_calls += 1
+        else:
+            self.idle_calls = 0
         out_res: dict[str, Any] = {
             "ok": ok,
             "requires_replan": not ok or stop_reason == "hurt",
