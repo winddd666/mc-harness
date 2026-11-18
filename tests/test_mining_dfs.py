@@ -1684,3 +1684,21 @@ def test_reset_is_refused_while_deep_below_the_collar() -> None:
     assert res["ok"] is False
     assert res["stop_reason"] == "reset_needs_surface"
     assert "return_collar" in res["message"]
+
+
+def test_reset_refused_when_a_deep_second_collar_tries_to_move_again() -> None:
+    """Live s01: 8 resets at y=-54 churned corridors and wasted the whole 40 min budget."""
+    world = _MockMineWorld(start_pos=(0.5, -54.0, 0.5), surface_y=99)
+    with BotSession("tok", bot_username="ThrashBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        surface = eng._create_node(kind="collar", anchor=(0, 99, 0), parent_id=None,
+                                   edge_from_parent=None, branches=[])
+        eng.collar_ceiling_y = 99                       # we already opened a surface collar
+        deep = eng._create_node(kind="collar", anchor=(0, -54, 0), parent_id=None,
+                                edge_from_parent=None, branches=[])
+        eng.collar_node_id = deep.node_id
+        res = eng.reset(geofence=None)
+        assert eng.collar_node_id == deep.node_id       # tree kept
+    assert res["stop_reason"] == "reset_needs_surface"
+    assert "explore" in res["message"]
+    assert surface.node_id in eng.nodes

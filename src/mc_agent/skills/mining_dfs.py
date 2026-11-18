@@ -793,6 +793,8 @@ class MiningDFSEngine:
         self.fluid_aborts: int = 0
         # Set when a water/cave-trap shaft is abandoned while we are still deep underground.
         self.fluid_abandoned_deep: bool = False
+        # Highest collar ever opened this run = the surface datum we must not reset away from.
+        self.collar_ceiling_y: int | None = None
         self.locked_cluster: dict[str, Any] | None = None
         self._last_radar_anchor: tuple[int, int, int] | None = None
         self.sealed_positions: set[tuple[int, int, int]] = set()
@@ -895,26 +897,33 @@ class MiningDFSEngine:
             if had_collar is None:
                 had_collar = active_anc
 
+        deep_ceiling = self.collar_ceiling_y
+        ref_y: int | None = None
         if had_collar is not None:
+            ref_y = had_collar[1]
+        if deep_ceiling is not None:
+            ref_y = int(deep_ceiling) if ref_y is None else max(ref_y, int(deep_ceiling))
+        if ref_y is not None:
             try:
                 st_chk = self.bot.status()
-                if st_chk.get("pos"):
+                if st_chk.get("pos") and _floor_pos(st_chk["pos"])[1] <= ref_y - 20:
                     now_y = _floor_pos(st_chk["pos"])[1]
-                    if now_y <= had_collar[1] - 6:
-                        # Underground reset would orphan the tree with no surface anchor and no
-                        # shaft to climb (live s03: explore -> no_progress loop at y=8).
-                        return {
-                            "ok": False,
-                            "requires_replan": True,
-                            "action": "reset",
-                            "strategy": self.strategy,
-                            "stop_reason": "reset_needs_surface",
-                            "message": (
-                                f"你当前在 y={now_y}，距井口 (y={had_collar[1]}) 太远，不能就地重置。"
-                                "请先 action='return_collar' 返回地表，再重置或换点。"
-                            ),
-                            "tree": self.snapshot(),
-                        }
+                    # Underground reset would orphan the tree with no surface anchor and no shaft
+                    # to climb; live s01 burned 8 resets at y=-54 and never found ore, and s03
+                    # cleared the tree at y=8 then spun on no_progress.
+                    return {
+                        "ok": False,
+                        "requires_replan": True,
+                        "action": "reset",
+                        "strategy": self.strategy,
+                        "stop_reason": "reset_needs_surface",
+                        "message": (
+                            f"你当前在 y={now_y}，比本局最高井口 (y={ref_y}) 低 20 格以上，不能就地重置。"
+                            "如果只是这条支巷挖干了，直接 action='explore' 会继续开支巷；"
+                            "如果要换井，请先 action='return_collar' 回到地表再重置。"
+                        ),
+                        "tree": self.snapshot(),
+                    }
             except (ApiError, ValueError, KeyError):
                 pass
 
@@ -3834,6 +3843,8 @@ class MiningDFSEngine:
         self.collar_node_id = node.node_id
         self.fluid_aborts = 0
         self.fluid_abandoned_deep = False
+        if self.collar_ceiling_y is None or anchor[1] > self.collar_ceiling_y:
+            self.collar_ceiling_y = int(anchor[1])
         return node
 
     def _spine_branches(self, forward_dir: str, anchor: tuple[int, int, int], geofence: Any) -> list[BranchSpec]:
