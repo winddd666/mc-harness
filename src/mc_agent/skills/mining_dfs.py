@@ -1508,6 +1508,30 @@ class MiningDFSEngine:
                 return True
         return False
 
+    def _clear_route_obstruction(self, target_wp: tuple[int, int, int]) -> int:
+        """Re-open a recorded corridor cell: dig solid fill, but refuse if it is now flooded/bedrock.
+
+        Returns the number of blocks dug, or -1 when the route is unrecoverable here.
+        The cell belongs to our own carved corridor, so clearing it cannot open new terrain.
+        """
+        dug = 0
+        for dy in (0, 1):
+            pt = (target_wp[0], target_wp[1] + dy, target_wp[2])
+            try:
+                name = self._get_block_name(pt)
+            except ApiError:
+                return -1
+            if name in FLUID_BLOCKS or name == "bedrock":
+                return -1
+            if name in PASSABLE_BLOCKS:
+                continue
+            try:
+                self.bot.call("dig", {"pos": [pt[0], pt[1], pt[2]], "collect": False, "stop_on": ["hurt", "death"]})
+                dug += 1
+            except ApiError:
+                return -1
+        return dug
+
     def _clear_incidental_obstruction_only(self, target_wp: tuple[int, int, int]) -> int:
         """During lossless backtrack, clear loose debris AND self-placed seal/catch/bridge blocks at waypoint."""
         dug = 0
@@ -1570,6 +1594,13 @@ class MiningDFSEngine:
             self.dug_during_return += cleared
             if cleared > 0 and self._move_exact(wp):
                 continue
+            # A recorded corridor cell that got filled in (collapse / inflow debris) used to end
+            # the walk here ("backtrack_blocked") and force a full staircase re-dig (live s12/s15).
+            repaired = self._clear_route_obstruction(wp)
+            if repaired > 0:
+                self.dug_during_return += repaired
+                if self._move_exact(wp):
+                    continue
             return False, "backtrack_blocked"
         return True, None
 

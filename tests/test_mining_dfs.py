@@ -1880,3 +1880,14 @@ def test_climb_out_prefers_walking_the_shaft_over_new_stairs(monkeypatch) -> Non
     assert res["climb"]["method"] == "walk"
     assert res["climb"]["reached"] is True
     assert stairs == []                            # never dug a single stair
+
+
+def test_corridor_repair_digs_fill_but_refuses_flooded_cells() -> None:
+    """A filled-in corridor cell must be re-opened instead of abandoning the route."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    world.blocks[(0, 20, -1)] = "stone"
+    world.blocks[(0, 20, -3)] = "water"
+    with BotSession("tok", bot_username="RepairBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        assert eng._clear_route_obstruction((0, 20, -1)) >= 1      # solid fill -> dug
+        assert eng._clear_route_obstruction((0, 20, -3)) == -1     # flooded -> give up
