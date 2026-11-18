@@ -4238,6 +4238,25 @@ class MiningDFSEngine:
                     pass
                 st_w = self.bot.status()
                 if st_w.get("in_water"):
+                    # Only a flooded MINING layer condemns the shaft. A puddle/pond on the way
+                    # down is a detour, not a dead shaft (live s11 churned 3 shafts at y=54).
+                    try:
+                        wet_y = _floor_pos(st_w["pos"])[1]
+                    except (KeyError, TypeError, ValueError):
+                        wet_y = self.target_y
+                    if wet_y > int(self.target_y) + 12:
+                        return {
+                            "ok": False,
+                            "requires_replan": True,
+                            "strategy": self.strategy,
+                            "stop_reason": "in_water",
+                            "water_escape": esc,
+                            "message": (
+                                "当前仍在水中，挖矿无法开始（reset 无效）。请先用 "
+                                "mc_skill_staircase(vertical='up') 或 mc_skill_flee 离开水域/爬上岸，"
+                                "然后直接 explore。"
+                            ),
+                        }
                     if self._note_fluid_abort("in_water"):
                         self._archive_current_shaft_to_ledger(mark_exhausted=True)
                         self._clear_active_tree_only()
