@@ -20,6 +20,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 BOT = "MoveTest_01"
+BOAT_TYPES = (
+    "oak_boat", "spruce_boat", "birch_boat", "jungle_boat", "acacia_boat", "dark_oak_boat",
+    "mangrove_boat", "cherry_boat", "pale_oak_boat", "oak_chest_boat", "spruce_chest_boat",
+    "birch_chest_boat", "jungle_chest_boat", "acacia_chest_boat", "dark_oak_chest_boat",
+    "mangrove_chest_boat", "cherry_chest_boat", "pale_oak_chest_boat",
+)
 ENV_PATH = pathlib.Path("/home/xzq/projects/mc/.env.beast")
 SKIN_ENV_PATH = pathlib.Path("/home/xzq/projects/mc/.env")
 STATE_DIR = pathlib.Path("/home/xzq/projects/mc/.state-move-test")
@@ -179,7 +185,10 @@ def arena_reset() -> list[dict[str, str]]:
         "gamerule randomTickSpeed 0",
         "gamerule fallDamage true",
         "gamerule keepInventory false",
-        f"kill @e[type=minecraft:boat,x={x0},y={y},z={z0},distance=..200]",
+        *(
+            f"execute positioned {x0 + 90} {y} {z0 + 90} run kill @e[type=minecraft:{b},distance=..260]"
+            for b in BOAT_TYPES
+        ),
         f"kill @e[type=minecraft:item,x={x0},y={y},z={z0},distance=..200]",
     ]
     return rcon_batch(cmds)
@@ -188,7 +197,10 @@ def arena_reset() -> list[dict[str, str]]:
 def arena_cleanup() -> list[dict[str, str]]:
     x0, x1, z0, z1, y = ARENA["x0"], ARENA["x1"], ARENA["z0"], ARENA["z1"], ARENA["y"]
     cmds = [
-        f"kill @e[type=minecraft:boat,x={x0},y={y},z={z0},distance=..200]",
+        *(
+            f"execute positioned {x0 + 90} {y} {z0 + 90} run kill @e[type=minecraft:{b},distance=..260]"
+            for b in BOAT_TYPES
+        ),
         f"kill @e[type=minecraft:item,x={x0},y={y},z={z0},distance=..200]",
         f"fill {x0} {y - 22} {z0} {x1} {y + 42} {z1} minecraft:air",
         # permanent 5x5 parking pad so the bot never free-falls when the arena is wiped

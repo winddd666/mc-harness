@@ -1114,10 +1114,16 @@ class MacroSkills:
 
         # Try direct first in case chunks are already loaded and unobstructed
         try:
-            direct_payload: dict[str, Any] = {"x": float(x), "z": float(z), "range": range_m, "stop_on": stop_on}
+            direct_payload: dict[str, Any] = {
+                "x": float(x),
+                "z": float(z),
+                "range": range_m,
+                "stop_on": stop_on,
+                "timeout": 30000,
+            }
             if y is not None:
                 direct_payload["y"] = float(y)
-            res_d = self.bot.call("move_to", direct_payload)
+            res_d = self.bot.call("move_to", direct_payload, timeout_s=42.0)
             return {"ok": True, "segmented": False, "segments_done": 1, "result": res_d}
         except ApiError as direct_err:
             if direct_err.code in {"hurt", "death", "interrupted"}:
@@ -1125,6 +1131,11 @@ class MacroSkills:
             if direct_err.code == "busy":
                 self._get_terrain_nav().release_stuck_action()
             last_err = direct_err
+        except Exception as exc:  # noqa: BLE001 - long direct path may outlive the HTTP timeout
+            last_err = ApiError(
+                code="timeout",
+                message=f"direct move_to HTTP timeout ({type(exc).__name__}); fall back to segmented hops",
+            )
 
         max_hops = min(18, max(3, int(math.ceil(total_hdist / max(10.0, step_m))) + 3))
         segs_done = 0
@@ -1157,7 +1168,13 @@ class MacroSkills:
             for hx, hz, hy, hr in hop_targets:
                 if geofence is not None and geofence.check_point(hx, hz, action="navigate_segmented") is not None:
                     continue
-                hop_payload: dict[str, Any] = {"x": round(hx, 2), "z": round(hz, 2), "range": hr, "stop_on": stop_on}
+                hop_payload: dict[str, Any] = {
+                    "x": round(hx, 2),
+                    "z": round(hz, 2),
+                    "range": hr,
+                    "stop_on": stop_on,
+                    "timeout": 25000,
+                }
                 if hy is not None:
                     hop_payload["y"] = float(hy)
                 try:
@@ -1182,13 +1199,22 @@ class MacroSkills:
                         # a previously hung action can wedge the server lock: free it and retry once
                         nav.release_stuck_action()
                         try:
-                            self.bot.call("move_to", hop_payload)
+                            self.bot.call("move_to", hop_payload, timeout_s=40.0)
                         except ApiError as retry_err:
                             if retry_err.code in {"hurt", "death", "interrupted"}:
                                 raise
                             last_err = retry_err
                             continue
+                        except Exception:  # noqa: BLE001
+                            last_err = ApiError(code="timeout", message="hop retry HTTP timeout")
+                            continue
                     last_err = hop_err
+                    continue
+                except Exception as exc:  # noqa: BLE001 - treat a hung hop as a failed hop
+                    last_err = ApiError(
+                        code="timeout",
+                        message=f"hop move_to HTTP timeout ({type(exc).__name__})",
+                    )
                     continue
             if not advanced:
                 if len(recoveries) < MAX_LOCAL_RECOVERY_ATTEMPTS:

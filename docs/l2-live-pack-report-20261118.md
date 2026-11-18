@@ -73,6 +73,8 @@ PYTHONPATH=.worktrees/l2-live-pack/src .venv/bin/pytest .worktrees/l2-live-pack/
 | forest 环线 | 10 min | 36 | 35 | 0 | 2 | 1673m |
 | forest 环线（加固后） | 6 min | 21 | 20 | 0 | 2 | 1041m |
 | stony_shore 环线（加固后） | 5 min | 14 | 12 | 0 | 0 | 518m |
+| forest 环线（大半径） | 20 min | 47 | 43 | 0 | 0 | 2867m |
+| forest 环线（超时修复后） | 12 min | 34 | 33 | 0 | 2 | 1973m |
 
 唯一失败点为森林边缘的**浮冰/冰面水塘**：`packed_ice` 边缘 + 悬空，路径 `stalled`，两次 `dig_level_tunnel` 无效后按契约返回阻塞原因（不死亡、不乱挖）。冰面水塘策略（优先绕行或 `escape_water`）列入后续。
 
@@ -129,6 +131,7 @@ PYTHONPATH=.worktrees/l2-live-pack/src .venv/bin/pytest .worktrees/l2-live-pack/
 23. **Tier4 误淘汰主工具（饱和测试抓到并修复）**：旧实现在绝境腾格时只保护"手持/已穿"的装备，背包里的铁镐与备用石镐会被当成散件丢掉。现先计算 **工具/护甲保留集**（镐 1–2 主镐 + ≤2 石镐、剑斧锹锄各 1、未穿最佳护甲每槽 1），Tier4 永不触碰。
 24. **水下放船挂起**：在水中且沉在水面下 2 格时放船会 `use_item` 超时；先 `posture{jump}` 浮到水面，再在 **3–5 格**外放船即可稳定成功（M27 实证）。
 25. **`move_to` 会游泳**：实测服务端寻路可以直接游过 70m+ 河面，因此"宽水恢复"只在 `navigate_segmented` 失败或显式 `recover()` 时触发（M27 用后者验证派发）。
+26. **长距离直连超过 HTTP 超时**：100m 直连 `move_to` 会跑满 45s 客户端超时；现给直连/跳点都带服务端 `timeout`（30s/25s），客户端超时也转换为失败并自动切分段跳点（20 分钟森林长跑从 4 次超时降到 0–1 次）。
 
 ## 7. 已知限制
 

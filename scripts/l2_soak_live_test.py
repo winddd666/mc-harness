@@ -187,6 +187,16 @@ def main() -> int:
     finally:
         try:
             common.arena_cleanup()
+            p_last = (s.bot.status().get("pos") or [0, 0, 0])
+            common.rcon_batch(
+                [
+                    *(
+                        f"execute positioned {p_last[0]:.0f} 120 {p_last[2]:.0f} run kill @e[type=minecraft:{b},distance=..120]"
+                        for b in common.BOAT_TYPES
+                    ),
+                    f"execute positioned {p_last[0]:.0f} 120 {p_last[2]:.0f} run kill @e[type=minecraft:item,distance=..120]",
+                ]
+            )
         except Exception:  # noqa: BLE001
             pass
         s.close()
