@@ -680,6 +680,58 @@ def group_sm5(s: common.Session) -> dict[str, Any]:
 GROUPS.update({"INV9": group_inv9, "SM5": group_sm5})
 
 
+
+# ---------------------------------------------------------------------------
+# SM6: collect while the bag is 36/36 full of protected items -> inventory_full,
+#       then free one slot and collect successfully
+# ---------------------------------------------------------------------------
+
+
+def group_sm6(s: common.Session) -> dict[str, Any]:
+    x, z = LAB_X, LAB_Z
+    _build_lab()
+    _place_block(x + 2, Y, z + 12, "furnace")
+    _tp(x + 2.5, Y, z + 14.0)
+    common.prepare_player({"cobblestone": 1, "coal": 1})
+    time.sleep(0.8)
+    started = s.skills.smelt_start("cobblestone", count=1)
+    # 36 stacks of a protection-listed item so the auto-cleaner can never free a slot
+    common.rcon_batch([f"give {BOT} minecraft:diamond 64" for _ in range(40)])
+    time.sleep(16)
+    blocked = s.skills.smelt_collect(wait_remaining_s=20.0)
+    inv_full = s.bot.inventory()
+    # drop one whole diamond stack by moving it out via /clear + re-give a single one
+    common.rcon_batch([f"clear {BOT} minecraft:diamond"])
+    time.sleep(1.0)
+    # walk two blocks away from the dropped overflow so pickups cannot refill the bag
+    try:
+        s.bot.call("control", {"forward": True, "ms": 600}, timeout_s=10.0)
+    except Exception:  # noqa: BLE001
+        pass
+    time.sleep(0.4)
+    retry = s.skills.smelt_collect(wait_remaining_s=25.0)
+    counts = _counts(s.bot)
+    return {
+        "checks": {
+            "SM6_start": {k: started.get(k) for k in ("ok", "error", "furnace_count")},
+            "SM6_blocked": {k: blocked.get(k) for k in ("ok", "collected", "failures", "in_conversion_counts")},
+            "SM6_inv_empty_slots": inv_full.get("empty_slots"),
+            "SM6_retry": {k: retry.get(k) for k in ("ok", "collected", "failures")},
+            "SM6_stone": counts.get("stone"),
+            "SM6_ledger": s.world_memory.get_in_conversion_counts(),
+        },
+        "ok": bool(started.get("ok"))
+        and any(
+            "inventory_full" in str(f.get("error"))
+            for f in (blocked.get("failures") or [])
+        )
+        and counts.get("stone", 0) >= 1,
+    }
+
+
+GROUPS.update({"SM6": group_sm6})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="all")
@@ -691,6 +743,12 @@ def main() -> int:
     try:
         report["connect"] = common.status_brief(s.connect())
         report["arena_reset"] = common.arena_reset()[-4:]
+        # deterministic ledger for the acceptance run: drop any stale in-flight jobs
+        stale = list(getattr(s.world_memory, "conversion_jobs", {}).keys())
+        if stale:
+            s.world_memory.conversion_jobs.clear()
+            s.world_memory.save(force=True)
+        report["stale_jobs_pruned"] = stale
         _build_lab()
         s.skills.inventory_manager = None
         for key in selected:

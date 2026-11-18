@@ -213,6 +213,14 @@ class _MockAtlasWorld:
             )
         if path == "/events":
             return httpx.Response(200, json={"ok": True, "result": {"events": [], "last_seq": 0}})
+        if path == "/stop":
+            return httpx.Response(200, json={"ok": True, "result": {"stopped": True, "released": True}})
+        if path == "/posture":
+            return httpx.Response(
+                200, json={"ok": True, "result": {"sneaking": False, "jumping": False, "blocking": False}}
+            )
+        if path == "/control":
+            return httpx.Response(200, json={"ok": True, "result": {"moved": 0, "pos": list(self.pos)}})
         raise AssertionError(f"Unhandled mock endpoint: {path}")
 
 

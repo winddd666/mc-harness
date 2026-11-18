@@ -384,3 +384,36 @@ def test_forward_gap_diagnosis_uses_gap_width() -> None:
     res = nav.recover(x=8.0, z=0.5)
     assert res["diagnosis"].startswith("gap_")
     assert res["op"] in {None, "sneak_bridge"}
+
+
+class _StubSkills:
+    def __init__(self) -> None:
+        self.tunnel_calls: list[dict[str, Any]] = []
+        self.unstick_calls = 0
+
+    def dig_level_tunnel(self, **kw: Any) -> dict[str, Any]:
+        self.tunnel_calls.append(kw)
+        return {"ok": True, "dug": 2}
+
+    def unstick(self) -> dict[str, Any]:
+        self.unstick_calls += 1
+        return {"ok": True}
+
+
+def test_recover_digs_through_solid_wall_when_unclassified() -> None:
+    blocks = {(0, 64, 0): "stone", (1, 65, 0): "stone", (1, 66, 0): "stone"}
+    bot = FakeBot(pos=(0.5, 65.0, 0.5), blocks=blocks)
+    stub = _StubSkills()
+    nav = TerrainNavigator(bot, skills=stub)
+    res = nav.recover(x=8.0, z=0.5)
+    assert res["op"] == "dig_level_tunnel"
+    assert stub.tunnel_calls and stub.tunnel_calls[0]["steps"] == 2
+
+
+def test_recover_falls_back_to_unstick_when_no_wall() -> None:
+    bot = FakeBot(pos=(0.5, 65.0, 0.5))
+    stub = _StubSkills()
+    nav = TerrainNavigator(bot, skills=stub)
+    res = nav.recover(x=8.0, z=0.5)
+    assert res["op"] == "unstick"
+    assert stub.unstick_calls == 1

@@ -1122,6 +1122,8 @@ class MacroSkills:
         except ApiError as direct_err:
             if direct_err.code in {"hurt", "death", "interrupted"}:
                 raise
+            if direct_err.code == "busy":
+                self._get_terrain_nav().release_stuck_action()
             last_err = direct_err
 
         max_hops = min(18, max(3, int(math.ceil(total_hdist / max(10.0, step_m))) + 3))
@@ -1162,7 +1164,12 @@ class MacroSkills:
                     self.bot.call("move_to", hop_payload)
                     st_after = self.bot.status()
                     p_after = st_after.get("pos") or [cx, cy, cz]
-                    if math.hypot(float(p_after[0]) - cx, float(p_after[2]) - cz) >= 1.5 or math.hypot(
+                    progress = math.hypot(float(p_after[0]) - cx, float(p_after[2]) - cz)
+                    hop_dist = math.hypot(float(hx) - cx, float(hz) - cz)
+                    # A 24m hop that only creeps 1-2m is a stall, not progress: hand it to the
+                    # local-recovery state machine instead of burning the whole hop budget.
+                    need_m = max(2.0, min(8.0, hop_dist * 0.3))
+                    if progress >= need_m or math.hypot(
                         float(x) - float(p_after[0]), float(z) - float(p_after[2])
                     ) <= max(range_m + 1.0, 3.5):
                         segs_done += 1
@@ -1171,6 +1178,16 @@ class MacroSkills:
                 except ApiError as hop_err:
                     if hop_err.code in {"hurt", "death", "interrupted"}:
                         raise
+                    if hop_err.code == "busy":
+                        # a previously hung action can wedge the server lock: free it and retry once
+                        nav.release_stuck_action()
+                        try:
+                            self.bot.call("move_to", hop_payload)
+                        except ApiError as retry_err:
+                            if retry_err.code in {"hurt", "death", "interrupted"}:
+                                raise
+                            last_err = retry_err
+                            continue
                     last_err = hop_err
                     continue
             if not advanced:

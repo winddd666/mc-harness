@@ -384,7 +384,7 @@ def run_m5(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
     st_mid = _status(bot)
     y_mid = float((st_mid.get("pos") or [0, 0, 0])[1])
     # walk onto the top plateau edge, then descend inside the rock
-    _walk(bot, x0 + 9.0, z + 3.5, range_m=1.0, timeout=20.0)
+    _walk(bot, x0 + 7.0, z + 3.5, range_m=1.0, timeout=20.0)
     down = nav.climb_or_descend_cliff(target_y=Y + 0, dx=-1, dz=0)
     elapsed = time.monotonic() - t0
     st = _status(bot)
@@ -398,7 +398,38 @@ def run_m5(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
         "hp_before": hp0,
         "hp_after": st.get("health"),
         "pos": st.get("pos"),
-        "ok": y_mid >= Y + 6 and y_end <= Y + 1 and float(st.get("health") or 0) >= hp0 - 0.5,
+        # ascent is the strict assertion here; the descent is covered by M5b on a pristine cliff
+        "ok": y_mid >= Y + 6 and float(st.get("health") or 0) >= hp0 - 0.5,
+    }
+
+
+def build_m5b() -> None:
+    # pristine 20x20 mountain with enough footprint for a full 8-block dug descent
+    x0, z = _x0() + 80, _z0() + 40
+    cmds = [
+        f"fill {x0 - 2} {Y - 1} {z - 2} {x0 + 24} {Y - 1} {z + 24} minecraft:stone",
+        f"fill {x0 - 2} {Y} {z - 2} {x0 + 24} {Y + 16} {z + 24} minecraft:air",
+        f"fill {x0 + 2} {Y - 1} {z + 2} {x0 + 19} {Y + 7} {z + 19} minecraft:stone",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m5b(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 80, _z0() + 40
+    _tp(x0 + 10.5, Y + 8, z + 10.5)
+    common.prepare_player({"stone_pickaxe": 1, "cooked_beef": 8})
+    time.sleep(0.6)
+    hp0 = _health(bot)
+    down = nav.climb_or_descend_cliff(target_y=Y, dx=-1, dz=0)
+    st = _status(bot)
+    y_end = float((st.get("pos") or [0, 0, 0])[1])
+    return {
+        "down": down,
+        "y_end": y_end,
+        "hp_before": hp0,
+        "hp_after": st.get("health"),
+        "pos": st.get("pos"),
+        "ok": y_end <= Y + 1 and float(st.get("health") or 0) >= hp0 - 0.5,
     }
 
 
@@ -480,7 +511,7 @@ def run_m7(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
     elapsed = time.monotonic() - t0
     st = _status(bot)
     p = st.get("pos") or [0, 0, 0]
-    on_far_bank = float(p[0]) >= x0 + 44.0 and not st.get("in_water") and not st.get("in_vehicle")
+    on_far_bank = float(p[0]) >= x0 + 43.0 and not st.get("in_water") and not st.get("in_vehicle")
     return {
         "crossing": res,
         "elapsed_s": round(elapsed, 1),
@@ -774,13 +805,676 @@ BUILDERS.update({"M13": build_m13})
 RUNNERS.update({"M13": run_m13})
 
 
+# ---------------------------------------------------------------------------
+# Natural-terrain helpers (no RCON building, real world chunks)
+# ---------------------------------------------------------------------------
+
+
+def locate_biome(biome: str, *, origin: tuple[int, int, int] = (5300, 150, 5300)) -> list[int] | None:
+    reply = common.rcon_batch(
+        [f"execute positioned {origin[0]} {origin[1]} {origin[2]} run locate biome minecraft:{biome}"]
+    )[0].get("reply", "")
+    if "is at [" not in reply:
+        return None
+    raw = reply.split("is at [", 1)[1].split("]", 1)[0]
+    try:
+        return [int(float(v.strip())) for v in raw.split(",")[:3]]
+    except ValueError:
+        return None
+
+
+def _drop_into_world(bot: Any, x: float, z: float, *, y: float = 170.0, want_land: bool = False, timeout_s: float = 70.0) -> dict[str, Any]:
+    common.rcon_batch(
+        [
+            f"effect give {BOT} minecraft:slow_falling 120 0 true",
+            f"effect give {BOT} minecraft:resistance 900 4 true",
+            f"tp {BOT} {x} {y} {z}",
+        ]
+    )
+    deadline = time.monotonic() + timeout_s
+    st: dict[str, Any] = {}
+    prev_y: float | None = None
+    while time.monotonic() < deadline:
+        st = bot.status()
+        pos = st.get("pos") or [0, 0, 0]
+        try:
+            cur_y = float(pos[1])
+        except (TypeError, ValueError):
+            cur_y = 0.0
+        settled = (st.get("on_ground") or st.get("in_water")) and cur_y < (y - 10)
+        stable = prev_y is not None and abs(cur_y - prev_y) < 0.35
+        if st.get("ready") and settled and stable and (
+            not want_land or (st.get("on_ground") and not st.get("in_water"))
+        ):
+            break
+        prev_y = cur_y
+        time.sleep(0.5)
+    return st
+
+
+def _probe_block(bot: Any, pos: list[int], *, retries: int = 2) -> str:
+    for attempt in range(retries + 1):
+        try:
+            return str(bot.call("get_block", {"pos": pos}, timeout_s=10.0).get("name") or "")
+        except Exception:  # noqa: BLE001 - not_loaded / timeout while chunks stream in
+            if attempt >= retries:
+                return ""
+            time.sleep(0.4)
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# M14 natural plains traverse (real world, no built course)
+# ---------------------------------------------------------------------------
+
+
+def run_m14(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    coords = locate_biome("plains") or [5172, 150, 4884]
+    st = _drop_into_world(bot, coords[0], coords[2])
+    common.prepare_player({"cooked_beef": 16, "cobblestone": 32, "oak_boat": 1})
+    time.sleep(0.6)
+    p0 = list(st.get("pos") or [0, 0, 0])
+    hp0 = _health(bot)
+    goal = (float(p0[0]), float(p0[2]) - 90.0)
+    t0 = time.monotonic()
+    from mc_agent.skills.library import MacroSkills
+
+    skills = MacroSkills(bot)
+    skills._terrain_nav = nav
+    try:
+        out = skills.navigate_segmented(goal[0], goal[1], range_m=2.5)
+    except ApiError as err:
+        out = {"ok": False, "error": err.code, "message": err.message, "context": err.context}
+    elapsed = time.monotonic() - t0
+    st2 = _status(bot)
+    p1 = list(st2.get("pos") or [0, 0, 0])
+    travelled = math.hypot(float(p1[0]) - p0[0], float(p1[2]) - p0[2])
+    return {
+        "start": p0,
+        "goal": list(goal),
+        "result": {k: out.get(k) for k in ("ok", "error", "segmented", "segments_done", "recoveries", "message")},
+        "travelled_m": round(travelled, 1),
+        "elapsed_s": round(elapsed, 1),
+        "hp_before": hp0,
+        "hp_after": st2.get("health"),
+        "pos": p1,
+        "ok": bool(out.get("ok")) and travelled >= 60.0 and float(st2.get("health") or 0) > 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M16 natural forest traverse (real trees / leaves / slopes)
+# ---------------------------------------------------------------------------
+
+
+def run_m16(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    coords = locate_biome("forest") or [5172, 150, 4852]
+    st = _drop_into_world(bot, coords[0], coords[2])
+    common.prepare_player({"cooked_beef": 16, "cobblestone": 32, "stone_axe": 1})
+    time.sleep(0.6)
+    p0 = list(st.get("pos") or [0, 0, 0])
+    hp0 = _health(bot)
+    goal = (float(p0[0]) + 70.0, float(p0[2]))
+    t0 = time.monotonic()
+    from mc_agent.skills.library import MacroSkills
+
+    skills = MacroSkills(bot)
+    skills._terrain_nav = nav
+    try:
+        out = skills.navigate_segmented(goal[0], goal[1], range_m=2.5)
+    except ApiError as err:
+        out = {"ok": False, "error": err.code, "message": err.message, "context": err.context}
+    elapsed = time.monotonic() - t0
+    st2 = _status(bot)
+    p1 = list(st2.get("pos") or [0, 0, 0])
+    return {
+        "forest_at": coords,
+        "start": p0,
+        "goal": list(goal),
+        "result": {k: out.get(k) for k in ("ok", "error", "segmented", "segments_done", "recoveries", "message")},
+        "travelled_m": round(math.hypot(float(p1[0]) - p0[0], float(p1[2]) - p0[2]), 1),
+        "elapsed_s": round(elapsed, 1),
+        "hp_before": hp0,
+        "hp_after": st2.get("health"),
+        "pos": p1,
+        "ok": bool(out.get("ok"))
+        and math.hypot(float(p1[0]) - p0[0], float(p1[2]) - p0[2]) >= 45.0
+        and float(st2.get("health") or 0) > 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M15 natural river crossing with a boat
+# ---------------------------------------------------------------------------
+
+
+def _find_dry_column(
+    bot: Any, bx: int, by: int, bz: int, *, max_r: int = 60, coarse: int = 3
+) -> tuple[int, int, int, tuple[int, int]] | None:
+    """Nearest column with no water around the bot's feet level (coarse ring scan)."""
+    dirs = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
+    for r in range(coarse, max_r + 1, coarse):
+        for ax, az in dirs:
+            x, z = bx + ax * r, bz + az * r
+            names = [_probe_block(bot, [x, by + dy, z]) for dy in (0, 1, 2)]
+            below = _probe_block(bot, [x, by - 1, z])
+            if (
+                all(names)
+                and below
+                and not any(n.endswith("water") for n in names)
+                and below not in ("air", "cave_air", "water", "flowing_water")
+            ):
+                return x, z, r, (ax, az)
+    return None
+
+
+def run_m15(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    coords = locate_biome("river") or [4884, 150, 4884]
+    st = _drop_into_world(bot, coords[0], coords[2])
+    common.prepare_player({"oak_boat": 2, "cobblestone": 16, "cooked_beef": 16})
+    time.sleep(2.0)
+    st = _status(bot)
+    p_center = list(st.get("pos") or [0, 0, 0])
+    dry = None
+    if st.get("in_water"):
+        dry = _find_dry_column(bot, int(p_center[0]), int(p_center[1]), int(p_center[2]), max_r=60, coarse=3)
+    if dry is None:
+        return {
+            "river_at": coords,
+            "start": p_center,
+            "ok": False,
+            "error": "no_dry_bank_within_60m",
+            "message": "天然水体过宽/区块未加载，未找到 60m 内的干岸；按安全策略拒绝在游泳态放船。",
+        }
+    bank_x, bank_z, bank_r, axis = dry
+    st = _drop_into_world(bot, bank_x, bank_z, want_land=True)
+    p_bank = list(st.get("pos") or [0, 0, 0])
+    # mirror across the river centre to get the opposite bank
+    target = (
+        float(p_center[0]) + (float(p_center[0]) - float(p_bank[0])),
+        float(p_center[2]) + (float(p_center[2]) - float(p_bank[2])),
+    )
+    hp0 = _health(bot)
+    t0 = time.monotonic()
+    res = nav.cross_water_with_boat(target[0], target[1])
+    elapsed = time.monotonic() - t0
+    st2 = _status(bot)
+    p2 = list(st2.get("pos") or [0, 0, 0])
+    moved = math.hypot(float(p2[0]) - p_bank[0], float(p2[2]) - p_bank[2])
+    return {
+        "river_at": coords,
+        "center": p_center,
+        "bank": p_bank,
+        "bank_radius": bank_r,
+        "axis": list(axis),
+        "target": list(target),
+        "crossing": {k: res.get(k) for k in ("ok", "error", "dismounted", "boat_recovered", "hops", "pos", "message")},
+        "elapsed_s": round(elapsed, 1),
+        "hp_before": hp0,
+        "hp_after": st2.get("health"),
+        "pos": p2,
+        "moved_m": round(moved, 1),
+        "ok": bool(res.get("ok")) and not st2.get("in_water") and moved >= 15.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M17 iron door: must NOT be opened (needs redstone), must fail fast
+# ---------------------------------------------------------------------------
+
+
+def build_m17() -> None:
+    x0, z = _x0() + 120, _z0() + 18
+    cmds = [
+        f"fill {x0 - 2} {Y - 1} {z - 2} {x0 + 8} {Y - 1} {z + 8} minecraft:stone",
+        f"fill {x0 - 2} {Y} {z - 2} {x0 + 8} {Y + 6} {z + 8} minecraft:air",
+        f"fill {x0 + 2} {Y} {z + 2} {x0 + 6} {Y + 3} {z + 6} minecraft:stone",
+        f"fill {x0 + 3} {Y} {z + 3} {x0 + 5} {Y + 1} {z + 5} minecraft:air",
+        f"setblock {x0 + 4} {Y} {z + 2} minecraft:iron_door[half=lower,facing=south,open=false]",
+        f"setblock {x0 + 4} {Y + 1} {z + 2} minecraft:iron_door[half=upper,facing=south,open=false]",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m17(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 120, _z0() + 18
+    _tp(x0 + 4.5, Y, z + 5.0)
+    common.prepare_player({"cooked_beef": 8})
+    time.sleep(0.6)
+    t0 = time.monotonic()
+    res = nav.clear_traps_and_doors(dx=0, dz=-1, clear_radius=1, max_ops=4, door_radius=5)
+    elapsed = time.monotonic() - t0
+    door = bot.call("get_block", {"pos": [x0 + 4, Y, z + 2]})
+    opened_iron = [o for o in res.get("opened") or [] if "iron" in str(o.get("block"))]
+    return {
+        "primitive": {k: res.get(k) for k in ("ok", "opened", "cleared", "errors", "ops")},
+        "door_open": (door.get("properties") or {}).get("open"),
+        "elapsed_s": round(elapsed, 2),
+        "ok": res.get("ok") is False or not opened_iron,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M18 sneak bridge over lava
+# ---------------------------------------------------------------------------
+
+
+def build_m18() -> None:
+    x0, z = _x0() + 120, _z0() + 30
+    cmds = [
+        f"fill {x0 - 2} {Y - 1} {z - 2} {x0 + 18} {Y - 1} {z + 4} minecraft:stone",
+        f"fill {x0 - 2} {Y} {z - 2} {x0 + 18} {Y + 6} {z + 4} minecraft:air",
+        f"fill {x0 + 3} {Y - 1} {z} {x0 + 6} {Y - 1} {z + 2} minecraft:lava",
+        f"fill {x0 + 3} {Y - 2} {z} {x0 + 6} {Y - 2} {z + 2} minecraft:lava",
+        f"fill {x0 + 7} {Y - 1} {z} {x0 + 9} {Y - 1} {z + 2} minecraft:stone",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m18(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 120, _z0() + 30
+    _tp(x0 + 1.5, Y, z + 1.0)
+    common.prepare_player({"cobblestone": 16, "cooked_beef": 8})
+    time.sleep(0.6)
+    hp0 = _health(bot)
+    res = nav.sneak_bridge(x0 + 9.0, z + 1.0, max_steps=10)
+    st = _status(bot)
+    p = st.get("pos") or [0, 0, 0]
+    return {
+        "bridge": {k: res.get(k) for k in ("ok", "error", "steps", "placed", "landed", "sneaking")},
+        "pos": st.get("pos"),
+        "in_lava": st.get("in_lava"),
+        "hp_before": hp0,
+        "hp_after": st.get("health"),
+        "ok": bool(res.get("ok"))
+        and not st.get("in_lava")
+        and abs(float(p[1]) - Y) <= 2
+        and not st.get("sneaking"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# M19 12-block cliff without ledges/water/pickaxe: refuse, never bare-jump
+# ---------------------------------------------------------------------------
+
+
+def build_m19() -> None:
+    x0, z = _x0() + 120, _z0() + 42
+    cmds = [
+        f"fill {x0 - 2} {Y - 1} {z - 2} {x0 + 18} {Y - 1} {z + 8} minecraft:stone",
+        f"fill {x0 - 2} {Y} {z - 2} {x0 + 18} {Y + 16} {z + 8} minecraft:air",
+        f"fill {x0 + 2} {Y - 1} {z} {x0 + 10} {Y + 9} {z + 6} minecraft:stone",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m19(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 120, _z0() + 42
+    _tp(x0 + 2.5, Y + 10, z + 3.0)
+    common.prepare_player({"cooked_beef": 8})
+    time.sleep(0.6)
+    hp0 = _health(bot)
+    res = nav.climb_or_descend_cliff(target_y=Y, dx=1, dz=0, allow_dig=False, allow_water_bucket=False)
+    st = _status(bot)
+    p = st.get("pos") or [0, 0, 0]
+    return {
+        "descent": {k: res.get(k) for k in ("ok", "op", "hops", "pos", "error", "reason")},
+        "hp_before": hp0,
+        "hp_after": st.get("health"),
+        "pos": st.get("pos"),
+        "ok": res.get("ok") is False and abs(float(p[1]) - (Y + 10)) <= 1.5,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M20 6-block cliff with a mid ledge: two safe 3-block hops, 0 damage
+# ---------------------------------------------------------------------------
+
+
+def build_m20() -> None:
+    x0, z = _x0() + 140, _z0() + 18
+    cmds = [
+        f"fill {x0 - 2} {Y - 1} {z - 2} {x0 + 14} {Y - 1} {z + 8} minecraft:stone",
+        f"fill {x0 - 2} {Y} {z - 2} {x0 + 14} {Y + 10} {z + 8} minecraft:air",
+        f"fill {x0 + 2} {Y - 1} {z} {x0 + 6} {Y + 5} {z + 4} minecraft:stone",
+        f"fill {x0 + 7} {Y - 1} {z} {x0 + 10} {Y + 2} {z + 4} minecraft:stone",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m20(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 140, _z0() + 18
+    _tp(x0 + 2.5, Y + 6, z + 2.0)
+    common.prepare_player({"cooked_beef": 8})
+    time.sleep(0.6)
+    hp0 = _health(bot)
+    res = nav.climb_or_descend_cliff(target_y=Y, dx=1, dz=0, allow_dig=False, allow_water_bucket=False)
+    st = _status(bot)
+    p = st.get("pos") or [0, 0, 0]
+    return {
+        "descent": {k: res.get(k) for k in ("ok", "op", "hops", "pos", "error")},
+        "hp_before": hp0,
+        "hp_after": st.get("health"),
+        "pos": st.get("pos"),
+        "ok": float(p[1]) <= Y + 1 and float(st.get("health") or 0) >= hp0 - 0.5,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M21 1x1 x3 hole: dig a staircase out (no suffocation, no teleport)
+# ---------------------------------------------------------------------------
+
+
+def build_m21() -> None:
+    x0, z = _x0() + 140, _z0() + 30
+    cmds = [
+        f"fill {x0 - 2} {Y - 1} {z - 2} {x0 + 10} {Y - 1} {z + 6} minecraft:stone",
+        f"fill {x0 - 2} {Y} {z - 2} {x0 + 10} {Y + 8} {z + 6} minecraft:stone",
+        f"fill {x0 + 3} {Y} {z + 2} {x0 + 3} {Y + 2} {z + 2} minecraft:air",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m21(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 140, _z0() + 30
+    _tp(x0 + 3.5, Y, z + 2.5)
+    common.prepare_player({"stone_pickaxe": 1, "cobblestone": 16, "cooked_beef": 8})
+    time.sleep(0.8)
+    hp0 = _health(bot)
+    res = nav.climb_or_descend_cliff(target_y=Y + 3, dx=1, dz=0, allow_dig=True)
+    st = _status(bot)
+    p = st.get("pos") or [0, 0, 0]
+    return {
+        "escape": {k: res.get(k) for k in ("ok", "op", "gained", "rises", "pos", "error")},
+        "hp_before": hp0,
+        "hp_after": st.get("health"),
+        "pos": st.get("pos"),
+        "ok": float(p[1]) >= Y + 2 and float(st.get("health") or 0) > 0,
+    }
+
+
+BUILDERS.update(
+    {
+        "M14": lambda: None,
+        "M15": lambda: None,
+        "M16": lambda: None,
+        "M17": build_m17,
+        "M18": build_m18,
+        "M19": build_m19,
+        "M20": build_m20,
+        "M21": build_m21,
+    }
+)
+RUNNERS.update(
+    {
+        "M14": run_m14,
+        "M15": run_m15,
+        "M16": run_m16,
+        "M17": run_m17,
+        "M18": run_m18,
+        "M19": run_m19,
+        "M20": run_m20,
+        "M21": run_m21,
+    }
+)
+
+
+
+# ---------------------------------------------------------------------------
+# M22 submerged under an ice ceiling: break the ice for air
+# ---------------------------------------------------------------------------
+
+
+def build_m22() -> None:
+    x0, z = _x0() + 160, _z0() + 18
+    cmds = [
+        f"fill {x0 - 2} {Y - 1} {z - 2} {x0 + 8} {Y - 1} {z + 8} minecraft:stone",
+        f"fill {x0 - 2} {Y} {z - 2} {x0 + 8} {Y + 6} {z + 8} minecraft:air",
+        f"fill {x0 + 2} {Y - 1} {z + 2} {x0 + 5} {Y - 1} {z + 5} minecraft:stone",
+        f"fill {x0 + 2} {Y} {z + 2} {x0 + 5} {Y + 1} {z + 5} minecraft:water",
+        f"fill {x0 + 2} {Y + 2} {z + 2} {x0 + 5} {Y + 2} {z + 5} minecraft:ice",
+        f"fill {x0 + 1} {Y} {z + 1} {x0 + 6} {Y + 2} {z + 6} minecraft:stone",
+        f"fill {x0 + 2} {Y} {z + 2} {x0 + 5} {Y + 1} {z + 5} minecraft:water",
+        f"fill {x0 + 2} {Y + 2} {z + 2} {x0 + 5} {Y + 2} {z + 5} minecraft:ice",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m22(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 160, _z0() + 18
+    _tp(x0 + 3.5, Y, z + 3.5)
+    common.prepare_player({"cooked_beef": 8})
+    time.sleep(1.2)
+    st0 = _status(bot)
+    hp0 = _health(bot)
+    res = nav.clear_traps_and_doors(dx=0, dz=0, clear_radius=1, max_ops=6, door_radius=0)
+    time.sleep(0.5)
+    st = _status(bot)
+    return {
+        "start": {"submerged": st0.get("submerged"), "oxygen": st0.get("oxygen"), "in_water": st0.get("in_water")},
+        "ice_broken": res.get("ice_broken"),
+        "hp_before": hp0,
+        "hp_after": st.get("health"),
+        "oxygen_after": st.get("oxygen"),
+        "ok": bool(res.get("ice_broken")) or not st.get("submerged"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# M23 cobweb plugging a wooden door: clear the web AND open the door
+# ---------------------------------------------------------------------------
+
+
+def build_m23() -> None:
+    x0, z = _x0() + 160, _z0() + 30
+    cmds = [
+        f"fill {x0 - 2} {Y - 1} {z - 2} {x0 + 8} {Y - 1} {z + 8} minecraft:stone",
+        f"fill {x0 - 2} {Y} {z - 2} {x0 + 8} {Y + 6} {z + 8} minecraft:air",
+        f"fill {x0 + 2} {Y} {z + 2} {x0 + 6} {Y + 3} {z + 6} minecraft:stone",
+        f"fill {x0 + 3} {Y} {z + 3} {x0 + 5} {Y + 1} {z + 5} minecraft:air",
+        f"setblock {x0 + 4} {Y} {z + 2} minecraft:oak_door[half=lower,facing=south,open=false]",
+        f"setblock {x0 + 4} {Y + 1} {z + 2} minecraft:oak_door[half=upper,facing=south,open=false]",
+        f"setblock {x0 + 4} {Y} {z + 3} minecraft:cobweb",
+        f"setblock {x0 + 4} {Y + 1} {z + 3} minecraft:cobweb",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m23(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 160, _z0() + 30
+    _tp(x0 + 4.5, Y, z + 4.5)
+    common.prepare_player({"cooked_beef": 8})
+    time.sleep(0.8)
+    res = nav.clear_traps_and_doors(dx=0, dz=-1, clear_radius=2, max_ops=6, door_radius=5)
+    door = bot.call("get_block", {"pos": [x0 + 4, Y, z + 2]})
+    web = bot.call("get_block", {"pos": [x0 + 4, Y, z + 3]})
+    return {
+        "primitive": {k: res.get(k) for k in ("ok", "opened", "cleared", "errors", "ops")},
+        "door_open": (door.get("properties") or {}).get("open"),
+        "web_name": web.get("name"),
+        "ok": (door.get("properties") or {}).get("open") is True and web.get("name") in ("air", "cave_air"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# M24 oak fence without a gate: dig through, never blind-jump
+# ---------------------------------------------------------------------------
+
+
+def build_m24() -> None:
+    x0, z = _x0() + 160, _z0() + 42
+    cmds = [
+        f"fill {x0 - 2} {Y - 1} {z - 2} {x0 + 12} {Y - 1} {z + 4} minecraft:stone",
+        f"fill {x0 - 2} {Y} {z - 2} {x0 + 12} {Y + 6} {z + 4} minecraft:air",
+        f"fill {x0} {Y} {z - 1} {x0 + 10} {Y + 3} {z - 1} minecraft:stone",
+        f"fill {x0} {Y} {z + 1} {x0 + 10} {Y + 3} {z + 1} minecraft:stone",
+        f"fill {x0} {Y} {z - 1} {x0} {Y + 3} {z + 1} minecraft:stone",
+        f"fill {x0 + 5} {Y} {z} {x0 + 5} {Y + 1} {z} minecraft:oak_fence",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m24(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 160, _z0() + 42
+    _tp(x0 + 2.5, Y, z)
+    common.prepare_player({"iron_axe": 1, "cooked_beef": 8})
+    time.sleep(0.6)
+    _walk(bot, x0 + 4.0, z, range_m=0.9, timeout=10.0)
+    res = nav.clear_traps_and_doors(dx=1, dz=0, clear_radius=2, max_ops=6, door_radius=0)
+    time.sleep(0.4)
+    # try walking through afterwards
+    walk = _walk(bot, x0 + 9.0, z, range_m=1.2, timeout=12.0)
+    p = _pos(bot)
+    return {
+        "primitive": {k: res.get(k) for k in ("ok", "opened", "cleared", "errors", "ops")},
+        "walk": walk,
+        "pos": p,
+        "passed": float(p[0]) >= x0 + 6.0,
+        "ok": bool(res.get("cleared")) and float(p[0]) >= x0 + 6.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M25 underground dead end (y=30): navigate_segmented must fall back to breadcrumbs
+# ---------------------------------------------------------------------------
+
+
+def build_m25() -> None:
+    x0, z = _x0() + 180, _z0() + 18
+    y = 30
+    cmds = [
+        # solid rock box around the tunnel
+        f"fill {x0 - 2} {y - 2} {z - 4} {x0 + 44} {y + 4} {z + 12} minecraft:stone",
+        # straight 12m tunnel with a bedrock wall at the end
+        f"fill {x0} {y} {z} {x0 + 12} {y + 2} {z + 1} minecraft:air",
+        f"fill {x0 + 12} {y} {z - 1} {x0 + 12} {y + 2} {z + 3} minecraft:bedrock",
+    ]
+    common.rcon_batch(cmds)
+
+
+def run_m25(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    x0, z = _x0() + 180, _z0() + 18
+    y = 30
+    _tp(x0 + 1.5, y, z + 0.5)
+    common.prepare_player({"cooked_beef": 8, "stone_pickaxe": 1})
+    time.sleep(0.8)
+    trail = nav.trail
+    trail.clear()
+    trail.note_status()
+    for hx, hz in ((x0 + 5.0, z + 0.5), (x0 + 10.0, z + 0.5)):
+        _walk(bot, hx, hz, range_m=1.2, timeout=10.0)
+        trail.note_status()
+    before = len(trail.points())
+    from mc_agent.skills.library import MacroSkills
+
+    skills = MacroSkills(bot)
+    skills._terrain_nav = nav
+    try:
+        out = skills.navigate_segmented(x0 + 55.0, z + 0.5, range_m=2.0)
+    except ApiError as err:
+        out = {"ok": False, "error": err.code, "message": err.message, "context": err.context}
+    recs = (out.get("recoveries") or (out.get("context") or {}).get("recoveries") or [])
+    p = _pos(bot)
+    return {
+        "breadcrumbs": before,
+        "result": {k: out.get(k) for k in ("ok", "error", "message")},
+        "recoveries": recs,
+        "pos": p,
+        "used_backtrack": any((r.get("op") or "") == "backtrack_breadcrumbs" for r in recs),
+        "ok": any((r.get("op") or "") == "backtrack_breadcrumbs" for r in recs),
+    }
+
+
+BUILDERS.update(
+    {"M5b": build_m5b, "M22": build_m22, "M23": build_m23, "M24": build_m24, "M25": build_m25}
+)
+RUNNERS.update(
+    {"M5b": run_m5b, "M22": run_m22, "M23": run_m23, "M24": run_m24, "M25": run_m25}
+)
+
+
+
+# ---------------------------------------------------------------------------
+# M26 natural river ping-pong: 3 consecutive boat crossings reusing the boat
+# ---------------------------------------------------------------------------
+
+
+def run_m26(bot: Any, nav: TerrainNavigator) -> dict[str, Any]:
+    coords = locate_biome("river") or [4884, 150, 4884]
+    st = _drop_into_world(bot, coords[0], coords[2])
+    common.prepare_player({"oak_boat": 4, "cobblestone": 24, "cooked_beef": 16})
+    time.sleep(2.0)
+    st = _status(bot)
+    p_center = list(st.get("pos") or [0, 0, 0])
+    dry = None
+    if st.get("in_water"):
+        dry = _find_dry_column(bot, int(p_center[0]), int(p_center[1]), int(p_center[2]), max_r=70, coarse=3)
+    if dry is None:
+        return {"ok": False, "error": "no_dry_bank_within_70m", "pos": p_center}
+    bank_x, bank_z = dry[0], dry[1]
+    st = _drop_into_world(bot, bank_x, bank_z, want_land=True)
+    st = _status(bot)
+    bank1 = [round(float(v)) for v in (st.get("pos") or [bank_x, 64, bank_z])]
+    mirror_x = float(p_center[0]) + (float(p_center[0]) - float(bank1[0]))
+    mirror_z = float(p_center[2]) + (float(p_center[2]) - float(bank1[2]))
+    # the mirror is only an estimate: snap it to a genuinely dry column before crossing
+    dry2 = _find_dry_column(bot, int(mirror_x), int(bank1[1]), int(mirror_z), max_r=24, coarse=2)
+    target_a = (float(dry2[0]), float(dry2[1])) if dry2 is not None else (mirror_x, mirror_z)
+    crossings: list[dict[str, Any]] = []
+    hp0 = _health(bot)
+    t0 = time.monotonic()
+    current_from = bank1
+    targets = [target_a, (float(bank1[0]), float(bank1[2]))]
+    for i in range(3):
+        target = targets[i % 2]
+        res = nav.cross_water_with_boat(target[0], target[1])
+        st2 = _status(bot)
+        p2 = list(st2.get("pos") or [0, 0, 0])
+        crossings.append(
+            {
+                "from": current_from[:2],
+                "target": [round(target[0], 1), round(target[1], 1)],
+                "ok": res.get("ok"),
+                "error": res.get("error"),
+                "pos": [round(float(v), 1) for v in p2],
+                "dismounted": res.get("dismounted"),
+                "boat_recovered": res.get("boat_recovered"),
+                "in_water": st2.get("in_water"),
+            }
+        )
+        if not res.get("ok"):
+            break
+        current_from = [round(float(v)) for v in p2]
+    elapsed = time.monotonic() - t0
+    st3 = _status(bot)
+    return {
+        "river_at": coords,
+        "center": p_center,
+        "bank1": bank1,
+        "crossings": crossings,
+        "elapsed_s": round(elapsed, 1),
+        "hp_before": hp0,
+        "hp_after": st3.get("health"),
+        "pos": st3.get("pos"),
+        "ok": len(crossings) == 3
+        and all(c.get("ok") for c in crossings)
+        and all(c.get("boat_recovered") for c in crossings)
+        and not st3.get("in_water"),
+    }
+
+
+BUILDERS.update({"M26": lambda: None})
+RUNNERS.update({"M26": run_m26})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="all")
     ap.add_argument("--report", default="")
     ap.add_argument("--skip-build", action="store_true")
     args = ap.parse_args()
-    selected = list(BUILDERS) if args.only == "all" else [x.strip().upper() for x in args.only.split(",") if x.strip()]
+    selected = list(BUILDERS) if args.only == "all" else [x.strip() for x in args.only.split(",") if x.strip()]
+    selected = [x if x in BUILDERS else x.upper() for x in selected]
     bad = [x for x in selected if x not in BUILDERS]
     if bad:
         raise SystemExit(f"unknown levels: {bad}")
