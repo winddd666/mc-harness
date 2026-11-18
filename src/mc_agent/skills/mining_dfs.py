@@ -249,6 +249,10 @@ MAX_IDLE_SECONDS = 20.0
 FLUID_ABORT_LIMIT = 3
 # Three consecutive "ok but nothing happened" calls mean the shaft is a dead end.
 IDLE_CALLS_BEFORE_RELOCATE = 3
+# A broken ore drops inside its own cell, so we must be standing within pickup range of it.
+# The MC API does NOT enforce dig reach (only 1 "out_of_reach" in thousands of live digs), so
+# nothing else stops us from shattering an ore behind a wall and losing the drop forever.
+DROP_PICKUP_RADIUS_MANHATTAN = 2
 FLUID_ABORT_REASONS = frozenset({
     "fluid_or_bedrock", "unsafe_floor_or_cave", "falling_material_adjacent", "cave_breach_sealed",
 })
@@ -799,6 +803,8 @@ class MiningDFSEngine:
         self.collar_ceiling_y: int | None = None
         # Consecutive explore calls that returned "ok" without moving or gaining anything.
         self.idle_calls: int = 0
+        # Ore blocks broken whose drop could not be picked up (through-wall mining losses).
+        self.lost_drops: int = 0
         self.locked_cluster: dict[str, Any] | None = None
         self._last_radar_anchor: tuple[int, int, int] | None = None
         self.sealed_positions: set[tuple[int, int, int]] = set()
@@ -2498,6 +2504,31 @@ class MiningDFSEngine:
                 pass
         return [first]
 
+    def _drop_cell_reachable(
+        self,
+        pt: tuple[int, int, int],
+        stand: tuple[int, int, int],
+        cache: dict[tuple[int, int, int], str],
+    ) -> bool:
+        """True when the drop of `pt` would land within pickup range of our feet position."""
+        if (
+            max(abs(pt[0] - stand[0]), abs(pt[2] - stand[2])) <= 1
+            and abs(pt[1] - stand[1]) <= 1
+        ):
+            return True
+        eye = (stand[0], stand[1] + 1, stand[2])
+        for ax, ay, az in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+            nb = (pt[0] + ax, pt[1] + ay, pt[2] + az)
+            if nb in {stand, eye}:
+                return True
+            if abs(nb[0] - stand[0]) + abs(nb[1] - stand[1]) + abs(nb[2] - stand[2]) <= 1:
+                try:
+                    if self._get_block_name(nb, cache) in PASSABLE_BLOCKS:
+                        return True
+                except ApiError:
+                    continue
+        return False
+
     def _mine_vein_ore_cell(
         self,
         pt: tuple[int, int, int],
@@ -2517,6 +2548,42 @@ class MiningDFSEngine:
                 return False, 0, 0
         except ApiError:
             return False, 0, 0
+
+        # The drop lands inside pt: if we are not within pickup range, walking closer first is
+        # mandatory (the API happily breaks a 6-block-distant ore and the item is then lost).
+        stand_now = anchor
+        try:
+            st_drop = self.bot.status()
+            if st_drop.get("pos"):
+                stand_now = _floor_pos(st_drop["pos"])
+        except ApiError:
+            pass
+        # Only hard-block the clearly hopeless ones for now: the drop lands in pt and may fall a
+        # block or two into a catch cell, so 3-4 blocks can still be collected (live-verified by
+        # the wall-pocket tests). Everything strictly farther is where drops were being lost.
+        far_from_pickup = (
+            abs(pt[0] - stand_now[0]) + abs(pt[1] - stand_now[1]) + abs(pt[2] - stand_now[2])
+            > DROP_PICKUP_RADIUS_MANHATTAN + 2
+        )
+        if far_from_pickup and not self._drop_cell_reachable(pt, stand_now, cache):
+            for pp in self._find_peel_blockers(stand_now, pt, cache, max_blocks=2):
+                self._dig_cell_safely(pp, collect_rock=False, parent_node_id=0, cache=cache)
+            if not self._drop_cell_reachable(pt, stand_now, cache):
+                for ax, ay, az in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (0, 1, 0), (0, -1, 0)):
+                    nb = (pt[0] + ax, pt[1] + ay, pt[2] + az)
+                    if abs(nb[0] - stand_now[0]) + abs(nb[1] - stand_now[1]) + abs(nb[2] - stand_now[2]) > DROP_PICKUP_RADIUS_MANHATTAN:
+                        continue
+                    try:
+                        if self._get_block_name(nb, cache) not in PASSABLE_BLOCKS:
+                            continue
+                    except ApiError:
+                        continue
+                    self._move_exact(nb, timeout_ms=1500)
+                    break
+            if not self._drop_cell_reachable(pt, stand_now, cache):
+                # Leave the ore in the world (do NOT mark it unreachable): once the corridor or a
+                # branch reaches it, the same ore becomes collectable and gets harvested then.
+                return False, catch_placed, breaches_sealed
 
         hazard, adj_fluids = self._inspect_step_hazards([pt], cache)
         if hazard is not None:
@@ -2641,6 +2708,9 @@ class MiningDFSEngine:
                 cache=cache,
                 can_open_lower=outer_all_sealed,
             )
+
+        if expected_drops and not collected_ok:
+            self.lost_drops += 1
 
         # Only AFTER drop pickup is verified/finished, plug pt itself if outer cave could not be fully sealed
         if outer_cave_faces and not outer_all_sealed:

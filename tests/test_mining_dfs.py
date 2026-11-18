@@ -1587,10 +1587,12 @@ def test_fishbone_scan_harvests_wall_pocket_diamond_and_deep_reset_relocates() -
         eng.nodes[eng.collar_node_id].anchor = (0, 16, 0)
         cur_deep = (math.floor(world.pos[0]), math.floor(world.pos[1]), math.floor(world.pos[2]))
         eng.nodes[eng.active_node_id].anchor = cur_deep
+        # Contract changed on purpose (2026-11-18): a reset 38 blocks below the collar is refused
+        # instead of silently clearing the tree (live s01 burned 8 such resets in one run).
         rst = skills.mine_dfs(action="reset", strategy="fishbone_scan")
-        assert rst["ok"] is True
-        assert cur_deep in eng.exhausted_collars
-        assert rst.get("relocated_to") is not None
+        assert rst["ok"] is False
+        assert rst["stop_reason"] == "reset_needs_surface"
+        assert eng.collar_node_id is not None        # tree preserved, no silent wipe
 
 
 
@@ -1754,3 +1756,23 @@ def test_reset_on_empty_tree_is_refused_not_a_free_ok() -> None:
     assert res["ok"] is False
     assert res["stop_reason"] == "nothing_to_reset"
     assert "explore" in res["message"]
+
+
+def test_drop_reachability_requires_standing_next_to_the_ore() -> None:
+    """The dig API ignores reach, so the engine must gate on pickup range by itself."""
+    world = _MockMineWorld(start_pos=(0.5, 16.0, 0.5), surface_y=16)
+    with BotSession("tok", bot_username="ReachBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        cache = {}
+
+        # face-adjacent ore: always fine
+        assert eng._drop_cell_reachable((1, 16, 0), (0, 16, 0), cache) is True
+
+        # 4 blocks away behind solid stone: not collectable
+        solid = {(x, 16, 0): "stone" for x in range(-6, 7)}
+        assert eng._drop_cell_reachable((4, 16, 0), (0, 16, 0), dict(solid)) is False
+
+        # 2 blocks away but one neighbour is open and one step from us -> we can walk next to it
+        cache2 = dict(solid)
+        cache2[(3, 16, 0)] = "air"
+        assert eng._drop_cell_reachable((4, 16, 0), (2, 16, 0), cache2) is True
