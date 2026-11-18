@@ -2532,6 +2532,64 @@ class MiningDFSEngine:
                     continue
         return False
 
+    def _climb_out(self, *, deadline: float, max_attempts: int = 40) -> dict[str, Any]:
+        """Climb to the surface datum in ONE call: probe directions and keep going.
+
+        Live s09/s12: one `staircase(up, steps=6)` per model turn (10-20s each) plus one wasted
+        turn per blocked direction made a 120-block climb cost 10-15 minutes. Doing the probing
+        and the repetition in-call turns that into 1-3 turns.
+        """
+        start_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+        target_y = (int(self.collar_ceiling_y) - 20) if self.collar_ceiling_y is not None else start_y
+        dirs = ["north", "south", "east", "west"]
+        if getattr(self, "_climb_dir", None) in dirs:
+            dirs.remove(self._climb_dir)
+            dirs.insert(0, self._climb_dir)
+        attempts = 0
+        stuck_dirs: set[str] = set()
+        fell_back_to_pillar = False
+        while time.monotonic() < deadline and attempts < max_attempts:
+            cur_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+            if cur_y >= target_y:
+                break
+            moved = 0
+            for d in [x for x in dirs if x not in stuck_dirs]:
+                attempts += 1
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    res = self.skills.dig_staircase(direction=d, steps=8, vertical="up", stop_on_ore=False)
+                except (ApiError, ValueError, KeyError, TypeError):
+                    stuck_dirs.add(d)
+                    continue
+                gained = _floor_pos(self.bot.status().get("pos") or [0, cur_y, 0])[1] - int(cur_y)
+                if gained > 0:
+                    self._climb_dir = d
+                    moved += gained
+                    cur_y += gained
+                    break          # keep using the direction that just worked
+                stuck_dirs.add(d)
+            if moved > 0:
+                stuck_dirs.clear()
+                continue
+            if not fell_back_to_pillar:
+                fell_back_to_pillar = True
+                try:
+                    self.skills.dig_staircase(direction="pillar", steps=6, vertical="pillar", stop_on_ore=False)
+                except (ApiError, ValueError, KeyError, TypeError):
+                    pass
+                continue
+            break
+        end_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+        return {
+            "start_y": start_y,
+            "end_y": end_y,
+            "climbed": end_y - start_y,
+            "target_y": target_y,
+            "reached": end_y >= target_y,
+            "attempts": attempts,
+        }
+
     def _surface_climb_hint(self) -> str:
         """Tell the model exactly how high to climb before calling explore again."""
         if self.collar_ceiling_y is None:
@@ -4214,6 +4272,23 @@ class MiningDFSEngine:
         act = str(action or "explore").strip().lower()
         if act == "reset":
             return self.reset(geofence=geofence)
+        if act in {"climb_out", "climb"}:
+            climb = self._climb_out(deadline=time.monotonic() + max_duration_s)
+            ok_climb = bool(climb["reached"])
+            return {
+                "ok": ok_climb,
+                "requires_replan": not ok_climb,
+                "action": "climb_out",
+                "strategy": self.strategy,
+                "stop_reason": "surface_reached" if ok_climb else "climb_incomplete",
+                "climb": climb,
+                "message": (
+                    "已爬回地表高度，可以 explore 开新井。"
+                    if ok_climb
+                    else f"本轮只爬到 y={climb['end_y']}（目标 y={climb['target_y']}），可再次 climb_out。"
+                ),
+                "tree": self.snapshot(),
+            }
         if act == "status":
             return {"ok": True, "action": "status", "strategy": self.strategy, "tree": self.snapshot()}
 
@@ -4357,6 +4432,34 @@ class MiningDFSEngine:
             ):
                 # Live s01/s03: after a deep reset this path opened a "collar" at y=-54,
                 # so every later reset looked legitimate and the run churned underground.
+                # First try to climb out right here so the model does not have to orchestrate it.
+                if time.monotonic() + 6.0 < deadline:
+                    climb = self._climb_out(deadline=deadline)
+                    if climb["reached"]:
+                        cur_pos = _floor_pos(self.bot.status().get("pos") or cur_pos)
+                        restored = self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref)
+                        if not restored:
+                            solid_pos2, dirs2, err2 = self._ensure_solid_collar_anchor(
+                                cur_pos, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
+                            )
+                            if err2 is None or dirs2:
+                                self._init_collar(solid_pos2, target_y=self.target_y,
+                                                  geofence=geofence, viable_dirs=dirs2)
+                                restored = True
+                    else:
+                        return {
+                            "ok": False,
+                            "requires_replan": True,
+                            "action": act,
+                            "strategy": self.strategy,
+                            "stop_reason": "needs_surface_climb",
+                            "climb": climb,
+                            "message": (
+                                f"已尝试自动爬升：y {climb['start_y']}→{climb['end_y']}"
+                                f"（目标 y={climb['target_y']}）。" + self._surface_climb_hint()
+                            ),
+                            "tree": self.snapshot(),
+                        }
                 return {
                     "ok": False,
                     "requires_replan": True,

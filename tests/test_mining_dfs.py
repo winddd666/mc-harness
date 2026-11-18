@@ -1786,3 +1786,32 @@ def test_drowning_counts_toward_water_trap_abandonment() -> None:
         assert eng._note_fluid_abort("in_water") is False
         assert eng._note_fluid_abort("fluid_or_bedrock") is False
         assert eng._note_fluid_abort("in_water") is True     # 3rd water-related abort
+
+
+def test_climb_out_action_reports_progress_and_target(monkeypatch) -> None:
+    """One call must own probe+repeat; the model should not spend a turn per blocked direction."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="ClimbBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64                     # target = 44
+        calls: list[str] = []
+
+        def fake_status():
+            return {"pos": [0.5, float(world.pos[1]), 0.5], "health": 20.0, "food": 20.0, "alive": True}
+
+        def fake_stair(direction=None, steps=0, vertical="down", stop_on_ore=None):
+            if direction in {"north", "south", "east", "west"}:
+                calls.append(direction)
+                world.pos = [world.pos[0], min(64.0, world.pos[1] + 4.0), world.pos[2]]
+                return {"ok": True, "steps_done": 4}
+            return {"ok": False}
+
+        monkeypatch.setattr(eng.bot, "status", fake_status)
+        monkeypatch.setattr(eng.skills, "dig_staircase", fake_stair)
+        res = eng.run(action="climb_out", target_y=16, max_duration_s=20.0)
+
+    assert res["action"] == "climb_out"
+    assert res["climb"]["target_y"] == 44
+    assert res["climb"]["reached"] is True
+    assert res["climb"]["climbed"] >= 24
+    assert calls
