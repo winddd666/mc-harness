@@ -2629,6 +2629,27 @@ class MiningDFSEngine:
                 except (ApiError, ValueError, KeyError, TypeError):
                     pass
                 continue
+            # All four stair directions blocked by the same overhang (live s13: water directly
+            # overhead rejected north/south/east/west identically). Tunnel sideways out from
+            # under it, then resume climbing instead of giving up.
+            escaped = False
+            for d in dirs:
+                if time.monotonic() >= deadline:
+                    break
+                before = _floor_pos(self.bot.status().get("pos") or [0, cur_y, 0])
+                try:
+                    self.skills.dig_level_tunnel(direction=d, steps=3, stop_on_ore=False)
+                except (ApiError, ValueError, KeyError, TypeError):
+                    continue
+                after = _floor_pos(self.bot.status().get("pos") or [0, cur_y, 0])
+                if after != before:
+                    self._climb_dir = d
+                    escaped = True
+                    break
+            if escaped:
+                stuck_dirs.clear()
+                fell_back_to_pillar = False
+                continue
             break
         end_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
         return {
