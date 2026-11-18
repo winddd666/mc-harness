@@ -937,6 +937,10 @@ class MiningDFSEngine:
         self.stone_pick_rock_equips = 0
         self.ore_pick_equips = 0
         self.dug_during_return = 0
+        # A reset starts a fresh shaft: a stale hazard streak made the very next explore
+        # return shaft_exhausted instantly (live s03: reset -> explore -> shaft_exhausted x6).
+        self.fluid_aborts = 0
+        self.fluid_abandoned_deep = False
 
         relocated_from: list[int] | None = None
         relocated_to: list[int] | None = None
@@ -2308,6 +2312,12 @@ class MiningDFSEngine:
 
         self.nodes = restored
         self.collar_node_id = collar_id
+        # Restoring a saved shaft is a fresh attempt: don't inherit a hazard streak that would
+        # make the next explore bail out as shaft_exhausted on its first branch.
+        self.fluid_aborts = 0
+        self.fluid_abandoned_deep = False
+        if self.collar_ceiling_y is None or restored[collar_id].anchor[1] > self.collar_ceiling_y:
+            self.collar_ceiling_y = int(restored[collar_id].anchor[1])
         self.next_node_id = max(restored.keys(), default=1) + 1
         active_id = int(best_sh.get("active_node_id") or collar_id)
         self.active_node_id = active_id if active_id in restored else collar_id
@@ -4818,12 +4828,6 @@ class MiningDFSEngine:
             stop_reason = "quota_reached"
 
         returned_collar_on_low = False
-        if stop_reason == "shaft_exhausted" and self.fluid_abandoned_deep:
-            out_res["message"] = (
-                "本井连续遇到水/洞穴中止，已归档废弃；但你仍在地下深处。"
-                "请先调用 action='return_collar' 沿自建巷道返回地表（不要 action='reset'），"
-                "到地表后再次 explore 会自动在新井口重新开井。"
-            )
         if stop_reason == "pickaxe_low":
             returned_collar_on_low = self._maybe_return_collar_for_resupply(counts_after, min_hp_ref=min_hp_ref)
 
@@ -4862,6 +4866,12 @@ class MiningDFSEngine:
             }
         if returned_collar_on_low:
             out_res["returned_to_collar_for_resupply"] = True
+        if stop_reason == "shaft_exhausted" and self.fluid_abandoned_deep:
+            out_res["message"] = (
+                "本井连续遇到水/洞穴中止，已归档废弃；但你仍在地下深处。"
+                "请先调用 action='return_collar' 沿自建巷道返回地表（不要 action='reset'），"
+                "到地表后再次 explore 会自动在新井口重新开井。"
+            )
         if stop_reason == "pickaxe_low":
             out_res["message"] = _pickaxe_low_hint(counts_after)
         if stop_reason == "no_progress":

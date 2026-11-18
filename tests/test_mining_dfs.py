@@ -1702,3 +1702,30 @@ def test_reset_refused_when_a_deep_second_collar_tries_to_move_again() -> None:
     assert res["stop_reason"] == "reset_needs_surface"
     assert "explore" in res["message"]
     assert surface.node_id in eng.nodes
+
+
+def test_shaft_exhausted_message_is_built_after_result_dict_exists() -> None:
+    """Regression: s04 crashed with UnboundLocalError because out_res was written too early."""
+    import pathlib as _pl
+
+    src = _pl.Path("src/mc_agent/skills/mining_dfs.py").read_text(encoding="utf-8")
+    created = src.index("out_res: dict[str, Any] = {")
+    used = src.index('if stop_reason == "shaft_exhausted" and self.fluid_abandoned_deep:')
+    assert used > created
+
+
+def test_manual_reset_clears_the_hazard_streak() -> None:
+    """Live s03: stale fluid_aborts made reset -> explore return shaft_exhausted instantly, x6."""
+    world = _MockMineWorld(start_pos=(0.5, 64.0, 0.5), surface_y=71)
+    with BotSession("tok", bot_username="StreakBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.fluid_aborts = 3
+        eng.fluid_abandoned_deep = True
+        eng.collar_ceiling_y = 71
+        node = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                edge_from_parent=None, branches=[])
+        eng.collar_node_id = node.node_id
+        res = eng.reset(geofence=None)                 # allowed: we are at the collar level
+    assert res["ok"] is True
+    assert eng.fluid_aborts == 0
+    assert eng.fluid_abandoned_deep is False
