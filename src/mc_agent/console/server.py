@@ -572,32 +572,37 @@ class ConsoleController:
             self._default_max_calls = chosen_max_calls
             self._default_thinking = chosen_thinking
 
-            # Case 1: Active run -> inject into InputInbox!
+            # Case 1: Active run -> inject into InputInbox! (if inbox just closed during teardown race, fall through to new turn)
             if self._active_turn_id is not None and self._active_inbox is not None:
-                active_turn = self._find_turn_locked(self._active_turn_id)
-                self._active_inbox.submit(text, immediate=is_urgent)
-                steer_item = {
-                    "id": self._next_id("steer"),
-                    "kind": "user_steer",
-                    "input_id": None,
-                    "text": text,
-                    "priority": "urgent" if is_urgent else "normal",
-                    "status": "queued",
-                    "boundary": None,
-                    "created_at": _utc_iso(),
-                }
-                if active_turn is not None:
-                    active_turn["items"].append(steer_item)
-                turn_id = self._active_turn_id
-                steered_payload = deepcopy(steer_item)
-                self._emit_ws({"type": "turn_item_upsert", "turn_id": turn_id, "item": steered_payload})
-                return {
-                    "ok": True,
-                    "mode": "steered",
-                    "immediate": is_urgent,
-                    "turn_id": turn_id,
-                    "item": steered_payload,
-                }
+                try:
+                    self._active_inbox.submit(text, immediate=is_urgent)
+                except RuntimeError:
+                    self._active_turn_id = None
+                    self._active_inbox = None
+                else:
+                    active_turn = self._find_turn_locked(self._active_turn_id)
+                    steer_item = {
+                        "id": self._next_id("steer"),
+                        "kind": "user_steer",
+                        "input_id": None,
+                        "text": text,
+                        "priority": "urgent" if is_urgent else "normal",
+                        "status": "queued",
+                        "boundary": None,
+                        "created_at": _utc_iso(),
+                    }
+                    if active_turn is not None:
+                        active_turn["items"].append(steer_item)
+                    turn_id = self._active_turn_id
+                    steered_payload = deepcopy(steer_item)
+                    self._emit_ws({"type": "turn_item_upsert", "turn_id": turn_id, "item": steered_payload})
+                    return {
+                        "ok": True,
+                        "mode": "steered",
+                        "immediate": is_urgent,
+                        "turn_id": turn_id,
+                        "item": steered_payload,
+                    }
 
             # Case 2: Idle -> start a fresh worker run on persistent BotSession
             stem = datetime.now().strftime("%Y%m%d-%H%M%S-%f")

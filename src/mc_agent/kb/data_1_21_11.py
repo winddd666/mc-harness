@@ -447,6 +447,118 @@ RECIPES_1_21: dict[str, dict[str, Any]] = {
         "keywords": ["酿造台", "brewing_stand", "brew_potion", "药水"],
         "notes": "1 烈焰棒 + 3 圆石，用于下界药水酿造链。",
     },
+    "blaze_powder": {
+        "id": "blaze_powder",
+        "table_3x3": False,
+        "yield_count": 2,
+        "ingredients": {"blaze_rod": 1},
+        "keywords": ["烈焰粉", "blaze_powder", "酿造燃料", "末影之眼"],
+        "notes": "1 根烈焰棒研磨成 2 份烈焰粉；既是酿造台燃料，也是末影之眼材料。",
+    },
+    "ender_eye": {
+        "id": "ender_eye",
+        "table_3x3": False,
+        "yield_count": 1,
+        "ingredients": {"ender_pearl": 1, "blaze_powder": 1},
+        "keywords": ["末影之眼", "ender_eye", "要塞", "follow_ender_eye", "enter_the_end"],
+        "notes": "1 末影珍珠 + 1 烈焰粉；要塞传送门需 12 个，另需 1~2 个投掷寻路。",
+    },
+    "paper": {
+        "id": "paper",
+        "table_3x3": False,
+        "yield_count": 3,
+        "ingredients": {"sugar_cane": 3},
+        "keywords": ["纸", "paper", "书", "book"],
+        "notes": "3 甘蔗横排合 3 纸（2x2 即可）。",
+    },
+    "book": {
+        "id": "book",
+        "table_3x3": False,
+        "yield_count": 1,
+        "ingredients": {"paper": 3, "leather": 1},
+        "keywords": ["书", "book", "附魔台", "书架"],
+        "notes": "3 纸 + 1 皮革无序合成；附魔台需要 1 本书。",
+    },
+    "target": {
+        "id": "target",
+        "table_3x3": True,
+        "yield_count": 1,
+        "ingredients": {"hay_block": 1, "redstone": 4},
+        "keywords": ["标靶", "target", "bullseye", "正中靶心"],
+        "notes": "1 干草块居中 + 4 红石十字；30 格外射中红心解锁 adventure/bullseye。",
+    },
+    "note_block": {
+        "id": "note_block",
+        "table_3x3": True,
+        "yield_count": 1,
+        "ingredients": {"any_planks": 8, "redstone": 1},
+        "keywords": ["音符盒", "note_block", "birthday_song", "悦灵"],
+        "notes": "8 木板围 1 红石；悦灵把蛋糕丢在音符盒旁可解锁 husbandry/birthday_song。",
+    },
+    "cake": {
+        "id": "cake",
+        "table_3x3": True,
+        "yield_count": 1,
+        "ingredients": {"milk_bucket": 3, "sugar": 2, "egg": 1, "wheat": 3},
+        "keywords": ["蛋糕", "cake", "birthday_song", "悦灵"],
+        "notes": "3 牛奶桶 + 2 糖 + 1 蛋 + 3 小麦；放置后每个切片回 2 饱食。",
+    },
+    "lead": {
+        "id": "lead",
+        "table_3x3": False,
+        "yield_count": 2,
+        "ingredients": {"string": 4, "slime_ball": 1},
+        "keywords": ["拴绳", "lead", "leash", "青蛙", "山羊"],
+        "notes": "4 线 + 1 黏液球无序合成 2 根；拴青蛙/山羊/炽足兽用。",
+    },
+    "wolf_armor": {
+        "id": "wolf_armor",
+        "table_3x3": True,
+        "yield_count": 1,
+        "ingredients": {"armadillo_scute": 6},
+        "keywords": ["狼铠", "wolf_armor", "犰狳鳞甲", "repair_wolf_armor"],
+        "notes": "6 犰狳鳞甲 3x2 合成；对狼右键装备，对已装备狼用鳞甲右键修复。",
+    },
+    "beacon": {
+        "id": "beacon",
+        "table_3x3": True,
+        "yield_count": 1,
+        "ingredients": {"glass": 5, "obsidian": 3, "nether_star": 1},
+        "keywords": ["信标", "beacon", "create_beacon", "下界之星"],
+        "notes": "5 玻璃 + 3 黑曜石 + 1 下界之星；放下后需矿物块金字塔底座才能激活。",
+    },
+    "respawn_anchor": {
+        "id": "respawn_anchor",
+        "table_3x3": True,
+        "yield_count": 1,
+        "ingredients": {"crying_obsidian": 6, "glowstone": 3},
+        "keywords": ["重生锚", "respawn_anchor", "charge_respawn_anchor", "萤石"],
+        "notes": "6 哭泣黑曜石 + 3 萤石；下界重生用，最多用 4 个萤石充能。",
+    },
+    "comparator": {
+        "id": "comparator",
+        "table_3x3": True,
+        "yield_count": 1,
+        "ingredients": {"stone": 3, "redstone_torch": 3, "quartz": 1},
+        "keywords": ["比较器", "comparator", "read_power_of_chiseled_bookshelf", "雕纹书架"],
+        "notes": "3 石头 + 3 红石火把 + 1 下界石英；贴在雕纹书架侧面读取信号。",
+    },
+    "chiseled_bookshelf": {
+        "id": "chiseled_bookshelf",
+        "table_3x3": True,
+        "yield_count": 1,
+        "ingredients": {"any_planks": 6, "any_wooden_slab": 3},
+        "keywords": ["雕纹书架", "chiseled_bookshelf", "the_power_of_books"],
+        "notes": "6 木板 + 3 木台阶；可插 6 本书，比较器读取最后一本书的信号。",
+    },
+    "copper_bulb": {
+        "id": "copper_bulb",
+        "table_3x3": True,
+        "yield_count": 4,
+        "ingredients": {"copper_block": 3, "blaze_rod": 1, "redstone": 1},
+        "keywords": ["铜灯", "copper_bulb", "lighten_up", "刮氧化"],
+        "notes": "3 铜块 + 1 烈焰棒 + 1 红石得 4 个；斧右键氧化铜灯刮亮解锁 lighten_up。",
+    },
 }
 
 ORES_1_21: dict[str, dict[str, Any]] = {
@@ -606,11 +718,11 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
 ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     "minecraft:story/root": {
         "difficulty": "easy",
-        "how_to": "打开工作台或任意途径获得 workbench/crafting_table 即触发（mc_skill_craft_gear('crafting_table')）。",
+        "how_to": "获得crafting_table（工作台）即触发，无需打开。",
     },
     "minecraft:story/mine_stone": {
         "difficulty": "easy",
-        "how_to": "持木镐 mc_skill_mine_blocks(['stone'], count=3) 挖取圆石放入背包即可。",
+        "how_to": "木镐挖stone得cobblestone入包即触发。",
     },
     "minecraft:story/upgrade_tools": {
         "difficulty": "easy",
@@ -618,23 +730,23 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:story/smelt_iron": {
         "difficulty": "easy",
-        "how_to": "石镐挖 iron_ore 得 raw_iron 后，调 mc_skill_smelt('raw_iron', count=...) 烧出并取出 iron_ingot。",
+        "how_to": "石镐挖iron_ore得raw_iron，熔炉烧成iron_ingot并取出。",
     },
     "minecraft:story/iron_tools": {
         "difficulty": "easy",
-        "how_to": "有 3 个 iron_ingot 后调用 mc_skill_craft_gear('iron_pickaxe')。",
+        "how_to": "3铁锭+2木棍在工作台合iron_pickaxe。",
     },
     "minecraft:story/obtain_armor": {
         "difficulty": "easy",
-        "how_to": "最省仅需 4 铁锭合 iron_boots 或 5 铁锭合 iron_helmet（mc_skill_craft_gear）。",
+        "how_to": "4铁锭合iron_boots或5铁锭合iron_helmet并穿戴。",
     },
     "minecraft:story/lava_bucket": {
         "difficulty": "medium",
-        "how_to": "持铁桶 bucket 对静止岩浆源方块调用 mc_interact(x, y, z, item='bucket')。",
+        "how_to": "持bucket对静止岩浆源右键装成lava_bucket。",
     },
     "minecraft:story/deflect_arrow": {
         "difficulty": "medium",
-        "how_to": "副手装备 shield 后面对骷髅开 mc_posture(shield=True) 举盾格挡一发箭。",
+        "how_to": "副手shield，面向骷髅举盾格挡一发箭。",
     },
     "minecraft:story/form_obsidian": {
         "difficulty": "medium",
@@ -650,23 +762,23 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:story/enter_the_nether": {
         "difficulty": "hard",
-        "how_to": "搭黑曜石门并用 mc_interact(x,y,z,item='flint_and_steel') 点燃后走入。",
+        "how_to": "黑曜石门框用flint_and_steel点燃后走入。",
     },
     "minecraft:husbandry/root": {
         "difficulty": "easy",
-        "how_to": "在 food < 20 时吃下任意可食用食物（mc_use_item 或 mc_skill_stabilize 自动吃烤肉/面包/苹果）。",
+        "how_to": "吃下任意食物（蛋糕除外）即触发。",
     },
     "minecraft:husbandry/plant_seed": {
         "difficulty": "easy",
-        "how_to": "打草得 wheat_seeds -> 合 stone_hoe -> mc_interact(x,y,z,item='stone_hoe') 锄地为 farmland -> mc_interact(x,y,z,item='wheat_seeds') 播种。",
+        "how_to": "锄头锄地成farmland，再持wheat_seeds右键播种。",
     },
     "minecraft:husbandry/breed_an_animal": {
         "difficulty": "easy",
-        "how_to": "找两只距离近的同种动物（牛/羊用 wheat，鸡用 wheat_seeds），分别 mc_interact(entity_id, item=...) 喂食。",
+        "how_to": "两只同种动物各喂一次：牛/羊用wheat，鸡用wheat_seeds。",
     },
     "minecraft:husbandry/fishy_business": {
         "difficulty": "medium",
-        "how_to": "合成 fishing_rod，到天然开阔水域边缘调用 mc_use_item(item='fishing_rod', x=..., y=..., z=...) 钓上 1 条鱼。",
+        "how_to": "持fishing_rod对开阔水域使用，钓上1条鱼。",
     },
     "minecraft:husbandry/tame_an_animal": {
         "difficulty": "medium",
@@ -686,15 +798,15 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:adventure/kill_a_mob": {
         "difficulty": "easy",
-        "how_to": "持石剑/铁剑 + 副手盾牌，安全锁定单只孤立僵尸/蜘蛛用 mc_attack(entity_id) 击杀（远离苦力怕与末影人）。",
+        "how_to": "持剑+副手盾，击杀单只僵尸/蜘蛛等敌对生物。",
     },
     "minecraft:adventure/shoot_arrow": {
         "difficulty": "medium",
-        "how_to": "背包带 bow 和 arrow，用 mc_shoot(weapon='bow', entity_id=...) 命中任意生物。",
+        "how_to": "持bow+arrow，用mc_shoot命中任意生物。",
     },
     "minecraft:adventure/trade": {
         "difficulty": "medium",
-        "how_to": "找到村民或流浪商人，用 mc_window_view/mc_window_act 完成一次绿宝石交易。",
+        "how_to": "与村民/流浪商人完成一次绿宝石交易。",
     },
     "minecraft:adventure/craft_a_decorated_pot": {
         "difficulty": "medium",
@@ -702,14 +814,318 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:adventure/brush_armadillo": {
         "difficulty": "medium",
-        "how_to": "需在恶地/热带草原找犰狳，手持 brush 用 mc_interact(entity_id, item='brush') 刷下鳞甲。",
+        "how_to": "持brush对犰狳右键，刷下armadillo_scute。",
     },
     "minecraft:adventure/throw_trident": {
         "difficulty": "hard",
-        "how_to": "trident 不可合成，只能击杀河流/海洋中罕见手持三叉戟的 drowned 极低概率掉落；获得后再用 mc_shoot(weapon='trident', entity_id=...) 命中生物。若周围无溺尸或背包无 trident，应先跳过该项。",
+        "how_to": "击杀手持三叉戟的溺尸获trident，再用mc_shoot命中生物。",
     },
     "minecraft:adventure/arbalistic": {
         "difficulty": "hard",
-        "how_to": "需在附魔台获得穿透 IV(piercing) 弩并用单支箭一次穿透击杀 5 个生物，属于高成本后期项。",
+        "how_to": "穿透IV弩一箭贯穿击杀5个生物。",
+    },
+    "minecraft:story/cure_zombie_villager": {
+        "difficulty": "hard",
+        "how_to": "水瓶+发酵蛛眼酿弱化药水，喷僵尸村民后喂金苹果，等3-5分钟。",
+    },
+    "minecraft:story/enter_the_end": {
+        "difficulty": "hard",
+        "how_to": "集12个末影之眼嵌入要塞传送门框，跳入传送门。",
+    },
+    "minecraft:story/follow_ender_eye": {
+        "difficulty": "hard",
+        "how_to": "投出末影之眼并跟随其飞行方向，找到要塞即触发。",
+    },
+    "minecraft:story/mine_diamond": {
+        "difficulty": "medium",
+        "how_to": "铁镐及以上挖diamond_ore/deepslate_diamond_ore，钻石入包即解锁。",
+    },
+    "minecraft:nether/all_effects": {
+        "difficulty": "hard",
+        "how_to": "同一时刻叠满全部状态效果（含1.21新效果），需药水/信标/生物配合。",
+    },
+    "minecraft:nether/all_potions": {
+        "difficulty": "hard",
+        "how_to": "同一时刻拥有全部药水效果；1.21含蛀蚀/渗浆/织网/风爆。",
+    },
+    "minecraft:nether/create_full_beacon": {
+        "difficulty": "hard",
+        "how_to": "4层矿物块金字塔(164块)上放信标，先击杀凋灵取nether_star。",
+    },
+    "minecraft:nether/netherite_armor": {
+        "difficulty": "hard",
+        "how_to": "锻造台用下界合金升级模板+下界合金锭升级4件钻石甲并穿戴。",
+    },
+    "minecraft:nether/summon_wither": {
+        "difficulty": "hard",
+        "how_to": "灵魂沙摆T形4块，上方放3个凋灵骷髅头召唤凋灵。",
+    },
+    "minecraft:nether/uneasy_alliance": {
+        "difficulty": "hard",
+        "how_to": "用栓绳/钓鱼竿把恶魂引过下界传送门到主世界后击杀。",
+    },
+    "minecraft:nether/create_beacon": {
+        "difficulty": "hard",
+        "how_to": "5玻璃+3黑曜石+nether_star合beacon，放在矿物块底座上激活。",
+    },
+    "minecraft:nether/get_wither_skull": {
+        "difficulty": "hard",
+        "how_to": "在下界要塞击杀凋灵骷髅，拾取wither_skeleton_skull。",
+    },
+    "minecraft:nether/obtain_ancient_debris": {
+        "difficulty": "hard",
+        "how_to": "钻石镐在下界Y8-22挖ancient_debris；床或TNT炸开更快。",
+    },
+    "minecraft:nether/ride_strider_in_overworld_lava": {
+        "difficulty": "hard",
+        "how_to": "给炽足兽装鞍，在主世界≥50格岩浆湖上骑乘行走。",
+    },
+    "minecraft:nether/charge_respawn_anchor": {
+        "difficulty": "medium",
+        "how_to": "放下respawn_anchor后连续用4个萤石右键充能至满。",
+    },
+    "minecraft:nether/explore_nether": {
+        "difficulty": "medium",
+        "how_to": "走访下界5种群系：荒地/灵魂沙峡谷/绯红森林/诡异森林/玄武岩三角洲。",
+    },
+    "minecraft:nether/find_bastion": {
+        "difficulty": "medium",
+        "how_to": "在下界探索找到bastion_remnant（堡垒遗迹）即触发。",
+    },
+    "minecraft:nether/find_fortress": {
+        "difficulty": "medium",
+        "how_to": "在下界探索找到nether_fortress（下界要塞）即触发。",
+    },
+    "minecraft:nether/loot_bastion": {
+        "difficulty": "medium",
+        "how_to": "在堡垒遗迹打开任意战利品箱（金块区/疣猪兽棚等）。",
+    },
+    "minecraft:nether/obtain_blaze_rod": {
+        "difficulty": "medium",
+        "how_to": "在下界要塞击杀烈焰人，拾取blaze_rod。",
+    },
+    "minecraft:nether/ride_strider": {
+        "difficulty": "medium",
+        "how_to": "给炽足兽装鞍后骑上，在岩浆表面行走一段距离。",
+    },
+    "minecraft:nether/brew_potion": {
+        "difficulty": "medium",
+        "how_to": "酿造台放烈焰粉燃料+水瓶+下界疣，酿出任意药水。",
+    },
+    "minecraft:nether/obtain_crying_obsidian": {
+        "difficulty": "medium",
+        "how_to": "用钻石镐挖crying_obsidian（堡垒遗迹/废弃传送门常见）。",
+    },
+    "minecraft:nether/distract_piglin": {
+        "difficulty": "easy",
+        "how_to": "把金锭或金装备丢给猪灵，使其分心去拾取。",
+    },
+    "minecraft:end/elytra": {
+        "difficulty": "hard",
+        "how_to": "经末地折跃门到末地船，取物品框里的elytra并穿上滑翔。",
+    },
+    "minecraft:end/find_end_city": {
+        "difficulty": "hard",
+        "how_to": "用末影珍珠穿过末地折跃门到外岛，找到end_city。",
+    },
+    "minecraft:end/levitate": {
+        "difficulty": "hard",
+        "how_to": "被潜影贝子弹命中，获得漂浮(levitation)效果即触发。",
+    },
+    "minecraft:end/enter_end_gateway": {
+        "difficulty": "medium",
+        "how_to": "把末影珍珠投入末地折跃门，传送至外岛。",
+    },
+    "minecraft:adventure/hero_of_the_village": {
+        "difficulty": "hard",
+        "how_to": "带不祥之兆进村触发袭击，杀光劫掠者守住村庄。",
+    },
+    "minecraft:adventure/revaulting": {
+        "difficulty": "hard",
+        "how_to": "试炼密室用不祥之瓶触发不祥试炼，以不祥试炼钥匙开不祥宝库。",
+    },
+    "minecraft:adventure/totem_of_undying": {
+        "difficulty": "hard",
+        "how_to": "副手持totem_of_undying，受致命伤时图腾触发复活。",
+    },
+    "minecraft:adventure/trade_at_world_height": {
+        "difficulty": "hard",
+        "how_to": "把村民运到Y≥320的世界最高处，完成一次交易。",
+    },
+    "minecraft:adventure/two_birds_one_arrow": {
+        "difficulty": "hard",
+        "how_to": "用带穿透附魔的弩一箭射杀两只幻翼。",
+    },
+    "minecraft:adventure/craft_decorated_pot_using_only_sherds": {
+        "difficulty": "medium",
+        "how_to": "只用4个陶片（不放红砖）在工作台合成decorated_pot。",
+    },
+    "minecraft:adventure/heart_transplanter": {
+        "difficulty": "medium",
+        "how_to": "在两段pale_oak_log之间按正确朝向放置creaking_heart。",
+    },
+    "minecraft:adventure/kill_mob_near_sculk_catalyst": {
+        "difficulty": "medium",
+        "how_to": "在sculk_catalyst周围8格内击杀一只生物。",
+    },
+    "minecraft:adventure/play_jukebox_in_meadows": {
+        "difficulty": "medium",
+        "how_to": "在草甸(meadow)群系放置jukebox并放入唱片播放。",
+    },
+    "minecraft:adventure/sniper_duel": {
+        "difficulty": "medium",
+        "how_to": "用弓在至少50格外射杀一只骷髅（水平距离）。",
+    },
+    "minecraft:adventure/summon_iron_golem": {
+        "difficulty": "medium",
+        "how_to": "4个铁块摆T形，顶部放carved_pumpkin召唤iron_golem。",
+    },
+    "minecraft:adventure/trim_with_any_armor_pattern": {
+        "difficulty": "medium",
+        "how_to": "锻造台用任意盔甲纹饰模板+材料给盔甲打上纹饰。",
+    },
+    "minecraft:adventure/under_lock_and_key": {
+        "difficulty": "medium",
+        "how_to": "在试炼密室用trial_key开启普通vault（宝库）。",
+    },
+    "minecraft:adventure/voluntary_exile": {
+        "difficulty": "medium",
+        "how_to": "击杀头顶灾厄旗帜的pillager captain（袭击队长）。",
+    },
+    "minecraft:adventure/who_needs_rockets": {
+        "difficulty": "medium",
+        "how_to": "用wind_charge炸自己，向上弹射至少8格。",
+    },
+    "minecraft:adventure/avoid_vibration": {
+        "difficulty": "medium",
+        "how_to": "潜行靠近sculk_sensor且不触发它（Sneak 100）。",
+    },
+    "minecraft:adventure/bullseye": {
+        "difficulty": "medium",
+        "how_to": "在至少30格外用箭命中target方块红心。",
+    },
+    "minecraft:adventure/crafters_crafting_crafters": {
+        "difficulty": "medium",
+        "how_to": "给已放好的crafter红石信号，让它合成另一个crafter。",
+    },
+    "minecraft:adventure/lighten_up": {
+        "difficulty": "medium",
+        "how_to": "用斧右键氧化铜灯(copper_bulb)，刮除氧化使其变亮。",
+    },
+    "minecraft:adventure/minecraft_trials_edition": {
+        "difficulty": "medium",
+        "how_to": "进入trial_chamber（试炼密室）即触发。",
+    },
+    "minecraft:adventure/ol_betsy": {
+        "difficulty": "medium",
+        "how_to": "用crossbow射出至少一支箭。",
+    },
+    "minecraft:adventure/read_power_of_chiseled_bookshelf": {
+        "difficulty": "medium",
+        "how_to": "把comparator贴在chiseled_bookshelf侧面读取信号。",
+    },
+    "minecraft:adventure/salvage_sherd": {
+        "difficulty": "medium",
+        "how_to": "用brush刷可疑沙/砾石，获得任意pottery_sherd。",
+    },
+    "minecraft:adventure/spyglass_at_ghast": {
+        "difficulty": "medium",
+        "how_to": "手持spyglass对准恶魂(ghast)观察。",
+    },
+    "minecraft:adventure/spyglass_at_parrot": {
+        "difficulty": "medium",
+        "how_to": "手持spyglass对准鹦鹉(parrot)观察。",
+    },
+    "minecraft:adventure/use_lodestone": {
+        "difficulty": "medium",
+        "how_to": "放置lodestone后，持compass对其右键绑定。",
+    },
+    "minecraft:adventure/walk_on_powder_snow_with_leather_boots": {
+        "difficulty": "medium",
+        "how_to": "穿leather_boots在powder_snow上行走而不陷入。",
+    },
+    "minecraft:adventure/whos_the_pillager_now": {
+        "difficulty": "medium",
+        "how_to": "用crossbow射杀一名pillager。",
+    },
+    "minecraft:husbandry/feed_snifflet": {
+        "difficulty": "hard",
+        "how_to": "手持torchflower_seeds右键喂幼年嗅探兽(snifflet)。",
+    },
+    "minecraft:husbandry/froglights": {
+        "difficulty": "hard",
+        "how_to": "背包同时持有ochre/verdant/pearlescent三种froglight。",
+    },
+    "minecraft:husbandry/leash_all_frog_variants": {
+        "difficulty": "hard",
+        "how_to": "分别用lead拴过温/冷/暖三种青蛙（不需同时）。",
+    },
+    "minecraft:husbandry/allay_deliver_cake_to_note_block": {
+        "difficulty": "medium",
+        "how_to": "给allay蛋糕，再在note_block旁让它把蛋糕丢下。",
+    },
+    "minecraft:husbandry/allay_deliver_item_to_player": {
+        "difficulty": "medium",
+        "how_to": "给allay物品，让它把拾到的同类物品丢回给你。",
+    },
+    "minecraft:husbandry/axolotl_in_a_bucket": {
+        "difficulty": "medium",
+        "how_to": "用水桶右键美西螈，得到bucket_of_axolotl。",
+    },
+    "minecraft:husbandry/kill_axolotl_target": {
+        "difficulty": "medium",
+        "how_to": "与美西螈一起攻击并击杀一只敌对生物。",
+    },
+    "minecraft:husbandry/make_a_sign_glow": {
+        "difficulty": "medium",
+        "how_to": "放置告示牌后持glow_ink_sac右键使其发光。",
+    },
+    "minecraft:husbandry/obtain_sniffer_egg": {
+        "difficulty": "medium",
+        "how_to": "在暖水海底废墟刷suspicious_sand，刷出sniffer_egg。",
+    },
+    "minecraft:husbandry/plant_any_sniffer_seed": {
+        "difficulty": "medium",
+        "how_to": "在耕地上种下torchflower_seeds或pitcher_pod。",
+    },
+    "minecraft:husbandry/remove_wolf_armor": {
+        "difficulty": "medium",
+        "how_to": "对穿着wolf_armor的狼用shears取下护甲。",
+    },
+    "minecraft:husbandry/repair_wolf_armor": {
+        "difficulty": "medium",
+        "how_to": "对穿受损wolf_armor的狼连续用armadillo_scute右键至满。",
+    },
+    "minecraft:husbandry/ride_a_boat_with_a_goat": {
+        "difficulty": "medium",
+        "how_to": "把山羊引入船中，然后坐进同一条船。",
+    },
+    "minecraft:husbandry/silk_touch_nest": {
+        "difficulty": "medium",
+        "how_to": "用精准采集镐挖下含3只蜜蜂的bee_nest/beehive。",
+    },
+    "minecraft:husbandry/tadpole_in_a_bucket": {
+        "difficulty": "medium",
+        "how_to": "用水桶右键蝌蚪，得到bucket_of_tadpole。",
+    },
+    "minecraft:husbandry/place_dried_ghast_in_water": {
+        "difficulty": "medium",
+        "how_to": "把dried_ghast方块放入或浸入水中。",
+    },
+    "minecraft:husbandry/safely_harvest_honey": {
+        "difficulty": "medium",
+        "how_to": "蜂巢下点campfire，再用glass_bottle右键取蜂蜜。",
+    },
+    "minecraft:husbandry/tactical_fishing": {
+        "difficulty": "medium",
+        "how_to": "用水桶右键任意鱼，直接装进桶里。",
+    },
+    "minecraft:husbandry/wax_on": {
+        "difficulty": "medium",
+        "how_to": "手持honeycomb右键铜块上蜡。",
+    },
+    "minecraft:husbandry/wax_off": {
+        "difficulty": "easy",
+        "how_to": "用斧右键已上蜡的铜块，刮掉蜡层。",
     },
 }

@@ -23,3 +23,6 @@ dist/
 tools/teammate_combat_kit/testkit.env
 tools/teammate_combat_kit/.fightbot_token.json
 tools/teammate_combat_kit/combat_test_report.json
+
+# Isolated feature worktrees
+.worktrees/

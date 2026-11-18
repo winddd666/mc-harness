@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from .geofence import VoidGeofence
@@ -197,6 +198,24 @@ def _summarize_inventory(inv: dict[str, Any]) -> tuple[dict[str, int], str]:
     return counts, summary
 
 
+def _is_surface_explore_task(task: str = "", target_advancement: str | None = None) -> bool:
+    """识别纯地表探索/漫游/寻路任务（兼容“不要原地挖矿/观察裸露矿脉”等否定或观察表述），避免 HUD 误导模型下井挖矿。"""
+    adv = (target_advancement or "").removeprefix("minecraft:").lower()
+    if adv and adv not in {"adventure/adventuring_time", "adventure/sleep_in_bed"}:
+        return False
+    low = (task or "").lower()
+    if not any(k in low for k in ("探索", "巡游", "漫游", "roam", "explore", "寻路", "找村庄", "找群系")):
+        return False
+    # 剥离否定子句（如“不要长时间原地挖矿或下潜”“禁止挖矿”）与纯观察词（“裸露矿脉”），只检查正向采矿目标
+    cleaned = re.sub(r"(不要|禁止|切勿|勿|别|无需|不用)[^，。；,.!\n]{0,20}", " ", low)
+    cleaned = cleaned.replace("裸露矿脉", " ").replace("露头矿", " ")
+    positive_mining_markers = (
+        "挖到", "挖钻", "挖铁", "下井", "探矿", "采矿", "黑曜石", "下界", "深板岩",
+        "mine_dfs", "diamond", "iron_ingot", "iron_pickaxe", "obsidian", "nether",
+    )
+    return not any(m in cleaned for m in positive_mining_markers)
+
+
 def compute_goal_gap_hint(
     counts: dict[str, int],
     *,
@@ -228,6 +247,11 @@ def compute_goal_gap_hint(
     dim = normalize_dimension(dimension)
     adv = (target_advancement or "").removeprefix("minecraft:")
     task_low = (task or "").lower()
+
+    if _is_surface_explore_task(task, target_advancement):
+        if bot_y is not None and bot_y < 55 and dim == "overworld":
+            return f"当前为地表探索任务但落入地下(y={bot_y})，请优先调mc_skill_staircase(vertical='up',steps=8)或mc_skill_unstick回地表继续漫游"
+        return "当前为地表探索/漫游模式：请用mc_move_to向远处未探索区块推进并观察地标/实体，严禁调mc_skill_mine_dfs下井"
 
     def _wood_shortage_hint(context_prefix: str) -> str | None:
         if bot_y is None:
@@ -482,7 +506,12 @@ def build_world_hud(
         f"{name}@{blk.get('pos')}({float(blk.get('dist', 0)):.1f}m)"
         for name, blk in sorted_types[:9]
     ]
-    line3 = "16m暴露: " + (", ".join(res_bits) if res_bits else "暂无明显资源(可阶梯下探或换向寻路)")
+    empty_res_msg = (
+        "暂无明显暴露方块(建议向未探索方向继续漫游)"
+        if _is_surface_explore_task(task, target_advancement)
+        else "暂无明显资源(可阶梯下探或换向寻路)"
+    )
+    line3 = "16m暴露: " + (", ".join(res_bits) if res_bits else empty_res_msg)
 
     gap_hint = compute_goal_gap_hint(
         counts,

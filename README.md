@@ -1,12 +1,12 @@
 # Minecraft Competition Agent (`mc-agent`)
 
-基于 [agent-api-spec-dist.md](agent-api-spec-dist.md)（Minecraft Agent API v1.3.7）、[docs/HANDOFF-20261115.md](docs/HANDOFF-20261115.md)（**2026-11-15 全栈架构、常驻后台运维与实机修复完整归档**）、[docs/endurance-findings-20261116.md](docs/endurance-findings-20261116.md)（**2026-11-16 65 分钟长程深潜压测复盘与思考吞吐实测**）、[docs/TODO.md](docs/TODO.md)（**当前阶段成绩基线、底座修复待办与 AltoClef 脚本化二阶段路线图**）、[AGENTS.md](AGENTS.md)（**项目操作与沙箱边界规范**）、[docs/mc-gameplay-handoff.md](docs/mc-gameplay-handoff.md)（**游戏侧专版：盲玩机制、现成技能库与知识库/成就路线共建指南**）、[docs/team-briefing.md](docs/team-briefing.md)（**接口能力与真机踩坑速览**）、[docs/expedition-20261114.md](docs/expedition-20261114.md)（2 小时托管远征与双模型实测报告）、[docs/advancements-1.21.11.md](docs/advancements-1.21.11.md)（`1.21.11` 全部 125 项原版进度表）与 [benchmarks/nju-api-20261109/REPORT.md](benchmarks/nju-api-20261109/REPORT.md) 构建的竞赛 Bot 客户端底座，当前已完成 **NMO 皮肤站角色管理**、**MC Agent API 认证与会话守护**、**1.21.11 知识库与宏技能库**、**多模型自主远征 Harness**、**实景直播看板（`mc-live`）** 及 **Codex 风格 Web 控制台（`mc-console`）**。
+基于 [agent-api-spec-dist.md](agent-api-spec-dist.md)（Minecraft Agent API v1.3.14，上游 [Zyzzyva0381/mc-agent-api](https://github.com/Zyzzyva0381/mc-agent-api)）、[docs/HANDOFF-20261115.md](docs/HANDOFF-20261115.md)（**2026-11-15 全栈架构、常驻后台运维与实机修复完整归档**）、[docs/endurance-findings-20261116.md](docs/endurance-findings-20261116.md)（**2026-11-16 65 分钟长程深潜压测复盘与思考吞吐实测**）、[docs/TODO.md](docs/TODO.md)（**当前阶段成绩基线、底座修复待办与 AltoClef 脚本化二阶段路线图**）、[AGENTS.md](AGENTS.md)（**项目操作与沙箱边界规范**）、[docs/mc-gameplay-handoff.md](docs/mc-gameplay-handoff.md)（**游戏侧专版：盲玩机制、现成技能库与知识库/成就路线共建指南**）、[docs/team-briefing.md](docs/team-briefing.md)（**接口能力与真机踩坑速览**）、[docs/expedition-20261114.md](docs/expedition-20261114.md)（2 小时托管远征与双模型实测报告）、[docs/advancements-1.21.11.md](docs/advancements-1.21.11.md)（`1.21.11` 全部 125 项原版进度表）与 [benchmarks/nju-api-20261109/REPORT.md](benchmarks/nju-api-20261109/REPORT.md) 构建的竞赛 Bot 客户端底座，当前已完成 **NMO 皮肤站角色管理**、**MC Agent API 认证与会话守护**、**1.21.11 知识库与宏技能库**、**多模型自主远征 Harness**、**实景直播看板（`mc-live`）** 及 **Codex 风格 Web 控制台（`mc-console`）**。
 
 > **2026-11-16 最新阶段基线**：`pytest` **`132 passed`**；前期托管累计解锁 **`5 / 125`** 项原版进度；在 `BeastBot_01` 上完成 **`65m 04s` / `168` 轮**纯目标自主深潜（零复读死循环、合出 4 把铁镐、最深 `Y=-37`、开矿道贴近 `deepslate_diamond_ore` 仅 `0.7` 格，`qwen3.6` 思考中位数 `5.66s`、均频 `2.58 RPM`），详细复盘与下阶段清单见 [`docs/TODO.md`](docs/TODO.md)。
 
 ## 关键接口与现状摘要
 
-1. **MC Bot 控制接口（v1.3.7）**
+1. **MC Bot 控制接口（v1.3.14）**
    - Base URL：`https://apiin.nmo.net.cn/api/v1`（校园网直连默认，keep-alive 实测 ~9–11ms；校外备选公网隧道：`https://mc-api.windywindie.top/api/v1`，~164–177ms）
    - 认证：`POST /auth/login` 换取 Bearer Token；**同一角色重复登录会使旧 Token 立即失效**，因此本地通过 `.state/tokens.json`（权限 `0600`）按角色缓存并探活复用。
    - 连接与就绪：登录后自动连接并切往 `survivaltest` 比赛服；需轮询 `GET /status` 直至 `result.ready == true` 后才可调用动作接口（否则返回 `wrong_server`）。断线重连间隔 ≥ 30s；60s 内死亡 3 次触发 5 分钟 `death_loop_cooldown`。
@@ -58,7 +58,7 @@ with provisioned.session as bot:
     blocks = bot.call("find_blocks", {"radius": 16})
 ```
 
-## 本地仿赛测试服（Leaves `1.21.11` + `mc-agent-api` `v1.3.7`）
+## 本地仿赛测试服（Leaves `1.21.11` + `mc-agent-api` `v1.3.14`）
 
 已在队友机器（SSH 别名 `5ease`，`D:\mc-server\` 绿色自包含部署）搭建与线上比赛同款的 **Leaves `1.21.11` + 开源 `mc-agent-api`（`offline` + `direct` 模式）**，支持任意合法 Bot 名（`3–16` 位字母/数字/下划线）免积分秒进服。
 

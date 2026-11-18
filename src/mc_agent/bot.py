@@ -24,7 +24,7 @@ MIN_RECONNECT_INTERVAL_S = 30.0
 
 
 class BotSession:
-    """Authenticated client for a single Minecraft bot (`agent-api-spec-dist.md` v1.3.7)."""
+    """Authenticated client for a single Minecraft bot (`agent-api-spec-dist.md` v1.3.14)."""
 
     def __init__(
         self,
@@ -39,13 +39,10 @@ class BotSession:
         self._token = token
         self.bot_username = bot_username
         self.base_url = base_url.rstrip("/")
+        self._timeout = timeout
+        self._transport = transport
         self._reauth_callback = reauth_callback
-        self._client = httpx.Client(
-            base_url=self.base_url,
-            timeout=httpx.Timeout(timeout, connect=15.0),
-            transport=transport,
-            trust_env=should_trust_env(self.base_url),
-        )
+        self._client = self._build_http_client()
         self._last_disconnect_mono: float | None = None
         self._recovering_quarantine: bool = False
         self._last_inventory: dict[str, Any] | None = None
@@ -94,6 +91,14 @@ class BotSession:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def _build_http_client(self) -> httpx.Client:
+        return httpx.Client(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(self._timeout, connect=15.0),
+            transport=self._transport,
+            trust_env=should_trust_env(self.base_url),
+        )
+
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"}
 
@@ -113,17 +118,31 @@ class BotSession:
         timeout_options = {} if timeout_s is None else {"timeout": timeout_s}
 
         for attempt in range(2):
-            if upper_method == "GET":
-                resp = self._client.get(rel_path, headers=self._headers(), params=params, **timeout_options)
-            else:
-                resp = self._client.request(
-                    upper_method,
-                    rel_path,
-                    headers=self._headers(),
-                    params=params,
-                    json={} if body is None else body,
-                    **timeout_options,
-                )
+            try:
+                if upper_method == "GET":
+                    resp = self._client.get(rel_path, headers=self._headers(), params=params, **timeout_options)
+                else:
+                    resp = self._client.request(
+                        upper_method,
+                        rel_path,
+                        headers=self._headers(),
+                        params=params,
+                        json={} if body is None else body,
+                        **timeout_options,
+                    )
+            except httpx.RemoteProtocolError:
+                # Node keep-alive idle close ("Server disconnected without sending a response"):
+                # no response bytes were sent; refresh pooled socket and retry once.
+                if attempt == 0:
+                    if self._transport is None:
+                        try:
+                            self._client.close()
+                        except Exception:
+                            pass
+                        self._client = self._build_http_client()
+                    time.sleep(0.15)
+                    continue
+                raise
 
             try:
                 payload = resp.json()

@@ -822,7 +822,7 @@ def test_mining_dfs_64_block_radar_steers_spine_toward_distant_diamond() -> None
 
     with BotSession("tok", bot_username="Miner", transport=httpx.MockTransport(world.handler)) as bot:
         skills = MacroSkills(bot)
-        res = skills.mine_dfs(target="diamond", goal_count=1, target_y=-54, max_duration_s=25.0)
+        res = skills.mine_dfs(target="diamond", goal_count=1, target_y=-54, max_duration_s=25.0, strategy="radar")
 
     assert res["ok"] is True
     assert res["stop_reason"] == "quota_reached"
@@ -940,6 +940,8 @@ def test_dual_strategy_fishbone_ignores_distant_cave_while_radar_triages_hostile
     monkeypatch: Any,
 ) -> None:
     """Compare `fishbone` vs `v5` (bug-fixed v4) vs `radar` (with hostile triage + LocC-v4 surgical parapet)."""
+    monkeypatch.delenv("MC_DFS_STRATEGY", raising=False)
+    assert normalize_dfs_strategy(None) == "fishbone_scan"
     monkeypatch.setenv("MC_DFS_STRATEGY", "fishbone")
     assert normalize_dfs_strategy(None) == "fishbone"
     monkeypatch.setenv("MC_DFS_STRATEGY", "v5")

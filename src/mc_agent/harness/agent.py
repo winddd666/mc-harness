@@ -119,7 +119,21 @@ def _infer_extra_tools_for_task(task: str, explicit: set[str] | list[str] | tupl
         extras.update({"mc_attack", "mc_posture", "mc_look"})
     if any(k in low for k in ("弓", "弩", "bow", "crossbow", "arrow", "箭", "shoot", "射")):
         extras.update({"mc_shoot", "mc_use_item", "mc_posture"})
-    if any(k in low for k in ("附魔", "enchant", "容器", "箱", "chest", "crafter", "合成器", "交易", "window")):
+    if any(k in low for k in ("附魔", "enchant")):
+        extras.update({"mc_skill_enchant", "mc_window_view"})
+    if any(k in low for k in ("交易", "trade", "村民", "villager")):
+        extras.update({"mc_skill_trade", "mc_window_view"})
+    if any(k in low for k in ("酿造", "酿药", "brew", "brewing_stand")):
+        extras.update({"mc_skill_brew", "mc_window_view"})
+    if any(k in low for k in ("容器", "箱", "木桶", "chest", "barrel", "存取", "仓库")):
+        extras.update({"mc_skill_container", "mc_window_view"})
+    if any(k in low for k in ("锻造", "纹饰", "下界合金", "smithing", "trim", "netherite")):
+        extras.update({"mc_skill_smithing", "mc_window_view"})
+    if any(k in low for k in ("铁砧", "anvil", "改名")):
+        extras.update({"mc_skill_anvil", "mc_window_view"})
+    if any(k in low for k in ("切石机", "stonecutter")):
+        extras.update({"mc_skill_stonecutter", "mc_window_view"})
+    if any(k in low for k in ("crafter", "合成器", "window", "战利品")):
         extras.update({"mc_window_view", "mc_window_act"})
     if any(k in low for k in ("床", "bed", "睡觉", "重生")):
         extras.update({"mc_skill_bind_bed", "mc_interact"})
@@ -779,6 +793,7 @@ def run_mc_agent(
     extra_tools: set[str] | list[str] | tuple[str, ...] | None = None,
     geofence: VoidGeofence | None = None,
     target_advancement: str | None = None,
+    system_prompt_override: str | None = None,
 ) -> dict:
     """基于 nano-agent 有界循环驱动单个 Minecraft Bot 完成任务。"""
     if max_calls < 1:
@@ -833,8 +848,15 @@ def run_mc_agent(
     else:
         resolved_extras = None
     repeat_guard = _RepeatFailureGuard(toolset)
+    base_reg = toolset.registry(profile=tool_profile, extra_tools=resolved_extras)
+    if (
+        tool_profile == "compact"
+        and extra_tools is None
+        and any(neg in task for neg in ("不要长时间原地挖矿", "不要挖矿", "禁止挖矿", "勿挖矿", "不要下潜"))
+    ):
+        base_reg = base_reg.exclude_tools("mc_skill_mine_dfs")
     registry = (
-        toolset.registry(profile=tool_profile, extra_tools=resolved_extras)
+        base_reg
         .with_tools(context.result_tool(compact=(tool_profile == "compact")))
         .map_tools(repeat_guard.wrap_tool)
     )
@@ -854,7 +876,7 @@ def run_mc_agent(
         except Exception as exc:
             initial_user_content += f"\n\n[开局状态拉取失败：{exc}]"
 
-    system_prompt = MC_COMPACT_SYSTEM_PROMPT if tool_profile == "compact" else MC_SYSTEM_PROMPT
+    system_prompt = system_prompt_override or (MC_COMPACT_SYSTEM_PROMPT if tool_profile == "compact" else MC_SYSTEM_PROMPT)
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": initial_user_content},
@@ -1381,6 +1403,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=1600,
         help="单条工具输出进入上下文的字符上限（至少 256，默认 1600）",
     )
+    parser.add_argument("--system-prompt-file", default=None, help="用文件内容覆盖默认 system prompt（用于地表探索/找村庄等专用模式）")
     return parser
 
 
@@ -1391,6 +1414,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--max-calls 必须大于 0")
     if args.tool_output_chars < 256:
         parser.error("--tool-output-chars 至少为 256")
+    system_prompt_override = None
+    if args.system_prompt_file:
+        prompt_path = Path(args.system_prompt_file)
+        if not prompt_path.is_file():
+            parser.error(f"system prompt 文件不存在：{prompt_path}")
+        system_prompt_override = prompt_path.read_text(encoding="utf-8").strip()
+        if not system_prompt_override:
+            parser.error(f"system prompt 文件为空：{prompt_path}")
 
     geofence = VoidGeofence.from_env(dotenv_path=args.env_file)
     if args.island_radius is not None:
@@ -1491,6 +1522,7 @@ def main(argv: list[str] | None = None) -> int:
                     context_mode=args.context_mode,
                     tool_profile=args.tool_profile,
                     geofence=geofence,
+                    system_prompt_override=system_prompt_override,
                 )
 
             if args.interactive and inbox is not None:

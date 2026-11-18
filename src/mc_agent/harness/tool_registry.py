@@ -102,6 +102,10 @@ class ToolRegistry:
     def select(self, *names):
         return ToolRegistry(self._tools[name] for name in names)
 
+    def exclude_tools(self, *names):
+        excluded = set(names)
+        return ToolRegistry(t for n, t in self._tools.items() if n not in excluded)
+
     def with_tools(self, *tools):
         return ToolRegistry([*self._tools.values(), *tools])
 

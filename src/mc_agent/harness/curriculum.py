@@ -436,7 +436,17 @@ def _infer_extra_tools_for_advancement(adv_id: str, how_to: str = "") -> tuple[s
         extra.extend(["mc_attack", "mc_posture"])
     if any(k in text for k in ("bow", "arrow", "crossbow", "trident", "bullseye", "sniper", "arbalistic", "two_birds")):
         extra.extend(["mc_shoot", "mc_use_item", "mc_posture"])
-    if any(k in text for k in ("enchant", "crafter", "brew", "trade", "chest", "pot", "vault")):
+    if "enchant" in text or "附魔" in text:
+        extra.extend(["mc_skill_enchant", "mc_window_view"])
+    if any(k in text for k in ("trade", "villager", "交易", "村民")):
+        extra.extend(["mc_skill_trade", "mc_window_view"])
+    if any(k in text for k in ("brew", "酿", "药水")):
+        extra.extend(["mc_skill_brew", "mc_window_view"])
+    if any(k in text for k in ("trim", "smithing", "netherite_armor", "锻造", "纹饰", "下界合金")):
+        extra.extend(["mc_skill_smithing", "mc_window_view"])
+    if any(k in text for k in ("chest", "loot", "bastion", "箱", "战利品")):
+        extra.extend(["mc_skill_container", "mc_window_view"])
+    if any(k in text for k in ("crafter", "pot", "vault", "bookshelf", "jukebox")):
         extra.extend(["mc_window_view", "mc_window_act"])
     if "bed" in text or "sleep" in text:
         extra.append("mc_skill_bind_bed")

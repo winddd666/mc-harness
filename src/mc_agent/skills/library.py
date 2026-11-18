@@ -276,6 +276,38 @@ def _inventory_counts(bot: BotSession) -> dict[str, int]:
     return _inventory_counts_from_raw(bot.inventory())
 
 
+def _window_item_entries(items: Any) -> list[dict[str, Any]]:
+    """Normalize `{item: count}` or `[{item,count,...}]` into window-op entries."""
+    if isinstance(items, dict):
+        raw: list[Any] = [{"item": key, "count": value} for key, value in items.items()]
+    elif isinstance(items, (list, tuple)):
+        raw = list(items)
+    else:
+        return []
+    entries: list[dict[str, Any]] = []
+    for row in raw:
+        if isinstance(row, str):
+            entries.append({"item": resolve_item_alias(row), "count": 1})
+            continue
+        if not isinstance(row, dict):
+            continue
+        name = row.get("item") or row.get("name")
+        if not name:
+            continue
+        try:
+            count = int(row.get("count") or 1)
+        except (TypeError, ValueError):
+            count = 1
+        if count < 1:
+            continue
+        entry: dict[str, Any] = {"item": resolve_item_alias(str(name)), "count": count}
+        for key in ("slot", "potion", "enchanted", "custom_name"):
+            if row.get(key) is not None:
+                entry[key] = row[key]
+        entries.append(entry)
+    return entries
+
+
 def _log_to_planks_name(log_name: str) -> str:
     if log_name.endswith("_stem"):
         return log_name.removesuffix("_stem") + "_planks"
@@ -986,6 +1018,8 @@ class MacroSkills:
         step_m: float = 24.0,
         geofence: Any = None,
         ignore_hurt: bool = False,
+        skip_direct: bool = False,
+        hop_timeout_ms: int = 12000,
     ) -> dict[str, Any]:
         """Relay long-distance navigation (>36m) in ~24m segments with ±35 deg detour fallback."""
         st0 = self.bot.status()
@@ -995,23 +1029,37 @@ class MacroSkills:
         stop_on = ["death"] if (ignore_hurt or st0.get("in_water")) else ["hurt", "death"]
 
         if total_hdist <= 36.0:
-            payload: dict[str, Any] = {"x": float(x), "z": float(z), "range": range_m, "stop_on": stop_on}
+            payload: dict[str, Any] = {
+                "x": float(x),
+                "z": float(z),
+                "range": range_m,
+                "timeout": max(4000, int(hop_timeout_ms)),
+                "stop_on": stop_on,
+            }
             if y is not None:
                 payload["y"] = float(y)
             res = self.bot.call("move_to", payload)
             return {"ok": True, "segmented": False, "segments_done": 1, "result": res}
 
-        # Try direct first in case chunks are already loaded and unobstructed
-        try:
-            direct_payload: dict[str, Any] = {"x": float(x), "z": float(z), "range": range_m, "stop_on": stop_on}
-            if y is not None:
-                direct_payload["y"] = float(y)
-            res_d = self.bot.call("move_to", direct_payload)
-            return {"ok": True, "segmented": False, "segments_done": 1, "result": res_d}
-        except ApiError as direct_err:
-            if direct_err.code in {"hurt", "death", "interrupted"}:
-                raise
-            last_err = direct_err
+        last_err: ApiError = ApiError("path_not_found", f"unable to reach ({x:.1f}, {z:.1f})")
+        if not skip_direct:
+            # Try direct first in case chunks are already loaded and unobstructed
+            try:
+                direct_payload: dict[str, Any] = {
+                    "x": float(x),
+                    "z": float(z),
+                    "range": range_m,
+                    "timeout": 18000,
+                    "stop_on": stop_on,
+                }
+                if y is not None:
+                    direct_payload["y"] = float(y)
+                res_d = self.bot.call("move_to", direct_payload)
+                return {"ok": True, "segmented": False, "segments_done": 1, "result": res_d}
+            except ApiError as direct_err:
+                if direct_err.code in {"hurt", "death", "interrupted"}:
+                    raise
+                last_err = direct_err
 
         max_hops = min(18, max(3, int(math.ceil(total_hdist / max(10.0, step_m))) + 3))
         segs_done = 0
@@ -1036,7 +1084,13 @@ class MacroSkills:
             for hx, hz, hy, hr in hop_targets:
                 if geofence is not None and geofence.check_point(hx, hz, action="navigate_segmented") is not None:
                     continue
-                hop_payload: dict[str, Any] = {"x": round(hx, 2), "z": round(hz, 2), "range": hr, "stop_on": stop_on}
+                hop_payload: dict[str, Any] = {
+                    "x": round(hx, 2),
+                    "z": round(hz, 2),
+                    "range": hr,
+                    "timeout": max(4000, int(hop_timeout_ms)),
+                    "stop_on": stop_on,
+                }
                 if hy is not None:
                     hop_payload["y"] = float(hy)
                 try:
@@ -3222,6 +3276,484 @@ class MacroSkills:
         if pre_dropped:
             out_smelt["auto_dropped"] = pre_dropped
         return out_smelt
+
+    # ---- 比赛窗口接口（window/view + window/act）无策略原子封装 ----
+    # 以下函数只做“给定明确参数 -> 调窗口接口 -> 原样返回结果”，
+    # 不判断前置、不排序、不自动跳转任务；调用方负责何时调用。
+
+    @staticmethod
+    def _window_target(
+        *,
+        block: str | None = None,
+        entity_id: int | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> dict[str, Any] | None:
+        if entity_id is not None:
+            return {"entity_id": int(entity_id)}
+        if x is not None and y is not None and z is not None:
+            return {"pos": [int(x), int(y), int(z)]}
+        if block:
+            return {"block": str(block)}
+        return None
+
+    @staticmethod
+    def _window_api_error(err: ApiError) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": err.code,
+            "message": err.message,
+            **dict(err.context or {}),
+        }
+
+    def _resolve_nearby_container_pos(self, block: str | None) -> list[int] | None:
+        """Resolve nearest container coordinates within interaction reach when caller only passed `block='chest'`."""
+        clean = str(block or "").removeprefix("minecraft:").strip().lower()
+        if not clean:
+            return None
+        is_container = clean in {"chest", "barrel", "trapped_chest"} or clean.endswith("shulker_box")
+        if not is_container:
+            return None
+        try:
+            found = self.bot.call("find_blocks", {"radius": 6, "types": [clean], "limit": 1})
+            blks = (found or {}).get("blocks") or []
+            if blks and isinstance(blks[0], dict) and isinstance(blks[0].get("pos"), list) and len(blks[0]["pos"]) >= 3:
+                p = blks[0]["pos"]
+                return [int(p[0]), int(p[1]), int(p[2])]
+        except Exception:
+            pass
+        return None
+
+    def _sync_container_window(
+        self,
+        result: dict[str, Any],
+        *,
+        pos: list[int] | None,
+        block: str | None,
+        dim: str | None = None,
+    ) -> bool:
+        """Push the final `window` description into WorldMemory container snapshot."""
+        try:
+            inner = result.get("window") if isinstance(result.get("window"), dict) else result
+            if not isinstance(inner, dict):
+                return False
+            resolved_pos = pos
+            if resolved_pos is None:
+                eff_block = block or (str(inner.get("target")) if isinstance(inner.get("target"), str) else None)
+                resolved_pos = self._resolve_nearby_container_pos(eff_block)
+            if dim is None:
+                try:
+                    dim = str((self.bot.status() or {}).get("dimension") or "overworld")
+                except Exception:
+                    dim = "overworld"
+            return bool(
+                self._get_world_memory().update_container_from_window(
+                    inner,
+                    fallback_pos=resolved_pos,
+                    fallback_block=block,
+                    dim=dim,
+                )
+            )
+        except Exception:
+            return False
+
+    def container_batch(
+        self,
+        items: Any,
+        *,
+        action: str = "put",
+        block: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+        dim: str | None = None,
+    ) -> dict[str, Any]:
+        """Batch `put`/`take` on the `container` section of a chest/barrel window."""
+        if action not in ("put", "take"):
+            return {"ok": False, "error": "bad_args", "message": "action 必须是 put 或 take。"}
+        entries = _window_item_entries(items)
+        if not entries:
+            return {"ok": False, "error": "bad_args", "message": "items 不能为空。"}
+        target = self._window_target(block=block, x=x, y=y, z=z)
+        if target is None:
+            return {"ok": False, "error": "bad_args", "message": "需要 block 或 (x, y, z)。"}
+
+        ops: list[dict[str, Any]] = []
+        for entry in entries:
+            op: dict[str, Any] = {
+                "op": action,
+                "item": entry["item"],
+                "count": entry["count"],
+                "to" if action == "put" else "from": "container",
+            }
+            if action == "put":
+                for key in ("slot", "potion", "enchanted", "custom_name"):
+                    if key in entry:
+                        op[key] = entry[key]
+            ops.append(op)
+
+        pos = [int(x), int(y), int(z)] if x is not None and y is not None and z is not None else None
+        try:
+            result = self.bot.call("window/act", {"target": target, "ops": ops})
+        except ApiError as err:
+            return self._window_api_error(err)
+
+        if pos is None:
+            pos = self._resolve_nearby_container_pos(block)
+        synced = self._sync_container_window(result, pos=pos, block=block, dim=dim)
+        return {
+            "ok": True,
+            "action": action,
+            "ops": ops,
+            "done": result.get("done"),
+            "window": result.get("window"),
+            "container_pos": pos,
+            "memory_synced": synced,
+        }
+
+    def container_deposit(
+        self,
+        items: Any,
+        *,
+        block: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+        dim: str | None = None,
+    ) -> dict[str, Any]:
+        """Batch-deposit items into a chest/barrel (`container` section)."""
+        return self.container_batch(items, action="put", block=block, x=x, y=y, z=z, dim=dim)
+
+    def container_withdraw(
+        self,
+        items: Any,
+        *,
+        block: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+        dim: str | None = None,
+    ) -> dict[str, Any]:
+        """Batch-withdraw items from a chest/barrel (`container` section)."""
+        return self.container_batch(items, action="take", block=block, x=x, y=y, z=z, dim=dim)
+
+    def enchant_item_once(
+        self,
+        item: str,
+        option: int,
+        *,
+        lapis_count: int | None = None,
+        take: bool = True,
+        block: str | None = "enchanting_table",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> dict[str, Any]:
+        """One enchanting-table combo in a single `/window/act` call.
+
+        Order is fixed by the API: put item -> put lapis -> select option -> take item.
+        `option` is the API option index (0-based); lapis cost is `option + 1` when omitted.
+
+        Upstream 1.3.14 note: repeated calls can leave mineflayer's window inventory
+        stale even though the server applied the enchant. Prefer the tool-level
+        `mc_skill_enchant` wrapper, which verifies `/inventory` and reconnects once.
+        """
+        target = self._window_target(block=block, x=x, y=y, z=z)
+        if target is None:
+            return {"ok": False, "error": "bad_args", "message": "需要 block 或 (x, y, z)。"}
+        try:
+            opt = int(option)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad_args", "message": "option 必须是整数。"}
+        if opt < 0:
+            return {"ok": False, "error": "bad_args", "message": "option 从 0 开始。"}
+        lapis = opt + 1 if lapis_count is None else int(lapis_count)
+        ops: list[dict[str, Any]] = [
+            {"op": "put", "item": resolve_item_alias(item), "to": "item"},
+            {"op": "put", "item": "lapis_lazuli", "count": max(1, lapis), "to": "lapis"},
+            {"op": "select", "option": opt},
+        ]
+        if take:
+            ops.append({"op": "take", "from": "item"})
+
+        try:
+            result = self.bot.call("window/act", {"target": target, "ops": ops})
+        except ApiError as err:
+            return self._window_api_error(err)
+        return {"ok": True, "option": opt, "ops": ops, "done": result.get("done"), "window": result.get("window")}
+
+    def merchant_trade(
+        self,
+        *,
+        entity_id: int,
+        option: int | None = None,
+        get_item: str | None = None,
+        times: int = 1,
+        dim: str | None = None,
+    ) -> dict[str, Any]:
+        """Read merchant `options`, then run `select(option, times)` in one `/window/act` call."""
+        target = self._window_target(entity_id=entity_id)
+        if target is None:
+            return {"ok": False, "error": "bad_args", "message": "需要 entity_id。"}
+        try:
+            view = self.bot.call("window/view", {"target": target})
+        except ApiError as err:
+            return self._window_api_error(err)
+        options = [o for o in (view.get("options") or []) if isinstance(o, dict)]
+
+        chosen: dict[str, Any] | None = None
+        if option is not None:
+            try:
+                idx = int(option)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "bad_args", "message": "option 必须是整数。"}
+            chosen = next((o for o in options if int(o.get("index", -1)) == idx), None)
+            if chosen is None and 0 <= idx < len(options):
+                chosen = options[idx]
+        elif get_item:
+            needle = resolve_item_alias(get_item)
+            matches = [
+                o
+                for o in options
+                if isinstance(o.get("get"), dict)
+                and resolve_item_alias(str(o["get"].get("name") or "")) == needle
+            ]
+            available = [o for o in matches if o.get("available") is not False]
+            chosen = (available or matches or [None])[0]
+        else:
+            return {"ok": False, "error": "bad_args", "message": "需要 option 或 get_item 之一。"}
+
+        if chosen is None:
+            return {
+                "ok": False,
+                "error": "no_matching_trade",
+                "message": "没有匹配的交易选项。",
+                "options": options,
+            }
+
+        idx = int(chosen.get("index", 0))
+        count = max(1, int(times))
+        try:
+            result = self.bot.call(
+                "window/act",
+                {"target": target, "ops": [{"op": "select", "option": idx, "times": count}]},
+            )
+        except ApiError as err:
+            return self._window_api_error(err)
+        return {
+            "ok": True,
+            "option": idx,
+            "trade": chosen,
+            "done": result.get("done"),
+            "window": result.get("window"),
+        }
+
+    def brew_once(
+        self,
+        ingredient_item: str,
+        *,
+        bottles: Any = None,
+        fuel_item: str | None = None,
+        wait: bool = True,
+        wait_timeout_s: float = 30.0,
+        poll_interval_s: float = 2.0,
+        block: str | None = "brewing_stand",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> dict[str, Any]:
+        """Load a brewing stand (`bottles`/`ingredient`/`fuel`) and optionally poll `brew_time_left`."""
+        target = self._window_target(block=block, x=x, y=y, z=z)
+        if target is None:
+            return {"ok": False, "error": "bad_args", "message": "需要 block 或 (x, y, z)。"}
+
+        bottle_entries = _window_item_entries(bottles) if bottles else []
+        ops: list[dict[str, Any]] = []
+        for i, entry in enumerate(bottle_entries):
+            op: dict[str, Any] = {
+                "op": "put",
+                "item": entry["item"],
+                "count": entry["count"],
+                "to": "bottles",
+            }
+            if "potion" in entry:
+                op["potion"] = entry["potion"]
+            if "slot" in entry:
+                op["slot"] = entry["slot"]
+            elif entry["count"] == 1 and len(bottle_entries) > 1:
+                op["slot"] = i
+            ops.append(op)
+        ops.append(
+            {"op": "put", "item": resolve_item_alias(ingredient_item), "count": 1, "to": "ingredient"}
+        )
+        if fuel_item:
+            ops.append({"op": "put", "item": resolve_item_alias(fuel_item), "count": 1, "to": "fuel"})
+
+        try:
+            result = self.bot.call("window/act", {"target": target, "ops": ops})
+        except ApiError as err:
+            return self._window_api_error(err)
+
+        view: dict[str, Any] | None = None
+        if wait:
+            deadline = time.monotonic() + max(1.0, float(wait_timeout_s))
+            delay = 1.0
+            while time.monotonic() < deadline:
+                time.sleep(delay)
+                delay = max(0.5, float(poll_interval_s))
+                try:
+                    view = self.bot.call("window/view", {"target": target})
+                except ApiError as err:
+                    return self._window_api_error(err)
+                info = view.get("info") or {}
+                try:
+                    left = float(info.get("brew_time_left") or 0.0)
+                except (TypeError, ValueError):
+                    left = 0.0
+                if left <= 0:
+                    break
+
+        out: dict[str, Any] = {
+            "ok": True,
+            "ops": ops,
+            "done": result.get("done"),
+            "window": (view or {}).get("window", result.get("window")),
+            "sections": (view or {}).get("sections"),
+            "info": (view or {}).get("info"),
+        }
+        return out
+
+    def anvil_operate(
+        self,
+        left_item: str | dict[str, Any],
+        *,
+        right_item: str | dict[str, Any] | None = None,
+        left_enchanted: bool | None = None,
+        right_enchanted: bool | None = None,
+        text: str | None = None,
+        take: bool = True,
+        block: str | None = "anvil",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> dict[str, Any]:
+        """Single `/window/act` anvil combo: put left/right, optional rename text, take output."""
+        target = self._window_target(block=block, x=x, y=y, z=z)
+        if target is None:
+            return {"ok": False, "error": "bad_args", "message": "需要 block 或 (x, y, z)。"}
+
+        def _build_anvil_put(spec: str | dict[str, Any], slot_name: str, ench_flag: bool | None) -> dict[str, Any]:
+            if isinstance(spec, dict):
+                op_d: dict[str, Any] = {
+                    "op": "put",
+                    "item": resolve_item_alias(str(spec.get("item") or spec.get("name") or "")),
+                    "to": slot_name,
+                }
+                for fk in ("enchanted", "custom_name", "slot"):
+                    if fk in spec and spec[fk] is not None:
+                        op_d[fk] = spec[fk]
+                if ench_flag is not None and "enchanted" not in op_d:
+                    op_d["enchanted"] = bool(ench_flag)
+                return op_d
+            op_s: dict[str, Any] = {"op": "put", "item": resolve_item_alias(str(spec)), "to": slot_name}
+            if ench_flag is not None:
+                op_s["enchanted"] = bool(ench_flag)
+            return op_s
+
+        ops: list[dict[str, Any]] = [_build_anvil_put(left_item, "left", left_enchanted)]
+        if right_item is not None:
+            ops.append(_build_anvil_put(right_item, "right", right_enchanted))
+        if text is not None:
+            ops.append({"op": "text", "value": str(text)})
+        if take:
+            ops.append({"op": "take", "from": "output"})
+        try:
+            result = self.bot.call("window/act", {"target": target, "ops": ops})
+        except ApiError as err:
+            err_payload = self._window_api_error(err)
+            if err.code == "no_output":
+                win = err_payload.get("window") if isinstance(err_payload.get("window"), dict) else {}
+                secs = win.get("sections") if isinstance(win.get("sections"), dict) else {}
+                left_rows = secs.get("left") or []
+                right_rows = secs.get("right") or []
+                l0 = left_rows[0] if left_rows and isinstance(left_rows[0], dict) else {}
+                r0 = right_rows[0] if right_rows and isinstance(right_rows[0], dict) else {}
+                rcost = int((win.get("info") or {}).get("repair_cost") or 0) if isinstance(win.get("info"), dict) else 0
+                if l0 and r0 and not l0.get("durability_used") and not r0.get("enchantments"):
+                    err_payload["hint"] = (
+                        "铁砧无产物(no_output)：左槽物品为满耐久且右槽无附魔可叠加；"
+                        "若要修耐久请将受损装备放 left，若要合附魔请用 left_enchanted=True / right_enchanted=True 指定附魔件。"
+                    )
+                elif l0.get("enchantments") and r0.get("enchantments"):
+                    err_payload["hint"] = (
+                        "铁砧无产物(no_output)：左右槽附魔可能互斥（如锋利/亡灵杀手/节肢克星互斥）或已达等级上限，或当前经验等级不足。"
+                    )
+                elif rcost > 0:
+                    err_payload["hint"] = f"铁砧无产物或无法取出：所需经验等级 repair_cost={rcost}，请确认当前 XP 等级足够。"
+            return err_payload
+        return {"ok": True, "ops": ops, "done": result.get("done"), "window": result.get("window")}
+
+    def smithing_apply(
+        self,
+        template_item: str,
+        base_item: str,
+        addition_item: str,
+        *,
+        take: bool = True,
+        block: str | None = "smithing_table",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> dict[str, Any]:
+        """Single `/window/act` smithing combo: template + base + addition -> take output."""
+        target = self._window_target(block=block, x=x, y=y, z=z)
+        if target is None:
+            return {"ok": False, "error": "bad_args", "message": "需要 block 或 (x, y, z)。"}
+        ops: list[dict[str, Any]] = [
+            {"op": "put", "item": resolve_item_alias(template_item), "to": "template"},
+            {"op": "put", "item": resolve_item_alias(base_item), "to": "base"},
+            {"op": "put", "item": resolve_item_alias(addition_item), "to": "addition"},
+        ]
+        if take:
+            ops.append({"op": "take", "from": "output"})
+        try:
+            result = self.bot.call("window/act", {"target": target, "ops": ops})
+        except ApiError as err:
+            return self._window_api_error(err)
+        return {"ok": True, "ops": ops, "done": result.get("done"), "window": result.get("window")}
+
+    def stonecutter_cut(
+        self,
+        input_item: str,
+        option: int,
+        *,
+        count: int | None = None,
+        take: bool = True,
+        block: str | None = "stonecutter",
+        x: int | None = None,
+        y: int | None = None,
+        z: int | None = None,
+    ) -> dict[str, Any]:
+        """Single `/window/act` stonecutter combo: put input -> select option -> take output."""
+        target = self._window_target(block=block, x=x, y=y, z=z)
+        if target is None:
+            return {"ok": False, "error": "bad_args", "message": "需要 block 或 (x, y, z)。"}
+        try:
+            opt = int(option)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad_args", "message": "option 必须是整数。"}
+        put_op: dict[str, Any] = {"op": "put", "item": resolve_item_alias(input_item), "to": "input"}
+        if count is not None:
+            put_op["count"] = max(1, int(count))
+        ops: list[dict[str, Any]] = [put_op, {"op": "select", "option": opt}]
+        if take:
+            ops.append({"op": "take", "from": "output"})
+        try:
+            result = self.bot.call("window/act", {"target": target, "ops": ops})
+        except ApiError as err:
+            return self._window_api_error(err)
+        return {"ok": True, "option": opt, "ops": ops, "done": result.get("done"), "window": result.get("window")}
 
     def bind_bed_spawn(self, x: int, y: int, z: int) -> dict[str, Any]:
         """Move near a bed and interact reliably day or night to set respawn point."""

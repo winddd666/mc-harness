@@ -427,3 +427,61 @@ def test_biomes_habitats_unexplored_compass_and_disk_persistence(tmp_path: Path)
     assert ("overworld", "desert") in reloaded.biomes
     assert ("overworld", "plains") in reloaded.biomes
     assert len(reloaded.visited_chunks) >= 4
+    assert ("overworld", "villager") in reloaded.habitats
+    assert ("overworld", "sheep") in reloaded.habitats
+
+
+def test_stale_cross_session_last_death_ignored_and_explore_hud_has_no_mine_nag() -> None:
+    """Fresh WorldMemory ignores pre-existing status.last_death on first alive poll, and surface roam HUD suppresses mining nags."""
+    wm = WorldMemory()
+    # First alive status carries a stale death from hours ago -> must NOT pollute fresh WorldMemory
+    wm.observe_status(
+        {
+            "pos": [-160.2, 69.0, -390.4],
+            "dimension": "overworld",
+            "alive": True,
+            "last_death": {"pos": [1995.0, 150.0, 1995.0], "seq": 42},
+        }
+    )
+    assert wm.last_death is None
+
+    # Subsequent genuine new death in this session (new seq / pos) IS recorded!
+    wm.observe_status(
+        {
+            "pos": [-160.0, 69.0, -390.0],
+            "dimension": "overworld",
+            "alive": True,
+            "last_death": {"pos": [120.4, 62.0, -88.2], "seq": 43},
+        }
+    )
+    assert wm.last_death is not None
+    assert wm.last_death["pos"] == [120, 62, -89]
+
+    # Surface explore task without pickaxe should NOT nag about crafting pickaxes or staircase down
+    world = _MockAtlasWorld(
+        start_pos=(0.5, 68.0, 0.5),
+        biome="plains",
+        inventory_items=[
+            {"name": "oak_planks", "count": 16, "slot": 9},
+            {"name": "cobblestone", "count": 16, "slot": 10},
+        ],
+    )
+    with BotSession("tok", bot_username="Roamer", transport=httpx.MockTransport(world.handler)) as bot:
+        ts = McToolset(bot, world_memory=wm)
+        # Exact wording from live run 20261118-124221 ("不要长时间原地挖矿...观察裸露矿脉") must STILL be recognized as surface explore!
+        hud = build_world_hud(
+            ts,
+            task="在接下来90分钟自由探索当前世界。优先沿地表向远处走，不要长时间原地挖矿或下潜。沿途观察裸露矿脉与村庄。",
+        )
+        assert "阶梯下探" not in hud
+        assert "严禁调mc_skill_mine_dfs下井" in hud
+
+        # Segmented relay triggered from mc_move_to skips redundant 2nd direct move_to and passes bounded timeout!
+        world.blocked_xz_zones.append((50.0, 0.0, 200.0))  # everything east is path_not_found
+        world.move_calls.clear()
+        fail_mv = json.loads(ts.mc_move_to(x=80.0, z=0.5))
+        assert fail_mv["ok"] is False
+        # 1 initial direct call + 3 angled 24m hop probes = 4 calls total (no duplicate 2nd full direct call!), hops carry timeout=12000
+        assert len(world.move_calls) == 4
+        assert all(c.get("timeout") == 12000 for c in world.move_calls[1:])
+

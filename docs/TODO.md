@@ -1,7 +1,7 @@
 # `mc-agent` 阶段成绩、底座修复待办与 AltoClef 脚本化路线图
 
-> 更新日期：2026-11-16  
-> 适用架构：**LLM 负责高层战略规划与决策（选择性思考 <3 RPM），Python 确定性脚本 / 状态机负责绝大部分执行**（重点参考 AltoClef 任务架构并结合 `mc-agent-api v1.3.7`）。
+> 更新日期：2026-11-17  
+> 适用架构：**单 Bot 自主运行**；**LLM 负责高层战略规划与决策（选择性思考 <3 RPM），Python 确定性脚本 / 状态机负责绝大部分执行**（重点参考 AltoClef 任务架构并结合 [`mc-agent-api v1.3.14`](https://github.com/Zyzzyva0381/mc-agent-api)）。
 
 ---
 
@@ -49,48 +49,64 @@
 
 ---
 
-## 3. 战斗与主动防御脚本化待办（基于 [`docs/战斗fight(1).txt`](战斗fight(1).txt)）
+## 3. 已落成 Phase 2 核心底座（2026-11-17 完成，`162 passed`）
 
-> 对应接口前提：我们无逐 tick 视觉，且 14 个动作全局互斥（不能边挖边砍），但拥有不占动作锁的 `GET /status`、`POST /get_entities`、`POST /posture {"shield": true}`、`POST /look`、`POST /stop`，以及支持 `max_hits`/`interval_ms` 的 `POST /attack` 与自带重力/移动提前量解算的 `POST /shoot`。
-
-按 [`docs/战斗fight(1).txt`](战斗fight(1).txt) 归纳的 7 个模块拆解 Python 战斗防御脚本（`MobDefenseSkill` + `GenerationGuard` 升级）：
-
-- [ ] **① 自身脆弱度与危险生物分级撤退（模块 2、3、6）**
-  - 按 `health`、`armor_points`、是否有 `shield` 及周围敌对数量/类型计算脆弱阈值；
-  - 命中「点燃的苦力怕、凋灵骷髅、疣猪兽、僵尸疣猪兽、守卫者、远古守卫者、坚守者」以及高风险环境时直接触发击退/举盾撤退或封口撤离，不硬拼。
-- [ ] **② 怪物持续纠缠计时器与主目标锁定防抖（模块 4、5）**
-  - 为视野/警戒半径内敌对实体 ID 记录首次持续威胁时间戳（对骷髅、女巫放大关注半径），超过默认 **12 秒** 且存在可达视线时加入“主动清除集合”；
-  - 锁定单一主目标 ID，除非目标死亡、消失或寻路判不可达否则不频繁换怪；当主目标进入 `10m` 内时，将其他杂兵的自动击退/防干扰范围收缩至 `2m`。
-- [ ] **③ 盾牌实时格挡 + 三区距离近战与 `POST /shoot` 远程接管（模块 1、5、7）**
-  - **三区距离控场**：过远用 `move_to(entity_id)` 接近；进入有效近战区按武器冷却间隔执行 `attack(max_hits=1..2, interval_ms=625)`；过近贴脸时执行击退后撤或跳劈；
-  - **无锁举盾与远程反制**：骷髅/流浪者/沼骸/女巫/唤魔者进入视野后，无弓箭且近身前先调 `look` 面向威胁 + `posture(shield=true)` 挡箭；持有 `bow` / `crossbow` 与 `arrow` 时，对骷髅群、女巫、唤魔者及烈焰人熄火间隙优先调用 `shoot`。
-- [ ] **④ 1.21 特殊生物专项硬规则（模块 7）**
-  - **幻翼**：刷新即带高威胁关注；
-  - **卫道士**：会破盾，禁止依赖纯举盾站撸，优先拉开距离/远程或垫高；
-  - **旋风人**：免疫弓箭伤害，强制切近战并注意高跳位移；
-  - **嘎吱**：本体无敌，识别后优先撤离或转交挖除 `creaking_heart`；
-  - **劫掠兽**：`1v1` 先举盾挡冲击后砍 `1–2` 刀即迅速后撤躲咆哮；
-  - **烈焰人 / 恶魂**：恶魂 64 格高危火球预警、烈焰人 48 格警戒与“着火 3s（盾挡 3 小火球）-> 熄火 5s（输出窗口）”节拍控制及防掉落物坠崖；
-  - **溺尸**：35 格警戒，白天不主动下水即可规避大部分仇恨；
-  - **史莱姆 / 岩浆怪**：分裂体列入主动防御清理优先级。
+- [x] **路径压缩 `MiningDFS` + 工具耐久分级**（[`src/mc_agent/skills/mining_dfs.py`](../src/mc_agent/skills/mining_dfs.py)，详见 [`docs/dfs-mining-multi-location-test-20261117.md`](dfs-mining-multi-location-test-20261117.md)）：
+  - 路线已正式收口至鱼骨及其改版：默认策略锁定为 **`fishbone_scan`**（鱼骨骨架 + 目标层侧墙剥皮/受控短切口，兼顾几何安全与钻层采摘率；同时保留 `MC_DFS_STRATEGY=fishbone | v5 | radar` 备查）；落地 0 步死循环根治、目标矿物真实入包校验（防圆石冒充与封墙埋矿）、悬空矿 Catch-Block 托盘、流体/洞穴破口封堵、回溯走廊保护、无石镐自动补石镐保护铁镐与跨层防误恢复。
+- [x] **`WorldMemory` 单 Bot 五层世界地图与原位透穿**（[`src/mc_agent/harness/world_memory.py`](../src/mc_agent/harness/world_memory.py)）：
+  - 五层轻量底座（核心锚点 `spawn/bed/home/portals/last_death`、仓储箱快照 `containers`、非矿脉白名单稀缺地标 `pois` + 32m 惰性销账 + 300s 冷却降级、生物群系与聚落 `biomes/habitats`、已探索区块足迹 `visited_chunks`）；
+  - HUD 末尾 `<= 84` 字单行离线记忆目录 + 0 新工具透穿增强 `mc_find_blocks`、`mc_get_entities`、`mc_skill_mine_blocks`、`mc_move_to`（`>36m` 自动切 `24m` 分段折线远航）与 `craft_gear` 缺料提示。
+  - **2026-11-18 实机回测通过**：`MapTest_01` 独立完成 M1–M6 **17/17**（5 区块足迹、107.9m 记忆回捞并真实挖到金块、陈旧 POI 惰性销账、Home Base/容器/缺料提示、床锚点、栖息地、HUD 77 字记忆行、`0600` 持久化重载、下界维度隔离、`last_death`）。报告见 [`runs/world-memory-live-20261118-122519.json`](../runs/world-memory-live-20261118-122519.json)，复盘见 [`docs/world-memory-regression-20261118.md`](world-memory-regression-20261118.md)，复跑脚本 [`scripts/world_memory_live_test.py`](../scripts/world_memory_live_test.py)。实测限制：当前 Leaves/API 的 `status.biome` 为空，群系层仅由离线单测覆盖。
+  - **2026-11-18 90 分钟自由巡游**：`MapTest_01` 续跑 208 步，轨迹 **4.1km**、直线位移 **2.08km**、**84** 个区块足迹、**40** 个 POI（water×32/pumpkin×6/lava×2）、**11** 个栖息点（牛/羊/猪/鸡/狼）；后 30 分钟在 `Y≈38` 洞穴卡住，未遇到村庄/容器。复盘见 [`docs/world-memory-roam-20261118.md`](world-memory-roam-20261118.md)，报告见 [`runs/world-memory-roam-20261118-125531.json`](../runs/world-memory-roam-20261118-125531.json)，巡游脚本 [`scripts/world_memory_roam.py`](../scripts/world_memory_roam.py)、摘要脚本 [`scripts/world_memory_roam_report.py`](../scripts/world_memory_roam_report.py)。
+  - **2026-11-18 轨迹深审收口（`195 passed`）**：
+    - `habitats` 持久化纳入 `save/load`（最近 6 个 cluster，`seen_at` 重载重置并受 15 分钟 TTL 约束）；
+    - 全新记忆首帧存活轮询忽略跨会话残留 `status.last_death`，仅记录会话内真实新死亡；
+    - `navigate_segmented` 增加 `skip_direct=True` 与单跳 `timeout=12000ms`（消除封闭海底洞窟内单步 `mc_move_to` 阻塞 1003s 问题）；
+    - 纯地表探索任务（兼容 `"不要原地挖矿"` / `"观察裸露矿脉"` 表述）自动抑制 HUD 挖矿催促并在禁挖矿模式下剔除 `mc_skill_mine_dfs`。
 
 ---
 
-## 4. Phase 2 架构路线图：LLM 战略规划 + AltoClef 式确定性脚本树
+## 4. 待办分级清单（按实现难度与职责边界严格隔离）
 
-核心范式：**LLM 只做阶段目标选择、异常重规划与多目标统筹（`enable_thinking=True` 按节点触发，消耗 `<3 RPM`）；Python 脚本树（借鉴 AltoClef）承担 90%+ 的分解采集、合成、探矿、战斗与容错状态迁移**。
+### 🟢 外包搬砖区（`[L1 / L2]`：纯客观数据 & 纯单接口原子封装）
 
-1. **优先级 `TaskChain` 仲裁环（对标 AltoClef `TaskRunner` / `TaskChain`，0 LLM 开销）**
-   - [ ] 在长脚本每个 `5–10s` 执行切片之间运行固定优先级仲裁：
-     `SurvivalChain`（水/岩浆/着火/夜间防连死） → `FoodChain`（安全进食） → `MobDefenseChain`（[`docs/战斗fight(1).txt`](战斗fight(1).txt) 7 模块） → `ActiveGoalTask`（当前任务脚本）。
-2. **`TaskCatalogue` 递归前置树（对标 AltoClef `ResourceTask`）**
-   - [ ] 实现确定性 `EnsureResourceTask(target_item, count)`：收到高层目标（如“准备 1 套铁镐 + 盾牌 + 铁胸甲”或“凑齐 4 钻石合成钻石靴”）时，在本地配方与采集表里递归展开前置缺口（木头 → 木板/工作台 → 石镐 → 铁矿 → 熔炉烧铁 → 铁镐 & `shield`），单轮脚本自动跑完全链路，仅在彻底缺生态条件或异常中断时交还 LLM。
-3. **`WorldLedger` 世界与容器账本（对标 AltoClef `BlockTracker` / `ContainerTracker`）**
-   - [ ] 持久化记录：井口 `Collar` 与地下安全航点 `waypoints`（死亡回 `Y=70` 后 0 挖掘沿现成矿井速降，避免再次磨爆多把铁镐）、已放置工作台/熔炉/箱子与存储物资、床重生点坐标、`chunk` 级别不可达/水体黑名单冷却。
-4. **路径压缩 `MiningDFS` + 工具耐久分级（详见 [`docs/mining-dfs-design-20261116.md`](mining-dfs-design-20261116.md)）**
-   - [ ] 落地 `Root Collar` / `Switchback Landing` / `Spine Junction` 三类节点、悬空矿石托盘（Catch-Block）、洞穴破口圆石封堵、航点倒序零挖掘回溯；
-   - [ ] **工具耐久分级策略**：开凿普通 `stone`/`deepslate` 矿道强制优先使用 `stone_pickaxe`，严格将 `iron_pickaxe` 耐久留给铁/红石/金/钻石矿脉；下深层前强制完成 **`shield`（1 铁 + 6 木板）** 与食物准备。
-5. **比赛双 Bot 异构分工并发（结合 `benchmarks/nju-api-20261109` 实测）**
-   - [ ] 基于共享 `24 RPM` 全队限速桶支持双 Bot 协同：
-     - **Bot A（深潜/探险/下界主攻手）**：高频或全开思考处理复杂洞穴与深层目标；
-     - **Bot B（地表基地/砍树/农牧/盾牌与食物工兵）**：常规动作默认 `enable_thinking=False` 极速运行脚本、遇异常再局部唤醒思考，向基地公共箱存肉/木/盾/备用镐。
+> **⚠️ 外包硬红线**：本区任务**严禁编写任何前置阻断门禁、任务调度优先级、自动跳转挖矿或主观战术规则**；只允许填写客观原版事实字典，或编写“给定明确参数 -> 调单一窗口接口返回结果”的无策略纯封装函数。
+
+- [x] **`[L1-Data]` 99 个计分成就的 `1.21.11` 客观事实与微攻略填表**（[`src/mc_agent/kb/data_1_21_11.py`](../src/mc_agent/kb/data_1_21_11.py)）
+  - 已覆盖 `RULES.md` 全部 99 项计分成就（`how_to` 均 `<= 50` 字），并补充末影之眼、纸/书、标靶、音符盒、蛋糕、拴绳、狼铠、信标、重生锚、比较器、雕纹书架、铜灯等 1.21.11 客观配方；**未改动 `curriculum.py` 的目标筛选与排序逻辑**。
+- [x] **`[L2-GUI-Chest]` 箱子/木桶容器批量存取原子函数**（[`src/mc_agent/skills/library.py`](../src/mc_agent/skills/library.py)）
+  - 已封装 `container_batch` / `container_deposit` / `container_withdraw`：按给定物品数组生成 `sections.container` 的 `put`/`take` 单次 `window/act`，完成后调用 `world_memory.update_container_from_window` 同步库存快照。
+- [x] **`[L2-GUI-Enchant]` 附魔台单次连招原子函数**（[`src/mc_agent/skills/library.py`](../src/mc_agent/skills/library.py)）
+  - `enchant_item_once` 在**同一次 `window/act`** 中按 `put item -> put lapis -> select option -> take item` 顺序执行；青金石数量省略时按 API 规则取 `option + 1`。
+- [x] **`[L2-GUI-Merchant]` 村民/流浪商人按索引交易原子函数**（[`src/mc_agent/skills/library.py`](../src/mc_agent/skills/library.py)）
+  - `merchant_trade` 先 `window/view` 读取 `options`（`give`/`get`/`available`），再按指定 `option` 或匹配 `get_item` 执行 `window/act select(option, times)`；不添加任何调度/前置判断。
+- [x] **`[L2-GUI-Stations]` 酿造台 / 铁砧 / 锻造台 / 切石机原子函数**（[`src/mc_agent/skills/library.py`](../src/mc_agent/skills/library.py)）
+  - `brew_once`（`bottles`/`ingredient`/`fuel` + 轮询 `brew_time_left`）、`anvil_operate`（`left`/`right` + `text`）、`smithing_apply`（`template`/`base`/`addition`）、`stonecutter_cut`（`input` + `select`）均已按比赛 API 固定 sections 名封装；对应 7 个 `mc_skill_*` 工具仅在 full profile 注册，不膨胀 compact 核心工具集。
+  - **2026-11-18 实机验收通过**：独立 `GuiTest_01`（独立 `.state-gui-test` Token，不触碰 `BeastBot_01`）在 nju-beast 天空测试台完成 10/10 项冒烟；随后完成 **A–F 六组 33/33 全量回归**（容器/WorldMemory、顺序敏感合成台、附魔/铁砧/锻造/砂轮/织布机、两段酿造/熔炉三件套/切石机、流浪商人与双材料图书管理员、信标）。报告见 [`runs/gui-window-full-A-B-C-D-E-F-20261118-120840.json`](../runs/gui-window-full-A-B-C-D-E-F-20261118-120840.json)，复盘与上游连续附魔窗口陈旧问题见 [`docs/gui-window-regression-20261118.md`](gui-window-regression-20261118.md)，复跑脚本 [`scripts/gui_window_full_live_test.py`](../scripts/gui_window_full_live_test.py)。
+  - **连续附魔防护与生产接线收口（`195 passed`）**：
+    - `mc_skill_enchant` 默认 `verify=True` + `reconnect_on_stale=True` 校验落包；`_reset_window_session` 支持比赛服 30s 重连冷却自动回退；
+    - 7 个新增 `mc_skill_*` GUI 工具全部接入 `McToolset._run_skill(...)`（统一断线/隔离自愈与坐标缓存更新），并在 `compact` 模式按任务/进度关键词精准按需解锁（单轮总工具预算保持 `< 3k tokens`）；
+    - 无坐标开箱（仅传 `block="chest"` / `"barrel"`）自动在 6 格内补全容器坐标同步 `WorldMemory`；`mc_skill_anvil` 支持 `left_enchanted`/`right_enchanted` 筛选与满耐久/互斥附魔 `no_output` 原因提示；`BotSession.call` 首轮捕获 HTTP keep-alive 空闲断连 `RemoteProtocolError` 自动重建连接重试。
+
+---
+
+### 🔴 核心主攻区（`[L3 / L4]`：前置树、全局调度、空间策略与异步锁博弈 —— 禁外包）
+
+> **说明**：凡涉及硬/软前置边界、跨阶段状态流转、虚空岛空间巡航策略、互斥动作锁时序及双并发协调的模块，统一留在本区主攻把关。
+
+- [ ] **`[L3-Sched-1]` 课程持久单会话化与动态轮数预算**（[`src/mc_agent/harness/curriculum.py`](../src/mc_agent/harness/curriculum.py) & [`agent.py`](../src/mc_agent/harness/agent.py)）
+  - `CurriculumSupervisor` 全场共享唯一持久 `McToolset`（跨集保留 `WorldMemory` 与 `MiningDFS` 矿井树），按目标体量动态分配轮数上限（短交互 8 轮 / 深潜与下界 35~40 轮）。
+- [ ] **`[L3-Sched-2]` 独立 `ensure_items` 0-LLM 物理硬前置递归器**（新增 `src/mc_agent/skills/ensure.py`）
+  - **仅编码客观原版配方与工具等级硬定律**（绝不掺杂主观软前置门禁；闲置富余材料可顺手整备但不卡主线），自动递归跑通基础材料链并在切片间调 `check_and_stabilize` 保障生存续跑。
+- [ ] **`[L3-Sched-3]` `select_next_target` 联动 `WorldMemory` + 套餐合并 + 环岛摸底**（[`src/mc_agent/harness/curriculum.py`](../src/mc_agent/harness/curriculum.py)）
+  - 合并同层矿井需求套餐（如深层一次备齐钻靴+钻镐+附魔台）；看脸支线（`trade`/`lava_bucket`/`breed_an_animal`）绑定 `WorldMemory` 探明后解锁提权；铁器成型后执行一次圆形虚空岛环岛侦察。
+- [ ] **`[L3-Explore]` 基地自动归仓策略与虚空岛广域巡航开图技能**（[`src/mc_agent/skills/library.py`](../src/mc_agent/skills/library.py) & [`world_memory.py`](../src/mc_agent/harness/world_memory.py)）
+  - 包满/远征前返 `home` 分类归仓与提货；结合 `unexplored_directions` 与 `VoidGeofence` 安全边界的环岛开图巡航。
+- [ ] **`[L3-Router]` 按场景动态裁剪工具集 `SceneRouter`（延后储备）**
+  - 待总工具扩展至 25+ 后，按场景档位硬裁剪至 `9~13` 个工具并在切档瞬间归档滑动窗口旧 `tool_calls`。
+- [ ] **`[L4-Combat-Core]` 主动战斗防御闭环（[`docs/战斗fight(1).txt`](战斗fight(1).txt) 模块 1–6 + `GenerationGuard` 协同）**
+  - 脆弱度分级撤退阈值 + 12s 纠缠主目标锁定防抖 + 无锁实时转向举盾（`/look` + `/posture(shield=true)` + `/stop`）与占锁三区拉扯近战 / `POST /shoot` 远程反制的微秒级锁时序对齐。
+- [ ] **`[L4-Combat-1.21]` 1.21 特殊生物专项博弈状态机（模块 7）**
+  - 卫道士破盾拉扯、旋风人禁箭切近战、嘎吱无敌避让挖心、劫掠兽挡冲后撤、烈焰人“着火 3s 盾挡 -> 熄火 5s 输出”节拍控制与恶魂 64 格预警。
+- [ ] **`[L4-Sched-4]` 第 2 路 LLM 并发槽「异步只读战略参谋」**
+  - 前 3 步稳定后，利用比赛 `Concurrency = 2` 的第 2 路槽位低频运行只读 `Strategic Planner`（`enable_thinking=True`），动态重排目标套餐队列与卡点止损跳线。

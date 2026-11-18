@@ -1,7 +1,7 @@
 # MC 游戏机制探索总结与 1.21.11 知识库/成就路线共建指南（游戏侧专版）
 
 > 更新日期：2026-11-14｜对象：MC 游戏机制、生存路线与成就刷分负责同学  
-> 环境版本：**Minecraft Java `1.21.11`**（`survivaltest`）｜接口规范：**v1.3.7**（全盲玩 HTTP 控制）
+> 环境版本：**Minecraft Java `1.21.11`**（`survivaltest`）｜接口规范：**v1.3.14**（全盲玩 HTTP 控制；上游 [Zyzzyva0381/mc-agent-api](https://github.com/Zyzzyva0381/mc-agent-api)）
 
 ---
 

@@ -217,6 +217,8 @@ class WorldMemory:
 
         self._dirty = False
         self._last_save_ts = 0.0
+        self._status_death_primed = False
+        self._status_death_sig: tuple[Any, ...] | None = None
         if self.path is not None:
             self.load()
 
@@ -256,11 +258,14 @@ class WorldMemory:
                     ][:8]
             ld = anchors.get("last_death")
             if isinstance(ld, dict) and isinstance(ld.get("pos"), list) and len(ld["pos"]) >= 3:
+                dp_loaded = [int(ld["pos"][0]), int(ld["pos"][1]), int(ld["pos"][2])]
                 self.last_death = {
                     "dim": str(ld.get("dim") or "overworld"),
-                    "pos": [int(ld["pos"][0]), int(ld["pos"][1]), int(ld["pos"][2])],
+                    "pos": dp_loaded,
                     "t": now_m,
                 }
+                self._status_death_primed = True
+                self._status_death_sig = (tuple(dp_loaded), None)
 
         for row in raw.get("containers") or []:
             if not isinstance(row, dict):
@@ -307,6 +312,31 @@ class WorldMemory:
                 if bname and pts:
                     self.biomes[(dim, bname)] = pts
 
+        for row in raw.get("habitats") or []:
+            if not isinstance(row, dict):
+                continue
+            dim = normalize_dimension(row.get("dim") or "overworld")
+            mob = _clean_name(row.get("mob") or "")
+            if mob not in HABITAT_MOB_TYPES:
+                continue
+            clusters: list[dict[str, Any]] = []
+            for c in row.get("clusters") or []:
+                if not isinstance(c, dict):
+                    continue
+                p = c.get("pos")
+                if isinstance(p, list) and len(p) >= 3:
+                    try:
+                        clusters.append(
+                            {
+                                "pos": [int(p[0]), int(p[1]), int(p[2])],
+                                "seen_at": now_m,  # monotonic timestamps are process-local
+                            }
+                        )
+                    except (TypeError, ValueError):
+                        continue
+            if clusters:
+                self.habitats[(dim, mob)] = clusters[-6:]
+
         for row in raw.get("visited_chunks") or []:
             if isinstance(row, list) and len(row) >= 3:
                 self.visited_chunks[(str(row[0]), int(row[1]), int(row[2]))] = None
@@ -343,6 +373,14 @@ class WorldMemory:
             "biomes": [
                 {"dim": dim, "biome": b, "points": pts}
                 for (dim, b), pts in self.biomes.items()
+            ],
+            "habitats": [
+                {
+                    "dim": dim,
+                    "mob": mob,
+                    "clusters": [{"pos": list(c.get("pos") or [])} for c in clusters[-6:]],
+                }
+                for (dim, mob), clusters in self.habitats.items()
             ],
             "visited_chunks": [[d, cx, cz] for (d, cx, cz) in list(self.visited_chunks.keys())[-DEFAULT_MAX_VISITED_CHUNKS:]],
         }
@@ -399,16 +437,28 @@ class WorldMemory:
                     pts.pop(0)
                 self._dirty = True
 
-        # 4) Last death from status if present
+        # 4) Last death from status if newly occurred in this session (ignore pre-existing stale status.last_death on first alive poll)
         ld = st.get("last_death")
         if isinstance(ld, dict) and isinstance(ld.get("pos"), (list, tuple)) and len(ld["pos"]) >= 3:
             try:
                 dp = [math.floor(float(ld["pos"][0])), math.floor(float(ld["pos"][1])), math.floor(float(ld["pos"][2]))]
-                if self.last_death is None or self.last_death.get("pos") != dp:
+                ld_stamp = ld.get("seq") or ld.get("t") or ld.get("time") or ld.get("at")
+                sig = (tuple(dp), ld_stamp)
+                if not self._status_death_primed:
+                    self._status_death_primed = True
+                    self._status_death_sig = sig
+                    if st.get("alive") is False:
+                        self.last_death = {"dim": dim, "pos": dp, "t": time.monotonic()}
+                        self._dirty = True
+                elif sig != self._status_death_sig:
+                    self._status_death_sig = sig
                     self.last_death = {"dim": dim, "pos": dp, "t": time.monotonic()}
                     self._dirty = True
             except (TypeError, ValueError):
                 pass
+        elif not self._status_death_primed:
+            self._status_death_primed = True
+            self._status_death_sig = None
         self.save()
 
     def observe_blocks(self, blocks: Iterable[dict[str, Any]], *, dim: str = "overworld") -> int:

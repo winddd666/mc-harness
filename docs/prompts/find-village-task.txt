@@ -1,0 +1,10 @@
+在接下来 90 分钟沿地表寻找至少 1 个村庄，并记录村庄记忆。不要挖矿、不下潜、不追求装备或计分。
+
+执行要求：
+1. 优先走平原、沙漠、热带草原、针叶林、雪原等村庄可能生成的生物群系；避开大海、高山和密林。
+2. 每走 48–72m，调用 mc_find_blocks(types=["bell","lectern","composter","hay_block","farmland","torch"], radius=64) 扫描村庄标志物；同时调用 mc_get_entities(radius=48, types=["villager","iron_golem","cat"])。
+3. 看到村民/钟/农田立即靠近；找到村庄后记录钟、床、箱子、农田坐标，用 mc_window_view 打开箱子，必要时用 mc_skill_bind_bed 绑床。不要攻击村民或铁傀儡。
+4. 连续 15–20 步没有村庄线索时，换一个未探索方向，或沿河流/道路走，不要原地转圈。
+5. 只有连续两次 move_to 位移 <8m 且 y<55 时，才允许 mc_skill_staircase(vertical="up", steps=8) 返回地表；不要为了找村庄挖洞。
+6. 找到村庄后，优先把村庄中心、村民、箱子、床写入 WorldMemory；如果时间还多，再在村庄周边继续走 300–500m 扩大区块足迹。
+7. 如果看到箱子/木桶 POI，立即用坐标调用 mc_window_view 打开并记录；如果 mc_move_to 连续两次没有 8m 以上位移，必须换目标或换方向，禁止重复同一坐标。
