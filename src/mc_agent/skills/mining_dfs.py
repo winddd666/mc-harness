@@ -770,6 +770,24 @@ def _can_stack_expected_drop(inv_raw: dict[str, Any], expected_drops: set[str] |
     return False
 
 
+def _interpolate_cells(a: tuple[int, int, int], b: tuple[int, int, int]) -> list[tuple[int, int, int]]:
+    """Cell-by-cell straight line from a to b (each hop <= 1 block on every axis)."""
+    steps = max(abs(b[0] - a[0]), abs(b[1] - a[1]), abs(b[2] - a[2]))
+    if steps <= 1:
+        return [a, b]
+    out: list[tuple[int, int, int]] = []
+    for i in range(1, steps + 1):
+        t = i / steps
+        out.append(
+            (
+                int(round(a[0] + (b[0] - a[0]) * t)),
+                int(round(a[1] + (b[1] - a[1]) * t)),
+                int(round(a[2] + (b[2] - a[2]) * t)),
+            )
+        )
+    return [a, *out]
+
+
 def _floor_pos(raw: Any) -> tuple[int, int, int]:
     if not isinstance(raw, (list, tuple)) or len(raw) < 3:
         raise ValueError(f"Invalid pos: {raw!r}")
@@ -1581,6 +1599,18 @@ class MiningDFSEngine:
             cur = _floor_pos(st["pos"])
             if abs(cur[0] - wp[0]) == 0 and abs(cur[1] - wp[1]) == 0 and abs(cur[2] - wp[2]) == 0:
                 continue
+            # Waypoints can be far apart (node anchors). Walk the straight line cell by cell:
+            # a single move_exact over a 30-block climb always fails, which used to end the
+            # route walk ("backtrack_blocked") and force a full staircase re-dig (live s18).
+            hops = _interpolate_cells(cur, wp)
+            if len(hops) > 1:
+                stepped_all = True
+                for hop in hops[1:]:
+                    if not self._move_exact(hop):
+                        stepped_all = False
+                        break
+                if stepped_all:
+                    continue
             if self._move_exact(wp):
                 continue
             dx_w = wp[0] - cur[0]

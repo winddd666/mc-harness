@@ -1891,3 +1891,13 @@ def test_corridor_repair_digs_fill_but_refuses_flooded_cells() -> None:
         eng = MacroSkills(bot).mining_dfs
         assert eng._clear_route_obstruction((0, 20, -1)) >= 1      # solid fill -> dug
         assert eng._clear_route_obstruction((0, 20, -3)) == -1     # flooded -> give up
+
+
+def test_waypoint_walk_interpolates_long_hops() -> None:
+    """A 35-block climb must be walked cell by cell; one move_exact over it always fails."""
+    from mc_agent.skills.mining_dfs import _interpolate_cells
+
+    hops = _interpolate_cells((0, 63, 0), (0, 28, 0))
+    assert len(hops) == 36
+    assert hops[0] == (0, 63, 0) and hops[-1] == (0, 28, 0)
+    assert all(abs(hops[i + 1][1] - hops[i][1]) == 1 for i in range(len(hops) - 1))
