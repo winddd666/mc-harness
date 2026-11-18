@@ -2608,7 +2608,7 @@ class MiningDFSEngine:
                 if time.monotonic() >= deadline:
                     break
                 try:
-                    res = self.skills.dig_staircase(direction=d, steps=8, vertical="up", stop_on_ore=False)
+                    res = self.skills.dig_staircase(direction=d, steps=6, vertical="up", stop_on_ore=False)
                 except (ApiError, ValueError, KeyError, TypeError):
                     stuck_dirs.add(d)
                     continue
@@ -4345,7 +4345,10 @@ class MiningDFSEngine:
         if act == "reset":
             return self.reset(geofence=geofence)
         if act in {"climb_out", "climb"}:
-            climb = self._climb_out(deadline=time.monotonic() + max_duration_s)
+            # Climbing needs a bigger slice than a mining tick: one 8-step staircase alone eats
+            # ~25s, so a 32s budget produced "attempts: 1, climbed: 8" (live s15).
+            budget = min(90.0, max(float(max_duration_s), 60.0))
+            climb = self._climb_out(deadline=time.monotonic() + budget)
             ok_climb = bool(climb["reached"])
             return {
                 "ok": ok_climb,
