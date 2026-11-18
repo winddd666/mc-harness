@@ -2556,6 +2556,41 @@ class MiningDFSEngine:
         """
         start_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
         target_y = (int(self.collar_ceiling_y) - 20) if self.collar_ceiling_y is not None else start_y
+        method = "stair"
+        try:
+            hp_now = float(self.bot.status().get("health") or 20.0)
+        except (ApiError, TypeError, ValueError):
+            hp_now = 20.0
+        hp_ref = [hp_now]
+
+        # 1) Preferred: walk our own corridor (no digging at all).
+        walked = False
+        if self.collar_node_id is not None and self.collar_node_id in self.nodes:
+            ok_walk, _err_walk = self._navigate_to_node(self.collar_node_id, min_hp_ref=hp_ref)
+            walked = bool(ok_walk)
+        # 2) Borrow the route of a previously retired shaft near us (travel only).
+        if not walked:
+            cur_now = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])
+            if self._try_restore_saved_shaft(cur_now, min_hp_ref=hp_ref, allow_retired=True):
+                ok_walk, _err_walk = self._navigate_to_node(self.collar_node_id, min_hp_ref=hp_ref)
+                if ok_walk:
+                    walked = True
+                    # Travel only: do not keep this retired tree as the mining tree.
+                    self._clear_active_tree_only()
+        if walked:
+            method = "walk"
+            y_walk = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
+            if y_walk >= target_y:
+                return {
+                    "start_y": start_y,
+                    "end_y": y_walk,
+                    "climbed": y_walk - start_y,
+                    "target_y": target_y,
+                    "reached": True,
+                    "attempts": 0,
+                    "method": method,
+                }
+
         dirs = ["north", "south", "east", "west"]
         if getattr(self, "_climb_dir", None) in dirs:
             dirs.remove(self._climb_dir)
@@ -2603,6 +2638,7 @@ class MiningDFSEngine:
             "target_y": target_y,
             "reached": end_y >= target_y,
             "attempts": attempts,
+            "method": method if not walked else f"{method}+stair",
         }
 
     def _surface_climb_hint(self) -> str:

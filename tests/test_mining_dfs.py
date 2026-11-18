@@ -1847,3 +1847,36 @@ def test_retired_shaft_keeps_its_walkable_route() -> None:
         assert saved, "exhausted shaft must keep its node graph"
         assert saved[0]["retired"] is True
         assert len(saved[0]["nodes"]) >= 2
+
+
+def test_climb_out_prefers_walking_the_shaft_over_new_stairs(monkeypatch) -> None:
+    """Walking our own corridor must win over re-digging stairs (s12: 27 turns of staircase)."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="WalkHomeBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        tip = eng._create_node(kind="spine", anchor=(0, 20, 0), parent_id=collar.node_id,
+                               edge_from_parent=ShaftEdge("stair_down", "north", [(0, 40, 0)]),
+                               branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.active_node_id = tip.node_id
+        eng.collar_ceiling_y = 64
+
+        def fake_status():
+            return {"pos": [0.5, float(world.pos[1]), 0.5], "health": 20.0, "food": 20.0, "alive": True}
+
+        def fake_nav(goal_node_id, min_hp_ref):
+            world.pos = [0.5, 64.0, 0.5]          # walk all the way home
+            return True, None
+
+        stairs: list[str] = []
+        monkeypatch.setattr(eng.bot, "status", fake_status)
+        monkeypatch.setattr(eng, "_navigate_to_node", fake_nav)
+        monkeypatch.setattr(eng.skills, "dig_staircase",
+                            lambda **kw: (stairs.append(kw.get("direction")), {"ok": True})[1])
+        res = eng.run(action="climb_out", target_y=16, max_duration_s=20.0)
+
+    assert res["climb"]["method"] == "walk"
+    assert res["climb"]["reached"] is True
+    assert stairs == []                            # never dug a single stair
