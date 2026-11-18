@@ -4512,9 +4512,33 @@ class MiningDFSEngine:
         if act in {"climb_out", "climb"}:
             # Climbing needs a bigger slice than a mining tick: one 8-step staircase alone eats
             # ~25s, so a 32s budget produced "attempts: 1, climbed: 8" (live s15).
+
             budget = min(120.0, max(float(max_duration_s), 90.0))
             climb = self._climb_out(deadline=time.monotonic() + budget)
             ok_climb = bool(climb["reached"])
+            # Never hand control back while the bot is floating: live n0152 drowned during the
+            # model's next (empty) turns after unstick left it in_water.
+            wet_after = False
+            try:
+                if bool(self.bot.status().get("in_water")):
+                    esc = self.skills.escape_water()
+                    wet_after = bool(esc.get("in_water"))
+                    if wet_after:
+                        self.skills.unstick()
+                        wet_after = bool(self.bot.status().get("in_water"))
+            except (ApiError, ValueError, KeyError):
+                wet_after = False
+            if wet_after:
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "action": "climb_out",
+                    "strategy": self.strategy,
+                    "stop_reason": "in_water",
+                    "climb": climb,
+                    "message": "爬升途中仍在水中，请先用 staircase(vertical='up') 或 unstick 上岸/离开水域，再继续。",
+                    "tree": self.snapshot(),
+                }
             return {
                 "ok": ok_climb,
                 "requires_replan": not ok_climb,
