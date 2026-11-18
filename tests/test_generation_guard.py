@@ -428,3 +428,32 @@ def test_disconnected_guard_finishes_run_with_disconnected_status(monkeypatch):
 
     assert report["status"] == "disconnected"
     assert "连接中断" in (report.get("error") or "")
+
+
+def test_tool_transport_error_becomes_receipt_not_run_failure(monkeypatch):
+    """httpx transport breaks (RemoteProtocolError) must not bypass the tool-level guard."""
+    from mc_agent.harness.agent import _RepeatFailureGuard
+    from mc_agent.harness.tool_registry import Tool
+
+    class _ToolsetStub:
+        def last_block_pos(self):
+            return (0, 64, 0)
+
+        def update_block_pos(self, pos):
+            return None
+
+    monkeypatch.setattr(_RepeatFailureGuard, "_API_RETRY_DELAYS", (0.0, 0.0))
+    attempts = {"n": 0}
+
+    def _broken(**kwargs):
+        attempts["n"] += 1
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+
+    tool = Tool(name="mc_skill_mine_dfs", description="", parameters={}, handler=_broken, concurrency="exclusive")
+    guard = _RepeatFailureGuard(_ToolsetStub())
+    out = json.loads(guard.wrap_tool(tool).handler())
+
+    assert attempts["n"] == 3                     # transient: retried twice, then surfaced
+    assert out["ok"] is False
+    assert out["error"]["code"] == "network_error"
+    assert out["requires_replan"] is True

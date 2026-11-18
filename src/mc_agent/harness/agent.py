@@ -9,6 +9,8 @@ import math
 import sys
 import threading
 import time
+
+import httpx
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -313,9 +315,16 @@ class _RepeatFailureGuard:
         return None
 
     @classmethod
-    def _api_error_receipt(cls, tool_name: str, kwargs: dict[str, Any], exc: ApiError) -> str:
-        """Turn a fatal-looking ApiError into a normal tool failure receipt the model can replan from."""
-        code = str(exc.code or "api_error")
+    def _api_error_receipt(cls, tool_name: str, kwargs: dict[str, Any], exc: Exception) -> str:
+        """Turn a fatal-looking tool/transport error into a normal receipt the model can replan from."""
+        if isinstance(exc, ApiError):
+            code = str(exc.code or "api_error")
+            message = exc.message
+            context = dict(exc.context or {})
+        else:
+            code = "network_error"
+            message = f"MC API 网络异常（{type(exc).__name__}）：{exc}"
+            context = {}
         hint = cls._API_ERROR_HINTS.get(code) or (
             "这是工具层返回的可恢复错误：先确认背包/位置是否变化（死亡会掉物品），再换一种方式重试，不要重复同一调用。"
         )
@@ -324,7 +333,7 @@ class _RepeatFailureGuard:
             "requires_replan": True,
             "tool": tool_name,
             "args": kwargs,
-            "error": {"code": code, "message": exc.message, **(exc.context or {})},
+            "error": {"code": code, "message": message, **context},
             "hint": hint,
         }
         return json.dumps(payload, ensure_ascii=False)
@@ -564,7 +573,7 @@ class _RepeatFailureGuard:
                     )
 
             raw = ""
-            last_exc: ApiError | None = None
+            last_exc: Exception | None = None
             for attempt in range(len(self._API_RETRY_DELAYS) + 1):
                 try:
                     raw = orig_handler(**kwargs)
@@ -574,6 +583,12 @@ class _RepeatFailureGuard:
                     last_exc = exc
                     if str(exc.code or "").lower() not in self._API_RETRYABLE_CODES:
                         break
+                    if attempt < len(self._API_RETRY_DELAYS):
+                        time.sleep(self._API_RETRY_DELAYS[attempt])
+                except httpx.HTTPError as exc:
+                    # Transport-level break (RemoteProtocolError / ReadTimeout ...): always retry,
+                    # then surface as a receipt instead of killing the whole run.
+                    last_exc = exc
                     if attempt < len(self._API_RETRY_DELAYS):
                         time.sleep(self._API_RETRY_DELAYS[attempt])
             if last_exc is not None:
@@ -1264,6 +1279,10 @@ def run_mc_agent(
     except RunDisconnected as exc:
         report["status"] = "disconnected"
         report["error"] = str(exc)
+    except httpx.HTTPError as exc:
+        # Transport break outside the tool wrapper (snapshot/HUD/stream): keep it off "runtime_error".
+        report["status"] = "network_error"
+        report["error"] = f"MC API 网络异常（{type(exc).__name__}）：{exc}"
     except (ApiError, RuntimeError) as exc:
         report["status"] = "runtime_error"
         report["error"] = str(exc)
