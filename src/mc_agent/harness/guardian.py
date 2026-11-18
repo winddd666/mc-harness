@@ -14,6 +14,11 @@ from ..errors import ApiError
 from ..skills.library import MacroSkills
 from ..skills.safety import SAFE_FOOD_PRIORITY
 
+# Hurt sources that mean "my body is embedded in a block", not "something is attacking me".
+# These need a carve-out reflex (unstick), never bunkering: a bunker needs a pickaxe that may
+# already have been dropped on death, which is how a death loop turns into a fatal API error.
+IN_WALL_HURT_SOURCES = frozenset({"in_wall", "suffocation", "cramming", "inside_block"})
+
 
 class _GuardSession:
     def __init__(self, bot, checkpoint):
@@ -158,20 +163,38 @@ class GenerationGuard:
         elif hurt and not in_water and not status.get("in_lava"):
             attacker = (hurts[-1].get("source_entity") or hurts[-1].get("likely_attacker")) if hurts else status.get("nearest_hostile")
             hurt_src = str(hurts[-1].get("source") or "") if hurts else ""
-            raw_dist = (attacker or status.get("nearest_hostile") or {}).get("dist", 99.0)
-            try:
-                nh_dist = float(raw_dist)
-            except (TypeError, ValueError):
-                nh_dist = 99.0
-            melee_or_airborne = (
-                (status.get("on_ground") is not True)
-                or (hurt_src in {"mob_attack", "player_explosion", "entity_explosion"})
-                or (nh_dist <= 4.5)
-            )
-            if not melee_or_airborne:
-                bunker = self._action("emergency_bunker", lambda: MacroSkills(self.bot).dig_safety_bunker(urgent=True))
-                actions.append(bunker)
-                if not bunker["ok"]:
+            if hurt_src in IN_WALL_HURT_SOURCES:
+                # Suffocating inside a block: carve ourselves out instead of digging a bunker
+                # (a bunker needs a pickaxe, which a death may already have taken away).
+                actions.append(self._action("unstick_in_wall", lambda: MacroSkills(self.bot).unstick()))
+            else:
+                raw_dist = (attacker or status.get("nearest_hostile") or {}).get("dist", 99.0)
+                try:
+                    nh_dist = float(raw_dist)
+                except (TypeError, ValueError):
+                    nh_dist = 99.0
+                melee_or_airborne = (
+                    (status.get("on_ground") is not True)
+                    or (hurt_src in {"mob_attack", "player_explosion", "entity_explosion"})
+                    or (nh_dist <= 4.5)
+                )
+                if not melee_or_airborne:
+                    bunker = self._action("emergency_bunker", lambda: MacroSkills(self.bot).dig_safety_bunker(urgent=True))
+                    actions.append(bunker)
+                    if not bunker["ok"]:
+                        actions.append(
+                            self._action(
+                                "combat_or_flee",
+                                lambda: MacroSkills(self.bot).defend_or_flee(
+                                    attacker=attacker,
+                                    counts=counts,
+                                    health=health,
+                                    urgent=True,
+                                    geofence=self.geofence,
+                                ),
+                            )
+                        )
+                else:
                     actions.append(
                         self._action(
                             "combat_or_flee",
@@ -184,19 +207,6 @@ class GenerationGuard:
                             ),
                         )
                     )
-            else:
-                actions.append(
-                    self._action(
-                        "combat_or_flee",
-                        lambda: MacroSkills(self.bot).defend_or_flee(
-                            attacker=attacker,
-                            counts=counts,
-                            health=health,
-                            urgent=True,
-                            geofence=self.geofence,
-                        ),
-                    )
-                )
         if needs_food and (not hurt or any(a["action"] in {"emergency_bunker", "combat_or_flee"} and a["ok"] for a in actions)):
             best_food = next((name for name in SAFE_FOOD_PRIORITY if counts.get(name, 0) > 0), None)
             if best_food:

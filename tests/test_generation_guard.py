@@ -205,3 +205,101 @@ def test_guardian_snapshot_is_visible_before_next_tool():
     assert replay.status["health"] == 16
     assert replay.status["blocking"] is True
     assert replay.inventory["items"] == [{"name": "dirt", "count": 16}]
+
+
+def test_in_wall_hurt_triggers_unstick_instead_of_bunker(monkeypatch):
+    """Suffocating inside a block must carve out (no pickaxe needed), never bunker (needs a pickaxe)."""
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    state = {"hurt": False}
+    requests = 0
+    events = []
+    skill_calls = []
+
+    monkeypatch.setattr(
+        MacroSkills, "unstick", lambda self: skill_calls.append("unstick") or {"ok": True, "patched": True}
+    )
+    monkeypatch.setattr(
+        MacroSkills,
+        "dig_safety_bunker",
+        lambda self, **kwargs: skill_calls.append("bunker") or {"ok": True, "patched": True},
+    )
+
+    def handle(request):
+        action = request.url.path.rsplit("/", 1)[-1]
+        if action == "events":
+            since = int(request.url.params.get("since", 0)) if request.method == "GET" else 0
+            rows = [{"seq": 1, "type": "hurt", "health": 12, "source": "in_wall"}] if state["hurt"] and since < 1 else []
+            result = {"events": rows, "last_seq": 1 if state["hurt"] else 0}
+        elif action == "status":
+            result = {"pos": [0.5, 64, 0.5], "health": 12 if state["hurt"] else 20, "food": 20,
+                      "alive": True, "ready": True, "on_ground": True, "in_water": False}
+        elif action == "inventory":
+            result = {"items": []}
+        else:
+            result = {"ok": True}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def chat(messages, tools=None, *, control=None, **kwargs):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            state["hurt"] = True
+            clock[0] += 1
+            check_control(control)
+            pytest.fail("in_wall reflex should have cancelled the stale generation.")
+        return {"role": "assistant", "content": "已从墙里脱困，按新状态重规划。"}
+
+    with BotSession("cached", transport=httpx.MockTransport(handle)) as bot:
+        report = run_mc_agent("guard", bot, chat_fn=chat, max_calls=4, survival_guard=True,
+                              include_initial_snapshot=False, on_event=events.append)
+
+    assert report["status"] == "answered"
+    assert skill_calls == ["unstick"]
+    started = [e["action"] for e in events if e["type"] == "guardian.action.started"]
+    assert "unstick_in_wall" in started
+    assert "emergency_bunker" not in started
+
+
+def test_tool_api_error_becomes_receipt_and_run_keeps_going(monkeypatch):
+    """A single tool-level ApiError must return a replan-able receipt instead of aborting the run."""
+    from mc_agent.errors import ApiError
+    from mc_agent.harness.tool_registry import Tool
+
+    class _ToolsetStub:
+        def last_block_pos(self):
+            return (0, 64, 0)
+
+        def update_block_pos(self, pos):
+            return None
+
+    from mc_agent.harness.agent import _RepeatFailureGuard
+
+    monkeypatch.setattr(_RepeatFailureGuard, "_API_RETRY_DELAYS", (0.0, 0.0))
+
+    def _missing(**kwargs):
+        raise ApiError("missing_item", "no iron_pickaxe in inventory", context={"inventory": {"items": []}})
+
+    tool = Tool(name="mc_equip", description="", parameters={}, handler=_missing, concurrency="exclusive")
+    guard = _RepeatFailureGuard(_ToolsetStub())
+    out = json.loads(guard.wrap_tool(tool).handler(item="iron_pickaxe"))
+    assert out["ok"] is False
+    assert out["requires_replan"] is True
+    assert out["error"]["code"] == "missing_item"
+    assert out["error"]["message"] == "no iron_pickaxe in inventory"
+    assert "hint" in out and "craft_gear" in out["hint"]
+
+    # transient codes get retried before surfacing a receipt
+    attempts = {"n": 0}
+
+    def _flaky(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise ApiError("not_connected", "socket closed")
+        return json.dumps({"ok": True, "result": {}})
+
+    flaky = Tool(name="mc_status", description="", parameters={}, handler=_flaky, concurrency="exclusive")
+    raw = guard.wrap_tool(flaky).handler()
+    assert attempts["n"] == 3
+    assert json.loads(raw)["ok"] is True
+

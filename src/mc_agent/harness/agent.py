@@ -182,6 +182,18 @@ class _RepeatFailureGuard:
 
     _TRANSIENT_CODES = frozenset({"not_connected", "action_quarantined", "busy", "repeated_identical_failure_blocked", "bad_args"})
     _ALLOW_ONE_RETRY_CODES = frozenset({"movement_not_confirmed", "interrupted"})
+    # ApiError codes worth re-issuing once inside the tool wrapper (transient transport issues).
+    _API_RETRYABLE_CODES = frozenset({"not_connected", "timeout", "api_timeout", "server_busy", "rate_limited"})
+    _API_RETRY_DELAYS = (0.4, 1.0)
+    _API_ERROR_HINTS = {
+        "missing_item": (
+            "该物品已不在背包（死亡会掉落全部物品）：先 mc_inventory 确认，再用 mc_skill_craft_gear / mc_skill_smelt 重做，"
+            "不要重复 equip 同一件不存在的物品。"
+        ),
+        "not_connected": "Bot 与服务器连接中断：先 mc_status 确认在线状态，必要时重新登录后再继续。",
+        "missing_ingredients": "材料不足：先收集/熔炼材料再合成。",
+        "no_recipe": "没有该配方：确认物品名与所需工作台（3x3）后再合成。",
+    }
     _AREA_SCAN_TOOLS = frozenset({"mc_skill_harvest_logs", "mc_skill_mine_blocks", "mc_skill_collect_drops"})
     _MAX_SIGNATURES = 32
     _LOCAL_RADIUS = 5
@@ -299,6 +311,23 @@ class _RepeatFailureGuard:
             if isinstance(parsed, dict):
                 return parsed
         return None
+
+    @classmethod
+    def _api_error_receipt(cls, tool_name: str, kwargs: dict[str, Any], exc: ApiError) -> str:
+        """Turn a fatal-looking ApiError into a normal tool failure receipt the model can replan from."""
+        code = str(exc.code or "api_error")
+        hint = cls._API_ERROR_HINTS.get(code) or (
+            "这是工具层返回的可恢复错误：先确认背包/位置是否变化（死亡会掉物品），再换一种方式重试，不要重复同一调用。"
+        )
+        payload = {
+            "ok": False,
+            "requires_replan": True,
+            "tool": tool_name,
+            "args": kwargs,
+            "error": {"code": code, "message": exc.message, **(exc.context or {})},
+            "hint": hint,
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
     @classmethod
     def _summarize_failure(cls, data: dict[str, Any]) -> str:
@@ -534,7 +563,23 @@ class _RepeatFailureGuard:
                         ensure_ascii=False,
                     )
 
-            raw = orig_handler(**kwargs)
+            raw = ""
+            last_exc: ApiError | None = None
+            for attempt in range(len(self._API_RETRY_DELAYS) + 1):
+                try:
+                    raw = orig_handler(**kwargs)
+                    last_exc = None
+                    break
+                except ApiError as exc:
+                    last_exc = exc
+                    if str(exc.code or "").lower() not in self._API_RETRYABLE_CODES:
+                        break
+                    if attempt < len(self._API_RETRY_DELAYS):
+                        time.sleep(self._API_RETRY_DELAYS[attempt])
+            if last_exc is not None:
+                # A single tool/API failure must never abort the whole run: hand the model a
+                # normal failure receipt (and let the streak breaker below handle loops).
+                raw = self._api_error_receipt(tool.name, kwargs, last_exc)
             parsed = self._parse_json(raw)
             if not isinstance(parsed, dict):
                 return raw
