@@ -1794,7 +1794,7 @@ def test_climb_out_action_reports_progress_and_target(monkeypatch) -> None:
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
     with BotSession("tok", bot_username="ClimbBot", transport=httpx.MockTransport(world.handler)) as bot:
         eng = MacroSkills(bot).mining_dfs
-        eng.collar_ceiling_y = 64                     # target = 44
+        eng.collar_ceiling_y = 64                     # target = 48 (ceiling-16)
         calls: list[str] = []
 
         def fake_status():
@@ -1812,9 +1812,9 @@ def test_climb_out_action_reports_progress_and_target(monkeypatch) -> None:
         res = eng.run(action="climb_out", target_y=16, max_duration_s=20.0)
 
     assert res["action"] == "climb_out"
-    assert res["climb"]["target_y"] == 44
+    assert res["climb"]["target_y"] == 48
     assert res["climb"]["reached"] is True
-    assert res["climb"]["climbed"] >= 24
+    assert res["climb"]["climbed"] >= 28
     assert calls
 
 
@@ -1917,3 +1917,13 @@ def test_upward_layer_switch_is_refused_on_an_existing_shaft() -> None:
         res = eng.run(target="iron", goal_count=4, target_y=16, action="explore", max_duration_s=6.0)
     assert res["stop_reason"] == "layer_switch_upward_refused"
     assert res["requires_replan"] is True
+
+
+def test_climb_target_overshoots_the_explore_threshold() -> None:
+    """Live n0332: target==ceiling-20 made climb "reach" exactly where explore still refuses."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="BoundaryBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64
+        climb = eng._climb_out(deadline=0.0)          # no time: just check the computed target
+    assert climb["target_y"] == 48                    # > 64-20=44, so explore will accept

@@ -2704,7 +2704,10 @@ class MiningDFSEngine:
         and the repetition in-call turns that into 1-3 turns.
         """
         start_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
-        target_y = (int(self.collar_ceiling_y) - 20) if self.collar_ceiling_y is not None else start_y
+        # explore refuses at y <= ceiling-20, so climbing must overshoot that boundary by a few
+        # blocks. With target_y == ceiling-20 the two thresholds coincide and live n0332 looped
+        # forever: climb_out "reached" at 42, explore rejected 42, climb again, ...
+        target_y = (int(self.collar_ceiling_y) - 16) if self.collar_ceiling_y is not None else start_y
         method = "stair"
         try:
             hp_now = float(self.bot.status().get("health") or 20.0)
