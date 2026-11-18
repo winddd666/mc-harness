@@ -2660,9 +2660,15 @@ class MiningDFSEngine:
                     # Travel only: do not keep this retired tree as the mining tree.
                     self._clear_active_tree_only()
         if walked:
+            y_walk = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
+            # _navigate_to_node can report success while we are still deep (e.g. the active node
+            # already equals the collar id). Only trust it when it actually moved us up.
+            if y_walk <= start_y and y_walk < target_y - 2:
+                walked = False
+        if walked:
             method = "walk"
             y_walk = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
-            if y_walk >= target_y:
+            if y_walk >= target_y - 2:
                 return {
                     "start_y": start_y,
                     "end_y": y_walk,
