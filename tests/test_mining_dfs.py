@@ -1927,3 +1927,29 @@ def test_climb_target_overshoots_the_explore_threshold() -> None:
         eng.collar_ceiling_y = 64
         climb = eng._climb_out(deadline=0.0)          # no time: just check the computed target
     assert climb["target_y"] == 48                    # > 64-20=44, so explore will accept
+
+
+def test_thirty_dry_calls_abandon_a_dead_shaft() -> None:
+    """n0344 burned 45 dry calls for 1 hit; n0424 recovered after ~20, so the bar is 30."""
+    world = _MockMineWorld(
+        start_pos=(0.5, -54.0, 0.5),
+        surface_y=64,
+        inventory_items=[
+            {"name": "iron_pickaxe", "count": 1, "slot": 9, "durability": [250, 250]},
+            {"name": "stone_pickaxe", "count": 1, "slot": 10, "durability": [131, 131]},
+            {"name": "cobblestone", "count": 64, "slot": 11},
+        ],
+    )
+    with BotSession("tok", bot_username="DryBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.active_node_id = collar.node_id
+        eng.collar_ceiling_y = 64
+        eng.target_y = -54
+        eng.dry_calls = 30
+        res = eng.run(target="diamond", goal_count=4, target_y=-54, action="explore", max_duration_s=6.0)
+    assert res["stop_reason"] == "shaft_dry_abandoned"
+    assert res["requires_replan"] is True
+    assert eng.dry_calls == 0

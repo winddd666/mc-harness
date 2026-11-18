@@ -249,6 +249,11 @@ MAX_IDLE_SECONDS = 20.0
 FLUID_ABORT_LIMIT = 3
 # Three consecutive "ok but nothing happened" calls mean the shaft is a dead end.
 IDLE_CALLS_BEFORE_RELOCATE = 3
+# A shaft that yields nothing for this many consecutive calls is a dead run: abandon it loudly.
+# Threshold evidence (overnight runs): n0424 had ~20 dry calls in a row and then produced 3
+# diamonds, so 20 was too aggressive; n0344 burned 45 dry calls for 1 hit. 30 separates them,
+# and this remains a coarse heuristic — treat it as a budget guard, not a geological verdict.
+DRY_CALLS_BEFORE_ABANDON = 30
 # A broken ore drops inside its own cell, so we must be standing within pickup range of it.
 # The MC API does NOT enforce dig reach (only 1 "out_of_reach" in thousands of live digs), so
 # nothing else stops us from shattering an ore behind a wall and losing the drop forever.
@@ -833,6 +838,8 @@ class MiningDFSEngine:
         self.idle_calls: int = 0
         # Ore blocks broken whose drop could not be picked up (through-wall mining losses).
         self.lost_drops: int = 0
+        # Consecutive calls on this shaft that produced no target item at all.
+        self.dry_calls: int = 0
         self.locked_cluster: dict[str, Any] | None = None
         self._last_radar_anchor: tuple[int, int, int] | None = None
         self.sealed_positions: set[tuple[int, int, int]] = set()
@@ -1057,6 +1064,7 @@ class MiningDFSEngine:
             "active_node_id": self.active_node_id,
             "target_y": self.target_y,
             "node_count": len(self.nodes),
+            "dry_calls": self.dry_calls,
             "nodes": node_summaries[-12:],
             "deferred_ores": [
                 {
@@ -4267,6 +4275,7 @@ class MiningDFSEngine:
         node = self._create_node(kind="collar", anchor=anchor, parent_id=None, edge_from_parent=None, branches=branches)
         self.collar_node_id = node.node_id
         self.fluid_aborts = 0
+        self.dry_calls = 0
         self.fluid_abandoned_deep = False
         if self.collar_ceiling_y is None or anchor[1] > self.collar_ceiling_y:
             self.collar_ceiling_y = int(anchor[1])
@@ -4873,6 +4882,25 @@ class MiningDFSEngine:
                         }
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
 
+        if self.dry_calls >= DRY_CALLS_BEFORE_ABANDON and self.collar_node_id in self.nodes:
+            # Dead shaft: 40 minutes of zero target yield. Archive it and tell the model to move.
+            self._archive_current_shaft_to_ledger(mark_exhausted=True)
+            self._clear_active_tree_only()
+            self.dry_calls = 0
+            return {
+                "ok": False,
+                "requires_replan": True,
+                "action": act,
+                "strategy": self.strategy,
+                "stop_reason": "shaft_dry_abandoned",
+                "message": (
+                    f"本井连续 {DRY_CALLS_BEFORE_ABANDON} 次调用没有产出任何 {profile['profile_key']}，"
+                    "判定为死井并归档。请换到 16 格以外的新点位："
+                    "mc_move_to 平移后 explore；若在地下先 action='climb_out' 回地表。"
+                ),
+                "tree": self.snapshot(),
+            }
+
         if self.idle_calls >= IDLE_CALLS_BEFORE_RELOCATE:
             # Live s05: 9 consecutive explore calls returned ok=true with gained={} and an
             # unchanged position; the model had no signal and kept retrying the same dead node.
@@ -5474,6 +5502,10 @@ class MiningDFSEngine:
             self.idle_calls += 1
         else:
             self.idle_calls = 0
+        if target_gained <= 0:
+            self.dry_calls += 1
+        else:
+            self.dry_calls = 0
         out_res: dict[str, Any] = {
             "ok": ok,
             "requires_replan": not ok or stop_reason == "hurt",
