@@ -61,12 +61,24 @@ _FIND_BLOCK_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+# These r11 inputs are item/entity registry IDs, never block IDs. Other
+# unfamiliar names remain version-authoritative and are checked by the API.
+_NON_BLOCK_FIND_TYPES = frozenset({"shield", "leather", "sheep"})
+
+
+def _invalid_find_block_query(ignored: list[str]) -> str:
+    return json.dumps({
+        "ok": False, "requires_replan": True, "ignored_types": ignored,
+        "error": {"code": "bad_args", "message": "没有有效方块类型。示例：mc_find_blocks(types=['oak_log','stone'])；查实体请用 mc_get_entities。"},
+    }, ensure_ascii=False)
+
+
 def _normalize_find_block_types(types: list[str] | tuple[str, ...]) -> list[str]:
     """Expand block families; leave registry validation to the server version."""
     out: list[str] = []
     for raw in types:
         name = str(raw).strip().lower().removeprefix("minecraft:")
-        if name:
+        if name and name not in _NON_BLOCK_FIND_TYPES:
             out.extend(_FIND_BLOCK_ALIASES.get(name, (name,)))
     return list(dict.fromkeys(out))
 
@@ -603,14 +615,18 @@ class McToolset:
         radius = max(1, min(64, radius))
         limit = max(1, min(60, limit))
         payload: dict[str, Any] = {"radius": radius, "limit": limit}
+        ignored: list[str] = []
         if types:
+            requested = [str(name).strip().lower().removeprefix("minecraft:") for name in types]
+            ignored = list(dict.fromkeys(name for name in requested if name in _NON_BLOCK_FIND_TYPES))
             types = _normalize_find_block_types(types)
+            if not types:
+                return _invalid_find_block_query(ignored or requested)
             payload["types"] = types
         if mature is not None:
             norm_types = [str(t).removeprefix("minecraft:").strip().lower() for t in (types or [])]
             if not norm_types or any(t in self._CROP_BLOCK_TYPES for t in norm_types):
                 payload["mature"] = mature
-        ignored: list[str] = []
         while True:
             raw = self._call_json("find_blocks", payload)
             try:
@@ -626,10 +642,7 @@ class McToolset:
             ignored.append(bad_type)
             types = [name for name in types if name != bad_type]
             if not types:
-                return json.dumps({
-                    "ok": False, "requires_replan": True, "ignored_types": ignored,
-                    "error": {"code": "bad_args", "message": "没有有效方块类型。示例：mc_find_blocks(types=['oak_log','stone'])；查实体请用 mc_get_entities。"},
-                }, ensure_ascii=False)
+                return _invalid_find_block_query(ignored)
             payload["types"] = types
         if ignored and isinstance(parsed, dict):
             parsed["ignored_types"] = ignored

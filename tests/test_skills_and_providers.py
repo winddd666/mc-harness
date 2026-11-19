@@ -1615,10 +1615,11 @@ def test_find_blocks_expands_families_and_keeps_valid_part_of_mixed_query() -> N
     final = queries[-1]
     assert {"oak_log", "pale_oak_log", "birch_planks", "bamboo_planks", "white_bed", "black_wool", "short_grass", "tall_grass", "nether_portal", "netherrack", "cave_air", "water", "future_valid_block"} <= set(final)
     assert len(final) == len(set(final))
-    assert len(queries) == 4
+    assert len(queries) == 2
 
 
-def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback() -> None:
+@pytest.mark.parametrize("types,expected_queries", [(["shield", "leather"], 0), (["made_up_one", "made_up_two"], 2)])
+def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback(types, expected_queries) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     queries = []
@@ -1630,11 +1631,11 @@ def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback() -
         return httpx.Response(200, json={"ok": False, "error": {"code": "bad_args", "message": f"unknown block {body['types'][0]}"}})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = json.loads(McToolset(bot).mc_find_blocks(types=["shield", "leather"]))
+        result = json.loads(McToolset(bot).mc_find_blocks(types=types))
     assert result["ok"] is False
-    assert result["ignored_types"] == ["shield", "leather"]
+    assert result["ignored_types"] == types
     assert "mc_find_blocks(types=" in result["error"]["message"]
-    assert len(queries) == 2
+    assert len(queries) == expected_queries
 
 
 @pytest.mark.parametrize("item,counts,missing", [
