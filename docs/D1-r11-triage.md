@@ -565,6 +565,22 @@ staircase  16.2s       27→27   (time_budget, 0 进展)
 
 **问题（P2-31）**：找床阶段半径 64→128→200→300→400→600→800→1000 连发 10+ 次扫描，全部空手；随后 `craft_gear(white_bed)` 缺羊毛。建议半径上限 128 + "先找羊"。
 
+### 4z. r20_short 收官 + r19→r20 对比 + r21 启动损失
+
+**r20_short（17/18，`hy4_hy_3` 被 BUG-035 吞）终验**：仅 2 项 FAIL —— `startup crash`（BUG-035，`3aea714` 已修）与 `over-cap 2`（BUG-029 残留，`989d757` 未合入）；其余 9 项 PASS。
+
+**r19→r20 逐 bot 分数**（18→17 路，sum 1760→1680，人均 97.8→98.8）：
+
+| 变化 | bot |
+|---|---|
+| +45 / +30 / +15 | `nju_guitest`、`ds_4`、`hy4_4`/`hy4_9`/`nju_3` |
+| -20 / -20 / -15 | `hy4_7`、`hy4_8`、`glm_1` |
+| 丢路 | `hy4_3`（BUG-035） |
+
+失败项趋势：`staircase:time_budget` 30→36（BUG-037）、`path_not_found` 31→41、`tunnel:unknown` 9→17；反过来 `move_to:bad_args` 7→2、多类 `repeated_identical_failure_blocked` 归零。
+
+**r21_short（23:25 启动，已含 BUG-035 修复）**：`glm_1` 启动即丢 —— `ensure_bot_ready` 3 次/186s 后 `RuntimeError`（**BUG-039**）。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
