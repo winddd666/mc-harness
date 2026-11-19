@@ -2291,6 +2291,80 @@ def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch, sta
     assert not world.dig_log
 
 
+@pytest.mark.parametrize("end_y", [20, 45])
+def test_deep_explore_reports_descent_or_lost_depth_without_raising_budget(monkeypatch, end_y) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 28.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="DescentReceipt", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+
+        def interrupted(*, deadline, **kwargs):
+            assert deadline == 1031.5
+            engine.bot.status()
+            world.pos[1] = end_y
+            engine.bot.status()
+            clock.now = deadline
+            engine.bot.status()
+
+        monkeypatch.setattr(engine, "_run", interrupted)
+        result = engine.run(target="diamond", target_y=-54, max_duration_s=32)
+
+    assert result["budget_effective_s"] == 32
+    assert clock.now <= 1032.0
+    assert result["goal_met"] is False
+    if end_y > 28:
+        assert result["stop_reason"] == "depth_reset"
+        assert result["progress_lost"] is True
+        assert result["ok"] is False and result["requires_replan"] is True
+    else:
+        assert result["stop_reason"] == "time_slice_progress"
+        assert result["suggested_next"]["retry_with"]["max_duration_s"] == 60
+
+
+@pytest.mark.parametrize("dry_turn", [True, False])
+def test_exhausted_deep_node_tries_local_descent_and_keeps_its_shaft(monkeypatch, dry_turn) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 28.0, 0.5), surface_y=64)
+    world.blocks[(0, 28, 0)] = world.blocks[(0, 29, 0)] = "air"
+    world.blocks[(0, 27, 1)] = "bedrock"
+    world.blocks[(-1, 27, 0)] = "iron_ore" if dry_turn else "bedrock"
+    walks = []
+
+    def blocked_walk(waypoints, **kwargs):
+        walks.append(waypoints)
+        return False, "backtrack_blocked"
+
+    with BotSession("tok", bot_username="DeepNodeRecovery", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=(0, 64, -36), parent_id=None, edge_from_parent=None,
+            branches=[mining.BranchSpec("stair_down", "east", 40)],
+        )
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        route = [(0, 64 - step, -36 + step) for step in range(37)]
+        engine._create_node(
+            kind="switchback", anchor=route[-1], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", route),
+            branches=[mining.BranchSpec("stair_down", "east", 40, status="pruned")],
+        )
+        monkeypatch.setattr(engine, "_walk_waypoints", blocked_walk)
+        monkeypatch.setattr(engine, "_relocate_to_fresh_collar_site", lambda *a, **k: pytest.fail("abandoned the deep shaft"))
+        result = engine.run(target="iron", target_y=-20, goal_count=1, max_duration_s=20)
+
+    assert engine.collar_node_id == collar.node_id
+    if dry_turn:
+        assert result["stop_reason"] == "quota_reached"
+        assert not walks
+    else:
+        assert result["stop_reason"] == "backtrack_blocked"
+        assert walks == [route]
+
+
 def test_climb_remembers_all_blocked_primitives_at_the_same_cell(monkeypatch) -> None:
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
     attempts: list[tuple[str, str]] = []

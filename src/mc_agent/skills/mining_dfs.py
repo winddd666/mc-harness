@@ -3799,40 +3799,52 @@ class MiningDFSEngine:
     ) -> bool:
         """Keep the verified descent and queue dry side branches when available."""
         end = waypoints[-1]
-        x, y, z = end
-        if waypoints[0] != node.anchor or y >= node.anchor[1]:
+        if waypoints[0] != node.anchor or end[1] >= node.anchor[1]:
             return False
+        branches = self._probe_dry_descent(
+            end, directions=LEFT_RIGHT_DIRS[branch.direction], geofence=geofence, min_hp_ref=min_hp_ref,
+        )
+        if branches is None:
+            return False
+        self._create_node(
+            kind="switchback", anchor=end, parent_id=node.node_id,
+            edge_from_parent=ShaftEdge(branch.kind, branch.direction, waypoints), branches=branches,
+        )
+        return bool(branches)
+
+    def _probe_dry_descent(
+        self,
+        anchor: tuple[int, int, int],
+        *,
+        directions: tuple[str, ...],
+        geofence: Any,
+        min_hp_ref: list[float],
+    ) -> list[BranchSpec] | None:
+        """Return dry branch candidates, or None if the current stance is unconfirmed."""
+        x, y, z = anchor
         status = self.bot.status()
         health = status.get("health")
         if (
             status.get("alive") is False or status.get("ready") is False
             or not status.get("on_ground") or status.get("in_water") or status.get("in_lava")
-            or not status.get("pos") or _floor_pos(status["pos"]) != end
+            or not status.get("pos") or _floor_pos(status["pos"]) != anchor
             or (isinstance(health, (int, float)) and health < min_hp_ref[0])
             or self._geofence_blocked(geofence, x, z, action="mine_dfs_switchback") is not None
         ):
-            return False
+            return None
 
         cache: dict[tuple[int, int, int], str] = {}
         try:
             if not self._is_solid_floor((x, y - 1, z), cache):
-                return False
-            if any(self._get_block_name(pt, cache) not in PASSABLE_BLOCKS for pt in (end, (x, y + 1, z))):
-                return False
+                return None
+            if any(self._get_block_name(pt, cache) not in PASSABLE_BLOCKS for pt in (anchor, (x, y + 1, z))):
+                return None
         except ApiError:
-            return False
-        directions = self._probe_collar_dirs(
-            end, geofence=geofence, cache=cache, directions=LEFT_RIGHT_DIRS[branch.direction], dry_only=True,
+            return None
+        viable = self._probe_collar_dirs(
+            anchor, geofence=geofence, cache=cache, directions=directions, dry_only=True,
         )
-        self._create_node(
-            kind="switchback", anchor=end, parent_id=node.node_id,
-            edge_from_parent=ShaftEdge(branch.kind, branch.direction, waypoints),
-            branches=[
-                BranchSpec("stair_down", direction, y - self.target_y, branch_target_y=self.target_y)
-                for direction in directions
-            ],
-        )
-        return bool(directions)
+        return [BranchSpec("stair_down", d, y - self.target_y, branch_target_y=self.target_y) for d in viable]
 
     def _force_relocate_on_fluid(
         self,
@@ -4805,6 +4817,7 @@ class MiningDFSEngine:
             if act == "explore":
                 requested = max(1, min(64, int(goal_count)))
                 result["goal_met"] = int(result.get("target_gained", 0)) >= requested
+                self._report_explore_depth(result, target_y=self.target_y, budget=budget)
             return result
         except _MiningDeadline:
             # Keep interrupted branches retryable. Preserve the observed return route if
@@ -4878,6 +4891,7 @@ class MiningDFSEngine:
                         stop_reason="quota_reached" if result["goal_met"] else "time_slice_progress",
                         message="本轮已保留确认的采掘进展和回撤路径，可以继续 explore。",
                     )
+                self._report_explore_depth(result, target_y=int(profile["target_y"]), budget=budget)
             if act in {"climb_out", "climb"} and scoped.positions:
                 start_y, end_y = scoped.positions[0][1], scoped.positions[-1][1]
                 target_height = int(self.collar_ceiling_y) - 16 if self.collar_ceiling_y is not None else start_y
@@ -4915,6 +4929,30 @@ class MiningDFSEngine:
                     pass
             self.bot, self.skills = original_bot, original_skills
             self._deadline = previous_deadline
+
+    @staticmethod
+    def _report_explore_depth(result: dict[str, Any], *, target_y: int, budget: float) -> None:
+        result["budget_effective_s"] = budget
+        before, after = result.get("pos_before"), result.get("pos_after")
+        if not before or not after or result["goal_met"]:
+            return
+        start_y, end_y = _floor_pos(before)[1], _floor_pos(after)[1]
+        if start_y > target_y + 8 and end_y > start_y + 8:
+            result["progress_lost"] = True
+            result["depth_lost"] = end_y - start_y
+            if result.get("stop_reason") == "time_slice_progress":
+                result.update(
+                    ok=False, requires_replan=True, stop_reason="depth_reset",
+                    message=f"本轮从 y={start_y} 回升到了 y={end_y}，目标层是 y={target_y}。请先检查下行路线再继续。",
+                )
+        elif result.get("stop_reason") == "time_slice_progress" and end_y < start_y and end_y - target_y >= 32:
+            next_budget = min(90, max(60, math.ceil(30 + 0.4 * (end_y - target_y))))
+            if next_budget > budget:
+                result["suggested_next"] = {"retry_with": {"max_duration_s": next_budget}}
+                result["message"] = (
+                    f"本轮已下挖到 y={end_y}，距离目标层还有 {end_y - target_y} 格。"
+                    f"下一轮可保留其余参数，将 max_duration_s 调到 {next_budget} 秒。"
+                )
 
     def _collar_failure(self, reason: str, pos: tuple[int, int, int], geofence: Any) -> dict[str, Any]:
         fence_error = self._geofence_blocked(geofence, pos[0], pos[2], action="mine_dfs_collar")
@@ -5546,10 +5584,25 @@ class MiningDFSEngine:
                             continue
                     stop_reason = "shaft_exhausted"
                     break
-                ok_bt, err_bt = self._walk_waypoints(node.edge_from_parent.waypoints, reverse=True, min_hp_ref=min_hp_ref)
+                edge = node.edge_from_parent
+                deep_descent = (
+                    edge.edge_kind == "stair_down" and node.anchor[1] > self.target_y + 12
+                    and self.collar_ceiling_y is not None and node.anchor[1] <= self.collar_ceiling_y - 20
+                )
+                if deep_descent:
+                    tried = {b.direction for b in node.branches} | {OPPOSITE_DIR.get(edge.direction)}
+                    directions = tuple(d for d in DIRECTIONS if d not in tried)
+                    if directions:
+                        alternatives = self._probe_dry_descent(
+                            node.anchor, directions=directions, geofence=geofence, min_hp_ref=min_hp_ref,
+                        )
+                        if alternatives:
+                            node.branches.extend(alternatives)
+                            continue
+                ok_bt, err_bt = self._walk_waypoints(edge.waypoints, reverse=True, min_hp_ref=min_hp_ref)
                 if not ok_bt:
                     self._archive_current_shaft_to_ledger(mark_exhausted=False)
-                    if auto_relocations_this_slice < 1 and time.monotonic() + 8.0 < deadline:
+                    if not deep_descent and auto_relocations_this_slice < 1 and time.monotonic() + 8.0 < deadline:
                         auto_relocations_this_slice += 1
                         cur_now = _floor_pos(self.bot.status()["pos"])
                         self._clear_active_tree_only()
