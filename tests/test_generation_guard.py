@@ -2170,6 +2170,50 @@ def test_bug026_ranged_arrow_cover_or_flee_lava_sneak_armor_and_cooldown(monkeyp
     clock[0] += 1.0
     assert g_cd.poll() is None  # still inside 10s pre_hurt_ranged cooldown!
 
+    # 4) Known shooter pos on arrow hurt sidesteps ~2m perpendicularly BEFORE equip/raise_shield + cover/flee,
+    #    and piglin_brute / pre_hurt_ranged immediately equip+raise shield on entry!
+    side_calls: list[tuple[str, dict]] = []
+
+    class _KnownShooterArrowBot:
+        _last_event_seq = 0
+
+        def status(self):
+            return self.call("status")
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            side_calls.append((action, pl))
+            if action == "status":
+                return {
+                    "pos": [0.5, 64.0, 0.5], "health": 16.0, "food": 20, "alive": True, "ready": True,
+                    "on_ground": True, "in_water": False, "in_lava": False, "blocking": False,
+                    "nearest_hostile": {"id": 88, "name": "skeleton", "pos": [10.5, 64.0, 0.5], "dist": 10.0},
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                rows = [{"seq": 1, "type": "hurt", "health": 16.0, "source": "arrow", "source_entity": {"id": 88, "pos": [10.5, 64.0, 0.5]}}] if since < 1 else []
+                return {"events": rows, "last_seq": 1}
+            if action == "inventory":
+                return {"items": [{"name": "shield", "count": 1}, {"name": "cobblestone", "count": 16}], "offhand": None}
+            if action == "get_block":
+                p = pl.get("pos", [0, 64, 0])
+                return {"name": "stone" if p[1] < 64 else "air"}
+            return {"ok": True}
+
+    g_side = GenerationGuard(_KnownShooterArrowBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_ArrowCoverSkills(cover_ok=False))
+    inc_side = g_side.poll()
+    assert inc_side is not None
+    side_acts = [a["action"] for a in inc_side["actions"]]
+    assert side_acts[:4] == ["lateral_sidestep", "equip_shield", "face_attacker", "raise_shield"]
+    assert side_acts[-1] == "combat_or_flee"
+
+    out_brute = ctrl.on_encounter(
+        CombatEnv(_RangedCaveEnvBot("piglin_brute", 2.9)),
+        {"source": "pre_hurt_melee", "primary_entity_id": 70, "primary_type": "piglin_brute", "pos": [3.4, 40.0, 0.5], "distance": 2.9},
+    )
+    assert any(a["action"] == "raise_shield_entry" for a in out_brute["actions"])
+
+
 
 
 

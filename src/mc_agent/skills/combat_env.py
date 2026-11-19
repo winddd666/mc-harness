@@ -186,6 +186,21 @@ LONE_COUNTERKILL_MOBS: frozenset[str] = frozenset(
     }
 )
 
+# Ambush melee hostiles watched by Guardian pre_hurt / mid-tool watcher (excludes neutral pigman/enderman).
+PRE_HURT_MELEE_MOBS: frozenset[str] = LONE_COUNTERKILL_MOBS | frozenset(
+    {
+        "piglin",
+        "piglin_brute",
+        "wither_skeleton",
+        "hoglin",
+        "vindicator",
+        "ravager",
+        "phantom",
+        "magma_cube",
+        "zoglin",
+    }
+)
+
 RANGED_MOBS: frozenset[str] = frozenset(
     {
         "skeleton",
@@ -1597,6 +1612,23 @@ class SubcorticalInstinctController:
         submerged = bool(st.get("submerged"))
         oxy_raw = st.get("oxygen")
         low_oxygen = isinstance(oxy_raw, (int, float)) and oxy_raw < 180
+
+        if (
+            not in_water
+            and has_shield
+            and not st.get("blocking")
+            and trigger.get("source") in {"pre_hurt_ranged", "pre_hurt_melee", "pre_hurt_creeper"}
+        ):
+            if mob_id is not None:
+                try:
+                    env.bot.call("look", {"entity_id": int(mob_id)})
+                except ApiError:
+                    pass
+            try:
+                env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
+                actions.append({"action": "raise_shield_entry", "ok": True})
+            except ApiError:
+                pass
 
         # 0) Underwater drowning emergency: surface immediately instead of burning oxygen in combat!
         if in_water and (submerged or low_oxygen):

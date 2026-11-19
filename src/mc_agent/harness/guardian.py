@@ -26,11 +26,13 @@ from .control import RequestCancelled, RunTimedOut
 from ..skills.combat_env import (
     LONE_COUNTERKILL_MOBS,
     MELEE_WEAPON_ORDER,
+    PRE_HURT_MELEE_MOBS,
     RANGED_MOBS,
     CombatController,
     CombatControllerSlot,
     CombatEnv,
     ThreatTrigger,
+    aim_yaw_pitch,
 )
 from ..skills.library import MacroSkills
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
@@ -138,7 +140,7 @@ class _GuardSession:
 class GenerationGuard:
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 10.0
-    PRE_HURT_MELEE_COOLDOWN_S = 16.0
+    PRE_HURT_MELEE_COOLDOWN_S = 12.0
 
     def __init__(
         self,
@@ -464,11 +466,7 @@ class GenerationGuard:
             return None
         now = time.monotonic()
         is_creeper = nh_name == "creeper" and nh_dist <= 4.5
-        is_melee = (
-            nh_name in LONE_COUNTERKILL_MOBS
-            and nh_dist <= 2.8
-            and (now - self._last_pre_hurt_melee_at >= self.PRE_HURT_MELEE_COOLDOWN_S)
-        )
+        is_melee = nh_name in PRE_HURT_MELEE_MOBS and nh_dist <= 3.5
         is_ranged = nh_name in RANGED_MOBS and nh_dist <= 13.5
         if not (is_creeper or is_melee or is_ranged):
             return None
@@ -950,10 +948,49 @@ class GenerationGuard:
                     )
                 elif hurt_src in RANGED_HURT_SOURCES:
                     self._shield_only_streak = 0
+                    att_pos_r = (attacker.get("pos") if isinstance(attacker, dict) else None) or nh_pos
+                    pos_r = status.get("pos")
+                    if (
+                        isinstance(pos_r, (list, tuple))
+                        and len(pos_r) >= 3
+                        and isinstance(att_pos_r, (list, tuple))
+                        and len(att_pos_r) >= 3
+                        and status.get("on_ground") is True
+                    ):
+                        to_yaw_r, _ = aim_yaw_pitch(pos_r, att_pos_r)
+                        scan_side = self.combat_env.scan_safe_yaws(
+                            pos_r,
+                            to_yaw_r + (math.pi / 2.0),
+                            dist=2.0,
+                            angles_deg=(0, 180),
+                        )
+                        chosen_side = float(scan_side.get("best_yaw") if scan_side.get("best_yaw") is not None else (to_yaw_r + math.pi / 2.0))
+
+                        def _sidestep_2m() -> dict[str, Any]:
+                            self.bot.call("look", {"yaw": chosen_side, "pitch": 0.0})
+                            return self.bot.call(
+                                "control",
+                                {"forward": True, "sprint": True, "jump": False, "ms": 480, "stop_on": ["death"]},
+                            )
+
+                        actions.append(self._action("lateral_sidestep", _sidestep_2m))
+                        if has_shield and not already_blocking:
+                            self._equip_and_raise_shield_for_water(
+                                {**status, "in_water": False, "jumping": False},
+                                actions,
+                                inv=inv if isinstance(inv, dict) else {},
+                                attacker=attacker if isinstance(attacker, dict) else status.get("nearest_hostile"),
+                            )
                     cover = self._action("dig_cover", lambda: self._skills().dig_cover_pocket())
                     actions.append(cover)
                     if not cover["ok"]:
-                        if has_shield and not already_blocking and isinstance(inv, dict) and "offhand" in inv:
+                        if (
+                            has_shield
+                            and not already_blocking
+                            and not _already("raise_shield")
+                            and isinstance(inv, dict)
+                            and "offhand" in inv
+                        ):
                             self._equip_and_raise_shield_for_water(
                                 {**status, "in_water": False, "jumping": False},
                                 actions,
@@ -1127,26 +1164,52 @@ class GenerationGuard:
             # Delay 0.30s before first poll so fast (<5ms) offline mock calls never incur background HTTP reads
             if stop_evt.wait(0.30):
                 return
+            watch_hp0: float | None = None
             while not stop_evt.is_set():
                 try:
                     st = orig_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
-                    nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(st if isinstance(st, dict) else {})
-                    if isinstance(st, dict) and (
-                        bool(st.get("in_lava"))
-                        or (
-                            nh_name == "creeper"
-                            and nh_dist <= 4.5
-                            and not self._is_pre_hurt_debounced(nh_id, nh_name)
-                        )
-                    ):
+                    if not isinstance(st, dict):
+                        if stop_evt.wait(0.30):
+                            return
+                        continue
+                    cur_hp = st.get("health")
+                    if watch_hp0 is None and isinstance(cur_hp, (int, float)):
+                        watch_hp0 = float(cur_hp)
+                    nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(st)
+                    hp_dropped = (
+                        isinstance(watch_hp0, (int, float))
+                        and isinstance(cur_hp, (int, float))
+                        and float(cur_hp) <= float(watch_hp0) - 1.0
+                        and bool(nh_name)
+                        and nh_dist <= 16.0
+                    )
+                    melee_ambush = (
+                        nh_name in PRE_HURT_MELEE_MOBS
+                        and nh_dist <= 3.0
+                        and not self._is_pre_hurt_debounced(nh_id, nh_name)
+                    )
+                    creeper_close = (
+                        nh_name == "creeper"
+                        and nh_dist <= 4.5
+                        and not self._is_pre_hurt_debounced(nh_id, nh_name)
+                    )
+                    if bool(st.get("in_lava")) or creeper_close or melee_ambush or hp_dropped:
                         in_lava_now = bool(st.get("in_lava"))
+                        if in_lava_now:
+                            src_w, eid_w, tp_w, pos_w, dist_w = "boundary_threat", None, "lava", None, 0.0
+                        elif creeper_close:
+                            src_w, eid_w, tp_w, pos_w, dist_w = "pre_hurt_creeper", nh_id, "creeper", nh_pos, nh_dist
+                        elif hp_dropped:
+                            src_w, eid_w, tp_w, pos_w, dist_w = "tool_interrupted_hurt", nh_id, (nh_name or "hostile"), nh_pos, nh_dist
+                        else:
+                            src_w, eid_w, tp_w, pos_w, dist_w = "pre_hurt_melee", nh_id, nh_name, nh_pos, nh_dist
                         pending_trigger.append(
                             {
-                                "source": "boundary_threat" if in_lava_now else ("pre_hurt_creeper" if nh_name == "creeper" else "boundary_threat"),
-                                "primary_entity_id": None if in_lava_now else nh_id,
-                                "primary_type": "lava" if in_lava_now else (nh_name or "lava"),
-                                "primary_pos": None if in_lava_now else nh_pos,
-                                "distance": 0.0 if in_lava_now else nh_dist,
+                                "source": src_w,
+                                "primary_entity_id": eid_w,
+                                "primary_type": tp_w,
+                                "primary_pos": pos_w,
+                                "distance": dist_w,
                             }
                         )
                         try:
