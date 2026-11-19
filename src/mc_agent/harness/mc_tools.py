@@ -2044,10 +2044,28 @@ class McToolset:
     def mc_skill_stabilize(self) -> str:
         return self._run_skill(lambda: check_and_stabilize(self.bot))
 
+    def _cleanup_inventory_after(self, res: Any) -> Any:
+        """BUG-029: enforce retention caps after every mining-style skill."""
+        if not isinstance(res, dict):
+            return res
+        try:
+            _, cleaned = self.skills._ensure_free_slots(min_free=3)
+        except Exception:
+            cleaned = []
+        if cleaned:
+            res["inventory_cleaned"] = [
+                {"item": d.get("item"), "count": d.get("count")} for d in cleaned
+            ]
+        return res
+
     def mc_skill_harvest_logs(self, target_logs: int = 4, radius: int = 32) -> str:
         target_logs = max(1, min(32, int(target_logs)))
         radius = max(4, min(64, int(radius)))
-        return self._run_skill(lambda: self.skills.harvest_logs(target_logs=target_logs, radius=radius))
+        return self._run_skill(
+            lambda: self._cleanup_inventory_after(
+                self.skills.harvest_logs(target_logs=target_logs, radius=radius)
+            )
+        )
 
     def mc_skill_craft_gear(self, item: str, count: int = 1, equip_slot: str | None = None) -> str:
         count = max(1, min(64, int(count)))
@@ -2071,7 +2089,11 @@ class McToolset:
     def mc_skill_mine_blocks(self, block_types: list[str], count: int = 3, radius: int = 32) -> str:
         count = max(1, min(32, int(count)))
         radius = max(4, min(64, int(radius)))
-        return self._run_skill(lambda: self.skills.mine_blocks(block_types=block_types, count=count, radius=radius))
+        return self._run_skill(
+            lambda: self._cleanup_inventory_after(
+                self.skills.mine_blocks(block_types=block_types, count=count, radius=radius)
+            )
+        )
 
     def mc_skill_smelt(self, input_item: str, count: int = 1, fuel_item: str | None = None) -> str:
         count = max(1, min(64, int(count)))
@@ -2194,7 +2216,11 @@ class McToolset:
         blocked = self._check_direction_geofence(direction, steps, "mc_skill_tunnel")
         if blocked is not None:
             return blocked
-        return self._run_skill(lambda: self.skills.dig_level_tunnel(direction, steps, stop_on_ore))
+        return self._run_skill(
+            lambda: self._cleanup_inventory_after(
+                self.skills.dig_level_tunnel(direction, steps, stop_on_ore)
+            )
+        )
 
     def mc_skill_mine_dfs(
         self,

@@ -2137,6 +2137,36 @@ def test_mine_dfs_triggers_retention_cleanup() -> None:
     assert state["cobblestone"] == 192
 
 
+def test_tunnel_triggers_retention_cleanup() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    state = {"cobblestone": 300}
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.5, 64.0, 1000.5]}})
+        if path == "inventory":
+            rows = []
+            left = state["cobblestone"]
+            while left > 0:
+                rows.append({"name": "cobblestone", "count": min(64, left)})
+                left -= min(64, left)
+            return httpx.Response(200, json={"ok": True, "result": {"items": rows}})
+        if path == "drop":
+            state["cobblestone"] -= int(body.get("count") or 0)
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        toolset.skills.dig_level_tunnel = lambda *args, **kwargs: {"ok": True, "steps_done": 1}
+        result = json.loads(toolset.mc_skill_tunnel("north", 1))
+    assert result["inventory_cleaned"]
+    assert state["cobblestone"] == 192
+
+
 def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
     """r15 P2-21: dig timeout was retried on the same coordinate."""
     from mc_agent.harness.mc_tools import McToolset
