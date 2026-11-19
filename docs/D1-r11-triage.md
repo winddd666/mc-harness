@@ -194,6 +194,27 @@
 
 ---
 
+## 4b. r13 收官验证（21/22，`nju_guitest_01_nether` 启动即崩）
+
+| 指标 | r12 | r13 | 结论 |
+|---|---|---|---|
+| 整集 `runtime_error` / `disconnected` | 10 / 2 | **2 / 0** | ✅ BUG-020 基本修复 |
+| `mine_dfs:repeated_identical_failure_blocked` | 56 | **11** | ✅ BUG-019 修复 |
+| `mine_dfs` 单次 med / p90 / max | 7.5 / 49.8 / 85.0s | **20.5 / 51.8 / 84.7s** | ⚠️ BUG-018 由 /8→/2 缓解，未达标 |
+| `mine_dfs` 0 进展 `time_slice` | 124/241 | **44/265（16.6%）** | ⚠️ 仍高 |
+| `find_blocks:bad_args` | 8 | **1** | ✅ BUG-006 修复 |
+| `craft_gear:server_recipe_rejected` | 0 | **9** | BUG-007 错误分流已生效（仍需补预检） |
+| 死亡 incident | 19 | **42** | ❌ 新生存回归（trident 9 全在 deep_water） |
+| 总分 | 2160（22 路） | **2030（21 路）** | ❌ 铁/钻链路仍卡 |
+| `mine_skill_tunnel:missing_pickaxe` | 0 | **15** | 新 P2-18 |
+
+**r13 新工单**
+- **BUG-021 P1（D2）**：`nju_guitest_01_nether` 启动 `DeathLoopCooldownError`（129s remaining）直接退出 → 整路丢失。`l3_wild_endurance_runner.py:797` + `bot.py:192-204`
+- **BUG-022 P1（Slice A）**：`ds_ds_2_iron` 95→20→25、`hy4_hy_4_iron` 95→20→20。下潜 12 次到 y=47 后 `shaft_exhausted` → 强制 `needs_surface_climb` → `climb_out` 反复超时，episode 烧完也到不了 diamond(-54)
+- **BUG-005 补强（Slice B）**：`hy4_hy_9_deep_water` 9 次 trident 死亡，`escape_water ok=true` 仍被连击打死
+
+---
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
