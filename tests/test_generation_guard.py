@@ -641,3 +641,707 @@ def test_arrow_hit_falls_back_to_flee_when_no_wall_for_cover():
 
     assert incident is not None
     assert [a["action"] for a in incident["actions"]] == ["dig_cover", "combat_or_flee"]
+
+
+def test_escape_lava_does_not_trust_in_water_false_and_nether_skips_water_bucket(monkeypatch):
+    """Reproduces hy4_hy_7_village: escape_water() lied ok=True in lava, looping 11 ticks to death."""
+    from mc_agent.skills.safety import SafetyEmergency, check_and_stabilize
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    state = {"in_lava": True, "pos": [10.5, 62.0, 10.5]}
+    calls: list[tuple[str, dict]] = []
+
+    class _LavaPitBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            payload = dict(body or {})
+            calls.append((action, payload))
+            if action == "status":
+                return {
+                    "pos": list(state["pos"]),
+                    "health": 15.0 if state["in_lava"] else 15.0,
+                    "food": 20,
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": not state["in_lava"],
+                    "in_water": False,
+                    "in_lava": state["in_lava"],
+                    "dimension": "minecraft:overworld",
+                    "yaw": 0.0,
+                }
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 5}]}
+            if action == "get_block":
+                p = payload["pos"]
+                # Surround at y=62..64 except a 1-block step onto solid dry bank at x=11, y=62
+                if p == [11, 62, 10]:
+                    return {"name": "stone"}
+                if p[1] < 62:
+                    return {"name": "stone"}
+                if p == [10, 62, 10]:
+                    return {"name": "lava"}
+                return {"name": "air"}
+            if action == "control" and payload.get("forward"):
+                state["in_lava"] = False
+                state["pos"] = [11.5, 63.0, 10.5]
+            return {"ok": True}
+
+    guard = GenerationGuard(_LavaPitBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.last_poll = float("-inf")
+    inc = guard.poll()
+    assert inc is not None
+    assert "in_lava" in inc["reasons"]
+    esc_act = next(a for a in inc["actions"] if a["action"] == "escape_lava")
+    assert esc_act["ok"] is True
+    assert state["in_lava"] is False
+
+    # safety.check_and_stabilize in Nether must NOT waste water_bucket (it evaporates immediately).
+    nether_calls: list[str] = []
+
+    class _NetherBot:
+        def status(self):
+            return {"pos": [0.5, 50.0, 0.5], "health": 16.0, "food": 20, "alive": True,
+                    "in_water": False, "in_lava": True, "dimension": "minecraft:the_nether"}
+
+        def inventory(self):
+            return {"items": [{"name": "water_bucket", "count": 1}]}
+
+        def call(self, action, body=None, **kwargs):
+            nether_calls.append(action)
+            return {"ok": True}
+
+    with pytest.raises(SafetyEmergency):
+        check_and_stabilize(_NetherBot())
+    assert "use_item" not in nether_calls
+
+
+def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
+    """Reproduces glm_glm_3_village / hy4_hy_8_nether: ReadTimeout in subcortical_combat must /stop & not crash run."""
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    # 1) Bounded attack timeout on SubcorticalInstinctController
+    seen_attack_payloads: list[dict] = []
+
+    class _AttackBot:
+        def status(self):
+            return {"pos": [0.5, 64.0, 0.5], "health": 20.0, "food": 20, "alive": True, "ready": True,
+                    "on_ground": True, "in_water": False, "nearest_hostile": {"id": 5, "name": "zombie", "dist": 1.8}}
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [{"id": 5, "name": "zombie", "pos": [1.5, 64.0, 0.5], "dist": 1.8}]}
+            if action == "attack":
+                seen_attack_payloads.append(dict(body or {}))
+                return {"hits": 2, "killed": True}
+            return {"ok": True}
+
+    ctrl = SubcorticalInstinctController()
+    out = ctrl.on_encounter(CombatEnv(_AttackBot()), {"source": "pre_hurt_melee", "primary_entity_id": 5, "primary_type": "zombie"})
+    assert out["mode"] == "counter_killed"
+    assert seen_attack_payloads and 1000 <= seen_attack_payloads[0]["timeout"] <= 3000
+
+    # 2) ReadTimeout during run_tool_with_reflex preemption emits /stop, posture {}, and returns replan receipt
+    stop_calls: list[str] = []
+
+    def handle(req: httpx.Request) -> httpx.Response:
+        action = req.url.path.rsplit("/", 1)[-1]
+        if action == "status":
+            return httpx.Response(200, json={"ok": True, "result": {
+                "pos": [0.5, 64.0, 0.5], "health": 18.0, "food": 20, "alive": True, "ready": True,
+                "on_ground": True, "in_water": False,
+                "nearest_hostile": {"id": 7, "name": "zombie", "pos": [1.5, 64.0, 0.5], "dist": 1.5},
+            }})
+        if action == "events":
+            return httpx.Response(200, json={"ok": True, "result": {"events": [], "last_seq": 0}})
+        if action == "inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": "iron_sword", "count": 1}]}})
+        if action == "get_entities":
+            return httpx.Response(200, json={"ok": True, "result": {"entities": [{"id": 7, "name": "zombie", "pos": [1.5, 64.0, 0.5], "dist": 1.5}]}})
+        if action == "attack":
+            raise httpx.ReadTimeout("timed out waiting for server attack")
+        if action in ("stop", "posture", "control"):
+            stop_calls.append(action)
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        if action == "dig":
+            return httpx.Response(200, json={"ok": True, "result": {"interrupted_by": "hurt"}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    turns = {"n": 0}
+
+    def chat(messages, tools=None, **kwargs):
+        turns["n"] += 1
+        if turns["n"] == 1:
+            return {"role": "assistant", "content": "挖石", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "mc_dig", "arguments": json.dumps({"x": 1, "y": 64, "z": 0})}}
+            ]}
+        return {"role": "assistant", "content": "超时已恢复"}
+
+    with BotSession("tok", transport=httpx.MockTransport(handle)) as bot:
+        report = run_mc_agent("test", bot, chat_fn=chat, max_calls=3, survival_guard=True, include_initial_snapshot=False)
+
+    assert report["status"] == "answered"
+    assert "stop" in stop_calls
+    assert "posture" in stop_calls
+
+
+def test_underwater_drowned_preemption_surfaces_and_ignores_swim_pre_hurt(monkeypatch):
+    """Reproduces hy4_hy_10_enchant_anvil & hy4_hy_3_iron: underwater reflex surfaces first; swimming skips empty pre_hurt."""
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, SubcorticalInstinctController
+
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 200.0)
+    surfaced = []
+    monkeypatch.setattr(MacroSkills, "escape_water", lambda self: surfaced.append("escape_water") or {"ok": True, "in_water": False})
+
+    class _WetBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 56.0, 0.5], "health": 18.0, "food": 20, "alive": True, "ready": True,
+                    "in_water": True, "submerged": True, "on_ground": False, "oxygen": 60, "jumping": True,
+                    "nearest_hostile": {"id": 31, "name": "drowned", "pos": [1.5, 56.0, 0.5], "dist": 2.0},
+                }
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "get_entities":
+                return {"entities": [{"id": 31, "name": "drowned", "pos": [1.5, 56.0, 0.5], "dist": 2.0}]}
+            if action == "get_block":
+                return {"name": "water"}
+            if action == "inventory":
+                return {"items": [{"name": "diamond_sword", "count": 1}]}
+            if action == "attack":
+                raise AssertionError("must not melee underwater with low oxygen")
+            return {"ok": True}
+
+    bot = _WetBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(bot))
+    # 1) handle_preemption underwater surfaces instead of burning remaining oxygen in melee
+    receipt = guard.handle_preemption(
+        {"source": "tool_interrupted_hurt", "primary_entity_id": 31, "primary_type": "drowned", "distance": 2.0},
+        interrupted_name="mc_skill_mine_dfs",
+    )
+    assert receipt["reflex_mode"] == "water_surface"
+    assert surfaced == ["escape_water"]
+
+    # 2) CombatControllerSlot preserves jump=True when still submerged on exit
+    postures: list[dict] = []
+
+    class _StillWetBot:
+        def status(self):
+            return {"pos": [0.5, 56.0, 0.5], "health": 18.0, "food": 20, "alive": True, "ready": True,
+                    "in_water": True, "submerged": True, "on_ground": False, "oxygen": 40}
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "diamond_sword", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [{"id": 31, "name": "drowned", "pos": [1.5, 56.0, 0.5], "dist": 2.0}]}
+            if action == "posture":
+                postures.append(dict(body or {}))
+            if action == "attack":
+                raise AssertionError("must not attack underwater")
+            return {"ok": True}
+
+    slot = CombatControllerSlot(SubcorticalInstinctController())
+    slot_out = slot.handle(CombatEnv(_StillWetBot()), {"source": "tool_interrupted_hurt", "primary_entity_id": 31, "primary_type": "drowned"})
+    assert slot_out["mode"] == "water_surface"
+    assert postures and postures[-1].get("jump") is True
+
+    # 3) poll() while already jumping in water with drowned nearby does NOT cancel LLM with empty actions=[]
+    guard.last_poll = float("-inf")
+    assert guard.poll() is None
+
+
+def test_creeper_l_corner_not_carved_shaft_and_close_creeper_latches_shield(monkeypatch):
+    """Reproduces hy4_hy_8_nether & glm_glm_3_village: L-corner is open_cave; close creeper post-flee latches shield."""
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, SubcorticalInstinctController
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    postures: list[dict] = []
+
+    class _CornerAndCloseCreeperBot:
+        def __init__(self) -> None:
+            self.pos = [0.5, 64.0, 0.5]
+            self.blocks = {
+                (0, 64, -1): "stone", (0, 65, -1): "stone",  # North wall
+                (1, 64, 0): "stone", (1, 65, 0): "stone",    # East wall (South & West open = L-corner!)
+                (0, 66, 0): "oak_leaves",                     # Overhead leaf
+            }
+
+        def status(self):
+            return {
+                "pos": list(self.pos), "health": 20.0, "food": 20, "alive": True, "ready": True,
+                "on_ground": True, "in_water": False, "yaw": 0.0,
+                "nearest_hostile": {"id": 55, "name": "creeper", "pos": [self.pos[0], 64.0, self.pos[2] + 2.2], "dist": 2.2},
+            }
+
+        def call(self, action, body=None, **kwargs):
+            payload = dict(body or {})
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "shield", "count": 1}, {"name": "cobblestone", "count": 8}]}
+            if action == "get_block":
+                p = tuple(payload["pos"])
+                return {"name": self.blocks.get(p, "stone" if p[1] < 64 else "air")}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_entities":
+                # Creeper chased alongside us and is STILL 2.2m away!
+                return {"entities": [{"id": 55, "name": "creeper", "pos": [self.pos[0], 64.0, self.pos[2] + 2.2], "dist": 2.2}]}
+            if action == "move_to":
+                self.pos[2] -= 6.0  # Moved >= 1.5m so flee() ok=True, yet creeper still at 2.2m!
+                return {"pos": list(self.pos)}
+            if action == "posture":
+                postures.append(payload)
+            return {"ok": True}
+
+    bot = _CornerAndCloseCreeperBot()
+    env = CombatEnv(bot)
+    snap = env.arena_snapshot([0.5, 64.0, 0.5])
+    assert snap["enclosure"] != "carved_shaft"
+
+    out = CombatControllerSlot(SubcorticalInstinctController()).handle(
+        env, {"source": "pre_hurt_creeper", "primary_entity_id": 55, "primary_type": "creeper", "distance": 2.6}
+    )
+    assert out["mode"] == "creeper_evade"
+    assert out["latched_guard"] is True
+    assert postures and postures[-1].get("shield") is True
+
+    # CombatEnv.flee detects respawn teleport (>64m) as ok=False, mode='respawned'
+    class _DeadFleeBot:
+        def __init__(self):
+            self.dead = False
+
+        def status(self):
+            return {"pos": [5000.0, 70.0, 5000.0] if self.dead else [0.5, 64.0, 0.5],
+                    "health": 20.0, "alive": True, "ready": True, "yaw": 0.0}
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 64 else "air"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "control":
+                self.dead = True
+            return {"ok": True}
+
+    flee_resp = CombatEnv(_DeadFleeBot()).flee([0.5, 64.0, 3.0])
+    assert flee_resp["ok"] is False and flee_resp["mode"] == "respawned"
+
+
+def test_night_surface_bunker_after_failed_flee_boundary_eat_and_no_dead_eat(monkeypatch):
+    """Covers hy4_hy_2_bare night flee->bunker, boundary_eat NameError fix, and post-death not_ready eat guard."""
+    clock = [300.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    bunker_calls = []
+    eat_calls = []
+    state = {"hp": 13.0, "food": 20, "blocking": False, "ready": True, "alive": True, "hurt_seq": 1}
+
+    class _NightSkills:
+        mining_dfs = None
+
+        def dig_safety_bunker(self, urgent=False):
+            bunker_calls.append(urgent)
+            return {"ok": True, "inside_shaft": True, "roof_placed": True}
+
+        def defend_or_flee(self, **kwargs):
+            return {"ok": True, "mode": "flee", "moved_dist": 12.0}
+
+        def dig_cover_pocket(self):
+            return {"ok": True, "mode": "cover_pocket", "sealed": [True, True]}
+
+    class _NightBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 70.0, 0.5], "health": state["hp"], "food": state["food"],
+                    "alive": state["alive"], "ready": state["ready"], "on_ground": True,
+                    "in_water": False, "in_lava": False, "is_day": False, "blocking": state["blocking"],
+                    "nearest_hostile": {"id": 11, "name": "zombie", "dist": 2.0} if state["hp"] <= 13 else None,
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                seq = state["hurt_seq"]
+                rows = [{"seq": seq, "type": "hurt", "health": state["hp"], "source": "mob_attack"}] if seq > since else []
+                return {"events": rows, "last_seq": seq}
+            if action == "inventory":
+                return {"items": [{"name": "stone_pickaxe", "count": 1}, {"name": "cobblestone", "count": 16}, {"name": "bread", "count": 2}]}
+            if action == "use_item":
+                eat_calls.append(dict(body or {}))
+                return {"ok": True}
+            return {"ok": True}
+
+    guard = GenerationGuard(_NightBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_NightSkills())
+    # 1) First melee hurt on surface at night -> flees
+    inc1 = guard.poll()
+    assert inc1 is not None and [a["action"] for a in inc1["actions"]] == ["combat_or_flee"]
+
+    # 2) Second melee hurt shortly after with no sword -> bunkers instead of infinite night surface flee
+    clock[0] += 5.0
+    state["hurt_seq"] = 2
+    inc2 = guard.poll()
+    assert inc2 is not None and "emergency_bunker" in [a["action"] for a in inc2["actions"]]
+    assert bunker_calls == [True]
+
+    # 3) stabilize_after_tools with blocking=True and food=10 eats cleanly without NameError('st')
+    state["hp"] = 18.0
+    state["food"] = 10
+    state["blocking"] = True
+    eat_calls.clear()
+    note = guard.stabilize_after_tools(["ok"])
+    assert note is not None and "顺手进食 bread" in note
+    assert eat_calls == [{"item": "bread"}]
+
+    # 4) If bot died / ready=False after combat, poll() must NOT call use_item(food)
+    state["ready"] = False
+    state["alive"] = False
+    eat_calls.clear()
+    clock[0] += 5.0
+    inc_dead = guard.poll()
+    assert inc_dead is not None
+    assert eat_calls == []
+
+    # 5) Already blocking arrow hurt escalates to dig_cover instead of standing still calling raise_shield
+    state["ready"] = True
+    state["alive"] = True
+    state["hp"] = 15.0
+    state["food"] = 20
+    state["blocking"] = True
+
+    class _ShieldAlreadyUpBot(_NightBot):
+        def call(self, action, body=None, **kwargs):
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                rows = [{"seq": 10, "type": "hurt", "health": 15.0, "source": "arrow"}] if since < 10 else []
+                return {"events": rows, "last_seq": 10}
+            if action == "inventory":
+                return {"items": [{"name": "shield", "count": 1}, {"name": "cobblestone", "count": 16}]}
+            return super().call(action, body, **kwargs)
+
+    guard2 = GenerationGuard(_ShieldAlreadyUpBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_NightSkills())
+    inc_shield = guard2.poll()
+    assert inc_shield is not None
+    assert [a["action"] for a in inc_shield["actions"]] == ["dig_cover"]
+
+
+def test_bug_009_pre_hurt_same_target_debounce_cancels_once(monkeypatch):
+    """BUG-009: Consecutive pre_hurt_* triggers from the same target within 3s must cancel only once."""
+    clock = [500.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+
+    class _PreHurtSameTargetBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 64.0, 0.5],
+                    "health": 20.0,
+                    "food": 20,
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": True,
+                    "in_water": False,
+                    "in_lava": False,
+                    "blocking": False,
+                    "nearest_hostile": {"id": 55, "name": "creeper", "pos": [2.5, 64.0, 0.5], "dist": 2.0},
+                }
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {"items": [{"name": "shield", "count": 1}]}
+            if action == "get_block":
+                return {"name": "stone" if (body or {}).get("pos", [0, 64, 0])[1] < 64 else "air"}
+            if action == "get_entities":
+                return {"entities": [{"id": 55, "name": "creeper", "pos": [2.5, 64.0, 0.5], "dist": 2.0}]}
+            if action == "find_blocks":
+                return {"blocks": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(_PreHurtSameTargetBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    inc1 = guard.poll()
+    assert inc1 is not None and "pre_hurt_creeper" in inc1["reasons"]
+
+    # Within 3.0s debounce window for the same creeper id=55 (even with creeper close!), poll() suppresses duplicate pre_hurt
+    clock[0] += 1.0
+    assert guard.poll() is None
+    clock[0] += 1.0
+    assert guard.poll() is None
+
+    # After 3.0s cooldown elapses, the same target can trigger again if still present
+    clock[0] += 1.5
+    inc2 = guard.poll()
+    assert inc2 is not None and "pre_hurt_creeper" in inc2["reasons"]
+
+    # End-to-end run_mc_agent verification: same ranged skeleton repeatedly observed within 2.5s cancels only once
+    skeleton_visible = {"on": False}
+
+    def handle(request):
+        action = request.url.path.rsplit("/", 1)[-1]
+        if action == "status":
+            result = {
+                "pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "alive": True, "ready": True,
+                "on_ground": True, "in_water": False, "in_lava": False, "blocking": False,
+                "nearest_hostile": (
+                    {"id": 88, "name": "skeleton", "pos": [8.5, 64.0, 0.5], "dist": 8.0}
+                    if skeleton_visible["on"]
+                    else None
+                ),
+            }
+        elif action == "events":
+            result = {"last_seq": 0, "events": []}
+        elif action == "inventory":
+            result = {"items": [{"name": "shield", "count": 1}]}
+        elif action == "get_entities":
+            result = {
+                "entities": (
+                    [{"id": 88, "name": "skeleton", "pos": [8.5, 64.0, 0.5], "dist": 8.0}]
+                    if skeleton_visible["on"]
+                    else []
+                )
+            }
+        elif action == "get_block":
+            body = json.loads(request.content) if request.content else {}
+            y = body.get("pos", [0, 64, 0])[1]
+            result = {"name": "stone" if y < 64 else "air"}
+        elif action == "find_blocks":
+            result = {"blocks": []}
+        else:
+            result = {"ok": True}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    requests = 0
+    events: list[dict] = []
+
+    def chat(messages, tools=None, *, control=None, **kwargs):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            skeleton_visible["on"] = True
+            clock[0] += 0.5
+            check_control(control)
+            pytest.fail("First generation should be cancelled on initial pre_hurt_ranged trigger.")
+        # Multiple control checks within 2.5s while skeleton id=88 remains nearby must NOT cancel generation 2
+        clock[0] += 0.6
+        check_control(control)
+        clock[0] += 0.6
+        check_control(control)
+        return {"role": "assistant", "content": "已按同一目标去抖逻辑保持稳态规划。"}
+
+    with BotSession("cached", transport=httpx.MockTransport(handle)) as bot:
+        rep = run_mc_agent(
+            "skeleton debounce check",
+            bot,
+            chat_fn=chat,
+            max_calls=4,
+            survival_guard=True,
+            include_initial_snapshot=False,
+            on_event=events.append,
+        )
+    assert rep["status"] == "answered"
+    assert requests == 2
+    assert rep["guardian"]["cancelled_generations"] == 1
+
+
+def test_bug_010_respawn_not_ready_skips_eat_and_retries_after_ready(monkeypatch):
+    """BUG-010: deaths or not status.ready skips eat + sets retry_after_ready; not_ready isn't counted as failure; eats once after ready returns."""
+    from mc_agent.errors import ApiError
+
+    clock = [600.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    use_item_calls: list[dict] = []
+    events: list[dict] = []
+    state = {
+        "ready": False,
+        "alive": False,
+        "food": 12,
+        "health": 18.0,
+        "event_seq": 1,
+        "events": [{"seq": 1, "type": "death"}, {"seq": 2, "type": "spawn"}],
+        "eat_api_error": None,
+    }
+
+    class _RespawnBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [4.5, 64.0, 4.5],
+                    "health": state["health"],
+                    "food": state["food"],
+                    "ready": state["ready"],
+                    "alive": state["alive"],
+                    "on_ground": True,
+                    "in_water": False,
+                    "in_lava": False,
+                    "blocking": False,
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                rows = [e for e in state["events"] if int(e.get("seq", 0)) > since]
+                return {"events": rows, "last_seq": max([since] + [int(e.get("seq", 0)) for e in rows])}
+            if action == "inventory":
+                return {"items": [{"name": "bread", "count": 3}]}
+            if action == "use_item":
+                err_code = state["eat_api_error"]
+                if err_code:
+                    raise ApiError(err_code, f"transient {err_code}")
+                use_item_calls.append(dict(body or {}))
+                state["food"] = 18
+                return {"ok": True}
+            return {"ok": True}
+
+    guard = GenerationGuard(_RespawnBot(), EventSink(events.append), checkpoint=lambda: None)
+
+    # 1) Poll during death/spawn + not ready: must skip use_item and mark retry_after_ready=True
+    inc_death = guard.poll()
+    assert inc_death is not None
+    assert "death_or_connection_changed" in inc_death["reasons"]
+    assert use_item_calls == []
+    assert guard.retry_after_ready is True
+    assert guard.failures == 0
+    assert not any(a["action"] == "eat" for a in inc_death["actions"])
+
+    # 2) Even if ready=True arrives, if use_item returns ApiError('not_ready') or 'wrong_server', do NOT count as failure
+    clock[0] += 0.5
+    state["events"] = []
+    state["ready"] = True
+    state["alive"] = True
+    state["eat_api_error"] = "wrong_server"
+    assert guard.poll() is None
+    assert guard.retry_after_ready is True
+    assert guard.failures == 0
+    assert not any(e.get("type") == "guardian.action.completed" and e.get("ok") is False for e in events)
+
+    # 3) Once server truly becomes ready (<3s later too!), poll() eats once and clears retry_after_ready
+    clock[0] += 0.5
+    state["eat_api_error"] = None
+    inc_eat = guard.poll()
+    assert inc_eat is not None
+    assert [a["action"] for a in inc_eat["actions"]] == ["eat"]
+    assert inc_eat["actions"][0]["ok"] is True
+    assert inc_eat["requires_replan"] is False
+    assert use_item_calls == [{"item": "bread"}]
+    assert guard.retry_after_ready is False
+    assert guard.failures == 0
+
+    # 4) Subsequent poll at food=18 (above hunger threshold, retry_after_ready already cleared) does not eat again
+    clock[0] += 5.0
+    assert guard.poll() is None
+    assert use_item_calls == [{"item": "bread"}]
+
+
+def test_bug_011_guardian_http_error_returns_network_uncertain_without_crashing_episode(monkeypatch):
+    """BUG-011: httpx.HTTPError (ReadTimeout/ReadError) inside _action or guard.poll() must never raise RuntimeError or terminate episode."""
+    clock = [700.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+
+    # 1) Direct _action calls return structured network_uncertain on ReadTimeout and ReadError
+    class _DummyBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            return {"ok": True}
+
+    guard = GenerationGuard(_DummyBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    out_timeout = guard._action("subcortical_combat", lambda: (_ for _ in ()).throw(httpx.ReadTimeout("timeout")))
+    assert out_timeout["ok"] is False
+    assert out_timeout["error"]["code"] == "network_uncertain"
+
+    out_read_err = guard._action("subcortical_combat", lambda: (_ for _ in ()).throw(httpx.ReadError("reset by peer")))
+    assert out_read_err["ok"] is False
+    assert out_read_err["error"]["code"] == "network_uncertain"
+
+    # 2) Poll-time attack ReadTimeout in run_mc_agent cancels waiting generation and continues to status='answered'
+    attack_timed_out = {"active": False, "done": False}
+    events: list[dict] = []
+
+    def handle(request):
+        action = request.url.path.rsplit("/", 1)[-1]
+        if action == "status":
+            result = {
+                "pos": [0.5, 64.0, 0.5],
+                "health": 20.0,
+                "food": 20,
+                "alive": True,
+                "ready": True,
+                "on_ground": True,
+                "in_water": False,
+                "in_lava": False,
+                "blocking": False,
+                "nearest_hostile": (
+                    {"id": 19, "name": "zombie", "pos": [1.5, 64.0, 0.5], "dist": 1.5}
+                    if attack_timed_out["active"] and not attack_timed_out["done"]
+                    else None
+                ),
+            }
+        elif action == "events":
+            result = {"last_seq": 0, "events": []}
+        elif action == "inventory":
+            result = {"items": [{"name": "iron_sword", "count": 1}]}
+        elif action == "get_entities":
+            result = {
+                "entities": (
+                    [{"id": 19, "name": "zombie", "pos": [1.5, 64.0, 0.5], "dist": 1.5}]
+                    if attack_timed_out["active"] and not attack_timed_out["done"]
+                    else []
+                )
+            }
+        elif action == "attack":
+            attack_timed_out["done"] = True
+            raise httpx.ReadTimeout("attack read timeout")
+        elif action == "get_block":
+            body = json.loads(request.content) if request.content else {}
+            y = body.get("pos", [0, 64, 0])[1]
+            result = {"name": "stone" if y < 64 else "air"}
+        else:
+            result = {"ok": True}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    turns = {"n": 0}
+
+    def chat(messages, tools=None, *, control=None, **kwargs):
+        turns["n"] += 1
+        if turns["n"] == 1:
+            attack_timed_out["active"] = True
+            clock[0] += 0.5
+            check_control(control)
+            pytest.fail("Expected poll reflex timeout incident to replan turn 1 instead of crashing.")
+        return {"role": "assistant", "content": "网络超时已降级为结构化恢复，本集继续完成。"}
+
+    with BotSession("cached", transport=httpx.MockTransport(handle)) as bot:
+        rep = run_mc_agent(
+            "bug-011 network_uncertain recovery",
+            bot,
+            chat_fn=chat,
+            max_calls=4,
+            survival_guard=True,
+            include_initial_snapshot=False,
+            on_event=events.append,
+        )
+    assert rep["status"] == "answered"
+    assert any(
+        e.get("type") == "guardian.action.completed"
+        and e.get("ok") is False
+        and isinstance(e.get("error"), dict)
+        and e["error"].get("code") == "network_uncertain"
+        for e in events
+    )
+
+
