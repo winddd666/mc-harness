@@ -1272,8 +1272,8 @@ def ensure_bot_ready(
     bot: Any,
     *,
     timeout_s: float = 45.0,
-    max_cooldown_wait_s: float = 420.0,
-    attempts: int = 3,
+    max_cooldown_wait_s: float = 600.0,
+    attempts: int = 8,
 ) -> dict[str, Any]:
     """Bring the bot to `ready: True`, sleeping through the API's death-loop cooldown instead of dying.
 
@@ -1331,7 +1331,10 @@ def ensure_bot_ready(
             waited += wait_s
         elif attempt < attempts:
             time.sleep(2.0)
-    raise RuntimeError(f"bot did not become ready after {attempts} attempts (cooldown waited {waited:.0f}s)")
+    raise RuntimeError(
+        f"bot did not become ready after {attempts} attempts (cooldown waited {waited:.0f}s); "
+        f"last_status={last_status}"
+    )
 
 
 SCENE_FOCUS: dict[str, dict[str, Any]] = {
