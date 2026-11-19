@@ -332,6 +332,20 @@ escape_lava → combat_env.py:1206 AttributeError: 'VoidGeofence' object has no 
 
 **结论**：除 BUG-028 外，r16 是一次全面转绿；4 路崩溃全部是同一个 4 行 API 误用，修复提交 `52b0d3f` 已被 r17 加载（21:51），r17 截至 22:00 无同类 Traceback。
 
+## 4g. r17 中段（22:02，878 tool calls，0/22 summary）
+
+```
+ALL PASS — 11 项门禁全绿
+  startup crash 0        stick fails 0        no_support 0
+  deaths 8 (<=25)        cooldown 60.7s       mine median 28.1s / zero 3.9%
+  runtime_error 0        trident deaths 0     trade 1 / brew 2
+```
+
+- **BUG-028 未复现**：r17 加载修复后 878 次调用 0 Traceback；`escape_water/escape_lava` 均正常返回
+- **BUG-027 已被 `e65356d` 前置校验化解**：`out_of_reach` 10 次（带距离+建议），`no_window` 6→3；模型收到后会补 `mc_move_to`，`nju_3` 已成功开窗交易；残留是"贴脸仍被村民碰撞箱卡住"→ P2-24
+- **P2-1 部分修复**：`6f54b6f` 把"已在 range 内"转为成功，但 r17 仍有 10 次（entity_id 未覆盖 / status 取失败）
+- 死亡 8：`hy4_6` 5 次（lava 3）、`hy4_1` 2、`ds_4` 1；暂无 trident
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
