@@ -381,6 +381,40 @@ def prepare_scene_ground(
             ]
         )
         return cmds
+    if stage == "brewing_alchemy":
+        # 9x7 cobblestone pad with brewing stand, 2x2 infinite water source, and crafting table.
+        cmds.extend(
+            [
+                f"fill {ix - 3} {iy - 1} {iz - 3} {ix + 5} {iy - 1} {iz + 3} minecraft:cobblestone",
+                f"fill {ix - 3} {iy} {iz - 3} {ix + 5} {iy + 3} {iz + 3} minecraft:air",
+                f"setblock {ix + 2} {iy} {iz} minecraft:brewing_stand",
+                f"setblock {ix + 2} {iy} {iz + 2} minecraft:crafting_table",
+                f"fill {ix + 3} {iy - 1} {iz - 2} {ix + 4} {iy - 1} {iz - 1} minecraft:water",
+                f"tp {bot_name} {ix}.5 {iy} {iz}.5",
+                f"spawnpoint {bot_name} {ix} {iy} {iz}",
+            ]
+        )
+        return cmds
+    if stage == "cave_combat":
+        # Enclosed 11x11x4 cobblestone combat arena with roof (prevents sunburn) and torches at corners.
+        cmds.extend(
+            [
+                f"fill {ix - 5} {iy - 1} {iz - 5} {ix + 5} {iy - 1} {iz + 5} minecraft:cobblestone",
+                f"fill {ix - 5} {iy} {iz - 5} {ix + 5} {iy + 3} {iz + 5} minecraft:air",
+                f"fill {ix - 5} {iy + 4} {iz - 5} {ix + 5} {iy + 4} {iz + 5} minecraft:cobblestone",
+                f"fill {ix - 5} {iy} {iz - 5} {ix + 5} {iy + 3} {iz - 5} minecraft:cobblestone",
+                f"fill {ix - 5} {iy} {iz + 5} {ix + 5} {iy + 3} {iz + 5} minecraft:cobblestone",
+                f"fill {ix - 5} {iy} {iz - 4} {ix - 5} {iy + 3} {iz + 4} minecraft:cobblestone",
+                f"fill {ix + 5} {iy} {iz - 4} {ix + 5} {iy + 3} {iz + 4} minecraft:cobblestone",
+                f"setblock {ix - 4} {iy} {iz - 4} minecraft:torch",
+                f"setblock {ix + 4} {iy} {iz + 4} minecraft:torch",
+                f"summon minecraft:zombie {ix + 3}.5 {iy} {iz}.5",
+                f"summon minecraft:skeleton {ix - 3}.5 {iy} {iz + 3}.5",
+                f"tp {bot_name} {ix}.5 {iy} {iz}.5",
+                f"spawnpoint {bot_name} {ix} {iy} {iz}",
+            ]
+        )
+        return cmds
     if stage == "deep_water":
         # Re-assert the dry staging pad on death return (idempotent, only when spawned at/below sea level).
         cmds.append(
@@ -556,6 +590,63 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:shield 1",
                 f"give {bot_name} minecraft:oak_log 16",
                 f"give {bot_name} minecraft:cooked_beef 16",
+            ]
+        )
+    elif stage == "brewing_alchemy":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"advancement grant {bot_name} only minecraft:story/enter_the_nether",
+                f"give {bot_name} minecraft:blaze_powder 8",
+                f"give {bot_name} minecraft:nether_wart 8",
+                f"give {bot_name} minecraft:glass_bottle 9",
+                f"give {bot_name} minecraft:magma_cream 4",
+                f"give {bot_name} minecraft:sugar 4",
+                f"give {bot_name} minecraft:redstone 4",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:cooked_beef 16",
+            ]
+        )
+    elif stage == "village_trade":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"give {bot_name} minecraft:emerald 32",
+                f"give {bot_name} minecraft:wheat 32",
+                f"give {bot_name} minecraft:stick 64",
+                f"give {bot_name} minecraft:coal 32",
+                f"give {bot_name} minecraft:paper 32",
+                f"give {bot_name} minecraft:iron_ingot 16",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:cooked_beef 16",
+            ]
+        )
+    elif stage == "cave_combat":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:iron_pickaxe 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:bow 1",
+                f"give {bot_name} minecraft:arrow 24",
+                f"give {bot_name} minecraft:iron_helmet 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
+                f"give {bot_name} minecraft:iron_leggings 1",
+                f"give {bot_name} minecraft:iron_boots 1",
+                f"give {bot_name} minecraft:torch 16",
+                f"give {bot_name} minecraft:cooked_beef 24",
             ]
         )
     elif stage == "deep_water":
@@ -998,7 +1089,20 @@ def main() -> int:
     parser.add_argument("--site-index", type=int, default=0)
     parser.add_argument(
         "--stage",
-        choices=["bare", "iron", "midgame", "village", "nether", "nether_fortress", "nether_bastion", "enchant_anvil", "deep_water"],
+        choices=[
+            "bare",
+            "iron",
+            "midgame",
+            "village",
+            "village_trade",
+            "nether",
+            "nether_fortress",
+            "nether_bastion",
+            "enchant_anvil",
+            "brewing_alchemy",
+            "cave_combat",
+            "deep_water",
+        ],
         default="bare",
         help="Starting checkpoint stage for sliced testing",
     )
@@ -1072,7 +1176,7 @@ def main() -> int:
     with BotSession(rec.token, bot_username=rec.bot_username, base_url=settings.mc_api_base_url) as bot:
         st = ensure_bot_ready(bot, timeout_s=45.0)
 
-        if args.stage == "village":
+        if args.stage in ("village", "village_trade"):
             sx, sy, sz, biome = select_village_wild_site(bot, bot_name, start_idx=args.site_index)
         elif args.stage == "nether_fortress":
             sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:fortress", start_idx=args.site_index)
