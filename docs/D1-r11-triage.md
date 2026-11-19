@@ -1138,6 +1138,53 @@ retries 0 | 429 0 | 502 0 | tracebacks 0
 - 1 次 runtime_error = `max_tokens` 截断（P2-33）
 - 1 次 aborted = `lost_iron_pickaxe`（`hy4_9` EP7，BUG-043 已扩散到 3 路）
 
+## 4bp. 06:52 抽检：Qwen 429 突发窗口的精确根因
+
+### 主轨第二波 `overnight_12bot_part2`（进行中 ~80 分钟）
+
+```
+171 集：answered 108 / goal 18 / limit 12 / timeout 11 / runtime_error 19 / aborted 1 / paused 2
+```
+
+- runtime_error 19 = **17× Qwen 429 `rate_limit_error`** + 1× MC API ReadTimeout + 1× `[not_connected]`
+- **硬失败率对照**：
+
+  | 波次 | 请求 | 重试 | 重试率 | 429 硬失败 | 硬失败率 |
+  |---|---|---|---|---|---|
+  | `overnight_12bot` | 10100 | 879 | 8.0% | 9 | **0.08%** |
+  | `overnight_12bot_part2` | 3175 | 313 | 9.0% | 17 | **0.49%** |
+
+  重试率几乎相同 → **不是流量总量问题，是突发窗口**。第一波 9 次散布在 19:33–20:53（UTC）；第二波 **15/17 集中在 22:23–22:33（10 分钟）**，此时主轨 12 路 + hy4 审计轨 4 路 = **16 并发**。
+
+- **每次硬失败的调用序列完全一致**（5 个文件逐一核对）：
+  ```
+  model.request
+  → http_retry(attempt=1, wait=15.0, concurrency_limit=false)
+  → http_retry(attempt=2, wait=15.0, concurrency_limit=false)
+  → model.failed  Qwen API 返回 HTTP 429 {"type":"rate_limit_error"}
+  → run.finished  runtime_error
+  ```
+  **2 次重试、共 30 秒退避后放弃**。
+
+- **根因（`model.py:652-653`）**：
+  ```python
+  standard_max_attempts = 3
+  concurrency_max_attempts = 8
+  ```
+  `_is_concurrency_limit_429` 只认 `concurrency`/`simultaneous`；Qwen 的 `rate_limit_error` 不匹配 → 走 standard 分支（3 次尝试、`2*(attempt+1)` 秒）；并发分支才有 8 次 + `6/10/15/20/22/25/28` 秒（≈126s）。**Qwen 限流窗口 ≥60s，30s 必然不够。**
+
+- **最小修复**：① 关键词增补 `rate_limit` / `rate limit` / `overloaded` / `try again later` / `server_error`；② 对**任意 429** 直接使用 8 次尝试的预算（429 语义就是"稍后重试"）。
+
+### hy4 审计轨 `hy4_audit_r28`（刚起）
+
+4 路、23 次请求、**0 retry / 0 429**。前三波（r25/r26/r27）累计 **0 次 429**。
+
+### 新增 P2
+
+- **P2-34**：`ds_4` EP9 连续两次 `mob_attack` 死亡后以 `[not_connected]` 收尾 → `runtime_error`，白烧 28 次请求。`not_connected` 在 `agent.py:206` 属 transient，但收尾阶段抛出的未被识别。
+- **P2-33 量化**：过夜双轨 **65 次** `finish_reason=length`，**64 次被 `length_recovered` 救回**，仅 1 次报废 → 优先级维持 P2。
+- **BUG-043 扩散**：`nju_movetest_01_bare` EP7（shiny_gear）也 `lost_iron_pickaxe` → 已 4 路。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
