@@ -662,10 +662,11 @@ class McToolset:
             raw = json.dumps(parsed, ensure_ascii=False)
         res_obj = parsed.get("result") if isinstance(parsed, dict) else None
         blocks = res_obj.get("blocks") if isinstance(res_obj, dict) else None
-        if parsed.get("ok") is True and isinstance(res_obj, dict) and isinstance(res_obj.get("total"), int):
+        if (parsed.get("ok") is True and isinstance(res_obj, dict)
+                and isinstance(res_obj.get("total"), int) and isinstance(blocks, list)):
             # total is the backend scan count, not the number of returned rows.
             # Do not rewrite it; expose the truncation explicitly (P2-9).
-            returned = len(blocks) if isinstance(blocks, list) else 0
+            returned = len(blocks)
             res_obj["returned"] = returned
             if res_obj["total"] > returned:
                 res_obj["truncated"] = True
