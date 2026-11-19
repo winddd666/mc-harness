@@ -24,6 +24,7 @@ import pathlib
 import time
 
 WT = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated")
+STATE = pathlib.Path("/tmp/opencode/d1_watcher_seen.json")
 
 
 def wave_state(d: pathlib.Path) -> dict:
@@ -62,12 +63,17 @@ def main() -> int:
 
     deadline = time.monotonic() + args.max_hours * 3600
     seen: set[str] = set()
+    if STATE.exists():
+        try:
+            seen.update(json.loads(STATE.read_text()))
+        except Exception:
+            pass
     # Pre-seed waves that are already settled so we only report new settles.
     for d in sorted(WT.joinpath("runs").iterdir()):
         if not d.is_dir() or d.name in args.exclude:
             continue
         st = wave_state(d)
-        if st["idle"] >= args.idle * 1.5:
+        if is_settled(st, args.idle):
             seen.add(d.name)
 
     last_beat = 0.0
@@ -83,6 +89,9 @@ def main() -> int:
                     f"idle={st['idle']:.0f}s tracebacks={st['tracebacks']} at {time.strftime('%T')}",
                     flush=True,
                 )
+                seen.add(st["wave"])
+                STATE.parent.mkdir(parents=True, exist_ok=True)
+                STATE.write_text(json.dumps(sorted(seen)))
                 return 0
         now = time.monotonic()
         if now - last_beat >= 300:

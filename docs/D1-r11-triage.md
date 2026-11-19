@@ -400,6 +400,96 @@ ALL PASS — 11 项门禁全绿
 
 **BUG-029**：r18 目前 `inventory_full` 0、`no_drops_collected` 7、`partial_collection` 1 → 尚未造成硬失败，待 `owned_end` 收官复核。
 
+## 4l. r18 收官（22/22）与 r19_short 收官（18/18）
+
+| 门禁 | r18_22bot | r19_short | 说明 |
+|---|---|---|---|
+| startup crash | 0 ✅ | 0 ✅ | — |
+| BUG-025 木棍 | 0 ✅ | 0 ✅ | — |
+| BUG-024 no_support | 0 ✅ | 0 ✅ | — |
+| BUG-026 死亡 | **37** ❌ | 13 ✅ | r18 死亡集中在下界：`ds_4` 7、`hy4_6` 6、`hy4_8` 4 |
+| BUG-026 冷却 | **653.2s** ❌ | **205.6s** ❌ | `hy4_4` 单路 117 次取消 |
+| BUG-018 mine median | 27.8s ✅ | 30.8s ✅ | — |
+| BUG-018 zero-slice | 3.4% ✅ | 9.3% ✅ | 接近阈值 |
+| BUG-020 runtime_error | 0 ✅ | 0 ✅ | — |
+| BUG-033 thread | **1** ❌（旧码） | 0 ✅ | `2bfe3c7` 修复在 r19 生效 |
+| BUG-023 trident | 0 ✅ | 0 ✅ | — |
+| SCENE-001 trade/brew | 2 / 2 ✅ | 1 / 2 ✅ | — |
+
+**修复核对**
+- **BUG-033 FIXED**：`2bfe3c7` 对 GET/只读/非 actor 线程不再抛 `ReflexPreempted`；r19 0 异常（提交信息误写 BUG-031）
+- **BUG-029 部分修复**：cap 判断已可达，但 r19 仍有 **3/18** 超限（`nju_guitest` 234、`ds_2` 261 cobble、`glm_2` 138 netherrack）→ 缺"挖矿结束后软清理"触发点
+- **BUG-030 未修**：r18/r19 的 iron 槽都只有 **20** 分，`mining_dfs.py:4818` 仍是 `min(90, max_duration_s)`
+- **BUG-026/034 未达标**：r18 冷却 653s，主因仍是下界 lava/on_fire + `pre_hurt_ranged` 取消风暴
+
+**监听**：通用 watcher 已自动发现并接管 `r20_long` / `r20_short`（不依赖波次名），r19 收官后已重启（PID 1637626）。
+
+### 4m. r20 早期：新 P0 **BUG-035**（熔炼收取 ReadTimeout 打死进程）
+
+`runs/r20_short/hy4_hy_3_midgame/stdout.log`：
+```
+curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_collect
+  bot.call("window/view") → httpcore.ReadTimeout
+  → 未捕获 → main 退出，整路丢失
+```
+- `smelt_collect` 只 `except ApiError`，未捕获 `httpx.HTTPError`；`collect_job`/`curriculum.run` 也无兜底
+- 修法：ReadTimeout 视为"稍后再收"（保留 job、返回 deferred），不要让恢复流程崩溃
+- 影响：任何有未收熔炼任务 + 网络抖动的 bot 都会整路丢失
+
+### 4n. r20_short / r20_long 早期（23:12）
+
+- **BUG-035 连续第 2 波复现**：`hy4_hy_3_midgame` 再次在 `library.py:4121 smelt_collect` 的 `ReadTimeout` 整路退出 → P0 确认
+- r20_short 其余门禁：deaths 8、cooldown 66.4s、thread exceptions 0、trade 2 / brew 2、mine 耗时/预算 0.93、零进展 6.0%
+- r20_long（4 路长任务）：ALL PASS（trade/brew 门禁按 stage 自动 N/A）
+- 门禁改进：
+  1. `BUG-018` 从"绝对中位 25~40s"改为 **耗时/声明预算 ≤1.2**（r20 大量用 60/90s 预算，旧门禁误报）
+  2. `SCENE-001`/`BUG-023` 在波次不含对应 stage 时自动 **N/A**，不再误报
+  3. 线程异常与进程崩溃分开统计（`Exception in thread` → BUG-033 门禁）
+
+### 4o. r20 第二轮复核（23:13）
+
+- **BUG-030**：r20_short **45 次**深挖 `target_y<=-40`，**0 次到达**；最深 -22，多路仍停在 y=60~74 → "深度清零/拒绝续潜"比预算更致命
+- **BUG-034**：r20_short 取消仅 **43 次 / 70.4s**（pre_hurt_ranged 10），本波安静；但 r18 的 653s 仍说明机制未改，保持 OPEN
+- **BUG-035**：仅 `hy4_hy_3` 1 路复现（连续第 2 波）
+- r20_long（4 路 bare/midgame）：ALL PASS；新 P2-28 `smelt:missing_fuel`
+
+### 4p. r20 修复核对（23:15）
+
+| 工单 | 状态 | 证据 |
+|---|---|---|
+| BUG-029 | **FIXED** | `53835cf` 在 `mine_dfs` 返回路径调用 `_ensure_free_slots` 并回报 `inventory_cleaned`（缺失触发点已补） |
+| BUG-034 | **FIXED（待收官）** | `guardian.py:144` 改为 30s；r20_short 早期 43 次/70.4s（r18 311/653） |
+| P2-24 | **FIXED** | `9ecb239` NoAI 村民 + 4m 前置；r20 `window_view ok 2 / out_of_reach 1 / no_window 0`，trade ok 2 |
+| BUG-035 | **未修** | `library.py:4120` 仍只 catch ApiError；r20 第 2 波复现 |
+| BUG-030 | **未修** | `mining_dfs.py:4818` 未改；r20 45 次深挖 0 到达 |
+
+### 4q. r20_long 增量分析（23:18）
+
+- **BUG-036（P1）**：`nju_movetest_01_bare` 45 分钟长任务在 **425.7s** 结束，`status=auth_error`，错误 `[invalid_token] token not found or expired`。curriculum 在集边界遇 401 直接终止整轮，没有用 TokenStore 重新登录续跑；另有"同名 bot 跨波次并发"的互斥风险（`MoveTest_01` 共用 token 文件）。
+- 其余 3 路长任务仍在跑（32~52 次工具调用）：
+  - `ds_ds_1_bare` 末尾 **连续 4 次 `staircase:time_budget`** → 见 BUG-037
+  - `hy4_hy_1_bare` 2 死、`mine_dfs` 出现 `backtrack_blocked@...`（深度清零老问题）
+  - `glm_glm_5_midgame` 正常（`move_to` ok、少量 `no_such_entity`）
+
+**新增 BUG-037（P1，Slice C）**：r20_short 的 `staircase:time_budget` 28 次里 **21 次 `steps_done=0`**，单次中位 15.3s ≈ `per_step_timeout=15s` → **第一步被 per-step 超时饿死**。建议第 0 步用总预算（45s）或把 per-step 提到 20~25s。
+
+### 4r. r20 BUG-035 触发链 + 裸开卡点（23:22）
+
+- **BUG-035 触发链**：`hy4_hy_3` 的 curriculum 里 `active_world_jobs: 1`，第 2 集 `use_lodestone` 为 `paused_for_world_job`；下一集 resume 时 `collect_job → smelt_collect` 撞 ReadTimeout。全波仅 1 个 active job，但有 job 的 bot 必中。
+- **BUG-037 影响裸开**：`ds_ds_1_bare` 的 `bootstrap_iron_age` 13 次调用里 6 次 `staircase:time_budget` → 铁器时代直接超时。
+- **P2-28 升级**：`ds_1` 报 `missing_fuel`（零燃料、零木头）；建议提示先 `harvest_logs(2)`，并把"有原木"纳入自动燃料选择。
+
+### 4s. BUG-030 根因修正（23:25）
+
+原判断"每片只下潜几格"不准确：实测**每次平均下潜 11.5 格**。真正的问题：
+
+- r20_short 50 次深挖调用中 **29 次从 y>50 地表重新起挖**（58%）
+- `hy4_hy_2_iron`：文件 2 开头 `-17 → hurt` 后位置 **67** → 一次死亡清零 80 格下潜
+- `nju_3`：新一集 `start_y=95`，集边界同样重置
+- 显式回撤（dy>5）整波仅 1 次 → 不是回撤，而是**死亡/集边界重置**
+
+→ 修复重点改为：新集/复活后**复用已建竖井**（restore shaft + 走到最深节点），而非从地表重挖；预算自适应降为次要。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s

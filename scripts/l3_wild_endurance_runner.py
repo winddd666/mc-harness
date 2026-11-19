@@ -218,13 +218,13 @@ def select_village_wild_site(
             parked = _park_near_entity(bot, bot_name, ("villager",), pos)
             if parked is not None:
                 pos = parked
-                _pin_villager_near(bot_name, parked)
+                _pin_villager_near(bot, bot_name, parked)
         biome = str(st.get("biome") or "village").lower()
         return float(pos[0]), float(pos[1]), float(pos[2]), f"village:{biome}"
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
 
 
-def _pin_villager_near(bot_name: str, pos: list[float]) -> bool:
+def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
     """Teleport + freeze the nearest villager 1.5 blocks beside the bot (village_trade fixture).
 
     r18 glm_glm_3_village_trade kept chasing villagers 27m away (`out_of_reach`) and hit
@@ -233,9 +233,11 @@ def _pin_villager_near(bot_name: str, pos: list[float]) -> bool:
     """
     tx, ty, tz = float(pos[0]), float(pos[1]), float(pos[2])
     try:
+        # Teleport onto the bot's own block: that block is guaranteed passable (a "+1.5 east" spot
+        # can be inside a hillside/wall and suffocate the villager, which is what r20 GLM_3 saw).
         rcon_batch(
             [
-                f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run tp @e[type=minecraft:villager,sort=nearest,limit=1] {tx + 1.5:.1f} {ty:.1f} {tz:.1f}",
+                f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run tp @e[type=minecraft:villager,sort=nearest,limit=1] {tx:.1f} {ty:.1f} {tz:.1f}",
             ],
             timeout=30,
         )
@@ -246,8 +248,24 @@ def _pin_villager_near(bot_name: str, pos: list[float]) -> bool:
             ],
             timeout=30,
         )
-        print(f"[Scene] pinned a NoAI villager next to {bot_name} at ({tx + 1.5:.1f}, {ty:.1f}, {tz:.1f})", flush=True)
-        return True
+        time.sleep(1.0)
+        present = False
+        try:
+            res = bot.call("get_entities", {"radius": 8}) or {}
+            ents = res.get("entities") if isinstance(res, dict) else None
+            present = isinstance(ents, list) and any(
+                "villager" in f"{e.get('name') or ''} {e.get('type') or ''}".lower()
+                for e in ents
+                if isinstance(e, dict)
+            )
+        except Exception:
+            present = False
+        print(
+            f"[Scene] pinned a NoAI villager next to {bot_name} at ({tx:.1f}, {ty:.1f}, {tz:.1f}) "
+            f"verified={present}",
+            flush=True,
+        )
+        return present
     except Exception as exc:
         print(f"[Scene] villager pin failed for {bot_name}: {exc}", flush=True)
         return False
@@ -1319,12 +1337,13 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "tier": 2,
         "budget_class": "short",
         "task": (
-            "本场景已在村庄内、出生点东侧 1.5 格固定了一名 NoAI 村民，背包备有 emerald 32 / wheat 32 / "
-            "stick 64 / paper 32 / coal 32。先 mc_get_entities(radius=12) 找到最近的 villager，"
-            "若距离 >4m 先 mc_move_to(x=..., z=..., range=1.5) 贴近（不要隔着 20m 直接开窗，会 out_of_reach），"
-            "然后 mc_window_view(entity_id=...) 读取报价；只要有一项 available=true 且材料够，马上 "
-            "mc_skill_trade(entity_id=..., option=...) 成交，优先 paper/wheat 换绿宝石。返回 no_window 就换下一个村民，"
-            "禁止对同一村民反复重试，也不要离开村庄爬山。"
+            "本场景已在村庄内、出生点脚下固定了一名 NoAI 村民，背包备有 emerald 32 / wheat 32 / "
+            "stick 64 / paper 32 / coal 32。先 mc_get_entities(radius=12)（**不要**传 types 过滤，"
+            "直接看返回列表里的 villager），若距离 >4m 先 mc_move_to(x=..., z=..., range=1.5) 贴近"
+            "（不要隔着 20m 直接开窗，会 out_of_reach），然后 mc_window_view(entity_id=...) 读取报价；"
+            "只要有一项 available=true 且材料够，马上 mc_skill_trade(entity_id=..., option=...) 成交，"
+            "优先 paper/wheat 换绿宝石。返回 no_window 就换下一个村民，禁止对同一村民反复重试，"
+            "也不要离开村庄爬山。"
         ),
         "extra_tools": ("mc_skill_trade", "mc_window_view", "mc_interact"),
         "advancement_id": "minecraft:adventure/trade",
@@ -1390,6 +1409,55 @@ def install_scene_focus(stage: str, episodes: int = 2) -> bool:
     cur.select_next_target = _wrapped
     print(f"[Scene Focus] stage={stage} first {state['remaining']} episode(s) -> {target.key}", flush=True)
     return True
+
+
+def build_token_refresher(bot_name: str, token_file: pathlib.Path, settings: Any) -> Any:
+    """Return a `BotSession` reauth callback: re-login with .env.beast credentials and persist the token.
+
+    BUG-036: a long run lost 38 minutes when the cached token was revoked mid-wave
+    (`[invalid_token] token not found or expired`) because the session had no reauth path.
+    """
+    from mc_agent.auth import BotTokenRecord, TokenStore
+    from mc_agent.config import parse_dotenv
+
+    store = TokenStore(token_file)
+    api_base = str(settings.mc_api_base_url).rstrip("/")
+
+    def _refresh() -> Any:
+        import httpx
+
+        env = parse_dotenv(ENV_FILE)
+        password = env.get("MC_SKIN_PASSWORD") or env.get("MC_BOT_PASSWORD") or ""
+        if not password:
+            raise RuntimeError(
+                f"cannot refresh token for {bot_name}: MC_SKIN_PASSWORD missing in {ENV_FILE.name}"
+            )
+        try:
+            resp = httpx.post(
+                f"{api_base}/auth/login",
+                json={"username": bot_name, "password": password},
+                timeout=15.0,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"token refresh request failed for {bot_name}: {exc}") from exc
+        if resp.status_code != 200:
+            raise RuntimeError(f"token refresh failed for {bot_name}: HTTP {resp.status_code}")
+        payload = resp.json()
+        res = payload.get("result") or payload
+        token = res.get("token")
+        if not token:
+            raise RuntimeError(f"token refresh for {bot_name} returned no token")
+        record = BotTokenRecord(
+            bot_username=res.get("bot_username") or bot_name,
+            token=str(token),
+            expires_at=res.get("expires_at"),
+            login_username=bot_name,
+        )
+        store.put(record)
+        print(f"[Token] refreshed cached token for {bot_name}", flush=True)
+        return record
+
+    return _refresh
 
 
 def main() -> int:
@@ -1495,7 +1563,12 @@ def main() -> int:
 
     out_file = runs_dir / f"wild-endurance-{args.tag}-{stamp}.json"
 
-    with BotSession(rec.token, bot_username=rec.bot_username, base_url=settings.mc_api_base_url) as bot:
+    with BotSession(
+        rec.token,
+        bot_username=rec.bot_username,
+        base_url=settings.mc_api_base_url,
+        reauth_callback=build_token_refresher(bot_name, token_file, settings),
+    ) as bot:
         st = ensure_bot_ready(bot, timeout_s=45.0)
 
         if args.stage in ("village", "village_trade"):
