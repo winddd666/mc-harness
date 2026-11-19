@@ -538,6 +538,7 @@ def reset_wild_bot(
             [
                 f"execute in minecraft:the_nether run tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
                 f"execute in minecraft:the_nether run spawnpoint {bot_name} {ix} {iy} {iz}",
+                f"advancement revoke {bot_name} everything",
                 f"advancement grant {bot_name} only minecraft:story/root",
                 f"advancement grant {bot_name} only minecraft:adventure/root",
                 f"advancement grant {bot_name} only minecraft:husbandry/root",
