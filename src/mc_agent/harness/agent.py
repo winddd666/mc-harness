@@ -717,7 +717,23 @@ class _RepeatFailureGuard:
                 and pos_after_blk == pos_before_blk
                 and float(kwargs.get("range", 1.0) or 1.0) >= 1.0
             ):
-                # Allow 1 no-op arrival, block if repeated identically without moving
+                rng_val = float(kwargs.get("range", 1.0) or 1.0)
+                tx_kw, tz_kw = kwargs.get("x"), kwargs.get("z")
+                dist_rem = (
+                    math.hypot(float(tx_kw) - float(pos_after_blk[0]), float(tz_kw) - float(pos_after_blk[2]))
+                    if tx_kw is not None and tz_kw is not None
+                    else 0.0
+                )
+                if dist_rem > rng_val + 1.5:
+                    msg_nc = (
+                        f"目标({tx_kw}, {tz_kw})距当前仍有 {dist_rem:.1f}m，但寻路原地未动（可能被坑洼/水面/障碍阻挡）；"
+                        "请先调 mc_skill_unstick 脱困，或改用更短步长（15~25 格）与换方向绕开障碍。"
+                    )
+                else:
+                    msg_nc = (
+                        f"当前站位已在目标 range={kwargs.get('range', 1.0)}m 半径内，未发生实际位移；"
+                        "若需让出脚下方块请指定 3 格以外坐标并设 range=0.5，或直接调 mc_place(item=...) 不传 x/y/z。"
+                    )
                 parsed = {
                     "ok": False,
                     "requires_replan": True,
@@ -725,10 +741,7 @@ class _RepeatFailureGuard:
                     "pos_after": list(pos_after_blk),
                     "error": {
                         "code": "movement_not_confirmed",
-                        "message": (
-                            f"当前站位已在目标 range={kwargs.get('range', 1.0)}m 半径内，未发生实际位移；"
-                            "若需让出脚下方块请指定 3 格以外坐标并设 range=0.5，或直接调 mc_place(item=...) 不传 x/y/z。"
-                        ),
+                        "message": msg_nc,
                     },
                 }
                 raw = json.dumps(parsed, ensure_ascii=False)

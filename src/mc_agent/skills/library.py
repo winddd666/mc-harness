@@ -262,6 +262,8 @@ TOOL_WOOD_NEEDS: dict[str, tuple[int, int]] = {
     "painting": (0, 8),
     "campfire": (0, 3),
     "torch": (0, 1),
+    "lever": (0, 1),
+    "redstone_torch": (0, 1),
 }
 
 

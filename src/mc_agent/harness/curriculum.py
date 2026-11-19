@@ -583,7 +583,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         points=15,
         tier=1,
         budget_class="medium",
-        pre_ensure=(("crafter", 1), ("iron_ingot", 5), ("crafting_table", 1), ("redstone", 1), ("dropper", 1)),
+        pre_ensure=(("crafter", 1), ("lever", 1), ("iron_ingot", 5), ("crafting_table", 1), ("redstone", 1), ("dropper", 1)),
         task=(
             "解锁 adventure/crafters_crafting_crafters(15分)：准备 1 个已合成的 crafter + 第 2 个 crafter 的配方原料（5 iron_ingot + 1 crafting_table + 1 redstone + 1 dropper），"
             "放置第 1 个 crafter 并用 mc_window_act 按槽位摆入 crafter 配方、接红石脉冲（如 redstone_torch/lever）激活产出。"
