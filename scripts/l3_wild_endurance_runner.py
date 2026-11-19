@@ -754,13 +754,18 @@ class SceneWatchdog(threading.Thread):
         pos = st.get("pos") or []
         health = float(st.get("health") or 0.0)
         dim = str(st.get("dimension") or "overworld").lower()
-        wrong_dim = self.scene.dim == "the_nether" and "nether" not in dim
+        in_nether = "nether" in dim
+        in_end = "end" in dim
+        # Overworld slices may legitimately portal into the Nether (stage=`nether` builds and enters a
+        # portal); only the opposite case — a Nether slice bot sitting in the overworld — is a fault.
+        dim_matches = in_nether if self.scene.dim == "the_nether" else not (in_nether or in_end)
+        wrong_dim = self.scene.dim == "the_nether" and not dim_matches
         dist = (
             math.hypot(float(pos[0]) - self.scene.x, float(pos[2]) - self.scene.z)
             if isinstance(pos, (list, tuple)) and len(pos) >= 3
             else float("inf")
         )
-        drifted = dist > self.scene.drift_limit
+        drifted = dim_matches and dist > self.scene.drift_limit
         suspected_death = health <= 0.0
         if not suspected_death:
             self._inv_tick += 1
@@ -770,7 +775,7 @@ class SceneWatchdog(threading.Thread):
                     # Only infer death from an inventory collapse when the bot is back at the scene
                     # anchor and not standing next to a known chest (otherwise chest deposits and
                     # deliberate stashing would trigger free-gear restocks).
-                    at_anchor = dist <= 48.0
+                    at_anchor = dim_matches and dist <= 48.0
                     stashing = False
                     if self.near_container is not None:
                         try:
