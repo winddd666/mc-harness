@@ -2170,28 +2170,36 @@ class MiningDFSEngine:
         has_seal = _seal_reserve(inv_counts) >= 1
         canonical = {"north": 0, "east": 1, "south": 2, "west": 3}
         scored: list[tuple[int, float, int, str]] = []
+        effective_y = self._effective_collar_target_y(anchor)
+        at_target_layer = self._collar_starts_at_level(anchor, effective_y)
+        step_y = anchor[1] if at_target_layer else anchor[1] - 1
 
         for d in ("north", "east", "south", "west"):
             dx, dz = DIRECTIONS[d]
             if self._geofence_blocked(geofence, anchor[0] + dx * 3, anchor[2] + dz * 3, action="mine_dfs_collar") is not None:
                 continue
             nx, nz = anchor[0] + dx, anchor[2] + dz
-            dig_cells = [(nx, anchor[1] + 1, nz), (nx, anchor[1], nz), (nx, anchor[1] - 1, nz)]
+            # At the target layer, the block below the face is the floor.
+            # Probing it as a dig cell rejects walkable bedrock and probes a
+            # descent that this collar will never actually take.
+            dig_cells = [(nx, y, nz) for y in range(anchor[1] + 1, step_y - 1, -1)]
             try:
                 hazard, adj_fluids = self._inspect_step_hazards(dig_cells, blk_cache, forward_delta=(dx, dz))
                 if hazard is not None:
                     continue
                 if adj_fluids and not has_seal and any(blk_cache.get(nb) in LAVA_BLOCKS for nb in adj_fluids):
                     continue
-                support_pt = (nx, anchor[1] - 2, nz)
+                support_pt = (nx, step_y - 1, nz)
                 support_blk = self._get_block_name(support_pt, blk_cache)
-                if support_blk in FLUID_BLOCKS | {"bedrock"}:
+                if support_blk in FLUID_BLOCKS | HAZARD_FLOOR_BLOCKS:
+                    continue
+                if support_blk == "bedrock" and not at_target_layer and step_y > effective_y:
                     continue
                 support_ok = self._is_solid_floor(support_pt, blk_cache)
                 if not support_ok:
                     can_bridge = has_seal and (
                         self._is_self_cavity([support_pt, *dig_cells])
-                        or self._is_solid_floor((nx, anchor[1] - 3, nz), blk_cache)
+                        or self._is_solid_floor((nx, step_y - 2, nz), blk_cache)
                     )
                     if not can_bridge:
                         continue
@@ -4370,6 +4378,10 @@ class MiningDFSEngine:
                 return int(rt[1])
         return self.target_y
 
+    def _collar_starts_at_level(self, anchor: tuple[int, int, int], effective_y: int) -> bool:
+        radar_target = self._best_radar_target_for_anchor(anchor, at_spine=True) if self.radar_enabled else None
+        return anchor[1] <= effective_y and (radar_target is None or radar_target[1] >= anchor[1] - 2)
+
     def _init_collar(
         self,
         anchor: tuple[int, int, int],
@@ -4385,9 +4397,11 @@ class MiningDFSEngine:
 
         # If Collar is initialized directly AT or BELOW target depth (unless radar sees an overhead cluster),
         # attach Spine branches directly so we never execute 0-step stair_down transitions!
-        rt = self._best_radar_target_for_anchor(anchor, at_spine=True) if self.radar_enabled else None
-        if anchor[1] <= eff_y and (rt is None or rt[1] >= anchor[1] - 2):
-            sp_branches = self._spine_branches(cands[0], anchor, geofence)
+        if self._collar_starts_at_level(anchor, eff_y):
+            sp_branches = [
+                branch for branch in self._spine_branches(cands[0], anchor, geofence)
+                if branch.kind == "stair_up" or branch.direction in cands
+            ]
             node = self._create_node(
                 kind="spine",
                 anchor=anchor,
@@ -4734,6 +4748,29 @@ class MiningDFSEngine:
             self.bot, self.skills = original_bot, original_skills
             self._deadline = previous_deadline
 
+    def _collar_failure(self, reason: str, pos: tuple[int, int, int], geofence: Any) -> dict[str, Any]:
+        fence_error = self._geofence_blocked(geofence, pos[0], pos[2], action="mine_dfs_collar")
+        if fence_error is not None:
+            reason = "void_geofence_blocked"
+            message = "当前站位超出安全范围，请核对坐标和岛中心后再进入安全区。"
+        elif reason == "no_viable_collar_direction":
+            message = "当前站位附近没有可安全开挖的方向，请移到另一处实心站位再 explore。"
+        else:
+            message = "当前站位无法确认有实心支撑，请先移到安全的实心地面再 explore。"
+        result: dict[str, Any] = {
+            "ok": False,
+            "requires_replan": True,
+            "action": "explore",
+            "strategy": self.strategy,
+            "stop_reason": reason,
+            "message": message,
+            "pos_after": list(pos),
+            "tree": self.snapshot(),
+        }
+        if fence_error is not None:
+            result["error"] = fence_error["error"]
+        return result
+
     def _run(
         self,
         *,
@@ -4968,46 +5005,33 @@ class MiningDFSEngine:
             ):
                 # Live s01/s03: after a deep reset this path opened a "collar" at y=-54,
                 # so every later reset looked legitimate and the run churned underground.
-                # First try to climb out right here so the model does not have to orchestrate it.
-                if time.monotonic() + 6.0 < deadline:
-                    climb = self._climb_out(deadline=deadline)
-                    if climb["reached"]:
-                        cur_pos = _floor_pos(self.bot.status().get("pos") or cur_pos)
-                        restored = self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref)
-                        if not restored:
-                            solid_pos2, dirs2, err2 = self._ensure_solid_collar_anchor(
-                                cur_pos, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
-                            )
-                            if err2 is None or dirs2:
-                                self._init_collar(solid_pos2, target_y=self.target_y,
-                                                  geofence=geofence, viable_dirs=dirs2)
-                                restored = True
-                    else:
-                        return {
-                            "ok": False,
-                            "requires_replan": True,
-                            "action": act,
-                            "strategy": self.strategy,
-                            "stop_reason": "needs_surface_climb",
-                            "climb": climb,
-                            "message": (
-                                f"已尝试自动爬升：y {climb['start_y']}→{climb['end_y']}"
-                                f"（目标 y={climb['target_y']}）。" + self._surface_climb_hint()
-                            ),
-                            "tree": self.snapshot(),
-                        }
-                return {
-                    "ok": False,
-                    "requires_replan": True,
-                    "action": act,
-                    "strategy": self.strategy,
-                    "stop_reason": "needs_surface_climb",
-                    "message": (
-                        f"当前 y={cur_pos[1]}，比本局最高井口 (y={self.collar_ceiling_y}) 低 20 格以上，"
-                        "不能在地下就地开新井。" + self._surface_climb_hint()
-                    ),
-                    "tree": self.snapshot(),
-                }
+                if time.monotonic() + 6.0 >= deadline:
+                    return {
+                        "ok": False,
+                        "requires_replan": True,
+                        "action": act,
+                        "strategy": self.strategy,
+                        "stop_reason": "needs_surface_climb",
+                        "message": self._surface_climb_hint(),
+                        "tree": self.snapshot(),
+                    }
+                climb = self._climb_out(deadline=deadline)
+                if not climb["reached"]:
+                    return {
+                        "ok": False,
+                        "requires_replan": True,
+                        "action": act,
+                        "strategy": self.strategy,
+                        "stop_reason": "needs_surface_climb",
+                        "climb": climb,
+                        "message": (
+                            f"已尝试自动爬升，y {climb['start_y']}→{climb['end_y']}"
+                            f"（目标 y={climb['target_y']}）。" + self._surface_climb_hint()
+                        ),
+                        "tree": self.snapshot(),
+                    }
+                cur_pos = _floor_pos(self.bot.status().get("pos") or cur_pos)
+                restored = self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref)
             if not restored:
                 solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
                     cur_pos,
@@ -5015,15 +5039,8 @@ class MiningDFSEngine:
                     deadline=deadline,
                     min_hp_ref=min_hp_ref,
                 )
-                if anchor_err is not None and not viable_dirs:
-                    return {
-                        "ok": False,
-                        "requires_replan": True,
-                        "strategy": self.strategy,
-                        "stop_reason": anchor_err,
-                        "message": "当前站位无法开新井（脚下非实心地面），请先用 unstick 下到实心地面再调用 DFS。",
-                        "tree": self.snapshot(),
-                    }
+                if not viable_dirs:
+                    return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                 self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
         else:
             collar = self.nodes[self.collar_node_id]
@@ -5053,12 +5070,14 @@ class MiningDFSEngine:
                 self._archive_current_shaft_to_ledger(mark_exhausted=False)
                 self._clear_active_tree_only()
                 if not self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref):
-                    solid_pos, viable_dirs, _ = self._ensure_solid_collar_anchor(
+                    solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
                         cur_pos,
                         geofence=geofence,
                         deadline=deadline,
                         min_hp_ref=min_hp_ref,
                     )
+                    if not viable_dirs:
+                        return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
             elif math.dist(cur_pos, active.anchor) > 3.5:
                 ok_nav, err_nav = self._navigate_to_node(active.node_id, min_hp_ref=min_hp_ref)
@@ -5086,15 +5105,8 @@ class MiningDFSEngine:
                     solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
                         cur_pos, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
                     )
-                    if anchor_err is not None and not viable_dirs:
-                        return {
-                            "ok": False,
-                            "requires_replan": True,
-                            "strategy": self.strategy,
-                            "stop_reason": anchor_err,
-                            "message": "当前站位无法开新井（脚下非实心地面），请先用 unstick 下到实心地面再调用 DFS。",
-                            "tree": self.snapshot(),
-                        }
+                    if not viable_dirs:
+                        return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
 
         if self.dry_calls >= DRY_CALLS_BEFORE_ABANDON and self.collar_node_id in self.nodes:

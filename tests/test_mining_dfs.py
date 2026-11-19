@@ -2275,3 +2275,65 @@ def test_no_progress_hint_does_not_recommend_a_redundant_reset(monkeypatch) -> N
     assert "reset" not in result["message"]
     assert "空间树为空时直接 explore" in result["message"]
     assert result["goal_met"] is False
+
+
+def test_collar_at_nether_target_layer_can_mine_over_bedrock() -> None:
+    world = _MockMineWorld(start_pos=(0.5, 5.0, 0.5), surface_y=5)
+    for x in range(-9, 10):
+        for z in range(-9, 10):
+            world.blocks[(x, 4, z)] = "bedrock"
+    world.blocks[(1, 5, 0)] = "nether_quartz_ore"
+    with BotSession("tok", bot_username="BedrockFloor", transport=httpx.MockTransport(world.handler)) as bot:
+        result = MacroSkills(bot).mine_dfs(target="quartz", target_y=5, goal_count=1, max_duration_s=5.0)
+    assert result["goal_met"] is True
+    assert world._count("nether_quartz_ore") == 1
+    assert all(name != "bedrock" for _, name, _ in world.dig_log)
+
+
+def test_collar_reports_when_solid_station_is_outside_geofence() -> None:
+    world = _MockMineWorld(start_pos=(0.5, 70.0, 0.5), surface_y=70)
+    fence = VoidGeofence(center_x=100.0, center_z=100.0, radius=15.0, margin=5.0)
+    with BotSession("tok", bot_username="FenceAtCollar", transport=httpx.MockTransport(world.handler)) as bot:
+        result = MacroSkills(bot).mine_dfs(target="iron", geofence=fence, max_duration_s=5.0)
+    assert result["stop_reason"] == "void_geofence_blocked"
+    assert result["error"]["code"] == "void_geofence_blocked"
+    assert result["tree"]["node_count"] == 0
+    assert not world.dig_log
+
+
+def test_explore_continues_after_successful_automatic_climb(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="AutoClimb", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64
+
+        def climb(*, deadline):
+            world.pos[1] = 64.0
+            return {"reached": True}
+
+        monkeypatch.setattr(eng, "_climb_out", climb)
+        result = eng.run(target="iron", target_y=60, max_duration_s=10.0)
+    assert result["stop_reason"] != "needs_surface_climb"
+    assert result["tree"]["collar_node_id"] is not None
+    assert world.dig_log
+
+
+def test_explore_does_not_open_a_fake_collar_after_a_disconnected_move(monkeypatch) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    world = _MockMineWorld(start_pos=(60.5, 20.0, 0.5), surface_y=20)
+    for dx, dz in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        world.blocks[(60 + dx, 19, dz)] = "bedrock"
+    with BotSession("tok", bot_username="BlockedCollar", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        old_collar = eng._create_node(
+            kind="collar", anchor=(0, 20, 0), parent_id=None, edge_from_parent=None,
+            branches=[BranchSpec(kind="stair_down", direction="east", steps=4)],
+        )
+        eng.collar_node_id = old_collar.node_id
+        monkeypatch.setattr(eng, "_find_solid_collar_candidates", lambda *args, **kwargs: [])
+        result = eng.run(target="iron", target_y=16, max_duration_s=5.0)
+    assert result["stop_reason"] == "no_viable_collar_direction"
+    assert "另一处实心站位" in result["message"]
+    assert result["tree"]["node_count"] == 0
+    assert not world.dig_log
