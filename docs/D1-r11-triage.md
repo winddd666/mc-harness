@@ -930,6 +930,36 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - `hy4_audit_r25`：4 路，刚起（4 事件文件）
 - 低频审计器 PID **1736176**（45 分钟抽检或收官即报）；hy4 轨 429 目标 = 0
 
+## 4bg. 过夜双轨首轮审计（01:45）
+
+### hy4 审计轨 `hy4_audit_r25`（4 路，rpm=6，20 分钟，4/4 收官）
+
+```
+retries 0 | failed429 0 | 502 0 | tracebacks 0
+门禁：ALL PASS（deaths 7、cooldown 8.4s、mine 0.89、zero-slice 0.0%、over-cap 0）
+```
+
+| bot | 分数 | 集数 |
+|---|---|---|
+| `hy4_6_nether_bastion` | **210** | 3 |
+| `hy4_5_brewing_alchemy` | 75 | 8 |
+| `hy4_9_deep_water` | 30 | 3 |
+| `hy4_2_iron` | 20 | 3 |
+
+- `mine_dfs` 66 次、**0 零进展**；`depth_reset` 仅 1 次（`hy4_6`）
+- `unstick` 4 次：中位 **4.35s**、max **8.3s** → **无慢调用**
+- 结论：**hy4 的 429 风暴是 10 路并发导致，4 路 + rpm=6 完全安全**
+
+### 主轨 `overnight_12bot`（12 路，4h，进行中 22 分钟）
+
+```
+48 集：answered 28 / goal_satisfied 14 / timeout 3 / limit 2 / paused 1
+runtime_error 0 | failed429 0 | retries 26 | tracebacks 0
+```
+
+- nju/glm/ds 全部正常，429 为 0（重试均成功）
+- 下一次抽检约 02:29 或主轨收官时
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
