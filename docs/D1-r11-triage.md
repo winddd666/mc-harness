@@ -864,6 +864,23 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - 行为本身仍需修：复位后应导航回 deepest node，而不是从 collar 重挖
 - 另：`glm_2` 在下界 y=64 连续 5 次 `ancient_debris` 0 进展（内部阶梯首步，BUG-037）
 
+## 4ba. 看板状态对账（00:55）
+
+把 7 个已修复但仍标 OPEN 的工单核对代码后更新，避免团队重复修：
+
+| 工单 | 依据 |
+|---|---|
+| BUG-005 | 并入 BUG-026 |
+| BUG-008 | `ef6a8ac`（桶 used/gained 判据） |
+| BUG-010 | `dd274ba`（`retry_after_ready` / `eat_deferred`） |
+| BUG-011 | `dd274ba`（httpx 不再包成 RuntimeError） |
+| BUG-012 | `26f7213`（`_API_RETRYABLE_CODES` 含 not_loaded） |
+| BUG-021 | `26f7213`（残余为 BUG-039） |
+| BUG-023 | `e680b1f`（深水盾+岸，r16/r17 trident 0） |
+
+当前看板：**38 单 → 27 FIXED / 1 PARTIAL / 10 OPEN**。
+仍 OPEN：BUG-007、009、026、030、032、036、037、038、039、042。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
