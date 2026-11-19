@@ -281,10 +281,9 @@ def prepare_scene_ground(
         cmds.extend(
             [
                 f"{pre} forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
-                f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:obsidian",
-                f"{pre} setblock {ix + 3} {iy} {iz} minecraft:respawn_anchor[charges=4]",
-                f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix - 1} {iy - 1} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz + 3} minecraft:air",
+                f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:respawn_anchor[charges=4]",
                 f"{pre} tp {bot_name} {ix}.5 {iy} {iz}.5",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
