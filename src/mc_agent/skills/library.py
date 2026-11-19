@@ -332,7 +332,12 @@ def _window_item_entries(items: Any) -> list[dict[str, Any]]:
             count = 1
         if count < 1:
             continue
-        entry: dict[str, Any] = {"item": resolve_item_alias(str(name)), "count": count}
+        raw_name = str(name).removeprefix("minecraft:").strip()
+        if raw_name == "water_bottle":
+            # Java's registry item is potion{potion:water}, not water_bottle.
+            entry: dict[str, Any] = {"item": "potion", "potion": "water", "count": count}
+        else:
+            entry = {"item": resolve_item_alias(raw_name), "count": count}
         for key in ("slot", "potion", "enchanted", "custom_name"):
             if row.get(key) is not None:
                 entry[key] = row[key]
@@ -4513,7 +4518,17 @@ class MacroSkills:
                             "或省略 x/y/z 让工具自动搜索附近酿造台。不要重复同一坐标。"
                         ),
                     }
-            return self._window_api_error(err)
+            out = self._window_api_error(err)
+            if err.code == "missing_item":
+                try:
+                    out.setdefault("inventory", _inventory_counts(self.bot))
+                except ApiError:
+                    pass
+                out["message"] = (
+                    f"{out.get('message') or err.message}；已附 inventory 计数，"
+                    "请核对 ingredient/fuel 是否仍在背包，勿原参数重复。"
+                )
+            return out
 
         view: dict[str, Any] | None = None
         if wait:

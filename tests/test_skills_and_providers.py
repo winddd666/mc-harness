@@ -1961,6 +1961,41 @@ def test_window_view_allows_near_entity() -> None:
     assert result["ok"] is True
 
 
+def test_brew_bottle_alias_accepts_water_bottle_shape() -> None:
+    from mc_agent.skills.library import _window_item_entries
+
+    entries = _window_item_entries([{"item": "minecraft:water_bottle", "slot": 0}])
+    assert entries == [{"item": "potion", "potion": "water", "count": 1, "slot": 0}]
+
+
+def test_brew_missing_item_reports_inventory_counts() -> None:
+    def handler(request):
+        path = request.url.path
+        if path.endswith("/window/act"):
+            return httpx.Response(
+                200, json={"ok": False, "error": {"code": "missing_item", "message": "no blaze_powder"}}
+            )
+        if path.endswith("/inventory"):
+            return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": "cobblestone", "count": 5}]}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).brew_once(
+            "nether_wart",
+            bottles=[{"item": "water_bottle"}],
+            fuel_item="blaze_powder",
+            block="brewing_stand",
+            x=10,
+            y=64,
+            z=10,
+            wait=False,
+        )
+    assert result["ok"] is False
+    assert result["error"] == "missing_item"
+    assert result["inventory"]["cobblestone"] == 5
+    assert "inventory" in result["message"]
+
+
 def test_brew_no_window_reports_wrong_block_at_coordinates() -> None:
     """r16 brewing used a coordinate that actually held cobblestone."""
     calls = []
