@@ -662,6 +662,18 @@ class McToolset:
             raw = json.dumps(parsed, ensure_ascii=False)
         res_obj = parsed.get("result") if isinstance(parsed, dict) else None
         blocks = res_obj.get("blocks") if isinstance(res_obj, dict) else None
+        if parsed.get("ok") is True and isinstance(res_obj, dict) and isinstance(res_obj.get("total"), int):
+            # total is the backend scan count, not the number of returned rows.
+            # Do not rewrite it; expose the truncation explicitly (P2-9).
+            returned = len(blocks) if isinstance(blocks, list) else 0
+            res_obj["returned"] = returned
+            if res_obj["total"] > returned:
+                res_obj["truncated"] = True
+                res_obj["total_note"] = (
+                    "total 为后端在半径内扫描到的匹配总数；blocks 仅返回前 limit 条。"
+                    "请缩小 radius/types 或提高 limit（上限 60），不要把 total 当作可访问方块数。"
+                )
+            raw = json.dumps(parsed, ensure_ascii=False)
         if parsed.get("ok") is True and isinstance(blocks, list) and blocks:
             dim_obs, _, _ = self._cached_env(fetch_if_missing=False)
             self.world_memory.observe_blocks(blocks, dim=dim_obs)

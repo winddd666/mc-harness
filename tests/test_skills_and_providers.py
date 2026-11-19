@@ -1809,6 +1809,33 @@ def test_find_blocks_uses_nether_stems_for_generic_log() -> None:
     assert queries == [["crimson_stem", "warped_stem", "crimson_planks", "warped_planks", "stone"]]
 
 
+def test_find_blocks_labels_backend_total_as_truncated_scan_count() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        assert request.url.path.endswith("/find_blocks")
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {
+                    "total": 10000,
+                    "blocks": [
+                        {"name": "netherrack", "pos": [0, 63, 0], "dist": 1.2},
+                        {"name": "netherrack", "pos": [1, 63, 0], "dist": 1.2},
+                    ],
+                },
+            },
+        )
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_find_blocks(types=["netherrack"], radius=64, limit=2))
+    assert result["result"]["total"] == 10000
+    assert result["result"]["returned"] == 2
+    assert result["result"]["truncated"] is True
+    assert "后端在半径内扫描到的匹配总数" in result["result"]["total_note"]
+
+
 @pytest.mark.parametrize("types,expected_queries", [(["shield", "leather"], 0), (["made_up_one", "made_up_two"], 2)])
 def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback(types, expected_queries) -> None:
     from mc_agent.harness.mc_tools import McToolset
