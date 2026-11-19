@@ -5969,13 +5969,14 @@ class MacroSkills:
                 except ApiError:
                     pass
 
-        def _pick_step_filler() -> str | None:
+        def _pick_step_filler(exclude: set[str] | None = None) -> str | None:
+            excluded = exclude or set()
             counts = _inventory_counts(self.bot)
             for cand in STAIR_FILLER_BLOCKS:
-                if counts.get(cand, 0) >= 1:
+                if cand not in excluded and counts.get(cand, 0) >= 1:
                     return cand
             for name, cnt in sorted(counts.items()):
-                if cnt >= 1 and name.endswith("_planks"):
+                if name not in excluded and cnt >= 1 and name.endswith("_planks"):
                     return name
             return None
 
@@ -6243,15 +6244,25 @@ class MacroSkills:
                     break
 
                 if _is_non_solid_support(_block_name([nx, by, nz])):
+                    # The client inventory can disagree with the server's
+                    # findItem (r13: cobblestone reported but place said none).
+                    # Fall through to other solid fillers before giving up.
+                    rejected_fillers: set[str] = set()
                     filler = _pick_step_filler()
-                    if not filler:
-                        stop_reason = "missing_step_support"
-                        break
-                    try:
-                        self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
-                        placed_count += 1
-                    except ApiError as err:
-                        last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
+                    placed_ok = False
+                    while filler:
+                        try:
+                            self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
+                            placed_count += 1
+                            placed_ok = True
+                            break
+                        except ApiError as err:
+                            last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
+                            if err.code != "missing_item":
+                                break
+                            rejected_fillers.add(filler)
+                            filler = _pick_step_filler(exclude=rejected_fillers)
+                    if not placed_ok:
                         stop_reason = "missing_step_support"
                         break
 
