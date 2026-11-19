@@ -234,11 +234,49 @@ def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
     deterministic without touching the harness.
     """
     tx, ty, tz = float(pos[0]), float(pos[1]), float(pos[2])
+
+    def _verified(radius: int = 12) -> bool:
+        try:
+            res = bot.call("get_entities", {"radius": radius}) or {}
+            ents = res.get("entities") if isinstance(res, dict) else None
+            return isinstance(ents, list) and any(
+                "villager" in f"{e.get('name') or ''} {e.get('type') or ''}".lower()
+                for e in ents
+                if isinstance(e, dict)
+            )
+        except Exception:
+            return False
+
     try:
-        # Teleport onto the bot's own block: that block is guaranteed passable (a "+1.5 east" spot
-        # can be inside a hillside/wall and suffocate the villager, which is what r20 GLM_3 saw).
-        # Selector without a distance cap scans every loaded villager, so this also works when the
-        # initial spreadplayers landing is >64m from the village (r21 GLM_3 hill village).
+        # Preferred fixture: SUMMON a persistent, invulnerable, NoAI farmer with a paper->emerald
+        # trade directly on the bot's block. Teleporting an existing villager kept losing it
+        # (r22: entities=[] + 20m chase; r23 NJU: stale id 1330 -> target_not_visible).
+        summon = (
+            f"summon minecraft:villager {tx:.1f} {ty:.1f} {tz:.1f} "
+            "{NoAI:1b,Invulnerable:1b,Persistent:1b,Silent:1b,"
+            'VillagerData:{profession:"minecraft:farmer",level:2,type:"minecraft:plains"},'
+            "Offers:{Recipes:[{buy:{id:\"minecraft:paper\",count:24},"
+            'sell:{id:"minecraft:emerald",count:1},maxUses:999,uses:0,xp:1}]}}'
+        )
+        try:
+            replies = rcon_batch([summon], timeout=30)
+            reply = str((replies[0] if replies else {}).get("reply") or "")
+        except Exception:
+            reply = ""
+        if reply.lower().startswith("summoned"):
+            time.sleep(1.2)
+            if _verified():
+                print(
+                    f"[Scene] summoned a persistent trader villager for {bot_name} at "
+                    f"({tx:.1f}, {ty:.1f}, {tz:.1f})",
+                    flush=True,
+                )
+                return True
+            print(f"[Scene] trader summon replied '{reply[:80]}' but verify failed; falling back", flush=True)
+        else:
+            print(f"[Scene] trader summon not accepted ({reply[:80]!r}); falling back to tp+NoAI", flush=True)
+
+        # Fallback: teleport a loaded villager onto the bot's passable block and freeze it.
         pinned = False
         for attempt in (1, 2):
             rcon_batch(
@@ -250,21 +288,12 @@ def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
             time.sleep(0.6 if attempt == 1 else 1.2)
             rcon_batch(
                 [
-                    f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run data merge entity @e[type=minecraft:villager,distance=..6,limit=1] {{NoAI:1b}}",
+                    f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run data merge entity @e[type=minecraft:villager,distance=..6,limit=1] {{NoAI:1b,Invulnerable:1b}}",
                 ],
                 timeout=30,
             )
             time.sleep(1.5)
-            try:
-                res = bot.call("get_entities", {"radius": 12}) or {}
-                ents = res.get("entities") if isinstance(res, dict) else None
-                pinned = isinstance(ents, list) and any(
-                    "villager" in f"{e.get('name') or ''} {e.get('type') or ''}".lower()
-                    for e in ents
-                    if isinstance(e, dict)
-                )
-            except Exception:
-                pinned = False
+            pinned = _verified()
             if pinned:
                 break
         print(
