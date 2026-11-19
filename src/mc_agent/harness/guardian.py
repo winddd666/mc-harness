@@ -141,8 +141,9 @@ class _GuardSession:
 
 class GenerationGuard:
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
-    PRE_HURT_RANGED_COOLDOWN_S = 10.0
+    PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
+    RANGED_COMBAT_STANCE_S = 35.0
 
     def __init__(
         self,
@@ -188,6 +189,9 @@ class GenerationGuard:
         self._pre_hurt_suppress_block: tuple[int, int, int] | None = None
         self._pre_hurt_suppress_until: float = float("-inf")
         self._pre_hurt_target_cooldown: dict[str, float] = {}
+        self._ranged_combat_stance_until: float = float("-inf")
+        self._ranged_cover_active_until: float = float("-inf")
+        self._last_dig_cover_fail_at: float = float("-inf")
         self.stats = {
             "polls": 0,
             "incidents": 0,
@@ -390,23 +394,60 @@ class GenerationGuard:
         until = self._pre_hurt_target_cooldown.get(self._pre_hurt_target_key(entity_id, entity_name), float("-inf"))
         return cur < until
 
+    def _mark_ranged_engagement(
+        self,
+        now: float | None = None,
+        *,
+        trigger: ThreatTrigger | None = None,
+        attacker: dict[str, Any] | None = None,
+        in_cover: bool = False,
+    ) -> None:
+        """Enter or extend ranged combat stance, optional cover window, and 30s shooter cooldown."""
+        cur = time.monotonic() if now is None else now
+        self._ranged_combat_stance_until = max(
+            self._ranged_combat_stance_until,
+            cur + self.RANGED_COMBAT_STANCE_S,
+        )
+        if in_cover:
+            self._ranged_cover_active_until = max(
+                self._ranged_cover_active_until,
+                cur + self.RANGED_COMBAT_STANCE_S,
+            )
+        eid = (
+            trigger.get("primary_entity_id")
+            if isinstance(trigger, dict)
+            else (attacker.get("id") if isinstance(attacker, dict) else None)
+        )
+        ename_raw = (
+            trigger.get("primary_type")
+            if isinstance(trigger, dict)
+            else (attacker.get("name") if isinstance(attacker, dict) else "")
+        )
+        ename = str(ename_raw or "").removeprefix("minecraft:").strip().lower()
+        if not ename and not isinstance(eid, int):
+            return
+        key = self._pre_hurt_target_key(eid if isinstance(eid, int) else None, ename)
+        self._pre_hurt_target_cooldown[key] = max(
+            self._pre_hurt_target_cooldown.get(key, float("-inf")),
+            cur + self.PRE_HURT_RANGED_COOLDOWN_S,
+        )
+
     def _mark_pre_hurt_cooldown(self, trigger: ThreatTrigger | None, now: float | None = None) -> None:
         if not isinstance(trigger, dict):
             return
         source = str(trigger.get("source") or "")
+        ename = str(trigger.get("primary_type") or "").removeprefix("minecraft:").strip().lower()
+        hurt_src = str(trigger.get("hurt_source") or "").strip().lower()
+        if source == "pre_hurt_ranged" or ename in RANGED_MOBS or hurt_src in RANGED_HURT_SOURCES:
+            self._mark_ranged_engagement(now, trigger=trigger)
+            return
         if not source.startswith("pre_hurt_"):
             return
         eid = trigger.get("primary_entity_id")
-        ename = str(trigger.get("primary_type") or "")
         if not ename and not isinstance(eid, int):
             return
         cur = time.monotonic() if now is None else now
-        if source == "pre_hurt_ranged":
-            cd = self.PRE_HURT_RANGED_COOLDOWN_S
-        elif source == "pre_hurt_melee":
-            cd = self.PRE_HURT_MELEE_COOLDOWN_S
-        else:
-            cd = self.PRE_HURT_TARGET_COOLDOWN_S
+        cd = self.PRE_HURT_MELEE_COOLDOWN_S if source == "pre_hurt_melee" else self.PRE_HURT_TARGET_COOLDOWN_S
         key = self._pre_hurt_target_key(eid if isinstance(eid, int) else None, ename)
         self._pre_hurt_target_cooldown[key] = max(
             self._pre_hurt_target_cooldown.get(key, float("-inf")),
@@ -471,6 +512,17 @@ class GenerationGuard:
         is_melee = nh_name in PRE_HURT_MELEE_MOBS and nh_dist <= 3.5
         is_ranged = nh_name in RANGED_MOBS and nh_dist <= 13.5
         if not (is_creeper or is_melee or is_ranged):
+            return None
+        if (
+            is_ranged
+            and not is_creeper
+            and not is_melee
+            and (
+                now < self._ranged_combat_stance_until
+                or now < self._ranged_cover_active_until
+                or bool(status.get("blocking"))
+            )
+        ):
             return None
         if self._is_pre_hurt_debounced(nh_id, nh_name, now=now):
             return None
@@ -644,7 +696,22 @@ class GenerationGuard:
             else self._detect_pre_hurt_trigger(status)
         )
         effective_combat_hurt = hurt and not non_combat_only_hurt
-        if effective_combat_hurt:
+        ranged_hurt_only = (
+            effective_combat_hurt
+            and bool(hurts)
+            and all(
+                str(h.get("source") or "").strip().lower() in RANGED_HURT_SOURCES
+                for h in hurts
+            )
+            and nh_name0 != "creeper"
+            and nh_dist0 > 3.5
+        )
+        already_in_ranged_guard = (
+            bool(status.get("blocking"))
+            or (now < self._ranged_cover_active_until)
+            or (now < self._ranged_combat_stance_until)
+        )
+        if effective_combat_hurt and not ranged_hurt_only:
             self._pre_hurt_suppress_until = float("-inf")
         critical_override = bool(
             deaths
@@ -786,6 +853,9 @@ class GenerationGuard:
                 self._mark_pre_hurt_cooldown(pre_trigger, time.monotonic())
                 actions.append(sc_out)
                 sc_res = sc_out.get("result") if isinstance(sc_out, dict) else None
+                in_sc_cover = isinstance(sc_res, dict) and sc_res.get("mode") in {"cover_pocket", "bunker_sealed", "sealed_shaft"}
+                if pre_trigger.get("source") == "pre_hurt_ranged" or str(pre_trigger.get("primary_type") or "") in RANGED_MOBS:
+                    self._mark_ranged_engagement(time.monotonic(), trigger=pre_trigger, in_cover=in_sc_cover)
                 if isinstance(sc_res, dict):
                     st_after_sc = sc_res.get("status_after") if isinstance(sc_res.get("status_after"), dict) else status
                     pos_sc = st_after_sc.get("pos") or status.get("pos")
@@ -924,6 +994,8 @@ class GenerationGuard:
                             lambda: self.combat_slot.handle(self.combat_env, trig),
                         )
                     )
+                    if hurt_src in RANGED_HURT_SOURCES or att_type in RANGED_MOBS:
+                        self._mark_ranged_engagement(time.monotonic(), trigger=trig)
                 elif (
                     has_shield
                     and not already_blocking
@@ -950,10 +1022,13 @@ class GenerationGuard:
                     )
                 elif hurt_src in RANGED_HURT_SOURCES:
                     self._shield_only_streak = 0
+                    att_obj = attacker if isinstance(attacker, dict) else (status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None)
+                    self._mark_ranged_engagement(now, attacker=att_obj)
                     att_pos_r = (attacker.get("pos") if isinstance(attacker, dict) else None) or nh_pos
                     pos_r = status.get("pos")
                     if (
-                        isinstance(pos_r, (list, tuple))
+                        not already_blocking
+                        and isinstance(pos_r, (list, tuple))
                         and len(pos_r) >= 3
                         and isinstance(att_pos_r, (list, tuple))
                         and len(att_pos_r) >= 3
@@ -976,16 +1051,25 @@ class GenerationGuard:
                             )
 
                         actions.append(self._action("lateral_sidestep", _sidestep_2m))
-                        if has_shield and not already_blocking:
+                        if has_shield:
                             self._equip_and_raise_shield_for_water(
                                 {**status, "in_water": False, "jumping": False},
                                 actions,
                                 inv=inv if isinstance(inv, dict) else {},
                                 attacker=attacker if isinstance(attacker, dict) else status.get("nearest_hostile"),
                             )
-                    cover = self._action("dig_cover", lambda: self._skills().dig_cover_pocket())
-                    actions.append(cover)
-                    if not cover["ok"]:
+                    already_in_dug_cover = (now < self._ranged_cover_active_until) and hp_val > 10.0 and ranged_hurt_only
+                    recent_cover_fail = already_blocking and ranged_hurt_only and hp_val > 10.0 and (now - self._last_dig_cover_fail_at < 15.0)
+                    cover: dict[str, Any] | None = None
+                    if not already_in_dug_cover and not recent_cover_fail:
+                        cover = self._action("dig_cover", lambda: self._skills().dig_cover_pocket())
+                        actions.append(cover)
+                        if cover.get("ok"):
+                            self._mark_ranged_engagement(now, attacker=att_obj, in_cover=True)
+                        else:
+                            self._last_dig_cover_fail_at = now
+                    cover_ok = bool(cover and cover.get("ok")) or already_in_dug_cover
+                    if not cover_ok and (not already_blocking or hp_val <= 10.0 or not ranged_hurt_only):
                         if (
                             has_shield
                             and not already_blocking
@@ -1117,17 +1201,31 @@ class GenerationGuard:
 
         if not actions and not critical_non_combat and not (deaths or disconnected or not ready or status.get("alive") is False or status.get("busy")):
             return None
-        replan = bool(
-            effective_combat_hurt
-            or critical_non_combat
-            or pre_trigger is not None
-            or in_lava
-            or deaths
-            or disconnected
-            or needs_float
-            or not ready
-            or status.get("alive") is False
-            or any(r != "needs_food" for r in reasons)
+        exempt_ranged_cancel = (
+            ranged_hurt_only
+            and hp_cur > 10.0
+            and already_in_ranged_guard
+            and not deaths
+            and not disconnected
+            and not in_lava
+            and not in_water
+            and not needs_float
+            and not status.get("busy")
+        )
+        replan = (
+            not exempt_ranged_cancel
+            and bool(
+                effective_combat_hurt
+                or critical_non_combat
+                or pre_trigger is not None
+                or in_lava
+                or deaths
+                or disconnected
+                or needs_float
+                or not ready
+                or status.get("alive") is False
+                or any(r != "needs_food" for r in reasons)
+            )
         )
         try:
             post_status = self.bot.status()
@@ -1643,6 +1741,12 @@ class GenerationGuard:
                 )
                 self._mark_pre_hurt_cooldown(boundary_trigger, time.monotonic())
                 res_d = act.get("result") if isinstance(act.get("result"), dict) else {}
+                if boundary_trigger.get("source") == "pre_hurt_ranged" or str(boundary_trigger.get("primary_type") or "") in RANGED_MOBS:
+                    self._mark_ranged_engagement(
+                        time.monotonic(),
+                        trigger=boundary_trigger,
+                        in_cover=res_d.get("mode") in {"cover_pocket", "bunker_sealed", "sealed_shaft"},
+                    )
                 if act.get("ok"):
                     notes.append(str(res_d.get("summary") or f"处置近身威胁 {nh_name}"))
                 elif isinstance(act.get("error"), dict):
@@ -1723,7 +1827,11 @@ class GenerationGuard:
         note = (
             "响应不代表整体安全；按最新状态重新规划，勿继续被中断的旧动作链。"
             if requires_replan
-            else "后台已静默进食，未打断当前生成。"
+            else (
+                "处于举盾/掩体/远程交战姿态，未打断当前生成。"
+                if "fresh_hurt" in reasons
+                else "后台已静默进食，未打断当前生成。"
+            )
         )
         rem_no_water = self._no_water_until - time.monotonic()
         if requires_replan and rem_no_water > 0.0:

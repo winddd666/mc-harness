@@ -2554,7 +2554,183 @@ def test_r18_lava_airborne_swim_timeout_and_creeper_flee_timeout_hardening(monke
     assert out_c["mode"] == "creeper_evade"
     assert out_c["latched_guard"] is True
     assert any(a == "stop" for a, _ in creeper_calls)
-    assert any(a == "posture" and pl.get("shield") is True for a, pl in creeper_calls)
+    assert any(a == "posture" and pl_c.get("shield") is True for a, pl_c in creeper_calls)
+
+
+def test_bug034_ranged_combat_stance_blocking_and_cover_exempt_cancels(monkeypatch):
+    """Covers BUG-034: 30s ranged cooldown + 35s combat stance + blocking/dig_cover exemption stop skeleton cancel storms."""
+    clock = [3000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+
+    state = {
+        "skeleton_on": False,
+        "blocking": False,
+        "health": 18.0,
+        "hurt_seq": 0,
+        "close_creeper": False,
+    }
+    cover_calls = {"n": 0}
+
+    class _CoverSkills:
+        class _Eng:
+            nodes = {}
+            def is_inside_shaft(self):
+                return False
+
+        mining_dfs = _Eng()
+
+        def __init__(self, *, cover_ok: bool):
+            self.cover_ok = cover_ok
+
+        def dig_cover_pocket(self):
+            cover_calls["n"] += 1
+            return {"ok": self.cover_ok, "mode": "cover_pocket"} if self.cover_ok else {"ok": False, "reason": "no_filler_block"}
+
+        def defend_or_flee(self, **kwargs):
+            return {"ok": True, "mode": "flee", "moved_dist": 4.0}
+
+    # 1) Direct poll checks: initial pre_hurt_ranged cancels once, then 35s stance & blocking=True exempt sustained arrows!
+    class _SustainedSkeletonBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                hostile = (
+                    {"id": 99, "name": "creeper", "pos": [2.0, 64.0, 0.5], "dist": 1.5}
+                    if state["close_creeper"]
+                    else ({"id": 468872, "name": "skeleton", "pos": [9.5, 64.0, 0.5], "dist": 9.0} if state["skeleton_on"] else None)
+                )
+                return {
+                    "pos": [0.5, 64.0, 0.5],
+                    "health": state["health"],
+                    "food": 20,
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": True,
+                    "in_water": False,
+                    "in_lava": False,
+                    "blocking": state["blocking"],
+                    "nearest_hostile": hostile,
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                rows = [{"seq": state["hurt_seq"], "type": "hurt", "health": state["health"], "source": "arrow"}] if state["hurt_seq"] > since else []
+                return {"events": rows, "last_seq": state["hurt_seq"]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                if state["close_creeper"]:
+                    return {"entities": [{"id": 99, "name": "creeper", "pos": [2.0, 64.0, 0.5], "dist": 1.5}]}
+                return {"entities": [{"id": 468872, "name": "skeleton", "pos": [9.5, 64.0, 0.5], "dist": 9.0}] if state["skeleton_on"] else []}
+            if action == "get_block":
+                p = (body or {}).get("pos", [0, 64, 0])
+                return {"name": "stone" if p[1] < 64 else "air"}
+            return {"ok": True}
+
+    guard = GenerationGuard(_SustainedSkeletonBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_CoverSkills(cover_ok=False))
+    state["skeleton_on"] = True
+    inc1 = guard.poll()
+    assert inc1 is not None and "pre_hurt_ranged" in inc1["reasons"]
+    assert inc1["requires_replan"] is True
+
+    # 12s & 24s later (inside 30s target cooldown & 35s stance): pre_hurt_ranged MUST NOT re-fire!
+    clock[0] += 12.0
+    assert guard.poll() is None
+    clock[0] += 12.0
+    assert guard.poll() is None
+
+    # Sustained arrow hit while blocking=True and HP=18.0 -> exempted from cancelling generation (`requires_replan=False`),
+    # and subsequent arrow hits within 15s of failed dig_cover stay completely silent (`None`)!
+    state["blocking"] = True
+    state["hurt_seq"] = 1
+    clock[0] += 1.0
+    inc_blk1 = guard.poll()
+    assert inc_blk1 is None or inc_blk1["requires_replan"] is False
+    clock[0] += 4.0
+    state["hurt_seq"] = 2
+    assert guard.poll() is None  # no repeat dig_cover churn or cancel storm!
+
+    # Low HP (<=10.0) or close creeper STILL immediately overrides and requires replan!
+    state["health"] = 9.0
+    state["hurt_seq"] = 3
+    clock[0] += 3.5
+    inc_low = guard.poll()
+    assert inc_low is not None and inc_low["requires_replan"] is True
+
+    state["health"] = 18.0
+    state["close_creeper"] = True
+    clock[0] += 0.5
+    inc_cr = guard.poll()
+    assert inc_cr is not None and "pre_hurt_creeper" in inc_cr["reasons"] and inc_cr["requires_replan"] is True
+
+    # 2) End-to-end run_mc_agent: sustained skeleton visibility + arrows over 26s cancels ONLY ONCE!
+    clock[0] = 4000.0
+    state.update({"skeleton_on": False, "blocking": False, "health": 18.0, "hurt_seq": 0, "close_creeper": False})
+    req_n = {"n": 0}
+
+    def handle_http(request):
+        action = request.url.path.rsplit("/", 1)[-1]
+        if action == "status":
+            res = {
+                "pos": [0.5, 64.0, 0.5],
+                "health": state["health"],
+                "food": 20,
+                "alive": True,
+                "ready": True,
+                "on_ground": True,
+                "in_water": False,
+                "in_lava": False,
+                "blocking": state["blocking"],
+                "nearest_hostile": {"id": 468872, "name": "skeleton", "pos": [9.5, 64.0, 0.5], "dist": 9.0} if state["skeleton_on"] else None,
+            }
+        elif action == "events":
+            params_s = str(request.url.query or b"")
+            since = int(params_s.split("since=")[-1].split("&")[0]) if "since=" in params_s else 0
+            rows = [{"seq": state["hurt_seq"], "type": "hurt", "health": state["health"], "source": "arrow"}] if state["hurt_seq"] > since else []
+            res = {"events": rows, "last_seq": state["hurt_seq"]}
+        elif action == "inventory":
+            res = {"items": [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}], "offhand": {"name": "shield"}}
+        elif action == "get_entities":
+            res = {"entities": [{"id": 468872, "name": "skeleton", "pos": [9.5, 64.0, 0.5], "dist": 9.0}] if state["skeleton_on"] else []}
+        elif action == "get_block":
+            body = json.loads(request.content) if request.content else {}
+            p = body.get("pos", [0, 64, 0])
+            res = {"name": "stone" if p[1] < 64 else "air"}
+        elif action == "find_blocks":
+            res = {"blocks": []}
+        else:
+            res = {"ok": True}
+        return httpx.Response(200, json={"ok": True, "result": res})
+
+    def chat_ranged(messages, tools=None, *, control=None, **kwargs):
+        req_n["n"] += 1
+        if req_n["n"] == 1:
+            state["skeleton_on"] = True
+            clock[0] += 0.5
+            check_control(control)
+            pytest.fail("Expected first ranged trigger to cancel generation 1 once.")
+        # Simulate 26s of sustained skeleton pressure (11s, 21s, + arrow hits while blocking=True)
+        state["blocking"] = True
+        for seq_i in range(1, 4):
+            clock[0] += 9.0
+            state["hurt_seq"] = seq_i
+            check_control(control)
+        return {"role": "assistant", "content": "处于远程交战姿态持续输出，未被反复打断。"}
+
+    with BotSession("cached", transport=httpx.MockTransport(handle_http)) as bot:
+        rep = run_mc_agent(
+            "bug-034 sustained ranged stance",
+            bot,
+            chat_fn=chat_ranged,
+            max_calls=4,
+            survival_guard=True,
+            include_initial_snapshot=False,
+        )
+    assert rep["status"] == "answered"
+    assert req_n["n"] == 2
+    assert rep["guardian"]["cancelled_generations"] == 1
+
 
 
 
