@@ -1446,12 +1446,34 @@ class GenerationGuard:
                 st_pre = {}
             if trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava")):
                 act = self._action("escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
+                act_res = act.get("result") if isinstance(act.get("result"), dict) else {}
                 try:
                     st_after = self.bot.status()
                 except (ApiError, httpx.HTTPError):
                     st_after = st_pre
-                summary = f"执行 {interrupted_name} 途中滑入岩浆，已中断原工具并脱困，当前 HP={st_after.get('health')}"
-                outcome = {"handled": True, "mode": "lava_escape", "summary": summary, "actions": [act], "status_after": st_after}
+                lava_died = bool(
+                    act_res.get("respawned")
+                    or st_after.get("alive") is False
+                    or st_after.get("ready") is False
+                )
+                esc_ok = bool(act.get("ok") and not act_res.get("in_lava") and not lava_died)
+                if lava_died:
+                    summary = f"执行 {interrupted_name} 途中滑入岩浆，抢占逃生期间已死亡并重生（装备已掉落，先重整背包再继续）"
+                elif esc_ok:
+                    summary = f"执行 {interrupted_name} 途中滑入岩浆，已中断原工具并脱困，当前 HP={st_after.get('health')}"
+                else:
+                    summary = (
+                        f"执行 {interrupted_name} 途中滑入岩浆，已中断原工具但尚未完全脱困"
+                        f"（in_lava={act_res.get('in_lava', st_after.get('in_lava'))}），当前 HP={st_after.get('health')}"
+                    )
+                outcome = {
+                    "handled": esc_ok,
+                    "mode": "lava_escape",
+                    "summary": summary,
+                    "actions": [act],
+                    "status_after": st_after,
+                    **({"respawned": True} if lava_died else {}),
+                }
             else:
                 now_pre = time.monotonic()
                 oxy_pre = st_pre.get("oxygen")

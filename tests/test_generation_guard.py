@@ -3140,6 +3140,54 @@ def test_r20_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch):
     assert use_items == [{"item": "cooked_beef"}]
 
 
+def test_r21_preempted_lava_death_reports_respawned_not_escaped():
+    """Reproduces r21_short hy4_hy_8_nether: lava preemption ending in death/respawn must NOT claim '已中断原工具并脱困'."""
+    dead_lava_state = {"calls": 0}
+
+    class _LavaDiePreemptBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                dead_lava_state["calls"] += 1
+                if dead_lava_state["calls"] <= 2:
+                    return {
+                        "pos": [778.9, 29.8, -824.5],
+                        "health": 2.0,
+                        "alive": True,
+                        "ready": True,
+                        "in_lava": True,
+                        "on_ground": False,
+                        "dimension": "minecraft:the_nether",
+                    }
+                return {
+                    "pos": [7828.5, 64.1, 2818.5],
+                    "health": 20.0,
+                    "alive": True,
+                    "ready": True,
+                    "in_lava": False,
+                    "on_ground": True,
+                    "dimension": "minecraft:overworld",
+                }
+            if action == "inventory":
+                return {"items": []}
+            if action in {"find_blocks", "get_entities"}:
+                return {"blocks": [], "entities": []}
+            if action == "get_block":
+                return {"name": "lava"}
+            return {"ok": True}
+
+    guard = GenerationGuard(_LavaDiePreemptBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    receipt = guard.handle_preemption(
+        {"source": "boundary_threat", "primary_type": "lava", "distance": 0.0},
+        interrupted_name="mc_skill_mine_dfs",
+    )
+    assert receipt["reflex_mode"] == "lava_escape"
+    assert "并脱困" not in receipt["message"]
+    assert "死亡并重生" in receipt["message"]
+
+
+
 
 
 
