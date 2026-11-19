@@ -287,13 +287,13 @@ def _deep_water_pad_cmds(bot_name: str, ix: int, iz: int, surface_y: int) -> lis
         f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
         f"fill {ix - 3} {surface_y - 1} {iz - 3} {ix + 3} {surface_y - 1} {iz + 3} minecraft:cobblestone",
         f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 3} {iz + 3} minecraft:air",
-        # 2-high cobblestone parapet blocks drowned trident line-of-sight (r13/r14 showed all pad
-        # damage came from tridents); a 1x2 gate on the east side keeps the dive route open.
-        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 1} {iz - 3} minecraft:cobblestone",
-        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y + 1} {iz + 3} minecraft:cobblestone",
-        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y + 1} {iz + 2} minecraft:cobblestone",
-        f"fill {ix + 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 1} {iz - 1} minecraft:cobblestone",
-        f"fill {ix + 3} {surface_y} {iz + 1} {ix + 3} {surface_y + 1} {iz + 3} minecraft:cobblestone",
+        # 1-high rim (easy to climb back onto from the water) with an east gate; trident safety comes
+        # from the drowned sweep + resistance, since a 2-high wall also blocked the bot's escape.
+        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y} {iz - 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y} {iz + 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y} {iz + 2} minecraft:cobblestone",
+        f"fill {ix + 3} {surface_y} {iz - 3} {ix + 3} {surface_y} {iz - 1} minecraft:cobblestone",
+        f"fill {ix + 3} {surface_y} {iz + 1} {ix + 3} {surface_y} {iz + 3} minecraft:cobblestone",
         f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
         f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
         # Clear the drowned/trident camp that otherwise farms the bot on respawn (r13/r14: 100% of
