@@ -705,6 +705,18 @@ mine_dfs(iron)            → insufficient_pickaxe_tier（仅木镐）
 - `glm_5` 出现 `move_to(entity_id=skeleton@31.5m, ignore_hurt=True)` → `stalled ×2`（P2 级，仅 4 次/2 bots，暂不提单）
 - 全波 `mine_dfs` 0 零进展、0 void、0 Traceback
 
+### 4ak. BUG-041 成本量化（00:21）
+
+`hy4_hy_1_bare` 整轮工具时间：
+
+```
+staircase 426s（7.1 分钟）  ← 两个 episode 282s / 144s，占该集 59% / 94%
+mine_dfs  654s
+unstick    46s
+```
+
+只换来 y 33→43（仍在树木带 y<58 之下），6 个 episode 仍 10 分。→ BUG-041 是当前裸开分数天花板的直接原因。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
