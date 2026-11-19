@@ -640,6 +640,13 @@ staircase(south, ...) → 同样 0 步失败
 - 后果：场景内所有 `staircase`/`tunnel`/`move_to` 都被判"离岛"（距离 7600~8300m）
 - 已提 **BUG-040（P1，Integrator + D2）**：runner 围栏加 pinned、或回中前校验；`verify_scene_entry` 增加围栏一致性断言
 
+### 4af. r22 进度快照（00:09，r22_short 15/18）
+
+- `void_geofence_blocked` 累计 **29 次**：`nju_3` **19**（分数 25，r21 40）、`nju_guitest` 9（本波 180）、`ds_3` 1 → **BUG-040 确认是 NJU 掉分主因**
+- `mine` 零进展 15.7% → **11.3%**（持续收敛）；`staircase:time_budget` 17（BUG-037）
+- `r22_long` 44 次 mine、0 零进展、0 void、0 Traceback
+- `glm_1`/`hy4_8` 未收官但**无 Traceback** → BUG-039 本波未复发
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
