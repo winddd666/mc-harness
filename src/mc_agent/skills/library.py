@@ -5672,9 +5672,23 @@ class MacroSkills:
         if last_error is not None:
             out_pillar["last_error"] = last_error
 
-        if not ok and steps_done == 0:
-            ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
+        if not ok:
+            # A failed jump-place is read back while the bot is still airborne
+            # (r12: pos_after y=97.2 for a grounded start at y=96). With no
+            # confirmed step the bot falls back to the start cell, so remember
+            # the failure there; otherwise the next probe advertises
+            # viable_pillar_up=true at the exact cell that just failed.
+            record_pos = pos_before if steps_done == 0 else end_pos
+            ebx, eby, ebz = (
+                math.floor(float(record_pos[0])),
+                math.floor(float(record_pos[1])),
+                math.floor(float(record_pos[2])),
+            )
             self._record_failed_stair_dir((ebx, eby, ebz, "pillar"), "pillar", stop_reason)
+            if steps_done > 0 and st_end.get("on_ground") is False:
+                # Partial climb: the last confirmed step is one block below
+                # the airborne read-back; block retries there as well.
+                self._record_failed_stair_dir((ebx, eby - 1, ebz, "pillar"), "pillar", stop_reason)
             probe_cache_p: dict[tuple[int, int, int], str] = {}
             inv_p = _inventory_counts(self.bot)
             up_dirs = self._probe_viable_up_stair_dirs(ebx, eby, ebz, probe_cache=probe_cache_p, inv_counts=inv_p)

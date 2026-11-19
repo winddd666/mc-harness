@@ -1811,6 +1811,58 @@ def test_pillar_deadline_clears_persistent_jump_posture(monkeypatch) -> None:
     assert calls[-2:] == ["stop", "posture"]
 
 
+def test_failed_pillar_blocks_landing_cell_not_airborne_cell(monkeypatch) -> None:
+    """r12: a failed jump-place was remembered at y+1, so the next call still
+    advertised viable_pillar_up=true at the same grounded cell."""
+    import mc_agent.skills.library as library
+
+    monkeypatch.setattr(library.time, "monotonic", lambda: 500.0)
+    monkeypatch.setattr(library.time, "sleep", lambda _: None)
+    jumping = [False]
+    status_reads = [0]
+    place_calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            # First read is the grounded start; the r12 failure returned while
+            # the jump/place attempt was still at y=31.2.
+            y = 30.0 if status_reads[0] == 0 else 31.2
+            status_reads[0] += 1
+            result = {
+                "pos": [0.5, y, 0.5],
+                "on_ground": status_reads[0] == 1,
+                "alive": True,
+                "ready": True,
+                "health": 20.0,
+            }
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 8}]}
+        elif path == "get_block":
+            result = {"name": "air"}
+        elif path == "posture":
+            jumping[0] = bool(body.get("jump"))
+            result = {}
+        elif path == "place":
+            place_calls.append(body)
+            return httpx.Response(
+                409, json={"ok": False, "error": {"code": "place_failed", "message": "the block is still air"}}
+            )
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        result = skills.dig_staircase(vertical="pillar", steps=1)
+        assert result["stop_reason"] == "place_failed"
+        assert place_calls
+        assert skills._probe_viable_pillar_up(0, 30, 0, inv_counts={"cobblestone": 8}) is False
+
+
 @pytest.mark.parametrize("floor", ["stone", "water"])
 def test_portal_entry_builds_one_safe_step_from_two_blocks_below(monkeypatch, floor) -> None:
     import mc_agent.skills.library as library
