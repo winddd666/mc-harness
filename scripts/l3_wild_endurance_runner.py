@@ -1432,6 +1432,58 @@ def install_scene_focus(stage: str, episodes: int = 2) -> bool:
     return True
 
 
+class TraderKeeper(threading.Thread):
+    """Keep a villager at the bot's feet for the village_trade slice.
+
+    r22 proved that a one-shot `tp` + `{NoAI}` pin can drift/lose the villager by the first episode
+    (the model saw `entities: []` then a villager 20m+ away behind walls). This daemon re-anchors the
+    nearest loaded villager to the bot's current position every `interval_s`, so the trade target is
+    always within a couple of blocks without touching the harness.
+    """
+
+    def __init__(self, bot: Any, bot_name: str, *, interval_s: float = 15.0) -> None:
+        super().__init__(name=f"trader-keeper-{bot_name}", daemon=True)
+        self.bot = bot
+        self.bot_name = bot_name
+        self.interval_s = interval_s
+        self._stop = threading.Event()
+        self.moves = 0
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _tick(self) -> None:
+        try:
+            st = self.bot.status()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return
+        pos = st.get("pos") if isinstance(st, dict) else None
+        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+            return
+        x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
+        try:
+            rcon_batch(
+                [
+                    f"execute positioned {x:.1f} {y:.1f} {z:.1f} run tp @e[type=minecraft:villager,sort=nearest,limit=1] {x:.1f} {y:.1f} {z:.1f}",
+                ],
+                timeout=20,
+            )
+            self.moves += 1
+        except Exception:
+            return
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            try:
+                self._tick()
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as exc:
+                print(f"[Trader Keeper] {self.bot_name} tick error: {exc!r}", flush=True)
+
+
 def _write_not_ready_summary(
     out_file: pathlib.Path,
     *,
@@ -1723,6 +1775,10 @@ def main() -> int:
 
         watchdog = SceneWatchdog(bot, bot_name, scene, near_container=_near_known_container)
         watchdog.start()
+        trader_keeper = TraderKeeper(bot, bot_name) if args.stage == "village_trade" else None
+        if trader_keeper is not None:
+            trader_keeper.start()
+            print(f"[Scene] trader keeper started for {bot_name} (15s re-anchor)", flush=True)
         install_scene_focus(args.stage, args.focus_episodes)
         try:
             sup = CurriculumSupervisor(
@@ -1740,6 +1796,9 @@ def main() -> int:
             )
             summary = sup.run(max_episodes=args.max_episodes)
         finally:
+            if trader_keeper is not None:
+                trader_keeper.stop()
+                print(f"[Scene] trader keeper stopped for {bot_name} moves={trader_keeper.moves}", flush=True)
             watchdog.stop()
             qwen.close()
 
@@ -1783,6 +1842,7 @@ def main() -> int:
                 "entry_verified": entry_ok,
                 "watchdog_ticks": watchdog._ticks,
                 "watchdog_preempt_skips": watchdog._preempt_skips,
+                "trader_keeper_moves": trader_keeper.moves if trader_keeper is not None else 0,
             },
             "end_status": {
                 "pos": st_end.get("pos"),
