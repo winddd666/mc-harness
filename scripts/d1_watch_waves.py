@@ -67,7 +67,7 @@ def main() -> int:
         if not d.is_dir() or d.name in args.exclude:
             continue
         st = wave_state(d)
-        if st["idle"] >= args.idle * 1.5:
+        if is_settled(st, args.idle):
             seen.add(d.name)
 
     last_beat = 0.0

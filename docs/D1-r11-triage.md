@@ -400,6 +400,30 @@ ALL PASS — 11 项门禁全绿
 
 **BUG-029**：r18 目前 `inventory_full` 0、`no_drops_collected` 7、`partial_collection` 1 → 尚未造成硬失败，待 `owned_end` 收官复核。
 
+## 4l. r18 收官（22/22）与 r19_short 收官（18/18）
+
+| 门禁 | r18_22bot | r19_short | 说明 |
+|---|---|---|---|
+| startup crash | 0 ✅ | 0 ✅ | — |
+| BUG-025 木棍 | 0 ✅ | 0 ✅ | — |
+| BUG-024 no_support | 0 ✅ | 0 ✅ | — |
+| BUG-026 死亡 | **37** ❌ | 13 ✅ | r18 死亡集中在下界：`ds_4` 7、`hy4_6` 6、`hy4_8` 4 |
+| BUG-026 冷却 | **653.2s** ❌ | **205.6s** ❌ | `hy4_4` 单路 117 次取消 |
+| BUG-018 mine median | 27.8s ✅ | 30.8s ✅ | — |
+| BUG-018 zero-slice | 3.4% ✅ | 9.3% ✅ | 接近阈值 |
+| BUG-020 runtime_error | 0 ✅ | 0 ✅ | — |
+| BUG-033 thread | **1** ❌（旧码） | 0 ✅ | `2bfe3c7` 修复在 r19 生效 |
+| BUG-023 trident | 0 ✅ | 0 ✅ | — |
+| SCENE-001 trade/brew | 2 / 2 ✅ | 1 / 2 ✅ | — |
+
+**修复核对**
+- **BUG-033 FIXED**：`2bfe3c7` 对 GET/只读/非 actor 线程不再抛 `ReflexPreempted`；r19 0 异常（提交信息误写 BUG-031）
+- **BUG-029 部分修复**：cap 判断已可达，但 r19 仍有 **3/18** 超限（`nju_guitest` 234、`ds_2` 261 cobble、`glm_2` 138 netherrack）→ 缺"挖矿结束后软清理"触发点
+- **BUG-030 未修**：r18/r19 的 iron 槽都只有 **20** 分，`mining_dfs.py:4818` 仍是 `min(90, max_duration_s)`
+- **BUG-026/034 未达标**：r18 冷却 653s，主因仍是下界 lava/on_fire + `pre_hurt_ranged` 取消风暴
+
+**监听**：通用 watcher 已自动发现并接管 `r20_long` / `r20_short`（不依赖波次名），r19 收官后已重启（PID 1637626）。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
