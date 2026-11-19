@@ -1387,9 +1387,14 @@ def test_pickaxe_low_hint_tells_model_how_many_stone_picks_it_can_craft() -> Non
     assert "121" in hint
     assert "stone_pickaxe" in hint
 
-    # stone rich but no wood -> tell it to make planks/sticks first
+    # No wood -> harvest a log before trying to craft again.
     no_wood_hint = _pickaxe_low_hint({"cobblestone": 9})
-    assert "oak_planks" in no_wood_hint and "stick" in no_wood_hint
+    assert "mc_skill_harvest_logs(target_logs=1)" in no_wood_hint
+
+    # Sticks are made in batches of four from two planks, including mixed planks.
+    for planks, expected in [(1, 0), (2, 4), (3, 4)]:
+        assert _stone_pickaxe_headroom({"cobblestone": 18, "acacia_planks": planks}) == (expected // 2, 18, expected)
+    assert _stone_pickaxe_headroom({"cobblestone": 18, "acacia_planks": 1, "oak_planks": 1}) == (2, 18, 4)
 
     # no stone at all -> dig some first
     assert "石料不足" in _pickaxe_low_hint({"oak_log": 8})
@@ -1397,6 +1402,30 @@ def test_pickaxe_low_hint_tells_model_how_many_stone_picks_it_can_craft() -> Non
     # zero-material edge case must not claim a positive count
     n0, _, _ = _stone_pickaxe_headroom({})
     assert n0 == 0
+
+
+def test_pickaxe_low_with_one_plank_requests_logs_before_recraft(monkeypatch) -> None:
+    world = _MockMineWorld(inventory_items=[
+        {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [4, 131]},
+        {"name": "acacia_planks", "count": 1, "slot": 10},
+        {"name": "crafting_table", "count": 1, "slot": 11},
+    ])
+    world._add_item("cobblestone", 169)
+    world._add_item("cobbled_deepslate", 223)
+    crafted = []
+
+    def craft_gear(item, **kwargs):
+        crafted.append(item)
+        return {"ok": False, "error": "missing_ingredients"}
+
+    with BotSession("tok", bot_username="OnePlank", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        monkeypatch.setattr(skills, "craft_gear", craft_gear)
+        result = skills.mine_dfs()
+
+    assert result["stop_reason"] == "pickaxe_low"
+    assert "mc_skill_harvest_logs(target_logs=1)" in result["message"]
+    assert not crafted
 
 
 def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -> None:
@@ -1682,6 +1711,58 @@ def test_fluid_trap_deep_underground_does_not_try_surface_relocation() -> None:
     assert (moved, auto) == (False, 0)
     assert eng.fluid_abandoned_deep is True
     assert eng.collar_node_id is None                     # archived, must climb out first
+
+
+@pytest.mark.parametrize("dry_detour", [True, False])
+def test_deep_descent_can_turn_away_from_a_fluid_abort(monkeypatch, dry_detour) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 55.0, 0.5), surface_y=80)
+    world.blocks[(0, 55, 0)] = world.blocks[(0, 56, 0)] = "air"
+    water = (2, 53, 0)
+    world.blocks[water] = "water"
+    ore = (1, 53, -1)
+    if dry_detour:
+        world.blocks[ore] = "iron_ore"
+    else:
+        world.blocks[(1, 53, -2)] = "water"
+    world.blocks[(1, 53, 1)] = "bedrock"
+
+    with BotSession("tok", bot_username="DeepDescentDetour", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 80, -25), parent_id=None, edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.collar_ceiling_y = collar.anchor[1]
+        route = [(0, 80 - step, -25 + step) for step in range(26)]
+        node = eng._create_node(
+            kind="switchback", anchor=route[-1], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", route),
+            branches=[mining.BranchSpec("stair_down", "east", 40, branch_target_y=16)],
+        )
+        eng.fluid_aborts = mining.FLUID_ABORT_LIMIT - 1
+        result = eng.run(target="iron", target_y=16, goal_count=1, max_duration_s=20.0)
+
+    assert world.blocks[water] == "water"
+    assert not any(pos == water for pos, _, _ in world.dig_log)
+    if dry_detour:
+        assert result["stop_reason"] == "quota_reached"
+        assert result["target_gained"] == 1
+        assert eng.collar_node_id == collar.node_id
+        turn = next(n for n in eng.nodes.values() if n.anchor == (1, 54, 0))
+        assert turn.parent_id == node.node_id
+        assert turn.edge_from_parent.waypoints == [(0, 55, 0), (1, 54, 0)]
+    else:
+        assert result["stop_reason"] == "shaft_exhausted"
+        assert eng.fluid_abandoned_deep is True
+        assert eng.collar_node_id is None
+        assert "climb_out" in result["message"]
+        assert world.block_at(ore) == "stone"
+        [saved] = eng.ledger.saved_shafts
+        assert saved["retired"] is True
+        assert saved["nodes"][-1]["anchor"] == [1, 54, 0]
 
 
 def test_reset_is_refused_while_deep_below_the_collar() -> None:
@@ -2010,6 +2091,33 @@ def test_climb_out_honors_the_callers_budget_in_nested_staircase(monkeypatch) ->
     assert not any(path.endswith(("/connect", "/disconnect")) for _, path, _ in requests)
 
 
+def test_climb_timeout_with_confirmed_ascent_can_resume(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=40)
+    with BotSession("tok", bot_username="TimedAscent", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        engine.collar_ceiling_y = 41
+
+        def climb_step(*, deadline, **kwargs):
+            world.pos[1] += 1
+            engine.bot.status()
+            if world.pos[1] == 21:
+                clock.now = deadline
+            return {"steps_done": 1}
+
+        monkeypatch.setattr(engine.skills, "dig_staircase", climb_step)
+        first = engine.run(action="climb_out", max_duration_s=5.0)
+        second = engine.run(action="climb_out", max_duration_s=5.0)
+
+    assert first["stop_reason"] == "climb_progress"
+    assert first["next_action"] == "climb_out"
+    assert first["climb"]["end_y"] == second["climb"]["start_y"] == 21
+    assert second["stop_reason"] == "surface_reached"
+
+
 def test_dfs_budget_includes_entry_observations_and_radar(monkeypatch) -> None:
     """Initialization used to run outside the slice, then get a fresh full deadline."""
     import mc_agent.skills.mining_dfs as mining
@@ -2136,10 +2244,11 @@ def test_navigation_rejoins_an_edge_instead_of_moving_through_a_wall(monkeypatch
     assert walks[0][:6] == list(reversed(route[:6]))
 
 
-def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> None:
+@pytest.mark.parametrize(("start_z", "landing_y", "resumable"), [(0, 19, True), (1, 19, True), (1, 10, False)])
+def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch, start_z, landing_y, resumable) -> None:
     import mc_agent.skills.mining_dfs as mining
 
-    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, start_z + 0.5), surface_y=20)
     clock = _MiningClock()
     monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
     with BotSession("tok", bot_username="PartialEdge", transport=httpx.MockTransport(world.handler)) as bot:
@@ -2152,7 +2261,8 @@ def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> 
         def interrupted(**kwargs):
             branch.status = "active"
             eng.bot.status()
-            world.pos = [1.5, 19.0, 0.5]
+            eng._record_corridor((0, 20, start_z))
+            world.pos = [1.5, float(landing_y), start_z + 0.5]
             eng.bot.status()
             clock.now = kwargs["deadline"]
             eng.bot.call("dig", {"pos": [2, 18, 0]})
@@ -2160,16 +2270,24 @@ def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> 
         monkeypatch.setattr(eng, "_run", interrupted)
         result = eng.run(max_duration_s=5.0)
         tip = eng.nodes[eng.active_node_id]
-        assert tip.parent_id == collar.node_id
-        assert tip.anchor == (1, 19, 0)
-        assert tip.edge_from_parent.waypoints == [(0, 20, 0), (1, 19, 0)]
-        assert tip.branches[0].status == "pending"
-        assert branch.status == "completed"
+        if resumable:
+            assert tip.parent_id == collar.node_id
+            assert tip.anchor == (1, landing_y, start_z)
+            expected_route = [collar.anchor]
+            if start_z:
+                expected_route.append((0, 20, start_z))
+            assert tip.edge_from_parent.waypoints == [*expected_route, tip.anchor]
+            assert tip.branches[0].status == "pending"
+            assert tip.branches[0].steps == 7
+            assert branch.status == "completed"
+        else:
+            assert tip is collar
+            assert branch.status == "pending"
     assert result["stop_reason"] == "time_slice_progress"
     assert result["ok"] is True
     assert result["goal_met"] is False
-    assert result["pos_before"] == [0.5, 20.0, 0.5]
-    assert result["pos_after"] == [1.5, 19.0, 0.5]
+    assert result["pos_before"] == [0.5, 20.0, start_z + 0.5]
+    assert result["pos_after"] == [1.5, float(landing_y), start_z + 0.5]
     assert not world.dig_log
 
 

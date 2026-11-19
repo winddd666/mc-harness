@@ -505,7 +505,11 @@ class McToolset:
             if exc.code == "blocked_by_self":
                 err_obj["recovery_hint"] = "先用 mc_move_to 到至少 3 格外，设 range=0.5，让出目标格，再放置；也可省略 x/y/z 自动选落点。"
             elif exc.code == "no_support":
-                err_obj["recovery_hint"] = "目标需要相邻实心方块支撑；先用 mc_get_block 检查目标与下方，选择有实心地面的空格，或省略 x/y/z 自动选落点。"
+                err_obj["recovery_hint"] = (
+                    "目标需要相邻实心方块支撑；先用 mc_get_block 检查目标与下方，选择贴着实心面的空格。"
+                    "若四周全空，先在旁边 mc_dig 一格侧袋制造参考面，或换一个贴着实心块的坐标，"
+                    "也可省略 x/y/z 自动选落点；不要重复同一坐标。"
+                )
             else:
                 err_obj["recovery_hint"] = (f"先用 mc_get_block 检查目标 {target}；若仍是 sugar_cane、草或其他可清理障碍，先 mc_dig 清空目标格，再 mc_place。不要重复向同一占用格放置。")
         if action == "craft":
@@ -927,6 +931,26 @@ class McToolset:
 
     # ---- Exclusive Actions ----
 
+    @staticmethod
+    def _annotate_stale_entity(raw: str, entity_id: int | None) -> str:
+        if entity_id is None:
+            return raw
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(parsed, dict) or parsed.get("ok") is not False:
+            return raw
+        err = parsed.get("error") if isinstance(parsed.get("error"), dict) else None
+        if err is None or err.get("code") != "no_such_entity":
+            return raw
+        parsed["requires_replan"] = True
+        err["message"] = (
+            f"实体 {entity_id} 已不可见或消失；请重新调 mc_get_entities 获取最新 id/位置，"
+            "不要重复使用旧 id。"
+        )
+        return json.dumps(parsed, ensure_ascii=False)
+
     def mc_move_to(
         self,
         x: float | None = None,
@@ -1057,7 +1081,7 @@ class McToolset:
                     for (edim, ex, ey, ez) in list(self.world_memory.pois.keys()):
                         if edim == dim_m and abs(ex - tx_i) <= 1 and abs(ez - tz_i) <= 1 and (y is None or abs(ey - math.floor(float(y))) <= 2):
                             self.world_memory.mark_unreachable((ex, ey, ez), dim=dim_m, reason=err_code, cooldown_s=300.0)
-        return raw
+        return self._annotate_stale_entity(raw, entity_id)
 
     def mc_dig(self, x: int, y: int, z: int, collect: bool = True) -> str:
         blocked = self.geofence.check_point(float(x), float(z), action="mc_dig")
@@ -1109,6 +1133,22 @@ class McToolset:
                     [x, y, z], dim=self._last_dimension, block_name=bname or None
                 )
                 self.world_memory.remove_poi([x, y, z], dim=self._last_dimension)
+            elif isinstance(parsed_dig, dict) and parsed_dig.get("ok") is False:
+                err = parsed_dig.get("error") if isinstance(parsed_dig.get("error"), dict) else {}
+                if err.get("code") == "timeout":
+                    # P2-21/r15: a timed-out cell was immediately retried by the
+                    # model. Avoid it briefly so the next scan picks another.
+                    try:
+                        self.skills._avoid_temporarily((x, y, z), "dig_timeout", 15.0)
+                    except Exception:
+                        pass
+                    parsed_dig["requires_replan"] = True
+                    err["message"] = (
+                        f"挖掘 {[x, y, z]} 在预算内未确认；已临时避开该格 15 秒。"
+                        "请换相邻格、先 mc_skill_unstick/靠近，或改用 mc_skill_mine_blocks 重新扫描；"
+                        "不要立即重试同一坐标。"
+                    )
+                    raw_dig = json.dumps(parsed_dig, ensure_ascii=False)
         except Exception:
             pass
         return raw_dig
@@ -1891,7 +1931,7 @@ class McToolset:
         ):
             if val is not None:
                 payload[key] = val
-        return self._call_json("look", payload)
+        return self._annotate_stale_entity(self._call_json("look", payload), entity_id)
 
     # ---- L0 / L1 Macro Skills ----
 
