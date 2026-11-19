@@ -850,6 +850,20 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 
 `glm / ds / nju` 全部 0 次 runtime_error。→ hy4 10 路当前几乎不产出，建议立即暂停或换 provider。
 
+### 4az. BUG-030 埋点已生效（00:52）
+
+`depth_reset` 新 stop_reason 在 r24_short 出现 3 次，带净上升量：
+
+| bot | pos_before → pos_after | 净上升 |
+|---|---|---|
+| `ds_2_cave_combat` | 106 → 125 | **+19** |
+| `hy4_2_iron` | -25 → -5 | **+20** |
+| `ds_4_nether_fortress` | 44 → 54 | **+10** |
+
+- 这是 D1 建议的埋点，现已可量化"深度清零"代价
+- 行为本身仍需修：复位后应导航回 deepest node，而不是从 collar 重挖
+- 另：`glm_2` 在下界 y=64 连续 5 次 `ancient_debris` 0 进展（内部阶梯首步，BUG-037）
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
