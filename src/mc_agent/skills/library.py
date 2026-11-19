@@ -2593,9 +2593,11 @@ class MacroSkills:
                 deadline_hit = True
                 break
             # A single un-timed dig can eat the whole slice (r12 obsidian:
-            # 4 blocks / 300s). Leave a share for the remaining blocks and
-            # never wait past the slice deadline.
-            per_dig = max(4.0, min(30.0, remaining / max(1, count - dug_count)))
+            # 4 blocks / 300s). Keep a hard slice cap, but do not starve each
+            # dig by dividing the remainder by the remaining blocks (r14:
+            # normal stone/log digs need >8s under fleet load). The 15s floor
+            # still leaves the total bounded by mine_deadline.
+            per_dig = max(15.0, min(30.0, remaining / max(1, count - dug_count)))
             try:
                 dig_body = {"pos": list(pos), "collect": True}
                 res = (

@@ -348,7 +348,9 @@ def test_mine_blocks_single_dig_cannot_outlive_slice_deadline(monkeypatch) -> No
     assert result["stop_reason"] == "time_budget"
     assert result["partial_error"]["code"] == "mine_timeout"
     assert result["dug_count"] == 0
-    assert dig_timeouts and dig_timeouts[0] <= 12.0
+    # r14: simple stone/log digs took 8~12s; the per-dig budget must not be
+    # divided down to a few seconds just because count is large.
+    assert dig_timeouts and dig_timeouts[0] == pytest.approx(15.0)
     assert clock[0] <= 48.0
 
 
