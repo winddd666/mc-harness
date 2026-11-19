@@ -2438,6 +2438,126 @@ def test_bug031_watchdog_thread_and_readonly_status_never_raise_reflex_preempted
     assert actor_preempted["done"] is True
 
 
+def test_r18_lava_airborne_swim_timeout_and_creeper_flee_timeout_hardening(monkeypatch):
+    """Reproduces r18_22bot hy4_hy_6_nether_bastion & glm_glm_4_brewing_alchemy:
+    1) Airborne bob above lava (`in_lava=False, on_ground=False` over lava) must NOT exit ok=True prematurely; continue to place filler block.
+    2) Transient ReadTimeout in lava `control` or creeper `flee.move_to` must `/stop` and continue to cobblestone place / creeper shield latch.
+    """
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+
+    # 1) Airborne bob above lava + ReadTimeout during lava_surface_swim -> /stop & bridge cobblestone before returning ok=True
+    state_l: dict[str, Any] = {
+        "pos": [237.5, 34.3, 196.3],
+        "in_lava": True,
+        "on_ground": False,
+        "placed_solid": set(),
+    }
+    lava_actions: list[str] = []
+
+    class _AirborneLavaBot:
+        def status(self):
+            return {
+                "pos": list(state_l["pos"]),
+                "health": 16.0,
+                "alive": True,
+                "ready": True,
+                "in_lava": state_l["in_lava"],
+                "on_ground": state_l["on_ground"],
+                "yaw": 0.64,
+                "dimension": "minecraft:the_nether",
+            }
+
+        def call(self, action, body=None, **kwargs):
+            lava_actions.append(action)
+            pl = dict(body or {})
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 16}]}
+            if action == "get_block":
+                p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
+                if p in state_l["placed_solid"]:
+                    return {"name": "cobblestone"}
+                if p == (237, 35, 196) and state_l["in_lava"]:
+                    return {"name": "lava"}
+                if p[1] == 34:
+                    return {"name": "lava"}
+                return {"name": "air"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "control":
+                # First swim call simulates transient ReadTimeout; jump-sprint launches mid-air above lava!
+                if pl.get("ms") == 950 and lava_actions.count("control") == 1:
+                    raise httpx.ReadTimeout("simulated swim control timeout")
+                if pl.get("forward"):
+                    state_l["pos"] = [234.7, 36.0, 193.8]
+                    state_l["in_lava"] = False
+                    state_l["on_ground"] = False
+                return {"ok": True}
+            if action == "place":
+                p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
+                state_l["placed_solid"].add(p)
+                state_l["in_lava"] = False
+                return {"ok": True}
+            return {"ok": True}
+
+    out_l = CombatEnv(_AirborneLavaBot()).escape_lava()
+    assert out_l["ok"] is True and out_l["in_lava"] is False
+    assert "lava_surface_swim_timeout" in out_l["actions"]
+    assert "lava_jump_sprint" in out_l["actions"]
+    assert "lava_place_cobblestone" in out_l["actions"]
+    assert "stop" in lava_actions
+    assert state_l["placed_solid"]  # Did NOT exit ok=True while airborne at y=36 above y=34 lava!
+
+    # 2) Creeper evade: move_to ReadTimeout inside flee() must /stop and still latch shield (`latched_guard=True`)
+    creeper_calls: list[tuple[str, dict]] = []
+
+    class _CreeperFleeTimeoutBot:
+        def status(self):
+            return {
+                "pos": [0.5, 64.0, 0.5],
+                "health": 19.0,
+                "food": 17,
+                "alive": True,
+                "ready": True,
+                "on_ground": True,
+                "in_water": False,
+                "in_lava": False,
+                "blocking": False,
+                "nearest_hostile": {"id": 88, "name": "creeper", "pos": [2.5, 64.0, 0.5], "dist": 2.0},
+            }
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            creeper_calls.append((action, pl))
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [{"id": 88, "name": "creeper", "pos": [2.5, 64.0, 0.5], "dist": 2.0}]}
+            if action == "get_block":
+                p = pl.get("pos", [0, 64, 0])
+                return {"name": "stone" if p[1] < 64 else "air"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "move_to":
+                raise httpx.ReadTimeout("simulated creeper flee pathfinder timeout")
+            return {"ok": True}
+
+    out_c = SubcorticalInstinctController().on_encounter(
+        CombatEnv(_CreeperFleeTimeoutBot()),
+        {"source": "pre_hurt_creeper", "primary_entity_id": 88, "primary_type": "creeper", "primary_pos": [2.5, 64.0, 0.5], "distance": 2.0},
+    )
+    assert out_c["mode"] == "creeper_evade"
+    assert out_c["latched_guard"] is True
+    assert any(a == "stop" for a, _ in creeper_calls)
+    assert any(a == "posture" and pl.get("shield") is True for a, pl in creeper_calls)
+
+
+
 
 
 
