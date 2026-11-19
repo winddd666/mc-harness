@@ -960,6 +960,29 @@ runtime_error 0 | failed429 0 | retries 26 | tracebacks 0
 - nju/glm/ds 全部正常，429 为 0（重试均成功）
 - 下一次抽检约 02:29 或主轨收官时
 
+## 4bh. 过夜审计 02:30 抽检
+
+### 主轨 `overnight_12bot`（1h07m，进行中）
+
+```
+133 集：answered 90 / goal_satisfied 24 / timeout 11 / limit 5 / paused 3 / aborted 3
+retries 105 | failed429 0 | 502 0 | tracebacks 0
+```
+
+- **429/502 = 0**（105 次重试全部成功）→ 12 路 nju/glm/ds 稳定
+- `mine_dfs` 386 次、零进展 20（**5.2%**）
+- `depth_reset` 5 次：`glm_5` 2、`nju_guitest`/`glm_2`/`ds_1` 各 1
+- `staircase`：completed 97 / **time_budget 76（44%）** / pillar_fallback 36 / **dig_cell_avoided 35**（BUG-041 fail-fast 生效）/ dig_failed 34
+- `unstick` >20s 仅 5 次，max **33.4s**（无 >60s）
+- **新 P1（BUG-043）**：`ds_2` 连续 3 集 `aborted / lost_iron_pickaxe`（EP4 烧了 33 次请求才判定；EP7/EP8 各 1 次又重选同一目标）
+
+### hy4 审计轨
+
+- `hy4_audit_r25`：4/4，**0 retries / 0 429 / 0 502 / 0 Traceback**
+- `hy4_audit_r26`（进行中）：24 集、retries 4、**0 429**、**1 个 502** runtime_error
+
+**结论**：双轨 429 均为 0，hy4 的 4 路 + rpm=6 配置可固定；当前最大 churn 是 `staircase:time_budget`（BUG-037）与 `lost_iron_pickaxe` 重选（BUG-043）。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
