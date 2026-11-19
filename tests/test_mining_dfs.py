@@ -2251,6 +2251,35 @@ def test_climb_timeout_with_confirmed_ascent_can_resume(monkeypatch) -> None:
     assert second["stop_reason"] == "surface_reached"
 
 
+def test_climb_timeout_keeps_success_when_the_collar_was_already_reached(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 22.0, 0.5), surface_y=41)
+    with BotSession("tok", bot_username="TimedButReached", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 41, 0), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+
+        def reach_collar(goal, *, deadline, **kwargs):
+            world.pos[1] = 41.0
+            engine.bot.status()
+            clock.now = deadline
+            return True, None
+
+        monkeypatch.setattr(engine, "_navigate_to_node", reach_collar)
+        result = engine.run(action="climb_out", max_duration_s=5)
+
+    assert result["climb"]["reached"] is True
+    assert result["stop_reason"] == "surface_reached"
+    assert result["ok"] is True
+    assert result["requires_replan"] is False
+    assert "suggested_next" not in result
+
+
 def test_climb_walks_open_stairs_when_pathfinder_would_time_out(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 

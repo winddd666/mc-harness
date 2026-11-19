@@ -5006,14 +5006,24 @@ class MiningDFSEngine:
             if act in {"climb_out", "climb"} and scoped.positions:
                 start_y, end_y = scoped.positions[0][1], scoped.positions[-1][1]
                 target_height = int(self.collar_ceiling_y) - 16 if self.collar_ceiling_y is not None else start_y
-                reached = end_y >= target_height - 2
+                status = scoped.last_status
+                in_fluid = status.get("in_water") or status.get("in_lava")
+                reached = (
+                    end_y >= target_height - 2 and bool(status.get("pos"))
+                    and status.get("on_ground", True) and not in_fluid
+                    and status.get("alive") is not False and status.get("ready") is not False
+                )
                 result["climb"] = {
                     "start_y": start_y, "end_y": end_y, "climbed": end_y - start_y,
                     "target_y": target_height, "reached": reached,
                     "method": "interrupted",
                 }
-                in_fluid = scoped.last_status.get("in_water") or scoped.last_status.get("in_lava")
-                if end_y > start_y and not reached and not in_fluid:
+                if reached:
+                    result.update(
+                        ok=True, requires_replan=False, stop_reason="surface_reached",
+                        message=f"已到达爬升目标，当前 y={end_y}（目标 y={target_height}）。",
+                    )
+                elif end_y > start_y and not in_fluid:
                     result.update(
                         stop_reason="climb_progress", next_action="climb_out",
                         message=f"本轮已爬到 y={end_y}，目标 y={target_height}。可从当前站位继续 climb_out。",
