@@ -779,6 +779,7 @@ def _infer_extra_tools_for_advancement(adv_id: str, how_to: str = "") -> tuple[s
 
 _LATE_GRIND_FRONTIER_IDS: frozenset[str] = frozenset(
     {
+        "minecraft:adventure/crafters_crafting_crafters",  # mc-agent-api returns unsupported_window (minecraft:crafter_3x3)
         "minecraft:adventure/throw_trident",
         "minecraft:adventure/arbalistic",
         "minecraft:adventure/two_birds_one_arrow",
@@ -786,6 +787,13 @@ _LATE_GRIND_FRONTIER_IDS: frozenset[str] = frozenset(
         "minecraft:adventure/totem_of_undying",
         "minecraft:adventure/voluntary_exile",
         "minecraft:adventure/whos_the_pillager_now",
+    }
+)
+
+# Advancements whose required Minecraft GUI/protocol is currently unsupported by mc-agent-api.
+_UNSUPPORTED_API_ADVANCEMENTS: frozenset[str] = frozenset(
+    {
+        "minecraft:adventure/crafters_crafting_crafters",
     }
 )
 
@@ -1326,7 +1334,7 @@ def select_next_target(
         if leash_active and key == "minecraft:adventure/kill_a_mob" and is_day_now and not has_hostile_now:
             continue
         adv_id = pb.advancement_id or key
-        if adv_id in completed or _is_cooled(key):
+        if adv_id in completed or adv_id in _UNSUPPORTED_API_ADVANCEMENTS or _is_cooled(key):
             continue
         is_unlocked = adv_id in frontier_by_id or (
             key == "minecraft:story/shiny_gear" and has_iron_or_better

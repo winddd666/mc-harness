@@ -79,19 +79,24 @@ def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True):
             reason = "missing_pickaxe"
             hint = "背包内没有可用镐，请先合成镐后再水平开矿道。"
         else:
-            try:
-                bot.call("equip", {"item": pick, "slot": "hand"})
-            except ApiError as eq_err:
-                if eq_err.code == "missing_item":
-                    before = _inventory_counts(bot)
-                    pick, tier = _best_pickaxe_in_inv(before)
-                    if not pick:
-                        reason = "missing_pickaxe"
-                        hint = "背包内没有可用镐，请先合成镐后再水平开矿道。"
-                    else:
+            held_now = str(initial.get("held") or "").removeprefix("minecraft:")
+            if held_now != pick:
+                tried_picks: set[str] = set()
+                while pick:
+                    try:
                         bot.call("equip", {"item": pick, "slot": "hand"})
-                else:
-                    raise
+                        break
+                    except ApiError as eq_err:
+                        if eq_err.code == "missing_item":
+                            tried_picks.add(pick)
+                            before = {k: v for k, v in _inventory_counts(bot).items() if k not in tried_picks}
+                            pick, tier = _best_pickaxe_in_inv(before)
+                            if not pick:
+                                reason = "missing_pickaxe"
+                                hint = "背包内没有可用镐，请先合成镐后再水平开矿道。"
+                                break
+                        else:
+                            raise
         if reason == "completed" and pick:
             for _ in range(steps):
                 status, failure = checkpoint()

@@ -2389,9 +2389,10 @@ class MacroSkills:
         water_skipped = 0
         last_drop_scan: dict[str, Any] | None = None
         last_bot_pos: list[float] | None = None
+        mine_deadline = time.monotonic() + max(45.0, min(90.0, float(count) * 12.0))
 
         for _ in range(count * 3):
-            if dug_count >= count:
+            if dug_count >= count or time.monotonic() >= mine_deadline:
                 break
             for apos in list(self.temporary_avoidance):
                 self._is_block_avoided(apos)
