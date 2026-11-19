@@ -3604,6 +3604,51 @@ def test_bug009_busy_hungry_bot_keeps_generation_until_it_can_eat(monkeypatch):
     assert actions == ["use_item"]
 
 
+def test_r23_recent_arrow_hit_keeps_shield_up_when_nearest_mob_is_melee(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    state = {
+        "health": 14, "food": 20, "blocking": True, "pos": [0.5, 81, 0.5],
+        "nearest_hostile": {"name": "zombie", "dist": 3.0},
+        "alive": True, "ready": True, "on_ground": True,
+    }
+    fresh = [{"seq": 1, "type": "hurt", "source": "mob_attack"}]
+    calls = []
+
+    class DuringRetreat:
+        def defend_or_flee(self, **kwargs):
+            state.update(health=3.9, food=17, nearest_hostile={"name": "zombie", "dist": 10.3})
+            fresh.append({"seq": 2, "type": "hurt", "source": "arrow"})
+            return {"ok": True, "mode": "flee"}
+
+    class VillageBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(state)
+            if action == "events":
+                since = kwargs["params"]["since"]
+                return {"events": [e for e in fresh if e["seq"] > since], "last_seq": fresh[-1]["seq"]}
+            if action == "inventory":
+                return {"items": [{"name": "bread", "count": 1}, {"name": "iron_sword", "count": 1}]}
+            calls.append((action, body))
+            if action == "use_item":
+                return {"interrupted_by": "hurt"}
+            return {"ok": True}
+
+    guard = GenerationGuard(VillageBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=DuringRetreat())
+    assert guard.poll()["event_seqs"] == [1, 2]
+
+    clock[0] += 6.0
+    assert guard.poll() is None
+    assert calls == []
+
+    clock[0] += 3.0
+    incident = guard.poll()
+    assert calls == [("posture", {"shield": False}), ("use_item", {"item": "bread"})]
+    assert incident["requires_replan"] is True
+    assert "fresh_hurt" in incident["reasons"]
+
+
 
 
 

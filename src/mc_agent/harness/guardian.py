@@ -193,6 +193,7 @@ class GenerationGuard:
         self._pre_hurt_target_cooldown: dict[str, float] = {}
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
+        self._last_ranged_hurt_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
@@ -274,7 +275,7 @@ class GenerationGuard:
             st = self.bot.status()
             self.previous_health = float(st["health"]) if isinstance(st.get("health"), (int, float)) else None
             self.previous_ready = bool(st.get("ready", st.get("alive", True)))
-            self._drain_events_pages()
+            self._drain_events_pages(observe_ranged_hurt=False)
             setattr(self.raw_bot, "_last_event_seq", self.cursor)
             if st.get("ready", True) and st.get("alive") is not False:
                 inv = self.bot.inventory()
@@ -342,7 +343,7 @@ class GenerationGuard:
         self.events.emit("guardian.action.completed", duration=time.monotonic() - started, **outcome)
         return outcome
 
-    def _drain_events_pages(self) -> list[dict[str, Any]]:
+    def _drain_events_pages(self, *, observe_ranged_hurt: bool = True) -> list[dict[str, Any]]:
         fresh: list[dict[str, Any]] = []
         for _ in range(5):
             page = self.bot.call("events", method="GET", params={"since": self.cursor, "limit": 100})
@@ -356,6 +357,14 @@ class GenerationGuard:
             self.cursor = max([self.cursor, int(page.get("last_seq", 0))] + [int(e.get("seq", 0)) for e in rows])
             if not page.get("has_more") or not rows:
                 break
+        if observe_ranged_hurt:
+            for event in reversed(fresh):
+                if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
+                    self._last_ranged_hurt_at = float("-inf")
+                    break
+                if event.get("type") == "hurt" and str(event.get("source") or "").strip().lower() in RANGED_HURT_SOURCES:
+                    self._last_ranged_hurt_at = time.monotonic()
+                    break
         return fresh
 
     @staticmethod
@@ -469,11 +478,11 @@ class GenerationGuard:
         if status.get("in_lava") or status.get("in_water") or status.get("on_ground") is False:
             return False
         nh_name, nh_dist, _, _ = self._extract_hostile_info(status)
-        if not nh_name:
-            return True
-        if nh_dist <= min_dist:
+        if nh_name and nh_dist <= min_dist:
             return False
-        if (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist and not self._inside_own_shaft():
+        ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
+        protecting_against_recent_hit = status.get("blocking") and time.monotonic() - self._last_ranged_hurt_at < 8.0
+        if (ranged_in_range or protecting_against_recent_hit) and not self._inside_own_shaft():
             return False
         return True
 
@@ -1268,10 +1277,19 @@ class GenerationGuard:
 
         if not actions and not critical_non_combat and not (deaths or disconnected or not ready or status.get("alive") is False or status.get("busy")):
             return None
+        eat_interrupted = any(
+            a.get("action") == "eat"
+            and isinstance(a.get("result"), dict)
+            and a["result"].get("interrupted_by") == "hurt"
+            for a in actions
+        )
+        if eat_interrupted and "fresh_hurt" not in reasons:
+            reasons.append("fresh_hurt")
         exempt_ranged_cancel = (
             ranged_hurt_only
             and hp_cur > 10.0
             and already_in_ranged_guard
+            and not eat_interrupted
             and not deaths
             and not disconnected
             and not in_lava
