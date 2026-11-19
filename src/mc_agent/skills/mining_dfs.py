@@ -2236,6 +2236,8 @@ class MiningDFSEngine:
         geofence: Any,
         cache: dict[tuple[int, int, int], str] | None = None,
         counts: dict[str, int] | None = None,
+        directions: tuple[str, ...] = ("north", "east", "south", "west"),
+        dry_only: bool = False,
     ) -> list[str]:
         blk_cache = cache if cache is not None else {}
         inv_counts = counts if counts is not None else _inventory_counts(self.bot)
@@ -2246,7 +2248,7 @@ class MiningDFSEngine:
         at_target_layer = self._collar_starts_at_level(anchor, effective_y)
         step_y = anchor[1] if at_target_layer else anchor[1] - 1
 
-        for d in ("north", "east", "south", "west"):
+        for d in directions:
             dx, dz = DIRECTIONS[d]
             if self._geofence_blocked(geofence, anchor[0] + dx * 3, anchor[2] + dz * 3, action="mine_dfs_collar") is not None:
                 continue
@@ -2259,7 +2261,7 @@ class MiningDFSEngine:
                 hazard, adj_fluids = self._inspect_step_hazards(dig_cells, blk_cache, forward_delta=(dx, dz))
                 if hazard is not None:
                     continue
-                if adj_fluids and not has_seal and any(blk_cache.get(nb) in LAVA_BLOCKS for nb in adj_fluids):
+                if adj_fluids and (dry_only or not has_seal and any(blk_cache.get(nb) in LAVA_BLOCKS for nb in adj_fluids)):
                     continue
                 support_pt = (nx, step_y - 1, nz)
                 support_blk = self._get_block_name(support_pt, blk_cache)
@@ -3067,14 +3069,14 @@ class MiningDFSEngine:
         """Tell the model exactly how high to climb before calling explore again."""
         if self.collar_ceiling_y is None:
             return (
-                "请直接调用一次 action='climb_out'（优先走自建巷道，其次挖台阶），"
-                "它会连续爬回地表，不要一格一格叫 staircase。"
+                "请调用 action='climb_out'，优先走自建巷道，再挖台阶。"
+                "若返回 climb_progress，可从当前站位继续 climb_out。"
             )
         need_y = int(self.collar_ceiling_y) - 20
         return (
-            f"请直接调用一次 action='climb_out'（一次调用内自动探测方向、优先走自建巷道，"
-            f"目标 y>={need_y}，地表基准 y={self.collar_ceiling_y}）；"
-            "它会连续爬到高度并就地开新井，不要再用 staircase 一格一格爬、也不要反复调用 explore。"
+            f"请调用 action='climb_out'，优先沿自建巷道向上（目标 y>={need_y}，"
+            f"地表基准 y={self.collar_ceiling_y}）。若返回 climb_progress，可从当前站位继续 climb_out。"
+            "到达地表后再 explore 开新井。"
         )
 
     def _mine_vein_ore_cell(
@@ -3793,6 +3795,52 @@ class MiningDFSEngine:
         elif reason not in {"time_slice", "completed", "reached_target_y"}:
             self.fluid_aborts = 0
         return self.fluid_aborts >= FLUID_ABORT_LIMIT
+
+    def _continue_descent_around_hazard(
+        self,
+        node: ShaftNode,
+        branch: BranchSpec,
+        waypoints: list[tuple[int, int, int]],
+        *,
+        geofence: Any,
+        min_hp_ref: list[float],
+    ) -> bool:
+        """Keep the verified descent and queue dry side branches when available."""
+        end = waypoints[-1]
+        x, y, z = end
+        if waypoints[0] != node.anchor or y >= node.anchor[1]:
+            return False
+        status = self.bot.status()
+        health = status.get("health")
+        if (
+            status.get("alive") is False or status.get("ready") is False
+            or not status.get("on_ground") or status.get("in_water") or status.get("in_lava")
+            or not status.get("pos") or _floor_pos(status["pos"]) != end
+            or (isinstance(health, (int, float)) and health < min_hp_ref[0])
+            or self._geofence_blocked(geofence, x, z, action="mine_dfs_switchback") is not None
+        ):
+            return False
+
+        cache: dict[tuple[int, int, int], str] = {}
+        try:
+            if not self._is_solid_floor((x, y - 1, z), cache):
+                return False
+            if any(self._get_block_name(pt, cache) not in PASSABLE_BLOCKS for pt in (end, (x, y + 1, z))):
+                return False
+        except ApiError:
+            return False
+        directions = self._probe_collar_dirs(
+            end, geofence=geofence, cache=cache, directions=LEFT_RIGHT_DIRS[branch.direction], dry_only=True,
+        )
+        self._create_node(
+            kind="switchback", anchor=end, parent_id=node.node_id,
+            edge_from_parent=ShaftEdge(branch.kind, branch.direction, waypoints),
+            branches=[
+                BranchSpec("stair_down", direction, y - self.target_y, branch_target_y=self.target_y)
+                for direction in directions
+            ],
+        )
+        return bool(directions)
 
     def _force_relocate_on_fluid(
         self,
@@ -4777,17 +4825,32 @@ class MiningDFSEngine:
                         route = scoped.positions
                         if node.anchor in route:
                             route = route[len(route) - 1 - list(reversed(route)).index(node.anchor):]
-                            if len(route) > 1 and route[-1] != node.anchor:
-                                branch.status = "completed"
-                                self._create_node(
-                                    kind="switchback" if branch.kind.startswith("stair") else "spine",
-                                    anchor=route[-1], parent_id=node.node_id,
-                                    edge_from_parent=ShaftEdge(branch.kind, branch.direction, list(route)),
-                                    branches=[dataclasses.replace(
-                                        branch, status="pending", completed_waypoints=[],
-                                        steps=max(1, branch.steps - len(route) + 1),
-                                    )],
-                                )
+                            steps_taken = len(route) - 1
+                        elif (
+                            branch.kind == "stair_down" and len(route) > 1
+                            and route[0] in self.known_corridor_positions
+                            and route[0][1] == node.anchor[1] and math.dist(route[0], node.anchor) == 1
+                            and route[-1][1] < node.anchor[1]
+                            and not (scoped.last_status.get("in_water") or scoped.last_status.get("in_lava"))
+                            and all(math.dist(a, b) <= math.sqrt(2) and b[1] <= a[1] for a, b in zip(route, route[1:]))
+                        ):
+                            # The bot can start digging one cell beside a node on the same floor.
+                            # Join the observed stairs by a single level step and keep the same collar.
+                            steps_taken = node.anchor[1] - route[-1][1]
+                            route = [node.anchor, *route]
+                        else:
+                            break
+                        if steps_taken > 0 and route[-1] != node.anchor:
+                            branch.status = "completed"
+                            self._create_node(
+                                kind="switchback" if branch.kind.startswith("stair") else "spine",
+                                anchor=route[-1], parent_id=node.node_id,
+                                edge_from_parent=ShaftEdge(branch.kind, branch.direction, list(route)),
+                                branches=[dataclasses.replace(
+                                    branch, status="pending", completed_waypoints=[],
+                                    steps=max(1, branch.steps - steps_taken),
+                                )],
+                            )
                         break
             self._archive_current_shaft_to_ledger(mark_exhausted=False)
             result: dict[str, Any] = {
@@ -4826,11 +4889,18 @@ class MiningDFSEngine:
             if act in {"climb_out", "climb"} and scoped.positions:
                 start_y, end_y = scoped.positions[0][1], scoped.positions[-1][1]
                 target_height = int(self.collar_ceiling_y) - 16 if self.collar_ceiling_y is not None else start_y
+                reached = end_y >= target_height - 2
                 result["climb"] = {
                     "start_y": start_y, "end_y": end_y, "climbed": end_y - start_y,
-                    "target_y": target_height, "reached": end_y >= target_height - 2,
+                    "target_y": target_height, "reached": reached,
                     "method": "interrupted",
                 }
+                in_fluid = scoped.last_status.get("in_water") or scoped.last_status.get("in_lava")
+                if end_y > start_y and not reached and not in_fluid:
+                    result.update(
+                        stop_reason="climb_progress", next_action="climb_out",
+                        message=f"本轮已爬到 y={end_y}，目标 y={target_height}。可从当前站位继续 climb_out。",
+                    )
             if result["stop_reason"] == "time_slice":
                 next_steps: dict[str, Any] = {
                     "if_blocked": "处理前方障碍，或换到安全站位后重新规划。",
@@ -4918,7 +4988,7 @@ class MiningDFSEngine:
                     "message": "爬升途中仍在水中，请先用 staircase(vertical='up') 或 unstick 上岸/离开水域，再继续。",
                     "tree": self.snapshot(),
                 }
-            return {
+            result = {
                 "ok": ok_climb,
                 "requires_replan": not ok_climb,
                 "action": "climb_out",
@@ -4935,6 +5005,9 @@ class MiningDFSEngine:
                 ),
                 "tree": self.snapshot(),
             }
+            if not ok_climb and climb["climbed"] > 0:
+                result["next_action"] = "climb_out"
+            return result
         if act == "status":
             return {"ok": True, "action": "status", "strategy": self.strategy, "tree": self.snapshot()}
 
@@ -5608,8 +5681,17 @@ class MiningDFSEngine:
                 reached_band = (end_anchor[1] >= eff_y - 1) if is_up else (end_anchor[1] <= eff_y + 2)
 
                 if self._note_fluid_abort(er):
+                    detoured = (
+                        not is_up and steps_done > 0 and end_anchor[1] > self.target_y + 12
+                        and self._continue_descent_around_hazard(
+                            node, next_branch, edge_res["waypoints"], geofence=geofence, min_hp_ref=min_hp_ref,
+                        )
+                    )
                     next_branch.status = "pruned"
                     next_branch.prune_reason = er
+                    if detoured:
+                        self.fluid_aborts = 0
+                        continue
                     moved, auto_relocations_this_slice = self._force_relocate_on_fluid(
                         geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref,
                         auto_relocations=auto_relocations_this_slice,
@@ -5906,9 +5988,8 @@ class MiningDFSEngine:
             out_res["returned_to_collar_for_resupply"] = True
         if stop_reason == "shaft_exhausted" and self.fluid_abandoned_deep:
             out_res["message"] = (
-                "本井连续遇到水/洞穴中止，已归档废弃；但你仍在地下深处。"
-                "请先调用 action='return_collar' 沿自建巷道返回地表（不要 action='reset'），"
-                "到地表后再次 explore 会自动在新井口重新开井。"
+                "本井连续遇到水或洞穴，已归档回撤路线。请调用 action='climb_out' 优先沿已保存的巷道上爬。"
+                "若返回 climb_progress，可从当前站位继续 climb_out。到达地表后再 explore。"
             )
         if stop_reason == "pickaxe_low":
             out_res["message"] = _pickaxe_low_hint(counts_after)

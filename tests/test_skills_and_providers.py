@@ -1441,6 +1441,24 @@ def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
     assert calls == ["status"]
 
 
+def test_move_to_entity_reports_stale_id_with_replan_hint() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "busy": None}})
+        if path == "move_to":
+            return httpx.Response(200, json={"ok": False, "error": {"code": "no_such_entity", "message": "entity 214998 not visible"}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_move_to(entity_id=214998, range=15))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert "mc_get_entities" in result["error"]["message"]
+
+
 def test_move_to_rejects_z_swapped_into_out_of_range_y() -> None:
     """r12 P2-17: y=-2814 was silently dropped, wasting a 90s path search."""
     from mc_agent.harness.mc_tools import McToolset
@@ -1550,6 +1568,41 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
     assert placed == ["cobblestone", "netherrack"]
 
 
+def test_staircase_up_retries_transient_place_failed() -> None:
+    """r14: up-step filler was refused once, then a retry succeeded."""
+    pos = [0.5, 30.0, 0.5]
+    placement_attempts = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": pos, "on_ground": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 8}]}
+        elif path == "get_block":
+            result = {"name": "air"}
+        elif path == "place":
+            placement_attempts.append(body)
+            if len(placement_attempts) <= 2:
+                return httpx.Response(
+                    409, json={"ok": False, "error": {"code": "place_failed", "message": "the block is still air"}}
+                )
+            result = {"pos": body["pos"]}
+        elif path == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(pos)}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+    assert result["ok"] is True
+    assert result["steps_done"] == 1
+    assert len(placement_attempts) == 3
+
+
 @pytest.mark.parametrize("timeout_path", ["get_block", "move_to", "dig"])
 def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypatch, timeout_path) -> None:
     import mc_agent.skills.library as library
@@ -1603,6 +1656,9 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
     assert clock[0] <= 45
     assert calls[-1] == "stop"
     assert calls.count("stop") == 1
+    if timeout_path == "dig":
+        assert result["dig_target"]
+        assert "mc_skill_unstick" in result["error"]["message"]
 
 
 def test_stair_session_leaves_time_for_obsidian_dig(monkeypatch) -> None:

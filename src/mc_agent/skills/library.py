@@ -1162,6 +1162,7 @@ class _StairSession:
         self.last_status: dict[str, Any] = {}
         self.last_timeout_path: str | None = None
         self.last_retry_path: str | None = None
+        self.last_dig_pos: list[Any] | None = None
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
     _IDEMPOTENT_READS = frozenset({"status", "inventory", "get_block", "find_blocks"})
@@ -1182,6 +1183,8 @@ class _StairSession:
             call_body = body
             if path == "move_to":
                 call_body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
+            elif path == "dig" and isinstance((body or {}).get("pos"), (list, tuple)):
+                self.last_dig_pos = list(body["pos"])
             try:
                 result = (self.bot.call(path, call_body, timeout_s=timeout, **kwargs)
                           if self.supports_timeout else self.bot.call(path, call_body))
@@ -5833,13 +5836,21 @@ class MacroSkills:
                     self.bot.call("posture", {"jump": False, "sneak": False, "shield": False}, timeout_s=1.0, allow_reauth=False)
                 except (ApiError, httpx.HTTPError):
                     pass
+            timeout_message = "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"
+            if session.last_timeout_path == "dig":
+                timeout_message = (
+                    f"单步挖掘未在预算内确认（目标 {session.last_dig_pos}）。"
+                    "若目标位于脚下、为黑曜石/高硬度方块，或同一平台连续超时，"
+                    "先调 mc_skill_unstick 并离开该处 8~12 格后再挖；不要原地重复同一方向。"
+                )
             return {
                 "ok": False, "requires_replan": True, "stop_reason": "time_budget",
-                "error": {"code": "time_budget", "message": "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"},
+                "error": {"code": "time_budget", "message": timeout_message},
                 "direction": direction, "vertical": vertical, "steps_requested": steps,
                 **session.progress, "pos_after": session.last_status.get("pos"),
                 "timeout_path": session.last_timeout_path,
                 "retried_path": session.last_retry_path,
+                "dig_target": session.last_dig_pos,
                 "action_released": cleanup.get("released", cleanup.get("stopped", False)),
             }
 
@@ -6303,6 +6314,7 @@ class MacroSkills:
                     rejected_fillers: set[str] = set()
                     filler = _pick_step_filler()
                     placed_ok = False
+                    place_failures = 0
                     while filler:
                         try:
                             self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
@@ -6311,6 +6323,13 @@ class MacroSkills:
                             break
                         except ApiError as err:
                             last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
+                            if err.code == "place_failed" and place_failures < 2:
+                                # r14: an up-step filler placement was refused
+                                # once while the bot settled, then succeeded on
+                                # a later attempt.
+                                place_failures += 1
+                                time.sleep(0.25)
+                                continue
                             if err.code != "missing_item":
                                 break
                             rejected_fillers.add(filler)
