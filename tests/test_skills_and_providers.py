@@ -1752,3 +1752,59 @@ def test_attack_rechecks_observed_distant_target_before_chasing(live_distance, a
     if not attack_expected:
         assert "inventory" not in calls
         assert result["error"]["code"] in {"target_out_of_reach", "target_not_visible"}
+
+
+@pytest.mark.parametrize("filler", ["stone", "netherrack", "tuff"])
+def test_stair_direction_hints_share_filler_rules_and_avoid_recent_failure(filler) -> None:
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        assert path == "get_block"
+        return httpx.Response(200, json={"ok": True, "result": {"name": "air"}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        skills._record_failed_stair_dir((0, 30, 0, "up"), "north", "movement_not_confirmed")
+        result = skills._probe_viable_up_stair_dirs(0, 30, 0, inv_counts={filler: 8})
+        assert result == ["south", "east", "west"]
+        # A down-step over open air is rejected by dig_staircase even with
+        # filler available, so a hint must not claim that route is executable.
+        down = skills._probe_viable_down_stair_dirs(0, 30, 0, inv_counts={filler: 8})
+        assert down == []
+
+
+def test_pillar_deadline_clears_persistent_jump_posture(monkeypatch) -> None:
+    import mc_agent.skills.library as library
+
+    clock = [100.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(library.time, "sleep", lambda _: None)
+    posture = []
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(path)
+        if path == "status":
+            if posture and posture[-1]["jump"]:
+                clock[0] += request.extensions["timeout"]["read"]
+            result = {"pos": [0.5, 30, 0.5], "on_ground": True, "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "stone", "count": 8}]}
+        elif path == "get_block":
+            result = {"name": "air"}
+        elif path == "posture":
+            posture.append(body)
+            result = {}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(vertical="pillar", deadline=100.5, per_step_timeout=0.2)
+    assert result["stop_reason"] == "time_budget"
+    assert clock[0] == pytest.approx(100.2)
+    assert [item["jump"] for item in posture] == [True, False]
+    assert calls[-2:] == ["stop", "posture"]

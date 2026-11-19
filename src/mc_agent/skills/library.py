@@ -54,6 +54,11 @@ PICKAXE_TIERS: dict[str, int] = {
     "netherite_pickaxe": 5,
 }
 
+STAIR_FILLER_BLOCKS: tuple[str, ...] = (
+    "cobblestone", "cobbled_deepslate", "dirt", "stone", "deepslate",
+    "netherrack", "blackstone", "basalt", "end_stone", "andesite", "diorite", "granite", "tuff",
+)
+
 BLOCK_MIN_PICKAXE_TIER: dict[str, int] = {
     "stone": 1,
     "cobblestone": 1,
@@ -1695,7 +1700,7 @@ class MacroSkills:
         }
         has_filler = any(
             counts.get(c, 0) >= 1
-            for c in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
+            for c in STAIR_FILLER_BLOCKS
         ) or any(cnt >= 1 and name.endswith("_planks") for name, cnt in counts.items())
 
         def _non_air_has_adj_fluid(cells: list[tuple[int, int, int]]) -> bool:
@@ -1758,7 +1763,6 @@ class MacroSkills:
         """Probe which 4 cardinal directions can safely perform dig_staircase(vertical='down')."""
         dirs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
         cache = probe_cache if probe_cache is not None else {}
-        counts = inv_counts if inv_counts is not None else _inventory_counts(self.bot)
         air_set = {"air", "cave_air", "void_air"}
         fluids = {"water", "lava", "flowing_water", "flowing_lava"}
         fluid_or_bedrock = fluids | {"bedrock"}
@@ -1770,11 +1774,6 @@ class MacroSkills:
             "poppy",
             "oak_sapling",
         }
-        has_filler = any(
-            counts.get(c, 0) >= 1
-            for c in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
-        ) or any(cnt >= 1 and name.endswith("_planks") for name, cnt in counts.items())
-
         def _non_air_has_adj_fluid(cells: list[tuple[int, int, int]]) -> bool:
             for cx, cy, cz in cells:
                 if self._probe_cached_block((cx, cy, cz), cache) in air_set:
@@ -1803,7 +1802,7 @@ class MacroSkills:
                 if step_sup in fluid_or_bedrock:
                     continue
                 is_non_solid = step_sup in non_solid or step_sup.endswith(("_leaves", "_sapling", "_carpet", "_banner"))
-                if is_non_solid and not has_filler:
+                if is_non_solid:
                     continue
                 viable_down.append(odir)
             except ApiError:
@@ -5418,16 +5417,7 @@ class MacroSkills:
         hazard_set = fluids | falling_set
         ore_types = ["iron_ore", "deepslate_iron_ore", "coal_ore", "deepslate_coal_ore", "copper_ore"]
         iron_names = {"iron_ore", "deepslate_iron_ore"}
-        filler_candidates = (
-            "cobblestone",
-            "cobbled_deepslate",
-            "dirt",
-            "andesite",
-            "diorite",
-            "granite",
-            "tuff",
-            "stone",
-        )
+        filler_candidates = STAIR_FILLER_BLOCKS
 
         def _bname(pos_xyz: list[int]) -> str:
             res = self.bot.call("get_block", {"pos": pos_xyz})
@@ -5473,6 +5463,8 @@ class MacroSkills:
 
         try:
             for step_idx in range(steps):
+                if isinstance(self.bot, _StairSession):
+                    self.bot.step_deadline = min(self.bot.deadline, time.monotonic() + self.bot.per_step_timeout)
                 st = self.bot.status()
                 if st.get("alive") is False or (st.get("last_death") or {}).get("t") != last_death:
                     stop_reason = "died"
@@ -5626,6 +5618,8 @@ class MacroSkills:
                     break
 
                 steps_done += 1
+                if isinstance(self.bot, _StairSession):
+                    self.bot.progress.update(steps_done=steps_done, dug_count=dug_count, placed_count=placed_count)
                 if steps_done >= 2:
                     surface_evidence = _confirm_pillar_surface(cur_pos)
                     if surface_evidence:
@@ -5645,6 +5639,8 @@ class MacroSkills:
             stop_reason = "api_error"
             last_error = {"code": exc.code, "message": exc.message, **exc.context}
 
+        if isinstance(self.bot, _StairSession):
+            self.bot.step_deadline = self.bot.deadline
         st_end = self.bot.status()
         end_pos = st_end.get("pos") or pos_before
         ok = steps_done > 0 and stop_reason in {"completed", "iron_ore_found", "reached_surface"}
@@ -5726,6 +5722,13 @@ class MacroSkills:
                 cleanup = self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
             except (ApiError, httpx.HTTPError):
                 pass
+            if str(vertical).lower() == "pillar" or str(direction).lower() == "pillar":
+                try:
+                    # The scoped session has expired, so its ordinary finally
+                    # cannot clear the persistent jump posture.
+                    self.bot.call("posture", {"jump": False, "sneak": False, "shield": False}, timeout_s=1.0, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
             return {
                 "ok": False, "requires_replan": True, "stop_reason": "time_budget",
                 "error": {"code": "time_budget", "message": "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"},
@@ -5881,7 +5884,7 @@ class MacroSkills:
 
         def _pick_step_filler() -> str | None:
             counts = _inventory_counts(self.bot)
-            for cand in ("cobblestone", "cobbled_deepslate", "dirt", "stone", "deepslate", "netherrack", "blackstone", "basalt", "end_stone", "andesite", "diorite", "granite"):
+            for cand in STAIR_FILLER_BLOCKS:
                 if counts.get(cand, 0) >= 1:
                     return cand
             for name, cnt in sorted(counts.items()):
