@@ -305,6 +305,19 @@ class GenerationGuard:
             return {**result, "ok": False, "respawned": True}
         return result
 
+    def _defend_or_flee(
+        self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int], *, ranged: bool = False,
+    ) -> dict[str, Any]:
+        skills = self._skills()
+        if "nether" in str(status.get("dimension") or "").lower() or (ranged and isinstance(skills, MacroSkills)):
+            pos = attacker.get("pos") if isinstance(attacker, dict) else None
+            if not pos:
+                _, _, _, pos = self._extract_hostile_info(status)
+            return self.combat_env.flee(pos)
+        return skills.defend_or_flee(
+            attacker=attacker, counts=counts, health=status.get("health"), urgent=True, geofence=self.geofence,
+        )
+
     def _inside_own_shaft(self) -> bool:
         """Only bunker-in-place when we are inside our own carved tunnel (never in open cave air)."""
         eng = getattr(self.skills, "mining_dfs", None) if self.skills is not None else None
@@ -1191,11 +1204,7 @@ class GenerationGuard:
                             )
                         cf = self._action(
                             "combat_or_flee",
-                            lambda: self.combat_env.flee(att_pos_r)
-                            if isinstance(skills, MacroSkills) or "nether" in str(status.get("dimension") or "").lower()
-                            else skills.defend_or_flee(
-                                attacker=attacker, counts=counts, health=health, urgent=True, geofence=self.geofence,
-                            ),
+                            lambda: self._defend_or_flee(status, attacker, counts, ranged=True),
                         )
                         actions.append(cf)
                         if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":
@@ -1230,13 +1239,7 @@ class GenerationGuard:
                         else:
                             cf = self._action(
                                 "combat_or_flee",
-                                lambda: self._skills().defend_or_flee(
-                                    attacker=attacker,
-                                    counts=counts,
-                                    health=health,
-                                    urgent=True,
-                                    geofence=self.geofence,
-                                ),
+                                lambda: self._defend_or_flee(status, attacker, counts),
                             )
                             actions.append(cf)
                             if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":
@@ -1246,13 +1249,7 @@ class GenerationGuard:
                     else:
                         cf = self._action(
                             "combat_or_flee",
-                            lambda: self._skills().defend_or_flee(
-                                attacker=attacker,
-                                counts=counts,
-                                health=health,
-                                urgent=True,
-                                geofence=self.geofence,
-                            ),
+                            lambda: self._defend_or_flee(status, attacker, counts),
                         )
                         actions.append(cf)
                         if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":

@@ -3739,6 +3739,41 @@ def test_r24_boundary_drowning_surfaces_first_and_checks_respawn(scenario):
         assert actions[0]["result"]["mode"] == ("surfaced" if scenario == "surface" else "respawned")
 
 
+def test_r24_nether_damage_retreat_refuses_lava_border():
+    mutations = []
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [724.3, 68, 636.7], "health": 16.5, "food": 20, "ready": True, "alive": True,
+                    "on_ground": True, "blocking": True, "dimension": "the_nether",
+                    "nearest_hostile": {"id": 42, "name": "wither_skeleton", "dist": 1.1},
+                }
+            if action == "events":
+                since = kwargs["params"]["since"]
+                return {"events": [{"seq": 1, "type": "hurt", "source": "hot_floor"}] if since < 1 else []}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if y == 67:
+                    return {"name": "magma_block" if (x, z) == (724, 636) else "lava"}
+                return {"name": "air" if y >= 68 else "netherrack"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            mutations.append(action)
+            return {"ok": True}
+
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    retreat, = incident["actions"]
+    assert retreat["action"] == "combat_or_flee"
+    assert retreat["result"]["reason"] == "no_safe_retreat"
+    assert mutations == []
+
+
 
 
 
