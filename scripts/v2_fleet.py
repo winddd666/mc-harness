@@ -174,17 +174,48 @@ def cmd_provision() -> int:
     return 0 if ok_cnt == len(needed) else 1
 
 
-def _load_runner_sites() -> list[tuple[int, int]]:
-    """Import CANDIDATE_SITES from the runner script (module body has no side effects)."""
+_RUNNER_MODULE: Any = None
+_BASELINE_CACHE: dict[str, int] = {}
+
+
+def _load_runner_module() -> Any:
+    """Import the runner script once (module body only defines constants/functions)."""
+    global _RUNNER_MODULE
+    if _RUNNER_MODULE is not None:
+        return _RUNNER_MODULE
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("_l3_runner_sites", RUNNER)
+    spec = importlib.util.spec_from_file_location("_l3_runner_scene", RUNNER)
     if spec is None or spec.loader is None:
-        return []
+        raise RuntimeError(f"cannot import runner from {RUNNER}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod  # dataclasses needs the module registered before exec
     spec.loader.exec_module(mod)
+    _RUNNER_MODULE = mod
+    return mod
+
+
+def _load_runner_sites() -> list[tuple[int, int]]:
+    try:
+        mod = _load_runner_module()
+    except Exception:
+        return []
     return list(getattr(mod, "CANDIDATE_SITES", []))
+
+
+def baseline_points_for_stage(stage: str) -> int:
+    """Points the slice loadout pre-grants (P2-32); computed from the runner's loadout recipe."""
+    if stage in _BASELINE_CACHE:
+        return _BASELINE_CACHE[stage]
+    pts = 0
+    try:
+        mod = _load_runner_module()
+        info = mod.compute_stage_baseline(stage) or {}
+        pts = int(info.get("points") or 0)
+    except Exception:
+        pts = 0
+    _BASELINE_CACHE[stage] = pts
+    return pts
 
 
 def _assign_isolated_sites(selected: list[FleetSlot]) -> list[FleetSlot]:
@@ -423,6 +454,8 @@ class BotRow:
     scene_anchor: str = ""
     scene_ticks: int | None = None
     scene_preempt_skips: int | None = None
+    baseline_points: int | None = None
+    earned_points: int | None = None
     error: str = ""
 
     @property
@@ -563,6 +596,10 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     if isinstance(scene_meta.get("anchor"), dict):
         a = scene_meta["anchor"]
         scene_anchor = f"({a.get('x')}, {a.get('y')}, {a.get('z')})"
+    baseline_raw = scene_meta.get("baseline_points")
+    baseline_points = (
+        int(baseline_raw) if isinstance(baseline_raw, int) else baseline_points_for_stage(stage)
+    )
     return BotRow(
         name=name,
         squad=squad,
@@ -590,6 +627,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
             if isinstance(scene_meta.get("watchdog_preempt_skips"), int)
             else None
         ),
+        baseline_points=baseline_points,
+        earned_points=score - baseline_points,
         error=str(cs.get("error") or summary.get("error") or scene_meta.get("error") or ""),
     )
 
@@ -633,6 +672,12 @@ def aggregate_by_squad(rows: list[BotRow]) -> list[dict[str, Any]]:
                 "completed": len(done),
                 "crashed": sum(1 for r in group if r.status == "crash"),
                 "avg_score": round(sum(scores) / len(scores), 1) if scores else 0.0,
+                "avg_baseline": round(
+                    sum(int(r.baseline_points or 0) for r in done) / len(done), 1
+                ) if done else 0.0,
+                "avg_earned": round(
+                    sum(int(r.earned_points or 0) for r in done) / len(done), 1
+                ) if done else 0.0,
                 "total_deaths": sum(r.deaths for r in group),
                 "avg_deaths": round(sum(r.deaths for r in group) / len(group), 2) if group else 0.0,
                 "http_429": sum(r.http_429 for r in group),
@@ -661,29 +706,38 @@ def _write_markdown(
         f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} · "
         f"bot 目录 `{len(rows)}` · completed `{n_done}` · crash `{n_crash}` · incomplete `{n_incomplete}`",
         "",
-        "## 1. 各路成绩总览",
+        "## 1. 各路成绩总览（baseline = 场景 loadout 预授分，earned = 实机净增分）",
         "",
-        "| Squad | Bot | Stage | Status | Score | Eps | Deaths | Guard | Preempt | 429 | Gained |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+        "| Squad | Bot | Stage | Status | Score | Baseline | Earned | Eps | Deaths | Guard | Preempt | 429 | Gained |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in sorted(rows, key=lambda x: (x.squad, x.name)):
         g = ", ".join(r.gained_short[:4])
         lines.append(
-            f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.score} | {r.episodes_done} | "
+            f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.score} | "
+            f"{int(r.baseline_points or 0)} | {int(r.earned_points or 0)} | {r.episodes_done} | "
             f"{r.deaths} | {r.guardian_incidents} | {r.preemptions} | {r.http_429} | {g} |"
         )
+    lines.extend(
+        [
+            "",
+            "> `Score` = `final_score`（含 loadout 预授）；`Baseline` = 场景 loadout 预授予的成就分；"
+            "`Earned` = Score - Baseline，跨场景横向比较请看 Earned。",
+        ]
+    )
     lines.extend(["", "## 2. 模型维度聚合（跨模型对比）", ""])
     agg = aggregate_by_squad(rows)
     lines.extend(
         [
-            "| 模型 | Bots | Completed | Crash | 平均分 | 总死亡 | 场均死亡 | 429 | 头号错误 |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| 模型 | Bots | Completed | Crash | 平均分 | 平均 Baseline | 平均 Earned | 总死亡 | 场均死亡 | 429 | 头号错误 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for a in agg:
         lines.append(
             f"| {a['label']} | {a['bots']} | {a['completed']} | {a['crashed']} | {a['avg_score']} | "
-            f"{a['total_deaths']} | {a['avg_deaths']} | {a['http_429']} | `{a['top_error']}` |"
+            f"{a['avg_baseline']} | {a['avg_earned']} | {a['total_deaths']} | {a['avg_deaths']} | "
+            f"{a['http_429']} | `{a['top_error']}` |"
         )
     scene_bad = [r for r in rows if r.scene_ok is False]
     lines.extend(["", "## 3. 场景入口校验", ""])
@@ -794,7 +848,9 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
     print(f"\n================ FLEET TRIAGE: {wave} ({len(rows)} bots) ================")
     for r in rows:
         print(
-            f"  [{r.squad:3s}] {r.name:30s} {r.status:10s} score={r.score:3d} eps={r.episodes_done:2d} "
+            f"  [{r.squad:3s}] {r.name:30s} {r.status:10s} score={r.score:3d} "
+            f"base={int(r.baseline_points or 0):3d} earned={int(r.earned_points or 0):3d} "
+            f"eps={r.episodes_done:2d} "
             f"deaths={r.deaths:2d} guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
             f"429={r.http_429:2d} gained=[{','.join(r.gained_short[:4])}]"
             + (" scene=BAD" if r.scene_ok is False else "")
@@ -810,7 +866,8 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
     for a in aggregate_by_squad(rows):
         print(
             f"  {a['label']:22s} bots={a['bots']:2d} done={a['completed']:2d} crash={a['crashed']:d} "
-            f"avg_score={a['avg_score']:6.1f} deaths={a['total_deaths']:3d} "
+            f"avg_score={a['avg_score']:6.1f} avg_base={a['avg_baseline']:5.1f} "
+            f"avg_earned={a['avg_earned']:6.1f} deaths={a['total_deaths']:3d} "
             f"avg_deaths={a['avg_deaths']:4.2f} 429={a['http_429']:d} top={a['top_error']}"
         )
 

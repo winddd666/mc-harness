@@ -925,6 +925,41 @@ def scene_dimension(stage: str) -> str:
     return "the_nether" if stage in NETHER_STAGES else "overworld"
 
 
+def compute_stage_baseline(stage: str) -> dict[str, Any]:
+    """Score the advancements a slice loadout pre-grants (P2-32 baseline vs earned points).
+
+    `final_score` counts every completed advancement, including the ~95 points that `midgame`
+    pre-grants in `stage_loadout_cmds`. Reporting this baseline separately makes cross-scene scores
+    comparable: earned = final_score - baseline_points.
+    """
+    ids: list[str] = []
+    for cmd in stage_loadout_cmds("__baseline__", stage, 0.0, 64.0, 0.0):
+        if cmd.startswith("advancement grant "):
+            ids.append(cmd.split()[-1])
+    roots = [
+        "minecraft:story/root",
+        "minecraft:adventure/root",
+        "minecraft:husbandry/root",
+        "minecraft:nether/root",
+    ]
+    if stage not in NETHER_STAGES:
+        roots.append("minecraft:end/root")
+    ids.extend(roots)
+    points = 0
+    breakdown: dict[str, int] = {}
+    try:
+        from mc_agent.harness.curriculum import score_completed_advancements
+
+        points, breakdown = score_completed_advancements(set(ids))
+    except Exception:
+        pass
+    return {
+        "points": int(points),
+        "advancements": sorted(set(ids)),
+        "breakdown": {k: int(v) for k, v in sorted(breakdown.items())},
+    }
+
+
 @dataclasses.dataclass(frozen=True)
 class SceneAnchor:
     """Immutable description of the slice's safe scene anchor (used by guard + watchdog)."""
@@ -1102,6 +1137,7 @@ class SceneWatchdog(threading.Thread):
         *,
         interval_s: float = 8.0,
         near_container: Any = None,
+        fence_repair: Any = None,
     ) -> None:
         super().__init__(name=f"scene-watchdog-{bot_name}", daemon=True)
         self.bot = bot
@@ -1109,6 +1145,7 @@ class SceneWatchdog(threading.Thread):
         self.scene = scene
         self.interval_s = interval_s
         self.near_container = near_container
+        self.fence_repair = fence_repair
         self._stop = threading.Event()
         self._last_return = 0.0
         self._last_total = -1
@@ -1185,6 +1222,13 @@ class SceneWatchdog(threading.Thread):
         # The API reports ready=false for the whole death/respawn window; do not skip it, otherwise
         # the death itself is never observed and the bot comes back with an empty inventory.
         dead_signal = health <= 0.0 or alive is False
+        if self.fence_repair is not None:
+            try:
+                self.fence_repair()
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:
+                pass
         if not ready and not dead_signal:
             return
         pos = st.get("pos") or []
@@ -1580,6 +1624,7 @@ def _write_not_ready_summary(
     error: str,
 ) -> None:
     """Persist a `status=not_ready` summary so a startup-cooldown slot still shows up in triage."""
+    baseline = compute_stage_baseline(stage)
     payload = {
         "bot": bot_name,
         "tag": tag,
@@ -1588,7 +1633,14 @@ def _write_not_ready_summary(
         "spawn": None,
         "end_status": None,
         "owned_end": {},
-        "scene": {"stage": stage, "status": "not_ready", "entry_verified": False, "error": error},
+        "scene": {
+            "stage": stage,
+            "status": "not_ready",
+            "entry_verified": False,
+            "error": error,
+            "baseline_points": baseline["points"],
+            "baseline_breakdown": baseline["breakdown"],
+        },
         "curriculum_summary": {
             "status": "not_ready",
             "final_score": 0,
@@ -1716,6 +1768,7 @@ def main() -> int:
             "stage": args.stage,
             "dimension": dim,
             "anchor": [px, py, pz],
+            "baseline": compute_stage_baseline(args.stage),
             "ground": prepare_scene_ground(bot_name, args.stage, px, py, pz, dim=dim),
             "reset": build_reset_cmds(
                 bot_name, px, py, pz, set_day=not args.keep_time, stage=args.stage, dim=dim
@@ -1790,6 +1843,7 @@ def main() -> int:
             sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
         dim = scene_dimension(args.stage)
         scene = SceneAnchor(stage=args.stage, dim=dim, x=sx, y=sy, z=sz)
+        baseline = compute_stage_baseline(args.stage)
         prep = prepare_scene_ground(bot_name, args.stage, sx, sy, sz, dim=dim)
         if prep:
             rcon_batch(prep, timeout=60)
@@ -1860,7 +1914,14 @@ def main() -> int:
             except Exception:
                 pass
 
-        watchdog = SceneWatchdog(bot, bot_name, scene, near_container=_near_known_container)
+        scene_state: dict[str, Any] = {"sup": None}
+
+        def _repair_fence() -> None:
+            _reassert_scene_geofence(toolset, scene, supervisor=scene_state["sup"])
+
+        watchdog = SceneWatchdog(
+            bot, bot_name, scene, near_container=_near_known_container, fence_repair=_repair_fence
+        )
         watchdog.start()
         trader_keeper = TraderKeeper(bot, bot_name) if args.stage == "village_trade" else None
         if trader_keeper is not None:
@@ -1881,6 +1942,7 @@ def main() -> int:
                 enable_async_world_jobs=True,
                 on_episode_event=_guard_scene_anchor,
             )
+            scene_state["sup"] = sup
             summary = sup.run(max_episodes=args.max_episodes)
         finally:
             if trader_keeper is not None:
@@ -1930,6 +1992,8 @@ def main() -> int:
                 "watchdog_ticks": watchdog._ticks,
                 "watchdog_preempt_skips": watchdog._preempt_skips,
                 "trader_keeper_moves": trader_keeper.moves if trader_keeper is not None else 0,
+                "baseline_points": baseline["points"],
+                "baseline_breakdown": baseline["breakdown"],
             },
             "end_status": {
                 "pos": st_end.get("pos"),
