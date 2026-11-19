@@ -692,15 +692,14 @@ def test_compact_tool_schemas_fit_sub_3k_budget() -> None:
         s_core = ts.registry(profile="compact", extra_tools=()).schemas()
         s_ext = ts.registry(
             profile="compact",
-            extra_tools=("mc_interact", "mc_use_item", "mc_posture", "mc_skill_tunnel"),
+            extra_tools=("mc_interact", "mc_use_item", "mc_posture"),
         ).schemas()
-        assert len(s_core) == 14
+        assert len(s_core) == 15
         assert len(s_ext) == 18
-        assert len(json.dumps(s_core, ensure_ascii=False)) < 4000
-        assert len(json.dumps(s_ext, ensure_ascii=False)) < 5150
+        assert len(json.dumps(s_core, ensure_ascii=False)) < 4300
+        assert len(json.dumps(s_ext, ensure_ascii=False)) < 5250
 
         compact_by_name = {sc["function"]["name"]: sc["function"] for sc in s_core}
-        ext_by_name = {sc["function"]["name"]: sc["function"] for sc in s_ext}
         assert "mc_attack" in compact_by_name
         assert "mc_skill_flee" in compact_by_name
         assert "mc_craft" not in compact_by_name
@@ -708,7 +707,7 @@ def test_compact_tool_schemas_fit_sub_3k_budget() -> None:
         assert "mc_skill_collect_drops" not in compact_by_name
         assert "mc_skill_bunker" not in compact_by_name
         assert compact_by_name["mc_skill_staircase"]["parameters"]["properties"]["direction"]["description"] == "north/south/east/west"
-        assert ext_by_name["mc_skill_tunnel"]["parameters"]["properties"]["direction"]["description"] == "north/south/east/west"
+        assert compact_by_name["mc_skill_tunnel"]["parameters"]["properties"]["direction"]["description"] == "north/south/east/west"
 
         called_dirs: list[tuple[str, int, str]] = []
         ts.skills.dig_staircase = lambda direction="north", steps=12, vertical="down", stop_on_ore=True: (
@@ -1858,7 +1857,6 @@ def test_long_horizon_anti_wedge_context_tunnel_blocker_and_repeat_circuit_break
             hud_mode="ephemeral",
             context_mode="sliding",
             tool_profile="compact",
-            extra_tools=("mc_skill_tunnel",),
         )
     assert rep_c["status"] == "answered"
     assert seen_blocked_payload is True
@@ -2025,7 +2023,6 @@ def test_anti_ping_pong_cul_de_sac_probe_and_multi_step_circuit_breaker(monkeypa
             hud_mode="ephemeral",
             context_mode="sliding",
             tool_profile="compact",
-            extra_tools=("mc_skill_tunnel",),
         )
     assert rep_pp["status"] == "answered"
     assert saw_guard_notice is True
@@ -2113,7 +2110,7 @@ def test_silent_clamping_pillar_up_folding_and_hard_tool_masking(monkeypatch: py
 
     with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handle_clamp)) as bot_clamp:
         ts_clamp = McToolset(bot_clamp)
-        reg_clamp = ts_clamp.registry(profile="compact", extra_tools=("mc_skill_tunnel",))
+        reg_clamp = ts_clamp.registry(profile="compact")
         prep = reg_clamp.prepare(
             {"id": "p1", "type": "function", "function": {"name": "mc_skill_tunnel", "arguments": '{"direction":"west","steps":10.0}'}}
         )
@@ -2165,7 +2162,6 @@ def test_silent_clamping_pillar_up_folding_and_hard_tool_masking(monkeypatch: py
             hud_mode="ephemeral",
             context_mode="sliding",
             tool_profile="compact",
-            extra_tools=("mc_skill_tunnel",),
         )
     assert rep_bad["status"] == "answered"
 
@@ -2335,7 +2331,6 @@ def test_silent_clamping_pillar_up_folding_and_hard_tool_masking(monkeypatch: py
             hud_mode="ephemeral",
             context_mode="sliding",
             tool_profile="compact",
-            extra_tools=("mc_skill_tunnel",),
         )
     assert rep_mask["status"] == "answered"
     assert len(seen_tool_sets) == 5
@@ -2476,7 +2471,6 @@ def test_process_request_exit_race_drains_inbox_and_transient_llm_retry(monkeypa
             hud_mode="ephemeral",
             context_mode="sliding",
             tool_profile="compact",
-            extra_tools=("mc_skill_tunnel",),
         )
     assert rep_ok["status"] == "answered"
     assert rep_ok["answer"] == "恢复成功"
@@ -2503,7 +2497,6 @@ def test_process_request_exit_race_drains_inbox_and_transient_llm_retry(monkeypa
             hud_mode="ephemeral",
             context_mode="sliding",
             tool_profile="compact",
-            extra_tools=("mc_skill_tunnel",),
         )
     assert rep_fatal["status"] == "runtime_error"
     assert "致命参数结构损坏" in str(rep_fatal.get("error"))
@@ -2660,7 +2653,6 @@ def test_underground_wood_shortage_and_coordinate_drift_stagnation_masking() -> 
             hud_mode="ephemeral",
             context_mode="sliding",
             tool_profile="compact",
-            extra_tools=("mc_skill_tunnel",),
         )
     assert rep_drift["status"] == "answered"
     assert len(seen_tools) == 5

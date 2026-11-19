@@ -71,6 +71,7 @@ COMPACT_CORE_TOOLS: tuple[str, ...] = (
     "mc_skill_mine_blocks",
     "mc_skill_smelt",
     "mc_skill_staircase",
+    "mc_skill_tunnel",
     "mc_skill_mine_dfs",
     "mc_skill_flee",
     "mc_skill_unstick",
@@ -2416,7 +2417,7 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_skill_bunker": "竖井避怪",
     "mc_skill_flee": "无遮挡遇险时封堵矿道或冲刺逃离",
     "mc_skill_staircase": "爬出天坑/垫高(up/pillar)；下井探矿用mine_dfs",
-    "mc_skill_tunnel": "水平矿道",
+    "mc_skill_tunnel": "定向凿墙平推(隔墙目标/绕水/下界穿墙；盲探矿用mine_dfs)",
     "mc_skill_mine_dfs": "路径压缩探矿DFS/返井口",
 }
 
