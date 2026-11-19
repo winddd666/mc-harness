@@ -742,6 +742,13 @@ unstick    46s
 - 推断链：死亡 → 回世界出生点 (972,350) → HUD 自动回中把围栏钉在出生点 → 返回场景时越界
 - 追加修复：死亡/重生时按**场景锚点**重锚；或在工具检查前惰性重锚
 
+### 4ao. r23 zero-slice 17.5% 的根因（00:27）
+
+- 10 次 0 进展 `time_slice` 全部是**下界** `ancient_debris/gold @ y=15`：`pos_before == pos_after`，耗时 28~50s（预算 60~75）
+- tree：`active_node 5` 挂着 `pending: stair_down south, steps=35`，无 pruned 分支
+- → `mine_dfs` 内部 `dig_staircase` 在**第一步**就超时退出（与 BUG-037 per-step 15s 同源），分支未执行，引擎仍返回 `time_slice`
+- 建议：内部阶梯同样豁免第 0 步；0 进展 + pending 分支 → `branch_failed` → relocate
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
