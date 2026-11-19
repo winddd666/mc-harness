@@ -2052,18 +2052,23 @@ def test_corridor_repair_digs_fill_but_refuses_flooded_cells() -> None:
         assert eng._clear_route_obstruction((0, 20, -3)) == -1     # flooded -> give up
 
 
-def test_return_repairs_missing_support_under_an_open_recorded_stair(monkeypatch) -> None:
-    world = _MockMineWorld(start_pos=(0.5, 19.0, 0.5), surface_y=40)
-    support = (0, 19, 0)
-    lower = (1, 19, 0)
-    upper = (0, 20, 0)
-    for cell in (support, lower, upper, (1, 20, 0), (1, 21, 0), (0, 21, 0)):
-        world.blocks[cell] = "air"
+@pytest.mark.parametrize("steps_between_waypoints", [1, 2])
+def test_return_repairs_missing_support_under_an_open_recorded_stair(monkeypatch, steps_between_waypoints) -> None:
+    lower = (steps_between_waypoints, 19, 0)
+    upper = (0, 19 + steps_between_waypoints, 0)
+    support = (lower[0] - 1, 19, 0)
+    world = _MockMineWorld(start_pos=(support[0] + 0.5, 19.0, 0.5), surface_y=40)
+    world.blocks[support] = "air"
+    for step in range(steps_between_waypoints + 1):
+        for dy in range(3):
+            world.blocks[(lower[0] - step, lower[1] + step + dy, 0)] = "air"
     monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
 
     def handler(request):
         if request.url.path.endswith("/place"):
             assert tuple(math.floor(v) for v in world.pos) == lower
+        if request.url.path.endswith("/move_to") and json.loads(request.content).get("y", 0) > world.pos[1] + 1:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "path_not_found", "message": "stair gap"}})
         return world.handler(request)
 
     with BotSession("tok", bot_username="RepairStairSupport", transport=httpx.MockTransport(handler)) as bot:
@@ -2071,7 +2076,7 @@ def test_return_repairs_missing_support_under_an_open_recorded_stair(monkeypatch
         result = engine._walk_waypoints([upper, lower], reverse=True, min_hp_ref=[20.0])
 
     assert result == (True, None)
-    assert world.pos == [0.5, 20.0, 0.5]
+    assert world.pos == [0.5, float(upper[1]), 0.5]
     assert world.place_log == [(support, "cobblestone")]
     assert not world.dig_log
 

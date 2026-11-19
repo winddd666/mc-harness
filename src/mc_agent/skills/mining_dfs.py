@@ -884,6 +884,10 @@ def _can_stack_expected_drop(inv_raw: dict[str, Any], expected_drops: set[str] |
     return False
 
 
+def _is_two_step_stair(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool:
+    return abs(a[1] - b[1]) == 2 and (abs(a[0] - b[0]), abs(a[2] - b[2])) in {(2, 0), (0, 2)}
+
+
 def _interpolate_cells(a: tuple[int, int, int], b: tuple[int, int, int]) -> list[tuple[int, int, int]]:
     """Cell-by-cell straight line from a to b (each hop <= 1 block on every axis)."""
     steps = max(abs(b[0] - a[0]), abs(b[1] - a[1]), abs(b[2] - a[2]))
@@ -1814,7 +1818,7 @@ class MiningDFSEngine:
         if deadline is None:
             deadline = getattr(self, "_deadline", None)
         ordered = list(reversed(waypoints)) if reverse else list(waypoints)
-        for wp in ordered:
+        for index, wp in enumerate(ordered):
             if deadline is not None and time.monotonic() >= deadline:
                 # Live n0211: a 60-waypoint walk held one tool call for 3+ minutes with the bot
                 # unattended. Abort on the slice boundary and report it instead.
@@ -1833,11 +1837,13 @@ class MiningDFSEngine:
             # route walk ("backtrack_blocked") and force a full staircase re-dig (live s18).
             hops = _interpolate_cells(cur, wp)
             if len(hops) > 1:
+                # A straight stair can omit the middle step from its waypoint list.
+                recorded_stair = index > 0 and cur == ordered[index - 1] and _is_two_step_stair(cur, wp)
                 stepped_all = True
                 for previous, hop in zip(hops, hops[1:]):
                     if deadline is not None and time.monotonic() >= deadline:
                         return False, "walk_time_slice"
-                    if not self._step_to(hop, from_cell=previous, repair_support=(hop == wp)):
+                    if not self._step_to(hop, from_cell=previous, repair_support=(hop == wp or recorded_stair)):
                         stepped_all = False
                         break
                 if stepped_all:
@@ -1965,8 +1971,7 @@ class MiningDFSEngine:
                         # Stairs save every second step. A slice can stop on the omitted step.
                         offset = next((
                             index for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1)
-                            if abs(a[1] - cur_pos[1]) == 1 and abs(a[1] - b[1]) == 2
-                            and abs(a[0] - b[0]) + abs(a[2] - b[2]) == 2
+                            if abs(a[1] - cur_pos[1]) == 1 and _is_two_step_stair(a, b)
                             and _interpolate_cells(a, b)[1] == cur_pos
                         ), None)
                         if offset is None:
