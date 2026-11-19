@@ -279,7 +279,7 @@
 | 工单 | 状态 | 证据 |
 |---|---|---|
 | BUG-025 | **FIXED** | HEAD 已改 `4*(planks//2)+8*logs`（`3d4ac1e`）；`scripts/d1_stick_check.py` **5/5 OK, exit 0** |
-| BUG-024 | **部分修复** | `library.py:6310` 加了 `no_place_face→pillar` 兜底，但 r15 报错来源 `library.py:5673` 的 jump-place 仍无守卫 |
+| BUG-024 | **部分修复** | 兜底加在 `_dig_staircase` 的 up 分支（`library.py:6310`）；真实报错来自 **`_dig_pillar_up`**（`:5492` 定义，jump-place `:5673`）→ 需在该函数内补 `has_place_face` 判定 |
 | SCENE-001 | **已实现** | `7d5a571` 为三场景注入首集目标；待 r16 验证 `mc_skill_trade/brew` 首次出现 |
 | BUG-026 | **OPEN** | 死亡 28→57、cancelled 141→247、冷却 286→454s |
 
