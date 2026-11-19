@@ -6,6 +6,20 @@
 - Zero artificial survival buffs (real normal-difficulty mobs, real hunger, real Y=-54 caves).
 - Enforces `RULES.md` 220m `VoidGeofence`, `enable_pre_ensure=True`, `enable_island_recon=True`,
   and `enable_async_world_jobs=True`.
+
+Scene slices (`--stage`, one unique site per fleet slot):
+  bare / iron / midgame / nether / village     overworld checkpoints, `/spawnpoint` death return
+  nether_fortress / nether_bastion             locate real structure, obsidian ledge + charged
+                                               respawn anchor, `execute in the_nether` everywhere
+  enchant_anvil                                flattened 9x7 pad with table/anvil/bookshelves
+  deep_water                                   real `minecraft:deep_ocean` + dry staging pad
+
+Every slice runs a background `SceneWatchdog`: wrong dimension / >400m drift / death (health<=0 or
+inventory collapse at the anchor away from known chests) triggers `restock_scene` (teleport back +
+re-apply the slice loadout) within one poll (~8s).
+
+`--print-plan` prints the exact ground-prep + reset RCON batch for a stage without touching the
+server, so scene requests can be reviewed offline before #1 triggers a live run.
 """
 
 from __future__ import annotations
@@ -100,6 +114,27 @@ def rcon_batch(commands: list[str], *, timeout: int = 60) -> list[dict[str, str]
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+def _wait_settled(bot: Any, *, timeout_s: float = 12.0, settle_delta: float = 0.6) -> list[float] | None:
+    """Poll status until the bot stops falling after a teleport/spreadplayers (returns last pos)."""
+    pos: list[float] | None = None
+    last_y: float | None = None
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        time.sleep(0.8)
+        try:
+            st = bot.status()
+        except Exception:
+            continue
+        p = st.get("pos")
+        if not isinstance(p, (list, tuple)) or len(p) < 3:
+            continue
+        pos = [float(p[0]), float(p[1]), float(p[2])]
+        if last_y is not None and abs(pos[1] - last_y) < settle_delta:
+            return pos
+        last_y = pos[1]
+    return pos
+
+
 def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
     """Find a dry land surface spawn >= 2000m from other bots using vanilla `spreadplayers`."""
     for offset in range(len(CANDIDATE_SITES)):
@@ -111,9 +146,8 @@ def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -
             ],
             timeout=45,
         )
-        time.sleep(2.0)
+        pos = _wait_settled(bot) or [cx, 64, cz]
         st = bot.status()
-        pos = st.get("pos") or [cx, 64, cz]
         biome = str(st.get("biome") or "").lower()
         in_water = bool(st.get("in_water"))
         # Skip pure ocean spawns so we land on a true terrestrial island/continent
@@ -161,9 +195,9 @@ def select_village_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tup
             ],
             timeout=45,
         )
-        time.sleep(2.0)
+        pos = _wait_settled(bot) or [vx, 64, vz]
         st = bot.status()
-        pos = st.get("pos") or [vx, 64, vz]
+        pos = st.get("pos") or pos
         biome = str(st.get("biome") or "village").lower()
         return float(pos[0]), float(pos[1]), float(pos[2]), f"village:{biome}"
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
@@ -177,23 +211,51 @@ def _locate_coords(reply: str) -> tuple[int, int] | None:
     return int(m.group(1)), int(m.group(2))
 
 
+def _locate_structure(dim: str, cx: int, cz: int, structure_id: str) -> tuple[int, int] | None:
+    """`locate structure` inside `dim`, returning None when the server says it cannot find one."""
+    out = rcon_batch(
+        [f"execute in {dim} positioned {cx} 64 {cz} run locate structure {structure_id}"],
+        timeout=30,
+    )
+    reply = str((out[0] if out else {}).get("reply") or "")
+    if "could not" in reply.lower() or "cannot" in reply.lower():
+        return None
+    return _locate_coords(reply)
+
+
 def select_nether_structure_site(
     bot: Any,
     bot_name: str,
     structure_tag: str,
     start_idx: int = 0,
 ) -> tuple[float, float, float, str]:
-    """Locate a Nether structure (#minecraft:fortress or #minecraft:bastion_remnant) and carve a safe spawn ledge."""
-    cx, cz = [(0, 0), (800, 0), (-800, 0), (0, 800), (0, -800), (800, 800)][start_idx % 6]
-    out = rcon_batch(
-        [f"execute in minecraft:the_nether positioned {cx} 64 {cz} run locate structure {structure_tag}"],
-        timeout=30,
-    )
-    coords = _locate_coords(str((out[0] if out else {}).get("reply") or ""))
-    if coords is not None:
-        nx, nz = coords
-    else:
-        nx, nz = cx, cz
+    """Locate a Nether structure and carve a safe spawn ledge.
+
+    `structure_tag` accepts the vanilla structure *tag* (`#minecraft:fortress`, used by callers for
+    readability) but `locate` needs the concrete registry id (`minecraft:fortress`). The r12 fleet
+    silently fell back to the anchor because `#minecraft:fortress` is not a valid structure tag.
+    """
+    structure_id = structure_tag.lstrip("#")
+    candidates = (structure_id,)
+    search_anchors = [(0, 0), (800, 0), (-800, 0), (0, 800), (0, -800), (800, 800)]
+    nx: int | None = None
+    nz: int | None = None
+    for offset in range(len(search_anchors)):
+        sx, sz = search_anchors[(start_idx + offset) % len(search_anchors)]
+        for cand in candidates:
+            coords = _locate_structure("minecraft:the_nether", sx, sz, cand)
+            if coords is not None:
+                nx, nz = coords
+                break
+        if nx is not None:
+            break
+    if nx is None:
+        nx, nz = search_anchors[start_idx % len(search_anchors)]
+        print(
+            f"[Scene] locate {structure_id} failed across {len(search_anchors)} anchors; "
+            f"falling back to ({nx}, {nz})",
+            flush=True,
+        )
     ny = 64
     prep = prepare_scene_ground(
         bot_name, "nether_fortress", float(nx), float(ny), float(nz), dim="the_nether"
@@ -206,9 +268,8 @@ def select_nether_structure_site(
         ]
     )
     rcon_batch(prep, timeout=45)
-    time.sleep(2.0)
+    pos = _wait_settled(bot, timeout_s=8.0) or [float(nx) + 0.5, float(ny), float(nz) + 0.5]
     st = bot.status()
-    pos = st.get("pos") or [float(nx) + 0.5, float(ny), float(nz) + 0.5]
     if "nether" not in str(st.get("dimension") or "").lower():
         # `tp` may not have settled yet; never anchor the scene to a stale overworld position.
         pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
@@ -239,15 +300,21 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
         ],
         timeout=45,
     )
-    time.sleep(2.0)
+    # `spreadplayers` drops the bot from y=120; polling too early reads a mid-fall y and would build
+    # a floating platform tens of blocks above the ocean surface. Wait until y stabilises first.
+    pos = _wait_settled(bot, timeout_s=15.0) or [float(wx), 70.0, float(wz)]
     st = bot.status()
-    pos = st.get("pos") or [float(wx), 70.0, float(wz)]
-    ix, iz = int(float(pos[0])), int(float(pos[2]))
-    surface_y = max(int(float(pos[1])) + 1, 64)
+    ix, iz = int(pos[0]), int(pos[2])
+    # Deep ocean sea level is 63; clamp so a stale reading can never produce a sky platform.
+    surface_y = min(max(int(round(pos[1])) + 1, 64), 70)
     prep = [
         f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
         f"fill {ix - 3} {surface_y - 1} {iz - 3} {ix + 3} {surface_y - 1} {iz + 3} minecraft:cobblestone",
         f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 3} {iz + 3} minecraft:air",
+        # 1-high cobblestone rim keeps the spawn pad dry while leaving the east edge open for the dive.
+        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y} {iz - 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y} {iz + 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y} {iz + 2} minecraft:cobblestone",
         f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
         f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
     ]
@@ -519,7 +586,7 @@ class SceneAnchor:
     drift_limit: float = 400.0
 
 
-def reset_wild_bot(
+def build_reset_cmds(
     bot_name: str,
     sx: float,
     sy: float,
@@ -528,8 +595,8 @@ def reset_wild_bot(
     set_day: bool = True,
     stage: str = "bare",
     dim: str | None = None,
-) -> None:
-    """Reset the bot to the slice checkpoint. Dimension-aware: Nether slices must never `tp` to overworld."""
+) -> list[str]:
+    """Build the checkpoint reset RCON batch (dimension-aware; shared by live reset and --print-plan)."""
     dim = dim or scene_dimension(stage)
     ix, iy, iz = int(round(sx)), int(round(sy)), int(round(sz))
     cmds: list[str] = ["difficulty normal", f"gamemode survival {bot_name}", f"clear {bot_name}"]
@@ -570,7 +637,24 @@ def reset_wild_bot(
     cmds.extend(stage_loadout_cmds(bot_name, stage, sx, sy, sz))
     if set_day and dim != "the_nether":
         cmds.insert(0, "time set 1000")
-    rcon_batch(cmds, timeout=60)
+    return cmds
+
+
+def reset_wild_bot(
+    bot_name: str,
+    sx: float,
+    sy: float,
+    sz: float,
+    *,
+    set_day: bool = True,
+    stage: str = "bare",
+    dim: str | None = None,
+) -> None:
+    """Reset the bot to the slice checkpoint. Dimension-aware: Nether slices never `tp` to overworld."""
+    rcon_batch(
+        build_reset_cmds(bot_name, sx, sy, sz, set_day=set_day, stage=stage, dim=dim),
+        timeout=60,
+    )
 
 
 def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inventory: bool = False) -> None:
@@ -735,6 +819,34 @@ class SceneWatchdog(threading.Thread):
                 print(f"[Scene Watchdog] {self.bot_name} tick error: {exc}", flush=True)
 
 
+def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
+    """Confirm the bot is in the scene dimension and within 64m of the anchor; retry via restock."""
+    for i in range(attempts):
+        try:
+            st = bot.status()
+        except Exception:
+            st = {}
+        dim = str(st.get("dimension") or "overworld").lower()
+        pos = st.get("pos")
+        ok_dim = scene.dim != "the_nether" or "nether" in dim
+        ok_pos = isinstance(pos, (list, tuple)) and len(pos) >= 3 and (
+            math.hypot(float(pos[0]) - scene.x, float(pos[2]) - scene.z) <= 64.0
+        )
+        if ok_dim and ok_pos:
+            return True
+        print(
+            f"[Scene] entry verify failed (attempt {i + 1}/{attempts}) bot={bot_name} "
+            f"dim={dim} pos={pos} expected {scene.dim}@({scene.x:.1f},{scene.y:.1f},{scene.z:.1f})",
+            flush=True,
+        )
+        try:
+            restock_scene(bot_name, scene, reason="scene_entry_verify")
+        except Exception as exc:
+            print(f"[Scene] entry verify restock error: {exc}", flush=True)
+        time.sleep(2.0)
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bot", type=str, default=BOT)
@@ -754,9 +866,43 @@ def main() -> int:
     )
     parser.add_argument("--tag", type=str, default="wild")
     parser.add_argument("--keep-time", action="store_true", help="Do not reset world time to morning")
+    parser.add_argument(
+        "--print-plan",
+        action="store_true",
+        help="Print the exact ground-prep + reset RCON batch for this stage and exit (no network)",
+    )
+    parser.add_argument(
+        "--plan-pos",
+        type=str,
+        default=None,
+        help="Anchor x,y,z used by --print-plan (default: first CANDIDATE_SITES entry)",
+    )
     args = parser.parse_args()
 
     bot_name = args.bot
+    if args.print_plan:
+        if args.plan_pos:
+            try:
+                px, py, pz = (float(v) for v in args.plan_pos.split(","))
+            except ValueError:
+                raise SystemExit("--plan-pos must be 'x,y,z'")
+        else:
+            ax, az = CANDIDATE_SITES[args.site_index % len(CANDIDATE_SITES)]
+            px, py, pz = float(ax) + 0.5, 64.0, float(az) + 0.5
+        dim = scene_dimension(args.stage)
+        plan = {
+            "bot": bot_name,
+            "stage": args.stage,
+            "dimension": dim,
+            "anchor": [px, py, pz],
+            "ground": prepare_scene_ground(bot_name, args.stage, px, py, pz, dim=dim),
+            "reset": build_reset_cmds(
+                bot_name, px, py, pz, set_day=not args.keep_time, stage=args.stage, dim=dim
+            ),
+        }
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        return 0
+
     token_file = pathlib.Path(args.token_file)
     runs_dir = (RUNS_DIR / args.runs_subdir) if args.runs_subdir else RUNS_DIR
     LIVE_STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -800,9 +946,9 @@ def main() -> int:
         if args.stage == "village":
             sx, sy, sz, biome = select_village_wild_site(bot, bot_name, start_idx=args.site_index)
         elif args.stage == "nether_fortress":
-            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "#minecraft:fortress", start_idx=args.site_index)
+            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:fortress", start_idx=args.site_index)
         elif args.stage == "nether_bastion":
-            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "#minecraft:bastion_remnant", start_idx=args.site_index)
+            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:bastion_remnant", start_idx=args.site_index)
         elif args.stage == "deep_water":
             sx, sy, sz, biome = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
         else:
@@ -814,6 +960,7 @@ def main() -> int:
             rcon_batch(prep, timeout=60)
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
+        entry_ok = verify_scene_entry(bot, bot_name, scene)
 
         geofence = VoidGeofence(center_x=sx, center_z=sz, radius=220.0, margin=8.0)
         toolset = McToolset(bot, geofence=geofence, wait_for_cooldown=True)
@@ -933,6 +1080,7 @@ def main() -> int:
                 "anchor": {"x": round(scene.x, 1), "y": round(scene.y, 1), "z": round(scene.z, 1)},
                 "radius": scene.radius,
                 "drift_limit": scene.drift_limit,
+                "entry_verified": entry_ok,
             },
             "end_status": {
                 "pos": st_end.get("pos"),

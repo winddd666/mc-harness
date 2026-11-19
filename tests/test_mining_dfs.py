@@ -2452,3 +2452,108 @@ def test_generic_gold_in_nether_counts_nuggets_and_uses_the_nether_layer(monkeyp
     assert result["goal_met"] is True
     assert result["gained"]["gold_nugget"] == 1
     assert any(name == "nether_gold_ore" for _, name, _ in world.dig_log)
+
+
+def test_pathfinder_expiry_leaves_time_for_local_movement(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    sent = []
+
+    def handler(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint == "move_to":
+            server_timeout = json.loads(request.content)["timeout"] / 1000
+            read_timeout = request.extensions["timeout"]["read"]
+            sent.append((server_timeout, read_timeout))
+            if server_timeout + 0.1 > read_timeout:
+                clock.now += read_timeout
+                raise httpx.ReadTimeout("pathfinder still running", request=request)
+            clock.now += server_timeout + 0.1
+            return httpx.Response(200, json={"ok": False, "error": {
+                "code": "timeout", "message": "pathfinder reached its own timeout",
+            }})
+        if endpoint == "control":
+            world.pos = [1.5, 20.0, 0.5]
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="TimedMovementFallback", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+
+        def take_step(**kwargs):
+            return {"ok": engine._move_exact((1, 20, 0))}
+
+        monkeypatch.setattr(engine, "_run", take_step)
+        result = engine.run(max_duration_s=20.0)
+
+    assert len(sent) == 1
+    server_timeout, read_timeout = sent[0]
+    assert 0 < server_timeout < read_timeout
+    assert result["ok"] is True
+    assert tuple(world.pos) == (1.5, 20.0, 0.5)
+    assert clock.now < 1020.0
+
+
+@pytest.mark.parametrize(("landing_y", "on_ground"), [(20.0, True), (21.0, False)])
+def test_step_requires_settled_arrival_on_requested_layer(landing_y, on_ground, monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "control":
+            world.pos = [1.5, landing_y, 0.5]
+        response = world.handler(request)
+        if path == "status" and world.pos[0] == 1.5:
+            body = response.json()
+            body["result"]["on_ground"] = on_ground
+            return httpx.Response(200, json=body)
+        return response
+
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+    with BotSession("tok", bot_username="WrongLevelStep", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        monkeypatch.setattr(engine, "_move_exact", lambda cell: False)
+        monkeypatch.setattr(engine, "_hop_up_to", lambda cell: False)
+        assert engine._step_to((1, 21, 0)) is False
+
+    assert world.pos[0] == 1.5
+
+
+@pytest.mark.parametrize(("goal_x", "expected_xs"), [(3, [5, 4, 3]), (8, [5, 6, 7, 8])])
+def test_navigation_resumes_mid_edge_toward_the_requested_node(goal_x, expected_xs, monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(5.5, 15.0, 0.5), surface_y=20)
+    with BotSession("tok", bot_username="ResumeTowardGoal", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=(0, 20, 0), parent_id=None, edge_from_parent=None, branches=[],
+        )
+        engine.collar_node_id = collar.node_id
+        upper = engine._create_node(
+            kind="switchback", anchor=(3, 17, 0), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", [(i, 20 - i, 0) for i in range(4)]), branches=[],
+        )
+        lower = engine._create_node(
+            kind="switchback", anchor=(8, 12, 0), parent_id=upper.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", [(i, 20 - i, 0) for i in range(3, 9)]), branches=[],
+        )
+        traversed = []
+
+        def walk(waypoints, **kwargs):
+            traversed.extend(pt[0] for pt in waypoints)
+            x, y, z = waypoints[-1]
+            world.pos = [x + 0.5, float(y), z + 0.5]
+            return True, None
+
+        def reject_shortcut(*args, **kwargs):
+            pytest.fail("the bot must resume its recorded edge")
+
+        monkeypatch.setattr(engine, "_walk_waypoints", walk)
+        monkeypatch.setattr(engine, "_move_exact", reject_shortcut)
+        goal = upper if goal_x == 3 else lower
+        assert engine._navigate_to_node(goal.node_id, min_hp_ref=[20.0]) == (True, None)
+        assert engine.active_node_id == goal.node_id
+
+    assert traversed == expected_xs

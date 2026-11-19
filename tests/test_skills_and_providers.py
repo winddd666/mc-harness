@@ -1615,10 +1615,11 @@ def test_find_blocks_expands_families_and_keeps_valid_part_of_mixed_query() -> N
     final = queries[-1]
     assert {"oak_log", "pale_oak_log", "birch_planks", "bamboo_planks", "white_bed", "black_wool", "short_grass", "tall_grass", "nether_portal", "netherrack", "cave_air", "water", "future_valid_block"} <= set(final)
     assert len(final) == len(set(final))
-    assert len(queries) == 4
+    assert len(queries) == 2
 
 
-def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback() -> None:
+@pytest.mark.parametrize("types,expected_queries", [(["shield", "leather"], 0), (["made_up_one", "made_up_two"], 2)])
+def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback(types, expected_queries) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     queries = []
@@ -1630,11 +1631,11 @@ def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback() -
         return httpx.Response(200, json={"ok": False, "error": {"code": "bad_args", "message": f"unknown block {body['types'][0]}"}})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = json.loads(McToolset(bot).mc_find_blocks(types=["shield", "leather"]))
+        result = json.loads(McToolset(bot).mc_find_blocks(types=types))
     assert result["ok"] is False
-    assert result["ignored_types"] == ["shield", "leather"]
+    assert result["ignored_types"] == types
     assert "mc_find_blocks(types=" in result["error"]["message"]
-    assert len(queries) == 2
+    assert len(queries) == expected_queries
 
 
 @pytest.mark.parametrize("item,counts,missing", [
@@ -1865,3 +1866,37 @@ def test_portal_entry_builds_one_safe_step_from_two_blocks_below(monkeypatch, fl
         assert placed == []
         assert contact[0] is None
     assert clock[0] <= 8
+
+
+def test_staircase_timeout_preserves_confirmed_partial_excavation() -> None:
+    blocks = {}
+    dig_count = [0]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": [0.5, 30, 0.5], "on_ground": True}
+        elif path == "inventory":
+            result = {"items": []}
+        elif path == "get_block":
+            result = {"name": blocks.get(tuple(body["pos"]), "stone")}
+        elif path == "dig":
+            dig_count[0] += 1
+            if dig_count[0] == 2:
+                raise httpx.ReadTimeout("second dig pending", request=request)
+            blocks[tuple(body["pos"])] = "air"
+            result = {"dug": "stone"}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", steps=3, stop_on_ore=False)
+    assert result["stop_reason"] == "time_budget"
+    assert result["dug_count"] == 1
+    assert result["steps_done"] == 0
+    assert result["pos_before"] == [0.5, 30, 0.5]
+    assert result["pos_after"] == [0.5, 30, 0.5]

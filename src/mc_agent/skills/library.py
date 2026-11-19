@@ -1178,6 +1178,14 @@ class _StairSession:
             raise _StairDeadline() from None
         if path == "status":
             self.last_status = result
+            if isinstance(result.get("pos"), (list, tuple)):
+                self.progress.setdefault("pos_before", list(result["pos"]))
+        elif path in {"move_to", "control"} and isinstance(result.get("pos"), (list, tuple)):
+            self.last_status = {**self.last_status, "pos": list(result["pos"])}
+        if path == "dig":
+            self.progress["dug_count"] += 1
+        elif path == "place":
+            self.progress["placed_count"] = self.progress.get("placed_count", 0) + 1
         if time.monotonic() >= min(self.deadline, self.step_deadline):
             raise _StairDeadline()
         return result
@@ -1192,6 +1200,8 @@ class _StairSession:
         result = getattr(self.bot, path)()
         if path == "status":
             self.last_status = result
+            if isinstance(result.get("pos"), (list, tuple)):
+                self.progress.setdefault("pos_before", list(result["pos"]))
         if time.monotonic() >= min(self.deadline, self.step_deadline):
             raise _StairDeadline()
         return result

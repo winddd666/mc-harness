@@ -338,20 +338,32 @@ class _BudgetSession:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0.2:
             raise _MiningDeadline
-        payload = dict(body) if body is not None else None
-        if payload is not None and path.lstrip("/") in {"move_to", "control"}:
-            key = "ms" if path.lstrip("/") == "control" else "timeout"
-            payload[key] = min(int(payload.get(key, remaining * 1000)), max(1, int((remaining - 0.2) * 1000)))
+        endpoint = path.lstrip("/")
         # BotSession retries a closed keepalive once, with a 150ms pause. Reserve room
-        # for both HTTP attempts; httpx timeouts are per phase, so use a conservative cap.
-        kwargs["timeout_s"] = min(float(kwargs.get("timeout_s") or 45.0), (remaining - 0.15) / 8)
+        # for both HTTP attempts; httpx timeouts apply separately to each phase.
+        request_timeout = min(float(kwargs.get("timeout_s") or 45.0), (remaining - 0.15) / 8)
+        payload = dict(body) if body is not None else None
+        if payload is not None and endpoint in {"move_to", "control"}:
+            # Give the server time to return its own result before the HTTP read
+            # times out. A pathfinding failure can then fall back to local movement.
+            action_limit_ms = int((request_timeout - 0.25) * 1000)
+            if endpoint == "control":
+                if action_limit_ms < 50:
+                    raise _MiningDeadline
+                duration = payload.get("ms")
+                payload["ms"] = min(300 if duration is None else int(duration), action_limit_ms)
+            else:
+                if action_limit_ms < 1:
+                    raise _MiningDeadline
+                duration = payload.get("timeout")
+                payload["timeout"] = min(action_limit_ms if duration is None else int(duration), action_limit_ms)
+        kwargs["timeout_s"] = request_timeout
         kwargs["allow_reauth"] = False
         try:
             result = self._call(path, payload, **kwargs)
         except httpx.TimeoutException as exc:
             self.timed_out = True
             raise _MiningDeadline from exc
-        endpoint = path.lstrip("/")
         if endpoint == "dig" and result.get("dug"):
             self.dug_count += 1
         if endpoint == "inventory" and isinstance(result.get("items"), list):
@@ -1635,7 +1647,7 @@ class MiningDFSEngine:
             except ApiError:
                 pass
             cur, on_ground = self._settled_position(cur)
-            if math.floor(cur[1]) == pt[1] and math.dist((cur[0], cur[2]), (fx, fz)) <= 0.85:
+            if math.floor(cur[1]) == pt[1] and math.dist((cur[0], cur[2]), (fx, fz)) <= 0.85 and on_ground:
                 self._record_corridor(pt)
                 return True
         return False
@@ -1669,12 +1681,10 @@ class MiningDFSEngine:
             except ApiError:
                 continue
             try:
-                st2 = self.bot.status()
-                p2 = st2.get("pos") or [0.0, 64.0, 0.0]
-                now = (math.floor(float(p2[0])), math.floor(float(p2[1])), math.floor(float(p2[2])))
+                position, grounded = self._settled_position(pos)
             except (ApiError, TypeError, ValueError):
                 continue
-            if now == cell or (now[0] == cell[0] and now[2] == cell[2]):
+            if grounded and _floor_pos(position) == cell:
                 return True
         return False
 
@@ -1706,12 +1716,10 @@ class MiningDFSEngine:
         except ApiError:
             return False
         try:
-            st2 = self.bot.status()
-            p2 = st2.get("pos") or [0.0, 64.0, 0.0]
-            now = (math.floor(float(p2[0])), math.floor(float(p2[1])), math.floor(float(p2[2])))
+            position, grounded = self._settled_position(pos)
         except (ApiError, TypeError, ValueError):
             return False
-        return now == cell or (now[0] == cell[0] and now[2] == cell[2] and now[1] >= cell[1])
+        return grounded and _floor_pos(position) == cell
 
     def _clear_route_obstruction(self, target_wp: tuple[int, int, int]) -> int:
         """Re-open a recorded corridor cell: dig solid fill, but refuse if it is now flooded/bedrock.
@@ -1892,26 +1900,52 @@ class MiningDFSEngine:
         if deadline is not None and time.monotonic() >= deadline:
             return False, "walk_time_slice"
         st = self.bot.status()
-        cur_pos = _floor_pos(st["pos"])
-        # A slice can end between nodes. Rejoin the recorded edge at our actual cell,
-        # instead of attempting a straight move through the wall to a distant anchor.
-        for nd in self.nodes.values():
-            edge = nd.edge_from_parent
-            if edge is None or cur_pos not in edge.waypoints:
-                continue
-            offset = edge.waypoints.index(cur_pos)
-            to_parent = goal_node_id == self.collar_node_id
-            route = list(reversed(edge.waypoints[:offset + 1])) if to_parent else edge.waypoints[offset:]
-            dest = nd.parent_id if to_parent else nd.node_id
-            if dest is None:
-                continue
-            route = [*route, self.nodes[dest].anchor]
-            ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
-            if not ok:
-                return False, err
-            self.active_node_id = dest
-            cur_pos = self.nodes[dest].anchor
-            break
+        if st.get("alive") is False or st.get("ready") is False:
+            return False, "not_ready"
+        if st.get("on_ground", True):
+            cur_pos = _floor_pos(st["pos"])
+        else:
+            settled, grounded = self._settled_position(st["pos"])
+            if not grounded:
+                return False, "not_grounded"
+            cur_pos = _floor_pos(settled)
+        # A slice can end between nodes. Resume the recorded edge toward the
+        # goal subtree, without first walking to the far end and doubling back.
+        if cur_pos == self.nodes[goal_node_id].anchor:
+            self.active_node_id = goal_node_id
+            return True, None
+        if cur_pos != self.nodes[self.active_node_id].anchor:
+            for node_id, node in self.nodes.items():
+                if node.anchor == cur_pos:
+                    self.active_node_id = node_id
+                    break
+            else:
+                goal_ancestors = {goal_node_id}
+                parent_id = self.nodes[goal_node_id].parent_id
+                while parent_id in self.nodes and parent_id not in goal_ancestors:
+                    goal_ancestors.add(parent_id)
+                    parent_id = self.nodes[parent_id].parent_id
+
+                for node in self.nodes.values():
+                    edge = node.edge_from_parent
+                    parent_id = node.parent_id
+                    if edge is None or parent_id is None or parent_id not in self.nodes or cur_pos not in edge.waypoints:
+                        continue
+                    offset = edge.waypoints.index(cur_pos)
+                    if node.node_id in goal_ancestors:
+                        dest = node.node_id
+                        route = edge.waypoints[offset:]
+                    else:
+                        dest = parent_id
+                        route = list(reversed(edge.waypoints[:offset + 1]))
+                    if route[-1] != self.nodes[dest].anchor:
+                        route = [*route, self.nodes[dest].anchor]
+                    ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
+                    if not ok:
+                        return False, err
+                    self.active_node_id = dest
+                    cur_pos = self.nodes[dest].anchor
+                    break
         anchor_now = self.nodes[self.active_node_id].anchor
         if cur_pos != anchor_now:
             best_near_id: int | None = None
@@ -1956,10 +1990,18 @@ class MiningDFSEngine:
 
         segments = self._find_node_path(self.active_node_id, goal_node_id)
         for waypoints, rev, dest_id in segments:
-            ok, err = self._walk_waypoints(waypoints, reverse=rev, min_hp_ref=min_hp_ref, deadline=deadline)
+            if not waypoints:
+                return False, "no_recorded_route"
+            route = list(reversed(waypoints)) if rev else list(waypoints)
+            anchor = self.nodes[dest_id].anchor
+            if route[-1] != anchor:
+                route.append(anchor)
+            ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
             if not ok:
                 return False, err
             self.active_node_id = dest_id
+        if self.active_node_id != goal_node_id:
+            return False, "no_recorded_route"
         return True, None
 
     # ---- Long-Range 64-Block Cluster Radar & Hostile Threat Triage ('radar' strategy) ----
