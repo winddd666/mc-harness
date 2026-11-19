@@ -346,6 +346,60 @@ ALL PASS — 11 项门禁全绿
 - **P2-1 部分修复**：`6f54b6f` 把"已在 range 内"转为成功，但 r17 仍有 10 次（entity_id 未覆盖 / status 取失败）
 - 死亡 8：`hy4_6` 5 次（lava 3）、`hy4_1` 2、`ds_4` 1；暂无 trident
 
+## 4h. r17 收官（22/22，0 Traceback）与背包问题
+
+**门禁**：9/11 PASS；仅 **BUG-026** 未达标 —— 死亡 incident 28（>25）、`cancel_cooldown_wait` 302.8s（>200）。
+- 死亡 20（notable 去重）：`hy4_hy_6_nether_bastion` **11 次**（mob 8 / lava 6 合计口径），其余 1~2 次
+- 分数：2090（r15 2210），`hy4_hy_2_iron` **100→20（-80）**，`ds_2_cave 60→25`，`hy4_7 170→135`
+- `hy4_hy_2_iron` 的 4 集里 2 次 `shiny_gear` timeout（18/19 calls）。**已排除背包因素**：无 `inventory_full`/`no_drops_collected`，产物正常入包
+  - 真实根因（**BUG-030**）：EP2 下潜到 y=27 后 `backtrack_blocked` 把位置拉回 **y=64（+37）**，整段作废；EP3 稳定下潜，但到 **第 17 次调用**才到 y=-54，随即 episode 超时——只差 1~2 次调用
+  - 即：32s 默认切片 × 调用预算不足以覆盖 100+ 格下潜；backtrack 恢复还会清零深度进度
+
+**BUG-029（P1，Slice C）背包/物品栏管理**
+- r17 有 **7/22 路**超过保留上限：`hy4_2` 450 石料、`nju_3` 309、`hy4_9` 274、`ds_2` 220、`glm_2` 783 地狱岩
+- 根因：`library.py:1465-1467` 在"空槽足够"时提前 `return`，导致 :1478 的 `cobble_over_cap` 检查**永远不可达**；且清理只在 craft/harvest 触发，`mine_dfs/mine_blocks` 后无触发点，r17 全程 **0 个 dropped 结果**
+- 修复：cap 判断前置 + 采集后软清理（cobble≤384/地狱岩≤128/泥土≤64）+ 返回 `inventory_cleaned`
+
+## 4i. r18 早期（22:20，0/22 summary）
+
+- 门禁 10/11 PASS；唯一 FAIL 是新问题 **BUG-033**：`ds_ds_4` 的 `scene-watchdog-DS_4` 线程被 `ReflexPreempted(BaseException)` 打死（`except Exception` 抓不到），watchdog 静默失效
+- 其余早段指标：`mine_dfs` 中位 27.4s / 零进展 4.3%、deaths 11、cooldown 145.5s、trade 2 / brew 2、无 no_support / 木棍死锁
+- 验收脚本已修正口径：`Exception in thread` 不再误报为 startup crash，单列 `BUG-033 thread exceptions`
+
+**新增 BUG-033（P1，原误用 BUG-031 已改号）修复建议**：guardian 对只读 GET 不抛抢占信号；runner 的 watcher 显式捕获 `ReflexPreempted` 并上报 `thread_health`。
+
+### 4j. r18 中段（22:29，888 calls，0/22 summary）——取消风暴回潮
+
+| 指标 | 值 | 结论 |
+|---|---|---|
+| `model.failed(cancelled)` | **186**（前 18 分钟） | 其中 `hy4_hy_4_cave_combat` **113 次** |
+| `cancel_cooldown_wait` | **393.4s** | `hy4_hy_4` 占 259.7s |
+| `pre_hurt_ranged` | **74 次**（melee 11 / creeper 5） | cave_combat 骷髅持续射击 |
+| 死亡 incident | 17（<=25 门禁 PASS） | — |
+| `mine_dfs` 中位 / 零进展 | 27.9s / 4.8% | 稳定 |
+| thread exceptions | 1（`ds_4` 的 scene-watchdog） | BUG-033 |
+
+**新增 BUG-034（P1，Slice B）**：`PRE_HURT_RANGED_COOLDOWN_S=10s` 对持续远程火力太短，且 `status.blocking=True` 不豁免取消；建议 30~45s combat stance + 举盾期间不取消。
+
+**ID 冲突已处理**：watchdog 线程单原误用 BUG-031（与 Integrator 的长程单重号），已改为 **BUG-033**，验收脚本同步更新。
+
+### 4k. r18 深入归因（22:36，18/22 summary）
+
+**BUG-030 影响面（深挖全面失效）**：8 路发起 `target_y<=-40` 的调用，**0 路到达目标层**；合计 ~82 次调用 ≈ 38 分钟。
+
+| bot | deep calls | 最深 y | 关键现象 |
+|---|---|---|---|
+| `hy4_hy_2_iron` | 23 | -28 | 48→41→**48** 回退；3 次 `time_slice` 0 收益 |
+| `nju_3_village_trade` | 19 | 55 | 94→58 后 `shaft_exhausted` → 被迫 `needs_surface_climb` → 从 97 重开 |
+| `hy4_hy_9_deep_water` | 17 | -28 | **y=2 / -6 已挖到 diamond×2**，仍被 `target_y=-54` 牵着下潜 |
+| `hy4_hy_10_deep_water` | 11 | 18 | 未有效下潜 |
+
+→ 结论：不仅是"预算不够"，还有 **`shaft_exhausted` 后强制回地表** 的深度清零。与 BUG-022 同源，但影响已扩散到 8 路。
+
+**BUG-034 分集证据（`hy4_hy_4`）**：两集各 **22~23 次 pre_hurt / 40 次 cancel**，间隔中位 **12.1s**（10s 冷却）；骷髅距 3.5~8.4m，`subcortical_combat` 未击杀/未换掩体。
+
+**BUG-029**：r18 目前 `inventory_full` 0、`no_drops_collected` 7、`partial_collection` 1 → 尚未造成硬失败，待 `owned_end` 收官复核。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s

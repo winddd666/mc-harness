@@ -234,8 +234,16 @@ def cmd_launch(
     squads: set[str],
     stagger_s: float,
     use_slot_durations: bool = False,
+    min_slot_duration: int | None = None,
+    max_slot_duration: int | None = None,
 ) -> int:
-    selected_raw = [s for s in FLEET if s.squad in squads]
+    selected_raw = [
+        s
+        for s in FLEET
+        if s.squad in squads
+        and (min_slot_duration is None or s.duration_s >= min_slot_duration)
+        and (max_slot_duration is None or s.duration_s <= max_slot_duration)
+    ]
     if not selected_raw:
         print("No fleet slots matched squads:", squads)
         return 1
@@ -345,6 +353,8 @@ class BotRow:
     scene_stage: str = ""
     scene_ok: bool | None = None
     scene_anchor: str = ""
+    scene_ticks: int | None = None
+    scene_preempt_skips: int | None = None
 
     @property
     def gained_short(self) -> list[str]:
@@ -505,6 +515,12 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         scene_stage=str(scene_meta.get("stage") or ""),
         scene_ok=scene_meta.get("entry_verified") if "entry_verified" in scene_meta else None,
         scene_anchor=scene_anchor,
+        scene_ticks=scene_meta.get("watchdog_ticks") if isinstance(scene_meta.get("watchdog_ticks"), int) else None,
+        scene_preempt_skips=(
+            scene_meta.get("watchdog_preempt_skips")
+            if isinstance(scene_meta.get("watchdog_preempt_skips"), int)
+            else None
+        ),
     )
 
 
@@ -611,6 +627,11 @@ def _write_markdown(
             )
     else:
         lines.append("*（所有已收官 bot 场景入口正常）*")
+    wd_rows = [r for r in rows if r.scene_ticks is not None]
+    if wd_rows:
+        lines.extend(["", "| Bot | watchdog ticks | 反射抢占跳过 |", "|---|---:|---:|"])
+        for r in wd_rows:
+            lines.append(f"| `{r.name}` | {r.scene_ticks} | {r.scene_preempt_skips} |")
 
     lines.extend(["", "## 4. 跨模型 P0/P1 错误榜单", ""])
     ranked = sorted(err_counts.items(), key=lambda kv: (-len(err_bots[kv[0]]), -kv[1]))
@@ -695,6 +716,7 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"deaths={r.deaths:2d} guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
             f"429={r.http_429:2d} gained=[{','.join(r.gained_short[:4])}]"
             + (" scene=BAD" if r.scene_ok is False else "")
+            + (f" wd={r.scene_ticks}skips={r.scene_preempt_skips}" if r.scene_ticks is not None else "")
         )
         if r.status == "crash" and r.crash_tail:
             tail = r.crash_tail.splitlines()[-1]
@@ -745,6 +767,8 @@ def main() -> int:
     lp.add_argument("--wave", required=True)
     lp.add_argument("--duration", type=float, default=1200.0)
     lp.add_argument("--slot-durations", action="store_true", help="Use each FleetSlot's per-stage duration_s/max_episodes")
+    lp.add_argument("--min-slot-duration", type=int, default=None, help="Only launch slots with duration_s >= N (decouples long runs)")
+    lp.add_argument("--max-slot-duration", type=int, default=None, help="Only launch slots with duration_s <= N (decouples short/mid runs)")
     lp.add_argument("--max-episodes", type=int, default=20)
     lp.add_argument("--squads", default="nju,glm,ds,hy4")
     lp.add_argument("--stagger", type=float, default=1.5)
@@ -766,6 +790,8 @@ def main() -> int:
             {s.strip() for s in args.squads.split(",") if s.strip()},
             args.stagger,
             use_slot_durations=args.slot_durations,
+            min_slot_duration=args.min_slot_duration,
+            max_slot_duration=args.max_slot_duration,
         )
     md: str | bool | None = False if args.no_markdown else args.markdown
     return cmd_triage(args.wave, md, pathlib.Path(args.runs_root).expanduser() if args.runs_root else None)

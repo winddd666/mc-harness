@@ -2081,6 +2081,62 @@ def test_brew_no_window_reports_wrong_block_at_coordinates() -> None:
     assert calls[1].endswith("/get_block")
 
 
+@pytest.mark.parametrize("item,initial,cap", [("cobblestone", 320, 192), ("netherrack", 200, 128), ("dirt", 200, 64)])
+def test_free_slots_enforces_retention_cap_even_with_empty_slots(item, initial, cap) -> None:
+    """BUG-029: over-cap blocks were never dropped when >=min_free slots remained."""
+    state = {item: initial}
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "inventory":
+            rows = []
+            left = state[item]
+            while left > 0:
+                rows.append({"name": item, "count": min(64, left)})
+                left -= min(64, left)
+            return httpx.Response(200, json={"ok": True, "result": {"items": rows}})
+        if path == "drop":
+            state[item] = max(0, state[item] - int(body.get("count") or 0))
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        inv_after, dropped = skills._ensure_free_slots(min_free=3)
+    assert dropped
+    assert state[item] == cap
+    assert all(map(lambda d: d["item"] == item, dropped))
+
+
+def test_mine_dfs_triggers_retention_cleanup() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    state = {"cobblestone": 300}
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "inventory":
+            rows = []
+            left = state["cobblestone"]
+            while left > 0:
+                rows.append({"name": "cobblestone", "count": min(64, left)})
+                left -= min(64, left)
+            return httpx.Response(200, json={"ok": True, "result": {"items": rows}})
+        if path == "drop":
+            state["cobblestone"] -= int(body.get("count") or 0)
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        toolset.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
+        result = json.loads(toolset.mc_skill_mine_dfs(target="stone", goal_count=1))
+    assert result["inventory_cleaned"]
+    assert state["cobblestone"] == 192
+
+
 def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
     """r15 P2-21: dig timeout was retried on the same coordinate."""
     from mc_agent.harness.mc_tools import McToolset

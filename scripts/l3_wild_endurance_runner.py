@@ -218,9 +218,39 @@ def select_village_wild_site(
             parked = _park_near_entity(bot, bot_name, ("villager",), pos)
             if parked is not None:
                 pos = parked
+                _pin_villager_near(bot_name, parked)
         biome = str(st.get("biome") or "village").lower()
         return float(pos[0]), float(pos[1]), float(pos[2]), f"village:{biome}"
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
+
+
+def _pin_villager_near(bot_name: str, pos: list[float]) -> bool:
+    """Teleport + freeze the nearest villager 1.5 blocks beside the bot (village_trade fixture).
+
+    r18 glm_glm_3_village_trade kept chasing villagers 27m away (`out_of_reach`) and hit
+    `path_not_found` on the village hillside. A NoAI villager at arm's length makes the trade slice
+    deterministic without touching the harness.
+    """
+    tx, ty, tz = float(pos[0]), float(pos[1]), float(pos[2])
+    try:
+        rcon_batch(
+            [
+                f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run tp @e[type=minecraft:villager,sort=nearest,limit=1] {tx + 1.5:.1f} {ty:.1f} {tz:.1f}",
+            ],
+            timeout=30,
+        )
+        time.sleep(0.5)
+        rcon_batch(
+            [
+                f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run data merge entity @e[type=minecraft:villager,distance=..6,limit=1] {{NoAI:1b}}",
+            ],
+            timeout=30,
+        )
+        print(f"[Scene] pinned a NoAI villager next to {bot_name} at ({tx + 1.5:.1f}, {ty:.1f}, {tz:.1f})", flush=True)
+        return True
+    except Exception as exc:
+        print(f"[Scene] villager pin failed for {bot_name}: {exc}", flush=True)
+        return False
 
 
 def _park_near_entity(
@@ -490,6 +520,14 @@ def prepare_scene_ground(
                 f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz + 3} minecraft:air",
                 f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:respawn_anchor[charges=4]",
+                # 4-high obsidian parapet on three sides with a 1x2 gate on the east edge: the ledge
+                # is a respawn point inside a hostile structure, so open sightlines just feed the
+                # death loop (r17 hy4_hy_6_nether_bastion: 24 deaths).
+                f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 3} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy} {iz + 3} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy} {iz - 2} {ix - 3} {iy + 3} {iz + 2} minecraft:obsidian",
+                f"{pre} fill {ix + 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 1} minecraft:obsidian",
+                f"{pre} fill {ix + 3} {iy} {iz + 1} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
                 f"{pre} tp {bot_name} {ix}.5 {iy} {iz}.5",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
@@ -1021,6 +1059,8 @@ class SceneWatchdog(threading.Thread):
         self._last_return = 0.0
         self._last_total = -1
         self._inv_tick = 0
+        self._ticks = 0
+        self._preempt_skips = 0
 
     def stop(self) -> None:
         self._stop.set()
@@ -1029,7 +1069,10 @@ class SceneWatchdog(threading.Thread):
         """Total item count from the real `/inventory` shape (items[] + offhand + armor)."""
         try:
             inv = self.bot.inventory()
-        except Exception:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            # include ReflexPreempted(BaseException) raised by guardian._wrapped_call
             return None
         if not isinstance(inv, dict):
             return None
@@ -1073,7 +1116,12 @@ class SceneWatchdog(threading.Thread):
     def _tick(self) -> None:
         try:
             st = self.bot.status()
-        except Exception:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            # guardian._wrapped_call raises ReflexPreempted(BaseException) during a reflex takeover;
+            # letting it escape would kill the watchdog thread for the rest of the run (r18 ds_ds_4).
+            self._preempt_skips += 1
             return
         if not st:
             return
@@ -1100,6 +1148,14 @@ class SceneWatchdog(threading.Thread):
         )
         drifted = dim_matches and dist > self.scene.drift_limit and ready
         suspected_death = dead_signal
+        self._ticks += 1
+        if self._ticks % 15 == 0:  # ~2 min at the default 8s interval
+            print(
+                f"[Scene Watchdog] {self.bot_name} heartbeat tick={self._ticks} dim={dim} "
+                f"pos={pos if pos else '?'} hp={health:.0f} ready={ready} "
+                f"preempt_skips={self._preempt_skips}",
+                flush=True,
+            )
         if not suspected_death:
             self._inv_tick += 1
             if self._inv_tick % 3 == 1:  # sample on the very first tick, then every 3rd (~24s)
@@ -1153,8 +1209,10 @@ class SceneWatchdog(threading.Thread):
         while not self._stop.wait(self.interval_s):
             try:
                 self._tick()
-            except Exception as exc:
-                print(f"[Scene Watchdog] {self.bot_name} tick error: {exc}", flush=True)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as exc:
+                print(f"[Scene Watchdog] {self.bot_name} tick error: {exc!r}", flush=True)
 
 
 def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
@@ -1261,10 +1319,12 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "tier": 2,
         "budget_class": "short",
         "task": (
-            "本场景已站在村庄内，背包备有 emerald 32 / wheat 32 / stick 64 / paper 32 / coal 32。"
-            "立刻扫描 24m 内 villager，对最近的一个调用 mc_window_view(entity_id=...) 读取报价；"
-            "只要有一项 available=true 且背包材料够，马上 mc_skill_trade(entity_id=..., option=...) 成交，"
-            "优先 paper/wheat 换绿宝石。若返回 no_window/无业，换下一个村民，禁止对同一村民反复重试。"
+            "本场景已在村庄内、出生点东侧 1.5 格固定了一名 NoAI 村民，背包备有 emerald 32 / wheat 32 / "
+            "stick 64 / paper 32 / coal 32。先 mc_get_entities(radius=12) 找到最近的 villager，"
+            "若距离 >4m 先 mc_move_to(x=..., z=..., range=1.5) 贴近（不要隔着 20m 直接开窗，会 out_of_reach），"
+            "然后 mc_window_view(entity_id=...) 读取报价；只要有一项 available=true 且材料够，马上 "
+            "mc_skill_trade(entity_id=..., option=...) 成交，优先 paper/wheat 换绿宝石。返回 no_window 就换下一个村民，"
+            "禁止对同一村民反复重试，也不要离开村庄爬山。"
         ),
         "extra_tools": ("mc_skill_trade", "mc_window_view", "mc_interact"),
         "advancement_id": "minecraft:adventure/trade",
@@ -1583,6 +1643,8 @@ def main() -> int:
                 "radius": scene.radius,
                 "drift_limit": scene.drift_limit,
                 "entry_verified": entry_ok,
+                "watchdog_ticks": watchdog._ticks,
+                "watchdog_preempt_skips": watchdog._preempt_skips,
             },
             "end_status": {
                 "pos": st_end.get("pos"),
