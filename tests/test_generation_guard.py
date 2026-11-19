@@ -2889,6 +2889,63 @@ def test_r19_poll_skips_eat_in_close_melee_range_after_combat_timeout(monkeypatc
     assert latch_calls[-1] == ("posture", {"shield": True, "sneak": False, "jump": False})
 
 
+def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsupported(monkeypatch):
+    """Reproduces r20_short hy4_hy_6_nether_bastion: when underfoot place fails no_support/blocked_by_self, place side bridge against bank & step onto it."""
+    from mc_agent.errors import ApiError
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    bridge_state = {"in_lava": True, "pos": [249.5, 28.1, 208.5], "placed": set()}
+
+    class _DeepBankLavaBot:
+        def status(self):
+            return {
+                "pos": list(bridge_state["pos"]),
+                "health": 15.0,
+                "alive": True,
+                "ready": True,
+                "in_lava": bridge_state["in_lava"],
+                "on_ground": not bridge_state["in_lava"],
+                "yaw": 0.0,
+                "dimension": "minecraft:the_nether",
+            }
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 60}]}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
+                if p in bridge_state["placed"]:
+                    return {"name": "cobblestone"}
+                # Solid bastion wall 2 blocks East (x=251) while x=249..250 y=28 is lava
+                if p[0] == 251 and p[1] in (27, 28):
+                    return {"name": "blackstone"}
+                if p[1] in (27, 28):
+                    return {"name": "lava"}
+                return {"name": "air"}
+            if action == "place":
+                p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
+                if p in {(249, 28, 208), (249, 27, 208)}:
+                    raise ApiError("no_support", "no solid face in open lava")
+                bridge_state["placed"].add(p)
+                return {"ok": True}
+            if action == "control" and pl.get("forward") and bridge_state["placed"]:
+                bridge_state["in_lava"] = False
+                bridge_state["pos"] = [250.5, 29.0, 208.5]
+            return {"ok": True}
+
+    out_b = CombatEnv(_DeepBankLavaBot()).escape_lava()
+    assert out_b["ok"] is True and out_b["in_lava"] is False
+    assert "lava_place_cobblestone" in out_b["actions"]
+    assert "lava_step_bridge" in out_b["actions"]
+
+
+
 
 
 

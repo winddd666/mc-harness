@@ -1095,7 +1095,7 @@ class CombatEnv:
                 if _should_exit_lava(st):
                     return _lava_result(st)
 
-        # 3. Boxed-in pit or deep lava: try bridging beneath feet with filler BEFORE spending extra sprint budget
+        # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
         filler = self._pick_filler_block(counts)
         if filler is not None and time.monotonic() < lava_deadline + 0.8:
             p_cur = st.get("pos") or pos0
@@ -1103,6 +1103,24 @@ class CombatEnv:
             place_targets = [[bx, by, bz], [bx, by - 1, bz]]
             if st.get("on_ground") is False and _is_passable(self._get_block_name(bx, by - 1, bz)):
                 place_targets.append([bx, by - 2, bz])
+            for dx, dz in CARDINAL_VECTORS.values():
+                for cy in (by, by - 1):
+                    tx, tz = bx + dx, bz + dz
+                    if not self._point_allowed(tx + 0.5, tz + 0.5, action="escape_lava"):
+                        continue
+                    cur_bn = self._get_block_name(tx, cy, tz)
+                    if cur_bn not in {"lava", "flowing_lava"} and not _is_passable(cur_bn):
+                        continue
+                    has_support = any(
+                        _is_solid_ground(self._get_block_name(tx + ox, cy + oy, tz + oz))
+                        for ox, oy, oz in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (0, -1, 0), (0, 1, 0))
+                    )
+                    if has_support and [tx, cy, tz] not in place_targets:
+                        place_targets.append([tx, cy, tz])
+                        if len(place_targets) >= 5:
+                            break
+                if len(place_targets) >= 5:
+                    break
             for place_pos in place_targets:
                 if time.monotonic() >= lava_deadline + 0.8:
                     break
@@ -1112,6 +1130,15 @@ class CombatEnv:
                     self.bot.call("place", {"item": filler, "pos": place_pos})
                     actions.append(f"lava_place_{filler}")
                     self.invalidate_block_cache()
+                    if place_pos[0] != bx or place_pos[2] != bz:
+                        try:
+                            byaw, _ = aim_yaw_pitch(p_cur, [place_pos[0] + 0.5, place_pos[1] + 1.0, place_pos[2] + 0.5])
+                            self.bot.call("look", {"yaw": byaw, "pitch": 0.0})
+                            self.bot.call("control", {"forward": True, "jump": True, "sprint": True, "ms": 650, "stop_on": ["death"]})
+                            actions.append("lava_step_bridge")
+                        except (ApiError, httpx.HTTPError) as err_step:
+                            if isinstance(err_step, httpx.HTTPError):
+                                self._best_effort_stop()
                     st = self._safe_status(st)
                     if _should_exit_lava(st):
                         return _lava_result(st)
