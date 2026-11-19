@@ -697,8 +697,20 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
     "water_and_oxygen": {
         "id": "water_and_oxygen",
         "category": "api_mechanic",
-        "keywords": ["氧气", "oxygen", "水", "溺水", "in_water"],
-        "rule": "仅当 status.in_water=true 或 submerged=true 时才存在溺水风险（1.21 满氧气=20）；干燥地面上 oxygen 波动切勿误判成水坑！",
+        "keywords": ["氧气", "oxygen", "水", "溺水", "in_water", "深海", "deep_ocean", "潜水"],
+        "rule": "仅当 status.in_water=true 或 submerged=true 时才存在溺水风险（1.21 满氧气=20）；干燥地面上 oxygen 波动切勿误判成水坑！深潜前先确认上方 <=5 格有可呼吸气穴/岸边，氧气 <8 立即上浮或换气泡柱；离水后先补食物再继续。",
+    },
+    "nether_respawn_anchor": {
+        "id": "nether_respawn_anchor",
+        "category": "api_mechanic",
+        "keywords": ["重生锚", "respawn_anchor", "下界重生", "死亡回场", "nether_death", "萤石"],
+        "rule": "下界死亡默认被送回主世界出生点（背包全失），所以进下界前必须在安全落脚点放 respawn_anchor 并用 4 个萤石充能，再对其 mc_interact 激活；重生锚仅下界有效、主世界/末地放置会爆炸。无锚时优先保命回传送门，不要在岩浆海/堡垒平台死磕。",
+    },
+    "nether_structure_safety": {
+        "id": "nether_structure_safety",
+        "category": "api_mechanic",
+        "keywords": ["堡垒", "要塞", "bastion", "fortress", "烈焰人", "blaze", "猪灵", "piglin", "岩浆"],
+        "rule": "要塞/堡垒内部常跨岩浆海并有多层落差：垂直移动用 mc_skill_tunnel/staircase 逐格垫脚，不要直接 mc_move_to 带 y；遇到烈焰人刷怪笼先用弓箭/盾消耗，背包常备 8+ 黑曜石与打火石以便就地搭安全屋。",
     },
     "drowned_trident": {
         "id": "drowned_trident",

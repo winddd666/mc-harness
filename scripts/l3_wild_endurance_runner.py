@@ -11,12 +11,15 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import os
 import pathlib
+import re
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -126,8 +129,6 @@ def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -
 
 def select_village_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
     """Locate a real natural village near a far-away candidate anchor via RCON `locate structure`."""
-    import re
-
     cx, cz = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
     res = rcon_batch(
         [f"execute positioned {cx} 100 {cz} run locate structure #minecraft:village"],
@@ -152,6 +153,14 @@ def select_village_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tup
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
 
 
+def _locate_coords(reply: str) -> tuple[int, int] | None:
+    """Parse vanilla `locate` chat replies such as `[123, ~, -45]` (dimension-agnostic)."""
+    m = re.search(r"\[\s*(-?\d+)\s*,\s*[^,\]]+,\s*(-?\d+)\s*\]", str(reply or ""))
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
 def select_nether_structure_site(
     bot: Any,
     bot_name: str,
@@ -164,47 +173,139 @@ def select_nether_structure_site(
         [f"execute in minecraft:the_nether positioned {cx} 64 {cz} run locate structure {structure_tag}"],
         timeout=30,
     )
-    m = re.search(r"\[\s*(-?\d+)\s*,\s*[^,\]]+\s*,\s*(-?\d+)\s*\]", out)
-    if m:
-        nx, nz = int(m.group(1)), int(m.group(2))
+    coords = _locate_coords(str((out[0] if out else {}).get("reply") or ""))
+    if coords is not None:
+        nx, nz = coords
     else:
         nx, nz = cx, cz
     ny = 64
-    rcon_batch(
+    prep = prepare_scene_ground(
+        bot_name, "nether_fortress", float(nx), float(ny), float(nz), dim="the_nether"
+    )
+    # Fire resistance + resistance shield soften the first ~30s of fortress/bastion aggro while the bot boots up.
+    prep.extend(
         [
-            f"execute in minecraft:the_nether run forceload add {nx - 16} {nz - 16} {nx + 16} {nz + 16}",
-            f"execute in minecraft:the_nether run fill {nx - 2} {ny - 1} {nz - 2} {nx + 2} {ny - 1} {nz + 2} minecraft:cobblestone",
-            f"execute in minecraft:the_nether run fill {nx - 2} {ny} {nz - 2} {nx + 2} {ny + 3} {nz + 2} minecraft:air",
-            f"execute in minecraft:the_nether run tp {bot_name} {nx}.5 {ny} {nz}.5",
             f"effect give {bot_name} minecraft:fire_resistance 30 0 true",
             f"effect give {bot_name} minecraft:resistance 15 4 true",
-        ],
-        timeout=30,
+        ]
     )
+    rcon_batch(prep, timeout=45)
     time.sleep(2.0)
     st = bot.status()
     pos = st.get("pos") or [float(nx) + 0.5, float(ny), float(nz) + 0.5]
+    if "nether" not in str(st.get("dimension") or "").lower():
+        # `tp` may not have settled yet; never anchor the scene to a stale overworld position.
+        pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
     return float(pos[0]), float(pos[1]), float(pos[2]), f"nether:{structure_tag.split(':')[-1]}"
 
 
-def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: bool = True, stage: str = "bare") -> None:
-    cmds = [
-        "difficulty normal",
-        "weather clear",
-        f"tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
-        f"spawnpoint {bot_name} {int(round(sx))} {int(round(sy))} {int(round(sz))}",
-        f"gamemode survival {bot_name}",
-        f"clear {bot_name}",
-        f"effect clear {bot_name}",
-        f"effect give {bot_name} minecraft:instant_health 1 10 true",
-        f"effect give {bot_name} minecraft:saturation 2 10 true",
-        f"advancement revoke {bot_name} everything",
-        f"advancement grant {bot_name} only minecraft:story/root",
-        f"advancement grant {bot_name} only minecraft:adventure/root",
-        f"advancement grant {bot_name} only minecraft:husbandry/root",
-        f"advancement grant {bot_name} only minecraft:nether/root",
-        f"advancement grant {bot_name} only minecraft:end/root",
+def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
+    """Locate a real `minecraft:deep_ocean` biome and build a safe surface staging platform above the water.
+
+    The bot must be able to *dive* into deep water for the slice, but must never spawn inside it
+    (drowning on episode 1 would poison every downstream metric). A 7x7 cobblestone platform with a
+    3-block air pocket keeps the spawn dry while leaving open water within a few blocks.
+    """
+    cx, cz = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
+    res = rcon_batch(
+        [f"execute positioned {cx} 100 {cz} run locate biome minecraft:deep_ocean"],
+        timeout=45,
+    )
+    coords = _locate_coords(str((res[0] if res else {}).get("reply") or ""))
+    if coords is not None:
+        wx, wz = coords
+    else:
+        wx, wz = cx, cz
+    rcon_batch(
+        [
+            f"tp {bot_name} {wx} 120 {wz}",
+            f"spreadplayers {wx} {wz} 0 40 false {bot_name}",
+        ],
+        timeout=45,
+    )
+    time.sleep(2.0)
+    st = bot.status()
+    pos = st.get("pos") or [float(wx), 70.0, float(wz)]
+    ix, iz = int(float(pos[0])), int(float(pos[2]))
+    surface_y = max(int(float(pos[1])) + 1, 64)
+    prep = [
+        f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
+        f"fill {ix - 3} {surface_y - 1} {iz - 3} {ix + 3} {surface_y - 1} {iz + 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 3} {iz + 3} minecraft:air",
+        f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
+        f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
     ]
+    rcon_batch(prep, timeout=45)
+    time.sleep(1.0)
+    biome = str(st.get("biome") or "deep_ocean").lower()
+    return float(ix) + 0.5, float(surface_y), float(iz) + 0.5, f"deep_water:{biome}"
+
+
+def prepare_scene_ground(
+    bot_name: str,
+    stage: str,
+    sx: float,
+    sy: float,
+    sz: float,
+    *,
+    dim: str = "overworld",
+) -> list[str]:
+    """Build / re-assert an idempotent safe standing surface for the active slice.
+
+    Returns the RCON command list (callers may append scene-specific effects before batching).
+    All fills are absolute and idempotent so this can be re-run after a death without drifting.
+    """
+    ix, iy, iz = int(round(sx)), int(round(sy)), int(round(sz))
+    cmds: list[str] = []
+    if dim == "the_nether":
+        # Obsidian ledge (lava-proof), 3-block headroom, charged respawn anchor for in-Nether respawns.
+        # Every command MUST be prefixed with `execute in minecraft:the_nether run` — bare RCON
+        # fill/setblock/tp would otherwise act on the overworld coordinates.
+        pre = "execute in minecraft:the_nether run"
+        cmds.extend(
+            [
+                f"{pre} forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
+                f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:obsidian",
+                f"{pre} setblock {ix + 3} {iy} {iz} minecraft:respawn_anchor[charges=4]",
+                f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix - 1} {iy - 1} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz + 3} minecraft:air",
+                f"{pre} tp {bot_name} {ix}.5 {iy} {iz}.5",
+                f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
+            ]
+        )
+        return cmds
+    if stage == "enchant_anvil":
+        # Flatten a 9x7 pad so table/anvil/bookshelves never float or clip into a hillside.
+        cmds.extend(
+            [
+                f"fill {ix - 3} {iy - 1} {iz - 3} {ix + 5} {iy - 1} {iz + 3} minecraft:cobblestone",
+                f"fill {ix - 3} {iy} {iz - 3} {ix + 5} {iy + 3} {iz + 3} minecraft:air",
+                f"setblock {ix + 2} {iy} {iz} minecraft:enchanting_table",
+                f"setblock {ix + 2} {iy} {iz + 2} minecraft:anvil",
+                f"setblock {ix + 4} {iy} {iz} minecraft:bookshelf",
+                f"setblock {ix + 4} {iy} {iz - 1} minecraft:bookshelf",
+                f"setblock {ix + 4} {iy} {iz + 1} minecraft:bookshelf",
+                f"tp {bot_name} {ix}.5 {iy} {iz}.5",
+                f"spawnpoint {bot_name} {ix} {iy} {iz}",
+            ]
+        )
+        return cmds
+    if stage == "deep_water":
+        # Re-assert the dry staging pad on death return (idempotent, only when spawned at/below sea level).
+        if iy <= 63:
+            cmds.extend(
+                [
+                    f"fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:cobblestone",
+                    f"fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz + 3} minecraft:air",
+                ]
+            )
+        return cmds
+    return cmds
+
+
+def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: float) -> list[str]:
+    """Stage-specific advancements/inventory only (no teleport, no clear, no platform)."""
+    cmds: list[str] = []
     if stage == "iron":
         cmds.extend(
             [
@@ -311,45 +412,36 @@ def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: b
             ]
         )
     elif stage in {"nether_fortress", "nether_bastion"}:
-        # Bot is already teleported inside minecraft:the_nether by select_nether_structure_site; do NOT tp back to overworld!
-        cmds = [
-            f"gamemode survival {bot_name}",
-            f"clear {bot_name}",
-            f"advancement revoke {bot_name} everything",
-            f"advancement grant {bot_name} only minecraft:story/root",
-            f"advancement grant {bot_name} only minecraft:adventure/root",
-            f"advancement grant {bot_name} only minecraft:husbandry/root",
-            f"advancement grant {bot_name} only minecraft:nether/root",
-            f"advancement grant {bot_name} only minecraft:story/mine_stone",
-            f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
-            f"advancement grant {bot_name} only minecraft:story/smelt_iron",
-            f"advancement grant {bot_name} only minecraft:story/iron_tools",
-            f"advancement grant {bot_name} only minecraft:story/mine_diamond",
-            f"advancement grant {bot_name} only minecraft:story/shiny_gear",
-            f"advancement grant {bot_name} only minecraft:story/lava_bucket",
-            f"advancement grant {bot_name} only minecraft:story/form_obsidian",
-            f"advancement grant {bot_name} only minecraft:story/enter_the_nether",
-            f"effect clear {bot_name}",
-            f"effect give {bot_name} minecraft:instant_health 1 10 true",
-            f"effect give {bot_name} minecraft:saturation 1 20 true",
-            f"effect give {bot_name} minecraft:fire_resistance 45 0 true",
-            f"give {bot_name} minecraft:diamond_pickaxe 1",
-            f"give {bot_name} minecraft:iron_sword 1",
-            f"give {bot_name} minecraft:shield 1",
-            f"give {bot_name} minecraft:golden_boots 1",
-            f"give {bot_name} minecraft:iron_helmet 1",
-            f"give {bot_name} minecraft:iron_chestplate 1",
-            f"give {bot_name} minecraft:iron_leggings 1",
-            f"give {bot_name} minecraft:bow 1",
-            f"give {bot_name} minecraft:arrow 32",
-            f"give {bot_name} minecraft:gold_ingot 24",
-            f"give {bot_name} minecraft:cobblestone 64",
-            f"give {bot_name} minecraft:oak_log 16",
-            f"give {bot_name} minecraft:glass_bottle 3",
-            f"give {bot_name} minecraft:cooked_beef 24",
-        ]
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+                f"advancement grant {bot_name} only minecraft:story/shiny_gear",
+                f"advancement grant {bot_name} only minecraft:story/lava_bucket",
+                f"advancement grant {bot_name} only minecraft:story/form_obsidian",
+                f"advancement grant {bot_name} only minecraft:story/enter_the_nether",
+                f"give {bot_name} minecraft:diamond_pickaxe 1",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:golden_boots 1",
+                f"give {bot_name} minecraft:iron_helmet 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
+                f"give {bot_name} minecraft:iron_leggings 1",
+                f"give {bot_name} minecraft:bow 1",
+                f"give {bot_name} minecraft:arrow 32",
+                f"give {bot_name} minecraft:gold_ingot 24",
+                f"give {bot_name} minecraft:cobblestone 64",
+                f"give {bot_name} minecraft:obsidian 8",
+                f"give {bot_name} minecraft:flint_and_steel 1",
+                f"give {bot_name} minecraft:oak_log 16",
+                f"give {bot_name} minecraft:glass_bottle 3",
+                f"give {bot_name} minecraft:cooked_beef 24",
+            ]
+        )
     elif stage == "enchant_anvil":
-        ix, iy, iz = int(sx), int(sy), int(sz)
         cmds.extend(
             [
                 f"advancement grant {bot_name} only minecraft:story/mine_stone",
@@ -359,11 +451,6 @@ def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: b
                 f"advancement grant {bot_name} only minecraft:story/mine_diamond",
                 f"advancement grant {bot_name} only minecraft:story/shiny_gear",
                 f"xp set {bot_name} 30 levels",
-                f"setblock {ix + 2} {iy} {iz} minecraft:enchanting_table",
-                f"setblock {ix + 2} {iy} {iz + 2} minecraft:anvil",
-                f"setblock {ix + 4} {iy} {iz} minecraft:bookshelf",
-                f"setblock {ix + 4} {iy} {iz - 1} minecraft:bookshelf",
-                f"setblock {ix + 4} {iy} {iz + 1} minecraft:bookshelf",
                 f"give {bot_name} minecraft:lapis_lazuli 32",
                 f"give {bot_name} minecraft:book 6",
                 f"give {bot_name} minecraft:diamond_pickaxe 1",
@@ -385,17 +472,230 @@ def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: b
                 f"give {bot_name} minecraft:iron_sword 1",
                 f"give {bot_name} minecraft:shield 1",
                 f"give {bot_name} minecraft:bucket 2",
+                f"give {bot_name} minecraft:oak_boat 1",
                 f"give {bot_name} minecraft:iron_helmet 1",
                 f"give {bot_name} minecraft:iron_chestplate 1",
                 f"give {bot_name} minecraft:iron_leggings 1",
                 f"give {bot_name} minecraft:iron_boots 1",
                 f"give {bot_name} minecraft:oak_log 16",
-                f"give {bot_name} minecraft:cooked_beef 16",
+                f"give {bot_name} minecraft:cooked_beef 24",
             ]
         )
-    if set_day:
+    return cmds
+
+
+NETHER_STAGES = frozenset({"nether_fortress", "nether_bastion"})
+
+
+def scene_dimension(stage: str) -> str:
+    return "the_nether" if stage in NETHER_STAGES else "overworld"
+
+
+@dataclasses.dataclass(frozen=True)
+class SceneAnchor:
+    """Immutable description of the slice's safe scene anchor (used by guard + watchdog)."""
+
+    stage: str
+    dim: str
+    x: float
+    y: float
+    z: float
+    radius: float = 220.0
+    drift_limit: float = 400.0
+
+
+def reset_wild_bot(
+    bot_name: str,
+    sx: float,
+    sy: float,
+    sz: float,
+    *,
+    set_day: bool = True,
+    stage: str = "bare",
+    dim: str | None = None,
+) -> None:
+    """Reset the bot to the slice checkpoint. Dimension-aware: Nether slices must never `tp` to overworld."""
+    dim = dim or scene_dimension(stage)
+    ix, iy, iz = int(round(sx)), int(round(sy)), int(round(sz))
+    cmds: list[str] = ["difficulty normal", f"gamemode survival {bot_name}", f"clear {bot_name}"]
+    if dim == "the_nether":
+        cmds.extend(
+            [
+                f"execute in minecraft:the_nether run tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
+                f"execute in minecraft:the_nether run spawnpoint {bot_name} {ix} {iy} {iz}",
+                f"advancement grant {bot_name} only minecraft:story/root",
+                f"advancement grant {bot_name} only minecraft:adventure/root",
+                f"advancement grant {bot_name} only minecraft:husbandry/root",
+                f"advancement grant {bot_name} only minecraft:nether/root",
+            ]
+        )
+    else:
+        cmds.extend(
+            [
+                f"tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
+                f"spawnpoint {bot_name} {ix} {iy} {iz}",
+                f"advancement revoke {bot_name} everything",
+                f"advancement grant {bot_name} only minecraft:story/root",
+                f"advancement grant {bot_name} only minecraft:adventure/root",
+                f"advancement grant {bot_name} only minecraft:husbandry/root",
+                f"advancement grant {bot_name} only minecraft:nether/root",
+                f"advancement grant {bot_name} only minecraft:end/root",
+            ]
+        )
+    cmds.extend(
+        [
+            f"effect clear {bot_name}",
+            f"effect give {bot_name} minecraft:instant_health 1 10 true",
+            f"effect give {bot_name} minecraft:saturation 2 10 true",
+        ]
+    )
+    if dim == "the_nether":
+        cmds.append(f"effect give {bot_name} minecraft:fire_resistance 45 0 true")
+    cmds.extend(stage_loadout_cmds(bot_name, stage, sx, sy, sz))
+    if set_day and dim != "the_nether":
         cmds.insert(0, "time set 1000")
     rcon_batch(cmds, timeout=60)
+
+
+def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inventory: bool = False) -> None:
+    """Death-return / drift-return: teleport back to the scene anchor, and re-issue loadout on death."""
+    ix, iy, iz = int(round(scene.x)), int(round(scene.y)), int(round(scene.z))
+    cmds = [
+        f"gamemode survival {bot_name}",
+        f"effect clear {bot_name}",
+        f"effect give {bot_name} minecraft:instant_health 1 10 true",
+        f"effect give {bot_name} minecraft:saturation 1 20 true",
+        f"effect give {bot_name} minecraft:resistance 20 4 true",
+    ]
+    if clear_inventory:
+        cmds.insert(1, f"clear {bot_name}")
+    if scene.dim == "the_nether":
+        cmds.extend(
+            [
+                f"execute in minecraft:the_nether run tp {bot_name} {scene.x:.1f} {scene.y:.1f} {scene.z:.1f}",
+                f"execute in minecraft:the_nether run spawnpoint {bot_name} {ix} {iy} {iz}",
+                f"execute in minecraft:the_nether run setblock {ix + 3} {iy - 1} {iz} minecraft:respawn_anchor[charges=4]",
+                f"effect give {bot_name} minecraft:fire_resistance 60 0 true",
+            ]
+        )
+    else:
+        cmds.extend(
+            [
+                f"tp {bot_name} {scene.x:.1f} {scene.y:.1f} {scene.z:.1f}",
+                f"spawnpoint {bot_name} {ix} {iy} {iz}",
+            ]
+        )
+    cmds.extend(prepare_scene_ground(bot_name, scene.stage, scene.x, scene.y, scene.z, dim=scene.dim))
+    if clear_inventory:
+        cmds.extend(stage_loadout_cmds(bot_name, scene.stage, scene.x, scene.y, scene.z))
+    rcon_batch(cmds, timeout=60)
+    print(
+        f"[Scene Restock] {bot_name} stage={scene.stage} reason={reason} restock={clear_inventory} "
+        f"-> ({scene.x:.1f}, {scene.y:.1f}, {scene.z:.1f})",
+        flush=True,
+    )
+
+
+class SceneWatchdog(threading.Thread):
+    """Background death-return + drift-return guard for a single-bot scene slice.
+
+    The LLM episode hook only fires at `curriculum.episode.started`, so a death mid-episode would
+    otherwise leave the bot at the world spawn with an empty inventory until the episode ends.
+    This watchdog polls status every `interval_s` and returns/restocks within one cycle.
+    """
+
+    def __init__(self, bot: Any, bot_name: str, scene: SceneAnchor, *, interval_s: float = 8.0) -> None:
+        super().__init__(name=f"scene-watchdog-{bot_name}", daemon=True)
+        self.bot = bot
+        self.bot_name = bot_name
+        self.scene = scene
+        self.interval_s = interval_s
+        self._stop = threading.Event()
+        self._last_return = 0.0
+        self._last_total = -1
+        self._inv_tick = 0
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _owned_total(self) -> int | None:
+        try:
+            inv = self.bot.inventory()
+        except Exception:
+            return None
+        if not isinstance(inv, dict):
+            return None
+        total = 0
+        for k, v in inv.items():
+            if str(k).startswith("_"):
+                continue
+            try:
+                total += int(v)
+            except (TypeError, ValueError):
+                continue
+        return total
+
+    def _tick(self) -> None:
+        try:
+            st = self.bot.status()
+        except Exception:
+            return
+        if not st or not st.get("ready"):
+            return
+        pos = st.get("pos") or []
+        health = float(st.get("health") or 0.0)
+        dim = str(st.get("dimension") or "overworld").lower()
+        wrong_dim = self.scene.dim == "the_nether" and "nether" not in dim
+        dist = (
+            math.hypot(float(pos[0]) - self.scene.x, float(pos[2]) - self.scene.z)
+            if isinstance(pos, (list, tuple)) and len(pos) >= 3
+            else float("inf")
+        )
+        drifted = dist > self.scene.drift_limit
+        suspected_death = health <= 0.0
+        if not suspected_death:
+            self._inv_tick += 1
+            if self._inv_tick % 3 == 1:  # sample on the very first tick, then every 3rd (~24s)
+                total = self._owned_total()
+                if total is not None:
+                    if (
+                        self._last_total >= 6
+                        and total <= max(1, self._last_total // 4)
+                        and self._last_total - total >= 6
+                    ):
+                        suspected_death = True
+                    self._last_total = total
+        if not (wrong_dim or drifted or suspected_death):
+            return
+        now = time.monotonic()
+        if now - self._last_return < 20.0:
+            return
+        if suspected_death:
+            reason = "death_return"
+        elif wrong_dim:
+            reason = f"wrong_dimension({dim})"
+        else:
+            reason = f"drift_{dist:.0f}m"
+        near_empty = self._last_total >= 0 and self._last_total <= 2
+        try:
+            restock_scene(
+                self.bot_name,
+                self.scene,
+                reason=reason,
+                clear_inventory=suspected_death or (wrong_dim and near_empty),
+            )
+        except Exception as exc:  # never kill the watchdog thread on a transient RCON hiccup
+            print(f"[Scene Restock] {self.bot_name} failed reason={reason}: {exc}", flush=True)
+        finally:
+            self._last_return = time.monotonic()
+            self._last_total = -1
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            try:
+                self._tick()
+            except Exception as exc:
+                print(f"[Scene Watchdog] {self.bot_name} tick error: {exc}", flush=True)
 
 
 def main() -> int:
@@ -466,9 +766,16 @@ def main() -> int:
             sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "#minecraft:fortress", start_idx=args.site_index)
         elif args.stage == "nether_bastion":
             sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "#minecraft:bastion_remnant", start_idx=args.site_index)
+        elif args.stage == "deep_water":
+            sx, sy, sz, biome = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
         else:
             sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
-        reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage)
+        dim = scene_dimension(args.stage)
+        scene = SceneAnchor(stage=args.stage, dim=dim, x=sx, y=sy, z=sz)
+        prep = prepare_scene_ground(bot_name, args.stage, sx, sy, sz, dim=dim)
+        if prep:
+            rcon_batch(prep, timeout=60)
+        reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
 
         geofence = VoidGeofence(center_x=sx, center_z=sz, radius=220.0, margin=8.0)
@@ -498,19 +805,22 @@ def main() -> int:
                 st_cur = bot.status()
                 dim_cur = str(st_cur.get("dimension") or "overworld").lower()
                 p_cur = st_cur.get("pos")
-                if "overworld" in dim_cur and isinstance(p_cur, (list, tuple)) and len(p_cur) >= 3:
-                    if math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz) > 400.0:
-                        rcon_batch(
-                            [
-                                f"tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
-                                f"spawnpoint {bot_name} {int(round(sx))} {int(round(sy))} {int(round(sz))}",
-                            ],
-                            timeout=30,
-                        )
-                        print(f"[Scene Pullback] {bot_name} drifted >400m -> pulled back to ({sx:.1f}, {sy:.1f}, {sz:.1f})", flush=True)
+                if not isinstance(p_cur, (list, tuple)) or len(p_cur) < 3:
+                    return
+                wrong_dim = scene.dim == "the_nether" and "nether" not in dim_cur
+                dist = math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz)
+                if wrong_dim or (scene.dim in dim_cur and dist > scene.drift_limit):
+                    restock_scene(bot_name, scene, reason="episode_anchor_pullback")
+                    print(
+                        f"[Scene Pullback] {bot_name} dim={dim_cur} dist={dist:.0f}m -> reset to "
+                        f"({sx:.1f}, {sy:.1f}, {sz:.1f})",
+                        flush=True,
+                    )
             except Exception:
                 pass
 
+        watchdog = SceneWatchdog(bot, bot_name, scene)
+        watchdog.start()
         try:
             sup = CurriculumSupervisor(
                 bot,
@@ -527,6 +837,7 @@ def main() -> int:
             )
             summary = sup.run(max_episodes=args.max_episodes)
         finally:
+            watchdog.stop()
             qwen.close()
 
         # Enrich episode rows with guardian reflex stats from each episode report JSON
@@ -561,6 +872,13 @@ def main() -> int:
             "rpm_budget": args.rpm_budget,
             "started_at": stamp,
             "spawn": {"x": round(sx, 1), "y": round(sy, 1), "z": round(sz, 1), "biome": biome},
+            "scene": {
+                "stage": scene.stage,
+                "dimension": scene.dim,
+                "anchor": {"x": round(scene.x, 1), "y": round(scene.y, 1), "z": round(scene.z, 1)},
+                "radius": scene.radius,
+                "drift_limit": scene.drift_limit,
+            },
             "end_status": {
                 "pos": st_end.get("pos"),
                 "health": st_end.get("health"),

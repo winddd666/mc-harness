@@ -10,7 +10,11 @@ Squads:
 Usage:
   python scripts/v2_fleet.py provision
   python scripts/v2_fleet.py launch --wave r11 --duration 1200 [--squads nju,glm,ds,hy4]
-  python scripts/v2_fleet.py triage --wave r11
+  python scripts/v2_fleet.py triage --wave r11 [--markdown [PATH]] [--no-markdown]
+
+`triage` parses each bot's `wild-endurance-*.json` + `*.events.jsonl` and auto-exports
+`runs/<wave>/triage-<wave>.md` with a cross-model error leaderboard and generated work orders.
+Runs root can be overridden with `--runs-root` or `MC_FLEET_RUNS_ROOT`.
 """
 
 from __future__ import annotations
@@ -26,12 +30,46 @@ import sys
 import time
 from collections import Counter, defaultdict
 
-WT_ROOT = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated")
+WT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN_ROOT = pathlib.Path("/home/xzq/projects/mc")
 VENV_PY = MAIN_ROOT / ".venv/bin/python"
 RUNNER = WT_ROOT / "scripts/l3_wild_endurance_runner.py"
 ENV_FILE = MAIN_ROOT / ".env.beast"
 FLEET_TOKEN_FILE = MAIN_ROOT / ".state-fleet/tokens.json"
+RUNS_ROOT = pathlib.Path(os.environ.get("MC_FLEET_RUNS_ROOT") or (WT_ROOT / "runs"))
+SLOW_TOOL_THRESHOLD_S = 60.0
+KNOWN_STAGES: tuple[str, ...] = (
+    "nether_fortress",
+    "nether_bastion",
+    "enchant_anvil",
+    "deep_water",
+    "midgame",
+    "village",
+    "nether",
+    "bare",
+    "iron",
+)
+
+
+def _stage_from_dirname(name: str) -> str:
+    for stage in KNOWN_STAGES:  # longest first so nether_fortress wins over nether
+        if name.endswith("_" + stage):
+            return stage
+    return name.split("_")[-1] if name.count("_") >= 2 else "?"
+
+# Routing hints used to auto-assign exported Markdown tickets to the owning slice.
+SLICE_HINTS: tuple[tuple[str, str], ...] = (
+    ("mine_dfs", "Slice A (#3 Codex #1)"),
+    ("tunnel", "Slice A (#3 Codex #1)"),
+    ("staircase", "Slice C (#4 Codex #2)"),
+    ("mc_move_to", "Slice C (#4 Codex #2)"),
+    ("build_portal", "Slice C (#4 Codex #2)"),
+    ("craft_", "Slice C (#4 Codex #2)"),
+    ("smelt", "Slice C (#4 Codex #2)"),
+    ("guardian", "Slice B (#2 子 AGY)"),
+    ("combat", "Slice B (#2 子 AGY)"),
+    ("safety", "Slice B (#2 子 AGY)"),
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -141,7 +179,7 @@ def cmd_launch(wave: str, duration_s: float, max_episodes: int, squads: set[str]
     print(f"[Fleet Launch] wave={wave} bots={len(selected)} duration_s={duration_s} max_eps={max_episodes}")
     for idx, slot in enumerate(selected):
         subdir = f"{wave}/{slot.squad}_{slot.bot.lower()}_{slot.stage}"
-        log_dir = WT_ROOT / "runs" / subdir
+        log_dir = RUNS_ROOT / subdir
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "stdout.log"
         cmd = [
@@ -180,89 +218,367 @@ def cmd_launch(wave: str, duration_s: float, max_episodes: int, squads: set[str]
     return cmd_triage(wave)
 
 
-def cmd_triage(wave: str) -> int:
-    wave_dir = WT_ROOT / "runs" / wave
+def _decode_payload(raw: Any) -> dict[str, Any]:
+    """Decode a tool result payload (JSON string / dict / None) into a dict."""
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return {"_raw": raw[:400]}
+    return obj if isinstance(obj, dict) else {"_value": obj}
+
+
+def _extract_error_code(payload: dict[str, Any]) -> str:
+    """Error code from a decoded tool payload (aligned with `v2_triage._extract_error_code`)."""
+    if not payload:
+        return "unknown_fail"
+    err = payload.get("error")
+    if isinstance(err, dict):
+        code = err.get("code") or err.get("reason")
+        if code:
+            return str(code)
+    elif isinstance(err, str) and err:
+        return err
+    for key in ("stop_reason", "failure_reason", "reason"):
+        if payload.get(key):
+            return str(payload[key])
+    pe = payload.get("partial_error")
+    if isinstance(pe, dict) and pe.get("code"):
+        return str(pe["code"])
+    if isinstance(pe, str) and pe:
+        return pe
+    return "unknown_fail"
+
+
+@dataclasses.dataclass
+class BotRow:
+    name: str
+    squad: str
+    stage: str
+    status: str
+    score: int
+    episodes_done: int
+    elapsed_s: float
+    deaths: int
+    guardian_incidents: int
+    preemptions: int
+    http_429: int
+    rate_waits: int
+    gained: list[str]
+    top_tools: list[tuple[str, int, int]]
+    top_errors: list[tuple[str, int]]
+    slow_calls: list[tuple[float, str, str]]
+    crash_tail: str = ""
+
+    @property
+    def gained_short(self) -> list[str]:
+        return [x.split("/")[-1] for x in self.gained]
+
+
+def _read_crash_tail(bd: pathlib.Path) -> str:
+    log = bd / "stdout.log"
+    if not log.is_file():
+        return ""
+    try:
+        text = log.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+    if "Traceback (most recent call last)" not in text:
+        return ""
+    tail = text[-2000:]
+    lines = [ln for ln in tail.splitlines() if ln.strip()]
+    return "\n".join(lines[-6:])
+
+
+def triage_bot_dir(bd: pathlib.Path) -> BotRow:
+    """Parse one fleet bot directory (summary + raw events) into a normalized row."""
+    name = bd.name
+    squad = name.split("_")[0]
+    stage = _stage_from_dirname(name)
+
+    summaries = sorted(bd.glob("wild-endurance-*.json"))
+    summary: dict[str, Any] = {}
+    if summaries:
+        try:
+            summary = json.loads(summaries[-1].read_text(encoding="utf-8"))
+        except Exception:
+            summary = {}
+    if not summary:
+        cur = sorted(bd.glob("curriculum-*.json"))
+        if cur:
+            try:
+                summary = json.loads(cur[-1].read_text(encoding="utf-8"))
+            except Exception:
+                summary = {}
+
+    cs = summary.get("curriculum_summary")
+    if not isinstance(cs, dict) or not cs:
+        cs = summary
+    episodes = cs.get("episodes") or summary.get("episodes") or []
+    score = int(cs.get("final_score") or summary.get("final_score") or cs.get("current_score") or 0)
+    elapsed_s = float(cs.get("elapsed_s") or 0.0)
+    gained: list[str] = []
+    for ep in episodes:
+        gained.extend(ep.get("gained_advancements") or [])
+
+    guardian = summary.get("guardian_totals") or summary.get("guardian") or {}
+    guardian_incidents = int(guardian.get("incidents", 0) or 0)
+    preemptions = int(guardian.get("tool_preemptions", 0) or 0)
+
+    tool_calls: Counter[str] = Counter()
+    tool_fails: Counter[str] = Counter()
+    err_codes: Counter[str] = Counter()
+    slow_calls: list[tuple[float, str, str]] = []
+    event_deaths = 0
+    http_429 = 0
+    rate_waits = 0
+    event_preemptions = 0
+    has_events = False
+
+    for evf in sorted(bd.glob("*.events.jsonl")):
+        call_start: dict[str, tuple[float, str]] = {}
+        try:
+            lines = evf.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            if not ln.strip():
+                continue
+            has_events = True
+            try:
+                ev = json.loads(ln)
+            except Exception:
+                continue
+            tp = str(ev.get("type") or "")
+            el = float(ev.get("elapsed") or 0.0)
+            if tp in ("tool.started", "tool.ready"):
+                cid = str(ev.get("call_id") or "")
+                fn = ev.get("function") or {}
+                tname = str(ev.get("tool") or ev.get("name") or (fn.get("name") if isinstance(fn, dict) else "") or "")
+                if cid and tname:
+                    call_start[cid] = (el, tname)
+            elif tp == "tool.completed":
+                cid = str(ev.get("call_id") or "")
+                st_info = call_start.pop(cid, None)
+                fn = ev.get("function") or {}
+                tname = str(
+                    ev.get("tool")
+                    or ev.get("name")
+                    or (fn.get("name") if isinstance(fn, dict) else "")
+                    or (st_info[1] if st_info else "unknown")
+                )
+                dt = max(0.0, el - st_info[0]) if st_info else float(ev.get("duration") or 0.0)
+                tool_calls[tname] += 1
+                payload = _decode_payload(ev.get("result") if "result" in ev else ev.get("output"))
+                if payload.get("ok") is False:
+                    code = _extract_error_code(payload)
+                    tool_fails[tname] += 1
+                    err_codes[f"{tname}:{code}"] += 1
+                if payload.get("preempted_by_reflex") is True:
+                    event_preemptions += 1
+                if dt >= SLOW_TOOL_THRESHOLD_S:
+                    slow_calls.append((dt, name, tname))
+            elif tp == "guardian.incident":
+                reasons = ev.get("reasons") or []
+                if "death_or_connection_changed" in reasons:
+                    event_deaths += 1
+            elif tp == "guardian.preempted_tool":
+                event_preemptions += 1
+            elif tp == "mc.notable_events" and "死亡" in str(ev.get("text") or ""):
+                event_deaths += 1
+            elif tp == "model.rate_wait":
+                if float(ev.get("wait_s") or 0.0) > 0:
+                    rate_waits += 1
+            if "429" in str(ev.get("error") or ""):
+                http_429 += 1
+
+    if summaries:
+        status = str(cs.get("status") or "done")
+    elif has_events:
+        status = "incomplete"
+    else:
+        status = "empty"
+    crash_tail = _read_crash_tail(bd)
+    if crash_tail and not summaries:
+        status = "crash"
+
+    slow_calls.sort(reverse=True)
+    return BotRow(
+        name=name,
+        squad=squad,
+        stage=stage,
+        status=status,
+        score=score,
+        episodes_done=len(episodes),
+        elapsed_s=elapsed_s,
+        deaths=event_deaths,
+        guardian_incidents=guardian_incidents,
+        preemptions=max(preemptions, event_preemptions),
+        http_429=http_429,
+        rate_waits=rate_waits,
+        gained=sorted(set(gained)),
+        top_tools=[(k, tool_calls[k], tool_fails[k]) for k in sorted(tool_calls, key=lambda t: -tool_calls[t])[:6]],
+        top_errors=err_codes.most_common(5),
+        slow_calls=slow_calls[:4],
+        crash_tail=crash_tail,
+    )
+
+
+def _suggest_owner(key: str) -> str:
+    low = key.lower()
+    for needle, owner in SLICE_HINTS:
+        if needle in low:
+            return owner
+    if low.startswith("mc_skill_"):
+        return "Slice C (#4 Codex #2)"
+    return "Slice D2 (#6 DeepSeek #2) / 待分诊"
+
+
+def _write_markdown(
+    wave: str,
+    rows: list[BotRow],
+    err_counts: Counter[str],
+    err_bots: defaultdict[str, set[str]],
+    slow_tools: list[tuple[float, str, str]],
+    out_path: pathlib.Path,
+) -> pathlib.Path:
+    """Export a ready-to-file Markdown triage report with auto-generated work orders."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    n_done = sum(1 for r in rows if r.status in ("done", "completed"))
+    n_crash = sum(1 for r in rows if r.status == "crash")
+    n_incomplete = sum(1 for r in rows if r.status == "incomplete")
+    lines: list[str] = [
+        f"# FLEET TRIAGE — `{wave}`",
+        "",
+        f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} · "
+        f"bot 目录 `{len(rows)}` · completed `{n_done}` · crash `{n_crash}` · incomplete `{n_incomplete}`",
+        "",
+        "## 1. 各路成绩总览",
+        "",
+        "| Squad | Bot | Stage | Status | Score | Eps | Deaths | Guard | Preempt | 429 | Gained |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for r in sorted(rows, key=lambda x: (x.squad, x.name)):
+        g = ", ".join(r.gained_short[:4])
+        lines.append(
+            f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.score} | {r.episodes_done} | "
+            f"{r.deaths} | {r.guardian_incidents} | {r.preemptions} | {r.http_429} | {g} |"
+        )
+    lines.extend(["", "## 2. 跨模型 P0/P1 错误榜单", ""])
+    ranked = sorted(err_counts.items(), key=lambda kv: (-len(err_bots[kv[0]]), -kv[1]))
+    if ranked:
+        lines.extend(
+            [
+                "| # | 影响 bot 数 | 次数 | 错误码 | 样本 bot | 建议归属 |",
+                "|---:|---:|---:|---|---|---|",
+            ]
+        )
+        for i, (key, cnt) in enumerate(ranked[:20], 1):
+            bots = sorted(err_bots[key])
+            lines.append(f"| {i} | {len(bots)} | {cnt} | `{key}` | {', '.join(bots[:4])} | {_suggest_owner(key)} |")
+    else:
+        lines.append("*（无工具失败事件）*")
+    lines.extend(["", "## 3. 自动工单（Work Orders）", ""])
+    ticket_no = 0
+    for r in rows:
+        if r.status == "crash":
+            ticket_no += 1
+            lines.extend(
+                [
+                    f"### FLEET-{ticket_no:03d} | P0 | 启动崩溃 | 状态: OPEN",
+                    f"- **影响 bot**：`{r.name}` (stage=`{r.stage}`)",
+                    "- **证据**：`stdout.log` traceback tail：",
+                    "```text",
+                    (r.crash_tail or "<no tail>"),
+                    "```",
+                    "- **验收标准**：`py_compile` 通过 + 该 stage 单机能进入首个 episode。",
+                    "",
+                ]
+            )
+    for key, cnt in ranked[:10]:
+        if cnt < 2 and len(err_bots[key]) < 2:
+            continue
+        ticket_no += 1
+        bots = sorted(err_bots[key])
+        lines.extend(
+            [
+                f"### FLEET-{ticket_no:03d} | P1 | `{key}` | 状态: OPEN",
+                f"- **影响范围**：{len(bots)} bots / {cnt} 次 — {', '.join('`'+b+'`' for b in bots[:8])}",
+                f"- **建议归属**：{_suggest_owner(key)}",
+                "- **验收标准**：对应工具失败次数归零或返回可恢复错误码，补离线回归单测并跑通全量 `pytest`。",
+                "",
+            ]
+        )
+    if slow_tools:
+        lines.extend(["## 4. 超时穿透工具（≥{:.0f}s）".format(SLOW_TOOL_THRESHOLD_S), "",
+                      "| 耗时 | Bot | 工具 |", "|---:|---|---|"])
+        for dt, nm, tool in sorted(slow_tools, reverse=True)[:15]:
+            lines.append(f"| {dt:.0f}s | `{nm}` | `{tool}` |")
+        lines.append("")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path
+
+
+def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib.Path | None = None) -> int:
+    root = runs_root or RUNS_ROOT
+    wave_dir = root / wave
     bot_dirs = sorted(p for p in wave_dir.iterdir() if p.is_dir()) if wave_dir.is_dir() else []
     if not bot_dirs:
         print(f"No run directories found under {wave_dir}")
         return 1
 
-    # Aggregate cross-model P0/P1 errors & squad scores
+    rows: list[BotRow] = []
     err_counts: Counter[str] = Counter()
     err_bots: defaultdict[str, set[str]] = defaultdict(set)
     slow_tools: list[tuple[float, str, str]] = []
-    rows = []
 
     for bd in bot_dirs:
-        name = bd.name
-        squad = name.split("_")[0]
-        summaries = sorted(bd.glob("wild-endurance-*.json"))
-        score = 0
-        deaths = 0
-        g_inc = 0
-        status = "running"
-        gained_all: list[str] = []
-        if summaries:
-            try:
-                d = json.loads(summaries[-1].read_text())
-                score = int(d.get("final_score", 0) or 0)
-                status = "done"
-                g_inc = int((d.get("guardian") or {}).get("incidents", 0) or 0)
-                for ep in (d.get("curriculum") or {}).get("episodes") or d.get("episodes") or []:
-                    gained_all.extend(ep.get("gained_advancements") or [])
-            except Exception:
-                pass
-        c429 = 0
-        t_start: dict[str, tuple[str, float]] = {}
-        for evf in sorted(bd.glob("*.events.jsonl")):
-            for ln in evf.read_text(errors="ignore").splitlines():
-                if not ln.strip():
-                    continue
-                if '"429"' in ln or "rate_limit" in ln.lower():
-                    c429 += 1
-                try:
-                    ev = json.loads(ln)
-                except Exception:
-                    continue
-                tp = ev.get("type", "")
-                if tp == "guardian.incident":
-                    if not summaries:
-                        g_inc += 1
-                    if "death_or_connection_changed" in (ev.get("reasons") or []):
-                        deaths += 1
-                elif tp == "tool.started":
-                    t_start[str(ev.get("call_id"))] = (str(ev.get("name") or "?"), float(ev.get("elapsed") or 0))
-                elif tp == "tool.finished":
-                    cid = str(ev.get("call_id"))
-                    nm = str(ev.get("name") or "?")
-                    if cid in t_start:
-                        nm, s0 = t_start.pop(cid)
-                        dt = max(0.0, float(ev.get("elapsed") or 0) - s0)
-                        if dt >= 60.0:
-                            slow_tools.append((dt, name, nm))
-                    if ev.get("ok") is False:
-                        err = ev.get("error")
-                        code = err.get("code") if isinstance(err, dict) else str(err or "unknown_fail")
-                        key = f"{nm}:{code}"
-                        err_counts[key] += 1
-                        err_bots[key].add(name)
-        rows.append((squad, name, status, score, deaths, g_inc, c429, sorted(set(gained_all))))
+        row = triage_bot_dir(bd)
+        rows.append(row)
+        for key, cnt in row.top_errors:
+            err_counts[key] += cnt
+            err_bots[key].add(row.name)
+        slow_tools.extend(row.slow_calls)
 
     print(f"\n================ FLEET TRIAGE: {wave} ({len(rows)} bots) ================")
-    for sq, nm, st, sc, dth, gi, r429, gnd in rows:
-        g_str = ",".join(x.split("/")[-1] for x in gnd[:4])
-        print(f"  [{sq:3s}] {nm:30s} {st:7s} score={sc:3d} deaths={dth:2d} guard={gi:2d} 429={r429:2d} gained=[{g_str}]")
+    for r in rows:
+        print(
+            f"  [{r.squad:3s}] {r.name:30s} {r.status:10s} score={r.score:3d} eps={r.episodes_done:2d} "
+            f"deaths={r.deaths:2d} guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
+            f"429={r.http_429:2d} gained=[{','.join(r.gained_short[:4])}]"
+        )
+        if r.status == "crash" and r.crash_tail:
+            tail = r.crash_tail.splitlines()[-1]
+            print(f"        crash: {tail[:150]}")
 
     print("\n--- CROSS-MODEL P0/P1 BUG LEADERBOARD (ranked by affected_bots x count) ---")
     ranked = sorted(err_counts.items(), key=lambda kv: (-len(err_bots[kv[0]]), -kv[1]))
-    for key, cnt in ranked[:15]:
-        bots = sorted(err_bots[key])
-        print(f"  {len(bots):2d} bots | {cnt:3d}x | {key:42s} | sample={bots[:4]}")
+    if ranked:
+        for key, cnt in ranked[:15]:
+            bots = sorted(err_bots[key])
+            print(f"  {len(bots):2d} bots | {cnt:3d}x | {key:48s} | sample={bots[:4]}")
+    else:
+        print("  (no tool-failure events parsed)")
 
     if slow_tools:
-        print("\n--- SLOW TOOL CALLS (>=60s) ---")
+        print(f"\n--- SLOW TOOL CALLS (>={SLOW_TOOL_THRESHOLD_S:.0f}s) ---")
         for dt, nm, tool in sorted(slow_tools, reverse=True)[:10]:
             print(f"  {dt:5.1f}s | {nm:28s} | {tool}")
+
+    if markdown is not False:
+        out_path = (
+            pathlib.Path(markdown).expanduser()
+            if isinstance(markdown, str)
+            else wave_dir / f"triage-{wave}.md"
+        )
+        try:
+            written = _write_markdown(wave, rows, err_counts, err_bots, slow_tools, out_path)
+            print(f"\n[Markdown 工单] {written}")
+        except OSError as exc:
+            print(f"\n[Markdown 工单] 导出失败: {exc}")
     return 0
 
 
@@ -278,12 +594,17 @@ def main() -> int:
     lp.add_argument("--stagger", type=float, default=1.5)
     tp = sub.add_parser("triage")
     tp.add_argument("--wave", required=True)
+    tp.add_argument("--runs-root", default=None, help="Override runs/ root (default: MC_FLEET_RUNS_ROOT or <worktree>/runs)")
+    tp.add_argument("--markdown", nargs="?", const=True, default=None, help="Export Markdown work orders (optional path)")
+    tp.add_argument("--no-markdown", action="store_true", help="Skip Markdown export")
     args = ap.parse_args()
     if args.cmd == "provision":
         return cmd_provision()
     if args.cmd == "launch":
         return cmd_launch(args.wave, args.duration, args.max_episodes, {s.strip() for s in args.squads.split(",") if s.strip()}, args.stagger)
-    return cmd_triage(args.wave)
+    md: str | bool | None = False if args.no_markdown else args.markdown
+    return cmd_triage(args.wave, md, pathlib.Path(args.runs_root).expanduser() if args.runs_root else None)
+
 
 
 if __name__ == "__main__":
