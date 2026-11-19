@@ -747,6 +747,7 @@ class SceneWatchdog(threading.Thread):
         self._stop.set()
 
     def _owned_total(self) -> int | None:
+        """Total item count from the real `/inventory` shape (items[] + offhand + armor)."""
         try:
             inv = self.bot.inventory()
         except Exception:
@@ -754,13 +755,40 @@ class SceneWatchdog(threading.Thread):
         if not isinstance(inv, dict):
             return None
         total = 0
-        for k, v in inv.items():
-            if str(k).startswith("_"):
-                continue
-            try:
-                total += int(v)
-            except (TypeError, ValueError):
-                continue
+        items = inv.get("items")
+        if isinstance(items, list):
+            for row in items:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    total += int(row.get("count") or 0)
+                except (TypeError, ValueError):
+                    continue
+        else:
+            # Tolerate a legacy flat {item: count} mapping used by older API builds/tests.
+            for k, v in inv.items():
+                if str(k).startswith("_") or str(k) in ("offhand", "armor"):
+                    continue
+                try:
+                    total += int(v)
+                except (TypeError, ValueError):
+                    continue
+        off = inv.get("offhand")
+        if isinstance(off, dict):
+            onm = str(off.get("name") or "").removeprefix("minecraft:")
+            if onm and onm != "air":
+                try:
+                    total += max(1, int(off.get("count") or 1))
+                except (TypeError, ValueError):
+                    total += 1
+        armor = inv.get("armor")
+        if isinstance(armor, dict):
+            for slot in ("head", "chest", "torso", "legs", "feet"):
+                piece = armor.get(slot)
+                if isinstance(piece, dict):
+                    anm = str(piece.get("name") or "").removeprefix("minecraft:")
+                    if anm and anm != "air":
+                        total += 1
         return total
 
     def _tick(self) -> None:
@@ -768,10 +796,17 @@ class SceneWatchdog(threading.Thread):
             st = self.bot.status()
         except Exception:
             return
-        if not st or not st.get("ready"):
+        if not st:
+            return
+        ready = bool(st.get("ready"))
+        health = float(st.get("health") or 0.0)
+        alive = st.get("alive")
+        # The API reports ready=false for the whole death/respawn window; do not skip it, otherwise
+        # the death itself is never observed and the bot comes back with an empty inventory.
+        dead_signal = health <= 0.0 or alive is False
+        if not ready and not dead_signal:
             return
         pos = st.get("pos") or []
-        health = float(st.get("health") or 0.0)
         dim = str(st.get("dimension") or "overworld").lower()
         in_nether = "nether" in dim
         in_end = "end" in dim
@@ -784,8 +819,8 @@ class SceneWatchdog(threading.Thread):
             if isinstance(pos, (list, tuple)) and len(pos) >= 3
             else float("inf")
         )
-        drifted = dim_matches and dist > self.scene.drift_limit
-        suspected_death = health <= 0.0
+        drifted = dim_matches and dist > self.scene.drift_limit and ready
+        suspected_death = dead_signal
         if not suspected_death:
             self._inv_tick += 1
             if self._inv_tick % 3 == 1:  # sample on the very first tick, then every 3rd (~24s)
