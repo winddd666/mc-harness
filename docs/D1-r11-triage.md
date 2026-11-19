@@ -912,6 +912,24 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - 快照字段：summaries/bots、episode 状态分布、http_retry、失败 429/502、Traceback —— 直接回答"hy4 4 并发 + rpm=6 是否 0 次 429"
 - 追踪重点：BUG-030 `depth_reset`、BUG-037 阶梯、`unstick` 慢调用、过夜长程新 P0/P1
 
+## 4bf. r24_long 终验（4/4）与 r22_long 对比（01:23）
+
+| bot | r22_long | r24_long | 变化 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | 195 | 180 | -15 |
+| `hy4_hy_1_bare` | **10**（11 集） | **35**（6 集） | **+25** |
+| `ds_ds_1_bare` | 20 | 40 | +20 |
+| `nju_movetest_01_bare` | 35 | 35 | 0 |
+
+- **门禁 ALL PASS**：deaths 5、cooldown 64.5s、mine 0.90、zero-slice **0.0%**、over-cap **0**、runtime_error 1
+- `hy4_1` 从 10→35：r24 已含 BUG-041 修复（低镐提示 + 同格快速失败），裸开卡死明显缓解
+- `ds_1` 20→40 同步改善
+
+**过夜双轨已启动（01:23）**
+- `overnight_12bot`：12 路，刚起（14 事件文件，2 集 goal_satisfied）
+- `hy4_audit_r25`：4 路，刚起（4 事件文件）
+- 低频审计器 PID **1736176**（45 分钟抽检或收官即报）；hy4 轨 429 目标 = 0
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
