@@ -4494,6 +4494,25 @@ class MacroSkills:
         try:
             result = self.bot.call("window/act", {"target": target, "ops": ops})
         except ApiError as err:
+            if err.code == "no_window" and x is not None and y is not None and z is not None and block:
+                try:
+                    got = self.bot.call("get_block", {"pos": [x, y, z]})
+                    actual = str((got or {}).get("name") or "").removeprefix("minecraft:")
+                except ApiError:
+                    actual = ""
+                if actual and actual != str(block).removeprefix("minecraft:"):
+                    return {
+                        "ok": False,
+                        "error": "window_target_mismatch",
+                        "target": [x, y, z],
+                        "expected": block,
+                        "actual": actual,
+                        "message": (
+                            f"目标 {[x, y, z]} 实际是 {actual}，不是 {block}；"
+                            "请用 mc_find_blocks(types=['brewing_stand']) 重新定位，"
+                            "或省略 x/y/z 让工具自动搜索附近酿造台。不要重复同一坐标。"
+                        ),
+                    }
             return self._window_api_error(err)
 
         view: dict[str, Any] | None = None

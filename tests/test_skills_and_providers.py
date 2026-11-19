@@ -1914,6 +1914,39 @@ def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, ga
         assert "error" not in result
 
 
+def test_brew_no_window_reports_wrong_block_at_coordinates() -> None:
+    """r16 brewing used a coordinate that actually held cobblestone."""
+    calls = []
+
+    def handler(request):
+        path = request.url.path
+        calls.append(path)
+        if path.endswith("/window/act"):
+            return httpx.Response(
+                200, json={"ok": False, "error": {"code": "no_window", "message": "cobblestone did not open a GUI"}}
+            )
+        if path.endswith("/get_block"):
+            return httpx.Response(200, json={"ok": True, "result": {"name": "cobblestone"}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).brew_once(
+            "nether_wart",
+            bottles=[{"item": "potion", "count": 1}],
+            block="brewing_stand",
+            x=10,
+            y=64,
+            z=10,
+            wait=False,
+        )
+    assert result["ok"] is False
+    assert result["error"] == "window_target_mismatch"
+    assert result["actual"] == "cobblestone"
+    assert len(calls) == 2
+    assert calls[0].endswith("/window/act")
+    assert calls[1].endswith("/get_block")
+
+
 def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
     """r15 P2-21: dig timeout was retried on the same coordinate."""
     from mc_agent.harness.mc_tools import McToolset
