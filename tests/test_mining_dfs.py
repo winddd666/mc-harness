@@ -2130,7 +2130,11 @@ def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> 
         assert tip.edge_from_parent.waypoints == [(0, 20, 0), (1, 19, 0)]
         assert tip.branches[0].status == "pending"
         assert branch.status == "completed"
-    assert result["stop_reason"] == "time_slice"
+    assert result["stop_reason"] == "time_slice_progress"
+    assert result["ok"] is True
+    assert result["goal_met"] is False
+    assert result["pos_before"] == [0.5, 20.0, 0.5]
+    assert result["pos_after"] == [1.5, 19.0, 0.5]
     assert not world.dig_log
 
 
@@ -2337,3 +2341,68 @@ def test_explore_does_not_open_a_fake_collar_after_a_disconnected_move(monkeypat
     assert "另一处实心站位" in result["message"]
     assert result["tree"]["node_count"] == 0
     assert not world.dig_log
+
+
+def test_timed_slice_with_confirmed_dig_remains_retryable_at_same_cell(monkeypatch) -> None:
+    from mc_agent.harness.agent import _RepeatFailureGuard
+    from mc_agent.harness.tool_registry import Tool
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    with BotSession("tok", bot_username="RetryableSlice", transport=httpx.MockTransport(world.handler)) as bot:
+        toolset = McToolset(bot)
+        toolset.update_block_pos([0, 20, 0])
+        engine = toolset.skills.mining_dfs
+        attempts = 0
+
+        def cut_off_after_dig(*, deadline, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            engine.bot.status()
+            engine.bot.call("dig", {"pos": [attempts, 19, 0], "collect": False})
+            clock.now = deadline
+            engine.bot.status()
+
+        monkeypatch.setattr(engine, "_run", cut_off_after_dig)
+        tool = _RepeatFailureGuard(toolset).wrap_tool(Tool(
+            name="mc_skill_mine_dfs", description="Mine", parameters={},
+            handler=toolset.mc_skill_mine_dfs,
+        ))
+        first = json.loads(tool.handler(target="iron", max_duration_s=20))
+        second = json.loads(tool.handler(target="iron", max_duration_s=20))
+
+    assert attempts == 2
+    for result in (first, second):
+        assert result["stop_reason"] == "time_slice_progress"
+        assert result["dug_count"] == 1
+        assert result["pos_before"] == result["pos_after"]
+        assert result["gained"] == {}
+        assert result["goal_met"] is False
+
+
+def test_timed_slice_credits_only_observed_target_items(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    with BotSession("tok", bot_username="VerifiedSliceItems", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+
+        def cut_off_after_inventory(*, deadline, **kwargs):
+            engine.bot.inventory()
+            world._add_item("raw_iron")
+            engine.bot.inventory()
+            world._add_item("raw_iron")
+            clock.now = deadline
+            engine.bot.inventory()
+
+        monkeypatch.setattr(engine, "_run", cut_off_after_inventory)
+        result = engine.run(target="iron", goal_count=2, max_duration_s=5.0)
+
+    assert world._count("raw_iron") == 2
+    assert result["target_gained"] == 1
+    assert result["gained"] == {"raw_iron": 1}
+    assert result["goal_met"] is False

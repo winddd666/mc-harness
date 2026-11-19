@@ -27,6 +27,7 @@ from .library import (
     _compute_empty_slots,
     _expected_drops_for_blocks,
     _inventory_counts,
+    _inventory_counts_from_raw,
     _inventory_snapshot_and_counts,
     _normalize_drop_name,
     _positive_inv_delta,
@@ -311,8 +312,12 @@ class _BudgetSession:
 
     def __init__(self, bot: Any, deadline: float) -> None:
         self.deadline = deadline
+        self.first_pos: list[float] | None = None
         self.last_status: dict[str, Any] = {}
+        self.first_inventory: dict[str, Any] | None = None
+        self.last_inventory: dict[str, Any] | None = None
         self.timed_out = False
+        self.dug_count = 0
         self.positions: list[tuple[int, int, int]] = []
         self.session = copy.copy(bot)
         self._call = self.session.call
@@ -339,8 +344,17 @@ class _BudgetSession:
         except httpx.TimeoutException as exc:
             self.timed_out = True
             raise _MiningDeadline from exc
-        if path.lstrip("/") == "status":
+        endpoint = path.lstrip("/")
+        if endpoint == "dig" and result.get("dug"):
+            self.dug_count += 1
+        if endpoint == "inventory" and isinstance(result.get("items"), list):
+            if self.first_inventory is None:
+                self.first_inventory = result
+            self.last_inventory = result
+        if endpoint == "status":
             self.last_status = result
+            if self.first_pos is None and result.get("pos"):
+                self.first_pos = list(result["pos"])
             if result.get("pos") and result.get("on_ground", True):
                 cell = _floor_pos(result["pos"])
                 if not self.positions or cell != self.positions[-1]:
@@ -4678,6 +4692,7 @@ class MiningDFSEngine:
     ) -> dict[str, Any]:
         budget = max(0.0, min(90.0, float(max_duration_s)))
         deadline = time.monotonic() + budget
+        act = str(action or "explore").strip().lower()
         original_bot, original_skills = self.bot, self.skills
         previous_deadline = getattr(self, "_deadline", None)
         scoped = _BudgetSession(original_bot, deadline - min(0.5, budget / 10))
@@ -4689,7 +4704,7 @@ class MiningDFSEngine:
             result = self._run(target=target, goal_count=goal_count, target_y=target_y,
                                action=action, geofence=geofence,
                                strategy=strategy, deadline=scoped.deadline)
-            if str(action or "explore").strip().lower() == "explore":
+            if act == "explore":
                 requested = max(1, min(64, int(goal_count)))
                 result["goal_met"] = int(result.get("target_gained", 0)) >= requested
             return result
@@ -4717,15 +4732,38 @@ class MiningDFSEngine:
                                 )
                         break
             self._archive_current_shaft_to_ledger(mark_exhausted=False)
-            act = str(action or "explore").strip().lower()
             result: dict[str, Any] = {
                 "ok": False, "requires_replan": True, "action": act,
                 "strategy": self.strategy, "stop_reason": "time_slice",
-                "pos_after": scoped.last_status.get("pos"), "tree": self.snapshot(),
-                "message": "本轮时间预算已用尽，已保留矿井与回撤路径；可用相同 action 继续。",
+                "pos_before": scoped.first_pos, "pos_after": scoped.last_status.get("pos"),
+                "tree": self.snapshot(),
+                "message": "本轮在时间限制内未确认进展，请检查当前位置和障碍后再选择下一步。",
             }
             if act == "explore":
-                result["goal_met"] = False
+                gained = {}
+                if scoped.first_inventory is not None and scoped.last_inventory is not None:
+                    gained = _positive_inv_delta(
+                        _inventory_counts_from_raw(scoped.first_inventory),
+                        _inventory_counts_from_raw(scoped.last_inventory),
+                    )
+                profile = _resolve_target_profile(target, target_y)
+                target_gained = sum(gained.get(item, 0) for item in profile["expected_items"])
+                requested = max(1, min(64, int(goal_count)))
+                moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
+                result.update(
+                    goal_met=target_gained >= requested,
+                    goal_count=requested,
+                    target_gained=target_gained,
+                    gained=gained,
+                    dug_count=scoped.dug_count,
+                )
+                if moved or scoped.dug_count or gained:
+                    result.update(
+                        ok=True,
+                        requires_replan=False,
+                        stop_reason="quota_reached" if result["goal_met"] else "time_slice_progress",
+                        message="本轮已保留确认的采掘进展和回撤路径，可以继续 explore。",
+                    )
             if act in {"climb_out", "climb"} and scoped.positions:
                 start_y, end_y = scoped.positions[0][1], scoped.positions[-1][1]
                 target_height = int(self.collar_ceiling_y) - 16 if self.collar_ceiling_y is not None else start_y
