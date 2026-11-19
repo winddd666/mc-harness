@@ -1123,6 +1123,84 @@ def ensure_bot_ready(
     raise RuntimeError(f"bot did not become ready after {attempts} attempts (cooldown waited {waited:.0f}s)")
 
 
+SCENE_FOCUS: dict[str, dict[str, Any]] = {
+    # SCENE-001: the three scenario stages must open with a stage-specific target instead of the
+    # generic island_recon -> shiny_gear curriculum, otherwise their scores measure nothing.
+    "village_trade": {
+        "key": "minecraft:adventure/trade",
+        "title": "15分：与村民完成一次交易",
+        "points": 15,
+        "tier": 2,
+        "budget_class": "short",
+        "task": (
+            "本场景已站在村庄内，背包备有 emerald 32 / wheat 32 / stick 64 / paper 32 / coal 32。"
+            "立刻扫描 24m 内 villager，对最近的一个调用 mc_window_view(entity_id=...) 读取报价；"
+            "只要有一项 available=true 且背包材料够，马上 mc_skill_trade(entity_id=..., option=...) 成交，"
+            "优先 paper/wheat 换绿宝石。若返回 no_window/无业，换下一个村民，禁止对同一村民反复重试。"
+        ),
+        "extra_tools": ("mc_skill_trade", "mc_window_view", "mc_interact"),
+        "advancement_id": "minecraft:adventure/trade",
+    },
+    "brewing_alchemy": {
+        "key": "minecraft:nether/brew_potion",
+        "title": "15分：酿出任意一瓶药水",
+        "points": 15,
+        "tier": 2,
+        "budget_class": "short",
+        "task": (
+            "出生点已放好酿造台与 2x2 无限水源，背包有 glass_bottle 9 / nether_wart 8 / blaze_powder 8。"
+            "先用玻璃瓶装 3 瓶水，然后 mc_skill_brew(bottles=3, ingredient='nether_wart') 酿粗制药水，"
+            "轮询 brew_time_left 到 0 即解锁 nether/brew_potion；再用 blaze_powder 可加速下一次酿造。"
+            "不要离开出生点去挖矿。"
+        ),
+        "extra_tools": ("mc_skill_brew", "mc_window_view", "mc_interact"),
+        "advancement_id": "minecraft:nether/brew_potion",
+    },
+    "cave_combat": {
+        "key": "minecraft:adventure/kill_a_mob",
+        "title": "5分：击杀竞技场内的敌对生物并存活",
+        "points": 5,
+        "tier": 2,
+        "budget_class": "short",
+        "task": (
+            "你被封闭在 11x11 战斗竞技场，场内已有一只僵尸与一只骷髅，背包有铁剑/盾/弓/铁甲。"
+            "先 mc_posture(shield=True) 举盾贴近僵尸，用铁剑击杀即可解锁 adventure/kill_a_mob；"
+            "骷髅在远处时用盾挡箭或弓箭反制，低血量退到角落回血，不要在开阔处站桩。"
+        ),
+        "extra_tools": ("mc_posture",),
+        "advancement_id": "minecraft:adventure/kill_a_mob",
+    },
+}
+
+
+def install_scene_focus(stage: str, episodes: int = 2) -> bool:
+    """Force the first `episodes` curriculum picks to a stage-specific target (SCENE-001).
+
+    `CurriculumSupervisor.run()` resolves `select_next_target` from the module namespace at call
+    time, so wrapping that module function is enough — no core `harness/` edits. After the focus
+    budget is exhausted the original selector takes over again.
+    """
+    spec = SCENE_FOCUS.get(stage)
+    if not spec or episodes <= 0:
+        return False
+    from mc_agent.harness import curriculum as cur
+
+    target = cur.CurriculumTarget(**spec)
+    state = {"remaining": int(episodes)}
+    original = cur.select_next_target
+
+    def _wrapped(*args: Any, **kwargs: Any):
+        fallback, frontier = original(*args, **kwargs)
+        if state["remaining"] > 0:
+            state["remaining"] -= 1
+            return target, frontier
+        return fallback, frontier
+
+    cur.select_next_target = _wrapped
+    print(f"[Scene Focus] stage={stage} first {episodes} episode(s) -> {target.key}", flush=True)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bot", type=str, default=BOT)
@@ -1155,6 +1233,12 @@ def main() -> int:
     )
     parser.add_argument("--tag", type=str, default="wild")
     parser.add_argument("--keep-time", action="store_true", help="Do not reset world time to morning")
+    parser.add_argument(
+        "--focus-episodes",
+        type=int,
+        default=2,
+        help="For scene stages, force this many opening episodes onto the stage-specific target (0 disables)",
+    )
     parser.add_argument(
         "--print-plan",
         action="store_true",
@@ -1303,6 +1387,7 @@ def main() -> int:
 
         watchdog = SceneWatchdog(bot, bot_name, scene, near_container=_near_known_container)
         watchdog.start()
+        install_scene_focus(args.stage, args.focus_episodes)
         try:
             sup = CurriculumSupervisor(
                 bot,
