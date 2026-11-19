@@ -514,6 +514,17 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 - `ds_ds_1_bare` 铁器集 6 次 `time_budget` 全是 7~9 步 → 不是首步问题；模型一次要 40 步，45s 必然做不完
 - `missing_fuel` 后**没有恢复动作**（未 harvest_logs），铁器时代卡死 → P2-28 提示必须给出下一步
 
+### 4v. BUG-030 竖井树追踪（23:30）
+
+| bot | 现象 | 结论 |
+|---|---|---|
+| `hy4_hy_2_iron` | 树跨集保留 `node_count 1→7`；受伤后 **变 0**、位置回 `y=67` | 受伤/死亡路径**清空竖井树** |
+| `hy4_hy_4_cave_combat` | 树保留 `node_count=19`，但 `active_node_id` 回退 16/9/5、位置在 `y=39/51` | 有记忆但**不导航到最深节点**，反而上爬 |
+
+→ BUG-030 修复点：① 受伤/死亡分支不要清 `nodes`；② `run()` 入口优先导航到 `active_node`/最深节点，而不是 `collar`。
+
+**BUG-036 损失量化**：`nju_movetest` 425.7s / 2700s → 损失 **84%** 预算。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
