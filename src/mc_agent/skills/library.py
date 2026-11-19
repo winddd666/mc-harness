@@ -6845,10 +6845,13 @@ class MacroSkills:
                     scaffold_item = cand
                     break
 
-        replaceable = {
-            "air", "cave_air", "void_air", "short_grass", "tall_grass", "fern",
-            "large_fern", "snow", "leaf_litter", "dead_bush", "dandelion", "poppy",
-            "water", "flowing_water", "fire",
+        non_diggable = {
+            "air", "cave_air", "void_air", "water", "flowing_water", "lava", "flowing_lava", "fire",
+        }
+        solid_scaffold_ok = {
+            "stone", "cobblestone", "dirt", "grass_block", "deepslate", "cobbled_deepslate",
+            "netherrack", "obsidian", "sandstone", "andesite", "diorite", "granite",
+            "oak_planks", "spruce_planks", "birch_planks", "dark_oak_planks",
         }
 
         def _blk_name(x: int, y: int, z: int) -> str:
@@ -6860,7 +6863,7 @@ class MacroSkills:
 
         def _clear_cell(x: int, y: int, z: int) -> None:
             nm = _blk_name(x, y, z)
-            if nm and nm not in replaceable and nm != "obsidian":
+            if nm and nm not in non_diggable and nm != "obsidian":
                 try:
                     self.bot.call("dig", {"pos": [x, y, z]})
                 except Exception:
@@ -6870,9 +6873,9 @@ class MacroSkills:
             nm = _blk_name(x, y, z)
             if nm == item_name:
                 return True
-            if item_name != "obsidian" and nm and nm not in replaceable:
-                return True  # Existing solid block already serves as scaffold!
-            if nm and nm not in replaceable:
+            if item_name != "obsidian" and nm in solid_scaffold_ok:
+                return True  # Existing truly solid block already serves as scaffold!
+            if nm and nm not in non_diggable:
                 try:
                     self.bot.call("dig", {"pos": [x, y, z]})
                 except Exception:
@@ -6905,7 +6908,7 @@ class MacroSkills:
         if scaffold_item:
             for fx in range(bx, bx + 4):
                 nm = _blk_name(fx, by - 1, bz)
-                if not nm or nm in replaceable:
+                if nm not in solid_scaffold_ok:
                     _ensure_block(fx, by - 1, bz, scaffold_item)
 
         # 3) Build 4x5 frame (bottom bar -> bottom corners -> left/right pillars -> top corner -> top bar)

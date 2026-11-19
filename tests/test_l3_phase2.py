@@ -1274,6 +1274,86 @@ def test_build_nether_portal_and_mc_interact_vertical_guard(monkeypatch) -> None
     assert out["error"]["code"] == "out_of_reach_vertical"
 
 
+def test_nether_dimension_prioritizes_nether_advancements_and_wildflowers_portal(monkeypatch) -> None:
+    """In `the_nether`, Nether advancements outrank Overworld ones; build_nether_portal digs `wildflowers` before scaffold."""
+    from mc_agent.harness.curriculum import select_next_target
+    from mc_agent.skills.library import MacroSkills
+
+    monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda _: None)
+    dug: list[list[int]] = []
+    placed: list[tuple[list[int], str]] = []
+    blocks: dict[tuple[int, int, int], str] = {(12, 64, 22): "wildflowers"}
+
+    class _NetherAndFlowerBot:
+        def status(self):
+            return {"pos": [10.5, 64.0, 20.5], "dimension": "minecraft:the_nether", "in_water": False, "alive": True, "ready": True}
+
+        def advancements(self, **kwargs):
+            return self.call("advancements")
+
+        def inventory(self):
+            return {
+                "items": [
+                    {"name": "diamond_pickaxe", "count": 1},
+                    {"name": "obsidian", "count": 14},
+                    {"name": "flint_and_steel", "count": 1},
+                    {"name": "cobblestone", "count": 32},
+                    {"name": "gold_ingot", "count": 16},
+                ]
+            }
+
+        def call(self, action, body=None, **kwargs):
+            if action == "advancements":
+                return {
+                    "advancements": [
+                        {"id": "minecraft:story/root", "status": "completed"},
+                        {"id": "minecraft:story/mine_stone", "status": "completed"},
+                        {"id": "minecraft:story/upgrade_tools", "status": "completed"},
+                        {"id": "minecraft:story/smelt_iron", "status": "completed"},
+                        {"id": "minecraft:story/iron_tools", "status": "completed"},
+                        {"id": "minecraft:story/shiny_gear", "status": "completed"},
+                        {"id": "minecraft:story/enter_the_nether", "status": "completed"},
+                        {"id": "minecraft:nether/root", "status": "completed"},
+                        {"id": "minecraft:story/deflect_arrow", "status": "not_started"},
+                        {"id": "minecraft:husbandry/make_a_sign_glow", "status": "not_started"},
+                        {"id": "minecraft:nether/find_fortress", "status": "not_started"},
+                        {"id": "minecraft:nether/distract_piglin", "status": "not_started"},
+                    ]
+                }
+            if action == "get_block":
+                p = tuple(int(v) for v in (body or {}).get("pos", [0, 0, 0]))
+                if p in blocks:
+                    return {"name": blocks[p]}
+                return {"name": "stone" if p[1] == 63 else "air"}
+            if action == "dig":
+                p = tuple(int(v) for v in body["pos"])
+                dug.append(list(p))
+                blocks[p] = "air"
+                return {"ok": True}
+            if action == "place":
+                p = tuple(int(v) for v in body["pos"])
+                placed.append((list(p), str(body["item"])))
+                blocks[p] = str(body["item"])
+                return {"ok": True}
+            if action == "find_blocks":
+                return {"blocks": [{"name": "nether_portal", "pos": [10, 65, 22]}]}
+            return {"ok": True}
+
+    bot = _NetherAndFlowerBot()
+    # 1) In the Nether, Nether advancements (tier=1) MUST beat Overworld `make_a_sign_glow` / `deflect_arrow`!
+    target, _ = select_next_target(bot)
+    assert target.key.startswith("minecraft:nether/")
+    assert target.tier == 1
+
+    # 2) In Overworld with `wildflowers` at bottom-right corner (12, 64, 22), build_nether_portal MUST dig wildflowers and place scaffold!
+    bot.status = lambda: {"pos": [10.5, 64.0, 20.5], "dimension": "minecraft:overworld", "in_water": False, "alive": True, "ready": True}
+    res = MacroSkills(bot).build_nether_portal(enter=False)
+    assert res["ok"] is True
+    assert [12, 64, 22] in dug
+    assert ([12, 64, 22], "cobblestone") in placed
+
+
+
 
 
 

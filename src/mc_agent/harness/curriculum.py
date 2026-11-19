@@ -654,8 +654,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         tier=2,
         budget_class="short",
         task=(
-            "解锁 adventure/trade(15分)：前往已知村民聚落扫描 villager 实体，先用 mc_window_view(entity_id=...) 查看可用交易选项，"
-            "携绿宝石/纸/铁锭/农作物调 mc_skill_trade(entity_id=..., option=...) 完成一次交易。"
+            "解锁 adventure/trade(15分)：前往已知村民聚落扫描 villager 实体，用 mc_window_view(entity_id=...) 查看交易选项；"
+            "一旦某个村民返回 available=true 且背包已备齐对应 give 物品（如 paper/emerald/wheat/coal），立即对该村民调 mc_skill_trade(entity_id=..., option=...) 完成交易（不要再逛其他村民）！"
+            "若某村民返回 no_window 说明其无业或在睡觉，严禁对同一村民重复重试。"
         ),
         extra_tools=("mc_skill_trade", "mc_window_view"),
         advancement_id="minecraft:adventure/trade",
@@ -734,6 +735,32 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         ),
         extra_tools=("mc_skill_build_portal", "mc_interact", "mc_posture"),
         advancement_id="minecraft:story/enter_the_nether",
+    ),
+    "minecraft:nether/distract_piglin": CurriculumTarget(
+        key="minecraft:nether/distract_piglin",
+        title="5分：用金锭转移猪灵注意力（下界）",
+        points=5,
+        tier=3,
+        budget_class="short",
+        task=(
+            "解锁 nether/distract_piglin(5分)：在下界先确保穿戴 golden_boots（避免猪灵敌对），扫描附近 piglin 实体，"
+            "靠近至 6 格内用 mc_interact(entity_id=..., item='gold_ingot') 或丢出 1 个 gold_ingot 让猪灵拾取交易即可解锁。"
+        ),
+        extra_tools=("mc_interact", "mc_drop"),
+        advancement_id="minecraft:nether/distract_piglin",
+    ),
+    "minecraft:nether/find_fortress": CurriculumTarget(
+        key="minecraft:nether/find_fortress",
+        title="30分：在下界探索并定位下界要塞",
+        points=30,
+        tier=3,
+        budget_class="expedition",
+        task=(
+            "解锁 nether/find_fortress(30分)：当前已身处下界，请勿穿回主世界传送门！沿安全实心下界岩地形分段探索，"
+            "扫描 nether_bricks / nether_brick_fence / blaze / wither_skeleton，进入下界要塞区域即可解锁。"
+        ),
+        extra_tools=("mc_posture",),
+        advancement_id="minecraft:nether/find_fortress",
     ),
 }
 
@@ -1370,6 +1397,13 @@ def select_next_target(
         if key == "minecraft:story/enter_the_nether" and counts.get("obsidian", 0) >= 10 and counts.get("flint_and_steel", 0) >= 1:
             enriched_pb = dataclasses.replace(enriched_pb, tier=1)
             mem_boosted = True
+        if cur_dim == "the_nether":
+            if key.startswith("minecraft:nether/"):
+                enriched_pb = dataclasses.replace(enriched_pb, tier=1)
+                mem_boosted = True
+            else:
+                enriched_pb = dataclasses.replace(enriched_pb, tier=3)
+                mem_boosted = False
         is_uncond = 0 if (adv_id in UNCONDITIONAL_ADVANCEMENTS or mem_boosted) else 1
         sort_key = (enriched_pb.tier, is_uncond, -enriched_pb.points, key)
         candidates.append((sort_key, enriched_pb))
@@ -1390,11 +1424,19 @@ def select_next_target(
         )
         if leash_active and budget_cls not in {"micro", "short"}:
             continue
+        if cur_dim == "the_nether" and adv_id.startswith("minecraft:nether/") and adv_id not in _LATE_GRIND_FRONTIER_IDS:
+            frontier_tier = 1
+        elif cur_dim == "the_nether" and not adv_id.startswith("minecraft:nether/"):
+            frontier_tier = 3
+        elif adv_id.startswith(("minecraft:nether/", "minecraft:end/")) or adv_id in _LATE_GRIND_FRONTIER_IDS:
+            frontier_tier = 3
+        else:
+            frontier_tier = 2
         raw_target = CurriculumTarget(
             key=adv_id,
             title=f"{pts}分：{title_zh} ({adv_id.removeprefix('minecraft:')})",
             points=pts,
-            tier=3 if (adv_id.startswith(("minecraft:nether/", "minecraft:end/")) or adv_id in _LATE_GRIND_FRONTIER_IDS) else 2,
+            tier=frontier_tier,
             budget_class=budget_cls,
             task=(
                 f"尝试解锁竞赛高分成就 `{adv_id}`（RULES.md 计 {pts} 分，{title_zh}）。"
@@ -2284,7 +2326,11 @@ class CurriculumSupervisor:
                 or (target.key in {"minecraft:story/enchant_item", "minecraft:story/enter_the_nether"} and obsidian_after > obsidian_before)
                 or (target.key == "island_recon_sweep" and chunks_after > chunks_before)
             )
-            progress_made = bool(gained_advs) or material_progress
+            progress_made = (
+                objective_verified
+                or material_progress
+                or (bool(gained_advs) and not target.advancement_id)
+            )
             is_pause_yield = report.get("status") in {"paused", "paused_for_world_job"}
             transient_api_err = (not progress_made) and _is_transient_llm_error(report)
 
@@ -2302,7 +2348,8 @@ class CurriculumSupervisor:
             elif not transient_api_err and not is_pause_yield and target.key != "furnace_leash_prep":
                 cnt = self.strikes.get(target.key, 0) + 1
                 self.strikes[target.key] = cnt
-                if cnt >= self.strike_limit:
+                eff_strike_limit = 1 if target.key == "minecraft:husbandry/make_a_sign_glow" else self.strike_limit
+                if cnt >= eff_strike_limit:
                     cd_dur = min(self.cooldown_s, 90.0) if target.key.startswith("bootstrap_") else self.cooldown_s
                     self.cooldowns[target.key] = time.monotonic() + cd_dur
                     self.strikes[target.key] = 0
