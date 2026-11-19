@@ -1353,6 +1353,63 @@ def test_nether_dimension_prioritizes_nether_advancements_and_wildflowers_portal
     assert ([12, 64, 22], "cobblestone") in placed
 
 
+def test_escape_lava_not_short_circuited_and_cobblestone_maps_stone() -> None:
+    """escape_water() must actively escape when in_lava=True (in_water=False); mine_blocks(['cobblestone']) includes 'stone'."""
+    from mc_agent.skills.library import MacroSkills
+    from mc_agent.skills.mining_dfs import ORE_DFS_PROFILES, TRACKED_ORES
+
+    assert "ancient_debris" in ORE_DFS_PROFILES
+    assert "ancient_debris" in TRACKED_ORES
+
+    calls: list[tuple[str, dict]] = []
+    state = {"in_lava": True}
+
+    class _LavaBot:
+        def status(self):
+            return {
+                "pos": [10.5, 56.0, 20.5],
+                "dimension": "minecraft:the_nether",
+                "in_water": False,
+                "in_lava": state["in_lava"],
+                "jumping": False,
+                "alive": True,
+                "ready": True,
+            }
+
+        def inventory(self):
+            return {"items": [{"name": "wooden_pickaxe", "count": 1}]}
+
+        def call(self, action, body=None, **kwargs):
+            calls.append((action, dict(body or {})))
+            if action == "get_block":
+                pos = (body or {}).get("pos", [0, 0, 0])
+                # Solid netherrack bank at x=11, y=56, air above
+                if pos == [11, 56, 20]:
+                    return {"name": "netherrack", "diggable": True}
+                if pos in ([11, 57, 20], [11, 58, 20], [10, 57, 20], [10, 58, 20]):
+                    return {"name": "air", "diggable": False}
+                return {"name": "netherrack", "diggable": True}
+            if action == "control":
+                state["in_lava"] = False
+                return {"ok": True, "moved": 1.2}
+            if action == "find_blocks":
+                return {"blocks": []}
+            return {"ok": True}
+
+    bot = _LavaBot()
+    skills = MacroSkills(bot)
+    esc = skills.escape_water()
+    assert esc.get("already_dry") is not True
+    assert any(a == "control" for a, _ in calls)
+
+    # mine_blocks(["cobblestone"]) must query "stone" too!
+    calls.clear()
+    skills.mine_blocks(["cobblestone"], count=3, radius=8)
+    fb_calls = [b for a, b in calls if a == "find_blocks"]
+    assert fb_calls and "stone" in (fb_calls[0].get("types") or [])
+
+
+
 
 
 

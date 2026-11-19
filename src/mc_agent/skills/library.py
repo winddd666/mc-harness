@@ -2940,6 +2940,10 @@ class MacroSkills:
         """Validate pickaxe tier against Minecraft harvest rules, equip best pickaxe, and dig count blocks."""
         if not block_types:
             return {"ok": False, "error": "bad_args", "message": "block_types 不能为空。"}
+        # Natural terrain has `stone`/`deepslate` rather than `cobblestone`; auto-expand so cobblestone requests work!
+        block_types = list(block_types)
+        if "cobblestone" in block_types and "stone" not in block_types:
+            block_types.append("stone")
         count = max(1, min(32, int(count)))
         radius = max(4, min(64, int(radius)))
         req_tier = max((BLOCK_MIN_PICKAXE_TIER.get(b, 0) for b in block_types), default=0)
@@ -4462,12 +4466,13 @@ class MacroSkills:
         return {"ok": True, "bed_pos": [x, y, z], **res}
 
     def escape_water(self) -> dict[str, Any]:
-        """Float to the water surface, carve an upper notch over a solid shoreline step if needed, and hop onto dry land."""
+        """Float to the water/lava surface, carve an upper notch over a solid shoreline step if needed, and hop onto dry land."""
         st = self.bot.status()
-        if not bool(st.get("in_water")):
+        if not bool(st.get("in_water")) and not bool(st.get("in_lava")):
             return {
                 "ok": True,
                 "in_water": False,
+                "in_lava": False,
                 "already_dry": True,
                 "pos_after": st.get("pos"),
                 "dug": [],
@@ -4549,7 +4554,7 @@ class MacroSkills:
                     above_name, _ = self._block_info([bx, wy + 1, bz])
                 except ApiError:
                     break
-                if above_name in water_names:
+                if above_name in fluids:
                     try:
                         self.bot.call("control", {"jump": True, "ms": 450, "stop_on": ["death"]})
                     except ApiError:
@@ -4614,13 +4619,13 @@ class MacroSkills:
                 except ApiError as err:
                     mv_res = {"error": err.code, "message": err.message}
                 after_cur = self.bot.status()
-                if not bool(after_cur.get("in_water")):
+                if not bool(after_cur.get("in_water")) and not bool(after_cur.get("in_lava")):
                     return mv_res, after_cur
             return mv_res, after_cur
 
         mv_res, st_after = _step_onto_adjacent_bank()
 
-        if bool(st_after.get("in_water")):
+        if bool(st_after.get("in_water")) or bool(st_after.get("in_lava")):
             pos_now = st_after.get("pos") or st.get("pos") or [0.0, 64.0, 0.0]
             by_now = math.floor(float(pos_now[1]))
             shore_blocks: list[dict[str, Any]] = []
@@ -4641,6 +4646,13 @@ class MacroSkills:
                             "granite",
                             "clay",
                             "mud",
+                            "netherrack",
+                            "blackstone",
+                            "basalt",
+                            "soul_sand",
+                            "soul_soil",
+                            "nether_bricks",
+                            "obsidian",
                         ],
                         "limit": 30,
                     },

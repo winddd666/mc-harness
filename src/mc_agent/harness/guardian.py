@@ -403,7 +403,7 @@ class GenerationGuard:
             counts, has_shield, has_melee_weapon = self._parse_inventory_summary(inv)
 
             if in_lava:
-                if counts.get("water_bucket", 0) > 0:
+                if counts.get("water_bucket", 0) > 0 and "nether" not in str(status.get("dimension") or "").lower():
                     actions.append(self._action("douse_lava", lambda: self.combat_env.build_tactical("place_water_feet")))
                 actions.append(self._action("escape_lava", lambda: self._skills().escape_water()))
 

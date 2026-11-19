@@ -150,6 +150,14 @@ SURFACE_GROUND_BLOCKS: tuple[str, ...] = (
     "terracotta",
     "clay",
     "packed_ice",
+    "netherrack",
+    "blackstone",
+    "basalt",
+    "smooth_basalt",
+    "soul_sand",
+    "soul_soil",
+    "crimson_nylium",
+    "warped_nylium",
 )
 TRACKED_ORES: tuple[str, ...] = (
     "diamond_ore",
@@ -166,9 +174,24 @@ TRACKED_ORES: tuple[str, ...] = (
     "deepslate_emerald_ore",
     "coal_ore",
     "deepslate_coal_ore",
+    "ancient_debris",
+    "nether_gold_ore",
+    "nether_quartz_ore",
 )
 
 ORE_DFS_PROFILES: dict[str, dict[str, Any]] = {
+    "ancient_debris": {
+        "target_blocks": ("ancient_debris",),
+        "expected_items": ("ancient_debris",),
+        "default_target_y": 15,
+        "min_tier": 4,
+    },
+    "quartz": {
+        "target_blocks": ("nether_quartz_ore",),
+        "expected_items": ("quartz", "nether_quartz_ore"),
+        "default_target_y": 48,
+        "min_tier": 1,
+    },
     "iron": {
         "target_blocks": ("iron_ore", "deepslate_iron_ore"),
         "expected_items": ("raw_iron", "iron_ore", "deepslate_iron_ore"),

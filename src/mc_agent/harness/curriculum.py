@@ -2017,7 +2017,7 @@ class CurriculumSupervisor:
 
                 if self.enable_pre_ensure and eff_pre_ensure:
                     try:
-                        max_pre_cap = 75.0 if base_playbook.key.startswith("bootstrap_") else 180.0
+                        max_pre_cap = 45.0 if base_playbook.key.startswith("bootstrap_") else 90.0
                         pre_slice_s = min(ep_timeout * 0.5, max_pre_cap)
                         _sink(
                             {
