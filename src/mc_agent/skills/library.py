@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from copy import copy
+import inspect
 import math
 import time
 from typing import Any, Callable
+
+import httpx
 
 from ..bot import BotSession
 from ..errors import ApiError
@@ -1076,6 +1080,65 @@ def _summarize_uncollected_drops(
         ],
         "approach_hint": approach_hint,
     }
+
+
+class _StairDeadline(Exception):
+    """Stop the whole staircase, including helpers that catch ApiError."""
+
+
+class _StairSession:
+    """Per-invocation deadline; never patch the shared BotSession/guardian."""
+
+    def __init__(self, bot: BotSession, duration_s: float) -> None:
+        self.bot = bot
+        params = inspect.signature(bot.call).parameters
+        self.supports_timeout = "timeout_s" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        self.deadline = time.monotonic() + duration_s
+        self.last_status: dict[str, Any] = {}
+        self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
+
+    def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise _StairDeadline()
+        cap = 6.0 if path == "move_to" else 8.0 if path == "dig" else 3.0
+        timeout = min(remaining, cap, float(kwargs.pop("timeout_s", cap)))
+        if path == "move_to":
+            body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
+        try:
+            result = (self.bot.call(path, body, timeout_s=timeout, **kwargs)
+                      if self.supports_timeout else self.bot.call(path, body))
+        except httpx.TimeoutException:
+            # A client timeout does not release the server action lease.
+            raise _StairDeadline() from None
+        if path == "status":
+            self.last_status = result
+        if time.monotonic() >= self.deadline:
+            raise _StairDeadline()
+        return result
+
+    def _read(self, path: str) -> dict[str, Any]:
+        if isinstance(self.bot, BotSession):
+            return self.call(path, method="GET")
+        # Lightweight in-process adapters expose reads as methods rather than
+        # API paths. They still share the same checks before and after each read.
+        if time.monotonic() >= self.deadline:
+            raise _StairDeadline()
+        result = getattr(self.bot, path)()
+        if path == "status":
+            self.last_status = result
+        if time.monotonic() >= self.deadline:
+            raise _StairDeadline()
+        return result
+
+    def status(self) -> dict[str, Any]:
+        return self._read("status")
+
+    def inventory(self) -> dict[str, Any]:
+        return self._read("inventory")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.bot, name)
 
 
 class MacroSkills:
@@ -5583,6 +5646,32 @@ class MacroSkills:
         vertical: str = "down",
         stop_on_ore: bool | None = None,
     ) -> dict[str, Any]:
+        session = _StairSession(self.bot, 45.0)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            return scoped._dig_staircase(direction, steps, vertical, stop_on_ore)
+        except _StairDeadline:
+            cleanup: dict[str, Any] = {}
+            try:
+                cleanup = self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+            except (ApiError, httpx.HTTPError):
+                pass
+            return {
+                "ok": False, "requires_replan": True, "stop_reason": "time_budget",
+                "error": {"code": "time_budget", "message": "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"},
+                "direction": direction, "vertical": vertical, "steps_requested": steps,
+                **session.progress, "pos_after": session.last_status.get("pos"),
+                "action_released": cleanup.get("released", cleanup.get("stopped", False)),
+            }
+
+    def _dig_staircase(
+        self,
+        direction: str | None = None,
+        steps: int = 12,
+        vertical: str = "down",
+        stop_on_ore: bool | None = None,
+    ) -> dict[str, Any]:
         """Dig a safe 3-high stepped staircase downward, upward, or straight-up pillar."""
         dirs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
         d_key = str(direction or "").strip().lower()
@@ -5723,7 +5812,7 @@ class MacroSkills:
 
         def _pick_step_filler() -> str | None:
             counts = _inventory_counts(self.bot)
-            for cand in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite"):
+            for cand in ("cobblestone", "cobbled_deepslate", "dirt", "stone", "deepslate", "netherrack", "blackstone", "basalt", "end_stone", "andesite", "diorite", "granite"):
                 if counts.get(cand, 0) >= 1:
                     return cand
             for name, cnt in sorted(counts.items()):
@@ -5814,7 +5903,7 @@ class MacroSkills:
                 if _block_name([c0x, c0y - 1, c0z]).endswith("_leaves"):
                     stop_reason = "on_tree_canopy"
 
-        stair_deadline = time.monotonic() + 75.0
+        stair_deadline = self.bot.deadline
         for step_idx in range(steps if stop_reason == "completed" else 0):
             if step_idx > 0 and time.monotonic() >= stair_deadline:
                 stop_reason = "time_budget"
@@ -5903,13 +5992,26 @@ class MacroSkills:
                             last_error = {"code": err.code, "message": err.message, "pos": dpos}
                             dig_failed = True
                             break
-                        if idx >= 1 and _block_name(dpos) not in air_set:
-                            try:
-                                self.bot.call("dig", {"pos": dpos, "collect": True, "stop_on": ["death"]})
-                                dug_count += 1
-                            except ApiError as err:
-                                last_error = {"code": err.code, "message": err.message, "pos": dpos}
+                        if idx >= 1:
+                            for _ in range(2):
+                                remaining_block = _block_name(dpos)
+                                if remaining_block in air_set:
+                                    break
+                                if remaining_block in fluid_or_bedrock:
+                                    last_error = {"code": "unsafe_refilled_cell", "pos": dpos, "block": remaining_block}
+                                    dig_failed = True
+                                    break
+                                try:
+                                    self.bot.call("dig", {"pos": dpos, "collect": True, "stop_on": ["death"]})
+                                    dug_count += 1
+                                except ApiError as err:
+                                    last_error = {"code": err.code, "message": err.message, "pos": dpos}
+                                    dig_failed = True
+                                    break
+                            if not dig_failed and _block_name(dpos) in {"sand", "red_sand", "gravel", "suspicious_sand", "suspicious_gravel"}:
+                                last_error = {"code": "stair_cell_not_cleared", "pos": dpos}
                                 dig_failed = True
+                            if dig_failed:
                                 break
                 if dig_failed:
                     stop_reason = "dig_failed"
@@ -5980,7 +6082,7 @@ class MacroSkills:
                     stop_reason = "dig_failed"
                     break
 
-                if _block_name([nx, by, nz]) in non_solid:
+                if _is_non_solid_support(_block_name([nx, by, nz])):
                     filler = _pick_step_filler()
                     if not filler:
                         stop_reason = "missing_step_support"
@@ -5988,7 +6090,8 @@ class MacroSkills:
                     try:
                         self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
                         placed_count += 1
-                    except ApiError:
+                    except ApiError as err:
+                        last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
                         stop_reason = "missing_step_support"
                         break
 
@@ -5998,6 +6101,7 @@ class MacroSkills:
                     break
 
                 steps_done += 1
+                self.bot.progress.update(steps_done=steps_done, dug_count=dug_count)
                 if step_idx >= 1:
                     surface_evidence = _confirm_surface(cur)
                     if surface_evidence:
@@ -6014,6 +6118,7 @@ class MacroSkills:
                 continue
 
             steps_done += 1
+            self.bot.progress.update(steps_done=steps_done, dug_count=dug_count)
             if stop_on_ore and steps_done % 3 == 0:
                 found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
                 ores_nearby = found_ores.get("blocks") or []
@@ -6800,31 +6905,97 @@ class MacroSkills:
                 "message": "当前已身处下界(the_nether)，无需再搭传送门。",
             }
 
+        entry_detail: dict[str, Any] = {}
+
         def _walk_into_portal(portal_blocks: list[dict[str, Any]]) -> tuple[bool, str]:
-            # Pick lowest-Y nether_portal block so the bot stands directly inside the portal frame
-            portal_blocks_sorted = sorted(
-                (b for b in portal_blocks if isinstance(b, dict) and isinstance(b.get("pos"), (list, tuple)) and len(b["pos"]) >= 3),
+            # A pathfinder success only confirms its goal radius. Check actual
+            # portal contact and use short controls when the portal plane is avoided.
+            blocks = sorted(
+                (b for b in portal_blocks if isinstance(b, dict)
+                 and isinstance(b.get("pos"), (list, tuple)) and len(b["pos"]) >= 3),
                 key=lambda b: (float(b["pos"][1]), float(b.get("dist", 99.0))),
             )
-            if not portal_blocks_sorted:
+            if not blocks:
+                entry_detail["error"] = {"code": "portal_not_found", "phase": "entry"}
                 return False, dim
-            ppos = portal_blocks_sorted[0]["pos"]
-            px_t, py_t, pz_t = float(ppos[0]) + 0.5, float(ppos[1]), float(ppos[2]) + 0.5
-            try:
-                self.bot.call("move_to", {"x": px_t, "y": py_t, "z": pz_t, "range": 0.0})
-            except Exception:
-                pass
-            deadline = time.monotonic() + max(4.0, float(wait_s))
+            target = [math.floor(float(v)) for v in blocks[0]["pos"][:3]]
+            tx, ty, tz = target
+            entry_detail["entry_target"] = target
+            deadline = time.monotonic() + max(4.0, min(30.0, float(wait_s)))
             dim_now = dim
-            while time.monotonic() < deadline:
-                time.sleep(0.6)
+
+            def _entry_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ApiError("portal_entry_timeout", "入门预算耗尽")
+                cap = min(float(kwargs.pop("timeout_s", 3.0)), remaining)
+                if path == "move_to":
+                    body = {**(body or {}), "timeout": max(1, int(max(0.001, cap - 0.2) * 1000))}
+                return self.bot.call(path, body, timeout_s=cap, **kwargs)
+
+            def _status() -> dict[str, Any]:
+                nonlocal dim_now
+                st_now = (_entry_call("status", method="GET", timeout_s=2.0)
+                          if isinstance(self.bot, BotSession) else self.bot.status())
+                dim_now = str(st_now.get("dimension") or "").lower()
+                entry_detail["entry_pos"] = st_now.get("pos")
+                return st_now
+
+            try:
+                # Break the vegetation/terrain on the nearest face, without
+                # touching the frame, portal, or its supporting floor.
+                block = _entry_call("get_block", {"pos": target})
+                axis = (block.get("properties") or {}).get("axis", "x")
+                normal = (0, 1) if axis == "x" else (1, 0)
+                cur = _status().get("pos") or st.get("pos") or target
+                sign = -1 if (float(cur[0]) - tx - 0.5) * normal[0] + (float(cur[2]) - tz - 0.5) * normal[1] <= 0 else 1
+                ax, az = tx + sign * normal[0], tz + sign * normal[1]
+                for y_cell in (ty, ty + 1, ty + 2):
+                    cell = [ax, y_cell, az]
+                    name = str(_entry_call("get_block", {"pos": cell}).get("name") or "").removeprefix("minecraft:")
+                    if name in {"water", "lava", "flowing_water", "flowing_lava", "bedrock", "obsidian"}:
+                        entry_detail["error"] = {"code": "portal_approach_blocked", "phase": "entry", "pos": cell, "block": name}
+                        return False, dim_now
+                    if name and name not in {"air", "cave_air", "void_air", "nether_portal", "fire"}:
+                        _entry_call("dig", {"pos": cell, "collect": False}, timeout_s=min(3.0, max(0.05, deadline - time.monotonic())))
                 try:
-                    st2 = self.bot.status()
-                    dim_now = str(st2.get("dimension") or "").lower()
+                    _entry_call("move_to", {"x": tx + 0.5, "y": ty, "z": tz + 0.5,
+                                             "range": 0.2, "timeout": 2500}, timeout_s=3.0)
+                except ApiError as err:
+                    entry_detail["move_error"] = {"code": err.code, "message": err.message}
+                contact_seen = False
+                pulses = 0
+                while time.monotonic() < deadline:
+                    now = _status()
                     if "nether" in dim_now:
                         return True, dim_now
-                except Exception:
-                    pass
+                    cur = now.get("pos") or []
+                    if len(cur) < 3:
+                        break
+                    cx, cy, cz = map(float, cur[:3])
+                    in_portal = abs(cx - tx - 0.5) <= 0.45 and abs(cz - tz - 0.5) <= 0.45 and ty <= cy < ty + 1
+                    contact_seen = contact_seen or in_portal
+                    if not in_portal and pulses < 8:
+                        # Steer only within a single step of the portal floor.
+                        if (cy < ty - 1.1 or cy > ty + 0.6) or math.hypot(cx - tx - 0.5, cz - tz - 0.5) > 2.2:
+                            break
+                        _entry_call("look", {"x": tx + 0.5, "y": cy + 1.62, "z": tz + 0.5}, timeout_s=1.0)
+                        _entry_call("control", {"forward": True, "jump": cy < ty - 0.4, "ms": 150, "stop_on": ["hurt", "death"]}, timeout_s=1.0)
+                        pulses += 1
+                    else:
+                        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+                entry_detail["error"] = {
+                    "code": "portal_transfer_timeout" if contact_seen else "portal_entry_not_reached",
+                    "phase": "entry", "target": target,
+                    "message": "请检查门前两格净空、脚下支撑及 entry_pos；不要重复建门。",
+                }
+            except (ApiError, httpx.HTTPError) as err:
+                if isinstance(err, httpx.TimeoutException):
+                    try:
+                        self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                    except (ApiError, httpx.HTTPError):
+                        pass
+                entry_detail["error"] = {"code": "portal_entry_failed", "phase": "entry", "cause": getattr(err, "code", type(err).__name__)}
             return False, dim_now
 
         # 0) If a lit nether_portal already exists within 12 blocks, walk straight into it without needing 10 obsidian!
@@ -6851,6 +7022,7 @@ class MacroSkills:
                 "entered_nether": entered_now,
                 "dimension": dim_now,
                 "requires_replan": not entered_now,
+                **entry_detail,
             }
 
         inv = self.bot.inventory()
@@ -7007,6 +7179,14 @@ class MacroSkills:
             for cy in (by + 1, by + 2, by + 3):
                 _clear_cell(cx, cy, bz)
 
+        if failed_cells:
+            return {
+                "ok": False, "requires_replan": True, "portal_origin": [bx, by, bz],
+                "placed_obsidian": placed_obs, "failed_cells": failed_cells,
+                "portal_ignited": False, "entered_nether": False,
+                "error": {"code": "portal_frame_incomplete", "phase": "placement", "failed_cells": failed_cells},
+            }
+
         # 4) Ignite the bottom interior of the frame
         try:
             self.bot.call("move_to", {"x": bx + 1.5, "y": by, "z": bz - 2.0, "range": 1.8})
@@ -7045,4 +7225,5 @@ class MacroSkills:
             "entered_nether": entered_nether,
             "dimension": dim_after,
             "requires_replan": not (ignited and (entered_nether or not enter)),
+            **({"error": {"code": "portal_ignition_failed", "phase": "ignition"}} if not ignited else entry_detail),
         }

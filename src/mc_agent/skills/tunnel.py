@@ -15,7 +15,11 @@ ORE = {"coal_ore", "iron_ore", "copper_ore", "gold_ore", "redstone_ore", "lapis_
 ORE |= {"deepslate_" + name for name in ORE}
 
 
-def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True):
+class _TunnelDeadline(Exception):
+    pass
+
+
+def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True, *, deadline=None):
     # Lazy import avoids a library/tunnel import cycle.
     from .library import BLOCK_MIN_PICKAXE_TIER, _best_pickaxe_in_inv, _inventory_counts, _positive_inv_delta
 
@@ -28,20 +32,32 @@ def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True):
                 "message": "direction 必须为 north/south/east/west；steps 必须为整数。"}
     steps = max(1, min(8, steps))
     dx, dz = directions[direction]
+    deadline = min(time.monotonic() + 35.0,
+                   float(deadline) if deadline is not None else float("inf"),
+                   float(getattr(bot, "_mining_deadline", float("inf"))))
+    if time.monotonic() >= deadline:
+        return {"ok": False, "requires_replan": True, "stop_reason": "time_slice",
+                "direction": direction, "steps_requested": steps, "steps_done": 0,
+                "dug": [], "gained": {}}
     before = _inventory_counts(bot)
     pick, tier = _best_pickaxe_in_inv(before)
     initial = bot.status()
     origin = initial.get("pos")
     last_death = (initial.get("last_death") or {}).get("t")
     minimum_health = initial.get("health")
-    deadline = time.monotonic() + 35.0
     done, dug, ore_faces = 0, [], []
     reason, error = "completed", None
     blocker: dict | None = None
     hint: str | None = None
 
+    def check_time():
+        if time.monotonic() >= deadline:
+            raise _TunnelDeadline
+
     def block(pos):
+        check_time()
         result = bot.call("get_block", {"pos": list(pos)})
+        check_time()
         name = result.get("name") or result.get("block")
         # Missing data is never evidence of air.
         if not name:
@@ -55,10 +71,14 @@ def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True):
                 return coord, bname
         return None, None
 
+    last_status = initial
+
     def checkpoint():
+        nonlocal last_status
+        check_time()
         status = bot.status()
-        if time.monotonic() >= deadline:
-            return status, "time_budget"
+        last_status = status
+        check_time()
         if not status.get("pos") or status.get("ready") is False or status.get("alive") is False:
             return status, "not_ready"
         if status.get("in_water") or status.get("in_lava"):
@@ -84,6 +104,7 @@ def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True):
                 tried_picks: set[str] = set()
                 while pick:
                     try:
+                        check_time()
                         bot.call("equip", {"item": pick, "slot": "hand"})
                         break
                     except ApiError as eq_err:
@@ -175,6 +196,7 @@ def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True):
                     name = block(pos)
                     if name in AIR:
                         continue
+                    check_time()
                     bot.call("dig", {"pos": list(pos), "collect": False, "stop_on": ["hurt", "death"]})
                     rem = block(pos)
                     if rem not in AIR:
@@ -197,9 +219,10 @@ def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True):
                     blocker = {"pos": [nx, y - 1, nz], "block": post_floor, "relation": "support_changed"}
                     hint = f"挖掘后脚下支撑 { [nx, y - 1, nz] } 变为 {post_floor}，已停步。"
                     break
+                check_time()
                 bot.call("move_to", {"x": nx + 0.5, "y": y, "z": nz + 0.5, "range": 0.3,
                                      "timeout": 4000, "stop_on": ["hurt", "death"]})
-                time.sleep(0.15)
+                time.sleep(min(0.15, max(0.0, deadline - time.monotonic())))
                 status, failure = checkpoint()
                 if failure:
                     reason = failure
@@ -211,11 +234,20 @@ def dig_level_tunnel(bot, direction="north", steps=4, stop_on_ore=True):
                     hint = f"已挖开前格但未能走入 {[nx, y, nz]}（当前 {actual}），可能撞墙角/实体挡路。"
                     break
                 done += 1
+    except _TunnelDeadline:
+        reason = "time_slice"
     except ApiError as exc:
         reason = "api_error"
         error = {"code": exc.code, "message": exc.message, **exc.context}
-    after = _inventory_counts(bot)
-    final = bot.status()
+    if time.monotonic() >= deadline:
+        # Final observations are work too; do not restart I/O after the cutoff.
+        reason = "time_slice"
+        after, final = before, last_status
+    else:
+        after = _inventory_counts(bot)
+        final = bot.status() if time.monotonic() < deadline else last_status
+        if time.monotonic() >= deadline:
+            reason = "time_slice"
     result = {
         "ok": reason in {"completed", "ore_at_face"},
         "requires_replan": reason not in {"completed", "ore_at_face"},

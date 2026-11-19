@@ -1249,3 +1249,311 @@ def test_event_cursor_pagination_wall_los_and_dig_tier_guard() -> None:
         assert any(p.get("item") == "furnace" and p.get("pos") == [-166, 63, -393] for p in placed_calls)
     finally:
         bot.close()
+
+
+@pytest.mark.parametrize("axis", ["x", "z"])
+def test_portal_entry_clears_approach_and_confirms_dimension(monkeypatch, axis) -> None:
+    # Reproduce r11: the frame is already lit, move_to reports success while
+    # still outside (one block below the portal), then a jump enters the plane.
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(library.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    target = [0, 65, 2]
+    approach = [0, 65, 1] if axis == "x" else [-1, 65, 2]
+    state = {"pos": [0.5, 64.0, 1.5] if axis == "x" else [-0.5, 64.0, 2.5], "contact": None}
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append((path, body))
+        if path == "status":
+            assert request.method == "GET"
+            transferred = state["contact"] is not None and clock[0] - state["contact"] >= 4
+            result = {"pos": state["pos"], "dimension": "the_nether" if transferred else "overworld"}
+        elif path == "find_blocks":
+            # Deliberately give the top row first.
+            result = {"blocks": [{"pos": [0, 67, 2]}, {"pos": target}]}
+        elif path == "get_block":
+            result = {"name": "nether_portal", "properties": {"axis": axis}} if body["pos"] == target else {"name": "wildflowers" if body["pos"] == approach else "air"}
+        elif path == "control":
+            assert body["jump"] is True
+            state["pos"] = [0.5, 65.0, 2.5]
+            state["contact"] = clock[0]
+            result = {"pos": state["pos"]}
+        elif path in {"move_to", "dig", "look"}:
+            result = {"pos": state["pos"]}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).build_nether_portal(wait_s=8)
+    assert result["ok"] is True
+    assert result["entered_nether"] is True
+    assert result["entry_target"] == target
+    assert [body["pos"] for path, body in calls if path == "dig"] == [approach]
+    assert sum(path == "control" for path, _ in calls) == 1
+    assert not any(path in {"place", "inventory"} for path, _ in calls)
+
+
+@pytest.mark.parametrize("mode,code", [("blocked", "portal_approach_blocked"), ("wrong_elevation", "portal_entry_not_reached"), ("no_transfer", "portal_transfer_timeout")])
+def test_portal_entry_returns_recoverable_failure(monkeypatch, mode, code) -> None:
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(library.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    controls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": [0.5, 70 if mode == "wrong_elevation" else 65, 2.5], "dimension": "overworld"}
+        elif path == "find_blocks":
+            result = {"blocks": [{"pos": [0, 65, 2]}]}
+        elif path == "get_block":
+            result = {"name": "nether_portal" if body["pos"] == [0, 65, 2] else "lava" if mode == "blocked" else "air"}
+        elif path == "move_to":
+            result = {}  # A successful response is not evidence of portal contact.
+        elif path == "control":
+            controls.append(body)
+            result = {}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).build_nether_portal(wait_s=4)
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert result["error"]["code"] == code
+    assert controls == []
+
+
+@pytest.mark.parametrize("release", [True, False])
+def test_move_to_busy_retries_only_after_lease_release(release) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "move_to" and calls.count(path) == 1:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "busy", "message": "running dig"}})
+        if path == "move_to":
+            result = {"pos": [4.5, 64, 0.5]}
+        elif path == "stop":
+            result = {"stopped": True, "released": release, "action": "dig"}
+        elif path == "status":
+            result = {"pos": [0.5, 64, 0.5], "dimension": "overworld"}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools._is_in_water = lambda: False
+        result = json.loads(tools.mc_move_to(x=4.5, z=0.5))
+    assert result["ok"] is release
+    assert calls.count("stop") == 1
+    assert calls.count("move_to") == (2 if release else 1)
+
+
+@pytest.mark.parametrize("filler", ["stone", "netherrack", "blackstone", "cobblestone"])
+def test_staircase_up_uses_available_solid_filler(filler) -> None:
+    pos = [0.5, 30.0, 0.5]
+    placed = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": pos, "on_ground": True}
+        elif path == "inventory":
+            result = {"items": [{"name": filler, "count": 8}]}
+        elif path == "get_block":
+            result = {"name": "air"}
+        elif path == "place":
+            placed.append(body)
+            result = {"pos": body["pos"]}
+        elif path == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(pos)}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+    assert result["ok"] is True
+    assert result["steps_done"] == 1
+    assert placed == [{"item": filler, "pos": [0, 30, -1]}]
+
+
+@pytest.mark.parametrize("timeout_path", ["get_block", "move_to", "dig"])
+def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypatch, timeout_path) -> None:
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(library.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    calls = []
+    blocks = {}
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(path)
+        timeout = request.extensions["timeout"]["read"]
+        if path == timeout_path:
+            assert 0 < timeout <= 8
+            if path == "get_block":
+                # Reading safety probes also consumes the same total budget.
+                clock[0] += 3
+            else:
+                clock[0] += timeout
+                raise httpx.ReadTimeout("offline pending action", request=request)
+        if path == "status":
+            result = {"pos": [0.5, 30.0, 0.5], "on_ground": True}
+        elif path == "inventory":
+            result = {"items": []}
+        elif path == "get_block":
+            result = {"name": blocks.get(tuple(body["pos"]), "stone")}
+        elif path == "dig":
+            blocks[tuple(body["pos"])] = "air"
+            result = {}
+        elif path == "stop":
+            assert timeout <= 1
+            result = {"stopped": True, "released": True}
+        elif path == "move_to":
+            result = {}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        original_call = bot.call
+        result = skills.dig_staircase(direction="north", steps=25, stop_on_ore=False)
+        assert skills.bot is bot
+        assert bot.call == original_call
+    assert result["ok"] is False
+    assert result["stop_reason"] == "time_budget"
+    assert result["action_released"] is True
+    assert clock[0] <= 45
+    assert calls[-1] == "stop"
+    assert calls.count("stop") == 1
+
+
+@pytest.mark.parametrize("place_fails,code", [(True, "portal_frame_incomplete"), (False, "portal_ignition_failed")])
+def test_portal_reports_construction_phase_failures(monkeypatch, place_fails, code) -> None:
+    import mc_agent.skills.library as library
+
+    monkeypatch.setattr(library.time, "sleep", lambda _: None)
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(path)
+        if path == "status":
+            result = {"pos": [0.5, 64, 0.5], "dimension": "overworld"}
+        elif path == "inventory":
+            result = {"items": [{"name": "obsidian", "count": 10}, {"name": "flint_and_steel", "count": 1}, {"name": "cobblestone", "count": 12}]}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        elif path == "get_block":
+            result = {"name": "air"}
+        elif path == "place" and body["item"] == "obsidian" and place_fails:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "place_failed", "message": "obstructed"}})
+        elif path in {"place", "move_to", "interact"}:
+            result = {}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).build_nether_portal(enter=False)
+    assert result["ok"] is False
+    assert result["error"]["code"] == code
+    if place_fails:
+        assert result["failed_cells"]
+        assert "interact" not in calls
+
+
+@pytest.mark.parametrize("refills", [1, 100])
+def test_staircase_down_verifies_refilled_floor_before_moving(monkeypatch, refills) -> None:
+    import mc_agent.skills.library as library
+
+    monkeypatch.setattr(library.time, "sleep", lambda _: None)
+    pos = [0.5, 30.0, 0.5]
+    digs = []
+    moves = []
+    floor = [0, 29, -1]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": list(pos), "on_ground": True}
+        elif path == "inventory":
+            result = {"items": []}
+        elif path == "get_block":
+            cell = body["pos"]
+            name = "stone" if cell[1] <= 28 else "air"
+            if cell == floor:
+                name = "gravel" if len(digs) <= refills else "air"
+            result = {"name": name}
+        elif path == "dig":
+            assert body["pos"] == floor
+            digs.append(body)
+            result = {}
+        elif path == "move_to":
+            moves.append(body)
+            pos[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(pos)}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", steps=1, stop_on_ore=False)
+    if refills == 1:
+        assert result["ok"] is True
+        assert len(digs) == 2
+        assert len(moves) == 1
+    else:
+        assert result["ok"] is False
+        assert result["stop_reason"] == "dig_failed"
+        assert result["last_error"]["code"] == "stair_cell_not_cleared"
+        assert len(digs) == 3
+        assert moves == []
+
+
+@pytest.mark.parametrize("used,gained,ok", [({}, {"lava_bucket": 1}, True), ({"bucket": 1}, {}, True), ({"bucket": 1}, {"lava_bucket": 1}, True), ({}, {}, False)])
+def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, gained, ok) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            result = {"pos": [0.5, 64, 0.5]}
+        elif path == "interact":
+            result = {"before": "lava", "after": "lava", "changed": False, "used": used, "gained": gained}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_interact(x=1, y=64, z=0, item="bucket"))
+    assert result["ok"] is ok
+    if not ok:
+        assert result["error"]["code"] == "interact_no_effect"
+    else:
+        assert result["result"]["gained"] == gained
+        assert "error" not in result

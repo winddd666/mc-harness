@@ -876,6 +876,16 @@ class McToolset:
         if ignore_hurt or self._is_in_water():
             payload["stop_on"] = ["death"]
         raw = self._call_json("move_to", payload)
+        try:
+            first = json.loads(raw)
+            if first.get("ok") is False and (first.get("error") or {}).get("code") == "busy":
+                # /stop waits for the preceding lease to finish. Retry only
+                # after the server confirms release; never spin on busy.
+                stopped = self.bot.call("stop", {}, timeout_s=5.5)
+                if stopped.get("released") is True or (stopped.get("stopped") is True and stopped.get("action") is None):
+                    raw = self._call_json("move_to", payload)
+        except (ValueError, ApiError, httpx.HTTPError):
+            pass
         if x is not None and z is not None:
             try:
                 parsed = json.loads(raw)
@@ -1159,7 +1169,9 @@ class McToolset:
             try:
                 parsed = json.loads(raw)
                 res_obj = parsed.get("result") if isinstance(parsed, dict) else None
-                if parsed.get("ok") is True and isinstance(res_obj, dict) and res_obj.get("changed") is False:
+                if (parsed.get("ok") is True and isinstance(res_obj, dict)
+                        and res_obj.get("changed") is False
+                        and not res_obj.get("used") and not res_obj.get("gained")):
                     parsed["ok"] = False
                     parsed["requires_replan"] = True
                     parsed["error"] = {
