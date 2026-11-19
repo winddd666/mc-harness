@@ -351,7 +351,9 @@ ALL PASS — 11 项门禁全绿
 **门禁**：9/11 PASS；仅 **BUG-026** 未达标 —— 死亡 incident 28（>25）、`cancel_cooldown_wait` 302.8s（>200）。
 - 死亡 20（notable 去重）：`hy4_hy_6_nether_bastion` **11 次**（mob 8 / lava 6 合计口径），其余 1~2 次
 - 分数：2090（r15 2210），`hy4_hy_2_iron` **100→20（-80）**，`ds_2_cave 60→25`，`hy4_7 170→135`
-- `hy4_hy_2_iron` 的 4 集里 2 次 `shiny_gear` timeout（18/19 calls），与"背包被 450 块石料塞满"可能相关
+- `hy4_hy_2_iron` 的 4 集里 2 次 `shiny_gear` timeout（18/19 calls）。**已排除背包因素**：无 `inventory_full`/`no_drops_collected`，产物正常入包
+  - 真实根因（**BUG-030**）：EP2 下潜到 y=27 后 `backtrack_blocked` 把位置拉回 **y=64（+37）**，整段作废；EP3 稳定下潜，但到 **第 17 次调用**才到 y=-54，随即 episode 超时——只差 1~2 次调用
+  - 即：32s 默认切片 × 调用预算不足以覆盖 100+ 格下潜；backtrack 恢复还会清零深度进度
 
 **BUG-029（P1，Slice C）背包/物品栏管理**
 - r17 有 **7/22 路**超过保留上限：`hy4_2` 450 石料、`nju_3` 309、`hy4_9` 274、`ds_2` 220、`glm_2` 783 地狱岩
