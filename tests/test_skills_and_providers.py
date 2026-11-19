@@ -1441,6 +1441,24 @@ def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
     assert calls == ["status"]
 
 
+def test_move_to_entity_reports_stale_id_with_replan_hint() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "busy": None}})
+        if path == "move_to":
+            return httpx.Response(200, json={"ok": False, "error": {"code": "no_such_entity", "message": "entity 214998 not visible"}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_move_to(entity_id=214998, range=15))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert "mc_get_entities" in result["error"]["message"]
+
+
 def test_move_to_rejects_z_swapped_into_out_of_range_y() -> None:
     """r12 P2-17: y=-2814 was silently dropped, wasting a 90s path search."""
     from mc_agent.harness.mc_tools import McToolset

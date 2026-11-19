@@ -927,6 +927,26 @@ class McToolset:
 
     # ---- Exclusive Actions ----
 
+    @staticmethod
+    def _annotate_stale_entity(raw: str, entity_id: int | None) -> str:
+        if entity_id is None:
+            return raw
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(parsed, dict) or parsed.get("ok") is not False:
+            return raw
+        err = parsed.get("error") if isinstance(parsed.get("error"), dict) else None
+        if err is None or err.get("code") != "no_such_entity":
+            return raw
+        parsed["requires_replan"] = True
+        err["message"] = (
+            f"实体 {entity_id} 已不可见或消失；请重新调 mc_get_entities 获取最新 id/位置，"
+            "不要重复使用旧 id。"
+        )
+        return json.dumps(parsed, ensure_ascii=False)
+
     def mc_move_to(
         self,
         x: float | None = None,
@@ -1057,7 +1077,7 @@ class McToolset:
                     for (edim, ex, ey, ez) in list(self.world_memory.pois.keys()):
                         if edim == dim_m and abs(ex - tx_i) <= 1 and abs(ez - tz_i) <= 1 and (y is None or abs(ey - math.floor(float(y))) <= 2):
                             self.world_memory.mark_unreachable((ex, ey, ez), dim=dim_m, reason=err_code, cooldown_s=300.0)
-        return raw
+        return self._annotate_stale_entity(raw, entity_id)
 
     def mc_dig(self, x: int, y: int, z: int, collect: bool = True) -> str:
         blocked = self.geofence.check_point(float(x), float(z), action="mc_dig")
@@ -1891,7 +1911,7 @@ class McToolset:
         ):
             if val is not None:
                 payload[key] = val
-        return self._call_json("look", payload)
+        return self._annotate_stale_entity(self._call_json("look", payload), entity_id)
 
     # ---- L0 / L1 Macro Skills ----
 
