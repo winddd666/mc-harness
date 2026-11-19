@@ -10,6 +10,8 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
+import httpx
+
 from ..bot import BotSession
 from ..errors import ApiError, AuthError, BotNotReadyError, DeathLoopCooldownError
 from ..kb import RECIPES_1_21, normalize_dimension
@@ -381,7 +383,16 @@ class WorldJobRegistry:
         job = self.jobs.get(job_id)
         if job is None:
             return {"ok": False, "error": "unknown_job"}
-        res = collect_smelt_batch(skills, job.furnaces, wait_remaining_s=wait_remaining_s)
+        try:
+            res = collect_smelt_batch(skills, job.furnaces, wait_remaining_s=wait_remaining_s)
+        except (httpx.HTTPError, ApiError, TimeoutError, OSError) as exc:
+            job.ready_at = max(job.ready_at, time.monotonic() + 10.0)
+            return {
+                "ok": False,
+                "deferred": True,
+                "still_burning": True,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         if res.get("ok") and not res.get("still_burning"):
             self.jobs.pop(job_id, None)
         elif isinstance(res.get("remaining_furnaces"), list) and res["remaining_furnaces"]:
