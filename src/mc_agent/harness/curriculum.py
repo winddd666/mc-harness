@@ -2353,7 +2353,19 @@ class CurriculumSupervisor:
             elif not transient_api_err and not is_pause_yield and target.key != "furnace_leash_prep":
                 cnt = self.strikes.get(target.key, 0) + 1
                 self.strikes[target.key] = cnt
-                eff_strike_limit = 1 if target.key == "minecraft:husbandry/make_a_sign_glow" else self.strike_limit
+                _LOCAL_RESOURCE_TARGETS = frozenset({
+                    "minecraft:husbandry/make_a_sign_glow",
+                    "minecraft:story/lava_bucket",
+                    "minecraft:adventure/sleep_in_bed",
+                    "minecraft:husbandry/breed_an_animal",
+                    "minecraft:husbandry/tame_an_animal",
+                })
+                eff_strike_limit = (
+                    1
+                    if target.key == "minecraft:husbandry/make_a_sign_glow"
+                    or (target.key in _LOCAL_RESOURCE_TARGETS and report.get("status") == "answered")
+                    else self.strike_limit
+                )
                 if cnt >= eff_strike_limit:
                     cd_dur = min(self.cooldown_s, 90.0) if target.key.startswith("bootstrap_") else self.cooldown_s
                     self.cooldowns[target.key] = time.monotonic() + cd_dur

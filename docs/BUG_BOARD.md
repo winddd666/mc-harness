@@ -336,7 +336,7 @@
 - **最小修复**：① `run()` 按 `|current_y - target_y|` 自动抬升切片（如 `min(90, 30 + 0.4*gap)`）并返回 `budget_effective_s`；② `backtrack_blocked` 时优先在当前深度开分支/侧移，不要回地表；③ 若恢复导致净上升 >8 格，返回 `progress_lost:true` 或独立 `stop_reason="depth_reset"`，让模型能换策略
 - **验收标准**：r18 起 `shiny_gear` 集内 `mine_dfs` 首次到达 `target_y±3` 的调用数 ≤10；`depth_reset` 0 次；`hy4_hy_2_iron`（或 iron 槽）≥80 分
 
-### BUG-031 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（r15 45m 长程诊断）
+### BUG-031 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: FIXED（待 r19 长程实测验证）
 - **影响**：`glm_glm_5_midgame` 45 分钟长程中连续 **8 集 `objective_verified=False`**（EP08~EP15），后半程 ~20 分钟基本空转；`scripts/long_run_diag.py` 命中 `LONG-002:stalled_streak(8_eps)`
 - **证据（`r15_22bot/glm_glm_5_midgame` 逐集自述）**：
   - EP10：`story/lava_bucket` 扫 352 格无静止岩浆 → 失败；**EP11 立刻又派同一个 `story/lava_bucket`**（扫 640 格仍无岩浆）
