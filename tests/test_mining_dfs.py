@@ -1684,6 +1684,58 @@ def test_fluid_trap_deep_underground_does_not_try_surface_relocation() -> None:
     assert eng.collar_node_id is None                     # archived, must climb out first
 
 
+@pytest.mark.parametrize("dry_detour", [True, False])
+def test_deep_descent_can_turn_away_from_a_fluid_abort(monkeypatch, dry_detour) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 55.0, 0.5), surface_y=80)
+    world.blocks[(0, 55, 0)] = world.blocks[(0, 56, 0)] = "air"
+    water = (2, 53, 0)
+    world.blocks[water] = "water"
+    ore = (1, 53, -1)
+    if dry_detour:
+        world.blocks[ore] = "iron_ore"
+    else:
+        world.blocks[(1, 53, -2)] = "water"
+    world.blocks[(1, 53, 1)] = "bedrock"
+
+    with BotSession("tok", bot_username="DeepDescentDetour", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 80, -25), parent_id=None, edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.collar_ceiling_y = collar.anchor[1]
+        route = [(0, 80 - step, -25 + step) for step in range(26)]
+        node = eng._create_node(
+            kind="switchback", anchor=route[-1], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", route),
+            branches=[mining.BranchSpec("stair_down", "east", 40, branch_target_y=16)],
+        )
+        eng.fluid_aborts = mining.FLUID_ABORT_LIMIT - 1
+        result = eng.run(target="iron", target_y=16, goal_count=1, max_duration_s=20.0)
+
+    assert world.blocks[water] == "water"
+    assert not any(pos == water for pos, _, _ in world.dig_log)
+    if dry_detour:
+        assert result["stop_reason"] == "quota_reached"
+        assert result["target_gained"] == 1
+        assert eng.collar_node_id == collar.node_id
+        turn = next(n for n in eng.nodes.values() if n.anchor == (1, 54, 0))
+        assert turn.parent_id == node.node_id
+        assert turn.edge_from_parent.waypoints == [(0, 55, 0), (1, 54, 0)]
+    else:
+        assert result["stop_reason"] == "shaft_exhausted"
+        assert eng.fluid_abandoned_deep is True
+        assert eng.collar_node_id is None
+        assert "climb_out" in result["message"]
+        assert world.block_at(ore) == "stone"
+        [saved] = eng.ledger.saved_shafts
+        assert saved["retired"] is True
+        assert saved["nodes"][-1]["anchor"] == [1, 54, 0]
+
+
 def test_reset_is_refused_while_deep_below_the_collar() -> None:
     """Underground reset used to clear the tree with no surface anchor -> no_progress spin."""
     world = _MockMineWorld(start_pos=(0.5, 8.0, 0.5), surface_y=70)
@@ -2008,6 +2060,33 @@ def test_climb_out_honors_the_callers_budget_in_nested_staircase(monkeypatch) ->
     # No quarantine reconnect, background retry, or new action starts after cutoff.
     assert all(started < 1005.0 for started, _, _ in requests)
     assert not any(path.endswith(("/connect", "/disconnect")) for _, path, _ in requests)
+
+
+def test_climb_timeout_with_confirmed_ascent_can_resume(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=40)
+    with BotSession("tok", bot_username="TimedAscent", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        engine.collar_ceiling_y = 41
+
+        def climb_step(*, deadline, **kwargs):
+            world.pos[1] += 1
+            engine.bot.status()
+            if world.pos[1] == 21:
+                clock.now = deadline
+            return {"steps_done": 1}
+
+        monkeypatch.setattr(engine.skills, "dig_staircase", climb_step)
+        first = engine.run(action="climb_out", max_duration_s=5.0)
+        second = engine.run(action="climb_out", max_duration_s=5.0)
+
+    assert first["stop_reason"] == "climb_progress"
+    assert first["next_action"] == "climb_out"
+    assert first["climb"]["end_y"] == second["climb"]["start_y"] == 21
+    assert second["stop_reason"] == "surface_reached"
 
 
 def test_dfs_budget_includes_entry_observations_and_radar(monkeypatch) -> None:
