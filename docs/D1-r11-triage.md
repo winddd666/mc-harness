@@ -424,6 +424,18 @@ ALL PASS — 11 项门禁全绿
 
 **监听**：通用 watcher 已自动发现并接管 `r20_long` / `r20_short`（不依赖波次名），r19 收官后已重启（PID 1637626）。
 
+### 4m. r20 早期：新 P0 **BUG-035**（熔炼收取 ReadTimeout 打死进程）
+
+`runs/r20_short/hy4_hy_3_midgame/stdout.log`：
+```
+curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_collect
+  bot.call("window/view") → httpcore.ReadTimeout
+  → 未捕获 → main 退出，整路丢失
+```
+- `smelt_collect` 只 `except ApiError`，未捕获 `httpx.HTTPError`；`collect_job`/`curriculum.run` 也无兜底
+- 修法：ReadTimeout 视为"稍后再收"（保留 job、返回 deferred），不要让恢复流程崩溃
+- 影响：任何有未收熔炼任务 + 网络抖动的 bot 都会整路丢失
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
