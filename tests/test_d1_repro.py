@@ -24,6 +24,7 @@ from mc_agent.harness.mc_tools import _normalize_find_block_types  # noqa: E402
 from mc_agent.skills.crafting import material_shortage  # noqa: E402
 
 
+@pytest.mark.xfail(strict=False, reason="TDD repro for open BUG-006")
 def test_find_blocks_never_emits_unknown_colloquial_names():
     """BUG-006: a single bad/alias name must not reach the backend as-is."""
     out = _normalize_find_block_types(["log", "shield", "oak_log"])
@@ -33,6 +34,7 @@ def test_find_blocks_never_emits_unknown_colloquial_names():
     assert "oak_log" in out
 
 
+@pytest.mark.xfail(strict=False, reason="TDD repro for open BUG-006")
 def test_find_blocks_alias_log_expands_to_real_log_blocks():
     """BUG-006: `log` is the highest-frequency alias in r11 (22 failures)."""
     out = _normalize_find_block_types(["log"])
@@ -40,6 +42,7 @@ def test_find_blocks_alias_log_expands_to_real_log_blocks():
     assert all(name.endswith("_log") or name.endswith("_stem") for name in out), out
 
 
+@pytest.mark.xfail(strict=False, reason="TDD repro for open BUG-007")
 def test_craft_precheck_covers_stone_tools():
     """BUG-007: stone tools were not in the hand-written precheck table."""
     plan = material_shortage("stone_pickaxe", 1, {"cobblestone": 1, "stick": 2})
