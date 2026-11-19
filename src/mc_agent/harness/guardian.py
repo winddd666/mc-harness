@@ -194,6 +194,8 @@ class GenerationGuard:
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
+        self._last_dig_cover_block: tuple[int, int, int] | None = None
+        self._last_dig_cover_at: float = float("-inf")
         self.stats = {
             "polls": 0,
             "incidents": 0,
@@ -1101,18 +1103,44 @@ class GenerationGuard:
                                 inv=inv if isinstance(inv, dict) else {},
                                 attacker=attacker if isinstance(attacker, dict) else status.get("nearest_hostile"),
                             )
-                    already_in_dug_cover = (now < self._ranged_cover_active_until) and hp_val > 10.0 and ranged_hurt_only
+                    att_name_r = str((att_obj or {}).get("name") or nh_name or "").removeprefix("minecraft:").strip().lower()
+                    skip_cover_for_fireball = (
+                        hurt_src in {"fireball", "small_fireball"}
+                        or att_name_r in {"blaze", "ghast"}
+                        or bool(status.get("on_fire"))
+                    )
+                    cur_blk_r = (
+                        (math.floor(float(pos_r[0])), math.floor(float(pos_r[1]) + 0.05), math.floor(float(pos_r[2])))
+                        if isinstance(pos_r, (list, tuple)) and len(pos_r) >= 3
+                        else None
+                    )
+                    same_spot_cover_ineffective = (
+                        cur_blk_r is not None
+                        and cur_blk_r == self._last_dig_cover_block
+                        and (now - self._last_dig_cover_at < 20.0)
+                    )
+                    already_in_dug_cover = (
+                        not skip_cover_for_fireball
+                        and not same_spot_cover_ineffective
+                        and (now < self._ranged_cover_active_until)
+                        and hp_val > 10.0
+                        and ranged_hurt_only
+                    )
                     recent_cover_fail = already_blocking and ranged_hurt_only and hp_val > 10.0 and (now - self._last_dig_cover_fail_at < 15.0)
                     cover: dict[str, Any] | None = None
-                    if not already_in_dug_cover and not recent_cover_fail:
+                    if not skip_cover_for_fireball and not same_spot_cover_ineffective and not already_in_dug_cover and not recent_cover_fail:
                         cover = self._action("dig_cover", lambda: self._skills().dig_cover_pocket())
                         actions.append(cover)
+                        self._last_dig_cover_block = cur_blk_r
+                        self._last_dig_cover_at = time.monotonic()
                         if cover.get("ok"):
                             self._mark_ranged_engagement(now, attacker=att_obj, in_cover=True)
                         else:
                             self._last_dig_cover_fail_at = now
                     cover_ok = bool(cover and cover.get("ok")) or already_in_dug_cover
-                    if not cover_ok and (not already_blocking or hp_val <= 10.0 or not ranged_hurt_only):
+                    if not cover_ok and (
+                        skip_cover_for_fireball or not already_blocking or hp_val <= 10.0 or not ranged_hurt_only
+                    ):
                         if (
                             has_shield
                             and not already_blocking

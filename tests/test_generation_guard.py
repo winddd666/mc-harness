@@ -3382,6 +3382,80 @@ def test_r22_shore_query_bypasses_lakebed_and_failed_shore_backs_off_cooldown(mo
     assert "water_avoid_cooldown" in inc_retry["reasons"]
 
 
+def test_r22_fireball_skips_dig_cover_and_same_spot_arrow_escalates_to_flee(monkeypatch):
+    """Reproduces r22_short glm_1 (20s dig_cover in fireball) & hy4_10 (3x repeated dig_cover at same exposed spot)."""
+    clock = [9000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+
+    dig_cover_calls: list[str] = []
+    flee_calls: list[dict] = []
+    hurt_state = {"seq": 1, "src": "fireball", "hp": 16.0, "mob": "blaze"}
+
+    class _RangedFallbackSkills:
+        mining_dfs = None
+
+        def dig_cover_pocket(self):
+            dig_cover_calls.append(hurt_state["src"])
+            return {"ok": True, "mode": "cover_pocket", "pos_after": [6346.3, 54.0, -9022.3]}
+
+        def defend_or_flee(self, **kwargs):
+            flee_calls.append(kwargs)
+            return {"ok": True, "mode": "flee", "moved_dist": 6.0}
+
+    class _RangedFallbackBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [6346.3, 54.0, -9022.3],
+                    "health": hurt_state["hp"],
+                    "food": 20,
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": True,
+                    "in_water": False,
+                    "in_lava": False,
+                    "blocking": False,
+                    "nearest_hostile": {"id": 91, "name": hurt_state["mob"], "pos": [6350.0, 54.0, -9022.3], "dist": 3.7},
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                seq = hurt_state["seq"]
+                rows = [{"seq": seq, "type": "hurt", "health": hurt_state["hp"], "source": hurt_state["src"]}] if seq > since else []
+                return {"events": rows, "last_seq": seq}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 16}], "offhand": {"name": "shield"}}
+            if action in {"find_blocks", "get_entities"}:
+                return {"blocks": [], "entities": []}
+            if action == "get_block":
+                return {"name": "stone" if (body or {}).get("pos", [0, 54, 0])[1] < 54 else "air"}
+            return {"ok": True}
+
+    guard = GenerationGuard(_RangedFallbackBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_RangedFallbackSkills())
+    # 1) Blaze fireball must NEVER spend 20s digging cover pocket — directly execute combat_or_flee
+    inc_fb = guard.poll()
+    assert inc_fb is not None
+    assert [a["action"] for a in inc_fb["actions"] if a["action"] in {"dig_cover", "combat_or_flee"}] == ["combat_or_flee"]
+    assert dig_cover_calls == []
+
+    # 2) Arrow hit at exposed spot digs cover once; a subsequent arrow hit 6.5s later at the SAME block escalates to combat_or_flee!
+    hurt_state.update({"seq": 2, "src": "arrow", "hp": 14.0, "mob": "skeleton"})
+    clock[0] += 4.0
+    inc_a1 = guard.poll()
+    assert inc_a1 is not None
+    assert "dig_cover" in [a["action"] for a in inc_a1["actions"]]
+    assert len(dig_cover_calls) == 1
+
+    hurt_state.update({"seq": 3, "src": "arrow", "hp": 6.0, "mob": "skeleton"})
+    clock[0] += 6.5
+    inc_a2 = guard.poll()
+    assert inc_a2 is not None
+    assert len(dig_cover_calls) == 1  # NOT re-dug on the exact same broken block!
+    assert any(a["action"] == "combat_or_flee" for a in inc_a2["actions"])
+
+
+
 
 
 
