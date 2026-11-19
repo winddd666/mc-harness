@@ -676,6 +676,22 @@ mine_dfs(iron)            → insufficient_pickaxe_tier（仅木镐）
 → 24 分钟仍 10 分。修 BUG-037 模式二（clamp steps 或按 steps 缩放预算）可直接解锁。
 `ds_ds_1_bare` 本波 iron_age 已 `goal_satisfied +10`（20 分），说明恢复路径可行、但依赖地形。
 
+### 4ai. BUG-041：木镐硬岩导致 30s/格（00:17）
+
+`hy4_hy_1_bare` 的 staircase 1 步超时调用：
+
+```json
+{"stop_reason":"time_budget","steps_done":1,"dug_count":4,
+ "timeout_path":"dig","dig_target":[-11054,36,-11051],
+ "steps_capped_from":20,"steps_clamped":true}
+```
+
+- 8 次调用（north/east/south/west）全部 `steps_done=1`，耗时 24~32s
+- 原因是**木镐挖 stone/deepslate**：单块 ~25s；不是 45s 预算或 clamp 问题
+- 与 BUG-037（clamp 已回传）、BUG-038（climb 慢）共同构成裸开铁器死锁
+
+**新增 BUG-041（P1，Slice C）**：低镐等级时应优先软方块方向（dirt/gravel/sand），并在 `timeout_path=dig` 时直接提示补石镐。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
