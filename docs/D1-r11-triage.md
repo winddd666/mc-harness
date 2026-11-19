@@ -836,6 +836,20 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - 门禁脚本已修正：**runtime_error 现在也读取进行中的 `curriculum-*.json`**，此前 0 summary 时会漏报（r24_short 曾显示 0）
 - 建议：#1 立即暂停 hy4 squad 或切 provider
 
+### 4ay. hy4 通道报废率（00:50）
+
+| bot | 总集 | runtime | 成功 |
+|---|---|---|---|
+| `hy4_6_nether_bastion` | 4 | **4（100%）** | 0 |
+| `hy4_7_village` | 9 | **8（89%）** | 0 |
+| `hy4_3_midgame` | 12 | **8（67%）** | 1 |
+| `hy4_10_deep_water` | 4 | 3（75%） | 0 |
+| `hy4_9_deep_water` | 5 | 4（80%） | 1 |
+| `hy4_8_nether` | 6 | 4（67%） | 2 |
+| `hy4_2_iron` | 3 | 2（67%） | 0 |
+
+`glm / ds / nju` 全部 0 次 runtime_error。→ hy4 10 路当前几乎不产出，建议立即暂停或换 provider。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
