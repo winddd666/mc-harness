@@ -1865,3 +1865,37 @@ def test_portal_entry_builds_one_safe_step_from_two_blocks_below(monkeypatch, fl
         assert placed == []
         assert contact[0] is None
     assert clock[0] <= 8
+
+
+def test_staircase_timeout_preserves_confirmed_partial_excavation() -> None:
+    blocks = {}
+    dig_count = [0]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": [0.5, 30, 0.5], "on_ground": True}
+        elif path == "inventory":
+            result = {"items": []}
+        elif path == "get_block":
+            result = {"name": blocks.get(tuple(body["pos"]), "stone")}
+        elif path == "dig":
+            dig_count[0] += 1
+            if dig_count[0] == 2:
+                raise httpx.ReadTimeout("second dig pending", request=request)
+            blocks[tuple(body["pos"])] = "air"
+            result = {"dug": "stone"}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", steps=3, stop_on_ore=False)
+    assert result["stop_reason"] == "time_budget"
+    assert result["dug_count"] == 1
+    assert result["steps_done"] == 0
+    assert result["pos_before"] == [0.5, 30, 0.5]
+    assert result["pos_after"] == [0.5, 30, 0.5]
