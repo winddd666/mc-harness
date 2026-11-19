@@ -23,6 +23,7 @@ from ..skills import MacroSkills, SafetyEmergency, check_and_stabilize, compute_
 from ..skills.library import (
     BLOCK_MIN_PICKAXE_TIER,
     LOG_TYPES,
+    NETHER_STEM_TYPES,
     TABLE_RECIPES,
     _best_pickaxe_in_inv,
     _can_fit_item_in_inventory,
@@ -73,12 +74,23 @@ def _invalid_find_block_query(ignored: list[str]) -> str:
     }, ensure_ascii=False)
 
 
-def _normalize_find_block_types(types: list[str] | tuple[str, ...]) -> list[str]:
+def _normalize_find_block_types(
+    types: list[str] | tuple[str, ...], *, dimension: str | None = None
+) -> list[str]:
     """Expand block families; leave registry validation to the server version."""
+    nether = str(dimension or "").lower() == "the_nether"
     out: list[str] = []
     for raw in types:
         name = str(raw).strip().lower().removeprefix("minecraft:")
-        if name and name not in _NON_BLOCK_FIND_TYPES:
+        if not name or name in _NON_BLOCK_FIND_TYPES:
+            continue
+        if nether and name in {"log", "logs"}:
+            # Generic "log" in the nether means the local wood family. Expanding
+            # to overworld logs only makes the server reject/empty the query.
+            out.extend(NETHER_STEM_TYPES)
+        elif nether and name == "planks":
+            out.extend(("crimson_planks", "warped_planks"))
+        else:
             out.extend(_FIND_BLOCK_ALIASES.get(name, (name,)))
     return list(dict.fromkeys(out))
 
@@ -619,7 +631,8 @@ class McToolset:
         if types:
             requested = [str(name).strip().lower().removeprefix("minecraft:") for name in types]
             ignored = list(dict.fromkeys(name for name in requested if name in _NON_BLOCK_FIND_TYPES))
-            types = _normalize_find_block_types(types)
+            dim_alias, _, _ = self._cached_env(fetch_if_missing=False)
+            types = _normalize_find_block_types(types, dimension=dim_alias)
             if not types:
                 return _invalid_find_block_query(ignored or requested)
             payload["types"] = types
@@ -649,6 +662,18 @@ class McToolset:
             raw = json.dumps(parsed, ensure_ascii=False)
         res_obj = parsed.get("result") if isinstance(parsed, dict) else None
         blocks = res_obj.get("blocks") if isinstance(res_obj, dict) else None
+        if parsed.get("ok") is True and isinstance(res_obj, dict) and isinstance(res_obj.get("total"), int):
+            # total is the backend scan count, not the number of returned rows.
+            # Do not rewrite it; expose the truncation explicitly (P2-9).
+            returned = len(blocks) if isinstance(blocks, list) else 0
+            res_obj["returned"] = returned
+            if res_obj["total"] > returned:
+                res_obj["truncated"] = True
+                res_obj["total_note"] = (
+                    "total 为后端在半径内扫描到的匹配总数；blocks 仅返回前 limit 条。"
+                    "请缩小 radius/types 或提高 limit（上限 60），不要把 total 当作可访问方块数。"
+                )
+            raw = json.dumps(parsed, ensure_ascii=False)
         if parsed.get("ok") is True and isinstance(blocks, list) and blocks:
             dim_obs, _, _ = self._cached_env(fetch_if_missing=False)
             self.world_memory.observe_blocks(blocks, dim=dim_obs)
@@ -922,7 +947,22 @@ class McToolset:
                 yf = float(y)
                 last_y = float(self._last_block_pos[1]) if self._last_block_pos and len(self._last_block_pos) >= 3 else None
                 bogus_zero_y = (yf == 0.0) and (last_y is None or abs(last_y) >= 16.0)
-                if -64.0 <= yf <= 320.0 and not bogus_zero_y:
+                if not (-64.0 <= yf <= 320.0):
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "requires_replan": True,
+                            "error": {
+                                "code": "bad_args",
+                                "message": (
+                                    f"y={yf:g} 超出主世界/下界合法高度(-64..320)，疑似把 z 填进了 y。"
+                                    "请检查坐标后重传 x/z（y 可省略让寻路决定），不要用同一参数重试。"
+                                ),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                if not bogus_zero_y:
                     payload["y"] = yf
         elif entity_id is not None:
             payload["entity_id"] = entity_id
@@ -934,6 +974,33 @@ class McToolset:
         # 水中自动保护：防止溺水扣血打断自己的游上岸动作
         if ignore_hurt or self._is_in_water():
             payload["stop_on"] = ["death"]
+        # r12: a stale action lease made /move_to block ~101s before returning
+        # busy. /status already exposes the lease owner, so probe it cheaply and
+        # fail fast instead of queueing a long path behind an unrelated action.
+        try:
+            pre = self.bot.call("status", timeout_s=2.0)
+            if isinstance(pre, dict):
+                self._update_status_cache(pre)
+                busy_action = str(pre.get("busy") or "")
+                if busy_action:
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "requires_replan": True,
+                            "error": {
+                                "code": "action_busy",
+                                "action": busy_action,
+                                "message": (
+                                    f"动作锁仍被 {busy_action} 占用，未提交 move_to，避免阻塞等待。"
+                                    "请先处理当前动作（受伤先脱险/等待其完成），1~2 秒后重试坐标；"
+                                    "不要用同一参数连续重试。"
+                                ),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+        except (ApiError, httpx.HTTPError, RuntimeError, ValueError):
+            pass
         raw = self._call_json("move_to", payload)
         try:
             first = json.loads(raw)

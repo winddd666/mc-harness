@@ -1160,22 +1160,35 @@ class _StairSession:
         self.step_deadline = self.deadline
         self.per_step_timeout = max(0.05, float(per_step_timeout))
         self.last_status: dict[str, Any] = {}
+        self.last_timeout_path: str | None = None
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
+    _IDEMPOTENT_READS = frozenset({"status", "inventory", "get_block", "find_blocks"})
+
     def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
-        remaining = min(self.deadline, self.step_deadline) - time.monotonic()
-        if remaining <= 0:
-            raise _StairDeadline()
-        cap = 6.0 if path == "move_to" else 8.0 if path == "dig" else 3.0
-        timeout = min(remaining, cap, float(kwargs.pop("timeout_s", cap)))
-        if path == "move_to":
-            body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
-        try:
-            result = (self.bot.call(path, body, timeout_s=timeout, **kwargs)
-                      if self.supports_timeout else self.bot.call(path, body))
-        except httpx.TimeoutException:
-            # A client timeout does not release the server action lease.
-            raise _StairDeadline() from None
+        # A slow first status/probe under fleet load used to abort the whole
+        # staircase as time_budget with zero steps. Retry one idempotent read
+        # once; action calls still abort immediately (their lease may persist).
+        explicit_timeout = kwargs.pop("timeout_s", None)
+        for read_attempt in range(2):
+            remaining = min(self.deadline, self.step_deadline) - time.monotonic()
+            if remaining <= 0:
+                raise _StairDeadline()
+            cap = 6.0 if path == "move_to" else 8.0 if path == "dig" else 3.0
+            timeout = min(remaining, cap, float(explicit_timeout if explicit_timeout is not None else cap))
+            call_body = body
+            if path == "move_to":
+                call_body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
+            try:
+                result = (self.bot.call(path, call_body, timeout_s=timeout, **kwargs)
+                          if self.supports_timeout else self.bot.call(path, call_body))
+            except httpx.TimeoutException:
+                self.last_timeout_path = path
+                if read_attempt == 0 and path in self._IDEMPOTENT_READS and remaining > 1.0:
+                    continue
+                # A client timeout does not release the server action lease.
+                raise _StairDeadline() from None
+            break
         if path == "status":
             self.last_status = result
             if isinstance(result.get("pos"), (list, tuple)):
@@ -2522,9 +2535,20 @@ class MacroSkills:
         last_drop_scan: dict[str, Any] | None = None
         last_bot_pos: list[float] | None = None
         mine_deadline = time.monotonic() + max(45.0, min(90.0, float(count) * 12.0))
+        deadline_hit = False
+        try:
+            dig_call_params = inspect.signature(self.bot.call).parameters
+            dig_supports_timeout = "timeout_s" in dig_call_params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in dig_call_params.values()
+            )
+        except (TypeError, ValueError):
+            dig_supports_timeout = False
 
         for _ in range(count * 3):
-            if dug_count >= count or time.monotonic() >= mine_deadline:
+            if dug_count >= count:
+                break
+            if time.monotonic() >= mine_deadline:
+                deadline_hit = True
                 break
             for apos in list(self.temporary_avoidance):
                 self._is_block_avoided(apos)
@@ -2564,8 +2588,21 @@ class MacroSkills:
             if target is None:
                 break
             pos = tuple(target["pos"])
+            remaining = mine_deadline - time.monotonic()
+            if remaining <= 1.0:
+                deadline_hit = True
+                break
+            # A single un-timed dig can eat the whole slice (r12 obsidian:
+            # 4 blocks / 300s). Leave a share for the remaining blocks and
+            # never wait past the slice deadline.
+            per_dig = max(4.0, min(30.0, remaining / max(1, count - dug_count)))
             try:
-                res = self.bot.call("dig", {"pos": list(pos), "collect": True})
+                dig_body = {"pos": list(pos), "collect": True}
+                res = (
+                    self.bot.call("dig", dig_body, timeout_s=min(remaining, per_dig))
+                    if dig_supports_timeout
+                    else self.bot.call("dig", dig_body)
+                )
                 dug_count += 1
                 for k, v in (res.get("gained") or {}).items():
                     gained[k] = gained.get(k, 0) + int(v)
@@ -2631,6 +2668,24 @@ class MacroSkills:
                         "gained": gained,
                         "partial_error": {"code": err.code, "message": err.message, **err.context},
                     }
+            except httpx.TimeoutException as err:
+                # Do not let one server-side dig outlive the slice. Release the
+                # pending action before returning the confirmed partial result.
+                try:
+                    self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "stop_reason": "time_budget",
+                    "dig_timeout_s": round(min(remaining, per_dig), 2),
+                    "dug_count": dug_count,
+                    "gained": gained,
+                    "partial_error": {"code": "mine_timeout", "message": "单次挖掘未在切片预算内确认；已停止并保留已入包产物。"},
+                    "message": "本轮挖掘预算已用尽，单次 dig 超时；请换到目标旁 2 格内或降低 count 后重试，勿等待同一调用完成。",
+                    **self._avoidance_summary(),
+                }
 
         if dug_count > 0 and _target_gain_sum(gained) == 0:
             if last_drop_scan is None:
@@ -2721,6 +2776,13 @@ class MacroSkills:
             else:
                 out["message"] = f"本次只挖掘 {dug_count}/{count} 格；请按 gained 检查实际入包量。临时避让与保护区分别报告，改变站位或等待冷却后可重试临时失败。"
             out["requires_replan"] = True
+        if deadline_hit:
+            out["stop_reason"] = "time_budget"
+            out["requires_replan"] = True
+            out["message"] = (
+                f"本轮挖掘预算已用尽，仅完成 {dug_count}/{count} 格；已保留入包产物，"
+                "请换到目标旁 2 格内或降低 count 后重试，勿等待同一调用完成。"
+            )
         return out
 
     def harvest_logs(self, target_logs: int = 4, radius: int = 32) -> dict[str, Any]:
@@ -5672,9 +5734,23 @@ class MacroSkills:
         if last_error is not None:
             out_pillar["last_error"] = last_error
 
-        if not ok and steps_done == 0:
-            ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
+        if not ok:
+            # A failed jump-place is read back while the bot is still airborne
+            # (r12: pos_after y=97.2 for a grounded start at y=96). With no
+            # confirmed step the bot falls back to the start cell, so remember
+            # the failure there; otherwise the next probe advertises
+            # viable_pillar_up=true at the exact cell that just failed.
+            record_pos = pos_before if steps_done == 0 else end_pos
+            ebx, eby, ebz = (
+                math.floor(float(record_pos[0])),
+                math.floor(float(record_pos[1])),
+                math.floor(float(record_pos[2])),
+            )
             self._record_failed_stair_dir((ebx, eby, ebz, "pillar"), "pillar", stop_reason)
+            if steps_done > 0 and st_end.get("on_ground") is False:
+                # Partial climb: the last confirmed step is one block below
+                # the airborne read-back; block retries there as well.
+                self._record_failed_stair_dir((ebx, eby - 1, ebz, "pillar"), "pillar", stop_reason)
             probe_cache_p: dict[tuple[int, int, int], str] = {}
             inv_p = _inventory_counts(self.bot)
             up_dirs = self._probe_viable_up_stair_dirs(ebx, eby, ebz, probe_cache=probe_cache_p, inv_counts=inv_p)
@@ -5744,6 +5820,7 @@ class MacroSkills:
                 "error": {"code": "time_budget", "message": "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"},
                 "direction": direction, "vertical": vertical, "steps_requested": steps,
                 **session.progress, "pos_after": session.last_status.get("pos"),
+                "timeout_path": session.last_timeout_path,
                 "action_released": cleanup.get("released", cleanup.get("stopped", False)),
             }
 
@@ -5892,13 +5969,14 @@ class MacroSkills:
                 except ApiError:
                     pass
 
-        def _pick_step_filler() -> str | None:
+        def _pick_step_filler(exclude: set[str] | None = None) -> str | None:
+            excluded = exclude or set()
             counts = _inventory_counts(self.bot)
             for cand in STAIR_FILLER_BLOCKS:
-                if counts.get(cand, 0) >= 1:
+                if cand not in excluded and counts.get(cand, 0) >= 1:
                     return cand
             for name, cnt in sorted(counts.items()):
-                if cnt >= 1 and name.endswith("_planks"):
+                if name not in excluded and cnt >= 1 and name.endswith("_planks"):
                     return name
             return None
 
@@ -6166,15 +6244,25 @@ class MacroSkills:
                     break
 
                 if _is_non_solid_support(_block_name([nx, by, nz])):
+                    # The client inventory can disagree with the server's
+                    # findItem (r13: cobblestone reported but place said none).
+                    # Fall through to other solid fillers before giving up.
+                    rejected_fillers: set[str] = set()
                     filler = _pick_step_filler()
-                    if not filler:
-                        stop_reason = "missing_step_support"
-                        break
-                    try:
-                        self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
-                        placed_count += 1
-                    except ApiError as err:
-                        last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
+                    placed_ok = False
+                    while filler:
+                        try:
+                            self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
+                            placed_count += 1
+                            placed_ok = True
+                            break
+                        except ApiError as err:
+                            last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
+                            if err.code != "missing_item":
+                                break
+                            rejected_fillers.add(filler)
+                            filler = _pick_step_filler(exclude=rejected_fillers)
+                    if not placed_ok:
                         stop_reason = "missing_step_support"
                         break
 

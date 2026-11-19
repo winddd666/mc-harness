@@ -151,27 +151,46 @@
 
 ---
 
-## 4. r12 半程验证（19:26 起，进行中）
+## 4. r12 收官验证（22/22 完成）——修复有效，但引入一个 P0 回归
 
-| 指标 | r11 | r12 半程 | 结论 |
+| 指标 | r11 | r12 | 结论 |
 |---|---|---|---|
-| 启动崩溃（Traceback） | 3 路 | **0** | BUG-001 已消除 |
-| `model.failed(cancelled)` | 128 | **8**（半程） | BUG-009 显著收敛 |
-| `cancel_cooldown_wait` 总时长 | 290.1s | 16.2s | 同上 |
-| 死亡 incident | 16 | 2 | 明显改善 |
-| `build_portal:unknown` | 13 | **0** | BUG-002 未复发 |
-| `find_blocks:bad_args` | 22 | **0** | BUG-006 已生效 |
-| `interact_no_effect` | 10 | 2（均无 `used/gained`，属真实无效） | BUG-008 正确 |
-| `mine_dfs:repeated_identical_failure_blocked` | 1 | **5（3 路下界 bot）** | 新问题 → **BUG-013** |
+| 启动崩溃（Traceback） | 3 路 | **0** | ✅ BUG-001 已消除 |
+| 总分（22 路） | 1860（19 路） | **2160（22 路）** | 提升，但有 -75 回归 |
+| 死亡 incident | 16 | 19 | 略升（lava/trident/共岛） |
+| `build_portal:unknown` | 13 | **0** | ✅ BUG-002 未复发 |
+| `find_blocks:bad_args` | 22 | **8** | ✅ 部分生效（BUG-006 仍 OPEN） |
+| `interact_no_effect` | 10 | 8（2 次无 `used/gained`，属真实无效） | ✅ BUG-008 正确 |
+| `mine_dfs` 单次 med/p90/max | 35.0/90.7/174.5s | **7.5/49.8/85.0s** | ⚠️ 过度收紧 → BUG-018 |
+| `mine_dfs:unknown`（124 次"预算用尽"） | 27 | **154** | ❌ 回归 |
+| `mine_dfs:repeated_identical_failure_blocked` | 1 | **56** | ❌ 回归（BUG-019） |
+| `staircase:time_budget` | 0 | **87**（调用数 69→208） | 新硬上限生效但 churn 高 |
+| `model.failed(cancelled)` | 128 | **137** | ❌ BUG-009 未修 |
+| `cancel_cooldown_wait` | 290.1s | 272.6s | 同上 |
+| 整集 `runtime_error`/`disconnected` | 3 | **10 / 2** | ❌ BUG-020 |
 
-> r12 尚在进行，计数未按调用量归一；仅用于确认修复方向，不等同最终验收。
+**分数回归定位**：`ds_ds_2_iron` 95→20、`hy4_hy_4_iron` 95→20（各 -75）。两路在 `shiny_gear` 上分别烧掉 55/62 个 actor 请求，每次 `mine_dfs` 4~8s 就 `time_slice` 且 0 进展。
 
-### 【新增 P1】BUG-013 下界场景"挖钻石"空转
-- **影响**：r12 前 3 分钟即 3 bots / 5 次防卡死拦截 + 2 次 `time_slice`（`glm_glm_1_nether_fortress`、`glm_glm_2_nether_bastion`、`ds_ds_4_nether_fortress`）
-- **证据**：`mine_dfs(explore, target=diamond, target_y=15)` 在下界 `[0.5,52,795.3]` / `[6.4,43,-810.6]` / `[800.5,60,796.5]` 空挖到 `time_slice`，随后 `repeat_count=2/3` 被拦
-- **源码定位**：`skills/mining_dfs.py:186-260 ORE_DFS_PROFILES` 仅主世界矿种；`_resolve_target_profile:668-703` 不校验维度
-- **最小修复**：`run()` 入口按 `status.dimension` 校验目标；下界/末地遇到不可能矿种立即返回 `bad_target_for_dimension` + 可用目标建议
-- **验收**：r13 下界三路 0 次实际空挖
+### 【新增 P0 回归】BUG-018 `_BudgetSession` 把每次子调用压到 ~3.9s
+- **触发**：`eea50d7`（修 BUG-003 时引入）
+- **根因行**：`src/mc_agent/skills/mining_dfs.py:344`
+  `request_timeout = min(timeout_s or 45.0, (remaining - 0.15) / 8)`
+- **离线证据**：`scripts/d1_budget_check.py`（exit 1）
+  ```
+  slice_budget  move_to_timeout  dig_timeout  verdict
+         31.5s            3.92s         3.92s  STARVED
+         59.5s            7.42s         7.42s  STARVED
+         89.5s           11.17s        11.17s  OK
+  ```
+  默认 32s 切片下每次 move_to/dig 仅 3.92s，短于 r12 `move_to` 中位 5.1s / p90 25.7s → 第一次调用即超时 → `time_slice` 0 进展
+- **建议**：`request_timeout = min(timeout_s or 45.0, max(6.0, remaining - 0.5))`（deadline 已在调用前后检查，不必预先除以 8）
+
+### 【新增 P1】BUG-013 下界"挖钻石"（已由 `fbd9548` 修复，待 r13）
+5 路下界 bot 全部中招：`glm_1` diamond×3、`glm_2` diamond×4、`ds_4` diamond×7、`hy4_8` diamond×3（含 `target_y=12/15/20`）。根因：`ORE_DFS_PROFILES` 无维度校验 + prompt "钻石镐…" 歧义。
+
+### 【新增 P1】BUG-019 / BUG-020
+- **BUG-019**：`time_slice` 文案"可用相同 action 继续"→ 模型照做 → 被防卡死拦截，17 bots / 56 次
+- **BUG-020**：瞬时故障报废 12 集：`not_loaded`×4、Qwen/CF `520/522/525`×4（525 不在任何重试清单）、`not_connected`×1、guardian `ReadTimeout`×1
 
 ---
 
@@ -186,9 +205,9 @@
 ---
 
 ## 6. 交接建议（省额度）
-- **Slice A（#3）**：BUG-003（deadline 透传 + 取消 `climb_out` 隐式预算抬升）
+- **Slice A（#3）**：**BUG-018（P0，`/8` 一行修复，最高优先）**；BUG-019 的 `time_slice` 文案改 `suggested_next`
 - **Slice B（#2）**：BUG-009 去抖与冷却、BUG-010 复活进食、BUG-011 反射网络抖动不可致命
 - **Slice C（#4）**：BUG-002 进传送门、BUG-006 别名、BUG-007 配方预检、BUG-008 桶假阴性
 - **Slice D2（#6）**：BUG-001 的 `import re` + `v2_fleet.py triage` 字段对齐（可直接参考 `scripts/d1_triage.py`）
-- **Integrator（#1）**：BUG-012 `not_loaded` 可重试化（`agent.py` 未分配 Slice）
+- **Integrator（#1）**：BUG-020（525/526 入重试清单、`not_loaded`/`not_connected` 不判整集失败）
 - 其余 P2 已归档，不需要任何人现在放下 P0/P1
