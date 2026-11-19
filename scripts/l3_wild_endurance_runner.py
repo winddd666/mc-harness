@@ -278,6 +278,20 @@ def select_nether_structure_site(
     if "nether" not in str(st.get("dimension") or "").lower():
         # `tp` may not have settled yet; never anchor the scene to a stale overworld position.
         pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
+    elif abs(float(pos[1]) - float(ny)) > 6.0:
+        # The bot fell into the structure during the settle window (r16 HY_6 anchored at y=46.9
+        # inside a bastion and then died to fall/lava on every return). Re-carve the ledge and pin
+        # the anchor to the carved height instead of the fall-through position.
+        print(
+            f"[Scene] nether settle y={pos[1]:.1f} differs from ledge y={ny}; re-carving ledge",
+            flush=True,
+        )
+        rcon_batch(
+            prepare_scene_ground(bot_name, "nether_fortress", float(nx), float(ny), float(nz), dim="the_nether"),
+            timeout=30,
+        )
+        time.sleep(1.0)
+        pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
     return float(pos[0]), float(pos[1]), float(pos[2]), f"nether:{structure_tag.split(':')[-1]}"
 
 
