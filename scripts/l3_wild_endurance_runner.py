@@ -490,6 +490,14 @@ def prepare_scene_ground(
                 f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz + 3} minecraft:air",
                 f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:respawn_anchor[charges=4]",
+                # 4-high obsidian parapet on three sides with a 1x2 gate on the east edge: the ledge
+                # is a respawn point inside a hostile structure, so open sightlines just feed the
+                # death loop (r17 hy4_hy_6_nether_bastion: 24 deaths).
+                f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 3} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy} {iz + 3} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy} {iz - 2} {ix - 3} {iy + 3} {iz + 2} minecraft:obsidian",
+                f"{pre} fill {ix + 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 1} minecraft:obsidian",
+                f"{pre} fill {ix + 3} {iy} {iz + 1} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
                 f"{pre} tp {bot_name} {ix}.5 {iy} {iz}.5",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
