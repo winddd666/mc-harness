@@ -1171,6 +1171,7 @@ class _StairSession:
         self.last_dig_pos: list[Any] | None = None
         self.last_dig_block: str | None = None
         self.pickaxe_tier: int | None = None
+        self.dig_cap: float | None = None
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
     _IDEMPOTENT_READS = frozenset({"status", "inventory", "get_block", "find_blocks"})
@@ -1186,7 +1187,13 @@ class _StairSession:
                 raise _StairDeadline()
             # Obsidian needs ~9.4s with a diamond pickaxe (r14: fortress
             # staircase timed out on every first dig at the old 8s cap).
-            cap = 6.0 if path == "move_to" else 15.0 if path == "dig" else 3.0
+            # BUG-037/r24: a first step on a loaded server can stall 20~30s
+            # even with a tier>=2 pickaxe, so allow the caller to raise the
+            # dig cap for the first step only.
+            base_cap = 6.0 if path == "move_to" else 15.0 if path == "dig" else 3.0
+            if path == "dig" and self.dig_cap:
+                base_cap = max(base_cap, float(self.dig_cap))
+            cap = base_cap
             timeout = min(remaining, cap, float(explicit_timeout if explicit_timeout is not None else cap))
             call_body = body
             if path == "move_to":
@@ -5128,8 +5135,58 @@ class MacroSkills:
             "pos_after": st_after.get("pos") or pos_before,
         }
 
-    def unstick(self) -> dict[str, Any]:
-        """Clear blocks overlapping the bot's 0.6x1.8 floor()-aligned hitbox and step out of pits/corners, canopy, or water."""
+    def unstick(self, *, max_duration_s: float = 45.0) -> dict[str, Any]:
+        """Clear blocks overlapping the bot's 0.6x1.8 floor()-aligned hitbox and step out of pits/corners, canopy, or water.
+
+        All internal get_block/dig/control steps share one hard deadline
+        (default 45s) so a stuck server action can never turn this into a
+        150~270s call (r22/r23/r24).
+        """
+        deadline = time.monotonic() + max(5.0, float(max_duration_s))
+        started = time.monotonic()
+        params = inspect.signature(self.bot.call).parameters
+        supports_timeout = "timeout_s" in params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+
+        class _UnstickDeadline(Exception):
+            pass
+
+        timed_out = False
+
+        def _call(path: str, body: dict[str, Any] | None = None, cap: float = 3.0) -> dict[str, Any]:
+            nonlocal timed_out
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.2:
+                timed_out = True
+                raise _UnstickDeadline()
+            timeout = min(remaining, cap)
+            try:
+                if supports_timeout:
+                    return self.bot.call(path, body, timeout_s=timeout)
+                return self.bot.call(path, body)
+            except httpx.TimeoutException:
+                timed_out = True
+                raise _UnstickDeadline() from None
+
+        def _finish(payload: dict[str, Any]) -> dict[str, Any]:
+            payload["elapsed_s"] = round(time.monotonic() - started, 2)
+            payload["budget_s"] = round(max(5.0, float(max_duration_s)), 2)
+            if timed_out:
+                payload["deadline_hit"] = True
+                payload["timed_out"] = True
+                payload["requires_replan"] = True
+                payload["hint"] = (
+                    f"unstick 在 {payload['budget_s']}s 硬预算内未完成（已做{len(payload.get('dug') or [])}步挖除）。"
+                    "请改用 mc_move_to(x,z) 短距离 8~12 格换站位、mc_skill_staircase 或 mc_control 短脉冲脱困，"
+                    "不要连续重复调用 unstick。"
+                )
+                try:
+                    self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
+            return payload
+
         st = self.bot.status()
         pos_before = st.get("pos") or [0.0, 64.0, 0.0]
         px, py, pz = float(pos_before[0]), float(pos_before[1]), float(pos_before[2])
@@ -5139,7 +5196,7 @@ class MacroSkills:
         zs = sorted({math.floor(pz - 0.38), bz, math.floor(pz + 0.38)})
         if bool(st.get("in_water")):
             esc = self.escape_water()
-            return {
+            return _finish({
                 "ok": True,
                 "foot_block_before": [bx, by, bz],
                 "hitbox_xs": xs,
@@ -5150,28 +5207,32 @@ class MacroSkills:
                 "control": esc.get("control", {}),
                 "escaped_water": esc.get("ok", False),
                 "in_water": esc.get("in_water", False),
-            }
+            })
 
         canopy = self.descend_canopy()
         if canopy.get("on_canopy") and canopy.get("dug"):
-            return {
+            return _finish({
                 "ok": True,
                 "descended_canopy": True,
                 "foot_block_before": [bx, by, bz],
                 "pos_before": pos_before,
                 "pos_after": canopy.get("pos_after", pos_before),
                 "dug": canopy.get("dug", []),
-            }
+            })
 
         skip_names = {"air", "cave_air", "void_air", "water", "lava", "bedrock"}
         dug: list[dict[str, Any]] = []
         pick_equipped = False
 
         def _try_dig_if_solid(cx: int, cy: int, cz: int, *, retries: int = 1) -> None:
-            nonlocal pick_equipped
+            nonlocal pick_equipped, timed_out
             for _attempt in range(retries):
+                if timed_out:
+                    return
                 try:
-                    blk = self.bot.call("get_block", {"pos": [cx, cy, cz]})
+                    blk = _call("get_block", {"pos": [cx, cy, cz]}, cap=3.0)
+                except _UnstickDeadline:
+                    return
                 except ApiError:
                     return
                 bname = str(blk.get("name") or "air")
@@ -5182,10 +5243,17 @@ class MacroSkills:
                 if not pick_equipped and (
                     bname in BLOCK_MIN_PICKAXE_TIER or "stone" in bname or "ore" in bname or "deepslate" in bname
                 ):
-                    pick_equipped = self._equip_if_present(tuple(PICKAXE_TIERS)) is not None
+                    try:
+                        pick_equipped = self._equip_if_present(tuple(PICKAXE_TIERS)) is not None
+                    except (ApiError, httpx.HTTPError):
+                        pick_equipped = False
                 try:
-                    self.bot.call("dig", {"pos": [cx, cy, cz], "collect": True, "stop_on": ["death"]})
+                    _call("dig", {"pos": [cx, cy, cz], "collect": True, "stop_on": ["death"]}, cap=15.0)
                     dug.append({"pos": [cx, cy, cz], "block": bname})
+                except _UnstickDeadline:
+                    self._avoid_temporarily((cx, cy, cz), "dig_timeout", 30.0)
+                    timed_out = True
+                    return
                 except ApiError as err:
                     if _is_protected_err(err):
                         self.protected_positions.add((cx, cy, cz))
@@ -5203,31 +5271,39 @@ class MacroSkills:
         # 2. Clear one cardinal 3-high escape slot and nudge out with control()
         mv_res: dict[str, Any] = {}
         exit_yaw = -math.pi / 2
-        for dx, dz, yaw in (
-            (1, 0, -math.pi / 2),
-            (0, -1, 0.0),
-            (-1, 0, math.pi / 2),
-            (0, 1, math.pi),
-        ):
-            ex, ez = bx + dx, bz + dz
-            _try_dig_if_solid(ex, by + 1, ez)
-            _try_dig_if_solid(ex, by + 2, ez)
-            _try_dig_if_solid(ex, by, ez)
-            exit_yaw = yaw
-            break
+        if not timed_out:
+            for dx, dz, yaw in (
+                (1, 0, -math.pi / 2),
+                (0, -1, 0.0),
+                (-1, 0, math.pi / 2),
+                (0, 1, math.pi),
+            ):
+                ex, ez = bx + dx, bz + dz
+                _try_dig_if_solid(ex, by + 1, ez)
+                _try_dig_if_solid(ex, by + 2, ez)
+                _try_dig_if_solid(ex, by, ez)
+                exit_yaw = yaw
+                break
+
+        if not timed_out:
+            try:
+                mv_res = _call(
+                    "control",
+                    {"forward": True, "jump": True, "yaw": exit_yaw, "ms": 900, "stop_on": []},
+                    cap=3.0,
+                )
+            except _UnstickDeadline:
+                mv_res = {"error": "deadline", "message": "control skipped: unstick budget exhausted"}
+            except ApiError as err:
+                mv_res = {"error": err.code, "message": err.message}
 
         try:
-            mv_res = self.bot.call(
-                "control",
-                {"forward": True, "jump": True, "yaw": exit_yaw, "ms": 900, "stop_on": []},
-            )
-        except ApiError as err:
-            mv_res = {"error": err.code, "message": err.message}
-
-        st_after = self.bot.status()
+            st_after = self.bot.status()
+        except (ApiError, httpx.HTTPError):
+            st_after = {"pos": pos_before}
         pos_after = st_after.get("pos") or pos_before
-        return {
-            "ok": True,
+        return _finish({
+            "ok": bool(dug) or not timed_out,
             "foot_block_before": [bx, by, bz],
             "hitbox_xs": xs,
             "hitbox_zs": zs,
@@ -5235,7 +5311,7 @@ class MacroSkills:
             "pos_after": pos_after,
             "dug": dug,
             "control": mv_res,
-        }
+        })
 
     def dig_safety_bunker(self, *, urgent: bool = False) -> dict[str, Any]:
         """Dig a 1x3 vertical shaft under the bot and seal the top to block night mobs."""
@@ -6307,6 +6383,9 @@ class MacroSkills:
                 if step_idx == 0 and self.bot.per_step_timeout >= 10.0
                 else min(self.bot.deadline, time.monotonic() + self.bot.per_step_timeout)
             )
+            # BUG-037/r24: step 0 may also stall 20~30s inside the server's dig
+            # even with a tier>=2 pickaxe; let that first dig use the budget.
+            self.bot.dig_cap = 40.0 if (step_idx == 0 and self.bot.per_step_timeout >= 10.0) else None
             if step_idx > 0 and time.monotonic() >= stair_deadline:
                 stop_reason = "time_budget"
                 break
@@ -6627,6 +6706,7 @@ class MacroSkills:
                     break
 
         self.bot.step_deadline = self.bot.deadline
+        self.bot.dig_cap = None
         st_end = self.bot.status()
         if stop_on_ore and stop_reason == "completed":
             found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})

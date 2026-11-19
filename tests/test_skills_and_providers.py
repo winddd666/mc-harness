@@ -1867,7 +1867,10 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
         calls.append(path)
         timeout = request.extensions["timeout"]["read"]
         if path == timeout_path:
-            assert 0 < timeout <= 15
+            # BUG-037/r24: the step-0 dig may use up to 40s of the session
+            # budget instead of the old flat 15s cap; nothing may exceed it.
+            limit = 40 if timeout_path == "dig" else 15
+            assert 0 < timeout <= limit + 0.01
             if path == "get_block":
                 # Reading safety probes also consumes the same total budget.
                 clock[0] += 3
@@ -2432,6 +2435,116 @@ def test_tunnel_triggers_retention_cleanup() -> None:
         result = json.loads(toolset.mc_skill_tunnel("north", 1))
     assert result["inventory_cleaned"]
     assert state["cobblestone"] == 192
+
+
+def test_staircase_step0_dig_uses_budget_beyond_15s(monkeypatch) -> None:
+    """BUG-037/r24: step 0 stalled ~28s in dig even with a stone pickaxe."""
+    import mc_agent.skills.library as library
+
+    clock = [100.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(library.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    dig_timeouts = []
+    pos = [0.5, 36.0, 0.5]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": list(pos), "on_ground": True, "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "stone_pickaxe", "count": 1}]}
+        elif path == "equip":
+            result = {"held": {"name": "stone_pickaxe"}}
+        elif path == "get_block":
+            result = {"name": "stone" if body["pos"][1] <= 36 else "air"}
+        elif path == "dig":
+            dig_timeouts.append(request.extensions["timeout"]["read"])
+            if len(dig_timeouts) == 1:
+                # The first dig stalls ~28s: only the raised step-0 cap can wait.
+                clock[0] += 28.0
+            result = {}
+        elif path == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(pos)}
+        elif path == "look":
+            result = {}
+        elif path == "control":
+            result = {"pos": list(pos), "moved": 1.0}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="down", steps=1)
+    assert dig_timeouts and dig_timeouts[0] > 15.0
+    assert result["steps_done"] >= 1
+
+
+def test_unstick_sends_stop_and_reports_deadline_hit(monkeypatch) -> None:
+    """r22/r23/r24: unstick could run 150~270s; budget must cap it."""
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    calls: list[str] = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(path)
+        if path == "control" and body.get("yaw") == 0.0:
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        if path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "in_water": False}
+        elif path == "inventory":
+            result = {"items": []}
+        elif path == "get_block":
+            result = {"name": "stone", "diggable": True}
+        elif path == "dig":
+            clock[0] += min(20.0, float(request.extensions["timeout"]["read"]))
+            result = {}
+        elif path == "control":
+            result = {"pos": [0.5, 64.0, 0.5], "moved": 0.0}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        skills.descend_canopy = lambda **kwargs: {"on_canopy": False}
+        result = skills.unstick(max_duration_s=45.0)
+    assert result["deadline_hit"] is True
+    assert result["elapsed_s"] <= 45.5
+    assert result["budget_s"] == pytest.approx(45.0)
+    assert "不要连续重复调用 unstick" in result["hint"]
+    assert "stop" in calls
+
+
+def test_unstick_fast_path_has_no_deadline_flag() -> None:
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "in_water": False}
+        elif path == "get_block":
+            result = {"name": "air", "diggable": False}
+        elif path == "control":
+            result = {"pos": [1.5, 64.0, 0.5], "moved": 1.0}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).unstick()
+    assert result["ok"] is True
+    assert "deadline_hit" not in result
+    assert result["elapsed_s"] >= 0.0
 
 
 def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
