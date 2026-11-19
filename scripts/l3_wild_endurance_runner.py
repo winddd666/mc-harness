@@ -100,6 +100,27 @@ def rcon_batch(commands: list[str], *, timeout: int = 60) -> list[dict[str, str]
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+def _wait_settled(bot: Any, *, timeout_s: float = 12.0, settle_delta: float = 0.6) -> list[float] | None:
+    """Poll status until the bot stops falling after a teleport/spreadplayers (returns last pos)."""
+    pos: list[float] | None = None
+    last_y: float | None = None
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        time.sleep(0.8)
+        try:
+            st = bot.status()
+        except Exception:
+            continue
+        p = st.get("pos")
+        if not isinstance(p, (list, tuple)) or len(p) < 3:
+            continue
+        pos = [float(p[0]), float(p[1]), float(p[2])]
+        if last_y is not None and abs(pos[1] - last_y) < settle_delta:
+            return pos
+        last_y = pos[1]
+    return pos
+
+
 def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
     """Find a dry land surface spawn >= 2000m from other bots using vanilla `spreadplayers`."""
     for offset in range(len(CANDIDATE_SITES)):
@@ -111,9 +132,8 @@ def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -
             ],
             timeout=45,
         )
-        time.sleep(2.0)
+        pos = _wait_settled(bot) or [cx, 64, cz]
         st = bot.status()
-        pos = st.get("pos") or [cx, 64, cz]
         biome = str(st.get("biome") or "").lower()
         in_water = bool(st.get("in_water"))
         # Skip pure ocean spawns so we land on a true terrestrial island/continent
@@ -161,9 +181,9 @@ def select_village_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tup
             ],
             timeout=45,
         )
-        time.sleep(2.0)
+        pos = _wait_settled(bot) or [vx, 64, vz]
         st = bot.status()
-        pos = st.get("pos") or [vx, 64, vz]
+        pos = st.get("pos") or pos
         biome = str(st.get("biome") or "village").lower()
         return float(pos[0]), float(pos[1]), float(pos[2]), f"village:{biome}"
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
@@ -206,9 +226,8 @@ def select_nether_structure_site(
         ]
     )
     rcon_batch(prep, timeout=45)
-    time.sleep(2.0)
+    pos = _wait_settled(bot, timeout_s=8.0) or [float(nx) + 0.5, float(ny), float(nz) + 0.5]
     st = bot.status()
-    pos = st.get("pos") or [float(nx) + 0.5, float(ny), float(nz) + 0.5]
     if "nether" not in str(st.get("dimension") or "").lower():
         # `tp` may not have settled yet; never anchor the scene to a stale overworld position.
         pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
@@ -241,22 +260,7 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
     )
     # `spreadplayers` drops the bot from y=120; polling too early reads a mid-fall y and would build
     # a floating platform tens of blocks above the ocean surface. Wait until y stabilises first.
-    pos = [float(wx), 70.0, float(wz)]
-    last_y: float | None = None
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        time.sleep(0.8)
-        try:
-            st = bot.status()
-        except Exception:
-            continue
-        p = st.get("pos")
-        if not isinstance(p, (list, tuple)) or len(p) < 3:
-            continue
-        pos = [float(p[0]), float(p[1]), float(p[2])]
-        if last_y is not None and abs(pos[1] - last_y) < 0.6 and pos[1] < 100.0:
-            break
-        last_y = pos[1]
+    pos = _wait_settled(bot, timeout_s=15.0) or [float(wx), 70.0, float(wz)]
     st = bot.status()
     ix, iz = int(pos[0]), int(pos[2])
     # Deep ocean sea level is 63; clamp so a stale reading can never produce a sky platform.
