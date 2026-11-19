@@ -1052,11 +1052,40 @@ class McToolset:
                         "请先脱困或等待 1~2 秒后重试，不要连续提交同一路径。"
                     )
                     raw = json.dumps(parsed, ensure_ascii=False)
+                st_mv: dict[str, Any] | None = None
                 try:
                     st_mv = self.bot.status()
                     self._update_status_cache(st_mv)
                 except Exception:
                     pass
+                if err_code == "movement_not_confirmed" and isinstance(st_mv, dict):
+                    pos_now = st_mv.get("pos")
+                    if isinstance(pos_now, (list, tuple)) and len(pos_now) >= 3:
+                        if y is not None:
+                            dist_now = math.dist(
+                                [float(x), float(y), float(z)],
+                                [float(pos_now[0]), float(pos_now[1]), float(pos_now[2])],
+                            )
+                        else:
+                            dist_now = math.hypot(float(x) - float(pos_now[0]), float(z) - float(pos_now[2]))
+                        if dist_now <= float(range) + 0.05:
+                            return json.dumps(
+                                {
+                                    "ok": True,
+                                    "result": {
+                                        "already_in_range": True,
+                                        "pos": list(pos_now[:3]),
+                                        "range": range,
+                                        "distance": round(dist_now, 2),
+                                        "hint": (
+                                            "已在目标 range 内，本次移动视为完成。"
+                                            "若要挪动站位，请指定至少 3 格外的坐标并设 range=0.5，"
+                                            "或直接调 mc_place 不传坐标。"
+                                        ),
+                                    },
+                                },
+                                ensure_ascii=False,
+                            )
                 dim_m, cur_p, _ = self._cached_env(fetch_if_missing=True)
                 dist_m = math.hypot(float(x) - cur_p[0], float(z) - cur_p[2]) if cur_p is not None else 0.0
                 if dist_m > 36.0 and err_code in {"path_not_found", "no_path", "timeout", "action_timeout", "stalled"}:

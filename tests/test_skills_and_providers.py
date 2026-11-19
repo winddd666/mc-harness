@@ -1441,6 +1441,32 @@ def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
     assert calls == ["status"]
 
 
+def test_move_to_already_in_range_is_success_not_failure() -> None:
+    """r15 top Slice C error: movement_not_confirmed at 33/10 bots."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.7, 64.0, 1000.5], "busy": None}})
+        if path == "move_to":
+            return httpx.Response(
+                200,
+                json={"ok": False, "error": {"code": "movement_not_confirmed", "message": "no movement"}},
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_move_to(x=1000.8, z=1000.5, range=2.0))
+    assert result["ok"] is True
+    assert result["result"]["already_in_range"] is True
+    assert result["result"]["distance"] < 0.2
+    assert calls.count("move_to") == 1
+
+
 def test_move_to_entity_reports_stale_id_with_replan_hint() -> None:
     from mc_agent.harness.mc_tools import McToolset
 
