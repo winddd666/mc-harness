@@ -368,6 +368,21 @@ ALL PASS — 11 项门禁全绿
 
 **新增 BUG-033（P1，原误用 BUG-031 已改号）修复建议**：guardian 对只读 GET 不抛抢占信号；runner 的 watcher 显式捕获 `ReflexPreempted` 并上报 `thread_health`。
 
+### 4j. r18 中段（22:29，888 calls，0/22 summary）——取消风暴回潮
+
+| 指标 | 值 | 结论 |
+|---|---|---|
+| `model.failed(cancelled)` | **186**（前 18 分钟） | 其中 `hy4_hy_4_cave_combat` **113 次** |
+| `cancel_cooldown_wait` | **393.4s** | `hy4_hy_4` 占 259.7s |
+| `pre_hurt_ranged` | **74 次**（melee 11 / creeper 5） | cave_combat 骷髅持续射击 |
+| 死亡 incident | 17（<=25 门禁 PASS） | — |
+| `mine_dfs` 中位 / 零进展 | 27.9s / 4.8% | 稳定 |
+| thread exceptions | 1（`ds_4` 的 scene-watchdog） | BUG-033 |
+
+**新增 BUG-034（P1，Slice B）**：`PRE_HURT_RANGED_COOLDOWN_S=10s` 对持续远程火力太短，且 `status.blocking=True` 不豁免取消；建议 30~45s combat stance + 举盾期间不取消。
+
+**ID 冲突已处理**：watchdog 线程单原误用 BUG-031（与 Integrator 的长程单重号），已改为 **BUG-033**，验收脚本同步更新。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
