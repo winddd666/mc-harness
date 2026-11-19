@@ -479,6 +479,17 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 - **BUG-037 影响裸开**：`ds_ds_1_bare` 的 `bootstrap_iron_age` 13 次调用里 6 次 `staircase:time_budget` → 铁器时代直接超时。
 - **P2-28 升级**：`ds_1` 报 `missing_fuel`（零燃料、零木头）；建议提示先 `harvest_logs(2)`，并把"有原木"纳入自动燃料选择。
 
+### 4s. BUG-030 根因修正（23:25）
+
+原判断"每片只下潜几格"不准确：实测**每次平均下潜 11.5 格**。真正的问题：
+
+- r20_short 50 次深挖调用中 **29 次从 y>50 地表重新起挖**（58%）
+- `hy4_hy_2_iron`：文件 2 开头 `-17 → hurt` 后位置 **67** → 一次死亡清零 80 格下潜
+- `nju_3`：新一集 `start_y=95`，集边界同样重置
+- 显式回撤（dy>5）整波仅 1 次 → 不是回撤，而是**死亡/集边界重置**
+
+→ 修复重点改为：新集/复活后**复用已建竖井**（restore shaft + 走到最深节点），而非从地表重挖；预算自适应降为次要。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
