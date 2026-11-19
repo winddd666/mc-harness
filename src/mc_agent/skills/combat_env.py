@@ -1029,15 +1029,15 @@ class CombatEnv:
             else:
                 base_yaw = float(st.get("yaw") or 0.0)
                 best_shore_yaw: float | None = None
-                for probe_dist in (4.5, 7.5, 11.0, 15.0):
+                for probe_dist in (4.5, 9.0):
                     if time.monotonic() >= lava_deadline:
                         break
-                    for deg in (0, 45, -45, 90, -90, 135, -135, 180):
+                    for deg in (0, 90, -90, 180, 45, -45, 135, -135):
                         cand_yaw = base_yaw + math.radians(deg)
                         ux, uz = yaw_to_unit_xz(cand_yaw)
                         px = math.floor(float(pos0[0]) + ux * probe_dist)
                         pz = math.floor(float(pos0[2]) + uz * probe_dist)
-                        for y_chk in (py, py + 1, py - 1):
+                        for y_chk in (py, py + 1):
                             if _is_solid_ground(self._get_block_name(px, y_chk, pz)) and _is_passable(self._get_block_name(px, y_chk + 1, pz)):
                                 best_shore_yaw = cand_yaw
                                 break
@@ -1048,9 +1048,9 @@ class CombatEnv:
                 tried_yaws = [best_shore_yaw] if best_shore_yaw is not None else [base_yaw]
 
         swim_ms = 1400 if (lava_shore_target is not None or len(tried_yaws) == 1) else 950
-        for cyaw in tried_yaws[:2]:
-            if time.monotonic() >= lava_deadline:
-                break
+
+        def _run_jump_sprint(cyaw: float) -> bool:
+            nonlocal st
             try:
                 self.bot.call("look", {"yaw": cyaw, "pitch": 0.0})
                 self.bot.call(
@@ -1064,7 +1064,10 @@ class CombatEnv:
                     self._best_effort_stop()
             self.invalidate_block_cache()
             st = self._safe_status(st)
-            if _should_exit_lava(st):
+            return _should_exit_lava(st)
+
+        if tried_yaws and time.monotonic() < lava_deadline:
+            if _run_jump_sprint(tried_yaws[0]):
                 return _lava_result(st)
 
         # 2b. Short pathfinder step onto close shore (`<=6.5m`) guarded against pathfinder ReadTimeout stalls.
@@ -1092,16 +1095,16 @@ class CombatEnv:
                 if _should_exit_lava(st):
                     return _lava_result(st)
 
-        # 3. Boxed-in pit or deep lava: try replacing lava at feet / pillaring up with a filler block
+        # 3. Boxed-in pit or deep lava: try bridging beneath feet with filler BEFORE spending extra sprint budget
         filler = self._pick_filler_block(counts)
-        if filler is not None and time.monotonic() < lava_deadline:
+        if filler is not None and time.monotonic() < lava_deadline + 0.8:
             p_cur = st.get("pos") or pos0
             bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
             place_targets = [[bx, by, bz], [bx, by - 1, bz]]
             if st.get("on_ground") is False and _is_passable(self._get_block_name(bx, by - 1, bz)):
                 place_targets.append([bx, by - 2, bz])
             for place_pos in place_targets:
-                if time.monotonic() >= lava_deadline:
+                if time.monotonic() >= lava_deadline + 0.8:
                     break
                 try:
                     self.bot.call("control", {"jump": True, "ms": 220, "wait": False})
@@ -1116,6 +1119,10 @@ class CombatEnv:
                     if isinstance(err, httpx.HTTPError):
                         self._best_effort_stop()
                     continue
+
+        if len(tried_yaws) > 1 and time.monotonic() < lava_deadline:
+            if _run_jump_sprint(tried_yaws[1]):
+                return _lava_result(st)
 
         # 4. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
         p_cur = st.get("pos") or pos0

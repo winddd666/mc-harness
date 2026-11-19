@@ -2732,6 +2732,60 @@ def test_bug034_ranged_combat_stance_blocking_and_cover_exempt_cancels(monkeypat
     assert rep["guardian"]["cancelled_generations"] == 1
 
 
+def test_r19_lava_pit_places_netherrack_filler_before_second_sprint(monkeypatch):
+    """Reproduces r19_short hy4_hy_8_nether: boxed Nether pit must try netherrack bridge right after first sprint instead of starving."""
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    clock = [5000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    state_p = {"in_lava": True, "pos": [967.5, 30.1, 373.5], "sprint_n": 0}
+    action_seq: list[str] = []
+
+    class _PitLavaBot:
+        def status(self):
+            return {
+                "pos": list(state_p["pos"]),
+                "health": 10.0,
+                "alive": True,
+                "ready": True,
+                "in_lava": state_p["in_lava"],
+                "on_ground": not state_p["in_lava"],
+                "yaw": 0.0,
+                "dimension": "minecraft:the_nether",
+            }
+
+        def call(self, action, body=None, **kwargs):
+            action_seq.append(action)
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "netherrack", "count": 48}]}
+            if action == "get_block":
+                p = (body or {}).get("pos", [0, 0, 0])
+                if p[1] in (30, 31) and p[0] == 967 and p[2] == 373:
+                    return {"name": "lava"}
+                return {"name": "air"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "control":
+                if (body or {}).get("forward"):
+                    state_p["sprint_n"] += 1
+                    # Simulate elapsed time hitting 4.6s right after sprint #1 (just before old 5.0s deadline!)
+                    clock[0] += 4.6 if state_p["sprint_n"] == 1 else 1.0
+                return {"ok": True}
+            if action == "place":
+                state_p["in_lava"] = False
+                return {"ok": True}
+            return {"ok": True}
+
+    out_p = CombatEnv(_PitLavaBot()).escape_lava()
+    assert out_p["ok"] is True and out_p["in_lava"] is False
+    assert "lava_place_netherrack" in out_p["actions"]
+    assert out_p["actions"].count("lava_jump_sprint") == 1
+
+
+
 
 
 
