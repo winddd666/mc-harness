@@ -1198,6 +1198,9 @@ class SubcorticalInstinctController:
             _clean_block_name(e.get("name")) == "creeper" and float(e.get("dist", 99.0)) <= 5.5
             for e in hostiles
         )
+        # Count close-range engaged hostiles (<=8.5m) for swarm/solo gates so mobs outside enclosed
+        # walls (`10..16m`) never trick a sword+shield bot into pure circle-fleeing inside a room.
+        nearby_hostiles = [e for e in hostiles if float(e.get("dist", 99.0)) <= 8.5]
         mode = "stabilize"
         latched_guard = False
 
@@ -1300,7 +1303,7 @@ class SubcorticalInstinctController:
         elif (
             mob_name in LONE_COUNTERKILL_MOBS
             and hp > 10.0
-            and len(hostiles) <= 2
+            and len(nearby_hostiles) <= 2
             and any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
         ):
             weapon = self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
@@ -1394,7 +1397,7 @@ class SubcorticalInstinctController:
                 and has_shield
                 and has_weapon
                 and hp >= 14.0
-                and len(hostiles) <= 1
+                and len(nearby_hostiles) <= 1
                 and mob_dist <= 9.5
                 and mob_id is not None
             ):
@@ -1411,12 +1414,23 @@ class SubcorticalInstinctController:
                         mode = "cover_or_flee"
                     else:
                         env.bot.call("posture", {"shield": False, "sneak": False, "jump": False})
-                        atk_r = env.bot.call("attack", {"entity_id": int(mob_id), "timeout": 2800, "stop_on": ["death"]})
-                        actions.append({"action": "shield_rush_attack", "ok": True, "killed": bool(atk_r.get("killed"))})
+                        for _ in range(3):
+                            if time.monotonic() >= deadline:
+                                break
+                            atk_r = env.bot.call("attack", {"entity_id": int(mob_id), "timeout": 2400, "stop_on": ["death"]})
+                            hits_r = atk_r.get("hits")
+                            killed_r = bool(atk_r.get("killed"))
+                            actions.append({"action": "shield_rush_attack", "ok": True, "killed": killed_r})
+                            if killed_r or (isinstance(hits_r, (int, float)) and hits_r == 0):
+                                break
+                            st_rk = env.bot.status()
+                            if st_rk.get("alive") is False or float(st_rk.get("health") or 20.0) <= 10.0:
+                                break
                 except ApiError as err:
                     actions.append({"action": "shield_rush_attack", "ok": False, "code": err.code})
-                    fl = env.flee(mob_pos, distance=12.0, urgent=True)
-                    actions.append({"action": "fallback_flee", "ok": bool(fl.get("ok"))})
+                    if err.code not in {"entity_not_found", "invalid_entity", "target_dead"}:
+                        fl = env.flee(mob_pos, distance=12.0, urgent=True)
+                        actions.append({"action": "fallback_flee", "ok": bool(fl.get("ok"))})
             else:
                 mode = "cover_or_flee"
                 covered = False

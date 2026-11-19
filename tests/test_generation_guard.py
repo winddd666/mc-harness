@@ -1613,6 +1613,80 @@ def test_non_combat_fire_fall_hurt_skips_shield_spam_and_water_trident_equips_sh
     assert out_tp["ok"] is False and out_tp.get("respawned") is True
 
 
+def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush():
+    """Reproduces r15 cave_combat: distant mobs >8.5m outside walls must not disable sword counter_kill or multi-hit shield_rush_ranged."""
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    strikes = {"n": 0}
+
+    class _CaveArenaBot:
+        def __init__(self, *, solo_skeleton: bool = False):
+            self.solo_skeleton = solo_skeleton
+
+        def status(self):
+            return {
+                "pos": [0.5, 64.0, 0.5],
+                "health": 18.0,
+                "food": 20,
+                "alive": True,
+                "ready": True,
+                "on_ground": True,
+                "in_water": False,
+                "in_lava": False,
+                "yaw": 0.0,
+            }
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}]}
+            if action == "get_entities":
+                if self.solo_skeleton:
+                    return {
+                        "entities": [
+                            {"id": 20, "name": "skeleton", "pos": [0.5, 64.0, 5.0], "dist": 4.5},
+                            # Ambient outdoor mobs > 8.5m behind cobblestone walls
+                            {"id": 31, "name": "zombie", "pos": [12.5, 64.0, 0.5], "dist": 12.0},
+                            {"id": 32, "name": "zombie", "pos": [-13.5, 64.0, 0.5], "dist": 14.0},
+                        ]
+                    }
+                return {
+                    "entities": [
+                        {"id": 10, "name": "zombie", "pos": [2.5, 64.0, 0.5], "dist": 2.0},
+                        {"id": 20, "name": "skeleton", "pos": [0.5, 64.0, 5.0], "dist": 4.5},
+                        {"id": 31, "name": "zombie", "pos": [12.5, 64.0, 0.5], "dist": 12.0},
+                        {"id": 32, "name": "spider", "pos": [-13.5, 64.0, 0.5], "dist": 14.0},
+                    ]
+                }
+            if action == "get_block":
+                p = (body or {}).get("pos", [0, 64, 0])
+                return {"name": "stone" if p[1] < 64 or abs(p[0]) >= 5 or abs(p[2]) >= 5 else "air"}
+            if action == "attack":
+                strikes["n"] += 1
+                return {"hits": 1, "killed": strikes["n"] >= 2}
+            return {"ok": True}
+
+    ctrl = SubcorticalInstinctController()
+    # 1) Zombie + skeleton inside arena + 2 mobs outside at 12-14m -> counter-kills zombie instead of circle-fleeing
+    out_z = ctrl.on_encounter(
+        CombatEnv(_CaveArenaBot(solo_skeleton=False)),
+        {"source": "pre_hurt_melee", "primary_entity_id": 10, "primary_type": "zombie", "distance": 2.0},
+    )
+    assert out_z["mode"] == "counter_killed"
+
+    # 2) Solo skeleton inside + 2 outdoor mobs -> shield_rush_ranged finishes skeleton in 2 strikes
+    strikes["n"] = 0
+    out_s = ctrl.on_encounter(
+        CombatEnv(_CaveArenaBot(solo_skeleton=True)),
+        {"source": "pre_hurt_ranged", "primary_entity_id": 20, "primary_type": "skeleton", "distance": 4.5},
+    )
+    assert out_s["mode"] == "shield_rush_ranged"
+    assert strikes["n"] == 2
+    assert any(a["action"] == "shield_rush_attack" and a.get("killed") is True for a in out_s["actions"])
+
+
+
 
 
 
