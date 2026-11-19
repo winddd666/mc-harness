@@ -29,9 +29,9 @@ from ..skills.library import (
     _compute_empty_slots,
     _inventory_counts,
     best_melee_weapon_in_inv,
+    explain_material_craft_error,
     is_passable_sight_block,
 )
-from ..skills.crafting import explain_craft_error
 from ..skills.safety import SAFE_FOOD_PRIORITY
 from .geofence import VoidGeofence
 from .tool_registry import Parameter, Tool, ToolRegistry
@@ -474,7 +474,7 @@ class McToolset:
                 except (TypeError, ValueError):
                     pass
         if action == "craft":
-            err_obj = explain_craft_error(params.get("item", ""), params.get("count", 1), err_obj)
+            err_obj = explain_material_craft_error(params.get("item", ""), params.get("count", 1), err_obj)
         if action == "use_item" and str(exc.code).lower() == "missing_item" and isinstance(err_obj.get("inventory"), dict):
             inv_map = err_obj["inventory"]
             avail_foods = [

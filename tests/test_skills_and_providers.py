@@ -1635,3 +1635,78 @@ def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback() -
     assert result["ignored_types"] == ["shield", "leather"]
     assert "mc_find_blocks(types=" in result["error"]["message"]
     assert len(queries) == 2
+
+
+@pytest.mark.parametrize("item,counts,missing", [
+    ("stone_pickaxe", {"cobblestone": 1, "oak_log": 2}, {"cobblestone": 2, "stick": 2}),
+    ("stone_shovel", {"stick": 2}, {"cobblestone": 1}),
+    ("shield", {"oak_planks": 6}, {"iron_ingot": 1}),
+    ("stone_bricks", {"stone": 1}, {"stone": 3}),
+])
+def test_craft_gear_missing_materials_fail_before_any_mutation(item, counts, missing) -> None:
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        assert path == "inventory"
+        return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": name, "count": count} for name, count in counts.items()]}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).craft_gear(item)
+    assert result["error"] == "missing_ingredients"
+    assert result["requires_replan"] is True
+    assert result["missing_materials"] == missing
+    assert calls == ["inventory"]
+
+
+def test_recipe_preflight_handles_stone_alternatives_and_batch_yield() -> None:
+    from mc_agent.skills.library import craft_material_shortage
+
+    stone = craft_material_shortage("stone_pickaxe", 1, {"cobblestone": 1, "cobbled_deepslate": 1, "blackstone": 1, "stick": 2})
+    assert stone["missing_materials"] == {}
+    assert stone["available_materials"]["cobblestone"] == 3
+    torch = craft_material_shortage("torch", 5, {"charcoal": 2, "stick": 2})
+    assert torch["missing_materials"] == {}
+    assert torch["required_materials"] == {"coal_or_charcoal": 2, "stick": 2}
+    bricks = craft_material_shortage("stone_bricks", 5, {"stone": 7})
+    assert bricks["missing_materials"] == {"stone": 1}
+    assert craft_material_shortage("unknown_new_recipe", 1, {}) is None
+
+
+@pytest.mark.parametrize("lose_material,code", [(False, "server_recipe_rejected"), (True, "missing_ingredients")])
+def test_craft_no_result_distinguishes_fresh_shortage_and_never_rebuilds_table(lose_material, code) -> None:
+    crafted = []
+    counts = {"cobblestone": 3, "stick": 2, "crafting_table": 1}
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "inventory":
+            result = {"items": [{"name": name, "count": count} for name, count in counts.items()], "empty_slots": 30}
+            return httpx.Response(200, json={"ok": True, "result": result})
+        assert path == "craft"  # No dig/find_blocks/move_to recovery on recipe rejection.
+        crafted.append(body)
+        if lose_material:
+            counts["cobblestone"] = 1
+        return httpx.Response(200, json={"ok": False, "error": {"code": "missing_ingredients", "message": "could not craft stone_pickaxe: server placed no result"}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        skills.ensure_crafting_table = lambda **kwargs: {"ok": True, "reused": True}
+        result = skills.craft_gear("stone_pickaxe")
+    assert result["error"] == code
+    assert result["requires_replan"] is True
+    assert crafted == [{"item": "stone_pickaxe", "count": 1}]
+    assert result["missing_materials"] == ({"cobblestone": 2} if lose_material else {})
+
+
+def test_atomic_craft_error_reports_actual_materials_instead_of_example_variant() -> None:
+    from mc_agent.errors import ApiError
+    from mc_agent.harness.mc_tools import McToolset
+
+    err = ApiError("missing_ingredients", "server placed no result", context={"example_recipe_needs": {"cobbled_deepslate": 3, "stick": 2}, "inventory": {"cobblestone": 1, "stick": 2}})
+    result = json.loads(McToolset._format_api_error("craft", {"item": "stone_pickaxe", "count": 1}, err))
+    assert result["error"]["missing_materials"] == {"cobblestone": 2}
+    assert "example_recipe_needs" not in result["error"]
+    assert result["error"]["server_recipe_example"]["cobbled_deepslate"] == 3
