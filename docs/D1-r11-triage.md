@@ -782,6 +782,21 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 
 **结论**：长任务能力上限明显提升（glm_5 195、nju 恢复），但 `hy4_1` 同时被 BUG-041 与 BUG-042 打击。
 
+## 4as. r23_short 终验（18/18）—— provider 过载吞掉 21 集
+
+| 门禁 | 结果 |
+|---|---|
+| BUG-020 runtime_error | **21 ❌**（18× 429 overloaded + 3× 502） |
+| BUG-018 zero-slice | 13.5% ❌（下界 ancient_debris 内部阶梯问题） |
+| BUG-026 死亡 / 冷却 | 17 ✅ / 165.5s ✅ |
+| BUG-029 over-cap | **0 ✅** |
+| BUG-040 void | 5 次（`hy4_8`，死亡回城残余） |
+| trade / brew | 5 / 2 ✅ |
+
+- 分数 1845 → 1765（18 vs 18）；死亡 29 → 17（改善）
+- 报废集分布：`hy4_7 5`、`hy4_6 4`、`hy4_2 3`、`hy4_9 3`、`hy4_5 2`、`hy4_8 2`、`hy4_3 1`、`hy4_10 1`
+- **r24 实时**：`r24_short` 已有 100 次 `http_retry` + 14 次 429，provider 仍在过载
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
