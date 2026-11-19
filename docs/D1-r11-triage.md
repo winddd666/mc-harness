@@ -481,14 +481,124 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 
 ### 4s. BUG-030 根因修正（23:25）
 
-原判断"每片只下潜几格"不准确：实测**每次平均下潜 11.5 格**。真正的问题：
+口径更正（先前"58% 从地表重挖"是把每个 episode 的首次调用误计为重启）：
 
-- r20_short 50 次深挖调用中 **29 次从 y>50 地表重新起挖**（58%）
-- `hy4_hy_2_iron`：文件 2 开头 `-17 → hurt` 后位置 **67** → 一次死亡清零 80 格下潜
-- `nju_3`：新一集 `start_y=95`，集边界同样重置
-- 显式回撤（dy>5）整波仅 1 次 → 不是回撤，而是**死亡/集边界重置**
+- **11 个深挖 episode = 11 次首调用 + 39 次续调用**；续调用里只有 **1 次**净上升 >15 格后重开
+- 每片平均下潜 **11.5 格**，从 y≈64 到 -54 需 **10~11 次调用 ≈5 分钟**；episode 还要分给备料/战斗，常在到达前超时
+- `hy4_hy_2_iron` 文件 2 的 `-17 → hurt → 67` 是唯一一次深度清零样本
 
-→ 修复重点改为：新集/复活后**复用已建竖井**（restore shaft + 走到最深节点），而非从地表重挖；预算自适应降为次要。
+→ 修复重点：**跨 episode 复用竖井**（restore shaft，走到最深节点）；单次预算自适应只减少轮次开销，不改变总挖掘时间。
+
+### 4t. r20_short 收官（17/18，`hy4_hy_3` 被 BUG-035 吞掉）
+
+| 门禁 | 结果 |
+|---|---|
+| startup crash | **1 ❌**（BUG-035） |
+| BUG-025 stick | 2 ❌（均为真缺原木） |
+| BUG-029 over-cap | 2 ❌（`glm_3` cobble 242、`hy4_8` netherrack 182） |
+| BUG-026 死亡 / 冷却 | 14 ✅ / **157.7s ✅**（r19 205.6、r18 653.2） |
+| BUG-018 耗时/预算 / 零进展 | 0.93 ✅ / 6.2% ✅ |
+| BUG-020 / 033 / 023 / SCENE-001 | 全部 ✅ |
+
+- 分数 1760（18 路 r19）→ 1680（17 路 r20），人均 97.8→98.8
+- `objective_verified` 17→21（变好）
+- BUG-029 残留成因：清理只挂在 `mine_dfs`，`mine_blocks`/`tunnel` 收集的石料没有触发点
+
+### 4u. BUG-037 模式拆分（r20_long，23:28）
+
+| 波次 | `steps_done=0`（per-step 15s 饿死） | `steps_done>0`（45s 总预算 vs 长请求） | 请求 steps 中位 |
+|---|---|---|---|
+| r20_short | **24** | 12 | 12 |
+| r20_long | 0 | 8（完成中位 8 步） | **40** |
+
+- `ds_ds_1_bare` 铁器集 6 次 `time_budget` 全是 7~9 步 → 不是首步问题；模型一次要 40 步，45s 必然做不完
+- `missing_fuel` 后**没有恢复动作**（未 harvest_logs），铁器时代卡死 → P2-28 提示必须给出下一步
+
+### 4v. BUG-030 竖井树追踪（23:30）
+
+| bot | 现象 | 结论 |
+|---|---|---|
+| `hy4_hy_1_bare`（r20_long） | `node_count 1→…→15` 跨集保留，`surface_reached` 后继续下潜到 **-27** | **期望行为**（树可复用） |
+| `hy4_hy_2_iron`（r20_short） | 树 1→7 后某次 `action=explore` 返回 `node_count=0`、y=64（**参数里没有 reset**） | 树在两次调用间被清，需加 `tree_reset{reason}` 事件定位 |
+| `hy4_hy_4_cave_combat` | 树保留 19，但 `active_node_id` 回退 16/9/5、位置 y=39/51 | 有记忆但**不回最深节点** |
+
+→ 结论修正：**树通常是保留的**；要修的是"偶发归零"（先打点定位）与"恢复时导航到最深节点"，而不是假设受伤必清树。
+
+**BUG-036 损失量化**：`nju_movetest` 425.7s / 2700s → 损失 **84%** 预算。
+
+### 4w. 修复核对（23:27）
+
+- **BUG-035 FIXED**：`3aea714` 在 `collect_job` 捕获瞬态异常并返回 `deferred/still_burning`；`d1_smelt_timeout_check.py` **exit 0**
+  ```
+  collect_job returned: {'ok': False, 'deferred': True, 'still_burning': True, ...}
+  OK: timeout is deferred and the job is preserved
+  ```
+- **BUG-029 残留**：`989d757` 已提交 `_cleanup_inventory_after`（挂 harvest/mine_blocks/tunnel），但 **HEAD 未合入**，r21 前需 #1 合并
+- 仍在跑：r20_long 1/4（预计 ~23:45）
+
+### 4x. r20_long 裸开恢复死锁 → BUG-038（23:29）
+
+`ds_ds_1_bare` 断镐后的完整恢复链：
+
+```
+pickaxe_low            y=20→17
+climb_out  53.0s       17→20
+climb_out  27.7s       20→20   (time_slice, 0 进展)
+climb_out  40.9s       20→20   (time_slice, 0 进展)
+climb_out  43.3s       20→25
+climb_out  25.6s       25→26
+staircase  25.8s       26→27   (time_budget)
+unstick    25.7s
+staircase  16.2s       27→27   (time_budget, 0 进展)
+→ 下一集 craft_gear missing / harvest_logs no_targets
+```
+
+- **~250s 只上升 10 格**，`bootstrap_iron_age` 超时，整轮停在 15 分
+- 两次 `climb_out` 0 进展说明"沿自建巷道走"未生效，退化成重新开阶梯；再叠加 BUG-037
+- 已提 **BUG-038（P1，Slice A）**：climb 应沿 corridor waypoints 直达、单片 ≥8 格；断镐+无木时给量化回地表建议
+
+### 4y. glm_5 附魔/睡觉链路（r20_long，23:30）
+
+**正向**：
+- `mine_dfs` 4 片 × 55s 下潜 → `quota_reached`；`craft_gear(diamond_pickaxe)`、`craft_gear(enchanting_table)`、`mc_place`（无坐标自动落位）、`mc_skill_enchant(iron_sword)` 全部成功 → `enchant_item +30`
+- `staircase(up, steps=20)` 先 `missing_step_support`，随后 **`pillar_fallback` 成功**（BUG-024 修复在长任务中同样生效）
+
+**问题（P2-31）**：找床阶段半径 64→128→200→300→400→600→800→1000 连发 10+ 次扫描，全部空手；随后 `craft_gear(white_bed)` 缺羊毛。建议半径上限 128 + "先找羊"。
+
+### 4z. r20_short 收官 + r19→r20 对比 + r21 启动损失
+
+**r20_short（17/18，`hy4_hy_3` 被 BUG-035 吞）终验**：仅 2 项 FAIL —— `startup crash`（BUG-035，`3aea714` 已修）与 `over-cap 2`（BUG-029 残留，`989d757` 未合入）；其余 9 项 PASS。
+
+**r19→r20 逐 bot 分数**（18→17 路，sum 1760→1680，人均 97.8→98.8）：
+
+| 变化 | bot |
+|---|---|
+| +45 / +30 / +15 | `nju_guitest`、`ds_4`、`hy4_4`/`hy4_9`/`nju_3` |
+| -20 / -20 / -15 | `hy4_7`、`hy4_8`、`glm_1` |
+| 丢路 | `hy4_3`（BUG-035） |
+
+失败项趋势：`staircase:time_budget` 30→36（BUG-037）、`path_not_found` 31→41、`tunnel:unknown` 9→17；反过来 `move_to:bad_args` 7→2、多类 `repeated_identical_failure_blocked` 归零。
+
+**r21_short（23:25 启动，已含 BUG-035 修复）**：`glm_1` 启动即丢 —— `ensure_bot_ready` 3 次/186s 后 `RuntimeError`（**BUG-039**）。
+
+### 4aa. r21_short 早期（23:34，0/18 summary）
+
+- **BUG-035 未复发**：全波 stdout `smelt_collect` 报错 0 次；唯一 Traceback 是 `glm_1` 的 `ensure_bot_ready`（BUG-039）
+- 门禁：`startup crash 1`（BUG-039）、`zero-slice 11.8%`（早期偏差，r20 收官 6.2%）两项 FAIL；其余 9 项 PASS（deaths 2、cooldown 23.5s、thread 0、trade/brew 2/2）
+- `mine_dfs` 51 次调用、6 次 0 进展；`staircase:time_budget 10`（BUG-037 继续）
+
+### 4ab. BUG-037 第三种模式（r21，23:35）
+
+`ds_ds_4_nether_fortress` 在下界 `[705,66,640]`：
+
+```
+staircase(north, down, steps=40) → steps_requested=25（被 clamp）
+   steps_done=0, dug_count=0, movement_not_confirmed
+   viable_directions=[south,east,west]
+staircase(south, ...) → 同样 0 步失败
+```
+
+→ 建议：0 步 0 挖时自动 `unstick` 或用 `viable_directions[0]`，并把 `steps` 被 clamp 到 25 回传给模型（`steps_clamped`）。否则模型按 40 步规划、在失败方向上来回试。
 
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 

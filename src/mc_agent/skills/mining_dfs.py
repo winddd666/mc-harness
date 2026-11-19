@@ -1647,15 +1647,23 @@ class MiningDFSEngine:
                 return True
         return False
 
-    def _step_to(self, cell: tuple[int, int, int]) -> bool:
+    def _step_to(self, cell: tuple[int, int, int], *, from_cell: tuple[int, int, int] | None = None) -> bool:
         """One-cell traversal that also handles step-ups, gaps and 1-block drops.
 
         Live n0112: repeated `backtrack_blocked@...,(feet=air,head=air)` — nothing obstructed,
         move_exact simply cannot jump a gap or a 1-block ledge, so the whole route was abandoned.
         """
+        # On a recorded ascending stair, try the local jump before asking the
+        # pathfinder to solve the entire adjacent step.
+        jump_first = (
+            from_cell is not None and cell[1] == from_cell[1] + 1
+            and abs(cell[0] - from_cell[0]) + abs(cell[2] - from_cell[2]) == 1
+        )
+        if jump_first and self._hop_up_to(cell):
+            return True
         if self._move_exact(cell):
             return True
-        if self._hop_up_to(cell):
+        if not jump_first and self._hop_up_to(cell):
             return True
         try:
             st = self.bot.status()
@@ -1691,14 +1699,21 @@ class MiningDFSEngine:
         """
         try:
             st = self.bot.status()
+            if not st.get("on_ground", True):
+                return False
             pos = st.get("pos") or [0.0, 64.0, 0.0]
             cur = (math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2])))
         except (ApiError, TypeError, ValueError):
             return False
         if cell[1] - cur[1] != 1 or max(abs(cell[0] - cur[0]), abs(cell[2] - cur[2])) > 1:
             return False
+        x, y, z = cell
         try:
-            if self._get_block_name(cell) not in PASSABLE_BLOCKS:
+            if (
+                self._get_block_name(cell) not in PASSABLE_BLOCKS
+                or self._get_block_name((x, y + 1, z)) not in PASSABLE_BLOCKS
+                or not self._is_solid_floor((x, y - 1, z), {})
+            ):
                 return False
         except ApiError:
             return False
@@ -1706,7 +1721,7 @@ class MiningDFSEngine:
         try:
             self.bot.call(
                 "control",
-                {"forward": True, "jump": True, "yaw": yaw, "ms": ms, "stop_on": ["death"]},
+                {"forward": True, "jump": True, "yaw": yaw, "ms": ms, "stop_on": ["hurt", "death"]},
             )
         except ApiError:
             return False
@@ -1714,7 +1729,10 @@ class MiningDFSEngine:
             position, grounded = self._settled_position(pos)
         except (ApiError, TypeError, ValueError):
             return False
-        return grounded and _floor_pos(position) == cell
+        if grounded and _floor_pos(position) == cell:
+            self._record_corridor(cell)
+            return True
+        return False
 
     def _clear_route_obstruction(self, target_wp: tuple[int, int, int]) -> int:
         """Re-open a recorded corridor cell: dig solid fill, but refuse if it is now flooded/bedrock.
@@ -1802,10 +1820,10 @@ class MiningDFSEngine:
             hops = _interpolate_cells(cur, wp)
             if len(hops) > 1:
                 stepped_all = True
-                for hop in hops[1:]:
+                for previous, hop in zip(hops, hops[1:]):
                     if deadline is not None and time.monotonic() >= deadline:
                         return False, "walk_time_slice"
-                    if not self._step_to(hop):
+                    if not self._step_to(hop, from_cell=previous):
                         stepped_all = False
                         break
                 if stepped_all:
@@ -1924,15 +1942,30 @@ class MiningDFSEngine:
                 for node in self.nodes.values():
                     edge = node.edge_from_parent
                     parent_id = node.parent_id
-                    if edge is None or parent_id is None or parent_id not in self.nodes or cur_pos not in edge.waypoints:
+                    if edge is None or parent_id is None or parent_id not in self.nodes:
                         continue
-                    offset = edge.waypoints.index(cur_pos)
+                    waypoints = edge.waypoints
+                    if cur_pos in waypoints:
+                        offset = waypoints.index(cur_pos)
+                    elif edge.edge_kind in {"stair_down", "stair_up"}:
+                        # Stairs save every second step. A slice can stop on the omitted step.
+                        offset = next((
+                            index for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1)
+                            if abs(a[1] - cur_pos[1]) == 1 and abs(a[1] - b[1]) == 2
+                            and abs(a[0] - b[0]) + abs(a[2] - b[2]) == 2
+                            and _interpolate_cells(a, b)[1] == cur_pos
+                        ), None)
+                        if offset is None:
+                            continue
+                        waypoints = [*waypoints[:offset], cur_pos, *waypoints[offset:]]
+                    else:
+                        continue
                     if node.node_id in goal_ancestors:
                         dest = node.node_id
-                        route = edge.waypoints[offset:]
+                        route = waypoints[offset:]
                     else:
                         dest = parent_id
-                        route = list(reversed(edge.waypoints[:offset + 1]))
+                        route = list(reversed(waypoints[:offset + 1]))
                     if route[-1] != self.nodes[dest].anchor:
                         route = [*route, self.nodes[dest].anchor]
                     ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
@@ -1953,7 +1986,9 @@ class MiningDFSEngine:
             if best_near_id is not None and best_near_d <= 16.0 and (
                 best_near_id == self.collar_node_id or best_near_d <= math.dist(cur_pos, anchor_now)
             ):
-                if not self._move_exact(self.nodes[best_near_id].anchor):
+                anchor = self.nodes[best_near_id].anchor
+                adjacent_ascent = anchor[1] == cur_pos[1] + 1 and best_near_d <= math.sqrt(2)
+                if not (adjacent_ascent and self._hop_up_to(anchor)) and not self._move_exact(anchor):
                     return False, "cannot_reach_nearest_node"
                 self.active_node_id = best_near_id
             elif self.collar_node_id in self.nodes and math.hypot(
@@ -1998,6 +2033,18 @@ class MiningDFSEngine:
         if self.active_node_id != goal_node_id:
             return False, "no_recorded_route"
         return True, None
+
+    def _resume_shaft_tip(self, goal_node_id: int, *, min_hp_ref: list[float]) -> tuple[bool, str | None]:
+        try:
+            ok, reason = self._navigate_to_node(goal_node_id, min_hp_ref=min_hp_ref)
+            if reason == "walk_time_slice":
+                raise _MiningDeadline
+            return ok, reason
+        except _MiningDeadline:
+            # Navigation may have updated the active node at an intermediate anchor.
+            # Keep the mining destination so the next slice continues along the route.
+            self.active_node_id = goal_node_id
+            raise
 
     # ---- Long-Range 64-Block Cluster Radar & Hostile Threat Triage ('radar' strategy) ----
 
@@ -2633,6 +2680,7 @@ class MiningDFSEngine:
         *,
         min_hp_ref: list[float],
         allow_retired: bool = False,
+        skip_collar: tuple[int, int, int] | None = None,
     ) -> bool:
         best_sh: dict[str, Any] | None = None
         best_d = 36.0
@@ -2641,33 +2689,29 @@ class MiningDFSEngine:
             if not isinstance(anc_raw, list) or len(anc_raw) < 3:
                 continue
             anc = (int(anc_raw[0]), int(anc_raw[1]), int(anc_raw[2]))
-            if anc in self.exhausted_collars and not allow_retired:
+            if anc == skip_collar or (anc in self.exhausted_collars and not allow_retired):
+                continue
+            # Pending stairs still carry their original branch target layer.
+            saved_target_y = sh.get("target_y")
+            if not allow_retired and saved_target_y is not None and abs(int(saved_target_y) - self.target_y) > SCAN_BAND:
                 continue
             hd = math.hypot(cur_pos[0] - anc[0], cur_pos[2] - anc[2])
             vertical_near = abs(cur_pos[1] - anc[1]) <= 20
-            if allow_retired:
+            if allow_retired or not vertical_near or hd > 36.0:
                 points = [tuple(n["anchor"]) for n in sh.get("nodes", []) if n.get("anchor")]
                 points.extend(tuple(wp) for n in sh.get("nodes", [])
                               for wp in (n.get("edge_from_parent") or {}).get("waypoints", []))
-                if points:
+                if allow_retired and points:
                     hd = min(math.dist(cur_pos, pt) for pt in points)
                     vertical_near = hd <= 6.0
+                elif cur_pos in points:
+                    hd = 0.0
+                    vertical_near = True
             if hd <= best_d and vertical_near:
                 best_d = hd
                 best_sh = sh
 
         if best_sh is None:
-            return False
-
-        # Never reuse a shaft saved for a different target layer: its pending stair_down edges
-        # still carry the old branch_target_y (live: restored -54 shaft ignored target=iron(16)
-        # and dove 130 blocks past the iron layer in a single call).
-        saved_ty_raw = best_sh.get("target_y")
-        if (
-            not allow_retired
-            and saved_ty_raw is not None
-            and abs(int(saved_ty_raw) - int(self.target_y)) > SCAN_BAND
-        ):
             return False
 
         raw_nodes = best_sh.get("nodes") or []
@@ -2741,7 +2785,7 @@ class MiningDFSEngine:
         if allow_retired:
             # The caller is climbing: do not detour back to the saved mining tip first.
             return True
-        ok_nav, _ = self._navigate_to_node(self.active_node_id, min_hp_ref=min_hp_ref)
+        ok_nav, _ = self._resume_shaft_tip(self.active_node_id, min_hp_ref=min_hp_ref)
         if not ok_nav:
             self._clear_active_tree_only()
             return False
@@ -2926,10 +2970,17 @@ class MiningDFSEngine:
         # 1) Preferred: walk our own corridor (no digging at all).
         walked = False
         walk_gain = 0
+        attempted_collar = None
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
-            ok_walk, _err_walk = self._navigate_to_node(
-                self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
-            )
+            attempted_collar = self.nodes[self.collar_node_id].anchor
+            mining_node_id = self.active_node_id
+            try:
+                ok_walk, _err_walk = self._navigate_to_node(
+                    self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
+                )
+            finally:
+                # A supply trip should leave the mining destination available to explore.
+                self.active_node_id = mining_node_id
             walked = bool(ok_walk)
             if not walked:
                 y_part = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
@@ -2946,10 +2997,12 @@ class MiningDFSEngine:
                         "attempts": 0,
                         "method": "walk",
                     }
-        # 2) Borrow the route of a previously retired shaft near us (travel only).
+        # 2) Look for a different nearby saved route before cutting new stairs.
         if not walked:
             cur_now = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])
-            if self._try_restore_saved_shaft(cur_now, min_hp_ref=hp_ref, allow_retired=True):
+            if self._try_restore_saved_shaft(
+                cur_now, min_hp_ref=hp_ref, allow_retired=True, skip_collar=attempted_collar,
+            ):
                 ok_walk, _err_walk = self._navigate_to_node(
                     self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
                 )
@@ -3412,6 +3465,16 @@ class MiningDFSEngine:
         self._move_exact(anchor, timeout_ms=2500)
         return ok_m, catch_total, seal_total
 
+    def _vein_hook_reach(self, *, target_ore: bool, scan_band: bool) -> tuple[int, int]:
+        """Return the vertical and horizontal search limits from a corridor anchor."""
+        if self.surgical_enabled:
+            return (4, 6) if target_ore else (3, 4)
+        if self.radar_enabled:
+            return (4, 7) if target_ore else (3, 5)
+        if scan_band:
+            return (6, 8) if target_ore else (3, 4)
+        return 2, 3
+
     def _run_vein_hook(
         self,
         anchor: tuple[int, int, int],
@@ -3475,22 +3538,7 @@ class MiningDFSEngine:
             if bname in target_set:
                 self.ledger.record_ore(pt, bname, req_t)
 
-            if self.surgical_enabled:
-                max_y_diff = 4 if bname in target_set else 3
-                max_xz_diff = 6 if bname in target_set else 4
-            elif self.radar_enabled:
-                # 'v5' mode: exact v4 candidate envelope (no lateral pocket digging, max 1-block skin peel)
-                max_y_diff = 4 if bname in target_set else 3
-                max_xz_diff = 7 if bname in target_set else 5
-            elif _scan_band:
-                # 'fishbone_scan' target band: modest reach widening (vertical offset tolerated up to 6,
-                # lateral up to 8) so nearby target veins are actually harvested, not just seen.
-                max_y_diff = 6 if bname in target_set else 3
-                max_xz_diff = 8 if bname in target_set else 4
-            else:
-                # 'fishbone' mode: strictly collect ONLY ores right beside the corridor (<=3 blocks)!
-                max_y_diff = 2
-                max_xz_diff = 3
+            max_y_diff, max_xz_diff = self._vein_hook_reach(target_ore=bname in target_set, scan_band=_scan_band)
 
             if abs(pt[1] - anchor[1]) > max_y_diff or (abs(pt[0] - anchor[0]) + abs(pt[2] - anchor[2])) > max_xz_diff:
                 if (self.radar_enabled or _scan_band) and bname in target_set and req_t <= max_tier:
@@ -4793,10 +4841,12 @@ class MiningDFSEngine:
             sticks < 2 and pos and self.collar_ceiling_y is not None
             and _floor_pos(pos)[1] <= min(19, self.collar_ceiling_y - 20)
         ):
+            climb_target_y = self.collar_ceiling_y - 16
             return {
                 "next_action": "climb_out",
                 "message": (
                     "当前井下缺少合成新镐的木料。先调用 action='climb_out' 沿已有巷道回撤，"
+                    f"本次爬升目标为 y>={climb_target_y}。若收到 climb_progress，可从当前位置继续回撤。"
                     "回到能采木的位置后用 mc_skill_harvest_logs(target_logs=1) 补原木或菌柄，合成可用镐后继续。"
                 ),
             }
@@ -5341,7 +5391,7 @@ class MiningDFSEngine:
                         return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
             elif math.dist(cur_pos, active.anchor) > 3.5:
-                ok_nav, err_nav = self._navigate_to_node(active.node_id, min_hp_ref=min_hp_ref)
+                ok_nav, err_nav = self._resume_shaft_tip(active.node_id, min_hp_ref=min_hp_ref)
                 if not ok_nav:
                     if (
                         self.collar_ceiling_y is not None
@@ -5437,13 +5487,21 @@ class MiningDFSEngine:
         for rec in unlockable:
             if time.monotonic() >= deadline:
                 break
-            if rec.nearest_node_id not in self.nodes:
+            near_node = self.nodes.get(rec.nearest_node_id)
+            if near_node is None:
+                continue
+            near_anc = near_node.anchor
+            # A wide scan can associate ore with a node outside both retrieval ranges.
+            vertical = abs(rec.pos[1] - near_anc[1])
+            horizontal = abs(rec.pos[0] - near_anc[0]) + abs(rec.pos[2] - near_anc[2])
+            scan_band = self.strategy == "fishbone_scan" and abs(near_anc[1] - self.target_y) <= SCAN_BAND
+            hook_y, hook_xz = self._vein_hook_reach(target_ore=True, scan_band=scan_band)
+            if vertical + horizontal > DROP_PICKUP_RADIUS_MANHATTAN + 2 and (vertical > hook_y or horizontal > hook_xz):
                 continue
             ok_nav, err_nav = self._navigate_to_node(rec.nearest_node_id, min_hp_ref=min_hp_ref)
             if not ok_nav:
                 stop_reason = err_nav or "deferred_nav_failed"
                 break
-            near_anc = self.nodes[rec.nearest_node_id].anchor
             hook = self._run_vein_hook(
                 near_anc,
                 target_blocks=target_blocks,

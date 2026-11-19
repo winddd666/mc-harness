@@ -2044,10 +2044,28 @@ class McToolset:
     def mc_skill_stabilize(self) -> str:
         return self._run_skill(lambda: check_and_stabilize(self.bot))
 
+    def _cleanup_inventory_after(self, res: Any) -> Any:
+        """BUG-029: enforce retention caps after every mining-style skill."""
+        if not isinstance(res, dict):
+            return res
+        try:
+            _, cleaned = self.skills._ensure_free_slots(min_free=3)
+        except Exception:
+            cleaned = []
+        if cleaned:
+            res["inventory_cleaned"] = [
+                {"item": d.get("item"), "count": d.get("count")} for d in cleaned
+            ]
+        return res
+
     def mc_skill_harvest_logs(self, target_logs: int = 4, radius: int = 32) -> str:
         target_logs = max(1, min(32, int(target_logs)))
         radius = max(4, min(64, int(radius)))
-        return self._run_skill(lambda: self.skills.harvest_logs(target_logs=target_logs, radius=radius))
+        return self._run_skill(
+            lambda: self._cleanup_inventory_after(
+                self.skills.harvest_logs(target_logs=target_logs, radius=radius)
+            )
+        )
 
     def mc_skill_craft_gear(self, item: str, count: int = 1, equip_slot: str | None = None) -> str:
         count = max(1, min(64, int(count)))
@@ -2071,7 +2089,11 @@ class McToolset:
     def mc_skill_mine_blocks(self, block_types: list[str], count: int = 3, radius: int = 32) -> str:
         count = max(1, min(32, int(count)))
         radius = max(4, min(64, int(radius)))
-        return self._run_skill(lambda: self.skills.mine_blocks(block_types=block_types, count=count, radius=radius))
+        return self._run_skill(
+            lambda: self._cleanup_inventory_after(
+                self.skills.mine_blocks(block_types=block_types, count=count, radius=radius)
+            )
+        )
 
     def mc_skill_smelt(self, input_item: str, count: int = 1, fuel_item: str | None = None) -> str:
         count = max(1, min(64, int(count)))
@@ -2166,7 +2188,12 @@ class McToolset:
                     stop_on_ore=resolved_stop_pillar,
                 )
             )
-        steps = max(1, min(25, int(steps)))
+        original_steps = max(1, int(steps))
+        requested_steps = min(25, original_steps)
+        # BUG-037: a 45s call cannot finish long requests (models often ask
+        # for 40); cap at 10 so the model gets progress instead of another
+        # zero/low-progress time_budget.
+        steps = min(requested_steps, 10)
         if d_norm in ("down", "up"):
             vertical = d_norm if (v_norm not in ("down", "up") or (v_norm == "down" and d_norm == "up")) else v_norm
             v_norm = str(vertical).strip().lower()
@@ -2179,14 +2206,47 @@ class McToolset:
         blocked = self._check_direction_geofence(direction, steps, "mc_skill_staircase")
         if blocked is not None:
             return blocked
-        return self._run_skill(
-            lambda: self.skills.dig_staircase(
-                direction=direction,
+        def _invoke(dir_key: str) -> dict[str, Any]:
+            return self.skills.dig_staircase(
+                direction=dir_key,
                 steps=steps,
                 vertical=vertical,
                 stop_on_ore=resolved_stop,
             )
-        )
+
+        raw = self._run_skill(lambda: _invoke(direction))
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(parsed, dict):
+            return raw
+        if requested_steps != steps:
+            parsed["steps_capped_from"] = original_steps
+            parsed["steps_clamped"] = True
+        # BUG-037 third mode (r21): first step stuck but viable directions
+        # are already known; retry once automatically instead of making the
+        # model try the opposite direction.
+        if (
+            parsed.get("stop_reason") == "movement_not_confirmed"
+            and int(parsed.get("steps_done") or 0) == 0
+            and int(parsed.get("dug_count") or 0) == 0
+        ):
+            viable = [d for d in (parsed.get("viable_directions") or []) if isinstance(d, str)]
+            alt = next((d for d in viable if d != direction), None)
+            if alt:
+                retry_raw = self._run_skill(lambda: _invoke(alt))
+                try:
+                    retry_parsed = json.loads(retry_raw)
+                except (TypeError, ValueError):
+                    return retry_raw
+                if isinstance(retry_parsed, dict):
+                    retry_parsed["auto_retry_direction"] = alt
+                    if requested_steps != steps:
+                        retry_parsed["steps_capped_from"] = original_steps
+                        retry_parsed["steps_clamped"] = True
+                    return json.dumps(retry_parsed, ensure_ascii=False)
+        return json.dumps(parsed, ensure_ascii=False)
 
     def mc_skill_tunnel(self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> str:
         direction = str(direction).strip().lower()
@@ -2194,7 +2254,11 @@ class McToolset:
         blocked = self._check_direction_geofence(direction, steps, "mc_skill_tunnel")
         if blocked is not None:
             return blocked
-        return self._run_skill(lambda: self.skills.dig_level_tunnel(direction, steps, stop_on_ore))
+        return self._run_skill(
+            lambda: self._cleanup_inventory_after(
+                self.skills.dig_level_tunnel(direction, steps, stop_on_ore)
+            )
+        )
 
     def mc_skill_mine_dfs(
         self,
