@@ -767,6 +767,21 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - `0264145`：同一 dig 格超时后 `_avoid_temporarily(..., "dig_timeout", 30s)` + 下次快速失败
 - 与 D1 建议一致；**尚未合入 HEAD**（`grep low_tier_slow_dig` = 0），需 #1 合并后 r24 复验
 
+## 4ar. r22_long 终验（4/4）与 r20_long 对比
+
+| bot | r20_long | r22_long | 说明 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | 180 | **195** | 15 集，shiny_gear+enchant |
+| `nju_movetest_01_bare` | 0（auth） | **35** | token 正常，恢复 |
+| `ds_ds_1_bare` | 15 | 20 | 铁器已过 |
+| `hy4_hy_1_bare` | 40 | **10** | 11 集，BUG-041 + **5 集被 429/502 吞** |
+
+**门禁**：`deaths 6 / cooldown 82.1s / mine 0.92 / zero-slice 1.1%` 全 PASS；2 FAIL：
+- `runtime_error 5` → 新增 **BUG-042**（Qwen 429 "overloaded" 未被识别为并发限流，3 次退避后整集报废）
+- `over-cap 1` → `nju_movetest` cobble 262（`989d757` 已合入但仍残留，可能来自 `harvest/mine_blocks` 之外的路径）
+
+**结论**：长任务能力上限明显提升（glm_5 195、nju 恢复），但 `hy4_1` 同时被 BUG-041 与 BUG-042 打击。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
