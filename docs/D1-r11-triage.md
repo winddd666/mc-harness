@@ -622,6 +622,12 @@ staircase(south, ...) → 同样 0 步失败
 
 **对比 r20_short→r21_short**：`+30`：`glm_2`、`hy4_3`；`+15`：`hy4_5`、`hy4_7`、`hy4_8`；`-20`：`hy4_9`；丢路：`glm_1`。
 
+## 4ad. r22 早期（00:00，586 tool calls）
+
+- **BUG-029 残留修复已合入**：`989d757` 进入 HEAD（`e60a8d5` 23:47 合并，`grep` = 4 处）；r22 加载于 23:48 → 本波可验收 `owned_end`
+- **r22_short**：0/18 summary、**0 Traceback**（BUG-035/039 均未复发）；唯一 FAIL 是 `mine zero-slice 15.7%`（早期偏差，dur/budget 0.65）；deaths 10、冷却 93.7s、trade 3 / brew 2
+- **r22_long**：0/4、0 Traceback，ALL PASS（早期）
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
