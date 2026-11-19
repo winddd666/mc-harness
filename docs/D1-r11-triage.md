@@ -453,6 +453,16 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 - **BUG-035**：仅 `hy4_hy_3` 1 路复现（连续第 2 波）
 - r20_long（4 路 bare/midgame）：ALL PASS；新 P2-28 `smelt:missing_fuel`
 
+### 4p. r20 修复核对（23:15）
+
+| 工单 | 状态 | 证据 |
+|---|---|---|
+| BUG-029 | **FIXED** | `53835cf` 在 `mine_dfs` 返回路径调用 `_ensure_free_slots` 并回报 `inventory_cleaned`（缺失触发点已补） |
+| BUG-034 | **FIXED（待收官）** | `guardian.py:144` 改为 30s；r20_short 早期 43 次/70.4s（r18 311/653） |
+| P2-24 | **FIXED** | `9ecb239` NoAI 村民 + 4m 前置；r20 `window_view ok 2 / out_of_reach 1 / no_window 0`，trade ok 2 |
+| BUG-035 | **未修** | `library.py:4120` 仍只 catch ApiError；r20 第 2 波复现 |
+| BUG-030 | **未修** | `mining_dfs.py:4818` 未改；r20 45 次深挖 0 到达 |
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
