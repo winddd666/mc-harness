@@ -520,6 +520,8 @@ class _MockMineWorld:
                     self.craft_log.append((item, cnt))
                     return httpx.Response(200, json={"ok": True, "result": {"crafted": item, "gained": cnt, "used_table": True}})
             return httpx.Response(200, json={"ok": False, "error": {"code": "no_recipe", "message": item}})
+        if path == "/stop":
+            return httpx.Response(200, json={"ok": True, "result": {"stopped": True}})
         if path == "/look":
             return httpx.Response(200, json={"ok": True, "result": {"yaw": 0.0, "pitch": 0.0}})
         if path == "/control":
@@ -1953,3 +1955,245 @@ def test_thirty_dry_calls_abandon_a_dead_shaft() -> None:
     assert res["stop_reason"] == "shaft_dry_abandoned"
     assert res["requires_replan"] is True
     assert eng.dry_calls == 0
+
+
+class _MiningClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_climb_out_honors_the_callers_budget_in_nested_staircase(monkeypatch) -> None:
+    """A 5s climb must never turn into the old implicit 90s staircase budget."""
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
+    requests: list[tuple[float, str, dict]] = []
+
+    def slow_handler(request):
+        timeout = request.extensions["timeout"]
+        requests.append((clock.now, request.url.path, timeout))
+        clock.now += 0.25
+        return world.handler(request)
+
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    with BotSession("tok", bot_username="TimedClimb", transport=httpx.MockTransport(slow_handler)) as bot:
+        skills = MacroSkills(bot)
+        eng = skills.mining_dfs
+        eng.collar_ceiling_y = 64
+        original_call = bot.call
+        result = eng.run(action="climb_out", max_duration_s=5.0)
+        assert eng.bot is bot and eng.skills is skills
+        assert skills.bot is bot and bot.call == original_call
+    assert clock.now <= 1005.0
+    assert result["stop_reason"] == "time_budget"
+    assert requests
+    for started, _, timeouts in requests:
+        assert 0 < timeouts["read"] <= 1005.0 - started
+    # No quarantine reconnect, background retry, or new action starts after cutoff.
+    assert all(started < 1005.0 for started, _, _ in requests)
+    assert not any(path.endswith(("/connect", "/disconnect")) for _, path, _ in requests)
+
+
+def test_dfs_budget_includes_entry_observations_and_radar(monkeypatch) -> None:
+    """Initialization used to run outside the slice, then get a fresh full deadline."""
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    calls: list[str] = []
+
+    def slow_handler(request):
+        calls.append(request.url.path)
+        clock.now += 0.4
+        return world.handler(request)
+
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    with BotSession("tok", bot_username="TimedInit", transport=httpx.MockTransport(slow_handler)) as bot:
+        result = MacroSkills(bot).mine_dfs(target="iron", max_duration_s=5.0)
+    assert clock.now <= 1005.0
+    assert result["stop_reason"] == "time_budget"
+    assert len(calls) < 15
+
+
+def test_waypoint_interpolation_checks_deadline_between_hops(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    visited: list[tuple[int, int, int]] = []
+
+    def step(cell):
+        visited.append(cell)
+        clock.now += 1.0
+        return True
+
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    with BotSession("tok", bot_username="TimedWalk", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        monkeypatch.setattr(eng, "_step_to", step)
+        result = eng._walk_waypoints([(30, 20, 0)], min_hp_ref=[20.0], deadline=1002.0)
+    assert result == (False, "walk_time_slice")
+    assert visited == [(1, 20, 0), (2, 20, 0)]
+
+
+def test_climb_can_restore_a_retired_exhausted_route_from_the_bottom(monkeypatch) -> None:
+    """A deep bot must match the archived route, even 44 blocks below its collar."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="DeepRetired", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        eng._create_node(kind="spine", anchor=(0, 20, 0), parent_id=collar.node_id,
+                         edge_from_parent=ShaftEdge("stair_down", "north", [(0, 64, 0), (0, 20, 0)]),
+                         branches=[])
+        eng.collar_ceiling_y = 64
+        eng._archive_current_shaft_to_ledger(mark_exhausted=True)
+        eng._clear_active_tree_only()
+        stairs: list[dict] = []
+
+        def nav(goal_node_id, **kwargs):
+            if goal_node_id == eng.collar_node_id:
+                world.pos[1] = 64.0
+            return True, None
+
+        monkeypatch.setattr(eng, "_navigate_to_node", nav)
+        monkeypatch.setattr(eng.skills, "dig_staircase", lambda **kw: stairs.append(kw))
+        result = eng.run(action="climb_out", max_duration_s=5.0)
+    assert result["climb"]["method"] == "walk"
+    assert result["climb"]["reached"] is True
+    assert not stairs
+
+
+def test_navigation_rejoins_an_edge_instead_of_moving_through_a_wall(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(5.5, 15.0, 0.5), surface_y=20)
+    with BotSession("tok", bot_username="MidEdge", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 20, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        route = [(i, 20 - i, 0) for i in range(11)]
+        eng._create_node(kind="switchback", anchor=(10, 10, 0), parent_id=collar.node_id,
+                         edge_from_parent=ShaftEdge("stair_down", "east", route), branches=[])
+        walks: list[list] = []
+
+        def walk(points, **kwargs):
+            walks.append(points)
+            world.pos = [points[-1][0] + 0.5, float(points[-1][1]), points[-1][2] + 0.5]
+            return True, None
+
+        monkeypatch.setattr(eng, "_walk_waypoints", walk)
+        monkeypatch.setattr(eng, "_move_exact", lambda *a, **k: (_ for _ in ()).throw(AssertionError("direct wall move")))
+        assert eng._navigate_to_node(collar.node_id, min_hp_ref=[20.0]) == (True, None)
+    assert walks[0][:6] == list(reversed(route[:6]))
+
+
+def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    with BotSession("tok", bot_username="PartialEdge", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        branch = mining.BranchSpec("stair_down", "east", 8)
+        collar = eng._create_node(kind="collar", anchor=(0, 20, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[branch])
+        eng.collar_node_id = collar.node_id
+
+        def interrupted(**kwargs):
+            branch.status = "active"
+            eng.bot.status()
+            world.pos = [1.5, 19.0, 0.5]
+            eng.bot.status()
+            clock.now = kwargs["deadline"]
+            eng.bot.call("dig", {"pos": [2, 18, 0]})
+
+        monkeypatch.setattr(eng, "_run", interrupted)
+        result = eng.run(max_duration_s=5.0)
+        tip = eng.nodes[eng.active_node_id]
+        assert tip.parent_id == collar.node_id
+        assert tip.anchor == (1, 19, 0)
+        assert tip.edge_from_parent.waypoints == [(0, 20, 0), (1, 19, 0)]
+        assert tip.branches[0].status == "pending"
+        assert branch.status == "completed"
+    assert result["stop_reason"] == "time_budget"
+    assert not world.dig_log
+
+
+def test_climb_remembers_all_blocked_primitives_at_the_same_cell(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
+    attempts: list[tuple[str, str]] = []
+    with BotSession("tok", bot_username="BlockedClimb", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64
+        monkeypatch.setattr(eng.skills, "dig_staircase",
+                            lambda **kw: (attempts.append(("stair", kw["direction"])) or {"ok": False}))
+        monkeypatch.setattr(eng.skills, "dig_level_tunnel",
+                            lambda **kw: (attempts.append(("tunnel", kw["direction"])) or {"ok": False}))
+        first = eng.run(action="climb_out", max_duration_s=5.0)
+        count = len(attempts)
+        second = eng.run(action="climb_out", max_duration_s=5.0)
+    assert first["stop_reason"] == second["stop_reason"] == "climb_blocked"
+    assert count == 9  # four stairs, one pillar, four lateral exits
+    assert len(attempts) == count
+    assert "可继续 climb_out" not in second["message"]
+
+
+def test_slow_blocked_climb_tries_a_different_direction_next_slice(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
+    directions: list[str] = []
+
+    def blocked_stair(**kwargs):
+        directions.append(kwargs["direction"])
+        clock.now += 4.4
+        return {"ok": False, "steps_done": 0}
+
+    with BotSession("tok", bot_username="SlowBlockedClimb", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64
+        monkeypatch.setattr(eng.skills, "dig_staircase", blocked_stair)
+        first = eng.run(action="climb_out", max_duration_s=5.0)
+        second = eng.run(action="climb_out", max_duration_s=5.0)
+    assert first["stop_reason"] == second["stop_reason"] == "time_budget"
+    assert directions == ["north", "south"]
+    assert clock.now < 1010.0
+
+
+def test_nested_http_timeout_stops_the_action_and_restores_shared_sessions(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/dig"):
+            raise httpx.ReadTimeout("offline simulated stalled dig", request=request)
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="TimedHTTP", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        eng = skills.mining_dfs
+
+        def stalled(**kwargs):
+            eng.bot.status()
+            eng.skills.bot.call("dig", {"pos": [1, 20, 0]})
+
+        monkeypatch.setattr(eng, "_run", stalled)
+        result = eng.run(max_duration_s=5.0)
+        assert eng.bot is bot and eng.skills is skills and skills.bot is bot
+        assert bot._recovering_quarantine is False
+    assert result["stop_reason"] == "time_budget"
+    assert [p.rsplit("/", 1)[-1] for p in calls] == ["status", "dig", "stop"]
