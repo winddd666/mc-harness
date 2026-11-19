@@ -1529,7 +1529,7 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
         calls.append(path)
         timeout = request.extensions["timeout"]["read"]
         if path == timeout_path:
-            assert 0 < timeout <= 8
+            assert 0 < timeout <= 15
             if path == "get_block":
                 # Reading safety probes also consumes the same total budget.
                 clock[0] += 3
@@ -1566,6 +1566,29 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
     assert clock[0] <= 45
     assert calls[-1] == "stop"
     assert calls.count("stop") == 1
+
+
+def test_stair_session_leaves_time_for_obsidian_dig(monkeypatch) -> None:
+    """r14: an 8s dig cap made every fortress obsidian step time out."""
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    dig_timeouts = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        assert path == "dig"
+        dig_timeouts.append(request.extensions["timeout"]["read"])
+        clock[0] += 9.5
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        session = library._StairSession(bot, 45.0)
+        session.call("dig", {"pos": [0, 0, 0]})
+    assert session.per_step_timeout == pytest.approx(15.0)
+    assert dig_timeouts[0] >= 9.5
+    assert session.progress["dug_count"] == 1
 
 
 def test_staircase_retries_one_slow_read_before_budget_failure(monkeypatch) -> None:

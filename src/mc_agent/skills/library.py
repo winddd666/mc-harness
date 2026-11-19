@@ -1152,7 +1152,7 @@ class _StairDeadline(Exception):
 class _StairSession:
     """Per-invocation deadline; never patch the shared BotSession/guardian."""
 
-    def __init__(self, bot: BotSession, duration_s: float, *, deadline: float | None = None, per_step_timeout: float = 10.0) -> None:
+    def __init__(self, bot: BotSession, duration_s: float, *, deadline: float | None = None, per_step_timeout: float = 15.0) -> None:
         self.bot = bot
         params = inspect.signature(bot.call).parameters
         self.supports_timeout = "timeout_s" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
@@ -1174,7 +1174,9 @@ class _StairSession:
             remaining = min(self.deadline, self.step_deadline) - time.monotonic()
             if remaining <= 0:
                 raise _StairDeadline()
-            cap = 6.0 if path == "move_to" else 8.0 if path == "dig" else 3.0
+            # Obsidian needs ~9.4s with a diamond pickaxe (r14: fortress
+            # staircase timed out on every first dig at the old 8s cap).
+            cap = 6.0 if path == "move_to" else 15.0 if path == "dig" else 3.0
             timeout = min(remaining, cap, float(explicit_timeout if explicit_timeout is not None else cap))
             call_body = body
             if path == "move_to":
@@ -5797,7 +5799,7 @@ class MacroSkills:
         stop_on_ore: bool | None = None,
         *,
         deadline: float | None = None,
-        per_step_timeout: float = 10.0,
+        per_step_timeout: float = 15.0,
     ) -> dict[str, Any]:
         session = _StairSession(self.bot, 45.0, deadline=deadline, per_step_timeout=per_step_timeout)
         scoped = copy(self)
