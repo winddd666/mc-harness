@@ -351,7 +351,10 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
     st = bot.status()
     ix, iz = int(pos[0]), int(pos[2])
     biome = str(st.get("biome") or "deep_ocean").lower()
-    wet = bool(st.get("in_water")) or "ocean" in biome or "river" in biome
+    # Trust the live `in_water` flag; only treat the ocean/river biome as wet when the bot is below
+    # sea level, otherwise a dry sandbar/beach on a deep_ocean column would get a needless pad.
+    frozen_y = int(round(pos[1]))
+    wet = bool(st.get("in_water")) or (("ocean" in biome or "river" in biome) and frozen_y <= 62)
     print(
         f"[Scene] deep_water staging={stage_kind} pos=({ix}, {int(round(pos[1]))}, {iz}) "
         f"biome={biome or '?'} in_water={bool(st.get('in_water'))}",
