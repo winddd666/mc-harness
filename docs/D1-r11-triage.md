@@ -518,10 +518,11 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 
 | bot | 现象 | 结论 |
 |---|---|---|
-| `hy4_hy_2_iron` | 树跨集保留 `node_count 1→7`；受伤后 **变 0**、位置回 `y=67` | 受伤/死亡路径**清空竖井树** |
-| `hy4_hy_4_cave_combat` | 树保留 `node_count=19`，但 `active_node_id` 回退 16/9/5、位置在 `y=39/51` | 有记忆但**不导航到最深节点**，反而上爬 |
+| `hy4_hy_1_bare`（r20_long） | `node_count 1→…→15` 跨集保留，`surface_reached` 后继续下潜到 **-27** | **期望行为**（树可复用） |
+| `hy4_hy_2_iron`（r20_short） | 树 1→7 后某次 `action=explore` 返回 `node_count=0`、y=64（**参数里没有 reset**） | 树在两次调用间被清，需加 `tree_reset{reason}` 事件定位 |
+| `hy4_hy_4_cave_combat` | 树保留 19，但 `active_node_id` 回退 16/9/5、位置 y=39/51 | 有记忆但**不回最深节点** |
 
-→ BUG-030 修复点：① 受伤/死亡分支不要清 `nodes`；② `run()` 入口优先导航到 `active_node`/最深节点，而不是 `collar`。
+→ 结论修正：**树通常是保留的**；要修的是"偶发归零"（先打点定位）与"恢复时导航到最深节点"，而不是假设受伤必清树。
 
 **BUG-036 损失量化**：`nju_movetest` 425.7s / 2700s → 损失 **84%** 预算。
 
