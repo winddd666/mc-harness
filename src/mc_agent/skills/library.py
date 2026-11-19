@@ -1089,16 +1089,18 @@ class _StairDeadline(Exception):
 class _StairSession:
     """Per-invocation deadline; never patch the shared BotSession/guardian."""
 
-    def __init__(self, bot: BotSession, duration_s: float) -> None:
+    def __init__(self, bot: BotSession, duration_s: float, *, deadline: float | None = None, per_step_timeout: float = 10.0) -> None:
         self.bot = bot
         params = inspect.signature(bot.call).parameters
         self.supports_timeout = "timeout_s" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-        self.deadline = time.monotonic() + duration_s
+        self.deadline = min(time.monotonic() + duration_s, float(deadline)) if deadline is not None else time.monotonic() + duration_s
+        self.step_deadline = self.deadline
+        self.per_step_timeout = max(0.05, float(per_step_timeout))
         self.last_status: dict[str, Any] = {}
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
     def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
-        remaining = self.deadline - time.monotonic()
+        remaining = min(self.deadline, self.step_deadline) - time.monotonic()
         if remaining <= 0:
             raise _StairDeadline()
         cap = 6.0 if path == "move_to" else 8.0 if path == "dig" else 3.0
@@ -1113,7 +1115,7 @@ class _StairSession:
             raise _StairDeadline() from None
         if path == "status":
             self.last_status = result
-        if time.monotonic() >= self.deadline:
+        if time.monotonic() >= min(self.deadline, self.step_deadline):
             raise _StairDeadline()
         return result
 
@@ -1122,12 +1124,12 @@ class _StairSession:
             return self.call(path, method="GET")
         # Lightweight in-process adapters expose reads as methods rather than
         # API paths. They still share the same checks before and after each read.
-        if time.monotonic() >= self.deadline:
+        if time.monotonic() >= min(self.deadline, self.step_deadline):
             raise _StairDeadline()
         result = getattr(self.bot, path)()
         if path == "status":
             self.last_status = result
-        if time.monotonic() >= self.deadline:
+        if time.monotonic() >= min(self.deadline, self.step_deadline):
             raise _StairDeadline()
         return result
 
@@ -5645,8 +5647,11 @@ class MacroSkills:
         steps: int = 12,
         vertical: str = "down",
         stop_on_ore: bool | None = None,
+        *,
+        deadline: float | None = None,
+        per_step_timeout: float = 10.0,
     ) -> dict[str, Any]:
-        session = _StairSession(self.bot, 45.0)
+        session = _StairSession(self.bot, 45.0, deadline=deadline, per_step_timeout=per_step_timeout)
         scoped = copy(self)
         scoped.bot = session
         try:
@@ -5905,6 +5910,7 @@ class MacroSkills:
 
         stair_deadline = self.bot.deadline
         for step_idx in range(steps if stop_reason == "completed" else 0):
+            self.bot.step_deadline = min(self.bot.deadline, time.monotonic() + self.bot.per_step_timeout)
             if step_idx > 0 and time.monotonic() >= stair_deadline:
                 stop_reason = "time_budget"
                 break
@@ -6127,6 +6133,7 @@ class MacroSkills:
                     stop_reason = "ore_detected"
                     break
 
+        self.bot.step_deadline = self.bot.deadline
         st_end = self.bot.status()
         if stop_on_ore and stop_reason == "completed":
             found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
