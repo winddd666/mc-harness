@@ -7039,6 +7039,7 @@ class MacroSkills:
                     entry_detail["move_error"] = {"code": err.code, "message": err.message}
                 contact_seen = False
                 pulses = 0
+                approach_recovered = False
                 while time.monotonic() < deadline:
                     now = _status()
                     if "nether" in dim_now:
@@ -7049,6 +7050,26 @@ class MacroSkills:
                     cx, cy, cz = map(float, cur[:3])
                     in_portal = abs(cx - tx - 0.5) <= 0.45 and abs(cz - tz - 0.5) <= 0.45 and ty <= cy < ty + 1
                     contact_seen = contact_seen or in_portal
+                    normal_distance = abs((cx - tx - 0.5) * normal[0] + (cz - tz - 0.5) * normal[1])
+                    lateral_distance = abs((cx - tx - 0.5) * normal[1] + (cz - tz - 0.5) * normal[0])
+                    if (not approach_recovered and 1.1 < ty - cy <= 2.1
+                            and 0.7 <= normal_distance <= 1.3 and lateral_distance <= 0.6):
+                        # r12: pathfinding can fall to a low approach floor two
+                        # blocks below the portal. One verified jump-place makes
+                        # a one-block stair, without touching its obsidian bar.
+                        floor_pos = [math.floor(cx), math.floor(cy) - 1, math.floor(cz)]
+                        floor = str(_entry_call("get_block", {"pos": floor_pos}).get("name") or "").removeprefix("minecraft:")
+                        if not floor or is_passable_sight_block(floor) or floor in {"lava", "flowing_lava", "magma_block", "cactus"}:
+                            entry_detail["error"] = {"code": "portal_approach_unsupported", "phase": "entry", "pos": floor_pos, "block": floor}
+                            return False, dim_now
+                        approach_recovered = True
+                        recovery = self.dig_staircase(vertical="pillar", steps=1, stop_on_ore=False,
+                                                      deadline=deadline, per_step_timeout=3.0)
+                        entry_detail["entry_recovery"] = {key: recovery.get(key) for key in ("ok", "steps_done", "pos_after", "stop_reason")}
+                        if not recovery.get("ok"):
+                            entry_detail["error"] = {"code": "portal_approach_step_failed", "phase": "entry", "cause": recovery.get("stop_reason")}
+                            return False, dim_now
+                        continue
                     if not in_portal and pulses < 8:
                         # Steer only within a single step of the portal floor.
                         if (cy < ty - 1.1 or cy > ty + 0.6) or math.hypot(cx - tx - 0.5, cz - tz - 0.5) > 2.2:

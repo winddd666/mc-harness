@@ -1808,3 +1808,60 @@ def test_pillar_deadline_clears_persistent_jump_posture(monkeypatch) -> None:
     assert clock[0] == pytest.approx(100.2)
     assert [item["jump"] for item in posture] == [True, False]
     assert calls[-2:] == ["stop", "posture"]
+
+
+@pytest.mark.parametrize("floor", ["stone", "water"])
+def test_portal_entry_builds_one_safe_step_from_two_blocks_below(monkeypatch, floor) -> None:
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(library.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    pos = [0.5, 64.0, 1.5]
+    contact = [None]
+    placed = []
+    jumping = [False]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            nether = contact[0] is not None and clock[0] - contact[0] >= 4
+            result = {"pos": list(pos), "dimension": "the_nether" if nether else "overworld", "alive": True, "ready": True, "on_ground": not jumping[0]}
+        elif path == "find_blocks":
+            result = {"blocks": [{"pos": [0, 66, 2], "name": "nether_portal"}]}
+        elif path == "get_block":
+            result = {"name": "nether_portal", "properties": {"axis": "x"}} if body["pos"] == [0, 66, 2] else {"name": floor if body["pos"][1] <= 63 else "air"}
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 8}]}
+        elif path == "posture":
+            jumping[0] = body["jump"]
+            pos[1] = 65.1 if body["jump"] else 65.0
+            result = {}
+        elif path == "place":
+            placed.append(body)
+            result = {"pos": body["pos"]}
+        elif path == "control":
+            assert body["jump"] is True
+            pos[:] = [0.5, 66.0, 2.5]
+            contact[0] = clock[0]
+            result = {"pos": list(pos)}
+        elif path in {"move_to", "look"}:
+            result = {"pos": list(pos)}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).build_nether_portal(wait_s=8)
+    if floor == "stone":
+        assert result["ok"] is True
+        assert result["entered_nether"] is True
+        assert result["entry_recovery"]["steps_done"] == 1
+        assert placed == [{"item": "cobblestone", "pos": [0, 64, 1]}]
+    else:
+        assert result["ok"] is False
+        assert result["error"]["code"] == "portal_approach_unsupported"
+        assert placed == []
+        assert contact[0] is None
+    assert clock[0] <= 8
