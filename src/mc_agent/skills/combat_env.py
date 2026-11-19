@@ -1140,9 +1140,7 @@ class CombatEnv:
             and threat_dist_mid >= min(float(distance), 8.5)
             and mid_moved >= 4.0
         )
-        if should_pathfind and (
-            self.geofence is None or not hasattr(self.geofence, "check_point") or self.geofence.check_point(goal_x, goal_z) is None
-        ):
+        if should_pathfind and self._point_allowed(goal_x, goal_z, action="flee"):
             try:
                 self.bot.call(
                     "move_to",
@@ -1176,6 +1174,12 @@ class CombatEnv:
             "pos_after": pos_end,
             **({"respawned": True} if respawned else {}),
         }
+
+    def _point_allowed(self, x: float, z: float, *, action: str = "combat_env") -> bool:
+        """Return True unless an enabled VoidGeofence rejects `(x, z)` via `check_point`."""
+        if self.geofence is None or not hasattr(self.geofence, "check_point"):
+            return True
+        return self.geofence.check_point(float(x), float(z), action=action) is None
 
     def _find_walkable_shore_target(
         self,
@@ -1218,7 +1222,7 @@ class CombatEnv:
                 continue
             if not _is_solid_ground(_clean_block_name(row.get("name"))):
                 continue
-            if self.geofence is not None and not self.geofence.contains(cx + 0.5, float(cy + 1), cz + 0.5):
+            if not self._point_allowed(cx + 0.5, cz + 0.5, action="lava_shore"):
                 continue
             hdist = math.hypot(cx + 0.5 - start_x, cz + 0.5 - start_z)
             away_penalty = 1.5 if (has_threat and math.hypot(cx + 0.5 - tx_th, cz + 0.5 - tz_th) < threat_dist0) else 0.0
@@ -1305,7 +1309,7 @@ class CombatEnv:
                 for dist in (4, 8, 14):
                     px = math.floor(start_x + ux * dist)
                     pz = math.floor(start_z + uz * dist)
-                    if self.geofence is not None and not self.geofence.contains(px + 0.5, float(y_probe + 1), pz + 0.5):
+                    if not self._point_allowed(px + 0.5, pz + 0.5, action="water_shore"):
                         continue
                     g_name = self._get_block_name(px, y_probe, pz)
                     if _is_solid_ground(g_name):
@@ -1366,13 +1370,13 @@ class CombatEnv:
             ux, uz = yaw_to_unit_xz(away_yaw)
             step_dist = 12.0
             sx, sy, sz = start_x + ux * step_dist, max(63.0, start_y + 1.0), start_z + uz * step_dist
-            if self.geofence is not None and not self.geofence.contains(sx, sy, sz):
+            if not self._point_allowed(sx, sz, action="water_retreat"):
                 sx, sz = start_x + ux * 5.0, start_z + uz * 5.0
             try:
                 self.bot.call("look", {"yaw": away_yaw, "pitch": -15.0})
             except ApiError:
                 pass
-            if self.geofence is None or self.geofence.contains(sx, sy, sz):
+            if self._point_allowed(sx, sz, action="water_retreat"):
                 try:
                     self.bot.call(
                         "move_to",
@@ -1471,7 +1475,7 @@ class CombatEnv:
         sealed = 0
         if filler is not None:
             for lpos in exposed_lava[:2]:
-                if self.geofence is not None and not self.geofence.contains(lpos[0] + 0.5, float(lpos[1] + 1), lpos[2] + 0.5):
+                if not self._point_allowed(lpos[0] + 0.5, lpos[2] + 0.5, action="guard_lava_edge"):
                     continue
                 try:
                     self.bot.call("place", {"item": filler, "pos": lpos})

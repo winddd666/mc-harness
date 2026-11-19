@@ -2214,6 +2214,95 @@ def test_bug026_ranged_arrow_cover_or_flee_lava_sneak_armor_and_cooldown(monkeyp
     assert any(a["action"] == "raise_shield_entry" for a in out_brute["actions"])
 
 
+def test_bug028_real_void_geofence_across_escape_lava_water_and_lava_edge():
+    """BUG-028 P0 regression: real VoidGeofence uses check_point(), NEVER contains(), in lava/water/edge paths."""
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.skills.combat_env import CombatEnv
+
+    gf = VoidGeofence(center_x=225.0, center_z=235.0, radius=16.0, margin=4.0)  # safe_radius = 12.0
+
+    # 1) escape_lava with find_blocks candidates (one outside safe_radius=12, one inside!) -> must NOT raise AttributeError!
+    st_lava = {"pos": [227.4, 31.5, 235.0], "in_lava": True, "yaw": 3.14}
+    moves: list[tuple[float, float, float]] = []
+
+    class _GfLavaBot:
+        def status(self):
+            return {**st_lava, "health": 12.0, "alive": True, "ready": True, "dimension": "minecraft:the_nether"}
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 16}]}
+            if action == "find_blocks":
+                return {
+                    "blocks": [
+                        {"name": "basalt", "pos": [239, 32, 235], "dist": 11.6},  # outside VoidGeofence safe_radius=12!
+                        {"name": "netherrack", "pos": [229, 32, 234], "dist": 2.1},  # inside safe_radius -> pick this!
+                    ]
+                }
+            if action == "get_block":
+                p = pl.get("pos", [0, 0, 0])
+                if tuple(p) in {(229, 33, 234), (229, 34, 234), (227, 32, 235)}:
+                    return {"name": "air"}
+                return {"name": "lava"}
+            if action == "move_to":
+                moves.append((pl["x"], pl["y"], pl["z"]))
+                st_lava["pos"] = [pl["x"], pl["y"], pl["z"]]
+                st_lava["in_lava"] = False
+                return {"ok": True}
+            return {"ok": True}
+
+    out_l = CombatEnv(_GfLavaBot(), geofence=gf).escape_lava()
+    assert out_l["ok"] is True and out_l["in_lava"] is False
+    assert (229.5, 33.0, 234.5) in moves
+
+    # 2) escape_deep_water_to_shore (radial fallback + surface_retreat) with real VoidGeofence -> no AttributeError!
+    class _GfWaterBot:
+        def status(self):
+            return {"pos": [225.5, 61.5, 235.5], "health": 14.0, "alive": True, "ready": True, "in_water": True, "submerged": True, "oxygen": 200}
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "water"}
+            return {"ok": True}
+
+    out_w = CombatEnv(_GfWaterBot(), geofence=gf).escape_deep_water_to_shore([232.0, 62.0, 235.5])
+    assert out_w["mode"] == "surface_retreat"
+
+    # 3) guard_lava_edge skips lava cell outside safe_radius and seals in-bounds adjacent lava!
+    placed_edge: list[list[int]] = []
+
+    class _GfEdgeBot:
+        def status(self):
+            return {"pos": [236.5, 40.0, 235.5], "on_ground": True, "in_lava": False, "ready": True, "alive": True, "sneaking": False}
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 8}]}
+            if action == "get_block":
+                p = tuple(pl.get("pos", [0, 0, 0]))
+                if p in {(237, 39, 235), (235, 39, 235)}:  # 237.5 out of safe_radius(12 from 225); 235.5 in bounds!
+                    return {"name": "lava"}
+                return {"name": "stone" if p[1] < 40 else "air"}
+            if action == "place":
+                placed_edge.append(list(pl["pos"]))
+            return {"ok": True}
+
+    edge_res = CombatEnv(_GfEdgeBot(), geofence=gf).guard_lava_edge([236.5, 40.0, 235.5])
+    assert edge_res["ok"] is True and edge_res["sneak"] is True
+    assert placed_edge == [[235, 39, 235]]
+
+
+
 
 
 
