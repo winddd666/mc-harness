@@ -3857,7 +3857,7 @@ class MacroSkills:
             job = tgt["job"]
             try:
                 self.bot.call("move_to", {"x": pos[0] + 0.5, "z": pos[2] + 0.5, "range": 2.5, "stop_on": ["death"]})
-            except ApiError:
+            except Exception:  # noqa: BLE001
                 pass
             # short wait for tail-end smelting (never blocks longer than wait_remaining_s)
             take_ops: list[dict[str, Any]] = []

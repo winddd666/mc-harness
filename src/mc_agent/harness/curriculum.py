@@ -1679,7 +1679,10 @@ class CurriculumSupervisor:
 
                 # Soft ready collection: harvest any finished nearby furnace jobs between episodes!
                 if self.enable_async_world_jobs:
-                    self.world_jobs.collect_ready_jobs(self.toolset.skills, origin=cur_pos, dim=cur_dim)
+                    try:
+                        self.world_jobs.collect_ready_jobs(self.toolset.skills, origin=cur_pos, dim=cur_dim)
+                    except Exception:
+                        pass
 
                 # AltoClef between-episode hygiene: auto-upgrade armor (`torso` safe) + free clutter when bag slots <= 5!
                 nh_ep = st.get("nearest_hostile")
@@ -1804,7 +1807,7 @@ class CurriculumSupervisor:
                 wait_cd = min(max(5.0, float(exc.cooldown_remaining_seconds or 30.0)), max(5.0, remaining_s))
                 time.sleep(wait_cd)
                 continue
-            except (ApiError, BotNotReadyError, RuntimeError) as exc:
+            except (ApiError, BotNotReadyError, RuntimeError, TimeoutError, OSError) as exc:
                 ep_index -= 1
                 consecutive_recovery_waits += 1
                 if consecutive_recovery_waits > 12:
