@@ -490,6 +490,21 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 
 → 修复重点改为：新集/复活后**复用已建竖井**（restore shaft + 走到最深节点），而非从地表重挖；预算自适应降为次要。
 
+### 4t. r20_short 收官（17/18，`hy4_hy_3` 被 BUG-035 吞掉）
+
+| 门禁 | 结果 |
+|---|---|
+| startup crash | **1 ❌**（BUG-035） |
+| BUG-025 stick | 2 ❌（均为真缺原木） |
+| BUG-029 over-cap | 2 ❌（`glm_3` cobble 242、`hy4_8` netherrack 182） |
+| BUG-026 死亡 / 冷却 | 14 ✅ / **157.7s ✅**（r19 205.6、r18 653.2） |
+| BUG-018 耗时/预算 / 零进展 | 0.93 ✅ / 6.2% ✅ |
+| BUG-020 / 033 / 023 / SCENE-001 | 全部 ✅ |
+
+- 分数 1760（18 路 r19）→ 1680（17 路 r20），人均 97.8→98.8
+- `objective_verified` 17→21（变好）
+- BUG-029 残留成因：清理只挂在 `mine_dfs`，`mine_blocks`/`tunnel` 收集的石料没有触发点
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
