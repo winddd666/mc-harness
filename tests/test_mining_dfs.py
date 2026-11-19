@@ -2676,6 +2676,75 @@ def test_exhausted_deep_node_tries_local_descent_and_keeps_its_shaft(monkeypatch
         assert walks == [route]
 
 
+@pytest.mark.parametrize("prune_reason", ["fluid_or_bedrock", "movement_not_confirmed"])
+def test_exhausted_descent_tries_the_other_lateral_route_before_backtracking(monkeypatch, prune_reason) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 28.0, 0.5), surface_y=64)
+    world.blocks[(0, 28, 0)] = world.blocks[(0, 29, 0)] = "air"
+    world.blocks[(1, 27, 0)] = "bedrock"
+    world.blocks[(1, 27, 3)] = "iron_ore"
+    with BotSession("tok", bot_username="SecondLateralRoute", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -36), parent_id=None,
+                                     edge_from_parent=None, branches=[mining.BranchSpec("stair_down", "east", 40)])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        anchor = (0, 28, 0)
+        engine._create_node(
+            kind="switchback", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, anchor]),
+            branches=[
+                mining.BranchSpec("stair_down", "east", 48, status="pruned", prune_reason=prune_reason),
+                mining.BranchSpec("stair_down", "south", 48, status="pruned", prune_reason="protected_region"),
+                mining.BranchSpec("stair_down", "west", 48, status="pruned", prune_reason="protected_region"),
+                mining.BranchSpec("offset_retry", "east", 48, status="pruned", sidestep_dir="north"),
+            ],
+        )
+        monkeypatch.setattr(engine, "_walk_waypoints", lambda *a, **k: pytest.fail("backtracked before trying south"))
+        result = engine.run(target="iron", target_y=-20, goal_count=1, max_duration_s=20)
+
+    assert result["stop_reason"] == "quota_reached"
+    assert engine.collar_node_id == collar.node_id
+    assert result["pos_after"][1] <= 28
+
+
+def test_blocked_descent_backtrack_resumes_the_deepest_pending_node(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 28.0, 0.5), surface_y=64)
+    world.blocks[(0, 28, 0)] = world.blocks[(0, 29, 0)] = "air"
+    world.blocks[(2, 26, 0)] = world.blocks[(2, 27, 0)] = "air"
+    world.blocks[(3, 25, 0)] = "iron_ore"
+    with BotSession("tok", bot_username="ResumeDeepAlternative", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -36), parent_id=None,
+                                     edge_from_parent=None, branches=[mining.BranchSpec("stair_down", "north", 40)])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=(2, 26, 0), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", [collar.anchor, (2, 26, 0)]),
+            branches=[mining.BranchSpec("stair_down", "east", 46, branch_target_y=-20)],
+        )
+        engine._create_node(
+            kind="switchback", anchor=(0, 28, 0), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, (0, 28, 0)]),
+            branches=[mining.BranchSpec("stair_down", d, 48, status="pruned") for d in mining.DIRECTIONS],
+        )
+
+        def blocked_walk(*args, **kwargs):
+            world.pos = [2.5, 26.0, 0.5]
+            return False, "backtrack_blocked"
+
+        monkeypatch.setattr(engine, "_walk_waypoints", blocked_walk)
+        result = engine.run(target="iron", target_y=-20, goal_count=1, max_duration_s=20)
+
+    assert result["stop_reason"] == "quota_reached"
+    assert engine.collar_node_id == collar.node_id
+    assert result["pos_after"][1] <= 26
+
+
 def test_climb_remembers_all_blocked_primitives_at_the_same_cell(monkeypatch) -> None:
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
     attempts: list[tuple[str, str]] = []

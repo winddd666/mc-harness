@@ -2092,6 +2092,21 @@ class MiningDFSEngine:
             self.active_node_id = goal_node_id
             raise
 
+    def _resume_deepest_branch(self, node: ShaftNode, *, min_hp_ref: list[float]) -> bool:
+        deepest = min(
+            (candidate for candidate in self.nodes.values()
+             if candidate.node_id != node.node_id and candidate.anchor[1] <= node.anchor[1]
+             and any(branch.status == "pending" for branch in candidate.branches)),
+            key=lambda candidate: candidate.anchor[1],
+            default=None,
+        )
+        if deepest is None:
+            return False
+        reached, _ = self._resume_shaft_tip(deepest.node_id, min_hp_ref=min_hp_ref)
+        if not reached:
+            self.active_node_id = node.node_id
+        return reached
+
     # ---- Long-Range 64-Block Cluster Radar & Hostile Threat Triage ('radar' strategy) ----
 
     def _cluster_ore_points(
@@ -3935,6 +3950,8 @@ class MiningDFSEngine:
                 return None
         except ApiError:
             return None
+        if not directions:
+            return []
         viable = self._probe_collar_dirs(
             anchor, geofence=geofence, cache=cache, directions=directions, dry_only=True,
         )
@@ -4811,6 +4828,8 @@ class MiningDFSEngine:
         failed_branch: BranchSpec,
         prune_reason: str,
         geofence: Any,
+        *,
+        after_exhaustion: bool = False,
     ) -> bool:
         if failed_branch.offset_tried or failed_branch.kind != "stair_down" or node.kind == "spine":
             return False
@@ -4820,7 +4839,7 @@ class MiningDFSEngine:
             "cave_breach_sealed",
             "fluid_or_bedrock",
             "falling_material_adjacent",
-        }:
+        } and not (after_exhaustion and prune_reason == "movement_not_confirmed"):
             return False
 
         left_d, right_d = LEFT_RIGHT_DIRS[failed_branch.direction]
@@ -5448,6 +5467,8 @@ class MiningDFSEngine:
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
             elif math.dist(cur_pos, active.anchor) > 3.5:
                 ok_nav, err_nav = self._resume_shaft_tip(active.node_id, min_hp_ref=min_hp_ref)
+                if not ok_nav and active.kind == "switchback" and err_nav not in {"hurt", "not_ready", "not_grounded"}:
+                    ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref)
                 if not ok_nav:
                     if (
                         self.collar_ceiling_y is not None
@@ -5716,24 +5737,31 @@ class MiningDFSEngine:
                     stop_reason = "shaft_exhausted"
                     break
                 edge = node.edge_from_parent
-                deep_descent = (
-                    edge.edge_kind == "stair_down" and node.anchor[1] > self.target_y + 12
-                    and self.collar_ceiling_y is not None and node.anchor[1] <= self.collar_ceiling_y - 20
-                )
-                if deep_descent:
+                descending = node.kind == "switchback" and node.anchor[1] > self.target_y + SCAN_BAND
+                if descending:
                     tried = {b.direction for b in node.branches} | {OPPOSITE_DIR.get(edge.direction)}
                     directions = tuple(d for d in DIRECTIONS if d not in tried)
-                    if directions:
-                        alternatives = self._probe_dry_descent(
-                            node.anchor, directions=directions, geofence=geofence, min_hp_ref=min_hp_ref,
+                    alternatives = self._probe_dry_descent(
+                        node.anchor, directions=directions, geofence=geofence, min_hp_ref=min_hp_ref,
+                    )
+                    if alternatives:
+                        node.branches.extend(alternatives)
+                        continue
+                    # A failed first sidestep leaves the other side of that descent untested.
+                    if alternatives is not None and any(
+                        self._enqueue_offset_retry_if_eligible(
+                            node, branch, branch.prune_reason or "", geofence, after_exhaustion=True,
                         )
-                        if alternatives:
-                            node.branches.extend(alternatives)
-                            continue
+                        for branch in tuple(node.branches) if branch.status == "pruned"
+                    ):
+                        continue
                 ok_bt, err_bt = self._walk_waypoints(edge.waypoints, reverse=True, min_hp_ref=min_hp_ref)
                 if not ok_bt:
+                    if descending and (err_bt or "").startswith("backtrack_blocked"):
+                        if self._resume_deepest_branch(node, min_hp_ref=min_hp_ref):
+                            continue
                     self._archive_current_shaft_to_ledger(mark_exhausted=False)
-                    if not deep_descent and auto_relocations_this_slice < 1 and time.monotonic() + 8.0 < deadline:
+                    if not descending and auto_relocations_this_slice < 1 and time.monotonic() + 8.0 < deadline:
                         auto_relocations_this_slice += 1
                         cur_now = _floor_pos(self.bot.status()["pos"])
                         self._clear_active_tree_only()
