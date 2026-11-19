@@ -723,6 +723,18 @@ unstick    46s
 - r23 前 65 个事件文件：**`void_geofence_blocked` = 0**（r22 同期已多次出现）
 - 早期门禁：仅 `mine zero-slice 20%` FAIL（样本小，需观察）；trade **5 次**、brew 2 次、thread 0、runtime 0
 
+### 4am. r22_long 成就天花板对比（00:23，约 32/45 分钟）
+
+| bot | 分数 | 集数 | 成就 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | **195** | 11 | 13 个：`shiny_gear 60`、`enchant 30`、`lodestone/lava_bucket/deflect_arrow/form_obsidian/mine_diamond 各 15`… |
+| `ds_ds_1_bare` | 20 | 4 | stone + iron 四件套 |
+| `nju_movetest` | 20 | 5 | stone + iron 四件套 |
+| `hy4_hy_1_bare` | **10** | **7** | 只有 stone age |
+
+- 说明：**深挖/钻石链路在 GLM 上完全可行**（45 分钟内拿到 shiny_gear+enchant），BUG-030 不是全局阻塞
+- `hy4_1` 7 集仍 10 分，是 BUG-041（木镐硬岩）单点卡死，与模型能力无关
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
