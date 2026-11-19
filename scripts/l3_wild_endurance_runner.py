@@ -11,6 +11,9 @@
 
 Scene slices (`--stage`, one unique site per fleet slot):
   bare / iron / midgame / nether / village     overworld checkpoints, `/spawnpoint` death return
+  village_trade                                natural village, emerald/stick trade loadout
+  brewing_alchemy                              cobblestone pad + brewing stand + 2x2 water source
+  cave_combat                                  roofed 11x11 arena with one zombie + one skeleton
   nether_fortress / nether_bastion             locate real structure, obsidian ledge + charged
                                                respawn anchor, `execute in the_nether` everywhere
   enchant_anvil                                flattened 9x7 pad with table/anvil/bookshelves
@@ -408,8 +411,11 @@ def prepare_scene_ground(
                 f"fill {ix + 5} {iy} {iz - 4} {ix + 5} {iy + 3} {iz + 4} minecraft:cobblestone",
                 f"setblock {ix - 4} {iy} {iz - 4} minecraft:torch",
                 f"setblock {ix + 4} {iy} {iz + 4} minecraft:torch",
-                f"summon minecraft:zombie {ix + 3}.5 {iy} {iz}.5",
-                f"summon minecraft:skeleton {ix - 3}.5 {iy} {iz + 3}.5",
+                # Conditional summon: this prep also runs on every death-return restock, so an
+                # unconditional summon would stack a new pair of mobs inside the arena each death
+                # and turn the slice into an instant death loop.
+                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:zombie,distance=..24] run summon minecraft:zombie {ix + 3}.5 {iy} {iz}.5",
+                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:skeleton,distance=..24] run summon minecraft:skeleton {ix - 3}.5 {iy} {iz + 3}.5",
                 f"tp {bot_name} {ix}.5 {iy} {iz}.5",
                 f"spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
