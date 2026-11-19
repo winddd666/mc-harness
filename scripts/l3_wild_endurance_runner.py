@@ -6,6 +6,20 @@
 - Zero artificial survival buffs (real normal-difficulty mobs, real hunger, real Y=-54 caves).
 - Enforces `RULES.md` 220m `VoidGeofence`, `enable_pre_ensure=True`, `enable_island_recon=True`,
   and `enable_async_world_jobs=True`.
+
+Scene slices (`--stage`, one unique site per fleet slot):
+  bare / iron / midgame / nether / village     overworld checkpoints, `/spawnpoint` death return
+  nether_fortress / nether_bastion             locate real structure, obsidian ledge + charged
+                                               respawn anchor, `execute in the_nether` everywhere
+  enchant_anvil                                flattened 9x7 pad with table/anvil/bookshelves
+  deep_water                                   real `minecraft:deep_ocean` + dry staging pad
+
+Every slice runs a background `SceneWatchdog`: wrong dimension / >400m drift / death (health<=0 or
+inventory collapse at the anchor away from known chests) triggers `restock_scene` (teleport back +
+re-apply the slice loadout) within one poll (~8s).
+
+`--print-plan` prints the exact ground-prep + reset RCON batch for a stage without touching the
+server, so scene requests can be reviewed offline before #1 triggers a live run.
 """
 
 from __future__ import annotations
@@ -572,7 +586,7 @@ class SceneAnchor:
     drift_limit: float = 400.0
 
 
-def reset_wild_bot(
+def build_reset_cmds(
     bot_name: str,
     sx: float,
     sy: float,
@@ -581,8 +595,8 @@ def reset_wild_bot(
     set_day: bool = True,
     stage: str = "bare",
     dim: str | None = None,
-) -> None:
-    """Reset the bot to the slice checkpoint. Dimension-aware: Nether slices must never `tp` to overworld."""
+) -> list[str]:
+    """Build the checkpoint reset RCON batch (dimension-aware; shared by live reset and --print-plan)."""
     dim = dim or scene_dimension(stage)
     ix, iy, iz = int(round(sx)), int(round(sy)), int(round(sz))
     cmds: list[str] = ["difficulty normal", f"gamemode survival {bot_name}", f"clear {bot_name}"]
@@ -623,7 +637,24 @@ def reset_wild_bot(
     cmds.extend(stage_loadout_cmds(bot_name, stage, sx, sy, sz))
     if set_day and dim != "the_nether":
         cmds.insert(0, "time set 1000")
-    rcon_batch(cmds, timeout=60)
+    return cmds
+
+
+def reset_wild_bot(
+    bot_name: str,
+    sx: float,
+    sy: float,
+    sz: float,
+    *,
+    set_day: bool = True,
+    stage: str = "bare",
+    dim: str | None = None,
+) -> None:
+    """Reset the bot to the slice checkpoint. Dimension-aware: Nether slices never `tp` to overworld."""
+    rcon_batch(
+        build_reset_cmds(bot_name, sx, sy, sz, set_day=set_day, stage=stage, dim=dim),
+        timeout=60,
+    )
 
 
 def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inventory: bool = False) -> None:
@@ -807,9 +838,43 @@ def main() -> int:
     )
     parser.add_argument("--tag", type=str, default="wild")
     parser.add_argument("--keep-time", action="store_true", help="Do not reset world time to morning")
+    parser.add_argument(
+        "--print-plan",
+        action="store_true",
+        help="Print the exact ground-prep + reset RCON batch for this stage and exit (no network)",
+    )
+    parser.add_argument(
+        "--plan-pos",
+        type=str,
+        default=None,
+        help="Anchor x,y,z used by --print-plan (default: first CANDIDATE_SITES entry)",
+    )
     args = parser.parse_args()
 
     bot_name = args.bot
+    if args.print_plan:
+        if args.plan_pos:
+            try:
+                px, py, pz = (float(v) for v in args.plan_pos.split(","))
+            except ValueError:
+                raise SystemExit("--plan-pos must be 'x,y,z'")
+        else:
+            ax, az = CANDIDATE_SITES[args.site_index % len(CANDIDATE_SITES)]
+            px, py, pz = float(ax) + 0.5, 64.0, float(az) + 0.5
+        dim = scene_dimension(args.stage)
+        plan = {
+            "bot": bot_name,
+            "stage": args.stage,
+            "dimension": dim,
+            "anchor": [px, py, pz],
+            "ground": prepare_scene_ground(bot_name, args.stage, px, py, pz, dim=dim),
+            "reset": build_reset_cmds(
+                bot_name, px, py, pz, set_day=not args.keep_time, stage=args.stage, dim=dim
+            ),
+        }
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        return 0
+
     token_file = pathlib.Path(args.token_file)
     runs_dir = (RUNS_DIR / args.runs_subdir) if args.runs_subdir else RUNS_DIR
     LIVE_STATE_DIR.mkdir(parents=True, exist_ok=True)
