@@ -40,8 +40,11 @@ RUNS_ROOT = pathlib.Path(os.environ.get("MC_FLEET_RUNS_ROOT") or (WT_ROOT / "run
 SLOW_TOOL_THRESHOLD_S = 60.0
 KNOWN_STAGES: tuple[str, ...] = (
     "nether_fortress",
+    "brewing_alchemy",
     "nether_bastion",
     "enchant_anvil",
+    "village_trade",
+    "cave_combat",
     "deep_water",
     "midgame",
     "village",
@@ -82,35 +85,37 @@ class FleetSlot:
     stage: str
     site_index: int
     token_file: str
+    duration_s: int = 1200
+    max_episodes: int = 20
 
 
 FLEET: tuple[FleetSlot, ...] = (
     # --- Squad 1: NJU Competition Benchmark (3 bots, soft-oversubscribed) ---
-    FleetSlot("MoveTest_01", "nju", "nju", None, 9, "bare", 0, str(MAIN_ROOT / ".state-move-test/tokens.json")),
-    FleetSlot("GuiTest_01", "nju", "nju", None, 9, "nether", 1, str(MAIN_ROOT / ".state-gui-test/tokens.json")),
-    FleetSlot("NJU_3", "nju", "nju", None, 9, "village", 2, str(FLEET_TOKEN_FILE)),
+    FleetSlot("MoveTest_01", "nju", "nju", None, 9, "bare", 0, str(MAIN_ROOT / ".state-move-test/tokens.json"), duration_s=2700, max_episodes=45),
+    FleetSlot("GuiTest_01", "nju", "nju", None, 9, "nether", 1, str(MAIN_ROOT / ".state-gui-test/tokens.json"), duration_s=1200, max_episodes=20),
+    FleetSlot("NJU_3", "nju", "nju", None, 9, "village_trade", 2, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
     # --- Squad 2: GLM-5.3 Mid/Late-Game Strike Team (5 bots) ---
-    FleetSlot("GLM_1", "glm", "opencode", "glm-5.3", 0, "nether_fortress", 3, str(MAIN_ROOT / ".state-beast/tokens.json")),
-    FleetSlot("GLM_2", "glm", "opencode", "glm-5.3", 0, "nether_bastion", 4, str(MAIN_ROOT / ".state-beast/tokens.json")),
-    FleetSlot("GLM_3", "glm", "opencode", "glm-5.3", 0, "village", 5, str(MAIN_ROOT / ".state-beast/tokens.json")),
-    FleetSlot("GLM_4", "glm", "opencode", "glm-5.3", 0, "enchant_anvil", 6, str(MAIN_ROOT / ".state-beast/tokens.json")),
-    FleetSlot("GLM_5", "glm", "opencode", "glm-5.3", 0, "midgame", 7, str(MAIN_ROOT / ".state-glm5/tokens.json")),
+    FleetSlot("GLM_1", "glm", "opencode", "glm-5.3", 0, "nether_fortress", 3, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
+    FleetSlot("GLM_2", "glm", "opencode", "glm-5.3", 0, "nether_bastion", 4, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
+    FleetSlot("GLM_3", "glm", "opencode", "glm-5.3", 0, "village_trade", 5, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
+    FleetSlot("GLM_4", "glm", "opencode", "glm-5.3", 0, "brewing_alchemy", 6, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=900, max_episodes=15),
+    FleetSlot("GLM_5", "glm", "opencode", "glm-5.3", 0, "midgame", 7, str(MAIN_ROOT / ".state-glm5/tokens.json"), duration_s=2700, max_episodes=45),
     # --- Squad 3: DeepSeek-v4.1-flash Cross-Validation (4 bots) ---
-    FleetSlot("DS_1", "ds", "opencode", "deepseek-v4.1-flash", 0, "bare", 8, str(FLEET_TOKEN_FILE)),
-    FleetSlot("DS_2", "ds", "opencode", "deepseek-v4.1-flash", 0, "iron", 9, str(FLEET_TOKEN_FILE)),
-    FleetSlot("DS_3", "ds", "opencode", "deepseek-v4.1-flash", 0, "village", 10, str(FLEET_TOKEN_FILE)),
-    FleetSlot("DS_4", "ds", "opencode", "deepseek-v4.1-flash", 0, "nether_fortress", 11, str(FLEET_TOKEN_FILE)),
+    FleetSlot("DS_1", "ds", "opencode", "deepseek-v4.1-flash", 0, "bare", 8, str(FLEET_TOKEN_FILE), duration_s=2700, max_episodes=45),
+    FleetSlot("DS_2", "ds", "opencode", "deepseek-v4.1-flash", 0, "cave_combat", 9, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("DS_3", "ds", "opencode", "deepseek-v4.1-flash", 0, "enchant_anvil", 10, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("DS_4", "ds", "opencode", "deepseek-v4.1-flash", 0, "nether_fortress", 11, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
     # --- Squad 4: HY4-flash-free High-Concurrency Broad Sweeper (10 bots) ---
-    FleetSlot("HY_1", "hy4", "opencode", "hy4-flash-free", 0, "bare", 12, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_2", "hy4", "opencode", "hy4-flash-free", 0, "bare", 13, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_3", "hy4", "opencode", "hy4-flash-free", 0, "iron", 14, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_4", "hy4", "opencode", "hy4-flash-free", 0, "iron", 15, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_5", "hy4", "opencode", "hy4-flash-free", 0, "midgame", 16, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_6", "hy4", "opencode", "hy4-flash-free", 0, "midgame", 17, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_7", "hy4", "opencode", "hy4-flash-free", 0, "village", 18, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_8", "hy4", "opencode", "hy4-flash-free", 0, "nether", 19, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_9", "hy4", "opencode", "hy4-flash-free", 0, "deep_water", 20, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_10", "hy4", "opencode", "hy4-flash-free", 0, "enchant_anvil", 21, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_1", "hy4", "opencode", "hy4-flash-free", 0, "bare", 12, str(FLEET_TOKEN_FILE), duration_s=2700, max_episodes=45),
+    FleetSlot("HY_2", "hy4", "opencode", "hy4-flash-free", 0, "iron", 13, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_3", "hy4", "opencode", "hy4-flash-free", 0, "midgame", 14, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_4", "hy4", "opencode", "hy4-flash-free", 0, "cave_combat", 15, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("HY_5", "hy4", "opencode", "hy4-flash-free", 0, "brewing_alchemy", 16, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("HY_6", "hy4", "opencode", "hy4-flash-free", 0, "nether_bastion", 17, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_7", "hy4", "opencode", "hy4-flash-free", 0, "village", 18, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_8", "hy4", "opencode", "hy4-flash-free", 0, "nether", 19, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_9", "hy4", "opencode", "hy4-flash-free", 0, "deep_water", 20, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("HY_10", "hy4", "opencode", "hy4-flash-free", 0, "deep_water", 21, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
 )
 
 
@@ -222,7 +227,14 @@ def cmd_sites() -> int:
     return 0 if clash == 0 and max(s.site_index for s in FLEET) < len(sites) else 1
 
 
-def cmd_launch(wave: str, duration_s: float, max_episodes: int, squads: set[str], stagger_s: float) -> int:
+def cmd_launch(
+    wave: str,
+    duration_s: float,
+    max_episodes: int,
+    squads: set[str],
+    stagger_s: float,
+    use_slot_durations: bool = False,
+) -> int:
     selected_raw = [s for s in FLEET if s.squad in squads]
     if not selected_raw:
         print("No fleet slots matched squads:", squads)
@@ -231,8 +243,11 @@ def cmd_launch(wave: str, duration_s: float, max_episodes: int, squads: set[str]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(WT_ROOT / "src")
     procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path]] = []
-    print(f"[Fleet Launch] wave={wave} bots={len(selected)} duration_s={duration_s} max_eps={max_episodes}")
+    dur_label = "per-slot" if use_slot_durations else str(duration_s)
+    print(f"[Fleet Launch] wave={wave} bots={len(selected)} duration_s={dur_label} max_eps={max_episodes}")
     for idx, slot in enumerate(selected):
+        slot_dur = int(slot.duration_s) if use_slot_durations else int(duration_s)
+        slot_eps = int(slot.max_episodes) if use_slot_durations else int(max_episodes)
         subdir = f"{wave}/{slot.squad}_{slot.bot.lower()}_{slot.stage}"
         log_dir = RUNS_ROOT / subdir
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -247,8 +262,8 @@ def cmd_launch(wave: str, duration_s: float, max_episodes: int, squads: set[str]
             "--stage", slot.stage,
             "--runs-subdir", subdir,
             "--site-index", str(slot.site_index),
-            "--duration-s", str(int(duration_s)),
-            "--max-episodes", str(max_episodes),
+            "--duration-s", str(slot_dur),
+            "--max-episodes", str(slot_eps),
             "--tag", f"{wave}_{slot.bot.lower()}_{slot.stage}",
         ]
         if slot.model:
@@ -258,7 +273,7 @@ def cmd_launch(wave: str, duration_s: float, max_episodes: int, squads: set[str]
         lf = open(log_path, "wb")
         proc = subprocess.Popen(cmd, env=env, stdout=lf, stderr=subprocess.STDOUT)
         procs.append((slot, proc, log_path))
-        print(f"  [{idx+1:2d}/{len(selected):2d}] started {slot.bot:12s} ({slot.squad:3s}/{slot.model or 'nju':19s}) stage={slot.stage:15s} pid={proc.pid}", flush=True)
+        print(f"  [{idx+1:2d}/{len(selected):2d}] started {slot.bot:12s} ({slot.squad:3s}/{slot.model or 'nju':19s}) stage={slot.stage:15s} dur={slot_dur:4d}s pid={proc.pid}", flush=True)
         if idx + 1 < len(selected):
             time.sleep(stagger_s)
 
@@ -729,6 +744,7 @@ def main() -> int:
     lp = sub.add_parser("launch")
     lp.add_argument("--wave", required=True)
     lp.add_argument("--duration", type=float, default=1200.0)
+    lp.add_argument("--slot-durations", action="store_true", help="Use each FleetSlot's per-stage duration_s/max_episodes")
     lp.add_argument("--max-episodes", type=int, default=20)
     lp.add_argument("--squads", default="nju,glm,ds,hy4")
     lp.add_argument("--stagger", type=float, default=1.5)
@@ -743,7 +759,14 @@ def main() -> int:
     if args.cmd == "sites":
         return cmd_sites()
     if args.cmd == "launch":
-        return cmd_launch(args.wave, args.duration, args.max_episodes, {s.strip() for s in args.squads.split(",") if s.strip()}, args.stagger)
+        return cmd_launch(
+            args.wave,
+            args.duration,
+            args.max_episodes,
+            {s.strip() for s in args.squads.split(",") if s.strip()},
+            args.stagger,
+            use_slot_durations=args.slot_durations,
+        )
     md: str | bool | None = False if args.no_markdown else args.markdown
     return cmd_triage(args.wave, md, pathlib.Path(args.runs_root).expanduser() if args.runs_root else None)
 
