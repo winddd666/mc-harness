@@ -881,6 +881,11 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 当前看板：**38 单 → 27 FIXED / 1 PARTIAL / 10 OPEN**。
 仍 OPEN：BUG-007、009、026、030、032、036、037、038、039、042。
 
+### 4bb. BUG-007 / BUG-032 复核（00:57）
+
+- **BUG-007**：r24 的 8 次 craft 失败全部是**真实缺料**，`missing_materials` 正确；但 7 次 `message=None` → 模型需自己解析 map。剩余工作缩窄为"生成一句标准缺料提示"。
+- **BUG-032**：与 BUG-038（climb 慢）/BUG-041（木镐硬岩）是同一"地底断木断镐"现象的不同层面；032 负责 curriculum 层"下矿前木料保底"。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
