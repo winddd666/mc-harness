@@ -2216,7 +2216,8 @@ def test_slow_blocked_climb_tries_a_different_direction_next_slice(monkeypatch) 
     assert clock.now < 1010.0
 
 
-def test_nested_http_timeout_stops_the_action_and_restores_shared_sessions(monkeypatch) -> None:
+@pytest.mark.parametrize(("budget", "retry_budget"), [(32.0, 47), (90.0, None)])
+def test_nested_http_timeout_stops_the_action_and_restores_shared_sessions(monkeypatch, budget, retry_budget) -> None:
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
     calls: list[str] = []
 
@@ -2235,10 +2236,15 @@ def test_nested_http_timeout_stops_the_action_and_restores_shared_sessions(monke
             eng.skills.bot.call("dig", {"pos": [1, 20, 0]})
 
         monkeypatch.setattr(eng, "_run", stalled)
-        result = eng.run(max_duration_s=5.0)
+        result = eng.run(max_duration_s=budget)
         assert eng.bot is bot and eng.skills is skills and skills.bot is bot
         assert bot._recovering_quarantine is False
     assert result["stop_reason"] == "time_slice"
+    assert result["ok"] is False and result["requires_replan"] is True
+    assert "原地用相同参数重试" in result["message"]
+    next_steps = result["suggested_next"]
+    assert "安全站位" in next_steps["if_blocked"]
+    assert next_steps.get("retry_with") == ({"max_duration_s": retry_budget} if retry_budget else None)
     assert [p.rsplit("/", 1)[-1] for p in calls] == ["status", "dig", "stop"]
 
 

@@ -4795,7 +4795,6 @@ class MiningDFSEngine:
                 "strategy": self.strategy, "stop_reason": "time_slice",
                 "pos_before": scoped.first_pos, "pos_after": scoped.last_status.get("pos"),
                 "tree": self.snapshot(),
-                "message": "本轮在时间限制内未确认进展，请检查当前位置和障碍后再选择下一步。",
             }
             if act == "explore":
                 gained = {}
@@ -4832,6 +4831,15 @@ class MiningDFSEngine:
                     "target_y": target_height, "reached": end_y >= target_height - 2,
                     "method": "interrupted",
                 }
+            if result["stop_reason"] == "time_slice":
+                next_steps: dict[str, Any] = {
+                    "if_blocked": "处理前方障碍，或换到安全站位后重新规划。",
+                }
+                result["message"] = "本轮因时间限制中止。请先检查站位及障碍，避免原地用相同参数重试。"
+                if budget < 90:
+                    next_steps["retry_with"] = {"max_duration_s": max(20, min(90, math.ceil(budget + 15)))}
+                    result["message"] += "若路线畅通，可按 retry_with 调大预算并保留其余参数。"
+                result["suggested_next"] = next_steps
             return result
         finally:
             # Stop a request that may still be running server-side, within the reserved
