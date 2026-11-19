@@ -1531,6 +1531,60 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
     assert calls.count("stop") == 1
 
 
+def test_staircase_retries_one_slow_read_before_budget_failure(monkeypatch) -> None:
+    """r12: a slow first status aborted as time_budget with zero steps."""
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    calls = [0]
+    read_timeouts: list[float] = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls[0] += 1
+        assert path == "status"
+        read_timeouts.append(request.extensions["timeout"]["read"])
+        if calls[0] == 1:
+            clock[0] += request.extensions["timeout"]["read"]
+            raise httpx.ReadTimeout("slow status", request=request)
+        return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 30.0, 0.5]}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        session = library._StairSession(bot, 10.0)
+        status = session.status()
+        session.call("status", timeout_s=1.5)
+    assert status["pos"] == [0.5, 30.0, 0.5]
+    assert calls[0] == 3
+    assert session.last_timeout_path == "status"
+    assert read_timeouts[-1] == pytest.approx(1.5)
+
+
+def test_staircase_time_budget_reports_timed_out_read(monkeypatch) -> None:
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": []}})
+        if path == "status":
+            clock[0] += request.extensions["timeout"]["read"]
+            raise httpx.ReadTimeout("slow status", request=request)
+        if path == "stop":
+            return httpx.Response(200, json={"ok": True, "result": {"stopped": True, "released": True}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", steps=1, stop_on_ore=False)
+    assert result["ok"] is False
+    assert result["stop_reason"] == "time_budget"
+    assert result["timeout_path"] == "status"
+    assert result["action_released"] is True
+
+
 @pytest.mark.parametrize("place_fails,code", [(True, "portal_frame_incomplete"), (False, "portal_ignition_failed")])
 def test_portal_reports_construction_phase_failures(monkeypatch, place_fails, code) -> None:
     import mc_agent.skills.library as library

@@ -1160,22 +1160,35 @@ class _StairSession:
         self.step_deadline = self.deadline
         self.per_step_timeout = max(0.05, float(per_step_timeout))
         self.last_status: dict[str, Any] = {}
+        self.last_timeout_path: str | None = None
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
+    _IDEMPOTENT_READS = frozenset({"status", "inventory", "get_block", "find_blocks"})
+
     def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
-        remaining = min(self.deadline, self.step_deadline) - time.monotonic()
-        if remaining <= 0:
-            raise _StairDeadline()
-        cap = 6.0 if path == "move_to" else 8.0 if path == "dig" else 3.0
-        timeout = min(remaining, cap, float(kwargs.pop("timeout_s", cap)))
-        if path == "move_to":
-            body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
-        try:
-            result = (self.bot.call(path, body, timeout_s=timeout, **kwargs)
-                      if self.supports_timeout else self.bot.call(path, body))
-        except httpx.TimeoutException:
-            # A client timeout does not release the server action lease.
-            raise _StairDeadline() from None
+        # A slow first status/probe under fleet load used to abort the whole
+        # staircase as time_budget with zero steps. Retry one idempotent read
+        # once; action calls still abort immediately (their lease may persist).
+        explicit_timeout = kwargs.pop("timeout_s", None)
+        for read_attempt in range(2):
+            remaining = min(self.deadline, self.step_deadline) - time.monotonic()
+            if remaining <= 0:
+                raise _StairDeadline()
+            cap = 6.0 if path == "move_to" else 8.0 if path == "dig" else 3.0
+            timeout = min(remaining, cap, float(explicit_timeout if explicit_timeout is not None else cap))
+            call_body = body
+            if path == "move_to":
+                call_body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
+            try:
+                result = (self.bot.call(path, call_body, timeout_s=timeout, **kwargs)
+                          if self.supports_timeout else self.bot.call(path, call_body))
+            except httpx.TimeoutException:
+                self.last_timeout_path = path
+                if read_attempt == 0 and path in self._IDEMPOTENT_READS and remaining > 1.0:
+                    continue
+                # A client timeout does not release the server action lease.
+                raise _StairDeadline() from None
+            break
         if path == "status":
             self.last_status = result
             if isinstance(result.get("pos"), (list, tuple)):
@@ -5807,6 +5820,7 @@ class MacroSkills:
                 "error": {"code": "time_budget", "message": "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"},
                 "direction": direction, "vertical": vertical, "steps_requested": steps,
                 **session.progress, "pos_after": session.last_status.get("pos"),
+                "timeout_path": session.last_timeout_path,
                 "action_released": cleanup.get("released", cleanup.get("stopped", False)),
             }
 
