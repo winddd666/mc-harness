@@ -1122,7 +1122,9 @@ class CombatEnv:
         head_bx, head_by, head_bz = math.floor(float(pos0[0])), math.floor(float(pos0[1])) + 1, math.floor(float(pos0[2]))
         if self._get_block_name(head_bx, head_by, head_bz) in {"lava", "flowing_lava"}:
             try:
-                self.bot.call("control", {"forward": True, "jump": True, "sprint": True, "ms": 950, "stop_on": ["death"]})
+                # The current yaw can still face the attacker that knocked us in.
+                # Preserve the horizontal position until the shore probe picks a heading.
+                self.bot.call("control", {"forward": False, "jump": True, "sprint": False, "ms": 950, "stop_on": ["death"]})
                 actions.append("lava_surface_swim")
             except (ApiError, httpx.HTTPError) as err:
                 if isinstance(err, httpx.HTTPError):

@@ -2494,6 +2494,8 @@ def test_r18_lava_airborne_swim_timeout_and_creeper_flee_timeout_hardening(monke
             if action == "control":
                 # First swim call simulates transient ReadTimeout; jump-sprint launches mid-air above lava!
                 if pl.get("ms") == 950 and lava_actions.count("control") == 1:
+                    assert pl["jump"] is True
+                    assert pl["forward"] is False and pl["sprint"] is False
                     raise httpx.ReadTimeout("simulated swim control timeout")
                 if pl.get("forward"):
                     state_l["pos"] = [234.7, 36.0, 193.8]
