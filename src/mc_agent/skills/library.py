@@ -1836,11 +1836,19 @@ class MacroSkills:
 
     def _is_water_covered(self, pos: tuple[int, int, int]) -> bool:
         water_names = {"water", "flowing_water"}
-        for dy in (1, 2):
+        probes = (
+            (pos[0], pos[1] + 1, pos[2]),
+            (pos[0], pos[1] + 2, pos[2]),
+            (pos[0] + 1, pos[1], pos[2]),
+            (pos[0] - 1, pos[1], pos[2]),
+            (pos[0], pos[1], pos[2] + 1),
+            (pos[0], pos[1], pos[2] - 1),
+        )
+        for pt in probes:
             try:
-                name, _ = self._block_info([pos[0], pos[1] + dy, pos[2]])
+                name, _ = self._block_info(list(pt))
             except ApiError:
-                return False
+                continue
             if name in water_names:
                 return True
         return False
@@ -2069,16 +2077,20 @@ class MacroSkills:
                         return {"ok": True, "reused": True, "pos": cand_pos}
 
                 if distant_candidates:
+                    tpos0 = distant_candidates[0]
+                    dy_table = int(tpos0[1]) - int(py)
+                    approach_msg = (
+                        f"该工作台位于上方 {tpos0}（高差 +{dy_table} 格，直接 mc_move_to 不可达），请先调 mc_skill_mine_dfs(action='climb_out') 爬回地表后再靠近合成。"
+                        if dy_table >= 8
+                        else "无需回地表砍树，请先调 mc_skill_mine_dfs(action='return_collar') 或 mc_move_to 靠近该工作台后再合成。"
+                    )
                     return {
                         "ok": False,
                         "error": "need_crafting_table",
                         "requires_replan": True,
                         "pos": [px, py, pz],
-                        "nearest_crafting_table": distant_candidates[0],
-                        "message": (
-                            f"包内无富余木板新建工作台，但附近已放置有现成 crafting_table 位于 {distant_candidates[0]}；"
-                            "无需回地表砍树，请先调 mc_skill_mine_dfs(action='return_collar') 或 mc_move_to 靠近该工作台后再合成。"
-                        ),
+                        "nearest_crafting_table": tpos0,
+                        "message": f"包内无富余木板新建工作台，但附近已放置有现成 crafting_table 位于 {tpos0}；{approach_msg}",
                     }
 
                 if self._has_non_wood_table_recipe_ready(target_item, counts):
@@ -2415,7 +2427,7 @@ class MacroSkills:
                 target = cand
                 break
             if target is None:
-                continue
+                break
             pos = tuple(target["pos"])
             try:
                 res = self.bot.call("dig", {"pos": list(pos), "collect": True})

@@ -166,8 +166,6 @@ TRACKED_ORES: tuple[str, ...] = (
     "deepslate_emerald_ore",
     "coal_ore",
     "deepslate_coal_ore",
-    "copper_ore",
-    "deepslate_copper_ore",
 )
 
 ORE_DFS_PROFILES: dict[str, dict[str, Any]] = {

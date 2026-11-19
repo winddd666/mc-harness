@@ -1094,4 +1094,67 @@ def test_v2_integrated_monotonic_smelt_clock_and_episode_inventory_hygiene(tmp_p
     assert "iron_pickaxe" not in dropped_items
 
 
+def test_v2_wild_findings_reconnect_submerged_wall_recon_coords_and_no_copper_detour(tmp_path: Path) -> None:
+    """Verify all 5 real-world fixes discovered in the 2-concurrency V2 wild endurance run."""
+    from mc_agent.skills.mining_dfs import ORE_DFS_PROFILES, TRACKED_ORES
+    from mc_agent.harness.curriculum import select_next_target
+
+    # 1) Copper is excluded from opportunistic `TRACKED_ORES` (still available if `target='copper'` explicitly)
+    assert "copper_ore" not in TRACKED_ORES
+    assert "deepslate_copper_ore" not in TRACKED_ORES
+    assert "copper_ore" in ORE_DFS_PROFILES["copper"]["target_blocks"]
+
+    # 2) Vertical submerged riverbank wall (`stone` above, `water` horizontally adjacent) is detected as water-covered
+    world = _Phase2World()
+    world.pos = [6406.5, 64.0, -6430.5]
+    world.add_item("wooden_pickaxe", 1)
+    world.blocks[(6399, 58, -6428)] = "stone"
+    world.blocks[(6399, 59, -6428)] = "stone"
+    world.blocks[(6399, 60, -6428)] = "dirt"
+    world.blocks[(6398, 58, -6428)] = "water"  # River water adjacent horizontally!
+
+    connect_calls: list[int] = []
+    disconnected_once = {"flag": False}
+    orig_handler = world.handler
+
+    def wild_handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/status" and disconnected_once["flag"]:
+            disconnected_once["flag"] = False
+            return httpx.Response(409, json={"ok": False, "error": {"code": "not_connected", "message": "bot not connected"}})
+        if path == "/connect":
+            connect_calls.append(1)
+            return httpx.Response(200, json={"ok": True, "result": {"ready": True}})
+        return orig_handler(req)
+
+    with BotSession("tok", bot_username="WildFixBot", transport=httpx.MockTransport(wild_handler)) as bot:
+        skills = MacroSkills(bot)
+        assert skills._is_water_covered((6399, 58, -6428)) is True
+
+        # 3) `island_recon_sweep` interpolates concrete coordinates around `(6406, -6430)` and uses 0 extra tools
+        world.add_item("stone_pickaxe", 1)
+        wm = WorldMemory()
+        recon_t, _ = select_next_target(bot, world_memory=wm, enable_island_recon=True, recon_done=False)
+        assert recon_t.key == "island_recon_sweep"
+        assert "(6406, -6430)" in recon_t.task
+        assert "extra_tools" and recon_t.extra_tools == ()
+
+        # 4) `CurriculumSupervisor` auto-calls `/connect` when `/status` returns `not_connected` without burning `max_episodes`!
+        disconnected_once["flag"] = True
+        ts = McToolset(bot, world_memory=wm)
+        sup = CurriculumSupervisor(
+            bot,
+            chat_fn=lambda *a, **k: {"role": "assistant", "content": "recon done"},
+            runs_dir=tmp_path / "runs_rec",
+            duration_s=30.0,
+            toolset=ts,
+            enable_island_recon=True,
+        )
+        res = sup.run(max_episodes=1)
+        assert connect_calls == [1]
+        assert len(res["episodes"]) == 1
+        assert res["episodes"][0]["target"] == "island_recon_sweep"
+
+
+
 

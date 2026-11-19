@@ -81,14 +81,14 @@ def rcon_batch(commands: list[str], *, timeout: int = 60) -> list[dict[str, str]
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def select_dry_isolated_wild_site(bot: Any, start_idx: int = 0) -> tuple[float, float, float, str]:
+def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
     """Find a dry land surface spawn >= 2000m from other bots using vanilla `spreadplayers`."""
     for offset in range(len(CANDIDATE_SITES)):
         cx, cz = CANDIDATE_SITES[(start_idx + offset) % len(CANDIDATE_SITES)]
         rcon_batch(
             [
-                f"tp {BOT} {cx} 120 {cz}",
-                f"spreadplayers {cx} {cz} 0 32 false {BOT}",
+                f"tp {bot_name} {cx} 120 {cz}",
+                f"spreadplayers {cx} {cz} 0 32 false {bot_name}",
             ],
             timeout=45,
         )
@@ -124,23 +124,23 @@ def select_dry_isolated_wild_site(bot: Any, start_idx: int = 0) -> tuple[float, 
     raise RuntimeError("Could not find a wooded dry wild spawn site across CANDIDATE_SITES")
 
 
-def reset_wild_bot(sx: float, sy: float, sz: float, *, set_day: bool = True) -> None:
+def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: bool = True) -> None:
     cmds = [
         "difficulty normal",
         "weather clear",
-        f"tp {BOT} {sx:.1f} {sy:.1f} {sz:.1f}",
-        f"spawnpoint {BOT} {int(round(sx))} {int(round(sy))} {int(round(sz))}",
-        f"gamemode survival {BOT}",
-        f"clear {BOT}",
-        f"effect clear {BOT}",
-        f"effect give {BOT} minecraft:instant_health 1 10 true",
-        f"effect give {BOT} minecraft:saturation 2 10 true",
-        f"advancement revoke {BOT} everything",
-        f"advancement grant {BOT} only minecraft:story/root",
-        f"advancement grant {BOT} only minecraft:adventure/root",
-        f"advancement grant {BOT} only minecraft:husbandry/root",
-        f"advancement grant {BOT} only minecraft:nether/root",
-        f"advancement grant {BOT} only minecraft:end/root",
+        f"tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
+        f"spawnpoint {bot_name} {int(round(sx))} {int(round(sy))} {int(round(sz))}",
+        f"gamemode survival {bot_name}",
+        f"clear {bot_name}",
+        f"effect clear {bot_name}",
+        f"effect give {bot_name} minecraft:instant_health 1 10 true",
+        f"effect give {bot_name} minecraft:saturation 2 10 true",
+        f"advancement revoke {bot_name} everything",
+        f"advancement grant {bot_name} only minecraft:story/root",
+        f"advancement grant {bot_name} only minecraft:adventure/root",
+        f"advancement grant {bot_name} only minecraft:husbandry/root",
+        f"advancement grant {bot_name} only minecraft:nether/root",
+        f"advancement grant {bot_name} only minecraft:end/root",
     ]
     if set_day:
         cmds.insert(0, "time set 1000")
@@ -149,6 +149,10 @@ def reset_wild_bot(sx: float, sy: float, sz: float, *, set_day: bool = True) -> 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--bot", type=str, default=BOT)
+    parser.add_argument("--token-file", type=str, default=str(TOKEN_FILE))
+    parser.add_argument("--rpm-budget", type=int, default=None, help="Per-process RPM cap (e.g. 12 for 2x concurrency)")
+    parser.add_argument("--runs-subdir", type=str, default="", help="Optional subdirectory under runs/ for multi-bot isolation")
     parser.add_argument("--duration-s", type=float, default=1800.0, help="Wall-clock budget for this wild run")
     parser.add_argument("--max-episodes", type=int, default=12)
     parser.add_argument("--site-index", type=int, default=0)
@@ -156,10 +160,13 @@ def main() -> int:
     parser.add_argument("--keep-time", action="store_true", help="Do not reset world time to morning")
     args = parser.parse_args()
 
+    bot_name = args.bot
+    token_file = pathlib.Path(args.token_file)
+    runs_dir = (RUNS_DIR / args.runs_subdir) if args.runs_subdir else RUNS_DIR
     LIVE_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    mem_path = LIVE_STATE_DIR / f"world_memory_{BOT}_{args.tag}_{stamp}.json"
+    mem_path = LIVE_STATE_DIR / f"world_memory_{bot_name}_{args.tag}_{stamp}.json"
     os.environ["MC_WORLD_MEMORY_PATH"] = str(mem_path)
 
     import mc_agent
@@ -176,11 +183,11 @@ def main() -> int:
     assert pathlib.Path(mc_agent.__file__).resolve().is_relative_to(WT_ROOT / "src")
 
     settings = Settings.load(dotenv_path=ENV_FILE)
-    rec = TokenStore(TOKEN_FILE).get(BOT)
+    rec = TokenStore(token_file).get(bot_name)
     if rec is None:
-        raise SystemExit(f"Missing cached token for {BOT}")
+        raise SystemExit(f"Missing cached token for {bot_name} in {token_file}")
 
-    out_file = RUNS_DIR / f"wild-endurance-{args.tag}-{stamp}.json"
+    out_file = runs_dir / f"wild-endurance-{args.tag}-{stamp}.json"
 
     with BotSession(rec.token, bot_username=rec.bot_username, base_url=settings.mc_api_base_url) as bot:
         try:
@@ -194,15 +201,16 @@ def main() -> int:
             bot.connect(respect_reconnect_interval=False)
             st = bot.wait_until_ready(timeout_s=45.0)
 
-        sx, sy, sz, biome = select_dry_isolated_wild_site(bot, start_idx=args.site_index)
-        reset_wild_bot(sx, sy, sz, set_day=not args.keep_time)
+        sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
+        reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time)
         time.sleep(1.5)
 
         geofence = VoidGeofence(center_x=sx, center_z=sz, radius=220.0, margin=8.0)
         toolset = McToolset(bot, geofence=geofence, wait_for_cooldown=True)
 
         print(
-            f"[Wild Run Start] tag={args.tag} spawn=({sx:.1f}, {sy:.1f}, {sz:.1f}) biome={biome} "
+            f"[Wild Run Start] bot={bot_name} tag={args.tag} rpm={args.rpm_budget or 'default'} "
+            f"spawn=({sx:.1f}, {sy:.1f}, {sz:.1f}) biome={biome} "
             f"duration_s={args.duration_s} max_episodes={args.max_episodes}",
             flush=True,
         )
@@ -211,6 +219,7 @@ def main() -> int:
             QwenSpec(
                 dotenv_path=str(ENV_FILE),
                 fallback_dotenv_path=str(MAIN_ROOT / ".env"),
+                rpm_budget_override=args.rpm_budget,
             )
         )
         try:
@@ -218,7 +227,7 @@ def main() -> int:
                 bot,
                 chat_fn=qwen.chat,
                 model_name=f"{qwen.model}@{qwen.base_url}",
-                runs_dir=RUNS_DIR,
+                runs_dir=runs_dir,
                 duration_s=args.duration_s,
                 toolset=toolset,
                 geofence=geofence,
@@ -245,10 +254,21 @@ def main() -> int:
                 except Exception:
                     pass
 
-        inv_end = bot.inventory()
-        st_end = bot.status()
+        try:
+            inv_end = bot.inventory()
+            st_end = bot.status()
+        except ApiError:
+            try:
+                bot.connect(respect_reconnect_interval=False)
+                st_end = bot.wait_until_ready(timeout_s=30.0)
+                inv_end = bot.inventory()
+            except Exception:
+                inv_end = {}
+                st_end = {}
         payload = {
+            "bot": bot_name,
             "tag": args.tag,
+            "rpm_budget": args.rpm_budget,
             "started_at": stamp,
             "spawn": {"x": round(sx, 1), "y": round(sy, 1), "z": round(sz, 1), "biome": biome},
             "end_status": {

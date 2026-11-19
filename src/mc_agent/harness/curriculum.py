@@ -1155,6 +1155,49 @@ def _subtract_reserved_counts(counts: dict[str, int], reserved: dict[str, int]) 
     return out
 
 
+def _build_island_recon_target(
+    origin_pos: Sequence[float] | None,
+    unexp: Sequence[str],
+    *,
+    tier: int,
+) -> CurriculumTarget:
+    dirs = list(unexp[:3]) if unexp else ["east", "north", "west"]
+    dir_hint = "/".join(dirs)
+    if origin_pos is not None and len(origin_pos) >= 3:
+        ox = int(round(float(origin_pos[0])))
+        oz = int(round(float(origin_pos[2])))
+        dir_vec = {"north": (0, -70), "south": (0, 70), "east": (70, 0), "west": (-70, 0)}
+        examples = []
+        for d in dirs[:2]:
+            dx, dz = dir_vec.get(d, (70, 0))
+            examples.append(f"{d}->mc_move_to(x={ox + dx}, z={oz + dz}, range=4)")
+        anchor_clause = (
+            f"当前基准坐标为 ({ox}, {oz})，请沿未探索方向({dir_hint})基于当前真实坐标加减 60~80 格移动"
+            f"（严禁传 (0, ±75) 等世界原点坐标！示例：{'，'.join(examples)}；"
+            f"注意 range 固定填 4！若途中进入水域 in_water=true 必须立即退回 ({ox}, {oz}) 附近干燥陆地！），"
+        )
+    else:
+        anchor_clause = (
+            f"请先读取最新 `[实时HUD]` 格坐标，沿未探索方向({dir_hint})基于真实坐标加减 60~80 格调 mc_move_to(x=..., z=..., range=4)"
+            "（严禁盲传 (0, ±75) 原点坐标！注意 range 固定填 4！若途中进入水域 in_water=true 必须立即退回出发干燥陆地！），"
+        )
+    return CurriculumTarget(
+        key="island_recon_sweep",
+        title="环岛摸底侦察：扫描村庄/岩浆池/动物聚落充实 WorldMemory",
+        points=20,
+        tier=tier,
+        budget_class="micro",
+        task=(
+            "执行一次紧凑地表环岛摸底探索（严禁挖矿、严禁入海）："
+            + anchor_clause
+            + "每到一处陆地调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])"
+            "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后回到干燥陆地汇报收工。"
+        ),
+        extra_tools=(),
+        advancement_id=None,
+    )
+
+
 def select_next_target(
     bot: BotSession,
     *,
@@ -1245,25 +1288,7 @@ def select_next_target(
             has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
             if not (has_villager_mem and has_lava_mem):
                 unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
-                dir_hint = "/".join(unexp[:3]) if unexp else "east/north/west/south"
-                return (
-                    CurriculumTarget(
-                        key="island_recon_sweep",
-                        title="环岛摸底侦察：扫描村庄/岩浆池/动物聚落充实 WorldMemory",
-                        points=20,
-                        tier=0,
-                        budget_class="micro",
-                        task=(
-                            f"执行一次紧凑地表环岛摸底探索（严禁挖矿、严禁入海）：沿未探索方向({dir_hint})将当前 x/z 偏置 60~90 格调 mc_move_to(x=..., z=..., range=4)"
-                            "（注意 range 是到达容差固定填 4，严禁填 100！若途中进入水域 in_water=true 必须立即退回出发陆地坐标，严禁停留在水面！），"
-                            "每到一处陆地调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])（必须传 types 列表！）"
-                            "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后回到干燥陆地汇报收工。"
-                        ),
-                        extra_tools=("mc_interact", "mc_attack", "mc_kb_lookup"),
-                        advancement_id=None,
-                    ),
-                    frontier_data,
-                )
+                return _build_island_recon_target(origin_pos, unexp, tier=0), frontier_data
         if not has_iron_or_better and not _is_cooled("bootstrap_iron_age"):
             pb1, _ = _enrich_target_with_world_memory(
                 CURRICULUM_PLAYBOOKS["bootstrap_iron_age"],
@@ -1290,22 +1315,7 @@ def select_next_target(
         has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
         if ow_chunks < 16 and not (has_villager_mem and has_lava_mem) and (origin_pos is None or float(origin_pos[1]) >= 52.0):
             unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
-            dir_hint = "/".join(unexp[:3]) if unexp else "east/north/west/south"
-            recon_target = CurriculumTarget(
-                key="island_recon_sweep",
-                title="环岛摸底侦察：扫描村庄/岩浆池/动物聚落充实 WorldMemory",
-                points=20,
-                tier=1,
-                budget_class="micro",
-                task=(
-                    f"执行一次紧凑地表环岛摸底探索（严禁挖矿、严禁入海）：沿未探索方向({dir_hint})将当前 x/z 偏置 60~90 格调 mc_move_to(x=..., z=..., range=4)"
-                    "（注意 range 是到达容差固定填 4，严禁填 100！若途中进入水域 in_water=true 必须立即退回出发陆地坐标，严禁停留在水面！），"
-                    "每到一处陆地调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])（必须传 types 列表！）"
-                    "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后回到干燥陆地汇报收工。"
-                ),
-                extra_tools=("mc_interact", "mc_attack", "mc_kb_lookup"),
-                advancement_id=None,
-            )
+            recon_target = _build_island_recon_target(origin_pos, unexp, tier=1)
             candidates.append(((1, 0, -65, "island_recon_sweep"), recon_target))
 
     for key, pb in CURRICULUM_PLAYBOOKS.items():
@@ -1603,6 +1613,7 @@ class CurriculumSupervisor:
         started_mono = time.monotonic()
         deadline_mono = started_mono + self.duration_s
         ep_index = 0
+        consecutive_recovery_waits = 0
         final_status = "completed"
 
         def _is_stopped() -> bool:
@@ -1622,9 +1633,17 @@ class CurriculumSupervisor:
             is_preempt_branch = False
 
             try:
-                st = self.bot.status()
+                try:
+                    st = self.bot.status()
+                except ApiError as status_exc:
+                    if status_exc.code == "not_connected":
+                        self.bot.connect(respect_reconnect_interval=True)
+                        st = self.bot.wait_until_ready(timeout_s=min(45.0, max(5.0, remaining_s)), poll_interval_s=1.0)
+                    else:
+                        raise
                 if not st.get("ready"):
                     st = self.bot.wait_until_ready(timeout_s=min(60.0, remaining_s), poll_interval_s=1.0, initial_status=st)
+                consecutive_recovery_waits = 0
                 self.toolset._update_status_cache(st)
                 cur_pos = [float(st["pos"][0]), float(st["pos"][1]), float(st["pos"][2])] if isinstance(st.get("pos"), (list, tuple)) and len(st["pos"]) >= 3 else None
                 cur_dim = normalize_dimension(st.get("dimension"))
@@ -1780,11 +1799,18 @@ class CurriculumSupervisor:
                 self.episodes.append({"episode": ep_index, "status": "auth_error", "error": str(exc)})
                 break
             except DeathLoopCooldownError as exc:
+                ep_index -= 1
+                consecutive_recovery_waits += 1
                 wait_cd = min(max(5.0, float(exc.cooldown_remaining_seconds or 30.0)), max(5.0, remaining_s))
                 time.sleep(wait_cd)
                 continue
             except (ApiError, BotNotReadyError, RuntimeError) as exc:
-                self.episodes.append({"episode": ep_index, "status": "recovery_wait", "error": str(exc)})
+                ep_index -= 1
+                consecutive_recovery_waits += 1
+                if consecutive_recovery_waits > 12:
+                    final_status = "disconnected"
+                    self.episodes.append({"episode": ep_index + 1, "status": "disconnected", "error": str(exc)})
+                    break
                 time.sleep(min(5.0, max(1.0, remaining_s)))
                 continue
 
@@ -2292,6 +2318,12 @@ class CurriculumSupervisor:
             if report.get("status") == "interrupted":
                 final_status = "interrupted"
                 break
+            if report.get("status") == "disconnected" and time.monotonic() < deadline_mono and not _is_stopped():
+                try:
+                    self.bot.connect(respect_reconnect_interval=True)
+                    self.bot.wait_until_ready(timeout_s=30.0, poll_interval_s=1.0)
+                except Exception:
+                    pass
             if transient_api_err and self.api_error_backoff_s > 0 and time.monotonic() < deadline_mono and not _is_stopped():
                 time.sleep(min(self.api_error_backoff_s, max(0.0, deadline_mono - time.monotonic())))
 
