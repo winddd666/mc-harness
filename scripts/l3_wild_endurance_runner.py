@@ -434,6 +434,12 @@ def prepare_scene_ground(
                 f"setblock {ix + 2} {iy} {iz} minecraft:brewing_stand",
                 f"setblock {ix + 2} {iy} {iz + 2} minecraft:crafting_table",
                 f"fill {ix + 3} {iy - 1} {iz - 2} {ix + 4} {iy - 1} {iz - 1} minecraft:water",
+                # BUG-026 scene side: light the pad so the brewing/trade slices are not a night-time
+                # mob farm while the model stands still at the stand.
+                f"setblock {ix - 2} {iy} {iz - 2} minecraft:torch",
+                f"setblock {ix + 4} {iy} {iz - 2} minecraft:torch",
+                f"setblock {ix - 2} {iy} {iz + 2} minecraft:torch",
+                f"setblock {ix + 4} {iy} {iz + 2} minecraft:torch",
                 f"tp {bot_name} {ix}.5 {iy} {iz}.5",
                 f"spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
@@ -452,6 +458,12 @@ def prepare_scene_ground(
                 f"fill {ix + 5} {iy} {iz - 4} {ix + 5} {iy + 3} {iz + 4} minecraft:cobblestone",
                 f"setblock {ix - 4} {iy} {iz - 4} minecraft:torch",
                 f"setblock {ix + 4} {iy} {iz + 4} minecraft:torch",
+                f"setblock {ix + 4} {iy} {iz - 4} minecraft:torch",
+                f"setblock {ix - 4} {iy} {iz + 4} minecraft:torch",
+                f"setblock {ix} {iy} {iz - 4} minecraft:torch",
+                f"setblock {ix} {iy} {iz + 4} minecraft:torch",
+                f"setblock {ix - 4} {iy} {iz} minecraft:torch",
+                f"setblock {ix + 4} {iy} {iz} minecraft:torch",
                 # Conditional summon: this prep also runs on every death-return restock, so an
                 # unconditional summon would stack a new pair of mobs inside the arena each death
                 # and turn the slice into an instant death loop.
@@ -655,6 +667,8 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:redstone 4",
                 f"give {bot_name} minecraft:iron_sword 1",
                 f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:iron_helmet 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
                 f"give {bot_name} minecraft:cooked_beef 16",
             ]
         )
@@ -673,6 +687,8 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:iron_ingot 16",
                 f"give {bot_name} minecraft:iron_sword 1",
                 f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:iron_helmet 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
                 f"give {bot_name} minecraft:cooked_beef 16",
             ]
         )
@@ -721,6 +737,10 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
 
 
 NETHER_STAGES = frozenset({"nether_fortress", "nether_bastion"})
+
+# Surface slices where a night start is pure mob-farm noise (fleet passes --keep-time to every bot
+# except the first, so without this the village/brewing scenes would open at night).
+SURFACE_DAYTIME_STAGES = frozenset({"village", "village_trade", "brewing_alchemy"})
 
 
 def scene_dimension(stage: str) -> str:
@@ -798,7 +818,7 @@ def build_reset_cmds(
             ]
         )
     cmds.extend(stage_loadout_cmds(bot_name, stage, sx, sy, sz))
-    if set_day and dim != "the_nether":
+    if (set_day or stage in SURFACE_DAYTIME_STAGES) and dim != "the_nether":
         cmds.insert(0, "time set 1000")
     return cmds
 
