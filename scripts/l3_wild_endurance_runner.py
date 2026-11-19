@@ -4,6 +4,8 @@
 - Uses dedicated `MapTest_01` (reusing `.state-maptest/tokens.json` without re-login).
 - Picks a dry land biome >= 2000m away from all other online bots on `nju-beast`.
 - Zero artificial survival buffs (real normal-difficulty mobs, real hunger, real Y=-54 caves).
+  Exception: scene slices grant short *scene-entry* safety effects only (nether fire_resistance,
+  deep_water water_breathing) so a mountainside/ocean spawn cannot be a guaranteed instant death.
 - Enforces `RULES.md` 220m `VoidGeofence`, `enable_pre_ensure=True`, `enable_island_recon=True`,
   and `enable_async_world_jobs=True`.
 
@@ -555,6 +557,7 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:shield 1",
                 f"give {bot_name} minecraft:bucket 2",
                 f"give {bot_name} minecraft:oak_boat 1",
+                f'give {bot_name} minecraft:potion[minecraft:potion_contents={{potion:"minecraft:water_breathing"}}] 2',
                 f"give {bot_name} minecraft:iron_helmet 1",
                 f"give {bot_name} minecraft:iron_chestplate 1",
                 f"give {bot_name} minecraft:iron_leggings 1",
@@ -634,6 +637,15 @@ def build_reset_cmds(
     )
     if dim == "the_nether":
         cmds.append(f"effect give {bot_name} minecraft:fire_resistance 45 0 true")
+    if stage == "deep_water":
+        # Scene-safety window (analogous to nether fire_resistance): r13 showed a deep_ocean spawn
+        # dying to drowned tridents/drowning before orienting. 60s is enough to walk to a dive point.
+        cmds.extend(
+            [
+                f"effect give {bot_name} minecraft:water_breathing 60 0 true",
+                f"effect give {bot_name} minecraft:resistance 30 1 true",
+            ]
+        )
     cmds.extend(stage_loadout_cmds(bot_name, stage, sx, sy, sz))
     if set_day and dim != "the_nether":
         cmds.insert(0, "time set 1000")
@@ -686,6 +698,13 @@ def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inven
             ]
         )
     cmds.extend(prepare_scene_ground(bot_name, scene.stage, scene.x, scene.y, scene.z, dim=scene.dim))
+    if scene.stage == "deep_water":
+        cmds.extend(
+            [
+                f"effect give {bot_name} minecraft:water_breathing 45 0 true",
+                f"effect give {bot_name} minecraft:resistance 20 1 true",
+            ]
+        )
     if clear_inventory:
         cmds.extend(stage_loadout_cmds(bot_name, scene.stage, scene.x, scene.y, scene.z))
     rcon_batch(cmds, timeout=60)
