@@ -504,6 +504,16 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 - `objective_verified` 17→21（变好）
 - BUG-029 残留成因：清理只挂在 `mine_dfs`，`mine_blocks`/`tunnel` 收集的石料没有触发点
 
+### 4u. BUG-037 模式拆分（r20_long，23:28）
+
+| 波次 | `steps_done=0`（per-step 15s 饿死） | `steps_done>0`（45s 总预算 vs 长请求） | 请求 steps 中位 |
+|---|---|---|---|
+| r20_short | **24** | 12 | 12 |
+| r20_long | 0 | 8（完成中位 8 步） | **40** |
+
+- `ds_ds_1_bare` 铁器集 6 次 `time_budget` 全是 7~9 步 → 不是首步问题；模型一次要 40 步，45s 必然做不完
+- `missing_fuel` 后**没有恢复动作**（未 harvest_logs），铁器时代卡死 → P2-28 提示必须给出下一步
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
