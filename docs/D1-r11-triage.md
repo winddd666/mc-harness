@@ -749,6 +749,18 @@ unstick    46s
 - → `mine_dfs` 内部 `dig_staircase` 在**第一步**就超时退出（与 BUG-037 per-step 15s 同源），分支未执行，引擎仍返回 `time_slice`
 - 建议：内部阶梯同样豁免第 0 步；0 进展 + pending 分支 → `branch_failed` → relocate
 
+### 4ap. P2-14 趋势（00:28）
+
+`bad_target_for_dimension`（下界要挖钻石）每波稳定 **4~7 次**：
+
+```
+r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
+```
+
+- 维度守卫工作正常（每次都给 ancient_debris/quartz/gold 建议）
+- 但模型仍反复尝试 → 每波浪费 4~7 个模型轮次；根因是 prompt "钻石镐在下界…" 的歧义
+- 建议 D2 改为"用钻石镐挖 ancient_debris（钻石仅存在于主世界）"
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
