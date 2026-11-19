@@ -1129,6 +1129,22 @@ class McToolset:
                     [x, y, z], dim=self._last_dimension, block_name=bname or None
                 )
                 self.world_memory.remove_poi([x, y, z], dim=self._last_dimension)
+            elif isinstance(parsed_dig, dict) and parsed_dig.get("ok") is False:
+                err = parsed_dig.get("error") if isinstance(parsed_dig.get("error"), dict) else {}
+                if err.get("code") == "timeout":
+                    # P2-21/r15: a timed-out cell was immediately retried by the
+                    # model. Avoid it briefly so the next scan picks another.
+                    try:
+                        self.skills._avoid_temporarily((x, y, z), "dig_timeout", 15.0)
+                    except Exception:
+                        pass
+                    parsed_dig["requires_replan"] = True
+                    err["message"] = (
+                        f"挖掘 {[x, y, z]} 在预算内未确认；已临时避开该格 15 秒。"
+                        "请换相邻格、先 mc_skill_unstick/靠近，或改用 mc_skill_mine_blocks 重新扫描；"
+                        "不要立即重试同一坐标。"
+                    )
+                    raw_dig = json.dumps(parsed_dig, ensure_ascii=False)
         except Exception:
             pass
         return raw_dig

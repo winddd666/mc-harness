@@ -1888,6 +1888,29 @@ def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, ga
         assert "error" not in result
 
 
+def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
+    """r15 P2-21: dig timeout was retried on the same coordinate."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.5, 64.0, 1000.5]}})
+        if path == "get_block":
+            return httpx.Response(200, json={"ok": True, "result": {"name": "air"}})
+        if path == "dig":
+            return httpx.Response(200, json={"ok": False, "error": {"code": "timeout", "message": "dig timed out"}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_dig(1000, 64, 1000))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert "15 秒" in result["error"]["message"]
+    assert toolset.skills.temporary_avoidance[(1000, 64, 1000)]["reason"] == "dig_timeout"
+
+
 def test_bucket_interact_rejects_flowing_fluid_before_no_effect_roundtrip() -> None:
     """r13: bucket right-clicks on flowing lava repeated interact_no_effect."""
     from mc_agent.harness.mc_tools import McToolset
