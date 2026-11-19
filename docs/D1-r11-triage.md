@@ -600,6 +600,28 @@ staircase(south, ...) → 同样 0 步失败
 
 → 建议：0 步 0 挖时自动 `unstick` 或用 `viable_directions[0]`，并把 `steps` 被 clamp 到 25 回传给模型（`steps_clamped`）。否则模型按 40 步规划、在失败方向上来回试。
 
+## 4ac. r20_long（4/4）与 r21_short（17/18）终验（23:57）
+
+**r20_long（45 分钟长任务）**
+
+| bot | 分数 | 集数 | 备注 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | 180 | 12 | enchant/sleep 链路正常 |
+| `hy4_hy_1_bare` | 40 | 7 | 断镐恢复慢（BUG-038）、deepslate 493 超限 |
+| `ds_ds_1_bare` | 15 | 9 | pickaxe_low + missing_fuel 卡铁器 |
+| `nju_movetest_01_bare` | **0** | 3 | **auth_error（BUG-036）** |
+
+门禁：仅 `BUG-029 over-cap 2` 失败；deaths 4、cooldown 57s、mine 0.86/8.1%、thread 0。
+
+**r21_short（17/18）**
+
+- 唯一 FAIL：`startup crash 1` = BUG-039（`glm_1`）
+- **BUG-035 实机 0 复发**；上波被它吞掉的 `hy4_hy_3` 本波 **130 分**
+- deaths 14→9、cooldown 157.7→111.7s、over-cap 0、trade/brew 2/2
+- 分数 1680→1690（17 vs 17）；若 `glm_1` 不丢约 **1850**
+
+**对比 r20_short→r21_short**：`+30`：`glm_2`、`hy4_3`；`+15`：`hy4_5`、`hy4_7`、`hy4_8`；`-20`：`hy4_9`；丢路：`glm_1`。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
