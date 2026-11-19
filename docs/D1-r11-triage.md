@@ -315,6 +315,23 @@ escape_lava → combat_env.py:1206 AttributeError: 'VoidGeofence' object has no 
 ```
 `combat_env.py` 有 **4 处**（`:1206/:1293/:1354/:1360`）调用了不存在的方法；`VoidGeofence` 只有 `check_point/check_ray/distance_from_center`。由 `e680b1f`（找岸边）引入，r15 未走到该分支所以未暴露。**必须优先修**，否则任何下界/水边 bot 都可能整路丢失。
 
+## 4f. r16 收官（18/22，4 路被 P0 崩溃吞掉）
+
+| 指标 | r15 | r16 | 结论 |
+|---|---|---|---|
+| 战争损失 | 0 崩溃 | **4 路崩溃**（`ds_1`、`glm_5`、`hy4_6`、`nju_guitest`） | **BUG-028** `.contains` AttributeError；`52b0d3f` 已修 |
+| 死亡 incident | 57 | **14** | ✅ BUG-026 修复生效（`d2ac1ab`/`b920f24`） |
+| `cancel_cooldown_wait` | 454s | **148s** | ✅ 同上 |
+| `no_support` | 46 | **1** | ✅ BUG-024 修复（`7dbcdb1`） |
+| 木棍死锁 | 9（精确口径） | **0** | ✅ BUG-025 |
+| `mine_dfs` 中位 / 0 进展 | 27.8s / 5.9% | **28.0s / 3.1%** | ✅ BUG-018 |
+| `runtime_error` | 0 | **0** | ✅ BUG-020 |
+| trident 死亡（deep_water） | 1 | **0** | ✅ BUG-023 |
+| trade / brew 调用 | 0 / 0 | **4 / 8** | ✅ SCENE-001（交易 paper→emerald×12 成功） |
+| 总分 | 2210（22 路） | 1580（18 路） | 不可比：少 4 路高分手（`glm_5` 150、`ds_4` 未计入等） |
+
+**结论**：除 BUG-028 外，r16 是一次全面转绿；4 路崩溃全部是同一个 4 行 API 误用，修复提交 `52b0d3f` 已被 r17 加载（21:51），r17 截至 22:00 无同类 Traceback。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
