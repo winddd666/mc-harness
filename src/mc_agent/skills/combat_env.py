@@ -14,6 +14,8 @@ import math
 import time
 from typing import Any, Literal, Protocol, Sequence, TypedDict
 
+import httpx
+
 from ..errors import ApiError
 from ..harness.control import RequestCancelled, RunTimedOut
 from .safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
@@ -870,6 +872,7 @@ class CombatEnv:
             }
 
         actions: list[str] = []
+        lava_deadline = time.monotonic() + 5.0
         counts, _, _ = self._inventory_counts_and_shield()
         dim = str(st.get("dimension") or "").lower()
         if counts.get("water_bucket", 0) > 0 and "nether" not in dim:
@@ -934,14 +937,16 @@ class CombatEnv:
 
         py = math.floor(float(pos0[1]) + 0.05)
         lava_shore_target: list[float] | None = None
-        if not tried_yaws:
-            # Wide lava lake (e.g. Nether basalt/netherrack ocean): locate nearest walkable dry bank via find_blocks first.
+        if not tried_yaws and time.monotonic() < lava_deadline:
+            # Wide lava lake: filter shore types by dimension to keep find_blocks fast (<1s).
+            shore_blocks = NETHER_SHORE_BLOCKS if "nether" in dim else SHORE_LAND_BLOCKS
             lava_shore_target = self._find_walkable_shore_target(
                 pos0,
-                block_types=LAVA_SHORE_BLOCKS,
-                max_radius=24,
+                block_types=shore_blocks,
+                max_radius=18,
                 min_y=py - 1,
                 max_y=py + 2,
+                max_candidates=6,
             )
             if lava_shore_target is not None:
                 tried_yaws = [aim_yaw_pitch(pos0, lava_shore_target)[0]]
@@ -949,6 +954,8 @@ class CombatEnv:
                 base_yaw = float(st.get("yaw") or 0.0)
                 best_shore_yaw: float | None = None
                 for probe_dist in (4.5, 7.5, 11.0, 15.0):
+                    if time.monotonic() >= lava_deadline:
+                        break
                     for deg in (0, 45, -45, 90, -90, 135, -135, 180):
                         cand_yaw = base_yaw + math.radians(deg)
                         ux, uz = yaw_to_unit_xz(cand_yaw)
@@ -964,8 +971,10 @@ class CombatEnv:
                         break
                 tried_yaws = [best_shore_yaw] if best_shore_yaw is not None else [base_yaw]
 
-        swim_ms = 1650 if (lava_shore_target is not None or len(tried_yaws) == 1) else 950
+        swim_ms = 1400 if (lava_shore_target is not None or len(tried_yaws) == 1) else 950
         for cyaw in tried_yaws[:2]:
+            if time.monotonic() >= lava_deadline:
+                break
             try:
                 self.bot.call("look", {"yaw": cyaw, "pitch": 0.0})
                 self.bot.call(
@@ -973,15 +982,16 @@ class CombatEnv:
                     {"forward": True, "jump": True, "sprint": True, "ms": swim_ms, "stop_on": ["death"]},
                 )
                 actions.append("lava_jump_sprint")
-            except ApiError:
+            except (ApiError, httpx.HTTPError):
                 pass
             st = self.bot.status()
             if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
                 return _lava_result(st)
 
-        if lava_shore_target is not None:
+        # 2b. Short pathfinder step onto close shore (`<=6.5m`) guarded against pathfinder ReadTimeout stalls.
+        if lava_shore_target is not None and time.monotonic() + 1.5 < lava_deadline:
             shore_d = math.hypot(lava_shore_target[0] - float(pos0[0]), lava_shore_target[2] - float(pos0[2]))
-            if shore_d <= 8.0:
+            if shore_d <= 6.5:
                 try:
                     self.bot.call(
                         "move_to",
@@ -990,23 +1000,29 @@ class CombatEnv:
                             "y": lava_shore_target[1],
                             "z": lava_shore_target[2],
                             "range": 1.2,
-                            "timeout": 2200,
+                            "timeout": 1200,
                             "stop_on": ["death"],
                         },
                     )
                     actions.append("lava_move_to_shore")
-                except ApiError:
-                    pass
+                except (ApiError, httpx.HTTPError) as err:
+                    actions.append("lava_move_to_shore_timeout" if isinstance(err, httpx.HTTPError) else "lava_move_to_shore_err")
+                    try:
+                        self.bot.call("stop", {})
+                    except Exception:
+                        pass
                 st = self.bot.status()
                 if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
                     return _lava_result(st)
 
         # 3. Boxed-in pit or deep lava: try replacing lava at feet / pillaring up with a filler block
         filler = self._pick_filler_block(counts)
-        if filler is not None:
+        if filler is not None and time.monotonic() < lava_deadline:
             p_cur = st.get("pos") or pos0
             bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
             for place_pos in ([bx, by, bz], [bx, by - 1, bz]):
+                if time.monotonic() >= lava_deadline:
+                    break
                 try:
                     self.bot.call("control", {"jump": True, "ms": 220, "wait": False})
                     time.sleep(0.18)
@@ -1016,13 +1032,15 @@ class CombatEnv:
                     st = self.bot.status()
                     if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
                         return _lava_result(st)
-                except ApiError:
+                except (ApiError, httpx.HTTPError):
                     continue
 
         # 4. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
         p_cur = st.get("pos") or pos0
         bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
         for dname, (dx, dz) in CARDINAL_VECTORS.items():
+            if time.monotonic() >= lava_deadline:
+                break
             ex, ez = bx + dx, bz + dz
             if self.geofence is not None and hasattr(self.geofence, "check_point"):
                 if self.geofence.check_point(ex + 0.5, ez + 0.5, action="escape_lava") is not None:
@@ -1190,6 +1208,7 @@ class CombatEnv:
         min_y: int = -64,
         max_y: int | None = None,
         threat_pos: Sequence[float] | None = None,
+        max_candidates: int = 10,
     ) -> list[float] | None:
         """Query `find_blocks` for nearby solid shoreline with 2-high passable headroom."""
         start_x, start_z = float(pos0[0]), float(pos0[2])
@@ -1229,7 +1248,7 @@ class CombatEnv:
             candidates.append((hdist + away_penalty, cx, cy, cz))
 
         candidates.sort(key=lambda item: item[0])
-        for _, cx, cy, cz in candidates[:10]:
+        for _, cx, cy, cz in candidates[:max(1, int(max_candidates))]:
             foot_b = self._get_block_name(cx, cy + 1, cz)
             head_b = self._get_block_name(cx, cy + 2, cz)
             if _is_passable(foot_b) and _is_passable(head_b):

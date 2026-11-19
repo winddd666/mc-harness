@@ -1968,9 +1968,43 @@ def test_r15_nether_bastion_wide_lava_steers_via_find_blocks_onto_elevated_ledge
     assert out["ok"] is True and out["in_lava"] is False
     assert "lava_move_to_shore" in out["actions"]
     ctrl = next(pl for act, pl in calls if act == "control" and pl.get("forward"))
-    assert ctrl["ms"] >= 1500
+    assert ctrl["ms"] >= 1350
     mv = next(pl for act, pl in calls if act == "move_to")
     assert (mv["x"], mv["y"], mv["z"]) == (229.5, 33.0, 234.5)
+
+    # Pathfinding ReadTimeout inside lava move_to must /stop and continue into place fallback rather than throwing!
+    import httpx
+    st_rt = {"pos": [227.4, 31.5, 240.0], "in_lava": True}
+    rt_calls: list[str] = []
+
+    class _LavaMoveTimeoutBot:
+        def status(self):
+            return {**st_rt, "health": 12.0, "alive": True, "ready": True, "yaw": 3.14, "dimension": "minecraft:the_nether"}
+
+        def call(self, action, body=None, **kwargs):
+            rt_calls.append(action)
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 16}]}
+            if action == "find_blocks":
+                return {"blocks": [{"name": "netherrack", "pos": [229, 32, 234], "dist": 5.9}]}
+            if action == "get_block":
+                p = (body or {}).get("pos", [0, 0, 0])
+                if tuple(p) in {(229, 33, 234), (229, 34, 234), (227, 32, 240)}:
+                    return {"name": "air"}
+                return {"name": "lava"}
+            if action == "move_to":
+                raise httpx.ReadTimeout("simulated pathfinder timeout in lava")
+            if action == "place":
+                st_rt["in_lava"] = False
+            return {"ok": True}
+
+    out_rt = CombatEnv(_LavaMoveTimeoutBot()).escape_lava()
+    assert out_rt["ok"] is True and out_rt["in_lava"] is False
+    assert "lava_move_to_shore_timeout" in out_rt["actions"]
+    assert "stop" in rt_calls
+    assert "lava_place_cobblestone" in out_rt["actions"]
 
 
 def test_bug026_ranged_arrow_cover_or_flee_lava_sneak_armor_and_cooldown(monkeypatch):
