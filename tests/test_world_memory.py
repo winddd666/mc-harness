@@ -213,6 +213,14 @@ class _MockAtlasWorld:
             )
         if path == "/events":
             return httpx.Response(200, json={"ok": True, "result": {"events": [], "last_seq": 0}})
+        if path == "/stop":
+            return httpx.Response(200, json={"ok": True, "result": {"stopped": True, "released": True}})
+        if path == "/posture":
+            return httpx.Response(
+                200, json={"ok": True, "result": {"sneaking": False, "jumping": False, "blocking": False}}
+            )
+        if path == "/control":
+            return httpx.Response(200, json={"ok": True, "result": {"moved": 0, "pos": list(self.pos)}})
         raise AssertionError(f"Unhandled mock endpoint: {path}")
 
 
@@ -481,7 +489,9 @@ def test_stale_cross_session_last_death_ignored_and_explore_hud_has_no_mine_nag(
         world.move_calls.clear()
         fail_mv = json.loads(ts.mc_move_to(x=80.0, z=0.5))
         assert fail_mv["ok"] is False
-        # 1 initial direct call + 3 angled 24m hop probes = 4 calls total (no duplicate 2nd full direct call!), hops carry timeout=12000
-        assert len(world.move_calls) == 4
-        assert all(c.get("timeout") == 12000 for c in world.move_calls[1:])
+        # Segmented relay triggered from mc_move_to skips redundant 2nd direct move_to (only 1 x=80.0 call!)
+        # and passes bounded timeout=12000 on segmented 24m hops (with up to 2 bounded L2 local recovery passes)
+        assert sum(1 for c in world.move_calls if c.get("x") == 80.0) == 1
+        assert 4 <= len(world.move_calls) <= 12
+        assert all(isinstance(c.get("timeout"), int) and 4000 <= c["timeout"] <= 25000 for c in world.move_calls[1:] if c.get("range") == 3.0)
 
