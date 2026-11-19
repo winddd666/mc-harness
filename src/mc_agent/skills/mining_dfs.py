@@ -1647,15 +1647,23 @@ class MiningDFSEngine:
                 return True
         return False
 
-    def _step_to(self, cell: tuple[int, int, int]) -> bool:
+    def _step_to(self, cell: tuple[int, int, int], *, from_cell: tuple[int, int, int] | None = None) -> bool:
         """One-cell traversal that also handles step-ups, gaps and 1-block drops.
 
         Live n0112: repeated `backtrack_blocked@...,(feet=air,head=air)` — nothing obstructed,
         move_exact simply cannot jump a gap or a 1-block ledge, so the whole route was abandoned.
         """
+        # On a recorded ascending stair, try the local jump before asking the
+        # pathfinder to solve the entire adjacent step.
+        jump_first = (
+            from_cell is not None and cell[1] == from_cell[1] + 1
+            and abs(cell[0] - from_cell[0]) + abs(cell[2] - from_cell[2]) == 1
+        )
+        if jump_first and self._hop_up_to(cell):
+            return True
         if self._move_exact(cell):
             return True
-        if self._hop_up_to(cell):
+        if not jump_first and self._hop_up_to(cell):
             return True
         try:
             st = self.bot.status()
@@ -1691,14 +1699,21 @@ class MiningDFSEngine:
         """
         try:
             st = self.bot.status()
+            if not st.get("on_ground", True):
+                return False
             pos = st.get("pos") or [0.0, 64.0, 0.0]
             cur = (math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2])))
         except (ApiError, TypeError, ValueError):
             return False
         if cell[1] - cur[1] != 1 or max(abs(cell[0] - cur[0]), abs(cell[2] - cur[2])) > 1:
             return False
+        x, y, z = cell
         try:
-            if self._get_block_name(cell) not in PASSABLE_BLOCKS:
+            if (
+                self._get_block_name(cell) not in PASSABLE_BLOCKS
+                or self._get_block_name((x, y + 1, z)) not in PASSABLE_BLOCKS
+                or not self._is_solid_floor((x, y - 1, z), {})
+            ):
                 return False
         except ApiError:
             return False
@@ -1706,7 +1721,7 @@ class MiningDFSEngine:
         try:
             self.bot.call(
                 "control",
-                {"forward": True, "jump": True, "yaw": yaw, "ms": ms, "stop_on": ["death"]},
+                {"forward": True, "jump": True, "yaw": yaw, "ms": ms, "stop_on": ["hurt", "death"]},
             )
         except ApiError:
             return False
@@ -1714,7 +1729,10 @@ class MiningDFSEngine:
             position, grounded = self._settled_position(pos)
         except (ApiError, TypeError, ValueError):
             return False
-        return grounded and _floor_pos(position) == cell
+        if grounded and _floor_pos(position) == cell:
+            self._record_corridor(cell)
+            return True
+        return False
 
     def _clear_route_obstruction(self, target_wp: tuple[int, int, int]) -> int:
         """Re-open a recorded corridor cell: dig solid fill, but refuse if it is now flooded/bedrock.
@@ -1802,10 +1820,10 @@ class MiningDFSEngine:
             hops = _interpolate_cells(cur, wp)
             if len(hops) > 1:
                 stepped_all = True
-                for hop in hops[1:]:
+                for previous, hop in zip(hops, hops[1:]):
                     if deadline is not None and time.monotonic() >= deadline:
                         return False, "walk_time_slice"
-                    if not self._step_to(hop):
+                    if not self._step_to(hop, from_cell=previous):
                         stepped_all = False
                         break
                 if stepped_all:
@@ -1924,15 +1942,30 @@ class MiningDFSEngine:
                 for node in self.nodes.values():
                     edge = node.edge_from_parent
                     parent_id = node.parent_id
-                    if edge is None or parent_id is None or parent_id not in self.nodes or cur_pos not in edge.waypoints:
+                    if edge is None or parent_id is None or parent_id not in self.nodes:
                         continue
-                    offset = edge.waypoints.index(cur_pos)
+                    waypoints = edge.waypoints
+                    if cur_pos in waypoints:
+                        offset = waypoints.index(cur_pos)
+                    elif edge.edge_kind in {"stair_down", "stair_up"}:
+                        # Stairs save every second step. A slice can stop on the omitted step.
+                        offset = next((
+                            index for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1)
+                            if abs(a[1] - cur_pos[1]) == 1 and abs(a[1] - b[1]) == 2
+                            and abs(a[0] - b[0]) + abs(a[2] - b[2]) == 2
+                            and _interpolate_cells(a, b)[1] == cur_pos
+                        ), None)
+                        if offset is None:
+                            continue
+                        waypoints = [*waypoints[:offset], cur_pos, *waypoints[offset:]]
+                    else:
+                        continue
                     if node.node_id in goal_ancestors:
                         dest = node.node_id
-                        route = edge.waypoints[offset:]
+                        route = waypoints[offset:]
                     else:
                         dest = parent_id
-                        route = list(reversed(edge.waypoints[:offset + 1]))
+                        route = list(reversed(waypoints[:offset + 1]))
                     if route[-1] != self.nodes[dest].anchor:
                         route = [*route, self.nodes[dest].anchor]
                     ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
@@ -1953,7 +1986,9 @@ class MiningDFSEngine:
             if best_near_id is not None and best_near_d <= 16.0 and (
                 best_near_id == self.collar_node_id or best_near_d <= math.dist(cur_pos, anchor_now)
             ):
-                if not self._move_exact(self.nodes[best_near_id].anchor):
+                anchor = self.nodes[best_near_id].anchor
+                adjacent_ascent = anchor[1] == cur_pos[1] + 1 and best_near_d <= math.sqrt(2)
+                if not (adjacent_ascent and self._hop_up_to(anchor)) and not self._move_exact(anchor):
                     return False, "cannot_reach_nearest_node"
                 self.active_node_id = best_near_id
             elif self.collar_node_id in self.nodes and math.hypot(
@@ -2645,6 +2680,7 @@ class MiningDFSEngine:
         *,
         min_hp_ref: list[float],
         allow_retired: bool = False,
+        skip_collar: tuple[int, int, int] | None = None,
     ) -> bool:
         best_sh: dict[str, Any] | None = None
         best_d = 36.0
@@ -2653,7 +2689,7 @@ class MiningDFSEngine:
             if not isinstance(anc_raw, list) or len(anc_raw) < 3:
                 continue
             anc = (int(anc_raw[0]), int(anc_raw[1]), int(anc_raw[2]))
-            if anc in self.exhausted_collars and not allow_retired:
+            if anc == skip_collar or (anc in self.exhausted_collars and not allow_retired):
                 continue
             # Pending stairs still carry their original branch target layer.
             saved_target_y = sh.get("target_y")
@@ -2934,7 +2970,9 @@ class MiningDFSEngine:
         # 1) Preferred: walk our own corridor (no digging at all).
         walked = False
         walk_gain = 0
+        attempted_collar = None
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
+            attempted_collar = self.nodes[self.collar_node_id].anchor
             mining_node_id = self.active_node_id
             try:
                 ok_walk, _err_walk = self._navigate_to_node(
@@ -2959,10 +2997,12 @@ class MiningDFSEngine:
                         "attempts": 0,
                         "method": "walk",
                     }
-        # 2) Borrow the route of a previously retired shaft near us (travel only).
+        # 2) Look for a different nearby saved route before cutting new stairs.
         if not walked:
             cur_now = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])
-            if self._try_restore_saved_shaft(cur_now, min_hp_ref=hp_ref, allow_retired=True):
+            if self._try_restore_saved_shaft(
+                cur_now, min_hp_ref=hp_ref, allow_retired=True, skip_collar=attempted_collar,
+            ):
                 ok_walk, _err_walk = self._navigate_to_node(
                     self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
                 )
@@ -4806,10 +4846,12 @@ class MiningDFSEngine:
             sticks < 2 and pos and self.collar_ceiling_y is not None
             and _floor_pos(pos)[1] <= min(19, self.collar_ceiling_y - 20)
         ):
+            climb_target_y = self.collar_ceiling_y - 16
             return {
                 "next_action": "climb_out",
                 "message": (
                     "当前井下缺少合成新镐的木料。先调用 action='climb_out' 沿已有巷道回撤，"
+                    f"本次爬升目标为 y>={climb_target_y}。若收到 climb_progress，可从当前位置继续回撤。"
                     "回到能采木的位置后用 mc_skill_harvest_logs(target_logs=1) 补原木或菌柄，合成可用镐后继续。"
                 ),
             }

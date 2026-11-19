@@ -1440,6 +1440,7 @@ def test_deep_pickaxe_low_with_no_wood_requests_climb_before_harvesting() -> Non
 
     assert result["stop_reason"] == "pickaxe_low"
     assert result["next_action"] == "climb_out"
+    assert "y>=48" in result["message"]
     assert result["message"].index("climb_out") < result["message"].index("mc_skill_harvest_logs")
     assert result["pos_after"] == [0.5, -53.0, 0.5]
     assert world.pos == [0.5, -53.0, 0.5]
@@ -2138,6 +2139,83 @@ def test_climb_timeout_with_confirmed_ascent_can_resume(monkeypatch) -> None:
     assert second["stop_reason"] == "surface_reached"
 
 
+def test_climb_walks_open_stairs_when_pathfinder_would_time_out(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", lambda duration: setattr(clock, "now", clock.now + duration))
+    world = _MockMineWorld(start_pos=(0.5, 12.0, 0.5), surface_y=30,
+                           inventory_items=[{"name": "cobblestone", "count": 32, "slot": 9}])
+    for x in range(19):
+        world.blocks[(x, x + 12, 0)] = world.blocks[(x, x + 13, 0)] = "air"
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "move_to":
+            body = json.loads(request.content)
+            clock.now += body["timeout"] / 1000
+            return httpx.Response(200, json={"ok": False, "error": {"code": "path_not_found", "message": "stair"}})
+        if path == "control":
+            body = json.loads(request.content)
+            clock.now += body["ms"] / 1000
+            if body.get("jump") and body["ms"] >= 500:
+                world.pos[0] += 1
+                world.pos[1] += 1
+        if path == "stop":
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="FastClimb", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        route = [(x, x + 12, 0) for x in (*range(18, 1, -2), 1)]
+        collar = engine._create_node(kind="collar", anchor=route[0], parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(kind="switchback", anchor=route[-1], parent_id=collar.node_id,
+                            edge_from_parent=ShaftEdge("stair_down", "west", route), branches=[])
+
+        result = engine.run(action="climb_out", max_duration_s=18)
+
+    assert result["stop_reason"] == "surface_reached"
+    assert result["climb"]["method"] == "walk"
+    assert result["climb"]["end_y"] == 30
+    assert clock.now - 1000.0 < 15
+    assert not world.dig_log
+
+
+def test_climb_does_not_retry_the_blocked_collar_from_the_ledger(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="BlockedRecordedClimb", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        tip = (0, 20, 0)
+        engine._create_node(kind="switchback", anchor=tip, parent_id=collar.node_id,
+                            edge_from_parent=ShaftEdge("stair_down", "north", [collar.anchor, tip]),
+                            branches=[])
+        engine._archive_current_shaft_to_ledger()
+        attempted = []
+
+        def blocked_route(goal, **kwargs):
+            attempted.append(goal)
+            return False, "backtrack_blocked"
+
+        def alternate_stair(**kwargs):
+            world.pos[1] = 64.0
+            return {"steps_done": 1}
+
+        monkeypatch.setattr(engine, "_navigate_to_node", blocked_route)
+        monkeypatch.setattr(engine.skills, "dig_staircase", alternate_stair)
+        result = engine.run(action="climb_out", max_duration_s=15)
+
+    assert result["stop_reason"] == "surface_reached"
+    assert attempted == [collar.node_id]
+
+
 def test_dfs_budget_includes_entry_observations_and_radar(monkeypatch) -> None:
     """Initialization used to run outside the slice, then get a fresh full deadline."""
     import mc_agent.skills.mining_dfs as mining
@@ -2198,7 +2276,7 @@ def test_waypoint_interpolation_checks_deadline_between_hops(monkeypatch) -> Non
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
     visited: list[tuple[int, int, int]] = []
 
-    def step(cell):
+    def step(cell, *, from_cell):
         visited.append(cell)
         clock.now += 1.0
         return True
@@ -2858,7 +2936,7 @@ def test_navigation_resumes_mid_edge_toward_the_requested_node(goal_x, expected_
         )
         lower = engine._create_node(
             kind="switchback", anchor=(8, 12, 0), parent_id=upper.node_id,
-            edge_from_parent=ShaftEdge("stair_down", "east", [(i, 20 - i, 0) for i in range(3, 9)]), branches=[],
+            edge_from_parent=ShaftEdge("stair_down", "east", [(i, 20 - i, 0) for i in (3, 4, 6, 7, 8)]), branches=[],
         )
         traversed = []
 
