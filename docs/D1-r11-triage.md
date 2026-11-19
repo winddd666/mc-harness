@@ -536,6 +536,27 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 - **BUG-029 残留**：`989d757` 已提交 `_cleanup_inventory_after`（挂 harvest/mine_blocks/tunnel），但 **HEAD 未合入**，r21 前需 #1 合并
 - 仍在跑：r20_long 1/4（预计 ~23:45）
 
+### 4x. r20_long 裸开恢复死锁 → BUG-038（23:29）
+
+`ds_ds_1_bare` 断镐后的完整恢复链：
+
+```
+pickaxe_low            y=20→17
+climb_out  53.0s       17→20
+climb_out  27.7s       20→20   (time_slice, 0 进展)
+climb_out  40.9s       20→20   (time_slice, 0 进展)
+climb_out  43.3s       20→25
+climb_out  25.6s       25→26
+staircase  25.8s       26→27   (time_budget)
+unstick    25.7s
+staircase  16.2s       27→27   (time_budget, 0 进展)
+→ 下一集 craft_gear missing / harvest_logs no_targets
+```
+
+- **~250s 只上升 10 格**，`bootstrap_iron_age` 超时，整轮停在 15 分
+- 两次 `climb_out` 0 进展说明"沿自建巷道走"未生效，退化成重新开阶梯；再叠加 BUG-037
+- 已提 **BUG-038（P1，Slice A）**：climb 应沿 corridor waypoints 直达、单片 ≥8 格；断镐+无木时给量化回地表建议
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
