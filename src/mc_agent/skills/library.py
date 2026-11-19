@@ -4314,7 +4314,21 @@ class MacroSkills:
                     fuel_count = min(counts[plank], math.ceil(smelt_n / 1.5))
 
         if not chosen_fuel or fuel_count < 1:
-            return {"ok": False, "error": "missing_fuel", "message": "背包没有煤炭、木炭、木板或原木燃料。"}
+            # P2-28/r20_long: the bare message left the model stuck in
+            # bootstrap_iron_age with no next step.
+            return {
+                "ok": False,
+                "requires_replan": True,
+                "error": "missing_fuel",
+                "next_action": "mc_skill_harvest_logs(target_logs=2)",
+                "inventory": counts,
+                "message": (
+                    "背包没有煤炭、木炭、木板或原木燃料，熔炼无法开始（铁锭等产物仍在炉中）。"
+                    "请先调 mc_skill_harvest_logs(target_logs=2, radius=32) 砍 2 个原木（自动转木板作燃料），"
+                    "或用 mc_skill_mine_blocks(block_types=['coal_ore'], count=3) 采煤；"
+                    "拿到燃料后再用相同 input_item 调用 mc_skill_smelt。不要无燃料重复调用。"
+                ),
+            }
 
         self.bot.call(
             "window/act",

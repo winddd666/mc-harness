@@ -2013,6 +2013,35 @@ def test_window_view_allows_near_entity() -> None:
     assert result["ok"] is True
 
 
+def test_smelt_missing_fuel_gives_harvest_next_action() -> None:
+    """P2-28/r20_long: bare 'no fuel' left ds_1_bare stuck in bootstrap_iron_age."""
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "health": 20}})
+        if path == "inventory":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"items": [{"name": "raw_iron", "count": 3, "slot": 36}]}},
+            )
+        if path == "find_blocks":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"blocks": [{"name": "furnace", "pos": [1, 64, 0], "dist": 0.5}]}},
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).smelt_items("raw_iron", count=3)
+    assert result["ok"] is False
+    assert result["error"] == "missing_fuel"
+    assert result["requires_replan"] is True
+    assert result["next_action"] == "mc_skill_harvest_logs(target_logs=2)"
+    assert result["inventory"]["raw_iron"] == 3
+    assert "mc_skill_harvest_logs" in result["message"]
+
+
 def test_smelt_collect_survives_read_timeout() -> None:
     """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
     from mc_agent.harness.world_memory import WorldMemory
