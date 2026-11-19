@@ -336,7 +336,8 @@ def test_mine_blocks_single_dig_cannot_outlive_slice_deadline(monkeypatch) -> No
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot)._dig_target_blocks(
+        skills = MacroSkills(bot)
+        result = skills._dig_target_blocks(
             block_types=["obsidian"],
             count=4,
             radius=8,
@@ -344,6 +345,7 @@ def test_mine_blocks_single_dig_cannot_outlive_slice_deadline(monkeypatch) -> No
             below_tol=2.0,
             above_tol=2.0,
         )
+    assert skills.temporary_avoidance[(1, 64, 1)]["reason"] == "dig_timeout"
     assert result["ok"] is False
     assert result["stop_reason"] == "time_budget"
     assert result["partial_error"]["code"] == "mine_timeout"

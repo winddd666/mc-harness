@@ -2677,6 +2677,7 @@ class MacroSkills:
             except httpx.TimeoutException as err:
                 # Do not let one server-side dig outlive the slice. Release the
                 # pending action before returning the confirmed partial result.
+                self._avoid_temporarily(pos, "dig_timeout", 30.0)
                 try:
                     self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
                 except (ApiError, httpx.HTTPError):
