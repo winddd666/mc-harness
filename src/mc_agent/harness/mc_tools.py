@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -21,6 +22,7 @@ from ..kb import assess_world_target, build_jit_error_hint, lookup_kb, normalize
 from ..skills import MacroSkills, SafetyEmergency, check_and_stabilize, compute_advancement_frontier
 from ..skills.library import (
     BLOCK_MIN_PICKAXE_TIER,
+    LOG_TYPES,
     TABLE_RECIPES,
     _best_pickaxe_in_inv,
     _can_fit_item_in_inventory,
@@ -45,17 +47,27 @@ _BED_BLOCK_TYPES: tuple[str, ...] = tuple(
 )
 
 
+_BLOCK_COLORS: tuple[str, ...] = tuple(name.removesuffix("_bed") for name in _BED_BLOCK_TYPES)
+_BLOCK_WOODS: tuple[str, ...] = tuple(name.removesuffix("_log") for name in LOG_TYPES)
+_FIND_BLOCK_ALIASES: dict[str, tuple[str, ...]] = {
+    "bed": _BED_BLOCK_TYPES, "beds": _BED_BLOCK_TYPES,
+    "log": LOG_TYPES, "logs": LOG_TYPES,
+    "planks": tuple(f"{wood}_planks" for wood in (*_BLOCK_WOODS, "crimson", "warped", "bamboo")),
+    "wool": tuple(f"{color}_wool" for color in _BLOCK_COLORS),
+    "grass": ("short_grass", "tall_grass"),
+    "portal": ("nether_portal",), "nether_rack": ("netherrack",),
+    "cave": ("cave_air",), "flowing_water": ("water",), "flowing_lava": ("lava",),
+    "cobble": ("cobblestone",),
+}
+
+
 def _normalize_find_block_types(types: list[str] | tuple[str, ...]) -> list[str]:
-    """Expand common colloquial block aliases; APIs reject unknown IDs like `bed`."""
+    """Expand block families; leave registry validation to the server version."""
     out: list[str] = []
     for raw in types:
-        name = str(raw).removeprefix("minecraft:").strip().lower()
-        if not name:
-            continue
-        if name in {"bed", "beds"}:
-            out.extend(_BED_BLOCK_TYPES)
-        else:
-            out.append(name)
+        name = str(raw).strip().lower().removeprefix("minecraft:")
+        if name:
+            out.extend(_FIND_BLOCK_ALIASES.get(name, (name,)))
     return list(dict.fromkeys(out))
 
 
@@ -587,11 +599,30 @@ class McToolset:
             norm_types = [str(t).removeprefix("minecraft:").strip().lower() for t in (types or [])]
             if not norm_types or any(t in self._CROP_BLOCK_TYPES for t in norm_types):
                 payload["mature"] = mature
-        raw = self._call_json("find_blocks", payload)
-        try:
-            parsed = json.loads(raw)
-        except ValueError:
-            return raw
+        ignored: list[str] = []
+        while True:
+            raw = self._call_json("find_blocks", payload)
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                return raw
+            err = parsed.get("error") if isinstance(parsed, dict) else None
+            unknown = (re.search(r"\bunknown block\s+([a-z0-9_:]+)", str(err.get("message") or ""), re.IGNORECASE)
+                       if isinstance(err, dict) and err.get("code") == "bad_args" else None)
+            bad_type = unknown.group(1).lower().removeprefix("minecraft:") if unknown else None
+            if not bad_type or not types or bad_type not in types:
+                break
+            ignored.append(bad_type)
+            types = [name for name in types if name != bad_type]
+            if not types:
+                return json.dumps({
+                    "ok": False, "requires_replan": True, "ignored_types": ignored,
+                    "error": {"code": "bad_args", "message": "没有有效方块类型。示例：mc_find_blocks(types=['oak_log','stone'])；查实体请用 mc_get_entities。"},
+                }, ensure_ascii=False)
+            payload["types"] = types
+        if ignored and isinstance(parsed, dict):
+            parsed["ignored_types"] = ignored
+            raw = json.dumps(parsed, ensure_ascii=False)
         res_obj = parsed.get("result") if isinstance(parsed, dict) else None
         blocks = res_obj.get("blocks") if isinstance(res_obj, dict) else None
         if parsed.get("ok") is True and isinstance(blocks, list) and blocks:

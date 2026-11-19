@@ -1589,3 +1589,49 @@ def test_staircase_inherits_parent_deadline_and_caps_single_step(monkeypatch, ou
     assert clock[0] == pytest.approx(100.0 + expected)
     assert calls[-1] == "stop"
     assert "dig" not in calls
+
+
+def test_find_blocks_expands_families_and_keeps_valid_part_of_mixed_query() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    rejected = {"shield", "sheep", "made_up_block"}
+    queries = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        assert path == "find_blocks"
+        queries.append(body["types"])
+        bad = next((name for name in body["types"] if name in rejected), None)
+        if bad:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "bad_args", "message": f"unknown block {bad}"}})
+        return httpx.Response(200, json={"ok": True, "result": {"blocks": [{"name": "oak_log", "pos": [1, 64, 1]}]}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_find_blocks(types=["minecraft:LOG", "planks", "bed", "wool", "grass", "portal", "nether_rack", "cave", "flowing_water", "shield", "sheep", "made_up_block", "future_valid_block"]))
+    assert result["ok"] is True
+    assert result["ignored_types"] == ["shield", "sheep", "made_up_block"]
+    assert result["result"]["blocks"][0]["name"] == "oak_log"
+    final = queries[-1]
+    assert {"oak_log", "pale_oak_log", "birch_planks", "bamboo_planks", "white_bed", "black_wool", "short_grass", "tall_grass", "nether_portal", "netherrack", "cave_air", "water", "future_valid_block"} <= set(final)
+    assert len(final) == len(set(final))
+    assert len(queries) == 4
+
+
+def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    queries = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        assert body["types"]
+        queries.append(body["types"])
+        return httpx.Response(200, json={"ok": False, "error": {"code": "bad_args", "message": f"unknown block {body['types'][0]}"}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_find_blocks(types=["shield", "leather"]))
+    assert result["ok"] is False
+    assert result["ignored_types"] == ["shield", "leather"]
+    assert "mc_find_blocks(types=" in result["error"]["message"]
+    assert len(queries) == 2
