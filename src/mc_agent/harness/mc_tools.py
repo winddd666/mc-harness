@@ -2224,6 +2224,17 @@ class McToolset:
             )
             if clamped_from is not None and isinstance(res, dict):
                 res["clamped_shallow_diamond_y_from"] = clamped_from
+            if isinstance(res, dict):
+                # BUG-029: mine_dfs is the main long-mining path and does not
+                # call _ensure_free_slots; enforce retention caps here.
+                try:
+                    _, cleaned = self.skills._ensure_free_slots(min_free=3)
+                except Exception:
+                    cleaned = []
+                if cleaned:
+                    res["inventory_cleaned"] = [
+                        {"item": d.get("item"), "count": d.get("count")} for d in cleaned
+                    ]
             return res
 
         return self._run_skill(_invoke)

@@ -2109,6 +2109,34 @@ def test_free_slots_enforces_retention_cap_even_with_empty_slots(item, initial, 
     assert all(map(lambda d: d["item"] == item, dropped))
 
 
+def test_mine_dfs_triggers_retention_cleanup() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    state = {"cobblestone": 300}
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "inventory":
+            rows = []
+            left = state["cobblestone"]
+            while left > 0:
+                rows.append({"name": "cobblestone", "count": min(64, left)})
+                left -= min(64, left)
+            return httpx.Response(200, json={"ok": True, "result": {"items": rows}})
+        if path == "drop":
+            state["cobblestone"] -= int(body.get("count") or 0)
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        toolset.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
+        result = json.loads(toolset.mc_skill_mine_dfs(target="stone", goal_count=1))
+    assert result["inventory_cleaned"]
+    assert state["cobblestone"] == 192
+
+
 def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
     """r15 P2-21: dig timeout was retried on the same coordinate."""
     from mc_agent.harness.mc_tools import McToolset
