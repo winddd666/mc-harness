@@ -1951,20 +1951,36 @@ class SubcorticalInstinctController:
                 if st_cur.get("in_water") and (
                     st_cur.get("submerged") or (isinstance(oxy_cur, (int, float)) and oxy_cur < 150)
                 ):
+                    esc_cur: dict[str, Any] = {}
                     if env.skills is not None and hasattr(env.skills, "escape_water"):
                         esc_cur = env.skills.escape_water()
                         actions.append({"action": "water_surface_abort", "ok": bool(esc_cur.get("ok"))})
                     else:
                         try:
                             env.bot.call("control", {"jump": True, "forward": True, "ms": 950, "stop_on": ["death"]})
+                            esc_cur = {"ok": True}
                             actions.append({"action": "water_surface_abort", "ok": True})
                         except ApiError:
-                            pass
+                            esc_cur = {"ok": False}
+                    st_w = env._safe_status(st_cur)
+                    if not (esc_cur.get("ok") and not esc_cur.get("in_water") and not st_w.get("in_water")):
+                        shore_w = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield)
+                        actions.append({"action": "water_surface_shore", "ok": bool(shore_w.get("ok"))})
+                        st_w = env._safe_status(st_w)
+                    nh_w = st_w.get("nearest_hostile")
+                    nh_w_dist = float(nh_w.get("dist", 99.0)) if isinstance(nh_w, dict) and nh_w.get("name") else 99.0
+                    if has_shield and st_w.get("alive") is not False and not st_w.get("in_water") and (nh_w_dist <= 8.0 or not esc_cur.get("ok")):
+                        tid_w = nh_w.get("id") if isinstance(nh_w, dict) and nh_w.get("id") is not None else mob_id
+                        latched_guard = self._latch_shield_at_threat(env, int(tid_w) if tid_w is not None else None)
                     mode = "water_surface_abort"
                     break
                 if hp_cur <= 8.0 or st_cur.get("alive") is False:
                     flee_low = env.flee(mob_pos, distance=12.0, urgent=True)
                     actions.append({"action": "low_hp_abort_flee", "ok": bool(flee_low.get("ok"))})
+                    if not flee_low.get("ok") and not flee_low.get("respawned") and has_shield:
+                        st_lw = env._safe_status(st_cur)
+                        if st_lw.get("alive") is not False and not st_lw.get("in_water"):
+                            latched_guard = self._latch_shield_at_threat(env, int(mob_id) if mob_id is not None else None)
                     mode = "low_hp_disengage"
                     break
                 cur_hostiles = self._find_live_hostiles(env, radius=10)
@@ -2125,13 +2141,17 @@ class SubcorticalInstinctController:
         hp_post = float(st_post.get("health") or 20.0)
         food_post = int(st_post.get("food") or 20)
         nh_post = st_post.get("nearest_hostile")
-        nh_post_d = float(nh_post.get("dist", 99.0)) if isinstance(nh_post, dict) and nh_post.get("name") else 99.0
+        nh_post_name = _clean_block_name(nh_post.get("name")) if isinstance(nh_post, dict) and nh_post.get("name") else ""
+        nh_post_d = float(nh_post.get("dist", 99.0)) if nh_post_name else 99.0
         if (
-            st_post.get("ready", True)
+            not latched_guard
+            and st_post.get("ready", True)
             and st_post.get("alive") is not False
+            and st_post.get("on_ground") is not False
             and not st_post.get("in_water")
             and not st_post.get("in_lava")
             and nh_post_d > 6.0
+            and not ((nh_post_name in RANGED_MOBS or nh_post_name == "ghast") and nh_post_d <= 16.0)
             and food_post < 20
             and (hp_post < 16.0 or food_post <= 15)
         ):

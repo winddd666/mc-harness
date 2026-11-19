@@ -3187,6 +3187,107 @@ def test_r21_preempted_lava_death_reports_respawned_not_escaped():
     assert "死亡并重生" in receipt["message"]
 
 
+def test_r21_water_surface_abort_latches_shield_and_post_combat_eat_skips_ranged():
+    """Reproduces r21_short hy4_hy_3_midgame: water_surface_abort near drowned latches shield & skips ranged/latched post-combat eat."""
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    water_calls: list[tuple[str, dict]] = []
+    water_state = {"in_water": False, "submerged": False, "oxygen": 100, "hp": 15.0}
+
+    class _DrownedWaterSkills:
+        def escape_water(self):
+            water_state["in_water"] = False
+            water_state["submerged"] = False
+            water_state["hp"] = 3.4
+            return {"ok": True, "in_water": False}
+
+    class _DrownedAbortBot:
+        def status(self):
+            return self.call("status")
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            water_calls.append((action, pl))
+            if action == "status":
+                return {
+                    "pos": [0.5, 63.0, 0.5],
+                    "health": water_state["hp"],
+                    "food": 17,
+                    "oxygen": water_state["oxygen"],
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": True,
+                    "in_water": water_state["in_water"],
+                    "submerged": water_state["submerged"],
+                    "in_lava": False,
+                    "nearest_hostile": {"id": 665559, "name": "drowned", "pos": [1.5, 63.0, 0.5], "dist": 1.1},
+                }
+            if action == "attack":
+                # Match hy4_hy_3 seq 199: plunging after drowned pulls bot underwater mid counter_kill
+                water_state["in_water"] = True
+                water_state["submerged"] = True
+                return {"ok": True, "hits": 1, "killed": False}
+            if action == "inventory":
+                return {
+                    "items": [{"name": "iron_sword", "count": 1}, {"name": "cooked_beef", "count": 4}],
+                    "offhand": {"name": "shield", "count": 1},
+                }
+            if action == "get_entities":
+                return {"entities": [{"id": 665559, "name": "drowned", "pos": [1.5, 63.0, 0.5], "dist": 1.1}]}
+            if action == "get_block":
+                p = pl.get("pos", [0, 63, 0])
+                return {"name": "stone" if p[1] < 63 else "air"}
+            return {"ok": True}
+
+    out_w = CombatControllerSlot().handle(
+        CombatEnv(_DrownedAbortBot(), skills=_DrownedWaterSkills()),
+        {"source": "pre_hurt_melee", "primary_entity_id": 665559, "primary_type": "drowned", "distance": 2.3},
+    )
+    assert out_w["mode"] == "water_surface_abort"
+    assert out_w["latched_guard"] is True
+    assert [c for c in water_calls if c[0] == "posture"][-1] == (
+        "posture",
+        {"shield": True, "sneak": False, "jump": False},
+    )
+    assert all(act != "use_item" for act, _ in water_calls)
+
+    # Also verify SubcorticalInstinctController post_combat_eat skips when ranged skeleton is at 9.0m
+    ranged_post_calls: list[str] = []
+
+    class _PostRangedSkipBot:
+        def status(self):
+            return self.call("status")
+
+        def call(self, action, body=None, **kwargs):
+            ranged_post_calls.append(action)
+            if action == "status":
+                return {
+                    "pos": [0.5, 64.0, 0.5],
+                    "health": 13.0,
+                    "food": 14,
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": True,
+                    "in_water": False,
+                    "in_lava": False,
+                    "nearest_hostile": {"id": 88, "name": "skeleton", "pos": [9.5, 64.0, 0.5], "dist": 9.0},
+                }
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "cooked_beef", "count": 4}]}
+            if action == "get_entities":
+                return {"entities": [{"id": 88, "name": "skeleton", "pos": [9.5, 64.0, 0.5], "dist": 9.0}]}
+            if action == "get_block":
+                return {"name": "stone" if (body or {}).get("pos", [0, 64, 0])[1] < 64 else "air"}
+            return {"ok": True}
+
+    CombatControllerSlot().handle(
+        CombatEnv(_PostRangedSkipBot()),
+        {"source": "pre_hurt_ranged", "primary_entity_id": 88, "primary_type": "skeleton", "distance": 9.0},
+    )
+    assert "use_item" not in ranged_post_calls
+
+
+
 
 
 
