@@ -647,6 +647,126 @@ staircase(south, ...) → 同样 0 步失败
 - `r22_long` 44 次 mine、0 零进展、0 void、0 Traceback
 - `glm_1`/`hy4_8` 未收官但**无 Traceback** → BUG-039 本波未复发
 
+### 4ag. r22_short 终验（18/18）与 r21→r22 对比
+
+**分数**：1690（r21，17 路）→ **1845**（r22，18 路）；人均 99.4 → 102.5。
+
+| 变化 | bot |
+|---|---|
+| +60 / +20 / +15 | `hy4_6`（250）、`nju_guitest`（180）、`hy4_10` |
+| -35 / -30 / -15 | `glm_2`（160）、`hy4_8`（150）、`nju_3`（25，BUG-040）、`hy4_5`、`hy4_7` |
+
+**门禁**：3 FAIL —— deaths **29**、cooldown **258.2s**、zero-slice **11.3%**；其余 9 项 PASS（含 **BUG-029 over-cap 0 ✅**）。
+死亡原因（21 notable）：`arrow 7 / mob_attack 7 / lava 4`，集中于 `nju_guitest 6`、`hy4_6 6`、`hy4_8 5`。
+取消 131 次：`hy4_8 30`、`hy4_6 19`、`nju_guitest 16`、`hy4_10 14`；触发仍以 `fresh_hurt 61` 为主。
+
+**结论**：BUG-029 修复通过终验；生存与取消在 r22 回潮（r21 为 9 死/111.7s），需 Slice B 复核 30s pre-hurt 冷却是否在真实受击场景下过钝。
+
+### 4ah. r22_long 铁器死锁链（00:15）
+
+`hy4_hy_1_bare` 在 y=39 地下形成闭环：
+
+```
+craft_gear(stone_pickaxe) → missing {"stick":2}（无木）
+harvest_logs              → "y=39 低于树木带，先 staircase(up)"
+staircase(north, up, steps=20/30) → time_budget ×11（模式二）
+mine_dfs(iron)            → insufficient_pickaxe_tier（仅木镐）
+```
+
+→ 24 分钟仍 10 分。修 BUG-037 模式二（clamp steps 或按 steps 缩放预算）可直接解锁。
+`ds_ds_1_bare` 本波 iron_age 已 `goal_satisfied +10`（20 分），说明恢复路径可行、但依赖地形。
+
+### 4ai. BUG-041：木镐硬岩导致 30s/格（00:17）
+
+`hy4_hy_1_bare` 的 staircase 1 步超时调用：
+
+```json
+{"stop_reason":"time_budget","steps_done":1,"dug_count":4,
+ "timeout_path":"dig","dig_target":[-11054,36,-11051],
+ "steps_capped_from":20,"steps_clamped":true}
+```
+
+- 8 次调用（north/east/south/west）全部 `steps_done=1`，耗时 24~32s
+- 原因是**木镐挖 stone/deepslate**：单块 ~25s；不是 45s 预算或 clamp 问题
+- 与 BUG-037（clamp 已回传）、BUG-038（climb 慢）共同构成裸开铁器死锁
+
+**新增 BUG-041（P1，Slice C）**：低镐等级时应优先软方块方向（dirt/gravel/sand），并在 `timeout_path=dig` 时直接提示补石镐。
+
+### 4aj. r22_long 中段快照（00:20，约 28/45 分钟）
+
+| bot | 分数 | 集数 | 状态 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | **195** | 11 | 正常推进 |
+| `ds_ds_1_bare` | 20 | 4 | 铁器已过 |
+| `nju_movetest_01_bare` | 20 | 5 | 缓慢 |
+| `hy4_hy_1_bare` | **10** | **6** | 6 集无进展 → BUG-041 死锁实证 |
+
+- `hy4_hy_1` 6 集仍停在石器（10 分），与 BUG-041 的"木镐硬岩 30s/格"完全吻合
+- `glm_5` 出现 `move_to(entity_id=skeleton@31.5m, ignore_hurt=True)` → `stalled ×2`（P2 级，仅 4 次/2 bots，暂不提单）
+- 全波 `mine_dfs` 0 零进展、0 void、0 Traceback
+
+### 4ak. BUG-041 成本量化（00:21）
+
+`hy4_hy_1_bare` 整轮工具时间：
+
+```
+staircase 426s（7.1 分钟）  ← 两个 episode 282s / 144s，占该集 59% / 94%
+mine_dfs  654s
+unstick    46s
+```
+
+只换来 y 33→43（仍在树木带 y<58 之下），6 个 episode 仍 10 分。→ BUG-041 是当前裸开分数天花板的直接原因。
+
+### 4al. r23_short 早期 + BUG-040 修复验证（00:22）
+
+- **BUG-040 FIXED 待终验**：`165e652`（00:13）在每个 episode 开始时检测"bot 是否已在围栏半径外"并重锚；r23 加载于 00:14 → 已含修复
+- r23 前 65 个事件文件：**`void_geofence_blocked` = 0**（r22 同期已多次出现）
+- 早期门禁：仅 `mine zero-slice 20%` FAIL（样本小，需观察）；trade **5 次**、brew 2 次、thread 0、runtime 0
+
+### 4am. r22_long 成就天花板对比（00:23，约 32/45 分钟）
+
+| bot | 分数 | 集数 | 成就 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | **195** | 11 | 13 个：`shiny_gear 60`、`enchant 30`、`lodestone/lava_bucket/deflect_arrow/form_obsidian/mine_diamond 各 15`… |
+| `ds_ds_1_bare` | 20 | 4 | stone + iron 四件套 |
+| `nju_movetest` | 20 | 5 | stone + iron 四件套 |
+| `hy4_hy_1_bare` | **10** | **7** | 只有 stone age |
+
+- 说明：**深挖/钻石链路在 GLM 上完全可行**（45 分钟内拿到 shiny_gear+enchant），BUG-030 不是全局阻塞
+- `hy4_1` 7 集仍 10 分，是 BUG-041（木镐硬岩）单点卡死，与模型能力无关
+
+### 4an. BUG-040 残余：死亡回城导致围栏钉在出生点（00:25）
+
+- r23 的 NJU 两路已 **0 次** `void_geofence_blocked`（r22 为 9/19 次）→ `165e652` 主要场景已修好
+- 残留 1 例：`hy4_hy_8_nether` 第 3 集 **elapsed 238s** 时被拦，center=(972.4,350.5)、目标 (7795.5,2806)、距离 7251m
+- 推断链：死亡 → 回世界出生点 (972,350) → HUD 自动回中把围栏钉在出生点 → 返回场景时越界
+- 追加修复：死亡/重生时按**场景锚点**重锚；或在工具检查前惰性重锚
+
+### 4ao. r23 zero-slice 17.5% 的根因（00:27）
+
+- 10 次 0 进展 `time_slice` 全部是**下界** `ancient_debris/gold @ y=15`：`pos_before == pos_after`，耗时 28~50s（预算 60~75）
+- tree：`active_node 5` 挂着 `pending: stair_down south, steps=35`，无 pruned 分支
+- → `mine_dfs` 内部 `dig_staircase` 在**第一步**就超时退出（与 BUG-037 per-step 15s 同源），分支未执行，引擎仍返回 `time_slice`
+- 建议：内部阶梯同样豁免第 0 步；0 进展 + pending 分支 → `branch_failed` → relocate
+
+### 4ap. P2-14 趋势（00:28）
+
+`bad_target_for_dimension`（下界要挖钻石）每波稳定 **4~7 次**：
+
+```
+r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
+```
+
+- 维度守卫工作正常（每次都给 ancient_debris/quartz/gold 建议）
+- 但模型仍反复尝试 → 每波浪费 4~7 个模型轮次；根因是 prompt "钻石镐在下界…" 的歧义
+- 建议 D2 改为"用钻石镐挖 ancient_debris（钻石仅存在于主世界）"
+
+### 4aq. BUG-041 修复已在 fix/s-skills（00:29）
+
+- `1bbeb4f`：dig 超时按 `pickaxe_tier` 命名根因（"木镐挖 X 约 25s/格"），并给四条出路
+- `0264145`：同一 dig 格超时后 `_avoid_temporarily(..., "dig_timeout", 30s)` + 下次快速失败
+- 与 D1 建议一致；**尚未合入 HEAD**（`grep low_tier_slow_dig` = 0），需 #1 合并后 r24 复验
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s

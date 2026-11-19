@@ -234,11 +234,49 @@ def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
     deterministic without touching the harness.
     """
     tx, ty, tz = float(pos[0]), float(pos[1]), float(pos[2])
+
+    def _verified(radius: int = 12) -> bool:
+        try:
+            res = bot.call("get_entities", {"radius": radius}) or {}
+            ents = res.get("entities") if isinstance(res, dict) else None
+            return isinstance(ents, list) and any(
+                "villager" in f"{e.get('name') or ''} {e.get('type') or ''}".lower()
+                for e in ents
+                if isinstance(e, dict)
+            )
+        except Exception:
+            return False
+
     try:
-        # Teleport onto the bot's own block: that block is guaranteed passable (a "+1.5 east" spot
-        # can be inside a hillside/wall and suffocate the villager, which is what r20 GLM_3 saw).
-        # Selector without a distance cap scans every loaded villager, so this also works when the
-        # initial spreadplayers landing is >64m from the village (r21 GLM_3 hill village).
+        # Preferred fixture: SUMMON a persistent, invulnerable, NoAI farmer with a paper->emerald
+        # trade directly on the bot's block. Teleporting an existing villager kept losing it
+        # (r22: entities=[] + 20m chase; r23 NJU: stale id 1330 -> target_not_visible).
+        summon = (
+            f"summon minecraft:villager {tx:.1f} {ty:.1f} {tz:.1f} "
+            "{NoAI:1b,Invulnerable:1b,Persistent:1b,Silent:1b,"
+            'VillagerData:{profession:"minecraft:farmer",level:2,type:"minecraft:plains"},'
+            "Offers:{Recipes:[{buy:{id:\"minecraft:paper\",count:24},"
+            'sell:{id:"minecraft:emerald",count:1},maxUses:999,uses:0,xp:1}]}}'
+        )
+        try:
+            replies = rcon_batch([summon], timeout=30)
+            reply = str((replies[0] if replies else {}).get("reply") or "")
+        except Exception:
+            reply = ""
+        if reply.lower().startswith("summoned"):
+            time.sleep(1.2)
+            if _verified():
+                print(
+                    f"[Scene] summoned a persistent trader villager for {bot_name} at "
+                    f"({tx:.1f}, {ty:.1f}, {tz:.1f})",
+                    flush=True,
+                )
+                return True
+            print(f"[Scene] trader summon replied '{reply[:80]}' but verify failed; falling back", flush=True)
+        else:
+            print(f"[Scene] trader summon not accepted ({reply[:80]!r}); falling back to tp+NoAI", flush=True)
+
+        # Fallback: teleport a loaded villager onto the bot's passable block and freeze it.
         pinned = False
         for attempt in (1, 2):
             rcon_batch(
@@ -250,21 +288,12 @@ def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
             time.sleep(0.6 if attempt == 1 else 1.2)
             rcon_batch(
                 [
-                    f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run data merge entity @e[type=minecraft:villager,distance=..6,limit=1] {{NoAI:1b}}",
+                    f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run data merge entity @e[type=minecraft:villager,distance=..6,limit=1] {{NoAI:1b,Invulnerable:1b}}",
                 ],
                 timeout=30,
             )
             time.sleep(1.5)
-            try:
-                res = bot.call("get_entities", {"radius": 12}) or {}
-                ents = res.get("entities") if isinstance(res, dict) else None
-                pinned = isinstance(ents, list) and any(
-                    "villager" in f"{e.get('name') or ''} {e.get('type') or ''}".lower()
-                    for e in ents
-                    if isinstance(e, dict)
-                )
-            except Exception:
-                pinned = False
+            pinned = _verified()
             if pinned:
                 break
         print(
@@ -1240,6 +1269,46 @@ class SceneWatchdog(threading.Thread):
                 print(f"[Scene Watchdog] {self.bot_name} tick error: {exc!r}", flush=True)
 
 
+def _reassert_scene_geofence(toolset: Any, scene: SceneAnchor, *, supervisor: Any = None) -> bool:
+    """Rebuild the toolset geofence at the scene anchor if the HUD auto-recenter moved it (BUG-040).
+
+    `harness/agent.py:1234-1250` re-centers the fence on the bot whenever it is >400m from the
+    current center. When the scene teleport had not landed yet, the fence got pinned to the old
+    position and every staircase/tunnel/move_to in the scene was then rejected as off-island.
+    """
+    gf = getattr(toolset, "geofence", None)
+    if gf is None:
+        return False
+    try:
+        drift = math.hypot(float(gf.center_x) - scene.x, float(gf.center_z) - scene.z)
+    except Exception:
+        return False
+    if drift <= 50.0:
+        return False
+    try:
+        rebuilt = _scene_geofence_cls(type(gf))(
+            center_x=scene.x,
+            center_z=scene.z,
+            radius=getattr(gf, "radius", scene.radius),
+            margin=getattr(gf, "margin", 8.0),
+        )
+    except Exception as exc:
+        print(f"[Scene] geofence rebuild failed: {exc}", flush=True)
+        return False
+    toolset.geofence = rebuilt
+    if supervisor is not None:
+        try:
+            supervisor.geofence = rebuilt
+        except Exception:
+            pass
+    print(
+        f"[Scene] geofence drift {drift:.0f}m from anchor -> rebuilt at "
+        f"({scene.x:.1f}, {scene.z:.1f})",
+        flush=True,
+    )
+    return True
+
+
 def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
     """Confirm the bot is in the scene dimension and within 64m of the anchor; retry via restock."""
     for i in range(attempts):
@@ -1254,7 +1323,23 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
             math.hypot(float(pos[0]) - scene.x, float(pos[2]) - scene.z) <= 64.0
         )
         if ok_dim and ok_pos:
-            return True
+            # Re-poll once to rule out a stale pre-teleport snapshot (BUG-040: the HUD auto-recenter
+            # used an old position and pinned the geofence off-anchor).
+            time.sleep(1.2)
+            try:
+                st2 = bot.status()
+            except Exception:
+                st2 = {}
+            p2 = st2.get("pos")
+            if isinstance(p2, (list, tuple)) and len(p2) >= 3 and (
+                math.hypot(float(p2[0]) - scene.x, float(p2[2]) - scene.z) <= 64.0
+            ):
+                print(
+                    f"[Scene] entry verified bot={bot_name} dim={dim} "
+                    f"pos=({float(p2[0]):.1f}, {float(p2[1]):.1f}, {float(p2[2]):.1f})",
+                    flush=True,
+                )
+                return True
         print(
             f"[Scene] entry verify failed (attempt {i + 1}/{attempts}) bot={bot_name} "
             f"dim={dim} pos={pos} expected {scene.dim}@({scene.x:.1f},{scene.y:.1f},{scene.z:.1f})",
@@ -1763,6 +1848,8 @@ def main() -> int:
                     return
                 wrong_dim = scene.dim == "the_nether" and "nether" not in dim_cur
                 dist = math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz)
+                if _reassert_scene_geofence(toolset, scene, supervisor=sup):
+                    dist = math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz)
                 if wrong_dim or (scene.dim in dim_cur and dist > scene.drift_limit):
                     restock_scene(bot_name, scene, reason="episode_anchor_pullback")
                     print(
