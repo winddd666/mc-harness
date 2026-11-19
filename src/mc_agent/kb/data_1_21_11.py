@@ -679,8 +679,44 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
     "move_to_omit_y": {
         "id": "move_to_omit_y",
         "category": "api_mechanic",
-        "keywords": ["寻路", "move_to", "path_not_found", "跑图", "探索"],
-        "rule": "水平跨区移动/探索时，mc_move_to 务必只传 (x, z) 省略 y！硬传地下或山顶 y 极易导致 path_not_found；遇 8s 卡死(stalled)先调 mc_skill_unstick。",
+        "keywords": ["寻路", "move_to", "path_not_found", "跑图", "探索", "movement_not_confirmed", "stalled", "busy", "void_geofence", "原点"],
+        "rule": "水平跨区移动/探索时，mc_move_to 务必只传 (x, z) 省略 y！硬传地下或山顶 y 极易导致 path_not_found；遇 8s 卡死(stalled)先调 mc_skill_unstick。若 path_not_found 连续出现两次以上，先 unstick 再换成附近的中间点分段走，不要原样重试同一坐标。任何向 (0,0) 世界原点 / 场景中心 220m 外平移的目标都会被 void_geofence_blocked 拦截，属于场景围栏正常保护，应改为在当前可行走范围内选目标。",
+    },
+    "move_to_precision": {
+        "id": "move_to_precision",
+        "category": "api_mechanic",
+        "keywords": ["range", "微调", "movement_not_confirmed", "站位", "靠近", "0.1"],
+        "rule": "微调站位/靠近交互目标时 range 传 >=0.5（如 0.8~1.2），不要传 0.1；提示『已在 0.1~2m 内』时说明已到位，直接执行交互，而不是反复 move_to。前一个动作未结束时调用 move_to 会得到 busy，先等 status.busy=null 或先 finish 当前技能。",
+    },
+    "craft_gear_recipes": {
+        "id": "craft_gear_recipes",
+        "category": "api_mechanic",
+        "keywords": ["craft_gear", "no_recipe", "missing_ingredients", "合成", "配方", "wheat_seeds", "server_recipe_rejected"],
+        "rule": "craft_gear 只适用于 RECIPES_1_21 里登记过的可合成物（工具/盾牌/石砖/床等）；wheat_seeds、皮革、线之类没有工作台配方，调用必然 no_recipe。缺料时看 error.missing/missing_ingredients 补对应原料（如石镐 3 圆石 + 2 木棍），不要同一配方连续重试超过 2 次。",
+    },
+    "place_support_rules": {
+        "id": "place_support_rules",
+        "category": "api_mechanic",
+        "keywords": ["place", "no_support", "blocked_by_self", "place_failed", "放置", "垫脚", "甘蔗"],
+        "rule": "mc_place 前先确认目标格下方有实体支撑、目标格本身为空气且不与自身碰撞箱重叠；若目标格是 sugar_cane/草丛/雪层等可替换方块，先用 mc_skill_mine_blocks 清空再放；blocked_by_self 时先侧移 1 格。",
+    },
+    "attack_reach": {
+        "id": "attack_reach",
+        "category": "api_mechanic",
+        "keywords": ["attack", "zero_hits", "空挥", "reach", "射程", "glow_squid", "打不到"],
+        "rule": "近战有效距离约 <=3.5 格（不是 45m）；attack 连续 2 次 zero_hits 就是不可达：先 move_to(range>=0.8) 贴近，仍失败则放弃该目标（发光鱿鱼等水下目标改用弓箭/鱼竿或直接换目标），不要空挥 20s。",
+    },
+    "find_blocks_queries": {
+        "id": "find_blocks_queries",
+        "category": "api_mechanic",
+        "keywords": ["find_blocks", "bad_args", "radius", "方块查询", "unknown block", "water", "10000"],
+        "rule": "find_blocks 的 types 只传规范方块 ID（oak_log/spruce_log…，不要传 log/planks/bed/shield 这类别名或实体名），radius 控制在 16~48；查水/岩浆这类大面积方块时不要开 radius>=96（会返回上万条），改用 status.in_water 或小半径单点探测。",
+    },
+    "mine_dfs_reset_semantics": {
+        "id": "mine_dfs_reset_semantics",
+        "category": "api_mechanic",
+        "keywords": ["mine_dfs", "reset", "nothing_to_reset", "竖井", "回填"],
+        "rule": "mine_dfs(action='reset') 只用于放弃已有竖井树并回填；返回 nothing_to_reset 表示当前没有可回填的井，属正常结果，不要再重复 reset，直接开新矿点或换目标。",
     },
     "interact_block_items": {
         "id": "interact_block_items",

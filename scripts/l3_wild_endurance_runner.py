@@ -35,16 +35,32 @@ LIVE_STATE_DIR = WT_ROOT / ".state-l3-live"
 RUNS_DIR = WT_ROOT / "runs"
 
 CANDIDATE_SITES: list[tuple[int, int]] = [
+    # 24 anchors, each >= 2500m apart on both axes, so a 22-bot fleet can give every slot a
+    # unique site and avoid the friendly-fire / player_explosion deaths seen on shared islands.
     (-6400, -6400),
     (6400, -6400),
     (-6400, 6400),
+    (6400, 6400),
+    (-10000, -3000),
+    (10000, -3000),
+    (-10000, 3000),
+    (10000, 3000),
+    (-3000, -10000),
+    (3000, -10000),
+    (-3000, 10000),
+    (3000, 10000),
+    (-11000, -11000),
+    (11000, -11000),
+    (-11000, 11000),
+    (11000, 11000),
     (-7800, -2800),
     (7800, -2800),
     (-7800, 2800),
+    (7800, 2800),
     (-5200, -7600),
     (5200, -7600),
-    (-8800, 400),
-    (8800, -400),
+    (-5200, 7600),
+    (5200, 7600),
 ]
 
 

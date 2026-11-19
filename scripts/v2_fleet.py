@@ -88,29 +88,29 @@ FLEET: tuple[FleetSlot, ...] = (
     # --- Squad 1: NJU Competition Benchmark (3 bots, soft-oversubscribed) ---
     FleetSlot("MoveTest_01", "nju", "nju", None, 9, "bare", 0, str(MAIN_ROOT / ".state-move-test/tokens.json")),
     FleetSlot("GuiTest_01", "nju", "nju", None, 9, "nether", 1, str(MAIN_ROOT / ".state-gui-test/tokens.json")),
-    FleetSlot("NJU_3", "nju", "nju", None, 9, "village", 0, str(FLEET_TOKEN_FILE)),
+    FleetSlot("NJU_3", "nju", "nju", None, 9, "village", 2, str(FLEET_TOKEN_FILE)),
     # --- Squad 2: GLM-5.3 Mid/Late-Game Strike Team (5 bots) ---
-    FleetSlot("GLM_1", "glm", "opencode", "glm-5.3", 0, "nether_fortress", 0, str(MAIN_ROOT / ".state-beast/tokens.json")),
-    FleetSlot("GLM_2", "glm", "opencode", "glm-5.3", 0, "nether_bastion", 1, str(MAIN_ROOT / ".state-beast/tokens.json")),
-    FleetSlot("GLM_3", "glm", "opencode", "glm-5.3", 0, "village", 1, str(MAIN_ROOT / ".state-beast/tokens.json")),
-    FleetSlot("GLM_4", "glm", "opencode", "glm-5.3", 0, "enchant_anvil", 2, str(MAIN_ROOT / ".state-beast/tokens.json")),
-    FleetSlot("GLM_5", "glm", "opencode", "glm-5.3", 0, "midgame", 3, str(MAIN_ROOT / ".state-glm5/tokens.json")),
+    FleetSlot("GLM_1", "glm", "opencode", "glm-5.3", 0, "nether_fortress", 3, str(MAIN_ROOT / ".state-beast/tokens.json")),
+    FleetSlot("GLM_2", "glm", "opencode", "glm-5.3", 0, "nether_bastion", 4, str(MAIN_ROOT / ".state-beast/tokens.json")),
+    FleetSlot("GLM_3", "glm", "opencode", "glm-5.3", 0, "village", 5, str(MAIN_ROOT / ".state-beast/tokens.json")),
+    FleetSlot("GLM_4", "glm", "opencode", "glm-5.3", 0, "enchant_anvil", 6, str(MAIN_ROOT / ".state-beast/tokens.json")),
+    FleetSlot("GLM_5", "glm", "opencode", "glm-5.3", 0, "midgame", 7, str(MAIN_ROOT / ".state-glm5/tokens.json")),
     # --- Squad 3: DeepSeek-v4.1-flash Cross-Validation (4 bots) ---
-    FleetSlot("DS_1", "ds", "opencode", "deepseek-v4.1-flash", 0, "bare", 4, str(FLEET_TOKEN_FILE)),
-    FleetSlot("DS_2", "ds", "opencode", "deepseek-v4.1-flash", 0, "iron", 5, str(FLEET_TOKEN_FILE)),
-    FleetSlot("DS_3", "ds", "opencode", "deepseek-v4.1-flash", 0, "village", 2, str(FLEET_TOKEN_FILE)),
-    FleetSlot("DS_4", "ds", "opencode", "deepseek-v4.1-flash", 0, "nether_fortress", 2, str(FLEET_TOKEN_FILE)),
+    FleetSlot("DS_1", "ds", "opencode", "deepseek-v4.1-flash", 0, "bare", 8, str(FLEET_TOKEN_FILE)),
+    FleetSlot("DS_2", "ds", "opencode", "deepseek-v4.1-flash", 0, "iron", 9, str(FLEET_TOKEN_FILE)),
+    FleetSlot("DS_3", "ds", "opencode", "deepseek-v4.1-flash", 0, "village", 10, str(FLEET_TOKEN_FILE)),
+    FleetSlot("DS_4", "ds", "opencode", "deepseek-v4.1-flash", 0, "nether_fortress", 11, str(FLEET_TOKEN_FILE)),
     # --- Squad 4: HY4-flash-free High-Concurrency Broad Sweeper (10 bots) ---
-    FleetSlot("HY_1", "hy4", "opencode", "hy4-flash-free", 0, "bare", 6, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_2", "hy4", "opencode", "hy4-flash-free", 0, "bare", 7, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_3", "hy4", "opencode", "hy4-flash-free", 0, "iron", 8, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_4", "hy4", "opencode", "hy4-flash-free", 0, "iron", 0, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_5", "hy4", "opencode", "hy4-flash-free", 0, "midgame", 1, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_6", "hy4", "opencode", "hy4-flash-free", 0, "midgame", 2, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_7", "hy4", "opencode", "hy4-flash-free", 0, "village", 3, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_8", "hy4", "opencode", "hy4-flash-free", 0, "nether", 3, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_9", "hy4", "opencode", "hy4-flash-free", 0, "deep_water", 4, str(FLEET_TOKEN_FILE)),
-    FleetSlot("HY_10", "hy4", "opencode", "hy4-flash-free", 0, "enchant_anvil", 5, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_1", "hy4", "opencode", "hy4-flash-free", 0, "bare", 12, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_2", "hy4", "opencode", "hy4-flash-free", 0, "bare", 13, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_3", "hy4", "opencode", "hy4-flash-free", 0, "iron", 14, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_4", "hy4", "opencode", "hy4-flash-free", 0, "iron", 15, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_5", "hy4", "opencode", "hy4-flash-free", 0, "midgame", 16, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_6", "hy4", "opencode", "hy4-flash-free", 0, "midgame", 17, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_7", "hy4", "opencode", "hy4-flash-free", 0, "village", 18, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_8", "hy4", "opencode", "hy4-flash-free", 0, "nether", 19, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_9", "hy4", "opencode", "hy4-flash-free", 0, "deep_water", 20, str(FLEET_TOKEN_FILE)),
+    FleetSlot("HY_10", "hy4", "opencode", "hy4-flash-free", 0, "enchant_anvil", 21, str(FLEET_TOKEN_FILE)),
 )
 
 
@@ -168,11 +168,66 @@ def cmd_provision() -> int:
     return 0 if ok_cnt == len(needed) else 1
 
 
+def _load_runner_sites() -> list[tuple[int, int]]:
+    """Import CANDIDATE_SITES from the runner script (module body has no side effects)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_l3_runner_sites", RUNNER)
+    if spec is None or spec.loader is None:
+        return []
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # dataclasses needs the module registered before exec
+    spec.loader.exec_module(mod)
+    return list(getattr(mod, "CANDIDATE_SITES", []))
+
+
+def _assign_isolated_sites(selected: list[FleetSlot]) -> list[FleetSlot]:
+    """Ensure every launched bot gets a unique scene anchor (avoids shared-island friendly fire)."""
+    used: set[int] = set()
+    out: list[FleetSlot] = []
+    for slot in selected:
+        idx = slot.site_index
+        if idx in used:
+            new_idx = idx
+            while new_idx in used:
+                new_idx += 1
+            print(f"[Fleet Site] {slot.bot}: site {idx} already taken -> reassigned to {new_idx}", flush=True)
+            idx = new_idx
+        used.add(idx)
+        out.append(dataclasses.replace(slot, site_index=idx) if idx != slot.site_index else slot)
+    return out
+
+
+def cmd_sites() -> int:
+    sites = _load_runner_sites()
+    if not sites:
+        print(f"Could not load CANDIDATE_SITES from {RUNNER}")
+        return 1
+    print(f"Scene anchors ({len(sites)} available, {len(FLEET)} fleet slots):")
+    for slot in FLEET:
+        if slot.site_index >= len(sites):
+            print(f"  {slot.bot:12s} {slot.squad:3s} {slot.stage:15s} site={slot.site_index:2d} -> OUT OF RANGE")
+            continue
+        ax, az = sites[slot.site_index]
+        print(f"  {slot.bot:12s} {slot.squad:3s} {slot.stage:15s} site={slot.site_index:2d} -> ({ax}, {az})")
+    seen: dict[int, str] = {}
+    clash = 0
+    for slot in FLEET:
+        if slot.site_index in seen:
+            clash += 1
+            print(f"  [WARN] site {slot.site_index} shared by {seen[slot.site_index]} and {slot.bot}")
+        else:
+            seen[slot.site_index] = slot.bot
+    print(f"Unique sites: {len(seen)}/{len(FLEET)} (clashes={clash})")
+    return 0 if clash == 0 and max(s.site_index for s in FLEET) < len(sites) else 1
+
+
 def cmd_launch(wave: str, duration_s: float, max_episodes: int, squads: set[str], stagger_s: float) -> int:
-    selected = [s for s in FLEET if s.squad in squads]
-    if not selected:
+    selected_raw = [s for s in FLEET if s.squad in squads]
+    if not selected_raw:
         print("No fleet slots matched squads:", squads)
         return 1
+    selected = _assign_isolated_sites(selected_raw)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(WT_ROOT / "src")
     procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path]] = []
@@ -586,6 +641,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("provision")
+    sub.add_parser("sites")
     lp = sub.add_parser("launch")
     lp.add_argument("--wave", required=True)
     lp.add_argument("--duration", type=float, default=1200.0)
@@ -600,6 +656,8 @@ def main() -> int:
     args = ap.parse_args()
     if args.cmd == "provision":
         return cmd_provision()
+    if args.cmd == "sites":
+        return cmd_sites()
     if args.cmd == "launch":
         return cmd_launch(args.wave, args.duration, args.max_episodes, {s.strip() for s in args.squads.split(",") if s.strip()}, args.stagger)
     md: str | bool | None = False if args.no_markdown else args.markdown
