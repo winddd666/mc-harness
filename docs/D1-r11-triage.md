@@ -898,6 +898,20 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - 429/retry 按分钟：16:37~16:51 持续，峰值 16:48（10 次）
 - → 缩小上下文/减少历史**不会**缓解；只有暂停 hy4 或换通道有效
 
+## 4be. r24_short 终验 + 进入过夜低频审计模式（01:08）
+
+**r24_short（18/18，0 Traceback）**：仅 2 项 FAIL
+- `runtime_error 40`（全 hy4，BUG-042）
+- `over-cap 2`：`glm_2` netherrack 265、`hy4_8` netherrack 169（BUG-029 残留，均为下界）
+- 其余全 PASS：deaths 17、cooldown 116s、mine 0.93、zero-slice **3.9%**、trade/brew 2/2
+- 分数 1765 → **1870**（18 vs 18，尽管丢了 40 集）；`objective_verified` 15→23
+
+**过夜模式（01:08 起）**
+- 双轨：主轨 `overnight_12bot`（12 路 nju/glm/ds，4h）+ 审计轨 `hy4_audit_*`（4 路 hy4，rpm=6，20min）
+- 审计脚本 `scripts/d1_overnight_watch.py`：**只在波次收官或每 45 分钟**输出快照（PID 1728153），不做连续轮询
+- 快照字段：summaries/bots、episode 状态分布、http_retry、失败 429/502、Traceback —— 直接回答"hy4 4 并发 + rpm=6 是否 0 次 429"
+- 追踪重点：BUG-030 `depth_reset`、BUG-037 阶梯、`unstick` 慢调用、过夜长程新 P0/P1
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
