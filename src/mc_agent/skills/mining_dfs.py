@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 from ..errors import ApiError
+from ..kb import assess_world_target, normalize_dimension
 from .library import (
     BLOCK_MIN_PICKAXE_TIER,
     EXPECTED_BLOCK_DROPS,
@@ -195,6 +196,12 @@ ORE_DFS_PROFILES: dict[str, dict[str, Any]] = {
         "target_blocks": ("nether_quartz_ore",),
         "expected_items": ("quartz", "nether_quartz_ore"),
         "default_target_y": 48,
+        "min_tier": 1,
+    },
+    "nether_gold_ore": {
+        "target_blocks": ("nether_gold_ore",),
+        "expected_items": ("gold_nugget", "nether_gold_ore"),
+        "default_target_y": 64,
         "min_tier": 1,
     },
     "iron": {
@@ -679,7 +686,9 @@ def _should_focus_target_only(
     return strategy == "fishbone_scan" and abs(anchor_y - target_y) <= SCAN_BAND
 
 
-def _resolve_target_profile(target: str, target_y: int | None) -> dict[str, Any]:
+def _resolve_target_profile(
+    target: str, target_y: int | None, *, dimension: str | None = None,
+) -> dict[str, Any]:
     raw = str(target or "iron").strip().lower().removeprefix("minecraft:")
     aliases = {
         "raw_iron": "iron",
@@ -696,6 +705,8 @@ def _resolve_target_profile(target: str, target_y: int | None) -> dict[str, Any]
         "gold_ore": "gold",
         "deepslate_gold_ore": "gold",
         "raw_gold": "gold",
+        "gold_nugget": "nether_gold_ore",
+        "nether_quartz_ore": "quartz",
         "lapis_lazuli": "lapis",
         "lapis_ore": "lapis",
         "deepslate_lapis_ore": "lapis",
@@ -705,6 +716,8 @@ def _resolve_target_profile(target: str, target_y: int | None) -> dict[str, Any]
         "deepslate_emerald_ore": "emerald",
     }
     key = aliases.get(raw, raw)
+    if raw == "gold" and dimension == "the_nether":
+        key = "nether_gold_ore"
     prof = ORE_DFS_PROFILES.get(key)
     if prof is not None:
         resolved_y = int(target_y) if target_y is not None else int(prof["default_target_y"])
@@ -4746,7 +4759,9 @@ class MiningDFSEngine:
                         _inventory_counts_from_raw(scoped.first_inventory),
                         _inventory_counts_from_raw(scoped.last_inventory),
                     )
-                profile = _resolve_target_profile(target, target_y)
+                profile = _resolve_target_profile(
+                    target, target_y, dimension=normalize_dimension(scoped.last_status.get("dimension")),
+                )
                 target_gained = sum(gained.get(item, 0) for item in profile["expected_items"])
                 requested = max(1, min(64, int(goal_count)))
                 moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
@@ -4870,15 +4885,52 @@ class MiningDFSEngine:
         if act == "status":
             return {"ok": True, "action": "status", "strategy": self.strategy, "tree": self.snapshot()}
 
-        profile = _resolve_target_profile(target, target_y)
+        st0 = self.bot.status()
+        if st0.get("alive") is False:
+            return {"ok": False, "requires_replan": True, "strategy": self.strategy, "stop_reason": "dead", "tree": self.snapshot()}
+        raw_dimension = st0.get("dimension")
+        dimension = normalize_dimension(raw_dimension)
+        profile = _resolve_target_profile(target, target_y, dimension=dimension)
+        if act == "explore" and raw_dimension:
+            ecology = assess_world_target(profile["target_blocks"], dimension=dimension, mode="find")
+            if ecology["verdict"] == "wrong_dimension":
+                available_targets = {}
+                if dimension == "the_nether":
+                    available_targets = {
+                        target_name: ORE_DFS_PROFILES[profile_key]["default_target_y"]
+                        for target_name, profile_key in (
+                            ("ancient_debris", "ancient_debris"),
+                            ("quartz", "quartz"),
+                            ("gold", "nether_gold_ore"),
+                        )
+                    }
+                hints = [f"{name} (Y={y})" for name, y in available_targets.items()]
+                message = ecology["hint"]
+                if hints:
+                    message += " DFS 可改采 " + "、".join(hints) + "。"
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "action": act,
+                    "strategy": self.strategy,
+                    "stop_reason": "bad_target_for_dimension",
+                    "target": profile["profile_key"],
+                    "dimension": dimension,
+                    "allowed_dimensions": ecology["allowed_dimensions"],
+                    "available_targets": available_targets,
+                    "message": message,
+                    "pos_after": st0.get("pos"),
+                    "tree": self.snapshot(),
+                }
         if (
-            self.nodes
+            act == "explore"
+            and self.nodes
             and self.collar_node_id in self.nodes
             and abs(int(profile["target_y"]) - int(self.target_y)) >= 12
             and int(profile["target_y"]) > int(self.target_y)
         ):
             try:
-                cur_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+                cur_y = _floor_pos(st0.get("pos") or [0, 64, 0])[1]
             except (ApiError, TypeError, ValueError):
                 cur_y = int(self.target_y)
             # Live s20: the model switched target diamond(-54) -> iron(16) while standing at
@@ -4902,15 +4954,13 @@ class MiningDFSEngine:
                     ),
                     "tree": self.snapshot(),
                 }
-        self.target_y = profile["target_y"]
+        if act == "explore":
+            self.target_y = profile["target_y"]
         target_blocks = profile["target_blocks"]
         expected_items = profile["expected_items"]
         goal_count = max(1, min(64, int(goal_count)))
 
-        st0 = self.bot.status()
         recrafted_before = self.recrafted_picks
-        if st0.get("alive") is False:
-            return {"ok": False, "requires_replan": True, "strategy": self.strategy, "stop_reason": "dead", "tree": self.snapshot()}
         if st0.get("in_water"):
             esc = self.skills.escape_water()
             if esc.get("in_water"):

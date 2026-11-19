@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from mc_agent.bot import BotSession
 from mc_agent.harness.geofence import VoidGeofence
@@ -27,12 +28,14 @@ class _MockMineWorld:
         start_pos: tuple[float, float, float] = (0.5, 80.0, 0.5),
         inventory_items: list[dict[str, Any]] | None = None,
         surface_y: int = 80,
+        dimension: str | None = None,
         simulate_best_harvest_tool: bool = False,
         track_durability: bool = False,
         simulate_realistic_reach_and_pockets: bool = False,
     ) -> None:
         self.pos = list(start_pos)
         self.surface_y = surface_y
+        self.dimension = dimension
         self.simulate_best_harvest_tool = simulate_best_harvest_tool
         self.track_durability = track_durability
         self.simulate_realistic_reach_and_pockets = simulate_realistic_reach_and_pockets
@@ -154,6 +157,7 @@ class _MockMineWorld:
                     "ok": True,
                     "result": {
                         "pos": list(self.pos),
+                        "dimension": self.dimension,
                         "health": 20.0,
                         "food": 20,
                         "on_ground": True,
@@ -2282,7 +2286,7 @@ def test_no_progress_hint_does_not_recommend_a_redundant_reset(monkeypatch) -> N
 
 
 def test_collar_at_nether_target_layer_can_mine_over_bedrock() -> None:
-    world = _MockMineWorld(start_pos=(0.5, 5.0, 0.5), surface_y=5)
+    world = _MockMineWorld(start_pos=(0.5, 5.0, 0.5), surface_y=5, dimension="the_nether")
     for x in range(-9, 10):
         for z in range(-9, 10):
             world.blocks[(x, 4, z)] = "bedrock"
@@ -2406,3 +2410,45 @@ def test_timed_slice_credits_only_observed_target_items(monkeypatch) -> None:
     assert result["target_gained"] == 1
     assert result["gained"] == {"raw_iron": 1}
     assert result["goal_met"] is False
+
+
+@pytest.mark.parametrize(("dimension", "expected_dimension", "available"), [
+    ("minecraft:the_nether", "the_nether", {"ancient_debris": 15, "quartz": 48, "gold": 64}),
+    ("world_the_end", "the_end", {}),
+])
+def test_dfs_rejects_diamond_outside_overworld_before_scanning_or_digging(
+    dimension, expected_dimension, available,
+) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 52.0, 0.5), surface_y=64, dimension=dimension)
+    endpoints = []
+
+    def handler(request):
+        endpoints.append(request.url.path.rsplit("/", 1)[-1])
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="BadDimensionOre", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        result = skills.mine_dfs(target="diamond", target_y=15, max_duration_s=60)
+        assert skills.mining_dfs.target_y == 16
+
+    assert result["stop_reason"] == "bad_target_for_dimension"
+    assert result["ok"] is False and result["requires_replan"] is True
+    assert result["dimension"] == expected_dimension
+    assert result["allowed_dimensions"] == ["overworld"]
+    assert result["available_targets"] == available
+    assert result["tree"]["node_count"] == 0
+    assert endpoints == ["status"]
+
+
+def test_generic_gold_in_nether_counts_nuggets_and_uses_the_nether_layer(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 64.0, 0.5), surface_y=64, dimension="the_nether")
+    world.blocks[(1, 64, 0)] = "nether_gold_ore"
+    monkeypatch.setattr(world, "_drop_name_for", lambda name: "gold_nugget" if name == "nether_gold_ore" else name)
+    with BotSession("tok", bot_username="NetherGold", transport=httpx.MockTransport(world.handler)) as bot:
+        result = MacroSkills(bot).mine_dfs(target="gold", goal_count=1, max_duration_s=10.0)
+
+    assert result["stop_reason"] == "quota_reached"
+    assert result["target_y"] == 64
+    assert result["goal_met"] is True
+    assert result["gained"]["gold_nugget"] == 1
+    assert any(name == "nether_gold_ore" for _, name, _ in world.dig_log)
