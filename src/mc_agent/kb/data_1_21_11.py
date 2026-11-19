@@ -754,6 +754,12 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
         "keywords": ["堡垒", "要塞", "bastion", "fortress", "烈焰人", "blaze", "猪灵", "piglin", "岩浆"],
         "rule": "要塞/堡垒内部常跨岩浆海并有多层落差：垂直移动用 mc_skill_tunnel/staircase 逐格垫脚，不要直接 mc_move_to 带 y；遇到烈焰人刷怪笼先用弓箭/盾消耗，背包常备 8+ 黑曜石与打火石以便就地搭安全屋。",
     },
+    "nether_mining_targets": {
+        "id": "nether_mining_targets",
+        "category": "api_mechanic",
+        "keywords": ["下界挖矿", "mine_dfs", "ancient_debris", "远古残骸", "下界石英", "nether_quartz", "钻石", "diamond", "维度"],
+        "rule": "下界可挖目标只有 netherrack / nether_quartz_ore / nether_gold_ore / gold_ore / blackstone / ancient_debris（Y8-22）；diamond_ore、deepslate_diamond_ore、铁/铜矿等只存在于主世界，在下界调用 mine_dfs(target='diamond') 必然空挖，禁止此操作。要下界合金就先挖 ancient_debris 再回主世界冶炼。",
+    },
     "drowned_trident": {
         "id": "drowned_trident",
         "category": "mob",
@@ -928,7 +934,7 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:nether/obtain_ancient_debris": {
         "difficulty": "hard",
-        "how_to": "钻石镐在下界Y8-22挖ancient_debris；床或TNT炸开更快。",
+        "how_to": "用钻石镐在下界 Y8-22 挖 ancient_debris（远古残骸）；钻石/钻石矿只存在于主世界，下界不会生成，切勿在下界找钻石。床或TNT炸开更快。",
     },
     "minecraft:nether/ride_strider_in_overworld_lava": {
         "difficulty": "hard",
