@@ -1646,6 +1646,45 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
     assert placed == ["cobblestone", "netherrack"]
 
 
+def test_staircase_dig_timeout_names_wooden_pickaxe_as_cause() -> None:
+    """BUG-041/r22_long: wooden pickaxe + hard rock = ~25s per block, 1 step per call."""
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": [0.5, 36.0, 0.5], "on_ground": True, "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "wooden_pickaxe", "count": 1}]}
+        elif path == "equip":
+            result = {"held": {"name": "wooden_pickaxe"}}
+        elif path == "get_block":
+            result = {"name": "stone" if body["pos"][1] <= 36 else "air"}
+        elif path == "dig":
+            raise httpx.ReadTimeout("offline dig too slow", request=request)
+        elif path == "move_to":
+            result = {"pos": [0.5, 36.0, 0.5]}
+        elif path == "look":
+            result = {}
+        elif path == "control":
+            result = {"pos": [0.5, 36.0, 0.5], "moved": 0.0}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        result = skills.dig_staircase(direction="north", vertical="down", steps=1)
+    assert result["ok"] is False
+    assert result["stop_reason"] == "time_budget"
+    assert result["timeout_path"] == "dig"
+    assert result["pickaxe_tier"] == 1
+    assert result["low_tier_slow_dig"] is True
+    assert "stone_pickaxe" in result["error"]["message"]
+
+
 def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
     """BUG-024: a self-dug shaft step cell has no six-face support."""
     pos = [0.5, 30.0, 0.5]

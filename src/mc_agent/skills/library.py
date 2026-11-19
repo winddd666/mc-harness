@@ -1169,6 +1169,8 @@ class _StairSession:
         self.last_timeout_path: str | None = None
         self.last_retry_path: str | None = None
         self.last_dig_pos: list[Any] | None = None
+        self.last_dig_block: str | None = None
+        self.pickaxe_tier: int | None = None
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
     _IDEMPOTENT_READS = frozenset({"status", "inventory", "get_block", "find_blocks"})
@@ -5935,12 +5937,37 @@ class MacroSkills:
                 except (ApiError, httpx.HTTPError):
                     pass
             timeout_message = "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"
+            pick_tier = getattr(session, "pickaxe_tier", None)
+            low_tier_slow_dig = False
             if session.last_timeout_path == "dig":
                 timeout_message = (
                     f"单步挖掘未在预算内确认（目标 {session.last_dig_pos}）。"
                     "若目标位于脚下、为黑曜石/高硬度方块，或同一平台连续超时，"
                     "先调 mc_skill_unstick 并离开该处 8~12 格后再挖；不要原地重复同一方向。"
                 )
+                # BUG-041/r22_long: with a wooden pickaxe every stone staircase
+                # step costs ~25s, so the model loops for ~30s per 1 block.
+                if isinstance(pick_tier, int) and pick_tier < 2:
+                    low_tier_slow_dig = True
+                    blk = session.last_dig_block or "硬质方块"
+                    tier_label = {0: "无镐/空手", 1: "木镐"}.get(pick_tier, f"tier {pick_tier}")
+                    timeout_message = (
+                        f"单步挖掘未在预算内确认：当前镐等级 {pick_tier}（{tier_label}）挖 {blk} "
+                        f"约需 25s/格，45s 总预算只够 1 格。"
+                        "先调 mc_skill_craft_gear(item='stone_pickaxe')（有圆石时），"
+                        "或改走泥土/砂砾/沙子等软方块方向，或先 mc_skill_harvest_logs 补木料；"
+                        "也可先 mc_skill_unstick 让开该格；不要在硬岩上原地重复同一步梯。"
+                    )
+                    if isinstance(session.last_dig_pos, (list, tuple)) and len(session.last_dig_pos) >= 3:
+                        try:
+                            self._avoid_temporarily(
+                                (int(session.last_dig_pos[0]), int(session.last_dig_pos[1]), int(session.last_dig_pos[2]),
+                                 ),
+                                "dig_timeout",
+                                30.0,
+                            )
+                        except (TypeError, ValueError):
+                            pass
             return {
                 "ok": False, "requires_replan": True, "stop_reason": "time_budget",
                 "error": {"code": "time_budget", "message": timeout_message},
@@ -5949,6 +5976,9 @@ class MacroSkills:
                 "timeout_path": session.last_timeout_path,
                 "retried_path": session.last_retry_path,
                 "dig_target": session.last_dig_pos,
+                "dig_block": session.last_dig_block,
+                "pickaxe_tier": pick_tier,
+                "low_tier_slow_dig": low_tier_slow_dig,
                 "action_released": cleanup.get("released", cleanup.get("stopped", False)),
             }
 
@@ -6165,6 +6195,12 @@ class MacroSkills:
             return None
 
         _equip_best_pick()
+        # BUG-041: remember the pickaxe tier so a dig timeout can name the real
+        # cause (wooden pickaxe on hard rock costs ~25s per block).
+        try:
+            self.bot.pickaxe_tier = _best_pickaxe_in_inv(_inventory_counts(self.bot))[1]
+        except (ApiError, httpx.HTTPError, TypeError, ValueError):
+            self.bot.pickaxe_tier = None
         st0 = self.bot.status()
         pos_before = st0.get("pos") or [0.0, 64.0, 0.0]
         steps_done = 0
@@ -6318,6 +6354,7 @@ class MacroSkills:
                                     dig_failed = True
                                     break
                                 try:
+                                    self.bot.last_dig_block = _block_name(dpos)
                                     self.bot.call("dig", {"pos": dpos, "collect": True, "stop_on": ["death"]})
                                     dug_count += 1
                                 except ApiError as err:
@@ -6398,6 +6435,7 @@ class MacroSkills:
                         break
                     if uname not in air_set:
                         try:
+                            self.bot.last_dig_block = uname
                             self.bot.call("dig", {"pos": dpos, "collect": True})
                             dug_count += 1
                         except ApiError as err:
