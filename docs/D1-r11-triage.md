@@ -822,6 +822,13 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - 429 事件持续到 elapsed 386s（仍在发生）
 - 运维建议：暂停/降并发 hy4 squad，保留 glm/ds/nju；代码侧仍按 BUG-042 修 429 分类
 
+### 4aw. 评分口径问题（00:49）
+
+- `midgame` setup 预授予 6 个成就（`mine_stone/upgrade_tools/smelt_iron/iron_tools/mine_diamond/shiny_gear`）= **95 分**
+- r24_long `glm_5` 在 **180s、EP1 timeout** 时已 115 分 → 其中 95 分是白送
+- 影响：`glm_5 195 vs bare 10` 不能直接当作能力差异；跨场景/跨波次分数不可比
+- 建议（P2-32）：episode 起始做 advancement 基线，final_score 只计增量；或报告单列 baseline/earned
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
