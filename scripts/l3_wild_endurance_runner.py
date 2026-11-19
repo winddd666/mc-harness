@@ -152,6 +152,41 @@ def select_village_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tup
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
 
 
+def select_nether_structure_site(
+    bot: Any,
+    bot_name: str,
+    structure_tag: str,
+    start_idx: int = 0,
+) -> tuple[float, float, float, str]:
+    """Locate a Nether structure (#minecraft:fortress or #minecraft:bastion_remnant) and carve a safe spawn ledge."""
+    cx, cz = [(0, 0), (800, 0), (-800, 0), (0, 800), (0, -800), (800, 800)][start_idx % 6]
+    out = rcon_batch(
+        [f"execute in minecraft:the_nether positioned {cx} 64 {cz} run locate structure {structure_tag}"],
+        timeout=30,
+    )
+    m = re.search(r"\[\s*(-?\d+)\s*,\s*[^,\]]+\s*,\s*(-?\d+)\s*\]", out)
+    if m:
+        nx, nz = int(m.group(1)), int(m.group(2))
+    else:
+        nx, nz = cx, cz
+    ny = 64
+    rcon_batch(
+        [
+            f"execute in minecraft:the_nether run forceload add {nx - 16} {nz - 16} {nx + 16} {nz + 16}",
+            f"execute in minecraft:the_nether run fill {nx - 2} {ny - 1} {nz - 2} {nx + 2} {ny - 1} {nz + 2} minecraft:cobblestone",
+            f"execute in minecraft:the_nether run fill {nx - 2} {ny} {nz - 2} {nx + 2} {ny + 3} {nz + 2} minecraft:air",
+            f"execute in minecraft:the_nether run tp {bot_name} {nx}.5 {ny} {nz}.5",
+            f"effect give {bot_name} minecraft:fire_resistance 30 0 true",
+            f"effect give {bot_name} minecraft:resistance 15 4 true",
+        ],
+        timeout=30,
+    )
+    time.sleep(2.0)
+    st = bot.status()
+    pos = st.get("pos") or [float(nx) + 0.5, float(ny), float(nz) + 0.5]
+    return float(pos[0]), float(pos[1]), float(pos[2]), f"nether:{structure_tag.split(':')[-1]}"
+
+
 def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: bool = True, stage: str = "bare") -> None:
     cmds = [
         "difficulty normal",
@@ -275,6 +310,89 @@ def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: b
                 f"give {bot_name} minecraft:cooked_beef 24",
             ]
         )
+    elif stage in {"nether_fortress", "nether_bastion"}:
+        # Bot is already teleported inside minecraft:the_nether by select_nether_structure_site; do NOT tp back to overworld!
+        cmds = [
+            f"gamemode survival {bot_name}",
+            f"clear {bot_name}",
+            f"advancement revoke {bot_name} everything",
+            f"advancement grant {bot_name} only minecraft:story/root",
+            f"advancement grant {bot_name} only minecraft:adventure/root",
+            f"advancement grant {bot_name} only minecraft:husbandry/root",
+            f"advancement grant {bot_name} only minecraft:nether/root",
+            f"advancement grant {bot_name} only minecraft:story/mine_stone",
+            f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+            f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+            f"advancement grant {bot_name} only minecraft:story/iron_tools",
+            f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+            f"advancement grant {bot_name} only minecraft:story/shiny_gear",
+            f"advancement grant {bot_name} only minecraft:story/lava_bucket",
+            f"advancement grant {bot_name} only minecraft:story/form_obsidian",
+            f"advancement grant {bot_name} only minecraft:story/enter_the_nether",
+            f"effect clear {bot_name}",
+            f"effect give {bot_name} minecraft:instant_health 1 10 true",
+            f"effect give {bot_name} minecraft:saturation 1 20 true",
+            f"effect give {bot_name} minecraft:fire_resistance 45 0 true",
+            f"give {bot_name} minecraft:diamond_pickaxe 1",
+            f"give {bot_name} minecraft:iron_sword 1",
+            f"give {bot_name} minecraft:shield 1",
+            f"give {bot_name} minecraft:golden_boots 1",
+            f"give {bot_name} minecraft:iron_helmet 1",
+            f"give {bot_name} minecraft:iron_chestplate 1",
+            f"give {bot_name} minecraft:iron_leggings 1",
+            f"give {bot_name} minecraft:bow 1",
+            f"give {bot_name} minecraft:arrow 32",
+            f"give {bot_name} minecraft:gold_ingot 24",
+            f"give {bot_name} minecraft:cobblestone 64",
+            f"give {bot_name} minecraft:oak_log 16",
+            f"give {bot_name} minecraft:glass_bottle 3",
+            f"give {bot_name} minecraft:cooked_beef 24",
+        ]
+    elif stage == "enchant_anvil":
+        ix, iy, iz = int(sx), int(sy), int(sz)
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+                f"advancement grant {bot_name} only minecraft:story/shiny_gear",
+                f"xp set {bot_name} 30 levels",
+                f"setblock {ix + 2} {iy} {iz} minecraft:enchanting_table",
+                f"setblock {ix + 2} {iy} {iz + 2} minecraft:anvil",
+                f"setblock {ix + 4} {iy} {iz} minecraft:bookshelf",
+                f"setblock {ix + 4} {iy} {iz - 1} minecraft:bookshelf",
+                f"setblock {ix + 4} {iy} {iz + 1} minecraft:bookshelf",
+                f"give {bot_name} minecraft:lapis_lazuli 32",
+                f"give {bot_name} minecraft:book 6",
+                f"give {bot_name} minecraft:diamond_pickaxe 1",
+                f"give {bot_name} minecraft:diamond_sword 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:oak_log 16",
+                f"give {bot_name} minecraft:cooked_beef 16",
+            ]
+        )
+    elif stage == "deep_water":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"give {bot_name} minecraft:iron_pickaxe 1",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:bucket 2",
+                f"give {bot_name} minecraft:iron_helmet 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
+                f"give {bot_name} minecraft:iron_leggings 1",
+                f"give {bot_name} minecraft:iron_boots 1",
+                f"give {bot_name} minecraft:oak_log 16",
+                f"give {bot_name} minecraft:cooked_beef 16",
+            ]
+        )
     if set_day:
         cmds.insert(0, "time set 1000")
     rcon_batch(cmds, timeout=60)
@@ -291,7 +409,12 @@ def main() -> int:
     parser.add_argument("--duration-s", type=float, default=1800.0, help="Wall-clock budget for this wild run")
     parser.add_argument("--max-episodes", type=int, default=12)
     parser.add_argument("--site-index", type=int, default=0)
-    parser.add_argument("--stage", choices=["bare", "iron", "midgame", "village", "nether"], default="bare", help="Starting checkpoint stage for sliced testing")
+    parser.add_argument(
+        "--stage",
+        choices=["bare", "iron", "midgame", "village", "nether", "nether_fortress", "nether_bastion", "enchant_anvil", "deep_water"],
+        default="bare",
+        help="Starting checkpoint stage for sliced testing",
+    )
     parser.add_argument("--tag", type=str, default="wild")
     parser.add_argument("--keep-time", action="store_true", help="Do not reset world time to morning")
     args = parser.parse_args()
@@ -339,6 +462,10 @@ def main() -> int:
 
         if args.stage == "village":
             sx, sy, sz, biome = select_village_wild_site(bot, bot_name, start_idx=args.site_index)
+        elif args.stage == "nether_fortress":
+            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "#minecraft:fortress", start_idx=args.site_index)
+        elif args.stage == "nether_bastion":
+            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "#minecraft:bastion_remnant", start_idx=args.site_index)
         else:
             sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage)
