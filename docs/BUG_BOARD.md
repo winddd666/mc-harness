@@ -42,3 +42,18 @@
 
 - *(等待 #5 DeepSeek #1 从轨迹中归档)*
 
+---
+
+## 场景需求队列（Scene Requests — 由 #1~#5 提单，#6 DeepSeek #2 按单实现）
+
+> 任何会话需要特定实机复现/验收环境时，按以下 5 行模板追加需求单；`#6` 实现为 `l3_wild_endurance_runner.py --stage <name>` 并接入 `v2_fleet.py` 后标为 `READY_FOR_RUN`，由 `#1 主 AGY` 合入上机。
+>
+> ```markdown
+> ### SCENE-XXX | 状态: OPEN | 提单人: #X | stage名: <name>
+> - **地形/结构要素**：(如 locate fortress / fill 3x3 岩浆池 / 混合有业+无业村民)
+> - **初始背包与成就**：(...)
+> - **死亡拉回规则**：(如设 spawnpoint 或下界死亡回传补装)
+> - **核心验证目标**：(验证哪个 Bug 修复或哪个成就链路)
+> ```
+
+

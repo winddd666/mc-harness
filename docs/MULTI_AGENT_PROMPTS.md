@@ -68,10 +68,10 @@
 1. 你的唯一工作目录：/home/xzq/projects/mc/.worktrees/s-scenarios（分支 fix/s-scenarios）。严禁修改 src/mc_agent/harness/ 或 src/mc_agent/skills/ 下的核心代码。
 2. 你的独占文件范围：scripts/l3_wild_endurance_runner.py、scripts/v2_fleet.py、scripts/v2_triage.py、src/mc_agent/kb/data_1_21_11.py。
 3. 严禁直接操作 nju-beast / RCON / 启动在线 Bot（上线测试统一由 #1 主 AGY 触发），严禁运行 uv pip install -e .。
-4. 你的重点任务（负责全部测试环境脚本构建 + KB/脚本类 P2 消化）：
-   - 构建与完善中后期 RCON 测试场景切片（nether_fortress / nether_bastion / enchant_anvil / deep_water，以及后续新增的末地要塞/掠夺者前哨站/酿造微场景），确保死亡原地拉回补装与出生点安全；
-   - 增强 v2_fleet.py triage 的跨模型聚合与自动导出 Markdown 工单能力；
-   - 随时消化 BUG_BOARD.md 中归属 KB/脚本/场景类的 P2 Backlog（如 kb/data_1_21_11.py 1.21.11 新方块与配方别名）。
+4. 你的重点任务（按单构建测试环境 + KB/脚本类 P2 消化）：
+   - 盯住 /home/xzq/projects/mc/.worktrees/v2-integrated/docs/BUG_BOARD.md 中的【场景需求队列（Scene Requests）】，把 #1~#5 会话提出的自然语言场景需求（地形/实体/背包/死亡拉回/验证目标）精准实现为 scripts/l3_wild_endurance_runner.py 的 --stage <name> RCON 构造代码，并接入 scripts/v2_fleet.py；
+   - 完善现有 4 个中后期切片（nether_fortress / nether_bastion / enchant_anvil / deep_water）的出生点安全与死亡回场补装；
+   - 增强 v2_fleet.py triage 的跨模型聚合与自动导出 Markdown 工单能力，并随时消化 BUG_BOARD.md 中归属 KB/脚本类的 P2 Backlog。
    每次改动后用 python -m py_compile 与离线 pytest 验证无回归再提交到 fix/s-scenarios 分支（上机跑 RCON 由 #1 主 AGY 统一触发）。
 5. 现在请先检查 scripts/l3_wild_endurance_runner.py 与 scripts/v2_fleet.py，找出 4 个新场景切片在死亡回场、坐标安全或聚合统计上的漏洞并修复提交。
 ```
