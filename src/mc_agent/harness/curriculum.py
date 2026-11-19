@@ -1736,7 +1736,7 @@ class CurriculumSupervisor:
                 dim_changed = prev_dim is not None and cur_dim != prev_dim
                 self._last_dim = cur_dim
                 if self.geofence is not None and self.geofence.enabled and cur_pos is not None:
-                    if dim_changed or math.hypot(cur_pos[0] - self.geofence.center_x, cur_pos[2] - self.geofence.center_z) > 400.0:
+                    if dim_changed or math.hypot(cur_pos[0] - self.geofence.center_x, cur_pos[2] - self.geofence.center_z) > self.geofence.radius:
                         self.geofence = dataclasses.replace(self.geofence, center_x=cur_pos[0], center_z=cur_pos[2])
                         self.toolset.geofence = self.geofence
                         self._last_dry_pos = None
