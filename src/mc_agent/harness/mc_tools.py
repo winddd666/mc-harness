@@ -65,18 +65,13 @@ COMPACT_CORE_TOOLS: tuple[str, ...] = (
     "mc_move_to",
     "mc_dig",
     "mc_place",
-    "mc_craft",
-    "mc_equip",
     "mc_attack",
     "mc_skill_harvest_logs",
     "mc_skill_craft_gear",
     "mc_skill_mine_blocks",
     "mc_skill_smelt",
-    "mc_skill_collect_drops",
     "mc_skill_staircase",
-    "mc_skill_tunnel",
     "mc_skill_mine_dfs",
-    "mc_skill_bunker",
     "mc_skill_flee",
     "mc_skill_unstick",
 )
@@ -2366,16 +2361,6 @@ class McToolset:
                     handler=self.mc_skill_mine_dfs,
                     concurrency="exclusive",
                 ),
-                Tool(
-                    name="mc_skill_ensure_items",
-                    description="纯物理硬前置递归备料器（0策略门禁）：先查背包/穿戴与记忆库箱子库存，再按原版配方、熔炼与最低采集镐级自动递归砍树/挖石/DFS采矿/烧炼/合成；遇看脸掉落物或受击危险立即干净返回。",
-                    parameters={
-                        "items": Parameter("目标物品列表 [{item, count}]", kind="object_array"),
-                        "max_duration_s": Parameter("最大执行秒数，默认150", kind="integer", required=False),
-                    },
-                    handler=self.mc_skill_ensure_items,
-                    concurrency="exclusive",
-                ),
         ]
         if profile == "compact":
             allowed = set(COMPACT_CORE_TOOLS)
@@ -2420,20 +2405,19 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_look": "转向坐标/实体",
     "mc_advancement_frontier": "查可解锁进度",
     "mc_skill_stabilize": "保命进食浮水",
-    "mc_skill_harvest_logs": "砍树",
-    "mc_skill_craft_gear": "自动制装",
-    "mc_skill_mine_blocks": "自动挖矿",
-    "mc_skill_smelt": "放炉烧制",
+    "mc_skill_harvest_logs": "自动换斧砍树",
+    "mc_skill_craft_gear": "合成任意物品/工具/护甲(自动木板木棍工作台)",
+    "mc_skill_mine_blocks": "自动换镐挖露头矿/石",
+    "mc_skill_smelt": "自动放炉配燃料烧制",
     "mc_skill_collect_drops": "拾掉落",
     "mc_skill_bind_bed": "走近床设重生点",
-    "mc_skill_unstick": "卡死脱困",
+    "mc_skill_unstick": "卡死/水体脱困",
     "mc_kb_lookup": "查配方/矿/成就",
     "mc_skill_bunker": "竖井避怪",
     "mc_skill_flee": "无遮挡遇险时封堵矿道或冲刺逃离",
-    "mc_skill_staircase": "阶梯升降",
+    "mc_skill_staircase": "爬出天坑/垫高(up/pillar)；下井探矿用mine_dfs",
     "mc_skill_tunnel": "水平矿道",
     "mc_skill_mine_dfs": "路径压缩探矿DFS/返井口",
-    "mc_skill_ensure_items": "递归备齐配方/烧炼/镐级材料",
 }
 
 _SELF_EVIDENT_PARAMS: frozenset[str] = frozenset(

@@ -13,7 +13,7 @@ from typing import Any, Callable
 from ..bot import BotSession
 from ..errors import ApiError, AuthError, BotNotReadyError, DeathLoopCooldownError
 from ..kb import RECIPES_1_21, normalize_dimension
-from ..skills import compute_advancement_frontier, highest_pickaxe_tier, total_owned_counts
+from ..skills import InventoryManager, compute_advancement_frontier, highest_pickaxe_tier, total_owned_counts
 from ..skills.ensure import EXTRA_OBJECTIVE_RECIPES, PhysicalPrerequisiteResolver, SMELT_SOURCES, collect_smelt_batch
 from .events import EventSink, JsonlEvents
 from .geofence import VoidGeofence
@@ -508,7 +508,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "第1步：直接调 mc_place(item='lodestone')（切勿传 x/y/z，系统会自动在身旁空格放下并返回 placed pos）；"
             "第2步：读取 mc_place 返回的 pos=[px, py, pz]，调 mc_interact(x=px, y=py, z=pz, item='compass') 完成绑定。"
         ),
-        extra_tools=("mc_interact", "mc_kb_lookup"),
+        extra_tools=("mc_interact",),
         advancement_id="minecraft:adventure/use_lodestone",
     ),
     "minecraft:story/lava_bucket": CurriculumTarget(
@@ -592,7 +592,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "解锁 adventure/crafters_crafting_crafters(15分)：背包已备齐 crafter×1 及第二套配方原料（5 iron_ingot + 1 crafting_table + 1 redstone + 1 dropper），"
             "直接放置 crafter，调 mc_window_act 按 3x3 槽位摆入配方并在旁边放置 lever/redstone_torch 触发红石脉冲吐出新 crafter。"
         ),
-        extra_tools=("mc_interact", "mc_window_view", "mc_window_act", "mc_kb_lookup"),
+        extra_tools=("mc_interact", "mc_window_view", "mc_window_act"),
         advancement_id="minecraft:adventure/crafters_crafting_crafters",
     ),
     "minecraft:adventure/ol_betsy": CurriculumTarget(
@@ -605,7 +605,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "解锁 adventure/ol_betsy(15分)：收集 3 stick + 2 string + 1 iron_ingot + 1 tripwire_hook 合 crossbow 与箭矢(arrow)，"
             "用 mc_shoot(weapon='crossbow', ...) 瞄准附近实体或方块装填发射。"
         ),
-        extra_tools=("mc_shoot", "mc_use_item", "mc_attack"),
+        extra_tools=("mc_shoot",),
         advancement_id="minecraft:adventure/ol_betsy",
     ),
     "minecraft:story/deflect_arrow": CurriculumTarget(
@@ -644,7 +644,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         tier=2,
         budget_class="short",
         task="收集 3 羊毛+3木板合 white_bed（或前往村庄已有床）放置，调 mc_skill_bind_bed。",
-        extra_tools=("mc_skill_bind_bed", "mc_interact", "mc_attack"),
+        extra_tools=("mc_skill_bind_bed",),
         advancement_id="minecraft:adventure/sleep_in_bed",
     ),
     "minecraft:adventure/trade": CurriculumTarget(
@@ -657,7 +657,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "解锁 adventure/trade(15分)：前往已知村民聚落扫描 villager 实体，先用 mc_window_view(entity_id=...) 查看可用交易选项，"
             "携绿宝石/纸/铁锭/农作物调 mc_skill_trade(entity_id=..., option=...) 完成一次交易。"
         ),
-        extra_tools=("mc_skill_trade", "mc_window_view", "mc_interact"),
+        extra_tools=("mc_skill_trade", "mc_window_view"),
         advancement_id="minecraft:adventure/trade",
     ),
     "minecraft:adventure/kill_a_mob": CurriculumTarget(
@@ -667,7 +667,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         tier=2,
         budget_class="short",
         task="装备最高近战剑/斧与盾，扫描附近敌对生物（僵尸/蜘蛛/骷髅）并安全击杀，注意低血量进掩体恢复。",
-        extra_tools=("mc_attack", "mc_posture"),
+        extra_tools=("mc_posture",),
         advancement_id="minecraft:adventure/kill_a_mob",
     ),
     "minecraft:husbandry/plant_seed": CurriculumTarget(
@@ -700,7 +700,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "解锁 story/enchant_item(30分)：准备 diamond_pickaxe 挖 4 块 obsidian，合 book(3 paper+1 leather) + 2 diamond 合 enchanting_table，"
             "放置后准备 lapis_lazuli 与待附魔铁/钻装备调 mc_skill_enchant(item=..., option=0) 安全完成附魔。"
         ),
-        extra_tools=("mc_interact", "mc_skill_enchant", "mc_window_view", "mc_kb_lookup"),
+        extra_tools=("mc_skill_enchant",),
         advancement_id="minecraft:story/enchant_item",
     ),
     "minecraft:adventure/summon_iron_golem": CurriculumTarget(
@@ -750,27 +750,30 @@ def score_completed_advancements(completed_ids: set[str] | list[str]) -> tuple[i
 def _infer_extra_tools_for_advancement(adv_id: str, how_to: str = "") -> tuple[str, ...]:
     extra: list[str] = []
     text = f"{adv_id} {how_to}".lower()
-    if any(k in text for k in ("interact", "bucket", "lodestone", "sign", "seed", "breed", "tame", "honey", "wax", "flint", "portal", "trade", "villager", "bed")):
-        extra.extend(["mc_interact", "mc_use_item"])
-    if any(k in text for k in ("kill", "mob", "squid", "skeleton", "wither", "blaze", "ghast", "piglin", "golem", "slime")):
-        extra.extend(["mc_attack", "mc_posture"])
+    if any(k in text for k in ("interact", "bucket", "lodestone", "sign", "seed", "breed", "tame", "honey", "wax", "flint", "portal", "shears", "boat", "fish")):
+        extra.append("mc_interact")
+    if any(k in text for k in ("potion", "milk", "ominous", "diet", "eat", "golden_apple", "stew", "kelp", "spyglass", "ender_pearl", "goat_horn", "trident")):
+        extra.append("mc_use_item")
+    if any(k in text for k in ("shield", "deflect", "sneak", "avoid_vibration")):
+        extra.append("mc_posture")
+    if any(k in text for k in ("spyglass", "deflect")):
+        extra.append("mc_look")
     if any(k in text for k in ("bow", "arrow", "crossbow", "trident", "bullseye", "sniper", "arbalistic", "two_birds")):
-        extra.extend(["mc_shoot", "mc_use_item", "mc_posture"])
+        extra.extend(["mc_shoot", "mc_posture"])
     if "enchant" in text or "附魔" in text:
-        extra.extend(["mc_skill_enchant", "mc_window_view"])
+        extra.append("mc_skill_enchant")
     if any(k in text for k in ("trade", "villager", "交易", "村民")):
         extra.extend(["mc_skill_trade", "mc_window_view"])
     if any(k in text for k in ("brew", "酿", "药水")):
-        extra.extend(["mc_skill_brew", "mc_window_view"])
+        extra.append("mc_skill_brew")
     if any(k in text for k in ("trim", "smithing", "netherite_armor", "锻造", "纹饰", "下界合金")):
-        extra.extend(["mc_skill_smithing", "mc_window_view"])
+        extra.append("mc_skill_smithing")
     if any(k in text for k in ("chest", "loot", "bastion", "箱", "战利品")):
-        extra.extend(["mc_skill_container", "mc_window_view"])
-    if any(k in text for k in ("crafter", "pot", "vault", "bookshelf", "jukebox")):
+        extra.append("mc_skill_container")
+    if any(k in text for k in ("crafter", "decorated_pot", "vault", "bookshelf", "jukebox")):
         extra.extend(["mc_window_view", "mc_window_act"])
     if "bed" in text or "sleep" in text:
         extra.append("mc_skill_bind_bed")
-    extra.append("mc_kb_lookup")
     return tuple(dict.fromkeys(extra))
 
 
@@ -1004,7 +1007,7 @@ def _enrich_target_with_world_memory(
                     f"[仓储提示：记忆库 {h0['block']}@{h0['pos']}({h0['dist']}m) 存有 {', '.join(stored_useful[:4])}，"
                     "优先调 mc_skill_container(action='take') 取出复用，勿重复采矿]"
                 )
-                extra_add.extend(["mc_skill_container", "mc_window_view"])
+                extra_add.append("mc_skill_container")
 
     adv_id = target.advancement_id or target.key
     if adv_id == "minecraft:adventure/trade":
@@ -1440,7 +1443,7 @@ def select_next_target(
                 tier=4,
                 budget_class="medium",
                 task="勘察周围未知区域、收集铁/钻石与食物，寻找村庄/要塞/深水结构并顺手完成沿途容易解锁的进度。",
-                extra_tools=("mc_interact", "mc_attack", "mc_posture", "mc_kb_lookup"),
+                extra_tools=("mc_interact", "mc_posture"),
                 advancement_id=None,
             ),
             frontier_data,
@@ -1463,7 +1466,7 @@ class CurriculumSupervisor:
         duration_s: float = 28800.0,
         max_calls_per_episode: int | None = None,
         episode_timeout_s: float | None = None,
-        tool_output_chars: int = 1600,
+        tool_output_chars: int = 2200,
         cooldown_s: float = 1200.0,
         strike_limit: int = 2,
         api_error_backoff_s: float = 8.0,
@@ -1503,6 +1506,11 @@ class CurriculumSupervisor:
             toolset
             if toolset is not None
             else McToolset(self.bot, geofence=self.geofence, wait_for_cooldown=True)
+        )
+        self.inventory_manager = InventoryManager(
+            self.bot,
+            world_memory=self.toolset.world_memory,
+            skills=self.toolset.skills,
         )
         self.world_jobs = WorldJobRegistry()
         self.suspended_episode: SuspendedEpisode | None = None
@@ -1653,6 +1661,30 @@ class CurriculumSupervisor:
                 # Soft ready collection: harvest any finished nearby furnace jobs between episodes!
                 if self.enable_async_world_jobs:
                     self.world_jobs.collect_ready_jobs(self.toolset.skills, origin=cur_pos, dim=cur_dim)
+
+                # AltoClef between-episode hygiene: auto-upgrade armor (`torso` safe) + free clutter when bag slots <= 5!
+                nh_ep = st.get("nearest_hostile")
+                nh_ep_dist = float(nh_ep.get("dist", 999.0)) if isinstance(nh_ep, dict) and nh_ep.get("name") else 999.0
+                if (
+                    self.enable_pre_ensure
+                    and bool(st.get("on_ground", True))
+                    and not bool(st.get("in_water"))
+                    and not bool(st.get("in_lava"))
+                    and nh_ep_dist > 10.0
+                ):
+                    try:
+                        self.inventory_manager.auto_equip_best(dimension=cur_dim, preserve_offhand=True)
+                        inv_hyg = self.bot.inventory()
+                        if isinstance(inv_hyg.get("empty_slots"), int) and int(inv_hyg["empty_slots"]) <= 5:
+                            prot_mats = (
+                                _compute_reserved_materials(self.suspended_episode, total_owned_counts(inv_hyg))
+                                if self.suspended_episode is not None
+                                else {}
+                            )
+                            with self.inventory_manager.protect(prot_mats.keys()):
+                                self.inventory_manager.free_slots(min_free=6)
+                    except Exception:
+                        pass
 
                 # Priority 1: Run a 1-level preempting opportunity target if queued
                 if self._pending_preempt_key is not None and self._pending_preempt_key in CURRICULUM_PLAYBOOKS:

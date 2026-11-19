@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import httpx
@@ -1024,5 +1025,73 @@ def test_bunker_wall_blocks_pre_hurt_melee_and_respawn_reanchors_geofence(tmp_pa
         assert abs(sup.geofence.center_x - (-170.0)) < 1.0
         assert abs(sup.geofence.center_z - (-380.0)) < 1.0
         assert abs(ts.geofence.center_x - (-170.0)) < 1.0
+
+
+def test_v2_integrated_monotonic_smelt_clock_and_episode_inventory_hygiene(tmp_path: Path) -> None:
+    """[V2-Integration] 1) `start_smelt_batch_nonblocking` normalizes `smelt_start` wall-clock `ready_at` to `time.monotonic()`;
+    2) `CurriculumSupervisor` auto-equips chestplate onto `torso` and clears clutter when `empty_slots <= 5`."""
+    from mc_agent.skills.ensure import start_smelt_batch_nonblocking
+
+    world = _Phase2World()
+    world.add_item("cobblestone", 12)
+    world.add_item("coal", 4)
+    world.blocks[(2, 64, 0)] = "furnace"
+    world.blocks[(3, 64, 0)] = "furnace"
+
+    equipped_slots: list[tuple[str, str]] = []
+    dropped_items: list[str] = []
+    orig_handler = world.handler
+
+    def v2_handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        body = json.loads(req.content.decode("utf-8")) if req.content else {}
+        if path == "/equip":
+            it = body["item"]
+            sl = body.get("slot", "hand")
+            if sl == "chest":
+                return httpx.Response(400, json={"ok": False, "error": "bad_args", "message": "ERR_ASSERTION: invalid destination: chest"})
+            equipped_slots.append((it, sl))
+            if sl == "torso" and world.consume_item(it, 1):
+                world.armor["chest"] = {"name": it, "count": 1}
+                return httpx.Response(200, json={"ok": True, "result": {"equipped": it, "slot": sl}})
+        elif path == "/drop":
+            it = body["item"]
+            cnt = int(body.get("count", 1))
+            world.consume_item(it, cnt)
+            dropped_items.append(it)
+            return httpx.Response(200, json={"ok": True, "result": {"dropped": it, "count": cnt}})
+        return orig_handler(req)
+
+    with BotSession("tok", bot_username="V2Bot", transport=httpx.MockTransport(v2_handler)) as bot:
+        skills = MacroSkills(bot)
+        t0 = time.monotonic()
+        batch = start_smelt_batch_nonblocking(skills, input_item="cobblestone", output_item="stone", count=12)
+        assert batch["ok"] is True
+        # MUST be in `time.monotonic()` clock domain (~65s ahead of `t0`), NEVER `time.time()` (~1.79e9)!
+        assert 10.0 <= (float(batch["ready_at"]) - t0) <= 180.0
+
+        # Fill inventory with 32 clutter slots so `empty_slots <= 4`, plus `iron_chestplate` + `iron_pickaxe`!
+        world.items = [{"name": "iron_pickaxe", "count": 1, "slot": 0}, {"name": "iron_chestplate", "count": 1, "slot": 1}]
+        for s_idx in range(2, 34):
+            world.items.append({"name": "rotten_flesh", "count": 4, "slot": s_idx})
+
+        def noop_chat(messages: list[dict[str, Any]], tools: Any = None, **kwargs: Any) -> dict[str, Any]:
+            return {"role": "assistant", "content": "done"}
+
+        ts = McToolset(bot, world_memory=WorldMemory())
+        sup = CurriculumSupervisor(
+            bot,
+            chat_fn=noop_chat,
+            runs_dir=tmp_path / "runs",
+            duration_s=30.0,
+            toolset=ts,
+            enable_pre_ensure=True,
+        )
+        sup.run(max_episodes=1)
+
+    assert ("iron_chestplate", "torso") in equipped_slots
+    assert "rotten_flesh" in dropped_items
+    assert "iron_pickaxe" not in dropped_items
+
 
 

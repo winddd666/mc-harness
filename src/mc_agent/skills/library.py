@@ -251,6 +251,15 @@ TOOL_WOOD_NEEDS: dict[str, tuple[int, int]] = {
     "diamond_hoe": (0, 2),
     "shield": (6, 0),
     "oak_boat": (5, 0),
+    "birch_boat": (5, 0),
+    "spruce_boat": (5, 0),
+    "white_bed": (3, 0),
+    "oak_sign": (6, 1),
+    "bow": (0, 3),
+    "fishing_rod": (0, 3),
+    "crossbow": (2, 3),
+    "ladder": (0, 7),
+    "painting": (0, 8),
     "campfire": (0, 3),
     "torch": (0, 1),
 }
@@ -2742,6 +2751,13 @@ class MacroSkills:
         item = resolve_item_alias(item)
         count = max(1, min(64, count))
         inv_raw, initial = _inventory_snapshot_and_counts(self.bot)
+        if item in {"planks", "any_planks"} or (item == "oak_planks" and initial.get("oak_log", 0) == 0):
+            for k_log, v_log in initial.items():
+                if v_log > 0 and k_log.endswith(("_log", "_stem")):
+                    cand_planks = _log_to_planks_name(k_log)
+                    if cand_planks in RECIPES_1_21 or cand_planks.endswith("_planks"):
+                        item = cand_planks
+                        break
         if item in (
             "iron_pickaxe",
             "diamond_pickaxe",

@@ -269,6 +269,13 @@ def start_smelt_batch_nonblocking(
         res = skills.smelt_start(input_item, count=count, allow_multi_furnace=allow_multi_furnace)
         if isinstance(res, dict) and res.get("ok"):
             res.setdefault("output_item", output_item)
+            # Normalize wall-clock `time.time()` from `smelt_start` to `time.monotonic()` for `WorldJobRegistry`!
+            now_m = time.monotonic()
+            est_s = float(res.get("estimated_wait_s") or 0.0)
+            res["ready_at"] = now_m + est_s
+            for f_row in res.get("furnaces") or []:
+                if isinstance(f_row, dict) and "estimated_wait_s" in f_row:
+                    f_row["ready_at"] = round(now_m + float(f_row["estimated_wait_s"]), 2)
         return res
 
     bot = skills.bot
@@ -423,7 +430,27 @@ def collect_smelt_batch(
 ) -> dict[str, Any]:
     """Collect finished outputs from one or more furnace positions."""
     if hasattr(skills, "smelt_collect"):
-        return skills.smelt_collect(furnaces, wait_remaining_s=wait_remaining_s)
+        if furnaces:
+            f0 = furnaces[0].get("pos") if isinstance(furnaces[0], dict) else furnaces[0]
+            if isinstance(f0, (list, tuple)) and len(f0) >= 3:
+                try:
+                    st0 = skills.bot.status()
+                    cp0 = st0.get("pos") or f0
+                    if math.hypot(float(cp0[0]) - (float(f0[0]) + 0.5), float(cp0[2]) - (float(f0[2]) + 0.5)) > 4.2:
+                        skills.navigate_segmented(float(f0[0]) + 0.5, float(f0[2]) + 0.5, range_m=2.6)
+                except Exception:
+                    pass
+        res_sc = skills.smelt_collect(furnaces, wait_remaining_s=wait_remaining_s)
+        if isinstance(res_sc, dict) and res_sc.get("failures"):
+            rem_f = [
+                {"pos": f["pos"]}
+                for f in res_sc["failures"]
+                if isinstance(f, dict) and f.get("pos") and f.get("error") not in {"no_window", "not_found"}
+            ]
+            if rem_f:
+                res_sc["remaining_furnaces"] = rem_f
+                res_sc["still_burning"] = True
+        return res_sc
 
     bot = skills.bot
     collected: list[dict[str, Any]] = []
@@ -637,10 +664,11 @@ class PhysicalPrerequisiteResolver:
             owned_eq = total_owned_counts(inv_eq)
             for eq_item, slot_name in equip_slots.items():
                 canon = resolve_item_alias(eq_item)
+                eff_slot = "torso" if slot_name == "chest" else slot_name
                 if owned_eq.get(canon, 0) > 0:
                     try:
-                        self.bot.call("equip", {"item": canon, "slot": slot_name})
-                        steps_log.append({"step": "equip", "item": canon, "slot": slot_name, "ok": True})
+                        self.bot.call("equip", {"item": canon, "slot": eff_slot})
+                        steps_log.append({"step": "equip", "item": canon, "slot": eff_slot, "ok": True})
                     except ApiError:
                         pass
 

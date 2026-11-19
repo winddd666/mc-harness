@@ -74,9 +74,9 @@ MC_SYSTEM_PROMPT = """你是运行在 Minecraft Java 版 1.21.11 生存服务器
 MC_COMPACT_SYSTEM_PROMPT = """你是 MC 1.21.11 竞赛生存智能体。每轮末尾附最新 `[实时HUD]`（格坐标/HP/饱食/耐久/暴露方块/缺口），勿空转查状态。
 铁律：
 1. 调工具前仅输出<=20字当前真实意图（禁复读旧口号/手写JSON；思考模式仅在think内<=120字核对HUD与缺口），直接发 `tool_calls`。
-2. 优先宏技能：`mc_skill_harvest_logs`、`mc_skill_craft_gear`、`mc_skill_mine_dfs`（地下下井找矿/双镐切换/遇洞转角/零挖返井口）、`mc_skill_mine_blocks`、`mc_skill_smelt`、`mc_skill_collect_drops`、`mc_skill_staircase`、`mc_skill_tunnel`、`mc_skill_unstick`（树冠/卡死/水上脱困）、`mc_skill_bunker`、`mc_skill_flee`；禁止胡乱挖泥土/装饰石或盲调`mc_craft`寻路旧台。
+2. 优先宏技能：`mc_skill_harvest_logs`、`mc_skill_craft_gear`（合成任意2x2/3x3物品与护甲工具，自动合木板木棍摆工作台穿戴）、`mc_skill_mine_dfs`（地下下井找矿/双镐切换/零挖返井口`climb_out`）、`mc_skill_mine_blocks`（采露头矿石）、`mc_skill_smelt`、`mc_skill_staircase`（爬出天坑`up`或垫高`pillar`）、`mc_skill_unstick`（树冠/卡死/水上脱困）、`mc_skill_flee`；禁止胡乱挖泥土/装饰石。
 3. 敌情与保坑：HUD标`隔墙怪`(岩壁阻隔)且未掉血时安全，严禁调`mc_skill_flee`弃坑回地表，继续就地采矿/熔炼并避开该方向掘进！仅当`近敌(无遮挡!)`或刚受击：单只僵尸/蜘蛛且有剑/斧且HP>=12调`mc_attack(entity_id)`反杀；苦力怕/骷髅/群怪/无剑斧调`mc_skill_flee`(探矿穴内自动封堵保坑，露天冲刺逃离)。
-4. 硬规：仅真实入包才算取得材料；3x3 配方直接用`mc_skill_craft_gear`就地建台合装；镐级(stone/coal=木,iron/copper=石,diamond=铁,obsidian=钻)；`mc_move_to` 禁传 y；`in_water` 禁强挖先 `mc_skill_unstick`；勿重试失败坐标；虚空岛禁越界。
+4. 硬规：仅真实入包才算取得材料；所有配方统一用`mc_skill_craft_gear`就地合成；镐级(stone/coal=木,iron/copper=石,diamond=铁,obsidian=钻)；`mc_move_to` 禁传 y；`in_water` 禁强挖先 `mc_skill_unstick`；勿重试失败坐标；虚空岛禁越界。
 5. 目标确认达成后停用工具并简述结果。"""
 
 
@@ -109,39 +109,45 @@ def _infer_extra_tools_for_task(task: str, explicit: set[str] | list[str] | tupl
             "portal",
             "船",
             "门",
-            "villager",
-            "trade",
+            "剪",
+            "shears",
         )
     ):
         extras.add("mc_interact")
-    if any(k in low for k in ("use_item", "药水", "potion", "milk", "三叉戟", "trident")):
+    if any(k in low for k in ("use_item", "药水", "potion", "milk", "ominous", "三叉戟", "trident", "spyglass", "望远镜", "golden_apple", "金苹果")):
         extras.add("mc_use_item")
-    if any(k in low for k in ("杀", "击杀", "打怪", "鱿鱼", "squid", "skeleton", "zombie", "蜘蛛", "牛", "羊", "猪", "鸡", "hostile", "attack", "举盾", "shield", "deflect")):
-        extras.update({"mc_attack", "mc_posture", "mc_look"})
+    if any(k in low for k in ("举盾", "shield", "deflect", "弹反", "潜行", "sneak")):
+        extras.add("mc_posture")
+    if any(k in low for k in ("spyglass", "望远镜", "mc_look", "deflect", "弹反")):
+        extras.add("mc_look")
+    if any(k in low for k in ("equip", "副手", "换装")):
+        extras.add("mc_equip")
     if any(k in low for k in ("弓", "弩", "bow", "crossbow", "arrow", "箭", "shoot", "射")):
-        extras.update({"mc_shoot", "mc_use_item", "mc_posture"})
+        extras.update({"mc_shoot", "mc_posture"})
     if any(k in low for k in ("附魔", "enchant")):
-        extras.update({"mc_skill_enchant", "mc_window_view"})
+        extras.add("mc_skill_enchant")
     if any(k in low for k in ("交易", "trade", "村民", "villager")):
         extras.update({"mc_skill_trade", "mc_window_view"})
     if any(k in low for k in ("酿造", "酿药", "brew", "brewing_stand")):
-        extras.update({"mc_skill_brew", "mc_window_view"})
+        extras.add("mc_skill_brew")
     if any(k in low for k in ("容器", "箱", "木桶", "chest", "barrel", "存取", "仓库")):
-        extras.update({"mc_skill_container", "mc_window_view"})
+        extras.add("mc_skill_container")
     if any(k in low for k in ("锻造", "纹饰", "下界合金", "smithing", "trim", "netherite")):
-        extras.update({"mc_skill_smithing", "mc_window_view"})
+        extras.add("mc_skill_smithing")
     if any(k in low for k in ("铁砧", "anvil", "改名")):
-        extras.update({"mc_skill_anvil", "mc_window_view"})
+        extras.add("mc_skill_anvil")
     if any(k in low for k in ("切石机", "stonecutter")):
-        extras.update({"mc_skill_stonecutter", "mc_window_view"})
+        extras.add("mc_skill_stonecutter")
     if any(k in low for k in ("crafter", "合成器", "window", "战利品")):
         extras.update({"mc_window_view", "mc_window_act"})
     if any(k in low for k in ("床", "bed", "睡觉", "重生")):
-        extras.update({"mc_skill_bind_bed", "mc_interact"})
+        extras.add("mc_skill_bind_bed")
     if any(k in low for k in ("公屏", "聊天", "chat")):
         extras.add("mc_chat")
-    if any(k in low for k in ("待解锁", "frontier", "advancement", "配方", "查表", "kb")):
-        extras.update({"mc_advancement_frontier", "mc_kb_lookup"})
+    if any(k in low for k in ("待解锁", "frontier")):
+        extras.add("mc_advancement_frontier")
+    if any(k in low for k in ("查表", "kb", "mc_kb_lookup")):
+        extras.add("mc_kb_lookup")
     return extras
 
 
@@ -1011,11 +1017,9 @@ def run_mc_agent(
         and any(neg in task for neg in ("不要长时间原地挖矿", "不要挖矿", "禁止挖矿", "勿挖矿", "不要下潜"))
     ):
         base_reg = base_reg.exclude_tools("mc_skill_mine_dfs")
-    registry = (
-        base_reg
-        .with_tools(context.result_tool(compact=(tool_profile == "compact")))
-        .map_tools(repeat_guard.wrap_tool)
-    )
+    if tool_profile != "compact":
+        base_reg = base_reg.with_tools(context.result_tool(compact=False))
+    registry = base_reg.map_tools(repeat_guard.wrap_tool)
 
     # 对齐起始事件游标，避免把历史旧聊天当成当前新事件
     try:
@@ -1681,7 +1685,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tool-profile",
         choices=["compact", "full"],
         default="compact",
-        help="工具集档位（默认 compact 16 核心工具+按本局投影；full 开放全量 28 工具）",
+        help="工具集档位（默认 compact 14 正交核心工具+按本局投影；full 开放全量调试工具）",
     )
     parser.add_argument("--curriculum", action="store_true", help="启用 RULES.md 8 小时计分课程自主循环")
     parser.add_argument("--curriculum-hours", type=float, default=8.0, help="课程总运行时长（小时，默认 8.0）")
@@ -1697,8 +1701,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool-output-chars",
         type=int,
-        default=1600,
-        help="单条工具输出进入上下文的字符上限（至少 256，默认 1600）",
+        default=2200,
+        help="单条工具输出进入上下文的字符上限（至少 256，默认 2200）",
     )
     parser.add_argument("--system-prompt-file", default=None, help="用文件内容覆盖默认 system prompt（用于地表探索/找村庄等专用模式）")
     return parser
