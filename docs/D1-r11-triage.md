@@ -692,6 +692,19 @@ mine_dfs(iron)            → insufficient_pickaxe_tier（仅木镐）
 
 **新增 BUG-041（P1，Slice C）**：低镐等级时应优先软方块方向（dirt/gravel/sand），并在 `timeout_path=dig` 时直接提示补石镐。
 
+### 4aj. r22_long 中段快照（00:20，约 28/45 分钟）
+
+| bot | 分数 | 集数 | 状态 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | **195** | 11 | 正常推进 |
+| `ds_ds_1_bare` | 20 | 4 | 铁器已过 |
+| `nju_movetest_01_bare` | 20 | 5 | 缓慢 |
+| `hy4_hy_1_bare` | **10** | **6** | 6 集无进展 → BUG-041 死锁实证 |
+
+- `hy4_hy_1` 6 集仍停在石器（10 分），与 BUG-041 的"木镐硬岩 30s/格"完全吻合
+- `glm_5` 出现 `move_to(entity_id=skeleton@31.5m, ignore_hurt=True)` → `stalled ×2`（P2 级，仅 4 次/2 bots，暂不提单）
+- 全波 `mine_dfs` 0 零进展、0 void、0 Traceback
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
