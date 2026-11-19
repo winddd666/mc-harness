@@ -492,6 +492,44 @@ def _suggest_owner(key: str) -> str:
     return "Slice D2 (#6 DeepSeek #2) / 待分诊"
 
 
+SQUAD_LABELS: dict[str, str] = {
+    "nju": "NJU Qwen3.6-35B",
+    "glm": "GLM-5.3",
+    "ds": "DeepSeek-v4.1-flash",
+    "hy4": "HY4-flash-free",
+}
+
+
+def aggregate_by_squad(rows: list[BotRow]) -> list[dict[str, Any]]:
+    """Cross-model aggregation: one row per model family (squad)."""
+    buckets: defaultdict[str, list[BotRow]] = defaultdict(list)
+    for r in rows:
+        buckets[r.squad].append(r)
+    out: list[dict[str, Any]] = []
+    for squad, group in sorted(buckets.items()):
+        done = [r for r in group if r.status in ("done", "completed")]
+        scores = [r.score for r in done]
+        errors: Counter[str] = Counter()
+        for r in group:
+            for key, cnt in r.top_errors:
+                errors[key] += cnt
+        out.append(
+            {
+                "squad": squad,
+                "label": SQUAD_LABELS.get(squad, squad),
+                "bots": len(group),
+                "completed": len(done),
+                "crashed": sum(1 for r in group if r.status == "crash"),
+                "avg_score": round(sum(scores) / len(scores), 1) if scores else 0.0,
+                "total_deaths": sum(r.deaths for r in group),
+                "avg_deaths": round(sum(r.deaths for r in group) / len(group), 2) if group else 0.0,
+                "http_429": sum(r.http_429 for r in group),
+                "top_error": errors.most_common(1)[0][0] if errors else "-",
+            }
+        )
+    return out
+
+
 def _write_markdown(
     wave: str,
     rows: list[BotRow],
@@ -522,7 +560,20 @@ def _write_markdown(
             f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.score} | {r.episodes_done} | "
             f"{r.deaths} | {r.guardian_incidents} | {r.preemptions} | {r.http_429} | {g} |"
         )
-    lines.extend(["", "## 2. 跨模型 P0/P1 错误榜单", ""])
+    lines.extend(["", "## 2. 模型维度聚合（跨模型对比）", ""])
+    agg = aggregate_by_squad(rows)
+    lines.extend(
+        [
+            "| 模型 | Bots | Completed | Crash | 平均分 | 总死亡 | 场均死亡 | 429 | 头号错误 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    for a in agg:
+        lines.append(
+            f"| {a['label']} | {a['bots']} | {a['completed']} | {a['crashed']} | {a['avg_score']} | "
+            f"{a['total_deaths']} | {a['avg_deaths']} | {a['http_429']} | `{a['top_error']}` |"
+        )
+    lines.extend(["", "## 3. 跨模型 P0/P1 错误榜单", ""])
     ranked = sorted(err_counts.items(), key=lambda kv: (-len(err_bots[kv[0]]), -kv[1]))
     if ranked:
         lines.extend(
@@ -536,7 +587,7 @@ def _write_markdown(
             lines.append(f"| {i} | {len(bots)} | {cnt} | `{key}` | {', '.join(bots[:4])} | {_suggest_owner(key)} |")
     else:
         lines.append("*（无工具失败事件）*")
-    lines.extend(["", "## 3. 自动工单（Work Orders）", ""])
+    lines.extend(["", "## 4. 自动工单（Work Orders）", ""])
     ticket_no = 0
     for r in rows:
         if r.status == "crash":
@@ -568,7 +619,7 @@ def _write_markdown(
             ]
         )
     if slow_tools:
-        lines.extend(["## 4. 超时穿透工具（≥{:.0f}s）".format(SLOW_TOOL_THRESHOLD_S), "",
+        lines.extend(["## 5. 超时穿透工具（≥{:.0f}s）".format(SLOW_TOOL_THRESHOLD_S), "",
                       "| 耗时 | Bot | 工具 |", "|---:|---|---|"])
         for dt, nm, tool in sorted(slow_tools, reverse=True)[:15]:
             lines.append(f"| {dt:.0f}s | `{nm}` | `{tool}` |")
@@ -608,6 +659,14 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
         if r.status == "crash" and r.crash_tail:
             tail = r.crash_tail.splitlines()[-1]
             print(f"        crash: {tail[:150]}")
+
+    print("\n--- CROSS-MODEL AGGREGATE (per model family) ---")
+    for a in aggregate_by_squad(rows):
+        print(
+            f"  {a['label']:22s} bots={a['bots']:2d} done={a['completed']:2d} crash={a['crashed']:d} "
+            f"avg_score={a['avg_score']:6.1f} deaths={a['total_deaths']:3d} "
+            f"avg_deaths={a['avg_deaths']:4.2f} 429={a['http_429']:d} top={a['top_error']}"
+        )
 
     print("\n--- CROSS-MODEL P0/P1 BUG LEADERBOARD (ranked by affected_bots x count) ---")
     ranked = sorted(err_counts.items(), key=lambda kv: (-len(err_bots[kv[0]]), -kv[1]))

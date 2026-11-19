@@ -281,10 +281,9 @@ def prepare_scene_ground(
         cmds.extend(
             [
                 f"{pre} forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
-                f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:obsidian",
-                f"{pre} setblock {ix + 3} {iy} {iz} minecraft:respawn_anchor[charges=4]",
-                f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix - 1} {iy - 1} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz + 3} minecraft:air",
+                f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:respawn_anchor[charges=4]",
                 f"{pre} tp {bot_name} {ix}.5 {iy} {iz}.5",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
@@ -539,6 +538,7 @@ def reset_wild_bot(
             [
                 f"execute in minecraft:the_nether run tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
                 f"execute in minecraft:the_nether run spawnpoint {bot_name} {ix} {iy} {iz}",
+                f"advancement revoke {bot_name} everything",
                 f"advancement grant {bot_name} only minecraft:story/root",
                 f"advancement grant {bot_name} only minecraft:adventure/root",
                 f"advancement grant {bot_name} only minecraft:husbandry/root",
@@ -620,12 +620,21 @@ class SceneWatchdog(threading.Thread):
     This watchdog polls status every `interval_s` and returns/restocks within one cycle.
     """
 
-    def __init__(self, bot: Any, bot_name: str, scene: SceneAnchor, *, interval_s: float = 8.0) -> None:
+    def __init__(
+        self,
+        bot: Any,
+        bot_name: str,
+        scene: SceneAnchor,
+        *,
+        interval_s: float = 8.0,
+        near_container: Any = None,
+    ) -> None:
         super().__init__(name=f"scene-watchdog-{bot_name}", daemon=True)
         self.bot = bot
         self.bot_name = bot_name
         self.scene = scene
         self.interval_s = interval_s
+        self.near_container = near_container
         self._stop = threading.Event()
         self._last_return = 0.0
         self._last_total = -1
@@ -674,8 +683,20 @@ class SceneWatchdog(threading.Thread):
             if self._inv_tick % 3 == 1:  # sample on the very first tick, then every 3rd (~24s)
                 total = self._owned_total()
                 if total is not None:
+                    # Only infer death from an inventory collapse when the bot is back at the scene
+                    # anchor and not standing next to a known chest (otherwise chest deposits and
+                    # deliberate stashing would trigger free-gear restocks).
+                    at_anchor = dist <= 48.0
+                    stashing = False
+                    if self.near_container is not None:
+                        try:
+                            stashing = bool(self.near_container(dim, pos))
+                        except Exception:
+                            stashing = False
                     if (
-                        self._last_total >= 6
+                        at_anchor
+                        and not stashing
+                        and self._last_total >= 6
                         and total <= max(1, self._last_total // 4)
                         and self._last_total - total >= 6
                     ):
@@ -814,6 +835,24 @@ def main() -> int:
                 rpm_budget_override=args.rpm_budget,
             )
         )
+        def _near_known_container(dim_cur: str, pos_cur: Any, radius: float = 8.0) -> bool:
+            """True when the bot stands next to a remembered chest/container (so item loss is a stash, not a death)."""
+            try:
+                if not isinstance(pos_cur, (list, tuple)) or len(pos_cur) < 3:
+                    return False
+                dim_key = "nether" if "nether" in dim_cur else dim_cur
+                for key in toolset.world_memory.containers:
+                    cdim = str(key[0]).lower()
+                    cdim_norm = "nether" if "nether" in cdim else cdim
+                    if cdim_norm != dim_key:
+                        continue
+                    _, cx, cy, cz = key
+                    if math.hypot(float(pos_cur[0]) - cx, float(pos_cur[2]) - cz) <= radius and abs(float(pos_cur[1]) - cy) <= 4:
+                        return True
+            except Exception:
+                return False
+            return False
+
         def _guard_scene_anchor(ev: dict[str, Any]) -> None:
             if ev.get("type") != "curriculum.episode.started":
                 return
@@ -835,7 +874,7 @@ def main() -> int:
             except Exception:
                 pass
 
-        watchdog = SceneWatchdog(bot, bot_name, scene)
+        watchdog = SceneWatchdog(bot, bot_name, scene, near_container=_near_known_container)
         watchdog.start()
         try:
             sup = CurriculumSupervisor(

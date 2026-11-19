@@ -60,11 +60,16 @@ def main() -> int:
     err_models: collections.defaultdict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     err_msgs: collections.defaultdict[str, collections.Counter] = collections.defaultdict(collections.Counter)
 
+    # Failures caused by the 0-LLM reflex preempting an in-flight tool are NOT harness bugs.
+    preempt_cnt: collections.Counter[str] = collections.Counter()
+    preempt_bots: collections.defaultdict[str, set[str]] = collections.defaultdict(set)
+
     model_fail_bots: collections.defaultdict[str, set[str]] = collections.defaultdict(set)
     model_fail_cnt: collections.Counter[str] = collections.Counter()
     retry_bots: collections.defaultdict[str, set[str]] = collections.defaultdict(set)
     retry_cnt: collections.Counter[str] = collections.Counter()
     slow: list[tuple[float, str, str]] = []
+    tool_dur: collections.defaultdict[str, list[float]] = collections.defaultdict(list)
 
     rows = []
     for bd in bot_dirs:
@@ -101,20 +106,28 @@ def main() -> int:
                         cur["model"] = m.split("@")[0]
                 elif t == "tool.started":
                     fn = ev.get("function") or {}
-                    starts[str(ev.get("call_id"))] = str(fn.get("name") or "?")
+                    starts[str(ev.get("call_id"))] = (
+                        str(fn.get("name") or "?"),
+                        float(ev.get("elapsed") or 0),
+                    )
                 elif t == "tool.completed":
                     cid = str(ev.get("call_id"))
-                    tool = starts.pop(cid, "?")
+                    tool, s0 = starts.pop(cid, ("?", 0.0))
                     ok, code, msg = parse_result(ev.get("result"))
                     if ok is False:
                         key = f"{tool}:{code or 'unknown'}"
+                        if code is None and "小脑本能抢占接管" in str(msg or ""):
+                            preempt_cnt[tool] += 1
+                            preempt_bots[tool].add(name)
+                            continue
                         err_cnt[key] += 1
                         err_bots[key].add(name)
                         err_models[key][cur["model"]] += 1
                         if msg:
                             err_msgs[key][str(msg)[:220]] += 1
                         err_samples.setdefault(key, (str(evf), ev))
-                    dt = float(ev.get("elapsed") or 0)
+                    dt = float(ev.get("elapsed") or 0) - s0
+                    tool_dur[tool].append(max(0.0, dt))
                     if dt >= 60.0:
                         slow.append((dt, name, tool))
                 elif t == "model.failed":
@@ -158,6 +171,17 @@ def main() -> int:
             for msg, mc in err_msgs[key].most_common(2):
                 print(f"      msg[{mc}x] {msg}")
 
+        print("\n--- REFLEX PREEMPTIONS (excluded from bug leaderboard) ---")
+        for tool, cnt in preempt_cnt.most_common():
+            print(f"  {len(preempt_bots[tool]):2d} bots | {cnt:4d}x | {tool}")
+
+        print("\n--- PER-MODEL FAILURE MATRIX (top tools) ---")
+        models = sorted({m for c in err_models.values() for m in c})
+        print("  " + f"{'error':44s} " + " ".join(f"{m[:14]:>14s}" for m in models))
+        for key, cnt in sorted(err_cnt.items(), key=lambda kv: (-len(err_bots[kv[0]]), -kv[1]))[:12]:
+            row = " ".join(f"{err_models[key].get(m, 0):14d}" for m in models)
+            print(f"  {key:44s} " + row)
+
         print("\n--- MODEL FAILURE / RETRY LEADERBOARD ---")
         for key, cnt in sorted(model_fail_cnt.items(), key=lambda kv: (-len(model_fail_bots[kv[0]]), -kv[1])):
             print(f"  {len(model_fail_bots[key]):2d} bots | {cnt:4d}x | {key}")
@@ -168,6 +192,12 @@ def main() -> int:
             print("\n--- SLOW TOOL CALLS (>=60s) ---")
             for dt, nm, tool in sorted(slow, reverse=True)[:15]:
                 print(f"  {dt:6.1f}s | {nm:28s} | {tool}")
+
+        print("\n--- TOOL DURATION STATS (start/finish delta) ---")
+        for tool, vals in sorted(tool_dur.items(), key=lambda kv: -max(kv[1]))[:12]:
+            v = sorted(vals)
+            print(f"  {tool:26s} n={len(v):4d} med={v[len(v)//2]:6.1f}s "
+                  f"p90={v[min(len(v)-1, int(0.9*len(v)))]:6.1f}s max={v[-1]:6.1f}s")
         return 0
 
     print(f"# D1 TRIAGE {args.wave}\n")

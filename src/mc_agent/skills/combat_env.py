@@ -15,6 +15,7 @@ import time
 from typing import Any, Literal, Protocol, Sequence, TypedDict
 
 from ..errors import ApiError
+from ..harness.control import RequestCancelled, RunTimedOut
 from .safety import SAFE_FOOD_PRIORITY
 
 AIR_LIKE_BLOCKS: frozenset[str] = frozenset(
@@ -571,9 +572,13 @@ class CombatEnv:
                 break
 
         roof_solid = not _is_passable(self._get_block_name(bx, by + 2, bz))
+        opposite_walls = (
+            ("north" in solid_wall_dirs and "south" in solid_wall_dirs)
+            or ("east" in solid_wall_dirs and "west" in solid_wall_dirs)
+        )
         if len(solid_wall_dirs) == 4 and roof_solid:
             enclosure = "sealed_bunker"
-        elif roof_solid and len(solid_wall_dirs) >= 2:
+        elif roof_solid and (len(solid_wall_dirs) >= 3 or opposite_walls):
             enclosure = "carved_shaft"
         elif roof_solid or max_pillar < 3:
             enclosure = "open_cave"
@@ -799,6 +804,167 @@ class CombatEnv:
 
         return {"ok": False, "mode": norm_mode, "placed": 0, "pos_after": pos0, "reason": "unknown_mode"}
 
+    def escape_lava(self) -> dict[str, Any]:
+        """Deterministically escape lava using water douse (overworld), safe-yaw jump sprint, wall-notch/pillar climb, and live `in_lava` verification."""
+        st = self.bot.status()
+        if not bool(st.get("in_lava")):
+            return {
+                "ok": True,
+                "in_lava": False,
+                "already_dry": True,
+                "pos_after": st.get("pos"),
+                "actions": [],
+            }
+
+        actions: list[str] = []
+        counts, _, _ = self._inventory_counts_and_shield()
+        dim = str(st.get("dimension") or "").lower()
+        if counts.get("water_bucket", 0) > 0 and "nether" not in dim:
+            douse = self.build_tactical("place_water_feet")
+            actions.append("place_water_feet" if douse.get("ok") else "place_water_feet_failed")
+            st = self.bot.status()
+            if not bool(st.get("in_lava")):
+                return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
+            try:
+                self.bot.call("use_item", {"item": "water_bucket"})
+                actions.append("use_water_bucket")
+                st = self.bot.status()
+                if not bool(st.get("in_lava")):
+                    return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
+            except ApiError:
+                pass
+
+        # 1. If submerged deep in lava, swim up first so surface bank scan can find solid footing
+        self.invalidate_block_cache()
+        pos0 = st.get("pos") or [0.0, 64.0, 0.0]
+        head_bx, head_by, head_bz = math.floor(float(pos0[0])), math.floor(float(pos0[1])) + 1, math.floor(float(pos0[2]))
+        if self._get_block_name(head_bx, head_by, head_bz) in {"lava", "flowing_lava"}:
+            try:
+                self.bot.call("control", {"forward": True, "jump": True, "sprint": True, "ms": 950, "stop_on": ["death"]})
+                actions.append("lava_surface_swim")
+            except ApiError:
+                pass
+            self.invalidate_block_cache()
+            st = self.bot.status()
+            if st.get("alive") is False or not bool(st.get("in_lava")):
+                return {
+                    "ok": st.get("alive") is not False and not bool(st.get("in_lava")),
+                    "in_lava": bool(st.get("in_lava")),
+                    "pos_after": st.get("pos"),
+                    "actions": actions,
+                }
+            pos0 = st.get("pos") or pos0
+
+        # 2. Try scanning safe non-lava exits (including 1-block step-ups) and jump-sprinting out
+        scan = self.scan_safe_yaws(
+            pos0,
+            float(st.get("yaw") or 0.0),
+            dist=2.8,
+            angles_deg=(0, 45, -45, 90, -90, 135, -135, 180),
+        )
+        tried_yaws: list[float] = []
+        if scan.get("best_yaw") is not None:
+            tried_yaws.append(float(scan["best_yaw"]))
+        for c in scan.get("candidates") or []:
+            if c.get("hazard") not in {"lava", "geofence"} and float(c.get("yaw", 0.0)) not in tried_yaws:
+                if c.get("safe") or c.get("hazard") in {None, "water"}:
+                    tried_yaws.append(float(c["yaw"]))
+        if not tried_yaws:
+            tried_yaws = [float(st.get("yaw") or 0.0)]
+
+        for cyaw in tried_yaws[:2]:
+            try:
+                self.bot.call("look", {"yaw": cyaw, "pitch": 0.0})
+                self.bot.call(
+                    "control",
+                    {"forward": True, "jump": True, "sprint": True, "ms": 950, "stop_on": ["death"]},
+                )
+                actions.append("lava_jump_sprint")
+            except ApiError:
+                pass
+            st = self.bot.status()
+            if st.get("alive") is False or not bool(st.get("in_lava")):
+                return {
+                    "ok": st.get("alive") is not False and not bool(st.get("in_lava")),
+                    "in_lava": bool(st.get("in_lava")),
+                    "pos_after": st.get("pos"),
+                    "actions": actions,
+                }
+
+        # 2. Boxed-in pit or deep lava: try replacing lava at feet / pillaring up with a filler block
+        filler = self._pick_filler_block(counts)
+        if filler is not None:
+            p_cur = st.get("pos") or pos0
+            bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
+            for place_pos in ([bx, by, bz], [bx, by - 1, bz]):
+                try:
+                    self.bot.call("control", {"jump": True, "ms": 220, "wait": False})
+                    time.sleep(0.18)
+                    self.bot.call("place", {"item": filler, "pos": place_pos})
+                    actions.append(f"lava_place_{filler}")
+                    self.invalidate_block_cache()
+                    st = self.bot.status()
+                    if st.get("alive") is False or not bool(st.get("in_lava")):
+                        return {
+                            "ok": st.get("alive") is not False and not bool(st.get("in_lava")),
+                            "in_lava": bool(st.get("in_lava")),
+                            "pos_after": st.get("pos"),
+                            "actions": actions,
+                        }
+                except ApiError:
+                    continue
+
+        # 3. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
+        p_cur = st.get("pos") or pos0
+        bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
+        for dname, (dx, dz) in CARDINAL_VECTORS.items():
+            ex, ez = bx + dx, bz + dz
+            if self.geofence is not None and hasattr(self.geofence, "check_point"):
+                if self.geofence.check_point(ex + 0.5, ez + 0.5, action="escape_lava") is not None:
+                    continue
+            b_foot = self._get_block_name(ex, by, ez)
+            b_head = self._get_block_name(ex, by + 1, ez)
+            b_top = self._get_block_name(ex, by + 2, ez)
+            if b_foot in {"lava", "flowing_lava", "bedrock"} or b_head in {"lava", "flowing_lava", "bedrock"}:
+                continue
+            dug_any = False
+            for cy in (by + 1, by + 2):
+                bn = self._get_block_name(ex, cy, ez)
+                if not _is_passable(bn) and bn not in {"lava", "flowing_lava", "water", "flowing_water", "bedrock"}:
+                    try:
+                        self.bot.call("dig", {"pos": [ex, cy, ez], "collect": False, "stop_on": ["death"]})
+                        dug_any = True
+                    except ApiError:
+                        break
+            if dug_any or (_is_passable(b_head) and _is_passable(b_top)):
+                yaw_out = math.atan2(-(ex + 0.5 - float(p_cur[0])), -(ez + 0.5 - float(p_cur[2])))
+                try:
+                    self.bot.call("look", {"yaw": yaw_out, "pitch": 0.0})
+                    self.bot.call(
+                        "control",
+                        {"forward": True, "jump": True, "sprint": True, "ms": 1000, "stop_on": ["death"]},
+                    )
+                    actions.append(f"lava_notch_{dname}")
+                except ApiError:
+                    pass
+                st = self.bot.status()
+                if st.get("alive") is False or not bool(st.get("in_lava")):
+                    break
+
+        st_end = self.bot.status()
+        still_in_lava = bool(st_end.get("in_lava"))
+        if still_in_lava and st_end.get("alive") is not False:
+            try:
+                self.bot.call("posture", {"jump": True})
+            except ApiError:
+                pass
+        return {
+            "ok": st_end.get("alive") is not False and not still_in_lava,
+            "in_lava": still_in_lava,
+            "pos_after": st_end.get("pos"),
+            "actions": actions,
+        }
+
     def flee(
         self,
         threat_pos: Sequence[float] | None = None,
@@ -848,14 +1014,39 @@ class CombatEnv:
         except ApiError:
             pass
 
+        st_mid = self.bot.status()
+        if st_mid.get("alive") is False:
+            return {"ok": False, "mode": "respawned", "moved_dist": 0.0, "pos_after": st_mid.get("pos"), "respawned": True}
+        mid_pos = st_mid.get("pos") or pos0
+        mid_moved = math.hypot(float(mid_pos[0]) - float(pos0[0]), float(mid_pos[2]) - float(pos0[2]))
+        if mid_moved > 64.0:
+            return {
+                "ok": False,
+                "mode": "respawned",
+                "moved_dist": round(mid_moved, 2),
+                "pos_after": mid_pos,
+                "respawned": True,
+            }
+
+        threat_dist_mid = 0.0
+        if threat_pos is not None and len(threat_pos) >= 3:
+            threat_dist_mid = math.hypot(float(mid_pos[0]) - float(threat_pos[0]), float(mid_pos[2]) - float(threat_pos[2]))
+
         ux, uz = yaw_to_unit_xz(chosen_yaw)
         goal_x = float(pos0[0]) + ux * float(distance)
         goal_z = float(pos0[2]) + uz * float(distance)
-        if self.geofence is None or not hasattr(self.geofence, "check_point") or self.geofence.check_point(goal_x, goal_z) is None:
+        should_pathfind = not (
+            threat_pos is not None
+            and threat_dist_mid >= min(float(distance), 8.5)
+            and mid_moved >= 4.0
+        )
+        if should_pathfind and (
+            self.geofence is None or not hasattr(self.geofence, "check_point") or self.geofence.check_point(goal_x, goal_z) is None
+        ):
             try:
                 self.bot.call(
                     "move_to",
-                    {"x": round(goal_x, 1), "z": round(goal_z, 1), "range": 2.0, "timeout": 5500, "stop_on": ["death"]},
+                    {"x": round(goal_x, 1), "z": round(goal_z, 1), "range": 2.0, "timeout": 3500, "stop_on": ["death"]},
                 )
             except ApiError:
                 pass
@@ -864,6 +1055,7 @@ class CombatEnv:
         nh_end = st_end.get("nearest_hostile")
         if (
             urgent
+            and st_end.get("alive") is not False
             and isinstance(nh_end, dict)
             and nh_end.get("name")
             and float(nh_end.get("dist", 99.0)) <= 5.5
@@ -876,11 +1068,13 @@ class CombatEnv:
                 pass
         pos_end = st_end.get("pos") or pos0
         moved = round(math.hypot(float(pos_end[0]) - float(pos0[0]), float(pos_end[2]) - float(pos0[2])), 2)
+        respawned = st_end.get("alive") is False or moved > 64.0
         return {
-            "ok": moved >= 1.5,
-            "mode": "flee",
+            "ok": False if respawned else moved >= 1.5,
+            "mode": "respawned" if respawned else "flee",
             "moved_dist": moved,
             "pos_after": pos_end,
+            **({"respawned": True} if respawned else {}),
         }
 
 
@@ -894,10 +1088,27 @@ class SubcorticalInstinctController:
        equip best melee weapon and aggressively counter-kill (`0-LLM` loop until dead or low HP).
     3. Ranged shooter (`skeleton`/etc.), swarm (`>= 3`), or low HP (`<= 10`):
        - Inside `carved_shaft` with blocks -> `full_seal` (2 blocks break LOS in 0.5s);
-       - Close skeleton (`<= 9m`) on open ground with shield + melee weapon + `HP >= 12` -> shield-close & kill;
-       - Otherwise -> `cover_pocket` or `flee` along safe yaws.
+       - Close isolated skeleton (`<= 9m`) on open ground with shield + melee weapon + `HP >= 14` -> shield-close & kill;
+       - Otherwise -> `cover_pocket`, night/low-HP `dig_safety_bunker`, or `flee` along safe yaws.
     4. Post-engagement stabilization: if safe and `HP < 16` or `food <= 15`, eat 1 safe food item.
     """
+
+    def __init__(self) -> None:
+        self._recent_flee_streak = 0
+        self._last_flee_at = float("-inf")
+
+    @staticmethod
+    def _entity_dist(bot_pos: Sequence[float] | None, ent: dict[str, Any]) -> float:
+        epos = ent.get("pos")
+        if isinstance(bot_pos, (list, tuple)) and len(bot_pos) >= 3 and isinstance(epos, (list, tuple)) and len(epos) >= 3:
+            try:
+                return math.sqrt(sum((float(bot_pos[i]) - float(epos[i])) ** 2 for i in range(3)))
+            except (TypeError, ValueError):
+                pass
+        try:
+            return float(ent.get("dist", 99.0))
+        except (TypeError, ValueError):
+            return 99.0
 
     def _find_live_hostiles(self, env: CombatEnv, radius: int = 16) -> list[dict[str, Any]]:
         try:
@@ -905,6 +1116,8 @@ class SubcorticalInstinctController:
             rows = [e for e in (res or {}).get("entities") or [] if isinstance(e, dict)]
             rows.sort(key=lambda e: float(e.get("dist", 999.0)))
             return rows
+        except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
+            raise
         except Exception:
             return []
 
@@ -927,13 +1140,28 @@ class SubcorticalInstinctController:
                 off_nm = _clean_block_name((inv.get("offhand") or {}).get("name"))
                 if off_nm != "shield" and counts.get("shield", 0) > 0:
                     env.bot.call("equip", {"item": "shield", "slot": "off-hand"})
+            except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
+                raise
             except Exception:
                 pass
         return best_weapon
 
     def on_encounter(self, env: CombatEnv, trigger: ThreatTrigger) -> CombatOutcome:
         actions: list[dict[str, Any]] = []
+        deadline = time.monotonic() + 7.5
         st = env.bot.status()
+        if bool(st.get("in_lava")):
+            esc_lava = env.escape_lava()
+            st_lava_after = env.bot.status()
+            return {
+                "handled": bool(esc_lava.get("ok")),
+                "mode": "lava_escape",
+                "summary": f"处于岩浆中，优先执行脱困（ok={esc_lava.get('ok')} in_lava={esc_lava.get('in_lava')}）",
+                "actions": [{"action": "escape_lava", **esc_lava}],
+                "status_after": st_lava_after,
+                "requires_replan": True,
+                "latched_guard": False,
+            }
         pos = st.get("pos") or [0.0, 64.0, 0.0]
         hp = float(st.get("health") or 20.0)
         counts, has_shield, held_name = env._inventory_counts_and_shield()
@@ -964,8 +1192,26 @@ class SubcorticalInstinctController:
         mode = "stabilize"
         latched_guard = False
 
+        in_water = bool(st.get("in_water"))
+        submerged = bool(st.get("submerged"))
+        oxy_raw = st.get("oxygen")
+        low_oxygen = isinstance(oxy_raw, (int, float)) and oxy_raw < 180
+
+        # 0) Underwater drowning emergency: surface immediately instead of burning oxygen in combat!
+        if in_water and (submerged or low_oxygen):
+            mode = "water_surface"
+            if env.skills is not None and hasattr(env.skills, "escape_water"):
+                esc = env.skills.escape_water()
+                actions.append({"action": "water_surface", "ok": bool(esc.get("ok"))})
+            else:
+                try:
+                    env.bot.call("control", {"jump": True, "forward": True, "ms": 950, "stop_on": ["death"]})
+                    actions.append({"action": "water_surface", "ok": True})
+                except ApiError as err:
+                    actions.append({"action": "water_surface", "ok": False, "code": err.code})
+
         # 1) Creeper emergency: NEVER melee in blast radius — shield & retreat / seal shaft
-        if any_creeper_close or trigger.get("source") == "pre_hurt_creeper":
+        elif any_creeper_close or trigger.get("source") == "pre_hurt_creeper":
             mode = "creeper_evade"
             self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
             creeper_ent = next(
@@ -974,10 +1220,22 @@ class SubcorticalInstinctController:
             )
             c_pos = (creeper_ent or {}).get("pos") or mob_pos
             snap = env.arena_snapshot(pos)
+            sealed_ok = False
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
                 seal = env.build_tactical("full_seal", threat_pos=c_pos)
-                actions.append({"action": "seal_creeper_shaft", "ok": bool(seal.get("ok"))})
-            else:
+                sealed_ok = bool(seal.get("ok"))
+                actions.append({"action": "seal_creeper_shaft", "ok": sealed_ok})
+                if sealed_ok:
+                    st_chk_seal = env.bot.status()
+                    post_creepers = [
+                        e
+                        for e in self._find_live_hostiles(env, radius=8)
+                        if _clean_block_name(e.get("name")) == "creeper"
+                        and self._entity_dist(st_chk_seal.get("pos"), e) <= 4.5
+                    ]
+                    if post_creepers:
+                        sealed_ok = False
+            if not sealed_ok:
                 if has_shield:
                     if isinstance(creeper_ent, dict) and creeper_ent.get("id") is not None:
                         try:
@@ -989,9 +1247,40 @@ class SubcorticalInstinctController:
                         actions.append({"action": "raise_shield_creeper", "ok": True})
                     except ApiError:
                         pass
-                flee_res = env.flee(c_pos, distance=8.0, urgent=True, allow_shaft_seal=False)
+                flee_res = env.flee(c_pos, distance=11.5, urgent=True, allow_shaft_seal=False)
                 actions.append({"action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")), "moved": flee_res.get("moved_dist")})
-                if not flee_res.get("ok") and has_shield:
+                st_chk = env.bot.status()
+                post_h = self._find_live_hostiles(env, radius=8)
+                close_creeper = next(
+                    (
+                        e
+                        for e in post_h
+                        if _clean_block_name(e.get("name")) == "creeper"
+                        and self._entity_dist(st_chk.get("pos"), e) <= 5.5
+                    ),
+                    None,
+                )
+                if close_creeper is None:
+                    nh_chk = st_chk.get("nearest_hostile")
+                    if (
+                        isinstance(nh_chk, dict)
+                        and _clean_block_name(nh_chk.get("name")) == "creeper"
+                        and self._entity_dist(st_chk.get("pos"), nh_chk) <= 5.5
+                    ):
+                        close_creeper = nh_chk
+                creeper_still_close = close_creeper is not None
+                if (
+                    (not flee_res.get("ok") or creeper_still_close)
+                    and not flee_res.get("respawned")
+                    and has_shield
+                    and st_chk.get("alive") is not False
+                ):
+                    cid = (close_creeper or creeper_ent or {}).get("id")
+                    if cid is not None:
+                        try:
+                            env.bot.call("look", {"entity_id": int(cid)})
+                        except ApiError:
+                            pass
                     try:
                         env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                         latched_guard = True
@@ -1009,8 +1298,25 @@ class SubcorticalInstinctController:
             mode = "counter_kill"
             killed = False
             for _ in range(5):
+                if time.monotonic() >= deadline:
+                    break
                 st_cur = env.bot.status()
                 hp_cur = float(st_cur.get("health") or 20.0)
+                oxy_cur = st_cur.get("oxygen")
+                if st_cur.get("in_water") and (
+                    st_cur.get("submerged") or (isinstance(oxy_cur, (int, float)) and oxy_cur < 150)
+                ):
+                    if env.skills is not None and hasattr(env.skills, "escape_water"):
+                        esc_cur = env.skills.escape_water()
+                        actions.append({"action": "water_surface_abort", "ok": bool(esc_cur.get("ok"))})
+                    else:
+                        try:
+                            env.bot.call("control", {"jump": True, "forward": True, "ms": 950, "stop_on": ["death"]})
+                            actions.append({"action": "water_surface_abort", "ok": True})
+                        except ApiError:
+                            pass
+                    mode = "water_surface_abort"
+                    break
                 if hp_cur <= 8.0 or st_cur.get("alive") is False:
                     flee_low = env.flee(mob_pos, distance=12.0, urgent=True)
                     actions.append({"action": "low_hp_abort_flee", "ok": bool(flee_low.get("ok"))})
@@ -1018,7 +1324,7 @@ class SubcorticalInstinctController:
                     break
                 cur_hostiles = self._find_live_hostiles(env, radius=10)
                 if any(_clean_block_name(e.get("name")) == "creeper" and float(e.get("dist", 99.0)) <= 5.0 for e in cur_hostiles):
-                    flee_cr = env.flee(mob_pos, distance=10.0, urgent=True)
+                    flee_cr = env.flee(mob_pos, distance=11.0, urgent=True)
                     actions.append({"action": "creeper_intruded_flee", "ok": bool(flee_cr.get("ok"))})
                     mode = "creeper_evade"
                     break
@@ -1034,24 +1340,35 @@ class SubcorticalInstinctController:
                 if eff_id is None:
                     break
                 try:
-                    atk = env.bot.call("attack", {"entity_id": eff_id})
+                    atk = env.bot.call("attack", {"entity_id": eff_id, "timeout": 2600, "stop_on": ["death"]})
+                    hits = atk.get("hits")
                     actions.append({"action": "melee_attack", "weapon": weapon, "entity_id": eff_id, "ok": True, "killed": bool(atk.get("killed"))})
                     if atk.get("killed"):
                         killed = True
+                        break
+                    if isinstance(hits, (int, float)) and hits == 0:
+                        flee_uh = env.flee(mob_pos, distance=10.0, urgent=True)
+                        actions.append({"action": "unreachable_flee", "ok": bool(flee_uh.get("ok"))})
+                        mode = "cover_or_flee"
                         break
                 except ApiError as err:
                     actions.append({"action": "melee_attack", "ok": False, "code": err.code})
                     if err.code in {"entity_not_found", "invalid_entity", "target_dead"}:
                         killed = True
                         break
+                    if err.code in {"timeout", "attack_zero_hits", "path_not_found", "no_path"}:
+                        flee_to = env.flee(mob_pos, distance=10.0, urgent=True)
+                        actions.append({"action": "attack_timeout_flee", "ok": bool(flee_to.get("ok"))})
+                        mode = "cover_or_flee"
                     break
                 if not cur_hostiles:
                     killed = True
                     break
             if killed:
                 mode = "counter_killed"
+                self._recent_flee_streak = 0
 
-        # 3) Ranged shooter / swarm / low-HP / unarmed -> seal shaft, close-rush with shield, or cover/flee
+        # 3) Ranged shooter / swarm / low-HP / unarmed -> seal shaft, close-rush with shield, bunker, or cover/flee
         else:
             self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
             snap = env.arena_snapshot(pos)
@@ -1067,8 +1384,8 @@ class SubcorticalInstinctController:
                 mob_name in RANGED_MOBS
                 and has_shield
                 and has_weapon
-                and hp >= 12.0
-                and len(hostiles) <= 2
+                and hp >= 14.0
+                and len(hostiles) <= 1
                 and mob_dist <= 9.5
                 and mob_id is not None
             ):
@@ -1077,9 +1394,16 @@ class SubcorticalInstinctController:
                     env.bot.call("look", {"entity_id": int(mob_id)})
                     env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                     env.chase_to_range(int(mob_id), range_m=2.6, timeout_ms=1400)
-                    env.bot.call("posture", {"shield": False, "sneak": False, "jump": False})
-                    atk_r = env.bot.call("attack", {"entity_id": int(mob_id)})
-                    actions.append({"action": "shield_rush_attack", "ok": True, "killed": bool(atk_r.get("killed"))})
+                    st_mid_rush = env.bot.status()
+                    hp_mid_rush = float(st_mid_rush.get("health") or 20.0)
+                    if st_mid_rush.get("alive") is False or hp_mid_rush <= 10.0 or st_mid_rush.get("in_water"):
+                        fl_abort = env.flee(mob_pos, distance=12.0, urgent=True)
+                        actions.append({"action": "rush_low_hp_flee", "ok": bool(fl_abort.get("ok"))})
+                        mode = "cover_or_flee"
+                    else:
+                        env.bot.call("posture", {"shield": False, "sneak": False, "jump": False})
+                        atk_r = env.bot.call("attack", {"entity_id": int(mob_id), "timeout": 2800, "stop_on": ["death"]})
+                        actions.append({"action": "shield_rush_attack", "ok": True, "killed": bool(atk_r.get("killed"))})
                 except ApiError as err:
                     actions.append({"action": "shield_rush_attack", "ok": False, "code": err.code})
                     fl = env.flee(mob_pos, distance=12.0, urgent=True)
@@ -1093,6 +1417,31 @@ class SubcorticalInstinctController:
                         covered = True
                         mode = "cover_pocket"
                         actions.append({"action": "cover_pocket", "ok": True})
+                now_flee = time.monotonic()
+                if now_flee - self._last_flee_at > 25.0:
+                    self._recent_flee_streak = 0
+                should_bunker = (
+                    not covered
+                    and env.skills is not None
+                    and hasattr(env.skills, "dig_safety_bunker")
+                    and not any_creeper_close
+                    and st.get("on_ground") is True
+                    and (
+                        hp <= 10.0
+                        or (
+                            not has_weapon
+                            and st.get("is_day") is False
+                            and (hp <= 14.0 or len(hostiles) >= 2 or self._recent_flee_streak >= 1)
+                        )
+                    )
+                )
+                if should_bunker:
+                    bunk = env.skills.dig_safety_bunker(urgent=True)
+                    if bunk.get("ok"):
+                        covered = True
+                        mode = "bunker_sealed"
+                        self._recent_flee_streak = 0
+                        actions.append({"action": "emergency_bunker", "ok": True})
                 if not covered:
                     if has_shield and mob_id is not None:
                         try:
@@ -1102,14 +1451,24 @@ class SubcorticalInstinctController:
                             pass
                     fl = env.flee(mob_pos, distance=14.0, urgent=True)
                     actions.append({"action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist")})
+                    self._recent_flee_streak += 1
+                    self._last_flee_at = now_flee
 
-        # 4) Post-combat food recovery when safe
+        # 4) Post-combat food recovery when safe and ready
         st_post = env.bot.status()
         hp_post = float(st_post.get("health") or 20.0)
         food_post = int(st_post.get("food") or 20)
         nh_post = st_post.get("nearest_hostile")
         nh_post_d = float(nh_post.get("dist", 99.0)) if isinstance(nh_post, dict) and nh_post.get("name") else 99.0
-        if st_post.get("alive") is not False and nh_post_d > 6.0 and (hp_post < 16.0 or food_post <= 15):
+        if (
+            st_post.get("ready", True)
+            and st_post.get("alive") is not False
+            and not st_post.get("in_water")
+            and not st_post.get("in_lava")
+            and nh_post_d > 6.0
+            and food_post < 20
+            and (hp_post < 16.0 or food_post <= 15)
+        ):
             counts_now, _, _ = env._inventory_counts_and_shield()
             best_food = next((f for f in SAFE_FOOD_PRIORITY if counts_now.get(f, 0) > 0), None)
             if best_food:
@@ -1152,6 +1511,8 @@ class CombatControllerSlot:
         ):
             try:
                 cleanup_fn()
+            except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
+                raise
             except Exception:
                 pass
 
@@ -1170,11 +1531,20 @@ class CombatControllerSlot:
         finally:
             # 2. Exit rule: NEVER leave shield/sneak/jump stuck at 30% speed unless explicitly latched
             if not outcome.get("latched_guard", False):
+                st_end = outcome.get("status_after") if isinstance(outcome, dict) else None
+                wet_submerged = isinstance(st_end, dict) and bool(st_end.get("in_water")) and (
+                    bool(st_end.get("submerged"))
+                    or st_end.get("on_ground") is False
+                    or (isinstance(st_end.get("oxygen"), (int, float)) and st_end["oxygen"] < 240)
+                )
+                posture_payload: dict[str, Any] = {"shield": False, "sneak": False, "jump": True} if wet_submerged else {}
                 for reset_fn in (
                     lambda: env.bot.call("control", {"wait": False}),
-                    lambda: env.bot.call("posture", {}),
+                    lambda: env.bot.call("posture", posture_payload),
                 ):
                     try:
                         reset_fn()
+                    except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
+                        raise
                     except Exception:
                         pass

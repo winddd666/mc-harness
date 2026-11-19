@@ -54,6 +54,11 @@ PICKAXE_TIERS: dict[str, int] = {
     "netherite_pickaxe": 5,
 }
 
+STAIR_FILLER_BLOCKS: tuple[str, ...] = (
+    "cobblestone", "cobbled_deepslate", "dirt", "stone", "deepslate",
+    "netherrack", "blackstone", "basalt", "end_stone", "andesite", "diorite", "granite", "tuff",
+)
+
 BLOCK_MIN_PICKAXE_TIER: dict[str, int] = {
     "stone": 1,
     "cobblestone": 1,
@@ -832,6 +837,64 @@ _CRAFT_SLOT_INPUTS: dict[str, dict[str, int]] = {
     "diamond_leggings": {"diamond": 7},
     "diamond_boots": {"diamond": 4},
 }
+
+
+def craft_material_shortage(item: str, count: int, counts: dict[str, int]) -> dict[str, Any] | None:
+    """Use the curated recipes and existing slot recipes, with material tags."""
+    legacy = material_shortage(item, count, counts)
+    if legacy is not None:
+        return legacy
+    recipe = RECIPES_1_21.get(item)
+    if recipe is None:
+        inputs = _CRAFT_SLOT_INPUTS.get(item)
+        if item == "stone_bricks":
+            recipe = {"ingredients": {"stone": 4}, "yield_count": 4}
+        elif inputs:
+            recipe = {"ingredients": {("any_planks" if key == "_planks_any" else key): value for key, value in inputs.items()}, "yield_count": 1}
+        else:
+            return None
+    batches = math.ceil(max(1, int(count)) / max(1, int(recipe.get("yield_count", 1))))
+    required = {name: int(amount) * batches for name, amount in recipe["ingredients"].items()}
+
+    def _available(name: str) -> int:
+        if name == "any_planks":
+            return sum(v for k, v in counts.items() if k.endswith("_planks"))
+        if name == "any_log":
+            return sum(v for k, v in counts.items() if k.endswith(("_log", "_stem", "_wood", "_hyphae")))
+        if name == "coal_or_charcoal":
+            return counts.get("coal", 0) + counts.get("charcoal", 0)
+        if name == "any_wooden_slab":
+            woods = {n.removesuffix("_log") for n in LOG_TYPES} | {"crimson", "warped", "bamboo"}
+            return sum(counts.get(f"{wood}_slab", 0) for wood in woods)
+        if name == "cobblestone" and (item.startswith("stone_") or item == "furnace"):
+            return sum(counts.get(n, 0) for n in ("cobblestone", "cobbled_deepslate", "blackstone"))
+        return counts.get(name, 0)
+
+    available = {name: _available(name) for name in required}
+    missing = {name: amount - available[name] for name, amount in required.items() if available[name] < amount}
+    return {
+        "item": item, "target_count": count,
+        "required_materials": required, "available_materials": available,
+        "missing_materials": missing,
+        "recipe_note": ("cobblestone 可由 cobbled_deepslate、blackstone 替代。"
+                        if "cobblestone" in required and (item.startswith("stone_") or item == "furnace")
+                        else str(recipe.get("notes") or "any_planks 可混用木板；材料需求已按配方产量换算。")),
+    }
+
+
+def explain_material_craft_error(item: str, count: int, error: dict[str, Any]) -> dict[str, Any]:
+    enriched = explain_craft_error(item, count, error)
+    if error.get("code") != "missing_ingredients" or not isinstance(error.get("inventory"), dict):
+        return enriched
+    plan = craft_material_shortage(resolve_item_alias(item), count, error["inventory"])
+    if plan is None:
+        return enriched
+    enriched = {**enriched, **plan}
+    if "example_recipe_needs" in enriched:
+        enriched["server_recipe_example"] = enriched.pop("example_recipe_needs")
+    if not plan["missing_materials"] and "server placed no result" in str(error.get("message", "")):
+        enriched["code"] = "server_recipe_rejected"
+    return enriched
 
 
 def _compute_empty_slots(inv: dict[str, Any] | None) -> int:
@@ -1637,7 +1700,7 @@ class MacroSkills:
         }
         has_filler = any(
             counts.get(c, 0) >= 1
-            for c in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
+            for c in STAIR_FILLER_BLOCKS
         ) or any(cnt >= 1 and name.endswith("_planks") for name, cnt in counts.items())
 
         def _non_air_has_adj_fluid(cells: list[tuple[int, int, int]]) -> bool:
@@ -1700,7 +1763,6 @@ class MacroSkills:
         """Probe which 4 cardinal directions can safely perform dig_staircase(vertical='down')."""
         dirs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
         cache = probe_cache if probe_cache is not None else {}
-        counts = inv_counts if inv_counts is not None else _inventory_counts(self.bot)
         air_set = {"air", "cave_air", "void_air"}
         fluids = {"water", "lava", "flowing_water", "flowing_lava"}
         fluid_or_bedrock = fluids | {"bedrock"}
@@ -1712,11 +1774,6 @@ class MacroSkills:
             "poppy",
             "oak_sapling",
         }
-        has_filler = any(
-            counts.get(c, 0) >= 1
-            for c in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
-        ) or any(cnt >= 1 and name.endswith("_planks") for name, cnt in counts.items())
-
         def _non_air_has_adj_fluid(cells: list[tuple[int, int, int]]) -> bool:
             for cx, cy, cz in cells:
                 if self._probe_cached_block((cx, cy, cz), cache) in air_set:
@@ -1745,7 +1802,7 @@ class MacroSkills:
                 if step_sup in fluid_or_bedrock:
                     continue
                 is_non_solid = step_sup in non_solid or step_sup.endswith(("_leaves", "_sapling", "_carpet", "_banner"))
-                if is_non_solid and not has_filler:
+                if is_non_solid:
                     continue
                 viable_down.append(odir)
             except ApiError:
@@ -2838,28 +2895,22 @@ class MacroSkills:
                     if cand_planks in RECIPES_1_21 or cand_planks.endswith("_planks"):
                         item = cand_planks
                         break
-        if item in (
-            "iron_pickaxe",
-            "diamond_pickaxe",
-            "diamond_helmet",
-            "diamond_chestplate",
-            "diamond_leggings",
-            "diamond_boots",
-        ):
-            plan = material_shortage(item, count, initial)
-            if plan and plan["missing_materials"]:
-                non_wood_missing = {k: v for k, v in plan["missing_materials"].items() if k != "stick"}
-                if non_wood_missing:
-                    return self._attach_shortage_memory_hint(
-                        {
-                            "ok": False,
-                            "error": "missing_ingredients",
-                            "requires_replan": True,
-                            "inventory": initial,
-                            **plan,
-                        },
-                        non_wood_missing.keys(),
-                    )
+        plan = craft_material_shortage(item, count, initial)
+        if plan and plan["missing_materials"]:
+            # Logs/planks and sticks can be prepared automatically, but
+            # absent stone/ingots/wool cannot be repaired by rebuilding a table.
+            non_wood_missing = {k: v for k, v in plan["missing_materials"].items() if k not in {"stick", "any_planks"}}
+            if non_wood_missing:
+                return self._attach_shortage_memory_hint(
+                    {
+                        "ok": False,
+                        "error": "missing_ingredients",
+                        "requires_replan": True,
+                        "inventory": initial,
+                        **plan,
+                    },
+                    non_wood_missing.keys(),
+                )
         inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         planks_per, sticks_per = TOOL_WOOD_NEEDS.get(item, (0, 0))
         planks_needed = math.ceil(count / 4) * 2 if item == "stick" else planks_per * count
@@ -2888,7 +2939,7 @@ class MacroSkills:
                     f"当前可用木板仅 {_total_planks(prepared)}。"
                 ),
             }
-        plan = material_shortage(item, count, prepared)
+        plan = craft_material_shortage(item, count, prepared)
         if plan and plan["missing_materials"]:
             return self._attach_shortage_memory_hint(
                 {
@@ -2921,6 +2972,18 @@ class MacroSkills:
         try:
             craft_res = self._safe_craft(item, count)
         except ApiError as err:
+            if err.code == "missing_ingredients" and "server placed no result" in err.message:
+                try:
+                    counts_now = _inventory_counts(self.bot)
+                except ApiError:
+                    counts_now = prepared
+                plan_now = craft_material_shortage(item, count, counts_now)
+                return {
+                    "ok": False, "requires_replan": True,
+                    "error": "missing_ingredients" if plan_now and plan_now["missing_materials"] else "server_recipe_rejected",
+                    "message": err.message, "inventory": counts_now,
+                    **(plan_now or {}),
+                }
             if err.code == "inventory_full":
                 return {
                     "ok": False,
@@ -5354,16 +5417,7 @@ class MacroSkills:
         hazard_set = fluids | falling_set
         ore_types = ["iron_ore", "deepslate_iron_ore", "coal_ore", "deepslate_coal_ore", "copper_ore"]
         iron_names = {"iron_ore", "deepslate_iron_ore"}
-        filler_candidates = (
-            "cobblestone",
-            "cobbled_deepslate",
-            "dirt",
-            "andesite",
-            "diorite",
-            "granite",
-            "tuff",
-            "stone",
-        )
+        filler_candidates = STAIR_FILLER_BLOCKS
 
         def _bname(pos_xyz: list[int]) -> str:
             res = self.bot.call("get_block", {"pos": pos_xyz})
@@ -5409,6 +5463,8 @@ class MacroSkills:
 
         try:
             for step_idx in range(steps):
+                if isinstance(self.bot, _StairSession):
+                    self.bot.step_deadline = min(self.bot.deadline, time.monotonic() + self.bot.per_step_timeout)
                 st = self.bot.status()
                 if st.get("alive") is False or (st.get("last_death") or {}).get("t") != last_death:
                     stop_reason = "died"
@@ -5562,6 +5618,8 @@ class MacroSkills:
                     break
 
                 steps_done += 1
+                if isinstance(self.bot, _StairSession):
+                    self.bot.progress.update(steps_done=steps_done, dug_count=dug_count, placed_count=placed_count)
                 if steps_done >= 2:
                     surface_evidence = _confirm_pillar_surface(cur_pos)
                     if surface_evidence:
@@ -5581,6 +5639,8 @@ class MacroSkills:
             stop_reason = "api_error"
             last_error = {"code": exc.code, "message": exc.message, **exc.context}
 
+        if isinstance(self.bot, _StairSession):
+            self.bot.step_deadline = self.bot.deadline
         st_end = self.bot.status()
         end_pos = st_end.get("pos") or pos_before
         ok = steps_done > 0 and stop_reason in {"completed", "iron_ore_found", "reached_surface"}
@@ -5662,6 +5722,13 @@ class MacroSkills:
                 cleanup = self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
             except (ApiError, httpx.HTTPError):
                 pass
+            if str(vertical).lower() == "pillar" or str(direction).lower() == "pillar":
+                try:
+                    # The scoped session has expired, so its ordinary finally
+                    # cannot clear the persistent jump posture.
+                    self.bot.call("posture", {"jump": False, "sneak": False, "shield": False}, timeout_s=1.0, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
             return {
                 "ok": False, "requires_replan": True, "stop_reason": "time_budget",
                 "error": {"code": "time_budget", "message": "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"},
@@ -5817,7 +5884,7 @@ class MacroSkills:
 
         def _pick_step_filler() -> str | None:
             counts = _inventory_counts(self.bot)
-            for cand in ("cobblestone", "cobbled_deepslate", "dirt", "stone", "deepslate", "netherrack", "blackstone", "basalt", "end_stone", "andesite", "diorite", "granite"):
+            for cand in STAIR_FILLER_BLOCKS:
                 if counts.get(cand, 0) >= 1:
                     return cand
             for name, cnt in sorted(counts.items()):
@@ -6972,6 +7039,7 @@ class MacroSkills:
                     entry_detail["move_error"] = {"code": err.code, "message": err.message}
                 contact_seen = False
                 pulses = 0
+                approach_recovered = False
                 while time.monotonic() < deadline:
                     now = _status()
                     if "nether" in dim_now:
@@ -6982,6 +7050,26 @@ class MacroSkills:
                     cx, cy, cz = map(float, cur[:3])
                     in_portal = abs(cx - tx - 0.5) <= 0.45 and abs(cz - tz - 0.5) <= 0.45 and ty <= cy < ty + 1
                     contact_seen = contact_seen or in_portal
+                    normal_distance = abs((cx - tx - 0.5) * normal[0] + (cz - tz - 0.5) * normal[1])
+                    lateral_distance = abs((cx - tx - 0.5) * normal[1] + (cz - tz - 0.5) * normal[0])
+                    if (not approach_recovered and 1.1 < ty - cy <= 2.1
+                            and 0.7 <= normal_distance <= 1.3 and lateral_distance <= 0.6):
+                        # r12: pathfinding can fall to a low approach floor two
+                        # blocks below the portal. One verified jump-place makes
+                        # a one-block stair, without touching its obsidian bar.
+                        floor_pos = [math.floor(cx), math.floor(cy) - 1, math.floor(cz)]
+                        floor = str(_entry_call("get_block", {"pos": floor_pos}).get("name") or "").removeprefix("minecraft:")
+                        if not floor or is_passable_sight_block(floor) or floor in {"lava", "flowing_lava", "magma_block", "cactus"}:
+                            entry_detail["error"] = {"code": "portal_approach_unsupported", "phase": "entry", "pos": floor_pos, "block": floor}
+                            return False, dim_now
+                        approach_recovered = True
+                        recovery = self.dig_staircase(vertical="pillar", steps=1, stop_on_ore=False,
+                                                      deadline=deadline, per_step_timeout=3.0)
+                        entry_detail["entry_recovery"] = {key: recovery.get(key) for key in ("ok", "steps_done", "pos_after", "stop_reason")}
+                        if not recovery.get("ok"):
+                            entry_detail["error"] = {"code": "portal_approach_step_failed", "phase": "entry", "cause": recovery.get("stop_reason")}
+                            return False, dim_now
+                        continue
                     if not in_portal and pulses < 8:
                         # Steer only within a single step of the portal floor.
                         if (cy < ty - 1.1 or cy > ty + 0.6) or math.hypot(cx - tx - 0.5, cz - tz - 0.5) > 2.2:

@@ -110,9 +110,10 @@ def check_and_stabilize(
 
     # 2. Lava first-aid attempt with water_bucket
     if st.get("in_lava"):
+        dim = str(st.get("dimension") or "").lower()
         try:
             inv = bot.inventory()
-            if _item_counts(inv).get("water_bucket", 0) > 0:
+            if "nether" not in dim and _item_counts(inv).get("water_bucket", 0) > 0:
                 bot.call("use_item", {"item": "water_bucket"})
                 actions.append("lava_water_bucket")
                 st = bot.status()
