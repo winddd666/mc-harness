@@ -47,6 +47,7 @@ def collect(wave: str) -> dict:
         "trade": 0,
         "brew": 0,
         "runtime_error": 0,
+        "dw_trident": 0,
         "startup_crash": [],
         "deep_water": None,
         "iron_scores": [],
@@ -118,6 +119,10 @@ def collect(wave: str) -> dict:
                 elif t == "guardian.incident":
                     if "death_or_connection_changed" in (ev.get("reasons") or []):
                         out["deaths"][bot] += 1
+                elif t == "mc.notable_events":
+                    txt = str(ev.get("text") or "")
+                    if "死亡" in txt and "trident" in txt and "deep_water" in bot:
+                        out["dw_trident"] += 1
                 elif t == "model.failed" and ev.get("cancelled"):
                     out["cancel"] += 1
                 elif t == "model.cancel_cooldown_wait":
@@ -138,7 +143,6 @@ def main() -> int:
     zero_pct = 100.0 * o["mine_zero"] / max(1, o["mine_total"])
     deaths = sum(o["deaths"].values())
     deep_score = o["summaries"].get(o["deep_water"] or "", None)
-    dw_trident = o["errs"].get("__never__", 0)
 
     gates = [
         ("BUG-021 startup crash", len(o["startup_crash"]), "== 0"),
@@ -149,6 +153,7 @@ def main() -> int:
         ("BUG-018 mine_dfs median s", round(med, 1), "25~40"),
         ("BUG-018 mine zero-slice %", round(zero_pct, 1), "< 10"),
         ("BUG-020 runtime_error", o["runtime_error"], "<= 2"),
+        ("BUG-023 deep_water trident deaths", o["dw_trident"], "<= 2"),
         ("SCENE-001 trade calls", o["trade"], ">= 1"),
         ("SCENE-001 brew calls", o["brew"], ">= 1"),
     ]
