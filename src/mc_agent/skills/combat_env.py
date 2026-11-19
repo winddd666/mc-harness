@@ -834,9 +834,28 @@ class CombatEnv:
             except ApiError:
                 pass
 
-        # 1. Try scanning safe non-lava exits (including 1-block step-ups) and jump-sprinting out
+        # 1. If submerged deep in lava, swim up first so surface bank scan can find solid footing
         self.invalidate_block_cache()
         pos0 = st.get("pos") or [0.0, 64.0, 0.0]
+        head_bx, head_by, head_bz = math.floor(float(pos0[0])), math.floor(float(pos0[1])) + 1, math.floor(float(pos0[2]))
+        if self._get_block_name(head_bx, head_by, head_bz) in {"lava", "flowing_lava"}:
+            try:
+                self.bot.call("control", {"forward": True, "jump": True, "sprint": True, "ms": 950, "stop_on": ["death"]})
+                actions.append("lava_surface_swim")
+            except ApiError:
+                pass
+            self.invalidate_block_cache()
+            st = self.bot.status()
+            if st.get("alive") is False or not bool(st.get("in_lava")):
+                return {
+                    "ok": st.get("alive") is not False and not bool(st.get("in_lava")),
+                    "in_lava": bool(st.get("in_lava")),
+                    "pos_after": st.get("pos"),
+                    "actions": actions,
+                }
+            pos0 = st.get("pos") or pos0
+
+        # 2. Try scanning safe non-lava exits (including 1-block step-ups) and jump-sprinting out
         scan = self.scan_safe_yaws(
             pos0,
             float(st.get("yaw") or 0.0),
@@ -850,6 +869,8 @@ class CombatEnv:
             if c.get("hazard") not in {"lava", "geofence"} and float(c.get("yaw", 0.0)) not in tried_yaws:
                 if c.get("safe") or c.get("hazard") in {None, "water"}:
                     tried_yaws.append(float(c["yaw"]))
+        if not tried_yaws:
+            tried_yaws = [float(st.get("yaw") or 0.0)]
 
         for cyaw in tried_yaws[:2]:
             try:
@@ -932,6 +953,11 @@ class CombatEnv:
 
         st_end = self.bot.status()
         still_in_lava = bool(st_end.get("in_lava"))
+        if still_in_lava and st_end.get("alive") is not False:
+            try:
+                self.bot.call("posture", {"jump": True})
+            except ApiError:
+                pass
         return {
             "ok": st_end.get("alive") is not False and not still_in_lava,
             "in_lava": still_in_lava,
@@ -1124,6 +1150,18 @@ class SubcorticalInstinctController:
         actions: list[dict[str, Any]] = []
         deadline = time.monotonic() + 7.5
         st = env.bot.status()
+        if bool(st.get("in_lava")):
+            esc_lava = env.escape_lava()
+            st_lava_after = env.bot.status()
+            return {
+                "handled": bool(esc_lava.get("ok")),
+                "mode": "lava_escape",
+                "summary": f"处于岩浆中，优先执行脱困（ok={esc_lava.get('ok')} in_lava={esc_lava.get('in_lava')}）",
+                "actions": [{"action": "escape_lava", **esc_lava}],
+                "status_after": st_lava_after,
+                "requires_replan": True,
+                "latched_guard": False,
+            }
         pos = st.get("pos") or [0.0, 64.0, 0.0]
         hp = float(st.get("health") or 20.0)
         counts, has_shield, held_name = env._inventory_counts_and_shield()

@@ -840,13 +840,14 @@ class GenerationGuard:
                             and not self._is_pre_hurt_debounced(nh_id, nh_name)
                         )
                     ):
+                        in_lava_now = bool(st.get("in_lava"))
                         pending_trigger.append(
                             {
-                                "source": "pre_hurt_creeper" if nh_name == "creeper" else "boundary_threat",
-                                "primary_entity_id": nh_id,
-                                "primary_type": nh_name or "lava",
-                                "primary_pos": nh_pos,
-                                "distance": nh_dist,
+                                "source": "boundary_threat" if in_lava_now else ("pre_hurt_creeper" if nh_name == "creeper" else "boundary_threat"),
+                                "primary_entity_id": None if in_lava_now else nh_id,
+                                "primary_type": "lava" if in_lava_now else (nh_name or "lava"),
+                                "primary_pos": None if in_lava_now else nh_pos,
+                                "distance": 0.0 if in_lava_now else nh_dist,
                             }
                         )
                         try:
@@ -931,19 +932,19 @@ class GenerationGuard:
         self._in_reflex = True
         try:
             self.stats["tool_preemptions"] += 1
-            if trigger.get("primary_type") == "lava":
+            try:
+                st_pre = self.bot.status()
+            except (ApiError, httpx.HTTPError):
+                st_pre = {}
+            if trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava")):
                 act = self._action("escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
                 try:
                     st_after = self.bot.status()
                 except (ApiError, httpx.HTTPError):
-                    st_after = {}
+                    st_after = st_pre
                 summary = f"执行 {interrupted_name} 途中滑入岩浆，已中断原工具并脱困，当前 HP={st_after.get('health')}"
                 outcome = {"handled": True, "mode": "lava_escape", "summary": summary, "actions": [act], "status_after": st_after}
             else:
-                try:
-                    st_pre = self.bot.status()
-                except (ApiError, httpx.HTTPError):
-                    st_pre = {}
                 oxy_pre = st_pre.get("oxygen")
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))

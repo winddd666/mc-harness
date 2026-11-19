@@ -1345,3 +1345,80 @@ def test_bug_011_guardian_http_error_returns_network_uncertain_without_crashing_
     )
 
 
+def test_nether_deep_lava_preemption_prioritizes_escape_over_nearby_mob(monkeypatch):
+    """Reproduces glm_glm_2_nether_bastion: in_lava overrides nearby zombified_piglin during preemption & deep lava swims up first."""
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    state = {"in_lava": True, "pos": [6.4, 27.6, -815.0], "attacked": False}
+    action_log: list[tuple[str, dict]] = []
+
+    class _DeepLavaNetherBot:
+        _last_event_seq = 0
+
+        def status(self):
+            return {
+                "pos": list(state["pos"]),
+                "health": 16.8,
+                "food": 20,
+                "alive": True,
+                "ready": True,
+                "in_water": False,
+                "in_lava": state["in_lava"],
+                "dimension": "minecraft:the_nether",
+                "yaw": 0.0,
+                "nearest_hostile": {"id": 88302, "name": "zombified_piglin", "dist": 18.9, "pos": [25.0, 31.0, -815.0]},
+            }
+
+        def call(self, action, body=None, **kwargs):
+            payload = dict(body or {})
+            action_log.append((action, payload))
+            if action == "status":
+                return self.status()
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "netherrack", "count": 32}]}
+            if action == "get_block":
+                p = payload["pos"]
+                # Deep lava below y=30; solid bank at z=-813, y=30
+                if p == [6, 30, -813]:
+                    return {"name": "netherrack"}
+                if p[1] in (27, 28, 29, 30) and p[2] <= -814:
+                    return {"name": "lava"}
+                if p[1] < 27:
+                    return {"name": "netherrack"}
+                return {"name": "air"}
+            if action == "control" and payload.get("jump"):
+                if state["pos"][1] < 30.2:
+                    state["pos"] = [6.4, 30.5, -815.0]
+                elif payload.get("forward"):
+                    state["in_lava"] = False
+                    state["pos"] = [6.5, 31.0, -812.5]
+            if action in ("attack", "move_to"):
+                state["attacked"] = True
+            return {"ok": True}
+
+    guard = GenerationGuard(_DeepLavaNetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    # 1) Even when preemption trigger names a nearby mob (`zombified_piglin`), handle_preemption escapes lava FIRST!
+    receipt = guard.handle_preemption(
+        {"source": "boundary_threat", "primary_entity_id": 88302, "primary_type": "zombified_piglin", "distance": 18.9},
+        interrupted_name="mc_skill_mine_dfs",
+    )
+    assert receipt["reflex_mode"] == "lava_escape"
+    assert state["in_lava"] is False
+    assert state["attacked"] is False
+    assert any(act == "control" and pl.get("jump") for act, pl in action_log)
+
+    # 2) Direct SubcorticalInstinctController call while in_lava also prioritizes lava_escape
+    state["in_lava"] = True
+    state["pos"] = [6.4, 27.6, -815.0]
+    out = SubcorticalInstinctController().on_encounter(
+        CombatEnv(_DeepLavaNetherBot()),
+        {"source": "boundary_threat", "primary_entity_id": 88302, "primary_type": "zombified_piglin", "distance": 18.9},
+    )
+    assert out["mode"] == "lava_escape"
+    assert out["handled"] is True
+    assert state["in_lava"] is False
+
+
+
