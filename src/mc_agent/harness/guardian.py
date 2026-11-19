@@ -669,9 +669,10 @@ class GenerationGuard:
             and (not isinstance(food, (int, float)) or food >= 20)
         ):
             self.retry_after_ready = False
-        should_eat = needs_food or pending_ready_eat
-        hurt = bool(hurts) or dropped
         nh_name0, nh_dist0, _, _ = self._extract_hostile_info(status)
+        eat_safe_distance = (not nh_name0) or nh_dist0 > 5.5
+        should_eat = (needs_food or pending_ready_eat) and eat_safe_distance
+        hurt = bool(hurts) or dropped
         non_combat_only_hurt = (
             hurt
             and bool(hurts)
@@ -1181,9 +1182,11 @@ class GenerationGuard:
                     self.retry_after_ready = True
                     self.events.emit("guardian.eat_deferred", reason="post_combat_not_ready", retry_after_ready=True)
                 else:
+                    cur_nh_name, cur_nh_dist, _, _ = self._extract_hostile_info(cur_eat_st)
                     can_eat_now = (
                         not cur_eat_st.get("in_lava")
                         and not cur_eat_st.get("in_water")
+                        and ((not cur_nh_name) or cur_nh_dist > 5.5)
                         and (not isinstance(cur_food, (int, float)) or cur_food < 20)
                     )
                     best_food = next((name for name in SAFE_FOOD_PRIORITY if counts.get(name, 0) > 0), None) if can_eat_now else None

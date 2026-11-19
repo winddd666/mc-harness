@@ -2785,6 +2785,54 @@ def test_r19_lava_pit_places_netherrack_filler_before_second_sprint(monkeypatch)
     assert out_p["actions"].count("lava_jump_sprint") == 1
 
 
+def test_r19_poll_skips_eat_in_close_melee_range_after_combat_timeout(monkeypatch):
+    """Reproduces r19_short hy4_hy_3_midgame: never drop shield to eat when a hostile is <= 5.5m after melee cooldown."""
+    clock = [6000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    use_items: list[dict] = []
+    state = {"hp": 7.8, "food": 17, "blocking": True, "mob_dist": 2.2}
+
+    class _CloseThreatEatBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 64.0, 0.5],
+                    "health": state["hp"],
+                    "food": state["food"],
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": True,
+                    "in_water": False,
+                    "in_lava": False,
+                    "blocking": state["blocking"],
+                    "nearest_hostile": {"id": 51, "name": "zombie", "pos": [0.5 + state["mob_dist"], 64.0, 0.5], "dist": state["mob_dist"]},
+                }
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 10}, {"name": "iron_sword", "count": 1}]}
+            if action == "use_item":
+                use_items.append(dict(body or {}))
+            return {"ok": True}
+
+    guard = GenerationGuard(_CloseThreatEatBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    # Mark zombie id=51 as already in 12s pre_hurt_melee cooldown (simulating prior subcortical_combat timeout)
+    guard._mark_pre_hurt_cooldown({"source": "pre_hurt_melee", "primary_entity_id": 51, "primary_type": "zombie"}, clock[0])
+    assert guard.poll() is None
+    assert use_items == []  # MUST NOT drop shield (`posture(shield=False)`) to eat right in zombie's face!
+
+    # Once distanced > 5.5m safely, poll() eats cleanly!
+    state["mob_dist"] = 9.0
+    clock[0] += 0.5
+    inc_safe = guard.poll()
+    assert inc_safe is not None
+    assert [a["action"] for a in inc_safe["actions"]] == ["eat"]
+    assert use_items == [{"item": "cooked_beef"}]
+
+
+
 
 
 
