@@ -1993,7 +1993,7 @@ def test_climb_out_honors_the_callers_budget_in_nested_staircase(monkeypatch) ->
         assert eng.bot is bot and eng.skills is skills
         assert skills.bot is bot and bot.call == original_call
     assert clock.now <= 1005.0
-    assert result["stop_reason"] == "time_budget"
+    assert result["stop_reason"] == "time_slice"
     assert requests
     for started, _, timeouts in requests:
         assert 0 < timeouts["read"] <= 1005.0 - started
@@ -2020,7 +2020,7 @@ def test_dfs_budget_includes_entry_observations_and_radar(monkeypatch) -> None:
     with BotSession("tok", bot_username="TimedInit", transport=httpx.MockTransport(slow_handler)) as bot:
         result = MacroSkills(bot).mine_dfs(target="iron", max_duration_s=5.0)
     assert clock.now <= 1005.0
-    assert result["stop_reason"] == "time_budget"
+    assert result["stop_reason"] == "time_slice"
     assert len(calls) < 15
 
 
@@ -2126,7 +2126,7 @@ def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> 
         assert tip.edge_from_parent.waypoints == [(0, 20, 0), (1, 19, 0)]
         assert tip.branches[0].status == "pending"
         assert branch.status == "completed"
-    assert result["stop_reason"] == "time_budget"
+    assert result["stop_reason"] == "time_slice"
     assert not world.dig_log
 
 
@@ -2168,7 +2168,7 @@ def test_slow_blocked_climb_tries_a_different_direction_next_slice(monkeypatch) 
         monkeypatch.setattr(eng.skills, "dig_staircase", blocked_stair)
         first = eng.run(action="climb_out", max_duration_s=5.0)
         second = eng.run(action="climb_out", max_duration_s=5.0)
-    assert first["stop_reason"] == second["stop_reason"] == "time_budget"
+    assert first["stop_reason"] == second["stop_reason"] == "time_slice"
     assert directions == ["north", "south"]
     assert clock.now < 1010.0
 
@@ -2195,5 +2195,47 @@ def test_nested_http_timeout_stops_the_action_and_restores_shared_sessions(monke
         result = eng.run(max_duration_s=5.0)
         assert eng.bot is bot and eng.skills is skills and skills.bot is bot
         assert bot._recovering_quarantine is False
-    assert result["stop_reason"] == "time_budget"
+    assert result["stop_reason"] == "time_slice"
     assert [p.rsplit("/", 1)[-1] for p in calls] == ["status", "dig", "stop"]
+
+
+def test_level_tunnel_deadline_covers_each_probe_and_skips_final_io(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+    from mc_agent.skills.tunnel import dig_level_tunnel
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=21)
+    calls: list[float] = []
+
+    def slow_handler(request):
+        calls.append(clock.now)
+        clock.now += 0.2
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="TimedTunnel", transport=httpx.MockTransport(slow_handler)) as bot:
+        result = dig_level_tunnel(bot, "east", 8, deadline=1001.0)
+        before_expired_call = len(calls)
+        expired = dig_level_tunnel(bot, "east", 8, deadline=999.0)
+    assert result["ok"] is False and result["requires_replan"] is True
+    assert result["stop_reason"] == expired["stop_reason"] == "time_slice"
+    assert clock.now <= 1001.01
+    assert all(t < 1001.0 for t in calls)
+    assert not world.dig_log
+    assert len(calls) == before_expired_call
+
+
+def test_escape_primitive_passes_shared_deadline_to_new_skill_contract(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    received: list[float] = []
+    with BotSession("tok", bot_username="DeadlineContract", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+
+        def stairs(*, deadline, **kwargs):
+            received.append(deadline)
+            assert kwargs["steps"] == 1
+            return {"ok": False}
+
+        monkeypatch.setattr(eng.skills, "dig_staircase", stairs)
+        eng._escape_primitive("dig_staircase", deadline=1234.0, steps=1, direction="north", vertical="up")
+    assert received == [1234.0]

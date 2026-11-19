@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Callable
 import copy
 import dataclasses
+import inspect
 import json
 import math
 import os
@@ -316,6 +317,7 @@ class _BudgetSession:
         self.session = copy.copy(bot)
         self._call = self.session.call
         self.session.call = self.call
+        self.session._mining_deadline = deadline
         # A recovery reconnect owns a separate, much longer lifecycle budget. Leave that
         # to the caller, rather than letting BotSession.call start it inside mining.
         self.session._recovering_quarantine = True
@@ -2821,6 +2823,13 @@ class MiningDFSEngine:
                     continue
         return False
 
+    def _escape_primitive(self, name: str, *, deadline: float, **kwargs: Any) -> dict[str, Any]:
+        skill = getattr(self.skills, name)
+        params = inspect.signature(skill).parameters
+        if "deadline" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            kwargs["deadline"] = deadline
+        return skill(**kwargs)
+
     def _climb_out(self, *, deadline: float, max_attempts: int = 40) -> dict[str, Any]:
         """Climb to the surface datum in ONE call: probe directions and keep going.
 
@@ -2914,7 +2923,8 @@ class MiningDFSEngine:
                 attempts += 1
                 failed.add(("stair", d))
                 try:
-                    res = self.skills.dig_staircase(direction=d, steps=6, vertical="up", stop_on_ore=False)
+                    res = self._escape_primitive("dig_staircase", deadline=deadline,
+                                                 direction=d, steps=1, vertical="up", stop_on_ore=False)
                 except (ApiError, ValueError, KeyError, TypeError):
                     continue
                 gained = _floor_pos(self.bot.status().get("pos") or [0, cur_y, 0])[1] - int(cur_y)
@@ -2932,7 +2942,8 @@ class MiningDFSEngine:
                 failed.add(("pillar", "pillar"))
                 attempts += 1
                 try:
-                    self.skills.dig_staircase(direction="pillar", steps=6, vertical="pillar", stop_on_ore=False)
+                    self._escape_primitive("dig_staircase", deadline=deadline,
+                                           direction="pillar", steps=1, vertical="pillar", stop_on_ore=False)
                 except (ApiError, ValueError, KeyError, TypeError):
                     pass
                 continue
@@ -2949,7 +2960,8 @@ class MiningDFSEngine:
                 failed.add(("tunnel", d))
                 attempts += 1
                 try:
-                    self.skills.dig_level_tunnel(direction=d, steps=3, stop_on_ore=False)
+                    self._escape_primitive("dig_level_tunnel", deadline=deadline,
+                                           direction=d, steps=3, stop_on_ore=False)
                 except (ApiError, ValueError, KeyError, TypeError):
                     continue
                 after = _floor_pos(self.bot.status().get("pos") or [0, cur_y, 0])
@@ -4690,7 +4702,7 @@ class MiningDFSEngine:
             act = str(action or "explore").strip().lower()
             result: dict[str, Any] = {
                 "ok": False, "requires_replan": True, "action": act,
-                "strategy": self.strategy, "stop_reason": "time_budget",
+                "strategy": self.strategy, "stop_reason": "time_slice",
                 "pos_after": scoped.last_status.get("pos"), "tree": self.snapshot(),
                 "message": "本轮时间预算已用尽，已保留矿井与回撤路径；可用相同 action 继续。",
             }
