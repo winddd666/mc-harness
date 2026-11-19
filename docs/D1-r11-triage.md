@@ -1067,6 +1067,35 @@ retries 835 | failed429 9 | 502 0 | tracebacks 0
 
 56 集、**0 retries / 0 429 / 0 502**、1 次 aborted；三波审计轨累计 0 次 429。
 
+## 4bm. 过夜主轨终验 `overnight_12bot`（12/12，4 小时）
+
+| bot | 分数 | 集数 | over-cap |
+|---|---|---|---|
+| `glm_2_nether_bastion` | **270** | 30 | netherrack 551 |
+| `ds_4_nether_fortress` | **210** | 43 | — |
+| `glm_1_nether_fortress` | 205 | 34 | — |
+| `glm_4_brewing_alchemy` | 195 | 56 | deepslate 247 |
+| `glm_5_midgame` | 185 | 72 | — |
+| `nju_guitest_01_nether` | 180 | 75 | — |
+| `glm_3_village_trade` | 155 | 61 | cobble 300 |
+| `nju_3_village_trade` | 150 | 56 | deepslate 320 + cobble 256 |
+| `ds_3_enchant_anvil` | 150 | 41 | cobble 320 |
+| `ds_2_cave_combat` | 120 | 58 | cobble 382 + deepslate 301 |
+| `ds_1_bare` | 55 | 35 | cobble 571 |
+| `nju_movetest_bare` | 25 | 21 | cobble 256 |
+
+- 总分 **1900**；最高 `glm_2` 270、`ds_4` 210（43 集）
+- 门禁 4 FAIL：`deaths 144`、`cooldown 1417.8s`、`runtime_error 12`、`over-cap 8`
+- **429：9 次失败 / 879 次重试（1.0%）**，全部 `rate_limit_error`；无 502、无 Traceback
+- `mine_dfs` 1025 次、零进展 **3.6%**；`depth_reset` **16 次**
+- `staircase`：**time_budget 351**（342 次 dig、135 次低镐文案，steps_done 中位 1）
+- `unstick` 406 次：中位 5.4s、p90 25.2s、max 55.1s
+- **死亡 110（notable）**：`ds_4` **41**、`ds_3` 23、`ds_1` 13；`mob 38 / lava 22 / arrow 15 / hot_floor 13`
+
+### BUG-029 长程未达标（根因已定位）
+
+`pre_over_cap` 只让函数"进入"，但 `plan_garbage_drops` 的 `need = max(0, min_free - empty_before)` 在有 ≥3 空槽时为 0 → **一块都不丢**。修复：超 cap 时把 `need` 提升到"清到 cap"所需槽数，或加 `enforce_caps=True`。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
