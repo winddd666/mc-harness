@@ -2626,6 +2626,11 @@ def test_craft_gear_missing_materials_fail_before_any_mutation(item, counts, mis
     assert result["error"] == "missing_ingredients"
     assert result["requires_replan"] is True
     assert result["missing_materials"] == missing
+    # r24/D1: 7 of 8 real failures had message=None, forcing the model to
+    # parse the maps itself.
+    assert result["message"]
+    assert item in result["message"]
+    assert "缺少材料" in result["message"]
     assert calls == ["inventory"]
 
 

@@ -3012,6 +3012,11 @@ class MacroSkills:
             # absent stone/ingots/wool cannot be repaired by rebuilding a table.
             non_wood_missing = {k: v for k, v in plan["missing_materials"].items() if k not in {"stick", "any_planks"}}
             if non_wood_missing:
+                missing_desc = "、".join(
+                    f"{name} 需 {int(plan['required_materials'].get(name, amt))}"
+                    f"（现有 {int(plan['available_materials'].get(name, 0))}，缺 {amt}）"
+                    for name, amt in plan["missing_materials"].items()
+                )
                 return self._attach_shortage_memory_hint(
                     {
                         "ok": False,
@@ -3019,6 +3024,11 @@ class MacroSkills:
                         "requires_replan": True,
                         "inventory": initial,
                         **plan,
+                        "message": (
+                            f"合成 {item} x{count} 缺少材料：{missing_desc}。"
+                            "请先用 mc_skill_harvest_logs 补木料 / mc_skill_mine_blocks 补石料后再合成，"
+                            "或改合成本轮材料足够的替代工具；不要原参数重复调用。"
+                        ),
                     },
                     non_wood_missing.keys(),
                 )
@@ -3052,6 +3062,11 @@ class MacroSkills:
             }
         plan = craft_material_shortage(item, count, prepared)
         if plan and plan["missing_materials"]:
+            missing = plan["missing_materials"]
+            shortage_desc = "、".join(
+                f"{name} 需 {int(plan['required_materials'].get(name, amt))}（现有 {int(plan['available_materials'].get(name, 0))}，缺 {amt}）"
+                for name, amt in missing.items()
+            )
             return self._attach_shortage_memory_hint(
                 {
                     "ok": False,
@@ -3059,6 +3074,11 @@ class MacroSkills:
                     "requires_replan": True,
                     "inventory": prepared,
                     **plan,
+                    "message": (
+                        f"合成 {item} x{count} 缺少材料：{shortage_desc}。"
+                        "请先用 mc_skill_harvest_logs 补木料 / mc_skill_mine_blocks 补石料后再合成，"
+                        "或改合成本轮材料足够的替代工具；不要原参数重复调用。"
+                    ),
                 },
                 plan["missing_materials"].keys(),
             )
