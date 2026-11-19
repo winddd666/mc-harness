@@ -33,7 +33,7 @@ from ..skills.combat_env import (
     ThreatTrigger,
 )
 from ..skills.library import MacroSkills
-from ..skills.safety import SAFE_FOOD_PRIORITY
+from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
 
 # Hurt sources that mean "my body is embedded in a block", not "something is attacking me".
 IN_WALL_HURT_SOURCES = frozenset({"in_wall", "suffocation", "cramming", "inside_block"})
@@ -137,6 +137,8 @@ class _GuardSession:
 
 class GenerationGuard:
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
+    PRE_HURT_RANGED_COOLDOWN_S = 10.0
+    PRE_HURT_MELEE_COOLDOWN_S = 16.0
 
     def __init__(
         self,
@@ -167,6 +169,8 @@ class GenerationGuard:
         self._last_pre_hurt_melee_at = float("-inf")
         self._last_fire_douse_at = float("-inf")
         self._last_non_combat_alert_at = float("-inf")
+        self._last_gear_check_at = float("-inf")
+        self._last_torch_place_at = float("-inf")
         self.previous_health: float | None = None
         self.previous_ready: bool | None = None
         self.cursor = int(getattr(bot, "_last_event_seq", 0) or 0)
@@ -253,14 +257,21 @@ class GenerationGuard:
         return True, False
 
     def prime(self) -> None:
-        """Drain historical `/events` cursor and record baseline health before guarded execution."""
+        """Drain historical `/events` cursor, record baseline health, and auto-equip ready armor/shield."""
         try:
             st = self.bot.status()
             self.previous_health = float(st["health"]) if isinstance(st.get("health"), (int, float)) else None
             self.previous_ready = bool(st.get("ready", st.get("alive", True)))
             self._drain_events_pages()
             setattr(self.raw_bot, "_last_event_seq", self.cursor)
-        except Exception:
+            if st.get("ready", True) and st.get("alive") is not False:
+                inv = self.bot.inventory()
+                if isinstance(inv, dict) and (isinstance(inv.get("armor"), dict) or "offhand" in inv):
+                    auto_equip_survival_gear(self.bot, inv, allow_armor=True, allow_shield=True)
+                    self._last_gear_check_at = time.monotonic()
+        except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
+            raise
+        except (ApiError, httpx.HTTPError):
             pass
 
     def _skills(self) -> Any:
@@ -386,10 +397,16 @@ class GenerationGuard:
         if not ename and not isinstance(eid, int):
             return
         cur = time.monotonic() if now is None else now
+        if source == "pre_hurt_ranged":
+            cd = self.PRE_HURT_RANGED_COOLDOWN_S
+        elif source == "pre_hurt_melee":
+            cd = self.PRE_HURT_MELEE_COOLDOWN_S
+        else:
+            cd = self.PRE_HURT_TARGET_COOLDOWN_S
         key = self._pre_hurt_target_key(eid if isinstance(eid, int) else None, ename)
         self._pre_hurt_target_cooldown[key] = max(
             self._pre_hurt_target_cooldown.get(key, float("-inf")),
-            cur + self.PRE_HURT_TARGET_COOLDOWN_S,
+            cur + cd,
         )
 
     def _try_eat_food(self, food_name: str, eat_st: dict[str, Any], *, action_name: str = "eat") -> dict[str, Any] | None:
@@ -447,7 +464,11 @@ class GenerationGuard:
             return None
         now = time.monotonic()
         is_creeper = nh_name == "creeper" and nh_dist <= 4.5
-        is_melee = nh_name in LONE_COUNTERKILL_MOBS and nh_dist <= 3.3 and (now - self._last_pre_hurt_melee_at >= 12.0)
+        is_melee = (
+            nh_name in LONE_COUNTERKILL_MOBS
+            and nh_dist <= 2.8
+            and (now - self._last_pre_hurt_melee_at >= self.PRE_HURT_MELEE_COOLDOWN_S)
+        )
         is_ranged = nh_name in RANGED_MOBS and nh_dist <= 13.5
         if not (is_creeper or is_melee or is_ranged):
             return None
@@ -616,8 +637,6 @@ class GenerationGuard:
             str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts
         )
         hp_cur = float(health) if isinstance(health, (int, float)) else 20.0
-        if hurt:
-            self._pre_hurt_suppress_until = float("-inf")
 
         pre_trigger = (
             None
@@ -625,6 +644,8 @@ class GenerationGuard:
             else self._detect_pre_hurt_trigger(status)
         )
         effective_combat_hurt = hurt and not non_combat_only_hurt
+        if effective_combat_hurt:
+            self._pre_hurt_suppress_until = float("-inf")
         critical_override = bool(
             deaths
             or in_lava
@@ -707,6 +728,13 @@ class GenerationGuard:
             except (ApiError, httpx.HTTPError):
                 inv = {}
             counts, has_shield, has_melee_weapon = self._parse_inventory_summary(inv)
+            if (
+                isinstance(inv, dict)
+                and (isinstance(inv.get("armor"), dict) or "offhand" in inv)
+                and (now - self._last_gear_check_at >= 12.0)
+            ):
+                auto_equip_survival_gear(self.bot, inv, allow_armor=True, allow_shield=False)
+                self._last_gear_check_at = now
 
             if in_lava:
                 if counts.get("water_bucket", 0) > 0 and "nether" not in str(status.get("dimension") or "").lower():
@@ -899,6 +927,7 @@ class GenerationGuard:
                 elif (
                     has_shield
                     and not already_blocking
+                    and hurt_src not in RANGED_HURT_SOURCES
                     and hp_val >= 8.0
                     and (now - self._last_shield_only_at >= 12.0 or self._shield_only_streak < 1)
                 ):
@@ -924,6 +953,13 @@ class GenerationGuard:
                     cover = self._action("dig_cover", lambda: self._skills().dig_cover_pocket())
                     actions.append(cover)
                     if not cover["ok"]:
+                        if has_shield and not already_blocking and isinstance(inv, dict) and "offhand" in inv:
+                            self._equip_and_raise_shield_for_water(
+                                {**status, "in_water": False, "jumping": False},
+                                actions,
+                                inv=inv,
+                                attacker=attacker if isinstance(attacker, dict) else None,
+                            )
                         cf = self._action(
                             "combat_or_flee",
                             lambda: self._skills().defend_or_flee(
@@ -1413,8 +1449,35 @@ class GenerationGuard:
         food = int(status.get("food") or 20)
         needs_post_eat = (nh_dist > 8.0) and (hp <= 13.0 or food <= 13) and food < 20
         in_wall_hurt = any(str(h.get("source") or "") in IN_WALL_HURT_SOURCES for h in hurts)
+        pos_b = status.get("pos") or [0.0, 64.0, 0.0]
+        by_b = float(pos_b[1]) if isinstance(pos_b, (list, tuple)) and len(pos_b) >= 2 else 64.0
+        dim_b = str(status.get("dimension") or "").lower()
+        tool_blob_b = " ".join(str(r or "") for r in (tool_results or [])).lower()
+        needs_lava_edge_guard = (
+            not in_lava
+            and not in_water
+            and status.get("on_ground") is True
+            and ("lava" in tool_blob_b or ("nether" in dim_b and by_b <= 36.0))
+        )
+        needs_cave_prep = (
+            not in_lava
+            and not in_water
+            and status.get("on_ground") is True
+            and nh_dist > 8.0
+            and by_b < 60.0
+            and "nether" not in dim_b
+            and "cave" in tool_blob_b
+        )
 
-        if not (in_lava or needs_water_escape or in_wall_hurt or boundary_trigger is not None or needs_post_eat):
+        if not (
+            in_lava
+            or needs_water_escape
+            or in_wall_hurt
+            or boundary_trigger is not None
+            or needs_post_eat
+            or needs_lava_edge_guard
+            or needs_cave_prep
+        ):
             self.previous_health = hp
             return None
 
@@ -1427,6 +1490,15 @@ class GenerationGuard:
                 esc_l = self._action("boundary_escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
                 still_lava = not bool(esc_l.get("ok"))
                 notes.append("脱离岩浆" if not still_lava else "尝试脱离岩浆")
+            elif needs_lava_edge_guard:
+                edge_act = self._action(
+                    "boundary_guard_lava_edge",
+                    lambda: self.combat_env.guard_lava_edge(pos_b),
+                    raise_on_http_error=False,
+                )
+                edge_res = edge_act.get("result") if isinstance(edge_act.get("result"), dict) else {}
+                if edge_res.get("near_lava"):
+                    notes.append("岩浆边潜行封边" if edge_res.get("sealed") else "岩浆边强制潜行")
             elif needs_water_escape:
                 if hurts:
                     self._water_hurt_streak += 1
@@ -1503,7 +1575,7 @@ class GenerationGuard:
                 elif isinstance(act.get("error"), dict):
                     notes.append(f"近身处置受阻({act['error'].get('code')})")
 
-            if needs_post_eat and boundary_trigger is None and not still_lava and not still_wet:
+            if (needs_post_eat or needs_cave_prep) and boundary_trigger is None and not still_lava and not still_wet:
                 try:
                     inv = self.bot.inventory()
                 except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
@@ -1511,12 +1583,38 @@ class GenerationGuard:
                 except Exception:
                     inv = {}
                 counts, _, _ = self._parse_inventory_summary(inv)
-                best_food = next((f for f in SAFE_FOOD_PRIORITY if counts.get(f, 0) > 0), None)
-                if best_food:
-                    eat_act = self._try_eat_food(best_food, status, action_name="boundary_eat")
-                    if eat_act is not None and eat_act.get("ok"):
-                        notes.append(f"顺手进食 {best_food}")
-                        self.retry_after_ready = False
+                if isinstance(inv, dict) and (isinstance(inv.get("armor"), dict) or "offhand" in inv):
+                    geared = auto_equip_survival_gear(self.bot, inv, allow_armor=True, allow_shield=True)
+                    if geared:
+                        self._last_gear_check_at = now_b
+                        notes.append("自动穿戴护甲/盾")
+                if (
+                    status.get("on_ground") is True
+                    and nh_dist > 8.0
+                    and by_b < 60.0
+                    and "nether" not in dim_b
+                    and counts.get("torch", 0) > 0
+                    and (now_b - self._last_torch_place_at >= 20.0)
+                ):
+                    tx_b, ty_b, tz_b = math.floor(float(pos_b[0])), math.floor(by_b + 0.05), math.floor(float(pos_b[2]))
+                    try:
+                        foot_b = self.combat_env._get_block_name(tx_b, ty_b, tz_b)
+                        floor_b = self.combat_env._get_block_name(tx_b, ty_b - 1, tz_b)
+                        if foot_b in {"air", "cave_air"} and floor_b not in {
+                            "air", "cave_air", "void_air", "lava", "flowing_lava", "water", "flowing_water"
+                        }:
+                            self.bot.call("place", {"item": "torch", "pos": [tx_b, ty_b, tz_b]})
+                            self._last_torch_place_at = now_b
+                            notes.append("补放洞穴火把")
+                    except ApiError:
+                        pass
+                if needs_post_eat:
+                    best_food = next((f for f in SAFE_FOOD_PRIORITY if counts.get(f, 0) > 0), None)
+                    if best_food:
+                        eat_act = self._try_eat_food(best_food, status, action_name="boundary_eat")
+                        if eat_act is not None and eat_act.get("ok"):
+                            notes.append(f"顺手进食 {best_food}")
+                            self.retry_after_ready = False
 
             st_after = self.bot.status()
             self.previous_health = float(st_after.get("health") or hp)

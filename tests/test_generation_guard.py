@@ -26,7 +26,8 @@ def test_hurt_during_model_wait_raises_shield_and_discards_stale_response(monkey
         body = json.loads(request.content) if request.content else {}
         if action == "events":
             since = int(request.url.params.get("since", 0)) if request.method == "GET" else body.get("since", 0)
-            rows = [{"seq": 1, "type": "hurt", "health": 16, "source": "arrow", "source_entity": {"id": 12}}] if state["hurt"] and since < 1 else []
+            # BUG-026 moved ranged "arrow" hits to cover_or_flee; melee "mob_attack" exercises shield-on-hurt cancellation.
+            rows = [{"seq": 1, "type": "hurt", "health": 16, "source": "mob_attack", "source_entity": {"id": 12}}] if state["hurt"] and since < 1 else []
             result = {"events": rows, "last_seq": 1 if state["hurt"] else 0}
         elif action == "status":
             result = {"pos": [0.5, 64, 0.5], "health": 16 if state["hurt"] else 20,
@@ -1970,6 +1971,205 @@ def test_r15_nether_bastion_wide_lava_steers_via_find_blocks_onto_elevated_ledge
     assert ctrl["ms"] >= 1500
     mv = next(pl for act, pl in calls if act == "move_to")
     assert (mv["x"], mv["y"], mv["z"]) == (229.5, 33.0, 234.5)
+
+
+def test_bug026_ranged_arrow_cover_or_flee_lava_sneak_armor_and_cooldown(monkeypatch):
+    """Covers BUG-026: arrow hurts cover/flee instead of static shield-block, auto-armor/torches, lava-edge sneak+seal, and 10s ranged cooldown."""
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    clock = [2000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+
+    # 1) Arrow hit WITH unblocking shield in inventory -> NEVER stops at static raise_shield!
+    class _ArrowCoverSkills:
+        class _Eng:
+            nodes = {}
+            def is_inside_shaft(self):
+                return False
+
+        mining_dfs = _Eng()
+
+        def __init__(self, *, cover_ok: bool):
+            self.cover_ok = cover_ok
+
+        def dig_cover_pocket(self):
+            return {"ok": True, "mode": "cover_pocket"} if self.cover_ok else {"ok": False, "reason": "no_solid_wall"}
+
+        def defend_or_flee(self, **kwargs):
+            return {"ok": True, "mode": "flee", "moved_dist": 12.0}
+
+    def _make_arrow_bot():
+        class _ArrowShieldBot:
+            _last_event_seq = 0
+            def call(self, action, body=None, **kwargs):
+                if action == "status":
+                    return {
+                        "pos": [0.5, 64.0, 0.5], "health": 16.0, "food": 20, "alive": True, "ready": True,
+                        "in_water": False, "in_lava": False, "on_ground": True, "blocking": False,
+                        "nearest_hostile": {"id": 61, "name": "skeleton", "dist": 10.0},
+                    }
+                if action == "events":
+                    since = int((kwargs.get("params") or {}).get("since", 0))
+                    rows = [{"seq": 1, "type": "hurt", "health": 16.0, "source": "arrow", "source_entity": {"id": 61}}] if since < 1 else []
+                    return {"events": rows, "last_seq": 1}
+                if action == "inventory":
+                    return {"items": [{"name": "shield", "count": 1}, {"name": "cobblestone", "count": 16}], "offhand": None}
+                return {"ok": True}
+        return _ArrowShieldBot()
+
+    g_cov = GenerationGuard(_make_arrow_bot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_ArrowCoverSkills(cover_ok=True))
+    inc_cov = g_cov.poll()
+    assert inc_cov is not None
+    assert [a["action"] for a in inc_cov["actions"]] == ["dig_cover"]  # not standing still raising shield!
+
+    g_flee = GenerationGuard(_make_arrow_bot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_ArrowCoverSkills(cover_ok=False))
+    inc_flee = g_flee.poll()
+    assert inc_flee is not None
+    flee_names = [a["action"] for a in inc_flee["actions"]]
+    assert "dig_cover" in flee_names and "combat_or_flee" in flee_names
+
+    # Skeleton at 8.5m (>5m) with shield+sword prioritizes cover_or_flee, and blaze skips fire-trap cover_pocket!
+    class _RangedCaveEnvBot:
+        def __init__(self, mob_name: str, dist: float):
+            self.mob_name = mob_name
+            self.dist = dist
+            self.fled = False
+
+        def status(self):
+            return self.call("status")
+
+        def inventory(self):
+            return self.call("inventory")
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 40.0, 0.5], "health": 20.0, "food": 20, "alive": True, "ready": True,
+                    "on_ground": True, "in_water": False, "in_lava": False,
+                }
+            if action == "inventory":
+                return {
+                    "items": [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}, {"name": "cobblestone", "count": 16}],
+                    "offhand": {"name": "shield", "count": 1},
+                    "held": {"name": "iron_sword", "count": 1},
+                    "armor": {"head": None, "chest": None, "legs": None, "feet": None},
+                }
+            if action == "get_entities":
+                return {"entities": [{"id": 70, "name": self.mob_name, "pos": [0.5 + self.dist, 40.0, 0.5], "dist": self.dist}]}
+            if action == "get_block":
+                p = (body or {}).get("pos", [0, 40, 0])
+                return {"name": "stone" if p[1] < 40 else "air"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "move_to":
+                self.fled = True
+                return {"ok": True}
+            return {"ok": True}
+
+    ctrl = SubcorticalInstinctController()
+    out_skel = ctrl.on_encounter(
+        CombatEnv(_RangedCaveEnvBot("skeleton", 8.5)),
+        {"source": "pre_hurt_ranged", "primary_entity_id": 70, "primary_type": "skeleton", "pos": [9.0, 40.0, 0.5], "distance": 8.5},
+    )
+    assert out_skel["mode"] == "cover_or_flee"
+
+    out_blaze = ctrl.on_encounter(
+        CombatEnv(_RangedCaveEnvBot("blaze", 6.0)),
+        {"source": "pre_hurt_ranged", "primary_entity_id": 70, "primary_type": "blaze", "pos": [6.5, 40.0, 0.5], "distance": 6.0},
+    )
+    assert out_blaze["mode"] == "cover_or_flee"
+    assert not any(a["action"] == "cover_pocket" for a in out_blaze["actions"])
+
+    # 2) Cave gear (armor slots -> head/torso/legs/feet + offhand shield + cave torch) & lava-edge sneak+seal
+    gear_calls: list[tuple[str, dict]] = []
+
+    class _CaveAndLavaBot:
+        _last_event_seq = 0
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            gear_calls.append((action, pl))
+            if action == "status":
+                return {
+                    "pos": [10.5, 40.0, 10.5], "health": 18.0, "food": 20, "alive": True, "ready": True,
+                    "on_ground": True, "in_water": False, "in_lava": False, "sneaking": False, "blocking": False,
+                    "dimension": "minecraft:overworld",
+                }
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {
+                    "items": [
+                        {"name": "iron_helmet", "count": 1},
+                        {"name": "iron_chestplate", "count": 1},
+                        {"name": "iron_leggings", "count": 1},
+                        {"name": "iron_boots", "count": 1},
+                        {"name": "shield", "count": 1},
+                        {"name": "torch", "count": 8},
+                        {"name": "cobblestone", "count": 16},
+                    ],
+                    "armor": {"head": None, "chest": None, "legs": None, "feet": None},
+                    "offhand": None,
+                }
+            if action == "get_block":
+                p = pl.get("pos", [0, 40, 0])
+                if tuple(p) == (11, 39, 10):
+                    return {"name": "lava"}
+                if p[1] < 40:
+                    return {"name": "stone"}
+                return {"name": "air"}
+            return {"ok": True}
+
+    g_prep = GenerationGuard(_CaveAndLavaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    g_prep.prime()
+    equips = [(pl.get("item"), pl.get("slot")) for act, pl in gear_calls if act == "equip"]
+    assert ("iron_helmet", "head") in equips
+    assert ("iron_chestplate", "torso") in equips
+    assert ("iron_leggings", "legs") in equips
+    assert ("iron_boots", "feet") in equips
+    assert ("shield", "off-hand") in equips
+
+    gear_calls.clear()
+    note_edge = g_prep.stabilize_after_tools(['{"cave": true, "lava": true}'])
+    assert note_edge is not None
+    assert "岩浆边潜行" in note_edge
+    assert "补放洞穴火把" in note_edge
+    assert any(act == "posture" and pl.get("sneak") is True for act, pl in gear_calls)
+    assert any(act == "place" and pl == {"item": "cobblestone", "pos": [11, 39, 10]} for act, pl in gear_calls)
+    assert any(act == "place" and pl == {"item": "torch", "pos": [10, 40, 10]} for act, pl in gear_calls)
+
+    # 3) pre_hurt_ranged suppresses repeats for 10s AND on_fire ticks don't clear suppress_until!
+    class _BlazeOnFireDebounceBot:
+        _last_event_seq = 0
+        fire_seq = 0
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 64.0, 0.5], "health": 16.0, "food": 20, "alive": True, "ready": True,
+                    "on_ground": True, "in_water": False, "in_lava": False,
+                    "nearest_hostile": {"id": 91, "name": "skeleton", "pos": [11.0, 64.0, 0.5], "dist": 10.5},
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                rows = [{"seq": self.fire_seq, "type": "hurt", "health": 16.0, "source": "on_fire"}] if self.fire_seq > since else []
+                return {"events": rows, "last_seq": self.fire_seq}
+            if action == "get_block":
+                p = (body or {}).get("pos", [0, 64, 0])
+                return {"name": "netherrack" if p[1] < 64 else "air"}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    blaze_bot = _BlazeOnFireDebounceBot()
+    g_cd = GenerationGuard(blaze_bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    inc_r1 = g_cd.poll()
+    assert inc_r1 is not None and "pre_hurt_ranged" in inc_r1["reasons"]
+    clock[0] += 5.0
+    blaze_bot.fire_seq = 1  # ambient on_fire tick in between
+    assert g_cd.poll() is None  # no fake cancel on non-combat fire tick AND pre_hurt_ranged 10s cooldown stays intact!
+    clock[0] += 1.0
+    assert g_cd.poll() is None  # still inside 10s pre_hurt_ranged cooldown!
+
 
 
 

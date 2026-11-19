@@ -16,7 +16,7 @@ from typing import Any, Literal, Protocol, Sequence, TypedDict
 
 from ..errors import ApiError
 from ..harness.control import RequestCancelled, RunTimedOut
-from .safety import SAFE_FOOD_PRIORITY
+from .safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
 
 AIR_LIKE_BLOCKS: frozenset[str] = frozenset(
     {
@@ -1412,6 +1412,61 @@ class CombatEnv:
             "pos_after": pos_end,
         }
 
+    def guard_lava_edge(
+        self,
+        pos: Sequence[float] | None = None,
+        *,
+        counts: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Force sneak posture and seal exposed adjacent lava edges before falling in."""
+        st0 = self.bot.status()
+        if bool(st0.get("in_lava")) or st0.get("on_ground") is not True or st0.get("ready") is False or st0.get("alive") is False:
+            return {"ok": False, "near_lava": False, "sneak": bool(st0.get("sneaking")), "sealed": 0}
+
+        cur_pos = pos or st0.get("pos") or [0.0, 64.0, 0.0]
+        bx, by, bz = math.floor(float(cur_pos[0])), math.floor(float(cur_pos[1]) + 0.05), math.floor(float(cur_pos[2]))
+        exposed_lava: list[list[int]] = []
+        for dx, dz in CARDINAL_VECTORS.values():
+            nx, nz = bx + dx, bz + dz
+            for check_y in (by - 1, by):
+                if self._get_block_name(nx, check_y, nz) in {"lava", "flowing_lava"}:
+                    exposed_lava.append([nx, check_y, nz])
+                    break
+
+        if not exposed_lava:
+            return {"ok": True, "near_lava": False, "sneak": bool(st0.get("sneaking")), "sealed": 0}
+
+        sneaking = bool(st0.get("sneaking"))
+        if not sneaking:
+            try:
+                self.bot.call(
+                    "posture",
+                    {"sneak": True, "shield": bool(st0.get("blocking")), "jump": False},
+                )
+                sneaking = True
+            except ApiError:
+                pass
+
+        if counts is None:
+            try:
+                counts, _, _ = self._inventory_counts_and_shield()
+            except Exception:
+                counts = {}
+        filler = self._pick_filler_block(counts)
+        sealed = 0
+        if filler is not None:
+            for lpos in exposed_lava[:2]:
+                if self.geofence is not None and not self.geofence.contains(lpos[0] + 0.5, float(lpos[1] + 1), lpos[2] + 0.5):
+                    continue
+                try:
+                    self.bot.call("place", {"item": filler, "pos": lpos})
+                    sealed += 1
+                except ApiError:
+                    continue
+            if sealed:
+                self.invalidate_block_cache()
+        return {"ok": True, "near_lava": True, "sneak": sneaking, "sealed": sealed}
+
 
 class SubcorticalInstinctController:
     """Built-in 0-LLM aggressive instinct controller prior to teammate's full `combat.py` plug-in.
@@ -1499,7 +1554,15 @@ class SubcorticalInstinctController:
             }
         pos = st.get("pos") or [0.0, 64.0, 0.0]
         hp = float(st.get("health") or 20.0)
-        counts, has_shield, held_name = env._inventory_counts_and_shield()
+        try:
+            inv0 = env.bot.call("inventory", method="GET")
+        except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
+            raise
+        except Exception:
+            inv0 = {}
+        counts, has_shield, held_name = env._inventory_counts_and_shield(inv0)
+        if isinstance(inv0, dict) and (isinstance(inv0.get("armor"), dict) or "offhand" in inv0):
+            auto_equip_survival_gear(env.bot, inv0, allow_armor=True, allow_shield=has_shield)
 
         hostiles = self._find_live_hostiles(env, radius=16)
         nh = st.get("nearest_hostile") if isinstance(st.get("nearest_hostile"), dict) else None
@@ -1720,11 +1783,14 @@ class SubcorticalInstinctController:
                     actions.append({"action": "flee", "ok": bool(fl.get("ok"))})
             elif (
                 mob_name in RANGED_MOBS
+                and mob_name != "blaze"
+                and trigger.get("source") != "guard_poll_hurt"
+                and trigger.get("hurt_source") not in {"arrow", "trident", "fireball", "wither_skull"}
                 and has_shield
                 and has_weapon
                 and hp >= 14.0
                 and len(nearby_hostiles) <= 1
-                and mob_dist <= 9.5
+                and mob_dist <= 5.0
                 and mob_id is not None
             ):
                 mode = "shield_rush_ranged"
@@ -1760,7 +1826,7 @@ class SubcorticalInstinctController:
             else:
                 mode = "cover_or_flee"
                 covered = False
-                if snap["enclosure"] in {"open_cave", "carved_shaft"} and env.skills is not None:
+                if snap["enclosure"] in {"open_cave", "carved_shaft"} and env.skills is not None and mob_name != "blaze":
                     cov = env.build_tactical("cover_pocket")
                     if cov.get("ok"):
                         covered = True

@@ -37,6 +37,59 @@ SAFE_FOOD_PRIORITY: tuple[str, ...] = (
 )
 
 
+ARMOR_SLOT_PRIORITIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "head",
+        "head",
+        (
+            "netherite_helmet",
+            "diamond_helmet",
+            "iron_helmet",
+            "turtle_helmet",
+            "golden_helmet",
+            "chainmail_helmet",
+            "leather_helmet",
+        ),
+    ),
+    (
+        "chest",
+        "torso",
+        (
+            "netherite_chestplate",
+            "diamond_chestplate",
+            "iron_chestplate",
+            "golden_chestplate",
+            "chainmail_chestplate",
+            "leather_chestplate",
+        ),
+    ),
+    (
+        "legs",
+        "legs",
+        (
+            "netherite_leggings",
+            "diamond_leggings",
+            "iron_leggings",
+            "golden_leggings",
+            "chainmail_leggings",
+            "leather_leggings",
+        ),
+    ),
+    (
+        "feet",
+        "feet",
+        (
+            "netherite_boots",
+            "diamond_boots",
+            "iron_boots",
+            "golden_boots",
+            "chainmail_boots",
+            "leather_boots",
+        ),
+    ),
+)
+
+
 class SafetyEmergency(RuntimeError):
     """Raised when the bot is in imminent lethal danger and should disconnect immediately."""
 
@@ -111,6 +164,52 @@ def prepare_water_shield(
     except ApiError:
         pass
     return taken
+
+
+def auto_equip_survival_gear(
+    bot: Any,
+    inv: dict[str, Any] | None = None,
+    *,
+    allow_armor: bool = True,
+    allow_shield: bool = True,
+) -> list[str]:
+    """Equip highest-tier armor and off-hand shield from bag when those slots report empty/lower tier."""
+    if inv is None:
+        try:
+            inv = bot.inventory()
+        except Exception:
+            return []
+    if not isinstance(inv, dict):
+        return []
+
+    raw_counts = _item_counts(inv)
+    counts = {str(k).removeprefix("minecraft:"): int(v) for k, v in raw_counts.items()}
+    equipped: list[str] = []
+
+    armor_map = inv.get("armor")
+    if allow_armor and isinstance(armor_map, dict):
+        for inv_key, equip_slot, order in ARMOR_SLOT_PRIORITIES:
+            cur_piece = armor_map.get(inv_key)
+            cur_name = str((cur_piece or {}).get("name") or "").removeprefix("minecraft:")
+            cur_rank = order.index(cur_name) if cur_name in order else len(order)
+            best_idx = next((idx for idx, item in enumerate(order) if counts.get(item, 0) > 0), len(order))
+            if best_idx < cur_rank:
+                best_item = order[best_idx]
+                try:
+                    bot.call("equip", {"item": best_item, "slot": equip_slot})
+                    equipped.append(f"equip:{best_item}")
+                except ApiError:
+                    pass
+
+    if allow_shield and "offhand" in inv:
+        off_name = str((inv.get("offhand") or {}).get("name") or "").removeprefix("minecraft:")
+        if off_name != "shield" and counts.get("shield", 0) > 0:
+            try:
+                bot.call("equip", {"item": "shield", "slot": "off-hand"})
+                equipped.append("equip:shield")
+            except ApiError:
+                pass
+    return equipped
 
 
 def check_and_stabilize(
