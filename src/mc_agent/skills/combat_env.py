@@ -859,9 +859,66 @@ class CombatEnv:
 
         return {"ok": False, "mode": norm_mode, "placed": 0, "pos_after": pos0, "reason": "unknown_mode"}
 
+    def _best_effort_stop(self, *, stop_control: bool = True) -> None:
+        """Stop residual movement/pathfinder controls after a timeout or preemption."""
+        try:
+            self.bot.call("stop", {})
+        except (ApiError, httpx.HTTPError):
+            pass
+        if stop_control:
+            try:
+                self.bot.call("control", {"wait": False})
+            except (ApiError, httpx.HTTPError):
+                pass
+
+    def _safe_status(self, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Fetch live bot status safely without letting transient ReadTimeout abort active reflexes."""
+        try:
+            if callable(getattr(self.bot, "status", None)):
+                res = self.bot.status()
+            else:
+                res = self.bot.call("status", method="GET")
+            return res if isinstance(res, dict) else dict(fallback or {})
+        except (ApiError, httpx.HTTPError):
+            return dict(fallback or {})
+
+    def _is_airborne_above_lava(self, st_now: dict[str, Any], *, start_pos: Sequence[float]) -> bool:
+        """Return True when in_lava=False only because a jump lifted the bot mid-air over lava."""
+        if bool(st_now.get("in_lava")) or st_now.get("alive") is False or st_now.get("ready") is False:
+            return False
+        if st_now.get("on_ground") is not False:
+            return False
+        p_now = st_now.get("pos") or start_pos
+        try:
+            px, py_f, pz = float(p_now[0]), float(p_now[1]), float(p_now[2])
+            if math.hypot(px - float(start_pos[0]), pz - float(start_pos[2])) > 64.0:
+                return False
+            bx, by, bz = math.floor(px), math.floor(py_f + 0.05), math.floor(pz)
+        except (TypeError, ValueError, IndexError):
+            return False
+        below1 = self._get_block_name(bx, by - 1, bz)
+        if _is_solid_ground(below1):
+            return False
+        below2 = self._get_block_name(bx, by - 2, bz)
+        if _is_passable(below1) and _is_solid_ground(below2):
+            return False
+        return below1 in {"lava", "flowing_lava"} or (
+            _is_passable(below1) and below2 in {"lava", "flowing_lava"}
+        )
+
     def escape_lava(self) -> dict[str, Any]:
         """Deterministically escape lava using water douse (overworld), safe-yaw jump sprint, wall-notch/pillar climb, and live `in_lava` verification."""
-        st = self.bot.status()
+        try:
+            st = self.bot.status()
+        except (ApiError, httpx.HTTPError):
+            self._best_effort_stop()
+            return {
+                "ok": False,
+                "in_lava": True,
+                "timeout": True,
+                "pos_after": None,
+                "actions": ["lava_status_timeout"],
+            }
         if not bool(st.get("in_lava")):
             return {
                 "ok": True,
@@ -873,38 +930,55 @@ class CombatEnv:
 
         actions: list[str] = []
         lava_deadline = time.monotonic() + 5.0
-        counts, _, _ = self._inventory_counts_and_shield()
+        try:
+            counts, _, _ = self._inventory_counts_and_shield()
+        except (ApiError, httpx.HTTPError):
+            counts = {}
         dim = str(st.get("dimension") or "").lower()
         if counts.get("water_bucket", 0) > 0 and "nether" not in dim:
-            douse = self.build_tactical("place_water_feet")
-            actions.append("place_water_feet" if douse.get("ok") else "place_water_feet_failed")
-            st = self.bot.status()
+            try:
+                douse = self.build_tactical("place_water_feet")
+                actions.append("place_water_feet" if douse.get("ok") else "place_water_feet_failed")
+            except (ApiError, httpx.HTTPError):
+                actions.append("place_water_feet_failed")
+            st = self._safe_status(st)
             if not bool(st.get("in_lava")):
                 return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
             try:
                 self.bot.call("use_item", {"item": "water_bucket"})
                 actions.append("use_water_bucket")
-                st = self.bot.status()
-                if not bool(st.get("in_lava")):
-                    return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
-            except ApiError:
+            except (ApiError, httpx.HTTPError):
                 pass
+            st = self._safe_status(st)
+            if not bool(st.get("in_lava")):
+                return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
 
         # 1. If submerged deep in lava, swim up first so surface bank scan can find solid footing
         self.invalidate_block_cache()
         pos0 = st.get("pos") or [0.0, 64.0, 0.0]
+
+        def _should_exit_lava(st_now: dict[str, Any]) -> bool:
+            if st_now.get("alive") is False or st_now.get("ready") is False:
+                return True
+            return (not bool(st_now.get("in_lava"))) and (not self._is_airborne_above_lava(st_now, start_pos=pos0))
 
         def _lava_result(st_now: dict[str, Any]) -> dict[str, Any]:
             still_in_lava = bool(st_now.get("in_lava"))
             pos_now = st_now.get("pos") or pos0
             moved = math.hypot(float(pos_now[0]) - float(pos0[0]), float(pos_now[2]) - float(pos0[2]))
             respawned = st_now.get("alive") is False or st_now.get("ready") is False or moved > 64.0
+            airborne_over_lava = (
+                (not respawned)
+                and (not still_in_lava)
+                and self._is_airborne_above_lava(st_now, start_pos=pos0)
+            )
             return {
-                "ok": (not respawned) and (not still_in_lava),
+                "ok": (not respawned) and (not still_in_lava) and (not airborne_over_lava),
                 "in_lava": still_in_lava,
                 "pos_after": pos_now,
                 "actions": actions,
                 **({"respawned": True} if respawned else {}),
+                **({"airborne_above_lava": True} if airborne_over_lava else {}),
             }
 
         head_bx, head_by, head_bz = math.floor(float(pos0[0])), math.floor(float(pos0[1])) + 1, math.floor(float(pos0[2]))
@@ -912,11 +986,13 @@ class CombatEnv:
             try:
                 self.bot.call("control", {"forward": True, "jump": True, "sprint": True, "ms": 950, "stop_on": ["death"]})
                 actions.append("lava_surface_swim")
-            except ApiError:
-                pass
+            except (ApiError, httpx.HTTPError) as err:
+                if isinstance(err, httpx.HTTPError):
+                    actions.append("lava_surface_swim_timeout")
+                    self._best_effort_stop()
             self.invalidate_block_cache()
-            st = self.bot.status()
-            if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
+            st = self._safe_status(st)
+            if _should_exit_lava(st):
                 return _lava_result(st)
             pos0 = st.get("pos") or pos0
 
@@ -982,10 +1058,13 @@ class CombatEnv:
                     {"forward": True, "jump": True, "sprint": True, "ms": swim_ms, "stop_on": ["death"]},
                 )
                 actions.append("lava_jump_sprint")
-            except (ApiError, httpx.HTTPError):
-                pass
-            st = self.bot.status()
-            if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
+            except (ApiError, httpx.HTTPError) as err:
+                if isinstance(err, httpx.HTTPError):
+                    actions.append("lava_jump_sprint_timeout")
+                    self._best_effort_stop()
+            self.invalidate_block_cache()
+            st = self._safe_status(st)
+            if _should_exit_lava(st):
                 return _lava_result(st)
 
         # 2b. Short pathfinder step onto close shore (`<=6.5m`) guarded against pathfinder ReadTimeout stalls.
@@ -1007,12 +1086,10 @@ class CombatEnv:
                     actions.append("lava_move_to_shore")
                 except (ApiError, httpx.HTTPError) as err:
                     actions.append("lava_move_to_shore_timeout" if isinstance(err, httpx.HTTPError) else "lava_move_to_shore_err")
-                    try:
-                        self.bot.call("stop", {})
-                    except Exception:
-                        pass
-                st = self.bot.status()
-                if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
+                    self._best_effort_stop()
+                self.invalidate_block_cache()
+                st = self._safe_status(st)
+                if _should_exit_lava(st):
                     return _lava_result(st)
 
         # 3. Boxed-in pit or deep lava: try replacing lava at feet / pillaring up with a filler block
@@ -1020,7 +1097,10 @@ class CombatEnv:
         if filler is not None and time.monotonic() < lava_deadline:
             p_cur = st.get("pos") or pos0
             bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
-            for place_pos in ([bx, by, bz], [bx, by - 1, bz]):
+            place_targets = [[bx, by, bz], [bx, by - 1, bz]]
+            if st.get("on_ground") is False and _is_passable(self._get_block_name(bx, by - 1, bz)):
+                place_targets.append([bx, by - 2, bz])
+            for place_pos in place_targets:
                 if time.monotonic() >= lava_deadline:
                     break
                 try:
@@ -1029,10 +1109,12 @@ class CombatEnv:
                     self.bot.call("place", {"item": filler, "pos": place_pos})
                     actions.append(f"lava_place_{filler}")
                     self.invalidate_block_cache()
-                    st = self.bot.status()
-                    if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
+                    st = self._safe_status(st)
+                    if _should_exit_lava(st):
                         return _lava_result(st)
-                except (ApiError, httpx.HTTPError):
+                except (ApiError, httpx.HTTPError) as err:
+                    if isinstance(err, httpx.HTTPError):
+                        self._best_effort_stop()
                     continue
 
         # 4. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
@@ -1042,9 +1124,8 @@ class CombatEnv:
             if time.monotonic() >= lava_deadline:
                 break
             ex, ez = bx + dx, bz + dz
-            if self.geofence is not None and hasattr(self.geofence, "check_point"):
-                if self.geofence.check_point(ex + 0.5, ez + 0.5, action="escape_lava") is not None:
-                    continue
+            if not self._point_allowed(ex + 0.5, ez + 0.5, action="escape_lava"):
+                continue
             b_foot = self._get_block_name(ex, by, ez)
             b_head = self._get_block_name(ex, by + 1, ez)
             b_top = self._get_block_name(ex, by + 2, ez)
@@ -1057,7 +1138,9 @@ class CombatEnv:
                     try:
                         self.bot.call("dig", {"pos": [ex, cy, ez], "collect": False, "stop_on": ["death"]})
                         dug_any = True
-                    except ApiError:
+                    except (ApiError, httpx.HTTPError) as err:
+                        if isinstance(err, httpx.HTTPError):
+                            self._best_effort_stop()
                         break
             if dug_any or (_is_passable(b_head) and _is_passable(b_top)):
                 yaw_out = math.atan2(-(ex + 0.5 - float(p_cur[0])), -(ez + 0.5 - float(p_cur[2])))
@@ -1068,18 +1151,20 @@ class CombatEnv:
                         {"forward": True, "jump": True, "sprint": True, "ms": 1000, "stop_on": ["death"]},
                     )
                     actions.append(f"lava_notch_{dname}")
-                except ApiError:
-                    pass
-                st = self.bot.status()
-                if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
+                except (ApiError, httpx.HTTPError) as err:
+                    if isinstance(err, httpx.HTTPError):
+                        self._best_effort_stop()
+                self.invalidate_block_cache()
+                st = self._safe_status(st)
+                if _should_exit_lava(st):
                     break
 
-        st_end = self.bot.status()
+        st_end = self._safe_status(st)
         still_in_lava = bool(st_end.get("in_lava"))
         if still_in_lava and st_end.get("alive") is not False and st_end.get("ready") is not False:
             try:
                 self.bot.call("posture", {"jump": True})
-            except ApiError:
+            except (ApiError, httpx.HTTPError):
                 pass
         return _lava_result(st_end)
 
@@ -1129,10 +1214,11 @@ class CombatEnv:
                     "ms": 950 if urgent else 650,
                 },
             )
-        except ApiError:
-            pass
+        except (ApiError, httpx.HTTPError) as err:
+            if isinstance(err, httpx.HTTPError):
+                self._best_effort_stop()
 
-        st_mid = self.bot.status()
+        st_mid = self._safe_status(st0)
         if st_mid.get("alive") is False:
             return {"ok": False, "mode": "respawned", "moved_dist": 0.0, "pos_after": st_mid.get("pos"), "respawned": True}
         mid_pos = st_mid.get("pos") or pos0
@@ -1164,10 +1250,11 @@ class CombatEnv:
                     "move_to",
                     {"x": round(goal_x, 1), "z": round(goal_z, 1), "range": 2.0, "timeout": 3500, "stop_on": ["death"]},
                 )
-            except ApiError:
-                pass
+            except (ApiError, httpx.HTTPError) as err:
+                if isinstance(err, httpx.HTTPError):
+                    self._best_effort_stop()
 
-        st_end = self.bot.status()
+        st_end = self._safe_status(st_mid)
         nh_end = st_end.get("nearest_hostile")
         if (
             urgent
@@ -1179,9 +1266,10 @@ class CombatEnv:
             try:
                 self.bot.call("look", {"yaw": chosen_yaw, "pitch": 0.0})
                 self.bot.call("control", {"forward": True, "sprint": True, "jump": True, "ms": 750})
-                st_end = self.bot.status()
-            except ApiError:
-                pass
+                st_end = self._safe_status(st_end)
+            except (ApiError, httpx.HTTPError) as err:
+                if isinstance(err, httpx.HTTPError):
+                    self._best_effort_stop()
         pos_end = st_end.get("pos") or pos0
         moved = round(math.hypot(float(pos_end[0]) - float(pos0[0]), float(pos_end[2]) - float(pos0[2])), 2)
         respawned = st_end.get("alive") is False or moved > 64.0
@@ -1345,7 +1433,7 @@ class CombatEnv:
             try:
                 syaw, _ = aim_yaw_pitch(pos0, shore_target)
                 self.bot.call("look", {"yaw": syaw, "pitch": -10.0})
-            except ApiError:
+            except (ApiError, httpx.HTTPError):
                 pass
             try:
                 self.bot.call(
@@ -1360,10 +1448,12 @@ class CombatEnv:
                     },
                 )
                 actions.append("move_to_shore")
-            except ApiError:
+            except (ApiError, httpx.HTTPError) as err:
                 actions.append("move_to_shore_failed")
+                if isinstance(err, httpx.HTTPError):
+                    self._best_effort_stop()
 
-            st_mid = self.bot.status()
+            st_mid = self._safe_status(st0)
             if (
                 bool(st_mid.get("in_water"))
                 and st_mid.get("alive") is not False
@@ -1378,8 +1468,9 @@ class CombatEnv:
                         {"forward": True, "jump": True, "sprint": True, "ms": 850, "stop_on": ["death"]},
                     )
                     actions.append("shore_lip_jump")
-                except ApiError:
-                    pass
+                except (ApiError, httpx.HTTPError) as err:
+                    if isinstance(err, httpx.HTTPError):
+                        self._best_effort_stop()
         else:
             away_yaw = (
                 aim_yaw_pitch(threat_pos, pos0)[0]
@@ -1393,7 +1484,7 @@ class CombatEnv:
                 sx, sz = start_x + ux * 5.0, start_z + uz * 5.0
             try:
                 self.bot.call("look", {"yaw": away_yaw, "pitch": -15.0})
-            except ApiError:
+            except (ApiError, httpx.HTTPError):
                 pass
             if self._point_allowed(sx, sz, action="water_retreat"):
                 try:
@@ -1409,18 +1500,20 @@ class CombatEnv:
                         },
                     )
                     actions.append("surface_retreat_move")
-                except ApiError:
-                    pass
+                except (ApiError, httpx.HTTPError) as err:
+                    if isinstance(err, httpx.HTTPError):
+                        self._best_effort_stop()
             try:
                 self.bot.call(
                     "control",
                     {"forward": True, "jump": True, "sprint": True, "ms": 950, "stop_on": ["death"]},
                 )
                 actions.append("surface_retreat_jump")
-            except ApiError:
-                pass
+            except (ApiError, httpx.HTTPError) as err:
+                if isinstance(err, httpx.HTTPError):
+                    self._best_effort_stop()
 
-        st_end = self.bot.status()
+        st_end = self._safe_status(st0)
         pos_end = st_end.get("pos") or pos0
         moved = math.hypot(float(pos_end[0]) - start_x, float(pos_end[2]) - start_z)
         if st_end.get("alive") is False or st_end.get("ready") is False or moved > 64.0:
@@ -1696,16 +1789,16 @@ class SubcorticalInstinctController:
                     if isinstance(creeper_ent, dict) and creeper_ent.get("id") is not None:
                         try:
                             env.bot.call("look", {"entity_id": creeper_ent["id"]})
-                        except ApiError:
+                        except (ApiError, httpx.HTTPError):
                             pass
                     try:
                         env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                         actions.append({"action": "raise_shield_creeper", "ok": True})
-                    except ApiError:
+                    except (ApiError, httpx.HTTPError):
                         pass
                 flee_res = env.flee(c_pos, distance=11.5, urgent=True, allow_shaft_seal=False)
                 actions.append({"action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")), "moved": flee_res.get("moved_dist")})
-                st_chk = env.bot.status()
+                st_chk = env._safe_status(st)
                 post_h = self._find_live_hostiles(env, radius=8)
                 close_creeper = next(
                     (
@@ -1735,12 +1828,12 @@ class SubcorticalInstinctController:
                     if cid is not None:
                         try:
                             env.bot.call("look", {"entity_id": int(cid)})
-                        except ApiError:
+                        except (ApiError, httpx.HTTPError):
                             pass
                     try:
                         env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                         latched_guard = True
-                    except ApiError:
+                    except (ApiError, httpx.HTTPError):
                         pass
 
         # 2) Lone/pair melee hostile + healthy + weapon -> 0-LLM counter-kill loop!
