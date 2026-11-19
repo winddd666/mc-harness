@@ -93,6 +93,27 @@ HAZARD_BLOCK_TYPES: tuple[str, ...] = (
     "cobweb",
 )
 
+SHORE_LAND_BLOCKS: tuple[str, ...] = (
+    "grass_block",
+    "dirt",
+    "sand",
+    "stone",
+    "cobblestone",
+    "gravel",
+    "sandstone",
+    "deepslate",
+    "mud",
+    "clay",
+    "oak_planks",
+    "spruce_planks",
+    "oak_log",
+    "spruce_log",
+    "ice",
+    "packed_ice",
+    "snow_block",
+    "moss_block",
+)
+
 TRAP_BLOCKS: frozenset[str] = frozenset(
     {
         "cactus",
@@ -1084,6 +1105,239 @@ class CombatEnv:
             "moved_dist": moved,
             "pos_after": pos_end,
             **({"respawned": True} if respawned else {}),
+        }
+
+    def escape_deep_water_to_shore(
+        self,
+        threat_pos: Sequence[float] | None = None,
+        *,
+        max_radius: int = 24,
+        keep_shield: bool = False,
+    ) -> dict[str, Any]:
+        """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
+        st0 = self.bot.status()
+        if st0.get("alive") is False or st0.get("ready") is False:
+            return {
+                "ok": False,
+                "in_water": bool(st0.get("in_water", True)),
+                "mode": "not_ready",
+                "pos_after": st0.get("pos"),
+            }
+        if not bool(st0.get("in_water")):
+            return {
+                "ok": True,
+                "in_water": False,
+                "mode": "already_dry",
+                "pos_after": st0.get("pos"),
+            }
+
+        pos0 = st0.get("pos") or [0.0, 64.0, 0.0]
+        start_x, start_y, start_z = float(pos0[0]), float(pos0[1]), float(pos0[2])
+        bx, by, bz = math.floor(start_x), math.floor(start_y + 0.05), math.floor(start_z)
+        actions: list[str] = []
+
+        # Hold buoyancy + shield while locating shoreline or breaking surface.
+        try:
+            self.bot.call(
+                "posture",
+                {"shield": bool(keep_shield), "sneak": False, "jump": True},
+            )
+        except ApiError:
+            pass
+
+        oxy0 = st0.get("oxygen")
+        if bool(st0.get("submerged")) or (isinstance(oxy0, (int, float)) and oxy0 < 260):
+            try:
+                self.bot.call(
+                    "control",
+                    {"forward": True, "jump": True, "sprint": True, "ms": 750, "stop_on": ["death"]},
+                )
+                actions.append("water_surface_surge")
+            except ApiError:
+                pass
+
+        # 1. Search nearby solid dry shoreline via find_blocks (filtering out ocean floor below waterline).
+        shore_target: list[float] | None = None
+        min_surface_y = max(61, by - 1)
+        has_threat = isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3
+        tx_th = float(threat_pos[0]) if has_threat else 0.0
+        tz_th = float(threat_pos[2]) if has_threat else 0.0
+        threat_dist0 = math.hypot(start_x - tx_th, start_z - tz_th) if has_threat else 0.0
+
+        candidates: list[tuple[float, int, int, int]] = []
+        try:
+            found = self.bot.call(
+                "find_blocks",
+                {
+                    "radius": max(8, min(28, int(max_radius))),
+                    "types": list(SHORE_LAND_BLOCKS),
+                    "limit": 36,
+                },
+            )
+        except Exception:
+            found = None
+
+        for row in (found or {}).get("blocks") or []:
+            if not isinstance(row, dict):
+                continue
+            rpos = row.get("pos")
+            if not isinstance(rpos, (list, tuple)) or len(rpos) < 3:
+                continue
+            cx, cy, cz = int(rpos[0]), int(rpos[1]), int(rpos[2])
+            if cy < min_surface_y:
+                continue
+            if not _is_solid_ground(_clean_block_name(row.get("name"))):
+                continue
+            if self.geofence is not None and not self.geofence.contains(cx + 0.5, float(cy + 1), cz + 0.5):
+                continue
+            hdist = math.hypot(cx + 0.5 - start_x, cz + 0.5 - start_z)
+            away_penalty = 0.0
+            if has_threat and math.hypot(cx + 0.5 - tx_th, cz + 0.5 - tz_th) < threat_dist0:
+                away_penalty = 1.5
+            candidates.append((hdist + away_penalty, cx, cy, cz))
+
+        candidates.sort(key=lambda item: item[0])
+        for _, cx, cy, cz in candidates[:10]:
+            foot_b = self._get_block_name(cx, cy + 1, cz)
+            head_b = self._get_block_name(cx, cy + 2, cz)
+            if _is_passable(foot_b) and _is_passable(head_b):
+                shore_target = [cx + 0.5, float(cy + 1), cz + 0.5]
+                break
+
+        # 2. Radial fallback if find_blocks yielded no dry surface spot.
+        if shore_target is None:
+            base_yaw = (
+                aim_yaw_pitch(threat_pos, pos0)[0]
+                if has_threat
+                else float(st0.get("yaw") or 0.0)
+            )
+            y_probe = max(62, by)
+            for deg in (0, 45, -45, 90, -90, 135, -135, 180):
+                cyaw = base_yaw + math.radians(deg)
+                ux, uz = yaw_to_unit_xz(cyaw)
+                for dist in (4, 8, 14):
+                    px = math.floor(start_x + ux * dist)
+                    pz = math.floor(start_z + uz * dist)
+                    if self.geofence is not None and not self.geofence.contains(px + 0.5, float(y_probe + 1), pz + 0.5):
+                        continue
+                    g_name = self._get_block_name(px, y_probe, pz)
+                    if _is_solid_ground(g_name):
+                        foot_p = self._get_block_name(px, y_probe + 1, pz)
+                        head_p = self._get_block_name(px, y_probe + 2, pz)
+                        if _is_passable(foot_p) and _is_passable(head_p):
+                            shore_target = [px + 0.5, float(y_probe + 1), pz + 0.5]
+                            break
+                if shore_target is not None:
+                    break
+
+        # 3. Move to shore target (plus shoreline lip jump) or swim up and away from threat.
+        if shore_target is not None:
+            try:
+                syaw, _ = aim_yaw_pitch(pos0, shore_target)
+                self.bot.call("look", {"yaw": syaw, "pitch": -10.0})
+            except ApiError:
+                pass
+            try:
+                self.bot.call(
+                    "move_to",
+                    {
+                        "x": shore_target[0],
+                        "y": shore_target[1],
+                        "z": shore_target[2],
+                        "range": 1.2,
+                        "timeout": 4200,
+                        "stop_on": ["death"],
+                    },
+                )
+                actions.append("move_to_shore")
+            except ApiError:
+                actions.append("move_to_shore_failed")
+
+            st_mid = self.bot.status()
+            if (
+                bool(st_mid.get("in_water"))
+                and st_mid.get("alive") is not False
+                and st_mid.get("ready", True)
+            ):
+                mid_pos = st_mid.get("pos") or pos0
+                try:
+                    syaw_m, _ = aim_yaw_pitch(mid_pos, shore_target)
+                    self.bot.call("look", {"yaw": syaw_m, "pitch": -10.0})
+                    self.bot.call(
+                        "control",
+                        {"forward": True, "jump": True, "sprint": True, "ms": 850, "stop_on": ["death"]},
+                    )
+                    actions.append("shore_lip_jump")
+                except ApiError:
+                    pass
+        else:
+            away_yaw = (
+                aim_yaw_pitch(threat_pos, pos0)[0]
+                if has_threat
+                else float(st0.get("yaw") or 0.0)
+            )
+            ux, uz = yaw_to_unit_xz(away_yaw)
+            step_dist = 12.0
+            sx, sy, sz = start_x + ux * step_dist, max(63.0, start_y + 1.0), start_z + uz * step_dist
+            if self.geofence is not None and not self.geofence.contains(sx, sy, sz):
+                sx, sz = start_x + ux * 5.0, start_z + uz * 5.0
+            try:
+                self.bot.call("look", {"yaw": away_yaw, "pitch": -15.0})
+            except ApiError:
+                pass
+            if self.geofence is None or self.geofence.contains(sx, sy, sz):
+                try:
+                    self.bot.call(
+                        "move_to",
+                        {
+                            "x": sx,
+                            "y": sy,
+                            "z": sz,
+                            "range": 1.5,
+                            "timeout": 2800,
+                            "stop_on": ["death"],
+                        },
+                    )
+                    actions.append("surface_retreat_move")
+                except ApiError:
+                    pass
+            try:
+                self.bot.call(
+                    "control",
+                    {"forward": True, "jump": True, "sprint": True, "ms": 950, "stop_on": ["death"]},
+                )
+                actions.append("surface_retreat_jump")
+            except ApiError:
+                pass
+
+        st_end = self.bot.status()
+        pos_end = st_end.get("pos") or pos0
+        moved = math.hypot(float(pos_end[0]) - start_x, float(pos_end[2]) - start_z)
+        if st_end.get("alive") is False or st_end.get("ready") is False or moved > 64.0:
+            return {
+                "ok": False,
+                "in_water": bool(st_end.get("in_water", True)),
+                "mode": "respawned" if moved > 64.0 else "not_ready",
+                "shore_target": shore_target,
+                "actions": actions,
+                "pos_after": pos_end,
+            }
+
+        still_wet = bool(st_end.get("in_water"))
+        try:
+            self.bot.call(
+                "posture",
+                {"shield": bool(keep_shield), "sneak": False, "jump": still_wet},
+            )
+        except ApiError:
+            pass
+        return {
+            "ok": not still_wet,
+            "in_water": still_wet,
+            "mode": "move_to_shore" if shore_target is not None else "surface_retreat",
+            "shore_target": shore_target,
+            "actions": actions,
+            "pos_after": pos_end,
         }
 
 

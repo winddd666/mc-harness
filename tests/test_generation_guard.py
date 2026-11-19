@@ -1561,8 +1561,26 @@ def test_non_combat_fire_fall_hurt_skips_shield_spam_and_water_trident_equips_sh
     guard_dc = GenerationGuard(_DisconnectedSubmergedBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(_DisconnectedSubmergedBot()))
     inc_dc = guard_dc.poll()
     assert inc_dc is not None
-    assert [a["action"] for a in inc_dc["actions"]] == ["escape_water"]
-    assert "equip" not in dead_water_calls and "posture" not in dead_water_calls
+    # Shield is equipped & raised BEFORE escape_water attempts retreat; once escape_water fails with not_connected,
+    # NO follow-up escape_to_shore or post-failure status/equip/posture may fire.
+    assert [a["action"] for a in inc_dc["actions"]] == ["equip_shield", "face_attacker", "raise_shield", "escape_water"]
+    assert dead_water_calls.count("equip") == 1 and dead_water_calls.count("posture") == 1
+    assert "find_blocks" not in dead_water_calls and "move_to" not in dead_water_calls
+
+    # If equip itself fails with not_connected, zero follow-up look/posture/escape_water/escape_to_shore may fire.
+    class _EquipFailSubmergedBot(_DisconnectedSubmergedBot):
+        def call(self, action, body=None, **kwargs):
+            if action == "equip":
+                dead_water_calls.append(action)
+                raise ApiError("not_connected", "bot not connected")
+            return super().call(action, body, **kwargs)
+
+    dead_water_calls.clear()
+    guard_eq_dc = GenerationGuard(_EquipFailSubmergedBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(_EquipFailSubmergedBot()))
+    inc_eq_dc = guard_eq_dc.poll()
+    assert inc_eq_dc is not None
+    assert [a["action"] for a in inc_eq_dc["actions"]] == ["equip_shield"]
+    assert not any(a in dead_water_calls for a in ("look", "posture", "find_blocks", "move_to"))
 
     # 4) escape_lava wide shore detection (4.5m away) & death-respawn teleport (>64m, ready=False) -> ok=False, respawned=True
     look_yaws: list[float] = []
@@ -1684,6 +1702,217 @@ def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush():
     assert out_s["mode"] == "shield_rush_ranged"
     assert strikes["n"] == 2
     assert any(a["action"] == "shield_rush_attack" and a.get("killed") is True for a in out_s["actions"])
+
+
+def test_bug023_deep_water_trident_shield_first_moves_to_dry_shore_and_3hit_cooldown(monkeypatch):
+    """Covers BUG-023: trident/drowned in deep water raises shield first, moves to dry shore, and blocks reentry 30s on 3rd hit."""
+    from mc_agent.skills.combat_env import CombatEnv
+    from mc_agent.skills.safety import SafetyEmergency, check_and_stabilize
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+
+    escape_calls: list[str] = []
+    monkeypatch.setattr(
+        MacroSkills,
+        "escape_water",
+        lambda self: escape_calls.append("escape_water") or {"ok": False, "in_water": True},
+    )
+
+    # 1) Trident hit in deep water: equip+raise shield BEFORE escape, ignore y=50 ocean floor, move_to dry shore at [12.5, 63.0, -7.5]
+    state = {
+        "in_water": True,
+        "submerged": True,
+        "pos": [0.5, 61.5, 0.5],
+        "hp": 15.5,
+        "blocking": False,
+        "offhand": None,
+        "hurt_seq": 1,
+        "shore_succeeds": True,
+    }
+    calls_1: list[tuple[str, dict]] = []
+
+    class _ShoreOceanBot:
+        _last_event_seq = 0
+
+        def status(self):
+            return self.call("status")
+
+        def inventory(self):
+            return self.call("inventory")
+
+        def call(self, action, body=None, **kwargs):
+            payload = dict(body or {})
+            calls_1.append((action, payload))
+            if action == "status":
+                return {
+                    "pos": list(state["pos"]),
+                    "health": state["hp"],
+                    "food": 20,
+                    "alive": True,
+                    "ready": True,
+                    "in_water": state["in_water"],
+                    "submerged": state["submerged"],
+                    "on_ground": not state["in_water"],
+                    "blocking": state["blocking"],
+                    "oxygen": 240,
+                    "nearest_hostile": {"id": 44, "name": "drowned", "pos": [7.5, 62.0, 0.5], "dist": 7.0},
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                rows = (
+                    [{"seq": state["hurt_seq"], "type": "hurt", "health": state["hp"], "source": "trident", "source_entity": {"id": 44, "pos": [7.5, 62.0, 0.5]}}]
+                    if state["hurt_seq"] > since
+                    else []
+                )
+                return {"events": rows, "last_seq": state["hurt_seq"]}
+            if action == "inventory":
+                return {"items": [{"name": "shield", "count": 1}], "offhand": state["offhand"]}
+            if action == "equip" and payload.get("item") == "shield":
+                state["offhand"] = {"name": "shield", "count": 1}
+                return {"ok": True}
+            if action == "posture":
+                state["blocking"] = bool(payload.get("shield"))
+                return {"ok": True}
+            if action == "find_blocks":
+                return {
+                    "blocks": [
+                        {"name": "sand", "pos": [1, 50, 1], "dist": 11.5},  # ocean floor below waterline -> must ignore
+                        {"name": "grass_block", "pos": [12, 62, -8], "dist": 14.3},
+                        {"name": "stone", "pos": [20, 62, 10], "dist": 21.7},
+                    ]
+                }
+            if action == "block_at":
+                p = payload.get("pos", [0, 64, 0])
+                if p[0] == 12 and p[2] == -8 and p[1] in (63, 64):
+                    return {"name": "air"}
+                return {"name": "water"}
+            if action == "move_to":
+                if state["shore_succeeds"]:
+                    state["pos"] = [payload["x"], payload["y"], payload["z"]]
+                    state["in_water"] = False
+                    state["submerged"] = False
+                return {"ok": True}
+            return {"ok": True}
+
+    emitted: list[dict] = []
+    guard = GenerationGuard(_ShoreOceanBot(), EventSink(emitted.append), checkpoint=lambda: None, skills=MacroSkills(_ShoreOceanBot()))
+    inc = guard.poll()
+    assert inc is not None
+    act_names = [a["action"] for a in inc["actions"]]
+    assert act_names == ["equip_shield", "face_attacker", "raise_shield", "escape_water", "escape_to_shore"]
+    move_calls = [pl for act, pl in calls_1 if act == "move_to"]
+    assert move_calls and (move_calls[0]["x"], move_calls[0]["y"], move_calls[0]["z"]) == (12.5, 63.0, -7.5)
+    assert state["in_water"] is False
+
+    # 2) Three consecutive hurts still in water (<3s apart) -> 3rd hit forces shore escape & sets 30s no-water cooldown
+    emitted.clear()
+    escape_calls.clear()
+    state.update({"in_water": True, "submerged": True, "pos": [0.5, 61.5, 0.5], "hp": 14.0, "blocking": False, "shore_succeeds": False, "hurt_seq": 2})
+    bot2 = _ShoreOceanBot()
+    bot2._last_event_seq = 1
+    guard2 = GenerationGuard(bot2, EventSink(emitted.append), checkpoint=lambda: None, skills=MacroSkills(bot2))
+
+    # Hit 1
+    inc1 = guard2.poll()
+    assert inc1 is not None
+    assert guard2._water_hurt_streak == 1
+    assert guard2.no_water_until < 0
+
+    # Hit 2 (+1.2s, inside normal 3s window -> must NOT be dropped!)
+    clock[0] += 1.2
+    state.update({"hurt_seq": 3, "hp": 10.0, "blocking": False})
+    inc2 = guard2.poll()
+    assert inc2 is not None
+    assert guard2._water_hurt_streak == 2
+
+    # Hit 3 (+1.2s) -> climb succeeds on 3rd try, forces escape_to_shore (skipping slow escape_water) and activates 30s cooldown
+    clock[0] += 1.2
+    escape_calls.clear()
+    state.update({"hurt_seq": 4, "hp": 6.5, "blocking": True, "shore_succeeds": True})
+    inc3 = guard2.poll()
+    assert inc3 is not None
+    assert "water_avoid_cooldown" in inc3["reasons"]
+    assert "禁止下水冷却中" in inc3["note"]
+    assert guard2.no_water_until == pytest.approx(clock[0] + 30.0)
+    assert any(ev.get("type") == "guardian.no_water_cooldown" and ev.get("duration_s") == 30.0 for ev in emitted)
+    assert escape_calls == []
+    assert [a["action"] for a in inc3["actions"]] == ["escape_to_shore"]
+    assert state["in_water"] is False
+
+    # Step back into water 6s later (within 30s cooldown, no new hurt) -> forced back ashore immediately!
+    clock[0] += 6.0
+    calls_1.clear()
+    state.update({"in_water": True, "submerged": False, "pos": [10.5, 62.0, -7.5], "shore_succeeds": True})
+    inc_reentry = guard2.poll()
+    assert inc_reentry is not None
+    assert "water_avoid_cooldown" in inc_reentry["reasons"]
+    assert [a["action"] for a in inc_reentry["actions"]] == ["escape_to_shore"]
+    assert state["in_water"] is False
+
+    # 3) handle_preemption & stabilize_after_tools & safety.check_and_stabilize water-shield priority
+    state.update({"in_water": True, "submerged": True, "pos": [0.5, 61.5, 0.5], "hp": 5.0, "blocking": False, "offhand": None, "shore_succeeds": True})
+    guard_pre = GenerationGuard(_ShoreOceanBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(_ShoreOceanBot()))
+    rec = guard_pre.handle_preemption(
+        {"source": "tool_interrupted_hurt", "primary_entity_id": 44, "primary_type": "drowned", "primary_pos": [7.5, 62.0, 0.5], "distance": 7.0},
+        interrupted_name="mc_move_to",
+    )
+    assert rec["reflex_mode"] == "water_surface"
+    assert state["blocking"] is True
+    assert state["in_water"] is False
+
+    state.update({"in_water": True, "submerged": False, "pos": [0.5, 62.2, 0.5], "hp": 11.0, "blocking": False, "offhand": None, "hurt_seq": 5, "shore_succeeds": True})
+    calls_1.clear()
+    bot_b = _ShoreOceanBot()
+    bot_b._last_event_seq = 4
+    guard_b = GenerationGuard(bot_b, EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(bot_b))
+    b_note = guard_b.stabilize_after_tools(['{"ok": false, "in_water": true}'])
+    assert b_note is not None and "游向最近干燥陆地登岸" in b_note
+    assert any(act == "equip" for act, _ in calls_1)
+
+    state.update({"in_water": True, "submerged": True, "pos": [0.5, 61.5, 0.5], "hp": 4.0, "blocking": False, "offhand": None})
+    calls_1.clear()
+    with pytest.raises(SafetyEmergency):
+        check_and_stabilize(_ShoreOceanBot())
+    assert any(act == "equip" and pl == {"item": "shield", "slot": "off-hand"} for act, pl in calls_1)
+    assert any(act == "posture" and pl.get("shield") is True and pl.get("jump") is True for act, pl in calls_1)
+
+    # 4) Open ocean with zero shore blocks nearby lunges upward and retreats AWAY from threat_pos
+    open_calls: list[tuple[str, dict]] = []
+
+    class _OpenSeaNoLandBot:
+        def status(self):
+            return {
+                "pos": [0.5, 61.2, 0.5],
+                "health": 10.0,
+                "food": 20,
+                "alive": True,
+                "ready": True,
+                "in_water": True,
+                "submerged": True,
+                "oxygen": 200,
+                "yaw": 0.0,
+            }
+
+        def call(self, action, body=None, **kwargs):
+            payload = dict(body or {})
+            open_calls.append((action, payload))
+            if action == "status":
+                return self.status()
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "block_at":
+                return {"name": "water"}
+            return {"ok": True}
+
+    env_res = CombatEnv(_OpenSeaNoLandBot()).escape_deep_water_to_shore([7.5, 62.0, 0.5], keep_shield=True)
+    assert env_res["mode"] == "surface_retreat"
+    mv_open = [pl for act, pl in open_calls if act == "move_to"]
+    assert mv_open and mv_open[0]["x"] < 0.0 and mv_open[0]["y"] >= 63.0
+    assert any(act == "control" and pl.get("jump") is True and pl.get("forward") is True for act, pl in open_calls)
+
+
 
 
 

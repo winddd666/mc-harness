@@ -63,6 +63,56 @@ def _pick_best_food(counts: dict[str, int]) -> str | None:
     return None
 
 
+def prepare_water_shield(
+    bot: BotSession,
+    st: dict[str, Any],
+    inv: dict[str, Any] | None = None,
+) -> list[str]:
+    """Equip and raise off-hand shield (keeping jump=True in water) when shield and threat exist."""
+    if st.get("blocking"):
+        return []
+    nh = st.get("nearest_hostile")
+    if inv is None and not (isinstance(nh, dict) and nh.get("name")):
+        return []
+    if inv is None:
+        try:
+            inv = bot.inventory()
+        except ApiError:
+            return []
+    offhand = inv.get("offhand") if isinstance(inv, dict) else None
+    offhand_name = str((offhand or {}).get("name") or "").removeprefix("minecraft:")
+    counts = _item_counts(inv) if isinstance(inv, dict) else {}
+    bag_shield = sum(cnt for name, cnt in counts.items() if str(name).removeprefix("minecraft:") == "shield")
+    if offhand_name != "shield" and bag_shield <= 0:
+        return []
+
+    taken: list[str] = []
+    if offhand_name != "shield":
+        try:
+            bot.call("equip", {"item": "shield", "slot": "off-hand"})
+            taken.append("equip_shield")
+        except ApiError:
+            return taken
+    if isinstance(nh, dict) and nh.get("id") is not None:
+        try:
+            bot.call("look", {"entity_id": nh["id"]})
+        except ApiError:
+            pass
+    try:
+        bot.call(
+            "posture",
+            {
+                "sneak": bool(st.get("sneaking")),
+                "shield": True,
+                "jump": bool(st.get("in_water")),
+            },
+        )
+        taken.append("posture_water_shield")
+    except ApiError:
+        pass
+    return taken
+
+
 def check_and_stabilize(
     bot: BotSession,
     *,
@@ -77,17 +127,20 @@ def check_and_stabilize(
     if st.get("alive") is False:
         raise SafetyEmergency("bot_dead", st)
 
-    # 1. Water buoyancy reflex (avoid drowning while idle or waiting for LLM)
+    # 1. Water buoyancy & threat shield reflex (avoid drowning or unshielded trident hits)
     in_water = bool(st.get("in_water"))
     submerged = bool(st.get("submerged"))
     oxygen = st.get("oxygen", 300)
     jumping = bool(st.get("jumping"))
+    nh = st.get("nearest_hostile")
+    if in_water and isinstance(nh, dict) and nh.get("name"):
+        actions.extend(prepare_water_shield(bot, st))
     if in_water and (
         submerged
         or not bool(st.get("on_ground"))
         or (isinstance(oxygen, (int, float)) and oxygen < 240)
     ):
-        if not jumping:
+        if not jumping and "posture_water_shield" not in actions:
             bot.call(
                 "posture",
                 {
@@ -148,6 +201,22 @@ def check_and_stabilize(
                 actions.append(f"eat_failed:{best_food}:{exc.code}")
 
     low_health_warning = isinstance(health, (int, float)) and health <= emergency_health
+    if low_health_warning and bool(st.get("in_water")):
+        if isinstance(st.get("nearest_hostile"), dict) and st["nearest_hostile"].get("name") and "posture_water_shield" not in actions:
+            actions.extend(prepare_water_shield(bot, st))
+        if not bool(st.get("jumping")) and "posture_water_float" not in actions and "posture_water_shield" not in actions:
+            try:
+                bot.call(
+                    "posture",
+                    {
+                        "sneak": bool(st.get("sneaking")),
+                        "shield": bool(st.get("blocking")),
+                        "jump": True,
+                    },
+                )
+                actions.append("posture_water_float")
+            except ApiError:
+                pass
     if low_health_warning and raise_on_low_health:
         raise SafetyEmergency(f"low_health={health}", st)
 
