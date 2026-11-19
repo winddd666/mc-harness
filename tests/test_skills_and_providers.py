@@ -1406,6 +1406,21 @@ def test_move_to_busy_retries_only_after_lease_release(release) -> None:
     assert calls.count("move_to") == (2 if release else 1)
 
 
+def test_move_to_rejects_z_swapped_into_out_of_range_y() -> None:
+    """r12 P2-17: y=-2814 was silently dropped, wasting a 90s path search."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        raise AssertionError("invalid y must be rejected before any API call")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_move_to(x=-7828, y=-2814, z=-2744))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert result["error"]["code"] == "bad_args"
+    assert "y=-2814" in result["error"]["message"]
+
+
 @pytest.mark.parametrize("filler", ["stone", "netherrack", "blackstone", "cobblestone"])
 def test_staircase_up_uses_available_solid_filler(filler) -> None:
     pos = [0.5, 30.0, 0.5]

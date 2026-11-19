@@ -935,7 +935,22 @@ class McToolset:
                 yf = float(y)
                 last_y = float(self._last_block_pos[1]) if self._last_block_pos and len(self._last_block_pos) >= 3 else None
                 bogus_zero_y = (yf == 0.0) and (last_y is None or abs(last_y) >= 16.0)
-                if -64.0 <= yf <= 320.0 and not bogus_zero_y:
+                if not (-64.0 <= yf <= 320.0):
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "requires_replan": True,
+                            "error": {
+                                "code": "bad_args",
+                                "message": (
+                                    f"y={yf:g} 超出主世界/下界合法高度(-64..320)，疑似把 z 填进了 y。"
+                                    "请检查坐标后重传 x/z（y 可省略让寻路决定），不要用同一参数重试。"
+                                ),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                if not bogus_zero_y:
                     payload["y"] = yf
         elif entity_id is not None:
             payload["entity_id"] = entity_id
