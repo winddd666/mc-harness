@@ -1169,7 +1169,9 @@ class McToolset:
             try:
                 parsed = json.loads(raw)
                 res_obj = parsed.get("result") if isinstance(parsed, dict) else None
-                if parsed.get("ok") is True and isinstance(res_obj, dict) and res_obj.get("changed") is False:
+                if (parsed.get("ok") is True and isinstance(res_obj, dict)
+                        and res_obj.get("changed") is False
+                        and not res_obj.get("used") and not res_obj.get("gained")):
                     parsed["ok"] = False
                     parsed["requires_replan"] = True
                     parsed["error"] = {

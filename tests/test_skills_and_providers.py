@@ -1533,3 +1533,27 @@ def test_staircase_down_verifies_refilled_floor_before_moving(monkeypatch, refil
         assert result["last_error"]["code"] == "stair_cell_not_cleared"
         assert len(digs) == 3
         assert moves == []
+
+
+@pytest.mark.parametrize("used,gained,ok", [({}, {"lava_bucket": 1}, True), ({"bucket": 1}, {}, True), ({"bucket": 1}, {"lava_bucket": 1}, True), ({}, {}, False)])
+def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, gained, ok) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            result = {"pos": [0.5, 64, 0.5]}
+        elif path == "interact":
+            result = {"before": "lava", "after": "lava", "changed": False, "used": used, "gained": gained}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_interact(x=1, y=64, z=0, item="bucket"))
+    assert result["ok"] is ok
+    if not ok:
+        assert result["error"]["code"] == "interact_no_effect"
+    else:
+        assert result["result"]["gained"] == gained
+        assert "error" not in result
