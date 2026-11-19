@@ -225,7 +225,7 @@ class GenerationGuard:
         action_prefix: str = "",
         raise_on_http_error: bool = True,
     ) -> tuple[bool, bool]:
-        """Equip off-hand shield (if unequipped), face attacker, and raise blocking+floating posture."""
+        """Equip the off-hand shield, face the attacker, and float when in water."""
         counts, has_shield, _ = self._parse_inventory_summary(inv)
         if not has_shield:
             return False, False
@@ -260,7 +260,7 @@ class GenerationGuard:
                     "posture",
                     {
                         "shield": True,
-                        "jump": True,
+                        "jump": bool(status.get("in_water")),
                         "sneak": bool(status.get("sneaking")),
                     },
                 ),
@@ -1081,6 +1081,11 @@ class GenerationGuard:
                     att_obj = attacker if isinstance(attacker, dict) else (status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None)
                     self._mark_ranged_engagement(now, attacker=att_obj)
                     att_pos_r = (attacker.get("pos") if isinstance(attacker, dict) else None) or nh_pos
+                    att_id_r = attacker.get("id") if isinstance(attacker, dict) else None
+                    if att_id_r is None and nh_name in RANGED_MOBS:
+                        att_id_r = nh_id
+                    if already_blocking and hp_val <= LOW_HP_BUNKER_MAX and att_id_r is not None:
+                        actions.append(self._action("face_attacker", lambda: self.bot.call("look", {"entity_id": att_id_r})))
                     pos_r = status.get("pos")
                     if (
                         not already_blocking
@@ -1137,8 +1142,15 @@ class GenerationGuard:
                     )
                     recent_cover_fail = already_blocking and ranged_hurt_only and hp_val > 10.0 and (now - self._last_dig_cover_fail_at < 15.0)
                     cover: dict[str, Any] | None = None
-                    if not skip_cover_for_blast and not same_spot_cover_ineffective and not already_in_dug_cover and not recent_cover_fail:
-                        cover = self._action("dig_cover", lambda: self._skills().dig_cover_pocket())
+                    skills = self._skills()
+                    if (
+                        status.get("on_ground") is not False
+                        and not skip_cover_for_blast
+                        and not same_spot_cover_ineffective
+                        and not already_in_dug_cover
+                        and not recent_cover_fail
+                    ):
+                        cover = self._action("dig_cover", skills.dig_cover_pocket)
                         actions.append(cover)
                         self._last_dig_cover_block = cur_blk_r
                         self._last_dig_cover_at = time.monotonic()
@@ -1166,8 +1178,8 @@ class GenerationGuard:
                         cf = self._action(
                             "combat_or_flee",
                             lambda: self.combat_env.flee(att_pos_r)
-                            if "nether" in str(status.get("dimension") or "").lower()
-                            else self._skills().defend_or_flee(
+                            if isinstance(skills, MacroSkills) or "nether" in str(status.get("dimension") or "").lower()
+                            else skills.defend_or_flee(
                                 attacker=attacker, counts=counts, health=health, urgent=True, geofence=self.geofence,
                             ),
                         )

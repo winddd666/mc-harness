@@ -3649,6 +3649,40 @@ def test_r23_recent_arrow_hit_keeps_shield_up_when_nearest_mob_is_melee(monkeypa
     assert "fresh_hurt" in incident["reasons"]
 
 
+@pytest.mark.parametrize("blocking", [False, True])
+def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(blocking):
+    calls = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [-7807.3, 102.2, -2813.7], "health": 5.9, "food": 16,
+                    "alive": True, "ready": True, "on_ground": False, "blocking": blocking,
+                    "dimension": "overworld", "nearest_hostile": {"id": 42, "name": "skeleton", "dist": 7.8},
+                }
+            if action == "events":
+                since = kwargs["params"]["since"]
+                hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": {"id": 42}}
+                return {"events": [hurt] if since < 1 else [], "last_seq": 1}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            calls.append((action, body))
+            return {"ok": True}
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    expected = [("look", {"entity_id": 42})]
+    if not blocking:
+        expected.append(("posture", {"shield": True, "jump": False, "sneak": False}))
+    assert calls == expected
+    retreat = incident["actions"][-1]
+    assert retreat["action"] == "combat_or_flee"
+    assert retreat["ok"] is False
+    assert retreat["result"]["reason"] == "unsafe_landing"
+
+
 
 
 
