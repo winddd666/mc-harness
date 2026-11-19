@@ -2522,9 +2522,20 @@ class MacroSkills:
         last_drop_scan: dict[str, Any] | None = None
         last_bot_pos: list[float] | None = None
         mine_deadline = time.monotonic() + max(45.0, min(90.0, float(count) * 12.0))
+        deadline_hit = False
+        try:
+            dig_call_params = inspect.signature(self.bot.call).parameters
+            dig_supports_timeout = "timeout_s" in dig_call_params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in dig_call_params.values()
+            )
+        except (TypeError, ValueError):
+            dig_supports_timeout = False
 
         for _ in range(count * 3):
-            if dug_count >= count or time.monotonic() >= mine_deadline:
+            if dug_count >= count:
+                break
+            if time.monotonic() >= mine_deadline:
+                deadline_hit = True
                 break
             for apos in list(self.temporary_avoidance):
                 self._is_block_avoided(apos)
@@ -2564,8 +2575,21 @@ class MacroSkills:
             if target is None:
                 break
             pos = tuple(target["pos"])
+            remaining = mine_deadline - time.monotonic()
+            if remaining <= 1.0:
+                deadline_hit = True
+                break
+            # A single un-timed dig can eat the whole slice (r12 obsidian:
+            # 4 blocks / 300s). Leave a share for the remaining blocks and
+            # never wait past the slice deadline.
+            per_dig = max(4.0, min(30.0, remaining / max(1, count - dug_count)))
             try:
-                res = self.bot.call("dig", {"pos": list(pos), "collect": True})
+                dig_body = {"pos": list(pos), "collect": True}
+                res = (
+                    self.bot.call("dig", dig_body, timeout_s=min(remaining, per_dig))
+                    if dig_supports_timeout
+                    else self.bot.call("dig", dig_body)
+                )
                 dug_count += 1
                 for k, v in (res.get("gained") or {}).items():
                     gained[k] = gained.get(k, 0) + int(v)
@@ -2631,6 +2655,24 @@ class MacroSkills:
                         "gained": gained,
                         "partial_error": {"code": err.code, "message": err.message, **err.context},
                     }
+            except httpx.TimeoutException as err:
+                # Do not let one server-side dig outlive the slice. Release the
+                # pending action before returning the confirmed partial result.
+                try:
+                    self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "stop_reason": "time_budget",
+                    "dig_timeout_s": round(min(remaining, per_dig), 2),
+                    "dug_count": dug_count,
+                    "gained": gained,
+                    "partial_error": {"code": "mine_timeout", "message": "单次挖掘未在切片预算内确认；已停止并保留已入包产物。"},
+                    "message": "本轮挖掘预算已用尽，单次 dig 超时；请换到目标旁 2 格内或降低 count 后重试，勿等待同一调用完成。",
+                    **self._avoidance_summary(),
+                }
 
         if dug_count > 0 and _target_gain_sum(gained) == 0:
             if last_drop_scan is None:
@@ -2721,6 +2763,13 @@ class MacroSkills:
             else:
                 out["message"] = f"本次只挖掘 {dug_count}/{count} 格；请按 gained 检查实际入包量。临时避让与保护区分别报告，改变站位或等待冷却后可重试临时失败。"
             out["requires_replan"] = True
+        if deadline_hit:
+            out["stop_reason"] = "time_budget"
+            out["requires_replan"] = True
+            out["message"] = (
+                f"本轮挖掘预算已用尽，仅完成 {dug_count}/{count} 格；已保留入包产物，"
+                "请换到目标旁 2 格内或降低 count 后重试，勿等待同一调用完成。"
+            )
         return out
 
     def harvest_logs(self, target_logs: int = 4, radius: int = 32) -> dict[str, Any]:

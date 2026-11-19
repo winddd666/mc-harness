@@ -310,6 +310,48 @@ def test_mine_blocks_out_of_reach_ranking_and_drop_collection() -> None:
     assert moved_to and moved_to[0]["entity_id"] == 9001
 
 
+def test_mine_blocks_single_dig_cannot_outlive_slice_deadline(monkeypatch) -> None:
+    """r12: one un-timed obsidian dig let mine_blocks run ~300s."""
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    dig_timeouts: list[float] = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "find_blocks":
+            result = {"blocks": [{"name": "obsidian", "pos": [1, 64, 1], "dist": 1.0}]}
+        elif path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "health": 20.0}
+        elif path == "dig":
+            timeout = request.extensions["timeout"]["read"]
+            dig_timeouts.append(timeout)
+            clock[0] += timeout
+            raise httpx.ReadTimeout("offline dig still pending", request=request)
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot)._dig_target_blocks(
+            block_types=["obsidian"],
+            count=4,
+            radius=8,
+            protected_msg="protected",
+            below_tol=2.0,
+            above_tol=2.0,
+        )
+    assert result["ok"] is False
+    assert result["stop_reason"] == "time_budget"
+    assert result["partial_error"]["code"] == "mine_timeout"
+    assert result["dug_count"] == 0
+    assert dig_timeouts and dig_timeouts[0] <= 12.0
+    assert clock[0] <= 48.0
+
+
 def test_collect_drops_smelt_charcoal_reservation_and_toolset_registration() -> None:
     from mc_agent.harness.mc_tools import McToolset
 
