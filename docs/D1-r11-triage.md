@@ -1119,6 +1119,25 @@ elapsed 8509/10800s（约 2h22m）
 - **rpm=6、4 路，连续 2h22m 零 retry / 零 429** → 这是比 20 分钟抽检更强的证据
 - 1 次 aborted（需后续确认是否 BUG-043）
 
+## 4bo. hy4 审计轨 r27 终验（06:51，3 小时）
+
+```
+126 集：answered 93 / timeout 22 / goal 7 / limit 2 / paused 1 / runtime_error 1 / aborted 1
+retries 0 | 429 0 | 502 0 | tracebacks 0
+```
+
+| bot | 分数 | 集数 |
+|---|---|---|
+| `hy4_6_nether_bastion` | **195** | 50 |
+| `hy4_5_brewing_alchemy` | 165 | 31 |
+| `hy4_2_iron` | 100 | 27 |
+| `hy4_9_deep_water` | 60 | 19 |
+
+- **3 小时 × 4 路 × rpm=6：0 retries / 0 429 / 0 502** → 429 与模型无关，纯并发问题
+- 门禁仅 `over-cap 1` FAIL（BUG-029）；deaths 22、cooldown 128s、mine 0.86、zero-slice 2.2%
+- 1 次 runtime_error = `max_tokens` 截断（P2-33）
+- 1 次 aborted = `lost_iron_pickaxe`（`hy4_9` EP7，BUG-043 已扩散到 3 路）
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
