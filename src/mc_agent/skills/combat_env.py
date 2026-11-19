@@ -1022,9 +1022,34 @@ class CombatEnv:
         # 1. If submerged deep in lava, swim up first so surface bank scan can find solid footing
         self.invalidate_block_cache()
         pos0 = st.get("pos") or [0.0, 64.0, 0.0]
+        dim0 = str(st.get("dimension") or "").lower()
+        last_death0 = st.get("last_death")
+        hp0 = float(st.get("health")) if isinstance(st.get("health"), (int, float)) else None
+
+        def _did_respawn_during_lava(st_now: dict[str, Any]) -> bool:
+            pos_now = st_now.get("pos") or pos0
+            moved = math.hypot(float(pos_now[0]) - float(pos0[0]), float(pos_now[2]) - float(pos0[2]))
+            dim_now = str(st_now.get("dimension") or "").lower()
+            ld_now = st_now.get("last_death")
+            hp_now = st_now.get("health")
+            died_heal = (
+                hp0 is not None
+                and isinstance(hp_now, (int, float))
+                and hp0 < 18.0
+                and float(hp_now) >= 19.5
+                and (float(hp_now) - hp0) >= 2.0
+            )
+            return bool(
+                st_now.get("alive") is False
+                or st_now.get("ready") is False
+                or moved > 64.0
+                or (dim0 and dim_now and dim_now != dim0)
+                or (ld_now is not None and ld_now != last_death0)
+                or died_heal
+            )
 
         def _should_exit_lava(st_now: dict[str, Any]) -> bool:
-            if st_now.get("alive") is False or st_now.get("ready") is False:
+            if _did_respawn_during_lava(st_now):
                 return True
             if bool(st_now.get("in_lava")) or self._is_airborne_above_lava(st_now, start_pos=pos0):
                 return False
@@ -1038,8 +1063,7 @@ class CombatEnv:
         def _lava_result(st_now: dict[str, Any]) -> dict[str, Any]:
             still_in_lava = bool(st_now.get("in_lava"))
             pos_now = st_now.get("pos") or pos0
-            moved = math.hypot(float(pos_now[0]) - float(pos0[0]), float(pos_now[2]) - float(pos0[2]))
-            respawned = st_now.get("alive") is False or st_now.get("ready") is False or moved > 64.0
+            respawned = _did_respawn_during_lava(st_now)
             airborne_over_lava = (
                 (not respawned)
                 and (not still_in_lava)

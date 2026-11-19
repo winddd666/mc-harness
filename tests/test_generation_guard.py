@@ -3186,6 +3186,64 @@ def test_r21_preempted_lava_death_reports_respawned_not_escaped():
     assert "并脱困" not in receipt["message"]
     assert "死亡并重生" in receipt["message"]
 
+    # Also catch close-to-spawn Nether lava death (<64m displacement) where ready=True & health=20 on respawn
+    close_state = {"calls": 0}
+
+    class _CloseSpawnLavaDieBot:
+        _last_event_seq = 0
+
+        def status(self):
+            return self.call("status")
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                close_state["calls"] += 1
+                if close_state["calls"] <= 2:
+                    return {
+                        "pos": [712.0, 58.0, 635.0],
+                        "health": 11.0,
+                        "alive": True,
+                        "ready": True,
+                        "in_lava": True,
+                        "on_ground": False,
+                        "dimension": "minecraft:the_nether",
+                        "last_death": {"pos": [704.5, 64.0, 640.5], "t": 1000},
+                    }
+                return {
+                    "pos": [704.5, 64.0, 640.5],
+                    "health": 20.0,
+                    "alive": True,
+                    "ready": True,
+                    "in_lava": False,
+                    "on_ground": True,
+                    "dimension": "minecraft:the_nether",
+                    "last_death": {"pos": [712.0, 58.0, 635.0], "t": 2000},
+                }
+            if action == "inventory":
+                return {"items": []}
+            if action in {"find_blocks", "get_entities"}:
+                return {"blocks": [], "entities": []}
+            if action == "get_block":
+                return {"name": "lava"}
+            return {"ok": True}
+
+    from mc_agent.skills.combat_env import CombatEnv
+
+    close_state["calls"] = 0
+    out_close = CombatEnv(_CloseSpawnLavaDieBot()).escape_lava()
+    assert out_close["ok"] is False
+    assert out_close.get("respawned") is True
+
+    close_state["calls"] = 0
+    g_close = GenerationGuard(_CloseSpawnLavaDieBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    rec_close = g_close.handle_preemption(
+        {"source": "boundary_threat", "primary_type": "lava", "distance": 0.0},
+        interrupted_name="mc_skill_unstick",
+    )
+    assert rec_close["reflex_mode"] == "lava_escape"
+    assert "并脱困" not in rec_close["message"]
+    assert "死亡并重生" in rec_close["message"]
+
 
 def test_r21_water_surface_abort_latches_shield_and_post_combat_eat_skips_ranged():
     """Reproduces r21_short hy4_hy_3_midgame: water_surface_abort near drowned latches shield & skips ranged/latched post-combat eat."""

@@ -1492,10 +1492,24 @@ class GenerationGuard:
                     st_after = self.bot.status()
                 except (ApiError, httpx.HTTPError):
                     st_after = st_pre
+                hp_pre_l = st_pre.get("health")
+                hp_post_l = st_after.get("health")
+                dim_pre_l = str(st_pre.get("dimension") or "").lower()
+                dim_post_l = str(st_after.get("dimension") or "").lower()
+                ld_post_l = st_after.get("last_death")
                 lava_died = bool(
                     act_res.get("respawned")
                     or st_after.get("alive") is False
                     or st_after.get("ready") is False
+                    or (dim_pre_l and dim_post_l and dim_pre_l != dim_post_l)
+                    or (ld_post_l is not None and ld_post_l != st_pre.get("last_death"))
+                    or (
+                        isinstance(hp_pre_l, (int, float))
+                        and isinstance(hp_post_l, (int, float))
+                        and float(hp_pre_l) < 18.0
+                        and float(hp_post_l) >= 19.5
+                        and (float(hp_post_l) - float(hp_pre_l)) >= 2.0
+                    )
                 )
                 esc_ok = bool(act.get("ok") and not act_res.get("in_lava") and not lava_died)
                 if lava_died:
