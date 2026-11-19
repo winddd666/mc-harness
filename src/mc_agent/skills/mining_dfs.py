@@ -4825,17 +4825,32 @@ class MiningDFSEngine:
                         route = scoped.positions
                         if node.anchor in route:
                             route = route[len(route) - 1 - list(reversed(route)).index(node.anchor):]
-                            if len(route) > 1 and route[-1] != node.anchor:
-                                branch.status = "completed"
-                                self._create_node(
-                                    kind="switchback" if branch.kind.startswith("stair") else "spine",
-                                    anchor=route[-1], parent_id=node.node_id,
-                                    edge_from_parent=ShaftEdge(branch.kind, branch.direction, list(route)),
-                                    branches=[dataclasses.replace(
-                                        branch, status="pending", completed_waypoints=[],
-                                        steps=max(1, branch.steps - len(route) + 1),
-                                    )],
-                                )
+                            steps_taken = len(route) - 1
+                        elif (
+                            branch.kind == "stair_down" and len(route) > 1
+                            and route[0] in self.known_corridor_positions
+                            and route[0][1] == node.anchor[1] and math.dist(route[0], node.anchor) == 1
+                            and route[-1][1] < node.anchor[1]
+                            and not (scoped.last_status.get("in_water") or scoped.last_status.get("in_lava"))
+                            and all(math.dist(a, b) <= math.sqrt(2) and b[1] <= a[1] for a, b in zip(route, route[1:]))
+                        ):
+                            # The bot can start digging one cell beside a node on the same floor.
+                            # Join the observed stairs by a single level step and keep the same collar.
+                            steps_taken = node.anchor[1] - route[-1][1]
+                            route = [node.anchor, *route]
+                        else:
+                            break
+                        if steps_taken > 0 and route[-1] != node.anchor:
+                            branch.status = "completed"
+                            self._create_node(
+                                kind="switchback" if branch.kind.startswith("stair") else "spine",
+                                anchor=route[-1], parent_id=node.node_id,
+                                edge_from_parent=ShaftEdge(branch.kind, branch.direction, list(route)),
+                                branches=[dataclasses.replace(
+                                    branch, status="pending", completed_waypoints=[],
+                                    steps=max(1, branch.steps - steps_taken),
+                                )],
+                            )
                         break
             self._archive_current_shaft_to_ledger(mark_exhausted=False)
             result: dict[str, Any] = {

@@ -2215,10 +2215,11 @@ def test_navigation_rejoins_an_edge_instead_of_moving_through_a_wall(monkeypatch
     assert walks[0][:6] == list(reversed(route[:6]))
 
 
-def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> None:
+@pytest.mark.parametrize(("start_z", "landing_y", "resumable"), [(0, 19, True), (1, 19, True), (1, 10, False)])
+def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch, start_z, landing_y, resumable) -> None:
     import mc_agent.skills.mining_dfs as mining
 
-    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, start_z + 0.5), surface_y=20)
     clock = _MiningClock()
     monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
     with BotSession("tok", bot_username="PartialEdge", transport=httpx.MockTransport(world.handler)) as bot:
@@ -2231,7 +2232,8 @@ def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> 
         def interrupted(**kwargs):
             branch.status = "active"
             eng.bot.status()
-            world.pos = [1.5, 19.0, 0.5]
+            eng._record_corridor((0, 20, start_z))
+            world.pos = [1.5, float(landing_y), start_z + 0.5]
             eng.bot.status()
             clock.now = kwargs["deadline"]
             eng.bot.call("dig", {"pos": [2, 18, 0]})
@@ -2239,16 +2241,24 @@ def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> 
         monkeypatch.setattr(eng, "_run", interrupted)
         result = eng.run(max_duration_s=5.0)
         tip = eng.nodes[eng.active_node_id]
-        assert tip.parent_id == collar.node_id
-        assert tip.anchor == (1, 19, 0)
-        assert tip.edge_from_parent.waypoints == [(0, 20, 0), (1, 19, 0)]
-        assert tip.branches[0].status == "pending"
-        assert branch.status == "completed"
+        if resumable:
+            assert tip.parent_id == collar.node_id
+            assert tip.anchor == (1, landing_y, start_z)
+            expected_route = [collar.anchor]
+            if start_z:
+                expected_route.append((0, 20, start_z))
+            assert tip.edge_from_parent.waypoints == [*expected_route, tip.anchor]
+            assert tip.branches[0].status == "pending"
+            assert tip.branches[0].steps == 7
+            assert branch.status == "completed"
+        else:
+            assert tip is collar
+            assert branch.status == "pending"
     assert result["stop_reason"] == "time_slice_progress"
     assert result["ok"] is True
     assert result["goal_met"] is False
-    assert result["pos_before"] == [0.5, 20.0, 0.5]
-    assert result["pos_after"] == [1.5, 19.0, 0.5]
+    assert result["pos_before"] == [0.5, 20.0, start_z + 0.5]
+    assert result["pos_after"] == [1.5, float(landing_y), start_z + 0.5]
     assert not world.dig_log
 
 
