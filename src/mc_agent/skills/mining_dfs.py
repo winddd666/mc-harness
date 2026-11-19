@@ -249,6 +249,11 @@ MAX_IDLE_SECONDS = 20.0
 FLUID_ABORT_LIMIT = 3
 # Three consecutive "ok but nothing happened" calls mean the shaft is a dead end.
 IDLE_CALLS_BEFORE_RELOCATE = 3
+# A shaft that yields nothing for this many consecutive calls is a dead run: abandon it loudly.
+# Threshold evidence (overnight runs): n0424 had ~20 dry calls in a row and then produced 3
+# diamonds, so 20 was too aggressive; n0344 burned 45 dry calls for 1 hit. 30 separates them,
+# and this remains a coarse heuristic — treat it as a budget guard, not a geological verdict.
+DRY_CALLS_BEFORE_ABANDON = 30
 # A broken ore drops inside its own cell, so we must be standing within pickup range of it.
 # The MC API does NOT enforce dig reach (only 1 "out_of_reach" in thousands of live digs), so
 # nothing else stops us from shattering an ore behind a wall and losing the drop forever.
@@ -770,6 +775,24 @@ def _can_stack_expected_drop(inv_raw: dict[str, Any], expected_drops: set[str] |
     return False
 
 
+def _interpolate_cells(a: tuple[int, int, int], b: tuple[int, int, int]) -> list[tuple[int, int, int]]:
+    """Cell-by-cell straight line from a to b (each hop <= 1 block on every axis)."""
+    steps = max(abs(b[0] - a[0]), abs(b[1] - a[1]), abs(b[2] - a[2]))
+    if steps <= 1:
+        return [a, b]
+    out: list[tuple[int, int, int]] = []
+    for i in range(1, steps + 1):
+        t = i / steps
+        out.append(
+            (
+                int(round(a[0] + (b[0] - a[0]) * t)),
+                int(round(a[1] + (b[1] - a[1]) * t)),
+                int(round(a[2] + (b[2] - a[2]) * t)),
+            )
+        )
+    return [a, *out]
+
+
 def _floor_pos(raw: Any) -> tuple[int, int, int]:
     if not isinstance(raw, (list, tuple)) or len(raw) < 3:
         raise ValueError(f"Invalid pos: {raw!r}")
@@ -815,6 +838,8 @@ class MiningDFSEngine:
         self.idle_calls: int = 0
         # Ore blocks broken whose drop could not be picked up (through-wall mining losses).
         self.lost_drops: int = 0
+        # Consecutive calls on this shaft that produced no target item at all.
+        self.dry_calls: int = 0
         self.locked_cluster: dict[str, Any] | None = None
         self._last_radar_anchor: tuple[int, int, int] | None = None
         self.sealed_positions: set[tuple[int, int, int]] = set()
@@ -1039,6 +1064,7 @@ class MiningDFSEngine:
             "active_node_id": self.active_node_id,
             "target_y": self.target_y,
             "node_count": len(self.nodes),
+            "dry_calls": self.dry_calls,
             "nodes": node_summaries[-12:],
             "deferred_ores": [
                 {
@@ -1508,6 +1534,79 @@ class MiningDFSEngine:
                 return True
         return False
 
+    def _step_to(self, cell: tuple[int, int, int]) -> bool:
+        """One-cell traversal that also handles step-ups, gaps and 1-block drops.
+
+        Live n0112: repeated `backtrack_blocked@...,(feet=air,head=air)` — nothing obstructed,
+        move_exact simply cannot jump a gap or a 1-block ledge, so the whole route was abandoned.
+        """
+        if self._move_exact(cell):
+            return True
+        if self._hop_up_to(cell):
+            return True
+        try:
+            st = self.bot.status()
+            pos = st.get("pos") or [0.0, 64.0, 0.0]
+        except (ApiError, TypeError, ValueError):
+            return False
+        dx = cell[0] + 0.5 - float(pos[0])
+        dz = cell[2] + 0.5 - float(pos[2])
+        if max(abs(dx), abs(dz)) > 1.6:
+            return False
+        yaw = math.atan2(-dx, dz)
+        for jump in (True, False):
+            try:
+                self.bot.call(
+                    "control",
+                    {"forward": True, "jump": jump, "yaw": yaw, "ms": 650, "stop_on": ["death"]},
+                )
+            except ApiError:
+                continue
+            try:
+                st2 = self.bot.status()
+                p2 = st2.get("pos") or [0.0, 64.0, 0.0]
+                now = (math.floor(float(p2[0])), math.floor(float(p2[1])), math.floor(float(p2[2])))
+            except (ApiError, TypeError, ValueError):
+                continue
+            if now == cell or (now[0] == cell[0] and now[2] == cell[2]):
+                return True
+        return False
+
+    def _hop_up_to(self, cell: tuple[int, int, int], *, ms: int = 700) -> bool:
+        """Jump-step onto an air cell one block higher (move_exact cannot jump).
+
+        Live s19: the route block was reported as feet=air,head=air — nothing was obstructing,
+        the bot simply refused a 1-block step-up, which aborted the whole walk home.
+        """
+        try:
+            st = self.bot.status()
+            pos = st.get("pos") or [0.0, 64.0, 0.0]
+            cur = (math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2])))
+        except (ApiError, TypeError, ValueError):
+            return False
+        if cell[1] - cur[1] != 1 or max(abs(cell[0] - cur[0]), abs(cell[2] - cur[2])) > 1:
+            return False
+        try:
+            if self._get_block_name(cell) not in PASSABLE_BLOCKS:
+                return False
+        except ApiError:
+            return False
+        yaw = math.atan2(-(cell[0] + 0.5 - float(pos[0])), cell[2] + 0.5 - float(pos[2]))
+        try:
+            self.bot.call(
+                "control",
+                {"forward": True, "jump": True, "yaw": yaw, "ms": ms, "stop_on": ["death"]},
+            )
+        except ApiError:
+            return False
+        try:
+            st2 = self.bot.status()
+            p2 = st2.get("pos") or [0.0, 64.0, 0.0]
+            now = (math.floor(float(p2[0])), math.floor(float(p2[1])), math.floor(float(p2[2])))
+        except (ApiError, TypeError, ValueError):
+            return False
+        return now == cell or (now[0] == cell[0] and now[2] == cell[2] and now[1] >= cell[1])
+
     def _clear_route_obstruction(self, target_wp: tuple[int, int, int]) -> int:
         """Re-open a recorded corridor cell: dig solid fill, but refuse if it is now flooded/bedrock.
 
@@ -1569,9 +1668,14 @@ class MiningDFSEngine:
         *,
         reverse: bool = False,
         min_hp_ref: list[float],
+        deadline: float | None = None,
     ) -> tuple[bool, str | None]:
         ordered = list(reversed(waypoints)) if reverse else list(waypoints)
         for wp in ordered:
+            if deadline is not None and time.monotonic() >= deadline:
+                # Live n0211: a 60-waypoint walk held one tool call for 3+ minutes with the bot
+                # unattended. Abort on the slice boundary and report it instead.
+                return False, "walk_time_slice"
             st = self.bot.status()
             if st.get("alive") is False or st.get("ready") is False:
                 return False, "not_ready"
@@ -1581,6 +1685,18 @@ class MiningDFSEngine:
             cur = _floor_pos(st["pos"])
             if abs(cur[0] - wp[0]) == 0 and abs(cur[1] - wp[1]) == 0 and abs(cur[2] - wp[2]) == 0:
                 continue
+            # Waypoints can be far apart (node anchors). Walk the straight line cell by cell:
+            # a single move_exact over a 30-block climb always fails, which used to end the
+            # route walk ("backtrack_blocked") and force a full staircase re-dig (live s18).
+            hops = _interpolate_cells(cur, wp)
+            if len(hops) > 1:
+                stepped_all = True
+                for hop in hops[1:]:
+                    if not self._step_to(hop):
+                        stepped_all = False
+                        break
+                if stepped_all:
+                    continue
             if self._move_exact(wp):
                 continue
             dx_w = wp[0] - cur[0]
@@ -1606,7 +1722,11 @@ class MiningDFSEngine:
                 head = self._get_block_name((wp[0], wp[1] + 1, wp[2]))
             except ApiError:
                 feet, head = "?", "?"
-            return False, f"backtrack_blocked@{wp[0]},{wp[1]},{wp[2]}(feet={feet},head={head})"
+            return (
+                False,
+                f"backtrack_blocked@{wp[0]},{wp[1]},{wp[2]}"
+                f"(feet={feet},head={head},from={cur[0]},{cur[1]},{cur[2]})",
+            )
         return True, None
 
     def _find_node_path(self, start_id: int, goal_id: int) -> list[tuple[list[tuple[int, int, int]], bool, int]]:
@@ -1651,6 +1771,7 @@ class MiningDFSEngine:
         goal_node_id: int,
         *,
         min_hp_ref: list[float],
+        deadline: float | None = None,
     ) -> tuple[bool, str | None]:
         if self.active_node_id is None or self.active_node_id not in self.nodes or goal_node_id not in self.nodes:
             return False, "no_active_tree"
@@ -1700,7 +1821,7 @@ class MiningDFSEngine:
 
         segments = self._find_node_path(self.active_node_id, goal_node_id)
         for waypoints, rev, dest_id in segments:
-            ok, err = self._walk_waypoints(waypoints, reverse=rev, min_hp_ref=min_hp_ref)
+            ok, err = self._walk_waypoints(waypoints, reverse=rev, min_hp_ref=min_hp_ref, deadline=deadline)
             if not ok:
                 return False, err
             self.active_node_id = dest_id
@@ -2591,7 +2712,10 @@ class MiningDFSEngine:
         and the repetition in-call turns that into 1-3 turns.
         """
         start_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
-        target_y = (int(self.collar_ceiling_y) - 20) if self.collar_ceiling_y is not None else start_y
+        # explore refuses at y <= ceiling-20, so climbing must overshoot that boundary by a few
+        # blocks. With target_y == ceiling-20 the two thresholds coincide and live n0332 looped
+        # forever: climb_out "reached" at 42, explore rejected 42, climb again, ...
+        target_y = (int(self.collar_ceiling_y) - 16) if self.collar_ceiling_y is not None else start_y
         method = "stair"
         try:
             hp_now = float(self.bot.status().get("health") or 20.0)
@@ -2603,7 +2727,9 @@ class MiningDFSEngine:
         walked = False
         walk_gain = 0
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
-            ok_walk, _err_walk = self._navigate_to_node(self.collar_node_id, min_hp_ref=hp_ref)
+            ok_walk, _err_walk = self._navigate_to_node(
+                self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
+            )
             walked = bool(ok_walk)
             if not walked:
                 y_part = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
@@ -2624,15 +2750,23 @@ class MiningDFSEngine:
         if not walked:
             cur_now = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])
             if self._try_restore_saved_shaft(cur_now, min_hp_ref=hp_ref, allow_retired=True):
-                ok_walk, _err_walk = self._navigate_to_node(self.collar_node_id, min_hp_ref=hp_ref)
+                ok_walk, _err_walk = self._navigate_to_node(
+                    self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
+                )
                 if ok_walk:
                     walked = True
                     # Travel only: do not keep this retired tree as the mining tree.
                     self._clear_active_tree_only()
         if walked:
+            y_walk = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
+            # _navigate_to_node can report success while we are still deep (e.g. the active node
+            # already equals the collar id). Only trust it when it actually moved us up.
+            if y_walk <= start_y and y_walk < target_y - 2:
+                walked = False
+        if walked:
             method = "walk"
             y_walk = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
-            if y_walk >= target_y:
+            if y_walk >= target_y - 2:
                 return {
                     "start_y": start_y,
                     "end_y": y_walk,
@@ -2652,7 +2786,7 @@ class MiningDFSEngine:
         fell_back_to_pillar = False
         while time.monotonic() < deadline and attempts < max_attempts:
             cur_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
-            if cur_y >= target_y:
+            if cur_y >= target_y - 2:
                 break
             moved = 0
             for d in [x for x in dirs if x not in stuck_dirs]:
@@ -2709,7 +2843,7 @@ class MiningDFSEngine:
             "end_y": end_y,
             "climbed": end_y - start_y,
             "target_y": target_y,
-            "reached": end_y >= target_y,
+            "reached": end_y >= target_y - 2,
             "attempts": attempts,
             "method": method if not walked else f"{method}+stair",
         }
@@ -4141,6 +4275,7 @@ class MiningDFSEngine:
         node = self._create_node(kind="collar", anchor=anchor, parent_id=None, edge_from_parent=None, branches=branches)
         self.collar_node_id = node.node_id
         self.fluid_aborts = 0
+        self.dry_calls = 0
         self.fluid_abandoned_deep = False
         if self.collar_ceiling_y is None or anchor[1] > self.collar_ceiling_y:
             self.collar_ceiling_y = int(anchor[1])
@@ -4399,9 +4534,33 @@ class MiningDFSEngine:
         if act in {"climb_out", "climb"}:
             # Climbing needs a bigger slice than a mining tick: one 8-step staircase alone eats
             # ~25s, so a 32s budget produced "attempts: 1, climbed: 8" (live s15).
+
             budget = min(120.0, max(float(max_duration_s), 90.0))
             climb = self._climb_out(deadline=time.monotonic() + budget)
             ok_climb = bool(climb["reached"])
+            # Never hand control back while the bot is floating: live n0152 drowned during the
+            # model's next (empty) turns after unstick left it in_water.
+            wet_after = False
+            try:
+                if bool(self.bot.status().get("in_water")):
+                    esc = self.skills.escape_water()
+                    wet_after = bool(esc.get("in_water"))
+                    if wet_after:
+                        self.skills.unstick()
+                        wet_after = bool(self.bot.status().get("in_water"))
+            except (ApiError, ValueError, KeyError):
+                wet_after = False
+            if wet_after:
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "action": "climb_out",
+                    "strategy": self.strategy,
+                    "stop_reason": "in_water",
+                    "climb": climb,
+                    "message": "爬升途中仍在水中，请先用 staircase(vertical='up') 或 unstick 上岸/离开水域，再继续。",
+                    "tree": self.snapshot(),
+                }
             return {
                 "ok": ok_climb,
                 "requires_replan": not ok_climb,
@@ -4420,6 +4579,37 @@ class MiningDFSEngine:
             return {"ok": True, "action": "status", "strategy": self.strategy, "tree": self.snapshot()}
 
         profile = _resolve_target_profile(target, target_y)
+        if (
+            self.nodes
+            and self.collar_node_id in self.nodes
+            and abs(int(profile["target_y"]) - int(self.target_y)) >= 12
+            and int(profile["target_y"]) > int(self.target_y)
+        ):
+            try:
+                cur_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+            except (ApiError, TypeError, ValueError):
+                cur_y = int(self.target_y)
+            # Live s20: the model switched target diamond(-54) -> iron(16) while standing at
+            # y=-54, so the engine obediently climbed 20 blocks back up and the descent was lost.
+            if cur_y > int(self.target_y) + 8:
+                skip_guard = True
+            else:
+                skip_guard = False
+            if not skip_guard:
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "action": act,
+                    "strategy": self.strategy,
+                    "stop_reason": "layer_switch_upward_refused",
+                    "message": (
+                        f"你当前在 y={cur_y}，这条井的目标层已经是 y={self.target_y}；"
+                    f"把目标改到更浅的 y={profile['target_y']} 会让引擎掉头往上挖、白白废掉已下的深度。"
+                        "若确实要换层：先 action='return_collar' 或 'climb_out' 回到地表，再以新目标开井；"
+                        "否则请继续用原目标层（不要把 target 改小/改浅）。"
+                    ),
+                    "tree": self.snapshot(),
+                }
         self.target_y = profile["target_y"]
         target_blocks = profile["target_blocks"]
         expected_items = profile["expected_items"]
@@ -4498,7 +4688,11 @@ class MiningDFSEngine:
             if self.collar_node_id is None or self.collar_node_id not in self.nodes:
                 return {"ok": False, "requires_replan": True, "strategy": self.strategy, "stop_reason": "no_collar_recorded", "tree": self.snapshot()}
             dug_before = self.dug_during_return
-            ok_ret, err_ret = self._navigate_to_node(self.collar_node_id, min_hp_ref=min_hp_ref)
+            ok_ret, err_ret = self._navigate_to_node(
+                self.collar_node_id,
+                min_hp_ref=min_hp_ref,
+                deadline=time.monotonic() + max_duration_s,
+            )
             st_after = self.bot.status()
             return {
                 "ok": ok_ret,
@@ -4687,6 +4881,25 @@ class MiningDFSEngine:
                             "tree": self.snapshot(),
                         }
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
+
+        if self.dry_calls >= DRY_CALLS_BEFORE_ABANDON and self.collar_node_id in self.nodes:
+            # Dead shaft: 40 minutes of zero target yield. Archive it and tell the model to move.
+            self._archive_current_shaft_to_ledger(mark_exhausted=True)
+            self._clear_active_tree_only()
+            self.dry_calls = 0
+            return {
+                "ok": False,
+                "requires_replan": True,
+                "action": act,
+                "strategy": self.strategy,
+                "stop_reason": "shaft_dry_abandoned",
+                "message": (
+                    f"本井连续 {DRY_CALLS_BEFORE_ABANDON} 次调用没有产出任何 {profile['profile_key']}，"
+                    "判定为死井并归档。请换到 16 格以外的新点位："
+                    "mc_move_to 平移后 explore；若在地下先 action='climb_out' 回地表。"
+                ),
+                "tree": self.snapshot(),
+            }
 
         if self.idle_calls >= IDLE_CALLS_BEFORE_RELOCATE:
             # Live s05: 9 consecutive explore calls returned ok=true with gained={} and an
@@ -5289,6 +5502,10 @@ class MiningDFSEngine:
             self.idle_calls += 1
         else:
             self.idle_calls = 0
+        if target_gained <= 0:
+            self.dry_calls += 1
+        else:
+            self.dry_calls = 0
         out_res: dict[str, Any] = {
             "ok": ok,
             "requires_replan": not ok or stop_reason == "hurt",

@@ -1794,7 +1794,7 @@ def test_climb_out_action_reports_progress_and_target(monkeypatch) -> None:
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
     with BotSession("tok", bot_username="ClimbBot", transport=httpx.MockTransport(world.handler)) as bot:
         eng = MacroSkills(bot).mining_dfs
-        eng.collar_ceiling_y = 64                     # target = 44
+        eng.collar_ceiling_y = 64                     # target = 48 (ceiling-16)
         calls: list[str] = []
 
         def fake_status():
@@ -1812,9 +1812,9 @@ def test_climb_out_action_reports_progress_and_target(monkeypatch) -> None:
         res = eng.run(action="climb_out", target_y=16, max_duration_s=20.0)
 
     assert res["action"] == "climb_out"
-    assert res["climb"]["target_y"] == 44
+    assert res["climb"]["target_y"] == 48
     assert res["climb"]["reached"] is True
-    assert res["climb"]["climbed"] >= 24
+    assert res["climb"]["climbed"] >= 28
     assert calls
 
 
@@ -1866,7 +1866,7 @@ def test_climb_out_prefers_walking_the_shaft_over_new_stairs(monkeypatch) -> Non
         def fake_status():
             return {"pos": [0.5, float(world.pos[1]), 0.5], "health": 20.0, "food": 20.0, "alive": True}
 
-        def fake_nav(goal_node_id, min_hp_ref):
+        def fake_nav(goal_node_id, min_hp_ref, deadline=None):
             world.pos = [0.5, 64.0, 0.5]          # walk all the way home
             return True, None
 
@@ -1891,3 +1891,65 @@ def test_corridor_repair_digs_fill_but_refuses_flooded_cells() -> None:
         eng = MacroSkills(bot).mining_dfs
         assert eng._clear_route_obstruction((0, 20, -1)) >= 1      # solid fill -> dug
         assert eng._clear_route_obstruction((0, 20, -3)) == -1     # flooded -> give up
+
+
+def test_waypoint_walk_interpolates_long_hops() -> None:
+    """A 35-block climb must be walked cell by cell; one move_exact over it always fails."""
+    from mc_agent.skills.mining_dfs import _interpolate_cells
+
+    hops = _interpolate_cells((0, 63, 0), (0, 28, 0))
+    assert len(hops) == 36
+    assert hops[0] == (0, 63, 0) and hops[-1] == (0, 28, 0)
+    assert all(abs(hops[i + 1][1] - hops[i][1]) == 1 for i in range(len(hops) - 1))
+
+
+def test_upward_layer_switch_is_refused_on_an_existing_shaft() -> None:
+    """Live s20: switching diamond(-54) back to iron(16) made the engine climb 20 blocks up."""
+    world = _MockMineWorld(start_pos=(0.5, -54.0, 0.5), surface_y=70)
+    with BotSession("tok", bot_username="LayerBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.active_node_id = collar.node_id
+        eng.collar_ceiling_y = 64
+        eng.target_y = -54
+        res = eng.run(target="iron", goal_count=4, target_y=16, action="explore", max_duration_s=6.0)
+    assert res["stop_reason"] == "layer_switch_upward_refused"
+    assert res["requires_replan"] is True
+
+
+def test_climb_target_overshoots_the_explore_threshold() -> None:
+    """Live n0332: target==ceiling-20 made climb "reach" exactly where explore still refuses."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="BoundaryBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64
+        climb = eng._climb_out(deadline=0.0)          # no time: just check the computed target
+    assert climb["target_y"] == 48                    # > 64-20=44, so explore will accept
+
+
+def test_thirty_dry_calls_abandon_a_dead_shaft() -> None:
+    """n0344 burned 45 dry calls for 1 hit; n0424 recovered after ~20, so the bar is 30."""
+    world = _MockMineWorld(
+        start_pos=(0.5, -54.0, 0.5),
+        surface_y=64,
+        inventory_items=[
+            {"name": "iron_pickaxe", "count": 1, "slot": 9, "durability": [250, 250]},
+            {"name": "stone_pickaxe", "count": 1, "slot": 10, "durability": [131, 131]},
+            {"name": "cobblestone", "count": 64, "slot": 11},
+        ],
+    )
+    with BotSession("tok", bot_username="DryBot", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        eng.active_node_id = collar.node_id
+        eng.collar_ceiling_y = 64
+        eng.target_y = -54
+        eng.dry_calls = 30
+        res = eng.run(target="diamond", goal_count=4, target_y=-54, action="explore", max_duration_s=6.0)
+    assert res["stop_reason"] == "shaft_dry_abandoned"
+    assert res["requires_replan"] is True
+    assert eng.dry_calls == 0

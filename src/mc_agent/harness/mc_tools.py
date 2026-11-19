@@ -1729,6 +1729,7 @@ class McToolset:
         goal_count: int = 6,
         target_y: int | None = None,
         action: str = "explore",
+        max_duration_s: float = 32.0,
     ) -> str:
         norm_target = str(target or "").strip().lower().removeprefix("minecraft:")
         eff_target_y = target_y
@@ -1746,6 +1747,7 @@ class McToolset:
                 target_y=eff_target_y,
                 action=action,
                 geofence=self.geofence,
+                max_duration_s=max(20.0, min(90.0, float(max_duration_s))),
             )
             if clamped_from is not None and isinstance(res, dict):
                 res["clamped_shallow_diamond_y_from"] = clamped_from
@@ -2311,6 +2313,7 @@ class McToolset:
                         "goal_count": Parameter("目标入包数量，默认6", kind="integer", required=False),
                         "target_y": Parameter("指定开采Y层，省略按矿种预设", kind="integer", required=False),
                         "action": Parameter("explore/return_collar/climb_out/reset/status，默认explore（climb_out=一次调用内自动探测方向并连续爬回地表，深井废弃后用它，别一格一格叫staircase；reset会重置当前矿井并尝试换点；遇shaft_exhausted建议先mc_move_to平移16格以上再explore）", required=False),
+                        "max_duration_s": Parameter("单次调用最长作业秒数（20-90，默认32）。保持默认即可；提效调参留待后续专项", kind="number", required=False),
                     },
                     handler=self.mc_skill_mine_dfs,
                     concurrency="exclusive",
