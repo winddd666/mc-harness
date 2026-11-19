@@ -446,6 +446,13 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
   2. `SCENE-001`/`BUG-023` 在波次不含对应 stage 时自动 **N/A**，不再误报
   3. 线程异常与进程崩溃分开统计（`Exception in thread` → BUG-033 门禁）
 
+### 4o. r20 第二轮复核（23:13）
+
+- **BUG-030**：r20_short **45 次**深挖 `target_y<=-40`，**0 次到达**；最深 -22，多路仍停在 y=60~74 → "深度清零/拒绝续潜"比预算更致命
+- **BUG-034**：r20_short 取消仅 **43 次 / 70.4s**（pre_hurt_ranged 10），本波安静；但 r18 的 653s 仍说明机制未改，保持 OPEN
+- **BUG-035**：仅 `hy4_hy_3` 1 路复现（连续第 2 波）
+- r20_long（4 路 bare/midgame）：ALL PASS；新 P2-28 `smelt:missing_fuel`
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
