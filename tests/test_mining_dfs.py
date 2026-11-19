@@ -2520,3 +2520,40 @@ def test_step_requires_settled_arrival_on_requested_layer(landing_y, on_ground, 
         assert engine._step_to((1, 21, 0)) is False
 
     assert world.pos[0] == 1.5
+
+
+@pytest.mark.parametrize(("goal_x", "expected_xs"), [(3, [5, 4, 3]), (8, [5, 6, 7, 8])])
+def test_navigation_resumes_mid_edge_toward_the_requested_node(goal_x, expected_xs, monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(5.5, 15.0, 0.5), surface_y=20)
+    with BotSession("tok", bot_username="ResumeTowardGoal", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=(0, 20, 0), parent_id=None, edge_from_parent=None, branches=[],
+        )
+        engine.collar_node_id = collar.node_id
+        upper = engine._create_node(
+            kind="switchback", anchor=(3, 17, 0), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", [(i, 20 - i, 0) for i in range(4)]), branches=[],
+        )
+        lower = engine._create_node(
+            kind="switchback", anchor=(8, 12, 0), parent_id=upper.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", [(i, 20 - i, 0) for i in range(3, 9)]), branches=[],
+        )
+        traversed = []
+
+        def walk(waypoints, **kwargs):
+            traversed.extend(pt[0] for pt in waypoints)
+            x, y, z = waypoints[-1]
+            world.pos = [x + 0.5, float(y), z + 0.5]
+            return True, None
+
+        def reject_shortcut(*args, **kwargs):
+            pytest.fail("the bot must resume its recorded edge")
+
+        monkeypatch.setattr(engine, "_walk_waypoints", walk)
+        monkeypatch.setattr(engine, "_move_exact", reject_shortcut)
+        goal = upper if goal_x == 3 else lower
+        assert engine._navigate_to_node(goal.node_id, min_hp_ref=[20.0]) == (True, None)
+        assert engine.active_node_id == goal.node_id
+
+    assert traversed == expected_xs

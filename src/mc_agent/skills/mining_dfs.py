@@ -1900,26 +1900,52 @@ class MiningDFSEngine:
         if deadline is not None and time.monotonic() >= deadline:
             return False, "walk_time_slice"
         st = self.bot.status()
-        cur_pos = _floor_pos(st["pos"])
-        # A slice can end between nodes. Rejoin the recorded edge at our actual cell,
-        # instead of attempting a straight move through the wall to a distant anchor.
-        for nd in self.nodes.values():
-            edge = nd.edge_from_parent
-            if edge is None or cur_pos not in edge.waypoints:
-                continue
-            offset = edge.waypoints.index(cur_pos)
-            to_parent = goal_node_id == self.collar_node_id
-            route = list(reversed(edge.waypoints[:offset + 1])) if to_parent else edge.waypoints[offset:]
-            dest = nd.parent_id if to_parent else nd.node_id
-            if dest is None:
-                continue
-            route = [*route, self.nodes[dest].anchor]
-            ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
-            if not ok:
-                return False, err
-            self.active_node_id = dest
-            cur_pos = self.nodes[dest].anchor
-            break
+        if st.get("alive") is False or st.get("ready") is False:
+            return False, "not_ready"
+        if st.get("on_ground", True):
+            cur_pos = _floor_pos(st["pos"])
+        else:
+            settled, grounded = self._settled_position(st["pos"])
+            if not grounded:
+                return False, "not_grounded"
+            cur_pos = _floor_pos(settled)
+        # A slice can end between nodes. Resume the recorded edge toward the
+        # goal subtree, without first walking to the far end and doubling back.
+        if cur_pos == self.nodes[goal_node_id].anchor:
+            self.active_node_id = goal_node_id
+            return True, None
+        if cur_pos != self.nodes[self.active_node_id].anchor:
+            for node_id, node in self.nodes.items():
+                if node.anchor == cur_pos:
+                    self.active_node_id = node_id
+                    break
+            else:
+                goal_ancestors = {goal_node_id}
+                parent_id = self.nodes[goal_node_id].parent_id
+                while parent_id in self.nodes and parent_id not in goal_ancestors:
+                    goal_ancestors.add(parent_id)
+                    parent_id = self.nodes[parent_id].parent_id
+
+                for node in self.nodes.values():
+                    edge = node.edge_from_parent
+                    parent_id = node.parent_id
+                    if edge is None or parent_id is None or parent_id not in self.nodes or cur_pos not in edge.waypoints:
+                        continue
+                    offset = edge.waypoints.index(cur_pos)
+                    if node.node_id in goal_ancestors:
+                        dest = node.node_id
+                        route = edge.waypoints[offset:]
+                    else:
+                        dest = parent_id
+                        route = list(reversed(edge.waypoints[:offset + 1]))
+                    if route[-1] != self.nodes[dest].anchor:
+                        route = [*route, self.nodes[dest].anchor]
+                    ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
+                    if not ok:
+                        return False, err
+                    self.active_node_id = dest
+                    cur_pos = self.nodes[dest].anchor
+                    break
         anchor_now = self.nodes[self.active_node_id].anchor
         if cur_pos != anchor_now:
             best_near_id: int | None = None
@@ -1964,10 +1990,18 @@ class MiningDFSEngine:
 
         segments = self._find_node_path(self.active_node_id, goal_node_id)
         for waypoints, rev, dest_id in segments:
-            ok, err = self._walk_waypoints(waypoints, reverse=rev, min_hp_ref=min_hp_ref, deadline=deadline)
+            if not waypoints:
+                return False, "no_recorded_route"
+            route = list(reversed(waypoints)) if rev else list(waypoints)
+            anchor = self.nodes[dest_id].anchor
+            if route[-1] != anchor:
+                route.append(anchor)
+            ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
             if not ok:
                 return False, err
             self.active_node_id = dest_id
+        if self.active_node_id != goal_node_id:
+            return False, "no_recorded_route"
         return True, None
 
     # ---- Long-Range 64-Block Cluster Radar & Hostile Threat Triage ('radar' strategy) ----
