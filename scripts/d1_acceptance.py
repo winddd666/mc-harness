@@ -122,10 +122,17 @@ def collect(wave: str) -> dict:
                             if isinstance(le, dict) and le.get("code") == "no_support":
                                 out["no_support"] += 1
                         if tool == "mc_skill_craft_gear" and code == "missing_ingredients":
-                            # BUG-025 pattern: stone tool blocked *only* by sticks
+                            # BUG-025: flag only when the inventory *could* yield the
+                            # missing sticks but the formula under-counted them.
                             miss = o.get("missing_materials") or {}
-                            if isinstance(miss, dict) and miss and set(miss) == {"stick"}:
-                                out["stick_fails"] += 1
+                            inv = o.get("inventory") or {}
+                            if isinstance(miss, dict) and set(miss) == {"stick"} and isinstance(inv, dict):
+                                planks = sum(v for k, v in inv.items() if k.endswith("_planks"))
+                                logs = sum(v for k, v in inv.items() if k.endswith(("_log", "_stem")))
+                                sticks = int(inv.get("stick", 0) or 0)
+                                avail = sticks + 4 * (planks // 2) + 8 * logs
+                                if avail >= int(miss.get("stick", 1)):
+                                    out["stick_fails"] += 1
                     if tool == "mc_skill_trade":
                         out["trade"] += 1
                     if tool == "mc_skill_brew":
