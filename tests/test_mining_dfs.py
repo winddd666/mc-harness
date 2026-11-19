@@ -616,6 +616,53 @@ def test_mining_dfs_dual_pickaxe_discipline_and_deferred_diamond_reharvest() -> 
     assert all(h == "stone_pickaxe" for h in stone_digs)
 
 
+def test_deep_explore_skips_travel_for_deferred_ore_outside_pickup_range(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(
+        start_pos=(0.5, -20.0, 0.5), surface_y=64,
+        inventory_items=[{"name": "iron_pickaxe", "count": 1, "slot": 9, "durability": [250, 250]}],
+    )
+    ore = (-100, -45, 0)
+    world.blocks[ore] = "deepslate_diamond_ore"
+    with BotSession("tok", bot_username="DeepOreFrontier", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(-39, 25, 0), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = 64
+        tip = engine._create_node(
+            kind="switchback", anchor=(0, -20, 0), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", [collar.anchor, (0, -20, 0)]),
+            branches=[mining.BranchSpec("stair_down", "east", 34, branch_target_y=-54)],
+        )
+        engine.deferred_ores[ore] = mining.DeferredOreRecord(ore, "deepslate_diamond_ore", 3, collar.node_id)
+
+        def climb_for_ore(goal, **kwargs):
+            world.pos = [-38.5, 18.0, 0.5]
+            engine.bot.status()
+            clock.now = engine._deadline
+            return False, "walk_time_slice"
+
+        def descend(**kwargs):
+            world.pos = [1.5, -21.0, 0.5]
+            engine.bot.status()
+            clock.now = engine._deadline
+            engine.bot.status()
+
+        monkeypatch.setattr(engine, "_navigate_to_node", climb_for_ore)
+        monkeypatch.setattr(engine, "_dig_stair_down_edge", descend)
+        result = engine.run(target="diamond", target_y=-54, max_duration_s=32)
+
+    assert result["stop_reason"] == "time_slice_progress"
+    assert result["pos_after"][1] == -21
+    assert engine.nodes[engine.active_node_id].parent_id == tip.node_id
+    assert ore in engine.deferred_ores
+    assert not world.dig_log
+
+
 def test_mining_dfs_insufficient_tier_blocks_before_wasting_shaft() -> None:
     world = _MockMineWorld(
         start_pos=(0.5, 74.0, 0.5),

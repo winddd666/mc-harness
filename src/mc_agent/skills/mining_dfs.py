@@ -3465,6 +3465,16 @@ class MiningDFSEngine:
         self._move_exact(anchor, timeout_ms=2500)
         return ok_m, catch_total, seal_total
 
+    def _vein_hook_reach(self, *, target_ore: bool, scan_band: bool) -> tuple[int, int]:
+        """Return the vertical and horizontal search limits from a corridor anchor."""
+        if self.surgical_enabled:
+            return (4, 6) if target_ore else (3, 4)
+        if self.radar_enabled:
+            return (4, 7) if target_ore else (3, 5)
+        if scan_band:
+            return (6, 8) if target_ore else (3, 4)
+        return 2, 3
+
     def _run_vein_hook(
         self,
         anchor: tuple[int, int, int],
@@ -3528,22 +3538,7 @@ class MiningDFSEngine:
             if bname in target_set:
                 self.ledger.record_ore(pt, bname, req_t)
 
-            if self.surgical_enabled:
-                max_y_diff = 4 if bname in target_set else 3
-                max_xz_diff = 6 if bname in target_set else 4
-            elif self.radar_enabled:
-                # 'v5' mode: exact v4 candidate envelope (no lateral pocket digging, max 1-block skin peel)
-                max_y_diff = 4 if bname in target_set else 3
-                max_xz_diff = 7 if bname in target_set else 5
-            elif _scan_band:
-                # 'fishbone_scan' target band: modest reach widening (vertical offset tolerated up to 6,
-                # lateral up to 8) so nearby target veins are actually harvested, not just seen.
-                max_y_diff = 6 if bname in target_set else 3
-                max_xz_diff = 8 if bname in target_set else 4
-            else:
-                # 'fishbone' mode: strictly collect ONLY ores right beside the corridor (<=3 blocks)!
-                max_y_diff = 2
-                max_xz_diff = 3
+            max_y_diff, max_xz_diff = self._vein_hook_reach(target_ore=bname in target_set, scan_band=_scan_band)
 
             if abs(pt[1] - anchor[1]) > max_y_diff or (abs(pt[0] - anchor[0]) + abs(pt[2] - anchor[2])) > max_xz_diff:
                 if (self.radar_enabled or _scan_band) and bname in target_set and req_t <= max_tier:
@@ -5492,13 +5487,21 @@ class MiningDFSEngine:
         for rec in unlockable:
             if time.monotonic() >= deadline:
                 break
-            if rec.nearest_node_id not in self.nodes:
+            near_node = self.nodes.get(rec.nearest_node_id)
+            if near_node is None:
+                continue
+            near_anc = near_node.anchor
+            # A wide scan can associate ore with a node outside both retrieval ranges.
+            vertical = abs(rec.pos[1] - near_anc[1])
+            horizontal = abs(rec.pos[0] - near_anc[0]) + abs(rec.pos[2] - near_anc[2])
+            scan_band = self.strategy == "fishbone_scan" and abs(near_anc[1] - self.target_y) <= SCAN_BAND
+            hook_y, hook_xz = self._vein_hook_reach(target_ore=True, scan_band=scan_band)
+            if vertical + horizontal > DROP_PICKUP_RADIUS_MANHATTAN + 2 and (vertical > hook_y or horizontal > hook_xz):
                 continue
             ok_nav, err_nav = self._navigate_to_node(rec.nearest_node_id, min_hp_ref=min_hp_ref)
             if not ok_nav:
                 stop_reason = err_nav or "deferred_nav_failed"
                 break
-            near_anc = self.nodes[rec.nearest_node_id].anchor
             hook = self._run_vein_hook(
                 near_anc,
                 target_blocks=target_blocks,
