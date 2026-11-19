@@ -436,6 +436,16 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 - 修法：ReadTimeout 视为"稍后再收"（保留 job、返回 deferred），不要让恢复流程崩溃
 - 影响：任何有未收熔炼任务 + 网络抖动的 bot 都会整路丢失
 
+### 4n. r20_short / r20_long 早期（23:12）
+
+- **BUG-035 连续第 2 波复现**：`hy4_hy_3_midgame` 再次在 `library.py:4121 smelt_collect` 的 `ReadTimeout` 整路退出 → P0 确认
+- r20_short 其余门禁：deaths 8、cooldown 66.4s、thread exceptions 0、trade 2 / brew 2、mine 耗时/预算 0.93、零进展 6.0%
+- r20_long（4 路长任务）：ALL PASS（trade/brew 门禁按 stage 自动 N/A）
+- 门禁改进：
+  1. `BUG-018` 从"绝对中位 25~40s"改为 **耗时/声明预算 ≤1.2**（r20 大量用 60/90s 预算，旧门禁误报）
+  2. `SCENE-001`/`BUG-023` 在波次不含对应 stage 时自动 **N/A**，不再误报
+  3. 线程异常与进程崩溃分开统计（`Exception in thread` → BUG-033 门禁）
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s

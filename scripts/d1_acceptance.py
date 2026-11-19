@@ -42,6 +42,7 @@ def collect(wave: str) -> dict:
         "cancel": 0,
         "cancel_wait": 0.0,
         "mine_dur": [],
+        "mine_pairs": [],
         "mine_zero": 0,
         "mine_total": 0,
         "trade": 0,
@@ -103,6 +104,12 @@ def collect(wave: str) -> dict:
                         code = o.get("error", {}).get("code") if isinstance(o.get("error"), dict) else code
                     if tool == "mc_skill_mine_dfs":
                         out["mine_dur"].append(dur)
+                        try:
+                            b = float((args or {}).get("max_duration_s") or 0)
+                        except (TypeError, ValueError):
+                            b = 0.0
+                        if b > 0:
+                            out["mine_pairs"].append((dur, b))
                         out["mine_total"] += 1
                         if o.get("ok") is False and o.get("stop_reason") == "time_slice":
                             out["mine_zero"] += 1
@@ -145,28 +152,38 @@ def main() -> int:
     args = ap.parse_args()
     o = collect(args.wave)
     med = statistics.median(o["mine_dur"]) if o["mine_dur"] else 0.0
+    ratios = sorted(d / b for d, b in o["mine_pairs"]) if o["mine_pairs"] else []
+    ratio_med = ratios[len(ratios) // 2] if ratios else 0.0
     zero_pct = 100.0 * o["mine_zero"] / max(1, o["mine_total"])
     deaths = sum(o["deaths"].values())
     deep_score = o["summaries"].get(o["deep_water"] or "", None)
 
+    has_trade = any("village_trade" in b for b in o["bots"])
+    has_brew = any("brewing_alchemy" in b for b in o["bots"])
+    has_dw = o["deep_water"] is not None
     gates = [
         ("BUG-021 startup crash", len(o["startup_crash"]), "== 0"),
         ("BUG-025 stick craft fails", o["stick_fails"], "== 0"),
         ("BUG-024 no_support", o["no_support"], "<= 5"),
         ("BUG-026 deaths (incidents)", deaths, "<= 25"),
         ("BUG-026 cancel cooldown s", round(o["cancel_wait"], 1), "<= 200"),
-        ("BUG-018 mine_dfs median s", round(med, 1), "25~40"),
+        ("BUG-018 mine dur/budget med", round(ratio_med, 2), "<= 1.2"),
         ("BUG-018 mine zero-slice %", round(zero_pct, 1), "< 10"),
         ("BUG-020 runtime_error", o["runtime_error"], "<= 2"),
         ("BUG-033 thread exceptions", len(o["thread_errors"]), "== 0"),
-        ("BUG-023 deep_water trident deaths", o["dw_trident"], "<= 2"),
-        ("SCENE-001 trade calls", o["trade"], ">= 1"),
-        ("SCENE-001 brew calls", o["brew"], ">= 1"),
+        ("BUG-023 deep_water trident deaths", o["dw_trident"], "<= 2", has_dw),
+        ("SCENE-001 trade calls", o["trade"], ">= 1", has_trade),
+        ("SCENE-001 brew calls", o["brew"], ">= 1", has_brew),
     ]
     width = max(len(g[0]) for g in gates) + 2
     print(f"\n===== D1 ACCEPTANCE {args.wave} ({len(o['summaries'])}/{len(o['bots'])} summaries, {o['tool_calls']} tool calls) =====")
     failed = 0
-    for name, val, rule in gates:
+    for gate in gates:
+        name, val, rule = gate[0], gate[1], gate[2]
+        applicable = gate[3] if len(gate) > 3 else True
+        if not applicable:
+            print(f"  N/A   {name:34s} actual={val!s:>8s}  (stage not in this wave)")
+            continue
         if rule.startswith("=="):
             ok = val == float(rule[2:]) if "." in rule else val == int(rule[2:])
         elif rule.startswith("<="):
