@@ -647,6 +647,21 @@ staircase(south, ...) → 同样 0 步失败
 - `r22_long` 44 次 mine、0 零进展、0 void、0 Traceback
 - `glm_1`/`hy4_8` 未收官但**无 Traceback** → BUG-039 本波未复发
 
+### 4ag. r22_short 终验（18/18）与 r21→r22 对比
+
+**分数**：1690（r21，17 路）→ **1845**（r22，18 路）；人均 99.4 → 102.5。
+
+| 变化 | bot |
+|---|---|
+| +60 / +20 / +15 | `hy4_6`（250）、`nju_guitest`（180）、`hy4_10` |
+| -35 / -30 / -15 | `glm_2`（160）、`hy4_8`（150）、`nju_3`（25，BUG-040）、`hy4_5`、`hy4_7` |
+
+**门禁**：3 FAIL —— deaths **29**、cooldown **258.2s**、zero-slice **11.3%**；其余 9 项 PASS（含 **BUG-029 over-cap 0 ✅**）。
+死亡原因（21 notable）：`arrow 7 / mob_attack 7 / lava 4`，集中于 `nju_guitest 6`、`hy4_6 6`、`hy4_8 5`。
+取消 131 次：`hy4_8 30`、`hy4_6 19`、`nju_guitest 16`、`hy4_10 14`；触发仍以 `fresh_hurt 61` 为主。
+
+**结论**：BUG-029 修复通过终验；生存与取消在 r22 回潮（r21 为 9 死/111.7s），需 Slice B 复核 30s pre-hurt 冷却是否在真实受击场景下过钝。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
