@@ -239,15 +239,36 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
         ],
         timeout=45,
     )
-    time.sleep(2.0)
+    # `spreadplayers` drops the bot from y=120; polling too early reads a mid-fall y and would build
+    # a floating platform tens of blocks above the ocean surface. Wait until y stabilises first.
+    pos = [float(wx), 70.0, float(wz)]
+    last_y: float | None = None
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        time.sleep(0.8)
+        try:
+            st = bot.status()
+        except Exception:
+            continue
+        p = st.get("pos")
+        if not isinstance(p, (list, tuple)) or len(p) < 3:
+            continue
+        pos = [float(p[0]), float(p[1]), float(p[2])]
+        if last_y is not None and abs(pos[1] - last_y) < 0.6 and pos[1] < 100.0:
+            break
+        last_y = pos[1]
     st = bot.status()
-    pos = st.get("pos") or [float(wx), 70.0, float(wz)]
-    ix, iz = int(float(pos[0])), int(float(pos[2]))
-    surface_y = max(int(float(pos[1])) + 1, 64)
+    ix, iz = int(pos[0]), int(pos[2])
+    # Deep ocean sea level is 63; clamp so a stale reading can never produce a sky platform.
+    surface_y = min(max(int(round(pos[1])) + 1, 64), 70)
     prep = [
         f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
         f"fill {ix - 3} {surface_y - 1} {iz - 3} {ix + 3} {surface_y - 1} {iz + 3} minecraft:cobblestone",
         f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 3} {iz + 3} minecraft:air",
+        # 1-high cobblestone rim keeps the spawn pad dry while leaving the east edge open for the dive.
+        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y} {iz - 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y} {iz + 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y} {iz + 2} minecraft:cobblestone",
         f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
         f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
     ]
