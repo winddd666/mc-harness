@@ -345,6 +345,8 @@ class BotRow:
     scene_stage: str = ""
     scene_ok: bool | None = None
     scene_anchor: str = ""
+    scene_ticks: int | None = None
+    scene_preempt_skips: int | None = None
 
     @property
     def gained_short(self) -> list[str]:
@@ -505,6 +507,12 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         scene_stage=str(scene_meta.get("stage") or ""),
         scene_ok=scene_meta.get("entry_verified") if "entry_verified" in scene_meta else None,
         scene_anchor=scene_anchor,
+        scene_ticks=scene_meta.get("watchdog_ticks") if isinstance(scene_meta.get("watchdog_ticks"), int) else None,
+        scene_preempt_skips=(
+            scene_meta.get("watchdog_preempt_skips")
+            if isinstance(scene_meta.get("watchdog_preempt_skips"), int)
+            else None
+        ),
     )
 
 
@@ -611,6 +619,11 @@ def _write_markdown(
             )
     else:
         lines.append("*（所有已收官 bot 场景入口正常）*")
+    wd_rows = [r for r in rows if r.scene_ticks is not None]
+    if wd_rows:
+        lines.extend(["", "| Bot | watchdog ticks | 反射抢占跳过 |", "|---|---:|---:|"])
+        for r in wd_rows:
+            lines.append(f"| `{r.name}` | {r.scene_ticks} | {r.scene_preempt_skips} |")
 
     lines.extend(["", "## 4. 跨模型 P0/P1 错误榜单", ""])
     ranked = sorted(err_counts.items(), key=lambda kv: (-len(err_bots[kv[0]]), -kv[1]))
@@ -695,6 +708,7 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"deaths={r.deaths:2d} guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
             f"429={r.http_429:2d} gained=[{','.join(r.gained_short[:4])}]"
             + (" scene=BAD" if r.scene_ok is False else "")
+            + (f" wd={r.scene_ticks}skips={r.scene_preempt_skips}" if r.scene_ticks is not None else "")
         )
         if r.status == "crash" and r.crash_tail:
             tail = r.crash_tail.splitlines()[-1]

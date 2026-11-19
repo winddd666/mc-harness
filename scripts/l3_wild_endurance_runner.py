@@ -490,6 +490,14 @@ def prepare_scene_ground(
                 f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz + 3} minecraft:air",
                 f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:respawn_anchor[charges=4]",
+                # 4-high obsidian parapet on three sides with a 1x2 gate on the east edge: the ledge
+                # is a respawn point inside a hostile structure, so open sightlines just feed the
+                # death loop (r17 hy4_hy_6_nether_bastion: 24 deaths).
+                f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 3} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy} {iz + 3} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy} {iz - 2} {ix - 3} {iy + 3} {iz + 2} minecraft:obsidian",
+                f"{pre} fill {ix + 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 1} minecraft:obsidian",
+                f"{pre} fill {ix + 3} {iy} {iz + 1} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
                 f"{pre} tp {bot_name} {ix}.5 {iy} {iz}.5",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
@@ -1021,6 +1029,8 @@ class SceneWatchdog(threading.Thread):
         self._last_return = 0.0
         self._last_total = -1
         self._inv_tick = 0
+        self._ticks = 0
+        self._preempt_skips = 0
 
     def stop(self) -> None:
         self._stop.set()
@@ -1029,7 +1039,10 @@ class SceneWatchdog(threading.Thread):
         """Total item count from the real `/inventory` shape (items[] + offhand + armor)."""
         try:
             inv = self.bot.inventory()
-        except Exception:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            # include ReflexPreempted(BaseException) raised by guardian._wrapped_call
             return None
         if not isinstance(inv, dict):
             return None
@@ -1073,7 +1086,12 @@ class SceneWatchdog(threading.Thread):
     def _tick(self) -> None:
         try:
             st = self.bot.status()
-        except Exception:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            # guardian._wrapped_call raises ReflexPreempted(BaseException) during a reflex takeover;
+            # letting it escape would kill the watchdog thread for the rest of the run (r18 ds_ds_4).
+            self._preempt_skips += 1
             return
         if not st:
             return
@@ -1100,6 +1118,14 @@ class SceneWatchdog(threading.Thread):
         )
         drifted = dim_matches and dist > self.scene.drift_limit and ready
         suspected_death = dead_signal
+        self._ticks += 1
+        if self._ticks % 15 == 0:  # ~2 min at the default 8s interval
+            print(
+                f"[Scene Watchdog] {self.bot_name} heartbeat tick={self._ticks} dim={dim} "
+                f"pos={pos if pos else '?'} hp={health:.0f} ready={ready} "
+                f"preempt_skips={self._preempt_skips}",
+                flush=True,
+            )
         if not suspected_death:
             self._inv_tick += 1
             if self._inv_tick % 3 == 1:  # sample on the very first tick, then every 3rd (~24s)
@@ -1153,8 +1179,10 @@ class SceneWatchdog(threading.Thread):
         while not self._stop.wait(self.interval_s):
             try:
                 self._tick()
-            except Exception as exc:
-                print(f"[Scene Watchdog] {self.bot_name} tick error: {exc}", flush=True)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as exc:
+                print(f"[Scene Watchdog] {self.bot_name} tick error: {exc!r}", flush=True)
 
 
 def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
@@ -1583,6 +1611,8 @@ def main() -> int:
                 "radius": scene.radius,
                 "drift_limit": scene.drift_limit,
                 "entry_verified": entry_ok,
+                "watchdog_ticks": watchdog._ticks,
+                "watchdog_preempt_skips": watchdog._preempt_skips,
             },
             "end_status": {
                 "pos": st_end.get("pos"),
