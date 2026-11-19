@@ -7231,8 +7231,13 @@ class MacroSkills:
                         time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
                 entry_detail["error"] = {
                     "code": "portal_transfer_timeout" if contact_seen else "portal_entry_not_reached",
-                    "phase": "entry", "target": target,
-                    "message": "请检查门前两格净空、脚下支撑及 entry_pos；不要重复建门。",
+                    "phase": "entry", "target": target, "contact_seen": contact_seen,
+                    "message": (
+                        "已检测到踏入传送门，但维度切换在预算内未完成；服务器可能延迟。"
+                        "请先查询 status.dimension 等待传送，不要重复建门或再次入门。"
+                        if contact_seen
+                        else "未检测到踏入传送门；请检查门前两格净空、脚下支撑及 entry_pos，不要重复建门。"
+                    ),
                 }
             except (ApiError, httpx.HTTPError) as err:
                 if isinstance(err, httpx.TimeoutException):

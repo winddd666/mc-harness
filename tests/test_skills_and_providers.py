@@ -1375,6 +1375,9 @@ def test_portal_entry_returns_recoverable_failure(monkeypatch, mode, code) -> No
     assert result["ok"] is False
     assert result["requires_replan"] is True
     assert result["error"]["code"] == code
+    if mode == "no_transfer":
+        assert result["error"]["contact_seen"] is True
+        assert "服务器可能延迟" in result["error"]["message"]
     assert controls == []
 
 
