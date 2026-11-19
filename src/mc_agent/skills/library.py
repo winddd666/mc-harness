@@ -6303,6 +6303,7 @@ class MacroSkills:
                     rejected_fillers: set[str] = set()
                     filler = _pick_step_filler()
                     placed_ok = False
+                    place_failures = 0
                     while filler:
                         try:
                             self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
@@ -6311,6 +6312,13 @@ class MacroSkills:
                             break
                         except ApiError as err:
                             last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
+                            if err.code == "place_failed" and place_failures < 2:
+                                # r14: an up-step filler placement was refused
+                                # once while the bot settled, then succeeded on
+                                # a later attempt.
+                                place_failures += 1
+                                time.sleep(0.25)
+                                continue
                             if err.code != "missing_item":
                                 break
                             rejected_fillers.add(filler)

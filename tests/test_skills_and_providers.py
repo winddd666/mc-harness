@@ -1550,6 +1550,41 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
     assert placed == ["cobblestone", "netherrack"]
 
 
+def test_staircase_up_retries_transient_place_failed() -> None:
+    """r14: up-step filler was refused once, then a retry succeeded."""
+    pos = [0.5, 30.0, 0.5]
+    placement_attempts = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": pos, "on_ground": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 8}]}
+        elif path == "get_block":
+            result = {"name": "air"}
+        elif path == "place":
+            placement_attempts.append(body)
+            if len(placement_attempts) <= 2:
+                return httpx.Response(
+                    409, json={"ok": False, "error": {"code": "place_failed", "message": "the block is still air"}}
+                )
+            result = {"pos": body["pos"]}
+        elif path == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(pos)}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+    assert result["ok"] is True
+    assert result["steps_done"] == 1
+    assert len(placement_attempts) == 3
+
+
 @pytest.mark.parametrize("timeout_path", ["get_block", "move_to", "dig"])
 def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypatch, timeout_path) -> None:
     import mc_agent.skills.library as library
