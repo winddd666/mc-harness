@@ -338,20 +338,32 @@ class _BudgetSession:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0.2:
             raise _MiningDeadline
-        payload = dict(body) if body is not None else None
-        if payload is not None and path.lstrip("/") in {"move_to", "control"}:
-            key = "ms" if path.lstrip("/") == "control" else "timeout"
-            payload[key] = min(int(payload.get(key, remaining * 1000)), max(1, int((remaining - 0.2) * 1000)))
+        endpoint = path.lstrip("/")
         # BotSession retries a closed keepalive once, with a 150ms pause. Reserve room
-        # for both HTTP attempts; httpx timeouts are per phase, so use a conservative cap.
-        kwargs["timeout_s"] = min(float(kwargs.get("timeout_s") or 45.0), (remaining - 0.15) / 8)
+        # for both HTTP attempts; httpx timeouts apply separately to each phase.
+        request_timeout = min(float(kwargs.get("timeout_s") or 45.0), (remaining - 0.15) / 8)
+        payload = dict(body) if body is not None else None
+        if payload is not None and endpoint in {"move_to", "control"}:
+            # Give the server time to return its own result before the HTTP read
+            # times out. A pathfinding failure can then fall back to local movement.
+            action_limit_ms = int((request_timeout - 0.25) * 1000)
+            if endpoint == "control":
+                if action_limit_ms < 50:
+                    raise _MiningDeadline
+                duration = payload.get("ms")
+                payload["ms"] = min(300 if duration is None else int(duration), action_limit_ms)
+            else:
+                if action_limit_ms < 1:
+                    raise _MiningDeadline
+                duration = payload.get("timeout")
+                payload["timeout"] = min(action_limit_ms if duration is None else int(duration), action_limit_ms)
+        kwargs["timeout_s"] = request_timeout
         kwargs["allow_reauth"] = False
         try:
             result = self._call(path, payload, **kwargs)
         except httpx.TimeoutException as exc:
             self.timed_out = True
             raise _MiningDeadline from exc
-        endpoint = path.lstrip("/")
         if endpoint == "dig" and result.get("dug"):
             self.dug_count += 1
         if endpoint == "inventory" and isinstance(result.get("items"), list):
@@ -1635,7 +1647,7 @@ class MiningDFSEngine:
             except ApiError:
                 pass
             cur, on_ground = self._settled_position(cur)
-            if math.floor(cur[1]) == pt[1] and math.dist((cur[0], cur[2]), (fx, fz)) <= 0.85:
+            if math.floor(cur[1]) == pt[1] and math.dist((cur[0], cur[2]), (fx, fz)) <= 0.85 and on_ground:
                 self._record_corridor(pt)
                 return True
         return False
@@ -1669,12 +1681,10 @@ class MiningDFSEngine:
             except ApiError:
                 continue
             try:
-                st2 = self.bot.status()
-                p2 = st2.get("pos") or [0.0, 64.0, 0.0]
-                now = (math.floor(float(p2[0])), math.floor(float(p2[1])), math.floor(float(p2[2])))
+                position, grounded = self._settled_position(pos)
             except (ApiError, TypeError, ValueError):
                 continue
-            if now == cell or (now[0] == cell[0] and now[2] == cell[2]):
+            if grounded and _floor_pos(position) == cell:
                 return True
         return False
 
@@ -1706,12 +1716,10 @@ class MiningDFSEngine:
         except ApiError:
             return False
         try:
-            st2 = self.bot.status()
-            p2 = st2.get("pos") or [0.0, 64.0, 0.0]
-            now = (math.floor(float(p2[0])), math.floor(float(p2[1])), math.floor(float(p2[2])))
+            position, grounded = self._settled_position(pos)
         except (ApiError, TypeError, ValueError):
             return False
-        return now == cell or (now[0] == cell[0] and now[2] == cell[2] and now[1] >= cell[1])
+        return grounded and _floor_pos(position) == cell
 
     def _clear_route_obstruction(self, target_wp: tuple[int, int, int]) -> int:
         """Re-open a recorded corridor cell: dig solid fill, but refuse if it is now flooded/bedrock.

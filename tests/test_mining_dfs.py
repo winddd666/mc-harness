@@ -2452,3 +2452,71 @@ def test_generic_gold_in_nether_counts_nuggets_and_uses_the_nether_layer(monkeyp
     assert result["goal_met"] is True
     assert result["gained"]["gold_nugget"] == 1
     assert any(name == "nether_gold_ore" for _, name, _ in world.dig_log)
+
+
+def test_pathfinder_expiry_leaves_time_for_local_movement(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    sent = []
+
+    def handler(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint == "move_to":
+            server_timeout = json.loads(request.content)["timeout"] / 1000
+            read_timeout = request.extensions["timeout"]["read"]
+            sent.append((server_timeout, read_timeout))
+            if server_timeout + 0.1 > read_timeout:
+                clock.now += read_timeout
+                raise httpx.ReadTimeout("pathfinder still running", request=request)
+            clock.now += server_timeout + 0.1
+            return httpx.Response(200, json={"ok": False, "error": {
+                "code": "timeout", "message": "pathfinder reached its own timeout",
+            }})
+        if endpoint == "control":
+            world.pos = [1.5, 20.0, 0.5]
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="TimedMovementFallback", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+
+        def take_step(**kwargs):
+            return {"ok": engine._move_exact((1, 20, 0))}
+
+        monkeypatch.setattr(engine, "_run", take_step)
+        result = engine.run(max_duration_s=20.0)
+
+    assert len(sent) == 1
+    server_timeout, read_timeout = sent[0]
+    assert 0 < server_timeout < read_timeout
+    assert result["ok"] is True
+    assert tuple(world.pos) == (1.5, 20.0, 0.5)
+    assert clock.now < 1020.0
+
+
+@pytest.mark.parametrize(("landing_y", "on_ground"), [(20.0, True), (21.0, False)])
+def test_step_requires_settled_arrival_on_requested_layer(landing_y, on_ground, monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "control":
+            world.pos = [1.5, landing_y, 0.5]
+        response = world.handler(request)
+        if path == "status" and world.pos[0] == 1.5:
+            body = response.json()
+            body["result"]["on_ground"] = on_ground
+            return httpx.Response(200, json=body)
+        return response
+
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+    with BotSession("tok", bot_username="WrongLevelStep", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        monkeypatch.setattr(engine, "_move_exact", lambda cell: False)
+        monkeypatch.setattr(engine, "_hop_up_to", lambda cell: False)
+        assert engine._step_to((1, 21, 0)) is False
+
+    assert world.pos[0] == 1.5
