@@ -587,6 +587,19 @@ staircase  16.2s       27→27   (time_budget, 0 进展)
 - 门禁：`startup crash 1`（BUG-039）、`zero-slice 11.8%`（早期偏差，r20 收官 6.2%）两项 FAIL；其余 9 项 PASS（deaths 2、cooldown 23.5s、thread 0、trade/brew 2/2）
 - `mine_dfs` 51 次调用、6 次 0 进展；`staircase:time_budget 10`（BUG-037 继续）
 
+### 4ab. BUG-037 第三种模式（r21，23:35）
+
+`ds_ds_4_nether_fortress` 在下界 `[705,66,640]`：
+
+```
+staircase(north, down, steps=40) → steps_requested=25（被 clamp）
+   steps_done=0, dug_count=0, movement_not_confirmed
+   viable_directions=[south,east,west]
+staircase(south, ...) → 同样 0 步失败
+```
+
+→ 建议：0 步 0 挖时自动 `unstick` 或用 `viable_directions[0]`，并把 `steps` 被 clamp 到 25 回传给模型（`steps_clamped`）。否则模型按 40 步规划、在失败方向上来回试。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
