@@ -581,6 +581,12 @@ staircase  16.2s       27→27   (time_budget, 0 进展)
 
 **r21_short（23:25 启动，已含 BUG-035 修复）**：`glm_1` 启动即丢 —— `ensure_bot_ready` 3 次/186s 后 `RuntimeError`（**BUG-039**）。
 
+### 4aa. r21_short 早期（23:34，0/18 summary）
+
+- **BUG-035 未复发**：全波 stdout `smelt_collect` 报错 0 次；唯一 Traceback 是 `glm_1` 的 `ensure_bot_ready`（BUG-039）
+- 门禁：`startup crash 1`（BUG-039）、`zero-slice 11.8%`（早期偏差，r20 收官 6.2%）两项 FAIL；其余 9 项 PASS（deaths 2、cooldown 23.5s、thread 0、trade/brew 2/2）
+- `mine_dfs` 51 次调用、6 次 0 进展；`staircase:time_budget 10`（BUG-037 继续）
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
