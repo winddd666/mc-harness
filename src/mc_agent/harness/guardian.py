@@ -107,6 +107,8 @@ ACTION_LOCK_ENDPOINTS = frozenset(
     }
 )
 
+READ_ONLY_POLL_ENDPOINTS = frozenset({"status", "inventory", "events"})
+
 
 class ReflexPreempted(BaseException):
     """Internal signal raised to unwind an active macro skill into 0-LLM subcortical takeover."""
@@ -1158,6 +1160,7 @@ class GenerationGuard:
             return
 
         stop_evt = threading.Event()
+        actor_thread_id = threading.get_ident()
         pending_trigger: list[ThreatTrigger] = []
 
         def _watcher() -> None:
@@ -1228,9 +1231,16 @@ class GenerationGuard:
             watcher_thread.start()
 
         def _wrapped_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+            clean_path = str(path or "").lstrip("/")
+            is_actor_thread = threading.get_ident() == actor_thread_id
+            is_readonly_poll = (
+                str(kwargs.get("method") or "").upper() == "GET"
+                or clean_path in READ_ONLY_POLL_ENDPOINTS
+            )
+            if not is_actor_thread or is_readonly_poll:
+                return orig_call(path, body, **kwargs)
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
-            clean_path = str(path or "").lstrip("/")
             # Do not preempt explicit stop_on=['death'] emergency swim/trap digs
             caller_ignores_hurt = isinstance(body, dict) and body.get("stop_on") == ["death"]
             try:

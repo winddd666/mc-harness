@@ -2336,6 +2336,109 @@ def test_bug028_real_void_geofence_across_escape_lava_water_and_lava_edge():
     assert placed_edge == [[235, 39, 235]]
 
 
+def test_bug031_watchdog_thread_and_readonly_status_never_raise_reflex_preempted():
+    """BUG-031: background scene-watchdog threads and GET/status/inventory/events calls MUST never raise ReflexPreempted."""
+    import threading
+    import time
+
+    state = {"creeper_close": False}
+    watchdog_errors: list[BaseException] = []
+    watchdog_ticks = {"n": 0}
+    actor_preempted = {"done": False}
+    readonly_ok = {"status": False, "inventory": False, "events": False, "get": False}
+
+    class _WatchdogSafeBot:
+        _last_event_seq = 0
+
+        def status(self):
+            return self.call("status", method="GET")
+
+        def inventory(self):
+            return self.call("inventory", method="GET")
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 64.0, 0.5],
+                    "health": 20.0,
+                    "food": 20,
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": True,
+                    "in_water": False,
+                    "in_lava": False,
+                    "nearest_hostile": (
+                        {"id": 99, "name": "creeper", "pos": [2.0, 64.0, 0.5], "dist": 1.5}
+                        if state["creeper_close"]
+                        else None
+                    ),
+                }
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {"items": [{"name": "shield", "count": 1}], "offhand": None}
+            if action == "get_entities":
+                return {"entities": [{"id": 99, "name": "creeper", "pos": [2.0, 64.0, 0.5], "dist": 1.5}]} if state["creeper_close"] else {"entities": []}
+            if action == "get_block":
+                return {"name": "stone" if (body or {}).get("pos", [0, 64, 0])[1] < 64 else "air"}
+            return {"ok": True}
+
+    bot = _WatchdogSafeBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    stop_wd = threading.Event()
+    wd_ready = threading.Event()
+
+    def _fake_scene_watchdog():
+        wd_ready.set()
+        while not stop_wd.is_set():
+            try:
+                bot.status()
+                bot.inventory()
+                # Non-actor thread even calling generic read paths must NEVER get ReflexPreempted!
+                bot.call("find_blocks", {"radius": 4, "types": ["cobblestone"], "limit": 1})
+                watchdog_ticks["n"] += 1
+            except BaseException as exc:
+                watchdog_errors.append(exc)
+            stop_wd.wait(0.02)
+
+    wd = threading.Thread(target=_fake_scene_watchdog, name="scene-watchdog-test", daemon=True)
+    wd.start()
+    wd_ready.wait(timeout=1.0)
+
+    def _actor_tool():
+        # Wait long enough for _watcher to fire once creeper approaches (>0.30s)
+        state["creeper_close"] = True
+        time.sleep(0.45)
+        # Actor read-only GET / status / inventory / events must NEVER raise ReflexPreempted
+        assert bot.call("status")["ready"] is True
+        readonly_ok["status"] = True
+        assert "items" in bot.call("inventory")
+        readonly_ok["inventory"] = True
+        assert "events" in bot.call("events", {"since": 0})
+        readonly_ok["events"] = True
+        assert bot.call("custom_read", None, method="GET")["ok"] is True
+        readonly_ok["get"] = True
+        # Actor state-mutating action MUST raise ReflexPreempted and unwind cleanly
+        bot.call("dig", {"pos": [1, 64, 0]})
+        return "should_not_reach"
+
+    try:
+        raw_receipt = guard.run_tool_with_reflex("mc_skill_harvest_logs", _actor_tool)
+        receipt = json.loads(raw_receipt)
+        actor_preempted["done"] = bool(receipt.get("preempted_by_reflex"))
+        # Let watchdog run a few more ticks post-preemption too
+        time.sleep(0.08)
+    finally:
+        stop_wd.set()
+        wd.join(timeout=1.0)
+
+    assert watchdog_errors == []
+    assert watchdog_ticks["n"] >= 5
+    assert all(readonly_ok.values())
+    assert actor_preempted["done"] is True
+
+
+
 
 
 
