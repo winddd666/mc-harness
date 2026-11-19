@@ -318,13 +318,16 @@ class _BudgetSession:
     No worker thread survives a timeout and continues issuing actions.
     """
 
+    _RETRYABLE_PROBES = frozenset({"status", "inventory", "get_block", "get_entities", "find_blocks"})
+
     def __init__(self, bot: Any, deadline: float) -> None:
         self.deadline = deadline
         self.first_pos: list[float] | None = None
         self.last_status: dict[str, Any] = {}
         self.first_inventory: dict[str, Any] | None = None
         self.last_inventory: dict[str, Any] | None = None
-        self.timed_out = False
+        self.timeout_path: str | None = None
+        self.timeout_dig_pos: tuple[int, int, int] | None = None
         self.dug_count = 0
         self.positions: list[tuple[int, int, int]] = []
         self.session = copy.copy(bot)
@@ -336,38 +339,45 @@ class _BudgetSession:
         self.session._recovering_quarantine = True
 
     def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0.2:
-            raise _MiningDeadline
         endpoint = path.lstrip("/")
-        # BotSession retries a closed keepalive once after a 150ms pause.
-        # Leave most of each attempt for the server to complete the action during the read.
-        attempt_budget = (remaining - 0.15) / 2
         timeout_limit = float(kwargs.get("timeout_s") or 45.0)
-        phase_timeout = min(0.5, timeout_limit, attempt_budget / 4)
-        read_timeout = min(timeout_limit, attempt_budget - 3 * phase_timeout)
-        payload = dict(body) if body is not None else None
-        if payload is not None and endpoint in {"move_to", "control"}:
-            # Give the server time to return its own result before the HTTP read
-            # times out. A pathfinding failure can then fall back to local movement.
-            action_limit_ms = int((read_timeout - 0.25) * 1000)
-            if endpoint == "control":
-                if action_limit_ms < 50:
-                    raise _MiningDeadline
-                duration = payload.get("ms")
-                payload["ms"] = min(300 if duration is None else int(duration), action_limit_ms)
-            else:
-                if action_limit_ms < 1:
-                    raise _MiningDeadline
-                duration = payload.get("timeout")
-                payload["timeout"] = min(action_limit_ms if duration is None else int(duration), action_limit_ms)
-        kwargs["timeout_s"] = httpx.Timeout(read_timeout, pool=phase_timeout, connect=phase_timeout, write=phase_timeout)
+        first_step_probe = endpoint in self._RETRYABLE_PROBES and not self.dug_count and len(self.positions) < 2
         kwargs["allow_reauth"] = False
-        try:
-            result = self._call(path, payload, **kwargs)
-        except httpx.TimeoutException as exc:
-            self.timed_out = True
-            raise _MiningDeadline from exc
+        for attempt in range(2):
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0.2:
+                raise _MiningDeadline
+            # BotSession itself can retry a closed keepalive after a 150ms pause.
+            attempt_budget = (remaining - 0.15) / 2
+            limit = min(timeout_limit, 5.0) if first_step_probe and attempt == 0 else timeout_limit
+            phase_timeout = min(0.5, limit, attempt_budget / 4)
+            read_timeout = min(limit, attempt_budget - 3 * phase_timeout)
+            payload = dict(body) if body is not None else None
+            if payload is not None and endpoint in {"move_to", "control"}:
+                # Let the server return its own deadline before the client times out.
+                action_limit_ms = int((read_timeout - 0.25) * 1000)
+                if endpoint == "control":
+                    if action_limit_ms < 50:
+                        raise _MiningDeadline
+                    duration = payload.get("ms")
+                    payload["ms"] = min(300 if duration is None else int(duration), action_limit_ms)
+                else:
+                    if action_limit_ms < 1:
+                        raise _MiningDeadline
+                    duration = payload.get("timeout")
+                    payload["timeout"] = min(action_limit_ms if duration is None else int(duration), action_limit_ms)
+            kwargs["timeout_s"] = httpx.Timeout(read_timeout, pool=phase_timeout, connect=phase_timeout, write=phase_timeout)
+            try:
+                result = self._call(path, payload, **kwargs)
+                break
+            except httpx.TimeoutException as exc:
+                if first_step_probe and attempt == 0 and self.deadline - time.monotonic() > 1.0:
+                    continue
+                self.timeout_path = endpoint
+                dig_pos = (payload or {}).get("pos")
+                if endpoint == "dig" and isinstance(dig_pos, (list, tuple)) and len(dig_pos) >= 3:
+                    self.timeout_dig_pos = _floor_pos(dig_pos)
+                raise _MiningDeadline from exc
         if endpoint == "dig" and result.get("dug"):
             self.dug_count += 1
         if endpoint == "inventory" and isinstance(result.get("items"), list):
@@ -4950,13 +4960,19 @@ class MiningDFSEngine:
                 self._report_explore_depth(result, target_y=self.target_y, budget=budget)
             return result
         except _MiningDeadline:
+            if scoped.timeout_dig_pos is not None:
+                self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", 30.0)
             # Keep interrupted branches retryable. Preserve the observed return route if
             # the cutoff landed inside an edge before its local waypoints were committed.
             node = self.nodes.get(self.active_node_id)
             if node is not None:
-                for branch in node.branches:
+                for index, branch in enumerate(node.branches):
                     if branch.status == "active":
                         branch.status = "pending"
+                        if scoped.timeout_path == "dig" and not scoped.dug_count:
+                            # Let the remaining branches try their first step before
+                            # spending another slice on this unconfirmed dig.
+                            node.branches.append(node.branches.pop(index))
                         route = scoped.positions
                         if node.anchor in route:
                             route = route[len(route) - 1 - list(reversed(route)).index(node.anchor):]
@@ -4994,6 +5010,8 @@ class MiningDFSEngine:
                 "pos_before": scoped.first_pos, "pos_after": scoped.last_status.get("pos"),
                 "tree": self.snapshot(),
             }
+            if scoped.timeout_path is not None:
+                result["timeout_path"] = scoped.timeout_path
             if act == "explore":
                 gained = {}
                 if scoped.first_inventory is not None and scoped.last_inventory is not None:
@@ -5061,7 +5079,7 @@ class MiningDFSEngine:
             # Stop a request that may still be running server-side, within the reserved
             # portion of the caller's budget. Never reconnect or reauthenticate here.
             remaining = deadline - time.monotonic()
-            if remaining > 0.2 and (scoped.timed_out or time.monotonic() >= scoped.deadline - 0.2):
+            if remaining > 0.2 and (scoped.timeout_path is not None or time.monotonic() >= scoped.deadline - 0.2):
                 try:
                     scoped.deadline = deadline
                     scoped.call("stop", {}, timeout_s=0.25)
