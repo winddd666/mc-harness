@@ -505,7 +505,11 @@ class McToolset:
             if exc.code == "blocked_by_self":
                 err_obj["recovery_hint"] = "先用 mc_move_to 到至少 3 格外，设 range=0.5，让出目标格，再放置；也可省略 x/y/z 自动选落点。"
             elif exc.code == "no_support":
-                err_obj["recovery_hint"] = "目标需要相邻实心方块支撑；先用 mc_get_block 检查目标与下方，选择有实心地面的空格，或省略 x/y/z 自动选落点。"
+                err_obj["recovery_hint"] = (
+                    "目标需要相邻实心方块支撑；先用 mc_get_block 检查目标与下方，选择贴着实心面的空格。"
+                    "若四周全空，先在旁边 mc_dig 一格侧袋制造参考面，或换一个贴着实心块的坐标，"
+                    "也可省略 x/y/z 自动选落点；不要重复同一坐标。"
+                )
             else:
                 err_obj["recovery_hint"] = (f"先用 mc_get_block 检查目标 {target}；若仍是 sugar_cane、草或其他可清理障碍，先 mc_dig 清空目标格，再 mc_place。不要重复向同一占用格放置。")
         if action == "craft":
@@ -927,6 +931,26 @@ class McToolset:
 
     # ---- Exclusive Actions ----
 
+    @staticmethod
+    def _annotate_stale_entity(raw: str, entity_id: int | None) -> str:
+        if entity_id is None:
+            return raw
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(parsed, dict) or parsed.get("ok") is not False:
+            return raw
+        err = parsed.get("error") if isinstance(parsed.get("error"), dict) else None
+        if err is None or err.get("code") != "no_such_entity":
+            return raw
+        parsed["requires_replan"] = True
+        err["message"] = (
+            f"实体 {entity_id} 已不可见或消失；请重新调 mc_get_entities 获取最新 id/位置，"
+            "不要重复使用旧 id。"
+        )
+        return json.dumps(parsed, ensure_ascii=False)
+
     def mc_move_to(
         self,
         x: float | None = None,
@@ -1028,11 +1052,40 @@ class McToolset:
                         "请先脱困或等待 1~2 秒后重试，不要连续提交同一路径。"
                     )
                     raw = json.dumps(parsed, ensure_ascii=False)
+                st_mv: dict[str, Any] | None = None
                 try:
                     st_mv = self.bot.status()
                     self._update_status_cache(st_mv)
                 except Exception:
                     pass
+                if err_code == "movement_not_confirmed" and isinstance(st_mv, dict):
+                    pos_now = st_mv.get("pos")
+                    if isinstance(pos_now, (list, tuple)) and len(pos_now) >= 3:
+                        if y is not None:
+                            dist_now = math.dist(
+                                [float(x), float(y), float(z)],
+                                [float(pos_now[0]), float(pos_now[1]), float(pos_now[2])],
+                            )
+                        else:
+                            dist_now = math.hypot(float(x) - float(pos_now[0]), float(z) - float(pos_now[2]))
+                        if dist_now <= float(range) + 0.05:
+                            return json.dumps(
+                                {
+                                    "ok": True,
+                                    "result": {
+                                        "already_in_range": True,
+                                        "pos": list(pos_now[:3]),
+                                        "range": range,
+                                        "distance": round(dist_now, 2),
+                                        "hint": (
+                                            "已在目标 range 内，本次移动视为完成。"
+                                            "若要挪动站位，请指定至少 3 格外的坐标并设 range=0.5，"
+                                            "或直接调 mc_place 不传坐标。"
+                                        ),
+                                    },
+                                },
+                                ensure_ascii=False,
+                            )
                 dim_m, cur_p, _ = self._cached_env(fetch_if_missing=True)
                 dist_m = math.hypot(float(x) - cur_p[0], float(z) - cur_p[2]) if cur_p is not None else 0.0
                 if dist_m > 36.0 and err_code in {"path_not_found", "no_path", "timeout", "action_timeout", "stalled"}:
@@ -1057,7 +1110,7 @@ class McToolset:
                     for (edim, ex, ey, ez) in list(self.world_memory.pois.keys()):
                         if edim == dim_m and abs(ex - tx_i) <= 1 and abs(ez - tz_i) <= 1 and (y is None or abs(ey - math.floor(float(y))) <= 2):
                             self.world_memory.mark_unreachable((ex, ey, ez), dim=dim_m, reason=err_code, cooldown_s=300.0)
-        return raw
+        return self._annotate_stale_entity(raw, entity_id)
 
     def mc_dig(self, x: int, y: int, z: int, collect: bool = True) -> str:
         blocked = self.geofence.check_point(float(x), float(z), action="mc_dig")
@@ -1109,6 +1162,22 @@ class McToolset:
                     [x, y, z], dim=self._last_dimension, block_name=bname or None
                 )
                 self.world_memory.remove_poi([x, y, z], dim=self._last_dimension)
+            elif isinstance(parsed_dig, dict) and parsed_dig.get("ok") is False:
+                err = parsed_dig.get("error") if isinstance(parsed_dig.get("error"), dict) else {}
+                if err.get("code") == "timeout":
+                    # P2-21/r15: a timed-out cell was immediately retried by the
+                    # model. Avoid it briefly so the next scan picks another.
+                    try:
+                        self.skills._avoid_temporarily((x, y, z), "dig_timeout", 15.0)
+                    except Exception:
+                        pass
+                    parsed_dig["requires_replan"] = True
+                    err["message"] = (
+                        f"挖掘 {[x, y, z]} 在预算内未确认；已临时避开该格 15 秒。"
+                        "请换相邻格、先 mc_skill_unstick/靠近，或改用 mc_skill_mine_blocks 重新扫描；"
+                        "不要立即重试同一坐标。"
+                    )
+                    raw_dig = json.dumps(parsed_dig, ensure_ascii=False)
         except Exception:
             pass
         return raw_dig
@@ -1468,6 +1537,48 @@ class McToolset:
         target = _build_window_target(block, entity_id, x, y, z)
         if isinstance(target, str):
             return target
+        if entity_id is not None:
+            # BUG-027: the backend's goNear can silently fail, then activate
+            # from 12m away and report a misleading no_window. Pre-check here.
+            try:
+                ents = self.bot.call("get_entities", {"radius": 32}, timeout_s=2.0).get("entities") or []
+                ent = next((e for e in ents if isinstance(e, dict) and e.get("id") == entity_id), None)
+                if ent is None:
+                    return json.dumps(
+                        {
+                            "ok": False, "requires_replan": True,
+                            "error": {
+                                "code": "target_not_visible", "entity_id": entity_id,
+                                "message": (
+                                    f"实体 {entity_id} 在 32m 内不可见；请重新 mc_get_entities 获取最新 id，"
+                                    "或先 mc_move_to 到目标附近再开窗。不要重复使用旧 id。"
+                                ),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                dist = ent.get("dist")
+                if isinstance(dist, (int, float)) and float(dist) > 4.0:
+                    epos = ent.get("pos")
+                    move_hint = ""
+                    if isinstance(epos, (list, tuple)) and len(epos) >= 3:
+                        move_hint = f"先调 mc_move_to(x={epos[0]}, z={epos[2]}, range=2) 靠近，再 mc_window_view。"
+                    return json.dumps(
+                        {
+                            "ok": False, "requires_replan": True,
+                            "error": {
+                                "code": "out_of_reach", "entity_id": entity_id,
+                                "dist": round(float(dist), 1), "pos": epos,
+                                "message": (
+                                    f"目标距离 {float(dist):.1f}m，超过开窗交互范围(<=4m)。"
+                                    f"{move_hint}不要在 12m 外重复开窗，后端不会先走近。"
+                                ),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+            except (ApiError, httpx.HTTPError, TypeError, ValueError):
+                pass
         raw = self._call_json("window/view", {"target": target})
         self._sync_window_payload(
             raw,
@@ -1891,7 +2002,7 @@ class McToolset:
         ):
             if val is not None:
                 payload[key] = val
-        return self._call_json("look", payload)
+        return self._annotate_stale_entity(self._call_json("look", payload), entity_id)
 
     # ---- L0 / L1 Macro Skills ----
 

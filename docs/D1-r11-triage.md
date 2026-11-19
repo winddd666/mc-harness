@@ -215,6 +215,106 @@
 
 ---
 
+## 4c. r14 收官（21/22，`ds_ds_4` 启动冷却再次丢路）
+
+| 指标 | r13 | r14 | 结论 |
+|---|---|---|---|
+| 总分（21 路） | 2030 | **2040** | 持平；铁/钻仍是天花板 |
+| `mine_dfs` 中位 / 0 进展率 | 20.5s / 16.6% | **20.6s / 9.7%** | BUG-018 的 `/2` 接近达标，但 HEAD 仍是 `/8` |
+| `staircase` 调用数 / 中位 / max | 119 / 9.9s / 46s | **146 / 16.2s / 46s** | 45s 硬帽把长调用拆成更多短调用 → churn（新增 P2-20） |
+| 死亡 incident | 42 | **28** | 改善，但 `hy4_hy_9` 仍有 10 次 trident 死亡 |
+| `runtime_error` / `disconnected` | 2 / 0 | **4 / 2** | r14 进程早于 `26f7213`，未含 not_loaded 修复 |
+| `mc_move_to:bad_args` | 0 | **8（8 bots）** | P2-17 参数校验生效，成功拦截 y=z 串位 |
+| 启动丢路 | `nju_guitest` (129s) | **`ds_ds_4` (120s)** | BUG-021 修复已提交但未进本波进程 |
+
+**分数天花板**：`ds_ds_2_iron` 20、`hy4_hy_4_iron` 20（连续 3 波），`ds_ds_1_bare`/`hy4_hy_1_bare` 10。`shiny_gear`（钻石）拿不下是主因 → **BUG-022**。
+
+**r14 新工单**
+- **BUG-023 P1**：`hy4_hy_9_deep_water` 10 次 trident 死亡（r12/13/14 = 3/9/10），`escape_water ok` 仍被连击；需"上岸优先 + 盾挡 + 不再下水"与场景侧浅滩出生点
+- **P2-19**：`harvest_logs` 新增 `time_budget` 早退（18 次/6 bots），max 145.8→75.0s，需在提示中建议降 count
+- **P2-20**：`staircase` 45s 硬帽导致 69(r11)→146(r14) 调用，模型轮次成本可能高于一次长调用，建议改为 60~75s 或按 steps 缩放
+
+---
+
+## 4d. r15 最终收官（22/22）
+
+> 按"有返回即摊派"执行，不等 22/22。以下计数基于已落盘 events + 18 份 summary。
+
+| 指标 | r14 | r15（22 路） | 结论 |
+|---|---|---|---|
+| `mine_dfs` 中位 / p90 / max | 20.6 / 54.4 / 83.8s | **27.9 / 58.8 / 86.3s** | ✅ BUG-018 修复生效（0 进展 `time_slice` 仅 5.3%） |
+| iron 槽分数 | 20 | **100**（`hy4_hy_2_iron`） | ✅ BUG-022 解除 |
+| `staircase` 失败 | 44 | **109**（`missing_step_support 55`） | ❌ **BUG-024**：上阶梯垫脚 `no_support` 45 次 |
+| 死亡 | 28 | **57**（notable 去重 51） | ❌ **BUG-026**：新场景无生存调优 |
+| 总分 | 2040 | **2210** | 略升（22 路） |
+| `cancel_cooldown_wait` | 286s | **454s**（cancelled 141→247） | 同上 |
+| `craft_gear` 缺木棍 | — | **39 次 / 10 bots** | ❌ BUG-025（HEAD 已修，r15 为旧数据） |
+| `mc_move_to:movement_not_confirmed` | 33 | 38 | P2-1 未动 |
+| `mc_dig:timeout` | 4 | **15** | P2-21 |
+
+**r15 新工单（已写入 BUG_BOARD）**
+- **BUG-024 P1（Slice C）**：`staircase vertical=up` 垫脚 `place` 返回 `no_support`（45 次 / 6 bots），代码只重试 `place_failed`，遇 `no_support` 直接失败。`library.py:5688-5698`
+- **BUG-025 P1（Slice A）**：`_stone_pickaxe_headroom` 把 **1 木板折算 2 木棍**（实际 0），导致 `pickaxe_low` 误报"可立刻合成"，模型 4 轮死循环 `craft_gear`。`mining_dfs.py:848-853`。`ds_ds_1_bare` 391 石料 + 1 木板 + 0 木棍，20 分钟 0 分
+- **BUG-026 P1（Slice B + D2）**：死亡 49（mob 23 / arrow 13 / fall 5 / explosion 3 / lava 3），集中于 `hy4_8` 8、`ds_3` 5、`hy4_6` 5；新场景 cave_combat/brewing 无生存节奏
+  - 深度归因：**42/49 死在地表**、**10/49 死前无任何 guardian incident**、**0/49 死时手持盾**（但 17 路结束时背包仍有盾+剑）、`raise_shield` 仅 1 次 → 问题在"举盾时机/预判覆盖"，不是缺装备
+- **P2-21/22/23**：`dig:timeout`、`place:no_support`、`staircase:time_budget` churn
+- **SCENE-001（D2，已提单）**：`village_trade`/`brewing_alchemy`/`cave_combat` 只换出生点与背包，任务文本仍是通用课程。工具按关键词动态暴露（`agent.py:129-132`），结果 1593 次调用中 `mc_skill_trade 0 / mc_skill_brew 0 / mc_window_act 0`，场景目标完全未被验证
+
+---
+
+### 4d-1. 4 路未收官 bot 的即时复核（不等待 22/22）
+
+| bot | 关键证据 | 归属 |
+|---|---|---|
+| `ds_ds_1_bare` | `craft_gear` 死循环 **9 次**：`stone_pickaxe{missing stick:2/4}` → `stick{仅 1 木板}` → 再来；另 `staircase:time_budget` 10 次 | **BUG-025 确认** |
+| `nju_movetest_01_bare` | 2 次死循环（`wooden_pickaxe` 缺 `any_planks:3`）；`tunnel:missing_pickaxe` 3 次；2 死（arrow） | BUG-025 + BUG-026 |
+| `hy4_hy_1_bare` | 5 死（mob 4 + arrow 1，`y=6` 地下无甲）；`harvest_logs` 失败 4 | BUG-026 |
+| `glm_glm_5_midgame` | `mc_window_view` 10 次：**6 stalled + 3 no_window**，66.7s | **P2-24**（村民开窗卡实体碰撞箱） |
+
+- `no_support` 在这 4 路中 **0 次** → 与 BUG-024「竖井内上阶梯」定位一致，不影响地表裸开。
+- 4 路合计已跑 34 个 episode，说明长任务本身在推进，不存在"卡死不出 summary"。
+
+### 4d-2. r15 收官后的修复复核（HEAD `3fb883e`）
+
+| 工单 | 状态 | 证据 |
+|---|---|---|
+| BUG-025 | **FIXED** | HEAD 已改 `4*(planks//2)+8*logs`（`3d4ac1e`）；`scripts/d1_stick_check.py` **5/5 OK, exit 0** |
+| BUG-024 | **部分修复** | 兜底加在 `_dig_staircase` 的 up 分支（`library.py:6310`）；真实报错来自 **`_dig_pillar_up`**（`:5492` 定义，jump-place `:5673`）→ 需在该函数内补 `has_place_face` 判定 |
+| SCENE-001 | **已实现** | `7d5a571` 为三场景注入首集目标；待 r16 验证 `mc_skill_trade/brew` 首次出现 |
+| BUG-026 | **OPEN** | 死亡 28→57、cancelled 141→247、冷却 286→454s |
+
+### 4d-3. 可重复验收门禁（新增）
+
+`scripts/d1_acceptance.py --wave <wave>` 直接把 BUG_BOARD 的验收标准变成 PASS/FAIL：
+
+```
+r15: 6 GATE(S) FAILED  (BUG-025 39→精确口径 9, no_support 46, deaths 57, cooldown 454s, trade/brew 0)
+r16（早期 127 calls）: BUG-025 0 ✅  no_support 0 ✅  trade 1 ✅  brew 3 ✅
+                       mine_dfs median 12.4s / zero-slice 14.3% 需等收官
+```
+
+- 口径修正：BUG-025 只统计 `missing_materials == {"stick": N}` 的石器缺口（`diamond_pickaxe` 缺钻石不再误计）
+- 用法：`/home/xzq/projects/mc/.venv/bin/python scripts/d1_acceptance.py --wave r16_22bot`
+
+### 4e. r16 早期（21:27 起，0/22 summary、52 个事件文件）
+
+| 门禁 | 结果 | 说明 |
+|---|---|---|
+| BUG-025 木棍死锁 | **0** ✅ | 修复生效 |
+| BUG-024 no_support | **0**（暂） | 需收官确认 |
+| BUG-026 死亡/冷却 | 3 死 / 27.7s（暂） | 修复 `b920f24` **未进 HEAD**，预期不会大改 |
+| BUG-020 runtime_error | 0 | — |
+| SCENE-001 trade / brew | **1 / 8 次调用** ✅ | 交易成功 1 笔（paper→emerald×12）；酿造多次 ok |
+| `mc_window_view` | `no_window ×6`（全在 `glm_3`） | **BUG-027**（村民 12~16m，`openTarget` 不校验 goNear） |
+
+**新增 BUG-027（P1）**：`openTarget()` 在 `goNear` 失败后仍远距离 `activateEntity`，2.5s 等不到 windowOpen → 误报 `no_window`；实体距离 12.2/12.5/16.1m 已证实。
+
+**新增 BUG-028（P0 崩溃）**：`hy4_hy_6_nether_bastion` 在 r16 踩岩浆时整路崩溃：
+```
+escape_lava → combat_env.py:1206 AttributeError: 'VoidGeofence' object has no attribute 'contains'
+```
+`combat_env.py` 有 **4 处**（`:1206/:1293/:1354/:1360`）调用了不存在的方法；`VoidGeofence` 只有 `check_point/check_ray/distance_from_center`。由 `e680b1f`（找岸边）引入，r15 未走到该分支所以未暴露。**必须优先修**，否则任何下界/水边 bot 都可能整路丢失。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s

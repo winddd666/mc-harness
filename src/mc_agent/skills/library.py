@@ -332,7 +332,12 @@ def _window_item_entries(items: Any) -> list[dict[str, Any]]:
             count = 1
         if count < 1:
             continue
-        entry: dict[str, Any] = {"item": resolve_item_alias(str(name)), "count": count}
+        raw_name = str(name).removeprefix("minecraft:").strip()
+        if raw_name == "water_bottle":
+            # Java's registry item is potion{potion:water}, not water_bottle.
+            entry: dict[str, Any] = {"item": "potion", "potion": "water", "count": count}
+        else:
+            entry = {"item": resolve_item_alias(raw_name), "count": count}
         for key in ("slot", "potion", "enchanted", "custom_name"):
             if row.get(key) is not None:
                 entry[key] = row[key]
@@ -1162,6 +1167,7 @@ class _StairSession:
         self.last_status: dict[str, Any] = {}
         self.last_timeout_path: str | None = None
         self.last_retry_path: str | None = None
+        self.last_dig_pos: list[Any] | None = None
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
     _IDEMPOTENT_READS = frozenset({"status", "inventory", "get_block", "find_blocks"})
@@ -1182,6 +1188,8 @@ class _StairSession:
             call_body = body
             if path == "move_to":
                 call_body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
+            elif path == "dig" and isinstance((body or {}).get("pos"), (list, tuple)):
+                self.last_dig_pos = list(body["pos"])
             try:
                 result = (self.bot.call(path, call_body, timeout_s=timeout, **kwargs)
                           if self.supports_timeout else self.bot.call(path, call_body))
@@ -4491,7 +4499,36 @@ class MacroSkills:
         try:
             result = self.bot.call("window/act", {"target": target, "ops": ops})
         except ApiError as err:
-            return self._window_api_error(err)
+            if err.code == "no_window" and x is not None and y is not None and z is not None and block:
+                try:
+                    got = self.bot.call("get_block", {"pos": [x, y, z]})
+                    actual = str((got or {}).get("name") or "").removeprefix("minecraft:")
+                except ApiError:
+                    actual = ""
+                if actual and actual != str(block).removeprefix("minecraft:"):
+                    return {
+                        "ok": False,
+                        "error": "window_target_mismatch",
+                        "target": [x, y, z],
+                        "expected": block,
+                        "actual": actual,
+                        "message": (
+                            f"目标 {[x, y, z]} 实际是 {actual}，不是 {block}；"
+                            "请用 mc_find_blocks(types=['brewing_stand']) 重新定位，"
+                            "或省略 x/y/z 让工具自动搜索附近酿造台。不要重复同一坐标。"
+                        ),
+                    }
+            out = self._window_api_error(err)
+            if err.code == "missing_item":
+                try:
+                    out.setdefault("inventory", _inventory_counts(self.bot))
+                except ApiError:
+                    pass
+                out["message"] = (
+                    f"{out.get('message') or err.message}；已附 inventory 计数，"
+                    "请核对 ingredient/fuel 是否仍在背包，勿原参数重复。"
+                )
+            return out
 
         view: dict[str, Any] | None = None
         if wait:
@@ -5675,10 +5712,12 @@ class MacroSkills:
                             if perr.code == "blocked_by_self":
                                 continue
                             last_error = {"code": perr.code, "message": perr.message, "pos": [bx, by, bz]}
-                            if perr.code == "place_failed" and place_failures < 2:
+                            if perr.code in {"place_failed", "no_support"} and place_failures < 2:
                                 # r14 portal recovery: the first jump-place was
                                 # rejected while airborne, then the next whole
-                                # call succeeded. Wait one jump cycle and retry.
+                                # call succeeded. D1/BUG-024: the same path can
+                                # answer no_support before the new floor settles.
+                                # Wait one jump cycle and retry.
                                 place_failures += 1
                                 retry_after = time.monotonic() + 0.45
                                 continue
@@ -5833,13 +5872,21 @@ class MacroSkills:
                     self.bot.call("posture", {"jump": False, "sneak": False, "shield": False}, timeout_s=1.0, allow_reauth=False)
                 except (ApiError, httpx.HTTPError):
                     pass
+            timeout_message = "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"
+            if session.last_timeout_path == "dig":
+                timeout_message = (
+                    f"单步挖掘未在预算内确认（目标 {session.last_dig_pos}）。"
+                    "若目标位于脚下、为黑曜石/高硬度方块，或同一平台连续超时，"
+                    "先调 mc_skill_unstick 并离开该处 8~12 格后再挖；不要原地重复同一方向。"
+                )
             return {
                 "ok": False, "requires_replan": True, "stop_reason": "time_budget",
-                "error": {"code": "time_budget", "message": "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"},
+                "error": {"code": "time_budget", "message": timeout_message},
                 "direction": direction, "vertical": vertical, "steps_requested": steps,
                 **session.progress, "pos_after": session.last_status.get("pos"),
                 "timeout_path": session.last_timeout_path,
                 "retried_path": session.last_retry_path,
+                "dig_target": session.last_dig_pos,
                 "action_released": cleanup.get("released", cleanup.get("stopped", False)),
             }
 
@@ -6297,12 +6344,36 @@ class MacroSkills:
                     break
 
                 if _is_non_solid_support(_block_name([nx, by, nz])):
+                    # BUG-024: in a self-dug 1x1 shaft the step cell can have
+                    # no solid face at all; place would always answer no_support.
+                    # One safe pillar step is the only way to keep climbing.
+                    face_cells = (
+                        (nx, by - 1, nz), (nx + 1, by, nz), (nx - 1, by, nz),
+                        (nx, by, nz + 1), (nx, by, nz - 1), (nx, by + 1, nz),
+                    )
+                    has_place_face = any(
+                        not _is_non_solid_support(_block_name(cell)) for cell in face_cells
+                    )
+                    if not has_place_face:
+                        recovery = self._dig_pillar_up(steps=1, stop_on_ore=False)
+                        if recovery.get("ok"):
+                            steps_done += int(recovery.get("steps_done") or 0)
+                            dug_count += int(recovery.get("dug_count") or 0)
+                            placed_count += int(recovery.get("placed_count") or 0)
+                            stop_reason = "pillar_fallback"
+                        else:
+                            last_error = recovery.get("last_error") or {
+                                "code": "no_place_face", "pos": [nx, by, nz],
+                            }
+                            stop_reason = "missing_step_support"
+                        break
                     # The client inventory can disagree with the server's
                     # findItem (r13: cobblestone reported but place said none).
                     # Fall through to other solid fillers before giving up.
                     rejected_fillers: set[str] = set()
                     filler = _pick_step_filler()
                     placed_ok = False
+                    place_failures = 0
                     while filler:
                         try:
                             self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
@@ -6311,6 +6382,13 @@ class MacroSkills:
                             break
                         except ApiError as err:
                             last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
+                            if err.code == "place_failed" and place_failures < 2:
+                                # r14: an up-step filler placement was refused
+                                # once while the bot settled, then succeeded on
+                                # a later attempt.
+                                place_failures += 1
+                                time.sleep(0.25)
+                                continue
                             if err.code != "missing_item":
                                 break
                             rejected_fillers.add(filler)
@@ -6361,8 +6439,8 @@ class MacroSkills:
                 stop_reason = "ore_detected"
 
         out_stair: dict[str, Any] = {
-            "ok": stop_reason in {"completed", "ore_detected", "reached_surface"} and (steps_done > 0 or stop_reason == "ore_detected"),
-            "requires_replan": stop_reason not in {"completed", "ore_detected", "reached_surface"},
+            "ok": stop_reason in {"completed", "ore_detected", "reached_surface", "pillar_fallback"} and (steps_done > 0 or stop_reason == "ore_detected"),
+            "requires_replan": stop_reason not in {"completed", "ore_detected", "reached_surface", "pillar_fallback"},
             "direction": d_key,
             "vertical": v_key,
             "steps_requested": steps,
@@ -6391,6 +6469,12 @@ class MacroSkills:
             out_stair["blocker"] = blocker_info
         if last_error is not None:
             out_stair["last_error"] = last_error
+        if stop_reason == "pillar_fallback":
+            out_stair["fallback"] = "pillar"
+            out_stair["hint"] = (
+                "目标台阶四周没有可放置面（no_support），已原地安全垫高一格。"
+                "请从新高度重新调用 mc_skill_staircase；若仍无支撑，继续 vertical='pillar'。"
+            )
         end_pos = st_end.get("pos") or pos_before
         ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
         if stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "dig_failed", "undiggable_block", "movement_not_confirmed", "missing_step_support"}:

@@ -718,8 +718,13 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
         "keywords": ["mine_dfs", "reset", "nothing_to_reset", "竖井", "回填"],
         "rule": "mine_dfs(action='reset') 只用于放弃已有竖井树并回填；返回 nothing_to_reset 表示当前没有可回填的井，属正常结果，不要再重复 reset，直接开新矿点或换目标。",
     },
-    "staircase_terrain_boundaries": {
-        "id": "staircase_terrain_boundaries",
+    "villager_window_view": {
+        "id": "villager_window_view",
+        "category": "api_mechanic",
+        "keywords": ["villager", "村民", "window_view", "交易", "stalled", "no_window", "mc_skill_trade"],
+        "rule": "mc_window_view(entity_id) 要求身体与村民之间无实体碰撞/无方块遮挡：若返回 stalled 或 no_window，先侧移 1~2 格或 mc_move_to(range>=1.0) 重新贴近，再重开一次；同一村民连续 2 次 no_window 就换下一个村民（无业/睡觉的村民不会提供交易）。成交后立刻停手，不要在窗口里反复翻页。",
+    },
+    "staircase_terrain_boundaries": {        "id": "staircase_terrain_boundaries",
         "category": "api_mechanic",
         "keywords": ["staircase", "阶梯", "missing_step_support", "fluid_or_bedrock", "cave_or_drop_ahead", "换向", "垫脚"],
         "rule": "dig_staircase 的停止绝大多数是地形判定而非故障：missing_step_support 先在下一级下方放圆石/木板垫脚再继续；fluid_or_bedrock 直接换 90° 方向重开阶梯，不要原方向重试；cave_or_drop_ahead 先用 cobblestone 搭一格桥再下；movement_not_confirmed 说明站位未到，先把 range 调到 >=0.5 重新定位。同一方向连续失败 2 次就换方向，并记住该方向（本次运行内不要再选）。",

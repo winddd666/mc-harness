@@ -11,6 +11,9 @@
 
 Scene slices (`--stage`, one unique site per fleet slot):
   bare / iron / midgame / nether / village     overworld checkpoints, `/spawnpoint` death return
+  village_trade                                natural village, emerald/stick trade loadout
+  brewing_alchemy                              cobblestone pad + brewing stand + 2x2 water source
+  cave_combat                                  roofed 11x11 arena with one zombie + one skeleton
   nether_fortress / nether_bastion             locate real structure, obsidian ledge + charged
                                                respawn anchor, `execute in the_nether` everywhere
   enchant_anvil                                flattened 9x7 pad with table/anvil/bookshelves
@@ -275,15 +278,52 @@ def select_nether_structure_site(
     if "nether" not in str(st.get("dimension") or "").lower():
         # `tp` may not have settled yet; never anchor the scene to a stale overworld position.
         pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
+    elif abs(float(pos[1]) - float(ny)) > 6.0:
+        # The bot fell into the structure during the settle window (r16 HY_6 anchored at y=46.9
+        # inside a bastion and then died to fall/lava on every return). Re-carve the ledge and pin
+        # the anchor to the carved height instead of the fall-through position.
+        print(
+            f"[Scene] nether settle y={pos[1]:.1f} differs from ledge y={ny}; re-carving ledge",
+            flush=True,
+        )
+        rcon_batch(
+            prepare_scene_ground(bot_name, "nether_fortress", float(nx), float(ny), float(nz), dim="the_nether"),
+            timeout=30,
+        )
+        time.sleep(1.0)
+        pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
     return float(pos[0]), float(pos[1]), float(pos[2]), f"nether:{structure_tag.split(':')[-1]}"
 
 
-def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
-    """Locate a real `minecraft:deep_ocean` biome and build a safe surface staging platform above the water.
+def _deep_water_pad_cmds(bot_name: str, ix: int, iz: int, surface_y: int) -> list[str]:
+    """7x7 dry ocean pad: floor, 2-high parapet with an east gate, and a drowned/trident sweep."""
+    return [
+        f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
+        f"fill {ix - 3} {surface_y - 1} {iz - 3} {ix + 3} {surface_y - 1} {iz + 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 3} {iz + 3} minecraft:air",
+        # 1-high rim (easy to climb back onto from the water) with an east gate; trident safety comes
+        # from the drowned sweep + resistance, since a 2-high wall also blocked the bot's escape.
+        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y} {iz - 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y} {iz + 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y} {iz + 2} minecraft:cobblestone",
+        f"fill {ix + 3} {surface_y} {iz - 3} {ix + 3} {surface_y} {iz - 1} minecraft:cobblestone",
+        f"fill {ix + 3} {surface_y} {iz + 1} {ix + 3} {surface_y} {iz + 3} minecraft:cobblestone",
+        f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
+        f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
+        # Clear the drowned/trident camp that otherwise farms the bot on respawn (r13/r14: 100% of
+        # pad damage was `by trident`).
+        f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:drowned,distance=..48]",
+        f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:trident,distance=..48]",
+    ]
 
-    The bot must be able to *dive* into deep water for the slice, but must never spawn inside it
-    (drowning on episode 1 would poison every downstream metric). A 7x7 cobblestone platform with a
-    3-block air pocket keeps the spawn dry while leaving open water within a few blocks.
+
+def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
+    """Locate a real deep ocean and stage the bot on the closest dry shore/pad.
+
+    BUG-023 (D2 scene side): r12-r14 died repeatedly to drowned tridents because the bot spawned on
+    a tiny pad in open deep water with no reachable dry shelf. We now prefer the nearest
+    `minecraft:beach` (dry land + shallow water within a few blocks) and only fall back to a
+    parapet-protected pad when the beach is too far away.
     """
     cx, cz = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
     res = rcon_batch(
@@ -291,42 +331,67 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
         timeout=45,
     )
     coords = _locate_coords(str((res[0] if res else {}).get("reply") or ""))
-    if coords is not None:
-        wx, wz = coords
+    wx, wz = coords if coords is not None else (cx, cz)
+
+    beach: tuple[int, int] | None = None
+    try:
+        bres = rcon_batch(
+            [f"execute positioned {wx} 100 {wz} run locate biome minecraft:beach"],
+            timeout=45,
+        )
+        beach = _locate_coords(str((bres[0] if bres else {}).get("reply") or ""))
+    except Exception:
+        beach = None
+    beach_dist = math.hypot(beach[0] - wx, beach[1] - wz) if beach else float("inf")
+    if beach is not None and beach_dist <= 200.0:
+        staging_x, staging_z = beach
+        spread_radius = 8
+        stage_kind = f"beach({beach_dist:.0f}m from deep_ocean)"
     else:
-        wx, wz = cx, cz
+        staging_x, staging_z = wx, wz
+        spread_radius = 40
+        stage_kind = "deep_ocean_pad" if beach is None else f"deep_ocean_pad(beach {beach_dist:.0f}m away)"
+
     rcon_batch(
         [
-            f"tp {bot_name} {wx} 120 {wz}",
-            f"spreadplayers {wx} {wz} 0 40 false {bot_name}",
+            f"tp {bot_name} {staging_x} 120 {staging_z}",
+            f"spreadplayers {staging_x} {staging_z} 0 {spread_radius} false {bot_name}",
         ],
         timeout=45,
     )
     # `spreadplayers` drops the bot from y=120; polling too early reads a mid-fall y and would build
     # a floating platform tens of blocks above the ocean surface. Wait until y stabilises first.
-    pos = _wait_settled(bot, timeout_s=15.0) or [float(wx), 70.0, float(wz)]
+    pos = _wait_settled(bot, timeout_s=15.0) or [float(staging_x), 70.0, float(staging_z)]
     st = bot.status()
     ix, iz = int(pos[0]), int(pos[2])
-    # Deep ocean sea level is 63; clamp so a stale reading can never produce a sky platform.
-    surface_y = min(max(int(round(pos[1])) + 1, 64), 70)
-    prep = [
-        f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
-        f"fill {ix - 3} {surface_y - 1} {iz - 3} {ix + 3} {surface_y - 1} {iz + 3} minecraft:cobblestone",
-        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 3} {iz + 3} minecraft:air",
-        # 2-high cobblestone parapet blocks drowned trident line-of-sight (r13/r14 showed all pad
-        # damage came from tridents); a 1x2 gate on the east side keeps the dive route open.
-        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 1} {iz - 3} minecraft:cobblestone",
-        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y + 1} {iz + 3} minecraft:cobblestone",
-        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y + 1} {iz + 2} minecraft:cobblestone",
-        f"fill {ix + 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 1} {iz - 1} minecraft:cobblestone",
-        f"fill {ix + 3} {surface_y} {iz + 1} {ix + 3} {surface_y + 1} {iz + 3} minecraft:cobblestone",
-        f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
-        f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
-    ]
+    biome = str(st.get("biome") or "deep_ocean").lower()
+    # Trust the live `in_water` flag; only treat the ocean/river biome as wet when the bot is below
+    # sea level, otherwise a dry sandbar/beach on a deep_ocean column would get a needless pad.
+    frozen_y = int(round(pos[1]))
+    wet = bool(st.get("in_water")) or (("ocean" in biome or "river" in biome) and frozen_y <= 62)
+    print(
+        f"[Scene] deep_water staging={stage_kind} pos=({ix}, {int(round(pos[1]))}, {iz}) "
+        f"biome={biome or '?'} in_water={bool(st.get('in_water'))}",
+        flush=True,
+    )
+    if wet:
+        # Deep ocean sea level is 63; clamp so a stale reading can never produce a sky platform.
+        surface_y = min(max(int(round(pos[1])) + 1, 64), 70)
+        prep = _deep_water_pad_cmds(bot_name, ix, iz, surface_y)
+    else:
+        # Natural dry shore: keep it untouched, just pin the spawn and sweep the water edge.
+        surface_y = int(round(pos[1]))
+        prep = [
+            f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
+            f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
+            f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
+            f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:drowned,distance=..32]",
+            f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:trident,distance=..32]",
+        ]
     rcon_batch(prep, timeout=45)
     time.sleep(1.0)
-    biome = str(st.get("biome") or "deep_ocean").lower()
-    return float(ix) + 0.5, float(surface_y), float(iz) + 0.5, f"deep_water:{biome}"
+    kind = "beach" if not wet else "pad"
+    return float(ix) + 0.5, float(surface_y), float(iz) + 0.5, f"deep_water[{kind}]:{biome}"
 
 
 def prepare_scene_ground(
@@ -386,6 +451,12 @@ def prepare_scene_ground(
                 f"setblock {ix + 2} {iy} {iz} minecraft:brewing_stand",
                 f"setblock {ix + 2} {iy} {iz + 2} minecraft:crafting_table",
                 f"fill {ix + 3} {iy - 1} {iz - 2} {ix + 4} {iy - 1} {iz - 1} minecraft:water",
+                # BUG-026 scene side: light the pad so the brewing/trade slices are not a night-time
+                # mob farm while the model stands still at the stand.
+                f"setblock {ix - 2} {iy} {iz - 2} minecraft:torch",
+                f"setblock {ix + 4} {iy} {iz - 2} minecraft:torch",
+                f"setblock {ix - 2} {iy} {iz + 2} minecraft:torch",
+                f"setblock {ix + 4} {iy} {iz + 2} minecraft:torch",
                 f"tp {bot_name} {ix}.5 {iy} {iz}.5",
                 f"spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
@@ -404,8 +475,17 @@ def prepare_scene_ground(
                 f"fill {ix + 5} {iy} {iz - 4} {ix + 5} {iy + 3} {iz + 4} minecraft:cobblestone",
                 f"setblock {ix - 4} {iy} {iz - 4} minecraft:torch",
                 f"setblock {ix + 4} {iy} {iz + 4} minecraft:torch",
-                f"summon minecraft:zombie {ix + 3}.5 {iy} {iz}.5",
-                f"summon minecraft:skeleton {ix - 3}.5 {iy} {iz + 3}.5",
+                f"setblock {ix + 4} {iy} {iz - 4} minecraft:torch",
+                f"setblock {ix - 4} {iy} {iz + 4} minecraft:torch",
+                f"setblock {ix} {iy} {iz - 4} minecraft:torch",
+                f"setblock {ix} {iy} {iz + 4} minecraft:torch",
+                f"setblock {ix - 4} {iy} {iz} minecraft:torch",
+                f"setblock {ix + 4} {iy} {iz} minecraft:torch",
+                # Conditional summon: this prep also runs on every death-return restock, so an
+                # unconditional summon would stack a new pair of mobs inside the arena each death
+                # and turn the slice into an instant death loop.
+                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:zombie,distance=..24] run summon minecraft:zombie {ix + 3}.5 {iy} {iz}.5",
+                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:skeleton,distance=..24] run summon minecraft:skeleton {ix - 3}.5 {iy} {iz + 3}.5",
                 f"tp {bot_name} {ix}.5 {iy} {iz}.5",
                 f"spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
@@ -413,6 +493,12 @@ def prepare_scene_ground(
         return cmds
     if stage == "deep_water":
         # Re-assert the dry staging pad on death return (idempotent, only when spawned at/below sea level).
+        cmds.append(
+            f"execute positioned {ix} {iy} {iz} run kill @e[type=minecraft:drowned,distance=..40]"
+        )
+        cmds.append(
+            f"execute positioned {ix} {iy} {iz} run kill @e[type=minecraft:trident,distance=..40]"
+        )
         if iy <= 63:
             cmds.extend(
                 [
@@ -598,6 +684,8 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:redstone 4",
                 f"give {bot_name} minecraft:iron_sword 1",
                 f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:iron_helmet 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
                 f"give {bot_name} minecraft:cooked_beef 16",
             ]
         )
@@ -616,6 +704,8 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:iron_ingot 16",
                 f"give {bot_name} minecraft:iron_sword 1",
                 f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:iron_helmet 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
                 f"give {bot_name} minecraft:cooked_beef 16",
             ]
         )
@@ -664,6 +754,10 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
 
 
 NETHER_STAGES = frozenset({"nether_fortress", "nether_bastion"})
+
+# Surface slices where a night start is pure mob-farm noise (fleet passes --keep-time to every bot
+# except the first, so without this the village/brewing scenes would open at night).
+SURFACE_DAYTIME_STAGES = frozenset({"village", "village_trade", "brewing_alchemy"})
 
 
 def scene_dimension(stage: str) -> str:
@@ -741,7 +835,7 @@ def build_reset_cmds(
             ]
         )
     cmds.extend(stage_loadout_cmds(bot_name, stage, sx, sy, sz))
-    if set_day and dim != "the_nether":
+    if (set_day or stage in SURFACE_DAYTIME_STAGES) and dim != "the_nether":
         cmds.insert(0, "time set 1000")
     return cmds
 
@@ -1066,6 +1160,87 @@ def ensure_bot_ready(
     raise RuntimeError(f"bot did not become ready after {attempts} attempts (cooldown waited {waited:.0f}s)")
 
 
+SCENE_FOCUS: dict[str, dict[str, Any]] = {
+    # SCENE-001: the three scenario stages must open with a stage-specific target instead of the
+    # generic island_recon -> shiny_gear curriculum, otherwise their scores measure nothing.
+    "village_trade": {
+        "key": "minecraft:adventure/trade",
+        "title": "15分：与村民完成一次交易",
+        "points": 15,
+        "tier": 2,
+        "budget_class": "short",
+        "task": (
+            "本场景已站在村庄内，背包备有 emerald 32 / wheat 32 / stick 64 / paper 32 / coal 32。"
+            "立刻扫描 24m 内 villager，对最近的一个调用 mc_window_view(entity_id=...) 读取报价；"
+            "只要有一项 available=true 且背包材料够，马上 mc_skill_trade(entity_id=..., option=...) 成交，"
+            "优先 paper/wheat 换绿宝石。若返回 no_window/无业，换下一个村民，禁止对同一村民反复重试。"
+        ),
+        "extra_tools": ("mc_skill_trade", "mc_window_view", "mc_interact"),
+        "advancement_id": "minecraft:adventure/trade",
+    },
+    "brewing_alchemy": {
+        "key": "minecraft:nether/brew_potion",
+        "title": "15分：酿出任意一瓶药水",
+        "points": 15,
+        "tier": 2,
+        "budget_class": "short",
+        "episodes": 3,
+        "task": (
+            "出生点已放好酿造台与 2x2 无限水源，背包有 glass_bottle 9 / nether_wart 8 / sugar 4 / blaze_powder 8。"
+            "步骤：① 用玻璃瓶对水源 mc_interact 装 3 瓶水；② mc_skill_brew(bottles=3, ingredient='nether_wart') "
+            "酿成 awkward；③ **必须**用 mc_window_act(ops=[{'op':'take','from':'bottles'}], block='brewing_stand') "
+            "把药水取回背包，advancement 只在取回时触发，留在酿造台里不算；④ 若要更稳，取 1 瓶 awkward 放回并加 sugar "
+            "再酿 swiftness 后取回。fuel 用 blaze_powder，轮询 brew_time_left 到 0 再操作。不要离开出生点去挖矿。"
+        ),
+        "extra_tools": ("mc_skill_brew", "mc_window_act", "mc_window_view", "mc_interact"),
+        "advancement_id": "minecraft:nether/brew_potion",
+    },
+    "cave_combat": {
+        "key": "minecraft:adventure/kill_a_mob",
+        "title": "5分：击杀竞技场内的敌对生物并存活",
+        "points": 5,
+        "tier": 2,
+        "budget_class": "short",
+        "task": (
+            "你被封闭在 11x11 战斗竞技场，场内已有一只僵尸与一只骷髅，背包有铁剑/盾/弓/铁甲。"
+            "先 mc_posture(shield=True) 举盾贴近僵尸，用铁剑击杀即可解锁 adventure/kill_a_mob；"
+            "骷髅在远处时用盾挡箭或弓箭反制，低血量退到角落回血，不要在开阔处站桩。"
+        ),
+        "extra_tools": ("mc_posture",),
+        "advancement_id": "minecraft:adventure/kill_a_mob",
+    },
+}
+
+
+def install_scene_focus(stage: str, episodes: int = 2) -> bool:
+    """Force the first `episodes` curriculum picks to a stage-specific target (SCENE-001).
+
+    `CurriculumSupervisor.run()` resolves `select_next_target` from the module namespace at call
+    time, so wrapping that module function is enough — no core `harness/` edits. After the focus
+    budget is exhausted the original selector takes over again.
+    """
+    spec = SCENE_FOCUS.get(stage)
+    if not spec or episodes <= 0:
+        return False
+    from mc_agent.harness import curriculum as cur
+
+    target_kwargs = {k: v for k, v in spec.items() if k != "episodes"}
+    target = cur.CurriculumTarget(**target_kwargs)
+    state = {"remaining": int(spec.get("episodes", episodes))}
+    original = cur.select_next_target
+
+    def _wrapped(*args: Any, **kwargs: Any):
+        fallback, frontier = original(*args, **kwargs)
+        if state["remaining"] > 0:
+            state["remaining"] -= 1
+            return target, frontier
+        return fallback, frontier
+
+    cur.select_next_target = _wrapped
+    print(f"[Scene Focus] stage={stage} first {state['remaining']} episode(s) -> {target.key}", flush=True)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bot", type=str, default=BOT)
@@ -1098,6 +1273,12 @@ def main() -> int:
     )
     parser.add_argument("--tag", type=str, default="wild")
     parser.add_argument("--keep-time", action="store_true", help="Do not reset world time to morning")
+    parser.add_argument(
+        "--focus-episodes",
+        type=int,
+        default=2,
+        help="For scene stages, force this many opening episodes onto the stage-specific target (0 disables)",
+    )
     parser.add_argument(
         "--print-plan",
         action="store_true",
@@ -1246,6 +1427,7 @@ def main() -> int:
 
         watchdog = SceneWatchdog(bot, bot_name, scene, near_container=_near_known_container)
         watchdog.start()
+        install_scene_focus(args.stage, args.focus_episodes)
         try:
             sup = CurriculumSupervisor(
                 bot,

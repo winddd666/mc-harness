@@ -1441,6 +1441,50 @@ def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
     assert calls == ["status"]
 
 
+def test_move_to_already_in_range_is_success_not_failure() -> None:
+    """r15 top Slice C error: movement_not_confirmed at 33/10 bots."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.7, 64.0, 1000.5], "busy": None}})
+        if path == "move_to":
+            return httpx.Response(
+                200,
+                json={"ok": False, "error": {"code": "movement_not_confirmed", "message": "no movement"}},
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_move_to(x=1000.8, z=1000.5, range=2.0))
+    assert result["ok"] is True
+    assert result["result"]["already_in_range"] is True
+    assert result["result"]["distance"] < 0.2
+    assert calls.count("move_to") == 1
+
+
+def test_move_to_entity_reports_stale_id_with_replan_hint() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "busy": None}})
+        if path == "move_to":
+            return httpx.Response(200, json={"ok": False, "error": {"code": "no_such_entity", "message": "entity 214998 not visible"}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_move_to(entity_id=214998, range=15))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert "mc_get_entities" in result["error"]["message"]
+
+
 def test_move_to_rejects_z_swapped_into_out_of_range_y() -> None:
     """r12 P2-17: y=-2814 was silently dropped, wasting a 90s path search."""
     from mc_agent.harness.mc_tools import McToolset
@@ -1469,7 +1513,7 @@ def test_staircase_up_uses_available_solid_filler(filler) -> None:
         elif path == "inventory":
             result = {"items": [{"name": filler, "count": 8}]}
         elif path == "get_block":
-            result = {"name": "air"}
+            result = {"name": "stone" if body["pos"] == [0, 29, -1] else "air"}
         elif path == "place":
             placed.append(body)
             result = {"pos": body["pos"]}
@@ -1528,7 +1572,7 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
         elif path == "inventory":
             result = {"items": [{"name": "cobblestone", "count": 8}, {"name": "netherrack", "count": 8}]}
         elif path == "get_block":
-            result = {"name": "air"}
+            result = {"name": "stone" if body["pos"] == [0, 29, -1] else "air"}
         elif path == "place":
             placed.append(body["item"])
             if body["item"] == "cobblestone":
@@ -1548,6 +1592,78 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
     assert result["ok"] is True
     assert result["steps_done"] == 1
     assert placed == ["cobblestone", "netherrack"]
+
+
+def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
+    """BUG-024: a self-dug shaft step cell has no six-face support."""
+    pos = [0.5, 30.0, 0.5]
+    jumping = [False]
+    placed = [False]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            y = 31.2 if jumping[0] else (31.0 if placed[0] else 30.0)
+            result = {"pos": [0.5, y, 0.5], "on_ground": not jumping[0], "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 8}]}
+        elif path == "get_block":
+            result = {"name": "air"}
+        elif path == "posture":
+            jumping[0] = bool(body.get("jump"))
+            result = {}
+        elif path == "place":
+            placed[0] = True
+            result = {"pos": body["pos"]}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+    assert result["ok"] is True
+    assert result["stop_reason"] == "pillar_fallback"
+    assert result["fallback"] == "pillar"
+    assert result["steps_done"] == 1
+    assert result["placed_count"] == 1
+
+
+def test_staircase_up_retries_transient_place_failed() -> None:
+    """r14: up-step filler was refused once, then a retry succeeded."""
+    pos = [0.5, 30.0, 0.5]
+    placement_attempts = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": pos, "on_ground": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 8}]}
+        elif path == "get_block":
+            result = {"name": "stone" if body["pos"] == [0, 29, -1] else "air"}
+        elif path == "place":
+            placement_attempts.append(body)
+            if len(placement_attempts) <= 2:
+                return httpx.Response(
+                    409, json={"ok": False, "error": {"code": "place_failed", "message": "the block is still air"}}
+                )
+            result = {"pos": body["pos"]}
+        elif path == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(pos)}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+    assert result["ok"] is True
+    assert result["steps_done"] == 1
+    assert len(placement_attempts) == 3
 
 
 @pytest.mark.parametrize("timeout_path", ["get_block", "move_to", "dig"])
@@ -1603,6 +1719,9 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
     assert clock[0] <= 45
     assert calls[-1] == "stop"
     assert calls.count("stop") == 1
+    if timeout_path == "dig":
+        assert result["dig_target"]
+        assert "mc_skill_unstick" in result["error"]["message"]
 
 
 def test_stair_session_leaves_time_for_obsidian_dig(monkeypatch) -> None:
@@ -1793,6 +1912,144 @@ def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, ga
     else:
         assert result["result"]["gained"] == gained
         assert "error" not in result
+
+
+def test_window_view_rejects_entity_at_12m_before_no_window() -> None:
+    """r16 BUG-027: goNear silently failed, then no_window from 12m."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "get_entities":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"entities": [{"id": 81197, "pos": [100, 64, 100], "dist": 12.2}]}},
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_window_view(entity_id=81197))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert result["error"]["code"] == "out_of_reach"
+    assert result["error"]["dist"] == pytest.approx(12.2)
+    assert "mc_move_to" in result["error"]["message"]
+    assert calls == ["get_entities"]
+
+
+def test_window_view_allows_near_entity() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "get_entities":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"entities": [{"id": 5, "pos": [1, 64, 1], "dist": 2.0}]}},
+            )
+        if path == "view":
+            return httpx.Response(
+                200, json={"ok": True, "result": {"window": {"type": "minecraft:merchant"}, "target": {"entity_id": 5}}}
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_window_view(entity_id=5))
+    assert result["ok"] is True
+
+
+def test_brew_bottle_alias_accepts_water_bottle_shape() -> None:
+    from mc_agent.skills.library import _window_item_entries
+
+    entries = _window_item_entries([{"item": "minecraft:water_bottle", "slot": 0}])
+    assert entries == [{"item": "potion", "potion": "water", "count": 1, "slot": 0}]
+
+
+def test_brew_missing_item_reports_inventory_counts() -> None:
+    def handler(request):
+        path = request.url.path
+        if path.endswith("/window/act"):
+            return httpx.Response(
+                200, json={"ok": False, "error": {"code": "missing_item", "message": "no blaze_powder"}}
+            )
+        if path.endswith("/inventory"):
+            return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": "cobblestone", "count": 5}]}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).brew_once(
+            "nether_wart",
+            bottles=[{"item": "water_bottle"}],
+            fuel_item="blaze_powder",
+            block="brewing_stand",
+            x=10,
+            y=64,
+            z=10,
+            wait=False,
+        )
+    assert result["ok"] is False
+    assert result["error"] == "missing_item"
+    assert result["inventory"]["cobblestone"] == 5
+    assert "inventory" in result["message"]
+
+
+def test_brew_no_window_reports_wrong_block_at_coordinates() -> None:
+    """r16 brewing used a coordinate that actually held cobblestone."""
+    calls = []
+
+    def handler(request):
+        path = request.url.path
+        calls.append(path)
+        if path.endswith("/window/act"):
+            return httpx.Response(
+                200, json={"ok": False, "error": {"code": "no_window", "message": "cobblestone did not open a GUI"}}
+            )
+        if path.endswith("/get_block"):
+            return httpx.Response(200, json={"ok": True, "result": {"name": "cobblestone"}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).brew_once(
+            "nether_wart",
+            bottles=[{"item": "potion", "count": 1}],
+            block="brewing_stand",
+            x=10,
+            y=64,
+            z=10,
+            wait=False,
+        )
+    assert result["ok"] is False
+    assert result["error"] == "window_target_mismatch"
+    assert result["actual"] == "cobblestone"
+    assert len(calls) == 2
+    assert calls[0].endswith("/window/act")
+    assert calls[1].endswith("/get_block")
+
+
+def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
+    """r15 P2-21: dig timeout was retried on the same coordinate."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.5, 64.0, 1000.5]}})
+        if path == "get_block":
+            return httpx.Response(200, json={"ok": True, "result": {"name": "air"}})
+        if path == "dig":
+            return httpx.Response(200, json={"ok": False, "error": {"code": "timeout", "message": "dig timed out"}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_dig(1000, 64, 1000))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert "15 秒" in result["error"]["message"]
+    assert toolset.skills.temporary_avoidance[(1000, 64, 1000)]["reason"] == "dig_timeout"
 
 
 def test_bucket_interact_rejects_flowing_fluid_before_no_effect_roundtrip() -> None:
@@ -2019,7 +2276,7 @@ def test_atomic_craft_error_reports_actual_materials_instead_of_example_variant(
     assert result["error"]["server_recipe_example"]["cobbled_deepslate"] == 3
 
 
-@pytest.mark.parametrize("code,word", [("no_support", "支撑"), ("blocked_by_self", "3 格"), ("place_failed", "mc_dig")])
+@pytest.mark.parametrize("code,word", [("no_support", "支撑"), ("no_support", "侧袋"), ("blocked_by_self", "3 格"), ("place_failed", "mc_dig")])
 def test_place_failure_has_specific_recovery_without_world_mutation(code, word) -> None:
     from mc_agent.errors import ApiError
     from mc_agent.harness.mc_tools import McToolset
@@ -2117,8 +2374,9 @@ def test_pillar_deadline_clears_persistent_jump_posture(monkeypatch) -> None:
     assert calls[-2:] == ["stop", "posture"]
 
 
-def test_pillar_retries_transient_place_failed(monkeypatch) -> None:
-    """r14 portal recovery: first one-step pillar place_failed, next call worked."""
+@pytest.mark.parametrize("failure_code", ["place_failed", "no_support"])
+def test_pillar_retries_transient_place_failures(monkeypatch, failure_code) -> None:
+    """r14/BUG-024: first one-step pillar jump-place failed, next attempt worked."""
     import mc_agent.skills.library as library
 
     clock = [500.0]
@@ -2145,7 +2403,7 @@ def test_pillar_retries_transient_place_failed(monkeypatch) -> None:
             place_calls.append(body)
             if len(place_calls) <= 2:
                 return httpx.Response(
-                    409, json={"ok": False, "error": {"code": "place_failed", "message": "the block is still air"}}
+                    409, json={"ok": False, "error": {"code": failure_code, "message": "placement refused"}}
                 )
             placed[0] = True
             result = {"pos": body["pos"]}
