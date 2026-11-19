@@ -777,6 +777,28 @@ class SceneAnchor:
     drift_limit: float = 400.0
 
 
+def _scene_geofence_cls(base_cls: Any) -> Any:
+    """Build a `VoidGeofence` subclass that adds the `contains(x, y, z)` predicate.
+
+    r16 crash: `AttributeError: 'VoidGeofence' object has no attribute 'contains'`
+    (ds_ds_1_bare / glm_glm_5_midgame / hy4_hy_6_nether_bastion call it via skills/combat_env.py).
+    `VoidGeofence` is a frozen slots dataclass, so we subclass it (keeping dataclass semantics for
+    `dataclasses.replace`) rather than patching Slice B's file. Remove once upstream adds `contains`.
+    """
+
+    class SceneGeofence(base_cls):  # type: ignore[misc, valid-type]
+        def contains(self, x: float, y: float | None = None, z: float | None = None) -> bool:
+            if z is None and y is not None:
+                x, z = x, y  # tolerate the 2-arg (x, z) form
+            if z is None:
+                return True
+            if not self.enabled:
+                return True
+            return self.distance_from_center(float(x), float(z)) <= self.safe_radius
+
+    return SceneGeofence
+
+
 def build_reset_cmds(
     bot_name: str,
     sx: float,
@@ -1366,7 +1388,9 @@ def main() -> int:
         time.sleep(1.5)
         entry_ok = verify_scene_entry(bot, bot_name, scene)
 
-        geofence = VoidGeofence(center_x=sx, center_z=sz, radius=220.0, margin=8.0)
+        geofence = _scene_geofence_cls(VoidGeofence)(
+            center_x=sx, center_z=sz, radius=220.0, margin=8.0
+        )
         toolset = McToolset(bot, geofence=geofence, wait_for_cooldown=True)
 
         print(
