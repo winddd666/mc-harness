@@ -525,6 +525,16 @@ curriculum.py:1813 → collect_job → ensure.py:443 → library.py:4121 smelt_c
 
 **BUG-036 损失量化**：`nju_movetest` 425.7s / 2700s → 损失 **84%** 预算。
 
+### 4w. 修复核对（23:27）
+
+- **BUG-035 FIXED**：`3aea714` 在 `collect_job` 捕获瞬态异常并返回 `deferred/still_burning`；`d1_smelt_timeout_check.py` **exit 0**
+  ```
+  collect_job returned: {'ok': False, 'deferred': True, 'still_burning': True, ...}
+  OK: timeout is deferred and the job is preserved
+  ```
+- **BUG-029 残留**：`989d757` 已提交 `_cleanup_inventory_after`（挂 harvest/mine_blocks/tunnel），但 **HEAD 未合入**，r21 前需 #1 合并
+- 仍在跑：r20_long 1/4（预计 ~23:45）
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
