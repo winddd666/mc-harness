@@ -135,6 +135,9 @@ class McToolset:
         self._last_block_pos: list[int] | None = None
         self._last_dimension: str = "overworld"
         self._last_biome: str = ""
+        self._entity_observations: dict[int, dict[str, Any]] = {}
+        self._entity_observed_mono: float = 0.0
+        self._entity_observed_dimension: str = "overworld"
         self.geofence = geofence if geofence is not None else VoidGeofence.from_env()
         self.world_memory = (
             world_memory
@@ -473,6 +476,14 @@ class McToolset:
                     )
                 except (TypeError, ValueError):
                     pass
+        if action == "place" and exc.code in {"no_support", "blocked_by_self", "place_failed", "occupied"}:
+            target = params.get("pos")
+            if exc.code == "blocked_by_self":
+                err_obj["recovery_hint"] = "先用 mc_move_to 到至少 3 格外，设 range=0.5，让出目标格，再放置；也可省略 x/y/z 自动选落点。"
+            elif exc.code == "no_support":
+                err_obj["recovery_hint"] = "目标需要相邻实心方块支撑；先用 mc_get_block 检查目标与下方，选择有实心地面的空格，或省略 x/y/z 自动选落点。"
+            else:
+                err_obj["recovery_hint"] = (f"先用 mc_get_block 检查目标 {target}；若仍是 sugar_cane、草或其他可清理障碍，先 mc_dig 清空目标格，再 mc_place。不要重复向同一占用格放置。")
         if action == "craft":
             err_obj = explain_material_craft_error(params.get("item", ""), params.get("count", 1), err_obj)
         if action == "use_item" and str(exc.code).lower() == "missing_item" and isinstance(err_obj.get("inventory"), dict):
@@ -682,6 +693,10 @@ class McToolset:
             res_ent = parsed.get("result") if isinstance(parsed, dict) else None
             ents = (res_ent or {}).get("entities") or []
             dim_ent, pos_ent, _ = self._cached_env(fetch_if_missing=False)
+            if isinstance(parsed, dict) and parsed.get("ok") is True:
+                self._entity_observations = {int(ent["id"]): ent for ent in ents if isinstance(ent, dict) and isinstance(ent.get("id"), int)}
+                self._entity_observed_mono = time.monotonic()
+                self._entity_observed_dimension = dim_ent
             if ents:
                 self.world_memory.observe_entities(ents, dim=dim_ent)
             elif types and isinstance(res_ent, dict) and pos_ent is not None:
@@ -1239,6 +1254,22 @@ class McToolset:
         interval_ms: int | None = None,
         timeout_ms: int = 20000,
     ) -> str:
+        seen = self._entity_observations.get(entity_id)
+        if (seen is not None and time.monotonic() - self._entity_observed_mono <= 3.0
+                and self._entity_observed_dimension == self._last_dimension
+                and isinstance(seen.get("dist"), (int, float)) and seen["dist"] > 32.0):
+            try:
+                live = self.bot.call("get_entities", {"radius": 64}, timeout_s=2.0).get("entities") or []
+                target = next((ent for ent in live if isinstance(ent, dict) and ent.get("id") == entity_id), None)
+                if target is None or (isinstance(target.get("dist"), (int, float)) and target["dist"] > 32.0):
+                    return json.dumps({
+                        "ok": False, "requires_replan": True,
+                        "error": {"code": "target_out_of_reach" if target else "target_not_visible", "entity_id": entity_id,
+                                  "dist": target.get("dist") if target else None,
+                                  "message": "目标已超出近战追击范围或不再可见；请放弃空挥，先确认安全路线并靠近目标，或选择附近目标。"},
+                    }, ensure_ascii=False)
+            except (ApiError, httpx.HTTPError):
+                pass
         try:
             inv = self.bot.inventory()
             counts: dict[str, int] = {}

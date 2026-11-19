@@ -1710,3 +1710,45 @@ def test_atomic_craft_error_reports_actual_materials_instead_of_example_variant(
     assert result["error"]["missing_materials"] == {"cobblestone": 2}
     assert "example_recipe_needs" not in result["error"]
     assert result["error"]["server_recipe_example"]["cobbled_deepslate"] == 3
+
+
+@pytest.mark.parametrize("code,word", [("no_support", "支撑"), ("blocked_by_self", "3 格"), ("place_failed", "mc_dig")])
+def test_place_failure_has_specific_recovery_without_world_mutation(code, word) -> None:
+    from mc_agent.errors import ApiError
+    from mc_agent.harness.mc_tools import McToolset
+
+    result = json.loads(McToolset._format_api_error("place", {"item": "crafting_table", "pos": [1, 64, 1]}, ApiError(code, "offline place failure")))
+    assert result["error"]["code"] == code
+    assert word in result["error"]["recovery_hint"]
+
+
+@pytest.mark.parametrize("live_distance,attack_expected", [(45.0, False), (None, False), (2.0, True)])
+def test_attack_rechecks_observed_distant_target_before_chasing(live_distance, attack_expected) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "get_entities":
+            dist = 45.0 if calls.count(path) == 1 else live_distance
+            result = {"entities": [] if dist is None else [{"id": 77, "name": "glow_squid", "type": "animal", "dist": dist, "pos": [0.5, 64, dist]}]}
+        elif path == "inventory":
+            result = {"items": []}
+        elif path == "attack":
+            result = {"hits": 1, "killed": False}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        assert json.loads(tools.mc_get_entities(radius=64))["ok"] is True
+        result = json.loads(tools.mc_attack(entity_id=77))
+    assert ("attack" in calls) is attack_expected
+    assert result["ok"] is attack_expected
+    assert calls.count("get_entities") == 2
+    if not attack_expected:
+        assert "inventory" not in calls
+        assert result["error"]["code"] in {"target_out_of_reach", "target_not_visible"}
