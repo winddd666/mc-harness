@@ -420,6 +420,7 @@ class BotRow:
     scene_anchor: str = ""
     scene_ticks: int | None = None
     scene_preempt_skips: int | None = None
+    error: str = ""
 
     @property
     def gained_short(self) -> list[str]:
@@ -586,6 +587,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
             if isinstance(scene_meta.get("watchdog_preempt_skips"), int)
             else None
         ),
+        error=str(cs.get("error") or summary.get("error") or scene_meta.get("error") or ""),
     )
 
 
@@ -715,6 +717,18 @@ def _write_markdown(
     lines.extend(["", "## 5. 自动工单（Work Orders）", ""])
     ticket_no = 0
     for r in rows:
+        if r.status == "not_ready":
+            ticket_no += 1
+            lines.extend(
+                [
+                    f"### FLEET-{ticket_no:03d} | P1 | 启动未就绪（冷却） | 状态: OPEN",
+                    f"- **影响 bot**：`{r.name}` (stage=`{r.stage}`)",
+                    f"- **错误**：`{r.error or 'not_ready'}`",
+                    "- **验收标准**：`ensure_bot_ready` 在冷却预算内等到 ready，或该路以 `status=not_ready` "
+                    "正常收尾（无进程 Traceback），不影响其余 slot。",
+                    "",
+                ]
+            )
         if r.status == "crash":
             ticket_no += 1
             lines.extend(
@@ -786,6 +800,8 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
         if r.status == "crash" and r.crash_tail:
             tail = r.crash_tail.splitlines()[-1]
             print(f"        crash: {tail[:150]}")
+        if r.status == "not_ready":
+            print(f"        not_ready: {(r.error or 'unknown')[:150]}")
 
     print("\n--- CROSS-MODEL AGGREGATE (per model family) ---")
     for a in aggregate_by_squad(rows):

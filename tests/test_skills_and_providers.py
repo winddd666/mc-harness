@@ -2013,6 +2013,29 @@ def test_window_view_allows_near_entity() -> None:
     assert result["ok"] is True
 
 
+def test_smelt_collect_survives_read_timeout() -> None:
+    """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
+    from mc_agent.harness.world_memory import WorldMemory
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.5, 64.0, 1000.5], "dimension": "overworld"}})
+        if path == "move_to":
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        if path == "view":
+            raise httpx.ReadTimeout("offline furnace timeout", request=request)
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        skills.world_memory = WorldMemory()
+        result = skills.smelt_collect(furnace_pos=[1000, 64, 1000], wait_remaining_s=0)
+    assert result["ok"] is False
+    assert result["failures"]
+    assert result["failures"][0]["error"] == "ReadTimeout"
+
+
 def test_brew_bottle_alias_accepts_water_bottle_shape() -> None:
     from mc_agent.skills.library import _window_item_entries
 
@@ -2133,6 +2156,118 @@ def test_mine_dfs_triggers_retention_cleanup() -> None:
         toolset = McToolset(bot)
         toolset.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
         result = json.loads(toolset.mc_skill_mine_dfs(target="stone", goal_count=1))
+    assert result["inventory_cleaned"]
+    assert state["cobblestone"] == 192
+
+
+def test_staircase_first_step_uses_total_budget(monkeypatch) -> None:
+    """BUG-037: a 20s first step must not die at the 15s per-step cap."""
+    import mc_agent.skills.library as library
+
+    clock = [100.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(library.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    pos = [0.5, 30.0, 0.5]
+    delayed = [False]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": list(pos), "on_ground": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 8}]}
+        elif path == "get_block":
+            if body["pos"] == [0, 29, -1] and not delayed[0]:
+                delayed[0] = True
+                clock[0] += 20.0
+                result = {"name": "stone"}
+            else:
+                result = {"name": "air"}
+        elif path == "place":
+            result = {"pos": body["pos"]}
+        elif path == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(pos)}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+    assert result["ok"] is True
+    assert result["steps_done"] == 1
+
+
+def test_staircase_tool_caps_long_steps() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        raise AssertionError("no API call expected")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        captured = {}
+        toolset.skills.dig_staircase = lambda **kwargs: captured.update(kwargs) or {"ok": True, "steps_done": 10}
+        result = json.loads(toolset.mc_skill_staircase(direction="north", steps=40))
+    assert captured["steps"] == 10
+    assert result["steps_capped_from"] == 40
+    assert result["steps_clamped"] is True
+
+
+def test_staircase_tool_auto_retries_viable_direction_on_zero_progress() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        raise AssertionError("no API call expected")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        calls = []
+
+        def fake_dig(**kwargs):
+            calls.append(kwargs["direction"])
+            if kwargs["direction"] == "north":
+                return {
+                    "ok": False, "stop_reason": "movement_not_confirmed",
+                    "steps_done": 0, "dug_count": 0,
+                    "viable_directions": ["south", "east"],
+                }
+            return {"ok": True, "steps_done": 1, "stop_reason": "completed"}
+
+        toolset.skills.dig_staircase = fake_dig
+        result = json.loads(toolset.mc_skill_staircase(direction="north", steps=6))
+    assert calls == ["north", "south"]
+    assert result["ok"] is True
+    assert result["auto_retry_direction"] == "south"
+
+
+def test_tunnel_triggers_retention_cleanup() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    state = {"cobblestone": 300}
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.5, 64.0, 1000.5]}})
+        if path == "inventory":
+            rows = []
+            left = state["cobblestone"]
+            while left > 0:
+                rows.append({"name": "cobblestone", "count": min(64, left)})
+                left -= min(64, left)
+            return httpx.Response(200, json={"ok": True, "result": {"items": rows}})
+        if path == "drop":
+            state["cobblestone"] -= int(body.get("count") or 0)
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        toolset.skills.dig_level_tunnel = lambda *args, **kwargs: {"ok": True, "steps_done": 1}
+        result = json.loads(toolset.mc_skill_tunnel("north", 1))
     assert result["inventory_cleaned"]
     assert state["cobblestone"] == 192
 

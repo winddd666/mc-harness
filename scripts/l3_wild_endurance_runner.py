@@ -215,10 +215,12 @@ def select_village_wild_site(
         st = bot.status()
         pos = st.get("pos") or pos
         if park_near_villager:
-            parked = _park_near_entity(bot, bot_name, ("villager",), pos)
+            parked = _park_near_entity(bot, bot_name, ("villager",), pos, radius=64)
+            if parked is None:
+                parked = _park_near_entity(bot, bot_name, ("villager",), pos, radius=128)
             if parked is not None:
                 pos = parked
-                _pin_villager_near(bot, bot_name, parked)
+            _pin_villager_near(bot, bot_name, pos)
         biome = str(st.get("biome") or "village").lower()
         return float(pos[0]), float(pos[1]), float(pos[2]), f"village:{biome}"
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
@@ -235,37 +237,42 @@ def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
     try:
         # Teleport onto the bot's own block: that block is guaranteed passable (a "+1.5 east" spot
         # can be inside a hillside/wall and suffocate the villager, which is what r20 GLM_3 saw).
-        rcon_batch(
-            [
-                f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run tp @e[type=minecraft:villager,sort=nearest,limit=1] {tx:.1f} {ty:.1f} {tz:.1f}",
-            ],
-            timeout=30,
-        )
-        time.sleep(0.5)
-        rcon_batch(
-            [
-                f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run data merge entity @e[type=minecraft:villager,distance=..6,limit=1] {{NoAI:1b}}",
-            ],
-            timeout=30,
-        )
-        time.sleep(1.0)
-        present = False
-        try:
-            res = bot.call("get_entities", {"radius": 8}) or {}
-            ents = res.get("entities") if isinstance(res, dict) else None
-            present = isinstance(ents, list) and any(
-                "villager" in f"{e.get('name') or ''} {e.get('type') or ''}".lower()
-                for e in ents
-                if isinstance(e, dict)
+        # Selector without a distance cap scans every loaded villager, so this also works when the
+        # initial spreadplayers landing is >64m from the village (r21 GLM_3 hill village).
+        pinned = False
+        for attempt in (1, 2):
+            rcon_batch(
+                [
+                    f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run tp @e[type=minecraft:villager,sort=nearest,limit=1] {tx:.1f} {ty:.1f} {tz:.1f}",
+                ],
+                timeout=30,
             )
-        except Exception:
-            present = False
+            time.sleep(0.6 if attempt == 1 else 1.2)
+            rcon_batch(
+                [
+                    f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run data merge entity @e[type=minecraft:villager,distance=..6,limit=1] {{NoAI:1b}}",
+                ],
+                timeout=30,
+            )
+            time.sleep(1.5)
+            try:
+                res = bot.call("get_entities", {"radius": 12}) or {}
+                ents = res.get("entities") if isinstance(res, dict) else None
+                pinned = isinstance(ents, list) and any(
+                    "villager" in f"{e.get('name') or ''} {e.get('type') or ''}".lower()
+                    for e in ents
+                    if isinstance(e, dict)
+                )
+            except Exception:
+                pinned = False
+            if pinned:
+                break
         print(
             f"[Scene] pinned a NoAI villager next to {bot_name} at ({tx:.1f}, {ty:.1f}, {tz:.1f}) "
-            f"verified={present}",
+            f"verified={pinned}",
             flush=True,
         )
-        return present
+        return pinned
     except Exception as exc:
         print(f"[Scene] villager pin failed for {bot_name}: {exc}", flush=True)
         return False
@@ -1265,8 +1272,8 @@ def ensure_bot_ready(
     bot: Any,
     *,
     timeout_s: float = 45.0,
-    max_cooldown_wait_s: float = 420.0,
-    attempts: int = 3,
+    max_cooldown_wait_s: float = 600.0,
+    attempts: int = 8,
 ) -> dict[str, Any]:
     """Bring the bot to `ready: True`, sleeping through the API's death-loop cooldown instead of dying.
 
@@ -1277,8 +1284,12 @@ def ensure_bot_ready(
     from mc_agent.errors import ApiError, BotNotReadyError, DeathLoopCooldownError
 
     waited = 0.0
+    attempt = 0
     last_status: dict[str, Any] = {}
-    for attempt in range(1, attempts + 1):
+    # BUG-039: the cooldown budget is the real loop bound; `attempts` is only the soft cap for
+    # non-cooldown not-ready retries (2s backoff). A long death-loop must never abort in 186s.
+    while waited <= max_cooldown_wait_s:
+        attempt += 1
         try:
             last_status = bot.status() or {}
         except DeathLoopCooldownError as exc:
@@ -1303,28 +1314,38 @@ def ensure_bot_ready(
         except BotNotReadyError:
             cooldown = 0.0
         if cooldown > 0:
-            if waited + cooldown > max_cooldown_wait_s:
+            remaining_budget = max_cooldown_wait_s - waited
+            if cooldown + 2.0 > remaining_budget:
                 print(
-                    f"[Cooldown] death-loop cooldown {cooldown:.0f}s exceeds budget "
-                    f"{max_cooldown_wait_s:.0f}s (attempt {attempt}/{attempts}); giving up",
+                    f"[Cooldown] death-loop cooldown {cooldown:.0f}s exceeds remaining budget "
+                    f"{remaining_budget:.0f}s (waited {waited:.0f}s/{max_cooldown_wait_s:.0f}s); giving up",
                     flush=True,
                 )
                 raise DeathLoopCooldownError(
                     code="death_loop_cooldown",
-                    message=f"cooldown {cooldown:.0f}s exceeds startup budget",
+                    message=(
+                        f"cooldown {cooldown:.0f}s exceeds remaining startup budget "
+                        f"{remaining_budget:.0f}s"
+                    ),
                     cooldown_remaining_seconds=cooldown,
                 )
             wait_s = max(1.0, cooldown + 2.0)
             print(
                 f"[Cooldown] bot in death-loop cooldown {cooldown:.0f}s "
-                f"(attempt {attempt}/{attempts}); sleeping {wait_s:.0f}s then retrying",
+                f"(attempt {attempt}, waited {waited:.0f}s/{max_cooldown_wait_s:.0f}s, "
+                f"ETA {wait_s:.0f}s); retrying",
                 flush=True,
             )
             time.sleep(wait_s)
             waited += wait_s
         elif attempt < attempts:
             time.sleep(2.0)
-    raise RuntimeError(f"bot did not become ready after {attempts} attempts (cooldown waited {waited:.0f}s)")
+        else:
+            break
+    raise RuntimeError(
+        f"bot did not become ready after {attempt} attempts (cooldown waited {waited:.0f}s, "
+        f"budget {max_cooldown_wait_s:.0f}s); last_status={last_status}"
+    )
 
 
 SCENE_FOCUS: dict[str, dict[str, Any]] = {
@@ -1409,6 +1430,89 @@ def install_scene_focus(stage: str, episodes: int = 2) -> bool:
     cur.select_next_target = _wrapped
     print(f"[Scene Focus] stage={stage} first {state['remaining']} episode(s) -> {target.key}", flush=True)
     return True
+
+
+class TraderKeeper(threading.Thread):
+    """Keep a villager at the bot's feet for the village_trade slice.
+
+    r22 proved that a one-shot `tp` + `{NoAI}` pin can drift/lose the villager by the first episode
+    (the model saw `entities: []` then a villager 20m+ away behind walls). This daemon re-anchors the
+    nearest loaded villager to the bot's current position every `interval_s`, so the trade target is
+    always within a couple of blocks without touching the harness.
+    """
+
+    def __init__(self, bot: Any, bot_name: str, *, interval_s: float = 15.0) -> None:
+        super().__init__(name=f"trader-keeper-{bot_name}", daemon=True)
+        self.bot = bot
+        self.bot_name = bot_name
+        self.interval_s = interval_s
+        self._stop = threading.Event()
+        self.moves = 0
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _tick(self) -> None:
+        try:
+            st = self.bot.status()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return
+        pos = st.get("pos") if isinstance(st, dict) else None
+        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+            return
+        x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
+        try:
+            rcon_batch(
+                [
+                    f"execute positioned {x:.1f} {y:.1f} {z:.1f} run tp @e[type=minecraft:villager,sort=nearest,limit=1] {x:.1f} {y:.1f} {z:.1f}",
+                ],
+                timeout=20,
+            )
+            self.moves += 1
+        except Exception:
+            return
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            try:
+                self._tick()
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as exc:
+                print(f"[Trader Keeper] {self.bot_name} tick error: {exc!r}", flush=True)
+
+
+def _write_not_ready_summary(
+    out_file: pathlib.Path,
+    *,
+    bot_name: str,
+    tag: str,
+    rpm_budget: int | None,
+    stamp: str,
+    stage: str,
+    error: str,
+) -> None:
+    """Persist a `status=not_ready` summary so a startup-cooldown slot still shows up in triage."""
+    payload = {
+        "bot": bot_name,
+        "tag": tag,
+        "rpm_budget": rpm_budget,
+        "started_at": stamp,
+        "spawn": None,
+        "end_status": None,
+        "owned_end": {},
+        "scene": {"stage": stage, "status": "not_ready", "entry_verified": False, "error": error},
+        "curriculum_summary": {
+            "status": "not_ready",
+            "final_score": 0,
+            "elapsed_s": 0.0,
+            "episodes": [],
+            "error": error,
+        },
+    }
+    out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def build_token_refresher(bot_name: str, token_file: pathlib.Path, settings: Any) -> Any:
@@ -1569,8 +1673,21 @@ def main() -> int:
         base_url=settings.mc_api_base_url,
         reauth_callback=build_token_refresher(bot_name, token_file, settings),
     ) as bot:
-        st = ensure_bot_ready(bot, timeout_s=45.0)
-
+        try:
+            st = ensure_bot_ready(bot, timeout_s=45.0)
+        except Exception as exc:  # BUG-039: never kill the process for a cooldown-bound slot
+            msg = str(exc) or exc.__class__.__name__
+            print(f"[Startup] {bot_name} not ready: {msg}", flush=True)
+            _write_not_ready_summary(
+                out_file,
+                bot_name=bot_name,
+                tag=args.tag,
+                rpm_budget=args.rpm_budget,
+                stamp=stamp,
+                stage=args.stage,
+                error=msg,
+            )
+            return 0
         if args.stage in ("village", "village_trade"):
             sx, sy, sz, biome = select_village_wild_site(
                 bot,
@@ -1658,6 +1775,10 @@ def main() -> int:
 
         watchdog = SceneWatchdog(bot, bot_name, scene, near_container=_near_known_container)
         watchdog.start()
+        trader_keeper = TraderKeeper(bot, bot_name) if args.stage == "village_trade" else None
+        if trader_keeper is not None:
+            trader_keeper.start()
+            print(f"[Scene] trader keeper started for {bot_name} (15s re-anchor)", flush=True)
         install_scene_focus(args.stage, args.focus_episodes)
         try:
             sup = CurriculumSupervisor(
@@ -1675,6 +1796,9 @@ def main() -> int:
             )
             summary = sup.run(max_episodes=args.max_episodes)
         finally:
+            if trader_keeper is not None:
+                trader_keeper.stop()
+                print(f"[Scene] trader keeper stopped for {bot_name} moves={trader_keeper.moves}", flush=True)
             watchdog.stop()
             qwen.close()
 
@@ -1718,6 +1842,7 @@ def main() -> int:
                 "entry_verified": entry_ok,
                 "watchdog_ticks": watchdog._ticks,
                 "watchdog_preempt_skips": watchdog._preempt_skips,
+                "trader_keeper_moves": trader_keeper.moves if trader_keeper is not None else 0,
             },
             "end_status": {
                 "pos": st_end.get("pos"),
