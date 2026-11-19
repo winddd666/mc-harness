@@ -2823,13 +2823,71 @@ def test_r19_poll_skips_eat_in_close_melee_range_after_combat_timeout(monkeypatc
     assert guard.poll() is None
     assert use_items == []  # MUST NOT drop shield (`posture(shield=False)`) to eat right in zombie's face!
 
-    # Once distanced > 5.5m safely, poll() eats cleanly!
+    # Once distanced > 5.5m safely on solid ground, poll() eats cleanly; while falling (on_ground=False) it skips eat!
     state["mob_dist"] = 9.0
     clock[0] += 0.5
     inc_safe = guard.poll()
     assert inc_safe is not None
     assert [a["action"] for a in inc_safe["actions"]] == ["eat"]
     assert use_items == [{"item": "cooked_beef"}]
+
+    # Falling mid-air must NOT call eat
+    class _FallingBot(_CloseThreatEatBot):
+        def call(self, action, body=None, **kwargs):
+            res = super().call(action, body, **kwargs)
+            if action == "status":
+                res["on_ground"] = False
+                res["nearest_hostile"] = None
+            return res
+
+    use_items.clear()
+    g_fall = GenerationGuard(_FallingBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    assert g_fall.poll() is None
+    assert use_items == []
+
+    # cover_or_flee when flee fails against skeleton must keep shield latched (`latched_guard=True`)
+    from mc_agent.errors import ApiError
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    latch_calls: list[tuple[str, dict]] = []
+
+    class _FailedFleeSkeletonBot:
+        def status(self):
+            return {
+                "pos": [0.5, 64.0, 0.5],
+                "health": 6.0,
+                "food": 20,
+                "alive": True,
+                "ready": True,
+                "on_ground": False,
+                "in_water": False,
+                "in_lava": False,
+                "nearest_hostile": {"id": 77, "name": "skeleton", "pos": [6.5, 64.0, 0.5], "dist": 6.0},
+            }
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            latch_calls.append((action, pl))
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [{"id": 77, "name": "skeleton", "pos": [6.5, 64.0, 0.5], "dist": 6.0}]}
+            if action == "get_block":
+                p = pl.get("pos", [0, 64, 0])
+                return {"name": "stone" if p[1] < 64 else "air"}
+            if action == "move_to":
+                raise ApiError("path_not_found", "blocked")
+            return {"ok": True}
+
+    out_latch = CombatControllerSlot().handle(
+        CombatEnv(_FailedFleeSkeletonBot()),
+        {"source": "pre_hurt_ranged", "primary_entity_id": 77, "primary_type": "skeleton", "distance": 6.0},
+    )
+    assert out_latch["latched_guard"] is True
+    assert latch_calls[-1] == ("posture", {"shield": True, "sneak": False, "jump": False})
+
 
 
 

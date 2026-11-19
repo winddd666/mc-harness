@@ -1674,6 +1674,20 @@ class SubcorticalInstinctController:
                 pass
         return best_weapon
 
+    @staticmethod
+    def _latch_shield_at_threat(env: CombatEnv, target_id: int | None) -> bool:
+        """Face `target_id` (if known) and keep shield raised after a failed disengage."""
+        if target_id is not None:
+            try:
+                env.bot.call("look", {"entity_id": int(target_id)})
+            except (ApiError, httpx.HTTPError):
+                pass
+        try:
+            env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
+            return True
+        except (ApiError, httpx.HTTPError):
+            return False
+
     def on_encounter(self, env: CombatEnv, trigger: ThreatTrigger) -> CombatOutcome:
         actions: list[dict[str, Any]] = []
         deadline = time.monotonic() + 7.5
@@ -1832,16 +1846,7 @@ class SubcorticalInstinctController:
                     and st_chk.get("alive") is not False
                 ):
                     cid = (close_creeper or creeper_ent or {}).get("id")
-                    if cid is not None:
-                        try:
-                            env.bot.call("look", {"entity_id": int(cid)})
-                        except (ApiError, httpx.HTTPError):
-                            pass
-                    try:
-                        env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
-                        latched_guard = True
-                    except (ApiError, httpx.HTTPError):
-                        pass
+                    latched_guard = self._latch_shield_at_threat(env, int(cid) if cid is not None else None)
 
         # 2) Lone/pair melee hostile + healthy + weapon -> 0-LLM counter-kill loop!
         elif (
@@ -2017,15 +2022,22 @@ class SubcorticalInstinctController:
                         try:
                             env.bot.call("look", {"entity_id": int(mob_id)})
                             env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
-                        except ApiError:
+                        except (ApiError, httpx.HTTPError):
                             pass
                     fl = env.flee(mob_pos, distance=14.0, urgent=True)
                     actions.append({"action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist")})
                     self._recent_flee_streak += 1
                     self._last_flee_at = now_flee
+                    if not fl.get("ok") and not fl.get("respawned") and has_shield:
+                        st_fl = env._safe_status(st)
+                        if st_fl.get("alive") is not False and not st_fl.get("in_water"):
+                            latched_guard = self._latch_shield_at_threat(
+                                env,
+                                int(mob_id) if mob_id is not None else None,
+                            )
 
         # 4) Post-combat food recovery when safe and ready
-        st_post = env.bot.status()
+        st_post = env._safe_status(st)
         hp_post = float(st_post.get("health") or 20.0)
         food_post = int(st_post.get("food") or 20)
         nh_post = st_post.get("nearest_hostile")

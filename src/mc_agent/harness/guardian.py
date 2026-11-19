@@ -670,7 +670,7 @@ class GenerationGuard:
         ):
             self.retry_after_ready = False
         nh_name0, nh_dist0, _, _ = self._extract_hostile_info(status)
-        eat_safe_distance = (not nh_name0) or nh_dist0 > 5.5
+        eat_safe_distance = ((not nh_name0) or nh_dist0 > 5.5) and status.get("on_ground") is not False
         should_eat = (needs_food or pending_ready_eat) and eat_safe_distance
         hurt = bool(hurts) or dropped
         non_combat_only_hurt = (
@@ -1186,6 +1186,7 @@ class GenerationGuard:
                     can_eat_now = (
                         not cur_eat_st.get("in_lava")
                         and not cur_eat_st.get("in_water")
+                        and cur_eat_st.get("on_ground") is not False
                         and ((not cur_nh_name) or cur_nh_dist > 5.5)
                         and (not isinstance(cur_food, (int, float)) or cur_food < 20)
                     )
