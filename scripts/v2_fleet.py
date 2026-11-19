@@ -37,6 +37,7 @@ RUNNER = WT_ROOT / "scripts/l3_wild_endurance_runner.py"
 ENV_FILE = MAIN_ROOT / ".env.beast"
 FLEET_TOKEN_FILE = MAIN_ROOT / ".state-fleet/tokens.json"
 RUNS_ROOT = pathlib.Path(os.environ.get("MC_FLEET_RUNS_ROOT") or (WT_ROOT / "runs"))
+LOCK_DIR = WT_ROOT / ".state-fleet" / "locks"
 SLOW_TOOL_THRESHOLD_S = 60.0
 KNOWN_STAGES: tuple[str, ...] = (
     "nether_fortress",
@@ -227,6 +228,62 @@ def cmd_sites() -> int:
     return 0 if clash == 0 and max(s.site_index for s in FLEET) < len(sites) else 1
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _acquire_bot_locks(selected: list[FleetSlot], wave: str) -> list[pathlib.Path]:
+    """Refuse to launch a bot that is still running in another wave (BUG-036 single-token mutex)."""
+    LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    acquired: list[pathlib.Path] = []
+    conflicts: list[tuple[str, str, int]] = []
+    for slot in selected:
+        path = LOCK_DIR / f"{slot.bot.lower()}.json"
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            other_wave = str(data.get("wave") or "?")
+            other_pid = int(data.get("pid") or 0)
+            if other_wave != wave and _pid_alive(other_pid):
+                conflicts.append((slot.bot, other_wave, other_pid))
+                continue
+        path.write_text(
+            json.dumps({"bot": slot.bot, "wave": wave, "pid": os.getpid()}),
+            encoding="utf-8",
+        )
+        acquired.append(path)
+    if conflicts:
+        for p in acquired:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        detail = "\n".join(
+            f"  - {bot}: already running in wave '{w}' (pid {pid})" for bot, w, pid in conflicts
+        )
+        raise RuntimeError(
+            "Refusing to launch: the same bot is active in another wave. A second `login` would "
+            "revoke the running token (single-token mutex).\n" + detail
+        )
+    return acquired
+
+
+def _release_bot_locks(paths: list[pathlib.Path]) -> None:
+    for p in paths:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
 def cmd_launch(
     wave: str,
     duration_s: float,
@@ -248,51 +305,59 @@ def cmd_launch(
         print("No fleet slots matched squads:", squads)
         return 1
     selected = _assign_isolated_sites(selected_raw)
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(WT_ROOT / "src")
-    procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path]] = []
-    dur_label = "per-slot" if use_slot_durations else str(duration_s)
-    print(f"[Fleet Launch] wave={wave} bots={len(selected)} duration_s={dur_label} max_eps={max_episodes}")
-    for idx, slot in enumerate(selected):
-        slot_dur = int(slot.duration_s) if use_slot_durations else int(duration_s)
-        slot_eps = int(slot.max_episodes) if use_slot_durations else int(max_episodes)
-        subdir = f"{wave}/{slot.squad}_{slot.bot.lower()}_{slot.stage}"
-        log_dir = RUNS_ROOT / subdir
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "stdout.log"
-        cmd = [
-            str(VENV_PY),
-            str(RUNNER),
-            "--bot", slot.bot,
-            "--token-file", slot.token_file,
-            "--provider", slot.provider,
-            "--rpm-budget", str(slot.rpm_budget),
-            "--stage", slot.stage,
-            "--runs-subdir", subdir,
-            "--site-index", str(slot.site_index),
-            "--duration-s", str(slot_dur),
-            "--max-episodes", str(slot_eps),
-            "--tag", f"{wave}_{slot.bot.lower()}_{slot.stage}",
-        ]
-        if slot.model:
-            cmd.extend(["--model", slot.model])
-        if idx > 0:
-            cmd.append("--keep-time")
-        lf = open(log_path, "wb")
-        proc = subprocess.Popen(cmd, env=env, stdout=lf, stderr=subprocess.STDOUT)
-        procs.append((slot, proc, log_path))
-        print(f"  [{idx+1:2d}/{len(selected):2d}] started {slot.bot:12s} ({slot.squad:3s}/{slot.model or 'nju':19s}) stage={slot.stage:15s} dur={slot_dur:4d}s pid={proc.pid}", flush=True)
-        if idx + 1 < len(selected):
-            time.sleep(stagger_s)
+    try:
+        lock_paths = _acquire_bot_locks(selected, wave)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 2
+    try:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(WT_ROOT / "src")
+        procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path]] = []
+        dur_label = "per-slot" if use_slot_durations else str(duration_s)
+        print(f"[Fleet Launch] wave={wave} bots={len(selected)} duration_s={dur_label} max_eps={max_episodes}")
+        for idx, slot in enumerate(selected):
+            slot_dur = int(slot.duration_s) if use_slot_durations else int(duration_s)
+            slot_eps = int(slot.max_episodes) if use_slot_durations else int(max_episodes)
+            subdir = f"{wave}/{slot.squad}_{slot.bot.lower()}_{slot.stage}"
+            log_dir = RUNS_ROOT / subdir
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "stdout.log"
+            cmd = [
+                str(VENV_PY),
+                str(RUNNER),
+                "--bot", slot.bot,
+                "--token-file", slot.token_file,
+                "--provider", slot.provider,
+                "--rpm-budget", str(slot.rpm_budget),
+                "--stage", slot.stage,
+                "--runs-subdir", subdir,
+                "--site-index", str(slot.site_index),
+                "--duration-s", str(slot_dur),
+                "--max-episodes", str(slot_eps),
+                "--tag", f"{wave}_{slot.bot.lower()}_{slot.stage}",
+            ]
+            if slot.model:
+                cmd.extend(["--model", slot.model])
+            if idx > 0:
+                cmd.append("--keep-time")
+            lf = open(log_path, "wb")
+            proc = subprocess.Popen(cmd, env=env, stdout=lf, stderr=subprocess.STDOUT)
+            procs.append((slot, proc, log_path))
+            print(f"  [{idx+1:2d}/{len(selected):2d}] started {slot.bot:12s} ({slot.squad:3s}/{slot.model or 'nju':19s}) stage={slot.stage:15s} dur={slot_dur:4d}s pid={proc.pid}", flush=True)
+            if idx + 1 < len(selected):
+                time.sleep(stagger_s)
 
-    # Wait for all bots to finish
-    failed = 0
-    for slot, proc, _ in procs:
-        rc = proc.wait()
-        if rc != 0:
-            failed += 1
-        print(f"  [DONE] {slot.bot:12s} ({slot.stage:15s}) rc={rc}", flush=True)
-    print(f"[Fleet Complete] wave={wave} total={len(procs)} failed={failed}")
+        # Wait for all bots to finish
+        failed = 0
+        for slot, proc, _ in procs:
+            rc = proc.wait()
+            if rc != 0:
+                failed += 1
+            print(f"  [DONE] {slot.bot:12s} ({slot.stage:15s}) rc={rc}", flush=True)
+        print(f"[Fleet Complete] wave={wave} total={len(procs)} failed={failed}")
+    finally:
+        _release_bot_locks(lock_paths)
     return cmd_triage(wave)
 
 

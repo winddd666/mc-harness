@@ -1411,6 +1411,55 @@ def install_scene_focus(stage: str, episodes: int = 2) -> bool:
     return True
 
 
+def build_token_refresher(bot_name: str, token_file: pathlib.Path, settings: Any) -> Any:
+    """Return a `BotSession` reauth callback: re-login with .env.beast credentials and persist the token.
+
+    BUG-036: a long run lost 38 minutes when the cached token was revoked mid-wave
+    (`[invalid_token] token not found or expired`) because the session had no reauth path.
+    """
+    from mc_agent.auth import BotTokenRecord, TokenStore
+    from mc_agent.config import parse_dotenv
+
+    store = TokenStore(token_file)
+    api_base = str(settings.mc_api_base_url).rstrip("/")
+
+    def _refresh() -> Any:
+        import httpx
+
+        env = parse_dotenv(ENV_FILE)
+        password = env.get("MC_SKIN_PASSWORD") or env.get("MC_BOT_PASSWORD") or ""
+        if not password:
+            raise RuntimeError(
+                f"cannot refresh token for {bot_name}: MC_SKIN_PASSWORD missing in {ENV_FILE.name}"
+            )
+        try:
+            resp = httpx.post(
+                f"{api_base}/auth/login",
+                json={"username": bot_name, "password": password},
+                timeout=15.0,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"token refresh request failed for {bot_name}: {exc}") from exc
+        if resp.status_code != 200:
+            raise RuntimeError(f"token refresh failed for {bot_name}: HTTP {resp.status_code}")
+        payload = resp.json()
+        res = payload.get("result") or payload
+        token = res.get("token")
+        if not token:
+            raise RuntimeError(f"token refresh for {bot_name} returned no token")
+        record = BotTokenRecord(
+            bot_username=res.get("bot_username") or bot_name,
+            token=str(token),
+            expires_at=res.get("expires_at"),
+            login_username=bot_name,
+        )
+        store.put(record)
+        print(f"[Token] refreshed cached token for {bot_name}", flush=True)
+        return record
+
+    return _refresh
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bot", type=str, default=BOT)
@@ -1514,7 +1563,12 @@ def main() -> int:
 
     out_file = runs_dir / f"wild-endurance-{args.tag}-{stamp}.json"
 
-    with BotSession(rec.token, bot_username=rec.bot_username, base_url=settings.mc_api_base_url) as bot:
+    with BotSession(
+        rec.token,
+        bot_username=rec.bot_username,
+        base_url=settings.mc_api_base_url,
+        reauth_callback=build_token_refresher(bot_name, token_file, settings),
+    ) as bot:
         st = ensure_bot_ready(bot, timeout_s=45.0)
 
         if args.stage in ("village", "village_trade"):
