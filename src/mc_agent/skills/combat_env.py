@@ -245,6 +245,21 @@ def _is_los_transparent(name: str) -> bool:
     return False
 
 
+def _is_lava_block(name: str) -> bool:
+    return name in {"lava", "flowing_lava"}
+
+
+def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
+    """Return unique integer `(x, z)` columns overlapped by the player's 0.6x0.6 horizontal hitbox."""
+    return list(
+        dict.fromkeys(
+            (math.floor(px + ox), math.floor(pz + oz))
+            for ox in (-0.3, 0.3)
+            for oz in (-0.3, 0.3)
+        )
+    )
+
+
 def _is_solid_ground(name: str) -> bool:
     if _is_passable(name):
         return False
@@ -882,8 +897,31 @@ class CombatEnv:
         except (ApiError, httpx.HTTPError):
             return dict(fallback or {})
 
+    def _is_near_or_over_lava(self, st_now: dict[str, Any]) -> bool:
+        """Return True when the bot's hitbox or immediate 1-block rim touches lava."""
+        if bool(st_now.get("in_lava")):
+            return True
+        pos = st_now.get("pos")
+        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+            return False
+        try:
+            px, py_f, pz = float(pos[0]), float(pos[1]), float(pos[2])
+            bx, by, bz = math.floor(px), math.floor(py_f + 0.05), math.floor(pz)
+        except (TypeError, ValueError):
+            return False
+        for hx, hz in _hitbox_columns(px, pz):
+            for cy in (by, by - 1):
+                if _is_lava_block(self._get_block_name(hx, cy, hz)):
+                    return True
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for cy in (by, by - 1):
+                    if _is_lava_block(self._get_block_name(bx + dx, cy, bz + dz)):
+                        return True
+        return False
+
     def _is_airborne_above_lava(self, st_now: dict[str, Any], *, start_pos: Sequence[float]) -> bool:
-        """Return True when in_lava=False only because a jump lifted the bot mid-air over lava."""
+        """Return True when in_lava=False only because a jump lifted the bot mid-air or grazing lava."""
         if bool(st_now.get("in_lava")) or st_now.get("alive") is False or st_now.get("ready") is False:
             return False
         if st_now.get("on_ground") is not False:
@@ -896,17 +934,24 @@ class CombatEnv:
             bx, by, bz = math.floor(px), math.floor(py_f + 0.05), math.floor(pz)
         except (TypeError, ValueError, IndexError):
             return False
+        cols = _hitbox_columns(px, pz)
+        if any(_is_lava_block(self._get_block_name(hx, by, hz)) for hx, hz in cols):
+            return True
         below1 = self._get_block_name(bx, by - 1, bz)
         if _is_solid_ground(below1):
             return False
         below2 = self._get_block_name(bx, by - 2, bz)
         if _is_passable(below1) and _is_solid_ground(below2):
             return False
-        return below1 in {"lava", "flowing_lava"} or (
-            _is_passable(below1) and below2 in {"lava", "flowing_lava"}
-        )
+        for hx, hz in cols:
+            b1 = self._get_block_name(hx, by - 1, hz)
+            if _is_lava_block(b1):
+                return True
+            if _is_passable(b1) and _is_lava_block(self._get_block_name(hx, by - 2, hz)):
+                return True
+        return False
 
-    def escape_lava(self) -> dict[str, Any]:
+    def escape_lava(self, *, force_rim_escape: bool = False) -> dict[str, Any]:
         """Deterministically escape lava using water douse (overworld), safe-yaw jump sprint, wall-notch/pillar climb, and live `in_lava` verification."""
         try:
             st = self.bot.status()
@@ -919,14 +964,19 @@ class CombatEnv:
                 "pos_after": None,
                 "actions": ["lava_status_timeout"],
             }
+        rim_lava_active = False
         if not bool(st.get("in_lava")):
-            return {
-                "ok": True,
-                "in_lava": False,
-                "already_dry": True,
-                "pos_after": st.get("pos"),
-                "actions": [],
-            }
+            if force_rim_escape and st.get("alive") is not False and st.get("ready") is not False:
+                pos_chk = st.get("pos") or [0.0, 64.0, 0.0]
+                rim_lava_active = self._is_airborne_above_lava(st, start_pos=pos_chk) or self._is_near_or_over_lava(st)
+            if not rim_lava_active:
+                return {
+                    "ok": True,
+                    "in_lava": False,
+                    "already_dry": True,
+                    "pos_after": st.get("pos"),
+                    "actions": [],
+                }
 
         actions: list[str] = []
         lava_deadline = time.monotonic() + 5.0
@@ -960,7 +1010,14 @@ class CombatEnv:
         def _should_exit_lava(st_now: dict[str, Any]) -> bool:
             if st_now.get("alive") is False or st_now.get("ready") is False:
                 return True
-            return (not bool(st_now.get("in_lava"))) and (not self._is_airborne_above_lava(st_now, start_pos=pos0))
+            if bool(st_now.get("in_lava")) or self._is_airborne_above_lava(st_now, start_pos=pos0):
+                return False
+            if rim_lava_active:
+                p_chk = st_now.get("pos") or pos0
+                moved_r = math.hypot(float(p_chk[0]) - float(pos0[0]), float(p_chk[2]) - float(pos0[2]))
+                if moved_r < 0.45 and self._is_near_or_over_lava(st_now):
+                    return False
+            return True
 
         def _lava_result(st_now: dict[str, Any]) -> dict[str, Any]:
             still_in_lava = bool(st_now.get("in_lava"))

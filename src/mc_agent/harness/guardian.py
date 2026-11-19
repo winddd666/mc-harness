@@ -47,6 +47,7 @@ LOW_HP_BUNKER_MAX = 10.0
 RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "skeleton"})
 
 # Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
+LAVA_HURT_SOURCES = frozenset({"lava"})
 FIRE_HURT_SOURCES = frozenset({"on_fire", "in_fire", "fire"})
 NON_COMBAT_HURT_SOURCES = frozenset(
     {
@@ -454,6 +455,25 @@ class GenerationGuard:
             cur + cd,
         )
 
+    def _can_auto_eat_safely(
+        self,
+        status: dict[str, Any],
+        *,
+        min_dist: float = 5.5,
+        ranged_min_dist: float = 16.0,
+    ) -> bool:
+        """Return False when mid-air, in fluid, or exposed within melee or ranged threat range."""
+        if status.get("in_lava") or status.get("in_water") or status.get("on_ground") is False:
+            return False
+        nh_name, nh_dist, _, _ = self._extract_hostile_info(status)
+        if not nh_name:
+            return True
+        if nh_dist <= min_dist:
+            return False
+        if (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist and not self._inside_own_shaft():
+            return False
+        return True
+
     def _try_eat_food(self, food_name: str, eat_st: dict[str, Any], *, action_name: str = "eat") -> dict[str, Any] | None:
         """Eat via `use_item`; treat transient `not_ready`/`wrong_server` as deferred retry, not failure."""
         if eat_st.get("blocking"):
@@ -622,7 +642,11 @@ class GenerationGuard:
         hurts = [e for e in fresh if e.get("type") == "hurt"]
         deaths = [e for e in fresh if e.get("type") in {"death", "death_loop", "disconnected", "spawn"}]
         in_water = bool(status.get("in_water"))
-        in_lava = bool(status.get("in_lava"))
+        raw_in_lava = bool(status.get("in_lava"))
+        hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
+        in_lava = raw_in_lava or (
+            hurt_by_lava and not deaths and not disconnected and ready and status.get("alive") is not False
+        )
         oxygen = status.get("oxygen")
         low_oxygen = isinstance(oxygen, (int, float)) and oxygen < 240
         critical_drowning = isinstance(oxygen, (int, float)) and oxygen < 150
@@ -670,7 +694,7 @@ class GenerationGuard:
         ):
             self.retry_after_ready = False
         nh_name0, nh_dist0, _, _ = self._extract_hostile_info(status)
-        eat_safe_distance = ((not nh_name0) or nh_dist0 > 5.5) and status.get("on_ground") is not False
+        eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
         should_eat = (needs_food or pending_ready_eat) and eat_safe_distance
         hurt = bool(hurts) or dropped
         non_combat_only_hurt = (
@@ -807,7 +831,12 @@ class GenerationGuard:
             if in_lava:
                 if counts.get("water_bucket", 0) > 0 and "nether" not in str(status.get("dimension") or "").lower():
                     actions.append(self._action("douse_lava", lambda: self.combat_env.build_tactical("place_water_feet")))
-                actions.append(self._action("escape_lava", lambda: self.combat_env.escape_lava()))
+                actions.append(
+                    self._action(
+                        "escape_lava",
+                        lambda: self.combat_env.escape_lava(force_rim_escape=hurt_by_lava and not raw_in_lava),
+                    )
+                )
 
             def _already(name: str) -> bool:
                 return any(a.get("action") == name for a in actions)
@@ -1182,13 +1211,8 @@ class GenerationGuard:
                     self.retry_after_ready = True
                     self.events.emit("guardian.eat_deferred", reason="post_combat_not_ready", retry_after_ready=True)
                 else:
-                    cur_nh_name, cur_nh_dist, _, _ = self._extract_hostile_info(cur_eat_st)
-                    can_eat_now = (
-                        not cur_eat_st.get("in_lava")
-                        and not cur_eat_st.get("in_water")
-                        and cur_eat_st.get("on_ground") is not False
-                        and ((not cur_nh_name) or cur_nh_dist > 5.5)
-                        and (not isinstance(cur_food, (int, float)) or cur_food < 20)
+                    can_eat_now = self._can_auto_eat_safely(cur_eat_st, min_dist=5.5) and (
+                        not isinstance(cur_food, (int, float)) or cur_food < 20
                     )
                     best_food = next((name for name in SAFE_FOOD_PRIORITY if counts.get(name, 0) > 0), None) if can_eat_now else None
                     if best_food:
@@ -1357,6 +1381,16 @@ class GenerationGuard:
                             st_err = orig_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
                         except Exception:
                             pass
+                        if isinstance(st_err, dict) and bool(st_err.get("in_lava")):
+                            raise ReflexPreempted(
+                                {
+                                    "source": "boundary_threat",
+                                    "primary_entity_id": None,
+                                    "primary_type": "lava",
+                                    "primary_pos": None,
+                                    "distance": 0.0,
+                                }
+                            ) from None
                         nh_n, nh_d, nh_i, nh_p = self._extract_hostile_info(st_err)
                         if nh_n and nh_d <= 14.0:
                             raise ReflexPreempted(
@@ -1591,9 +1625,11 @@ class GenerationGuard:
 
         now_b = time.monotonic()
         in_water = bool(status.get("in_water"))
-        in_lava = bool(status.get("in_lava"))
+        raw_in_lava = bool(status.get("in_lava"))
         oxygen = status.get("oxygen")
         hurts = [e for e in fresh if e.get("type") == "hurt"]
+        hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
+        in_lava = raw_in_lava or hurt_by_lava
         nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
 
         if not in_water and not in_lava:
@@ -1622,7 +1658,7 @@ class GenerationGuard:
 
         hp = float(status.get("health") or 20.0)
         food = int(status.get("food") or 20)
-        needs_post_eat = (nh_dist > 8.0) and (hp <= 13.0 or food <= 13) and food < 20
+        needs_post_eat = self._can_auto_eat_safely(status, min_dist=8.0) and (hp <= 13.0 or food <= 13) and food < 20
         in_wall_hurt = any(str(h.get("source") or "") in IN_WALL_HURT_SOURCES for h in hurts)
         pos_b = status.get("pos") or [0.0, 64.0, 0.0]
         by_b = float(pos_b[1]) if isinstance(pos_b, (list, tuple)) and len(pos_b) >= 2 else 64.0
@@ -1662,7 +1698,11 @@ class GenerationGuard:
             still_lava = in_lava
             still_wet = in_water
             if in_lava:
-                esc_l = self._action("boundary_escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
+                esc_l = self._action(
+                    "boundary_escape_lava",
+                    lambda: self.combat_env.escape_lava(force_rim_escape=hurt_by_lava and not raw_in_lava),
+                    raise_on_http_error=False,
+                )
                 still_lava = not bool(esc_l.get("ok"))
                 notes.append("脱离岩浆" if not still_lava else "尝试脱离岩浆")
             elif needs_lava_edge_guard:

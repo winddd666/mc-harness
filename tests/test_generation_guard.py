@@ -2945,6 +2945,202 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
     assert "lava_step_bridge" in out_b["actions"]
 
 
+def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(monkeypatch):
+    """Reproduces r20_short ds_ds_4_nether_fortress:
+    1) Mid-air pos `[705.9, 64.6, 640]` whose 0.3m hitbox clips `(706, 64, 640)` lava stays in escape_lava until grounded dry.
+    2) `hurt(source="lava")` while `status["in_lava"]` fluctuates False routes to `escape_lava`, NEVER `emergency_bunker`.
+    """
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+
+    rim_state: dict[str, Any] = {
+        "in_lava": True,
+        "on_ground": False,
+        "pos": [706.5, 64.0, 640.5],
+        "placed": set(),
+    }
+
+    class _LavaRimBot:
+        def status(self):
+            return {
+                "pos": list(rim_state["pos"]),
+                "health": 15.6,
+                "alive": True,
+                "ready": True,
+                "in_lava": rim_state["in_lava"],
+                "on_ground": rim_state["on_ground"],
+                "yaw": -1.57,
+                "dimension": "minecraft:the_nether",
+            }
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 16}]}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
+                if p in rim_state["placed"]:
+                    return {"name": "cobblestone"}
+                if p[0] <= 704 and p[1] == 63:
+                    return {"name": "netherrack"}
+                if p[0] >= 706 and p[1] in (63, 64):
+                    return {"name": "lava"}
+                return {"name": "air"}
+            if action == "control" and pl.get("forward") and not rim_state["placed"]:
+                # Jump leaves center at 705.9 over air while 0.3m hitbox still clips lava at x=706!
+                rim_state["pos"] = [705.9, 64.6, 640.0]
+                rim_state["in_lava"] = False
+                rim_state["on_ground"] = False
+            elif action == "place":
+                p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
+                rim_state["placed"].add(p)
+                rim_state["pos"] = [704.5, 64.0, 640.5]
+                rim_state["on_ground"] = True
+            return {"ok": True}
+
+    out_rim = CombatEnv(_LavaRimBot()).escape_lava()
+    assert out_rim["ok"] is True
+    assert rim_state["placed"]  # Did NOT exit ok=True while [705.9, 64.6, 640.0] clipped (706, 64, 640) lava!
+
+    # 2) poll() with hurt(source="lava") while in_lava=False must escape lava rim instead of digging a bunker
+    poll_state: dict[str, Any] = {
+        "pos": [705.9, 64.0, 640.5],
+        "in_lava": False,
+        "on_ground": True,
+        "hurt_seq": 1,
+    }
+    bunker_calls: list[bool] = []
+    flee_calls: list[bool] = []
+    control_calls: list[dict] = []
+
+    class _LavaHurtPollSkills:
+        mining_dfs = None
+
+        def dig_safety_bunker(self, urgent=False):
+            bunker_calls.append(bool(urgent))
+            return {"ok": False}
+
+        def defend_or_flee(self, **kwargs):
+            flee_calls.append(True)
+            return {"ok": False}
+
+    class _LavaHurtPollBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            if action == "status":
+                return {
+                    "pos": list(poll_state["pos"]),
+                    "health": 12.5,
+                    "food": 20,
+                    "alive": True,
+                    "ready": True,
+                    "in_water": False,
+                    "in_lava": poll_state["in_lava"],
+                    "on_ground": poll_state["on_ground"],
+                    "dimension": "minecraft:the_nether",
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                seq = poll_state["hurt_seq"]
+                rows = [{"seq": seq, "type": "hurt", "health": 12.5, "source": "lava"}] if seq > since else []
+                return {"events": rows, "last_seq": seq}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 16}]}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
+                if p[0] <= 704 and p[1] <= 63:
+                    return {"name": "netherrack"}
+                if p[0] >= 706 and p[1] in (63, 64):
+                    return {"name": "lava"}
+                if p[1] <= 62:
+                    return {"name": "netherrack"}
+                return {"name": "air"}
+            if action == "control" and pl.get("forward"):
+                control_calls.append(pl)
+                poll_state["pos"] = [703.5, 64.0, 640.5]
+            return {"ok": True}
+
+    guard = GenerationGuard(_LavaHurtPollBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_LavaHurtPollSkills())
+    inc_lava = guard.poll()
+    assert inc_lava is not None
+    assert "in_lava" in inc_lava["reasons"]
+    assert any(a["action"] == "escape_lava" and a["ok"] for a in inc_lava["actions"])
+    assert bunker_calls == []
+    assert flee_calls == []
+    assert control_calls
+
+
+def test_r20_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch):
+    """Reproduces r20_short ds_ds_3_enchant_anvil: never drop shield to eat in open ranged-mob fire (6..16m)."""
+    clock = [7000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    use_items: list[dict] = []
+    posture_calls: list[dict] = []
+    state = {"hp": 5.3, "food": 19, "blocking": True, "dist": 6.2, "inside_shaft": False}
+
+    class _EnclosedSkills:
+        class _Eng:
+            nodes = {(0, 64, 0): True}
+
+            def is_inside_shaft(self):
+                return state["inside_shaft"]
+
+        mining_dfs = _Eng()
+
+    class _SkeletonRangeBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            if action == "status":
+                return {
+                    "pos": [0.5, 64.0, 0.5],
+                    "health": state["hp"],
+                    "food": state["food"],
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": True,
+                    "in_water": False,
+                    "in_lava": False,
+                    "blocking": state["blocking"],
+                    "nearest_hostile": {"id": 612494, "name": "skeleton", "pos": [0.5 + state["dist"], 64.0, 0.5], "dist": state["dist"]},
+                }
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 10}, {"name": "shield", "count": 1}]}
+            if action == "posture":
+                posture_calls.append(pl)
+            if action == "use_item":
+                use_items.append(pl)
+            return {"ok": True}
+
+    guard = GenerationGuard(_SkeletonRangeBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_EnclosedSkills())
+    guard._mark_ranged_engagement(clock[0], attacker={"id": 612494, "name": "skeleton"})
+    assert guard.poll() is None
+    assert guard.stabilize_after_tools(["ok"]) is None
+    assert posture_calls == []
+    assert use_items == []
+
+    # Safe inside enclosed shaft (or once skeleton moves >16m), eating succeeds
+    state["inside_shaft"] = True
+    clock[0] += 0.5
+    inc_shaft = guard.poll()
+    assert inc_shaft is not None
+    assert [a["action"] for a in inc_shaft["actions"]] == ["eat"]
+    assert use_items == [{"item": "cooked_beef"}]
+
+
+
 
 
 
