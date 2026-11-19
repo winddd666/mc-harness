@@ -1557,3 +1557,35 @@ def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, ga
     else:
         assert result["result"]["gained"] == gained
         assert "error" not in result
+
+
+@pytest.mark.parametrize("outer_budget,step_budget,expected", [(2.0, 10.0, 2.0), (45.0, 1.0, 1.0)])
+def test_staircase_inherits_parent_deadline_and_caps_single_step(monkeypatch, outer_budget, step_budget, expected) -> None:
+    import mc_agent.skills.library as library
+
+    clock = [100.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "status":
+            result = {"pos": [0.5, 30, 0.5], "on_ground": True}
+        elif path == "inventory":
+            result = {"items": []}
+        elif path == "get_block":
+            clock[0] += min(0.5, request.extensions["timeout"]["read"])
+            result = {"name": "stone"}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=25, deadline=100.0 + outer_budget, per_step_timeout=step_budget)
+    assert result["stop_reason"] == "time_budget"
+    assert clock[0] == pytest.approx(100.0 + expected)
+    assert calls[-1] == "stop"
+    assert "dig" not in calls
