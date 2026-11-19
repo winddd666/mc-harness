@@ -322,6 +322,10 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
         f"fill {ix + 3} {surface_y} {iz + 1} {ix + 3} {surface_y + 1} {iz + 3} minecraft:cobblestone",
         f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
         f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
+        # Clear the drowned/trident camp that otherwise farms the bot on respawn (r13/r14: 100% of
+        # pad damage was `by trident`).
+        f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:drowned,distance=..48]",
+        f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:trident,distance=..48]",
     ]
     rcon_batch(prep, timeout=45)
     time.sleep(1.0)
@@ -379,6 +383,12 @@ def prepare_scene_ground(
         return cmds
     if stage == "deep_water":
         # Re-assert the dry staging pad on death return (idempotent, only when spawned at/below sea level).
+        cmds.append(
+            f"execute positioned {ix} {iy} {iz} run kill @e[type=minecraft:drowned,distance=..40]"
+        )
+        cmds.append(
+            f"execute positioned {ix} {iy} {iz} run kill @e[type=minecraft:trident,distance=..40]"
+        )
         if iy <= 63:
             cmds.extend(
                 [
