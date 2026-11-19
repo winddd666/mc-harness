@@ -124,7 +124,7 @@ def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -
     raise RuntimeError("Could not find a wooded dry wild spawn site across CANDIDATE_SITES")
 
 
-def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: bool = True) -> None:
+def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: bool = True, stage: str = "bare") -> None:
     cmds = [
         "difficulty normal",
         "weather clear",
@@ -142,6 +142,53 @@ def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: b
         f"advancement grant {bot_name} only minecraft:nether/root",
         f"advancement grant {bot_name} only minecraft:end/root",
     ]
+    if stage == "iron":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"give {bot_name} minecraft:iron_pickaxe 1",
+                f"give {bot_name} minecraft:stone_pickaxe 2",
+                f"give {bot_name} minecraft:stone_sword 1",
+                f"give {bot_name} minecraft:oak_log 16",
+                f"give {bot_name} minecraft:coal 16",
+                f"give {bot_name} minecraft:cooked_beef 16",
+                f"give {bot_name} minecraft:crafting_table 2",
+                f"give {bot_name} minecraft:furnace 1",
+                f"give {bot_name} minecraft:cobblestone 32",
+            ]
+        )
+    elif stage == "midgame":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+                f"advancement grant {bot_name} only minecraft:story/shiny_gear",
+                f"give {bot_name} minecraft:diamond_pickaxe 1",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:diamond_boots 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
+                f"give {bot_name} minecraft:bucket 1",
+                f"give {bot_name} minecraft:shears 1",
+                f"give {bot_name} minecraft:iron_ingot 16",
+                f"give {bot_name} minecraft:redstone 8",
+                f"give {bot_name} minecraft:lapis_lazuli 8",
+                f"give {bot_name} minecraft:emerald 8",
+                f"give {bot_name} minecraft:obsidian 4",
+                f"give {bot_name} minecraft:book 2",
+                f"give {bot_name} minecraft:diamond 4",
+                f"give {bot_name} minecraft:oak_log 16",
+                f"give {bot_name} minecraft:coal 16",
+                f"give {bot_name} minecraft:cooked_beef 16",
+                f"give {bot_name} minecraft:cobblestone 32",
+            ]
+        )
     if set_day:
         cmds.insert(0, "time set 1000")
     rcon_batch(cmds, timeout=60)
@@ -156,6 +203,7 @@ def main() -> int:
     parser.add_argument("--duration-s", type=float, default=1800.0, help="Wall-clock budget for this wild run")
     parser.add_argument("--max-episodes", type=int, default=12)
     parser.add_argument("--site-index", type=int, default=0)
+    parser.add_argument("--stage", choices=["bare", "iron", "midgame"], default="bare", help="Starting checkpoint stage for sliced testing")
     parser.add_argument("--tag", type=str, default="wild")
     parser.add_argument("--keep-time", action="store_true", help="Do not reset world time to morning")
     args = parser.parse_args()
@@ -202,14 +250,14 @@ def main() -> int:
             st = bot.wait_until_ready(timeout_s=45.0)
 
         sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
-        reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time)
+        reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage)
         time.sleep(1.5)
 
         geofence = VoidGeofence(center_x=sx, center_z=sz, radius=220.0, margin=8.0)
         toolset = McToolset(bot, geofence=geofence, wait_for_cooldown=True)
 
         print(
-            f"[Wild Run Start] bot={bot_name} tag={args.tag} rpm={args.rpm_budget or 'default'} "
+            f"[Wild Run Start] bot={bot_name} stage={args.stage} tag={args.tag} rpm={args.rpm_budget or 'default'} "
             f"spawn=({sx:.1f}, {sy:.1f}, {sz:.1f}) biome={biome} "
             f"duration_s={args.duration_s} max_episodes={args.max_episodes}",
             flush=True,
