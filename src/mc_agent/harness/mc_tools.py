@@ -1075,7 +1075,22 @@ class McToolset:
             )
         if item:
             payload["item"] = item
-        return self._call_json("interact", payload)
+        raw = self._call_json("interact", payload)
+        if item in {"bucket", "water_bucket", "lava_bucket"}:
+            try:
+                parsed = json.loads(raw)
+                res_obj = parsed.get("result") if isinstance(parsed, dict) else None
+                if parsed.get("ok") is True and isinstance(res_obj, dict) and res_obj.get("changed") is False:
+                    parsed["ok"] = False
+                    parsed["requires_replan"] = True
+                    parsed["error"] = {
+                        "code": "interact_no_effect",
+                        "message": "交互未产生方块变化(changed=false)：目标可能是流动流体而非静止源头(level=0)，或视线/距离受阻，桶内状态未变化！请靠近静止源头(level=0) 3 格内重试。",
+                    }
+                    return json.dumps(parsed, ensure_ascii=False)
+            except ValueError:
+                pass
+        return raw
 
     def mc_use_item(
         self,
