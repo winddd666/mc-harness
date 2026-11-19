@@ -1999,6 +1999,18 @@ class MiningDFSEngine:
             return False, "no_recorded_route"
         return True, None
 
+    def _resume_shaft_tip(self, goal_node_id: int, *, min_hp_ref: list[float]) -> tuple[bool, str | None]:
+        try:
+            ok, reason = self._navigate_to_node(goal_node_id, min_hp_ref=min_hp_ref)
+            if reason == "walk_time_slice":
+                raise _MiningDeadline
+            return ok, reason
+        except _MiningDeadline:
+            # Navigation may have updated the active node at an intermediate anchor.
+            # Keep the mining destination so the next slice continues along the route.
+            self.active_node_id = goal_node_id
+            raise
+
     # ---- Long-Range 64-Block Cluster Radar & Hostile Threat Triage ('radar' strategy) ----
 
     def _cluster_ore_points(
@@ -2643,31 +2655,27 @@ class MiningDFSEngine:
             anc = (int(anc_raw[0]), int(anc_raw[1]), int(anc_raw[2]))
             if anc in self.exhausted_collars and not allow_retired:
                 continue
+            # Pending stairs still carry their original branch target layer.
+            saved_target_y = sh.get("target_y")
+            if not allow_retired and saved_target_y is not None and abs(int(saved_target_y) - self.target_y) > SCAN_BAND:
+                continue
             hd = math.hypot(cur_pos[0] - anc[0], cur_pos[2] - anc[2])
             vertical_near = abs(cur_pos[1] - anc[1]) <= 20
-            if allow_retired:
+            if allow_retired or not vertical_near or hd > 36.0:
                 points = [tuple(n["anchor"]) for n in sh.get("nodes", []) if n.get("anchor")]
                 points.extend(tuple(wp) for n in sh.get("nodes", [])
                               for wp in (n.get("edge_from_parent") or {}).get("waypoints", []))
-                if points:
+                if allow_retired and points:
                     hd = min(math.dist(cur_pos, pt) for pt in points)
                     vertical_near = hd <= 6.0
+                elif cur_pos in points:
+                    hd = 0.0
+                    vertical_near = True
             if hd <= best_d and vertical_near:
                 best_d = hd
                 best_sh = sh
 
         if best_sh is None:
-            return False
-
-        # Never reuse a shaft saved for a different target layer: its pending stair_down edges
-        # still carry the old branch_target_y (live: restored -54 shaft ignored target=iron(16)
-        # and dove 130 blocks past the iron layer in a single call).
-        saved_ty_raw = best_sh.get("target_y")
-        if (
-            not allow_retired
-            and saved_ty_raw is not None
-            and abs(int(saved_ty_raw) - int(self.target_y)) > SCAN_BAND
-        ):
             return False
 
         raw_nodes = best_sh.get("nodes") or []
@@ -2741,7 +2749,7 @@ class MiningDFSEngine:
         if allow_retired:
             # The caller is climbing: do not detour back to the saved mining tip first.
             return True
-        ok_nav, _ = self._navigate_to_node(self.active_node_id, min_hp_ref=min_hp_ref)
+        ok_nav, _ = self._resume_shaft_tip(self.active_node_id, min_hp_ref=min_hp_ref)
         if not ok_nav:
             self._clear_active_tree_only()
             return False
@@ -2927,9 +2935,14 @@ class MiningDFSEngine:
         walked = False
         walk_gain = 0
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
-            ok_walk, _err_walk = self._navigate_to_node(
-                self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
-            )
+            mining_node_id = self.active_node_id
+            try:
+                ok_walk, _err_walk = self._navigate_to_node(
+                    self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
+                )
+            finally:
+                # A supply trip should leave the mining destination available to explore.
+                self.active_node_id = mining_node_id
             walked = bool(ok_walk)
             if not walked:
                 y_part = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
@@ -5341,7 +5354,7 @@ class MiningDFSEngine:
                         return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
             elif math.dist(cur_pos, active.anchor) > 3.5:
-                ok_nav, err_nav = self._navigate_to_node(active.node_id, min_hp_ref=min_hp_ref)
+                ok_nav, err_nav = self._resume_shaft_tip(active.node_id, min_hp_ref=min_hp_ref)
                 if not ok_nav:
                     if (
                         self.collar_ceiling_y is not None

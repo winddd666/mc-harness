@@ -1977,6 +1977,7 @@ def test_climb_out_prefers_walking_the_shaft_over_new_stairs(monkeypatch) -> Non
 
         def fake_nav(goal_node_id, min_hp_ref, deadline=None):
             world.pos = [0.5, 64.0, 0.5]          # walk all the way home
+            eng.active_node_id = goal_node_id
             return True, None
 
         stairs: list[str] = []
@@ -1988,6 +1989,7 @@ def test_climb_out_prefers_walking_the_shaft_over_new_stairs(monkeypatch) -> Non
 
     assert res["climb"]["method"] == "walk"
     assert res["climb"]["reached"] is True
+    assert res["tree"]["active_node_id"] == tip.node_id
     assert stairs == []                            # never dug a single stair
 
 
@@ -2237,6 +2239,78 @@ def test_climb_can_restore_a_retired_exhausted_route_from_the_bottom(monkeypatch
     assert result["climb"]["method"] == "walk"
     assert result["climb"]["reached"] is True
     assert not stairs
+
+
+def test_restored_deep_shaft_keeps_its_tip_when_rejoin_uses_multiple_slices(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 64.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="ResumeDeepShaft", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        mid = engine._create_node(
+            kind="switchback", anchor=(0, 48, -16), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [collar.anchor, (0, 48, -16)]), branches=[],
+        )
+        tip = engine._create_node(
+            kind="switchback", anchor=(0, 30, -34), parent_id=mid.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [mid.anchor, (0, 30, -34)]),
+            branches=[mining.BranchSpec("stair_down", "north", 14)],
+        )
+        engine._archive_current_shaft_to_ledger()
+        engine._clear_active_tree_only()
+        goals = []
+
+        def rejoin(goal, **kwargs):
+            goals.append(goal)
+            engine.active_node_id = mid.node_id
+            world.pos = [0.5, 48.0, -15.5] if len(goals) == 1 else [0.5, 42.0, -21.5]
+            engine.bot.status()
+            clock.now = engine._deadline
+            if len(goals) == 2:
+                engine.bot.status()
+            return False, "walk_time_slice"
+
+        monkeypatch.setattr(engine, "_navigate_to_node", rejoin)
+        first = engine.run(target="iron", target_y=16, max_duration_s=5)
+        assert engine.active_node_id == tip.node_id
+        second = engine.run(target="iron", target_y=16, max_duration_s=5)
+
+    assert goals == [tip.node_id, tip.node_id]
+    assert engine.active_node_id == tip.node_id
+    assert engine.collar_node_id == collar.node_id
+    assert first["stop_reason"] == second["stop_reason"] == "time_slice_progress"
+    assert first["pos_after"][1] == 48 and second["pos_after"][1] == 42
+    assert not world.dig_log
+
+
+def test_restore_accepts_known_waypoint_far_below_the_saved_collar() -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    waypoint = (40, 20, 0)
+    tip_anchor = (41, 19, 0)
+    world = _MockMineWorld(start_pos=(40.5, 20.0, 0.5), surface_y=64)
+    for x, y, z in (waypoint, tip_anchor):
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    with BotSession("tok", bot_username="RestoreAtDepth", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        tip = engine._create_node(
+            kind="switchback", anchor=tip_anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", [collar.anchor, waypoint, tip_anchor]),
+            branches=[mining.BranchSpec("stair_down", "east", 4)],
+        )
+        engine._archive_current_shaft_to_ledger()
+        engine._clear_active_tree_only()
+
+        assert engine._try_restore_saved_shaft(waypoint, min_hp_ref=[20.0]) is True
+        assert engine.active_node_id == tip.node_id
+    assert world.pos == [41.5, 19.0, 0.5]
+    assert not world.dig_log
 
 
 def test_navigation_rejoins_an_edge_instead_of_moving_through_a_wall(monkeypatch) -> None:
