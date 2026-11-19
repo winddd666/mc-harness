@@ -1646,6 +1646,54 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
     assert placed == ["cobblestone", "netherrack"]
 
 
+def test_staircase_cools_down_stand_after_zero_progress_dig_timeout(monkeypatch) -> None:
+    """BUG-041/r23: same stand kept burning 45s per direction with 0 progress."""
+    import mc_agent.skills.library as library
+
+    monkeypatch.setattr(library.time, "monotonic", lambda: 1000.0)
+    pos = [0.5, 64.0, 0.5]
+    digs = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": list(pos), "on_ground": True, "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "diamond_pickaxe", "count": 1}]}
+        elif path == "equip":
+            result = {"held": {"name": "diamond_pickaxe"}}
+        elif path == "get_block":
+            result = {"name": "basalt" if body["pos"][1] <= 66 else "air"}
+        elif path == "dig":
+            digs.append(body["pos"])
+            raise httpx.ReadTimeout("offline dig stall", request=request)
+        elif path == "move_to":
+            result = {"pos": list(pos)}
+        elif path == "look":
+            result = {}
+        elif path == "control":
+            result = {"pos": list(pos), "moved": 0.0}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        first = skills.dig_staircase(direction="north", vertical="up", steps=3)
+        digs_after_first = len(digs)
+        second = skills.dig_staircase(direction="south", vertical="up", steps=3)
+    assert first["stop_reason"] == "time_budget"
+    assert digs_after_first >= 1
+    assert second["stop_reason"] == "stair_cell_cooldown"
+    assert len(digs) == digs_after_first
+    assert "8~12 格" in second["hint"]
+
+
 def test_staircase_fails_fast_on_previously_timed_out_dig_cell(monkeypatch) -> None:
     """BUG-041/r23: retrying the same timed-out cell burned 15-45s each time."""
     import mc_agent.skills.library as library

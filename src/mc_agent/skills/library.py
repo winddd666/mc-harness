@@ -5967,6 +5967,21 @@ class MacroSkills:
                         )
                     except (TypeError, ValueError):
                         pass
+                # BUG-041/r23: zero-progress dig timeout -> cool the whole stand
+                # down so the next call must relocate instead of retrying.
+                if not session.progress.get("steps_done"):
+                    start_cell = getattr(session, "start_cell", None)
+                    if isinstance(start_cell, tuple) and len(start_cell) == 3:
+                        try:
+                            self._record_failed_stair_dir(
+                                (int(start_cell[0]), int(start_cell[1]), int(start_cell[2]),
+                                 str(vertical or "down").strip().lower()),
+                                str(direction or "north").strip().lower(),
+                                "dig_timeout",
+                                ttl_s=60.0,
+                            )
+                        except (TypeError, ValueError):
+                            pass
             return {
                 "ok": False, "requires_replan": True, "stop_reason": "time_budget",
                 "error": {"code": "time_budget", "message": timeout_message},
@@ -6229,6 +6244,38 @@ class MacroSkills:
                 b0x, b0y, b0z = c0x, c0y, c0z
                 if _block_name([c0x, c0y - 1, c0z]).endswith("_leaves"):
                     stop_reason = "on_tree_canopy"
+
+        # BUG-041/r23: a zero-progress dig timeout from this exact stand means
+        # every direction here re-stalls. Refuse early instead of burning
+        # another 45s per attempt.
+        _start_cell = (b0x, b0y, b0z)
+        try:
+            self.bot.start_cell = _start_cell
+        except (AttributeError, TypeError):
+            pass
+        _cooldown = self._active_failed_stair_dirs((b0x, b0y, b0z, v_key))
+        if any("dig_timeout" in str(r) for r in _cooldown.values()):
+            return {
+                "ok": False,
+                "requires_replan": True,
+                "direction": d_key,
+                "vertical": v_key,
+                "steps_requested": steps,
+                "steps_done": 0,
+                "dug_count": 0,
+                "stop_reason": "stair_cell_cooldown",
+                "pos_before": pos_before,
+                "pos_after": pos_before,
+                "last_error": {
+                    "code": "stair_cell_cooldown",
+                    "pos": [b0x, b0y, b0z],
+                    "message": "该站位刚发生零进展 dig 超时，已冷却 60s，未再尝试阶梯。",
+                },
+                "hint": (
+                    "刚在同一站位连续 dig 超时（0 进展）。请先用 mc_move_to 水平离开 8~12 格"
+                    " 或 mc_skill_unstick 换站位，再重新开阶梯；不要原地换方向重试。"
+                ),
+            }
 
         stair_deadline = self.bot.deadline
         for step_idx in range(steps if stop_reason == "completed" else 0):
