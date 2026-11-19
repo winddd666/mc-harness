@@ -281,38 +281,9 @@ def select_nether_structure_site(
     return float(pos[0]), float(pos[1]), float(pos[2]), f"nether:{structure_tag.split(':')[-1]}"
 
 
-def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
-    """Locate a real `minecraft:deep_ocean` biome and build a safe surface staging platform above the water.
-
-    The bot must be able to *dive* into deep water for the slice, but must never spawn inside it
-    (drowning on episode 1 would poison every downstream metric). A 7x7 cobblestone platform with a
-    3-block air pocket keeps the spawn dry while leaving open water within a few blocks.
-    """
-    cx, cz = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
-    res = rcon_batch(
-        [f"execute positioned {cx} 100 {cz} run locate biome minecraft:deep_ocean"],
-        timeout=45,
-    )
-    coords = _locate_coords(str((res[0] if res else {}).get("reply") or ""))
-    if coords is not None:
-        wx, wz = coords
-    else:
-        wx, wz = cx, cz
-    rcon_batch(
-        [
-            f"tp {bot_name} {wx} 120 {wz}",
-            f"spreadplayers {wx} {wz} 0 40 false {bot_name}",
-        ],
-        timeout=45,
-    )
-    # `spreadplayers` drops the bot from y=120; polling too early reads a mid-fall y and would build
-    # a floating platform tens of blocks above the ocean surface. Wait until y stabilises first.
-    pos = _wait_settled(bot, timeout_s=15.0) or [float(wx), 70.0, float(wz)]
-    st = bot.status()
-    ix, iz = int(pos[0]), int(pos[2])
-    # Deep ocean sea level is 63; clamp so a stale reading can never produce a sky platform.
-    surface_y = min(max(int(round(pos[1])) + 1, 64), 70)
-    prep = [
+def _deep_water_pad_cmds(bot_name: str, ix: int, iz: int, surface_y: int) -> list[str]:
+    """7x7 dry ocean pad: floor, 2-high parapet with an east gate, and a drowned/trident sweep."""
+    return [
         f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
         f"fill {ix - 3} {surface_y - 1} {iz - 3} {ix + 3} {surface_y - 1} {iz + 3} minecraft:cobblestone",
         f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 3} {iz + 3} minecraft:air",
@@ -330,10 +301,80 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
         f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:drowned,distance=..48]",
         f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:trident,distance=..48]",
     ]
+
+
+def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
+    """Locate a real deep ocean and stage the bot on the closest dry shore/pad.
+
+    BUG-023 (D2 scene side): r12-r14 died repeatedly to drowned tridents because the bot spawned on
+    a tiny pad in open deep water with no reachable dry shelf. We now prefer the nearest
+    `minecraft:beach` (dry land + shallow water within a few blocks) and only fall back to a
+    parapet-protected pad when the beach is too far away.
+    """
+    cx, cz = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
+    res = rcon_batch(
+        [f"execute positioned {cx} 100 {cz} run locate biome minecraft:deep_ocean"],
+        timeout=45,
+    )
+    coords = _locate_coords(str((res[0] if res else {}).get("reply") or ""))
+    wx, wz = coords if coords is not None else (cx, cz)
+
+    beach: tuple[int, int] | None = None
+    try:
+        bres = rcon_batch(
+            [f"execute positioned {wx} 100 {wz} run locate biome minecraft:beach"],
+            timeout=45,
+        )
+        beach = _locate_coords(str((bres[0] if bres else {}).get("reply") or ""))
+    except Exception:
+        beach = None
+    beach_dist = math.hypot(beach[0] - wx, beach[1] - wz) if beach else float("inf")
+    if beach is not None and beach_dist <= 200.0:
+        staging_x, staging_z = beach
+        spread_radius = 8
+        stage_kind = f"beach({beach_dist:.0f}m from deep_ocean)"
+    else:
+        staging_x, staging_z = wx, wz
+        spread_radius = 40
+        stage_kind = "deep_ocean_pad" if beach is None else f"deep_ocean_pad(beach {beach_dist:.0f}m away)"
+
+    rcon_batch(
+        [
+            f"tp {bot_name} {staging_x} 120 {staging_z}",
+            f"spreadplayers {staging_x} {staging_z} 0 {spread_radius} false {bot_name}",
+        ],
+        timeout=45,
+    )
+    # `spreadplayers` drops the bot from y=120; polling too early reads a mid-fall y and would build
+    # a floating platform tens of blocks above the ocean surface. Wait until y stabilises first.
+    pos = _wait_settled(bot, timeout_s=15.0) or [float(staging_x), 70.0, float(staging_z)]
+    st = bot.status()
+    ix, iz = int(pos[0]), int(pos[2])
+    biome = str(st.get("biome") or "deep_ocean").lower()
+    wet = bool(st.get("in_water")) or "ocean" in biome or "river" in biome
+    print(
+        f"[Scene] deep_water staging={stage_kind} pos=({ix}, {int(round(pos[1]))}, {iz}) "
+        f"biome={biome or '?'} in_water={bool(st.get('in_water'))}",
+        flush=True,
+    )
+    if wet:
+        # Deep ocean sea level is 63; clamp so a stale reading can never produce a sky platform.
+        surface_y = min(max(int(round(pos[1])) + 1, 64), 70)
+        prep = _deep_water_pad_cmds(bot_name, ix, iz, surface_y)
+    else:
+        # Natural dry shore: keep it untouched, just pin the spawn and sweep the water edge.
+        surface_y = int(round(pos[1]))
+        prep = [
+            f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
+            f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
+            f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
+            f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:drowned,distance=..32]",
+            f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:trident,distance=..32]",
+        ]
     rcon_batch(prep, timeout=45)
     time.sleep(1.0)
-    biome = str(st.get("biome") or "deep_ocean").lower()
-    return float(ix) + 0.5, float(surface_y), float(iz) + 0.5, f"deep_water:{biome}"
+    kind = "beach" if not wet else "pad"
+    return float(ix) + 0.5, float(surface_y), float(iz) + 0.5, f"deep_water[{kind}]:{biome}"
 
 
 def prepare_scene_ground(
