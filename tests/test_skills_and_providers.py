@@ -1914,6 +1914,53 @@ def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, ga
         assert "error" not in result
 
 
+def test_window_view_rejects_entity_at_12m_before_no_window() -> None:
+    """r16 BUG-027: goNear silently failed, then no_window from 12m."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "get_entities":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"entities": [{"id": 81197, "pos": [100, 64, 100], "dist": 12.2}]}},
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_window_view(entity_id=81197))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert result["error"]["code"] == "out_of_reach"
+    assert result["error"]["dist"] == pytest.approx(12.2)
+    assert "mc_move_to" in result["error"]["message"]
+    assert calls == ["get_entities"]
+
+
+def test_window_view_allows_near_entity() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "get_entities":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"entities": [{"id": 5, "pos": [1, 64, 1], "dist": 2.0}]}},
+            )
+        if path == "view":
+            return httpx.Response(
+                200, json={"ok": True, "result": {"window": {"type": "minecraft:merchant"}, "target": {"entity_id": 5}}}
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_window_view(entity_id=5))
+    assert result["ok"] is True
+
+
 def test_brew_no_window_reports_wrong_block_at_coordinates() -> None:
     """r16 brewing used a coordinate that actually held cobblestone."""
     calls = []

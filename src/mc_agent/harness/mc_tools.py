@@ -1537,6 +1537,48 @@ class McToolset:
         target = _build_window_target(block, entity_id, x, y, z)
         if isinstance(target, str):
             return target
+        if entity_id is not None:
+            # BUG-027: the backend's goNear can silently fail, then activate
+            # from 12m away and report a misleading no_window. Pre-check here.
+            try:
+                ents = self.bot.call("get_entities", {"radius": 32}, timeout_s=2.0).get("entities") or []
+                ent = next((e for e in ents if isinstance(e, dict) and e.get("id") == entity_id), None)
+                if ent is None:
+                    return json.dumps(
+                        {
+                            "ok": False, "requires_replan": True,
+                            "error": {
+                                "code": "target_not_visible", "entity_id": entity_id,
+                                "message": (
+                                    f"实体 {entity_id} 在 32m 内不可见；请重新 mc_get_entities 获取最新 id，"
+                                    "或先 mc_move_to 到目标附近再开窗。不要重复使用旧 id。"
+                                ),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                dist = ent.get("dist")
+                if isinstance(dist, (int, float)) and float(dist) > 4.0:
+                    epos = ent.get("pos")
+                    move_hint = ""
+                    if isinstance(epos, (list, tuple)) and len(epos) >= 3:
+                        move_hint = f"先调 mc_move_to(x={epos[0]}, z={epos[2]}, range=2) 靠近，再 mc_window_view。"
+                    return json.dumps(
+                        {
+                            "ok": False, "requires_replan": True,
+                            "error": {
+                                "code": "out_of_reach", "entity_id": entity_id,
+                                "dist": round(float(dist), 1), "pos": epos,
+                                "message": (
+                                    f"目标距离 {float(dist):.1f}m，超过开窗交互范围(<=4m)。"
+                                    f"{move_hint}不要在 12m 外重复开窗，后端不会先走近。"
+                                ),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+            except (ApiError, httpx.HTTPError, TypeError, ValueError):
+                pass
         raw = self._call_json("window/view", {"target": target})
         self._sync_window_payload(
             raw,
