@@ -1096,6 +1096,29 @@ retries 835 | failed429 9 | 502 0 | tracebacks 0
 
 `pre_over_cap` 只让函数"进入"，但 `plan_garbage_drops` 的 `need = max(0, min_free - empty_before)` 在有 ≥3 空槽时为 0 → **一块都不丢**。修复：超 cap 时把 `need` 提升到"清到 cap"所需槽数，或加 `enforce_caps=True`。
 
+## 4bn. 过夜审计 06:17 抽检
+
+### 主轨第二波 `overnight_12bot_part2`（进行中，约 20 分钟）
+
+```
+86 集：answered 60 / goal 14 / limit 6 / timeout 4 / paused 2 / runtime_error 2
+retries 170 | failed429 2 | 502 0 | tracebacks 0
+```
+
+- 2 个 runtime_error 均为 `rate_limit_error` 429（`glm_4`、`glm_5`）
+- 与第一波相同的模式：重试大多成功，少数仍报废
+
+### hy4 审计轨 `hy4_audit_r27`（**3 小时**长审计，进行中）
+
+```
+95 集：answered 71 / goal 7 / timeout 14 / limit 2 / paused 1 / aborted 1
+retries 0 | 429 0 | 502 0 | tracebacks 0
+elapsed 8509/10800s（约 2h22m）
+```
+
+- **rpm=6、4 路，连续 2h22m 零 retry / 零 429** → 这是比 20 分钟抽检更强的证据
+- 1 次 aborted（需后续确认是否 BUG-043）
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
