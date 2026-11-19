@@ -34,6 +34,7 @@ def collect(wave: str) -> dict:
     out = {
         "bots": bots,
         "summaries": {},
+        "owned_end": {},
         "tool_calls": 0,
         "errs": collections.Counter(),
         "no_support": 0,
@@ -61,6 +62,7 @@ def collect(wave: str) -> dict:
             d = json.loads(sums[-1].read_text())
             cs = d.get("curriculum_summary") or {}
             out["summaries"][bot] = int(cs.get("final_score") or 0)
+            out["owned_end"][bot] = d.get("owned_end") or {}
             for ep in cs.get("episodes") or []:
                 if ep.get("status") == "runtime_error":
                     out["runtime_error"] += 1
@@ -158,6 +160,13 @@ def main() -> int:
     deaths = sum(o["deaths"].values())
     deep_score = o["summaries"].get(o["deep_water"] or "", None)
 
+    caps = {"cobblestone": 192, "cobbled_deepslate": 192, "netherrack": 128, "dirt": 64}
+    # Soft cap: mine_dfs cleanup drops in whole stacks, so allow 15% overshoot and
+    # only flag gross hoarding (the user-visible "inventory clogged" problem).
+    over_cap = sum(
+        1 for owned in o["owned_end"].values()
+        if any(int(owned.get(k, 0) or 0) > cap * 1.15 for k, cap in caps.items())
+    )
     has_trade = any("village_trade" in b for b in o["bots"])
     has_brew = any("brewing_alchemy" in b for b in o["bots"])
     has_dw = o["deep_water"] is not None
@@ -170,6 +179,7 @@ def main() -> int:
         ("BUG-018 mine dur/budget med", round(ratio_med, 2), "<= 1.2"),
         ("BUG-018 mine zero-slice %", round(zero_pct, 1), "< 10"),
         ("BUG-020 runtime_error", o["runtime_error"], "<= 2"),
+        ("BUG-029 over-cap bots", over_cap, "== 0", bool(o["summaries"])),
         ("BUG-033 thread exceptions", len(o["thread_errors"]), "== 0"),
         ("BUG-023 deep_water trident deaths", o["dw_trident"], "<= 2", has_dw),
         ("SCENE-001 trade calls", o["trade"], ">= 1", has_trade),
