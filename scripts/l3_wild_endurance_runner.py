@@ -974,7 +974,7 @@ def main() -> int:
     from mc_agent.auth import TokenStore
     from mc_agent.bot import BotSession
     from mc_agent.config import Settings
-    from mc_agent.errors import ApiError
+    from mc_agent.errors import ApiError, DeathLoopCooldownError
     from mc_agent.harness.curriculum import CurriculumSupervisor
     from mc_agent.harness.geofence import VoidGeofence
     from mc_agent.harness.mc_tools import McToolset
@@ -999,7 +999,16 @@ def main() -> int:
             else:
                 raise
         if not st.get("ready"):
-            bot.connect(respect_reconnect_interval=False)
+            try:
+                bot.connect(respect_reconnect_interval=False)
+            except DeathLoopCooldownError as exc:
+                wait_s = min(310.0, max(5.0, float(exc.cooldown_remaining_seconds or 30.0) + 2.0))
+                print(
+                    f"[Wild Run Cooldown] bot={bot_name} death_loop_cooldown active; sleeping {wait_s:.1f}s before retry",
+                    flush=True,
+                )
+                time.sleep(wait_s)
+                bot.connect(respect_reconnect_interval=False)
             st = bot.wait_until_ready(timeout_s=45.0)
 
         if args.stage == "village":

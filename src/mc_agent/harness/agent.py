@@ -203,10 +203,10 @@ def _capture_initial_snapshot(toolset: McToolset) -> str:
 class _RepeatFailureGuard:
     """Harness 级零进展重复失败熔断器：同一坐标下反复发出无进展的失败动作（含跨步周期乒乓）时直接短路提醒。"""
 
-    _TRANSIENT_CODES = frozenset({"not_connected", "action_quarantined", "busy", "repeated_identical_failure_blocked", "bad_args"})
-    _ALLOW_ONE_RETRY_CODES = frozenset({"movement_not_confirmed", "interrupted"})
+    _TRANSIENT_CODES = frozenset({"not_connected", "not_loaded", "chunk_not_loaded", "world_not_ready", "action_quarantined", "busy", "repeated_identical_failure_blocked", "bad_args"})
+    _ALLOW_ONE_RETRY_CODES = frozenset({"movement_not_confirmed", "interrupted", "time_slice"})
     # ApiError codes worth re-issuing once inside the tool wrapper (transient transport issues).
-    _API_RETRYABLE_CODES = frozenset({"not_connected", "timeout", "api_timeout", "server_busy", "rate_limited"})
+    _API_RETRYABLE_CODES = frozenset({"not_connected", "not_loaded", "chunk_not_loaded", "world_not_ready", "timeout", "api_timeout", "server_busy", "rate_limited"})
     _API_RETRY_DELAYS = (0.4, 1.0)
     _API_ERROR_HINTS = {
         "missing_item": (
@@ -214,6 +214,7 @@ class _RepeatFailureGuard:
             "不要重复 equip 同一件不存在的物品。"
         ),
         "not_connected": "Bot 与服务器连接中断：先 mc_status 确认在线状态，必要时重新登录后再继续。",
+        "not_loaded": "Bot 区块/维度尚未加载完成：稍等片刻再用 mc_status 确认后重试。",
         "missing_ingredients": "材料不足：先收集/熔炼材料再合成。",
         "no_recipe": "没有该配方：确认物品名与所需工作台（3x3）后再合成。",
     }
@@ -1615,7 +1616,13 @@ def run_mc_agent(
         # Transport break outside the tool wrapper (snapshot/HUD/stream): keep it off "runtime_error".
         report["status"] = "network_error"
         report["error"] = f"MC API 网络异常（{type(exc).__name__}）：{exc}"
-    except (ApiError, RuntimeError) as exc:
+    except ApiError as exc:
+        if exc.code in {"not_loaded", "chunk_not_loaded", "world_not_ready"}:
+            report["status"] = "network_error"
+        else:
+            report["status"] = "runtime_error"
+        report["error"] = str(exc)
+    except RuntimeError as exc:
         report["status"] = "runtime_error"
         report["error"] = str(exc)
     except KeyboardInterrupt:
