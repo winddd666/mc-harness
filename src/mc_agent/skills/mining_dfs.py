@@ -339,14 +339,17 @@ class _BudgetSession:
         if remaining <= 0.2:
             raise _MiningDeadline
         endpoint = path.lstrip("/")
-        # BotSession retries a closed keepalive once, with a 150ms pause. Reserve room
-        # for both HTTP attempts; httpx timeouts apply separately to each phase.
-        request_timeout = min(float(kwargs.get("timeout_s") or 45.0), (remaining - 0.15) / 8)
+        # BotSession retries a closed keepalive once after a 150ms pause.
+        # Leave most of each attempt for the server to complete the action during the read.
+        attempt_budget = (remaining - 0.15) / 2
+        timeout_limit = float(kwargs.get("timeout_s") or 45.0)
+        phase_timeout = min(0.5, timeout_limit, attempt_budget / 4)
+        read_timeout = min(timeout_limit, attempt_budget - 3 * phase_timeout)
         payload = dict(body) if body is not None else None
         if payload is not None and endpoint in {"move_to", "control"}:
             # Give the server time to return its own result before the HTTP read
             # times out. A pathfinding failure can then fall back to local movement.
-            action_limit_ms = int((request_timeout - 0.25) * 1000)
+            action_limit_ms = int((read_timeout - 0.25) * 1000)
             if endpoint == "control":
                 if action_limit_ms < 50:
                     raise _MiningDeadline
@@ -357,7 +360,7 @@ class _BudgetSession:
                     raise _MiningDeadline
                 duration = payload.get("timeout")
                 payload["timeout"] = min(action_limit_ms if duration is None else int(duration), action_limit_ms)
-        kwargs["timeout_s"] = request_timeout
+        kwargs["timeout_s"] = httpx.Timeout(read_timeout, pool=phase_timeout, connect=phase_timeout, write=phase_timeout)
         kwargs["allow_reauth"] = False
         try:
             result = self._call(path, payload, **kwargs)

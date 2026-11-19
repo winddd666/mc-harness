@@ -2032,6 +2032,37 @@ def test_dfs_budget_includes_entry_observations_and_radar(monkeypatch) -> None:
     assert len(calls) < 15
 
 
+def test_default_dfs_slice_allows_slow_ore_dig_within_budget(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 64.0, 0.5), surface_y=64)
+    ore = (1, 64, 0)
+    world.blocks[ore] = "iron_ore"
+    dig_timeouts = []
+
+    def handler(request):
+        if request.url.path.endswith("/dig") and tuple(json.loads(request.content)["pos"]) == ore:
+            timeouts = request.extensions["timeout"]
+            dig_timeouts.append((clock.now, timeouts))
+            if timeouts["read"] < 8.0:
+                clock.now += timeouts["read"]
+                raise httpx.ReadTimeout("ore dig still running", request=request)
+            clock.now += 8.0
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="SlowOreDig", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).mine_dfs(target="iron", target_y=64, goal_count=1)
+
+    assert result["stop_reason"] == "quota_reached"
+    assert result["target_gained"] == 1
+    assert clock.now <= 1032.0
+    [(started, timeouts)] = dig_timeouts
+    assert 2 * sum(timeouts.values()) + 0.15 <= 1031.5 - started + 1e-9
+
+
 def test_waypoint_interpolation_checks_deadline_between_hops(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 
