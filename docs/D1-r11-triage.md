@@ -557,6 +557,14 @@ staircase  16.2s       27→27   (time_budget, 0 进展)
 - 两次 `climb_out` 0 进展说明"沿自建巷道走"未生效，退化成重新开阶梯；再叠加 BUG-037
 - 已提 **BUG-038（P1，Slice A）**：climb 应沿 corridor waypoints 直达、单片 ≥8 格；断镐+无木时给量化回地表建议
 
+### 4y. glm_5 附魔/睡觉链路（r20_long，23:30）
+
+**正向**：
+- `mine_dfs` 4 片 × 55s 下潜 → `quota_reached`；`craft_gear(diamond_pickaxe)`、`craft_gear(enchanting_table)`、`mc_place`（无坐标自动落位）、`mc_skill_enchant(iron_sword)` 全部成功 → `enchant_item +30`
+- `staircase(up, steps=20)` 先 `missing_step_support`，随后 **`pillar_fallback` 成功**（BUG-024 修复在长任务中同样生效）
+
+**问题（P2-31）**：找床阶段半径 64→128→200→300→400→600→800→1000 连发 10+ 次扫描，全部空手；随后 `craft_gear(white_bed)` 缺羊毛。建议半径上限 128 + "先找羊"。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
