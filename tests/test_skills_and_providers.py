@@ -1406,6 +1406,30 @@ def test_move_to_busy_retries_only_after_lease_release(release) -> None:
     assert calls.count("move_to") == (2 if release else 1)
 
 
+def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
+    """r12 P2-16: busy move_to blocked ~101s before returning."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "busy": "dig"}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_move_to(x=4.5, z=0.5))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert result["error"]["code"] == "action_busy"
+    assert result["error"]["action"] == "dig"
+    assert calls == ["status"]
+
+
 def test_move_to_rejects_z_swapped_into_out_of_range_y() -> None:
     """r12 P2-17: y=-2814 was silently dropped, wasting a 90s path search."""
     from mc_agent.harness.mc_tools import McToolset

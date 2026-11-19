@@ -962,6 +962,33 @@ class McToolset:
         # 水中自动保护：防止溺水扣血打断自己的游上岸动作
         if ignore_hurt or self._is_in_water():
             payload["stop_on"] = ["death"]
+        # r12: a stale action lease made /move_to block ~101s before returning
+        # busy. /status already exposes the lease owner, so probe it cheaply and
+        # fail fast instead of queueing a long path behind an unrelated action.
+        try:
+            pre = self.bot.call("status", timeout_s=2.0)
+            if isinstance(pre, dict):
+                self._update_status_cache(pre)
+                busy_action = str(pre.get("busy") or "")
+                if busy_action:
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "requires_replan": True,
+                            "error": {
+                                "code": "action_busy",
+                                "action": busy_action,
+                                "message": (
+                                    f"动作锁仍被 {busy_action} 占用，未提交 move_to，避免阻塞等待。"
+                                    "请先处理当前动作（受伤先脱险/等待其完成），1~2 秒后重试坐标；"
+                                    "不要用同一参数连续重试。"
+                                ),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+        except (ApiError, httpx.HTTPError, RuntimeError, ValueError):
+            pass
         raw = self._call_json("move_to", payload)
         try:
             first = json.loads(raw)
