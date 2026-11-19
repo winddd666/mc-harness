@@ -327,6 +327,9 @@ class BotRow:
     top_errors: list[tuple[str, int]]
     slow_calls: list[tuple[float, str, str]]
     crash_tail: str = ""
+    scene_stage: str = ""
+    scene_ok: bool | None = None
+    scene_anchor: str = ""
 
     @property
     def gained_short(self) -> list[str]:
@@ -461,6 +464,11 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         status = "crash"
 
     slow_calls.sort(reverse=True)
+    scene_meta = summary.get("scene") or {}
+    scene_anchor = ""
+    if isinstance(scene_meta.get("anchor"), dict):
+        a = scene_meta["anchor"]
+        scene_anchor = f"({a.get('x')}, {a.get('y')}, {a.get('z')})"
     return BotRow(
         name=name,
         squad=squad,
@@ -479,6 +487,9 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         top_errors=err_codes.most_common(5),
         slow_calls=slow_calls[:4],
         crash_tail=crash_tail,
+        scene_stage=str(scene_meta.get("stage") or ""),
+        scene_ok=scene_meta.get("entry_verified") if "entry_verified" in scene_meta else None,
+        scene_anchor=scene_anchor,
     )
 
 
@@ -573,7 +584,20 @@ def _write_markdown(
             f"| {a['label']} | {a['bots']} | {a['completed']} | {a['crashed']} | {a['avg_score']} | "
             f"{a['total_deaths']} | {a['avg_deaths']} | {a['http_429']} | `{a['top_error']}` |"
         )
-    lines.extend(["", "## 3. 跨模型 P0/P1 错误榜单", ""])
+    scene_bad = [r for r in rows if r.scene_ok is False]
+    lines.extend(["", "## 3. 场景入口校验", ""])
+    if scene_bad:
+        lines.append("| Bot | Stage | Anchor | 问题 |")
+        lines.append("|---|---|---|---|")
+        for r in scene_bad:
+            lines.append(
+                f"| `{r.name}` | {r.scene_stage or r.stage} | {r.scene_anchor} | "
+                "`entry_verified=false`（未进入目标维度/偏离锚点>64m） |"
+            )
+    else:
+        lines.append("*（所有已收官 bot 场景入口正常）*")
+
+    lines.extend(["", "## 4. 跨模型 P0/P1 错误榜单", ""])
     ranked = sorted(err_counts.items(), key=lambda kv: (-len(err_bots[kv[0]]), -kv[1]))
     if ranked:
         lines.extend(
@@ -587,7 +611,7 @@ def _write_markdown(
             lines.append(f"| {i} | {len(bots)} | {cnt} | `{key}` | {', '.join(bots[:4])} | {_suggest_owner(key)} |")
     else:
         lines.append("*（无工具失败事件）*")
-    lines.extend(["", "## 4. 自动工单（Work Orders）", ""])
+    lines.extend(["", "## 5. 自动工单（Work Orders）", ""])
     ticket_no = 0
     for r in rows:
         if r.status == "crash":
@@ -619,7 +643,7 @@ def _write_markdown(
             ]
         )
     if slow_tools:
-        lines.extend(["## 5. 超时穿透工具（≥{:.0f}s）".format(SLOW_TOOL_THRESHOLD_S), "",
+        lines.extend(["## 6. 超时穿透工具（≥{:.0f}s）".format(SLOW_TOOL_THRESHOLD_S), "",
                       "| 耗时 | Bot | 工具 |", "|---:|---|---|"])
         for dt, nm, tool in sorted(slow_tools, reverse=True)[:15]:
             lines.append(f"| {dt:.0f}s | `{nm}` | `{tool}` |")
@@ -655,6 +679,7 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"  [{r.squad:3s}] {r.name:30s} {r.status:10s} score={r.score:3d} eps={r.episodes_done:2d} "
             f"deaths={r.deaths:2d} guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
             f"429={r.http_429:2d} gained=[{','.join(r.gained_short[:4])}]"
+            + (" scene=BAD" if r.scene_ok is False else "")
         )
         if r.status == "crash" and r.crash_tail:
             tail = r.crash_tail.splitlines()[-1]

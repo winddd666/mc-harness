@@ -819,6 +819,34 @@ class SceneWatchdog(threading.Thread):
                 print(f"[Scene Watchdog] {self.bot_name} tick error: {exc}", flush=True)
 
 
+def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
+    """Confirm the bot is in the scene dimension and within 64m of the anchor; retry via restock."""
+    for i in range(attempts):
+        try:
+            st = bot.status()
+        except Exception:
+            st = {}
+        dim = str(st.get("dimension") or "overworld").lower()
+        pos = st.get("pos")
+        ok_dim = scene.dim != "the_nether" or "nether" in dim
+        ok_pos = isinstance(pos, (list, tuple)) and len(pos) >= 3 and (
+            math.hypot(float(pos[0]) - scene.x, float(pos[2]) - scene.z) <= 64.0
+        )
+        if ok_dim and ok_pos:
+            return True
+        print(
+            f"[Scene] entry verify failed (attempt {i + 1}/{attempts}) bot={bot_name} "
+            f"dim={dim} pos={pos} expected {scene.dim}@({scene.x:.1f},{scene.y:.1f},{scene.z:.1f})",
+            flush=True,
+        )
+        try:
+            restock_scene(bot_name, scene, reason="scene_entry_verify")
+        except Exception as exc:
+            print(f"[Scene] entry verify restock error: {exc}", flush=True)
+        time.sleep(2.0)
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bot", type=str, default=BOT)
@@ -932,6 +960,7 @@ def main() -> int:
             rcon_batch(prep, timeout=60)
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
+        entry_ok = verify_scene_entry(bot, bot_name, scene)
 
         geofence = VoidGeofence(center_x=sx, center_z=sz, radius=220.0, margin=8.0)
         toolset = McToolset(bot, geofence=geofence, wait_for_cooldown=True)
@@ -1051,6 +1080,7 @@ def main() -> int:
                 "anchor": {"x": round(scene.x, 1), "y": round(scene.y, 1), "z": round(scene.z, 1)},
                 "radius": scene.radius,
                 "drift_limit": scene.drift_limit,
+                "entry_verified": entry_ok,
             },
             "end_status": {
                 "pos": st_end.get("pos"),
