@@ -751,7 +751,6 @@ _TRASH_TIER2_DECOR_STONES: tuple[str, ...] = (
     "tuff",
     "calcite",
     "dripstone_block",
-    "netherrack",
 )
 
 _TRASH_TIER2_LOOSE_BLOCKS: tuple[str, ...] = (
@@ -770,6 +769,8 @@ _TRASH_TIER4_COBBLE: tuple[str, ...] = (
     "cobblestone",
     "cobbled_deepslate",
 )
+
+_TRASH_TIER_NETHER: tuple[str, ...] = ("netherrack",)
 
 _UNSTACKABLE_ITEMS: frozenset[str] = frozenset(
     {
@@ -1463,7 +1464,19 @@ class MacroSkills:
         if not isinstance(inv, dict):
             return {}, []
         empty_now = _compute_empty_slots(inv)
-        if empty_now >= min_free:
+        pre_counts: dict[str, int] = {}
+        for row in inv.get("items") or []:
+            if not isinstance(row, dict) or not row.get("name"):
+                continue
+            iname = str(row["name"]).removeprefix("minecraft:")
+            if iname in _TRASH_TIER4_COBBLE or iname in _TRASH_TIER_NETHER or iname in _TRASH_TIER3_DIRT:
+                pre_counts[iname] = pre_counts.get(iname, 0) + int(row.get("count") or 0)
+        pre_over_cap = (
+            any(pre_counts.get(n, 0) > 192 for n in _TRASH_TIER4_COBBLE)
+            or any(pre_counts.get(n, 0) > 128 for n in _TRASH_TIER_NETHER)
+            or any(pre_counts.get(n, 0) > 64 for n in _TRASH_TIER3_DIRT)
+        )
+        if empty_now >= min_free and not pre_over_cap:
             return inv, []
 
         max_drop_ops = 12
@@ -1485,8 +1498,12 @@ class MacroSkills:
                 per_item_counts[iname] = per_item_counts.get(iname, 0) + cnt
                 per_item_slots.setdefault(iname, []).append(cnt)
 
-            cobble_over_cap = any(per_item_counts.get(n, 0) > 192 for n in _TRASH_TIER4_COBBLE)
-            if (empty_now >= min_free and not cobble_over_cap) or drop_ops >= max_drop_ops:
+            over_cap = (
+                any(per_item_counts.get(n, 0) > 192 for n in _TRASH_TIER4_COBBLE)
+                or any(per_item_counts.get(n, 0) > 128 for n in _TRASH_TIER_NETHER)
+                or any(per_item_counts.get(n, 0) > 64 for n in _TRASH_TIER3_DIRT)
+            )
+            if (empty_now >= min_free and not over_cap) or drop_ops >= max_drop_ops:
                 break
 
             cobble_total = per_item_counts.get("cobblestone", 0) + per_item_counts.get("cobbled_deepslate", 0)
@@ -1496,17 +1513,22 @@ class MacroSkills:
                 *((name, tier2_keep) for name in _TRASH_TIER2_DECOR_STONES),
                 *((name, tier2_keep) for name in _TRASH_TIER2_LOOSE_BLOCKS),
                 *((name, 64) for name in _TRASH_TIER3_DIRT),
+                *((name, 128) for name in _TRASH_TIER_NETHER),
                 *((name, 192) for name in _TRASH_TIER4_COBBLE),
             ]
             est_free = empty_now
             made_drop = False
             for name, keep in plan_specs:
-                is_cobble_cap = name in _TRASH_TIER4_COBBLE
+                is_capped = (
+                    name in _TRASH_TIER4_COBBLE
+                    or name in _TRASH_TIER_NETHER
+                    or name in _TRASH_TIER3_DIRT
+                )
                 total = per_item_counts.get(name, 0)
-                if drop_ops >= max_drop_ops or (est_free >= min_free and not (is_cobble_cap and total > keep)):
+                if drop_ops >= max_drop_ops or (est_free >= min_free and not (is_capped and total > keep)):
                     if drop_ops >= max_drop_ops:
                         break
-                    if est_free >= min_free and not any(per_item_counts.get(cn, 0) > 192 for cn in _TRASH_TIER4_COBBLE):
+                    if est_free >= min_free and not over_cap:
                         break
                     continue
                 excess = total - keep
@@ -1519,7 +1541,7 @@ class MacroSkills:
                     continue
                 target_drop = (
                     excess
-                    if (keep == 0 or is_cobble_cap)
+                    if (keep == 0 or is_capped)
                     else min(excess, max(0, min_free - est_free) * 64)
                 )
                 if keep > 0 and target_drop < smallest_slot:
@@ -1528,7 +1550,7 @@ class MacroSkills:
                 while (
                     remaining > 0
                     and drop_ops < max_drop_ops
-                    and (est_free < min_free or (is_cobble_cap and total > keep))
+                    and (est_free < min_free or (is_capped and total > keep))
                 ):
                     if turn_away_yaw is not None and not turned_away:
                         turned_away = True
@@ -3372,6 +3394,16 @@ class MacroSkills:
         }
         if auto_dropped:
             out_mine["auto_dropped"] = auto_dropped
+        # BUG-029: a long mining slice can leave hundreds of low-value blocks
+        # even when several slots are still empty; enforce retention caps here.
+        try:
+            _, cleaned = self._ensure_free_slots(min_free=3)
+        except Exception:
+            cleaned = []
+        if cleaned:
+            out_mine["inventory_cleaned"] = [
+                {"item": d.get("item"), "count": d.get("count")} for d in cleaned
+            ]
         return out_mine
 
     def _recall_and_mine_memory_poi(
