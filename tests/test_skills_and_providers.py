@@ -1616,7 +1616,8 @@ def test_staircase_retries_one_slow_read_before_budget_failure(monkeypatch) -> N
         session.call("status", timeout_s=1.5)
     assert status["pos"] == [0.5, 30.0, 0.5]
     assert calls[0] == 3
-    assert session.last_timeout_path == "status"
+    assert session.last_timeout_path is None
+    assert session.last_retry_path == "status"
     assert read_timeouts[-1] == pytest.approx(1.5)
 
 
@@ -1642,6 +1643,7 @@ def test_staircase_time_budget_reports_timed_out_read(monkeypatch) -> None:
     assert result["ok"] is False
     assert result["stop_reason"] == "time_budget"
     assert result["timeout_path"] == "status"
+    assert result["retried_path"] == "status"
     assert result["action_released"] is True
 
 

@@ -1161,6 +1161,7 @@ class _StairSession:
         self.per_step_timeout = max(0.05, float(per_step_timeout))
         self.last_status: dict[str, Any] = {}
         self.last_timeout_path: str | None = None
+        self.last_retry_path: str | None = None
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
     _IDEMPOTENT_READS = frozenset({"status", "inventory", "get_block", "find_blocks"})
@@ -1185,9 +1186,10 @@ class _StairSession:
                 result = (self.bot.call(path, call_body, timeout_s=timeout, **kwargs)
                           if self.supports_timeout else self.bot.call(path, call_body))
             except httpx.TimeoutException:
-                self.last_timeout_path = path
                 if read_attempt == 0 and path in self._IDEMPOTENT_READS and remaining > 1.0:
+                    self.last_retry_path = path
                     continue
+                self.last_timeout_path = path
                 # A client timeout does not release the server action lease.
                 raise _StairDeadline() from None
             break
@@ -5825,6 +5827,7 @@ class MacroSkills:
                 "direction": direction, "vertical": vertical, "steps_requested": steps,
                 **session.progress, "pos_after": session.last_status.get("pos"),
                 "timeout_path": session.last_timeout_path,
+                "retried_path": session.last_retry_path,
                 "action_released": cleanup.get("released", cleanup.get("stopped", False)),
             }
 
