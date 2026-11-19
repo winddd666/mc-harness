@@ -2081,6 +2081,42 @@ def test_return_repairs_missing_support_under_an_open_recorded_stair(monkeypatch
     assert not world.dig_log
 
 
+def test_return_jump_places_one_block_to_reach_recorded_vertical_waypoint(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 19.0, 0.5), surface_y=40)
+    lower, upper = (0, 19, 0), (0, 20, 0)
+    for y in (19, 20, 21):
+        world.blocks[(0, y, 0)] = "air"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+
+    jumping = False
+
+    def handler(request):
+        nonlocal jumping
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "posture":
+            jumping = bool(json.loads(request.content)["jump"])
+            world.pos[1] = 20.1 if jumping else (20.0 if world.block_at(lower) == "cobblestone" else 19.0)
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        if path == "place":
+            assert jumping
+        response = world.handler(request)
+        if path == "status" and jumping:
+            body = response.json()
+            body["result"]["on_ground"] = False
+            return httpx.Response(200, json=body)
+        return response
+
+    with BotSession("tok", bot_username="VerticalReturn", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        result = engine._walk_waypoints([lower, upper], min_hp_ref=[20.0])
+
+    assert result == (True, None)
+    assert world.pos == [0.5, 20.0, 0.5]
+    assert world.place_log == [(lower, "cobblestone")]
+    assert not world.dig_log
+    assert not jumping
+
+
 def test_waypoint_walk_interpolates_long_hops() -> None:
     """A 35-block climb must be walked cell by cell; one move_exact over it always fails."""
     from mc_agent.skills.mining_dfs import _interpolate_cells

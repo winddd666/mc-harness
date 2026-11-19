@@ -1752,6 +1752,30 @@ class MiningDFSEngine:
             return True
         return False
 
+    def _pillar_to_recorded_step(self, cell: tuple[int, int, int], *, deadline: float | None) -> bool:
+        x, y, z = cell
+        support = (x, y - 1, z)
+        try:
+            st = self.bot.status()
+            if not st.get("on_ground", True) or _floor_pos(st.get("pos")) != support:
+                return False
+            cache: dict[tuple[int, int, int], str] = {}
+            if any(self._get_block_name(pt, cache) not in AIR_BLOCKS for pt in (support, cell, (x, y + 1, z))):
+                return False
+            if not self._is_solid_floor((x, y - 2, z), cache):
+                return False
+            result = self.skills.dig_staircase(vertical="pillar", steps=1, stop_on_ore=False, deadline=deadline)
+            self.dug_during_return += int(result.get("dug_count", 0))
+            if result.get("placed_count"):
+                self.bridge_blocks_placed.append(list(support))
+            position, grounded = self._settled_position(st["pos"])
+        except (ApiError, TypeError, ValueError):
+            return False
+        if grounded and _floor_pos(position) == cell:
+            self._record_corridor(cell)
+            return True
+        return False
+
     def _clear_route_obstruction(self, target_wp: tuple[int, int, int]) -> int:
         """Re-open a recorded corridor cell: dig solid fill, but refuse if it is now flooded/bedrock.
 
@@ -1843,6 +1867,9 @@ class MiningDFSEngine:
                 for previous, hop in zip(hops, hops[1:]):
                     if deadline is not None and time.monotonic() >= deadline:
                         return False, "walk_time_slice"
+                    if hop == wp and previous == (hop[0], hop[1] - 1, hop[2]):
+                        if self._pillar_to_recorded_step(hop, deadline=deadline):
+                            continue
                     if not self._step_to(hop, from_cell=previous, repair_support=(hop == wp or recorded_stair)):
                         stepped_all = False
                         break
