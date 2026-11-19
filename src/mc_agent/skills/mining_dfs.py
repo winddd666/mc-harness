@@ -4672,9 +4672,13 @@ class MiningDFSEngine:
         self.skills = copy.copy(original_skills)
         self.skills.bot = self.bot
         try:
-            return self._run(target=target, goal_count=goal_count, target_y=target_y,
-                             action=action, geofence=geofence,
-                             strategy=strategy, deadline=scoped.deadline)
+            result = self._run(target=target, goal_count=goal_count, target_y=target_y,
+                               action=action, geofence=geofence,
+                               strategy=strategy, deadline=scoped.deadline)
+            if str(action or "explore").strip().lower() == "explore":
+                requested = max(1, min(64, int(goal_count)))
+                result["goal_met"] = int(result.get("target_gained", 0)) >= requested
+            return result
         except _MiningDeadline:
             # Keep interrupted branches retryable. Preserve the observed return route if
             # the cutoff landed inside an edge before its local waypoints were committed.
@@ -4706,6 +4710,8 @@ class MiningDFSEngine:
                 "pos_after": scoped.last_status.get("pos"), "tree": self.snapshot(),
                 "message": "本轮时间预算已用尽，已保留矿井与回撤路径；可用相同 action 继续。",
             }
+            if act == "explore":
+                result["goal_met"] = False
             if act in {"climb_out", "climb"} and scoped.positions:
                 start_y, end_y = scoped.positions[0][1], scoped.positions[-1][1]
                 target_height = int(self.collar_ceiling_y) - 16 if self.collar_ceiling_y is not None else start_y
@@ -5756,8 +5762,11 @@ class MiningDFSEngine:
         if stop_reason == "no_progress":
             out_res["message"] = (
                 "在原地连续多次既没挖到方块也没推进矿井节点（可能卡在死胡同反复重试），已提前结束本轮而不是空耗时间。"
-                "建议直接 mc_skill_mine_dfs(action='reset') 换点，或换目标层（如先 target='iron'）再继续。"
+                "请先调整站位；有井口记录时用 return_collar 回撤，空间树为空时直接 explore 开新井。"
             )
-        if stop_reason == "shaft_exhausted":
-            out_res["message"] = "当前矿井分支与偏移重试均已穷尽；下次调用 reset 或 explore 将换点重开，建议先用 mc_move_to 移动 16 格以上到新区域。"
+        if stop_reason == "shaft_exhausted" and not self.fluid_abandoned_deep:
+            out_res["message"] = (
+                "当前矿井分支与偏移重试均已穷尽；请先移到 16 格以外的安全新点位，再直接 explore。"
+                "若仍在地下，有井口记录时用 return_collar，空间树为空时用 climb_out 回撤。"
+            )
         return out_res

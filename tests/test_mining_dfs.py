@@ -551,6 +551,7 @@ def test_mining_dfs_collar_switchback_seal_and_spine() -> None:
     assert res["ok"] is True
     assert res["stop_reason"] == "quota_reached"
     assert res["target_gained"] >= 3
+    assert res["goal_met"] is True
     assert res["breaches_sealed"] >= 1
     assert res["tree"]["sealed_count"] >= 1
     node_kinds = {n["kind"] for n in res["tree"]["nodes"]}
@@ -1124,6 +1125,9 @@ def test_zero_displacement_stair_down_never_spins_duplicate_spine_nodes() -> Non
         res = skills.mine_dfs(target="iron", goal_count=2, target_y=16, strategy="radar", max_duration_s=10.0)
 
     assert res["stop_reason"] in {"shaft_exhausted", "no_progress"}
+    assert res["goal_met"] is False
+    assert "action='reset'" not in res["message"]
+    assert "reset 或 explore" not in res["message"]
     # Node count must remain tiny (never exploding to hundreds/thousands of duplicate Spine nodes)
     assert res["tree"]["node_count"] <= 16
     anchors = [tuple(n["anchor"]) for n in res["tree"]["nodes"]]
@@ -2239,3 +2243,35 @@ def test_escape_primitive_passes_shared_deadline_to_new_skill_contract(monkeypat
         monkeypatch.setattr(eng.skills, "dig_staircase", stairs)
         eng._escape_primitive("dig_staircase", deadline=1234.0, steps=1, direction="north", vertical="up")
     assert received == [1234.0]
+
+
+def test_partial_slice_success_reports_goal_unmet_without_claiming_ore(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    with BotSession("tok", bot_username="PartialGoal", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+
+        def partial_edge(**kwargs):
+            return {"steps_done": 0, "stop_reason": "time_slice", "breaches_sealed": 0,
+                    "catch_placed": 0, "deferred_added": 0, "mined_ores": [],
+                    "waypoints": [(0, 20, 0)], "end_anchor": [0, 20, 0]}
+
+        monkeypatch.setattr(eng, "_dig_stair_down_edge", partial_edge)
+        result = eng.run(target="iron", goal_count=4, target_y=16, max_duration_s=5.0)
+    assert result["ok"] is True
+    assert result["stop_reason"] == "time_slice_progress"
+    assert result["goal_met"] is False
+    assert result["target_gained"] == 0
+
+
+def test_no_progress_hint_does_not_recommend_a_redundant_reset(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    monkeypatch.setattr(mining, "MAX_IDLE_ITERATIONS", 0)
+    with BotSession("tok", bot_username="IdleHint", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        result = eng.run(target="iron", goal_count=4, target_y=16, max_duration_s=5.0)
+    assert result["stop_reason"] == "no_progress"
+    assert "reset" not in result["message"]
+    assert "空间树为空时直接 explore" in result["message"]
+    assert result["goal_met"] is False
