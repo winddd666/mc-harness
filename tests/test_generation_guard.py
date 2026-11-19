@@ -1421,4 +1421,107 @@ def test_nether_deep_lava_preemption_prioritizes_escape_over_nearby_mob(monkeypa
     assert state["in_lava"] is False
 
 
+def test_non_combat_fire_fall_hurt_skips_shield_spam_and_water_trident_equips_shield(monkeypatch):
+    """Covers r12 ds_ds_3_village on_fire/fall shield-spam & hy4_hy_9_deep_water trident offhand shield block."""
+    clock = [800.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+
+    # 1) Non-combat on_fire / fall hurt without close hostile must NOT raise shield or repeatedly cancel LLM
+    calls: list[tuple[str, dict]] = []
+    ev_state = {"seq": 1, "source": "on_fire", "hp": 17.0, "food": 20}
+
+    class _EnvHurtBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            payload = dict(body or {})
+            calls.append((action, payload))
+            if action == "status":
+                return {
+                    "pos": [0.5, 64.0, 0.5],
+                    "health": ev_state["hp"],
+                    "food": ev_state["food"],
+                    "alive": True,
+                    "ready": True,
+                    "on_ground": True,
+                    "in_water": False,
+                    "in_lava": False,
+                    "blocking": False,
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                rows = (
+                    [{"seq": ev_state["seq"], "type": "hurt", "health": ev_state["hp"], "source": ev_state["source"]}]
+                    if ev_state["seq"] > since
+                    else []
+                )
+                return {"events": rows, "last_seq": ev_state["seq"]}
+            if action == "inventory":
+                return {"items": [{"name": "shield", "count": 1}]}
+            return {"ok": True}
+
+    guard = GenerationGuard(_EnvHurtBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    assert guard.poll() is None  # on_fire tick with hp=17, no water_bucket -> zero fake shield/cancel!
+    clock[0] += 5.0
+    ev_state["seq"] = 2
+    ev_state["source"] = "fall"
+    ev_state["hp"] = 11.0
+    assert guard.poll() is None  # mild fall with hp=11, no hostile -> zero fake raise_shield!
+    assert not any(a in ("posture", "look") for a, _ in calls)
+
+    # Critical fall (hp <= 6.0) still notifies once for replan, without raising shield
+    clock[0] += 5.0
+    ev_state["seq"] = 3
+    ev_state["hp"] = 4.0
+    inc_crit = guard.poll()
+    assert inc_crit is not None and "fresh_hurt" in inc_crit["reasons"]
+    assert not any(a["action"] == "raise_shield" for a in inc_crit["actions"])
+
+    # 2) Open-ocean trident hurt when escape_water fails equips shield from bag & blocks while jumping!
+    monkeypatch.setattr(
+        MacroSkills,
+        "escape_water",
+        lambda self: {"ok": False, "in_water": True, "pos_after": [0.5, 62.5, 0.5]},
+    )
+    water_calls: list[tuple[str, dict]] = []
+
+    class _DeepWaterTridentBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            payload = dict(body or {})
+            water_calls.append((action, payload))
+            if action == "status":
+                return {
+                    "pos": [0.5, 62.5, 0.5],
+                    "health": 10.0,
+                    "food": 20,
+                    "alive": True,
+                    "ready": True,
+                    "in_water": True,
+                    "submerged": False,
+                    "on_ground": False,
+                    "blocking": False,
+                    "nearest_hostile": {"id": 44, "name": "drowned", "dist": 11.0},
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                rows = [{"seq": 1, "type": "hurt", "health": 10.0, "source": "trident", "source_entity": {"id": 44}}] if since < 1 else []
+                return {"events": rows, "last_seq": 1}
+            if action == "inventory":
+                return {"items": [{"name": "shield", "count": 1}], "offhand": None}
+            return {"ok": True}
+
+    guard_w = GenerationGuard(_DeepWaterTridentBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(_DeepWaterTridentBot()))
+    inc_w = guard_w.poll()
+    assert inc_w is not None
+    act_names = [a["action"] for a in inc_w["actions"]]
+    assert "escape_water" in act_names
+    assert "equip_shield" in act_names
+    assert "raise_shield" in act_names
+    assert any(act == "equip" and pl == {"item": "shield", "slot": "off-hand"} for act, pl in water_calls)
+    assert any(act == "posture" and pl.get("shield") is True and pl.get("jump") is True for act, pl in water_calls)
+
+
+
 

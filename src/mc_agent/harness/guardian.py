@@ -44,6 +44,30 @@ LOW_HP_BUNKER_MAX = 10.0
 # Ranged damage: sprinting away in open cave air just makes the firing line longer.
 RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "skeleton"})
 
+# Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
+FIRE_HURT_SOURCES = frozenset({"on_fire", "in_fire", "fire"})
+NON_COMBAT_HURT_SOURCES = frozenset(
+    {
+        "on_fire",
+        "in_fire",
+        "fire",
+        "hot_floor",
+        "fall",
+        "drown",
+        "starve",
+        "wither",
+        "magic",
+        "poison",
+        "cactus",
+        "sweet_berry_bush",
+        "freeze",
+        "dry_out",
+        "out_of_world",
+        "falling_stalactite",
+        "stalagmite",
+    }
+)
+
 # Tools that already manage combat/stabilization directly and must not be recursively preempted.
 NON_PREEMPTABLE_TOOLS = frozenset(
     {
@@ -139,6 +163,8 @@ class GenerationGuard:
         self.last_reaction = float("-inf")
         self._last_water_escape_at = float("-inf")
         self._last_pre_hurt_melee_at = float("-inf")
+        self._last_fire_douse_at = float("-inf")
+        self._last_non_combat_alert_at = float("-inf")
         self.previous_health: float | None = None
         self.previous_ready: bool | None = None
         self.cursor = int(getattr(bot, "_last_event_seq", 0) or 0)
@@ -496,6 +522,24 @@ class GenerationGuard:
             self.retry_after_ready = False
         should_eat = needs_food or pending_ready_eat
         hurt = bool(hurts) or dropped
+        nh_name0, nh_dist0, _, _ = self._extract_hostile_info(status)
+        non_combat_only_hurt = (
+            hurt
+            and bool(hurts)
+            and not in_lava
+            and not in_water
+            and not deaths
+            and all(
+                str(h.get("source") or "").strip().lower() in NON_COMBAT_HURT_SOURCES
+                and not (h.get("source_entity") or h.get("likely_attacker"))
+                for h in hurts
+            )
+            and (not nh_name0 or nh_dist0 > 8.0)
+        )
+        fire_hurt_only = non_combat_only_hurt and any(
+            str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts
+        )
+        hp_cur = float(health) if isinstance(health, (int, float)) else 20.0
         if hurt:
             self._pre_hurt_suppress_until = float("-inf")
 
@@ -510,8 +554,26 @@ class GenerationGuard:
             or (pre_trigger is not None and pre_trigger.get("source") == "pre_hurt_creeper")
             or any(str(h.get("source") or "") in IN_WALL_HURT_SOURCES for h in hurts)
         )
+        effective_combat_hurt = hurt and not non_combat_only_hurt
+        critical_non_combat = non_combat_only_hurt and hp_cur <= 6.0 and (now - self._last_non_combat_alert_at >= 10.0)
+        can_try_fire_douse = (
+            fire_hurt_only
+            and not status.get("busy")
+            and "nether" not in str(status.get("dimension") or "").lower()
+            and (now - self._last_fire_douse_at >= 12.0)
+        )
 
-        if not (hurt or deaths or disconnected or needs_float or should_eat or in_lava or pre_trigger is not None):
+        if not (
+            effective_combat_hurt
+            or critical_non_combat
+            or can_try_fire_douse
+            or deaths
+            or disconnected
+            or needs_float
+            or should_eat
+            or in_lava
+            or pre_trigger is not None
+        ):
             self._consecutive_flees = 0
             self._shield_only_streak = 0
             return None
@@ -520,7 +582,7 @@ class GenerationGuard:
 
         actions: list[dict[str, Any]] = []
         reasons: list[str] = []
-        if hurt:
+        if effective_combat_hurt or critical_non_combat:
             reasons.append("fresh_hurt")
         if pre_trigger is not None:
             reasons.append(str(pre_trigger["source"]))
@@ -604,8 +666,47 @@ class GenerationGuard:
                             self._pre_hurt_suppress_block = blk_sc
                             self._pre_hurt_suppress_until = now + 15.0
             elif hurt and in_water:
+                hurt_src_w = str(hurts[-1].get("source") or "").strip().lower() if hurts else ""
+                att_w = (hurts[-1].get("source_entity") or hurts[-1].get("likely_attacker")) if hurts else status.get("nearest_hostile")
                 if not _already("escape_water"):
                     actions.append(self._action("escape_water", lambda: self._skills().escape_water()))
+                esc_succeeded = any(a.get("action") == "escape_water" and a.get("ok") for a in actions)
+                if (
+                    not esc_succeeded
+                    and has_shield
+                    and not status.get("blocking")
+                    and (hurt_src_w in RANGED_HURT_SOURCES or (isinstance(att_w, dict) and att_w.get("id") is not None))
+                ):
+                    offhand_w = inv.get("offhand") if isinstance(inv, dict) else None
+                    if (
+                        isinstance(inv, dict)
+                        and "offhand" in inv
+                        and str((offhand_w or {}).get("name") or "").removeprefix("minecraft:") != "shield"
+                        and counts.get("shield", 0) > 0
+                    ):
+                        actions.append(self._action("equip_shield", lambda: self.bot.call("equip", {"item": "shield", "slot": "off-hand"})))
+                    if isinstance(att_w, dict) and att_w.get("id") is not None:
+                        actions.append(self._action("face_attacker", lambda: self.bot.call("look", {"entity_id": att_w["id"]})))
+                    actions.append(
+                        self._action(
+                            "raise_shield",
+                            lambda: self.bot.call(
+                                "posture",
+                                {
+                                    "shield": True,
+                                    "jump": True,
+                                    "sneak": bool(status.get("sneaking")),
+                                },
+                            ),
+                        )
+                    )
+            elif non_combat_only_hurt and not in_water and not in_lava:
+                if can_try_fire_douse:
+                    self._last_fire_douse_at = now
+                    if counts.get("water_bucket", 0) > 0:
+                        actions.append(self._action("douse_fire", lambda: self.combat_env.build_tactical("place_water_feet")))
+                if critical_non_combat:
+                    self._last_non_combat_alert_at = now
             elif hurt and not in_water and not in_lava:
                 attacker = (hurts[-1].get("source_entity") or hurts[-1].get("likely_attacker")) if hurts else status.get("nearest_hostile")
                 hurt_src = str(hurts[-1].get("source") or "") if hurts else ""
@@ -736,7 +837,7 @@ class GenerationGuard:
                             self._consecutive_flees = 0
 
             if should_eat and (
-                not hurt
+                not effective_combat_hurt
                 or any(
                     a["action"] in {"emergency_bunker", "combat_or_flee", "subcortical_combat"} and a["ok"]
                     for a in actions
@@ -778,10 +879,11 @@ class GenerationGuard:
         finally:
             self._in_reflex = False
 
-        if not actions and not (deaths or disconnected or not ready or status.get("alive") is False or status.get("busy")):
+        if not actions and not critical_non_combat and not (deaths or disconnected or not ready or status.get("alive") is False or status.get("busy")):
             return None
         replan = bool(
-            hurt
+            effective_combat_hurt
+            or critical_non_combat
             or pre_trigger is not None
             or in_lava
             or deaths
