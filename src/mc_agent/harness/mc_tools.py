@@ -837,7 +837,11 @@ class McToolset:
             payload["x"] = x
             payload["z"] = z
             if y is not None:
-                payload["y"] = y
+                yf = float(y)
+                last_y = float(self._last_block_pos[1]) if self._last_block_pos and len(self._last_block_pos) >= 3 else None
+                bogus_zero_y = (yf == 0.0) and (last_y is None or abs(last_y) >= 16.0)
+                if -64.0 <= yf <= 320.0 and not bogus_zero_y:
+                    payload["y"] = yf
         elif entity_id is not None:
             payload["entity_id"] = entity_id
         else:
