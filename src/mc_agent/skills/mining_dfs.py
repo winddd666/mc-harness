@@ -1647,7 +1647,13 @@ class MiningDFSEngine:
                 return True
         return False
 
-    def _step_to(self, cell: tuple[int, int, int], *, from_cell: tuple[int, int, int] | None = None) -> bool:
+    def _step_to(
+        self,
+        cell: tuple[int, int, int],
+        *,
+        from_cell: tuple[int, int, int] | None = None,
+        repair_support: bool = False,
+    ) -> bool:
         """One-cell traversal that also handles step-ups, gaps and 1-block drops.
 
         Live n0112: repeated `backtrack_blocked@...,(feet=air,head=air)` — nothing obstructed,
@@ -1659,7 +1665,7 @@ class MiningDFSEngine:
             from_cell is not None and cell[1] == from_cell[1] + 1
             and abs(cell[0] - from_cell[0]) + abs(cell[2] - from_cell[2]) == 1
         )
-        if jump_first and self._hop_up_to(cell):
+        if jump_first and self._hop_up_to(cell, repair_support=repair_support):
             return True
         if self._move_exact(cell):
             return True
@@ -1691,7 +1697,7 @@ class MiningDFSEngine:
                 return True
         return False
 
-    def _hop_up_to(self, cell: tuple[int, int, int], *, ms: int = 700) -> bool:
+    def _hop_up_to(self, cell: tuple[int, int, int], *, ms: int = 700, repair_support: bool = False) -> bool:
         """Jump-step onto an air cell one block higher (move_exact cannot jump).
 
         Live s19: the route block was reported as feet=air,head=air — nothing was obstructing,
@@ -1708,13 +1714,21 @@ class MiningDFSEngine:
         if cell[1] - cur[1] != 1 or max(abs(cell[0] - cur[0]), abs(cell[2] - cur[2])) > 1:
             return False
         x, y, z = cell
+        support = (x, y - 1, z)
+        cache: dict[tuple[int, int, int], str] = {}
         try:
             if (
                 self._get_block_name(cell) not in PASSABLE_BLOCKS
                 or self._get_block_name((x, y + 1, z)) not in PASSABLE_BLOCKS
-                or not self._is_solid_floor((x, y - 1, z), {})
             ):
                 return False
+            if not self._is_solid_floor(support, cache):
+                # Repair an open, recorded stair from the neighboring step. The
+                # bot can already be standing in the missing support cell.
+                if not repair_support or support == cur or cache.get(support) not in AIR_BLOCKS:
+                    return False
+                if not self._place_bridge_block(support, cache) or not self._is_solid_floor(support, cache):
+                    return False
         except ApiError:
             return False
         yaw = math.atan2(-(cell[0] + 0.5 - float(pos[0])), cell[2] + 0.5 - float(pos[2]))
@@ -1823,7 +1837,7 @@ class MiningDFSEngine:
                 for previous, hop in zip(hops, hops[1:]):
                     if deadline is not None and time.monotonic() >= deadline:
                         return False, "walk_time_slice"
-                    if not self._step_to(hop, from_cell=previous):
+                    if not self._step_to(hop, from_cell=previous, repair_support=(hop == wp)):
                         stepped_all = False
                         break
                 if stepped_all:

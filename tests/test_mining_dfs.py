@@ -2052,6 +2052,30 @@ def test_corridor_repair_digs_fill_but_refuses_flooded_cells() -> None:
         assert eng._clear_route_obstruction((0, 20, -3)) == -1     # flooded -> give up
 
 
+def test_return_repairs_missing_support_under_an_open_recorded_stair(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 19.0, 0.5), surface_y=40)
+    support = (0, 19, 0)
+    lower = (1, 19, 0)
+    upper = (0, 20, 0)
+    for cell in (support, lower, upper, (1, 20, 0), (1, 21, 0), (0, 21, 0)):
+        world.blocks[cell] = "air"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+
+    def handler(request):
+        if request.url.path.endswith("/place"):
+            assert tuple(math.floor(v) for v in world.pos) == lower
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="RepairStairSupport", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        result = engine._walk_waypoints([upper, lower], reverse=True, min_hp_ref=[20.0])
+
+    assert result == (True, None)
+    assert world.pos == [0.5, 20.0, 0.5]
+    assert world.place_log == [(support, "cobblestone")]
+    assert not world.dig_log
+
+
 def test_waypoint_walk_interpolates_long_hops() -> None:
     """A 35-block climb must be walked cell by cell; one move_exact over it always fails."""
     from mc_agent.skills.mining_dfs import _interpolate_cells
@@ -2323,7 +2347,7 @@ def test_waypoint_interpolation_checks_deadline_between_hops(monkeypatch) -> Non
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
     visited: list[tuple[int, int, int]] = []
 
-    def step(cell, *, from_cell):
+    def step(cell, *, from_cell, repair_support):
         visited.append(cell)
         clock.now += 1.0
         return True
