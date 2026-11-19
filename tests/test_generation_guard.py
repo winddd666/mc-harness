@@ -1219,9 +1219,13 @@ def test_bug_010_respawn_not_ready_skips_eat_and_retries_after_ready(monkeypatch
     assert guard.failures == 0
     assert not any(a["action"] == "eat" for a in inc_death["actions"])
 
+    clock[0] += 4.0
+    state["events"] = []
+    assert guard.poll() is None  # The same loading window must not cancel the next generation.
+    assert guard.retry_after_ready is True
+
     # 2) Even if ready=True arrives, if use_item returns ApiError('not_ready') or 'wrong_server', do NOT count as failure
     clock[0] += 0.5
-    state["events"] = []
     state["ready"] = True
     state["alive"] = True
     state["eat_api_error"] = "wrong_server"
@@ -3511,6 +3515,93 @@ def test_r22_fireball_skips_dig_cover_and_same_spot_arrow_escalates_to_flee(monk
     assert inc_a2 is not None
     assert len(dig_cover_calls) == 1  # NOT re-dug on the exact same broken block!
     assert any(a["action"] == "combat_or_flee" for a in inc_a2["actions"])
+
+
+@pytest.mark.parametrize("scenario", ["lava_rim", "cliff", "airborne", "sprint_lava", "path_airborne", "close_respawn"])
+def test_bug026_flee_probes_player_width_and_rechecks_each_landing(scenario):
+    import math
+
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    calls = []
+    status = {
+        "pos": [0.5, 64, 0.83], "alive": True, "ready": True, "on_ground": scenario != "airborne",
+        "in_lava": False, "dimension": "the_nether", "last_death": {"t": 10},
+    }
+
+    class RetreatBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, z = body["pos"]
+                name = "air" if y >= 64 else "netherrack"
+                if scenario == "lava_rim" and x >= 1 and z >= 1 and y == 63:
+                    name = "lava"
+                if scenario == "cliff" and (x != 0 or z not in {0, 1}) and y > 60:
+                    name = "air"
+                return {"name": name}
+            calls.append((action, body))
+            if action == "look":
+                status["yaw"] = body["yaw"]
+            if action == "control":
+                ux, uz = yaw_to_unit_xz(status["yaw"])
+                status["pos"] = [0.5 + 2.26 * ux, 64, 0.83 + 2.26 * uz]
+                if scenario == "sprint_lava":
+                    status.update(in_lava=True, on_ground=False)
+                if scenario == "close_respawn":
+                    status["last_death"] = {"t": 20}
+            if action == "move_to" and scenario == "path_airborne":
+                assert body["y"] == 64
+                status.update(pos=[16.82, 50, 0.83], on_ground=False)
+            return {"ok": True}
+
+    result = CombatEnv(RetreatBot()).flee([-3, 64, 0.83], allow_shaft_seal=False)
+    if scenario == "lava_rim":
+        assert result["ok"]
+        assert status["yaw"] != pytest.approx(-math.pi / 2)
+    elif scenario in {"cliff", "airborne"}:
+        assert not result["ok"]
+        assert not calls
+    elif scenario == "close_respawn":
+        assert not result["ok"]
+        assert result["respawned"] is True
+        assert [action for action, _ in calls] == ["look", "control"]
+    else:
+        assert not result["ok"]
+        assert result["reason"] == "unsafe_landing"
+        assert [action for action, _ in calls] == (
+            ["look", "control"] if scenario == "sprint_lava" else ["look", "control", "move_to"]
+        )
+
+
+def test_bug009_busy_hungry_bot_keeps_generation_until_it_can_eat(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {"pos": [0.5, 64, 0.5], "health": 20, "food": 12, "alive": True, "ready": True, "busy": "dig"}
+    actions = []
+
+    class BusyBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "inventory":
+                return {"items": [{"name": "bread", "count": 1}]}
+            actions.append(action)
+            return {"ok": True}
+
+    guard = GenerationGuard(BusyBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    assert guard.poll() is None
+    assert actions == []
+
+    status["busy"] = None
+    clock[0] += 0.5
+    incident = guard.poll()
+    assert incident["requires_replan"] is False
+    assert actions == ["use_item"]
 
 
 

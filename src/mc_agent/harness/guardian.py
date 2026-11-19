@@ -44,7 +44,7 @@ IN_WALL_HURT_SOURCES = frozenset({"in_wall", "suffocation", "cramming", "inside_
 LOW_HP_BUNKER_MAX = 10.0
 
 # Ranged damage: sprinting away in open cave air just makes the firing line longer.
-RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "skeleton"})
+RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "wither_skull", "skeleton"})
 
 # Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
 LAVA_HURT_SOURCES = frozenset({"lava"})
@@ -795,9 +795,11 @@ class GenerationGuard:
         if deaths or disconnected or not ready or status.get("alive") is False:
             self._consecutive_flees = 0
             self._water_hurt_streak = 0
-            if needs_food or self.retry_after_ready:
+            if needs_food and not self.retry_after_ready:
                 self.retry_after_ready = True
                 self.events.emit("guardian.eat_deferred", reason="deaths_or_not_ready", retry_after_ready=True)
+            if not (deaths or disconnected):
+                return None
             if not disconnected and status.get("busy"):
                 try:
                     self.bot.call("stop")
@@ -816,7 +818,7 @@ class GenerationGuard:
                 except Exception:
                     pass
             else:
-                return self._incident(status, reasons + ["unexpected_action_still_busy"], actions, fresh)
+                return None
 
         self._in_reflex = True
         try:
@@ -1080,22 +1082,20 @@ class GenerationGuard:
                         and status.get("on_ground") is True
                     ):
                         to_yaw_r, _ = aim_yaw_pitch(pos_r, att_pos_r)
-                        scan_side = self.combat_env.scan_safe_yaws(
-                            pos_r,
-                            to_yaw_r + (math.pi / 2.0),
-                            dist=2.0,
-                            angles_deg=(0, 180),
-                        )
-                        chosen_side = float(scan_side.get("best_yaw") if scan_side.get("best_yaw") is not None else (to_yaw_r + math.pi / 2.0))
+                        self.combat_env.invalidate_block_cache()
+                        for offset in (math.pi / 2.0, -math.pi / 2.0):
+                            chosen_side = to_yaw_r + offset
+                            route = self.combat_env.probe_retreat(pos_r, chosen_side, 3.5)
+                            if route is not None and not route[1]:
+                                def _sidestep_2m() -> dict[str, Any]:
+                                    self.bot.call("look", {"yaw": chosen_side, "pitch": 0.0})
+                                    return self.bot.call(
+                                        "control",
+                                        {"forward": True, "sprint": True, "jump": False, "ms": 400, "stop_on": ["death"]},
+                                    )
 
-                        def _sidestep_2m() -> dict[str, Any]:
-                            self.bot.call("look", {"yaw": chosen_side, "pitch": 0.0})
-                            return self.bot.call(
-                                "control",
-                                {"forward": True, "sprint": True, "jump": False, "ms": 480, "stop_on": ["death"]},
-                            )
-
-                        actions.append(self._action("lateral_sidestep", _sidestep_2m))
+                                actions.append(self._action("lateral_sidestep", _sidestep_2m))
+                                break
                         if has_shield:
                             self._equip_and_raise_shield_for_water(
                                 {**status, "in_water": False, "jumping": False},
@@ -1104,8 +1104,8 @@ class GenerationGuard:
                                 attacker=attacker if isinstance(attacker, dict) else status.get("nearest_hostile"),
                             )
                     att_name_r = str((att_obj or {}).get("name") or nh_name or "").removeprefix("minecraft:").strip().lower()
-                    skip_cover_for_fireball = (
-                        hurt_src in {"fireball", "small_fireball"}
+                    skip_cover_for_blast = (
+                        hurt_src in {"fireball", "small_fireball", "wither_skull"}
                         or att_name_r in {"blaze", "ghast"}
                         or bool(status.get("on_fire"))
                     )
@@ -1120,7 +1120,7 @@ class GenerationGuard:
                         and (now - self._last_dig_cover_at < 20.0)
                     )
                     already_in_dug_cover = (
-                        not skip_cover_for_fireball
+                        not skip_cover_for_blast
                         and not same_spot_cover_ineffective
                         and (now < self._ranged_cover_active_until)
                         and hp_val > 10.0
@@ -1128,7 +1128,7 @@ class GenerationGuard:
                     )
                     recent_cover_fail = already_blocking and ranged_hurt_only and hp_val > 10.0 and (now - self._last_dig_cover_fail_at < 15.0)
                     cover: dict[str, Any] | None = None
-                    if not skip_cover_for_fireball and not same_spot_cover_ineffective and not already_in_dug_cover and not recent_cover_fail:
+                    if not skip_cover_for_blast and not same_spot_cover_ineffective and not already_in_dug_cover and not recent_cover_fail:
                         cover = self._action("dig_cover", lambda: self._skills().dig_cover_pocket())
                         actions.append(cover)
                         self._last_dig_cover_block = cur_blk_r
@@ -1139,7 +1139,7 @@ class GenerationGuard:
                             self._last_dig_cover_fail_at = now
                     cover_ok = bool(cover and cover.get("ok")) or already_in_dug_cover
                     if not cover_ok and (
-                        skip_cover_for_fireball or not already_blocking or hp_val <= 10.0 or not ranged_hurt_only
+                        skip_cover_for_blast or not already_blocking or hp_val <= 10.0 or not ranged_hurt_only
                     ):
                         if (
                             has_shield
@@ -1156,12 +1156,10 @@ class GenerationGuard:
                             )
                         cf = self._action(
                             "combat_or_flee",
-                            lambda: self._skills().defend_or_flee(
-                                attacker=attacker,
-                                counts=counts,
-                                health=health,
-                                urgent=True,
-                                geofence=self.geofence,
+                            lambda: self.combat_env.flee(att_pos_r)
+                            if "nether" in str(status.get("dimension") or "").lower()
+                            else self._skills().defend_or_flee(
+                                attacker=attacker, counts=counts, health=health, urgent=True, geofence=self.geofence,
                             ),
                         )
                         actions.append(cf)
@@ -1965,7 +1963,7 @@ class GenerationGuard:
             "actions": actions,
             "status": {
                 k: status.get(k)
-                for k in ("pos", "health", "food", "ready", "alive", "busy", "in_water", "blocking")
+                for k in ("pos", "health", "food", "ready", "alive", "busy", "in_water", "in_lava", "on_ground", "blocking")
             },
             "event_seqs": [
                 e.get("seq")

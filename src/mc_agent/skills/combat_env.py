@@ -352,26 +352,31 @@ class CombatEnv:
         self.geofence = geofence
         self.block_cache_ttl = max(0.2, float(block_cache_ttl))
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
-        self._block_cache: dict[tuple[int, int, int], tuple[str, float]] = {}
+        self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
 
     def invalidate_block_cache(self) -> None:
         self._block_cache.clear()
         self._hazard_cache = None
 
-    def _get_block_name(self, x: int, y: int, z: int) -> str:
+    def _get_block_name(self, x: int, y: int, z: int, *, strict: bool = False) -> str:
         key = (int(x), int(y), int(z))
         now = time.monotonic()
         cached = self._block_cache.get(key)
         if cached is not None and (now - cached[1]) <= self.block_cache_ttl:
-            return cached[0]
-        try:
-            res = self.bot.call("get_block", {"pos": [key[0], key[1], key[2]]})
-            name = _clean_block_name(res)
-        except Exception:
-            name = "stone"
-        self._block_cache[key] = (name, now)
-        return name
+            name = cached[0]
+        else:
+            try:
+                res = self.bot.call("get_block", {"pos": [key[0], key[1], key[2]]})
+                name = _clean_block_name(res) if res.get("name") or res.get("type") else ""
+            except (RunTimedOut, RequestCancelled):
+                raise
+            except Exception:
+                name = None
+            self._block_cache[key] = (name, now)
+        if name or strict:
+            return name or ""
+        return "stone" if name is None else "air"
 
     def _inventory_counts_and_shield(self, inv: dict[str, Any] | None = None) -> tuple[dict[str, int], bool, str | None]:
         raw = inv if isinstance(inv, dict) else self.bot.call("inventory", method="GET")
@@ -596,6 +601,42 @@ class CombatEnv:
             "cornered": True,
             "candidates": candidates,
         }
+
+    def probe_retreat(self, origin: Sequence[float], yaw: float, dist: float) -> tuple[int, bool] | None:
+        """Check support and clearance under the entire hitbox along a short retreat."""
+        ox, oy, oz = map(float, origin[:3])
+        ux, uz = yaw_to_unit_xz(yaw)
+        start_y = math.floor(oy + 0.05)
+        walk_y = start_y
+        needs_jump = False
+        samples = max(1, math.ceil(dist / 0.45))
+        for step in range(1, samples + 1):
+            travel = dist * step / samples
+            nx, nz = ox + ux * travel, oz + uz * travel
+            if not self._point_allowed(nx, nz, action="flee"):
+                return None
+            bx, bz = math.floor(nx), math.floor(nz)
+            foot = self._get_block_name(bx, walk_y, bz, strict=True)
+            if not foot or foot in HAZARD_BLOCK_TYPES:
+                return None
+            if _is_solid_ground(foot):
+                walk_y += 1
+                needs_jump = True
+            elif _is_passable(self._get_block_name(bx, walk_y - 1, bz, strict=True)):
+                walk_y -= 1
+            if abs(walk_y - start_y) > 1:
+                return None
+            for hx, hz in _hitbox_columns(nx, nz):
+                foot, head, floor = (
+                    self._get_block_name(hx, walk_y + dy, hz, strict=True) for dy in (0, 1, -1)
+                )
+                if not _is_passable(foot) or not _is_passable(head) or not floor or floor in HAZARD_BLOCK_TYPES:
+                    return None
+                if (hx, hz) != (bx, bz) and _is_passable(floor):
+                    floor = self._get_block_name(hx, walk_y - 2, hz, strict=True)
+                if not floor or floor in HAZARD_BLOCK_TYPES or not _is_solid_ground(floor):
+                    return None
+        return walk_y, needs_jump
 
     def _query_hazards(self, bx: int, by: int, bz: int, radius: int) -> list[dict[str, Any]]:
         now = time.monotonic()
@@ -1307,9 +1348,13 @@ class CombatEnv:
         urgent: bool = True,
         allow_shaft_seal: bool = True,
     ) -> dict[str, Any]:
-        """Disengage from `threat_pos`: seal shaft if inside corridor, else sprint safe ray + pathfind away."""
+        """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
         st0 = self.bot.status()
-        pos0 = st0.get("pos") or [0.0, 64.0, 0.0]
+        pos0 = st0.get("pos")
+        if not pos0 or st0.get("alive") is False or st0.get("ready") is False:
+            return {"ok": False, "mode": "flee", "reason": "not_ready", "moved_dist": 0.0, "pos_after": pos0}
+        if st0.get("in_lava") or st0.get("on_ground") is False:
+            return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0, "pos_after": pos0}
         if threat_pos is None:
             nh = st0.get("nearest_hostile")
             if isinstance(nh, dict) and isinstance(nh.get("pos"), list):
@@ -1330,10 +1375,16 @@ class CombatEnv:
         else:
             pref_yaw = float(st0.get("yaw") or 0.0) + math.pi
 
-        scan = self.scan_safe_yaws(pos0, pref_yaw, dist=min(4.0, max(2.5, float(distance) * 0.35)))
-        chosen_yaw = scan["best_yaw"] if scan["best_yaw"] is not None else pref_yaw
-        needs_jump = bool(scan.get("best_needs_jump"))
+        self.invalidate_block_cache()
+        for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180):
+            chosen_yaw = pref_yaw + math.radians(angle)
+            route = self.probe_retreat(pos0, chosen_yaw, 3.5)
+            if route is not None:
+                break
+        else:
+            return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0, "pos_after": pos0}
 
+        _, needs_jump = route
         try:
             self.bot.call("look", {"yaw": chosen_yaw, "pitch": 0.0})
             self.bot.call(
@@ -1342,75 +1393,77 @@ class CombatEnv:
                     "forward": True,
                     "sprint": True,
                     "jump": needs_jump or bool(st0.get("in_water")),
-                    "ms": 950 if urgent else 650,
+                    "ms": 450 if urgent else 350,
+                    "stop_on": ["death"],
                 },
             )
         except (ApiError, httpx.HTTPError) as err:
             if isinstance(err, httpx.HTTPError):
                 self._best_effort_stop()
 
-        st_mid = self._safe_status(st0)
-        if st_mid.get("alive") is False:
-            return {"ok": False, "mode": "respawned", "moved_dist": 0.0, "pos_after": st_mid.get("pos"), "respawned": True}
-        mid_pos = st_mid.get("pos") or pos0
-        mid_moved = math.hypot(float(mid_pos[0]) - float(pos0[0]), float(mid_pos[2]) - float(pos0[2]))
-        if mid_moved > 64.0:
+        def retreat_result(st: dict[str, Any]) -> dict[str, Any]:
+            pos = st.get("pos") or pos0
+            moved = math.hypot(float(pos[0]) - float(pos0[0]), float(pos[2]) - float(pos0[2]))
+            respawned = (
+                st.get("alive") is False
+                or moved > 64.0
+                or (st.get("dimension") and st0.get("dimension") and st["dimension"] != st0["dimension"])
+                or (st.get("last_death") is not None and st["last_death"] != st0.get("last_death"))
+            )
+            unsafe = (
+                st.get("ready") is False or st.get("in_lava") or st.get("in_water") or st.get("on_ground") is False
+            )
             return {
-                "ok": False,
-                "mode": "respawned",
-                "moved_dist": round(mid_moved, 2),
-                "pos_after": mid_pos,
-                "respawned": True,
+                "ok": not respawned and not unsafe and moved >= 1.5,
+                "mode": "respawned" if respawned else "flee",
+                "moved_dist": round(moved, 2),
+                "pos_after": pos,
+                **({"respawned": True} if respawned else {}),
+                **({"reason": "unsafe_landing"} if unsafe else {}),
             }
 
+        st_mid = self._safe_status({**st0, "ready": False})
+        result = retreat_result(st_mid)
+        if result.get("respawned") or result.get("reason") == "unsafe_landing":
+            return result
+
+        mid_pos = result["pos_after"]
         threat_dist_mid = 0.0
         if threat_pos is not None and len(threat_pos) >= 3:
             threat_dist_mid = math.hypot(float(mid_pos[0]) - float(threat_pos[0]), float(mid_pos[2]) - float(threat_pos[2]))
 
         ux, uz = yaw_to_unit_xz(chosen_yaw)
-        goal_x = float(pos0[0]) + ux * float(distance)
-        goal_z = float(pos0[2]) + uz * float(distance)
-        should_pathfind = not (
+        if (
             threat_pos is not None
             and threat_dist_mid >= min(float(distance), 8.5)
-            and mid_moved >= 4.0
-        )
-        if should_pathfind and self._point_allowed(goal_x, goal_z, action="flee"):
-            try:
-                self.bot.call(
-                    "move_to",
-                    {"x": round(goal_x, 1), "z": round(goal_z, 1), "range": 2.0, "timeout": 3500, "stop_on": ["death"]},
-                )
-            except (ApiError, httpx.HTTPError) as err:
-                if isinstance(err, httpx.HTTPError):
-                    self._best_effort_stop()
-
-        st_end = self._safe_status(st_mid)
-        nh_end = st_end.get("nearest_hostile")
-        if (
-            urgent
-            and st_end.get("alive") is not False
-            and isinstance(nh_end, dict)
-            and nh_end.get("name")
-            and float(nh_end.get("dist", 99.0)) <= 5.5
+            and result["ok"]
         ):
-            try:
-                self.bot.call("look", {"yaw": chosen_yaw, "pitch": 0.0})
-                self.bot.call("control", {"forward": True, "sprint": True, "jump": True, "ms": 750})
-                st_end = self._safe_status(st_end)
-            except (ApiError, httpx.HTTPError) as err:
-                if isinstance(err, httpx.HTTPError):
-                    self._best_effort_stop()
-        pos_end = st_end.get("pos") or pos0
-        moved = round(math.hypot(float(pos_end[0]) - float(pos0[0]), float(pos_end[2]) - float(pos0[2])), 2)
-        respawned = st_end.get("alive") is False or moved > 64.0
-        return {
-            "ok": False if respawned else moved >= 1.5,
-            "mode": "respawned" if respawned else "flee",
-            "moved_dist": moved,
-            "pos_after": pos_end,
-            **({"respawned": True} if respawned else {}),
-        }
+            return result
+
+        remaining = min(6.0, float(distance) - result["moved_dist"])
+        if remaining < 1.5:
+            return result
+        self.invalidate_block_cache()
+        route = self.probe_retreat(mid_pos, chosen_yaw, remaining)
+        if route is None:
+            return result
+        goal_y, _ = route
+        try:
+            self.bot.call(
+                "move_to",
+                {
+                    "x": float(mid_pos[0]) + ux * remaining,
+                    "y": goal_y,
+                    "z": float(mid_pos[2]) + uz * remaining,
+                    "range": 1.0,
+                    "timeout": 2500,
+                    "stop_on": ["death"],
+                },
+            )
+        except (ApiError, httpx.HTTPError) as err:
+            if isinstance(err, httpx.HTTPError):
+                self._best_effort_stop()
+        return retreat_result(self._safe_status({**st_mid, "ready": False}))
 
     def _point_allowed(self, x: float, z: float, *, action: str = "combat_env") -> bool:
         """Return True unless an enabled VoidGeofence rejects `(x, z)` via `check_point`."""
@@ -2093,7 +2146,7 @@ class SubcorticalInstinctController:
                 mob_name in RANGED_MOBS
                 and mob_name != "blaze"
                 and trigger.get("source") != "guard_poll_hurt"
-                and trigger.get("hurt_source") not in {"arrow", "trident", "fireball", "wither_skull"}
+                and trigger.get("hurt_source") not in {"arrow", "trident", "fireball", "small_fireball", "wither_skull"}
                 and has_shield
                 and has_weapon
                 and hp >= 14.0
@@ -2134,7 +2187,12 @@ class SubcorticalInstinctController:
             else:
                 mode = "cover_or_flee"
                 covered = False
-                if snap["enclosure"] in {"open_cave", "carved_shaft"} and env.skills is not None and mob_name != "blaze":
+                if (
+                    snap["enclosure"] in {"open_cave", "carved_shaft"}
+                    and env.skills is not None
+                    and mob_name not in {"blaze", "ghast"}
+                    and trigger.get("hurt_source") not in {"fireball", "small_fireball", "wither_skull"}
+                ):
                     cov = env.build_tactical("cover_pocket")
                     if cov.get("ok"):
                         covered = True
@@ -2173,12 +2231,20 @@ class SubcorticalInstinctController:
                         except (ApiError, httpx.HTTPError):
                             pass
                     fl = env.flee(mob_pos, distance=14.0, urgent=True)
-                    actions.append({"action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist")})
+                    actions.append({
+                        "action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist"),
+                        **({"reason": fl["reason"]} if fl.get("reason") else {}),
+                    })
                     self._recent_flee_streak += 1
                     self._last_flee_at = now_flee
                     if not fl.get("ok") and not fl.get("respawned") and has_shield:
                         st_fl = env._safe_status(st)
-                        if st_fl.get("alive") is not False and not st_fl.get("in_water"):
+                        if (
+                            st_fl.get("ready") is not False
+                            and st_fl.get("alive") is not False
+                            and not st_fl.get("in_water")
+                            and not st_fl.get("in_lava")
+                        ):
                             latched_guard = self._latch_shield_at_threat(
                                 env,
                                 int(mob_id) if mob_id is not None else None,
