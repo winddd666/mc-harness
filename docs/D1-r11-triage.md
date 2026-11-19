@@ -236,6 +236,28 @@
 
 ---
 
+## 4d. r15 即时分析（部分收官：18/22 已返回，4 路仍在跑）
+
+> 按"有返回即摊派"执行，不等 22/22。以下计数基于已落盘 events + 18 份 summary。
+
+| 指标 | r14 | r15（部分） | 结论 |
+|---|---|---|---|
+| `mine_dfs` 中位 / p90 / max | 20.6 / 54.4 / 83.8s | **27.9 / 58.8 / 86.3s** | ✅ BUG-018 修复生效（0 进展 `time_slice` 仅 5.3%） |
+| iron 槽分数 | 20 | **100**（`hy4_hy_2_iron`） | ✅ BUG-022 解除 |
+| `staircase` 失败 | 44 | **109**（`missing_step_support 55`） | ❌ **BUG-024**：上阶梯垫脚 `no_support` 45 次 |
+| 死亡（18 路） | 28（21 路） | **49** | ❌ **BUG-026**：新场景无生存调优 |
+| `cancel_cooldown_wait` | 286s | **425s** | 同上 |
+| `mc_move_to:movement_not_confirmed` | 33 | 38 | P2-1 未动 |
+| `mc_dig:timeout` | 4 | **15** | P2-21 |
+
+**r15 新工单（已写入 BUG_BOARD）**
+- **BUG-024 P1（Slice C）**：`staircase vertical=up` 垫脚 `place` 返回 `no_support`（45 次 / 6 bots），代码只重试 `place_failed`，遇 `no_support` 直接失败。`library.py:5688-5698`
+- **BUG-025 P1（Slice A）**：`_stone_pickaxe_headroom` 把 **1 木板折算 2 木棍**（实际 0），导致 `pickaxe_low` 误报"可立刻合成"，模型 4 轮死循环 `craft_gear`。`mining_dfs.py:848-853`。`ds_ds_1_bare` 391 石料 + 1 木板 + 0 木棍，20 分钟 0 分
+- **BUG-026 P1（Slice B + D2）**：死亡 49（mob 23 / arrow 13 / fall 5 / explosion 3 / lava 3），集中于 `hy4_8` 8、`ds_3` 5、`hy4_6` 5；新场景 cave_combat/brewing 无生存节奏
+- **P2-21/22/23**：`dig:timeout`、`place:no_support`、`staircase:time_budget` churn
+
+---
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
