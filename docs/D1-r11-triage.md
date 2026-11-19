@@ -1185,6 +1185,48 @@ retries 0 | 429 0 | 502 0 | tracebacks 0
 - **P2-33 量化**：过夜双轨 **65 次** `finish_reason=length`，**64 次被 `length_recovered` 救回**，仅 1 次报废 → 优先级维持 P2。
 - **BUG-043 扩散**：`nju_movetest_01_bare` EP7（shiny_gear）也 `lost_iron_pickaxe` → 已 4 路。
 
+## 4bq. 07:37 抽检：429 的第二个根因 —— 无抖动惊群（thundering herd）
+
+### 天然 A/B 对照（同一波次、同一时段）
+
+| provider | retry 事件 | `concurrency_limit` | 硬失败 429 |
+|---|---|---|---|
+| NJU `nju_*` | 16 | **true** → 8 次尝试 + 6~28s | **0** |
+| Qwen `glm_*` | 527 | **false** → 3 次尝试 + 2~4s | **26** |
+| DeepSeek `ds_*` | 0 | — | **0** |
+
+同样压力下，**被识别成并发限流的 NJU 一次没死，未被识别的 Qwen 死了 26 次** → 直接证明"给任意 429 用 8 次预算"就能消除这批报废。
+
+### 惊群证据
+
+- 545 次 retry 中 **259 次 `wait_s=15.0`**（服务端 `Retry-After: 15` 被原样采用，无抖动）
+- **51 个惊群簇**：≥3 个不同 bot 在 2 秒内同时重试
+  ```
+  21:50:40  glm_1 / glm_3 / glm_5 同秒
+  21:50:56  glm_1 / glm_3 / glm_5 同秒（+16s，正好是 15s 退避的整点）
+  21:53:55  glm_1 / glm_4 / glm_5 同秒
+  ```
+- 对照：`overnight_12bot` 77 簇；hy4 4 路波次 **0 簇**
+- **机制**：所有 bot 在同一秒醒来 → 再次撞限流 → 再次同秒重试，形成自持碰撞循环。修复：对 `Retry-After` 结果加 **0.5~1.5× 抖动**（或每 bot 固定随机相位）。
+
+### 主轨 `overnight_12bot_part2`（2h05m / 3.9h）
+
+```
+269 集：answered 198 / goal 24 / limit 22 / timeout 22 / runtime_error 29 / aborted 1 / paused 4 / network_error 1
+retries 545 | 429 26 | 502 0 | tracebacks 0
+```
+
+- 26 次 429 硬失败**全部集中在 `glm_*`**：`glm_1` 9、`glm_5` 7、`glm_2` 5、`glm_4` 3、`glm_3` 2
+- 除 22:23–22:33 的 10 分钟高峰外，22:55 / 23:07 / 23:15 / 23:17 仍有小簇（同一批 glm bot）
+
+### 新 P2
+
+- **P2-35** `network_error` 状态未被 `_is_transient_llm_error` 识别（`:887` 只接受 `runtime_error`）→ 纯传输抖动（`[not_loaded] chunk not loaded`）会计入 strike。实测 `ds_1` EP13 `sleep_in_bed`。
+
+### hy4 审计轨 `hy4_audit_r28`（2.5h 波，32 分钟）
+
+23 集、**0 retry / 0 429**、1 aborted。四波审计轨累计 **0 次 429**。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
