@@ -1021,6 +1021,13 @@ class McToolset:
             if isinstance(parsed, dict) and parsed.get("ok") is False:
                 err_obj = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
                 err_code = str(err_obj.get("code") or "")
+                if err_code == "busy":
+                    parsed["requires_replan"] = True
+                    err_obj["message"] = (
+                        f"动作锁仍被 {err_obj.get('action') or '其他动作'} 占用，move_to 未执行；"
+                        "请先脱困或等待 1~2 秒后重试，不要连续提交同一路径。"
+                    )
+                    raw = json.dumps(parsed, ensure_ascii=False)
                 try:
                     st_mv = self.bot.status()
                     self._update_status_cache(st_mv)

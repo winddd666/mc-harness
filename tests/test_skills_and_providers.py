@@ -1406,6 +1406,10 @@ def test_move_to_busy_retries_only_after_lease_release(release) -> None:
     assert result["ok"] is release
     assert calls.count("stop") == 1
     assert calls.count("move_to") == (2 if release else 1)
+    if not release:
+        assert result["requires_replan"] is True
+        assert result["error"]["code"] == "busy"
+        assert "动作锁仍被" in result["error"]["message"]
 
 
 def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
