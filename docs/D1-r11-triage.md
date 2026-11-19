@@ -628,6 +628,18 @@ staircase(south, ...) → 同样 0 步失败
 - **r22_short**：0/18 summary、**0 Traceback**（BUG-035/039 均未复发）；唯一 FAIL 是 `mine zero-slice 15.7%`（早期偏差，dur/budget 0.65）；deaths 10、冷却 93.7s、trade 3 / brew 2
 - **r22_long**：0/4、0 Traceback，ALL PASS（早期）
 
+### 4ae. r22 新 P1：虚空围栏中心错位，重创 NJU 两路（00:03）
+
+| bot | spawn | 围栏 center | 被拦次数 |
+|---|---|---|---|
+| `nju_guitest` | (6381.5, -6415.5) | **(797.6, -814.5)** | 8（staircase/move_to） |
+| `nju_nju_3` | (-5703.2, 5728.0) | **(-153.5, -385.5)** | 11（tunnel/collar/staircase） |
+| `ds_ds_3` | (-2974.5, 9974.5) | 同 spawn ✓ | 1（213.9m，真实贴边） |
+
+- 根因假设：`agent.py:1234-1250` 的 ephemeral-HUD **自动回中**（overworld 且距中心 >400m 时把中心设为 bot 当前位置）与场景 teleport 竞态；NJU 网关较慢，teleport 未落地时被回中，围栏永久钉在旧坐标
+- 后果：场景内所有 `staircase`/`tunnel`/`move_to` 都被判"离岛"（距离 7600~8300m）
+- 已提 **BUG-040（P1，Integrator + D2）**：runner 围栏加 pinned、或回中前校验；`verify_scene_entry` 增加围栏一致性断言
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
