@@ -1713,6 +1713,8 @@ def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, ga
         path = request.url.path.rsplit("/", 1)[-1]
         if path == "status":
             result = {"pos": [0.5, 64, 0.5]}
+        elif path == "get_block":
+            result = {"name": "lava", "properties": {"level": 0}}
         elif path == "interact":
             result = {"before": "lava", "after": "lava", "changed": False, "used": used, "gained": gained}
         else:
@@ -1727,6 +1729,28 @@ def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, ga
     else:
         assert result["result"]["gained"] == gained
         assert "error" not in result
+
+
+def test_bucket_interact_rejects_flowing_fluid_before_no_effect_roundtrip() -> None:
+    """r13: bucket right-clicks on flowing lava repeated interact_no_effect."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "get_block":
+            return httpx.Response(200, json={"ok": True, "result": {"name": "lava", "properties": {"level": 3}}})
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_interact(x=1, y=64, z=0, item="bucket"))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert result["error"]["code"] == "interact_flowing_fluid"
+    assert result["error"]["level"] == 3
+    assert calls == ["get_block"]
 
 
 @pytest.mark.parametrize("outer_budget,step_budget,expected", [(2.0, 10.0, 2.0), (45.0, 1.0, 1.0)])

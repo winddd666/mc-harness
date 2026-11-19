@@ -1267,6 +1267,32 @@ class McToolset:
             payload["item"] = item
         if item in {"bucket", "water_bucket", "lava_bucket"} and x is not None and y is not None and z is not None:
             try:
+                blk = self.bot.call("get_block", {"pos": [x, y, z]}, timeout_s=2.0)
+                if isinstance(blk, dict):
+                    bname = str(blk.get("name") or "").removeprefix("minecraft:")
+                    level = (blk.get("properties") or {}).get("level")
+                    if bname in {"lava", "water", "flowing_lava", "flowing_water"} and level is not None:
+                        if int(level) > 0:
+                            return json.dumps(
+                                {
+                                    "ok": False,
+                                    "requires_replan": True,
+                                    "error": {
+                                        "code": "interact_flowing_fluid",
+                                        "target": [x, y, z],
+                                        "block": bname,
+                                        "level": int(level),
+                                        "message": (
+                                            f"目标 {bname} 是流动流体(level={int(level)})，桶只能舀源头(level=0)。"
+                                            "请沿流体上游/中心寻找源头，或先用方块封堵流向；不要对同一格重复右键。"
+                                        ),
+                                    },
+                                },
+                                ensure_ascii=False,
+                            )
+            except (ApiError, httpx.HTTPError, TypeError, ValueError):
+                pass
+            try:
                 st = getattr(self, "_last_status", None)
                 if not isinstance(st, dict) or not st.get("pos"):
                     st = self.bot.status()
