@@ -197,23 +197,51 @@ def _locate_coords(reply: str) -> tuple[int, int] | None:
     return int(m.group(1)), int(m.group(2))
 
 
+def _locate_structure(dim: str, cx: int, cz: int, structure_id: str) -> tuple[int, int] | None:
+    """`locate structure` inside `dim`, returning None when the server says it cannot find one."""
+    out = rcon_batch(
+        [f"execute in {dim} positioned {cx} 64 {cz} run locate structure {structure_id}"],
+        timeout=30,
+    )
+    reply = str((out[0] if out else {}).get("reply") or "")
+    if "could not" in reply.lower() or "cannot" in reply.lower():
+        return None
+    return _locate_coords(reply)
+
+
 def select_nether_structure_site(
     bot: Any,
     bot_name: str,
     structure_tag: str,
     start_idx: int = 0,
 ) -> tuple[float, float, float, str]:
-    """Locate a Nether structure (#minecraft:fortress or #minecraft:bastion_remnant) and carve a safe spawn ledge."""
-    cx, cz = [(0, 0), (800, 0), (-800, 0), (0, 800), (0, -800), (800, 800)][start_idx % 6]
-    out = rcon_batch(
-        [f"execute in minecraft:the_nether positioned {cx} 64 {cz} run locate structure {structure_tag}"],
-        timeout=30,
-    )
-    coords = _locate_coords(str((out[0] if out else {}).get("reply") or ""))
-    if coords is not None:
-        nx, nz = coords
-    else:
-        nx, nz = cx, cz
+    """Locate a Nether structure and carve a safe spawn ledge.
+
+    `structure_tag` accepts the vanilla structure *tag* (`#minecraft:fortress`, used by callers for
+    readability) but `locate` needs the concrete registry id (`minecraft:fortress`). The r12 fleet
+    silently fell back to the anchor because `#minecraft:fortress` is not a valid structure tag.
+    """
+    structure_id = structure_tag.lstrip("#")
+    candidates = (structure_id,)
+    search_anchors = [(0, 0), (800, 0), (-800, 0), (0, 800), (0, -800), (800, 800)]
+    nx: int | None = None
+    nz: int | None = None
+    for offset in range(len(search_anchors)):
+        sx, sz = search_anchors[(start_idx + offset) % len(search_anchors)]
+        for cand in candidates:
+            coords = _locate_structure("minecraft:the_nether", sx, sz, cand)
+            if coords is not None:
+                nx, nz = coords
+                break
+        if nx is not None:
+            break
+    if nx is None:
+        nx, nz = search_anchors[start_idx % len(search_anchors)]
+        print(
+            f"[Scene] locate {structure_id} failed across {len(search_anchors)} anchors; "
+            f"falling back to ({nx}, {nz})",
+            flush=True,
+        )
     ny = 64
     prep = prepare_scene_ground(
         bot_name, "nether_fortress", float(nx), float(ny), float(nz), dim="the_nether"
@@ -825,9 +853,9 @@ def main() -> int:
         if args.stage == "village":
             sx, sy, sz, biome = select_village_wild_site(bot, bot_name, start_idx=args.site_index)
         elif args.stage == "nether_fortress":
-            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "#minecraft:fortress", start_idx=args.site_index)
+            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:fortress", start_idx=args.site_index)
         elif args.stage == "nether_bastion":
-            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "#minecraft:bastion_remnant", start_idx=args.site_index)
+            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:bastion_remnant", start_idx=args.site_index)
         elif args.stage == "deep_water":
             sx, sy, sz, biome = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
         else:
