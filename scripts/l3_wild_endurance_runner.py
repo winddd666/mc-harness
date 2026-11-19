@@ -1029,6 +1029,8 @@ class SceneWatchdog(threading.Thread):
         self._last_return = 0.0
         self._last_total = -1
         self._inv_tick = 0
+        self._ticks = 0
+        self._preempt_skips = 0
 
     def stop(self) -> None:
         self._stop.set()
@@ -1089,6 +1091,7 @@ class SceneWatchdog(threading.Thread):
         except BaseException:
             # guardian._wrapped_call raises ReflexPreempted(BaseException) during a reflex takeover;
             # letting it escape would kill the watchdog thread for the rest of the run (r18 ds_ds_4).
+            self._preempt_skips += 1
             return
         if not st:
             return
@@ -1115,6 +1118,14 @@ class SceneWatchdog(threading.Thread):
         )
         drifted = dim_matches and dist > self.scene.drift_limit and ready
         suspected_death = dead_signal
+        self._ticks += 1
+        if self._ticks % 15 == 0:  # ~2 min at the default 8s interval
+            print(
+                f"[Scene Watchdog] {self.bot_name} heartbeat tick={self._ticks} dim={dim} "
+                f"pos={pos if pos else '?'} hp={health:.0f} ready={ready} "
+                f"preempt_skips={self._preempt_skips}",
+                flush=True,
+            )
         if not suspected_death:
             self._inv_tick += 1
             if self._inv_tick % 3 == 1:  # sample on the very first tick, then every 3rd (~24s)
@@ -1600,6 +1611,8 @@ def main() -> int:
                 "radius": scene.radius,
                 "drift_limit": scene.drift_limit,
                 "entry_verified": entry_ok,
+                "watchdog_ticks": watchdog._ticks,
+                "watchdog_preempt_skips": watchdog._preempt_skips,
             },
             "end_status": {
                 "pos": st_end.get("pos"),
