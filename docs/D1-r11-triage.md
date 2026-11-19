@@ -1029,6 +1029,25 @@ retries 4 | 429 0 | 502 1 | tracebacks 0
 - `depth_reset` 仅 1 次；`staircase` completed 29 / pillar_fallback 28 / time_budget 19
 - `unstick` 60 次：中位 3.7s、max 37.1s（无 >60s）
 
+## 4bk. 过夜审计 04:30 抽检
+
+### 主轨 `overnight_12bot`（3h07m）
+
+```
+429 集：answered 310 / goal 38 / timeout 42 / limit 23 / runtime_error 9 / aborted 4
+retries 612 | failed429 6 | 502 0 | tracebacks 0
+```
+
+- 9 个 runtime_error：**6× Qwen 429 `rate_limit_error`**（`glm_1` 3、`glm_2` 2、`ds_4` 2…）+ **3× MC API ReadTimeout**
+- 新 429 body：`{"type":"rate_limit_error","message":"Rate limit exceeded. Please try again."}` → 同样不被 `_is_concurrency_limit_429` 识别（BUG-042 需扩关键词）
+- 612 次 retry 绝大多数成功；6 集报废
+- aborted 4：`ds_2` 3（shiny_gear）+ `ds_1` EP19（shiny_gear，BUG-043 扩散到第 2 路）
+
+### hy4 审计轨
+
+- `hy4_audit_r27`（进行中）：26 集、**0 retries / 0 429 / 0 502**
+- r25/r26 已收官：均 **0 次 429**
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
