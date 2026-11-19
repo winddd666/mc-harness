@@ -234,8 +234,16 @@ def cmd_launch(
     squads: set[str],
     stagger_s: float,
     use_slot_durations: bool = False,
+    min_slot_duration: int | None = None,
+    max_slot_duration: int | None = None,
 ) -> int:
-    selected_raw = [s for s in FLEET if s.squad in squads]
+    selected_raw = [
+        s
+        for s in FLEET
+        if s.squad in squads
+        and (min_slot_duration is None or s.duration_s >= min_slot_duration)
+        and (max_slot_duration is None or s.duration_s <= max_slot_duration)
+    ]
     if not selected_raw:
         print("No fleet slots matched squads:", squads)
         return 1
@@ -759,6 +767,8 @@ def main() -> int:
     lp.add_argument("--wave", required=True)
     lp.add_argument("--duration", type=float, default=1200.0)
     lp.add_argument("--slot-durations", action="store_true", help="Use each FleetSlot's per-stage duration_s/max_episodes")
+    lp.add_argument("--min-slot-duration", type=int, default=None, help="Only launch slots with duration_s >= N (decouples long runs)")
+    lp.add_argument("--max-slot-duration", type=int, default=None, help="Only launch slots with duration_s <= N (decouples short/mid runs)")
     lp.add_argument("--max-episodes", type=int, default=20)
     lp.add_argument("--squads", default="nju,glm,ds,hy4")
     lp.add_argument("--stagger", type=float, default=1.5)
@@ -780,6 +790,8 @@ def main() -> int:
             {s.strip() for s in args.squads.split(",") if s.strip()},
             args.stagger,
             use_slot_durations=args.slot_durations,
+            min_slot_duration=args.min_slot_duration,
+            max_slot_duration=args.max_slot_duration,
         )
     md: str | bool | None = False if args.no_markdown else args.markdown
     return cmd_triage(args.wave, md, pathlib.Path(args.runs_root).expanduser() if args.runs_root else None)
