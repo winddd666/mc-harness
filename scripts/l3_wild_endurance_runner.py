@@ -182,8 +182,19 @@ def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -
     raise RuntimeError("Could not find a wooded dry wild spawn site across CANDIDATE_SITES")
 
 
-def select_village_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
-    """Locate a real natural village near a far-away candidate anchor via RCON `locate structure`."""
+def select_village_wild_site(
+    bot: Any,
+    bot_name: str,
+    start_idx: int = 0,
+    *,
+    park_near_villager: bool = False,
+) -> tuple[float, float, float, str]:
+    """Locate a real natural village near a far-away candidate anchor via RCON `locate structure`.
+
+    `park_near_villager` (village_trade): after landing, teleport right next to a real villager so
+    the first `mc_window_view` cannot fail with `no_window` because the target is 12m away or behind
+    a wall (r16 glm_glm_3_village_trade: 11 no_window errors).
+    """
     cx, cz = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
     res = rcon_batch(
         [f"execute positioned {cx} 100 {cz} run locate structure #minecraft:village"],
@@ -203,9 +214,67 @@ def select_village_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tup
         pos = _wait_settled(bot) or [vx, 64, vz]
         st = bot.status()
         pos = st.get("pos") or pos
+        if park_near_villager:
+            parked = _park_near_entity(bot, bot_name, ("villager",), pos)
+            if parked is not None:
+                pos = parked
         biome = str(st.get("biome") or "village").lower()
         return float(pos[0]), float(pos[1]), float(pos[2]), f"village:{biome}"
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
+
+
+def _park_near_entity(
+    bot: Any,
+    bot_name: str,
+    name_fragments: tuple[str, ...],
+    fallback: list[float],
+    *,
+    radius: int = 64,
+) -> list[float] | None:
+    """Teleport the bot 1.5 blocks beside the nearest matching entity (scene setup helper)."""
+    try:
+        res = bot.call("get_entities", {"radius": radius}) or {}
+    except Exception:
+        return None
+    entities = res.get("entities") if isinstance(res, dict) else None
+    if not isinstance(entities, list) or not entities:
+        return None
+    best: dict[str, Any] | None = None
+    best_dist = float("inf")
+    for ent in entities:
+        if not isinstance(ent, dict):
+            continue
+        label = f"{ent.get('name') or ''} {ent.get('type') or ''}".lower()
+        if not any(frag in label for frag in name_fragments):
+            continue
+        pos = ent.get("pos")
+        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+            continue
+        d = math.hypot(float(pos[0]) - fallback[0], float(pos[2]) - fallback[2])
+        if d < best_dist:
+            best_dist = d
+            best = ent
+    if best is None:
+        return None
+    ex, ey, ez = (float(v) for v in best["pos"][:3])
+    target = [ex + 1.5, ey, ez + 0.5]
+    try:
+        rcon_batch(
+            [
+                f"tp {bot_name} {target[0]:.1f} {target[1]:.1f} {target[2]:.1f}",
+                f"spawnpoint {bot_name} {int(round(target[0]))} {int(round(target[1]))} {int(round(target[2]))}",
+            ],
+            timeout=30,
+        )
+        settled = _wait_settled(bot, timeout_s=6.0) or target
+        print(
+            f"[Scene] parked {bot_name} next to '{best.get('name')}' at "
+            f"({target[0]:.1f}, {target[1]:.1f}, {target[2]:.1f}) in village",
+            flush=True,
+        )
+        return settled
+    except Exception:
+        return None
 
 
 def _locate_coords(reply: str) -> tuple[int, int] | None:
@@ -775,6 +844,28 @@ class SceneAnchor:
     z: float
     radius: float = 220.0
     drift_limit: float = 400.0
+
+
+def _scene_geofence_cls(base_cls: Any) -> Any:
+    """Build a `VoidGeofence` subclass that adds the `contains(x, y, z)` predicate.
+
+    r16 crash: `AttributeError: 'VoidGeofence' object has no attribute 'contains'`
+    (ds_ds_1_bare / glm_glm_5_midgame / hy4_hy_6_nether_bastion call it via skills/combat_env.py).
+    `VoidGeofence` is a frozen slots dataclass, so we subclass it (keeping dataclass semantics for
+    `dataclasses.replace`) rather than patching Slice B's file. Remove once upstream adds `contains`.
+    """
+
+    class SceneGeofence(base_cls):  # type: ignore[misc, valid-type]
+        def contains(self, x: float, y: float | None = None, z: float | None = None) -> bool:
+            if z is None and y is not None:
+                x, z = x, y  # tolerate the 2-arg (x, z) form
+            if z is None:
+                return True
+            if not self.enabled:
+                return True
+            return self.distance_from_center(float(x), float(z)) <= self.safe_radius
+
+    return SceneGeofence
 
 
 def build_reset_cmds(
@@ -1348,7 +1439,12 @@ def main() -> int:
         st = ensure_bot_ready(bot, timeout_s=45.0)
 
         if args.stage in ("village", "village_trade"):
-            sx, sy, sz, biome = select_village_wild_site(bot, bot_name, start_idx=args.site_index)
+            sx, sy, sz, biome = select_village_wild_site(
+                bot,
+                bot_name,
+                start_idx=args.site_index,
+                park_near_villager=(args.stage == "village_trade"),
+            )
         elif args.stage == "nether_fortress":
             sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:fortress", start_idx=args.site_index)
         elif args.stage == "nether_bastion":
@@ -1366,7 +1462,9 @@ def main() -> int:
         time.sleep(1.5)
         entry_ok = verify_scene_entry(bot, bot_name, scene)
 
-        geofence = VoidGeofence(center_x=sx, center_z=sz, radius=220.0, margin=8.0)
+        geofence = _scene_geofence_cls(VoidGeofence)(
+            center_x=sx, center_z=sz, radius=220.0, margin=8.0
+        )
         toolset = McToolset(bot, geofence=geofence, wait_for_cooldown=True)
 
         print(

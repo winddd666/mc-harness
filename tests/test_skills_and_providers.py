@@ -1467,6 +1467,58 @@ def test_move_to_already_in_range_is_success_not_failure() -> None:
     assert calls.count("move_to") == 1
 
 
+def test_move_to_trusts_server_already_in_range_despite_client_desync() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1002.4, 64.0, 1000.5], "busy": None}})
+        if path == "move_to":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": False,
+                    "error": {
+                        "code": "movement_not_confirmed",
+                        "message": "当前站位已在目标 range=1m 半径内，未发生实际位移",
+                    },
+                },
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_move_to(x=1000.8, z=1000.5, range=1.0))
+    assert result["ok"] is True
+    assert result["result"]["already_in_range"] is True
+
+
+def test_move_to_entity_trusts_server_already_in_range() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "busy": None}})
+        if path == "move_to":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": False,
+                    "pos_before": [0.5, 64.0, 0.5],
+                    "pos_after": [0.5, 64.0, 0.5],
+                    "error": {"code": "movement_not_confirmed", "message": "当前站位已在目标 range=1m 半径内，未发生实际位移"},
+                },
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_move_to(entity_id=77, range=1.0))
+    assert result["ok"] is True
+    assert result["result"]["already_in_range"] is True
+    assert result["result"]["entity_id"] == 77
+
+
 def test_move_to_entity_reports_stale_id_with_replan_hint() -> None:
     from mc_agent.harness.mc_tools import McToolset
 
