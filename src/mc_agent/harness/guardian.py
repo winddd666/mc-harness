@@ -559,7 +559,16 @@ class GenerationGuard:
                 best_food = next((name for name in SAFE_FOOD_PRIORITY if counts.get(name, 0) > 0), None)
                 if best_food:
                     reasons.append("needs_food")
-                    actions.append(self._action("eat", lambda: self.bot.call("use_item", {"item": best_food})))
+
+                    def _do_eat(food_name: str = best_food) -> dict[str, Any]:
+                        if status.get("blocking"):
+                            try:
+                                self.bot.call("posture", {"shield": False})
+                            except Exception:
+                                pass
+                        return self.bot.call("use_item", {"item": food_name})
+
+                    actions.append(self._action("eat", _do_eat))
         finally:
             self._in_reflex = False
 
@@ -834,7 +843,15 @@ class GenerationGuard:
                 counts, _, _ = self._parse_inventory_summary(inv)
                 best_food = next((f for f in SAFE_FOOD_PRIORITY if counts.get(f, 0) > 0), None)
                 if best_food:
-                    eat_act = self._action("boundary_eat", lambda: self.bot.call("use_item", {"item": best_food}))
+                    def _do_boundary_eat(food_name: str = best_food) -> dict[str, Any]:
+                        if st.get("blocking"):
+                            try:
+                                self.bot.call("posture", {"shield": False})
+                            except Exception:
+                                pass
+                        return self.bot.call("use_item", {"item": food_name})
+
+                    eat_act = self._action("boundary_eat", _do_boundary_eat)
                     if eat_act.get("ok"):
                         notes.append(f"顺手进食 {best_food}")
 

@@ -1363,6 +1363,9 @@ def select_next_target(
         if key == "minecraft:story/deflect_arrow" and not is_day_now and enriched_pb.tier == 2:
             enriched_pb = dataclasses.replace(enriched_pb, tier=1)
             mem_boosted = True
+        if key == "minecraft:story/enter_the_nether" and counts.get("obsidian", 0) >= 10 and counts.get("flint_and_steel", 0) >= 1:
+            enriched_pb = dataclasses.replace(enriched_pb, tier=1)
+            mem_boosted = True
         is_uncond = 0 if (adv_id in UNCONDITIONAL_ADVANCEMENTS or mem_boosted) else 1
         sort_key = (enriched_pb.tier, is_uncond, -enriched_pb.points, key)
         candidates.append((sort_key, enriched_pb))
@@ -1654,6 +1657,11 @@ class CurriculumSupervisor:
                 if st.get("busy"):
                     try:
                         self.bot.call("stop")
+                    except Exception:
+                        pass
+                if st.get("blocking"):
+                    try:
+                        self.bot.call("posture", {"shield": False})
                     except Exception:
                         pass
                 consecutive_recovery_waits = 0

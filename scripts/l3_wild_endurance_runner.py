@@ -239,7 +239,9 @@ def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: b
                 f"give {bot_name} minecraft:book 2",
                 f"give {bot_name} minecraft:diamond 4",
                 f"give {bot_name} minecraft:lapis_lazuli 12",
-                f"give {bot_name} minecraft:wheat 16",
+                f"give {bot_name} minecraft:wheat 24",
+                f"give {bot_name} minecraft:paper 24",
+                f"give {bot_name} minecraft:coal 20",
                 f"give {bot_name} minecraft:bucket 1",
                 f"give {bot_name} minecraft:oak_log 16",
                 f"give {bot_name} minecraft:cooked_beef 16",
@@ -362,6 +364,26 @@ def main() -> int:
                 rpm_budget_override=args.rpm_budget,
             )
         )
+        def _guard_scene_anchor(ev: dict[str, Any]) -> None:
+            if ev.get("type") != "curriculum.episode.started":
+                return
+            try:
+                st_cur = bot.status()
+                dim_cur = str(st_cur.get("dimension") or "overworld").lower()
+                p_cur = st_cur.get("pos")
+                if "overworld" in dim_cur and isinstance(p_cur, (list, tuple)) and len(p_cur) >= 3:
+                    if math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz) > 400.0:
+                        rcon_batch(
+                            [
+                                f"tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
+                                f"spawnpoint {bot_name} {int(round(sx))} {int(round(sy))} {int(round(sz))}",
+                            ],
+                            timeout=30,
+                        )
+                        print(f"[Scene Pullback] {bot_name} drifted >400m -> pulled back to ({sx:.1f}, {sy:.1f}, {sz:.1f})", flush=True)
+            except Exception:
+                pass
+
         try:
             sup = CurriculumSupervisor(
                 bot,
@@ -374,6 +396,7 @@ def main() -> int:
                 enable_pre_ensure=True,
                 enable_island_recon=True,
                 enable_async_world_jobs=True,
+                on_episode_event=_guard_scene_anchor,
             )
             summary = sup.run(max_episodes=args.max_episodes)
         finally:
