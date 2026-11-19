@@ -5881,6 +5881,10 @@ class MacroSkills:
         air_set = {"air", "cave_air", "void_air"}
         fluids = {"water", "lava", "flowing_water", "flowing_lava"}
         fluid_or_bedrock = fluids | {"bedrock"}
+        # r14: a fortress/nether portal head cell was repeatedly dug and
+        # returned undiggable for all four directions. Treat these as
+        # obstacles, not as dig targets.
+        undiggable_obstacles = {"nether_portal", "end_portal", "end_gateway", "barrier"}
         non_solid = air_set | fluids | {
             "short_grass",
             "tall_grass",
@@ -6089,6 +6093,11 @@ class MacroSkills:
                 blocker_info = {"pos": [bx, by + 1, bz], "block": head_here, "relation": "overhead"}
                 stop_reason = "fluid_or_bedrock"
                 break
+            if head_here in undiggable_obstacles:
+                blocker_info = {"pos": [bx, by + 1, bz], "block": head_here, "relation": "undiggable"}
+                last_error = {"code": "undiggable_block", "block": head_here, "pos": [bx, by + 1, bz]}
+                stop_reason = "undiggable_block"
+                break
             if head_here not in air_set:
                 adj_head = _find_adjacent_fluid([[bx, by + 1, bz]])
                 if adj_head is not None:
@@ -6107,6 +6116,11 @@ class MacroSkills:
                 if apex_here in fluid_or_bedrock:
                     blocker_info = {"pos": [bx, by + 2, bz], "block": apex_here, "relation": "overhead_apex"}
                     stop_reason = "fluid_or_bedrock"
+                    break
+                if apex_here in undiggable_obstacles:
+                    blocker_info = {"pos": [bx, by + 2, bz], "block": apex_here, "relation": "overhead_undiggable"}
+                    last_error = {"code": "undiggable_block", "block": apex_here, "pos": [bx, by + 2, bz]}
+                    stop_reason = "undiggable_block"
                     break
                 if apex_here not in air_set:
                     adj_apex = _find_adjacent_fluid([[bx, by + 2, bz]])
@@ -6152,7 +6166,13 @@ class MacroSkills:
 
                 dig_failed = False
                 for idx, dpos in enumerate(down_targets):
-                    if _block_name(dpos) not in air_set:
+                    dname = _block_name(dpos)
+                    if dname in undiggable_obstacles:
+                        blocker_info = {"pos": dpos, "block": dname, "relation": "undiggable"}
+                        last_error = {"code": "undiggable_block", "block": dname, "pos": dpos}
+                        dig_failed = True
+                        break
+                    if dname not in air_set:
                         try:
                             self.bot.call("dig", {"pos": dpos, "collect": True})
                             dug_count += 1
@@ -6182,7 +6202,11 @@ class MacroSkills:
                             if dig_failed:
                                 break
                 if dig_failed:
-                    stop_reason = "dig_failed"
+                    stop_reason = (
+                        "undiggable_block"
+                        if last_error and last_error.get("code") == "undiggable_block"
+                        else "dig_failed"
+                    )
                     break
 
                 cur = _advance_step(nx, by - 1, nz, bx, by, bz, jump=False)
@@ -6238,7 +6262,13 @@ class MacroSkills:
 
                 dig_failed = False
                 for dpos in up_targets:
-                    if _block_name(dpos) not in air_set:
+                    uname = _block_name(dpos)
+                    if uname in undiggable_obstacles:
+                        blocker_info = {"pos": dpos, "block": uname, "relation": "undiggable"}
+                        last_error = {"code": "undiggable_block", "block": uname, "pos": dpos}
+                        dig_failed = True
+                        break
+                    if uname not in air_set:
                         try:
                             self.bot.call("dig", {"pos": dpos, "collect": True})
                             dug_count += 1
@@ -6247,7 +6277,11 @@ class MacroSkills:
                             dig_failed = True
                             break
                 if dig_failed:
-                    stop_reason = "dig_failed"
+                    stop_reason = (
+                        "undiggable_block"
+                        if last_error and last_error.get("code") == "undiggable_block"
+                        else "dig_failed"
+                    )
                     break
 
                 if _is_non_solid_support(_block_name([nx, by, nz])):
@@ -6347,7 +6381,7 @@ class MacroSkills:
             out_stair["last_error"] = last_error
         end_pos = st_end.get("pos") or pos_before
         ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
-        if stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "dig_failed", "movement_not_confirmed", "missing_step_support"}:
+        if stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "dig_failed", "undiggable_block", "movement_not_confirmed", "missing_step_support"}:
             reason_label = (
                 f"{stop_reason}:{last_error['code']}"
                 if last_error and last_error.get("code")
@@ -6357,7 +6391,7 @@ class MacroSkills:
             if steps_done > 0 and dug_count == 0 and (ebx, eby, ebz) != (b0x, b0y, b0z):
                 self._record_failed_stair_dir((b0x, b0y, b0z, v_key), d_key, f"dead_end->{reason_label}")
 
-        if v_key == "down" and stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy", "dig_failed", "movement_not_confirmed"}:
+        if v_key == "down" and stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy", "dig_failed", "undiggable_block", "movement_not_confirmed"}:
             probe_cache: dict[tuple[int, int, int], str] = {}
 
             def _probe_block(px: int, py: int, pz: int) -> str:
@@ -6445,7 +6479,7 @@ class MacroSkills:
                         eby,
                         ebz,
                         probe_cache=probe_cache,
-                        exclude_dirs={d_key} if stop_reason == "dig_failed" else None,
+                        exclude_dirs={d_key} if stop_reason in {"dig_failed", "undiggable_block"} else None,
                         inv_counts=inv_now,
                     )
                     up_dirs = self._probe_viable_up_stair_dirs(
@@ -6500,7 +6534,7 @@ class MacroSkills:
                         f"前方({d_key})遇到{detail_desc}；当前坐标[{ebx},{eby},{ebz}]四面下方均为空洞/悬崖/树冠(viable_directions=[])，原地4个方向全部无法阶梯下探！"
                         "严禁在当前位置换方向继续调 mc_skill_staircase！请先调 mc_skill_unstick 下树/脱困，或调 mc_move_to(只传x,z省略y) 水平走开 12-20 格到平坦实心陆地后再下探！"
                     )
-        elif v_key == "up" and stop_reason in {"fluid_or_bedrock", "dig_failed", "movement_not_confirmed", "missing_step_support"}:
+        elif v_key == "up" and stop_reason in {"fluid_or_bedrock", "dig_failed", "undiggable_block", "movement_not_confirmed", "missing_step_support"}:
             probe_cache_up: dict[tuple[int, int, int], str] = {}
             up_inv = _inventory_counts(self.bot)
             up_dirs = self._probe_viable_up_stair_dirs(
@@ -6561,7 +6595,7 @@ class MacroSkills:
                         "(viable_up_directions=[], viable_tunnel_directions=[], viable_pillar_up=false)，禁止继续重复调用 mc_skill_staircase/mc_skill_tunnel；"
                         "请先调 mc_move_to 沿既有矿道走出死胡同，或用 mc_get_block 确认安全后以 mc_dig / mc_place 脱困。"
                     )
-        elif stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy"}:
+        elif stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy", "undiggable_block"}:
             out_stair["hint"] = f"前方({d_key})遇到{stop_reason}，禁止原地继续朝{d_key}重试，请换其他方向！"
         if surface_evidence is not None:
             out_stair["surface_evidence"] = surface_evidence

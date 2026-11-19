@@ -1478,6 +1478,34 @@ def test_staircase_up_uses_available_solid_filler(filler) -> None:
     assert placed == [{"item": filler, "pos": [0, 30, -1]}]
 
 
+def test_staircase_down_stops_before_digging_nether_portal() -> None:
+    """r14: the head cell was a nether_portal, so all four directions failed undiggable."""
+    calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(path)
+        if path == "status":
+            result = {"pos": [0.5, 30.0, 0.5], "on_ground": True}
+        elif path == "inventory":
+            result = {"items": []}
+        elif path == "get_block":
+            result = {"name": "nether_portal" if body["pos"] == [0, 31, 0] else "air"}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="down", steps=1)
+    assert result["ok"] is False
+    assert result["stop_reason"] == "undiggable_block"
+    assert result["last_error"]["block"] == "nether_portal"
+    assert "dig" not in calls
+
+
 def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
     """r13: count listed cobblestone but place returned missing_item."""
     pos = [0.5, 30.0, 0.5]
