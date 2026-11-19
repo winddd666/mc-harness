@@ -1156,5 +1156,124 @@ def test_v2_wild_findings_reconnect_submerged_wall_recon_coords_and_no_copper_de
         assert res["episodes"][0]["target"] == "island_recon_sweep"
 
 
+def test_water_float_ignores_surface_swimming_and_rate_limits_submerged(monkeypatch) -> None:
+    """Surface swimming (submerged=False, full oxygen) must NOT storm-cancel LLM generations."""
+    from mc_agent.harness.guardian import GenerationGuard
+    from mc_agent.harness.events import EventSink
+    from mc_agent.skills.library import MacroSkills
+
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    escaped: list[str] = []
+    monkeypatch.setattr(
+        MacroSkills,
+        "escape_water",
+        lambda self: escaped.append("escape_water") or {"ok": True, "in_water": False},
+    )
+
+    state = {"submerged": False, "oxygen": 300}
+
+    class _SurfBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 62.3, 0.5],
+                    "health": 20.0,
+                    "food": 20.0,
+                    "alive": True,
+                    "ready": True,
+                    "in_water": True,
+                    "submerged": state["submerged"],
+                    "on_ground": False,
+                    "jumping": False,
+                    "oxygen": state["oxygen"],
+                }
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            return {"ok": True}
+
+    guard = GenerationGuard(_SurfBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.last_poll = float("-inf")
+    assert guard.poll() is None  # Surface swimming: NO cancel storm!
+
+    # Submerged triggers once, then rate-limited for 20s unless oxygen < 150
+    state["submerged"] = True
+    clock[0] = 105.0
+    inc1 = guard.poll()
+    assert inc1 is not None and "water_float" in inc1["reasons"]
+    clock[0] = 110.0  # only 5s later -> rate limited
+    assert guard.poll() is None
+    clock[0] = 126.0  # >20s later -> triggers again
+    inc2 = guard.poll()
+    assert inc2 is not None and "water_float" in inc2["reasons"]
+
+
+def test_build_nether_portal_and_mc_interact_vertical_guard(monkeypatch) -> None:
+    """build_nether_portal builds 10 obsidian + ignites + enters Nether; mc_interact guards vertical bucket stalls."""
+    import json
+    from mc_agent.harness.mc_tools import McToolset
+    from mc_agent.skills.library import MacroSkills
+
+    monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda _: None)
+    placed: list[tuple[list[int], str]] = []
+    ignited_flag = {"on": False, "entered": False}
+
+    class _PortalBot:
+        def status(self):
+            return {
+                "pos": [10.5, 64.0, 20.5],
+                "dimension": "minecraft:the_nether" if ignited_flag["entered"] else "minecraft:overworld",
+                "in_water": False,
+                "alive": True,
+                "ready": True,
+            }
+
+        def inventory(self):
+            return {
+                "items": [
+                    {"name": "obsidian", "count": 14},
+                    {"name": "flint_and_steel", "count": 1},
+                    {"name": "cobblestone", "count": 32},
+                ]
+            }
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                pos = (body or {}).get("pos", [0, 0, 0])
+                return {"name": "stone" if pos[1] == 63 else "air"}
+            if action == "place":
+                placed.append((list(body["pos"]), str(body["item"])))
+                return {"ok": True}
+            if action == "interact" and (body or {}).get("item") == "flint_and_steel":
+                ignited_flag["on"] = True
+                return {"ok": True}
+            if action == "find_blocks" and "nether_portal" in ((body or {}).get("types") or []):
+                return {"blocks": [{"name": "nether_portal", "pos": [10, 65, 22]}]} if ignited_flag["on"] else {"blocks": []}
+            if action == "move_to":
+                if ignited_flag["on"] and float((body or {}).get("z", 0)) >= 22.0:
+                    ignited_flag["entered"] = True
+                return {"ok": True}
+            return {"ok": True}
+
+    bot = _PortalBot()
+    skills = MacroSkills(bot)
+    res = skills.build_nether_portal(enter=True, wait_s=2.0)
+    assert res["ok"] is True
+    assert res["placed_obsidian"] == 10
+    assert res["portal_ignited"] is True
+    assert res["entered_nether"] is True
+    assert sum(1 for _, it in placed if it == "obsidian") == 10
+
+    # Vertical offset guard for mc_interact with bucket
+    ts = McToolset(bot)
+    ts._update_status_cache({"pos": [10.5, 70.0, 20.5], "dimension": "minecraft:overworld"})
+    out = json.loads(ts.mc_interact(x=10, y=51, z=20, item="bucket"))
+    assert out["ok"] is False
+    assert out["error"]["code"] == "out_of_reach_vertical"
+
+
+
 
 

@@ -725,10 +725,14 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         points=30,
         tier=3,
         budget_class="expedition",
+        pre_ensure=(("obsidian", 10), ("flint_and_steel", 1)),
         task=(
-            "解锁 story/enter_the_nether(30分)：准备至少 10 块 obsidian（水桶浇筑或钻石镐采集）与 flint_and_steel（1铁锭+1燧石），搭建 4x5 黑曜石门框并用 mc_interact 点燃站入传送。"
+            "解锁 story/enter_the_nether(30分)：准备至少 10 块 obsidian 与 flint_and_steel 后，直接调用 mc_skill_build_portal() 一键清地、搭建 4x5 黑曜石门框、点火并走入传送门进入下界。"
         ),
-        extra_tools=("mc_interact", "mc_posture"),
+        post_ensure_task=(
+            "背包已备齐 obsidian>=10 与 flint_and_steel！严禁再去挖矿或找铁，请立即调用 mc_skill_build_portal() 一键搭建 4x5 黑曜石传送门、点火并步入下界！"
+        ),
+        extra_tools=("mc_skill_build_portal", "mc_interact", "mc_posture"),
         advancement_id="minecraft:story/enter_the_nether",
     ),
 }
@@ -1669,9 +1673,12 @@ class CurriculumSupervisor:
                 cur_pos = [float(st["pos"][0]), float(st["pos"][1]), float(st["pos"][2])] if isinstance(st.get("pos"), (list, tuple)) and len(st["pos"]) >= 3 else None
                 cur_dim = normalize_dimension(st.get("dimension"))
 
-                # Re-anchor `VoidGeofence` if server teleported or respawned the bot > 400m away (e.g. obstructed spawnpoint -> World Spawn)!
-                if self.geofence is not None and self.geofence.enabled and cur_dim == "overworld" and cur_pos is not None:
-                    if math.hypot(cur_pos[0] - self.geofence.center_x, cur_pos[2] - self.geofence.center_z) > 400.0:
+                # Re-anchor `VoidGeofence` if dimension changed (e.g. Overworld <-> Nether) or server teleported/respawned the bot > 400m away!
+                prev_dim = getattr(self, "_last_dim", None)
+                dim_changed = prev_dim is not None and cur_dim != prev_dim
+                self._last_dim = cur_dim
+                if self.geofence is not None and self.geofence.enabled and cur_pos is not None:
+                    if dim_changed or math.hypot(cur_pos[0] - self.geofence.center_x, cur_pos[2] - self.geofence.center_z) > 400.0:
                         self.geofence = dataclasses.replace(self.geofence, center_x=cur_pos[0], center_z=cur_pos[2])
                         self.toolset.geofence = self.geofence
                         self._last_dry_pos = None

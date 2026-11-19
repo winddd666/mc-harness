@@ -132,6 +132,7 @@ class GenerationGuard:
         self._custom_combat_registered = combat_controller is not None
         self.last_poll = float("-inf")
         self.last_reaction = float("-inf")
+        self._last_water_escape_at = float("-inf")
         self.previous_health: float | None = None
         self.previous_ready: bool | None = None
         self.cursor = int(getattr(bot, "_last_event_seq", 0) or 0)
@@ -342,8 +343,13 @@ class GenerationGuard:
         in_water = bool(status.get("in_water"))
         in_lava = bool(status.get("in_lava"))
         oxygen = status.get("oxygen")
-        needs_float = in_water and not status.get("jumping") and (
-            status.get("submerged") or not status.get("on_ground") or (isinstance(oxygen, (int, float)) and oxygen < 240)
+        low_oxygen = isinstance(oxygen, (int, float)) and oxygen < 240
+        critical_drowning = isinstance(oxygen, (int, float)) and oxygen < 150
+        needs_float = (
+            in_water
+            and not status.get("jumping")
+            and (bool(status.get("submerged")) or low_oxygen)
+            and (critical_drowning or (now - self._last_water_escape_at >= 20.0))
         )
         food = status.get("food")
         needs_food = isinstance(food, (int, float)) and (food <= 16 or (isinstance(health, (int, float)) and health < 18 and food < 20))
@@ -402,6 +408,7 @@ class GenerationGuard:
                 actions.append(self._action("escape_lava", lambda: self._skills().escape_water()))
 
             if needs_float and not in_lava:
+                self._last_water_escape_at = now
                 actions.append(self._action("escape_water", lambda: self._skills().escape_water()))
 
             def _already(name: str) -> bool:

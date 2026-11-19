@@ -6774,3 +6774,216 @@ class MacroSkills:
 
         resolver = PhysicalPrerequisiteResolver(self, geofence=geofence, stop_check=stop_check)
         return resolver.ensure_items(targets, max_duration_s=max_duration_s, equip_slots=equip_slots)
+
+    def build_nether_portal(self, *, enter: bool = True, wait_s: float = 8.0) -> dict[str, Any]:
+        """Deterministically clear, build a 4x5 obsidian Nether portal, ignite it, and step inside."""
+        st = self.bot.status()
+        dim = str(st.get("dimension") or "").lower()
+        if "nether" in dim:
+            return {
+                "ok": True,
+                "already_in_nether": True,
+                "entered_nether": True,
+                "dimension": dim,
+                "message": "当前已身处下界(the_nether)，无需再搭传送门。",
+            }
+
+        inv = self.bot.inventory()
+        counts: dict[str, int] = {}
+        for it in (inv.get("items") or []):
+            if isinstance(it, dict) and it.get("name"):
+                nm = str(it["name"]).removeprefix("minecraft:")
+                counts[nm] = counts.get(nm, 0) + int(it.get("count", 0))
+        obs_cnt = counts.get("obsidian", 0)
+        fns_cnt = counts.get("flint_and_steel", 0)
+        if obs_cnt < 10 or fns_cnt < 1:
+            return {
+                "ok": False,
+                "requires_replan": True,
+                "error": "missing_materials",
+                "obsidian": obs_cnt,
+                "flint_and_steel": fns_cnt,
+                "message": f"材料不足：需要 obsidian>=10 且 flint_and_steel>=1（当前 obsidian={obs_cnt}, flint_and_steel={fns_cnt}）。",
+            }
+
+        if bool(st.get("in_water")):
+            try:
+                self.escape_water()
+                st = self.bot.status()
+            except Exception:
+                pass
+
+        pos = st.get("pos") or [0.0, 64.0, 0.0]
+        px, py, pz = int(math.floor(float(pos[0]))), int(math.floor(float(pos[1]))), int(math.floor(float(pos[2])))
+        # Place portal 2 blocks south of bot (along X axis: x = bx..bx+3, y = by..by+4, z = bz)
+        bx, by, bz = px - 1, py, pz + 2
+
+        scaffold_candidates = (
+            "cobblestone",
+            "cobbled_deepslate",
+            "dirt",
+            "netherrack",
+            "stone",
+            "oak_planks",
+            "spruce_planks",
+            "birch_planks",
+            "dark_oak_planks",
+            "andesite",
+            "diorite",
+            "granite",
+        )
+        scaffold_item: str | None = None
+        for cand in scaffold_candidates:
+            if counts.get(cand, 0) >= 3:
+                scaffold_item = cand
+                break
+        if scaffold_item is None and obs_cnt >= 13:
+            scaffold_item = "obsidian"
+        if scaffold_item is None:
+            for cand in scaffold_candidates:
+                if counts.get(cand, 0) >= 1:
+                    scaffold_item = cand
+                    break
+
+        replaceable = {
+            "air", "cave_air", "void_air", "short_grass", "tall_grass", "fern",
+            "large_fern", "snow", "leaf_litter", "dead_bush", "dandelion", "poppy",
+            "water", "flowing_water", "fire",
+        }
+
+        def _blk_name(x: int, y: int, z: int) -> str:
+            try:
+                b = self.bot.call("get_block", {"pos": [x, y, z]})
+                return str(b.get("name") or "").removeprefix("minecraft:").lower()
+            except Exception:
+                return ""
+
+        def _clear_cell(x: int, y: int, z: int) -> None:
+            nm = _blk_name(x, y, z)
+            if nm and nm not in replaceable and nm != "obsidian":
+                try:
+                    self.bot.call("dig", {"pos": [x, y, z]})
+                except Exception:
+                    pass
+
+        def _ensure_block(x: int, y: int, z: int, item_name: str) -> bool:
+            nm = _blk_name(x, y, z)
+            if nm == item_name:
+                return True
+            if item_name != "obsidian" and nm and nm not in replaceable:
+                return True  # Existing solid block already serves as scaffold!
+            if nm and nm not in replaceable:
+                try:
+                    self.bot.call("dig", {"pos": [x, y, z]})
+                except Exception:
+                    pass
+            # Stand near the frame front without colliding with the target block
+            try:
+                self.bot.call("move_to", {"x": bx + 1.5, "y": by, "z": bz - 2.0, "range": 2.0})
+            except Exception:
+                pass
+            try:
+                self.bot.call("place", {"pos": [x, y, z], "item": item_name})
+                return True
+            except Exception:
+                # Retry once after stepping closer to the specific column
+                try:
+                    self.bot.call("move_to", {"x": float(x), "y": float(by), "z": float(bz - 1.8), "range": 2.0})
+                    self.bot.call("place", {"pos": [x, y, z], "item": item_name})
+                    return True
+                except Exception:
+                    return False
+
+        # 1) Clear standing space in front and portal interior
+        for cx in (bx + 1, bx + 2):
+            for cy in (by + 1, by + 2, by + 3):
+                _clear_cell(cx, cy, bz)
+            for cy in (by, by + 1):
+                _clear_cell(cx, cy, bz - 1)
+
+        # 2) Ensure solid floor beneath bottom bar & corners
+        if scaffold_item:
+            for fx in range(bx, bx + 4):
+                nm = _blk_name(fx, by - 1, bz)
+                if not nm or nm in replaceable:
+                    _ensure_block(fx, by - 1, bz, scaffold_item)
+
+        # 3) Build 4x5 frame (bottom bar -> bottom corners -> left/right pillars -> top corner -> top bar)
+        placed_obs = 0
+        failed_cells: list[list[int]] = []
+        frame_steps: list[tuple[int, int, int, str, bool]] = [
+            (bx + 1, by, bz, "obsidian", True),
+            (bx + 2, by, bz, "obsidian", True),
+            (bx, by, bz, scaffold_item or "obsidian", False),
+            (bx + 3, by, bz, scaffold_item or "obsidian", False),
+            (bx, by + 1, bz, "obsidian", True),
+            (bx, by + 2, bz, "obsidian", True),
+            (bx, by + 3, bz, "obsidian", True),
+            (bx + 3, by + 1, bz, "obsidian", True),
+            (bx + 3, by + 2, bz, "obsidian", True),
+            (bx + 3, by + 3, bz, "obsidian", True),
+            (bx, by + 4, bz, scaffold_item or "obsidian", False),
+            (bx + 1, by + 4, bz, "obsidian", True),
+            (bx + 2, by + 4, bz, "obsidian", True),
+        ]
+        for tx, ty, tz, item_nm, is_obs in frame_steps:
+            if _ensure_block(tx, ty, tz, item_nm):
+                if is_obs:
+                    placed_obs += 1
+            elif is_obs:
+                failed_cells.append([tx, ty, tz])
+
+        # Re-clear interior in case any stray block remains
+        for cx in (bx + 1, bx + 2):
+            for cy in (by + 1, by + 2, by + 3):
+                _clear_cell(cx, cy, bz)
+
+        # 4) Ignite the bottom interior of the frame
+        try:
+            self.bot.call("move_to", {"x": bx + 1.5, "y": by, "z": bz - 2.0, "range": 1.8})
+        except Exception:
+            pass
+        ignited = False
+        for ix in (bx + 1, bx + 2):
+            try:
+                self.bot.call("interact", {"pos": [ix, by, bz], "item": "flint_and_steel"})
+            except Exception:
+                pass
+            time.sleep(0.5)
+            try:
+                fb = self.bot.call("find_blocks", {"types": ["nether_portal"], "radius": 8, "limit": 6})
+                if fb.get("blocks"):
+                    ignited = True
+                    break
+            except Exception:
+                pass
+
+        entered_nether = False
+        dim_after = dim
+        if ignited and enter:
+            try:
+                self.bot.call("move_to", {"x": bx + 1.5, "y": by + 1.0, "z": bz + 0.5, "range": 0.5})
+            except Exception:
+                pass
+            deadline = time.monotonic() + max(2.0, float(wait_s))
+            while time.monotonic() < deadline:
+                time.sleep(0.6)
+                try:
+                    st2 = self.bot.status()
+                    dim_after = str(st2.get("dimension") or "").lower()
+                    if "nether" in dim_after:
+                        entered_nether = True
+                        break
+                except Exception:
+                    pass
+
+        return {
+            "ok": bool(ignited and (entered_nether or not enter)),
+            "portal_origin": [bx, by, bz],
+            "placed_obsidian": placed_obs,
+            "failed_cells": failed_cells,
+            "portal_ignited": ignited,
+            "entered_nether": entered_nether,
+            "dimension": dim_after,
+            "requires_replan": not (ignited and (entered_nether or not enter)),
+        }

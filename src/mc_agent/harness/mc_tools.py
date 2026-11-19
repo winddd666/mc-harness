@@ -1129,6 +1129,31 @@ class McToolset:
             )
         if item:
             payload["item"] = item
+        if item in {"bucket", "water_bucket", "lava_bucket"} and x is not None and y is not None and z is not None:
+            try:
+                st = getattr(self, "_last_status", None)
+                if not isinstance(st, dict) or not st.get("pos"):
+                    st = self.bot.status()
+                pos = st.get("pos") if isinstance(st, dict) else None
+                if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                    bot_y = float(pos[1])
+                    if abs(float(y) - bot_y) >= 5.0:
+                        return json.dumps(
+                            {
+                                "ok": False,
+                                "requires_replan": True,
+                                "error": {
+                                    "code": "out_of_reach_vertical",
+                                    "message": (
+                                        f"目标方块 y={y} 与当前高度 y={bot_y:.1f} 相差 {abs(float(y) - bot_y):.1f} 格，"
+                                        "直接右键桶会寻路卡死；请先用 mc_skill_staircase 移动到接近目标高度后再调 mc_interact。"
+                                    ),
+                                },
+                            },
+                            ensure_ascii=False,
+                        )
+            except Exception:
+                pass
         raw = self._call_json("interact", payload)
         if item in {"bucket", "water_bucket", "lava_bucket"}:
             try:
@@ -1368,6 +1393,11 @@ class McToolset:
                 z=z,
                 dim=self._last_dimension,
             )
+        )
+
+    def mc_skill_build_portal(self, enter: bool = True, wait_s: float = 8.0) -> str:
+        return self._run_skill(
+            lambda: self.skills.build_nether_portal(enter=bool(enter), wait_s=float(wait_s))
         )
 
     def mc_skill_enchant(
@@ -2110,6 +2140,16 @@ class McToolset:
                     concurrency="exclusive",
                 ),
                 Tool(
+                    name="mc_skill_build_portal",
+                    description="一键清地、搭建 4x5 黑曜石下界传送门、用打火石点火并走入传送门进入下界（需背包有 obsidian>=10 与 flint_and_steel>=1）。",
+                    parameters={
+                        "enter": Parameter("点火后是否自动走入传送门进入下界，默认true", kind="boolean", required=False),
+                        "wait_s": Parameter("站入传送门等待维度切换的最长秒数，默认8", kind="number", required=False),
+                    },
+                    handler=self.mc_skill_build_portal,
+                    concurrency="exclusive",
+                ),
+                Tool(
                     name="mc_skill_enchant",
                     description="附魔台单次连招：同一次window/act放物品+青金石+选option并取回；默认校验落包，窗口状态陈旧时自动重连刷新。",
                     parameters={
@@ -2460,6 +2500,7 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_window_view": "看容器或交易窗",
     "mc_window_act": "操作容器/炉/附魔/交易",
     "mc_skill_container": "容器批量存取",
+    "mc_skill_build_portal": "一键搭建并进入下界传送门",
     "mc_skill_enchant": "附魔台单次连招",
     "mc_skill_trade": "村民按选项交易",
     "mc_skill_brew": "酿造台投料并等待",
