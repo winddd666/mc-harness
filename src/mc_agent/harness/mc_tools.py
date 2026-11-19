@@ -23,6 +23,7 @@ from ..skills import MacroSkills, SafetyEmergency, check_and_stabilize, compute_
 from ..skills.library import (
     BLOCK_MIN_PICKAXE_TIER,
     LOG_TYPES,
+    NETHER_STEM_TYPES,
     TABLE_RECIPES,
     _best_pickaxe_in_inv,
     _can_fit_item_in_inventory,
@@ -73,12 +74,23 @@ def _invalid_find_block_query(ignored: list[str]) -> str:
     }, ensure_ascii=False)
 
 
-def _normalize_find_block_types(types: list[str] | tuple[str, ...]) -> list[str]:
+def _normalize_find_block_types(
+    types: list[str] | tuple[str, ...], *, dimension: str | None = None
+) -> list[str]:
     """Expand block families; leave registry validation to the server version."""
+    nether = str(dimension or "").lower() == "the_nether"
     out: list[str] = []
     for raw in types:
         name = str(raw).strip().lower().removeprefix("minecraft:")
-        if name and name not in _NON_BLOCK_FIND_TYPES:
+        if not name or name in _NON_BLOCK_FIND_TYPES:
+            continue
+        if nether and name in {"log", "logs"}:
+            # Generic "log" in the nether means the local wood family. Expanding
+            # to overworld logs only makes the server reject/empty the query.
+            out.extend(NETHER_STEM_TYPES)
+        elif nether and name == "planks":
+            out.extend(("crimson_planks", "warped_planks"))
+        else:
             out.extend(_FIND_BLOCK_ALIASES.get(name, (name,)))
     return list(dict.fromkeys(out))
 
@@ -619,7 +631,8 @@ class McToolset:
         if types:
             requested = [str(name).strip().lower().removeprefix("minecraft:") for name in types]
             ignored = list(dict.fromkeys(name for name in requested if name in _NON_BLOCK_FIND_TYPES))
-            types = _normalize_find_block_types(types)
+            dim_alias, _, _ = self._cached_env(fetch_if_missing=False)
+            types = _normalize_find_block_types(types, dimension=dim_alias)
             if not types:
                 return _invalid_find_block_query(ignored or requested)
             payload["types"] = types

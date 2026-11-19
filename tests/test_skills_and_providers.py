@@ -1618,6 +1618,27 @@ def test_find_blocks_expands_families_and_keeps_valid_part_of_mixed_query() -> N
     assert len(queries) == 2
 
 
+def test_find_blocks_uses_nether_stems_for_generic_log() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    queries = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        assert path == "find_blocks"
+        queries.append(body["types"])
+        return httpx.Response(200, json={"ok": True, "result": {"total": 0, "blocks": []}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        toolset.update_block_pos([0, 64, 0])
+        toolset._last_dimension = "the_nether"
+        result = json.loads(toolset.mc_find_blocks(types=["log", "planks", "stone"]))
+    assert result["ok"] is True
+    assert queries == [["crimson_stem", "warped_stem", "crimson_planks", "warped_planks", "stone"]]
+
+
 @pytest.mark.parametrize("types,expected_queries", [(["shield", "leather"], 0), (["made_up_one", "made_up_two"], 2)])
 def test_find_blocks_all_unknown_returns_example_without_unfiltered_fallback(types, expected_queries) -> None:
     from mc_agent.harness.mc_tools import McToolset
