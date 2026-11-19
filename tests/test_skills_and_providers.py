@@ -2112,6 +2112,52 @@ def test_pillar_deadline_clears_persistent_jump_posture(monkeypatch) -> None:
     assert calls[-2:] == ["stop", "posture"]
 
 
+def test_pillar_retries_transient_place_failed(monkeypatch) -> None:
+    """r14 portal recovery: first one-step pillar place_failed, next call worked."""
+    import mc_agent.skills.library as library
+
+    clock = [500.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(library.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    jumping = [False]
+    placed = [False]
+    place_calls = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            y = 31.2 if jumping[0] else (31.0 if placed[0] else 30.0)
+            result = {"pos": [0.5, y, 0.5], "on_ground": not jumping[0], "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 8}]}
+        elif path == "get_block":
+            result = {"name": "air"}
+        elif path == "posture":
+            jumping[0] = bool(body.get("jump"))
+            result = {}
+        elif path == "place":
+            place_calls.append(body)
+            if len(place_calls) <= 2:
+                return httpx.Response(
+                    409, json={"ok": False, "error": {"code": "place_failed", "message": "the block is still air"}}
+                )
+            placed[0] = True
+            result = {"pos": body["pos"]}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(vertical="pillar", steps=1)
+    assert result["ok"] is True
+    assert result["steps_done"] == 1
+    assert result["placed_count"] == 1
+    assert len(place_calls) == 3
+
+
 def test_failed_pillar_blocks_landing_cell_not_airborne_cell(monkeypatch) -> None:
     """r12: a failed jump-place was remembered at y+1, so the next call still
     advertised viable_pillar_up=true at the same grounded cell."""

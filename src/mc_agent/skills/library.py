@@ -5650,14 +5650,18 @@ class MacroSkills:
                         pass
 
                 placed_ok = False
+                place_failures = 0
+                retry_after = 0.0
                 self.bot.call("posture", {"sneak": False, "shield": False, "jump": True})
                 try:
-                    for attempt in range(14):
+                    for attempt in range(48):
                         time.sleep(0.05)
                         st_j = self.bot.status()
                         if st_j.get("alive") is False or st_j.get("ready") is False:
                             stop_reason = "not_ready" if st_j.get("ready") is False else "died"
                             break
+                        if time.monotonic() < retry_after:
+                            continue
                         jpos = st_j.get("pos") or [bx + 0.5, by, bz + 0.5]
                         if float(jpos[1]) < by + 1.0 and attempt < 2:
                             continue
@@ -5670,6 +5674,13 @@ class MacroSkills:
                             if perr.code == "blocked_by_self":
                                 continue
                             last_error = {"code": perr.code, "message": perr.message, "pos": [bx, by, bz]}
+                            if perr.code == "place_failed" and place_failures < 2:
+                                # r14 portal recovery: the first jump-place was
+                                # rejected while airborne, then the next whole
+                                # call succeeded. Wait one jump cycle and retry.
+                                place_failures += 1
+                                retry_after = time.monotonic() + 0.45
+                                continue
                             break
                 finally:
                     try:
