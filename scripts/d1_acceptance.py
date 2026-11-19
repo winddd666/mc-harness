@@ -58,14 +58,22 @@ def collect(wave: str) -> dict:
     for bot in bots:
         sd = root / bot
         sums = sorted(sd.glob("wild-endurance-*.json"))
+        cs = {}
         if sums:
             d = json.loads(sums[-1].read_text())
             cs = d.get("curriculum_summary") or {}
             out["summaries"][bot] = int(cs.get("final_score") or 0)
             out["owned_end"][bot] = d.get("owned_end") or {}
-            for ep in cs.get("episodes") or []:
-                if ep.get("status") == "runtime_error":
-                    out["runtime_error"] += 1
+        else:
+            # Mid-wave: episodes live in curriculum-*.json before the final summary.
+            for cf in sorted(sd.glob("curriculum-*.json")):
+                try:
+                    cs = json.loads(cf.read_text())
+                except Exception:
+                    cs = {}
+        for ep in cs.get("episodes") or []:
+            if ep.get("status") == "runtime_error":
+                out["runtime_error"] += 1
         log = sd / "stdout.log"
         txt = log.read_text(errors="ignore") if log.exists() else ""
         if "Traceback" in txt:

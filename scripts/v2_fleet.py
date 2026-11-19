@@ -293,6 +293,8 @@ def cmd_launch(
     use_slot_durations: bool = False,
     min_slot_duration: int | None = None,
     max_slot_duration: int | None = None,
+    bots_filter: set[str] | None = None,
+    rpm_override: int | None = None,
 ) -> int:
     selected_raw = [
         s
@@ -300,6 +302,7 @@ def cmd_launch(
         if s.squad in squads
         and (min_slot_duration is None or s.duration_s >= min_slot_duration)
         and (max_slot_duration is None or s.duration_s <= max_slot_duration)
+        and (not bots_filter or s.bot.lower() in bots_filter)
     ]
     if not selected_raw:
         print("No fleet slots matched squads:", squads)
@@ -329,7 +332,7 @@ def cmd_launch(
                 "--bot", slot.bot,
                 "--token-file", slot.token_file,
                 "--provider", slot.provider,
-                "--rpm-budget", str(slot.rpm_budget),
+                "--rpm-budget", str(slot.rpm_budget if rpm_override is None else rpm_override),
                 "--stage", slot.stage,
                 "--runs-subdir", subdir,
                 "--site-index", str(slot.site_index),
@@ -852,6 +855,8 @@ def main() -> int:
     lp.add_argument("--max-slot-duration", type=int, default=None, help="Only launch slots with duration_s <= N (decouples short/mid runs)")
     lp.add_argument("--max-episodes", type=int, default=20)
     lp.add_argument("--squads", default="nju,glm,ds,hy4")
+    lp.add_argument("--bots", default=None, help="Optional comma-separated bot names filter (e.g. HY_2,HY_5,HY_6,HY_9)")
+    lp.add_argument("--rpm-override", type=int, default=None, help="Optional per-bot RPM budget override for selected slots")
     lp.add_argument("--stagger", type=float, default=1.5)
     tp = sub.add_parser("triage")
     tp.add_argument("--wave", required=True)
@@ -864,6 +869,7 @@ def main() -> int:
     if args.cmd == "sites":
         return cmd_sites()
     if args.cmd == "launch":
+        bots_filter = {b.strip().lower() for b in args.bots.split(",") if b.strip()} if args.bots else None
         return cmd_launch(
             args.wave,
             args.duration,
@@ -873,6 +879,8 @@ def main() -> int:
             use_slot_durations=args.slot_durations,
             min_slot_duration=args.min_slot_duration,
             max_slot_duration=args.max_slot_duration,
+            bots_filter=bots_filter,
+            rpm_override=args.rpm_override,
         )
     md: str | bool | None = False if args.no_markdown else args.markdown
     return cmd_triage(args.wave, md, pathlib.Path(args.runs_root).expanduser() if args.runs_root else None)

@@ -1646,6 +1646,139 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
     assert placed == ["cobblestone", "netherrack"]
 
 
+def test_staircase_cools_down_stand_after_zero_progress_dig_timeout(monkeypatch) -> None:
+    """BUG-041/r23: same stand kept burning 45s per direction with 0 progress."""
+    import mc_agent.skills.library as library
+
+    monkeypatch.setattr(library.time, "monotonic", lambda: 1000.0)
+    pos = [0.5, 64.0, 0.5]
+    digs = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": list(pos), "on_ground": True, "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "diamond_pickaxe", "count": 1}]}
+        elif path == "equip":
+            result = {"held": {"name": "diamond_pickaxe"}}
+        elif path == "get_block":
+            result = {"name": "basalt" if body["pos"][1] <= 66 else "air"}
+        elif path == "dig":
+            digs.append(body["pos"])
+            raise httpx.ReadTimeout("offline dig stall", request=request)
+        elif path == "move_to":
+            result = {"pos": list(pos)}
+        elif path == "look":
+            result = {}
+        elif path == "control":
+            result = {"pos": list(pos), "moved": 0.0}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        first = skills.dig_staircase(direction="north", vertical="up", steps=3)
+        digs_after_first = len(digs)
+        second = skills.dig_staircase(direction="south", vertical="up", steps=3)
+    assert first["stop_reason"] == "time_budget"
+    assert digs_after_first >= 1
+    assert second["stop_reason"] == "stair_cell_cooldown"
+    assert len(digs) == digs_after_first
+    assert "8~12 格" in second["hint"]
+
+
+def test_staircase_fails_fast_on_previously_timed_out_dig_cell(monkeypatch) -> None:
+    """BUG-041/r23: retrying the same timed-out cell burned 15-45s each time."""
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    clock[0] = 1000.0
+    digs = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "on_ground": True, "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "stone_pickaxe", "count": 1}]}
+        elif path == "equip":
+            result = {"held": {"name": "stone_pickaxe"}}
+        elif path == "get_block":
+            result = {"name": "blackstone" if body["pos"][1] <= 66 else "air"}
+        elif path == "dig":
+            digs.append(body["pos"])
+            result = {}
+        elif path == "move_to":
+            result = {"pos": [0.5, 64.0, 0.5]}
+        elif path == "look":
+            result = {}
+        elif path == "control":
+            result = {"pos": [0.5, 64.0, 0.5], "moved": 0.0}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        skills._avoid_temporarily((0, 65, 0), "dig_timeout", 30.0)
+        result = skills.dig_staircase(direction="north", vertical="up", steps=3)
+    assert result["ok"] is False
+    assert result["stop_reason"] == "dig_cell_avoided"
+    assert result["last_error"]["code"] == "dig_cell_avoided"
+    assert digs == []
+    assert "8~12 格" in result["hint"]
+
+
+def test_staircase_dig_timeout_names_wooden_pickaxe_as_cause() -> None:
+    """BUG-041/r22_long: wooden pickaxe + hard rock = ~25s per block, 1 step per call."""
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": [0.5, 36.0, 0.5], "on_ground": True, "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "wooden_pickaxe", "count": 1}]}
+        elif path == "equip":
+            result = {"held": {"name": "wooden_pickaxe"}}
+        elif path == "get_block":
+            result = {"name": "stone" if body["pos"][1] <= 36 else "air"}
+        elif path == "dig":
+            raise httpx.ReadTimeout("offline dig too slow", request=request)
+        elif path == "move_to":
+            result = {"pos": [0.5, 36.0, 0.5]}
+        elif path == "look":
+            result = {}
+        elif path == "control":
+            result = {"pos": [0.5, 36.0, 0.5], "moved": 0.0}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        result = skills.dig_staircase(direction="north", vertical="down", steps=1)
+    assert result["ok"] is False
+    assert result["stop_reason"] == "time_budget"
+    assert result["timeout_path"] == "dig"
+    assert result["pickaxe_tier"] == 1
+    assert result["low_tier_slow_dig"] is True
+    assert "stone_pickaxe" in result["error"]["message"]
+
+
 def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
     """BUG-024: a self-dug shaft step cell has no six-face support."""
     pos = [0.5, 30.0, 0.5]
@@ -1734,7 +1867,10 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
         calls.append(path)
         timeout = request.extensions["timeout"]["read"]
         if path == timeout_path:
-            assert 0 < timeout <= 15
+            # BUG-037/r24: the step-0 dig may use up to 40s of the session
+            # budget instead of the old flat 15s cap; nothing may exceed it.
+            limit = 40 if timeout_path == "dig" else 15
+            assert 0 < timeout <= limit + 0.01
             if path == "get_block":
                 # Reading safety probes also consumes the same total budget.
                 clock[0] += 3
@@ -2013,6 +2149,35 @@ def test_window_view_allows_near_entity() -> None:
     assert result["ok"] is True
 
 
+def test_smelt_missing_fuel_gives_harvest_next_action() -> None:
+    """P2-28/r20_long: bare 'no fuel' left ds_1_bare stuck in bootstrap_iron_age."""
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "health": 20}})
+        if path == "inventory":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"items": [{"name": "raw_iron", "count": 3, "slot": 36}]}},
+            )
+        if path == "find_blocks":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"blocks": [{"name": "furnace", "pos": [1, 64, 0], "dist": 0.5}]}},
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).smelt_items("raw_iron", count=3)
+    assert result["ok"] is False
+    assert result["error"] == "missing_fuel"
+    assert result["requires_replan"] is True
+    assert result["next_action"] == "mc_skill_harvest_logs(target_logs=2)"
+    assert result["inventory"]["raw_iron"] == 3
+    assert "mc_skill_harvest_logs" in result["message"]
+
+
 def test_smelt_collect_survives_read_timeout() -> None:
     """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
     from mc_agent.harness.world_memory import WorldMemory
@@ -2272,6 +2437,116 @@ def test_tunnel_triggers_retention_cleanup() -> None:
     assert state["cobblestone"] == 192
 
 
+def test_staircase_step0_dig_uses_budget_beyond_15s(monkeypatch) -> None:
+    """BUG-037/r24: step 0 stalled ~28s in dig even with a stone pickaxe."""
+    import mc_agent.skills.library as library
+
+    clock = [100.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(library.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    dig_timeouts = []
+    pos = [0.5, 36.0, 0.5]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": list(pos), "on_ground": True, "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "stone_pickaxe", "count": 1}]}
+        elif path == "equip":
+            result = {"held": {"name": "stone_pickaxe"}}
+        elif path == "get_block":
+            result = {"name": "stone" if body["pos"][1] <= 36 else "air"}
+        elif path == "dig":
+            dig_timeouts.append(request.extensions["timeout"]["read"])
+            if len(dig_timeouts) == 1:
+                # The first dig stalls ~28s: only the raised step-0 cap can wait.
+                clock[0] += 28.0
+            result = {}
+        elif path == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(pos)}
+        elif path == "look":
+            result = {}
+        elif path == "control":
+            result = {"pos": list(pos), "moved": 1.0}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="down", steps=1)
+    assert dig_timeouts and dig_timeouts[0] > 15.0
+    assert result["steps_done"] >= 1
+
+
+def test_unstick_sends_stop_and_reports_deadline_hit(monkeypatch) -> None:
+    """r22/r23/r24: unstick could run 150~270s; budget must cap it."""
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    calls: list[str] = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(path)
+        if path == "control" and body.get("yaw") == 0.0:
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        if path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "in_water": False}
+        elif path == "inventory":
+            result = {"items": []}
+        elif path == "get_block":
+            result = {"name": "stone", "diggable": True}
+        elif path == "dig":
+            clock[0] += min(20.0, float(request.extensions["timeout"]["read"]))
+            result = {}
+        elif path == "control":
+            result = {"pos": [0.5, 64.0, 0.5], "moved": 0.0}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        skills.descend_canopy = lambda **kwargs: {"on_canopy": False}
+        result = skills.unstick(max_duration_s=45.0)
+    assert result["deadline_hit"] is True
+    assert result["elapsed_s"] <= 45.5
+    assert result["budget_s"] == pytest.approx(45.0)
+    assert "不要连续重复调用 unstick" in result["hint"]
+    assert "stop" in calls
+
+
+def test_unstick_fast_path_has_no_deadline_flag() -> None:
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "in_water": False}
+        elif path == "get_block":
+            result = {"name": "air", "diggable": False}
+        elif path == "control":
+            result = {"pos": [1.5, 64.0, 0.5], "moved": 1.0}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).unstick()
+    assert result["ok"] is True
+    assert "deadline_hit" not in result
+    assert result["elapsed_s"] >= 0.0
+
+
 def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
     """r15 P2-21: dig timeout was retried on the same coordinate."""
     from mc_agent.harness.mc_tools import McToolset
@@ -2464,6 +2739,11 @@ def test_craft_gear_missing_materials_fail_before_any_mutation(item, counts, mis
     assert result["error"] == "missing_ingredients"
     assert result["requires_replan"] is True
     assert result["missing_materials"] == missing
+    # r24/D1: 7 of 8 real failures had message=None, forcing the model to
+    # parse the maps itself.
+    assert result["message"]
+    assert item in result["message"]
+    assert "缺少材料" in result["message"]
     assert calls == ["inventory"]
 
 

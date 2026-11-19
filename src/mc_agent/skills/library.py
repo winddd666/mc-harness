@@ -1169,6 +1169,9 @@ class _StairSession:
         self.last_timeout_path: str | None = None
         self.last_retry_path: str | None = None
         self.last_dig_pos: list[Any] | None = None
+        self.last_dig_block: str | None = None
+        self.pickaxe_tier: int | None = None
+        self.dig_cap: float | None = None
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
     _IDEMPOTENT_READS = frozenset({"status", "inventory", "get_block", "find_blocks"})
@@ -1184,7 +1187,13 @@ class _StairSession:
                 raise _StairDeadline()
             # Obsidian needs ~9.4s with a diamond pickaxe (r14: fortress
             # staircase timed out on every first dig at the old 8s cap).
-            cap = 6.0 if path == "move_to" else 15.0 if path == "dig" else 3.0
+            # BUG-037/r24: a first step on a loaded server can stall 20~30s
+            # even with a tier>=2 pickaxe, so allow the caller to raise the
+            # dig cap for the first step only.
+            base_cap = 6.0 if path == "move_to" else 15.0 if path == "dig" else 3.0
+            if path == "dig" and self.dig_cap:
+                base_cap = max(base_cap, float(self.dig_cap))
+            cap = base_cap
             timeout = min(remaining, cap, float(explicit_timeout if explicit_timeout is not None else cap))
             call_body = body
             if path == "move_to":
@@ -3010,6 +3019,11 @@ class MacroSkills:
             # absent stone/ingots/wool cannot be repaired by rebuilding a table.
             non_wood_missing = {k: v for k, v in plan["missing_materials"].items() if k not in {"stick", "any_planks"}}
             if non_wood_missing:
+                missing_desc = "、".join(
+                    f"{name} 需 {int(plan['required_materials'].get(name, amt))}"
+                    f"（现有 {int(plan['available_materials'].get(name, 0))}，缺 {amt}）"
+                    for name, amt in plan["missing_materials"].items()
+                )
                 return self._attach_shortage_memory_hint(
                     {
                         "ok": False,
@@ -3017,6 +3031,11 @@ class MacroSkills:
                         "requires_replan": True,
                         "inventory": initial,
                         **plan,
+                        "message": (
+                            f"合成 {item} x{count} 缺少材料：{missing_desc}。"
+                            "请先用 mc_skill_harvest_logs 补木料 / mc_skill_mine_blocks 补石料后再合成，"
+                            "或改合成本轮材料足够的替代工具；不要原参数重复调用。"
+                        ),
                     },
                     non_wood_missing.keys(),
                 )
@@ -3050,6 +3069,11 @@ class MacroSkills:
             }
         plan = craft_material_shortage(item, count, prepared)
         if plan and plan["missing_materials"]:
+            missing = plan["missing_materials"]
+            shortage_desc = "、".join(
+                f"{name} 需 {int(plan['required_materials'].get(name, amt))}（现有 {int(plan['available_materials'].get(name, 0))}，缺 {amt}）"
+                for name, amt in missing.items()
+            )
             return self._attach_shortage_memory_hint(
                 {
                     "ok": False,
@@ -3057,6 +3081,11 @@ class MacroSkills:
                     "requires_replan": True,
                     "inventory": prepared,
                     **plan,
+                    "message": (
+                        f"合成 {item} x{count} 缺少材料：{shortage_desc}。"
+                        "请先用 mc_skill_harvest_logs 补木料 / mc_skill_mine_blocks 补石料后再合成，"
+                        "或改合成本轮材料足够的替代工具；不要原参数重复调用。"
+                    ),
                 },
                 plan["missing_materials"].keys(),
             )
@@ -4314,7 +4343,21 @@ class MacroSkills:
                     fuel_count = min(counts[plank], math.ceil(smelt_n / 1.5))
 
         if not chosen_fuel or fuel_count < 1:
-            return {"ok": False, "error": "missing_fuel", "message": "背包没有煤炭、木炭、木板或原木燃料。"}
+            # P2-28/r20_long: the bare message left the model stuck in
+            # bootstrap_iron_age with no next step.
+            return {
+                "ok": False,
+                "requires_replan": True,
+                "error": "missing_fuel",
+                "next_action": "mc_skill_harvest_logs(target_logs=2)",
+                "inventory": counts,
+                "message": (
+                    "背包没有煤炭、木炭、木板或原木燃料，熔炼无法开始（铁锭等产物仍在炉中）。"
+                    "请先调 mc_skill_harvest_logs(target_logs=2, radius=32) 砍 2 个原木（自动转木板作燃料），"
+                    "或用 mc_skill_mine_blocks(block_types=['coal_ore'], count=3) 采煤；"
+                    "拿到燃料后再用相同 input_item 调用 mc_skill_smelt。不要无燃料重复调用。"
+                ),
+            }
 
         self.bot.call(
             "window/act",
@@ -5092,8 +5135,58 @@ class MacroSkills:
             "pos_after": st_after.get("pos") or pos_before,
         }
 
-    def unstick(self) -> dict[str, Any]:
-        """Clear blocks overlapping the bot's 0.6x1.8 floor()-aligned hitbox and step out of pits/corners, canopy, or water."""
+    def unstick(self, *, max_duration_s: float = 45.0) -> dict[str, Any]:
+        """Clear blocks overlapping the bot's 0.6x1.8 floor()-aligned hitbox and step out of pits/corners, canopy, or water.
+
+        All internal get_block/dig/control steps share one hard deadline
+        (default 45s) so a stuck server action can never turn this into a
+        150~270s call (r22/r23/r24).
+        """
+        deadline = time.monotonic() + max(5.0, float(max_duration_s))
+        started = time.monotonic()
+        params = inspect.signature(self.bot.call).parameters
+        supports_timeout = "timeout_s" in params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+
+        class _UnstickDeadline(Exception):
+            pass
+
+        timed_out = False
+
+        def _call(path: str, body: dict[str, Any] | None = None, cap: float = 3.0) -> dict[str, Any]:
+            nonlocal timed_out
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.2:
+                timed_out = True
+                raise _UnstickDeadline()
+            timeout = min(remaining, cap)
+            try:
+                if supports_timeout:
+                    return self.bot.call(path, body, timeout_s=timeout)
+                return self.bot.call(path, body)
+            except httpx.TimeoutException:
+                timed_out = True
+                raise _UnstickDeadline() from None
+
+        def _finish(payload: dict[str, Any]) -> dict[str, Any]:
+            payload["elapsed_s"] = round(time.monotonic() - started, 2)
+            payload["budget_s"] = round(max(5.0, float(max_duration_s)), 2)
+            if timed_out:
+                payload["deadline_hit"] = True
+                payload["timed_out"] = True
+                payload["requires_replan"] = True
+                payload["hint"] = (
+                    f"unstick 在 {payload['budget_s']}s 硬预算内未完成（已做{len(payload.get('dug') or [])}步挖除）。"
+                    "请改用 mc_move_to(x,z) 短距离 8~12 格换站位、mc_skill_staircase 或 mc_control 短脉冲脱困，"
+                    "不要连续重复调用 unstick。"
+                )
+                try:
+                    self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
+            return payload
+
         st = self.bot.status()
         pos_before = st.get("pos") or [0.0, 64.0, 0.0]
         px, py, pz = float(pos_before[0]), float(pos_before[1]), float(pos_before[2])
@@ -5103,7 +5196,7 @@ class MacroSkills:
         zs = sorted({math.floor(pz - 0.38), bz, math.floor(pz + 0.38)})
         if bool(st.get("in_water")):
             esc = self.escape_water()
-            return {
+            return _finish({
                 "ok": True,
                 "foot_block_before": [bx, by, bz],
                 "hitbox_xs": xs,
@@ -5114,28 +5207,32 @@ class MacroSkills:
                 "control": esc.get("control", {}),
                 "escaped_water": esc.get("ok", False),
                 "in_water": esc.get("in_water", False),
-            }
+            })
 
         canopy = self.descend_canopy()
         if canopy.get("on_canopy") and canopy.get("dug"):
-            return {
+            return _finish({
                 "ok": True,
                 "descended_canopy": True,
                 "foot_block_before": [bx, by, bz],
                 "pos_before": pos_before,
                 "pos_after": canopy.get("pos_after", pos_before),
                 "dug": canopy.get("dug", []),
-            }
+            })
 
         skip_names = {"air", "cave_air", "void_air", "water", "lava", "bedrock"}
         dug: list[dict[str, Any]] = []
         pick_equipped = False
 
         def _try_dig_if_solid(cx: int, cy: int, cz: int, *, retries: int = 1) -> None:
-            nonlocal pick_equipped
+            nonlocal pick_equipped, timed_out
             for _attempt in range(retries):
+                if timed_out:
+                    return
                 try:
-                    blk = self.bot.call("get_block", {"pos": [cx, cy, cz]})
+                    blk = _call("get_block", {"pos": [cx, cy, cz]}, cap=3.0)
+                except _UnstickDeadline:
+                    return
                 except ApiError:
                     return
                 bname = str(blk.get("name") or "air")
@@ -5146,10 +5243,17 @@ class MacroSkills:
                 if not pick_equipped and (
                     bname in BLOCK_MIN_PICKAXE_TIER or "stone" in bname or "ore" in bname or "deepslate" in bname
                 ):
-                    pick_equipped = self._equip_if_present(tuple(PICKAXE_TIERS)) is not None
+                    try:
+                        pick_equipped = self._equip_if_present(tuple(PICKAXE_TIERS)) is not None
+                    except (ApiError, httpx.HTTPError):
+                        pick_equipped = False
                 try:
-                    self.bot.call("dig", {"pos": [cx, cy, cz], "collect": True, "stop_on": ["death"]})
+                    _call("dig", {"pos": [cx, cy, cz], "collect": True, "stop_on": ["death"]}, cap=15.0)
                     dug.append({"pos": [cx, cy, cz], "block": bname})
+                except _UnstickDeadline:
+                    self._avoid_temporarily((cx, cy, cz), "dig_timeout", 30.0)
+                    timed_out = True
+                    return
                 except ApiError as err:
                     if _is_protected_err(err):
                         self.protected_positions.add((cx, cy, cz))
@@ -5167,31 +5271,39 @@ class MacroSkills:
         # 2. Clear one cardinal 3-high escape slot and nudge out with control()
         mv_res: dict[str, Any] = {}
         exit_yaw = -math.pi / 2
-        for dx, dz, yaw in (
-            (1, 0, -math.pi / 2),
-            (0, -1, 0.0),
-            (-1, 0, math.pi / 2),
-            (0, 1, math.pi),
-        ):
-            ex, ez = bx + dx, bz + dz
-            _try_dig_if_solid(ex, by + 1, ez)
-            _try_dig_if_solid(ex, by + 2, ez)
-            _try_dig_if_solid(ex, by, ez)
-            exit_yaw = yaw
-            break
+        if not timed_out:
+            for dx, dz, yaw in (
+                (1, 0, -math.pi / 2),
+                (0, -1, 0.0),
+                (-1, 0, math.pi / 2),
+                (0, 1, math.pi),
+            ):
+                ex, ez = bx + dx, bz + dz
+                _try_dig_if_solid(ex, by + 1, ez)
+                _try_dig_if_solid(ex, by + 2, ez)
+                _try_dig_if_solid(ex, by, ez)
+                exit_yaw = yaw
+                break
+
+        if not timed_out:
+            try:
+                mv_res = _call(
+                    "control",
+                    {"forward": True, "jump": True, "yaw": exit_yaw, "ms": 900, "stop_on": []},
+                    cap=3.0,
+                )
+            except _UnstickDeadline:
+                mv_res = {"error": "deadline", "message": "control skipped: unstick budget exhausted"}
+            except ApiError as err:
+                mv_res = {"error": err.code, "message": err.message}
 
         try:
-            mv_res = self.bot.call(
-                "control",
-                {"forward": True, "jump": True, "yaw": exit_yaw, "ms": 900, "stop_on": []},
-            )
-        except ApiError as err:
-            mv_res = {"error": err.code, "message": err.message}
-
-        st_after = self.bot.status()
+            st_after = self.bot.status()
+        except (ApiError, httpx.HTTPError):
+            st_after = {"pos": pos_before}
         pos_after = st_after.get("pos") or pos_before
-        return {
-            "ok": True,
+        return _finish({
+            "ok": bool(dug) or not timed_out,
             "foot_block_before": [bx, by, bz],
             "hitbox_xs": xs,
             "hitbox_zs": zs,
@@ -5199,7 +5311,7 @@ class MacroSkills:
             "pos_after": pos_after,
             "dug": dug,
             "control": mv_res,
-        }
+        })
 
     def dig_safety_bunker(self, *, urgent: bool = False) -> dict[str, Any]:
         """Dig a 1x3 vertical shaft under the bot and seal the top to block night mobs."""
@@ -5921,12 +6033,51 @@ class MacroSkills:
                 except (ApiError, httpx.HTTPError):
                     pass
             timeout_message = "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"
+            pick_tier = getattr(session, "pickaxe_tier", None)
+            low_tier_slow_dig = False
             if session.last_timeout_path == "dig":
                 timeout_message = (
                     f"单步挖掘未在预算内确认（目标 {session.last_dig_pos}）。"
                     "若目标位于脚下、为黑曜石/高硬度方块，或同一平台连续超时，"
                     "先调 mc_skill_unstick 并离开该处 8~12 格后再挖；不要原地重复同一方向。"
                 )
+                # BUG-041/r22_long: with a wooden pickaxe every stone staircase
+                # step costs ~25s, so the model loops for ~30s per 1 block.
+                if isinstance(pick_tier, int) and pick_tier < 2:
+                    low_tier_slow_dig = True
+                    blk = session.last_dig_block or "硬质方块"
+                    tier_label = {0: "无镐/空手", 1: "木镐"}.get(pick_tier, f"tier {pick_tier}")
+                    timeout_message = (
+                        f"单步挖掘未在预算内确认：当前镐等级 {pick_tier}（{tier_label}）挖 {blk} "
+                        f"约需 25s/格，45s 总预算只够 1 格。"
+                        "先调 mc_skill_craft_gear(item='stone_pickaxe')（有圆石时），"
+                        "或改走泥土/砂砾/沙子等软方块方向，或先 mc_skill_harvest_logs 补木料；"
+                        "也可先 mc_skill_unstick 让开该格；不要在硬岩上原地重复同一步梯。"
+                    )
+                if isinstance(session.last_dig_pos, (list, tuple)) and len(session.last_dig_pos) >= 3:
+                    try:
+                        self._avoid_temporarily(
+                            (int(session.last_dig_pos[0]), int(session.last_dig_pos[1]), int(session.last_dig_pos[2])),
+                            "dig_timeout",
+                            30.0,
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                # BUG-041/r23: zero-progress dig timeout -> cool the whole stand
+                # down so the next call must relocate instead of retrying.
+                if not session.progress.get("steps_done"):
+                    start_cell = getattr(session, "start_cell", None)
+                    if isinstance(start_cell, tuple) and len(start_cell) == 3:
+                        try:
+                            self._record_failed_stair_dir(
+                                (int(start_cell[0]), int(start_cell[1]), int(start_cell[2]),
+                                 str(vertical or "down").strip().lower()),
+                                str(direction or "north").strip().lower(),
+                                "dig_timeout",
+                                ttl_s=60.0,
+                            )
+                        except (TypeError, ValueError):
+                            pass
             return {
                 "ok": False, "requires_replan": True, "stop_reason": "time_budget",
                 "error": {"code": "time_budget", "message": timeout_message},
@@ -5935,6 +6086,9 @@ class MacroSkills:
                 "timeout_path": session.last_timeout_path,
                 "retried_path": session.last_retry_path,
                 "dig_target": session.last_dig_pos,
+                "dig_block": session.last_dig_block,
+                "pickaxe_tier": pick_tier,
+                "low_tier_slow_dig": low_tier_slow_dig,
                 "action_released": cleanup.get("released", cleanup.get("stopped", False)),
             }
 
@@ -6151,6 +6305,12 @@ class MacroSkills:
             return None
 
         _equip_best_pick()
+        # BUG-041: remember the pickaxe tier so a dig timeout can name the real
+        # cause (wooden pickaxe on hard rock costs ~25s per block).
+        try:
+            self.bot.pickaxe_tier = _best_pickaxe_in_inv(_inventory_counts(self.bot))[1]
+        except (ApiError, httpx.HTTPError, TypeError, ValueError):
+            self.bot.pickaxe_tier = None
         st0 = self.bot.status()
         pos_before = st0.get("pos") or [0.0, 64.0, 0.0]
         steps_done = 0
@@ -6181,6 +6341,38 @@ class MacroSkills:
                 if _block_name([c0x, c0y - 1, c0z]).endswith("_leaves"):
                     stop_reason = "on_tree_canopy"
 
+        # BUG-041/r23: a zero-progress dig timeout from this exact stand means
+        # every direction here re-stalls. Refuse early instead of burning
+        # another 45s per attempt.
+        _start_cell = (b0x, b0y, b0z)
+        try:
+            self.bot.start_cell = _start_cell
+        except (AttributeError, TypeError):
+            pass
+        _cooldown = self._active_failed_stair_dirs((b0x, b0y, b0z, v_key))
+        if any("dig_timeout" in str(r) for r in _cooldown.values()):
+            return {
+                "ok": False,
+                "requires_replan": True,
+                "direction": d_key,
+                "vertical": v_key,
+                "steps_requested": steps,
+                "steps_done": 0,
+                "dug_count": 0,
+                "stop_reason": "stair_cell_cooldown",
+                "pos_before": pos_before,
+                "pos_after": pos_before,
+                "last_error": {
+                    "code": "stair_cell_cooldown",
+                    "pos": [b0x, b0y, b0z],
+                    "message": "该站位刚发生零进展 dig 超时，已冷却 60s，未再尝试阶梯。",
+                },
+                "hint": (
+                    "刚在同一站位连续 dig 超时（0 进展）。请先用 mc_move_to 水平离开 8~12 格"
+                    " 或 mc_skill_unstick 换站位，再重新开阶梯；不要原地换方向重试。"
+                ),
+            }
+
         stair_deadline = self.bot.deadline
         for step_idx in range(steps if stop_reason == "completed" else 0):
             # BUG-037: the first step often needs walk+dig+confirm and was
@@ -6191,6 +6383,9 @@ class MacroSkills:
                 if step_idx == 0 and self.bot.per_step_timeout >= 10.0
                 else min(self.bot.deadline, time.monotonic() + self.bot.per_step_timeout)
             )
+            # BUG-037/r24: step 0 may also stall 20~30s inside the server's dig
+            # even with a tier>=2 pickaxe; let that first dig use the budget.
+            self.bot.dig_cap = 40.0 if (step_idx == 0 and self.bot.per_step_timeout >= 10.0) else None
             if step_idx > 0 and time.monotonic() >= stair_deadline:
                 stop_reason = "time_budget"
                 break
@@ -6201,6 +6396,30 @@ class MacroSkills:
             pos = st.get("pos") or pos_before
             bx, by, bz = math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2]))
             nx, nz = bx + dx, bz + dz
+
+            # BUG-041/r23: when a dig cell already timed out here, every retry
+            # burns another 15~45s on the same unreachable block. Fail fast and
+            # tell the model to relocate instead.
+            avoided_cell = next(
+                (
+                    cell
+                    for cell in (
+                        (bx, by + 1, bz), (bx, by + 2, bz), (bx, by - 1, bz),
+                        (nx, by + 1, nz), (nx, by + 2, nz),
+                    )
+                    if self._is_block_avoided(cell)
+                    and (self.temporary_avoidance.get(cell) or {}).get("reason") == "dig_timeout"
+                ),
+                None,
+            )
+            if avoided_cell is not None and step_idx == 0:
+                stop_reason = "dig_cell_avoided"
+                last_error = {
+                    "code": "dig_cell_avoided",
+                    "pos": list(avoided_cell),
+                    "message": "该格刚发生 dig 超时，已临时避开 30s，未再次挖掘。",
+                }
+                break
 
             head_here = _block_name([bx, by + 1, bz])
             if head_here in fluid_or_bedrock:
@@ -6304,6 +6523,7 @@ class MacroSkills:
                                     dig_failed = True
                                     break
                                 try:
+                                    self.bot.last_dig_block = _block_name(dpos)
                                     self.bot.call("dig", {"pos": dpos, "collect": True, "stop_on": ["death"]})
                                     dug_count += 1
                                 except ApiError as err:
@@ -6384,6 +6604,7 @@ class MacroSkills:
                         break
                     if uname not in air_set:
                         try:
+                            self.bot.last_dig_block = uname
                             self.bot.call("dig", {"pos": dpos, "collect": True})
                             dug_count += 1
                         except ApiError as err:
@@ -6485,6 +6706,7 @@ class MacroSkills:
                     break
 
         self.bot.step_deadline = self.bot.deadline
+        self.bot.dig_cap = None
         st_end = self.bot.status()
         if stop_on_ore and stop_reason == "completed":
             found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
@@ -6529,6 +6751,12 @@ class MacroSkills:
             out_stair["hint"] = (
                 "目标台阶四周没有可放置面（no_support），已原地安全垫高一格。"
                 "请从新高度重新调用 mc_skill_staircase；若仍无支撑，继续 vertical='pillar'。"
+            )
+        if stop_reason == "dig_cell_avoided":
+            out_stair["hint"] = (
+                "该格刚发生 dig 超时（同一格已临时避开 30s），本次未再挖掘。"
+                "请先用 mc_move_to 水平离开 8~12 格或 mc_skill_unstick 换站位，"
+                "再换方向重新开阶梯；不要重复同一坐标/方向。"
             )
         end_pos = st_end.get("pos") or pos_before
         ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))

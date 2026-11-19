@@ -647,6 +647,271 @@ staircase(south, ...) → 同样 0 步失败
 - `r22_long` 44 次 mine、0 零进展、0 void、0 Traceback
 - `glm_1`/`hy4_8` 未收官但**无 Traceback** → BUG-039 本波未复发
 
+### 4ag. r22_short 终验（18/18）与 r21→r22 对比
+
+**分数**：1690（r21，17 路）→ **1845**（r22，18 路）；人均 99.4 → 102.5。
+
+| 变化 | bot |
+|---|---|
+| +60 / +20 / +15 | `hy4_6`（250）、`nju_guitest`（180）、`hy4_10` |
+| -35 / -30 / -15 | `glm_2`（160）、`hy4_8`（150）、`nju_3`（25，BUG-040）、`hy4_5`、`hy4_7` |
+
+**门禁**：3 FAIL —— deaths **29**、cooldown **258.2s**、zero-slice **11.3%**；其余 9 项 PASS（含 **BUG-029 over-cap 0 ✅**）。
+死亡原因（21 notable）：`arrow 7 / mob_attack 7 / lava 4`，集中于 `nju_guitest 6`、`hy4_6 6`、`hy4_8 5`。
+取消 131 次：`hy4_8 30`、`hy4_6 19`、`nju_guitest 16`、`hy4_10 14`；触发仍以 `fresh_hurt 61` 为主。
+
+**结论**：BUG-029 修复通过终验；生存与取消在 r22 回潮（r21 为 9 死/111.7s），需 Slice B 复核 30s pre-hurt 冷却是否在真实受击场景下过钝。
+
+### 4ah. r22_long 铁器死锁链（00:15）
+
+`hy4_hy_1_bare` 在 y=39 地下形成闭环：
+
+```
+craft_gear(stone_pickaxe) → missing {"stick":2}（无木）
+harvest_logs              → "y=39 低于树木带，先 staircase(up)"
+staircase(north, up, steps=20/30) → time_budget ×11（模式二）
+mine_dfs(iron)            → insufficient_pickaxe_tier（仅木镐）
+```
+
+→ 24 分钟仍 10 分。修 BUG-037 模式二（clamp steps 或按 steps 缩放预算）可直接解锁。
+`ds_ds_1_bare` 本波 iron_age 已 `goal_satisfied +10`（20 分），说明恢复路径可行、但依赖地形。
+
+### 4ai. BUG-041：木镐硬岩导致 30s/格（00:17）
+
+`hy4_hy_1_bare` 的 staircase 1 步超时调用：
+
+```json
+{"stop_reason":"time_budget","steps_done":1,"dug_count":4,
+ "timeout_path":"dig","dig_target":[-11054,36,-11051],
+ "steps_capped_from":20,"steps_clamped":true}
+```
+
+- 8 次调用（north/east/south/west）全部 `steps_done=1`，耗时 24~32s
+- 原因是**木镐挖 stone/deepslate**：单块 ~25s；不是 45s 预算或 clamp 问题
+- 与 BUG-037（clamp 已回传）、BUG-038（climb 慢）共同构成裸开铁器死锁
+
+**新增 BUG-041（P1，Slice C）**：低镐等级时应优先软方块方向（dirt/gravel/sand），并在 `timeout_path=dig` 时直接提示补石镐。
+
+### 4aj. r22_long 中段快照（00:20，约 28/45 分钟）
+
+| bot | 分数 | 集数 | 状态 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | **195** | 11 | 正常推进 |
+| `ds_ds_1_bare` | 20 | 4 | 铁器已过 |
+| `nju_movetest_01_bare` | 20 | 5 | 缓慢 |
+| `hy4_hy_1_bare` | **10** | **6** | 6 集无进展 → BUG-041 死锁实证 |
+
+- `hy4_hy_1` 6 集仍停在石器（10 分），与 BUG-041 的"木镐硬岩 30s/格"完全吻合
+- `glm_5` 出现 `move_to(entity_id=skeleton@31.5m, ignore_hurt=True)` → `stalled ×2`（P2 级，仅 4 次/2 bots，暂不提单）
+- 全波 `mine_dfs` 0 零进展、0 void、0 Traceback
+
+### 4ak. BUG-041 成本量化（00:21）
+
+`hy4_hy_1_bare` 整轮工具时间：
+
+```
+staircase 426s（7.1 分钟）  ← 两个 episode 282s / 144s，占该集 59% / 94%
+mine_dfs  654s
+unstick    46s
+```
+
+只换来 y 33→43（仍在树木带 y<58 之下），6 个 episode 仍 10 分。→ BUG-041 是当前裸开分数天花板的直接原因。
+
+### 4al. r23_short 早期 + BUG-040 修复验证（00:22）
+
+- **BUG-040 FIXED 待终验**：`165e652`（00:13）在每个 episode 开始时检测"bot 是否已在围栏半径外"并重锚；r23 加载于 00:14 → 已含修复
+- r23 前 65 个事件文件：**`void_geofence_blocked` = 0**（r22 同期已多次出现）
+- 早期门禁：仅 `mine zero-slice 20%` FAIL（样本小，需观察）；trade **5 次**、brew 2 次、thread 0、runtime 0
+
+### 4am. r22_long 成就天花板对比（00:23，约 32/45 分钟）
+
+| bot | 分数 | 集数 | 成就 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | **195** | 11 | 13 个：`shiny_gear 60`、`enchant 30`、`lodestone/lava_bucket/deflect_arrow/form_obsidian/mine_diamond 各 15`… |
+| `ds_ds_1_bare` | 20 | 4 | stone + iron 四件套 |
+| `nju_movetest` | 20 | 5 | stone + iron 四件套 |
+| `hy4_hy_1_bare` | **10** | **7** | 只有 stone age |
+
+- 说明：**深挖/钻石链路在 GLM 上完全可行**（45 分钟内拿到 shiny_gear+enchant），BUG-030 不是全局阻塞
+- `hy4_1` 7 集仍 10 分，是 BUG-041（木镐硬岩）单点卡死，与模型能力无关
+
+### 4an. BUG-040 残余：死亡回城导致围栏钉在出生点（00:25）
+
+- r23 的 NJU 两路已 **0 次** `void_geofence_blocked`（r22 为 9/19 次）→ `165e652` 主要场景已修好
+- 残留 1 例：`hy4_hy_8_nether` 第 3 集 **elapsed 238s** 时被拦，center=(972.4,350.5)、目标 (7795.5,2806)、距离 7251m
+- 推断链：死亡 → 回世界出生点 (972,350) → HUD 自动回中把围栏钉在出生点 → 返回场景时越界
+- 追加修复：死亡/重生时按**场景锚点**重锚；或在工具检查前惰性重锚
+
+### 4ao. r23 zero-slice 17.5% 的根因（00:27）
+
+- 10 次 0 进展 `time_slice` 全部是**下界** `ancient_debris/gold @ y=15`：`pos_before == pos_after`，耗时 28~50s（预算 60~75）
+- tree：`active_node 5` 挂着 `pending: stair_down south, steps=35`，无 pruned 分支
+- → `mine_dfs` 内部 `dig_staircase` 在**第一步**就超时退出（与 BUG-037 per-step 15s 同源），分支未执行，引擎仍返回 `time_slice`
+- 建议：内部阶梯同样豁免第 0 步；0 进展 + pending 分支 → `branch_failed` → relocate
+
+### 4ap. P2-14 趋势（00:28）
+
+`bad_target_for_dimension`（下界要挖钻石）每波稳定 **4~7 次**：
+
+```
+r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
+```
+
+- 维度守卫工作正常（每次都给 ancient_debris/quartz/gold 建议）
+- 但模型仍反复尝试 → 每波浪费 4~7 个模型轮次；根因是 prompt "钻石镐在下界…" 的歧义
+- 建议 D2 改为"用钻石镐挖 ancient_debris（钻石仅存在于主世界）"
+
+### 4aq. BUG-041 修复已在 fix/s-skills（00:29）
+
+- `1bbeb4f`：dig 超时按 `pickaxe_tier` 命名根因（"木镐挖 X 约 25s/格"），并给四条出路
+- `0264145`：同一 dig 格超时后 `_avoid_temporarily(..., "dig_timeout", 30s)` + 下次快速失败
+- 与 D1 建议一致；**尚未合入 HEAD**（`grep low_tier_slow_dig` = 0），需 #1 合并后 r24 复验
+
+## 4ar. r22_long 终验（4/4）与 r20_long 对比
+
+| bot | r20_long | r22_long | 说明 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | 180 | **195** | 15 集，shiny_gear+enchant |
+| `nju_movetest_01_bare` | 0（auth） | **35** | token 正常，恢复 |
+| `ds_ds_1_bare` | 15 | 20 | 铁器已过 |
+| `hy4_hy_1_bare` | 40 | **10** | 11 集，BUG-041 + **5 集被 429/502 吞** |
+
+**门禁**：`deaths 6 / cooldown 82.1s / mine 0.92 / zero-slice 1.1%` 全 PASS；2 FAIL：
+- `runtime_error 5` → 新增 **BUG-042**（Qwen 429 "overloaded" 未被识别为并发限流，3 次退避后整集报废）
+- `over-cap 1` → `nju_movetest` cobble 262（`989d757` 已合入但仍残留，可能来自 `harvest/mine_blocks` 之外的路径）
+
+**结论**：长任务能力上限明显提升（glm_5 195、nju 恢复），但 `hy4_1` 同时被 BUG-041 与 BUG-042 打击。
+
+## 4as. r23_short 终验（18/18）—— provider 过载吞掉 21 集
+
+| 门禁 | 结果 |
+|---|---|
+| BUG-020 runtime_error | **21 ❌**（18× 429 overloaded + 3× 502） |
+| BUG-018 zero-slice | 13.5% ❌（下界 ancient_debris 内部阶梯问题） |
+| BUG-026 死亡 / 冷却 | 17 ✅ / 165.5s ✅ |
+| BUG-029 over-cap | **0 ✅** |
+| BUG-040 void | 5 次（`hy4_8`，死亡回城残余） |
+| trade / brew | 5 / 2 ✅ |
+
+- 分数 1845 → 1765（18 vs 18）；死亡 29 → 17（改善）
+- 报废集分布：`hy4_7 5`、`hy4_6 4`、`hy4_2 3`、`hy4_9 3`、`hy4_5 2`、`hy4_8 2`、`hy4_3 1`、`hy4_10 1`
+- **r24 实时**：`r24_short` 已有 100 次 `http_retry` + 14 次 429，provider 仍在过载
+
+## 4at. r24 早期：provider 过载仍在恶化（00:46）
+
+- `r24_short`：**107 次 http_retry + 14 次失败 429**，已产生 **14 个 runtime_error 集**（`hy4_3/6/9` 各 3、`hy4_7` 2、`hy4_2/5` 各 1）
+- `r24_long`：13 次重试、0 失败（长任务请求频率低，受影响小）
+- **BUG-041 已合入**：`7b6e64d`（00:35），r24 加载于 00:37 → 本波可复验木镐提示/快速失败
+- 建议 #1：暂停新波次或切 provider，避免继续用 429 稀释分数
+
+### 4au. r24 BUG-037/041 交叉验证（00:47）
+
+| 波次 | stair time_budget | zero-step | dig_timeout | 低镐新文案 |
+|---|---|---|---|---|
+| r23_short | 11 | 7 | 10 | 0 |
+| r24_short | 9 | 5 | 9 | 0 |
+
+- r24 的 `timeout_path=dig` 消息仍是旧版（无"木镐"）→ 这些 bot 镐等级 ≥2
+- 说明**首步 15s 超时与镐等级无关**（黑曜石/堡垒砖同样触发）→ BUG-037 的第 0 步豁免仍必须
+- BUG-041 的低镐文案需等裸开（`r24_long`）出现 low-tier 场景才能实机验证
+
+### 4av. BUG-042 定位到 hy4 免费通道（00:48）
+
+- `r24_short` 的 **18 个 runtime_error 全部是 `hy4-flash-free`**：`hy4_7` 4、`hy4_3/6/9` 各 3、`hy4_5/8` 各 2、`hy4_2/10` 各 1
+- **glm / ds / nju 0 次** → 过载是 hy4 免费通道专属
+- 429 事件持续到 elapsed 386s（仍在发生）
+- 运维建议：暂停/降并发 hy4 squad，保留 glm/ds/nju；代码侧仍按 BUG-042 修 429 分类
+
+### 4aw. 评分口径问题（00:49）
+
+- `midgame` setup 预授予 6 个成就（`mine_stone/upgrade_tools/smelt_iron/iron_tools/mine_diamond/shiny_gear`）= **95 分**
+- r24_long `glm_5` 在 **180s、EP1 timeout** 时已 115 分 → 其中 95 分是白送
+- 影响：`glm_5 195 vs bare 10` 不能直接当作能力差异；跨场景/跨波次分数不可比
+- 建议（P2-32）：episode 起始做 advancement 基线，final_score 只计增量；或报告单列 baseline/earned
+
+### 4ax. r24_short：hy4 通道丢失 46% 集（00:51）
+
+- 72 个 episode 中 **33 个 runtime_error（46%）**，全部 `hy4-flash-free`：`hy4_3` 7、`hy4_7` 7、`hy4_6/9` 各 4、`hy4_8/10` 各 3
+- `r24_long` 仍 0（长任务频率低）
+- 门禁脚本已修正：**runtime_error 现在也读取进行中的 `curriculum-*.json`**，此前 0 summary 时会漏报（r24_short 曾显示 0）
+- 建议：#1 立即暂停 hy4 squad 或切 provider
+
+### 4ay. hy4 通道报废率（00:50）
+
+| bot | 总集 | runtime | 成功 |
+|---|---|---|---|
+| `hy4_6_nether_bastion` | 4 | **4（100%）** | 0 |
+| `hy4_7_village` | 9 | **8（89%）** | 0 |
+| `hy4_3_midgame` | 12 | **8（67%）** | 1 |
+| `hy4_10_deep_water` | 4 | 3（75%） | 0 |
+| `hy4_9_deep_water` | 5 | 4（80%） | 1 |
+| `hy4_8_nether` | 6 | 4（67%） | 2 |
+| `hy4_2_iron` | 3 | 2（67%） | 0 |
+
+`glm / ds / nju` 全部 0 次 runtime_error。→ hy4 10 路当前几乎不产出，建议立即暂停或换 provider。
+
+### 4az. BUG-030 埋点已生效（00:52）
+
+`depth_reset` 新 stop_reason 在 r24_short 出现 3 次，带净上升量：
+
+| bot | pos_before → pos_after | 净上升 |
+|---|---|---|
+| `ds_2_cave_combat` | 106 → 125 | **+19** |
+| `hy4_2_iron` | -25 → -5 | **+20** |
+| `ds_4_nether_fortress` | 44 → 54 | **+10** |
+
+- 这是 D1 建议的埋点，现已可量化"深度清零"代价
+- 行为本身仍需修：复位后应导航回 deepest node，而不是从 collar 重挖
+- 另：`glm_2` 在下界 y=64 连续 5 次 `ancient_debris` 0 进展（内部阶梯首步，BUG-037）
+
+## 4ba. 看板状态对账（00:55）
+
+把 7 个已修复但仍标 OPEN 的工单核对代码后更新，避免团队重复修：
+
+| 工单 | 依据 |
+|---|---|
+| BUG-005 | 并入 BUG-026 |
+| BUG-008 | `ef6a8ac`（桶 used/gained 判据） |
+| BUG-010 | `dd274ba`（`retry_after_ready` / `eat_deferred`） |
+| BUG-011 | `dd274ba`（httpx 不再包成 RuntimeError） |
+| BUG-012 | `26f7213`（`_API_RETRYABLE_CODES` 含 not_loaded） |
+| BUG-021 | `26f7213`（残余为 BUG-039） |
+| BUG-023 | `e680b1f`（深水盾+岸，r16/r17 trident 0） |
+
+当前看板：**38 单 → 27 FIXED / 1 PARTIAL / 10 OPEN**。
+仍 OPEN：BUG-007、009、026、030、032、036、037、038、039、042。
+
+### 4bb. BUG-007 / BUG-032 复核（00:57）
+
+- **BUG-007**：r24 的 8 次 craft 失败全部是**真实缺料**，`missing_materials` 正确；但 7 次 `message=None` → 模型需自己解析 map。剩余工作缩窄为"生成一句标准缺料提示"。
+- **BUG-032**：与 BUG-038（climb 慢）/BUG-041（木镐硬岩）是同一"地底断木断镐"现象的不同层面；032 负责 curriculum 层"下矿前木料保底"。
+
+### 4bc. hy4 过载未缓解（00:54）
+
+- r24_short：**93 集 / 40 runtime_error（43%）**，4 分钟内 +7
+- r24_long：仅 hy4_1 1 个 runtime_error（长任务频率低）
+- 结论：过载持续，暂停 hy4 squad 的建议仍然有效
+
+### 4bd. 429 诊断：通道级饱和，非上下文问题（00:55）
+
+- 失败集 `actor_requests` 中位 **3**（max 30），成功集中位 **6**（max 45）→ 失败发生在 episode 开头
+- 429/retry 按分钟：16:37~16:51 持续，峰值 16:48（10 次）
+- → 缩小上下文/减少历史**不会**缓解；只有暂停 hy4 或换通道有效
+
+## 4be. r24_short 终验 + 进入过夜低频审计模式（01:08）
+
+**r24_short（18/18，0 Traceback）**：仅 2 项 FAIL
+- `runtime_error 40`（全 hy4，BUG-042）
+- `over-cap 2`：`glm_2` netherrack 265、`hy4_8` netherrack 169（BUG-029 残留，均为下界）
+- 其余全 PASS：deaths 17、cooldown 116s、mine 0.93、zero-slice **3.9%**、trade/brew 2/2
+- 分数 1765 → **1870**（18 vs 18，尽管丢了 40 集）；`objective_verified` 15→23
+
+**过夜模式（01:08 起）**
+- 双轨：主轨 `overnight_12bot`（12 路 nju/glm/ds，4h）+ 审计轨 `hy4_audit_*`（4 路 hy4，rpm=6，20min）
+- 审计脚本 `scripts/d1_overnight_watch.py`：**只在波次收官或每 45 分钟**输出快照（PID 1728153），不做连续轮询
+- 快照字段：summaries/bots、episode 状态分布、http_retry、失败 429/502、Traceback —— 直接回答"hy4 4 并发 + rpm=6 是否 0 次 429"
+- 追踪重点：BUG-030 `depth_reset`、BUG-037 阶梯、`unstick` 慢调用、过夜长程新 P0/P1
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
