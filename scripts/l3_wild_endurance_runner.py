@@ -1170,13 +1170,15 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "points": 15,
         "tier": 2,
         "budget_class": "short",
+        "episodes": 3,
         "task": (
-            "出生点已放好酿造台与 2x2 无限水源，背包有 glass_bottle 9 / nether_wart 8 / blaze_powder 8。"
-            "先用玻璃瓶装 3 瓶水，然后 mc_skill_brew(bottles=3, ingredient='nether_wart') 酿粗制药水，"
-            "轮询 brew_time_left 到 0 即解锁 nether/brew_potion；再用 blaze_powder 可加速下一次酿造。"
-            "不要离开出生点去挖矿。"
+            "出生点已放好酿造台与 2x2 无限水源，背包有 glass_bottle 9 / nether_wart 8 / sugar 4 / blaze_powder 8。"
+            "步骤：① 用玻璃瓶对水源 mc_interact 装 3 瓶水；② mc_skill_brew(bottles=3, ingredient='nether_wart') "
+            "酿成 awkward；③ **必须**用 mc_window_act(ops=[{'op':'take','from':'bottles'}], block='brewing_stand') "
+            "把药水取回背包，advancement 只在取回时触发，留在酿造台里不算；④ 若要更稳，取 1 瓶 awkward 放回并加 sugar "
+            "再酿 swiftness 后取回。fuel 用 blaze_powder，轮询 brew_time_left 到 0 再操作。不要离开出生点去挖矿。"
         ),
-        "extra_tools": ("mc_skill_brew", "mc_window_view", "mc_interact"),
+        "extra_tools": ("mc_skill_brew", "mc_window_act", "mc_window_view", "mc_interact"),
         "advancement_id": "minecraft:nether/brew_potion",
     },
     "cave_combat": {
@@ -1208,8 +1210,9 @@ def install_scene_focus(stage: str, episodes: int = 2) -> bool:
         return False
     from mc_agent.harness import curriculum as cur
 
-    target = cur.CurriculumTarget(**spec)
-    state = {"remaining": int(episodes)}
+    target_kwargs = {k: v for k, v in spec.items() if k != "episodes"}
+    target = cur.CurriculumTarget(**target_kwargs)
+    state = {"remaining": int(spec.get("episodes", episodes))}
     original = cur.select_next_target
 
     def _wrapped(*args: Any, **kwargs: Any):
@@ -1220,7 +1223,7 @@ def install_scene_focus(stage: str, episodes: int = 2) -> bool:
         return fallback, frontier
 
     cur.select_next_target = _wrapped
-    print(f"[Scene Focus] stage={stage} first {episodes} episode(s) -> {target.key}", flush=True)
+    print(f"[Scene Focus] stage={stage} first {state['remaining']} episode(s) -> {target.key}", flush=True)
     return True
 
 
