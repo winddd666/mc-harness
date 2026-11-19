@@ -4119,10 +4119,12 @@ class MacroSkills:
             while True:
                 try:
                     view = self.bot.call("window/view", {"target": {"pos": pos}})
-                except ApiError as err:
-                    failures.append({"pos": pos, "error": err.code, "message": err.message})
+                except (ApiError, httpx.HTTPError) as err:
+                    code = str(getattr(err, "code", type(err).__name__))
+                    message = str(getattr(err, "message", err))
+                    failures.append({"pos": pos, "error": code, "message": message})
                     # Furnace was broken/replaced: write the job off so the ledger cannot go stale.
-                    if err.code in ("no_window", "not_found", "blocked", "cannot_interact") and job is not None:
+                    if code in ("no_window", "not_found", "blocked", "cannot_interact") and job is not None:
                         try:
                             block_name = self._container_block_at(pos)
                         except Exception:  # noqa: BLE001
@@ -4164,13 +4166,27 @@ class MacroSkills:
                 if job is not None:
                     failures.append({"pos": pos, "error": "no_output_yet", "job_id": job.get("id")})
                 continue
-            inv_now, dropped = self._ensure_free_slots(min_free=2)
+            try:
+                inv_now, dropped = self._ensure_free_slots(min_free=2)
+            except (ApiError, httpx.HTTPError) as err:
+                failures.append({
+                    "pos": pos,
+                    "error": str(getattr(err, "code", type(err).__name__)),
+                    "message": str(getattr(err, "message", err)),
+                    "got": got,
+                })
+                continue
             if dropped:
                 got.setdefault("_auto_dropped", 0)
             try:
                 res = self.bot.call("window/act", {"target": {"pos": pos}, "ops": take_ops})
-            except ApiError as err:
-                failures.append({"pos": pos, "error": err.code, "message": err.message, "got": got})
+            except (ApiError, httpx.HTTPError) as err:
+                failures.append({
+                    "pos": pos,
+                    "error": str(getattr(err, "code", type(err).__name__)),
+                    "message": str(getattr(err, "message", err)),
+                    "got": got,
+                })
                 continue
             taken: dict[str, int] = {}
             for step in res.get("done") or []:

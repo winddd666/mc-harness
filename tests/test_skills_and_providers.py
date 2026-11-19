@@ -2013,6 +2013,29 @@ def test_window_view_allows_near_entity() -> None:
     assert result["ok"] is True
 
 
+def test_smelt_collect_survives_read_timeout() -> None:
+    """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
+    from mc_agent.harness.world_memory import WorldMemory
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [1000.5, 64.0, 1000.5], "dimension": "overworld"}})
+        if path == "move_to":
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        if path == "view":
+            raise httpx.ReadTimeout("offline furnace timeout", request=request)
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        skills.world_memory = WorldMemory()
+        result = skills.smelt_collect(furnace_pos=[1000, 64, 1000], wait_remaining_s=0)
+    assert result["ok"] is False
+    assert result["failures"]
+    assert result["failures"][0]["error"] == "ReadTimeout"
+
+
 def test_brew_bottle_alias_accepts_water_bottle_shape() -> None:
     from mc_agent.skills.library import _window_item_entries
 
