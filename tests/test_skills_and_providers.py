@@ -2212,6 +2212,34 @@ def test_staircase_tool_caps_long_steps() -> None:
         result = json.loads(toolset.mc_skill_staircase(direction="north", steps=40))
     assert captured["steps"] == 10
     assert result["steps_capped_from"] == 40
+    assert result["steps_clamped"] is True
+
+
+def test_staircase_tool_auto_retries_viable_direction_on_zero_progress() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        raise AssertionError("no API call expected")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        calls = []
+
+        def fake_dig(**kwargs):
+            calls.append(kwargs["direction"])
+            if kwargs["direction"] == "north":
+                return {
+                    "ok": False, "stop_reason": "movement_not_confirmed",
+                    "steps_done": 0, "dug_count": 0,
+                    "viable_directions": ["south", "east"],
+                }
+            return {"ok": True, "steps_done": 1, "stop_reason": "completed"}
+
+        toolset.skills.dig_staircase = fake_dig
+        result = json.loads(toolset.mc_skill_staircase(direction="north", steps=6))
+    assert calls == ["north", "south"]
+    assert result["ok"] is True
+    assert result["auto_retry_direction"] == "south"
 
 
 def test_tunnel_triggers_retention_cleanup() -> None:

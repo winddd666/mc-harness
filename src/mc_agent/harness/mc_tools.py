@@ -2206,23 +2206,47 @@ class McToolset:
         blocked = self._check_direction_geofence(direction, steps, "mc_skill_staircase")
         if blocked is not None:
             return blocked
-        raw = self._run_skill(
-            lambda: self.skills.dig_staircase(
-                direction=direction,
+        def _invoke(dir_key: str) -> dict[str, Any]:
+            return self.skills.dig_staircase(
+                direction=dir_key,
                 steps=steps,
                 vertical=vertical,
                 stop_on_ore=resolved_stop,
             )
-        )
+
+        raw = self._run_skill(lambda: _invoke(direction))
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(parsed, dict):
+            return raw
         if requested_steps != steps:
-            try:
-                parsed = json.loads(raw)
-            except (TypeError, ValueError):
-                return raw
-            if isinstance(parsed, dict):
-                parsed["steps_capped_from"] = original_steps
-                return json.dumps(parsed, ensure_ascii=False)
-        return raw
+            parsed["steps_capped_from"] = original_steps
+            parsed["steps_clamped"] = True
+        # BUG-037 third mode (r21): first step stuck but viable directions
+        # are already known; retry once automatically instead of making the
+        # model try the opposite direction.
+        if (
+            parsed.get("stop_reason") == "movement_not_confirmed"
+            and int(parsed.get("steps_done") or 0) == 0
+            and int(parsed.get("dug_count") or 0) == 0
+        ):
+            viable = [d for d in (parsed.get("viable_directions") or []) if isinstance(d, str)]
+            alt = next((d for d in viable if d != direction), None)
+            if alt:
+                retry_raw = self._run_skill(lambda: _invoke(alt))
+                try:
+                    retry_parsed = json.loads(retry_raw)
+                except (TypeError, ValueError):
+                    return retry_raw
+                if isinstance(retry_parsed, dict):
+                    retry_parsed["auto_retry_direction"] = alt
+                    if requested_steps != steps:
+                        retry_parsed["steps_capped_from"] = original_steps
+                        retry_parsed["steps_clamped"] = True
+                    return json.dumps(retry_parsed, ensure_ascii=False)
+        return json.dumps(parsed, ensure_ascii=False)
 
     def mc_skill_tunnel(self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> str:
         direction = str(direction).strip().lower()
