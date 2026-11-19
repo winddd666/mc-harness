@@ -662,6 +662,20 @@ staircase(south, ...) → 同样 0 步失败
 
 **结论**：BUG-029 修复通过终验；生存与取消在 r22 回潮（r21 为 9 死/111.7s），需 Slice B 复核 30s pre-hurt 冷却是否在真实受击场景下过钝。
 
+### 4ah. r22_long 铁器死锁链（00:15）
+
+`hy4_hy_1_bare` 在 y=39 地下形成闭环：
+
+```
+craft_gear(stone_pickaxe) → missing {"stick":2}（无木）
+harvest_logs              → "y=39 低于树木带，先 staircase(up)"
+staircase(north, up, steps=20/30) → time_budget ×11（模式二）
+mine_dfs(iron)            → insufficient_pickaxe_tier（仅木镐）
+```
+
+→ 24 分钟仍 10 分。修 BUG-037 模式二（clamp steps 或按 steps 缩放预算）可直接解锁。
+`ds_ds_1_bare` 本波 iron_age 已 `goal_satisfied +10`（20 分），说明恢复路径可行、但依赖地形。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
