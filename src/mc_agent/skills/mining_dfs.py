@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+import copy
 import dataclasses
+import inspect
 import json
 import math
 import os
@@ -13,7 +15,10 @@ import re
 import time
 from typing import Any
 
+import httpx
+
 from ..errors import ApiError
+from ..kb import assess_world_target, normalize_dimension
 from .library import (
     BLOCK_MIN_PICKAXE_TIER,
     EXPECTED_BLOCK_DROPS,
@@ -23,6 +28,7 @@ from .library import (
     _compute_empty_slots,
     _expected_drops_for_blocks,
     _inventory_counts,
+    _inventory_counts_from_raw,
     _inventory_snapshot_and_counts,
     _normalize_drop_name,
     _positive_inv_delta,
@@ -192,6 +198,12 @@ ORE_DFS_PROFILES: dict[str, dict[str, Any]] = {
         "default_target_y": 48,
         "min_tier": 1,
     },
+    "nether_gold_ore": {
+        "target_blocks": ("nether_gold_ore",),
+        "expected_items": ("gold_nugget", "nether_gold_ore"),
+        "default_target_y": 64,
+        "min_tier": 1,
+    },
     "iron": {
         "target_blocks": ("iron_ore", "deepslate_iron_ore"),
         "expected_items": ("raw_iron", "iron_ore", "deepslate_iron_ore"),
@@ -292,6 +304,69 @@ FLUID_ABORT_REASONS = frozenset({
 })
 EXHAUSTED_COLLAR_MIN_SEP = 14.0
 UNREACHABLE_ORE_COOLDOWN_S = 300.0
+
+
+class _MiningDeadline(Exception):
+    """Unwind nested mining work without being swallowed as a recoverable ApiError."""
+
+
+class _BudgetSession:
+    """Private session copy: nested skills share a budget without changing the live bot.
+
+    Binding session methods to the copy bounds observations as well as actions.
+    No worker thread survives a timeout and continues issuing actions.
+    """
+
+    def __init__(self, bot: Any, deadline: float) -> None:
+        self.deadline = deadline
+        self.first_pos: list[float] | None = None
+        self.last_status: dict[str, Any] = {}
+        self.first_inventory: dict[str, Any] | None = None
+        self.last_inventory: dict[str, Any] | None = None
+        self.timed_out = False
+        self.dug_count = 0
+        self.positions: list[tuple[int, int, int]] = []
+        self.session = copy.copy(bot)
+        self._call = self.session.call
+        self.session.call = self.call
+        self.session._mining_deadline = deadline
+        # A recovery reconnect owns a separate, much longer lifecycle budget. Leave that
+        # to the caller, rather than letting BotSession.call start it inside mining.
+        self.session._recovering_quarantine = True
+
+    def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0.2:
+            raise _MiningDeadline
+        payload = dict(body) if body is not None else None
+        if payload is not None and path.lstrip("/") in {"move_to", "control"}:
+            key = "ms" if path.lstrip("/") == "control" else "timeout"
+            payload[key] = min(int(payload.get(key, remaining * 1000)), max(1, int((remaining - 0.2) * 1000)))
+        # BotSession retries a closed keepalive once, with a 150ms pause. Reserve room
+        # for both HTTP attempts; httpx timeouts are per phase, so use a conservative cap.
+        kwargs["timeout_s"] = min(float(kwargs.get("timeout_s") or 45.0), (remaining - 0.15) / 8)
+        kwargs["allow_reauth"] = False
+        try:
+            result = self._call(path, payload, **kwargs)
+        except httpx.TimeoutException as exc:
+            self.timed_out = True
+            raise _MiningDeadline from exc
+        endpoint = path.lstrip("/")
+        if endpoint == "dig" and result.get("dug"):
+            self.dug_count += 1
+        if endpoint == "inventory" and isinstance(result.get("items"), list):
+            if self.first_inventory is None:
+                self.first_inventory = result
+            self.last_inventory = result
+        if endpoint == "status":
+            self.last_status = result
+            if self.first_pos is None and result.get("pos"):
+                self.first_pos = list(result["pos"])
+            if result.get("pos") and result.get("on_ground", True):
+                cell = _floor_pos(result["pos"])
+                if not self.positions or cell != self.positions[-1]:
+                    self.positions.append(cell)
+        return result
 
 
 def normalize_dfs_strategy(raw: str | None = None) -> str:
@@ -611,7 +686,9 @@ def _should_focus_target_only(
     return strategy == "fishbone_scan" and abs(anchor_y - target_y) <= SCAN_BAND
 
 
-def _resolve_target_profile(target: str, target_y: int | None) -> dict[str, Any]:
+def _resolve_target_profile(
+    target: str, target_y: int | None, *, dimension: str | None = None,
+) -> dict[str, Any]:
     raw = str(target or "iron").strip().lower().removeprefix("minecraft:")
     aliases = {
         "raw_iron": "iron",
@@ -628,6 +705,8 @@ def _resolve_target_profile(target: str, target_y: int | None) -> dict[str, Any]
         "gold_ore": "gold",
         "deepslate_gold_ore": "gold",
         "raw_gold": "gold",
+        "gold_nugget": "nether_gold_ore",
+        "nether_quartz_ore": "quartz",
         "lapis_lazuli": "lapis",
         "lapis_ore": "lapis",
         "deepslate_lapis_ore": "lapis",
@@ -637,6 +716,8 @@ def _resolve_target_profile(target: str, target_y: int | None) -> dict[str, Any]
         "deepslate_emerald_ore": "emerald",
     }
     key = aliases.get(raw, raw)
+    if raw == "gold" and dimension == "the_nether":
+        key = "nether_gold_ore"
     prof = ORE_DFS_PROFILES.get(key)
     if prof is not None:
         resolved_y = int(target_y) if target_y is not None else int(prof["default_target_y"])
@@ -872,6 +953,10 @@ class MiningDFSEngine:
         self.relocations_count: int = 0
         self.surgical_extractions: int = 0
         self.verified_ore_pickups: int = 0
+        self._deadline: float | None = None
+        # Remember failed escape primitives at each cell across time slices. Otherwise
+        # a slow blocked north stair consumes every call and south is never attempted.
+        self._climb_failures: dict[tuple[int, int, int], set[tuple[str, str]]] = {}
 
     def _refresh_strategy(self, override: str | None = None) -> str:
         if override is not None:
@@ -1691,6 +1776,8 @@ class MiningDFSEngine:
         min_hp_ref: list[float],
         deadline: float | None = None,
     ) -> tuple[bool, str | None]:
+        if deadline is None:
+            deadline = getattr(self, "_deadline", None)
         ordered = list(reversed(waypoints)) if reverse else list(waypoints)
         for wp in ordered:
             if deadline is not None and time.monotonic() >= deadline:
@@ -1713,11 +1800,15 @@ class MiningDFSEngine:
             if len(hops) > 1:
                 stepped_all = True
                 for hop in hops[1:]:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return False, "walk_time_slice"
                     if not self._step_to(hop):
                         stepped_all = False
                         break
                 if stepped_all:
                     continue
+            if deadline is not None and time.monotonic() >= deadline:
+                return False, "walk_time_slice"
             if self._move_exact(wp):
                 continue
             dx_w = wp[0] - cur[0]
@@ -1796,8 +1887,31 @@ class MiningDFSEngine:
     ) -> tuple[bool, str | None]:
         if self.active_node_id is None or self.active_node_id not in self.nodes or goal_node_id not in self.nodes:
             return False, "no_active_tree"
+        if deadline is None:
+            deadline = getattr(self, "_deadline", None)
+        if deadline is not None and time.monotonic() >= deadline:
+            return False, "walk_time_slice"
         st = self.bot.status()
         cur_pos = _floor_pos(st["pos"])
+        # A slice can end between nodes. Rejoin the recorded edge at our actual cell,
+        # instead of attempting a straight move through the wall to a distant anchor.
+        for nd in self.nodes.values():
+            edge = nd.edge_from_parent
+            if edge is None or cur_pos not in edge.waypoints:
+                continue
+            offset = edge.waypoints.index(cur_pos)
+            to_parent = goal_node_id == self.collar_node_id
+            route = list(reversed(edge.waypoints[:offset + 1])) if to_parent else edge.waypoints[offset:]
+            dest = nd.parent_id if to_parent else nd.node_id
+            if dest is None:
+                continue
+            route = [*route, self.nodes[dest].anchor]
+            ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
+            if not ok:
+                return False, err
+            self.active_node_id = dest
+            cur_pos = self.nodes[dest].anchor
+            break
         anchor_now = self.nodes[self.active_node_id].anchor
         if cur_pos != anchor_now:
             best_near_id: int | None = None
@@ -2083,28 +2197,36 @@ class MiningDFSEngine:
         has_seal = _seal_reserve(inv_counts) >= 1
         canonical = {"north": 0, "east": 1, "south": 2, "west": 3}
         scored: list[tuple[int, float, int, str]] = []
+        effective_y = self._effective_collar_target_y(anchor)
+        at_target_layer = self._collar_starts_at_level(anchor, effective_y)
+        step_y = anchor[1] if at_target_layer else anchor[1] - 1
 
         for d in ("north", "east", "south", "west"):
             dx, dz = DIRECTIONS[d]
             if self._geofence_blocked(geofence, anchor[0] + dx * 3, anchor[2] + dz * 3, action="mine_dfs_collar") is not None:
                 continue
             nx, nz = anchor[0] + dx, anchor[2] + dz
-            dig_cells = [(nx, anchor[1] + 1, nz), (nx, anchor[1], nz), (nx, anchor[1] - 1, nz)]
+            # At the target layer, the block below the face is the floor.
+            # Probing it as a dig cell rejects walkable bedrock and probes a
+            # descent that this collar will never actually take.
+            dig_cells = [(nx, y, nz) for y in range(anchor[1] + 1, step_y - 1, -1)]
             try:
                 hazard, adj_fluids = self._inspect_step_hazards(dig_cells, blk_cache, forward_delta=(dx, dz))
                 if hazard is not None:
                     continue
                 if adj_fluids and not has_seal and any(blk_cache.get(nb) in LAVA_BLOCKS for nb in adj_fluids):
                     continue
-                support_pt = (nx, anchor[1] - 2, nz)
+                support_pt = (nx, step_y - 1, nz)
                 support_blk = self._get_block_name(support_pt, blk_cache)
-                if support_blk in FLUID_BLOCKS | {"bedrock"}:
+                if support_blk in FLUID_BLOCKS | HAZARD_FLOOR_BLOCKS:
+                    continue
+                if support_blk == "bedrock" and not at_target_layer and step_y > effective_y:
                     continue
                 support_ok = self._is_solid_floor(support_pt, blk_cache)
                 if not support_ok:
                     can_bridge = has_seal and (
                         self._is_self_cavity([support_pt, *dig_cells])
-                        or self._is_solid_floor((nx, anchor[1] - 3, nz), blk_cache)
+                        or self._is_solid_floor((nx, step_y - 2, nz), blk_cache)
                     )
                     if not can_bridge:
                         continue
@@ -2483,7 +2605,15 @@ class MiningDFSEngine:
             if anc in self.exhausted_collars and not allow_retired:
                 continue
             hd = math.hypot(cur_pos[0] - anc[0], cur_pos[2] - anc[2])
-            if hd <= best_d and abs(cur_pos[1] - anc[1]) <= 20:
+            vertical_near = abs(cur_pos[1] - anc[1]) <= 20
+            if allow_retired:
+                points = [tuple(n["anchor"]) for n in sh.get("nodes", []) if n.get("anchor")]
+                points.extend(tuple(wp) for n in sh.get("nodes", [])
+                              for wp in (n.get("edge_from_parent") or {}).get("waypoints", []))
+                if points:
+                    hd = min(math.dist(cur_pos, pt) for pt in points)
+                    vertical_near = hd <= 6.0
+            if hd <= best_d and vertical_near:
                 best_d = hd
                 best_sh = sh
 
@@ -2543,7 +2673,7 @@ class MiningDFSEngine:
         self.next_node_id = max(restored.keys(), default=1) + 1
         active_id = int(best_sh.get("active_node_id") or collar_id)
         self.active_node_id = active_id if active_id in restored else collar_id
-        if not self._tree_has_pending_branches():
+        if not allow_retired and not self._tree_has_pending_branches():
             self._clear_active_tree_only()
             return False
 
@@ -2569,6 +2699,9 @@ class MiningDFSEngine:
                 nearest_node_id=near_nid,
             )
 
+        if allow_retired:
+            # The caller is climbing: do not detour back to the saved mining tip first.
+            return True
         ok_nav, _ = self._navigate_to_node(self.active_node_id, min_hp_ref=min_hp_ref)
         if not ok_nav:
             self._clear_active_tree_only()
@@ -2725,6 +2858,13 @@ class MiningDFSEngine:
                     continue
         return False
 
+    def _escape_primitive(self, name: str, *, deadline: float, **kwargs: Any) -> dict[str, Any]:
+        skill = getattr(self.skills, name)
+        params = inspect.signature(skill).parameters
+        if "deadline" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            kwargs["deadline"] = deadline
+        return skill(**kwargs)
+
     def _climb_out(self, *, deadline: float, max_attempts: int = 40) -> dict[str, Any]:
         """Climb to the surface datum in ONE call: probe directions and keep going.
 
@@ -2803,36 +2943,42 @@ class MiningDFSEngine:
             dirs.remove(self._climb_dir)
             dirs.insert(0, self._climb_dir)
         attempts = 0
-        stuck_dirs: set[str] = set()
-        fell_back_to_pillar = False
         while time.monotonic() < deadline and attempts < max_attempts:
-            cur_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+            cur_cell = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])
+            cur_y = cur_cell[1]
             if cur_y >= target_y - 2:
                 break
+            if len(self._climb_failures) > 128:
+                self._climb_failures.pop(next(iter(self._climb_failures)))
+            failed = self._climb_failures.setdefault(cur_cell, set())
             moved = 0
-            for d in [x for x in dirs if x not in stuck_dirs]:
-                attempts += 1
-                if time.monotonic() >= deadline:
+            for d in [x for x in dirs if ("stair", x) not in failed]:
+                if time.monotonic() >= deadline or attempts >= max_attempts:
                     break
+                attempts += 1
+                failed.add(("stair", d))
                 try:
-                    res = self.skills.dig_staircase(direction=d, steps=6, vertical="up", stop_on_ore=False)
+                    res = self._escape_primitive("dig_staircase", deadline=deadline,
+                                                 direction=d, steps=1, vertical="up", stop_on_ore=False)
                 except (ApiError, ValueError, KeyError, TypeError):
-                    stuck_dirs.add(d)
                     continue
                 gained = _floor_pos(self.bot.status().get("pos") or [0, cur_y, 0])[1] - int(cur_y)
                 if gained > 0:
+                    self._climb_failures.pop(cur_cell, None)
                     self._climb_dir = d
                     moved += gained
                     cur_y += gained
                     break          # keep using the direction that just worked
-                stuck_dirs.add(d)
             if moved > 0:
-                stuck_dirs.clear()
                 continue
-            if not fell_back_to_pillar:
-                fell_back_to_pillar = True
+            if time.monotonic() >= deadline or attempts >= max_attempts:
+                break
+            if ("pillar", "pillar") not in failed:
+                failed.add(("pillar", "pillar"))
+                attempts += 1
                 try:
-                    self.skills.dig_staircase(direction="pillar", steps=6, vertical="pillar", stop_on_ore=False)
+                    self._escape_primitive("dig_staircase", deadline=deadline,
+                                           direction="pillar", steps=1, vertical="pillar", stop_on_ore=False)
                 except (ApiError, ValueError, KeyError, TypeError):
                     pass
                 continue
@@ -2841,11 +2987,16 @@ class MiningDFSEngine:
             # under it, then resume climbing instead of giving up.
             escaped = False
             for d in dirs:
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= deadline or attempts >= max_attempts:
                     break
+                if ("tunnel", d) in failed:
+                    continue
                 before = _floor_pos(self.bot.status().get("pos") or [0, cur_y, 0])
+                failed.add(("tunnel", d))
+                attempts += 1
                 try:
-                    self.skills.dig_level_tunnel(direction=d, steps=3, stop_on_ore=False)
+                    self._escape_primitive("dig_level_tunnel", deadline=deadline,
+                                           direction=d, steps=3, stop_on_ore=False)
                 except (ApiError, ValueError, KeyError, TypeError):
                     continue
                 after = _floor_pos(self.bot.status().get("pos") or [0, cur_y, 0])
@@ -2854,8 +3005,6 @@ class MiningDFSEngine:
                     escaped = True
                     break
             if escaped:
-                stuck_dirs.clear()
-                fell_back_to_pillar = False
                 continue
             break
         end_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
@@ -4256,6 +4405,10 @@ class MiningDFSEngine:
                 return int(rt[1])
         return self.target_y
 
+    def _collar_starts_at_level(self, anchor: tuple[int, int, int], effective_y: int) -> bool:
+        radar_target = self._best_radar_target_for_anchor(anchor, at_spine=True) if self.radar_enabled else None
+        return anchor[1] <= effective_y and (radar_target is None or radar_target[1] >= anchor[1] - 2)
+
     def _init_collar(
         self,
         anchor: tuple[int, int, int],
@@ -4271,9 +4424,11 @@ class MiningDFSEngine:
 
         # If Collar is initialized directly AT or BELOW target depth (unless radar sees an overhead cluster),
         # attach Spine branches directly so we never execute 0-step stair_down transitions!
-        rt = self._best_radar_target_for_anchor(anchor, at_spine=True) if self.radar_enabled else None
-        if anchor[1] <= eff_y and (rt is None or rt[1] >= anchor[1] - 2):
-            sp_branches = self._spine_branches(cands[0], anchor, geofence)
+        if self._collar_starts_at_level(anchor, eff_y):
+            sp_branches = [
+                branch for branch in self._spine_branches(cands[0], anchor, geofence)
+                if branch.kind == "stair_up" or branch.direction in cands
+            ]
             node = self._create_node(
                 kind="spine",
                 anchor=anchor,
@@ -4548,16 +4703,144 @@ class MiningDFSEngine:
         max_duration_s: float = 32.0,
         strategy: str | None = None,
     ) -> dict[str, Any]:
+        budget = max(0.0, min(90.0, float(max_duration_s)))
+        deadline = time.monotonic() + budget
+        act = str(action or "explore").strip().lower()
+        original_bot, original_skills = self.bot, self.skills
+        previous_deadline = getattr(self, "_deadline", None)
+        scoped = _BudgetSession(original_bot, deadline - min(0.5, budget / 10))
+        self._deadline = scoped.deadline
+        self.bot = scoped.session
+        self.skills = copy.copy(original_skills)
+        self.skills.bot = self.bot
+        try:
+            result = self._run(target=target, goal_count=goal_count, target_y=target_y,
+                               action=action, geofence=geofence,
+                               strategy=strategy, deadline=scoped.deadline)
+            if act == "explore":
+                requested = max(1, min(64, int(goal_count)))
+                result["goal_met"] = int(result.get("target_gained", 0)) >= requested
+            return result
+        except _MiningDeadline:
+            # Keep interrupted branches retryable. Preserve the observed return route if
+            # the cutoff landed inside an edge before its local waypoints were committed.
+            node = self.nodes.get(self.active_node_id)
+            if node is not None:
+                for branch in node.branches:
+                    if branch.status == "active":
+                        branch.status = "pending"
+                        route = scoped.positions
+                        if node.anchor in route:
+                            route = route[len(route) - 1 - list(reversed(route)).index(node.anchor):]
+                            if len(route) > 1 and route[-1] != node.anchor:
+                                branch.status = "completed"
+                                self._create_node(
+                                    kind="switchback" if branch.kind.startswith("stair") else "spine",
+                                    anchor=route[-1], parent_id=node.node_id,
+                                    edge_from_parent=ShaftEdge(branch.kind, branch.direction, list(route)),
+                                    branches=[dataclasses.replace(
+                                        branch, status="pending", completed_waypoints=[],
+                                        steps=max(1, branch.steps - len(route) + 1),
+                                    )],
+                                )
+                        break
+            self._archive_current_shaft_to_ledger(mark_exhausted=False)
+            result: dict[str, Any] = {
+                "ok": False, "requires_replan": True, "action": act,
+                "strategy": self.strategy, "stop_reason": "time_slice",
+                "pos_before": scoped.first_pos, "pos_after": scoped.last_status.get("pos"),
+                "tree": self.snapshot(),
+                "message": "本轮在时间限制内未确认进展，请检查当前位置和障碍后再选择下一步。",
+            }
+            if act == "explore":
+                gained = {}
+                if scoped.first_inventory is not None and scoped.last_inventory is not None:
+                    gained = _positive_inv_delta(
+                        _inventory_counts_from_raw(scoped.first_inventory),
+                        _inventory_counts_from_raw(scoped.last_inventory),
+                    )
+                profile = _resolve_target_profile(
+                    target, target_y, dimension=normalize_dimension(scoped.last_status.get("dimension")),
+                )
+                target_gained = sum(gained.get(item, 0) for item in profile["expected_items"])
+                requested = max(1, min(64, int(goal_count)))
+                moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
+                result.update(
+                    goal_met=target_gained >= requested,
+                    goal_count=requested,
+                    target_gained=target_gained,
+                    gained=gained,
+                    dug_count=scoped.dug_count,
+                )
+                if moved or scoped.dug_count or gained:
+                    result.update(
+                        ok=True,
+                        requires_replan=False,
+                        stop_reason="quota_reached" if result["goal_met"] else "time_slice_progress",
+                        message="本轮已保留确认的采掘进展和回撤路径，可以继续 explore。",
+                    )
+            if act in {"climb_out", "climb"} and scoped.positions:
+                start_y, end_y = scoped.positions[0][1], scoped.positions[-1][1]
+                target_height = int(self.collar_ceiling_y) - 16 if self.collar_ceiling_y is not None else start_y
+                result["climb"] = {
+                    "start_y": start_y, "end_y": end_y, "climbed": end_y - start_y,
+                    "target_y": target_height, "reached": end_y >= target_height - 2,
+                    "method": "interrupted",
+                }
+            return result
+        finally:
+            # Stop a request that may still be running server-side, within the reserved
+            # portion of the caller's budget. Never reconnect or reauthenticate here.
+            remaining = deadline - time.monotonic()
+            if remaining > 0.2 and (scoped.timed_out or time.monotonic() >= scoped.deadline - 0.2):
+                try:
+                    scoped.deadline = deadline
+                    scoped.call("stop", {}, timeout_s=0.25)
+                except (_MiningDeadline, ApiError, httpx.HTTPError):
+                    pass
+            self.bot, self.skills = original_bot, original_skills
+            self._deadline = previous_deadline
+
+    def _collar_failure(self, reason: str, pos: tuple[int, int, int], geofence: Any) -> dict[str, Any]:
+        fence_error = self._geofence_blocked(geofence, pos[0], pos[2], action="mine_dfs_collar")
+        if fence_error is not None:
+            reason = "void_geofence_blocked"
+            message = "当前站位超出安全范围，请核对坐标和岛中心后再进入安全区。"
+        elif reason == "no_viable_collar_direction":
+            message = "当前站位附近没有可安全开挖的方向，请移到另一处实心站位再 explore。"
+        else:
+            message = "当前站位无法确认有实心支撑，请先移到安全的实心地面再 explore。"
+        result: dict[str, Any] = {
+            "ok": False,
+            "requires_replan": True,
+            "action": "explore",
+            "strategy": self.strategy,
+            "stop_reason": reason,
+            "message": message,
+            "pos_after": list(pos),
+            "tree": self.snapshot(),
+        }
+        if fence_error is not None:
+            result["error"] = fence_error["error"]
+        return result
+
+    def _run(
+        self,
+        *,
+        target: str = "iron",
+        goal_count: int = 6,
+        target_y: int | None = None,
+        action: str = "explore",
+        geofence: Any = None,
+        strategy: str | None = None,
+        deadline: float,
+    ) -> dict[str, Any]:
         self._refresh_strategy(strategy)
         act = str(action or "explore").strip().lower()
         if act == "reset":
             return self.reset(geofence=geofence)
         if act in {"climb_out", "climb"}:
-            # Climbing needs a bigger slice than a mining tick: one 8-step staircase alone eats
-            # ~25s, so a 32s budget produced "attempts: 1, climbed: 8" (live s15).
-
-            budget = min(120.0, max(float(max_duration_s), 90.0))
-            climb = self._climb_out(deadline=time.monotonic() + budget)
+            climb = self._climb_out(deadline=deadline)
             ok_climb = bool(climb["reached"])
             # Never hand control back while the bot is floating: live n0152 drowned during the
             # model's next (empty) turns after unstick left it in_water.
@@ -4587,27 +4870,67 @@ class MiningDFSEngine:
                 "requires_replan": not ok_climb,
                 "action": "climb_out",
                 "strategy": self.strategy,
-                "stop_reason": "surface_reached" if ok_climb else "climb_incomplete",
+                "stop_reason": "surface_reached" if ok_climb else (
+                    "climb_progress" if climb["climbed"] > 0 else "climb_blocked"
+                ),
                 "climb": climb,
                 "message": (
                     "已爬回地表高度，可以 explore 开新井。"
                     if ok_climb
-                    else f"本轮只爬到 y={climb['end_y']}（目标 y={climb['target_y']}），可再次 climb_out。"
+                    else (f"本轮爬到 y={climb['end_y']}（目标 y={climb['target_y']}），可继续 climb_out。"
+                          if climb["climbed"] > 0 else "所有爬升方向均无法推进，请先处理障碍或换位置，避免原地重复 climb_out。")
                 ),
                 "tree": self.snapshot(),
             }
         if act == "status":
             return {"ok": True, "action": "status", "strategy": self.strategy, "tree": self.snapshot()}
 
-        profile = _resolve_target_profile(target, target_y)
+        st0 = self.bot.status()
+        if st0.get("alive") is False:
+            return {"ok": False, "requires_replan": True, "strategy": self.strategy, "stop_reason": "dead", "tree": self.snapshot()}
+        raw_dimension = st0.get("dimension")
+        dimension = normalize_dimension(raw_dimension)
+        profile = _resolve_target_profile(target, target_y, dimension=dimension)
+        if act == "explore" and raw_dimension:
+            ecology = assess_world_target(profile["target_blocks"], dimension=dimension, mode="find")
+            if ecology["verdict"] == "wrong_dimension":
+                available_targets = {}
+                if dimension == "the_nether":
+                    available_targets = {
+                        target_name: ORE_DFS_PROFILES[profile_key]["default_target_y"]
+                        for target_name, profile_key in (
+                            ("ancient_debris", "ancient_debris"),
+                            ("quartz", "quartz"),
+                            ("gold", "nether_gold_ore"),
+                        )
+                    }
+                hints = [f"{name} (Y={y})" for name, y in available_targets.items()]
+                message = ecology["hint"]
+                if hints:
+                    message += " DFS 可改采 " + "、".join(hints) + "。"
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "action": act,
+                    "strategy": self.strategy,
+                    "stop_reason": "bad_target_for_dimension",
+                    "target": profile["profile_key"],
+                    "dimension": dimension,
+                    "allowed_dimensions": ecology["allowed_dimensions"],
+                    "available_targets": available_targets,
+                    "message": message,
+                    "pos_after": st0.get("pos"),
+                    "tree": self.snapshot(),
+                }
         if (
-            self.nodes
+            act == "explore"
+            and self.nodes
             and self.collar_node_id in self.nodes
             and abs(int(profile["target_y"]) - int(self.target_y)) >= 12
             and int(profile["target_y"]) > int(self.target_y)
         ):
             try:
-                cur_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+                cur_y = _floor_pos(st0.get("pos") or [0, 64, 0])[1]
             except (ApiError, TypeError, ValueError):
                 cur_y = int(self.target_y)
             # Live s20: the model switched target diamond(-54) -> iron(16) while standing at
@@ -4631,16 +4954,13 @@ class MiningDFSEngine:
                     ),
                     "tree": self.snapshot(),
                 }
-        self.target_y = profile["target_y"]
+        if act == "explore":
+            self.target_y = profile["target_y"]
         target_blocks = profile["target_blocks"]
         expected_items = profile["expected_items"]
         goal_count = max(1, min(64, int(goal_count)))
-        max_duration_s = max(5.0, min(90.0, float(max_duration_s)))
 
-        st0 = self.bot.status()
         recrafted_before = self.recrafted_picks
-        if st0.get("alive") is False:
-            return {"ok": False, "requires_replan": True, "strategy": self.strategy, "stop_reason": "dead", "tree": self.snapshot()}
         if st0.get("in_water"):
             esc = self.skills.escape_water()
             if esc.get("in_water"):
@@ -4712,7 +5032,7 @@ class MiningDFSEngine:
             ok_ret, err_ret = self._navigate_to_node(
                 self.collar_node_id,
                 min_hp_ref=min_hp_ref,
-                deadline=time.monotonic() + max_duration_s,
+                deadline=deadline,
             )
             st_after = self.bot.status()
             return {
@@ -4760,7 +5080,6 @@ class MiningDFSEngine:
                 "tree": self.snapshot(),
             }
 
-        deadline = time.monotonic() + max_duration_s
         self._scan_ore_radar(cur_pos, target_blocks=target_blocks, max_tier=max_tier0, geofence=geofence, force=True)
 
         # Tree initialization, WorldLedger shaft restoration, or resume from Collar / current node
@@ -4774,46 +5093,33 @@ class MiningDFSEngine:
             ):
                 # Live s01/s03: after a deep reset this path opened a "collar" at y=-54,
                 # so every later reset looked legitimate and the run churned underground.
-                # First try to climb out right here so the model does not have to orchestrate it.
-                if time.monotonic() + 6.0 < deadline:
-                    climb = self._climb_out(deadline=deadline)
-                    if climb["reached"]:
-                        cur_pos = _floor_pos(self.bot.status().get("pos") or cur_pos)
-                        restored = self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref)
-                        if not restored:
-                            solid_pos2, dirs2, err2 = self._ensure_solid_collar_anchor(
-                                cur_pos, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
-                            )
-                            if err2 is None or dirs2:
-                                self._init_collar(solid_pos2, target_y=self.target_y,
-                                                  geofence=geofence, viable_dirs=dirs2)
-                                restored = True
-                    else:
-                        return {
-                            "ok": False,
-                            "requires_replan": True,
-                            "action": act,
-                            "strategy": self.strategy,
-                            "stop_reason": "needs_surface_climb",
-                            "climb": climb,
-                            "message": (
-                                f"已尝试自动爬升：y {climb['start_y']}→{climb['end_y']}"
-                                f"（目标 y={climb['target_y']}）。" + self._surface_climb_hint()
-                            ),
-                            "tree": self.snapshot(),
-                        }
-                return {
-                    "ok": False,
-                    "requires_replan": True,
-                    "action": act,
-                    "strategy": self.strategy,
-                    "stop_reason": "needs_surface_climb",
-                    "message": (
-                        f"当前 y={cur_pos[1]}，比本局最高井口 (y={self.collar_ceiling_y}) 低 20 格以上，"
-                        "不能在地下就地开新井。" + self._surface_climb_hint()
-                    ),
-                    "tree": self.snapshot(),
-                }
+                if time.monotonic() + 6.0 >= deadline:
+                    return {
+                        "ok": False,
+                        "requires_replan": True,
+                        "action": act,
+                        "strategy": self.strategy,
+                        "stop_reason": "needs_surface_climb",
+                        "message": self._surface_climb_hint(),
+                        "tree": self.snapshot(),
+                    }
+                climb = self._climb_out(deadline=deadline)
+                if not climb["reached"]:
+                    return {
+                        "ok": False,
+                        "requires_replan": True,
+                        "action": act,
+                        "strategy": self.strategy,
+                        "stop_reason": "needs_surface_climb",
+                        "climb": climb,
+                        "message": (
+                            f"已尝试自动爬升，y {climb['start_y']}→{climb['end_y']}"
+                            f"（目标 y={climb['target_y']}）。" + self._surface_climb_hint()
+                        ),
+                        "tree": self.snapshot(),
+                    }
+                cur_pos = _floor_pos(self.bot.status().get("pos") or cur_pos)
+                restored = self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref)
             if not restored:
                 solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
                     cur_pos,
@@ -4821,15 +5127,8 @@ class MiningDFSEngine:
                     deadline=deadline,
                     min_hp_ref=min_hp_ref,
                 )
-                if anchor_err is not None and not viable_dirs:
-                    return {
-                        "ok": False,
-                        "requires_replan": True,
-                        "strategy": self.strategy,
-                        "stop_reason": anchor_err,
-                        "message": "当前站位无法开新井（脚下非实心地面），请先用 unstick 下到实心地面再调用 DFS。",
-                        "tree": self.snapshot(),
-                    }
+                if not viable_dirs:
+                    return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                 self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
         else:
             collar = self.nodes[self.collar_node_id]
@@ -4859,12 +5158,14 @@ class MiningDFSEngine:
                 self._archive_current_shaft_to_ledger(mark_exhausted=False)
                 self._clear_active_tree_only()
                 if not self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref):
-                    solid_pos, viable_dirs, _ = self._ensure_solid_collar_anchor(
+                    solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
                         cur_pos,
                         geofence=geofence,
                         deadline=deadline,
                         min_hp_ref=min_hp_ref,
                     )
+                    if not viable_dirs:
+                        return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
             elif math.dist(cur_pos, active.anchor) > 3.5:
                 ok_nav, err_nav = self._navigate_to_node(active.node_id, min_hp_ref=min_hp_ref)
@@ -4892,15 +5193,8 @@ class MiningDFSEngine:
                     solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
                         cur_pos, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
                     )
-                    if anchor_err is not None and not viable_dirs:
-                        return {
-                            "ok": False,
-                            "requires_replan": True,
-                            "strategy": self.strategy,
-                            "stop_reason": anchor_err,
-                            "message": "当前站位无法开新井（脚下非实心地面），请先用 unstick 下到实心地面再调用 DFS。",
-                            "tree": self.snapshot(),
-                        }
+                    if not viable_dirs:
+                        return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
 
         if self.dry_calls >= DRY_CALLS_BEFORE_ABANDON and self.collar_node_id in self.nodes:
@@ -4929,7 +5223,7 @@ class MiningDFSEngine:
             # Do NOT clear the tree first: the helper needs the collar y to decide whether a
             # surface relocation is even physically possible from here.
             moved, _ = self._force_relocate_on_fluid(
-                geofence=geofence, deadline=time.monotonic() + 10.0,
+                geofence=geofence, deadline=deadline,
                 min_hp_ref=min_hp_ref, auto_relocations=0,
             )
             if not moved:
@@ -5568,8 +5862,11 @@ class MiningDFSEngine:
         if stop_reason == "no_progress":
             out_res["message"] = (
                 "在原地连续多次既没挖到方块也没推进矿井节点（可能卡在死胡同反复重试），已提前结束本轮而不是空耗时间。"
-                "建议直接 mc_skill_mine_dfs(action='reset') 换点，或换目标层（如先 target='iron'）再继续。"
+                "请先调整站位；有井口记录时用 return_collar 回撤，空间树为空时直接 explore 开新井。"
             )
-        if stop_reason == "shaft_exhausted":
-            out_res["message"] = "当前矿井分支与偏移重试均已穷尽；下次调用 reset 或 explore 将换点重开，建议先用 mc_move_to 移动 16 格以上到新区域。"
+        if stop_reason == "shaft_exhausted" and not self.fluid_abandoned_deep:
+            out_res["message"] = (
+                "当前矿井分支与偏移重试均已穷尽；请先移到 16 格以外的安全新点位，再直接 explore。"
+                "若仍在地下，有井口记录时用 return_collar，空间树为空时用 climb_out 回撤。"
+            )
         return out_res

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from mc_agent.bot import BotSession
 from mc_agent.harness.geofence import VoidGeofence
@@ -27,12 +28,14 @@ class _MockMineWorld:
         start_pos: tuple[float, float, float] = (0.5, 80.0, 0.5),
         inventory_items: list[dict[str, Any]] | None = None,
         surface_y: int = 80,
+        dimension: str | None = None,
         simulate_best_harvest_tool: bool = False,
         track_durability: bool = False,
         simulate_realistic_reach_and_pockets: bool = False,
     ) -> None:
         self.pos = list(start_pos)
         self.surface_y = surface_y
+        self.dimension = dimension
         self.simulate_best_harvest_tool = simulate_best_harvest_tool
         self.track_durability = track_durability
         self.simulate_realistic_reach_and_pockets = simulate_realistic_reach_and_pockets
@@ -154,6 +157,7 @@ class _MockMineWorld:
                     "ok": True,
                     "result": {
                         "pos": list(self.pos),
+                        "dimension": self.dimension,
                         "health": 20.0,
                         "food": 20,
                         "on_ground": True,
@@ -520,6 +524,8 @@ class _MockMineWorld:
                     self.craft_log.append((item, cnt))
                     return httpx.Response(200, json={"ok": True, "result": {"crafted": item, "gained": cnt, "used_table": True}})
             return httpx.Response(200, json={"ok": False, "error": {"code": "no_recipe", "message": item}})
+        if path == "/stop":
+            return httpx.Response(200, json={"ok": True, "result": {"stopped": True}})
         if path == "/look":
             return httpx.Response(200, json={"ok": True, "result": {"yaw": 0.0, "pitch": 0.0}})
         if path == "/control":
@@ -549,6 +555,7 @@ def test_mining_dfs_collar_switchback_seal_and_spine() -> None:
     assert res["ok"] is True
     assert res["stop_reason"] == "quota_reached"
     assert res["target_gained"] >= 3
+    assert res["goal_met"] is True
     assert res["breaches_sealed"] >= 1
     assert res["tree"]["sealed_count"] >= 1
     node_kinds = {n["kind"] for n in res["tree"]["nodes"]}
@@ -1122,6 +1129,9 @@ def test_zero_displacement_stair_down_never_spins_duplicate_spine_nodes() -> Non
         res = skills.mine_dfs(target="iron", goal_count=2, target_y=16, strategy="radar", max_duration_s=10.0)
 
     assert res["stop_reason"] in {"shaft_exhausted", "no_progress"}
+    assert res["goal_met"] is False
+    assert "action='reset'" not in res["message"]
+    assert "reset 或 explore" not in res["message"]
     # Node count must remain tiny (never exploding to hundreds/thousands of duplicate Spine nodes)
     assert res["tree"]["node_count"] <= 16
     anchors = [tuple(n["anchor"]) for n in res["tree"]["nodes"]]
@@ -1953,3 +1963,492 @@ def test_thirty_dry_calls_abandon_a_dead_shaft() -> None:
     assert res["stop_reason"] == "shaft_dry_abandoned"
     assert res["requires_replan"] is True
     assert eng.dry_calls == 0
+
+
+class _MiningClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_climb_out_honors_the_callers_budget_in_nested_staircase(monkeypatch) -> None:
+    """A 5s climb must never turn into the old implicit 90s staircase budget."""
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
+    requests: list[tuple[float, str, dict]] = []
+
+    def slow_handler(request):
+        timeout = request.extensions["timeout"]
+        requests.append((clock.now, request.url.path, timeout))
+        clock.now += 0.25
+        return world.handler(request)
+
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    with BotSession("tok", bot_username="TimedClimb", transport=httpx.MockTransport(slow_handler)) as bot:
+        skills = MacroSkills(bot)
+        eng = skills.mining_dfs
+        eng.collar_ceiling_y = 64
+        original_call = bot.call
+        result = eng.run(action="climb_out", max_duration_s=5.0)
+        assert eng.bot is bot and eng.skills is skills
+        assert skills.bot is bot and bot.call == original_call
+    assert clock.now <= 1005.0
+    assert result["stop_reason"] == "time_slice"
+    assert requests
+    for started, _, timeouts in requests:
+        assert 0 < timeouts["read"] <= 1005.0 - started
+    # No quarantine reconnect, background retry, or new action starts after cutoff.
+    assert all(started < 1005.0 for started, _, _ in requests)
+    assert not any(path.endswith(("/connect", "/disconnect")) for _, path, _ in requests)
+
+
+def test_dfs_budget_includes_entry_observations_and_radar(monkeypatch) -> None:
+    """Initialization used to run outside the slice, then get a fresh full deadline."""
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    calls: list[str] = []
+
+    def slow_handler(request):
+        calls.append(request.url.path)
+        clock.now += 0.4
+        return world.handler(request)
+
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    with BotSession("tok", bot_username="TimedInit", transport=httpx.MockTransport(slow_handler)) as bot:
+        result = MacroSkills(bot).mine_dfs(target="iron", max_duration_s=5.0)
+    assert clock.now <= 1005.0
+    assert result["stop_reason"] == "time_slice"
+    assert len(calls) < 15
+
+
+def test_waypoint_interpolation_checks_deadline_between_hops(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    visited: list[tuple[int, int, int]] = []
+
+    def step(cell):
+        visited.append(cell)
+        clock.now += 1.0
+        return True
+
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    with BotSession("tok", bot_username="TimedWalk", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        monkeypatch.setattr(eng, "_step_to", step)
+        result = eng._walk_waypoints([(30, 20, 0)], min_hp_ref=[20.0], deadline=1002.0)
+    assert result == (False, "walk_time_slice")
+    assert visited == [(1, 20, 0), (2, 20, 0)]
+
+
+def test_climb_can_restore_a_retired_exhausted_route_from_the_bottom(monkeypatch) -> None:
+    """A deep bot must match the archived route, even 44 blocks below its collar."""
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="DeepRetired", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        eng._create_node(kind="spine", anchor=(0, 20, 0), parent_id=collar.node_id,
+                         edge_from_parent=ShaftEdge("stair_down", "north", [(0, 64, 0), (0, 20, 0)]),
+                         branches=[])
+        eng.collar_ceiling_y = 64
+        eng._archive_current_shaft_to_ledger(mark_exhausted=True)
+        eng._clear_active_tree_only()
+        stairs: list[dict] = []
+
+        def nav(goal_node_id, **kwargs):
+            if goal_node_id == eng.collar_node_id:
+                world.pos[1] = 64.0
+            return True, None
+
+        monkeypatch.setattr(eng, "_navigate_to_node", nav)
+        monkeypatch.setattr(eng.skills, "dig_staircase", lambda **kw: stairs.append(kw))
+        result = eng.run(action="climb_out", max_duration_s=5.0)
+    assert result["climb"]["method"] == "walk"
+    assert result["climb"]["reached"] is True
+    assert not stairs
+
+
+def test_navigation_rejoins_an_edge_instead_of_moving_through_a_wall(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(5.5, 15.0, 0.5), surface_y=20)
+    with BotSession("tok", bot_username="MidEdge", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        collar = eng._create_node(kind="collar", anchor=(0, 20, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[])
+        eng.collar_node_id = collar.node_id
+        route = [(i, 20 - i, 0) for i in range(11)]
+        eng._create_node(kind="switchback", anchor=(10, 10, 0), parent_id=collar.node_id,
+                         edge_from_parent=ShaftEdge("stair_down", "east", route), branches=[])
+        walks: list[list] = []
+
+        def walk(points, **kwargs):
+            walks.append(points)
+            world.pos = [points[-1][0] + 0.5, float(points[-1][1]), points[-1][2] + 0.5]
+            return True, None
+
+        monkeypatch.setattr(eng, "_walk_waypoints", walk)
+        monkeypatch.setattr(eng, "_move_exact", lambda *a, **k: (_ for _ in ()).throw(AssertionError("direct wall move")))
+        assert eng._navigate_to_node(collar.node_id, min_hp_ref=[20.0]) == (True, None)
+    assert walks[0][:6] == list(reversed(route[:6]))
+
+
+def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    with BotSession("tok", bot_username="PartialEdge", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        branch = mining.BranchSpec("stair_down", "east", 8)
+        collar = eng._create_node(kind="collar", anchor=(0, 20, 0), parent_id=None,
+                                  edge_from_parent=None, branches=[branch])
+        eng.collar_node_id = collar.node_id
+
+        def interrupted(**kwargs):
+            branch.status = "active"
+            eng.bot.status()
+            world.pos = [1.5, 19.0, 0.5]
+            eng.bot.status()
+            clock.now = kwargs["deadline"]
+            eng.bot.call("dig", {"pos": [2, 18, 0]})
+
+        monkeypatch.setattr(eng, "_run", interrupted)
+        result = eng.run(max_duration_s=5.0)
+        tip = eng.nodes[eng.active_node_id]
+        assert tip.parent_id == collar.node_id
+        assert tip.anchor == (1, 19, 0)
+        assert tip.edge_from_parent.waypoints == [(0, 20, 0), (1, 19, 0)]
+        assert tip.branches[0].status == "pending"
+        assert branch.status == "completed"
+    assert result["stop_reason"] == "time_slice_progress"
+    assert result["ok"] is True
+    assert result["goal_met"] is False
+    assert result["pos_before"] == [0.5, 20.0, 0.5]
+    assert result["pos_after"] == [1.5, 19.0, 0.5]
+    assert not world.dig_log
+
+
+def test_climb_remembers_all_blocked_primitives_at_the_same_cell(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
+    attempts: list[tuple[str, str]] = []
+    with BotSession("tok", bot_username="BlockedClimb", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64
+        monkeypatch.setattr(eng.skills, "dig_staircase",
+                            lambda **kw: (attempts.append(("stair", kw["direction"])) or {"ok": False}))
+        monkeypatch.setattr(eng.skills, "dig_level_tunnel",
+                            lambda **kw: (attempts.append(("tunnel", kw["direction"])) or {"ok": False}))
+        first = eng.run(action="climb_out", max_duration_s=5.0)
+        count = len(attempts)
+        second = eng.run(action="climb_out", max_duration_s=5.0)
+    assert first["stop_reason"] == second["stop_reason"] == "climb_blocked"
+    assert count == 9  # four stairs, one pillar, four lateral exits
+    assert len(attempts) == count
+    assert "可继续 climb_out" not in second["message"]
+
+
+def test_slow_blocked_climb_tries_a_different_direction_next_slice(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=70)
+    directions: list[str] = []
+
+    def blocked_stair(**kwargs):
+        directions.append(kwargs["direction"])
+        clock.now += 4.4
+        return {"ok": False, "steps_done": 0}
+
+    with BotSession("tok", bot_username="SlowBlockedClimb", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64
+        monkeypatch.setattr(eng.skills, "dig_staircase", blocked_stair)
+        first = eng.run(action="climb_out", max_duration_s=5.0)
+        second = eng.run(action="climb_out", max_duration_s=5.0)
+    assert first["stop_reason"] == second["stop_reason"] == "time_slice"
+    assert directions == ["north", "south"]
+    assert clock.now < 1010.0
+
+
+def test_nested_http_timeout_stops_the_action_and_restores_shared_sessions(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/dig"):
+            raise httpx.ReadTimeout("offline simulated stalled dig", request=request)
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="TimedHTTP", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        eng = skills.mining_dfs
+
+        def stalled(**kwargs):
+            eng.bot.status()
+            eng.skills.bot.call("dig", {"pos": [1, 20, 0]})
+
+        monkeypatch.setattr(eng, "_run", stalled)
+        result = eng.run(max_duration_s=5.0)
+        assert eng.bot is bot and eng.skills is skills and skills.bot is bot
+        assert bot._recovering_quarantine is False
+    assert result["stop_reason"] == "time_slice"
+    assert [p.rsplit("/", 1)[-1] for p in calls] == ["status", "dig", "stop"]
+
+
+def test_level_tunnel_deadline_covers_each_probe_and_skips_final_io(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+    from mc_agent.skills.tunnel import dig_level_tunnel
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=21)
+    calls: list[float] = []
+
+    def slow_handler(request):
+        calls.append(clock.now)
+        clock.now += 0.2
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="TimedTunnel", transport=httpx.MockTransport(slow_handler)) as bot:
+        result = dig_level_tunnel(bot, "east", 8, deadline=1001.0)
+        before_expired_call = len(calls)
+        expired = dig_level_tunnel(bot, "east", 8, deadline=999.0)
+    assert result["ok"] is False and result["requires_replan"] is True
+    assert result["stop_reason"] == expired["stop_reason"] == "time_slice"
+    assert clock.now <= 1001.01
+    assert all(t < 1001.0 for t in calls)
+    assert not world.dig_log
+    assert len(calls) == before_expired_call
+
+
+def test_escape_primitive_passes_shared_deadline_to_new_skill_contract(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    received: list[float] = []
+    with BotSession("tok", bot_username="DeadlineContract", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+
+        def stairs(*, deadline, **kwargs):
+            received.append(deadline)
+            assert kwargs["steps"] == 1
+            return {"ok": False}
+
+        monkeypatch.setattr(eng.skills, "dig_staircase", stairs)
+        eng._escape_primitive("dig_staircase", deadline=1234.0, steps=1, direction="north", vertical="up")
+    assert received == [1234.0]
+
+
+def test_partial_slice_success_reports_goal_unmet_without_claiming_ore(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    with BotSession("tok", bot_username="PartialGoal", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+
+        def partial_edge(**kwargs):
+            return {"steps_done": 0, "stop_reason": "time_slice", "breaches_sealed": 0,
+                    "catch_placed": 0, "deferred_added": 0, "mined_ores": [],
+                    "waypoints": [(0, 20, 0)], "end_anchor": [0, 20, 0]}
+
+        monkeypatch.setattr(eng, "_dig_stair_down_edge", partial_edge)
+        result = eng.run(target="iron", goal_count=4, target_y=16, max_duration_s=5.0)
+    assert result["ok"] is True
+    assert result["stop_reason"] == "time_slice_progress"
+    assert result["goal_met"] is False
+    assert result["target_gained"] == 0
+
+
+def test_no_progress_hint_does_not_recommend_a_redundant_reset(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    monkeypatch.setattr(mining, "MAX_IDLE_ITERATIONS", 0)
+    with BotSession("tok", bot_username="IdleHint", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        result = eng.run(target="iron", goal_count=4, target_y=16, max_duration_s=5.0)
+    assert result["stop_reason"] == "no_progress"
+    assert "reset" not in result["message"]
+    assert "空间树为空时直接 explore" in result["message"]
+    assert result["goal_met"] is False
+
+
+def test_collar_at_nether_target_layer_can_mine_over_bedrock() -> None:
+    world = _MockMineWorld(start_pos=(0.5, 5.0, 0.5), surface_y=5, dimension="the_nether")
+    for x in range(-9, 10):
+        for z in range(-9, 10):
+            world.blocks[(x, 4, z)] = "bedrock"
+    world.blocks[(1, 5, 0)] = "nether_quartz_ore"
+    with BotSession("tok", bot_username="BedrockFloor", transport=httpx.MockTransport(world.handler)) as bot:
+        result = MacroSkills(bot).mine_dfs(target="quartz", target_y=5, goal_count=1, max_duration_s=5.0)
+    assert result["goal_met"] is True
+    assert world._count("nether_quartz_ore") == 1
+    assert all(name != "bedrock" for _, name, _ in world.dig_log)
+
+
+def test_collar_reports_when_solid_station_is_outside_geofence() -> None:
+    world = _MockMineWorld(start_pos=(0.5, 70.0, 0.5), surface_y=70)
+    fence = VoidGeofence(center_x=100.0, center_z=100.0, radius=15.0, margin=5.0)
+    with BotSession("tok", bot_username="FenceAtCollar", transport=httpx.MockTransport(world.handler)) as bot:
+        result = MacroSkills(bot).mine_dfs(target="iron", geofence=fence, max_duration_s=5.0)
+    assert result["stop_reason"] == "void_geofence_blocked"
+    assert result["error"]["code"] == "void_geofence_blocked"
+    assert result["tree"]["node_count"] == 0
+    assert not world.dig_log
+
+
+def test_explore_continues_after_successful_automatic_climb(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="AutoClimb", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        eng.collar_ceiling_y = 64
+
+        def climb(*, deadline):
+            world.pos[1] = 64.0
+            return {"reached": True}
+
+        monkeypatch.setattr(eng, "_climb_out", climb)
+        result = eng.run(target="iron", target_y=60, max_duration_s=10.0)
+    assert result["stop_reason"] != "needs_surface_climb"
+    assert result["tree"]["collar_node_id"] is not None
+    assert world.dig_log
+
+
+def test_explore_does_not_open_a_fake_collar_after_a_disconnected_move(monkeypatch) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    world = _MockMineWorld(start_pos=(60.5, 20.0, 0.5), surface_y=20)
+    for dx, dz in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        world.blocks[(60 + dx, 19, dz)] = "bedrock"
+    with BotSession("tok", bot_username="BlockedCollar", transport=httpx.MockTransport(world.handler)) as bot:
+        eng = MacroSkills(bot).mining_dfs
+        old_collar = eng._create_node(
+            kind="collar", anchor=(0, 20, 0), parent_id=None, edge_from_parent=None,
+            branches=[BranchSpec(kind="stair_down", direction="east", steps=4)],
+        )
+        eng.collar_node_id = old_collar.node_id
+        monkeypatch.setattr(eng, "_find_solid_collar_candidates", lambda *args, **kwargs: [])
+        result = eng.run(target="iron", target_y=16, max_duration_s=5.0)
+    assert result["stop_reason"] == "no_viable_collar_direction"
+    assert "另一处实心站位" in result["message"]
+    assert result["tree"]["node_count"] == 0
+    assert not world.dig_log
+
+
+def test_timed_slice_with_confirmed_dig_remains_retryable_at_same_cell(monkeypatch) -> None:
+    from mc_agent.harness.agent import _RepeatFailureGuard
+    from mc_agent.harness.tool_registry import Tool
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    with BotSession("tok", bot_username="RetryableSlice", transport=httpx.MockTransport(world.handler)) as bot:
+        toolset = McToolset(bot)
+        toolset.update_block_pos([0, 20, 0])
+        engine = toolset.skills.mining_dfs
+        attempts = 0
+
+        def cut_off_after_dig(*, deadline, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            engine.bot.status()
+            engine.bot.call("dig", {"pos": [attempts, 19, 0], "collect": False})
+            clock.now = deadline
+            engine.bot.status()
+
+        monkeypatch.setattr(engine, "_run", cut_off_after_dig)
+        tool = _RepeatFailureGuard(toolset).wrap_tool(Tool(
+            name="mc_skill_mine_dfs", description="Mine", parameters={},
+            handler=toolset.mc_skill_mine_dfs,
+        ))
+        first = json.loads(tool.handler(target="iron", max_duration_s=20))
+        second = json.loads(tool.handler(target="iron", max_duration_s=20))
+
+    assert attempts == 2
+    for result in (first, second):
+        assert result["stop_reason"] == "time_slice_progress"
+        assert result["dug_count"] == 1
+        assert result["pos_before"] == result["pos_after"]
+        assert result["gained"] == {}
+        assert result["goal_met"] is False
+
+
+def test_timed_slice_credits_only_observed_target_items(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=20)
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    with BotSession("tok", bot_username="VerifiedSliceItems", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+
+        def cut_off_after_inventory(*, deadline, **kwargs):
+            engine.bot.inventory()
+            world._add_item("raw_iron")
+            engine.bot.inventory()
+            world._add_item("raw_iron")
+            clock.now = deadline
+            engine.bot.inventory()
+
+        monkeypatch.setattr(engine, "_run", cut_off_after_inventory)
+        result = engine.run(target="iron", goal_count=2, max_duration_s=5.0)
+
+    assert world._count("raw_iron") == 2
+    assert result["target_gained"] == 1
+    assert result["gained"] == {"raw_iron": 1}
+    assert result["goal_met"] is False
+
+
+@pytest.mark.parametrize(("dimension", "expected_dimension", "available"), [
+    ("minecraft:the_nether", "the_nether", {"ancient_debris": 15, "quartz": 48, "gold": 64}),
+    ("world_the_end", "the_end", {}),
+])
+def test_dfs_rejects_diamond_outside_overworld_before_scanning_or_digging(
+    dimension, expected_dimension, available,
+) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 52.0, 0.5), surface_y=64, dimension=dimension)
+    endpoints = []
+
+    def handler(request):
+        endpoints.append(request.url.path.rsplit("/", 1)[-1])
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="BadDimensionOre", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        result = skills.mine_dfs(target="diamond", target_y=15, max_duration_s=60)
+        assert skills.mining_dfs.target_y == 16
+
+    assert result["stop_reason"] == "bad_target_for_dimension"
+    assert result["ok"] is False and result["requires_replan"] is True
+    assert result["dimension"] == expected_dimension
+    assert result["allowed_dimensions"] == ["overworld"]
+    assert result["available_targets"] == available
+    assert result["tree"]["node_count"] == 0
+    assert endpoints == ["status"]
+
+
+def test_generic_gold_in_nether_counts_nuggets_and_uses_the_nether_layer(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 64.0, 0.5), surface_y=64, dimension="the_nether")
+    world.blocks[(1, 64, 0)] = "nether_gold_ore"
+    monkeypatch.setattr(world, "_drop_name_for", lambda name: "gold_nugget" if name == "nether_gold_ore" else name)
+    with BotSession("tok", bot_username="NetherGold", transport=httpx.MockTransport(world.handler)) as bot:
+        result = MacroSkills(bot).mine_dfs(target="gold", goal_count=1, max_duration_s=10.0)
+
+    assert result["stop_reason"] == "quota_reached"
+    assert result["target_y"] == 64
+    assert result["goal_met"] is True
+    assert result["gained"]["gold_nugget"] == 1
+    assert any(name == "nether_gold_ore" for _, name, _ in world.dig_log)

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from copy import copy
+import inspect
 import math
 import time
 from typing import Any, Callable
+
+import httpx
 
 from ..bot import BotSession
 from ..errors import ApiError
@@ -49,6 +53,11 @@ PICKAXE_TIERS: dict[str, int] = {
     "diamond_pickaxe": 4,
     "netherite_pickaxe": 5,
 }
+
+STAIR_FILLER_BLOCKS: tuple[str, ...] = (
+    "cobblestone", "cobbled_deepslate", "dirt", "stone", "deepslate",
+    "netherrack", "blackstone", "basalt", "end_stone", "andesite", "diorite", "granite", "tuff",
+)
 
 BLOCK_MIN_PICKAXE_TIER: dict[str, int] = {
     "stone": 1,
@@ -830,6 +839,64 @@ _CRAFT_SLOT_INPUTS: dict[str, dict[str, int]] = {
 }
 
 
+def craft_material_shortage(item: str, count: int, counts: dict[str, int]) -> dict[str, Any] | None:
+    """Use the curated recipes and existing slot recipes, with material tags."""
+    legacy = material_shortage(item, count, counts)
+    if legacy is not None:
+        return legacy
+    recipe = RECIPES_1_21.get(item)
+    if recipe is None:
+        inputs = _CRAFT_SLOT_INPUTS.get(item)
+        if item == "stone_bricks":
+            recipe = {"ingredients": {"stone": 4}, "yield_count": 4}
+        elif inputs:
+            recipe = {"ingredients": {("any_planks" if key == "_planks_any" else key): value for key, value in inputs.items()}, "yield_count": 1}
+        else:
+            return None
+    batches = math.ceil(max(1, int(count)) / max(1, int(recipe.get("yield_count", 1))))
+    required = {name: int(amount) * batches for name, amount in recipe["ingredients"].items()}
+
+    def _available(name: str) -> int:
+        if name == "any_planks":
+            return sum(v for k, v in counts.items() if k.endswith("_planks"))
+        if name == "any_log":
+            return sum(v for k, v in counts.items() if k.endswith(("_log", "_stem", "_wood", "_hyphae")))
+        if name == "coal_or_charcoal":
+            return counts.get("coal", 0) + counts.get("charcoal", 0)
+        if name == "any_wooden_slab":
+            woods = {n.removesuffix("_log") for n in LOG_TYPES} | {"crimson", "warped", "bamboo"}
+            return sum(counts.get(f"{wood}_slab", 0) for wood in woods)
+        if name == "cobblestone" and (item.startswith("stone_") or item == "furnace"):
+            return sum(counts.get(n, 0) for n in ("cobblestone", "cobbled_deepslate", "blackstone"))
+        return counts.get(name, 0)
+
+    available = {name: _available(name) for name in required}
+    missing = {name: amount - available[name] for name, amount in required.items() if available[name] < amount}
+    return {
+        "item": item, "target_count": count,
+        "required_materials": required, "available_materials": available,
+        "missing_materials": missing,
+        "recipe_note": ("cobblestone 可由 cobbled_deepslate、blackstone 替代。"
+                        if "cobblestone" in required and (item.startswith("stone_") or item == "furnace")
+                        else str(recipe.get("notes") or "any_planks 可混用木板；材料需求已按配方产量换算。")),
+    }
+
+
+def explain_material_craft_error(item: str, count: int, error: dict[str, Any]) -> dict[str, Any]:
+    enriched = explain_craft_error(item, count, error)
+    if error.get("code") != "missing_ingredients" or not isinstance(error.get("inventory"), dict):
+        return enriched
+    plan = craft_material_shortage(resolve_item_alias(item), count, error["inventory"])
+    if plan is None:
+        return enriched
+    enriched = {**enriched, **plan}
+    if "example_recipe_needs" in enriched:
+        enriched["server_recipe_example"] = enriched.pop("example_recipe_needs")
+    if not plan["missing_materials"] and "server placed no result" in str(error.get("message", "")):
+        enriched["code"] = "server_recipe_rejected"
+    return enriched
+
+
 def _compute_empty_slots(inv: dict[str, Any] | None) -> int:
     if not isinstance(inv, dict):
         return 36
@@ -1076,6 +1143,67 @@ def _summarize_uncollected_drops(
         ],
         "approach_hint": approach_hint,
     }
+
+
+class _StairDeadline(Exception):
+    """Stop the whole staircase, including helpers that catch ApiError."""
+
+
+class _StairSession:
+    """Per-invocation deadline; never patch the shared BotSession/guardian."""
+
+    def __init__(self, bot: BotSession, duration_s: float, *, deadline: float | None = None, per_step_timeout: float = 10.0) -> None:
+        self.bot = bot
+        params = inspect.signature(bot.call).parameters
+        self.supports_timeout = "timeout_s" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        self.deadline = min(time.monotonic() + duration_s, float(deadline)) if deadline is not None else time.monotonic() + duration_s
+        self.step_deadline = self.deadline
+        self.per_step_timeout = max(0.05, float(per_step_timeout))
+        self.last_status: dict[str, Any] = {}
+        self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
+
+    def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+        remaining = min(self.deadline, self.step_deadline) - time.monotonic()
+        if remaining <= 0:
+            raise _StairDeadline()
+        cap = 6.0 if path == "move_to" else 8.0 if path == "dig" else 3.0
+        timeout = min(remaining, cap, float(kwargs.pop("timeout_s", cap)))
+        if path == "move_to":
+            body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
+        try:
+            result = (self.bot.call(path, body, timeout_s=timeout, **kwargs)
+                      if self.supports_timeout else self.bot.call(path, body))
+        except httpx.TimeoutException:
+            # A client timeout does not release the server action lease.
+            raise _StairDeadline() from None
+        if path == "status":
+            self.last_status = result
+        if time.monotonic() >= min(self.deadline, self.step_deadline):
+            raise _StairDeadline()
+        return result
+
+    def _read(self, path: str) -> dict[str, Any]:
+        if isinstance(self.bot, BotSession):
+            return self.call(path, method="GET")
+        # Lightweight in-process adapters expose reads as methods rather than
+        # API paths. They still share the same checks before and after each read.
+        if time.monotonic() >= min(self.deadline, self.step_deadline):
+            raise _StairDeadline()
+        result = getattr(self.bot, path)()
+        if path == "status":
+            self.last_status = result
+        if time.monotonic() >= min(self.deadline, self.step_deadline):
+            raise _StairDeadline()
+        return result
+
+    def status(self) -> dict[str, Any]:
+        return self._read("status")
+
+    def inventory(self) -> dict[str, Any]:
+        return self._read("inventory")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.bot, name)
 
 
 class MacroSkills:
@@ -1572,7 +1700,7 @@ class MacroSkills:
         }
         has_filler = any(
             counts.get(c, 0) >= 1
-            for c in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
+            for c in STAIR_FILLER_BLOCKS
         ) or any(cnt >= 1 and name.endswith("_planks") for name, cnt in counts.items())
 
         def _non_air_has_adj_fluid(cells: list[tuple[int, int, int]]) -> bool:
@@ -1635,7 +1763,6 @@ class MacroSkills:
         """Probe which 4 cardinal directions can safely perform dig_staircase(vertical='down')."""
         dirs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
         cache = probe_cache if probe_cache is not None else {}
-        counts = inv_counts if inv_counts is not None else _inventory_counts(self.bot)
         air_set = {"air", "cave_air", "void_air"}
         fluids = {"water", "lava", "flowing_water", "flowing_lava"}
         fluid_or_bedrock = fluids | {"bedrock"}
@@ -1647,11 +1774,6 @@ class MacroSkills:
             "poppy",
             "oak_sapling",
         }
-        has_filler = any(
-            counts.get(c, 0) >= 1
-            for c in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
-        ) or any(cnt >= 1 and name.endswith("_planks") for name, cnt in counts.items())
-
         def _non_air_has_adj_fluid(cells: list[tuple[int, int, int]]) -> bool:
             for cx, cy, cz in cells:
                 if self._probe_cached_block((cx, cy, cz), cache) in air_set:
@@ -1680,7 +1802,7 @@ class MacroSkills:
                 if step_sup in fluid_or_bedrock:
                     continue
                 is_non_solid = step_sup in non_solid or step_sup.endswith(("_leaves", "_sapling", "_carpet", "_banner"))
-                if is_non_solid and not has_filler:
+                if is_non_solid:
                     continue
                 viable_down.append(odir)
             except ApiError:
@@ -2773,28 +2895,22 @@ class MacroSkills:
                     if cand_planks in RECIPES_1_21 or cand_planks.endswith("_planks"):
                         item = cand_planks
                         break
-        if item in (
-            "iron_pickaxe",
-            "diamond_pickaxe",
-            "diamond_helmet",
-            "diamond_chestplate",
-            "diamond_leggings",
-            "diamond_boots",
-        ):
-            plan = material_shortage(item, count, initial)
-            if plan and plan["missing_materials"]:
-                non_wood_missing = {k: v for k, v in plan["missing_materials"].items() if k != "stick"}
-                if non_wood_missing:
-                    return self._attach_shortage_memory_hint(
-                        {
-                            "ok": False,
-                            "error": "missing_ingredients",
-                            "requires_replan": True,
-                            "inventory": initial,
-                            **plan,
-                        },
-                        non_wood_missing.keys(),
-                    )
+        plan = craft_material_shortage(item, count, initial)
+        if plan and plan["missing_materials"]:
+            # Logs/planks and sticks can be prepared automatically, but
+            # absent stone/ingots/wool cannot be repaired by rebuilding a table.
+            non_wood_missing = {k: v for k, v in plan["missing_materials"].items() if k not in {"stick", "any_planks"}}
+            if non_wood_missing:
+                return self._attach_shortage_memory_hint(
+                    {
+                        "ok": False,
+                        "error": "missing_ingredients",
+                        "requires_replan": True,
+                        "inventory": initial,
+                        **plan,
+                    },
+                    non_wood_missing.keys(),
+                )
         inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         planks_per, sticks_per = TOOL_WOOD_NEEDS.get(item, (0, 0))
         planks_needed = math.ceil(count / 4) * 2 if item == "stick" else planks_per * count
@@ -2823,7 +2939,7 @@ class MacroSkills:
                     f"当前可用木板仅 {_total_planks(prepared)}。"
                 ),
             }
-        plan = material_shortage(item, count, prepared)
+        plan = craft_material_shortage(item, count, prepared)
         if plan and plan["missing_materials"]:
             return self._attach_shortage_memory_hint(
                 {
@@ -2856,6 +2972,18 @@ class MacroSkills:
         try:
             craft_res = self._safe_craft(item, count)
         except ApiError as err:
+            if err.code == "missing_ingredients" and "server placed no result" in err.message:
+                try:
+                    counts_now = _inventory_counts(self.bot)
+                except ApiError:
+                    counts_now = prepared
+                plan_now = craft_material_shortage(item, count, counts_now)
+                return {
+                    "ok": False, "requires_replan": True,
+                    "error": "missing_ingredients" if plan_now and plan_now["missing_materials"] else "server_recipe_rejected",
+                    "message": err.message, "inventory": counts_now,
+                    **(plan_now or {}),
+                }
             if err.code == "inventory_full":
                 return {
                     "ok": False,
@@ -5289,16 +5417,7 @@ class MacroSkills:
         hazard_set = fluids | falling_set
         ore_types = ["iron_ore", "deepslate_iron_ore", "coal_ore", "deepslate_coal_ore", "copper_ore"]
         iron_names = {"iron_ore", "deepslate_iron_ore"}
-        filler_candidates = (
-            "cobblestone",
-            "cobbled_deepslate",
-            "dirt",
-            "andesite",
-            "diorite",
-            "granite",
-            "tuff",
-            "stone",
-        )
+        filler_candidates = STAIR_FILLER_BLOCKS
 
         def _bname(pos_xyz: list[int]) -> str:
             res = self.bot.call("get_block", {"pos": pos_xyz})
@@ -5344,6 +5463,8 @@ class MacroSkills:
 
         try:
             for step_idx in range(steps):
+                if isinstance(self.bot, _StairSession):
+                    self.bot.step_deadline = min(self.bot.deadline, time.monotonic() + self.bot.per_step_timeout)
                 st = self.bot.status()
                 if st.get("alive") is False or (st.get("last_death") or {}).get("t") != last_death:
                     stop_reason = "died"
@@ -5497,6 +5618,8 @@ class MacroSkills:
                     break
 
                 steps_done += 1
+                if isinstance(self.bot, _StairSession):
+                    self.bot.progress.update(steps_done=steps_done, dug_count=dug_count, placed_count=placed_count)
                 if steps_done >= 2:
                     surface_evidence = _confirm_pillar_surface(cur_pos)
                     if surface_evidence:
@@ -5516,6 +5639,8 @@ class MacroSkills:
             stop_reason = "api_error"
             last_error = {"code": exc.code, "message": exc.message, **exc.context}
 
+        if isinstance(self.bot, _StairSession):
+            self.bot.step_deadline = self.bot.deadline
         st_end = self.bot.status()
         end_pos = st_end.get("pos") or pos_before
         ok = steps_done > 0 and stop_reason in {"completed", "iron_ore_found", "reached_surface"}
@@ -5577,6 +5702,42 @@ class MacroSkills:
         return out_pillar
 
     def dig_staircase(
+        self,
+        direction: str | None = None,
+        steps: int = 12,
+        vertical: str = "down",
+        stop_on_ore: bool | None = None,
+        *,
+        deadline: float | None = None,
+        per_step_timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        session = _StairSession(self.bot, 45.0, deadline=deadline, per_step_timeout=per_step_timeout)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            return scoped._dig_staircase(direction, steps, vertical, stop_on_ore)
+        except _StairDeadline:
+            cleanup: dict[str, Any] = {}
+            try:
+                cleanup = self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+            except (ApiError, httpx.HTTPError):
+                pass
+            if str(vertical).lower() == "pillar" or str(direction).lower() == "pillar":
+                try:
+                    # The scoped session has expired, so its ordinary finally
+                    # cannot clear the persistent jump posture.
+                    self.bot.call("posture", {"jump": False, "sneak": False, "shield": False}, timeout_s=1.0, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
+            return {
+                "ok": False, "requires_replan": True, "stop_reason": "time_budget",
+                "error": {"code": "time_budget", "message": "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"},
+                "direction": direction, "vertical": vertical, "steps_requested": steps,
+                **session.progress, "pos_after": session.last_status.get("pos"),
+                "action_released": cleanup.get("released", cleanup.get("stopped", False)),
+            }
+
+    def _dig_staircase(
         self,
         direction: str | None = None,
         steps: int = 12,
@@ -5723,7 +5884,7 @@ class MacroSkills:
 
         def _pick_step_filler() -> str | None:
             counts = _inventory_counts(self.bot)
-            for cand in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite"):
+            for cand in STAIR_FILLER_BLOCKS:
                 if counts.get(cand, 0) >= 1:
                     return cand
             for name, cnt in sorted(counts.items()):
@@ -5814,8 +5975,9 @@ class MacroSkills:
                 if _block_name([c0x, c0y - 1, c0z]).endswith("_leaves"):
                     stop_reason = "on_tree_canopy"
 
-        stair_deadline = time.monotonic() + 75.0
+        stair_deadline = self.bot.deadline
         for step_idx in range(steps if stop_reason == "completed" else 0):
+            self.bot.step_deadline = min(self.bot.deadline, time.monotonic() + self.bot.per_step_timeout)
             if step_idx > 0 and time.monotonic() >= stair_deadline:
                 stop_reason = "time_budget"
                 break
@@ -5903,13 +6065,26 @@ class MacroSkills:
                             last_error = {"code": err.code, "message": err.message, "pos": dpos}
                             dig_failed = True
                             break
-                        if idx >= 1 and _block_name(dpos) not in air_set:
-                            try:
-                                self.bot.call("dig", {"pos": dpos, "collect": True, "stop_on": ["death"]})
-                                dug_count += 1
-                            except ApiError as err:
-                                last_error = {"code": err.code, "message": err.message, "pos": dpos}
+                        if idx >= 1:
+                            for _ in range(2):
+                                remaining_block = _block_name(dpos)
+                                if remaining_block in air_set:
+                                    break
+                                if remaining_block in fluid_or_bedrock:
+                                    last_error = {"code": "unsafe_refilled_cell", "pos": dpos, "block": remaining_block}
+                                    dig_failed = True
+                                    break
+                                try:
+                                    self.bot.call("dig", {"pos": dpos, "collect": True, "stop_on": ["death"]})
+                                    dug_count += 1
+                                except ApiError as err:
+                                    last_error = {"code": err.code, "message": err.message, "pos": dpos}
+                                    dig_failed = True
+                                    break
+                            if not dig_failed and _block_name(dpos) in {"sand", "red_sand", "gravel", "suspicious_sand", "suspicious_gravel"}:
+                                last_error = {"code": "stair_cell_not_cleared", "pos": dpos}
                                 dig_failed = True
+                            if dig_failed:
                                 break
                 if dig_failed:
                     stop_reason = "dig_failed"
@@ -5980,7 +6155,7 @@ class MacroSkills:
                     stop_reason = "dig_failed"
                     break
 
-                if _block_name([nx, by, nz]) in non_solid:
+                if _is_non_solid_support(_block_name([nx, by, nz])):
                     filler = _pick_step_filler()
                     if not filler:
                         stop_reason = "missing_step_support"
@@ -5988,7 +6163,8 @@ class MacroSkills:
                     try:
                         self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
                         placed_count += 1
-                    except ApiError:
+                    except ApiError as err:
+                        last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
                         stop_reason = "missing_step_support"
                         break
 
@@ -5998,6 +6174,7 @@ class MacroSkills:
                     break
 
                 steps_done += 1
+                self.bot.progress.update(steps_done=steps_done, dug_count=dug_count)
                 if step_idx >= 1:
                     surface_evidence = _confirm_surface(cur)
                     if surface_evidence:
@@ -6014,6 +6191,7 @@ class MacroSkills:
                 continue
 
             steps_done += 1
+            self.bot.progress.update(steps_done=steps_done, dug_count=dug_count)
             if stop_on_ore and steps_done % 3 == 0:
                 found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
                 ores_nearby = found_ores.get("blocks") or []
@@ -6022,6 +6200,7 @@ class MacroSkills:
                     stop_reason = "ore_detected"
                     break
 
+        self.bot.step_deadline = self.bot.deadline
         st_end = self.bot.status()
         if stop_on_ore and stop_reason == "completed":
             found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
@@ -6800,31 +6979,118 @@ class MacroSkills:
                 "message": "当前已身处下界(the_nether)，无需再搭传送门。",
             }
 
+        entry_detail: dict[str, Any] = {}
+
         def _walk_into_portal(portal_blocks: list[dict[str, Any]]) -> tuple[bool, str]:
-            # Pick lowest-Y nether_portal block so the bot stands directly inside the portal frame
-            portal_blocks_sorted = sorted(
-                (b for b in portal_blocks if isinstance(b, dict) and isinstance(b.get("pos"), (list, tuple)) and len(b["pos"]) >= 3),
+            # A pathfinder success only confirms its goal radius. Check actual
+            # portal contact and use short controls when the portal plane is avoided.
+            blocks = sorted(
+                (b for b in portal_blocks if isinstance(b, dict)
+                 and isinstance(b.get("pos"), (list, tuple)) and len(b["pos"]) >= 3),
                 key=lambda b: (float(b["pos"][1]), float(b.get("dist", 99.0))),
             )
-            if not portal_blocks_sorted:
+            if not blocks:
+                entry_detail["error"] = {"code": "portal_not_found", "phase": "entry"}
                 return False, dim
-            ppos = portal_blocks_sorted[0]["pos"]
-            px_t, py_t, pz_t = float(ppos[0]) + 0.5, float(ppos[1]), float(ppos[2]) + 0.5
-            try:
-                self.bot.call("move_to", {"x": px_t, "y": py_t, "z": pz_t, "range": 0.0})
-            except Exception:
-                pass
-            deadline = time.monotonic() + max(4.0, float(wait_s))
+            target = [math.floor(float(v)) for v in blocks[0]["pos"][:3]]
+            tx, ty, tz = target
+            entry_detail["entry_target"] = target
+            deadline = time.monotonic() + max(4.0, min(30.0, float(wait_s)))
             dim_now = dim
-            while time.monotonic() < deadline:
-                time.sleep(0.6)
+
+            def _entry_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ApiError("portal_entry_timeout", "入门预算耗尽")
+                cap = min(float(kwargs.pop("timeout_s", 3.0)), remaining)
+                if path == "move_to":
+                    body = {**(body or {}), "timeout": max(1, int(max(0.001, cap - 0.2) * 1000))}
+                return self.bot.call(path, body, timeout_s=cap, **kwargs)
+
+            def _status() -> dict[str, Any]:
+                nonlocal dim_now
+                st_now = (_entry_call("status", method="GET", timeout_s=2.0)
+                          if isinstance(self.bot, BotSession) else self.bot.status())
+                dim_now = str(st_now.get("dimension") or "").lower()
+                entry_detail["entry_pos"] = st_now.get("pos")
+                return st_now
+
+            try:
+                # Break the vegetation/terrain on the nearest face, without
+                # touching the frame, portal, or its supporting floor.
+                block = _entry_call("get_block", {"pos": target})
+                axis = (block.get("properties") or {}).get("axis", "x")
+                normal = (0, 1) if axis == "x" else (1, 0)
+                cur = _status().get("pos") or st.get("pos") or target
+                sign = -1 if (float(cur[0]) - tx - 0.5) * normal[0] + (float(cur[2]) - tz - 0.5) * normal[1] <= 0 else 1
+                ax, az = tx + sign * normal[0], tz + sign * normal[1]
+                for y_cell in (ty, ty + 1, ty + 2):
+                    cell = [ax, y_cell, az]
+                    name = str(_entry_call("get_block", {"pos": cell}).get("name") or "").removeprefix("minecraft:")
+                    if name in {"water", "lava", "flowing_water", "flowing_lava", "bedrock", "obsidian"}:
+                        entry_detail["error"] = {"code": "portal_approach_blocked", "phase": "entry", "pos": cell, "block": name}
+                        return False, dim_now
+                    if name and name not in {"air", "cave_air", "void_air", "nether_portal", "fire"}:
+                        _entry_call("dig", {"pos": cell, "collect": False}, timeout_s=min(3.0, max(0.05, deadline - time.monotonic())))
                 try:
-                    st2 = self.bot.status()
-                    dim_now = str(st2.get("dimension") or "").lower()
+                    _entry_call("move_to", {"x": tx + 0.5, "y": ty, "z": tz + 0.5,
+                                             "range": 0.2, "timeout": 2500}, timeout_s=3.0)
+                except ApiError as err:
+                    entry_detail["move_error"] = {"code": err.code, "message": err.message}
+                contact_seen = False
+                pulses = 0
+                approach_recovered = False
+                while time.monotonic() < deadline:
+                    now = _status()
                     if "nether" in dim_now:
                         return True, dim_now
-                except Exception:
-                    pass
+                    cur = now.get("pos") or []
+                    if len(cur) < 3:
+                        break
+                    cx, cy, cz = map(float, cur[:3])
+                    in_portal = abs(cx - tx - 0.5) <= 0.45 and abs(cz - tz - 0.5) <= 0.45 and ty <= cy < ty + 1
+                    contact_seen = contact_seen or in_portal
+                    normal_distance = abs((cx - tx - 0.5) * normal[0] + (cz - tz - 0.5) * normal[1])
+                    lateral_distance = abs((cx - tx - 0.5) * normal[1] + (cz - tz - 0.5) * normal[0])
+                    if (not approach_recovered and 1.1 < ty - cy <= 2.1
+                            and 0.7 <= normal_distance <= 1.3 and lateral_distance <= 0.6):
+                        # r12: pathfinding can fall to a low approach floor two
+                        # blocks below the portal. One verified jump-place makes
+                        # a one-block stair, without touching its obsidian bar.
+                        floor_pos = [math.floor(cx), math.floor(cy) - 1, math.floor(cz)]
+                        floor = str(_entry_call("get_block", {"pos": floor_pos}).get("name") or "").removeprefix("minecraft:")
+                        if not floor or is_passable_sight_block(floor) or floor in {"lava", "flowing_lava", "magma_block", "cactus"}:
+                            entry_detail["error"] = {"code": "portal_approach_unsupported", "phase": "entry", "pos": floor_pos, "block": floor}
+                            return False, dim_now
+                        approach_recovered = True
+                        recovery = self.dig_staircase(vertical="pillar", steps=1, stop_on_ore=False,
+                                                      deadline=deadline, per_step_timeout=3.0)
+                        entry_detail["entry_recovery"] = {key: recovery.get(key) for key in ("ok", "steps_done", "pos_after", "stop_reason")}
+                        if not recovery.get("ok"):
+                            entry_detail["error"] = {"code": "portal_approach_step_failed", "phase": "entry", "cause": recovery.get("stop_reason")}
+                            return False, dim_now
+                        continue
+                    if not in_portal and pulses < 8:
+                        # Steer only within a single step of the portal floor.
+                        if (cy < ty - 1.1 or cy > ty + 0.6) or math.hypot(cx - tx - 0.5, cz - tz - 0.5) > 2.2:
+                            break
+                        _entry_call("look", {"x": tx + 0.5, "y": cy + 1.62, "z": tz + 0.5}, timeout_s=1.0)
+                        _entry_call("control", {"forward": True, "jump": cy < ty - 0.4, "ms": 150, "stop_on": ["hurt", "death"]}, timeout_s=1.0)
+                        pulses += 1
+                    else:
+                        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+                entry_detail["error"] = {
+                    "code": "portal_transfer_timeout" if contact_seen else "portal_entry_not_reached",
+                    "phase": "entry", "target": target,
+                    "message": "请检查门前两格净空、脚下支撑及 entry_pos；不要重复建门。",
+                }
+            except (ApiError, httpx.HTTPError) as err:
+                if isinstance(err, httpx.TimeoutException):
+                    try:
+                        self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                    except (ApiError, httpx.HTTPError):
+                        pass
+                entry_detail["error"] = {"code": "portal_entry_failed", "phase": "entry", "cause": getattr(err, "code", type(err).__name__)}
             return False, dim_now
 
         # 0) If a lit nether_portal already exists within 12 blocks, walk straight into it without needing 10 obsidian!
@@ -6851,6 +7117,7 @@ class MacroSkills:
                 "entered_nether": entered_now,
                 "dimension": dim_now,
                 "requires_replan": not entered_now,
+                **entry_detail,
             }
 
         inv = self.bot.inventory()
@@ -7007,6 +7274,14 @@ class MacroSkills:
             for cy in (by + 1, by + 2, by + 3):
                 _clear_cell(cx, cy, bz)
 
+        if failed_cells:
+            return {
+                "ok": False, "requires_replan": True, "portal_origin": [bx, by, bz],
+                "placed_obsidian": placed_obs, "failed_cells": failed_cells,
+                "portal_ignited": False, "entered_nether": False,
+                "error": {"code": "portal_frame_incomplete", "phase": "placement", "failed_cells": failed_cells},
+            }
+
         # 4) Ignite the bottom interior of the frame
         try:
             self.bot.call("move_to", {"x": bx + 1.5, "y": by, "z": bz - 2.0, "range": 1.8})
@@ -7045,4 +7320,5 @@ class MacroSkills:
             "entered_nether": entered_nether,
             "dimension": dim_after,
             "requires_replan": not (ignited and (entered_nether or not enter)),
+            **({"error": {"code": "portal_ignition_failed", "phase": "ignition"}} if not ignited else entry_detail),
         }

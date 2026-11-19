@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -21,15 +22,16 @@ from ..kb import assess_world_target, build_jit_error_hint, lookup_kb, normalize
 from ..skills import MacroSkills, SafetyEmergency, check_and_stabilize, compute_advancement_frontier
 from ..skills.library import (
     BLOCK_MIN_PICKAXE_TIER,
+    LOG_TYPES,
     TABLE_RECIPES,
     _best_pickaxe_in_inv,
     _can_fit_item_in_inventory,
     _compute_empty_slots,
     _inventory_counts,
     best_melee_weapon_in_inv,
+    explain_material_craft_error,
     is_passable_sight_block,
 )
-from ..skills.crafting import explain_craft_error
 from ..skills.safety import SAFE_FOOD_PRIORITY
 from .geofence import VoidGeofence
 from .tool_registry import Parameter, Tool, ToolRegistry
@@ -45,17 +47,27 @@ _BED_BLOCK_TYPES: tuple[str, ...] = tuple(
 )
 
 
+_BLOCK_COLORS: tuple[str, ...] = tuple(name.removesuffix("_bed") for name in _BED_BLOCK_TYPES)
+_BLOCK_WOODS: tuple[str, ...] = tuple(name.removesuffix("_log") for name in LOG_TYPES)
+_FIND_BLOCK_ALIASES: dict[str, tuple[str, ...]] = {
+    "bed": _BED_BLOCK_TYPES, "beds": _BED_BLOCK_TYPES,
+    "log": LOG_TYPES, "logs": LOG_TYPES,
+    "planks": tuple(f"{wood}_planks" for wood in (*_BLOCK_WOODS, "crimson", "warped", "bamboo")),
+    "wool": tuple(f"{color}_wool" for color in _BLOCK_COLORS),
+    "grass": ("short_grass", "tall_grass"),
+    "portal": ("nether_portal",), "nether_rack": ("netherrack",),
+    "cave": ("cave_air",), "flowing_water": ("water",), "flowing_lava": ("lava",),
+    "cobble": ("cobblestone",),
+}
+
+
 def _normalize_find_block_types(types: list[str] | tuple[str, ...]) -> list[str]:
-    """Expand common colloquial block aliases; APIs reject unknown IDs like `bed`."""
+    """Expand block families; leave registry validation to the server version."""
     out: list[str] = []
     for raw in types:
-        name = str(raw).removeprefix("minecraft:").strip().lower()
-        if not name:
-            continue
-        if name in {"bed", "beds"}:
-            out.extend(_BED_BLOCK_TYPES)
-        else:
-            out.append(name)
+        name = str(raw).strip().lower().removeprefix("minecraft:")
+        if name:
+            out.extend(_FIND_BLOCK_ALIASES.get(name, (name,)))
     return list(dict.fromkeys(out))
 
 
@@ -123,6 +135,9 @@ class McToolset:
         self._last_block_pos: list[int] | None = None
         self._last_dimension: str = "overworld"
         self._last_biome: str = ""
+        self._entity_observations: dict[int, dict[str, Any]] = {}
+        self._entity_observed_mono: float = 0.0
+        self._entity_observed_dimension: str = "overworld"
         self.geofence = geofence if geofence is not None else VoidGeofence.from_env()
         self.world_memory = (
             world_memory
@@ -461,8 +476,16 @@ class McToolset:
                     )
                 except (TypeError, ValueError):
                     pass
+        if action == "place" and exc.code in {"no_support", "blocked_by_self", "place_failed", "occupied"}:
+            target = params.get("pos")
+            if exc.code == "blocked_by_self":
+                err_obj["recovery_hint"] = "先用 mc_move_to 到至少 3 格外，设 range=0.5，让出目标格，再放置；也可省略 x/y/z 自动选落点。"
+            elif exc.code == "no_support":
+                err_obj["recovery_hint"] = "目标需要相邻实心方块支撑；先用 mc_get_block 检查目标与下方，选择有实心地面的空格，或省略 x/y/z 自动选落点。"
+            else:
+                err_obj["recovery_hint"] = (f"先用 mc_get_block 检查目标 {target}；若仍是 sugar_cane、草或其他可清理障碍，先 mc_dig 清空目标格，再 mc_place。不要重复向同一占用格放置。")
         if action == "craft":
-            err_obj = explain_craft_error(params.get("item", ""), params.get("count", 1), err_obj)
+            err_obj = explain_material_craft_error(params.get("item", ""), params.get("count", 1), err_obj)
         if action == "use_item" and str(exc.code).lower() == "missing_item" and isinstance(err_obj.get("inventory"), dict):
             inv_map = err_obj["inventory"]
             avail_foods = [
@@ -587,11 +610,30 @@ class McToolset:
             norm_types = [str(t).removeprefix("minecraft:").strip().lower() for t in (types or [])]
             if not norm_types or any(t in self._CROP_BLOCK_TYPES for t in norm_types):
                 payload["mature"] = mature
-        raw = self._call_json("find_blocks", payload)
-        try:
-            parsed = json.loads(raw)
-        except ValueError:
-            return raw
+        ignored: list[str] = []
+        while True:
+            raw = self._call_json("find_blocks", payload)
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                return raw
+            err = parsed.get("error") if isinstance(parsed, dict) else None
+            unknown = (re.search(r"\bunknown block\s+([a-z0-9_:]+)", str(err.get("message") or ""), re.IGNORECASE)
+                       if isinstance(err, dict) and err.get("code") == "bad_args" else None)
+            bad_type = unknown.group(1).lower().removeprefix("minecraft:") if unknown else None
+            if not bad_type or not types or bad_type not in types:
+                break
+            ignored.append(bad_type)
+            types = [name for name in types if name != bad_type]
+            if not types:
+                return json.dumps({
+                    "ok": False, "requires_replan": True, "ignored_types": ignored,
+                    "error": {"code": "bad_args", "message": "没有有效方块类型。示例：mc_find_blocks(types=['oak_log','stone'])；查实体请用 mc_get_entities。"},
+                }, ensure_ascii=False)
+            payload["types"] = types
+        if ignored and isinstance(parsed, dict):
+            parsed["ignored_types"] = ignored
+            raw = json.dumps(parsed, ensure_ascii=False)
         res_obj = parsed.get("result") if isinstance(parsed, dict) else None
         blocks = res_obj.get("blocks") if isinstance(res_obj, dict) else None
         if parsed.get("ok") is True and isinstance(blocks, list) and blocks:
@@ -651,6 +693,10 @@ class McToolset:
             res_ent = parsed.get("result") if isinstance(parsed, dict) else None
             ents = (res_ent or {}).get("entities") or []
             dim_ent, pos_ent, _ = self._cached_env(fetch_if_missing=False)
+            if isinstance(parsed, dict) and parsed.get("ok") is True:
+                self._entity_observations = {int(ent["id"]): ent for ent in ents if isinstance(ent, dict) and isinstance(ent.get("id"), int)}
+                self._entity_observed_mono = time.monotonic()
+                self._entity_observed_dimension = dim_ent
             if ents:
                 self.world_memory.observe_entities(ents, dim=dim_ent)
             elif types and isinstance(res_ent, dict) and pos_ent is not None:
@@ -876,6 +922,16 @@ class McToolset:
         if ignore_hurt or self._is_in_water():
             payload["stop_on"] = ["death"]
         raw = self._call_json("move_to", payload)
+        try:
+            first = json.loads(raw)
+            if first.get("ok") is False and (first.get("error") or {}).get("code") == "busy":
+                # /stop waits for the preceding lease to finish. Retry only
+                # after the server confirms release; never spin on busy.
+                stopped = self.bot.call("stop", {}, timeout_s=5.5)
+                if stopped.get("released") is True or (stopped.get("stopped") is True and stopped.get("action") is None):
+                    raw = self._call_json("move_to", payload)
+        except (ValueError, ApiError, httpx.HTTPError):
+            pass
         if x is not None and z is not None:
             try:
                 parsed = json.loads(raw)
@@ -1159,7 +1215,9 @@ class McToolset:
             try:
                 parsed = json.loads(raw)
                 res_obj = parsed.get("result") if isinstance(parsed, dict) else None
-                if parsed.get("ok") is True and isinstance(res_obj, dict) and res_obj.get("changed") is False:
+                if (parsed.get("ok") is True and isinstance(res_obj, dict)
+                        and res_obj.get("changed") is False
+                        and not res_obj.get("used") and not res_obj.get("gained")):
                     parsed["ok"] = False
                     parsed["requires_replan"] = True
                     parsed["error"] = {
@@ -1196,6 +1254,22 @@ class McToolset:
         interval_ms: int | None = None,
         timeout_ms: int = 20000,
     ) -> str:
+        seen = self._entity_observations.get(entity_id)
+        if (seen is not None and time.monotonic() - self._entity_observed_mono <= 3.0
+                and self._entity_observed_dimension == self._last_dimension
+                and isinstance(seen.get("dist"), (int, float)) and seen["dist"] > 32.0):
+            try:
+                live = self.bot.call("get_entities", {"radius": 64}, timeout_s=2.0).get("entities") or []
+                target = next((ent for ent in live if isinstance(ent, dict) and ent.get("id") == entity_id), None)
+                if target is None or (isinstance(target.get("dist"), (int, float)) and target["dist"] > 32.0):
+                    return json.dumps({
+                        "ok": False, "requires_replan": True,
+                        "error": {"code": "target_out_of_reach" if target else "target_not_visible", "entity_id": entity_id,
+                                  "dist": target.get("dist") if target else None,
+                                  "message": "目标已超出近战追击范围或不再可见；请放弃空挥，先确认安全路线并靠近目标，或选择附近目标。"},
+                    }, ensure_ascii=False)
+            except (ApiError, httpx.HTTPError):
+                pass
         try:
             inv = self.bot.inventory()
             counts: dict[str, int] = {}
