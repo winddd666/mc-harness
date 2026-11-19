@@ -1335,8 +1335,13 @@ def test_nether_dimension_prioritizes_nether_advancements_and_wildflowers_portal
                 placed.append((list(p), str(body["item"])))
                 blocks[p] = str(body["item"])
                 return {"ok": True}
+            if action == "interact" and (body or {}).get("item") == "flint_and_steel":
+                blocks[(10, 65, 22)] = "nether_portal"
+                return {"ok": True}
             if action == "find_blocks":
-                return {"blocks": [{"name": "nether_portal", "pos": [10, 65, 22]}]}
+                if blocks.get((10, 65, 22)) == "nether_portal":
+                    return {"blocks": [{"name": "nether_portal", "pos": [10, 65, 22]}]}
+                return {"blocks": []}
             return {"ok": True}
 
     bot = _NetherAndFlowerBot()

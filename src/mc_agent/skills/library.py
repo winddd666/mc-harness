@@ -6787,7 +6787,7 @@ class MacroSkills:
         resolver = PhysicalPrerequisiteResolver(self, geofence=geofence, stop_check=stop_check)
         return resolver.ensure_items(targets, max_duration_s=max_duration_s, equip_slots=equip_slots)
 
-    def build_nether_portal(self, *, enter: bool = True, wait_s: float = 8.0) -> dict[str, Any]:
+    def build_nether_portal(self, *, enter: bool = True, wait_s: float = 10.0) -> dict[str, Any]:
         """Deterministically clear, build a 4x5 obsidian Nether portal, ignite it, and step inside."""
         st = self.bot.status()
         dim = str(st.get("dimension") or "").lower()
@@ -6798,6 +6798,59 @@ class MacroSkills:
                 "entered_nether": True,
                 "dimension": dim,
                 "message": "当前已身处下界(the_nether)，无需再搭传送门。",
+            }
+
+        def _walk_into_portal(portal_blocks: list[dict[str, Any]]) -> tuple[bool, str]:
+            # Pick lowest-Y nether_portal block so the bot stands directly inside the portal frame
+            portal_blocks_sorted = sorted(
+                (b for b in portal_blocks if isinstance(b, dict) and isinstance(b.get("pos"), (list, tuple)) and len(b["pos"]) >= 3),
+                key=lambda b: (float(b["pos"][1]), float(b.get("dist", 99.0))),
+            )
+            if not portal_blocks_sorted:
+                return False, dim
+            ppos = portal_blocks_sorted[0]["pos"]
+            px_t, py_t, pz_t = float(ppos[0]) + 0.5, float(ppos[1]), float(ppos[2]) + 0.5
+            try:
+                self.bot.call("move_to", {"x": px_t, "y": py_t, "z": pz_t, "range": 0.0})
+            except Exception:
+                pass
+            deadline = time.monotonic() + max(4.0, float(wait_s))
+            dim_now = dim
+            while time.monotonic() < deadline:
+                time.sleep(0.6)
+                try:
+                    st2 = self.bot.status()
+                    dim_now = str(st2.get("dimension") or "").lower()
+                    if "nether" in dim_now:
+                        return True, dim_now
+                except Exception:
+                    pass
+            return False, dim_now
+
+        # 0) If a lit nether_portal already exists within 12 blocks, walk straight into it without needing 10 obsidian!
+        try:
+            existing = self.bot.call("find_blocks", {"types": ["nether_portal"], "radius": 12, "limit": 8})
+            existing_blocks = existing.get("blocks") or []
+        except Exception:
+            existing_blocks = []
+        if existing_blocks:
+            if not enter:
+                return {
+                    "ok": True,
+                    "reused_existing_portal": True,
+                    "portal_ignited": True,
+                    "entered_nether": False,
+                    "dimension": dim,
+                    "requires_replan": False,
+                }
+            entered_now, dim_now = _walk_into_portal(existing_blocks)
+            return {
+                "ok": bool(entered_now),
+                "reused_existing_portal": True,
+                "portal_ignited": True,
+                "entered_nether": entered_now,
+                "dimension": dim_now,
+                "requires_replan": not entered_now,
             }
 
         inv = self.bot.inventory()
@@ -6892,9 +6945,10 @@ class MacroSkills:
                     self.bot.call("dig", {"pos": [x, y, z]})
                 except Exception:
                     pass
-            # Stand near the frame front without colliding with the target block
+            # Stand near the frame front without colliding with the target block (closer for top row y>=by+3)
+            stand_z = float(bz - 1.2) if y >= by + 3 else float(bz - 2.0)
             try:
-                self.bot.call("move_to", {"x": bx + 1.5, "y": by, "z": bz - 2.0, "range": 2.0})
+                self.bot.call("move_to", {"x": bx + 1.5, "y": by, "z": stand_z, "range": 1.5})
             except Exception:
                 pass
             try:
@@ -6903,7 +6957,7 @@ class MacroSkills:
             except Exception:
                 # Retry once after stepping closer to the specific column
                 try:
-                    self.bot.call("move_to", {"x": float(x), "y": float(by), "z": float(bz - 1.8), "range": 2.0})
+                    self.bot.call("move_to", {"x": float(x), "y": float(by), "z": float(bz - 1.2), "range": 1.2})
                     self.bot.call("place", {"pos": [x, y, z], "item": item_name})
                     return True
                 except Exception:
@@ -6959,6 +7013,7 @@ class MacroSkills:
         except Exception:
             pass
         ignited = False
+        lit_blocks: list[dict[str, Any]] = []
         for ix in (bx + 1, bx + 2):
             try:
                 self.bot.call("interact", {"pos": [ix, by, bz], "item": "flint_and_steel"})
@@ -6969,6 +7024,7 @@ class MacroSkills:
                 fb = self.bot.call("find_blocks", {"types": ["nether_portal"], "radius": 8, "limit": 6})
                 if fb.get("blocks"):
                     ignited = True
+                    lit_blocks = list(fb.get("blocks") or [])
                     break
             except Exception:
                 pass
@@ -6976,21 +7032,9 @@ class MacroSkills:
         entered_nether = False
         dim_after = dim
         if ignited and enter:
-            try:
-                self.bot.call("move_to", {"x": bx + 1.5, "y": by + 1.0, "z": bz + 0.5, "range": 0.5})
-            except Exception:
-                pass
-            deadline = time.monotonic() + max(2.0, float(wait_s))
-            while time.monotonic() < deadline:
-                time.sleep(0.6)
-                try:
-                    st2 = self.bot.status()
-                    dim_after = str(st2.get("dimension") or "").lower()
-                    if "nether" in dim_after:
-                        entered_nether = True
-                        break
-                except Exception:
-                    pass
+            entered_nether, dim_after = _walk_into_portal(
+                lit_blocks or [{"pos": [bx + 1, by + 1, bz], "dist": 1.0}]
+            )
 
         return {
             "ok": bool(ignited and (entered_nether or not enter)),

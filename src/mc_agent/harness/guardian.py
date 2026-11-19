@@ -133,6 +133,7 @@ class GenerationGuard:
         self.last_poll = float("-inf")
         self.last_reaction = float("-inf")
         self._last_water_escape_at = float("-inf")
+        self._last_pre_hurt_melee_at = float("-inf")
         self.previous_health: float | None = None
         self.previous_ready: bool | None = None
         self.cursor = int(getattr(bot, "_last_event_seq", 0) or 0)
@@ -247,7 +248,7 @@ class GenerationGuard:
         if not nh_name:
             return None
         is_creeper = nh_name == "creeper" and nh_dist <= 4.5
-        is_melee = nh_name in LONE_COUNTERKILL_MOBS and nh_dist <= 3.3
+        is_melee = nh_name in LONE_COUNTERKILL_MOBS and nh_dist <= 3.3 and (time.monotonic() - self._last_pre_hurt_melee_at >= 12.0)
         is_ranged = nh_name in RANGED_MOBS and nh_dist <= 13.5
         if not (is_creeper or is_melee or is_ranged):
             return None
@@ -417,6 +418,8 @@ class GenerationGuard:
             nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
 
             if pre_trigger is not None and not in_lava and not in_water:
+                if pre_trigger.get("source") == "pre_hurt_melee":
+                    self._last_pre_hurt_melee_at = now
                 sc_out = self._action(
                     "subcortical_combat",
                     lambda: self.combat_slot.handle(self.combat_env, pre_trigger),
