@@ -829,6 +829,13 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - 影响：`glm_5 195 vs bare 10` 不能直接当作能力差异；跨场景/跨波次分数不可比
 - 建议（P2-32）：episode 起始做 advancement 基线，final_score 只计增量；或报告单列 baseline/earned
 
+### 4ax. r24_short：hy4 通道丢失 46% 集（00:51）
+
+- 72 个 episode 中 **33 个 runtime_error（46%）**，全部 `hy4-flash-free`：`hy4_3` 7、`hy4_7` 7、`hy4_6/9` 各 4、`hy4_8/10` 各 3
+- `r24_long` 仍 0（长任务频率低）
+- 门禁脚本已修正：**runtime_error 现在也读取进行中的 `curriculum-*.json`**，此前 0 summary 时会漏报（r24_short 曾显示 0）
+- 建议：#1 立即暂停 hy4 squad 或切 provider
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
