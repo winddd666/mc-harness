@@ -1117,6 +1117,30 @@ class McToolset:
                     for (edim, ex, ey, ez) in list(self.world_memory.pois.keys()):
                         if edim == dim_m and abs(ex - tx_i) <= 1 and abs(ez - tz_i) <= 1 and (y is None or abs(ey - math.floor(float(y))) <= 2):
                             self.world_memory.mark_unreachable((ex, ey, ez), dim=dim_m, reason=err_code, cooldown_s=300.0)
+        if entity_id is not None:
+            try:
+                parsed_ent = json.loads(raw)
+                err_ent = parsed_ent.get("error") if isinstance(parsed_ent.get("error"), dict) else {}
+                msg_ent = str(err_ent.get("message") or "")
+                if (isinstance(parsed_ent, dict) and parsed_ent.get("ok") is False
+                        and err_ent.get("code") == "movement_not_confirmed"
+                        and (("已在目标" in msg_ent) or ("within range" in msg_ent.lower()))):
+                    pos_ent = parsed_ent.get("pos_after") or err_ent.get("pos") or [None, None, None]
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "result": {
+                                "already_in_range": True,
+                                "entity_id": entity_id,
+                                "pos": pos_ent,
+                                "range": range,
+                                "hint": "服务端确认已在目标 range 内，本次移动视为完成。",
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+            except (TypeError, ValueError):
+                pass
         return self._annotate_stale_entity(raw, entity_id)
 
     def mc_dig(self, x: int, y: int, z: int, collect: bool = True) -> str:
