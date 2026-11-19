@@ -4,6 +4,8 @@
 - Uses dedicated `MapTest_01` (reusing `.state-maptest/tokens.json` without re-login).
 - Picks a dry land biome >= 2000m away from all other online bots on `nju-beast`.
 - Zero artificial survival buffs (real normal-difficulty mobs, real hunger, real Y=-54 caves).
+  Exception: scene slices grant short *scene-entry* safety effects only (nether fire_resistance,
+  deep_water water_breathing) so a mountainside/ocean spawn cannot be a guaranteed instant death.
 - Enforces `RULES.md` 220m `VoidGeofence`, `enable_pre_ensure=True`, `enable_island_recon=True`,
   and `enable_async_world_jobs=True`.
 
@@ -555,6 +557,7 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:shield 1",
                 f"give {bot_name} minecraft:bucket 2",
                 f"give {bot_name} minecraft:oak_boat 1",
+                f'give {bot_name} minecraft:potion[minecraft:potion_contents={{potion:"minecraft:water_breathing"}}] 2',
                 f"give {bot_name} minecraft:iron_helmet 1",
                 f"give {bot_name} minecraft:iron_chestplate 1",
                 f"give {bot_name} minecraft:iron_leggings 1",
@@ -634,6 +637,15 @@ def build_reset_cmds(
     )
     if dim == "the_nether":
         cmds.append(f"effect give {bot_name} minecraft:fire_resistance 45 0 true")
+    if stage == "deep_water":
+        # Scene-safety window (analogous to nether fire_resistance): r13 showed a deep_ocean spawn
+        # dying to drowned tridents/drowning before orienting. 60s is enough to walk to a dive point.
+        cmds.extend(
+            [
+                f"effect give {bot_name} minecraft:water_breathing 60 0 true",
+                f"effect give {bot_name} minecraft:resistance 30 1 true",
+            ]
+        )
     cmds.extend(stage_loadout_cmds(bot_name, stage, sx, sy, sz))
     if set_day and dim != "the_nether":
         cmds.insert(0, "time set 1000")
@@ -686,6 +698,13 @@ def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inven
             ]
         )
     cmds.extend(prepare_scene_ground(bot_name, scene.stage, scene.x, scene.y, scene.z, dim=scene.dim))
+    if scene.stage == "deep_water":
+        cmds.extend(
+            [
+                f"effect give {bot_name} minecraft:water_breathing 45 0 true",
+                f"effect give {bot_name} minecraft:resistance 20 1 true",
+            ]
+        )
     if clear_inventory:
         cmds.extend(stage_loadout_cmds(bot_name, scene.stage, scene.x, scene.y, scene.z))
     rcon_batch(cmds, timeout=60)
@@ -728,6 +747,7 @@ class SceneWatchdog(threading.Thread):
         self._stop.set()
 
     def _owned_total(self) -> int | None:
+        """Total item count from the real `/inventory` shape (items[] + offhand + armor)."""
         try:
             inv = self.bot.inventory()
         except Exception:
@@ -735,13 +755,40 @@ class SceneWatchdog(threading.Thread):
         if not isinstance(inv, dict):
             return None
         total = 0
-        for k, v in inv.items():
-            if str(k).startswith("_"):
-                continue
-            try:
-                total += int(v)
-            except (TypeError, ValueError):
-                continue
+        items = inv.get("items")
+        if isinstance(items, list):
+            for row in items:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    total += int(row.get("count") or 0)
+                except (TypeError, ValueError):
+                    continue
+        else:
+            # Tolerate a legacy flat {item: count} mapping used by older API builds/tests.
+            for k, v in inv.items():
+                if str(k).startswith("_") or str(k) in ("offhand", "armor"):
+                    continue
+                try:
+                    total += int(v)
+                except (TypeError, ValueError):
+                    continue
+        off = inv.get("offhand")
+        if isinstance(off, dict):
+            onm = str(off.get("name") or "").removeprefix("minecraft:")
+            if onm and onm != "air":
+                try:
+                    total += max(1, int(off.get("count") or 1))
+                except (TypeError, ValueError):
+                    total += 1
+        armor = inv.get("armor")
+        if isinstance(armor, dict):
+            for slot in ("head", "chest", "torso", "legs", "feet"):
+                piece = armor.get(slot)
+                if isinstance(piece, dict):
+                    anm = str(piece.get("name") or "").removeprefix("minecraft:")
+                    if anm and anm != "air":
+                        total += 1
         return total
 
     def _tick(self) -> None:
@@ -749,19 +796,31 @@ class SceneWatchdog(threading.Thread):
             st = self.bot.status()
         except Exception:
             return
-        if not st or not st.get("ready"):
+        if not st:
+            return
+        ready = bool(st.get("ready"))
+        health = float(st.get("health") or 0.0)
+        alive = st.get("alive")
+        # The API reports ready=false for the whole death/respawn window; do not skip it, otherwise
+        # the death itself is never observed and the bot comes back with an empty inventory.
+        dead_signal = health <= 0.0 or alive is False
+        if not ready and not dead_signal:
             return
         pos = st.get("pos") or []
-        health = float(st.get("health") or 0.0)
         dim = str(st.get("dimension") or "overworld").lower()
-        wrong_dim = self.scene.dim == "the_nether" and "nether" not in dim
+        in_nether = "nether" in dim
+        in_end = "end" in dim
+        # Overworld slices may legitimately portal into the Nether (stage=`nether` builds and enters a
+        # portal); only the opposite case — a Nether slice bot sitting in the overworld — is a fault.
+        dim_matches = in_nether if self.scene.dim == "the_nether" else not (in_nether or in_end)
+        wrong_dim = self.scene.dim == "the_nether" and not dim_matches
         dist = (
             math.hypot(float(pos[0]) - self.scene.x, float(pos[2]) - self.scene.z)
             if isinstance(pos, (list, tuple)) and len(pos) >= 3
             else float("inf")
         )
-        drifted = dist > self.scene.drift_limit
-        suspected_death = health <= 0.0
+        drifted = dim_matches and dist > self.scene.drift_limit and ready
+        suspected_death = dead_signal
         if not suspected_death:
             self._inv_tick += 1
             if self._inv_tick % 3 == 1:  # sample on the very first tick, then every 3rd (~24s)
@@ -770,7 +829,7 @@ class SceneWatchdog(threading.Thread):
                     # Only infer death from an inventory collapse when the bot is back at the scene
                     # anchor and not standing next to a known chest (otherwise chest deposits and
                     # deliberate stashing would trigger free-gear restocks).
-                    at_anchor = dist <= 48.0
+                    at_anchor = dim_matches and dist <= 48.0
                     stashing = False
                     if self.near_container is not None:
                         try:
@@ -915,7 +974,7 @@ def main() -> int:
     from mc_agent.auth import TokenStore
     from mc_agent.bot import BotSession
     from mc_agent.config import Settings
-    from mc_agent.errors import ApiError
+    from mc_agent.errors import ApiError, DeathLoopCooldownError
     from mc_agent.harness.curriculum import CurriculumSupervisor
     from mc_agent.harness.geofence import VoidGeofence
     from mc_agent.harness.mc_tools import McToolset
@@ -940,7 +999,16 @@ def main() -> int:
             else:
                 raise
         if not st.get("ready"):
-            bot.connect(respect_reconnect_interval=False)
+            try:
+                bot.connect(respect_reconnect_interval=False)
+            except DeathLoopCooldownError as exc:
+                wait_s = min(310.0, max(5.0, float(exc.cooldown_remaining_seconds or 30.0) + 2.0))
+                print(
+                    f"[Wild Run Cooldown] bot={bot_name} death_loop_cooldown active; sleeping {wait_s:.1f}s before retry",
+                    flush=True,
+                )
+                time.sleep(wait_s)
+                bot.connect(respect_reconnect_interval=False)
             st = bot.wait_until_ready(timeout_s=45.0)
 
         if args.stage == "village":

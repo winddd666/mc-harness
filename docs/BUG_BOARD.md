@@ -31,6 +31,7 @@
 - **现象与根因**：`select_nether_structure_site` 使用了 `re.search` 但未导入 `re`（抛点 `scripts/l3_wild_endurance_runner.py:167`，已由 D1 在 `glm_glm_1_nether_fortress/stdout.log:11` 复核）；同时 `nether_fortress`/`nether_bastion` 缺下界死亡自动回场补装逻辑，且 `v2_fleet.py triage` 解析 `wild-endurance-*.json` 分数/错误字段未对齐 `v2_triage.py`。
 - **D1 字段对账**（`v2_fleet.py`）：`tool.finished`→应为 `tool.completed` 且 `ok` 在 `result` JSON 字符串内（:227/:243）；`final_score` 在 `curriculum_summary` 下（:208）；`episodes` 亦在 `curriculum_summary` 下（:211）。参考实现：`/home/xzq/projects/mc/.worktrees/s-triage/scripts/d1_triage.py`。
 - **验收标准**：补 `import re`、补下界死亡回场、`v2_fleet.py triage --wave r11_22bot` 能准确打印 22 路分数与 TopErr 榜单，通过 `py_compile` 与离线 `pytest`。
+- **D1 实机复核（r12 19:26 起）**：三路下界 bot 均正常启动并持续调用工具（`glm_glm_1_nether_fortress`/`glm_glm_2_nether_bastion`/`ds_ds_4_nether_fortress` 的 `stdout.log` 无 Traceback），启动崩溃已消除；分数待收官。
 
 ### BUG-002 | P0 | Slice C（#4 Codex #2）| 状态: FIXED (待 r12_22bot 实机验收，提交 `7d4a8ee` / `ef6a8ac`)
 - **跨模型影响**：`1 bot / 15 次连续失败`（比赛模型 `nju_guitest_01_nether` EP02：`mc_skill_build_portal:unknown_fail×13` + `repeated_identical_failure_blocked×2`）
@@ -39,34 +40,36 @@
 - **D1 精确根因（已定位到行）**：15 次连续失败全部为 `portal_ignited:true / entered_nether:false`（4x5 门在 `[6409,65,-6382]` 已建成点燃），期间 `move_to(y=67..70,range=0.0/0.1)` 反复 `stalled dist_left=0.7/1.6/2.6`，轨迹 `y=65→70.1（爬到门框顶）→64（unstick）`，**从未进入 y=66..68 门内**。代码 `src/mc_agent/skills/library.py:6803-6854 _walk_into_portal`：只发一次 `move_to(range=0.0)` 后仅轮询 `dimension`，从不校验实体是否位于 `nether_portal` 方块内；清障（:6966-6971）只清门内+门前两格，未清门框两侧/上方接近面，寻路绕顶后永久失败；`reused_existing_portal` 分支复用同一不可达门形成 540s 死循环。对照 `hy4_hy_8_nether` 同工具 `origin y=66` 一次成功。
 - **建议最小修复**：`_walk_into_portal` 改为「走到门前 1 格 → `mc_control(forward+jump,~600ms)` 原子跨入 → 每轮校验 feet/head 所在方块为 `nether_portal`」，3 轮失败返回 `portal_enter_blocked`；清障扩展到 `bz-2` 与门框两侧各 1 格。
 - **验收标准**：定位精确失败点（放置/点火/步入/地形清障）并修复 `library.py:build_nether_portal`，补离线回归单测并跑通全量 `pytest`。
+- **D1 离线复核**：`7d4a8ee` 已按根因加入门前 3 格净空清理、`get_block` 接触判定、`control` 脉冲与 `portal_*` 结构化错误；新增 `test_portal_entry_clears_approach_and_confirms_dimension` 覆盖 r11 的"脚低一格→跳跃入门"场景。全量离线 `pytest tests` = **345 passed, 1 skipped, 3 xfailed**（xfail 为 BUG-006/007 的 TDD 复现）。r12 待实机。
 
-### BUG-003 | P1（D1 建议升 P0：属"超时穿透"）| Slice A（#3 Codex #1）| 状态: OPEN
-- **跨模型影响**：`20 bots`；`mine_dfs` 161 次调用中，显式声明 `max_duration_s` 的 106 次里 **86 次超过预算 2 倍**，中位 **249.7s**，最大 **655.0s**（预算 32s）
-- **日志证据**：`hy4_hy_9_deep_water` → `climb_out max_duration_s=32` 实测 **654.98s**；`glm_glm_5_midgame` → `explore max_duration_s=60` 实测 242.9/312.6/383.9/454.2/530.1/600.7s；`hy4_hy_1_bare` → `max_duration_s=90` 实测 242/336/436/529/624s
-- **源码定位**：`skills/mining_dfs.py:4638`（预算夹到 5~90s）、`:4559-4560`（climb 预算 90~120s）、`:2808-2818`（deadline 仅在每次 `dig_staircase` 之前检查，而单次 `dig_staircase` 可达 376s）、`:5198-5231`（`time_slice` 只在子步骤结束后判定，`time_slice_progress` 被当成功返回 119 次）
-- **现象与根因**：预算是协作式的，底层 `dig_staircase`/`tunnel`/`_navigate_to_node` 不接收 `deadline`，单个子步骤即可吃掉全部预算；`climb_incomplete` 反复重试进一步放大。
-- **验收标准**：把 `deadline` 透传进 `dig_staircase`/`tunnel`/`_navigate_to_node` 并逐 step 检查；超预算必须返回 `ok:false, requires_replan:true, stop_reason:"time_slice"`；补离线回归单测并跑通全量 `pytest`。
+### BUG-003 | P1 | Slice A（#3 Codex #1）| 状态: FIXED（`eea50d7`+`7f87334`，但引入 P0 回归 BUG-018）
+- **D1 r12 实测**：`mine_dfs` 单次中位 35.0→**7.5s**、max 174.5→85.0s，预算穿透已消除，但**过度收紧**导致 124 次 0 进展 `time_slice`（见 BUG-018）。
+- **跨模型影响**：`20 bots`；156 次 `mine_dfs` 单次耗时（start→finish 差值）中位 **35.0s**、p90 **91.7s**、max **174.5s**；显式带预算的 106 次里 **6 次 > 2× 用户预算**
+- **日志证据（D1 口径更正：旧数字误把 run 相对 `elapsed` 当单次耗时）**：`hy4_hy_9_deep_water` `climb_out max_duration_s=32` → **174.5s**（`surface_reached`），另有 131.9/115.2/107.1s 均 `climb_incomplete`；`hy4_hy_8_nether` `explore max_duration_s=80` → **127.0s**（`no_progress`）；`ds_ds_1_bare` `explore 90s` → 95.8s；`hy4_hy_4_iron` `explore 32s` → 96.0s
+- **源码定位**：`skills/mining_dfs.py:4638`（预算夹到 5~90s）、`:4559-4560`（`climb_out` 预算 `min(120,max(max_duration_s,90))`，**32s 请求被静默抬到 90s**，是差额主因）、`:2808-2818`（deadline 仅在每次 `dig_staircase` 前检查，单步可再吃 20~90s，故最坏 174.5s≈内部 90s 上限的 1.9×）、`:5198-5231`（`time_slice_progress` 被当成功返回 119 次）
+- **现象与根因**：预算是协作式的，只在下钻一层检查；`climb_out` 隐式抬升预算，与工具契约 `max_duration_s` 不一致。
+- **验收标准**：`deadline` 透传进 `dig_staircase`/`tunnel`/`_navigate_to_node` 并逐 step 检查；确需更长预算时返回 `budget_effective_s`，禁止静默抬升；`time_slice_progress` 附 `goal_met:false`；补离线回归单测并跑通全量 `pytest`。
 
-### BUG-004 | P1 | Slice C（#4 Codex #2）| 状态: FIXED (待 r12_22bot 实机验收，提交 `7d4a8ee` / `2626e4e`)
-- **跨模型影响**：`6+ bots`；91 次 `mc_skill_staircase` 中 **71 次 > 60s**，最大 **376.3s**（steps=10 仅走 3 步 / `time_budget`）
-- **日志证据**：`nju_nju_3_village` `staircase(steps=10)` 376.3s `steps_done=3`；`hy4_hy_6_midgame` `steps=6` 373.9s；`steps=10` 298.2s / 232.8s / 203.0s；`movement_not_confirmed×9`、`missing_step_support×7` 均在同一调用内串行重试
-- **源码定位**：`skills/library.py:5480-5500`、`:5930-6000`（单步失败重试）、`:6066-6076`（stop_reason 归一）
-- **现象与根因**：单步失败后的"换方向/垫脚/重试"没有单步墙钟上限，最坏 4 方向 × 多轮串行。
-- **验收标准**：为 `dig_staircase` 增加 `deadline` 与 `per_step_timeout`（建议 8~12s），超时立即结构化返回；补离线单测并跑通全量 `pytest`。
+### BUG-004 | P2（D1 复核降级，见 P2-13）| Slice C（#4 Codex #2）| 状态: FIXED (待 r12_22bot 实机验收，提交 `7d4a8ee` / `2626e4e`)
+- **跨模型影响**：`6+ bots`；`mc_skill_staircase` 66 次调用中位 **17.9s**、仅 **5 次 > 60s**、max **92.3s**
+- **D1 口径更正（重要）**：原条目里的 `376.3s / 373.9s / 298.2s` 是 **run 相对 `elapsed`**，不是单次耗时（同 BUG-003）。真实单次耗时没有"十几倍爆炸"；`steps_done=3 / time_budget` 仍说明地形边界会提前收工，但不是延迟故障。
+- **保留价值**：`dig_staircase` 增加 `deadline/per_step_timeout` 的硬化本身仍正确（防御未来回归），可继续保留该提交；后续按 P2-13 跟踪真实停止原因分布（`movement_not_confirmed 9 / missing_step_support 7 / fluid_or_bedrock 8`）。
+- **验收标准**：r12 复核 `staircase` 单次 p90/max 不优于 r11 则回滚该硬化并重定位。
 
 ### BUG-005 | P1 | Slice B（#2 子 AGY）| 状态: OPEN
 - **跨模型影响**：`4 bots` 高死亡/高频抢占（`hy4_hy_2_bare` 5 死、`hy4_hy_10_enchant_anvil` 4 死、`hy4_hy_8_nether` 3 死、`glm_glm_3_village` `guardian=19/5preempt`）
 - **日志证据**：`/home/xzq/projects/mc/.worktrees/v2-integrated/runs/r11_22bot/hy4_hy_2_bare/stdout.log`、`/home/xzq/projects/mc/.worktrees/v2-integrated/runs/r11_22bot/hy4_hy_10_enchant_anvil/stdout.log`、`/home/xzq/projects/mc/.worktrees/v2-integrated/runs/r11_22bot/glm_glm_3_village/stdout.log`
 - **现象与根因**：排查上述 4 条轨迹中的连续死亡原因与 `guardian.py` 高频反射未脱险问题。
-- **D1 证据补强**：死亡归因 `hy4_hy_2_bare` = `falling_stalactite`×1 + `mob_attack`×2 + 复活后被围；`hy4_hy_10_enchant_anvil` = `player_explosion`/`spear`（舰队共岛互伤，见 P2-8）+ 复活瞬间进食失败；`hy4_hy_8_nether` = `player_explosion`×2。全舰队 128 次 `model.failed(cancelled)` 中 114 次紧邻 `guardian.incident`，其中 `pre_hurt_melee 30 / pre_hurt_ranged 16 / pre_hurt_creeper 15`，取消风暴与 BUG-003/004 的超长工具有强相关。
+- **D1 证据补强**：死亡归因 `hy4_hy_2_bare` = `falling_stalactite`×1 + `mob_attack`×2 + 复活后被围；`hy4_hy_10_enchant_anvil` = `player_explosion`/`spear`（舰队共岛互伤，见 P2-8）+ 复活瞬间进食失败；`hy4_hy_8_nether` = `player_explosion`×2。全舰队 128 次 `model.failed(cancelled)` 中 114 次紧邻 `guardian.incident`（`pre_hurt_melee 30 / pre_hurt_ranged 16 / pre_hurt_creeper 15`），另付 80×~4s≈290s 强制冷却（见 BUG-009）。
 - **验收标准**：修复对应 `guardian.py` / `combat/` / `safety.py` 生存反射硬漏洞，补离线单测并跑通全量 `pytest`。
 
-### BUG-006 | P1 | Slice C（#4 Codex #2）| 状态: OPEN
+### BUG-006 | P1 | Slice C（#4 Codex #2）| 状态: FIXED（`c34a895`，D1 已离线验证；待 r13 实机）
 - **跨模型影响**：**22 次 / 9 bots / 4 模型**（`hy4_hy_2_bare`、`hy4_hy_5_midgame`、`hy4_hy_7_village`、`hy4_hy_8_nether`、`nju_guitest_01_nether`、`ds_ds_3_village`…）
 - **日志证据**：`find_blocks(types:["log","planks","bed","wool"])` → `bad_args: unknown block log`；`["shield"]`、`["flowing_water"]`、`["nether_rack"]`、`["cave"]`、`["leather"]`、`["sheep"]` 同类整批失败（22 次）
 - **源码定位**：`harness/mc_tools.py:48-59 _normalize_find_block_types` 仅处理 `bed`，其余原样下发；`experiments/20261115-until-1900/backend_patched/src/session.js:1773` 任一未知名 `fail('bad_args')`
 - **现象与根因**：别名表过窄 + 后端 fail-fast，模型把实体/物品名混入方块查询时整次调用归零（高频别名 `log` 都缺失）。
 - **验收标准**：补别名（`log→*_log`、`planks→*_planks`、`grass→short/tall_grass`、`portal→nether_portal`、`nether_rack→netherrack`、`cave→cave_air`）；无法识别者剔除并继续，返回 `ignored_types`；全部失败才报错并给可执行示例；补离线单测。
+- **D1 离线复核**：`_normalize_find_block_types(["log","shield","oak_log"])` → `['oak_log','birch_log',…]`（`log` 展开、`shield` 剔除）；全量 `pytest tests` = 393 passed / 1 skipped / **2 xpassed**（即 BUG-006 的两条 TDD 复现已转绿），仅剩 BUG-007 的 1 条 xfail。
 
 ### BUG-007 | P1 | Slice C（#4 Codex #2）| 状态: OPEN
 - **跨模型影响**：**17 次 / 10 bots**（`hy4_hy_2_bare`、`hy4_hy_6_midgame`、`nju_guitest_01_nether`、`hy4_hy_7_village`…）
@@ -81,13 +84,15 @@
 - **源码定位**：`harness/mc_tools.py:1158-1171`——只要 `changed is False` 就强改 `ok=false`，忽略 `used`/`gained`
 - **现象与根因**：以"方块是否变化"为唯一判据；桶装流体时方块可能被同 tick 回填/读到旧快照。
 - **验收标准**：仅当 `changed is False` 且无 `used` 且无 `gained` 才判失败；补离线单测覆盖 `gained=lava_bucket`。
+- **D1 复核**：`ef6a8ac` 的条件与建议完全一致；r12 前半段 `interact_no_effect` 10→2，剩余 2 次均无 `used/gained`，属真实无效交互。
 
 ### BUG-009 | P1 | Slice B（#2 子 AGY）| 状态: OPEN
 - **跨模型影响**：**128 次 / 13 bots**（`glm_glm_4_enchant_anvil` 24、`hy4_hy_2_bare` 18、`glm_glm_3_village` 14、`hy4_hy_3_iron`/`hy4_hy_8_nether`/`hy4_hy_7_village` 各 12-13）
-- **日志证据**：114/128 紧邻 `guardian.incident`（`fresh_hurt 49 / pre_hurt_melee 30 / pre_hurt_ranged 16 / pre_hurt_creeper 15`），每次取消丢弃已生成 token 后整请求重发
+- **日志证据**：114/128 紧邻 `guardian.incident`（`fresh_hurt 49 / pre_hurt_melee 30 / pre_hurt_ranged 16 / pre_hurt_creeper 15`），每次取消丢弃已生成 token 后整请求重发；另 `model.cancel_cooldown_wait` **80 次 × ~4s = 290.1s 纯睡眠**
 - **源码定位**：`harness/guardian.py:246 _detect_pre_hurt_trigger` → 抢占取消在途生成
-- **现象与根因**：设计上抢占正确，但被 BUG-003/004 的超长工具（>4min）放大——工具越久，被抢占概率越高，浪费越大。
-- **验收标准**：优先随 BUG-003/004 收敛；`pre_hurt_*` 增加 2~3s 去抖/同目标冷却；离线单测覆盖同目标连续触发只取消一次。
+- **现象与根因**：抢占本身正确，但 `pre_hurt_*` 对同一目标反复触发，每次取消既丢 token 又强制 ~4s 冷却；与工具时长无关（D1 已更正：不存在 >4min 的单次工具）。
+- **验收标准**：`pre_hurt_*` 增加 2~3s 去抖/同目标冷却；取消后的 4s 冷却仅在真实受伤后生效；离线单测覆盖同目标连续触发只取消一次。
+- **D1 r12 实测（未修复）**：取消 **137 次**、`cancel_cooldown_wait` **272.6s**；`guardian.incident` 179 次中 `pre_hurt_*` 占 63 次（melee 29 / creeper 27 / ranged 7）。与 r11 基本持平，需 Slice B 处理。
 
 ### BUG-010 | P1 | Slice B（#2 子 AGY）| 状态: OPEN
 - **跨模型影响**：`hy4_hy_10_enchant_anvil`（同一死亡链）
@@ -102,6 +107,7 @@
 - **源码定位**：`harness/guardian.py:195-196` 把 `httpx.HTTPError` 重新包成 `RuntimeError`；`harness/agent.py:1614-1620` 中**原生** `httpx.HTTPError` 会被判为可继续的 `network_error`，但被包装后的 `RuntimeError` 落入 `runtime_error` 分支**终止整集**
 - **现象与根因**：一次瞬态网络抖动发生在生存反射里，就把整个 episode 打死；`guardian` 的包装绕过了 agent 的传输层异常分类。
 - **验收标准**：`_action` 捕获 `httpx.HTTPError` 后返回 `ok:false, error:{code:"network_uncertain"}` 或带退避重试，不再抛 `RuntimeError`；补离线单测（mock 抛 ReadTimeout 必须不终止 episode）。
+- **D1 r12 实测**：仍未修复，`hy4_hy_10_enchant_anvil` EP3 再次整集 `runtime_error`。
 
 ### BUG-012 | P1 | Slice Integrator（#1）/ 归属待定 | 状态: OPEN
 - **跨模型影响**：`hy4_hy_2_bare` EP5 `bootstrap_iron_age` 整集 `runtime_error`（`actor_requests=20`，`score_delta=0`）
@@ -109,6 +115,54 @@
 - **源码定位**：`harness/agent.py:209 _API_RETRYABLE_CODES` 不含 `not_loaded`；`agent.py:1618-1620` 把 `ApiError` 一律判 `runtime_error` 终止；`experiments/.../backend_patched/src/session.js:1367/1866/1917` 在区块未加载时返回 `not_loaded`
 - **现象与根因**：`not_loaded` 是毫秒级可恢复状态（区块加载完成即可），却按致命的 `runtime_error` 结算，直接报废整集。
 - **验收标准**：把 `not_loaded`/`chunk_not_loaded`/`world_not_ready` 纳入可重试集合（短退避 0.5~2s，最多 2~3 次），仍失败再降级为 `network_error` 而非 `runtime_error`；补离线单测。
+- **D1 r12 实测**：**未修复且放大**——`hy4_hy_9_deep_water` 单机 4 集（EP2/4/5/7）均因 `[not_loaded] chunk not loaded` 报废；已并入 BUG-020 统一处理。
+
+### BUG-013 | P1 | Slice A（#3 Codex #1）| 状态: OPEN（r12 进行中初判，待收官复核）
+- **跨模型影响**：r12 前 3 分钟即出现 `3 bots / 5 次 repeated_identical_failure_blocked + 2 次 time_slice`：`glm_glm_1_nether_fortress`、`glm_glm_2_nether_bastion`、`ds_ds_4_nether_fortress`（BUG-001 修复后才首次跑起来的三路下界 bot）
+- **日志证据**：`mine_dfs(action="explore", target="diamond", target_y=15, max_duration_s=60)` 在下界坐标 `[0.5,52,795.3]` / `[6.4,43,-810.6]` / `[800.5,60,796.5]` 反复 `time_slice` → 触发防卡死拦截（`repeat_count` 2/3）
+- **源码定位**：`skills/mining_dfs.py:186-260 ORE_DFS_PROFILES` 仅编码主世界矿种；`_resolve_target_profile`（:668-703）**不检查维度**；runner 返回的 `diamond_ore/deepslate_diamond_ore` 在下界根本不存在，引擎只能空挖 netherrack 到 `time_slice`
+- **现象与根因**：模型在 `nether_fortress`/`nether_bastion` 场景把"挖钻石"当成通用目标，`mine_dfs` 无维度可行性校验，导致 3 路各自空转 2~3 次、每次 60~90s。触发提示原文（r12 `run.started.task`）："钻石镐在下界Y8-22挖ancient_debris；床或TNT炸开更快。"——模型把"钻石镐"误读成"挖钻石"，且工具未兜底。
+- **最小修复**：`run()` 入口读取 `status.dimension`；当下界/末地时，若 profile 的 `target_blocks` 不属于该维度，立即返回 `bad_target_for_dimension` + 该维度可用目标（下界：`ancient_debris`/`quartz`/`gold`）与建议 `target_y`，不要开挖；补离线单测（mock 维度=the_nether + target=diamond）
+- **验收标准**：r13 下界三路不再出现"下界挖钻石"，且 `mine_dfs` 对不可能目标 0 次实际挖掘。
+- **D1 r12 收官实测**：`glm_glm_1_nether_fortress` 6 次调用中 3 次 `diamond@15`（4 次被拦）、`glm_glm_2_nether_bastion` 4 次 diamond、`ds_ds_4_nether_fortress` 7 次 diamond（12/15/20 层）、`hy4_hy_8_nether` 3 次 diamond——5 路下界 bot 全部中招。`fbd9548 fix(mining): reject ore targets unavailable in the current dimension` 已实现修复，待 r13 验收。
+
+### BUG-018 | **P0 回归** | Slice A（#3 Codex #1）| 状态: OPEN（r12 稳定复现，阻断铁/钻链路）
+- **触发提交**：`eea50d7 fix(mining): bound DFS slices and resume underground escape routes`（为修 BUG-003 引入 `_BudgetSession`）
+- **跨模型影响**：**18 bots / 154 次 `mine_dfs:unknown`**（`hy4` 82、`deepseek` 31、`nju` 22、`glm` 19），其中 124 次消息为"本轮时间预算已用尽"；`mine_dfs` 单次中位 **35.0s→7.5s**，调用数 161→241
+- **分数回归（r11→r12）**：`ds_ds_2_iron` **95→20（-75）**、`hy4_hy_4_iron` **95→20（-75）**；两路都把 55~62 个 actor 请求耗在 `shiny_gear` 的反复 4s `time_slice` 上（r11 同目标 6~9 请求即完成）
+- **精确根因**：`src/mc_agent/skills/mining_dfs.py:344`
+  `request_timeout = min(float(kwargs.get("timeout_s") or 45.0), (remaining - 0.15) / 8)`
+  —— 把剩余切片除以 8 当作"还要做 8 次调用"，导致默认 32s 切片下**每次子调用上限仅 3.92s**，短于 r12 `move_to` 中位 5.1s / p90 25.7s；第一次 move/dig 就超时 → `_MiningDeadline` → `stop_reason=time_slice`，0 进展返回
+- **D1 离线复现**：`scripts/d1_budget_check.py`（本 worktree，只读 v2 源码）
+  ```
+  slice_budget  move_to_timeout  dig_timeout  verdict
+         31.5s            3.92s         3.92s  STARVED
+         59.5s            7.42s         7.42s  STARVED
+         89.5s           11.17s        11.17s  OK
+  ```
+- **最小修复**：不要除以 8（deadline 已在每次调用前后检查）。建议
+  `request_timeout = min(timeout_s or 45.0, max(6.0, remaining - 0.5))`；
+  另给 `dig/move_to` 单项下限 6~8s。修后重跑 `d1_budget_check.py` 必须 exit 0。
+- **验收标准**：r13 `mine_dfs` 单次中位回到 25~40s、`time_slice` 0 进展率 <10%、`ds_ds_2_iron`/`hy4_hy_4_iron` 分数不低于 r11 的 95。
+
+### BUG-019 | P1 | Slice A（#3 Codex #1）/ Slice C（#4）| 状态: OPEN（r12 实测）
+- **跨模型影响**：**17 bots / 56 次** `mine_dfs:repeated_identical_failure_blocked`（r11 仅 1 次），另有 `staircase:repeated_identical_failure_blocked` 8 次
+- **日志证据**：工具返回 `time_slice` 且消息为"本轮时间预算已用尽，已保留矿井与回撤路径；**可用相同 action 继续**"，模型照做后立刻被防卡死拦截（`repeat_count=2/3`），0.0s 返回
+- **源码定位**：防卡死拦截在 `harness/agent.py` 的重复失败检测；`time_slice` 文案（`mining_dfs.py` 的 slice-timeout 分支，`7f87334`）却邀请相同参数重试
+- **现象与根因**：工具契约与 Harness 防循环规则自相矛盾；17 路各浪费 2~4 个 actor 请求
+- **最小修复**：`time_slice` 返回 `suggested_next`（如加大 `max_duration_s`、先 `mc_move_to` 换 16 格外、或 `action='climb_out'`），文案禁止"相同 action 继续"；或在防卡死判定中豁免 `time_slice` 同参续跑 1 次
+- **验收标准**：r13 `mine_dfs:repeated_identical_failure_blocked` ≤ 5 次且 0 次由 `time_slice` 文案直接触发
+
+### BUG-020 | P1 | Slice Integrator（#1）| 状态: FIXED（待 r15 实测验证）
+- **跨模型影响**：r12 **12 个 episode 直接报废**（`runtime_error` 10 + `disconnected` 2），其中 9 个是瞬时故障
+- **日志证据**：
+  - `[not_loaded] chunk not loaded` ×4（全部在 `hy4_hy_9_deep_water` EP2/4/5/7）
+  - Qwen/Cloudflare `HTTP 520/522/525` ×4（`nju_movetest_01_bare` EP3、`nju_nju_3_village` EP2/3、`nju_guitest_01_nether` EP2）——**525 既不在 `RETRYABLE_HTTP_STATUSES` 也不在 `is_transient_llm_error_text`**
+  - `[not_connected] bot not connected` ×1、`生存响应 subcortical_combat … ReadTimeout` ×1（= BUG-011）
+- **源码定位**：`harness/model.py:36`（缺 525/526）、`model.py:653`（`standard_max_attempts=3`，NJU 网关 5xx 连续 >10s 即耗尽）、`harness/agent.py:209/1618-1620`（`not_loaded`/`not_connected` 未纳入可重试，直接 `runtime_error`）
+- **现象与根因**：瞬时 provider/连接故障被按"整集失败"结算，浪费该集全部剩余预算（r12 共 12 集；r11 仅 3 集）
+- **最小修复**：① 525/526 加入两份清单；② `not_loaded`/`not_connected` 短退避重试后再判定；③ 重试耗尽时该集标 `paused/transient` 并允许重新排队，不写 `runtime_error`
+- **验收标准**：r13 瞬时故障导致的整集报废 ≤ 2，且无 `525` 直接落 `runtime_error`
 
 ---
 
@@ -128,6 +182,11 @@
 - **P2-10** `out_of_reach_vertical` 桶交互（y 差 6.8/9.0）：3 次。已有可执行提示，属策略层。
 - **P2-11** `mine_dfs` 未达成目标时仍返回 `ok=true`（`quota_reached`/`shaft_exhausted`/`time_slice_progress`）：约 130 次。建议 `ok` 与 `goal_met` 分离，避免模型误判进度。
 - **P2-12** `island_recon_sweep` 24 次 `objective_verified=false`：该 target 无 `advancement_id`，`curriculum.py:220-228` 必然落到 `return False`。仅影响报表字段，请勿用它做晋级门槛（进度看 `material_progress/chunks_after`）。
+- **P2-13**（原 BUG-004 降级）`dig_staircase` 地形边界停止：`movement_not_confirmed 9 / missing_step_support 7 / fluid_or_bedrock 8 / cave_or_drop_ahead 4`；66 次调用中位 17.9s、仅 5 次 >60s、max 92.3s。属正常地形判定，已有可执行 hint；只需优化"换向/垫脚"提示与失败方向记忆，不占 P1。
+- **P2-14** 下界 prompt 歧义：r12 场景任务文本"钻石镐在下界Y8-22挖ancient_debris"被模型读成"在下界挖钻石"（3 路复现）。建议改为"用钻石镐挖 ancient_debris（下界 Y8-22）；钻石在下界不存在"。与 BUG-013 的维度校验双保险。
+- **P2-15** 长尾工具耗时（r12）：`mine_blocks` 单次 **300.6s**（obsidian×4，`temporarily_avoided:1/timeout`，0 产出）、`smelt` 102s（12→9）、`harvest_logs` 87~91s（部分产出）。`mine_blocks` 内部 `mine_deadline` 仅 45~90s（`library.py:2524`），但 `dig`（:2568）未传 `timeout_s`，单次服务器超时即可吃掉全预算。建议同 `_StairSession` 加硬 deadline。
+- **P2-16** `mc_move_to` 在动作租约未释放时阻塞 ~101s 才返回 `busy: running move_to`（3 bots：`glm_glm_5_midgame`、`hy4_hy_7_village`、`hy4_hy_10_enchant_anvil`）。建议 `busy` 前置探测（<2s）或直接返回 `action_busy`。
+- **P2-17** 模型参数串位：`mc_move_to {"x":-7828,"y":-2814,"z":-2744}`（y 填成了 z）。越界保护已忽略该 y，但浪费一次 90.9s `path_not_found`。建议在参数校验层对 `|y|>320` 直接 `bad_args` 并提示。 
 
 ---
 

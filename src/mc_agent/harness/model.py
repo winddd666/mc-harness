@@ -33,7 +33,7 @@ DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
 OPENCODE_DEFAULT_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
 OPENCODE_DEFAULT_MODEL = "glm-5.3"
-RETRYABLE_HTTP_STATUSES = (429, 500, 502, 503, 504, 520, 521, 522, 523, 524)
+RETRYABLE_HTTP_STATUSES = (429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526)
 
 
 class OutputTruncatedError(RuntimeError):

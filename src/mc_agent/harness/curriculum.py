@@ -865,6 +865,8 @@ def is_transient_llm_error_text(err_text: str) -> bool:
         "http 522",
         "http 523",
         "http 524",
+        "http 525",
+        "http 526",
         "concurrency limit",
         "simultaneous requests",
     )
@@ -1695,6 +1697,9 @@ class CurriculumSupervisor:
                 except ApiError as status_exc:
                     if status_exc.code == "not_connected":
                         self.bot.connect(respect_reconnect_interval=True)
+                        st = self.bot.wait_until_ready(timeout_s=min(45.0, max(5.0, remaining_s)), poll_interval_s=1.0)
+                    elif status_exc.code == "not_loaded":
+                        time.sleep(min(1.5, max(0.2, remaining_s)))
                         st = self.bot.wait_until_ready(timeout_s=min(45.0, max(5.0, remaining_s)), poll_interval_s=1.0)
                     else:
                         raise

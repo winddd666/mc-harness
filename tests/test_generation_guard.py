@@ -1522,6 +1522,97 @@ def test_non_combat_fire_fall_hurt_skips_shield_spam_and_water_trident_equips_sh
     assert any(act == "equip" and pl == {"item": "shield", "slot": "off-hand"} for act, pl in water_calls)
     assert any(act == "posture" and pl.get("shield") is True and pl.get("jump") is True for act, pl in water_calls)
 
+    # 3) If escape_water fails with not_connected/bot-dead while submerged, NEVER fire follow-up equip/look/posture
+    from mc_agent.errors import ApiError
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr(
+        MacroSkills,
+        "escape_water",
+        lambda self: (_ for _ in ()).throw(ApiError("not_connected", "bot not connected")),
+    )
+    dead_water_calls: list[str] = []
+
+    class _DisconnectedSubmergedBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            dead_water_calls.append(action)
+            if action == "status":
+                return {
+                    "pos": [0.5, 58.0, 0.5],
+                    "health": 10.0,
+                    "food": 20,
+                    "alive": True,
+                    "ready": True,
+                    "in_water": True,
+                    "submerged": True,
+                    "on_ground": False,
+                    "blocking": False,
+                }
+            if action == "events":
+                since = int((kwargs.get("params") or {}).get("since", 0))
+                rows = [{"seq": 1, "type": "hurt", "health": 10.0, "source": "trident", "source_entity": {"id": 44}}] if since < 1 else []
+                return {"events": rows, "last_seq": 1}
+            if action == "inventory":
+                return {"items": [{"name": "shield", "count": 1}], "offhand": None}
+            return {"ok": True}
+
+    guard_dc = GenerationGuard(_DisconnectedSubmergedBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(_DisconnectedSubmergedBot()))
+    inc_dc = guard_dc.poll()
+    assert inc_dc is not None
+    assert [a["action"] for a in inc_dc["actions"]] == ["escape_water"]
+    assert "equip" not in dead_water_calls and "posture" not in dead_water_calls
+
+    # 4) escape_lava wide shore detection (4.5m away) & death-respawn teleport (>64m, ready=False) -> ok=False, respawned=True
+    look_yaws: list[float] = []
+
+    class _WideLavaPoolBot:
+        def __init__(self, *, respawn_teleport: bool = False):
+            self.respawn = respawn_teleport
+            self.pos = [-23.5, 30.0, 778.0]
+            self.in_lava = True
+            self.ready = True
+
+        def status(self):
+            return {
+                "pos": list(self.pos),
+                "health": 10.0,
+                "alive": True,
+                "ready": self.ready,
+                "in_lava": self.in_lava,
+                "yaw": 0.0,
+                "dimension": "minecraft:the_nether",
+            }
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                p = pl["pos"]
+                # Shore only exists 4.5m to the East (x=-19), NOT along initial yaw=0.0!
+                if p[1] == 30 and abs(p[0] - (-19)) <= 1 and abs(p[2] - 778) <= 2:
+                    return {"name": "netherrack"}
+                if p[1] == 30:
+                    return {"name": "lava"}
+                return {"name": "air"}
+            if action == "look":
+                look_yaws.append(round(float(pl["yaw"]), 2))
+            if action == "control" and self.respawn:
+                self.pos = [0.5, 64.1, 800.5]
+                self.in_lava = False
+                self.ready = False
+            return {"ok": True}
+
+    out_wide = CombatEnv(_WideLavaPoolBot(respawn_teleport=False)).escape_lava()
+    assert look_yaws and abs(look_yaws[0]) > 0.5  # Turned away from initial yaw=0.0 toward East bank!
+    out_tp = CombatEnv(_WideLavaPoolBot(respawn_teleport=True)).escape_lava()
+    assert out_tp["ok"] is False and out_tp.get("respawned") is True
+
+
 
 
 

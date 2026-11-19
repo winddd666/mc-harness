@@ -1152,7 +1152,7 @@ class _StairDeadline(Exception):
 class _StairSession:
     """Per-invocation deadline; never patch the shared BotSession/guardian."""
 
-    def __init__(self, bot: BotSession, duration_s: float, *, deadline: float | None = None, per_step_timeout: float = 10.0) -> None:
+    def __init__(self, bot: BotSession, duration_s: float, *, deadline: float | None = None, per_step_timeout: float = 15.0) -> None:
         self.bot = bot
         params = inspect.signature(bot.call).parameters
         self.supports_timeout = "timeout_s" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
@@ -1160,22 +1160,39 @@ class _StairSession:
         self.step_deadline = self.deadline
         self.per_step_timeout = max(0.05, float(per_step_timeout))
         self.last_status: dict[str, Any] = {}
+        self.last_timeout_path: str | None = None
+        self.last_retry_path: str | None = None
         self.progress: dict[str, Any] = {"steps_done": 0, "dug_count": 0}
 
+    _IDEMPOTENT_READS = frozenset({"status", "inventory", "get_block", "find_blocks"})
+
     def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
-        remaining = min(self.deadline, self.step_deadline) - time.monotonic()
-        if remaining <= 0:
-            raise _StairDeadline()
-        cap = 6.0 if path == "move_to" else 8.0 if path == "dig" else 3.0
-        timeout = min(remaining, cap, float(kwargs.pop("timeout_s", cap)))
-        if path == "move_to":
-            body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
-        try:
-            result = (self.bot.call(path, body, timeout_s=timeout, **kwargs)
-                      if self.supports_timeout else self.bot.call(path, body))
-        except httpx.TimeoutException:
-            # A client timeout does not release the server action lease.
-            raise _StairDeadline() from None
+        # A slow first status/probe under fleet load used to abort the whole
+        # staircase as time_budget with zero steps. Retry one idempotent read
+        # once; action calls still abort immediately (their lease may persist).
+        explicit_timeout = kwargs.pop("timeout_s", None)
+        for read_attempt in range(2):
+            remaining = min(self.deadline, self.step_deadline) - time.monotonic()
+            if remaining <= 0:
+                raise _StairDeadline()
+            # Obsidian needs ~9.4s with a diamond pickaxe (r14: fortress
+            # staircase timed out on every first dig at the old 8s cap).
+            cap = 6.0 if path == "move_to" else 15.0 if path == "dig" else 3.0
+            timeout = min(remaining, cap, float(explicit_timeout if explicit_timeout is not None else cap))
+            call_body = body
+            if path == "move_to":
+                call_body = {**(body or {}), "timeout": max(1, int(max(0.001, timeout - 0.2) * 1000))}
+            try:
+                result = (self.bot.call(path, call_body, timeout_s=timeout, **kwargs)
+                          if self.supports_timeout else self.bot.call(path, call_body))
+            except httpx.TimeoutException:
+                if read_attempt == 0 and path in self._IDEMPOTENT_READS and remaining > 1.0:
+                    self.last_retry_path = path
+                    continue
+                self.last_timeout_path = path
+                # A client timeout does not release the server action lease.
+                raise _StairDeadline() from None
+            break
         if path == "status":
             self.last_status = result
             if isinstance(result.get("pos"), (list, tuple)):
@@ -2522,9 +2539,20 @@ class MacroSkills:
         last_drop_scan: dict[str, Any] | None = None
         last_bot_pos: list[float] | None = None
         mine_deadline = time.monotonic() + max(45.0, min(90.0, float(count) * 12.0))
+        deadline_hit = False
+        try:
+            dig_call_params = inspect.signature(self.bot.call).parameters
+            dig_supports_timeout = "timeout_s" in dig_call_params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in dig_call_params.values()
+            )
+        except (TypeError, ValueError):
+            dig_supports_timeout = False
 
         for _ in range(count * 3):
-            if dug_count >= count or time.monotonic() >= mine_deadline:
+            if dug_count >= count:
+                break
+            if time.monotonic() >= mine_deadline:
+                deadline_hit = True
                 break
             for apos in list(self.temporary_avoidance):
                 self._is_block_avoided(apos)
@@ -2564,8 +2592,23 @@ class MacroSkills:
             if target is None:
                 break
             pos = tuple(target["pos"])
+            remaining = mine_deadline - time.monotonic()
+            if remaining <= 1.0:
+                deadline_hit = True
+                break
+            # A single un-timed dig can eat the whole slice (r12 obsidian:
+            # 4 blocks / 300s). Keep a hard slice cap, but do not starve each
+            # dig by dividing the remainder by the remaining blocks (r14:
+            # normal stone/log digs need >8s under fleet load). The 15s floor
+            # still leaves the total bounded by mine_deadline.
+            per_dig = max(15.0, min(30.0, remaining / max(1, count - dug_count)))
             try:
-                res = self.bot.call("dig", {"pos": list(pos), "collect": True})
+                dig_body = {"pos": list(pos), "collect": True}
+                res = (
+                    self.bot.call("dig", dig_body, timeout_s=min(remaining, per_dig))
+                    if dig_supports_timeout
+                    else self.bot.call("dig", dig_body)
+                )
                 dug_count += 1
                 for k, v in (res.get("gained") or {}).items():
                     gained[k] = gained.get(k, 0) + int(v)
@@ -2631,6 +2674,25 @@ class MacroSkills:
                         "gained": gained,
                         "partial_error": {"code": err.code, "message": err.message, **err.context},
                     }
+            except httpx.TimeoutException as err:
+                # Do not let one server-side dig outlive the slice. Release the
+                # pending action before returning the confirmed partial result.
+                self._avoid_temporarily(pos, "dig_timeout", 30.0)
+                try:
+                    self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
+                return {
+                    "ok": False,
+                    "requires_replan": True,
+                    "stop_reason": "time_budget",
+                    "dig_timeout_s": round(min(remaining, per_dig), 2),
+                    "dug_count": dug_count,
+                    "gained": gained,
+                    "partial_error": {"code": "mine_timeout", "message": "单次挖掘未在切片预算内确认；已停止并保留已入包产物。"},
+                    "message": "本轮挖掘预算已用尽，单次 dig 超时；请换到目标旁 2 格内或降低 count 后重试，勿等待同一调用完成。",
+                    **self._avoidance_summary(),
+                }
 
         if dug_count > 0 and _target_gain_sum(gained) == 0:
             if last_drop_scan is None:
@@ -2721,6 +2783,13 @@ class MacroSkills:
             else:
                 out["message"] = f"本次只挖掘 {dug_count}/{count} 格；请按 gained 检查实际入包量。临时避让与保护区分别报告，改变站位或等待冷却后可重试临时失败。"
             out["requires_replan"] = True
+        if deadline_hit:
+            out["stop_reason"] = "time_budget"
+            out["requires_replan"] = True
+            out["message"] = (
+                f"本轮挖掘预算已用尽，仅完成 {dug_count}/{count} 格；已保留入包产物，"
+                "请换到目标旁 2 格内或降低 count 后重试，勿等待同一调用完成。"
+            )
         return out
 
     def harvest_logs(self, target_logs: int = 4, radius: int = 32) -> dict[str, Any]:
@@ -5582,14 +5651,18 @@ class MacroSkills:
                         pass
 
                 placed_ok = False
+                place_failures = 0
+                retry_after = 0.0
                 self.bot.call("posture", {"sneak": False, "shield": False, "jump": True})
                 try:
-                    for attempt in range(14):
+                    for attempt in range(48):
                         time.sleep(0.05)
                         st_j = self.bot.status()
                         if st_j.get("alive") is False or st_j.get("ready") is False:
                             stop_reason = "not_ready" if st_j.get("ready") is False else "died"
                             break
+                        if time.monotonic() < retry_after:
+                            continue
                         jpos = st_j.get("pos") or [bx + 0.5, by, bz + 0.5]
                         if float(jpos[1]) < by + 1.0 and attempt < 2:
                             continue
@@ -5602,6 +5675,13 @@ class MacroSkills:
                             if perr.code == "blocked_by_self":
                                 continue
                             last_error = {"code": perr.code, "message": perr.message, "pos": [bx, by, bz]}
+                            if perr.code == "place_failed" and place_failures < 2:
+                                # r14 portal recovery: the first jump-place was
+                                # rejected while airborne, then the next whole
+                                # call succeeded. Wait one jump cycle and retry.
+                                place_failures += 1
+                                retry_after = time.monotonic() + 0.45
+                                continue
                             break
                 finally:
                     try:
@@ -5672,9 +5752,23 @@ class MacroSkills:
         if last_error is not None:
             out_pillar["last_error"] = last_error
 
-        if not ok and steps_done == 0:
-            ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
+        if not ok:
+            # A failed jump-place is read back while the bot is still airborne
+            # (r12: pos_after y=97.2 for a grounded start at y=96). With no
+            # confirmed step the bot falls back to the start cell, so remember
+            # the failure there; otherwise the next probe advertises
+            # viable_pillar_up=true at the exact cell that just failed.
+            record_pos = pos_before if steps_done == 0 else end_pos
+            ebx, eby, ebz = (
+                math.floor(float(record_pos[0])),
+                math.floor(float(record_pos[1])),
+                math.floor(float(record_pos[2])),
+            )
             self._record_failed_stair_dir((ebx, eby, ebz, "pillar"), "pillar", stop_reason)
+            if steps_done > 0 and st_end.get("on_ground") is False:
+                # Partial climb: the last confirmed step is one block below
+                # the airborne read-back; block retries there as well.
+                self._record_failed_stair_dir((ebx, eby - 1, ebz, "pillar"), "pillar", stop_reason)
             probe_cache_p: dict[tuple[int, int, int], str] = {}
             inv_p = _inventory_counts(self.bot)
             up_dirs = self._probe_viable_up_stair_dirs(ebx, eby, ebz, probe_cache=probe_cache_p, inv_counts=inv_p)
@@ -5719,7 +5813,7 @@ class MacroSkills:
         stop_on_ore: bool | None = None,
         *,
         deadline: float | None = None,
-        per_step_timeout: float = 10.0,
+        per_step_timeout: float = 15.0,
     ) -> dict[str, Any]:
         session = _StairSession(self.bot, 45.0, deadline=deadline, per_step_timeout=per_step_timeout)
         scoped = copy(self)
@@ -5744,6 +5838,8 @@ class MacroSkills:
                 "error": {"code": "time_budget", "message": "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"},
                 "direction": direction, "vertical": vertical, "steps_requested": steps,
                 **session.progress, "pos_after": session.last_status.get("pos"),
+                "timeout_path": session.last_timeout_path,
+                "retried_path": session.last_retry_path,
                 "action_released": cleanup.get("released", cleanup.get("stopped", False)),
             }
 
@@ -5797,6 +5893,10 @@ class MacroSkills:
         air_set = {"air", "cave_air", "void_air"}
         fluids = {"water", "lava", "flowing_water", "flowing_lava"}
         fluid_or_bedrock = fluids | {"bedrock"}
+        # r14: a fortress/nether portal head cell was repeatedly dug and
+        # returned undiggable for all four directions. Treat these as
+        # obstacles, not as dig targets.
+        undiggable_obstacles = {"nether_portal", "end_portal", "end_gateway", "barrier"}
         non_solid = air_set | fluids | {
             "short_grass",
             "tall_grass",
@@ -5892,13 +5992,14 @@ class MacroSkills:
                 except ApiError:
                     pass
 
-        def _pick_step_filler() -> str | None:
+        def _pick_step_filler(exclude: set[str] | None = None) -> str | None:
+            excluded = exclude or set()
             counts = _inventory_counts(self.bot)
             for cand in STAIR_FILLER_BLOCKS:
-                if counts.get(cand, 0) >= 1:
+                if cand not in excluded and counts.get(cand, 0) >= 1:
                     return cand
             for name, cnt in sorted(counts.items()):
-                if cnt >= 1 and name.endswith("_planks"):
+                if name not in excluded and cnt >= 1 and name.endswith("_planks"):
                     return name
             return None
 
@@ -6004,6 +6105,11 @@ class MacroSkills:
                 blocker_info = {"pos": [bx, by + 1, bz], "block": head_here, "relation": "overhead"}
                 stop_reason = "fluid_or_bedrock"
                 break
+            if head_here in undiggable_obstacles:
+                blocker_info = {"pos": [bx, by + 1, bz], "block": head_here, "relation": "undiggable"}
+                last_error = {"code": "undiggable_block", "block": head_here, "pos": [bx, by + 1, bz]}
+                stop_reason = "undiggable_block"
+                break
             if head_here not in air_set:
                 adj_head = _find_adjacent_fluid([[bx, by + 1, bz]])
                 if adj_head is not None:
@@ -6022,6 +6128,11 @@ class MacroSkills:
                 if apex_here in fluid_or_bedrock:
                     blocker_info = {"pos": [bx, by + 2, bz], "block": apex_here, "relation": "overhead_apex"}
                     stop_reason = "fluid_or_bedrock"
+                    break
+                if apex_here in undiggable_obstacles:
+                    blocker_info = {"pos": [bx, by + 2, bz], "block": apex_here, "relation": "overhead_undiggable"}
+                    last_error = {"code": "undiggable_block", "block": apex_here, "pos": [bx, by + 2, bz]}
+                    stop_reason = "undiggable_block"
                     break
                 if apex_here not in air_set:
                     adj_apex = _find_adjacent_fluid([[bx, by + 2, bz]])
@@ -6067,7 +6178,13 @@ class MacroSkills:
 
                 dig_failed = False
                 for idx, dpos in enumerate(down_targets):
-                    if _block_name(dpos) not in air_set:
+                    dname = _block_name(dpos)
+                    if dname in undiggable_obstacles:
+                        blocker_info = {"pos": dpos, "block": dname, "relation": "undiggable"}
+                        last_error = {"code": "undiggable_block", "block": dname, "pos": dpos}
+                        dig_failed = True
+                        break
+                    if dname not in air_set:
                         try:
                             self.bot.call("dig", {"pos": dpos, "collect": True})
                             dug_count += 1
@@ -6097,7 +6214,11 @@ class MacroSkills:
                             if dig_failed:
                                 break
                 if dig_failed:
-                    stop_reason = "dig_failed"
+                    stop_reason = (
+                        "undiggable_block"
+                        if last_error and last_error.get("code") == "undiggable_block"
+                        else "dig_failed"
+                    )
                     break
 
                 cur = _advance_step(nx, by - 1, nz, bx, by, bz, jump=False)
@@ -6153,7 +6274,13 @@ class MacroSkills:
 
                 dig_failed = False
                 for dpos in up_targets:
-                    if _block_name(dpos) not in air_set:
+                    uname = _block_name(dpos)
+                    if uname in undiggable_obstacles:
+                        blocker_info = {"pos": dpos, "block": uname, "relation": "undiggable"}
+                        last_error = {"code": "undiggable_block", "block": uname, "pos": dpos}
+                        dig_failed = True
+                        break
+                    if uname not in air_set:
                         try:
                             self.bot.call("dig", {"pos": dpos, "collect": True})
                             dug_count += 1
@@ -6162,19 +6289,33 @@ class MacroSkills:
                             dig_failed = True
                             break
                 if dig_failed:
-                    stop_reason = "dig_failed"
+                    stop_reason = (
+                        "undiggable_block"
+                        if last_error and last_error.get("code") == "undiggable_block"
+                        else "dig_failed"
+                    )
                     break
 
                 if _is_non_solid_support(_block_name([nx, by, nz])):
+                    # The client inventory can disagree with the server's
+                    # findItem (r13: cobblestone reported but place said none).
+                    # Fall through to other solid fillers before giving up.
+                    rejected_fillers: set[str] = set()
                     filler = _pick_step_filler()
-                    if not filler:
-                        stop_reason = "missing_step_support"
-                        break
-                    try:
-                        self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
-                        placed_count += 1
-                    except ApiError as err:
-                        last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
+                    placed_ok = False
+                    while filler:
+                        try:
+                            self.bot.call("place", {"item": filler, "pos": [nx, by, nz]})
+                            placed_count += 1
+                            placed_ok = True
+                            break
+                        except ApiError as err:
+                            last_error = {"code": err.code, "message": err.message, "pos": [nx, by, nz]}
+                            if err.code != "missing_item":
+                                break
+                            rejected_fillers.add(filler)
+                            filler = _pick_step_filler(exclude=rejected_fillers)
+                    if not placed_ok:
                         stop_reason = "missing_step_support"
                         break
 
@@ -6252,7 +6393,7 @@ class MacroSkills:
             out_stair["last_error"] = last_error
         end_pos = st_end.get("pos") or pos_before
         ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
-        if stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "dig_failed", "movement_not_confirmed", "missing_step_support"}:
+        if stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "dig_failed", "undiggable_block", "movement_not_confirmed", "missing_step_support"}:
             reason_label = (
                 f"{stop_reason}:{last_error['code']}"
                 if last_error and last_error.get("code")
@@ -6262,7 +6403,7 @@ class MacroSkills:
             if steps_done > 0 and dug_count == 0 and (ebx, eby, ebz) != (b0x, b0y, b0z):
                 self._record_failed_stair_dir((b0x, b0y, b0z, v_key), d_key, f"dead_end->{reason_label}")
 
-        if v_key == "down" and stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy", "dig_failed", "movement_not_confirmed"}:
+        if v_key == "down" and stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy", "dig_failed", "undiggable_block", "movement_not_confirmed"}:
             probe_cache: dict[tuple[int, int, int], str] = {}
 
             def _probe_block(px: int, py: int, pz: int) -> str:
@@ -6350,7 +6491,7 @@ class MacroSkills:
                         eby,
                         ebz,
                         probe_cache=probe_cache,
-                        exclude_dirs={d_key} if stop_reason == "dig_failed" else None,
+                        exclude_dirs={d_key} if stop_reason in {"dig_failed", "undiggable_block"} else None,
                         inv_counts=inv_now,
                     )
                     up_dirs = self._probe_viable_up_stair_dirs(
@@ -6405,7 +6546,7 @@ class MacroSkills:
                         f"前方({d_key})遇到{detail_desc}；当前坐标[{ebx},{eby},{ebz}]四面下方均为空洞/悬崖/树冠(viable_directions=[])，原地4个方向全部无法阶梯下探！"
                         "严禁在当前位置换方向继续调 mc_skill_staircase！请先调 mc_skill_unstick 下树/脱困，或调 mc_move_to(只传x,z省略y) 水平走开 12-20 格到平坦实心陆地后再下探！"
                     )
-        elif v_key == "up" and stop_reason in {"fluid_or_bedrock", "dig_failed", "movement_not_confirmed", "missing_step_support"}:
+        elif v_key == "up" and stop_reason in {"fluid_or_bedrock", "dig_failed", "undiggable_block", "movement_not_confirmed", "missing_step_support"}:
             probe_cache_up: dict[tuple[int, int, int], str] = {}
             up_inv = _inventory_counts(self.bot)
             up_dirs = self._probe_viable_up_stair_dirs(
@@ -6466,7 +6607,7 @@ class MacroSkills:
                         "(viable_up_directions=[], viable_tunnel_directions=[], viable_pillar_up=false)，禁止继续重复调用 mc_skill_staircase/mc_skill_tunnel；"
                         "请先调 mc_move_to 沿既有矿道走出死胡同，或用 mc_get_block 确认安全后以 mc_dig / mc_place 脱困。"
                     )
-        elif stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy"}:
+        elif stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "on_tree_canopy", "undiggable_block"}:
             out_stair["hint"] = f"前方({d_key})遇到{stop_reason}，禁止原地继续朝{d_key}重试，请换其他方向！"
         if surface_evidence is not None:
             out_stair["surface_evidence"] = surface_evidence
@@ -7091,8 +7232,13 @@ class MacroSkills:
                         time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
                 entry_detail["error"] = {
                     "code": "portal_transfer_timeout" if contact_seen else "portal_entry_not_reached",
-                    "phase": "entry", "target": target,
-                    "message": "请检查门前两格净空、脚下支撑及 entry_pos；不要重复建门。",
+                    "phase": "entry", "target": target, "contact_seen": contact_seen,
+                    "message": (
+                        "已检测到踏入传送门，但维度切换在预算内未完成；服务器可能延迟。"
+                        "请先查询 status.dimension 等待传送，不要重复建门或再次入门。"
+                        if contact_seen
+                        else "未检测到踏入传送门；请检查门前两格净空、脚下支撑及 entry_pos，不要重复建门。"
+                    ),
                 }
             except (ApiError, httpx.HTTPError) as err:
                 if isinstance(err, httpx.TimeoutException):

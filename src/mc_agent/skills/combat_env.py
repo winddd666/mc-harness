@@ -837,6 +837,20 @@ class CombatEnv:
         # 1. If submerged deep in lava, swim up first so surface bank scan can find solid footing
         self.invalidate_block_cache()
         pos0 = st.get("pos") or [0.0, 64.0, 0.0]
+
+        def _lava_result(st_now: dict[str, Any]) -> dict[str, Any]:
+            still_in_lava = bool(st_now.get("in_lava"))
+            pos_now = st_now.get("pos") or pos0
+            moved = math.hypot(float(pos_now[0]) - float(pos0[0]), float(pos_now[2]) - float(pos0[2]))
+            respawned = st_now.get("alive") is False or st_now.get("ready") is False or moved > 64.0
+            return {
+                "ok": (not respawned) and (not still_in_lava),
+                "in_lava": still_in_lava,
+                "pos_after": pos_now,
+                "actions": actions,
+                **({"respawned": True} if respawned else {}),
+            }
+
         head_bx, head_by, head_bz = math.floor(float(pos0[0])), math.floor(float(pos0[1])) + 1, math.floor(float(pos0[2]))
         if self._get_block_name(head_bx, head_by, head_bz) in {"lava", "flowing_lava"}:
             try:
@@ -846,16 +860,11 @@ class CombatEnv:
                 pass
             self.invalidate_block_cache()
             st = self.bot.status()
-            if st.get("alive") is False or not bool(st.get("in_lava")):
-                return {
-                    "ok": st.get("alive") is not False and not bool(st.get("in_lava")),
-                    "in_lava": bool(st.get("in_lava")),
-                    "pos_after": st.get("pos"),
-                    "actions": actions,
-                }
+            if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
+                return _lava_result(st)
             pos0 = st.get("pos") or pos0
 
-        # 2. Try scanning safe non-lava exits (including 1-block step-ups) and jump-sprinting out
+        # 2. Try scanning safe non-lava exits (including 1-block step-ups, plus wide shore search) and jump-sprinting out
         scan = self.scan_safe_yaws(
             pos0,
             float(st.get("yaw") or 0.0),
@@ -870,7 +879,22 @@ class CombatEnv:
                 if c.get("safe") or c.get("hazard") in {None, "water"}:
                     tried_yaws.append(float(c["yaw"]))
         if not tried_yaws:
-            tried_yaws = [float(st.get("yaw") or 0.0)]
+            # Wide Nether lava lake (>2.8m from shore): probe 4.5m..7.5m to steer straight toward solid dry land
+            base_yaw = float(st.get("yaw") or 0.0)
+            best_shore_yaw: float | None = None
+            py = math.floor(float(pos0[1]) + 0.05)
+            for probe_dist in (4.5, 7.5):
+                for deg in (0, 45, -45, 90, -90, 135, -135, 180):
+                    cand_yaw = base_yaw + math.radians(deg)
+                    ux, uz = yaw_to_unit_xz(cand_yaw)
+                    px = math.floor(float(pos0[0]) + ux * probe_dist)
+                    pz = math.floor(float(pos0[2]) + uz * probe_dist)
+                    if _is_solid_ground(self._get_block_name(px, py, pz)) and _is_passable(self._get_block_name(px, py + 1, pz)):
+                        best_shore_yaw = cand_yaw
+                        break
+                if best_shore_yaw is not None:
+                    break
+            tried_yaws = [best_shore_yaw] if best_shore_yaw is not None else [base_yaw]
 
         for cyaw in tried_yaws[:2]:
             try:
@@ -883,15 +907,10 @@ class CombatEnv:
             except ApiError:
                 pass
             st = self.bot.status()
-            if st.get("alive") is False or not bool(st.get("in_lava")):
-                return {
-                    "ok": st.get("alive") is not False and not bool(st.get("in_lava")),
-                    "in_lava": bool(st.get("in_lava")),
-                    "pos_after": st.get("pos"),
-                    "actions": actions,
-                }
+            if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
+                return _lava_result(st)
 
-        # 2. Boxed-in pit or deep lava: try replacing lava at feet / pillaring up with a filler block
+        # 3. Boxed-in pit or deep lava: try replacing lava at feet / pillaring up with a filler block
         filler = self._pick_filler_block(counts)
         if filler is not None:
             p_cur = st.get("pos") or pos0
@@ -904,17 +923,12 @@ class CombatEnv:
                     actions.append(f"lava_place_{filler}")
                     self.invalidate_block_cache()
                     st = self.bot.status()
-                    if st.get("alive") is False or not bool(st.get("in_lava")):
-                        return {
-                            "ok": st.get("alive") is not False and not bool(st.get("in_lava")),
-                            "in_lava": bool(st.get("in_lava")),
-                            "pos_after": st.get("pos"),
-                            "actions": actions,
-                        }
+                    if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
+                        return _lava_result(st)
                 except ApiError:
                     continue
 
-        # 3. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
+        # 4. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
         p_cur = st.get("pos") or pos0
         bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
         for dname, (dx, dz) in CARDINAL_VECTORS.items():
@@ -948,22 +962,17 @@ class CombatEnv:
                 except ApiError:
                     pass
                 st = self.bot.status()
-                if st.get("alive") is False or not bool(st.get("in_lava")):
+                if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
                     break
 
         st_end = self.bot.status()
         still_in_lava = bool(st_end.get("in_lava"))
-        if still_in_lava and st_end.get("alive") is not False:
+        if still_in_lava and st_end.get("alive") is not False and st_end.get("ready") is not False:
             try:
                 self.bot.call("posture", {"jump": True})
             except ApiError:
                 pass
-        return {
-            "ok": st_end.get("alive") is not False and not still_in_lava,
-            "in_lava": still_in_lava,
-            "pos_after": st_end.get("pos"),
-            "actions": actions,
-        }
+        return _lava_result(st_end)
 
     def flee(
         self,

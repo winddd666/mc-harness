@@ -668,15 +668,13 @@ class GenerationGuard:
             elif hurt and in_water:
                 hurt_src_w = str(hurts[-1].get("source") or "").strip().lower() if hurts else ""
                 att_w = (hurts[-1].get("source_entity") or hurts[-1].get("likely_attacker")) if hurts else status.get("nearest_hostile")
-                if not _already("escape_water"):
-                    actions.append(self._action("escape_water", lambda: self._skills().escape_water()))
-                esc_succeeded = any(a.get("action") == "escape_water" and a.get("ok") for a in actions)
-                if (
-                    not esc_succeeded
-                    and has_shield
+                should_shield_water = (
+                    has_shield
                     and not status.get("blocking")
                     and (hurt_src_w in RANGED_HURT_SOURCES or (isinstance(att_w, dict) and att_w.get("id") is not None))
-                ):
+                )
+
+                def _equip_and_raise_water_shield() -> None:
                     offhand_w = inv.get("offhand") if isinstance(inv, dict) else None
                     if (
                         isinstance(inv, dict)
@@ -684,7 +682,10 @@ class GenerationGuard:
                         and str((offhand_w or {}).get("name") or "").removeprefix("minecraft:") != "shield"
                         and counts.get("shield", 0) > 0
                     ):
-                        actions.append(self._action("equip_shield", lambda: self.bot.call("equip", {"item": "shield", "slot": "off-hand"})))
+                        eq_act = self._action("equip_shield", lambda: self.bot.call("equip", {"item": "shield", "slot": "off-hand"}))
+                        actions.append(eq_act)
+                        if isinstance(eq_act.get("error"), dict) and eq_act["error"].get("code") in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}:
+                            return
                     if isinstance(att_w, dict) and att_w.get("id") is not None:
                         actions.append(self._action("face_attacker", lambda: self.bot.call("look", {"entity_id": att_w["id"]})))
                     actions.append(
@@ -700,6 +701,35 @@ class GenerationGuard:
                             ),
                         )
                     )
+
+                if should_shield_water and not status.get("submerged"):
+                    _equip_and_raise_water_shield()
+                if not _already("escape_water"):
+                    actions.append(self._action("escape_water", lambda: self._skills().escape_water()))
+                esc_act = next((a for a in actions if a.get("action") == "escape_water"), None)
+                esc_succeeded = bool(esc_act and esc_act.get("ok"))
+                esc_err_code = (
+                    esc_act["error"].get("code")
+                    if isinstance(esc_act, dict) and isinstance(esc_act.get("error"), dict)
+                    else None
+                )
+                if (
+                    not esc_succeeded
+                    and should_shield_water
+                    and not _already("raise_shield")
+                    and esc_err_code not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}
+                ):
+                    try:
+                        st_post_w = self.bot.status()
+                    except (ApiError, httpx.HTTPError):
+                        st_post_w = {}
+                    if (
+                        st_post_w.get("ready", True)
+                        and st_post_w.get("alive") is not False
+                        and bool(st_post_w.get("in_water"))
+                        and not st_post_w.get("blocking")
+                    ):
+                        _equip_and_raise_water_shield()
             elif non_combat_only_hurt and not in_water and not in_lava:
                 if can_try_fire_douse:
                     self._last_fire_douse_at = now
