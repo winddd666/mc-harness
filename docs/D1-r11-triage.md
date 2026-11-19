@@ -1048,6 +1048,25 @@ retries 612 | failed429 6 | 502 0 | tracebacks 0
 - `hy4_audit_r27`（进行中）：26 集、**0 retries / 0 429 / 0 502**
 - r25/r26 已收官：均 **0 次 429**
 
+## 4bl. 过夜审计 05:16 抽检（主轨 3h54m，即将收官）
+
+```
+557 集：answered 410 / goal 46 / timeout 52 / limit 30 / runtime_error 12 / aborted 4
+retries 835 | failed429 9 | 502 0 | tracebacks 0
+```
+
+- 12 个 runtime_error：**9× 429 `rate_limit_error`**（`glm_1` 4、`glm_2`/`glm_4`/`glm_5`/`ds_4` 各 2）+ **3× MC API ReadTimeout**
+- `mine_dfs` **1025 次**、零进展 37（**3.6%**）；`depth_reset` **16 次**（`nju_guitest` 4、`ds_1` 4、`ds_2` 2、`glm_5` 2…）
+- `staircase`：**time_budget 351** > completed 292；`pillar_fallback` 137
+  - 351 次中 **342 次 `timeout_path=dig`**、**135 次触发低镐文案**、`steps_done` 中位 **1**（请求中位 15）
+  - 分布：`nju_3` 71、`ds_2` 59、`glm_3` 35、`glm_1` 33、`glm_4` 32
+  - → **BUG-041 的软方块方向优先是当前最大 churn 来源**
+- `unstick` 406 次：中位 5.4s、p90 25.2s、max **55.1s**（仍无 >60s）
+
+### hy4 审计轨 `hy4_audit_r27`（进行中）
+
+56 集、**0 retries / 0 429 / 0 502**、1 次 aborted；三波审计轨累计 0 次 429。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
