@@ -313,10 +313,13 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
         f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
         f"fill {ix - 3} {surface_y - 1} {iz - 3} {ix + 3} {surface_y - 1} {iz + 3} minecraft:cobblestone",
         f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 3} {iz + 3} minecraft:air",
-        # 1-high cobblestone rim keeps the spawn pad dry while leaving the east edge open for the dive.
-        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y} {iz - 3} minecraft:cobblestone",
-        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y} {iz + 3} minecraft:cobblestone",
-        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y} {iz + 2} minecraft:cobblestone",
+        # 2-high cobblestone parapet blocks drowned trident line-of-sight (r13/r14 showed all pad
+        # damage came from tridents); a 1x2 gate on the east side keeps the dive route open.
+        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 1} {iz - 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y + 1} {iz + 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y + 1} {iz + 2} minecraft:cobblestone",
+        f"fill {ix + 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 1} {iz - 1} minecraft:cobblestone",
+        f"fill {ix + 3} {surface_y} {iz + 1} {ix + 3} {surface_y + 1} {iz + 3} minecraft:cobblestone",
         f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
         f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
     ]
@@ -643,7 +646,7 @@ def build_reset_cmds(
         cmds.extend(
             [
                 f"effect give {bot_name} minecraft:water_breathing 60 0 true",
-                f"effect give {bot_name} minecraft:resistance 30 1 true",
+                f"effect give {bot_name} minecraft:resistance 60 1 true",
             ]
         )
     cmds.extend(stage_loadout_cmds(bot_name, stage, sx, sy, sz))
@@ -702,7 +705,7 @@ def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inven
         cmds.extend(
             [
                 f"effect give {bot_name} minecraft:water_breathing 45 0 true",
-                f"effect give {bot_name} minecraft:resistance 20 1 true",
+                f"effect give {bot_name} minecraft:resistance 45 1 true",
             ]
         )
     if clear_inventory:
@@ -906,6 +909,72 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
     return False
 
 
+def ensure_bot_ready(
+    bot: Any,
+    *,
+    timeout_s: float = 45.0,
+    max_cooldown_wait_s: float = 420.0,
+    attempts: int = 3,
+) -> dict[str, Any]:
+    """Bring the bot to `ready: True`, sleeping through the API's death-loop cooldown instead of dying.
+
+    BUG-021: a bot that died at the end of the previous wave enters a ~130s `death_loop_cooldown`;
+    `bot.connect()` raises `DeathLoopCooldownError` and the old runner aborted the whole run (an
+    entire fleet slot was lost with 0 events). We now wait out the reported ETA and retry.
+    """
+    from mc_agent.errors import ApiError, BotNotReadyError, DeathLoopCooldownError
+
+    waited = 0.0
+    last_status: dict[str, Any] = {}
+    for attempt in range(1, attempts + 1):
+        try:
+            last_status = bot.status() or {}
+        except DeathLoopCooldownError as exc:
+            last_status = {
+                "ready": False,
+                "code": "death_loop_cooldown",
+                "cooldown_remaining_seconds": exc.cooldown_remaining_seconds,
+            }
+        except ApiError as exc:
+            if exc.code in ("not_connected", "not_ready"):
+                last_status = {"ready": False, "code": exc.code}
+            else:
+                raise
+        if last_status.get("ready"):
+            return last_status
+        cooldown = float(last_status.get("cooldown_remaining_seconds") or 0.0)
+        try:
+            bot.connect(respect_reconnect_interval=False)
+            return bot.wait_until_ready(timeout_s=timeout_s)
+        except DeathLoopCooldownError as exc:
+            cooldown = float(exc.cooldown_remaining_seconds or cooldown or 60.0)
+        except BotNotReadyError:
+            cooldown = 0.0
+        if cooldown > 0:
+            if waited + cooldown > max_cooldown_wait_s:
+                print(
+                    f"[Cooldown] death-loop cooldown {cooldown:.0f}s exceeds budget "
+                    f"{max_cooldown_wait_s:.0f}s (attempt {attempt}/{attempts}); giving up",
+                    flush=True,
+                )
+                raise DeathLoopCooldownError(
+                    code="death_loop_cooldown",
+                    message=f"cooldown {cooldown:.0f}s exceeds startup budget",
+                    cooldown_remaining_seconds=cooldown,
+                )
+            wait_s = max(1.0, cooldown + 2.0)
+            print(
+                f"[Cooldown] bot in death-loop cooldown {cooldown:.0f}s "
+                f"(attempt {attempt}/{attempts}); sleeping {wait_s:.0f}s then retrying",
+                flush=True,
+            )
+            time.sleep(wait_s)
+            waited += wait_s
+        elif attempt < attempts:
+            time.sleep(2.0)
+    raise RuntimeError(f"bot did not become ready after {attempts} attempts (cooldown waited {waited:.0f}s)")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bot", type=str, default=BOT)
@@ -974,7 +1043,7 @@ def main() -> int:
     from mc_agent.auth import TokenStore
     from mc_agent.bot import BotSession
     from mc_agent.config import Settings
-    from mc_agent.errors import ApiError, DeathLoopCooldownError
+    from mc_agent.errors import ApiError
     from mc_agent.harness.curriculum import CurriculumSupervisor
     from mc_agent.harness.geofence import VoidGeofence
     from mc_agent.harness.mc_tools import McToolset
@@ -991,25 +1060,7 @@ def main() -> int:
     out_file = runs_dir / f"wild-endurance-{args.tag}-{stamp}.json"
 
     with BotSession(rec.token, bot_username=rec.bot_username, base_url=settings.mc_api_base_url) as bot:
-        try:
-            st = bot.status()
-        except ApiError as exc:
-            if exc.code == "not_connected":
-                st = {"ready": False}
-            else:
-                raise
-        if not st.get("ready"):
-            try:
-                bot.connect(respect_reconnect_interval=False)
-            except DeathLoopCooldownError as exc:
-                wait_s = min(310.0, max(5.0, float(exc.cooldown_remaining_seconds or 30.0) + 2.0))
-                print(
-                    f"[Wild Run Cooldown] bot={bot_name} death_loop_cooldown active; sleeping {wait_s:.1f}s before retry",
-                    flush=True,
-                )
-                time.sleep(wait_s)
-                bot.connect(respect_reconnect_interval=False)
-            st = bot.wait_until_ready(timeout_s=45.0)
+        st = ensure_bot_ready(bot, timeout_s=45.0)
 
         if args.stage == "village":
             sx, sy, sz, biome = select_village_wild_site(bot, bot_name, start_idx=args.site_index)
@@ -1130,8 +1181,7 @@ def main() -> int:
             st_end = bot.status()
         except ApiError:
             try:
-                bot.connect(respect_reconnect_interval=False)
-                st_end = bot.wait_until_ready(timeout_s=30.0)
+                st_end = ensure_bot_ready(bot, timeout_s=30.0, max_cooldown_wait_s=120.0, attempts=2)
                 inv_end = bot.inventory()
             except Exception:
                 inv_end = {}
