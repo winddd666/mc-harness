@@ -717,6 +717,12 @@ unstick    46s
 
 只换来 y 33→43（仍在树木带 y<58 之下），6 个 episode 仍 10 分。→ BUG-041 是当前裸开分数天花板的直接原因。
 
+### 4al. r23_short 早期 + BUG-040 修复验证（00:22）
+
+- **BUG-040 FIXED 待终验**：`165e652`（00:13）在每个 episode 开始时检测"bot 是否已在围栏半径外"并重锚；r23 加载于 00:14 → 已含修复
+- r23 前 65 个事件文件：**`void_geofence_blocked` = 0**（r22 同期已多次出现）
+- 早期门禁：仅 `mine zero-slice 20%` FAIL（样本小，需观察）；trade **5 次**、brew 2 次、thread 0、runtime 0
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
