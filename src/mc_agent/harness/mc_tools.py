@@ -2188,7 +2188,12 @@ class McToolset:
                     stop_on_ore=resolved_stop_pillar,
                 )
             )
-        steps = max(1, min(25, int(steps)))
+        original_steps = max(1, int(steps))
+        requested_steps = min(25, original_steps)
+        # BUG-037: a 45s call cannot finish long requests (models often ask
+        # for 40); cap at 10 so the model gets progress instead of another
+        # zero/low-progress time_budget.
+        steps = min(requested_steps, 10)
         if d_norm in ("down", "up"):
             vertical = d_norm if (v_norm not in ("down", "up") or (v_norm == "down" and d_norm == "up")) else v_norm
             v_norm = str(vertical).strip().lower()
@@ -2201,7 +2206,7 @@ class McToolset:
         blocked = self._check_direction_geofence(direction, steps, "mc_skill_staircase")
         if blocked is not None:
             return blocked
-        return self._run_skill(
+        raw = self._run_skill(
             lambda: self.skills.dig_staircase(
                 direction=direction,
                 steps=steps,
@@ -2209,6 +2214,15 @@ class McToolset:
                 stop_on_ore=resolved_stop,
             )
         )
+        if requested_steps != steps:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                return raw
+            if isinstance(parsed, dict):
+                parsed["steps_capped_from"] = original_steps
+                return json.dumps(parsed, ensure_ascii=False)
+        return raw
 
     def mc_skill_tunnel(self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> str:
         direction = str(direction).strip().lower()

@@ -6183,7 +6183,14 @@ class MacroSkills:
 
         stair_deadline = self.bot.deadline
         for step_idx in range(steps if stop_reason == "completed" else 0):
-            self.bot.step_deadline = min(self.bot.deadline, time.monotonic() + self.bot.per_step_timeout)
+            # BUG-037: the first step often needs walk+dig+confirm and was
+            # timing out at per_step_timeout with zero progress. Give step 0
+            # the remaining total budget; later steps keep the per-step cap.
+            self.bot.step_deadline = (
+                self.bot.deadline
+                if step_idx == 0 and self.bot.per_step_timeout >= 10.0
+                else min(self.bot.deadline, time.monotonic() + self.bot.per_step_timeout)
+            )
             if step_idx > 0 and time.monotonic() >= stair_deadline:
                 stop_reason = "time_budget"
                 break
