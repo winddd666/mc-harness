@@ -1102,6 +1102,7 @@ class SceneWatchdog(threading.Thread):
         *,
         interval_s: float = 8.0,
         near_container: Any = None,
+        fence_repair: Any = None,
     ) -> None:
         super().__init__(name=f"scene-watchdog-{bot_name}", daemon=True)
         self.bot = bot
@@ -1109,6 +1110,7 @@ class SceneWatchdog(threading.Thread):
         self.scene = scene
         self.interval_s = interval_s
         self.near_container = near_container
+        self.fence_repair = fence_repair
         self._stop = threading.Event()
         self._last_return = 0.0
         self._last_total = -1
@@ -1185,6 +1187,13 @@ class SceneWatchdog(threading.Thread):
         # The API reports ready=false for the whole death/respawn window; do not skip it, otherwise
         # the death itself is never observed and the bot comes back with an empty inventory.
         dead_signal = health <= 0.0 or alive is False
+        if self.fence_repair is not None:
+            try:
+                self.fence_repair()
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:
+                pass
         if not ready and not dead_signal:
             return
         pos = st.get("pos") or []
@@ -1860,7 +1869,14 @@ def main() -> int:
             except Exception:
                 pass
 
-        watchdog = SceneWatchdog(bot, bot_name, scene, near_container=_near_known_container)
+        scene_state: dict[str, Any] = {"sup": None}
+
+        def _repair_fence() -> None:
+            _reassert_scene_geofence(toolset, scene, supervisor=scene_state["sup"])
+
+        watchdog = SceneWatchdog(
+            bot, bot_name, scene, near_container=_near_known_container, fence_repair=_repair_fence
+        )
         watchdog.start()
         trader_keeper = TraderKeeper(bot, bot_name) if args.stage == "village_trade" else None
         if trader_keeper is not None:
@@ -1881,6 +1897,7 @@ def main() -> int:
                 enable_async_world_jobs=True,
                 on_episode_event=_guard_scene_anchor,
             )
+            scene_state["sup"] = sup
             summary = sup.run(max_episodes=args.max_episodes)
         finally:
             if trader_keeper is not None:
