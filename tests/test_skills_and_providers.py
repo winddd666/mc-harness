@@ -1646,6 +1646,52 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
     assert placed == ["cobblestone", "netherrack"]
 
 
+def test_staircase_fails_fast_on_previously_timed_out_dig_cell(monkeypatch) -> None:
+    """BUG-041/r23: retrying the same timed-out cell burned 15-45s each time."""
+    import mc_agent.skills.library as library
+
+    clock = [0.0]
+    monkeypatch.setattr(library.time, "monotonic", lambda: clock[0])
+    clock[0] = 1000.0
+    digs = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "on_ground": True, "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "stone_pickaxe", "count": 1}]}
+        elif path == "equip":
+            result = {"held": {"name": "stone_pickaxe"}}
+        elif path == "get_block":
+            result = {"name": "blackstone" if body["pos"][1] <= 66 else "air"}
+        elif path == "dig":
+            digs.append(body["pos"])
+            result = {}
+        elif path == "move_to":
+            result = {"pos": [0.5, 64.0, 0.5]}
+        elif path == "look":
+            result = {}
+        elif path == "control":
+            result = {"pos": [0.5, 64.0, 0.5], "moved": 0.0}
+        elif path == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        skills._avoid_temporarily((0, 65, 0), "dig_timeout", 30.0)
+        result = skills.dig_staircase(direction="north", vertical="up", steps=3)
+    assert result["ok"] is False
+    assert result["stop_reason"] == "dig_cell_avoided"
+    assert result["last_error"]["code"] == "dig_cell_avoided"
+    assert digs == []
+    assert "8~12 格" in result["hint"]
+
+
 def test_staircase_dig_timeout_names_wooden_pickaxe_as_cause() -> None:
     """BUG-041/r22_long: wooden pickaxe + hard rock = ~25s per block, 1 step per call."""
 

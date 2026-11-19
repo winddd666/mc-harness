@@ -5958,16 +5958,15 @@ class MacroSkills:
                         "或改走泥土/砂砾/沙子等软方块方向，或先 mc_skill_harvest_logs 补木料；"
                         "也可先 mc_skill_unstick 让开该格；不要在硬岩上原地重复同一步梯。"
                     )
-                    if isinstance(session.last_dig_pos, (list, tuple)) and len(session.last_dig_pos) >= 3:
-                        try:
-                            self._avoid_temporarily(
-                                (int(session.last_dig_pos[0]), int(session.last_dig_pos[1]), int(session.last_dig_pos[2]),
-                                 ),
-                                "dig_timeout",
-                                30.0,
-                            )
-                        except (TypeError, ValueError):
-                            pass
+                if isinstance(session.last_dig_pos, (list, tuple)) and len(session.last_dig_pos) >= 3:
+                    try:
+                        self._avoid_temporarily(
+                            (int(session.last_dig_pos[0]), int(session.last_dig_pos[1]), int(session.last_dig_pos[2])),
+                            "dig_timeout",
+                            30.0,
+                        )
+                    except (TypeError, ValueError):
+                        pass
             return {
                 "ok": False, "requires_replan": True, "stop_reason": "time_budget",
                 "error": {"code": "time_budget", "message": timeout_message},
@@ -6251,6 +6250,30 @@ class MacroSkills:
             pos = st.get("pos") or pos_before
             bx, by, bz = math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2]))
             nx, nz = bx + dx, bz + dz
+
+            # BUG-041/r23: when a dig cell already timed out here, every retry
+            # burns another 15~45s on the same unreachable block. Fail fast and
+            # tell the model to relocate instead.
+            avoided_cell = next(
+                (
+                    cell
+                    for cell in (
+                        (bx, by + 1, bz), (bx, by + 2, bz), (bx, by - 1, bz),
+                        (nx, by + 1, nz), (nx, by + 2, nz),
+                    )
+                    if self._is_block_avoided(cell)
+                    and (self.temporary_avoidance.get(cell) or {}).get("reason") == "dig_timeout"
+                ),
+                None,
+            )
+            if avoided_cell is not None and step_idx == 0:
+                stop_reason = "dig_cell_avoided"
+                last_error = {
+                    "code": "dig_cell_avoided",
+                    "pos": list(avoided_cell),
+                    "message": "该格刚发生 dig 超时，已临时避开 30s，未再次挖掘。",
+                }
+                break
 
             head_here = _block_name([bx, by + 1, bz])
             if head_here in fluid_or_bedrock:
@@ -6581,6 +6604,12 @@ class MacroSkills:
             out_stair["hint"] = (
                 "目标台阶四周没有可放置面（no_support），已原地安全垫高一格。"
                 "请从新高度重新调用 mc_skill_staircase；若仍无支撑，继续 vertical='pillar'。"
+            )
+        if stop_reason == "dig_cell_avoided":
+            out_stair["hint"] = (
+                "该格刚发生 dig 超时（同一格已临时避开 30s），本次未再挖掘。"
+                "请先用 mc_move_to 水平离开 8~12 格或 mc_skill_unstick 换站位，"
+                "再换方向重新开阶梯；不要重复同一坐标/方向。"
             )
         end_pos = st_end.get("pos") or pos_before
         ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
