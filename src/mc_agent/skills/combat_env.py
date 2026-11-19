@@ -95,8 +95,24 @@ HAZARD_BLOCK_TYPES: tuple[str, ...] = (
     "cobweb",
 )
 
+SURFACE_SHORE_PRIORITY_BLOCKS: tuple[str, ...] = (
+    "grass_block",
+    "dirt_path",
+    "coarse_dirt",
+    "podzol",
+    "mycelium",
+    "sandstone",
+    "cobblestone",
+    "oak_planks",
+    "spruce_planks",
+    "birch_planks",
+    "oak_log",
+    "spruce_log",
+)
+
 SHORE_LAND_BLOCKS: tuple[str, ...] = (
     "grass_block",
+    "dirt_path",
     "dirt",
     "sand",
     "stone",
@@ -1396,43 +1412,50 @@ class CombatEnv:
         tz_th = float(threat_pos[2]) if has_threat else 0.0
         threat_dist0 = math.hypot(start_x - tx_th, start_z - tz_th) if has_threat else 0.0
 
-        try:
-            found = self.bot.call(
-                "find_blocks",
-                {
-                    "radius": max(8, min(28, int(max_radius))),
-                    "types": list(block_types),
-                    "limit": 36,
-                },
-            )
-        except Exception:
-            found = None
+        def _pick_from_query(q_types: Sequence[str], *, q_limit: int) -> list[float] | None:
+            try:
+                found = self.bot.call(
+                    "find_blocks",
+                    {
+                        "radius": max(8, min(28, int(max_radius))),
+                        "types": list(q_types),
+                        "limit": q_limit,
+                    },
+                )
+            except Exception:
+                found = None
 
-        candidates: list[tuple[float, int, int, int]] = []
-        for row in (found or {}).get("blocks") or []:
-            if not isinstance(row, dict):
-                continue
-            rpos = row.get("pos")
-            if not isinstance(rpos, (list, tuple)) or len(rpos) < 3:
-                continue
-            cx, cy, cz = int(rpos[0]), int(rpos[1]), int(rpos[2])
-            if cy < min_y or (max_y is not None and cy > max_y):
-                continue
-            if not _is_solid_ground(_clean_block_name(row.get("name"))):
-                continue
-            if not self._point_allowed(cx + 0.5, cz + 0.5, action="lava_shore"):
-                continue
-            hdist = math.hypot(cx + 0.5 - start_x, cz + 0.5 - start_z)
-            away_penalty = 1.5 if (has_threat and math.hypot(cx + 0.5 - tx_th, cz + 0.5 - tz_th) < threat_dist0) else 0.0
-            candidates.append((hdist + away_penalty, cx, cy, cz))
+            candidates: list[tuple[float, int, int, int]] = []
+            for row in (found or {}).get("blocks") or []:
+                if not isinstance(row, dict):
+                    continue
+                rpos = row.get("pos")
+                if not isinstance(rpos, (list, tuple)) or len(rpos) < 3:
+                    continue
+                cx, cy, cz = int(rpos[0]), int(rpos[1]), int(rpos[2])
+                if cy < min_y or (max_y is not None and cy > max_y):
+                    continue
+                if not _is_solid_ground(_clean_block_name(row.get("name"))):
+                    continue
+                if not self._point_allowed(cx + 0.5, cz + 0.5, action="lava_shore"):
+                    continue
+                hdist = math.hypot(cx + 0.5 - start_x, cz + 0.5 - start_z)
+                away_penalty = 1.5 if (has_threat and math.hypot(cx + 0.5 - tx_th, cz + 0.5 - tz_th) < threat_dist0) else 0.0
+                candidates.append((hdist + away_penalty, cx, cy, cz))
 
-        candidates.sort(key=lambda item: item[0])
-        for _, cx, cy, cz in candidates[:max(1, int(max_candidates))]:
-            foot_b = self._get_block_name(cx, cy + 1, cz)
-            head_b = self._get_block_name(cx, cy + 2, cz)
-            if _is_passable(foot_b) and _is_passable(head_b):
-                return [cx + 0.5, float(cy + 1), cz + 0.5]
-        return None
+            candidates.sort(key=lambda item: item[0])
+            for _, cx, cy, cz in candidates[:max(1, int(max_candidates))]:
+                foot_b = self._get_block_name(cx, cy + 1, cz)
+                head_b = self._get_block_name(cx, cy + 2, cz)
+                if _is_passable(foot_b) and _is_passable(head_b):
+                    return [cx + 0.5, float(cy + 1), cz + 0.5]
+            return None
+
+        if tuple(block_types) == SHORE_LAND_BLOCKS:
+            surf_hit = _pick_from_query(SURFACE_SHORE_PRIORITY_BLOCKS, q_limit=48)
+            if surf_hit is not None:
+                return surf_hit
+        return _pick_from_query(block_types, q_limit=120)
 
     def escape_deep_water_to_shore(
         self,
@@ -1533,7 +1556,7 @@ class CombatEnv:
                         "x": shore_target[0],
                         "y": shore_target[1],
                         "z": shore_target[2],
-                        "range": 1.2,
+                        "range": 0.6,
                         "timeout": 4200,
                         "stop_on": ["death"],
                     },
@@ -1551,12 +1574,13 @@ class CombatEnv:
                 and st_mid.get("ready", True)
             ):
                 mid_pos = st_mid.get("pos") or pos0
+                lip_ms = 1150 if float(mid_pos[1]) < float(shore_target[1]) - 0.05 else 850
                 try:
                     syaw_m, _ = aim_yaw_pitch(mid_pos, shore_target)
                     self.bot.call("look", {"yaw": syaw_m, "pitch": -10.0})
                     self.bot.call(
                         "control",
-                        {"forward": True, "jump": True, "sprint": True, "ms": 850, "stop_on": ["death"]},
+                        {"forward": True, "jump": True, "sprint": True, "ms": lip_ms, "stop_on": ["death"]},
                     )
                     actions.append("shore_lip_jump")
                 except (ApiError, httpx.HTTPError) as err:

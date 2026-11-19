@@ -3287,6 +3287,102 @@ def test_r21_water_surface_abort_latches_shield_and_post_combat_eat_skips_ranged
     assert "use_item" not in ranged_post_calls
 
 
+def test_r22_shore_query_bypasses_lakebed_and_failed_shore_backs_off_cooldown(monkeypatch):
+    """Reproduces r22_short hy4_hy_7_village:
+    1) Surface bank query finds dry grass_block/dirt_path shore even when oceanbed sand/dirt fills generic limit=36.
+    2) When escape_to_shore fails inside 30s water_avoid_cooldown without new hurt, poll backs off 8.0s instead of spamming cancels every 5s.
+    """
+    from mc_agent.skills.combat_env import CombatEnv
+
+    # 1) Surface bank query finds dry grass_block shore when generic SHORE_LAND_BLOCKS query returns underwater riverbed sand
+    move_goals: list[dict] = []
+
+    class _RiverbedBot:
+        def status(self):
+            return {
+                "pos": [0.5, 62.2, 0.5],
+                "health": 16.0,
+                "food": 20,
+                "alive": True,
+                "ready": True,
+                "in_water": True,
+                "submerged": False,
+                "oxygen": 300,
+                "yaw": 0.0,
+            }
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            if action == "status":
+                return self.status()
+            if action == "find_blocks":
+                types = set(pl.get("types") or [])
+                if "sand" in types or "dirt" in types:
+                    # Generic riverbed blocks at y=58 (filtered out by min_y=61)
+                    return {"blocks": [{"name": "sand", "pos": [i, 58, 0]} for i in range(40)]}
+                # Surface bank query finds grass_block at [6, 62, 0] -> walkable [6.5, 63.0, 0.5]
+                return {"blocks": [{"name": "grass_block", "pos": [6, 62, 0]}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "move_to":
+                move_goals.append(pl)
+                return {"ok": True}
+            return {"ok": True}
+
+    env_river = CombatEnv(_RiverbedBot())
+    # Bypass final in_water flip only to inspect selected shore_target and move_to range
+    out_river = env_river.escape_deep_water_to_shore(keep_shield=True)
+    assert out_river["shore_target"] == [6.5, 63.0, 0.5]
+    assert move_goals and move_goals[0]["range"] <= 0.6
+
+    # 2) Failed escape_to_shore during 30s cooldown backs off 8.0s when no new hurt / drowning occurs
+    clock = [8000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+
+    class _WideWaterBot:
+        _last_event_seq = 0
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 62.2, 0.5],
+                    "health": 14.0,
+                    "food": 20,
+                    "oxygen": 280,
+                    "alive": True,
+                    "ready": True,
+                    "in_water": True,
+                    "submerged": False,
+                    "in_lava": False,
+                    "blocking": False,
+                }
+            if action == "events":
+                return {"events": [], "last_seq": 0}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "water"}
+            return {"ok": True}
+
+    guard = GenerationGuard(_WideWaterBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._no_water_until = clock[0] + 30.0
+    inc_first = guard.poll()
+    assert inc_first is not None
+    assert "water_avoid_cooldown" in inc_first["reasons"]
+    assert guard._last_water_escape_failed is True
+
+    # +5.0s later (previously spammed cancel every ~5s) -> still in 8.0s backoff!
+    clock[0] += 5.0
+    assert guard.poll() is None
+
+    # +3.5s more (total 8.5s >= 8.0s) -> resumes retry cleanly
+    clock[0] += 3.5
+    inc_retry = guard.poll()
+    assert inc_retry is not None
+    assert "water_avoid_cooldown" in inc_retry["reasons"]
+
+
+
 
 
 

@@ -170,6 +170,7 @@ class GenerationGuard:
         self.last_poll = float("-inf")
         self.last_reaction = float("-inf")
         self._last_water_escape_at = float("-inf")
+        self._last_water_escape_failed = False
         self._water_hurt_streak = 0
         self._no_water_until = float("-inf")
         self._last_pre_hurt_melee_at = float("-inf")
@@ -651,10 +652,11 @@ class GenerationGuard:
         low_oxygen = isinstance(oxygen, (int, float)) and oxygen < 240
         critical_drowning = isinstance(oxygen, (int, float)) and oxygen < 150
         no_water_active = now < self._no_water_until
+        water_retry_gap = 8.0 if self._last_water_escape_failed else 1.5
         no_water_reentry = (
             in_water
             and no_water_active
-            and (now - self._last_water_escape_at >= 1.5)
+            and (now - self._last_water_escape_at >= water_retry_gap)
         )
         needs_float = (
             in_water
@@ -671,6 +673,7 @@ class GenerationGuard:
             and status.get("alive") is not False
         ):
             self._water_hurt_streak = 0
+            self._last_water_escape_failed = False
         food = status.get("food")
         needs_food = isinstance(food, (int, float)) and (food <= 16 or (isinstance(health, (int, float)) and health < 18 and food < 20))
         pending_ready_eat = (
@@ -844,7 +847,6 @@ class GenerationGuard:
             nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
 
             if (needs_float or no_water_reentry) and not in_lava and not hurt:
-                self._last_water_escape_at = now
                 if no_water_reentry and nh_name and has_shield:
                     self._equip_and_raise_shield_for_water(
                         status,
@@ -858,6 +860,8 @@ class GenerationGuard:
                         lambda: self.combat_env.escape_deep_water_to_shore(nh_pos, keep_shield=has_shield),
                     )
                     actions.append(shore_act)
+                    shore_res = shore_act.get("result") if isinstance(shore_act, dict) and isinstance(shore_act.get("result"), dict) else {}
+                    self._last_water_escape_failed = not bool(shore_act.get("ok") and shore_res.get("in_water") is not True)
                 else:
                     esc_f = self._action("escape_water", lambda: self._skills().escape_water())
                     actions.append(esc_f)
@@ -865,12 +869,16 @@ class GenerationGuard:
                     esc_f_ok = bool(esc_f.get("ok") and esc_f_res.get("in_water") is not True)
                     esc_f_err = esc_f["error"].get("code") if isinstance(esc_f.get("error"), dict) else None
                     if not esc_f_ok and esc_f_err not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}:
-                        actions.append(
-                            self._action(
-                                "escape_to_shore",
-                                lambda: self.combat_env.escape_deep_water_to_shore(nh_pos, keep_shield=has_shield),
-                            )
+                        shore_f = self._action(
+                            "escape_to_shore",
+                            lambda: self.combat_env.escape_deep_water_to_shore(nh_pos, keep_shield=has_shield),
                         )
+                        actions.append(shore_f)
+                        shore_f_res = shore_f.get("result") if isinstance(shore_f, dict) and isinstance(shore_f.get("result"), dict) else {}
+                        self._last_water_escape_failed = not bool(shore_f.get("ok") and shore_f_res.get("in_water") is not True)
+                    else:
+                        self._last_water_escape_failed = False
+                self._last_water_escape_at = time.monotonic()
 
             if pre_trigger is not None and not in_lava and not in_water:
                 if pre_trigger.get("source") == "pre_hurt_melee":
@@ -967,8 +975,13 @@ class GenerationGuard:
 
                 if shore_succeeded:
                     self._water_hurt_streak = 0
-                elif (
-                    not transient_err
+                    self._last_water_escape_failed = False
+                else:
+                    self._last_water_escape_failed = True
+                self._last_water_escape_at = time.monotonic()
+                if (
+                    not shore_succeeded
+                    and not transient_err
                     and should_shield_water
                     and not _already("raise_shield")
                     and esc_err_code not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}
@@ -1776,6 +1789,7 @@ class GenerationGuard:
                 if esc_b_ok:
                     still_wet = False
                     self._water_hurt_streak = 0
+                    self._last_water_escape_failed = False
                     notes.append("自动浮水登岸")
                 else:
                     shore_b = self._action(
@@ -1786,6 +1800,7 @@ class GenerationGuard:
                     shore_b_res = shore_b.get("result") if isinstance(shore_b.get("result"), dict) else {}
                     shore_b_ok = bool(shore_b.get("ok") and shore_b_res.get("in_water") is not True)
                     still_wet = not shore_b_ok
+                    self._last_water_escape_failed = not shore_b_ok
                     if shore_b_ok:
                         self._water_hurt_streak = 0
                         notes.append("游向最近干燥陆地登岸")
@@ -1793,6 +1808,7 @@ class GenerationGuard:
                         notes.append("3次水下受击强制上岸并禁下水30s")
                     elif no_water_reentry_b:
                         notes.append("30s禁水冷却内驱离水面")
+                self._last_water_escape_at = time.monotonic()
             elif in_wall_hurt:
                 uns = self._action("boundary_unstick_wall", lambda: self._skills().unstick(), raise_on_http_error=False)
                 if uns.get("ok"):
