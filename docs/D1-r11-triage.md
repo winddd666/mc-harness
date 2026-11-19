@@ -1009,6 +1009,26 @@ retries 4 | 429 0 | 502 1
 
 - 429 仍为 **0**；1 个 502 + 1 个 MC API ReadTimeout
 
+## 4bj. hy4 审计轨 r26 终验（03:45，4/4）
+
+```
+retries 4 | 429 0 | 502 1 | tracebacks 0
+门禁：仅 deaths 54 FAIL（>25）；cooldown 191s、mine 0.86、zero-slice 1.7%、over-cap 0
+```
+
+| bot | 分数 | 集数 | 死亡 |
+|---|---|---|---|
+| `hy4_6_nether_bastion` | **210** | 20 | **20（每集 1 次）** |
+| `hy4_9_deep_water` | **120** | 35 | 3 |
+| `hy4_5_brewing_alchemy` | 105 | 19 | 2 |
+| `hy4_2_iron` | 100 | 18 | 13 |
+
+- **0 次 429**（4 路 + rpm=6 再次验证安全）
+- `in_lava` incident **45 次**、`fresh_hurt` 89；死因 `mob 13 / lava 11 / arrow 4 / fall 3`
+- 堡垒场景每集必死 1 次，但分数仍达 210（复活后继续）→ 生存质量是下一步重点
+- `depth_reset` 仅 1 次；`staircase` completed 29 / pillar_fallback 28 / time_budget 19
+- `unstick` 60 次：中位 3.7s、max 37.1s（无 >60s）
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
