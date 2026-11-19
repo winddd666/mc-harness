@@ -215,10 +215,12 @@ def select_village_wild_site(
         st = bot.status()
         pos = st.get("pos") or pos
         if park_near_villager:
-            parked = _park_near_entity(bot, bot_name, ("villager",), pos)
+            parked = _park_near_entity(bot, bot_name, ("villager",), pos, radius=64)
+            if parked is None:
+                parked = _park_near_entity(bot, bot_name, ("villager",), pos, radius=128)
             if parked is not None:
                 pos = parked
-                _pin_villager_near(bot, bot_name, parked)
+            _pin_villager_near(bot, bot_name, pos)
         biome = str(st.get("biome") or "village").lower()
         return float(pos[0]), float(pos[1]), float(pos[2]), f"village:{biome}"
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
@@ -235,37 +237,42 @@ def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
     try:
         # Teleport onto the bot's own block: that block is guaranteed passable (a "+1.5 east" spot
         # can be inside a hillside/wall and suffocate the villager, which is what r20 GLM_3 saw).
-        rcon_batch(
-            [
-                f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run tp @e[type=minecraft:villager,sort=nearest,limit=1] {tx:.1f} {ty:.1f} {tz:.1f}",
-            ],
-            timeout=30,
-        )
-        time.sleep(0.5)
-        rcon_batch(
-            [
-                f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run data merge entity @e[type=minecraft:villager,distance=..6,limit=1] {{NoAI:1b}}",
-            ],
-            timeout=30,
-        )
-        time.sleep(1.0)
-        present = False
-        try:
-            res = bot.call("get_entities", {"radius": 8}) or {}
-            ents = res.get("entities") if isinstance(res, dict) else None
-            present = isinstance(ents, list) and any(
-                "villager" in f"{e.get('name') or ''} {e.get('type') or ''}".lower()
-                for e in ents
-                if isinstance(e, dict)
+        # Selector without a distance cap scans every loaded villager, so this also works when the
+        # initial spreadplayers landing is >64m from the village (r21 GLM_3 hill village).
+        pinned = False
+        for attempt in (1, 2):
+            rcon_batch(
+                [
+                    f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run tp @e[type=minecraft:villager,sort=nearest,limit=1] {tx:.1f} {ty:.1f} {tz:.1f}",
+                ],
+                timeout=30,
             )
-        except Exception:
-            present = False
+            time.sleep(0.6 if attempt == 1 else 1.2)
+            rcon_batch(
+                [
+                    f"execute positioned {tx:.1f} {ty:.1f} {tz:.1f} run data merge entity @e[type=minecraft:villager,distance=..6,limit=1] {{NoAI:1b}}",
+                ],
+                timeout=30,
+            )
+            time.sleep(1.5)
+            try:
+                res = bot.call("get_entities", {"radius": 12}) or {}
+                ents = res.get("entities") if isinstance(res, dict) else None
+                pinned = isinstance(ents, list) and any(
+                    "villager" in f"{e.get('name') or ''} {e.get('type') or ''}".lower()
+                    for e in ents
+                    if isinstance(e, dict)
+                )
+            except Exception:
+                pinned = False
+            if pinned:
+                break
         print(
             f"[Scene] pinned a NoAI villager next to {bot_name} at ({tx:.1f}, {ty:.1f}, {tz:.1f}) "
-            f"verified={present}",
+            f"verified={pinned}",
             flush=True,
         )
-        return present
+        return pinned
     except Exception as exc:
         print(f"[Scene] villager pin failed for {bot_name}: {exc}", flush=True)
         return False
