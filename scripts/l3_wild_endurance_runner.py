@@ -313,10 +313,13 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
         f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
         f"fill {ix - 3} {surface_y - 1} {iz - 3} {ix + 3} {surface_y - 1} {iz + 3} minecraft:cobblestone",
         f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 3} {iz + 3} minecraft:air",
-        # 1-high cobblestone rim keeps the spawn pad dry while leaving the east edge open for the dive.
-        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y} {iz - 3} minecraft:cobblestone",
-        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y} {iz + 3} minecraft:cobblestone",
-        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y} {iz + 2} minecraft:cobblestone",
+        # 2-high cobblestone parapet blocks drowned trident line-of-sight (r13/r14 showed all pad
+        # damage came from tridents); a 1x2 gate on the east side keeps the dive route open.
+        f"fill {ix - 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 1} {iz - 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz + 3} {ix + 3} {surface_y + 1} {iz + 3} minecraft:cobblestone",
+        f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y + 1} {iz + 2} minecraft:cobblestone",
+        f"fill {ix + 3} {surface_y} {iz - 3} {ix + 3} {surface_y + 1} {iz - 1} minecraft:cobblestone",
+        f"fill {ix + 3} {surface_y} {iz + 1} {ix + 3} {surface_y + 1} {iz + 3} minecraft:cobblestone",
         f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
         f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
     ]
@@ -643,7 +646,7 @@ def build_reset_cmds(
         cmds.extend(
             [
                 f"effect give {bot_name} minecraft:water_breathing 60 0 true",
-                f"effect give {bot_name} minecraft:resistance 30 1 true",
+                f"effect give {bot_name} minecraft:resistance 60 1 true",
             ]
         )
     cmds.extend(stage_loadout_cmds(bot_name, stage, sx, sy, sz))
@@ -702,7 +705,7 @@ def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inven
         cmds.extend(
             [
                 f"effect give {bot_name} minecraft:water_breathing 45 0 true",
-                f"effect give {bot_name} minecraft:resistance 20 1 true",
+                f"effect give {bot_name} minecraft:resistance 45 1 true",
             ]
         )
     if clear_inventory:
