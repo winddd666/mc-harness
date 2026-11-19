@@ -1656,6 +1656,9 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
     assert clock[0] <= 45
     assert calls[-1] == "stop"
     assert calls.count("stop") == 1
+    if timeout_path == "dig":
+        assert result["dig_target"]
+        assert "mc_skill_unstick" in result["error"]["message"]
 
 
 def test_stair_session_leaves_time_for_obsidian_dig(monkeypatch) -> None:
