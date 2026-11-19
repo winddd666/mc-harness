@@ -505,7 +505,11 @@ class McToolset:
             if exc.code == "blocked_by_self":
                 err_obj["recovery_hint"] = "先用 mc_move_to 到至少 3 格外，设 range=0.5，让出目标格，再放置；也可省略 x/y/z 自动选落点。"
             elif exc.code == "no_support":
-                err_obj["recovery_hint"] = "目标需要相邻实心方块支撑；先用 mc_get_block 检查目标与下方，选择有实心地面的空格，或省略 x/y/z 自动选落点。"
+                err_obj["recovery_hint"] = (
+                    "目标需要相邻实心方块支撑；先用 mc_get_block 检查目标与下方，选择贴着实心面的空格。"
+                    "若四周全空，先在旁边 mc_dig 一格侧袋制造参考面，或换一个贴着实心块的坐标，"
+                    "也可省略 x/y/z 自动选落点；不要重复同一坐标。"
+                )
             else:
                 err_obj["recovery_hint"] = (f"先用 mc_get_block 检查目标 {target}；若仍是 sugar_cane、草或其他可清理障碍，先 mc_dig 清空目标格，再 mc_place。不要重复向同一占用格放置。")
         if action == "craft":

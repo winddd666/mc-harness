@@ -2135,7 +2135,7 @@ def test_atomic_craft_error_reports_actual_materials_instead_of_example_variant(
     assert result["error"]["server_recipe_example"]["cobbled_deepslate"] == 3
 
 
-@pytest.mark.parametrize("code,word", [("no_support", "支撑"), ("blocked_by_self", "3 格"), ("place_failed", "mc_dig")])
+@pytest.mark.parametrize("code,word", [("no_support", "支撑"), ("no_support", "侧袋"), ("blocked_by_self", "3 格"), ("place_failed", "mc_dig")])
 def test_place_failure_has_specific_recovery_without_world_mutation(code, word) -> None:
     from mc_agent.errors import ApiError
     from mc_agent.harness.mc_tools import McToolset
