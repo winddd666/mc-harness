@@ -1487,7 +1487,7 @@ def test_staircase_up_uses_available_solid_filler(filler) -> None:
         elif path == "inventory":
             result = {"items": [{"name": filler, "count": 8}]}
         elif path == "get_block":
-            result = {"name": "air"}
+            result = {"name": "stone" if body["pos"] == [0, 29, -1] else "air"}
         elif path == "place":
             placed.append(body)
             result = {"pos": body["pos"]}
@@ -1546,7 +1546,7 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
         elif path == "inventory":
             result = {"items": [{"name": "cobblestone", "count": 8}, {"name": "netherrack", "count": 8}]}
         elif path == "get_block":
-            result = {"name": "air"}
+            result = {"name": "stone" if body["pos"] == [0, 29, -1] else "air"}
         elif path == "place":
             placed.append(body["item"])
             if body["item"] == "cobblestone":
@@ -1568,6 +1568,43 @@ def test_staircase_up_retries_another_filler_when_server_rejects_item() -> None:
     assert placed == ["cobblestone", "netherrack"]
 
 
+def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
+    """BUG-024: a self-dug shaft step cell has no six-face support."""
+    pos = [0.5, 30.0, 0.5]
+    jumping = [False]
+    placed = [False]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            y = 31.2 if jumping[0] else (31.0 if placed[0] else 30.0)
+            result = {"pos": [0.5, y, 0.5], "on_ground": not jumping[0], "alive": True, "ready": True}
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 8}]}
+        elif path == "get_block":
+            result = {"name": "air"}
+        elif path == "posture":
+            jumping[0] = bool(body.get("jump"))
+            result = {}
+        elif path == "place":
+            placed[0] = True
+            result = {"pos": body["pos"]}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+    assert result["ok"] is True
+    assert result["stop_reason"] == "pillar_fallback"
+    assert result["fallback"] == "pillar"
+    assert result["steps_done"] == 1
+    assert result["placed_count"] == 1
+
+
 def test_staircase_up_retries_transient_place_failed() -> None:
     """r14: up-step filler was refused once, then a retry succeeded."""
     pos = [0.5, 30.0, 0.5]
@@ -1581,7 +1618,7 @@ def test_staircase_up_retries_transient_place_failed() -> None:
         elif path == "inventory":
             result = {"items": [{"name": "cobblestone", "count": 8}]}
         elif path == "get_block":
-            result = {"name": "air"}
+            result = {"name": "stone" if body["pos"] == [0, 29, -1] else "air"}
         elif path == "place":
             placement_attempts.append(body)
             if len(placement_attempts) <= 2:

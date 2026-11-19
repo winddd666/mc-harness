@@ -6308,6 +6308,29 @@ class MacroSkills:
                     break
 
                 if _is_non_solid_support(_block_name([nx, by, nz])):
+                    # BUG-024: in a self-dug 1x1 shaft the step cell can have
+                    # no solid face at all; place would always answer no_support.
+                    # One safe pillar step is the only way to keep climbing.
+                    face_cells = (
+                        (nx, by - 1, nz), (nx + 1, by, nz), (nx - 1, by, nz),
+                        (nx, by, nz + 1), (nx, by, nz - 1), (nx, by + 1, nz),
+                    )
+                    has_place_face = any(
+                        not _is_non_solid_support(_block_name(cell)) for cell in face_cells
+                    )
+                    if not has_place_face:
+                        recovery = self._dig_pillar_up(steps=1, stop_on_ore=False)
+                        if recovery.get("ok"):
+                            steps_done += int(recovery.get("steps_done") or 0)
+                            dug_count += int(recovery.get("dug_count") or 0)
+                            placed_count += int(recovery.get("placed_count") or 0)
+                            stop_reason = "pillar_fallback"
+                        else:
+                            last_error = recovery.get("last_error") or {
+                                "code": "no_place_face", "pos": [nx, by, nz],
+                            }
+                            stop_reason = "missing_step_support"
+                        break
                     # The client inventory can disagree with the server's
                     # findItem (r13: cobblestone reported but place said none).
                     # Fall through to other solid fillers before giving up.
@@ -6380,8 +6403,8 @@ class MacroSkills:
                 stop_reason = "ore_detected"
 
         out_stair: dict[str, Any] = {
-            "ok": stop_reason in {"completed", "ore_detected", "reached_surface"} and (steps_done > 0 or stop_reason == "ore_detected"),
-            "requires_replan": stop_reason not in {"completed", "ore_detected", "reached_surface"},
+            "ok": stop_reason in {"completed", "ore_detected", "reached_surface", "pillar_fallback"} and (steps_done > 0 or stop_reason == "ore_detected"),
+            "requires_replan": stop_reason not in {"completed", "ore_detected", "reached_surface", "pillar_fallback"},
             "direction": d_key,
             "vertical": v_key,
             "steps_requested": steps,
@@ -6410,6 +6433,12 @@ class MacroSkills:
             out_stair["blocker"] = blocker_info
         if last_error is not None:
             out_stair["last_error"] = last_error
+        if stop_reason == "pillar_fallback":
+            out_stair["fallback"] = "pillar"
+            out_stair["hint"] = (
+                "目标台阶四周没有可放置面（no_support），已原地安全垫高一格。"
+                "请从新高度重新调用 mc_skill_staircase；若仍无支撑，继续 vertical='pillar'。"
+            )
         end_pos = st_end.get("pos") or pos_before
         ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
         if stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "dig_failed", "undiggable_block", "movement_not_confirmed", "missing_step_support"}:
