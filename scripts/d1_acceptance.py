@@ -49,6 +49,7 @@ def collect(wave: str) -> dict:
         "runtime_error": 0,
         "dw_trident": 0,
         "startup_crash": [],
+        "thread_errors": [],
         "deep_water": None,
         "iron_scores": [],
     }
@@ -62,10 +63,14 @@ def collect(wave: str) -> dict:
             for ep in cs.get("episodes") or []:
                 if ep.get("status") == "runtime_error":
                     out["runtime_error"] += 1
-        else:
-            log = sd / "stdout.log"
-            txt = log.read_text(errors="ignore") if log.exists() else ""
-            if "Traceback" in txt:
+        log = sd / "stdout.log"
+        txt = log.read_text(errors="ignore") if log.exists() else ""
+        if "Traceback" in txt:
+            if "Exception in thread" in txt:
+                # A dead background thread (e.g. ReflexPreempted in a watchdog) is
+                # not a process crash; report it separately (BUG-031).
+                out["thread_errors"].append(bot)
+            elif not sums:
                 out["startup_crash"].append(bot)
         starts: dict[str, tuple[str, float, dict]] = {}
         for evf in sorted(sd.glob("*.events.jsonl")):
@@ -153,6 +158,7 @@ def main() -> int:
         ("BUG-018 mine_dfs median s", round(med, 1), "25~40"),
         ("BUG-018 mine zero-slice %", round(zero_pct, 1), "< 10"),
         ("BUG-020 runtime_error", o["runtime_error"], "<= 2"),
+        ("BUG-031 thread exceptions", len(o["thread_errors"]), "== 0"),
         ("BUG-023 deep_water trident deaths", o["dw_trident"], "<= 2"),
         ("SCENE-001 trade calls", o["trade"], ">= 1"),
         ("SCENE-001 brew calls", o["brew"], ">= 1"),
@@ -179,6 +185,8 @@ def main() -> int:
     print(f"  top failures: {o['errs'].most_common(5)}")
     if o["startup_crash"]:
         print(f"  startup crashes: {o['startup_crash']}")
+    if o["thread_errors"]:
+        print(f"  dead background threads: {o['thread_errors']}")
     print(f"\n{'ALL PASS' if failed == 0 else f'{failed} GATE(S) FAILED'}")
     return 0 if failed == 0 else 1
 
