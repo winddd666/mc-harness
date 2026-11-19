@@ -158,7 +158,7 @@ def main() -> int:
         ("BUG-018 mine_dfs median s", round(med, 1), "25~40"),
         ("BUG-018 mine zero-slice %", round(zero_pct, 1), "< 10"),
         ("BUG-020 runtime_error", o["runtime_error"], "<= 2"),
-        ("BUG-031 thread exceptions", len(o["thread_errors"]), "== 0"),
+        ("BUG-033 thread exceptions", len(o["thread_errors"]), "== 0"),
         ("BUG-023 deep_water trident deaths", o["dw_trident"], "<= 2"),
         ("SCENE-001 trade calls", o["trade"], ">= 1"),
         ("SCENE-001 brew calls", o["brew"], ">= 1"),

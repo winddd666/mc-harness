@@ -362,11 +362,11 @@ ALL PASS — 11 项门禁全绿
 
 ## 4i. r18 早期（22:20，0/22 summary）
 
-- 门禁 10/11 PASS；唯一 FAIL 是新问题 **BUG-031**：`ds_ds_4` 的 `scene-watchdog-DS_4` 线程被 `ReflexPreempted(BaseException)` 打死（`except Exception` 抓不到），watchdog 静默失效
+- 门禁 10/11 PASS；唯一 FAIL 是新问题 **BUG-033**：`ds_ds_4` 的 `scene-watchdog-DS_4` 线程被 `ReflexPreempted(BaseException)` 打死（`except Exception` 抓不到），watchdog 静默失效
 - 其余早段指标：`mine_dfs` 中位 27.4s / 零进展 4.3%、deaths 11、cooldown 145.5s、trade 2 / brew 2、无 no_support / 木棍死锁
-- 验收脚本已修正口径：`Exception in thread` 不再误报为 startup crash，单列 `BUG-031 thread exceptions`
+- 验收脚本已修正口径：`Exception in thread` 不再误报为 startup crash，单列 `BUG-033 thread exceptions`
 
-**新增 BUG-031（P1）修复建议**：guardian 对只读 GET 不抛抢占信号；runner 的 watcher 显式捕获 `ReflexPreempted` 并上报 `thread_health`。
+**新增 BUG-033（P1，原误用 BUG-031 已改号）修复建议**：guardian 对只读 GET 不抛抢占信号；runner 的 watcher 显式捕获 `ReflexPreempted` 并上报 `thread_health`。
 
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
