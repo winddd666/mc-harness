@@ -1428,6 +1428,24 @@ def test_pickaxe_low_with_one_plank_requests_logs_before_recraft(monkeypatch) ->
     assert not crafted
 
 
+def test_deep_pickaxe_low_with_no_wood_requests_climb_before_harvesting() -> None:
+    world = _MockMineWorld(
+        start_pos=(0.5, -53.0, 0.5), surface_y=64,
+        inventory_items=[{"name": "cobbled_deepslate", "count": 64, "slot": 9}],
+    )
+    with BotSession("tok", bot_username="WoodlessUnderground", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        engine.collar_ceiling_y = 64
+        result = engine.run(target="iron", max_duration_s=10)
+
+    assert result["stop_reason"] == "pickaxe_low"
+    assert result["next_action"] == "climb_out"
+    assert result["message"].index("climb_out") < result["message"].index("mc_skill_harvest_logs")
+    assert result["pos_after"] == [0.5, -53.0, 0.5]
+    assert world.pos == [0.5, -53.0, 0.5]
+    assert not world.dig_log
+
+
 def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -> None:
     """Rock digging must auto-craft a stone burner pick instead of stopping at pickaxe_low."""
     world = _MockMineWorld(

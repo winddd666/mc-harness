@@ -4787,6 +4787,21 @@ class MiningDFSEngine:
         ok_ret, _ = self._navigate_to_node(self.collar_node_id, min_hp_ref=min_hp_ref)
         return ok_ret
 
+    def _pickaxe_low_recovery(self, counts: dict[str, int], pos: list[float] | None) -> dict[str, Any]:
+        _, _, sticks = _stone_pickaxe_headroom(counts)
+        if (
+            sticks < 2 and pos and self.collar_ceiling_y is not None
+            and _floor_pos(pos)[1] <= min(19, self.collar_ceiling_y - 20)
+        ):
+            return {
+                "next_action": "climb_out",
+                "message": (
+                    "当前井下缺少合成新镐的木料。先调用 action='climb_out' 沿已有巷道回撤，"
+                    "回到能采木的位置后用 mc_skill_harvest_logs(target_logs=1) 补原木或菌柄，合成可用镐后继续。"
+                ),
+            }
+        return {"message": _pickaxe_low_hint(counts)}
+
     # ---- Public Entrypoint ----
 
     def run(
@@ -5215,14 +5230,16 @@ class MiningDFSEngine:
             inv0, counts0 = _inventory_snapshot_and_counts(self.bot)
             picks0, max_tier0, total_rem0 = _pickaxe_inventory_summary(inv0)
         if not picks0 or total_rem0 <= 6:
+            recovery = self._pickaxe_low_recovery(counts0, st0.get("pos"))
+            recovery["message"] = "可用镐缺失或总剩余耐久过低。" + recovery["message"]
             return {
                 "ok": False,
                 "requires_replan": True,
                 "strategy": self.strategy,
                 "stop_reason": "pickaxe_low",
-                "message": "可用镐缺失或总剩余耐久过低，请先补充石镐/铁镐再执行 MiningDFS。"
-                + _pickaxe_low_hint(counts0),
+                "pos_after": st0.get("pos"),
                 "tree": self.snapshot(),
+                **recovery,
             }
         if max_tier0 < int(profile["min_tier"]):
             return {
@@ -6037,7 +6054,7 @@ class MiningDFSEngine:
                 "若返回 climb_progress，可从当前站位继续 climb_out。到达地表后再 explore。"
             )
         if stop_reason == "pickaxe_low":
-            out_res["message"] = _pickaxe_low_hint(counts_after)
+            out_res.update(self._pickaxe_low_recovery(counts_after, st_end.get("pos")))
         if stop_reason == "no_progress":
             out_res["message"] = (
                 "在原地连续多次既没挖到方块也没推进矿井节点（可能卡在死胡同反复重试），已提前结束本轮而不是空耗时间。"
