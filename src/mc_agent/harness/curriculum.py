@@ -1651,6 +1651,11 @@ class CurriculumSupervisor:
                         raise
                 if not st.get("ready"):
                     st = self.bot.wait_until_ready(timeout_s=min(60.0, remaining_s), poll_interval_s=1.0, initial_status=st)
+                if st.get("busy"):
+                    try:
+                        self.bot.call("stop")
+                    except Exception:
+                        pass
                 consecutive_recovery_waits = 0
                 self.toolset._update_status_cache(st)
                 cur_pos = [float(st["pos"][0]), float(st["pos"][1]), float(st["pos"][2])] if isinstance(st.get("pos"), (list, tuple)) and len(st["pos"]) >= 3 else None

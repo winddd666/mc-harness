@@ -784,6 +784,29 @@ class McToolset:
                         continue
                     if not sender and bot_name and msg.startswith(f"{bot_name} "):
                         continue
+                    # Drop multiplayer server broadcast noise for other bots/players (advancements, deaths, joins)
+                    if not sender or sender.lower() == "unknown":
+                        low_msg = msg.lower()
+                        if any(
+                            m in low_msg
+                            for m in (
+                                "has made the advancement",
+                                "has completed the challenge",
+                                "has reached the goal",
+                                "was slain by",
+                                "was shot by",
+                                "was blown up by",
+                                "drowned",
+                                "fell from a high place",
+                                "hit the ground too hard",
+                                "tried to swim in lava",
+                                "suffocated in a wall",
+                                "burned to death",
+                                "joined the game",
+                                "left the game",
+                            )
+                        ):
+                            continue
                     notes.append(f"[不可信玩家公屏消息 {sender or 'unknown'}: {msg[:120]}]")
                 elif kind in ("advancement", "advancements"):
                     adv = ev.get("advancement") or ev.get("id") or ev.get("title") or ev.get("name") or ""
@@ -1054,7 +1077,34 @@ class McToolset:
         return raw
 
     def mc_equip(self, item: str, slot: str = "hand") -> str:
-        return self._call_json("equip", {"item": item, "slot": slot})
+        norm_item = str(item or "").removeprefix("minecraft:").strip()
+        norm_slot = "torso" if slot == "chest" else str(slot or "hand")
+        raw = self._call_json("equip", {"item": norm_item, "slot": norm_slot})
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return raw
+        if isinstance(parsed, dict) and parsed.get("ok") is False:
+            err = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
+            if err.get("code") == "missing_item":
+                try:
+                    inv = self.bot.inventory()
+                    offhand = inv.get("offhand") if isinstance(inv, dict) else None
+                    off_name = str(offhand.get("name") or "").removeprefix("minecraft:") if isinstance(offhand, dict) else ""
+                    if off_name and off_name == norm_item:
+                        if norm_slot == "off-hand":
+                            return json.dumps(
+                                {"ok": True, "already_equipped": True, "item": norm_item, "slot": "off-hand"},
+                                ensure_ascii=False,
+                            )
+                        parsed["hint"] = (
+                            f"{norm_item} 当前已装备在副手(off-hand slot 45)，服务端 /equip 仅查主背包槽位；"
+                            "请先将盾牌/方块等其他物品装备到 off-hand 腾出该物品，或改用背包内其他工具。"
+                        )
+                        return json.dumps(parsed, ensure_ascii=False)
+                except Exception:
+                    pass
+        return raw
 
     def mc_interact(
         self,

@@ -5802,7 +5802,11 @@ class MacroSkills:
                 if _block_name([c0x, c0y - 1, c0z]).endswith("_leaves"):
                     stop_reason = "on_tree_canopy"
 
+        stair_deadline = time.monotonic() + 75.0
         for step_idx in range(steps if stop_reason == "completed" else 0):
+            if step_idx > 0 and time.monotonic() >= stair_deadline:
+                stop_reason = "time_budget"
+                break
             if step_idx > 0 and step_idx % 6 == 0:
                 _equip_best_pick()
 
@@ -5829,6 +5833,25 @@ class MacroSkills:
                     last_error = {"code": err.code, "message": err.message, "pos": [bx, by + 1, bz]}
                     stop_reason = "dig_failed"
                     break
+            if v_key == "up":
+                apex_here = _block_name([bx, by + 2, bz])
+                if apex_here in fluid_or_bedrock:
+                    blocker_info = {"pos": [bx, by + 2, bz], "block": apex_here, "relation": "overhead_apex"}
+                    stop_reason = "fluid_or_bedrock"
+                    break
+                if apex_here not in air_set:
+                    adj_apex = _find_adjacent_fluid([[bx, by + 2, bz]])
+                    if adj_apex is not None:
+                        blocker_info = adj_apex
+                        stop_reason = "fluid_or_bedrock"
+                        break
+                    try:
+                        self.bot.call("dig", {"pos": [bx, by + 2, bz], "collect": True, "stop_on": ["death"]})
+                        dug_count += 1
+                    except ApiError as err:
+                        last_error = {"code": err.code, "message": err.message, "pos": [bx, by + 2, bz]}
+                        stop_reason = "dig_failed"
+                        break
 
             if v_key == "down":
                 safety_coords = [[nx, by + 2, nz], [nx, by + 1, nz], [nx, by, nz], [nx, by - 1, nz]]

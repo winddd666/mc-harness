@@ -1665,9 +1665,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-timeout-s", type=float, default=None, help="任务总运行时限（秒）")
     parser.add_argument(
         "--provider",
-        choices=["nju", "deepseek", "dashscope"],
+        choices=["nju", "deepseek", "dashscope", "opencode"],
         default=None,
-        help="LLM 服务提供方（默认按环境变量；deepseek 使用本机 deepseek-flash）",
+        help="LLM 服务提供方（默认按环境变量；deepseek 使用本机 deepseek-flash；opencode 使用 OpenCode Go / glm-5.3）",
     )
     parser.add_argument("--base-url", default=None, help="覆盖 LLM Base URL")
     parser.add_argument("--model", default=None, help="覆盖模型名（比赛接口必须为 default）")

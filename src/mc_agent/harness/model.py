@@ -31,6 +31,8 @@ DASHSCOPE_DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DASHSCOPE_DEFAULT_MODEL = "qwen-plus"
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
+OPENCODE_DEFAULT_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
+OPENCODE_DEFAULT_MODEL = "glm-5.3"
 RETRYABLE_HTTP_STATUSES = (429, 500, 502, 503, 504, 520, 521, 522, 523, 524)
 
 
@@ -62,13 +64,37 @@ class ResolvedQwenEndpoint:
     model: str
     api_key: str = dataclasses.field(repr=False)
     rpm_budget: int = 24
+    extra_headers: tuple[tuple[str, str], ...] = ()
 
     def extra_body(self, *, enable_thinking: bool) -> dict:
         if "deepseek.com" in self.base_url:
             return {"thinking": {"type": "enabled" if enable_thinking else "disabled"}}
         if "dashscope.aliyuncs.com" in self.base_url:
             return {"enable_thinking": bool(enable_thinking)}
+        if "opencode.ai" in self.base_url:
+            return {"reasoning_effort": "low" if enable_thinking else "none"}
         return {"chat_template_kwargs": {"enable_thinking": bool(enable_thinking)}}
+
+
+def _load_opencode_credentials(merged: dict[str, str]) -> tuple[str | None, str | None]:
+    """读取 OpenCode Go API Key 与可选 session id（默认 ~/.local/share/opencode/auth.json，绝不打印密钥）。"""
+    key = merged.get("OPENCODE_API_KEY", "").strip()
+    if not key:
+        auth_path = pathlib.Path(
+            merged.get("OPENCODE_AUTH_FILE", "").strip()
+            or pathlib.Path.home() / ".local" / "share" / "opencode" / "auth.json"
+        )
+        try:
+            if auth_path.is_file():
+                payload = json.loads(auth_path.read_text(encoding="utf-8"))
+                entry = payload.get("opencode-go") or {}
+                candidate = entry.get("key")
+                if isinstance(candidate, str) and candidate.strip():
+                    key = candidate.strip()
+        except (OSError, ValueError, TypeError):
+            pass
+    session = merged.get("OPENCODE_SESSION_ID", "").strip() or None
+    return (key or None), session
 
 
 def _load_local_deepseek_key(merged: dict[str, str]) -> str | None:
@@ -122,6 +148,37 @@ def resolve_qwen_endpoint(spec: QwenSpec) -> ResolvedQwenEndpoint:
     provider = (spec.provider or pick("MC_LLM_PROVIDER") or "").strip().lower()
     if not provider and spec.base_url_override and "deepseek.com" in spec.base_url_override:
         provider = "deepseek"
+    if not provider and spec.base_url_override and "opencode.ai" in spec.base_url_override:
+        provider = "opencode"
+
+    if provider == "opencode":
+        api_key, session_id = _load_opencode_credentials(merged)
+        if not api_key:
+            raise ConfigError(
+                "未配置 OpenCode API 密钥：请设置 OPENCODE_API_KEY，"
+                "或确认 ~/.local/share/opencode/auth.json 中存在 opencode-go.key。"
+            )
+        base_url = (
+            spec.base_url_override or pick("OPENCODE_BASE_URL") or OPENCODE_DEFAULT_BASE_URL
+        ).rstrip("/")
+        model = spec.model_override or pick("OPENCODE_MODEL") or OPENCODE_DEFAULT_MODEL
+        raw_rpm = pick("OPENCODE_RPM_BUDGET")
+        rpm_budget = (
+            spec.rpm_budget_override
+            if spec.rpm_budget_override is not None
+            else (int(raw_rpm) if raw_rpm else 0)
+        )
+        endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+        if not session_id:
+            session_id = f"ses_mc_{os.getpid()}_{int(time.time())}"
+        return ResolvedQwenEndpoint(
+            endpoint=endpoint,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            rpm_budget=rpm_budget,
+            extra_headers=(("x-opencode-session", session_id),),
+        )
 
     if provider == "deepseek":
         api_key = _load_local_deepseek_key(merged)
@@ -581,6 +638,8 @@ def _chat_direct(
         "Authorization": f"Bearer {resolved.api_key}",
         "User-Agent": "mc-agent-harness/0.1",
     }
+    for h_name, h_val in resolved.extra_headers:
+        headers[h_name] = h_val
     owns_client = client is None
     http_client = _make_http_client(spec, resolved.base_url) if owns_client else client
     emitted_any = False

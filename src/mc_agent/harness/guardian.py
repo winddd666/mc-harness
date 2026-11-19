@@ -378,6 +378,11 @@ class GenerationGuard:
             reasons.append("water_float")
 
         if deaths or disconnected or not ready or status.get("alive") is False:
+            if not disconnected and status.get("busy"):
+                try:
+                    self.bot.call("stop")
+                except Exception:
+                    pass
             return self._incident(status, reasons, actions, fresh)
 
         if status.get("busy") and not (in_lava or (pre_trigger and pre_trigger.get("source") == "pre_hurt_creeper")):

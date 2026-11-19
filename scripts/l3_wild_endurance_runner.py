@@ -124,6 +124,34 @@ def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -
     raise RuntimeError("Could not find a wooded dry wild spawn site across CANDIDATE_SITES")
 
 
+def select_village_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
+    """Locate a real natural village near a far-away candidate anchor via RCON `locate structure`."""
+    import re
+
+    cx, cz = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
+    res = rcon_batch(
+        [f"execute positioned {cx} 100 {cz} run locate structure #minecraft:village"],
+        timeout=45,
+    )
+    reply = str((res[0] if res else {}).get("reply") or "")
+    m = re.search(r"\[\s*(-?\d+)\s*,\s*[^,\]]+,\s*(-?\d+)\s*\]", reply)
+    if m:
+        vx, vz = int(m.group(1)), int(m.group(2))
+        rcon_batch(
+            [
+                f"tp {bot_name} {vx} 120 {vz}",
+                f"spreadplayers {vx} {vz} 0 24 false {bot_name}",
+            ],
+            timeout=45,
+        )
+        time.sleep(2.0)
+        st = bot.status()
+        pos = st.get("pos") or [vx, 64, vz]
+        biome = str(st.get("biome") or "village").lower()
+        return float(pos[0]), float(pos[1]), float(pos[2]), f"village:{biome}"
+    return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
+
+
 def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: bool = True, stage: str = "bare") -> None:
     cmds = [
         "difficulty normal",
@@ -189,6 +217,62 @@ def reset_wild_bot(bot_name: str, sx: float, sy: float, sz: float, *, set_day: b
                 f"give {bot_name} minecraft:cobblestone 32",
             ]
         )
+    elif stage == "village":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+                f"advancement grant {bot_name} only minecraft:story/shiny_gear",
+                f"xp set {bot_name} 15 levels",
+                f"give {bot_name} minecraft:diamond_pickaxe 1",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:diamond_boots 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
+                f"give {bot_name} minecraft:emerald 16",
+                f"give {bot_name} minecraft:iron_block 4",
+                f"give {bot_name} minecraft:shears 1",
+                f"give {bot_name} minecraft:obsidian 4",
+                f"give {bot_name} minecraft:book 2",
+                f"give {bot_name} minecraft:diamond 4",
+                f"give {bot_name} minecraft:lapis_lazuli 12",
+                f"give {bot_name} minecraft:wheat 16",
+                f"give {bot_name} minecraft:bucket 1",
+                f"give {bot_name} minecraft:oak_log 16",
+                f"give {bot_name} minecraft:cooked_beef 16",
+            ]
+        )
+    elif stage == "nether":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+                f"advancement grant {bot_name} only minecraft:story/shiny_gear",
+                f"advancement grant {bot_name} only minecraft:story/lava_bucket",
+                f"advancement grant {bot_name} only minecraft:story/form_obsidian",
+                f"give {bot_name} minecraft:obsidian 14",
+                f"give {bot_name} minecraft:flint_and_steel 1",
+                f"give {bot_name} minecraft:diamond_pickaxe 1",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:golden_boots 1",
+                f"give {bot_name} minecraft:iron_helmet 1",
+                f"give {bot_name} minecraft:iron_chestplate 1",
+                f"give {bot_name} minecraft:iron_leggings 1",
+                f"give {bot_name} minecraft:bow 1",
+                f"give {bot_name} minecraft:arrow 32",
+                f"give {bot_name} minecraft:gold_ingot 16",
+                f"give {bot_name} minecraft:cobblestone 64",
+                f"give {bot_name} minecraft:oak_log 16",
+                f"give {bot_name} minecraft:cooked_beef 24",
+            ]
+        )
     if set_day:
         cmds.insert(0, "time set 1000")
     rcon_batch(cmds, timeout=60)
@@ -199,11 +283,13 @@ def main() -> int:
     parser.add_argument("--bot", type=str, default=BOT)
     parser.add_argument("--token-file", type=str, default=str(TOKEN_FILE))
     parser.add_argument("--rpm-budget", type=int, default=None, help="Per-process RPM cap (e.g. 12 for 2x concurrency)")
+    parser.add_argument("--provider", type=str, default=None, help="LLM provider override (nju/opencode/deepseek/dashscope)")
+    parser.add_argument("--model", type=str, default=None, help="LLM model override (e.g. glm-5.3)")
     parser.add_argument("--runs-subdir", type=str, default="", help="Optional subdirectory under runs/ for multi-bot isolation")
     parser.add_argument("--duration-s", type=float, default=1800.0, help="Wall-clock budget for this wild run")
     parser.add_argument("--max-episodes", type=int, default=12)
     parser.add_argument("--site-index", type=int, default=0)
-    parser.add_argument("--stage", choices=["bare", "iron", "midgame"], default="bare", help="Starting checkpoint stage for sliced testing")
+    parser.add_argument("--stage", choices=["bare", "iron", "midgame", "village", "nether"], default="bare", help="Starting checkpoint stage for sliced testing")
     parser.add_argument("--tag", type=str, default="wild")
     parser.add_argument("--keep-time", action="store_true", help="Do not reset world time to morning")
     args = parser.parse_args()
@@ -249,7 +335,10 @@ def main() -> int:
             bot.connect(respect_reconnect_interval=False)
             st = bot.wait_until_ready(timeout_s=45.0)
 
-        sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
+        if args.stage == "village":
+            sx, sy, sz, biome = select_village_wild_site(bot, bot_name, start_idx=args.site_index)
+        else:
+            sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage)
         time.sleep(1.5)
 
@@ -257,7 +346,8 @@ def main() -> int:
         toolset = McToolset(bot, geofence=geofence, wait_for_cooldown=True)
 
         print(
-            f"[Wild Run Start] bot={bot_name} stage={args.stage} tag={args.tag} rpm={args.rpm_budget or 'default'} "
+            f"[Wild Run Start] bot={bot_name} stage={args.stage} provider={args.provider or 'default'} "
+            f"tag={args.tag} rpm={args.rpm_budget or 'default'} "
             f"spawn=({sx:.1f}, {sy:.1f}, {sz:.1f}) biome={biome} "
             f"duration_s={args.duration_s} max_episodes={args.max_episodes}",
             flush=True,
@@ -267,6 +357,8 @@ def main() -> int:
             QwenSpec(
                 dotenv_path=str(ENV_FILE),
                 fallback_dotenv_path=str(MAIN_ROOT / ".env"),
+                provider=args.provider,
+                model_override=args.model,
                 rpm_budget_override=args.rpm_budget,
             )
         )
