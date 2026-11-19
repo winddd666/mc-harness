@@ -1037,7 +1037,10 @@ class SceneWatchdog(threading.Thread):
         """Total item count from the real `/inventory` shape (items[] + offhand + armor)."""
         try:
             inv = self.bot.inventory()
-        except Exception:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            # include ReflexPreempted(BaseException) raised by guardian._wrapped_call
             return None
         if not isinstance(inv, dict):
             return None
@@ -1081,7 +1084,11 @@ class SceneWatchdog(threading.Thread):
     def _tick(self) -> None:
         try:
             st = self.bot.status()
-        except Exception:
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            # guardian._wrapped_call raises ReflexPreempted(BaseException) during a reflex takeover;
+            # letting it escape would kill the watchdog thread for the rest of the run (r18 ds_ds_4).
             return
         if not st:
             return
@@ -1161,8 +1168,10 @@ class SceneWatchdog(threading.Thread):
         while not self._stop.wait(self.interval_s):
             try:
                 self._tick()
-            except Exception as exc:
-                print(f"[Scene Watchdog] {self.bot_name} tick error: {exc}", flush=True)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as exc:
+                print(f"[Scene Watchdog] {self.bot_name} tick error: {exc!r}", flush=True)
 
 
 def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
