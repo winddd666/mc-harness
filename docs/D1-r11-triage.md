@@ -117,8 +117,19 @@
 - **源码定位**：`src/mc_agent/harness/guardian.py:573-581` `_do_eat` 直接 `use_item`，未检查 `status.ready` / 刚 `death_or_connection_changed`
 - **最小修复**：`deaths or not status.ready` 时跳过进食动作并标记 `retry_after_ready`；`guardian` 轮询到 `ready` 再补一次，不把 `not_ready` 计入动作失败
 
-### 【P1】BUG-001（已在册）启动崩溃：确认
-- `glm_glm_1_nether_fortress/stdout.log:11` `NameError: name 're' is not defined`，抛点 `scripts/l3_wild_endurance_runner.py:167`（`re.search`，文件缺 `import re`）；`glm_glm_2_nether_bastion`、`ds_ds_4_nether_fortress` 同因空跑
+### 【P1】BUG-011 生存反射里的瞬态网络抖动会打死整集
+- **影响**：`glm_glm_3_village` EP5、`hy4_hy_8_nether` EP7 → `status=runtime_error`，`score_delta=0`；全队 5 次 `ReadTimeout`/`ReadError`
+- **证据**：episode report `error="生存响应 subcortical_combat 的网络结果不确定：ReadTimeout"`（`../20261119-024632-126478.json`）
+- **源码定位**：`harness/guardian.py:195-196` 把 `httpx.HTTPError` 包成 `RuntimeError`；`harness/agent.py:1614-1620` 原生 `httpx.HTTPError` 会判为可继续的 `network_error`，但被包装后的 `RuntimeError` 落入 `runtime_error` **终止整集**
+- **最小修复**：`_action` 捕获后返回 `ok:false, error:{code:"network_uncertain"}`（或退避重试），不得抛 `RuntimeError`
+
+### 【P1】BUG-012 `not_loaded` 被当致命错误，整集报废
+- **影响**：`hy4_hy_2_bare` EP5 `bootstrap_iron_age`（`actor_requests=20`，`score_delta=0`）
+- **证据**：episode report `error="[not_loaded] chunk not loaded"`
+- **源码定位**：`harness/agent.py:209 _API_RETRYABLE_CODES` 不含 `not_loaded`；`agent.py:1618-1620` 把 `ApiError` 一律判 `runtime_error`；后端 `session.js:1367/1866/1917` 在区块未加载时返回 `not_loaded`
+- **最小修复**：`not_loaded`/`chunk_not_loaded`/`world_not_ready` 纳入短退避重试（0.5~2s，最多 2~3 次），仍失败降级 `network_error`
+
+### 【P1】BUG-001（已在册）启动崩溃：确认- `glm_glm_1_nether_fortress/stdout.log:11` `NameError: name 're' is not defined`，抛点 `scripts/l3_wild_endurance_runner.py:167`（`re.search`，文件缺 `import re`）；`glm_glm_2_nether_bastion`、`ds_ds_4_nether_fortress` 同因空跑
 - 这是 **3/22 路完全无数据** 的唯一原因，优先级应高于其它表现层 Bug
 
 ---
@@ -144,7 +155,8 @@
 ## 4. 交接建议（省额度）
 
 - **Slice A（#3）**：BUG-003 + BUG-004（deadline 透传，P0 级）
-- **Slice B（#2）**：BUG-009 去抖、BUG-010 复活进食
+- **Slice B（#2）**：BUG-009 去抖、BUG-010 复活进食、BUG-011 反射网络抖动不可致命
 - **Slice C（#4）**：BUG-002 进传送门、BUG-006 别名、BUG-007 配方预检、BUG-008 桶假阴性
 - **Slice D2（#6）**：BUG-001 的 `import re` + `v2_fleet.py triage` 字段对齐（可直接参考 `scripts/d1_triage.py`）
+- **Integrator（#1）**：BUG-012 `not_loaded` 可重试化（`agent.py` 未分配 Slice）
 - 其余 P2 已归档，不需要任何人现在放下 P0/P1
