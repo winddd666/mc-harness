@@ -1913,6 +1913,66 @@ def test_bug023_deep_water_trident_shield_first_moves_to_dry_shore_and_3hit_cool
     assert any(act == "control" and pl.get("jump") is True and pl.get("forward") is True for act, pl in open_calls)
 
 
+def test_r15_nether_bastion_wide_lava_steers_via_find_blocks_onto_elevated_ledge():
+    """Reproduces r15 hy4_hy_6_nether_bastion: wide Nether lava lake steers toward elevated basalt ledge via find_blocks+move_to."""
+    from mc_agent.skills.combat_env import CombatEnv
+
+    st = {
+        "pos": [227.4, 31.5, 240.0],
+        "in_lava": True,
+        "yaw": 3.14159,  # facing South deeper into lava lake!
+    }
+    calls: list[tuple[str, dict]] = []
+
+    class _NetherLavaLakeBot:
+        def status(self):
+            return {
+                "pos": list(st["pos"]),
+                "health": 18.0,
+                "alive": True,
+                "ready": True,
+                "in_lava": st["in_lava"],
+                "yaw": st["yaw"],
+                "dimension": "minecraft:the_nether",
+            }
+
+        def call(self, action, body=None, **kwargs):
+            pl = dict(body or {})
+            calls.append((action, pl))
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 61}]}
+            if action == "get_block":
+                p = pl.get("pos", [0, 0, 0])
+                if tuple(p) in {(229, 33, 234), (229, 34, 234), (227, 32, 240)}:
+                    return {"name": "air"}
+                if tuple(p) in {(229, 32, 234), (235, 31, 240), (235, 32, 240)}:
+                    return {"name": "basalt"}  # (235,31,240) has solid at y+1 -> sheer wall, skip!
+                return {"name": "lava"}
+            if action == "find_blocks":
+                return {
+                    "blocks": [
+                        {"name": "basalt", "pos": [235, 31, 240], "dist": 7.6},
+                        {"name": "netherrack", "pos": [229, 32, 234], "dist": 6.2},
+                    ]
+                }
+            if action == "move_to":
+                st["pos"] = [pl["x"], pl["y"], pl["z"]]
+                st["in_lava"] = False
+                return {"ok": True}
+            return {"ok": True}
+
+    out = CombatEnv(_NetherLavaLakeBot()).escape_lava()
+    assert out["ok"] is True and out["in_lava"] is False
+    assert "lava_move_to_shore" in out["actions"]
+    ctrl = next(pl for act, pl in calls if act == "control" and pl.get("forward"))
+    assert ctrl["ms"] >= 1500
+    mv = next(pl for act, pl in calls if act == "move_to")
+    assert (mv["x"], mv["y"], mv["z"]) == (229.5, 33.0, 234.5)
+
+
+
 
 
 

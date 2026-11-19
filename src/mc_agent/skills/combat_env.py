@@ -114,6 +114,23 @@ SHORE_LAND_BLOCKS: tuple[str, ...] = (
     "moss_block",
 )
 
+NETHER_SHORE_BLOCKS: tuple[str, ...] = (
+    "netherrack",
+    "basalt",
+    "blackstone",
+    "polished_blackstone",
+    "polished_blackstone_bricks",
+    "gilded_blackstone",
+    "nether_bricks",
+    "cracked_nether_bricks",
+    "soul_sand",
+    "soul_soil",
+    "crimson_nylium",
+    "warped_nylium",
+)
+
+LAVA_SHORE_BLOCKS: tuple[str, ...] = SHORE_LAND_BLOCKS + NETHER_SHORE_BLOCKS
+
 TRAP_BLOCKS: frozenset[str] = frozenset(
     {
         "cactus",
@@ -899,30 +916,46 @@ class CombatEnv:
             if c.get("hazard") not in {"lava", "geofence"} and float(c.get("yaw", 0.0)) not in tried_yaws:
                 if c.get("safe") or c.get("hazard") in {None, "water"}:
                     tried_yaws.append(float(c["yaw"]))
-        if not tried_yaws:
-            # Wide Nether lava lake (>2.8m from shore): probe 4.5m..7.5m to steer straight toward solid dry land
-            base_yaw = float(st.get("yaw") or 0.0)
-            best_shore_yaw: float | None = None
-            py = math.floor(float(pos0[1]) + 0.05)
-            for probe_dist in (4.5, 7.5):
-                for deg in (0, 45, -45, 90, -90, 135, -135, 180):
-                    cand_yaw = base_yaw + math.radians(deg)
-                    ux, uz = yaw_to_unit_xz(cand_yaw)
-                    px = math.floor(float(pos0[0]) + ux * probe_dist)
-                    pz = math.floor(float(pos0[2]) + uz * probe_dist)
-                    if _is_solid_ground(self._get_block_name(px, py, pz)) and _is_passable(self._get_block_name(px, py + 1, pz)):
-                        best_shore_yaw = cand_yaw
-                        break
-                if best_shore_yaw is not None:
-                    break
-            tried_yaws = [best_shore_yaw] if best_shore_yaw is not None else [base_yaw]
 
+        py = math.floor(float(pos0[1]) + 0.05)
+        lava_shore_target: list[float] | None = None
+        if not tried_yaws:
+            # Wide lava lake (e.g. Nether basalt/netherrack ocean): locate nearest walkable dry bank via find_blocks first.
+            lava_shore_target = self._find_walkable_shore_target(
+                pos0,
+                block_types=LAVA_SHORE_BLOCKS,
+                max_radius=24,
+                min_y=py - 1,
+                max_y=py + 2,
+            )
+            if lava_shore_target is not None:
+                tried_yaws = [aim_yaw_pitch(pos0, lava_shore_target)[0]]
+            else:
+                base_yaw = float(st.get("yaw") or 0.0)
+                best_shore_yaw: float | None = None
+                for probe_dist in (4.5, 7.5, 11.0, 15.0):
+                    for deg in (0, 45, -45, 90, -90, 135, -135, 180):
+                        cand_yaw = base_yaw + math.radians(deg)
+                        ux, uz = yaw_to_unit_xz(cand_yaw)
+                        px = math.floor(float(pos0[0]) + ux * probe_dist)
+                        pz = math.floor(float(pos0[2]) + uz * probe_dist)
+                        for y_chk in (py, py + 1, py - 1):
+                            if _is_solid_ground(self._get_block_name(px, y_chk, pz)) and _is_passable(self._get_block_name(px, y_chk + 1, pz)):
+                                best_shore_yaw = cand_yaw
+                                break
+                        if best_shore_yaw is not None:
+                            break
+                    if best_shore_yaw is not None:
+                        break
+                tried_yaws = [best_shore_yaw] if best_shore_yaw is not None else [base_yaw]
+
+        swim_ms = 1650 if (lava_shore_target is not None or len(tried_yaws) == 1) else 950
         for cyaw in tried_yaws[:2]:
             try:
                 self.bot.call("look", {"yaw": cyaw, "pitch": 0.0})
                 self.bot.call(
                     "control",
-                    {"forward": True, "jump": True, "sprint": True, "ms": 950, "stop_on": ["death"]},
+                    {"forward": True, "jump": True, "sprint": True, "ms": swim_ms, "stop_on": ["death"]},
                 )
                 actions.append("lava_jump_sprint")
             except ApiError:
@@ -930,6 +963,28 @@ class CombatEnv:
             st = self.bot.status()
             if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
                 return _lava_result(st)
+
+        if lava_shore_target is not None:
+            shore_d = math.hypot(lava_shore_target[0] - float(pos0[0]), lava_shore_target[2] - float(pos0[2]))
+            if shore_d <= 8.0:
+                try:
+                    self.bot.call(
+                        "move_to",
+                        {
+                            "x": lava_shore_target[0],
+                            "y": lava_shore_target[1],
+                            "z": lava_shore_target[2],
+                            "range": 1.2,
+                            "timeout": 2200,
+                            "stop_on": ["death"],
+                        },
+                    )
+                    actions.append("lava_move_to_shore")
+                except ApiError:
+                    pass
+                st = self.bot.status()
+                if st.get("alive") is False or st.get("ready") is False or not bool(st.get("in_lava")):
+                    return _lava_result(st)
 
         # 3. Boxed-in pit or deep lava: try replacing lava at feet / pillaring up with a filler block
         filler = self._pick_filler_block(counts)
@@ -1107,6 +1162,61 @@ class CombatEnv:
             **({"respawned": True} if respawned else {}),
         }
 
+    def _find_walkable_shore_target(
+        self,
+        pos0: Sequence[float],
+        *,
+        block_types: Sequence[str],
+        max_radius: int = 24,
+        min_y: int = -64,
+        max_y: int | None = None,
+        threat_pos: Sequence[float] | None = None,
+    ) -> list[float] | None:
+        """Query `find_blocks` for nearby solid shoreline with 2-high passable headroom."""
+        start_x, start_z = float(pos0[0]), float(pos0[2])
+        has_threat = isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3
+        tx_th = float(threat_pos[0]) if has_threat else 0.0
+        tz_th = float(threat_pos[2]) if has_threat else 0.0
+        threat_dist0 = math.hypot(start_x - tx_th, start_z - tz_th) if has_threat else 0.0
+
+        try:
+            found = self.bot.call(
+                "find_blocks",
+                {
+                    "radius": max(8, min(28, int(max_radius))),
+                    "types": list(block_types),
+                    "limit": 36,
+                },
+            )
+        except Exception:
+            found = None
+
+        candidates: list[tuple[float, int, int, int]] = []
+        for row in (found or {}).get("blocks") or []:
+            if not isinstance(row, dict):
+                continue
+            rpos = row.get("pos")
+            if not isinstance(rpos, (list, tuple)) or len(rpos) < 3:
+                continue
+            cx, cy, cz = int(rpos[0]), int(rpos[1]), int(rpos[2])
+            if cy < min_y or (max_y is not None and cy > max_y):
+                continue
+            if not _is_solid_ground(_clean_block_name(row.get("name"))):
+                continue
+            if self.geofence is not None and not self.geofence.contains(cx + 0.5, float(cy + 1), cz + 0.5):
+                continue
+            hdist = math.hypot(cx + 0.5 - start_x, cz + 0.5 - start_z)
+            away_penalty = 1.5 if (has_threat and math.hypot(cx + 0.5 - tx_th, cz + 0.5 - tz_th) < threat_dist0) else 0.0
+            candidates.append((hdist + away_penalty, cx, cy, cz))
+
+        candidates.sort(key=lambda item: item[0])
+        for _, cx, cy, cz in candidates[:10]:
+            foot_b = self._get_block_name(cx, cy + 1, cz)
+            head_b = self._get_block_name(cx, cy + 2, cz)
+            if _is_passable(foot_b) and _is_passable(head_b):
+                return [cx + 0.5, float(cy + 1), cz + 0.5]
+        return None
+
     def escape_deep_water_to_shore(
         self,
         threat_pos: Sequence[float] | None = None,
@@ -1157,52 +1267,14 @@ class CombatEnv:
                 pass
 
         # 1. Search nearby solid dry shoreline via find_blocks (filtering out ocean floor below waterline).
-        shore_target: list[float] | None = None
-        min_surface_y = max(61, by - 1)
         has_threat = isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3
-        tx_th = float(threat_pos[0]) if has_threat else 0.0
-        tz_th = float(threat_pos[2]) if has_threat else 0.0
-        threat_dist0 = math.hypot(start_x - tx_th, start_z - tz_th) if has_threat else 0.0
-
-        candidates: list[tuple[float, int, int, int]] = []
-        try:
-            found = self.bot.call(
-                "find_blocks",
-                {
-                    "radius": max(8, min(28, int(max_radius))),
-                    "types": list(SHORE_LAND_BLOCKS),
-                    "limit": 36,
-                },
-            )
-        except Exception:
-            found = None
-
-        for row in (found or {}).get("blocks") or []:
-            if not isinstance(row, dict):
-                continue
-            rpos = row.get("pos")
-            if not isinstance(rpos, (list, tuple)) or len(rpos) < 3:
-                continue
-            cx, cy, cz = int(rpos[0]), int(rpos[1]), int(rpos[2])
-            if cy < min_surface_y:
-                continue
-            if not _is_solid_ground(_clean_block_name(row.get("name"))):
-                continue
-            if self.geofence is not None and not self.geofence.contains(cx + 0.5, float(cy + 1), cz + 0.5):
-                continue
-            hdist = math.hypot(cx + 0.5 - start_x, cz + 0.5 - start_z)
-            away_penalty = 0.0
-            if has_threat and math.hypot(cx + 0.5 - tx_th, cz + 0.5 - tz_th) < threat_dist0:
-                away_penalty = 1.5
-            candidates.append((hdist + away_penalty, cx, cy, cz))
-
-        candidates.sort(key=lambda item: item[0])
-        for _, cx, cy, cz in candidates[:10]:
-            foot_b = self._get_block_name(cx, cy + 1, cz)
-            head_b = self._get_block_name(cx, cy + 2, cz)
-            if _is_passable(foot_b) and _is_passable(head_b):
-                shore_target = [cx + 0.5, float(cy + 1), cz + 0.5]
-                break
+        shore_target = self._find_walkable_shore_target(
+            pos0,
+            block_types=SHORE_LAND_BLOCKS,
+            max_radius=max_radius,
+            min_y=max(61, by - 1),
+            threat_pos=threat_pos,
+        )
 
         # 2. Radial fallback if find_blocks yielded no dry surface spot.
         if shore_target is None:
