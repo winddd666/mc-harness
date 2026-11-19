@@ -761,6 +761,12 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - 但模型仍反复尝试 → 每波浪费 4~7 个模型轮次；根因是 prompt "钻石镐在下界…" 的歧义
 - 建议 D2 改为"用钻石镐挖 ancient_debris（钻石仅存在于主世界）"
 
+### 4aq. BUG-041 修复已在 fix/s-skills（00:29）
+
+- `1bbeb4f`：dig 超时按 `pickaxe_tier` 命名根因（"木镐挖 X 约 25s/格"），并给四条出路
+- `0264145`：同一 dig 格超时后 `_avoid_temporarily(..., "dig_timeout", 30s)` + 下次快速失败
+- 与 D1 建议一致；**尚未合入 HEAD**（`grep low_tier_slow_dig` = 0），需 #1 合并后 r24 复验
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
