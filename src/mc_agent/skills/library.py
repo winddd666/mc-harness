@@ -5678,10 +5678,12 @@ class MacroSkills:
                             if perr.code == "blocked_by_self":
                                 continue
                             last_error = {"code": perr.code, "message": perr.message, "pos": [bx, by, bz]}
-                            if perr.code == "place_failed" and place_failures < 2:
+                            if perr.code in {"place_failed", "no_support"} and place_failures < 2:
                                 # r14 portal recovery: the first jump-place was
                                 # rejected while airborne, then the next whole
-                                # call succeeded. Wait one jump cycle and retry.
+                                # call succeeded. D1/BUG-024: the same path can
+                                # answer no_support before the new floor settles.
+                                # Wait one jump cycle and retry.
                                 place_failures += 1
                                 retry_after = time.monotonic() + 0.45
                                 continue

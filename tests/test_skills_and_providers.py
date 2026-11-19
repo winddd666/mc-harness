@@ -2259,8 +2259,9 @@ def test_pillar_deadline_clears_persistent_jump_posture(monkeypatch) -> None:
     assert calls[-2:] == ["stop", "posture"]
 
 
-def test_pillar_retries_transient_place_failed(monkeypatch) -> None:
-    """r14 portal recovery: first one-step pillar place_failed, next call worked."""
+@pytest.mark.parametrize("failure_code", ["place_failed", "no_support"])
+def test_pillar_retries_transient_place_failures(monkeypatch, failure_code) -> None:
+    """r14/BUG-024: first one-step pillar jump-place failed, next attempt worked."""
     import mc_agent.skills.library as library
 
     clock = [500.0]
@@ -2287,7 +2288,7 @@ def test_pillar_retries_transient_place_failed(monkeypatch) -> None:
             place_calls.append(body)
             if len(place_calls) <= 2:
                 return httpx.Response(
-                    409, json={"ok": False, "error": {"code": "place_failed", "message": "the block is still air"}}
+                    409, json={"ok": False, "error": {"code": failure_code, "message": "placement refused"}}
                 )
             placed[0] = True
             result = {"pos": body["pos"]}
