@@ -151,7 +151,31 @@
 
 ---
 
-## 4. 交接建议（省额度）
+## 4. r12 半程验证（19:26 起，进行中）
+
+| 指标 | r11 | r12 半程 | 结论 |
+|---|---|---|---|
+| 启动崩溃（Traceback） | 3 路 | **0** | BUG-001 已消除 |
+| `model.failed(cancelled)` | 128 | **8**（半程） | BUG-009 显著收敛 |
+| `cancel_cooldown_wait` 总时长 | 290.1s | 16.2s | 同上 |
+| 死亡 incident | 16 | 2 | 明显改善 |
+| `build_portal:unknown` | 13 | **0** | BUG-002 未复发 |
+| `find_blocks:bad_args` | 22 | **0** | BUG-006 已生效 |
+| `interact_no_effect` | 10 | 2（均无 `used/gained`，属真实无效） | BUG-008 正确 |
+| `mine_dfs:repeated_identical_failure_blocked` | 1 | **5（3 路下界 bot）** | 新问题 → **BUG-013** |
+
+> r12 尚在进行，计数未按调用量归一；仅用于确认修复方向，不等同最终验收。
+
+### 【新增 P1】BUG-013 下界场景"挖钻石"空转
+- **影响**：r12 前 3 分钟即 3 bots / 5 次防卡死拦截 + 2 次 `time_slice`（`glm_glm_1_nether_fortress`、`glm_glm_2_nether_bastion`、`ds_ds_4_nether_fortress`）
+- **证据**：`mine_dfs(explore, target=diamond, target_y=15)` 在下界 `[0.5,52,795.3]` / `[6.4,43,-810.6]` / `[800.5,60,796.5]` 空挖到 `time_slice`，随后 `repeat_count=2/3` 被拦
+- **源码定位**：`skills/mining_dfs.py:186-260 ORE_DFS_PROFILES` 仅主世界矿种；`_resolve_target_profile:668-703` 不校验维度
+- **最小修复**：`run()` 入口按 `status.dimension` 校验目标；下界/末地遇到不可能矿种立即返回 `bad_target_for_dimension` + 可用目标建议
+- **验收**：r13 下界三路 0 次实际空挖
+
+---
+
+## 5. 交接建议（省额度）
 
 - **Slice A（#3）**：BUG-003（deadline 透传 + 取消 `climb_out` 隐式预算抬升）
 - **Slice B（#2）**：BUG-009 去抖与冷却、BUG-010 复活进食、BUG-011 反射网络抖动不可致命
