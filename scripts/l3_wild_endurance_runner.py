@@ -1240,6 +1240,46 @@ class SceneWatchdog(threading.Thread):
                 print(f"[Scene Watchdog] {self.bot_name} tick error: {exc!r}", flush=True)
 
 
+def _reassert_scene_geofence(toolset: Any, scene: SceneAnchor, *, supervisor: Any = None) -> bool:
+    """Rebuild the toolset geofence at the scene anchor if the HUD auto-recenter moved it (BUG-040).
+
+    `harness/agent.py:1234-1250` re-centers the fence on the bot whenever it is >400m from the
+    current center. When the scene teleport had not landed yet, the fence got pinned to the old
+    position and every staircase/tunnel/move_to in the scene was then rejected as off-island.
+    """
+    gf = getattr(toolset, "geofence", None)
+    if gf is None:
+        return False
+    try:
+        drift = math.hypot(float(gf.center_x) - scene.x, float(gf.center_z) - scene.z)
+    except Exception:
+        return False
+    if drift <= 50.0:
+        return False
+    try:
+        rebuilt = _scene_geofence_cls(type(gf))(
+            center_x=scene.x,
+            center_z=scene.z,
+            radius=getattr(gf, "radius", scene.radius),
+            margin=getattr(gf, "margin", 8.0),
+        )
+    except Exception as exc:
+        print(f"[Scene] geofence rebuild failed: {exc}", flush=True)
+        return False
+    toolset.geofence = rebuilt
+    if supervisor is not None:
+        try:
+            supervisor.geofence = rebuilt
+        except Exception:
+            pass
+    print(
+        f"[Scene] geofence drift {drift:.0f}m from anchor -> rebuilt at "
+        f"({scene.x:.1f}, {scene.z:.1f})",
+        flush=True,
+    )
+    return True
+
+
 def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
     """Confirm the bot is in the scene dimension and within 64m of the anchor; retry via restock."""
     for i in range(attempts):
@@ -1254,7 +1294,23 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
             math.hypot(float(pos[0]) - scene.x, float(pos[2]) - scene.z) <= 64.0
         )
         if ok_dim and ok_pos:
-            return True
+            # Re-poll once to rule out a stale pre-teleport snapshot (BUG-040: the HUD auto-recenter
+            # used an old position and pinned the geofence off-anchor).
+            time.sleep(1.2)
+            try:
+                st2 = bot.status()
+            except Exception:
+                st2 = {}
+            p2 = st2.get("pos")
+            if isinstance(p2, (list, tuple)) and len(p2) >= 3 and (
+                math.hypot(float(p2[0]) - scene.x, float(p2[2]) - scene.z) <= 64.0
+            ):
+                print(
+                    f"[Scene] entry verified bot={bot_name} dim={dim} "
+                    f"pos=({float(p2[0]):.1f}, {float(p2[1]):.1f}, {float(p2[2]):.1f})",
+                    flush=True,
+                )
+                return True
         print(
             f"[Scene] entry verify failed (attempt {i + 1}/{attempts}) bot={bot_name} "
             f"dim={dim} pos={pos} expected {scene.dim}@({scene.x:.1f},{scene.y:.1f},{scene.z:.1f})",
@@ -1763,6 +1819,8 @@ def main() -> int:
                     return
                 wrong_dim = scene.dim == "the_nether" and "nether" not in dim_cur
                 dist = math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz)
+                if _reassert_scene_geofence(toolset, scene, supervisor=sup):
+                    dist = math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz)
                 if wrong_dim or (scene.dim in dim_cur and dist > scene.drift_limit):
                     restock_scene(bot_name, scene, reason="episode_anchor_pullback")
                     print(
