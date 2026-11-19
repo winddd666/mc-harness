@@ -983,6 +983,32 @@ retries 105 | failed429 0 | 502 0 | tracebacks 0
 
 **结论**：双轨 429 均为 0，hy4 的 4 路 + rpm=6 配置可固定；当前最大 churn 是 `staircase:time_budget`（BUG-037）与 `lost_iron_pickaxe` 重选（BUG-043）。
 
+## 4bi. 过夜审计 03:15 抽检
+
+### 主轨 `overnight_12bot`（1h52m）
+
+```
+243 集：answered 169 / goal_satisfied 29 / timeout 25 / limit 12 / paused 3 / aborted 3 / runtime_error 2
+retries 272 | failed429 0 | 502 0 | tracebacks 0
+```
+
+- **429/502 = 0**（272 次重试全成功）
+- `mine_dfs` 565 次、零进展 **3.9%**；`depth_reset` **10 次**（`ds_1` 3、`nju_guitest` 3、`glm_5` 2、`glm_2`/`ds_2` 各 1）
+- `staircase`：completed 162 / **time_budget 146** / `dig_cell_avoided` 64 / fluid 56 / cave 43
+  - 146 次 time_budget 中 **143 次 `timeout_path=dig`**、**64 次触发"木镐/镐等级"新文案**、`steps_done` 中位 **1**（请求中位 20）
+  - → **BUG-041 的命名+快速失败已生效，但缺"软方块方向优先"，仍 1 步/次**
+- `unstick` 170 次：中位 **4.9s**、p90 17.5s、max **45s**（无 >60s 慢调用）
+- **新 P1（BUG-044）**：3 集因 `MC API 网络请求异常（ReadTimeout）` 整集报废（`ds_4` EP11/12、`hy4_2` EP15）
+
+### hy4 审计轨 `hy4_audit_r26`（进行中）
+
+```
+58 集：answered 37 / goal_satisfied 6 / timeout 6 / limit 7 / runtime_error 2
+retries 4 | 429 0 | 502 1
+```
+
+- 429 仍为 **0**；1 个 502 + 1 个 MC API ReadTimeout
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
