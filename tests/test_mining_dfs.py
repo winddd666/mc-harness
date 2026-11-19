@@ -1387,9 +1387,14 @@ def test_pickaxe_low_hint_tells_model_how_many_stone_picks_it_can_craft() -> Non
     assert "121" in hint
     assert "stone_pickaxe" in hint
 
-    # stone rich but no wood -> tell it to make planks/sticks first
+    # No wood -> harvest a log before trying to craft again.
     no_wood_hint = _pickaxe_low_hint({"cobblestone": 9})
-    assert "oak_planks" in no_wood_hint and "stick" in no_wood_hint
+    assert "mc_skill_harvest_logs(target_logs=1)" in no_wood_hint
+
+    # Sticks are made in batches of four from two planks, including mixed planks.
+    for planks, expected in [(1, 0), (2, 4), (3, 4)]:
+        assert _stone_pickaxe_headroom({"cobblestone": 18, "acacia_planks": planks}) == (expected // 2, 18, expected)
+    assert _stone_pickaxe_headroom({"cobblestone": 18, "acacia_planks": 1, "oak_planks": 1}) == (2, 18, 4)
 
     # no stone at all -> dig some first
     assert "石料不足" in _pickaxe_low_hint({"oak_log": 8})
@@ -1397,6 +1402,30 @@ def test_pickaxe_low_hint_tells_model_how_many_stone_picks_it_can_craft() -> Non
     # zero-material edge case must not claim a positive count
     n0, _, _ = _stone_pickaxe_headroom({})
     assert n0 == 0
+
+
+def test_pickaxe_low_with_one_plank_requests_logs_before_recraft(monkeypatch) -> None:
+    world = _MockMineWorld(inventory_items=[
+        {"name": "stone_pickaxe", "count": 1, "slot": 9, "durability": [4, 131]},
+        {"name": "acacia_planks", "count": 1, "slot": 10},
+        {"name": "crafting_table", "count": 1, "slot": 11},
+    ])
+    world._add_item("cobblestone", 169)
+    world._add_item("cobbled_deepslate", 223)
+    crafted = []
+
+    def craft_gear(item, **kwargs):
+        crafted.append(item)
+        return {"ok": False, "error": "missing_ingredients"}
+
+    with BotSession("tok", bot_username="OnePlank", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        monkeypatch.setattr(skills, "craft_gear", craft_gear)
+        result = skills.mine_dfs()
+
+    assert result["stop_reason"] == "pickaxe_low"
+    assert "mc_skill_harvest_logs(target_logs=1)" in result["message"]
+    assert not crafted
 
 
 def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -> None:

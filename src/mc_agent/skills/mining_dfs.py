@@ -32,6 +32,7 @@ from .library import (
     _inventory_snapshot_and_counts,
     _normalize_drop_name,
     _positive_inv_delta,
+    _total_planks,
 )
 
 DIRECTIONS: dict[str, tuple[int, int]] = {
@@ -837,16 +838,15 @@ def _pick_seal_material(counts: dict[str, int]) -> str | None:
 
 
 def _stone_pickaxe_headroom(counts: dict[str, int]) -> tuple[int, int, int]:
-    """How many stone pickaxes the inventory could craft right now.
+    """Count recipe ingredients independently of crafting-table availability.
 
-    Returns (pickaxes, stone_blocks, sticks_available). Used to tell the model, in plain
-    numbers, that recrafting a stone burner pick is one call away (keeping iron for ore).
+    Returns (pickaxes, stone_blocks, sticks_available).
     """
     stone = int(counts.get("cobblestone", 0)) + int(counts.get("cobbled_deepslate", 0))
     sticks = int(counts.get("stick", 0))
-    planks = sum(int(v) for k, v in counts.items() if k.endswith("_planks"))
+    planks = _total_planks(counts)
     logs = sum(int(v) for k, v in counts.items() if k.endswith(("_log", "_stem")))
-    sticks_available = sticks + 2 * (planks + 4 * logs)
+    sticks_available = sticks + 4 * (planks // 2) + 8 * logs
     return min(stone // 3, sticks_available // 2), stone, sticks_available
 
 
@@ -855,30 +855,22 @@ def _pickaxe_low_hint(counts: dict[str, int]) -> str:
     n, stone, sticks = _stone_pickaxe_headroom(counts)
     if n > 0:
         return (
-            f"当前材料可立刻合 {n} 把石镐（3 石料 + 2 木棍/把；现有石料 {stone}、木棍折算 {sticks}）。"
+            f"石料和木棍材料够做 {n} 把石镐（每把 3 石料、2 木棍，当前有 {stone} 石料、木棍折算 {sticks}）。"
             "建议先 mc_skill_craft_gear(item='stone_pickaxe') 再继续，石镐当耗材、铁镐留着挖矿。"
         )
     if stone >= 3:
         return (
-            f"石料够（{stone}）但木棍不足（折算 {sticks}），先 mc_craft(item='oak_planks') 再 mc_craft(item='stick')，"
-            "然后 mc_skill_craft_gear(item='stone_pickaxe')。"
+            f"石料够（{stone}），木棍不足（折算 {sticks}）。先到能采木的安全位置，"
+            "用 mc_skill_harvest_logs(target_logs=1) 补原木或菌柄，再用 mc_skill_craft_gear(item='stone_pickaxe')。"
         )
     return "石料不足 3：先挖几块石头/深板岩，或用 mc_skill_craft_gear(item='stone_pickaxe') 让它自动备料。"
 
 
 def _has_collar_resupply_materials(counts: dict[str, int]) -> bool:
-    has_wood = (
-        counts.get("stick", 0) >= 2
-        or any(v >= 2 and k.endswith("_planks") for k, v in counts.items())
-        or any(v >= 1 and k.endswith(("_log", "_stem")) for k, v in counts.items())
-    )
-    has_head_mat = (
-        counts.get("cobblestone", 0) + counts.get("cobbled_deepslate", 0) >= 3
-        or counts.get("iron_ingot", 0) >= 3
-        or counts.get("diamond", 0) >= 3
-    )
+    _, stone, sticks = _stone_pickaxe_headroom(counts)
+    has_head_mat = stone >= 3 or counts.get("iron_ingot", 0) >= 3 or counts.get("diamond", 0) >= 3
     has_smeltable = counts.get("raw_iron", 0) >= 1
-    return (has_wood and has_head_mat) or has_smeltable
+    return (sticks >= 2 and has_head_mat) or has_smeltable
 
 
 def _can_stack_expected_drop(inv_raw: dict[str, Any], expected_drops: set[str] | frozenset[str]) -> bool:
@@ -3673,7 +3665,7 @@ class MiningDFSEngine:
             return False
         has_table = int(counts_now.get("crafting_table", 0)) >= 1
         if not has_table:
-            planks_equiv = sum(int(v) for k, v in counts_now.items() if k.endswith("_planks")) + 4 * sum(
+            planks_equiv = _total_planks(counts_now) + 4 * sum(
                 int(v) for k, v in counts_now.items() if k.endswith(("_log", "_stem"))
             )
             sticks = int(counts_now.get("stick", 0))
