@@ -721,8 +721,8 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
     "interact_block_items": {
         "id": "interact_block_items",
         "category": "api_mechanic",
-        "keywords": ["水桶", "锄头", "打火石", "种子", "need_block_target", "interact", "use_item", "种地"],
-        "rule": "bucket、water_bucket、flint_and_steel、*_hoe、*_seeds、bone_meal 必须调用 mc_interact(x, y, z, item=...) 对着方块坐标使用，不能用 mc_use_item！",
+        "keywords": ["水桶", "锄头", "打火石", "种子", "need_block_target", "interact", "use_item", "种地", "out_of_reach_vertical", "装水", "舀岩浆"],
+        "rule": "bucket、water_bucket、flint_and_steel、*_hoe、*_seeds、bone_meal 必须调用 mc_interact(x, y, z, item=...) 对着方块坐标使用，不能用 mc_use_item！交互距离约 <=4 格且必须能看到目标面：out_of_reach_vertical（y 差 6+）时先 mc_skill_tunnel/staircase 下到同层或 move_to 贴近目标 <=3 格再装水/舀岩浆，不要隔着 6~9 格垂直硬点。",
     },
     "negative_coord_floor": {
         "id": "negative_coord_floor",
