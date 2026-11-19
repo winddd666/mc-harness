@@ -236,17 +236,19 @@
 
 ---
 
-## 4d. r15 即时分析（部分收官：18/22 已返回，4 路仍在跑）
+## 4d. r15 最终收官（22/22）
 
 > 按"有返回即摊派"执行，不等 22/22。以下计数基于已落盘 events + 18 份 summary。
 
-| 指标 | r14 | r15（部分） | 结论 |
+| 指标 | r14 | r15（22 路） | 结论 |
 |---|---|---|---|
 | `mine_dfs` 中位 / p90 / max | 20.6 / 54.4 / 83.8s | **27.9 / 58.8 / 86.3s** | ✅ BUG-018 修复生效（0 进展 `time_slice` 仅 5.3%） |
 | iron 槽分数 | 20 | **100**（`hy4_hy_2_iron`） | ✅ BUG-022 解除 |
 | `staircase` 失败 | 44 | **109**（`missing_step_support 55`） | ❌ **BUG-024**：上阶梯垫脚 `no_support` 45 次 |
-| 死亡（18 路） | 28（21 路） | **49** | ❌ **BUG-026**：新场景无生存调优 |
-| `cancel_cooldown_wait` | 286s | **425s** | 同上 |
+| 死亡 | 28 | **57**（notable 去重 51） | ❌ **BUG-026**：新场景无生存调优 |
+| 总分 | 2040 | **2210** | 略升（22 路） |
+| `cancel_cooldown_wait` | 286s | **454s**（cancelled 141→247） | 同上 |
+| `craft_gear` 缺木棍 | — | **39 次 / 10 bots** | ❌ BUG-025（HEAD 已修，r15 为旧数据） |
 | `mc_move_to:movement_not_confirmed` | 33 | 38 | P2-1 未动 |
 | `mc_dig:timeout` | 4 | **15** | P2-21 |
 
@@ -271,6 +273,15 @@
 
 - `no_support` 在这 4 路中 **0 次** → 与 BUG-024「竖井内上阶梯」定位一致，不影响地表裸开。
 - 4 路合计已跑 34 个 episode，说明长任务本身在推进，不存在"卡死不出 summary"。
+
+### 4d-2. r15 收官后的修复复核（HEAD `3fb883e`）
+
+| 工单 | 状态 | 证据 |
+|---|---|---|
+| BUG-025 | **FIXED** | HEAD 已改 `4*(planks//2)+8*logs`（`3d4ac1e`）；`scripts/d1_stick_check.py` **5/5 OK, exit 0** |
+| BUG-024 | **部分修复** | `library.py:6310` 加了 `no_place_face→pillar` 兜底，但 r15 报错来源 `library.py:5673` 的 jump-place 仍无守卫 |
+| SCENE-001 | **已实现** | `7d5a571` 为三场景注入首集目标；待 r16 验证 `mc_skill_trade/brew` 首次出现 |
+| BUG-026 | **OPEN** | 死亡 28→57、cancelled 141→247、冷却 286→454s |
 
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
