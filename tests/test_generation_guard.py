@@ -3685,6 +3685,60 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
+@pytest.mark.parametrize("scenario", ["surface", "close_respawn", "macro_respawn", "macro_close_respawn"])
+def test_r24_boundary_drowning_surfaces_first_and_checks_respawn(scenario):
+    events = []
+    calls = []
+    macro = scenario.startswith("macro_")
+    state = {
+        "pos": [9971.3, 47.2, 2897.3], "health": 18, "oxygen": 0,
+        "in_water": True, "submerged": True, "on_ground": False,
+        "ready": True, "alive": True, "last_death": {"t": 10},
+    }
+
+    class WaterBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(state)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "drown"}
+                return {"events": [] if macro else [hurt]}
+            if action == "inventory":
+                return {"items": []}
+            calls.append((action, body))
+            if action == "control":
+                assert body["jump"] is True and body["forward"] is False and body["sprint"] is False
+                state.update(in_water=False, submerged=False, on_ground=True, pos=[9971.3, 49, 2897.3])
+                if scenario == "close_respawn":
+                    state.update(health=20, last_death={"t": 20})
+            return {"ok": True}
+
+    class EscapeMacro:
+        def escape_water(self):
+            assert macro
+            pos = [9974.5, 62.1, 2978.5] if scenario == "macro_respawn" else [9971.3, 49, 2897.3]
+            state.update(in_water=False, pos=pos, last_death={"t": 20})
+            return {"ok": True, "in_water": False, "pos_after": state["pos"]}
+
+    if macro:
+        state["oxygen"] = 100
+    guard = GenerationGuard(WaterBot(), EventSink(events.append), checkpoint=lambda: None, skills=EscapeMacro())
+    note = guard.stabilize_after_tools()
+    actions = [e for e in events if e["type"] == "guardian.action.completed"]
+    assert len(actions) == 1
+    if macro:
+        assert actions[0]["action"] == "boundary_escape_water"
+        assert actions[0]["result"]["respawned"] is True
+        assert actions[0]["ok"] is False
+        assert note is None
+        assert calls == []
+    else:
+        assert actions[0]["action"] == "boundary_escape_to_shore"
+        assert [action for action, _ in calls] == ["posture", "control"]
+        assert actions[0]["ok"] is (scenario == "surface")
+        assert actions[0]["result"]["mode"] == ("surfaced" if scenario == "surface" else "respawned")
+
+
 
 
 

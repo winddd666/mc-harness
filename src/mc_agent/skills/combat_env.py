@@ -1542,6 +1542,7 @@ class CombatEnv:
         *,
         max_radius: int = 24,
         keep_shield: bool = False,
+        surface_first: bool = False,
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
         st0 = self.bot.status()
@@ -1564,6 +1565,24 @@ class CombatEnv:
         start_x, start_y, start_z = float(pos0[0]), float(pos0[1]), float(pos0[2])
         bx, by, bz = math.floor(start_x), math.floor(start_y + 0.05), math.floor(start_z)
         actions: list[str] = []
+        shore_target: list[float] | None = None
+
+        def interrupted_water_escape(st: dict[str, Any]) -> dict[str, Any] | None:
+            pos = st.get("pos") or pos0
+            respawned = (
+                math.hypot(float(pos[0]) - start_x, float(pos[2]) - start_z) > 64.0
+                or (st.get("last_death") is not None and st["last_death"] != st0.get("last_death"))
+            )
+            if not respawned and st.get("alive") is not False and st.get("ready") is not False:
+                return None
+            return {
+                "ok": False,
+                "in_water": bool(st.get("in_water", True)),
+                "mode": "respawned" if respawned else "not_ready",
+                "shore_target": shore_target,
+                "actions": actions,
+                "pos_after": pos,
+            }
 
         # Hold buoyancy + shield while locating shoreline or breaking surface.
         try:
@@ -1575,15 +1594,25 @@ class CombatEnv:
             pass
 
         oxy0 = st0.get("oxygen")
-        if bool(st0.get("submerged")) or (isinstance(oxy0, (int, float)) and oxy0 < 260):
+        if surface_first or bool(st0.get("submerged")) or (isinstance(oxy0, (int, float)) and oxy0 < 260):
             try:
                 self.bot.call(
                     "control",
-                    {"forward": True, "jump": True, "sprint": True, "ms": 750, "stop_on": ["death"]},
+                    {"forward": not surface_first, "jump": True, "sprint": not surface_first, "ms": 750, "stop_on": ["death"]},
                 )
                 actions.append("water_surface_surge")
             except ApiError:
                 pass
+            if surface_first:
+                st_surface = self.bot.status()
+                interruption = interrupted_water_escape(st_surface)
+                if interruption is not None:
+                    return interruption
+                if not st_surface.get("in_water") and st_surface.get("on_ground") is not False:
+                    return {
+                        "ok": True, "in_water": False, "mode": "surfaced",
+                        "actions": actions, "pos_after": st_surface.get("pos"),
+                    }
 
         # 1. Search nearby solid dry shoreline via find_blocks (filtering out ocean floor below waterline).
         has_threat = isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3
@@ -1647,6 +1676,9 @@ class CombatEnv:
                     self._best_effort_stop()
 
             st_mid = self._safe_status(st0)
+            interruption = interrupted_water_escape(st_mid)
+            if interruption is not None:
+                return interruption
             if (
                 bool(st_mid.get("in_water"))
                 and st_mid.get("alive") is not False
@@ -1708,17 +1740,10 @@ class CombatEnv:
                     self._best_effort_stop()
 
         st_end = self._safe_status(st0)
+        interruption = interrupted_water_escape(st_end)
+        if interruption is not None:
+            return interruption
         pos_end = st_end.get("pos") or pos0
-        moved = math.hypot(float(pos_end[0]) - start_x, float(pos_end[2]) - start_z)
-        if st_end.get("alive") is False or st_end.get("ready") is False or moved > 64.0:
-            return {
-                "ok": False,
-                "in_water": bool(st_end.get("in_water", True)),
-                "mode": "respawned" if moved > 64.0 else "not_ready",
-                "shore_target": shore_target,
-                "actions": actions,
-                "pos_after": pos_end,
-            }
 
         still_wet = bool(st_end.get("in_water"))
         try:

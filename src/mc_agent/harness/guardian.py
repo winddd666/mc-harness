@@ -291,6 +291,20 @@ class GenerationGuard:
         """Live MacroSkills (with MiningDFS shaft state) when wired, else a throwaway binding."""
         return self.skills if self.skills is not None else MacroSkills(self.bot)
 
+    def _escape_water(self, before: dict[str, Any]) -> dict[str, Any]:
+        result = self._skills().escape_water()
+        if not result.get("ok"):
+            return result
+        after = self.bot.status()
+        start, end = before.get("pos"), after.get("pos") or result.get("pos_after")
+        if (
+            (start and end and math.hypot(end[0] - start[0], end[2] - start[2]) > 64.0)
+            or after.get("alive") is False
+            or (after.get("last_death") is not None and after["last_death"] != before.get("last_death"))
+        ):
+            return {**result, "ok": False, "respawned": True}
+        return result
+
     def _inside_own_shaft(self) -> bool:
         """Only bunker-in-place when we are inside our own carved tunnel (never in open cave air)."""
         eng = getattr(self.skills, "mining_dfs", None) if self.skills is not None else None
@@ -1735,6 +1749,10 @@ class GenerationGuard:
         hurts = [e for e in fresh if e.get("type") == "hurt"]
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or hurt_by_lava
+        drowning = in_water and (
+            (status.get("submerged") and oxygen == 0)
+            or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
+        )
         nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
 
         if not in_water and not in_lava:
@@ -1850,21 +1868,25 @@ class GenerationGuard:
                     if any(a.get("action") == "boundary_raise_shield" and a.get("ok") for a in b_actions):
                         notes.append("举盾护体")
 
-                forced_shore_b = self._water_hurt_streak >= 3 or no_water_reentry_b
+                forced_shore_b = self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
                 esc_b_ok = False
+                esc_b_respawned = False
                 if not forced_shore_b:
-                    esc = self._action("boundary_escape_water", lambda: self._skills().escape_water(), raise_on_http_error=False)
+                    esc = self._action("boundary_escape_water", lambda: self._escape_water(status), raise_on_http_error=False)
                     esc_b_res = esc.get("result") if isinstance(esc.get("result"), dict) else {}
                     esc_b_ok = bool(esc.get("ok") and esc_b_res.get("in_water") is not True)
+                    esc_b_respawned = bool(esc_b_res.get("respawned"))
                 if esc_b_ok:
                     still_wet = False
                     self._water_hurt_streak = 0
                     self._last_water_escape_failed = False
                     notes.append("自动浮水登岸")
-                else:
+                elif not esc_b_respawned:
                     shore_b = self._action(
                         "boundary_escape_to_shore",
-                        lambda: self.combat_env.escape_deep_water_to_shore(nh_pos, keep_shield=has_shield_b),
+                        lambda: self.combat_env.escape_deep_water_to_shore(
+                            nh_pos, keep_shield=has_shield_b, **({"surface_first": True} if drowning else {}),
+                        ),
                         raise_on_http_error=False,
                     )
                     shore_b_res = shore_b.get("result") if isinstance(shore_b.get("result"), dict) else {}
