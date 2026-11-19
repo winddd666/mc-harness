@@ -346,6 +346,18 @@ ALL PASS — 11 项门禁全绿
 - **P2-1 部分修复**：`6f54b6f` 把"已在 range 内"转为成功，但 r17 仍有 10 次（entity_id 未覆盖 / status 取失败）
 - 死亡 8：`hy4_6` 5 次（lava 3）、`hy4_1` 2、`ds_4` 1；暂无 trident
 
+## 4h. r17 收官（22/22，0 Traceback）与背包问题
+
+**门禁**：9/11 PASS；仅 **BUG-026** 未达标 —— 死亡 incident 28（>25）、`cancel_cooldown_wait` 302.8s（>200）。
+- 死亡 20（notable 去重）：`hy4_hy_6_nether_bastion` **11 次**（mob 8 / lava 6 合计口径），其余 1~2 次
+- 分数：2090（r15 2210），`hy4_hy_2_iron` **100→20（-80）**，`ds_2_cave 60→25`，`hy4_7 170→135`
+- `hy4_hy_2_iron` 的 4 集里 2 次 `shiny_gear` timeout（18/19 calls），与"背包被 450 块石料塞满"可能相关
+
+**BUG-029（P1，Slice C）背包/物品栏管理**
+- r17 有 **7/22 路**超过保留上限：`hy4_2` 450 石料、`nju_3` 309、`hy4_9` 274、`ds_2` 220、`glm_2` 783 地狱岩
+- 根因：`library.py:1465-1467` 在"空槽足够"时提前 `return`，导致 :1478 的 `cobble_over_cap` 检查**永远不可达**；且清理只在 craft/harvest 触发，`mine_dfs/mine_blocks` 后无触发点，r17 全程 **0 个 dropped 结果**
+- 修复：cap 判断前置 + 采集后软清理（cobble≤384/地狱岩≤128/泥土≤64）+ 返回 `inventory_cleaned`
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
