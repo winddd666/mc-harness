@@ -2934,6 +2934,53 @@ def test_descent_resumes_after_guardian_preemption(monkeypatch, steps_before_pre
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("deadline_expires", [False, True])
+def test_descent_keeps_confirmed_steps_when_the_bot_moves_upward(monkeypatch, deadline_expires) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    origin = (0, 50, 0)
+    descent = [origin, (1, 49, 0), (2, 48, 0)]
+    displaced = (2, 63, 0)
+    world = _MockMineWorld(start_pos=(0.5, 50.0, 0.5), surface_y=64)
+    attempted_from = []
+    with BotSession("tok", bot_username="DescentDisplaced", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=origin, parent_id=None, edge_from_parent=None,
+            branches=[mining.BranchSpec("stair_down", "east", 34)],
+        )
+        engine.collar_node_id = collar.node_id
+
+        def descend(**kwargs):
+            attempted_from.append(engine.active_node_id)
+            if len(attempted_from) > 1:
+                raise mining._MiningDeadline
+            for x, y, z in [*descent[1:], displaced]:
+                world.pos = [x + 0.5, y, z + 0.5]
+                engine.bot.status()
+            if deadline_expires:
+                raise mining._MiningDeadline
+            return {
+                "steps_done": 2, "stop_reason": "fluid_or_bedrock",
+                "end_anchor": displaced, "waypoints": [*descent, displaced],
+                "breaches_sealed": 0, "catch_placed": 0, "deferred_added": 0, "mined_ores": [],
+            }
+
+        monkeypatch.setattr(engine, "_dig_stair_down_edge", descend)
+        monkeypatch.setattr(engine, "_switchback_branches", lambda *a, **k: [mining.BranchSpec("stair_down", "south", 40)])
+        result = engine.run(target="iron", target_y=16, goal_count=1, max_duration_s=32)
+
+    assert result["stop_reason"] == "depth_reset"
+    assert attempted_from == [collar.node_id]
+    assert result["pos_after"][1] == displaced[1]
+    assert [node.anchor for node in engine.nodes.values()] == [origin, descent[-1]]
+    tip = engine.nodes[engine.active_node_id]
+    assert tip.edge_from_parent.waypoints == descent
+    assert [(b.status, b.steps) for b in tip.branches] == [("pending", 32)]
+
+
 def test_waypoint_interpolation_checks_deadline_between_hops(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 

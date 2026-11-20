@@ -915,6 +915,17 @@ def _descent_start_beside_anchor(
     return drop in (1, 2) and (dx, dz) == DIRECTIONS[direction]
 
 
+def _descending_waypoint_prefix(
+    waypoints: list[tuple[int, int, int]], start_y: int,
+) -> list[tuple[int, int, int]]:
+    previous_y = start_y
+    for index, (_, y, _) in enumerate(waypoints):
+        if y > previous_y:
+            return waypoints[:index]
+        previous_y = y
+    return waypoints
+
+
 def _omitted_waypoint_index(
     waypoints: list[tuple[int, int, int]], pos: tuple[int, int, int], edge_kind: str | None,
 ) -> int | None:
@@ -5154,6 +5165,13 @@ class MiningDFSEngine:
             route = [node.anchor, *route]
         else:
             return True
+        if branch.kind == "stair_down":
+            verified_route = _descending_waypoint_prefix(route, node.anchor[1])
+            if len(verified_route) < len(route):
+                if not verified_route:
+                    return True
+                route = verified_route
+                steps_taken = node.anchor[1] - route[-1][1]
         if steps_taken <= 0 or route[-1] == node.anchor:
             return True
         if deadline_failure is None:
@@ -5169,6 +5187,12 @@ class MiningDFSEngine:
             ):
                 return True
             steps_taken = node.anchor[1] - route[-1][1]
+        self._record_partial_branch(node, branch, route, steps_taken)
+        return True
+
+    def _record_partial_branch(
+        self, node: ShaftNode, branch: BranchSpec, route: list[tuple[int, int, int]], steps_taken: int,
+    ) -> None:
         branch.status = "completed"
         self._create_node(
             kind="switchback" if branch.kind.startswith("stair") else "spine",
@@ -5179,7 +5203,6 @@ class MiningDFSEngine:
                 steps=max(1, branch.steps - steps_taken),
             )],
         )
-        return True
 
     # ---- Public Entrypoint ----
 
@@ -5340,7 +5363,7 @@ class MiningDFSEngine:
         if end_y > max(start_y, target_y) + 8:
             result["progress_lost"] = True
             result["depth_lost"] = end_y - start_y
-            if result.get("stop_reason") == "time_slice_progress":
+            if result.get("stop_reason") in {"time_slice_progress", "movement_not_confirmed"}:
                 result.update(
                     ok=False, requires_replan=True, stop_reason="depth_reset",
                     message=f"本轮从 y={start_y} 回升到了 y={end_y}，目标层是 y={target_y}。请先检查下行路线再继续。",
@@ -6198,6 +6221,17 @@ class MiningDFSEngine:
 
             elif branch_kind in {"stair_down", "stair_up"}:
                 end_anchor = tuple(edge_res["end_anchor"])
+                if not is_up:
+                    waypoints = edge_res["waypoints"]
+                    verified_route = _descending_waypoint_prefix(waypoints, node.anchor[1])
+                    if len(verified_route) < len(waypoints):
+                        next_branch.status = "pending"
+                        if verified_route and verified_route[0] == node.anchor:
+                            descent = node.anchor[1] - verified_route[-1][1]
+                            if descent > 0:
+                                self._record_partial_branch(node, next_branch, verified_route, descent)
+                        stop_reason = er if er in {"hurt", "not_ready", "pickaxe_low"} else "movement_not_confirmed"
+                        break
                 reached_band = (end_anchor[1] >= eff_y - 1) if is_up else (end_anchor[1] <= eff_y + 2)
 
                 if self._note_fluid_abort(er):

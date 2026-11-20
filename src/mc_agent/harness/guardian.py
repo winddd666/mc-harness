@@ -966,6 +966,7 @@ class GenerationGuard:
             or needs_hot_floor_guard
             or drowning
             or (effective_combat_hurt and in_water)
+            or (effective_combat_hurt and other_hurts and hp_cur <= 4.0)
             or no_water_reentry
             or (pre_trigger is not None and pre_trigger.get("source") == "pre_hurt_creeper")
             or in_wall_hurt
@@ -1404,6 +1405,10 @@ class GenerationGuard:
                                 inv=inv,
                                 attacker=attacker if isinstance(attacker, dict) else None,
                             )
+                        if not has_shield and not att_pos_r and isinstance(att_id_r, int):
+                            shooter_pos = self._find_hostile_position(att_id_r, att_name_r)
+                            if shooter_pos is not None:
+                                attacker = {**(att_obj or {}), "pos": shooter_pos}
                         cf = self._action(
                             "combat_or_flee",
                             lambda: self._defend_or_flee(status, attacker, counts, ranged=True),
