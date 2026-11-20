@@ -2041,6 +2041,47 @@ def test_climb_out_prefers_walking_the_shaft_over_new_stairs(monkeypatch) -> Non
     assert stairs == []                            # never dug a single stair
 
 
+@pytest.mark.parametrize("retired", [False, True])
+def test_climb_out_rejoins_a_completed_side_branch_before_cutting_stairs(monkeypatch, retired) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    world = _MockMineWorld(start_pos=(9.5, 20.0, 0.5), surface_y=40)
+    stair = [(0, y, y - 20) for y in range(40, 19, -1)]
+    leaf = [(x, 20, 0) for x in range(10)]
+
+    def short_moves_only(request):
+        if request.url.path.endswith("/move_to"):
+            args = json.loads(request.content)
+            goal = (args["x"], args.get("y", world.pos[1]), args["z"])
+            if math.dist(world.pos, goal) > 1.5:
+                return httpx.Response(200, json={
+                    "ok": False, "error": {"code": "path_not_found", "message": "use the corridor"},
+                })
+        return world.handler(request)
+
+    for x, y, z in [*stair, *leaf]:
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    with BotSession("tok", bot_username="ClimbFromLeaf", transport=httpx.MockTransport(short_moves_only)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=stair[0], parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="spine", anchor=leaf[0], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", stair),
+            branches=[BranchSpec("branch_leaf", "east", 9, status="completed", completed_waypoints=leaf)],
+        )
+        if retired:
+            engine._archive_current_shaft_to_ledger(mark_exhausted=True)
+            engine._clear_active_tree_only()
+        monkeypatch.setattr(engine.skills, "dig_staircase", lambda **kw: pytest.fail("re-dug the return route"))
+        result = engine.run(action="climb_out", max_duration_s=20)
+
+    assert result["stop_reason"] == "surface_reached"
+    assert result["climb"]["method"] == "walk"
+    assert not world.dig_log
+
+
 def test_corridor_repair_digs_fill_but_refuses_flooded_cells() -> None:
     """A filled-in corridor cell must be re-opened instead of abandoning the route."""
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)

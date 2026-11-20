@@ -2034,6 +2034,25 @@ class MiningDFSEngine:
                     self.active_node_id = dest
                     cur_pos = self.nodes[dest].anchor
                     break
+                else:
+                    # Finished side branches keep waypoints without adding a node.
+                    # Follow the recorded branch back to its junction first.
+                    leaf = next((
+                        (node.node_id, branch.completed_waypoints)
+                        for node in self.nodes.values()
+                        for branch in node.branches
+                        if branch.kind == "branch_leaf" and branch.status == "completed"
+                        and branch.completed_waypoints and branch.completed_waypoints[0] == node.anchor
+                        and cur_pos in branch.completed_waypoints
+                    ), None)
+                    if leaf is not None:
+                        dest, waypoints = leaf
+                        route = list(reversed(waypoints[:waypoints.index(cur_pos) + 1]))
+                        ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
+                        if not ok:
+                            return False, err
+                        self.active_node_id = dest
+                        cur_pos = self.nodes[dest].anchor
         anchor_now = self.nodes[self.active_node_id].anchor
         if cur_pos != anchor_now:
             best_near_id: int | None = None
@@ -2780,6 +2799,12 @@ class MiningDFSEngine:
                 ]
                 points = [tuple(n["anchor"]) for n in nodes if n.get("anchor")]
                 points.extend(wp for _, waypoints in edges for wp in waypoints)
+                for n in nodes:
+                    for branch in n.get("branches", []):
+                        waypoints = branch.get("completed_waypoints") or []
+                        if (branch.get("kind") == "branch_leaf" and branch.get("status") == "completed"
+                                and waypoints and waypoints[0] == n.get("anchor")):
+                            points.extend(tuple(wp) for wp in waypoints)
                 if allow_retired and points:
                     hd = min(math.dist(cur_pos, pt) for pt in points)
                     vertical_near = hd <= 6.0
