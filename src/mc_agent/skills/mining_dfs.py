@@ -5009,6 +5009,7 @@ class MiningDFSEngine:
         act = str(action or "explore").strip().lower()
         original_bot, original_skills = self.bot, self.skills
         previous_deadline = getattr(self, "_deadline", None)
+        return_dug_before = self.dug_during_return
         scoped = _BudgetSession(original_bot, deadline - min(0.5, budget / 10))
         self._deadline = scoped.deadline
         self.bot = scoped.session
@@ -5131,6 +5132,20 @@ class MiningDFSEngine:
                     result.update(
                         stop_reason="climb_progress", next_action="climb_out",
                         message=f"本轮已爬到 y={end_y}，目标 y={target_height}。可从当前站位继续 climb_out。",
+                    )
+            if act == "return_collar" and self.collar_node_id in self.nodes:
+                collar = self.nodes[self.collar_node_id].anchor
+                result["collar_anchor"] = list(collar)
+                result["dug_during_return"] = self.dug_during_return - return_dug_before
+                status = scoped.last_status
+                if (
+                    moved and not (status.get("in_water") or status.get("in_lava"))
+                    and status.get("alive") is not False and status.get("ready") is not False
+                    and math.dist(scoped.positions[-1], collar) < math.dist(scoped.positions[0], collar)
+                ):
+                    result.update(
+                        requires_replan=False, stop_reason="return_collar_progress", next_action="return_collar",
+                        message="本轮已沿矿道向井口回撤。请从当前站位继续 action='return_collar'。",
                     )
             if result["stop_reason"] == "time_slice":
                 next_steps: dict[str, Any] = {
@@ -5415,6 +5430,8 @@ class MiningDFSEngine:
                 min_hp_ref=min_hp_ref,
                 deadline=deadline,
             )
+            if err_ret == "walk_time_slice":
+                raise _MiningDeadline
             st_after = self.bot.status()
             return {
                 "ok": ok_ret,

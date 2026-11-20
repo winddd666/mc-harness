@@ -698,6 +698,57 @@ def test_mining_dfs_zero_dig_return_collar_and_backtrack_after_branch_exhausted(
     assert tuple(int(v // 1) for v in world.pos) == (0, 80, 0)
 
 
+@pytest.mark.parametrize(("with_progress", "expire_during_status"), [(False, True), (True, True), (True, False)])
+def test_return_collar_timeout_reports_confirmed_approach(monkeypatch, with_progress, expire_during_status) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(6.5, 58.0, 0.5), surface_y=64)
+    with BotSession("tok", bot_username="ResumeReturn", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        route = [(0, 64, 0), (2, 62, 0), (4, 60, 0), (6, 58, 0)]
+        collar = engine._create_node(kind="collar", anchor=route[0], parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine._create_node(kind="switchback", anchor=route[-1], parent_id=collar.node_id,
+                            edge_from_parent=ShaftEdge("stair_down", "east", route), branches=[])
+        walked = []
+        interrupted = False
+
+        def step(cell, *, from_cell, repair_support):
+            nonlocal interrupted
+            if with_progress or interrupted:
+                x, y, z = cell
+                world.pos = [x + 0.5, float(y), z + 0.5]
+                walked.append(cell)
+                engine.bot.status()
+            if not interrupted and (not with_progress or cell == route[2]):
+                interrupted = True
+                clock.now = engine._deadline
+                if expire_during_status:
+                    engine.bot.status()
+            return True
+
+        monkeypatch.setattr(engine, "_step_to", step)
+        first = engine.run(action="return_collar", max_duration_s=5)
+        if with_progress:
+            assert first["stop_reason"] == "return_collar_progress"
+            assert first["next_action"] == "return_collar"
+            assert first["requires_replan"] is False
+            assert first["pos_after"][1] == 60
+        else:
+            assert first["stop_reason"] == "time_slice"
+            assert first["requires_replan"] is True
+        assert first["ok"] is False
+
+        second = engine.run(action="return_collar", max_duration_s=5)
+
+    assert second["stop_reason"] == "returned_to_collar"
+    assert walked == [(x, 64 - x, 0) for x in range(5, -1, -1)]
+    assert not world.dig_log
+
+
 def test_mining_dfs_respects_void_geofence() -> None:
     world = _MockMineWorld(start_pos=(0.5, 80.0, -7.5), surface_y=80)
     gf = VoidGeofence(center_x=0.0, center_z=0.0, radius=15.0, margin=5.0)
