@@ -2102,6 +2102,51 @@ def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, ga
         assert "error" not in result
 
 
+@pytest.mark.parametrize(
+    "item,level,changed,used,gained,filled",
+    [
+        ("glass_bottle", 1, False, {}, {}, False),
+        ("glass_bottle", 8, False, {}, {}, False),
+        ("glass_bottle", 0, False, {"glass_bottle": 1}, {}, False),
+        ("glass_bottle", 0, True, {"glass_bottle": 1}, {"kelp": 1}, False),
+        ("glass_bottle", 0, False, {"glass_bottle": 1}, {"potion": 1}, True),
+        ("minecraft:glass_bottle", 0, False, {"glass_bottle": 1}, {"potion": 1}, True),
+    ],
+)
+def test_glass_bottle_interact_with_water_requires_confirmed_fill(
+    item, level, changed, used, gained, filled
+) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    receipt = {
+        "block": "water",
+        "before": {"level": level},
+        "after": {"name": "water", "properties": {"level": level}},
+        "changed": changed,
+    }
+    if used:
+        receipt["used"] = used
+    if gained:
+        receipt["gained"] = gained
+
+    def handler(request):
+        assert request.url.path.endswith("/interact")
+        assert json.loads(request.content)["item"] == item
+        return httpx.Response(200, json={"ok": True, "result": receipt})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_interact(x=1, y=64, z=0, item=item))
+
+    assert result["ok"] is filled
+    assert result["result"] == receipt
+    if filled:
+        assert "error" not in result
+    else:
+        assert result["requires_replan"] is True
+        assert result["error"]["code"] == "interact_no_effect"
+        assert "level=0" in result["error"]["message"]
+
+
 def test_window_view_rejects_entity_at_12m_before_no_window() -> None:
     """r16 BUG-027: goNear silently failed, then no_window from 12m."""
     from mc_agent.harness.mc_tools import McToolset

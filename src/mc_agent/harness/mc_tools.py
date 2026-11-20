@@ -1373,7 +1373,8 @@ class McToolset:
             )
         if item:
             payload["item"] = item
-        if item in {"bucket", "water_bucket", "lava_bucket"} and x is not None and y is not None and z is not None:
+        is_bucket = item in {"bucket", "water_bucket", "lava_bucket"}
+        if is_bucket and x is not None and y is not None and z is not None:
             try:
                 blk = self.bot.call("get_block", {"pos": [x, y, z]}, timeout_s=2.0)
                 if isinstance(blk, dict):
@@ -1425,23 +1426,40 @@ class McToolset:
             except Exception:
                 pass
         raw = self._call_json("interact", payload)
-        if item in {"bucket", "water_bucket", "lava_bucket"}:
-            try:
-                parsed = json.loads(raw)
-                res_obj = parsed.get("result") if isinstance(parsed, dict) else None
-                if (parsed.get("ok") is True and isinstance(res_obj, dict)
-                        and res_obj.get("changed") is False
-                        and not res_obj.get("used") and not res_obj.get("gained")):
-                    parsed["ok"] = False
-                    parsed["requires_replan"] = True
-                    parsed["error"] = {
-                        "code": "interact_no_effect",
-                        "message": "交互未产生方块变化(changed=false)：目标可能是流动流体而非静止源头(level=0)，或视线/距离受阻，桶内状态未变化！请靠近静止源头(level=0) 3 格内重试。",
-                    }
-                    return json.dumps(parsed, ensure_ascii=False)
-            except ValueError:
-                pass
-        return raw
+        is_bottle = "pos" in payload and (item or "").removeprefix("minecraft:") == "glass_bottle"
+        if not (is_bucket or is_bottle):
+            return raw
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return raw
+        if not isinstance(parsed, dict) or parsed.get("ok") is not True:
+            return raw
+        res_obj = parsed.get("result")
+        if not isinstance(res_obj, dict):
+            return raw
+
+        used = res_obj.get("used")
+        gained = res_obj.get("gained")
+        if is_bucket and res_obj.get("changed") is False and not used and not gained:
+            message = "交互未产生方块变化(changed=false)：目标可能是流动流体而非静止源头(level=0)，或视线/距离受阻，桶内状态未变化！请靠近静止源头(level=0) 3 格内重试。"
+        elif is_bottle and str(res_obj.get("block") or "").removeprefix("minecraft:") in {"water", "flowing_water"}:
+            if (
+                isinstance(used, dict) and used.get("glass_bottle")
+                and isinstance(gained, dict) and (gained.get("potion") or gained.get("water_bottle"))
+            ):
+                return raw
+            message = (
+                "交互回执未确认玻璃瓶装水。请用 mc_inventory 确认水药瓶是否入包。"
+                "若没有，换一个 3 格内可达的静止水源（level=0）。"
+            )
+        else:
+            return raw
+
+        parsed["ok"] = False
+        parsed["requires_replan"] = True
+        parsed["error"] = {"code": "interact_no_effect", "message": message}
+        return json.dumps(parsed, ensure_ascii=False)
 
     def mc_use_item(
         self,
