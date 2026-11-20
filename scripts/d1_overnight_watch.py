@@ -101,6 +101,17 @@ def main() -> int:
                 out.append(p)
         return sorted(out)
 
+    # Pre-seen: a wave that is already settled must not trigger an immediate exit
+    # (hy4_audit_* finishes in ~20 min, often before the watcher starts).
+    seen: dict[str, float] = {}
+    for w in waves():
+        s = snapshot(w)
+        if s["summaries"] >= max(1, s["bots"]):
+            newest = max(
+                (f.stat().st_mtime for f in w.glob("*/*.events.jsonl")), default=0.0
+            )
+            seen[w.name] = newest
+
     deadline = time.monotonic() + args.every_min * 60.0
     print(f"[overnight] start {time.strftime('%T')} prefixes={prefixes} every={args.every_min}m", flush=True)
     while time.monotonic() < deadline:
@@ -109,7 +120,10 @@ def main() -> int:
             settled = (s["summaries"] >= max(1, s["bots"])) or (
                 s["summaries"] >= 1 and s["idle"] >= args.idle
             )
-            if settled:
+            newest = max(
+                (f.stat().st_mtime for f in w.glob("*/*.events.jsonl")), default=0.0
+            )
+            if settled and (w.name not in seen or newest > seen[w.name] + 120):
                 print(f"WAVE SETTLED {line(s)} at {time.strftime('%T')}", flush=True)
                 return 0
         time.sleep(60)

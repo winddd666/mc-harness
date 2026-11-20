@@ -912,6 +912,424 @@ r13 5  r14 5  r15 4  r17 4  r18 7  r19 7  r20 4  r21 6  r22 6  r23 4
 - 快照字段：summaries/bots、episode 状态分布、http_retry、失败 429/502、Traceback —— 直接回答"hy4 4 并发 + rpm=6 是否 0 次 429"
 - 追踪重点：BUG-030 `depth_reset`、BUG-037 阶梯、`unstick` 慢调用、过夜长程新 P0/P1
 
+## 4bf. r24_long 终验（4/4）与 r22_long 对比（01:23）
+
+| bot | r22_long | r24_long | 变化 |
+|---|---|---|---|
+| `glm_glm_5_midgame` | 195 | 180 | -15 |
+| `hy4_hy_1_bare` | **10**（11 集） | **35**（6 集） | **+25** |
+| `ds_ds_1_bare` | 20 | 40 | +20 |
+| `nju_movetest_01_bare` | 35 | 35 | 0 |
+
+- **门禁 ALL PASS**：deaths 5、cooldown 64.5s、mine 0.90、zero-slice **0.0%**、over-cap **0**、runtime_error 1
+- `hy4_1` 从 10→35：r24 已含 BUG-041 修复（低镐提示 + 同格快速失败），裸开卡死明显缓解
+- `ds_1` 20→40 同步改善
+
+**过夜双轨已启动（01:23）**
+- `overnight_12bot`：12 路，刚起（14 事件文件，2 集 goal_satisfied）
+- `hy4_audit_r25`：4 路，刚起（4 事件文件）
+- 低频审计器 PID **1736176**（45 分钟抽检或收官即报）；hy4 轨 429 目标 = 0
+
+## 4bg. 过夜双轨首轮审计（01:45）
+
+### hy4 审计轨 `hy4_audit_r25`（4 路，rpm=6，20 分钟，4/4 收官）
+
+```
+retries 0 | failed429 0 | 502 0 | tracebacks 0
+门禁：ALL PASS（deaths 7、cooldown 8.4s、mine 0.89、zero-slice 0.0%、over-cap 0）
+```
+
+| bot | 分数 | 集数 |
+|---|---|---|
+| `hy4_6_nether_bastion` | **210** | 3 |
+| `hy4_5_brewing_alchemy` | 75 | 8 |
+| `hy4_9_deep_water` | 30 | 3 |
+| `hy4_2_iron` | 20 | 3 |
+
+- `mine_dfs` 66 次、**0 零进展**；`depth_reset` 仅 1 次（`hy4_6`）
+- `unstick` 4 次：中位 **4.35s**、max **8.3s** → **无慢调用**
+- 结论：**hy4 的 429 风暴是 10 路并发导致，4 路 + rpm=6 完全安全**
+
+### 主轨 `overnight_12bot`（12 路，4h，进行中 22 分钟）
+
+```
+48 集：answered 28 / goal_satisfied 14 / timeout 3 / limit 2 / paused 1
+runtime_error 0 | failed429 0 | retries 26 | tracebacks 0
+```
+
+- nju/glm/ds 全部正常，429 为 0（重试均成功）
+- 下一次抽检约 02:29 或主轨收官时
+
+## 4bh. 过夜审计 02:30 抽检
+
+### 主轨 `overnight_12bot`（1h07m，进行中）
+
+```
+133 集：answered 90 / goal_satisfied 24 / timeout 11 / limit 5 / paused 3 / aborted 3
+retries 105 | failed429 0 | 502 0 | tracebacks 0
+```
+
+- **429/502 = 0**（105 次重试全部成功）→ 12 路 nju/glm/ds 稳定
+- `mine_dfs` 386 次、零进展 20（**5.2%**）
+- `depth_reset` 5 次：`glm_5` 2、`nju_guitest`/`glm_2`/`ds_1` 各 1
+- `staircase`：completed 97 / **time_budget 76（44%）** / pillar_fallback 36 / **dig_cell_avoided 35**（BUG-041 fail-fast 生效）/ dig_failed 34
+- `unstick` >20s 仅 5 次，max **33.4s**（无 >60s）
+- **新 P1（BUG-043）**：`ds_2` 连续 3 集 `aborted / lost_iron_pickaxe`（EP4 烧了 33 次请求才判定；EP7/EP8 各 1 次又重选同一目标）
+
+### hy4 审计轨
+
+- `hy4_audit_r25`：4/4，**0 retries / 0 429 / 0 502 / 0 Traceback**
+- `hy4_audit_r26`（进行中）：24 集、retries 4、**0 429**、**1 个 502** runtime_error
+
+**结论**：双轨 429 均为 0，hy4 的 4 路 + rpm=6 配置可固定；当前最大 churn 是 `staircase:time_budget`（BUG-037）与 `lost_iron_pickaxe` 重选（BUG-043）。
+
+## 4bi. 过夜审计 03:15 抽检
+
+### 主轨 `overnight_12bot`（1h52m）
+
+```
+243 集：answered 169 / goal_satisfied 29 / timeout 25 / limit 12 / paused 3 / aborted 3 / runtime_error 2
+retries 272 | failed429 0 | 502 0 | tracebacks 0
+```
+
+- **429/502 = 0**（272 次重试全成功）
+- `mine_dfs` 565 次、零进展 **3.9%**；`depth_reset` **10 次**（`ds_1` 3、`nju_guitest` 3、`glm_5` 2、`glm_2`/`ds_2` 各 1）
+- `staircase`：completed 162 / **time_budget 146** / `dig_cell_avoided` 64 / fluid 56 / cave 43
+  - 146 次 time_budget 中 **143 次 `timeout_path=dig`**、**64 次触发"木镐/镐等级"新文案**、`steps_done` 中位 **1**（请求中位 20）
+  - → **BUG-041 的命名+快速失败已生效，但缺"软方块方向优先"，仍 1 步/次**
+- `unstick` 170 次：中位 **4.9s**、p90 17.5s、max **45s**（无 >60s 慢调用）
+- **新 P1（BUG-044）**：3 集因 `MC API 网络请求异常（ReadTimeout）` 整集报废（`ds_4` EP11/12、`hy4_2` EP15）
+
+### hy4 审计轨 `hy4_audit_r26`（进行中）
+
+```
+58 集：answered 37 / goal_satisfied 6 / timeout 6 / limit 7 / runtime_error 2
+retries 4 | 429 0 | 502 1
+```
+
+- 429 仍为 **0**；1 个 502 + 1 个 MC API ReadTimeout
+
+## 4bj. hy4 审计轨 r26 终验（03:45，4/4）
+
+```
+retries 4 | 429 0 | 502 1 | tracebacks 0
+门禁：仅 deaths 54 FAIL（>25）；cooldown 191s、mine 0.86、zero-slice 1.7%、over-cap 0
+```
+
+| bot | 分数 | 集数 | 死亡 |
+|---|---|---|---|
+| `hy4_6_nether_bastion` | **210** | 20 | **20（每集 1 次）** |
+| `hy4_9_deep_water` | **120** | 35 | 3 |
+| `hy4_5_brewing_alchemy` | 105 | 19 | 2 |
+| `hy4_2_iron` | 100 | 18 | 13 |
+
+- **0 次 429**（4 路 + rpm=6 再次验证安全）
+- `in_lava` incident **45 次**、`fresh_hurt` 89；死因 `mob 13 / lava 11 / arrow 4 / fall 3`
+- 堡垒场景每集必死 1 次，但分数仍达 210（复活后继续）→ 生存质量是下一步重点
+- `depth_reset` 仅 1 次；`staircase` completed 29 / pillar_fallback 28 / time_budget 19
+- `unstick` 60 次：中位 3.7s、max 37.1s（无 >60s）
+
+## 4bk. 过夜审计 04:30 抽检
+
+### 主轨 `overnight_12bot`（3h07m）
+
+```
+429 集：answered 310 / goal 38 / timeout 42 / limit 23 / runtime_error 9 / aborted 4
+retries 612 | failed429 6 | 502 0 | tracebacks 0
+```
+
+- 9 个 runtime_error：**6× Qwen 429 `rate_limit_error`**（`glm_1` 3、`glm_2` 2、`ds_4` 2…）+ **3× MC API ReadTimeout**
+- 新 429 body：`{"type":"rate_limit_error","message":"Rate limit exceeded. Please try again."}` → 同样不被 `_is_concurrency_limit_429` 识别（BUG-042 需扩关键词）
+- 612 次 retry 绝大多数成功；6 集报废
+- aborted 4：`ds_2` 3（shiny_gear）+ `ds_1` EP19（shiny_gear，BUG-043 扩散到第 2 路）
+
+### hy4 审计轨
+
+- `hy4_audit_r27`（进行中）：26 集、**0 retries / 0 429 / 0 502**
+- r25/r26 已收官：均 **0 次 429**
+
+## 4bl. 过夜审计 05:16 抽检（主轨 3h54m，即将收官）
+
+```
+557 集：answered 410 / goal 46 / timeout 52 / limit 30 / runtime_error 12 / aborted 4
+retries 835 | failed429 9 | 502 0 | tracebacks 0
+```
+
+- 12 个 runtime_error：**9× 429 `rate_limit_error`**（`glm_1` 4、`glm_2`/`glm_4`/`glm_5`/`ds_4` 各 2）+ **3× MC API ReadTimeout**
+- `mine_dfs` **1025 次**、零进展 37（**3.6%**）；`depth_reset` **16 次**（`nju_guitest` 4、`ds_1` 4、`ds_2` 2、`glm_5` 2…）
+- `staircase`：**time_budget 351** > completed 292；`pillar_fallback` 137
+  - 351 次中 **342 次 `timeout_path=dig`**、**135 次触发低镐文案**、`steps_done` 中位 **1**（请求中位 15）
+  - 分布：`nju_3` 71、`ds_2` 59、`glm_3` 35、`glm_1` 33、`glm_4` 32
+  - → **BUG-041 的软方块方向优先是当前最大 churn 来源**
+- `unstick` 406 次：中位 5.4s、p90 25.2s、max **55.1s**（仍无 >60s）
+
+### hy4 审计轨 `hy4_audit_r27`（进行中）
+
+56 集、**0 retries / 0 429 / 0 502**、1 次 aborted；三波审计轨累计 0 次 429。
+
+## 4bm. 过夜主轨终验 `overnight_12bot`（12/12，4 小时）
+
+| bot | 分数 | 集数 | over-cap |
+|---|---|---|---|
+| `glm_2_nether_bastion` | **270** | 30 | netherrack 551 |
+| `ds_4_nether_fortress` | **210** | 43 | — |
+| `glm_1_nether_fortress` | 205 | 34 | — |
+| `glm_4_brewing_alchemy` | 195 | 56 | deepslate 247 |
+| `glm_5_midgame` | 185 | 72 | — |
+| `nju_guitest_01_nether` | 180 | 75 | — |
+| `glm_3_village_trade` | 155 | 61 | cobble 300 |
+| `nju_3_village_trade` | 150 | 56 | deepslate 320 + cobble 256 |
+| `ds_3_enchant_anvil` | 150 | 41 | cobble 320 |
+| `ds_2_cave_combat` | 120 | 58 | cobble 382 + deepslate 301 |
+| `ds_1_bare` | 55 | 35 | cobble 571 |
+| `nju_movetest_bare` | 25 | 21 | cobble 256 |
+
+- 总分 **1900**；最高 `glm_2` 270、`ds_4` 210（43 集）
+- 门禁 4 FAIL：`deaths 144`、`cooldown 1417.8s`、`runtime_error 12`、`over-cap 8`
+- **429：9 次失败 / 879 次重试（1.0%）**，全部 `rate_limit_error`；无 502、无 Traceback
+- `mine_dfs` 1025 次、零进展 **3.6%**；`depth_reset` **16 次**
+- `staircase`：**time_budget 351**（342 次 dig、135 次低镐文案，steps_done 中位 1）
+- `unstick` 406 次：中位 5.4s、p90 25.2s、max 55.1s
+- **死亡 110（notable）**：`ds_4` **41**、`ds_3` 23、`ds_1` 13；`mob 38 / lava 22 / arrow 15 / hot_floor 13`
+
+### BUG-029 长程未达标（根因已定位）
+
+`pre_over_cap` 只让函数"进入"，但 `plan_garbage_drops` 的 `need = max(0, min_free - empty_before)` 在有 ≥3 空槽时为 0 → **一块都不丢**。修复：超 cap 时把 `need` 提升到"清到 cap"所需槽数，或加 `enforce_caps=True`。
+
+## 4bn. 过夜审计 06:17 抽检
+
+### 主轨第二波 `overnight_12bot_part2`（进行中，约 20 分钟）
+
+```
+86 集：answered 60 / goal 14 / limit 6 / timeout 4 / paused 2 / runtime_error 2
+retries 170 | failed429 2 | 502 0 | tracebacks 0
+```
+
+- 2 个 runtime_error 均为 `rate_limit_error` 429（`glm_4`、`glm_5`）
+- 与第一波相同的模式：重试大多成功，少数仍报废
+
+### hy4 审计轨 `hy4_audit_r27`（**3 小时**长审计，进行中）
+
+```
+95 集：answered 71 / goal 7 / timeout 14 / limit 2 / paused 1 / aborted 1
+retries 0 | 429 0 | 502 0 | tracebacks 0
+elapsed 8509/10800s（约 2h22m）
+```
+
+- **rpm=6、4 路，连续 2h22m 零 retry / 零 429** → 这是比 20 分钟抽检更强的证据
+- 1 次 aborted（需后续确认是否 BUG-043）
+
+## 4bo. hy4 审计轨 r27 终验（06:51，3 小时）
+
+```
+126 集：answered 93 / timeout 22 / goal 7 / limit 2 / paused 1 / runtime_error 1 / aborted 1
+retries 0 | 429 0 | 502 0 | tracebacks 0
+```
+
+| bot | 分数 | 集数 |
+|---|---|---|
+| `hy4_6_nether_bastion` | **195** | 50 |
+| `hy4_5_brewing_alchemy` | 165 | 31 |
+| `hy4_2_iron` | 100 | 27 |
+| `hy4_9_deep_water` | 60 | 19 |
+
+- **3 小时 × 4 路 × rpm=6：0 retries / 0 429 / 0 502** → 429 与模型无关，纯并发问题
+- 门禁仅 `over-cap 1` FAIL（BUG-029）；deaths 22、cooldown 128s、mine 0.86、zero-slice 2.2%
+- 1 次 runtime_error = `max_tokens` 截断（P2-33）
+- 1 次 aborted = `lost_iron_pickaxe`（`hy4_9` EP7，BUG-043 已扩散到 3 路）
+
+## 4bp. 06:52 抽检：Qwen 429 突发窗口的精确根因
+
+### 主轨第二波 `overnight_12bot_part2`（进行中 ~80 分钟）
+
+```
+171 集：answered 108 / goal 18 / limit 12 / timeout 11 / runtime_error 19 / aborted 1 / paused 2
+```
+
+- runtime_error 19 = **17× Qwen 429 `rate_limit_error`** + 1× MC API ReadTimeout + 1× `[not_connected]`
+- **硬失败率对照**：
+
+  | 波次 | 请求 | 重试 | 重试率 | 429 硬失败 | 硬失败率 |
+  |---|---|---|---|---|---|
+  | `overnight_12bot` | 10100 | 879 | 8.0% | 9 | **0.08%** |
+  | `overnight_12bot_part2` | 3175 | 313 | 9.0% | 17 | **0.49%** |
+
+  重试率几乎相同 → **不是流量总量问题，是突发窗口**。第一波 9 次散布在 19:33–20:53（UTC）；第二波 **15/17 集中在 22:23–22:33（10 分钟）**，此时主轨 12 路 + hy4 审计轨 4 路 = **16 并发**。
+
+- **每次硬失败的调用序列完全一致**（5 个文件逐一核对）：
+  ```
+  model.request
+  → http_retry(attempt=1, wait=15.0, concurrency_limit=false)
+  → http_retry(attempt=2, wait=15.0, concurrency_limit=false)
+  → model.failed  Qwen API 返回 HTTP 429 {"type":"rate_limit_error"}
+  → run.finished  runtime_error
+  ```
+  **2 次重试、共 30 秒退避后放弃**。
+
+- **根因（`model.py:652-653`）**：
+  ```python
+  standard_max_attempts = 3
+  concurrency_max_attempts = 8
+  ```
+  `_is_concurrency_limit_429` 只认 `concurrency`/`simultaneous`；Qwen 的 `rate_limit_error` 不匹配 → 走 standard 分支（3 次尝试、`2*(attempt+1)` 秒）；并发分支才有 8 次 + `6/10/15/20/22/25/28` 秒（≈126s）。**Qwen 限流窗口 ≥60s，30s 必然不够。**
+
+- **最小修复**：① 关键词增补 `rate_limit` / `rate limit` / `overloaded` / `try again later` / `server_error`；② 对**任意 429** 直接使用 8 次尝试的预算（429 语义就是"稍后重试"）。
+
+### hy4 审计轨 `hy4_audit_r28`（刚起）
+
+4 路、23 次请求、**0 retry / 0 429**。前三波（r25/r26/r27）累计 **0 次 429**。
+
+### 新增 P2
+
+- **P2-34**：`ds_4` EP9 连续两次 `mob_attack` 死亡后以 `[not_connected]` 收尾 → `runtime_error`，白烧 28 次请求。`not_connected` 在 `agent.py:206` 属 transient，但收尾阶段抛出的未被识别。
+- **P2-33 量化**：过夜双轨 **65 次** `finish_reason=length`，**64 次被 `length_recovered` 救回**，仅 1 次报废 → 优先级维持 P2。
+- **BUG-043 扩散**：`nju_movetest_01_bare` EP7（shiny_gear）也 `lost_iron_pickaxe` → 已 4 路。
+
+## 4bq. 07:37 抽检：429 的第二个根因 —— 无抖动惊群（thundering herd）
+
+### 天然 A/B 对照（同一波次、同一时段）
+
+| provider | retry 事件 | `concurrency_limit` | 硬失败 429 |
+|---|---|---|---|
+| NJU `nju_*` | 16 | **true** → 8 次尝试 + 6~28s | **0** |
+| Qwen `glm_*` | 527 | **false** → 3 次尝试 + 2~4s | **26** |
+| DeepSeek `ds_*` | 0 | — | **0** |
+
+同样压力下，**被识别成并发限流的 NJU 一次没死，未被识别的 Qwen 死了 26 次** → 直接证明"给任意 429 用 8 次预算"就能消除这批报废。
+
+### 惊群证据
+
+- 545 次 retry 中 **259 次 `wait_s=15.0`**（服务端 `Retry-After: 15` 被原样采用，无抖动）
+- **51 个惊群簇**：≥3 个不同 bot 在 2 秒内同时重试
+  ```
+  21:50:40  glm_1 / glm_3 / glm_5 同秒
+  21:50:56  glm_1 / glm_3 / glm_5 同秒（+16s，正好是 15s 退避的整点）
+  21:53:55  glm_1 / glm_4 / glm_5 同秒
+  ```
+- 对照：`overnight_12bot` 77 簇；hy4 4 路波次 **0 簇**
+- **机制**：所有 bot 在同一秒醒来 → 再次撞限流 → 再次同秒重试，形成自持碰撞循环。修复：对 `Retry-After` 结果加 **0.5~1.5× 抖动**（或每 bot 固定随机相位）。
+
+### 主轨 `overnight_12bot_part2`（2h05m / 3.9h）
+
+```
+269 集：answered 198 / goal 24 / limit 22 / timeout 22 / runtime_error 29 / aborted 1 / paused 4 / network_error 1
+retries 545 | 429 26 | 502 0 | tracebacks 0
+```
+
+- 26 次 429 硬失败**全部集中在 `glm_*`**：`glm_1` 9、`glm_5` 7、`glm_2` 5、`glm_4` 3、`glm_3` 2
+- 除 22:23–22:33 的 10 分钟高峰外，22:55 / 23:07 / 23:15 / 23:17 仍有小簇（同一批 glm bot）
+
+### 新 P2
+
+- **P2-35** `network_error` 状态未被 `_is_transient_llm_error` 识别（`:887` 只接受 `runtime_error`）→ 纯传输抖动（`[not_loaded] chunk not loaded`）会计入 strike。实测 `ds_1` EP13 `sleep_in_bed`。
+
+### hy4 审计轨 `hy4_audit_r28`（2.5h 波，32 分钟）
+
+23 集、**0 retry / 0 429**、1 aborted。四波审计轨累计 **0 次 429**。
+
+## 4br. 08:23 抽检：Qwen 通道饱和，18% 墙钟耗在退避（新 P1：BUG-045）
+
+### 主轨 `overnight_12bot_part2`（2h50m / 3.9h）
+
+```
+429 集：answered 298 / goal 26 / limit 27 / timeout 29 / runtime 53 / aborted 1 / paused 4 / network_error 1
+retries 846 | 429 49 | 502 0 | tracebacks 0
+```
+
+- 53 个 runtime_error = **49× Qwen 429** + 3× MC API ReadTimeout + 1× `[not_connected]`
+- 429 已从"10 分钟突发"演变为**持续劣化**：23:46–23:59（14 次）、00:04–00:22（12 次）连续出现
+
+### 关键量化：按通道分组的 retry 率
+
+| bot | 集 | 请求 | retry | retry% | 硬失败 | 退避墙钟占比 |
+|---|---|---|---|---|---|---|
+| `glm_1_nether_fortress` | 63 | 1018 | 213 | **17.3%** | 15 | **24.4%** |
+| `glm_5_midgame` | 79 | 950 | 201 | **17.5%** | 15 | **22.7%** |
+| `glm_2_nether_bastion` | 24 | 702 | 169 | 19.4% | 9 | 18.4% |
+| `glm_4_brewing_alchemy` | 34 | 516 | 135 | 20.7% | 8 | 14.7% |
+| `glm_3_village_trade` | 19 | 313 | 105 | 25.1% | 2 | 10.5% |
+| `nju_*`（3 路） | 81 | 1475 | 22 | **1.2~2.1%** | **0** | ≤0.5% |
+| `ds_*`（4 路） | 139 | 2627 | 1 | **0~0.2%** | **0** | 0% |
+
+- **5 路 Qwen retry 率成比例一致（17~25%）** → 共享 key/通道配额饱和，不是单 bot 行为异常
+- **Qwen 合计 18.1% 墙钟（9251s / 51036s）在 429 退避里睡觉** —— 相当于 5 路里约 1 路全程空转
+- 对照：同期的 hy4 审计轨（另一通道，4 路 + rpm=6）**0 次 429**
+
+### 新 P1：BUG-045（通道级 RPM 缺失）
+
+`v2_fleet.py launch` 对 Qwen squad 没有按 provider 的 RPM 上限（hy4 已有 `rpm=6` 且实测有效）。建议：Qwen 加 `rpm=6`，或并发从 5 降到 3；按 provider 配置而不是全局 default。
+
+### hy4 审计轨 `hy4_audit_r28`
+
+39 集、**0 retry / 0 429**、1 aborted、10 集 goal_satisfied。
+
+## 4bs. 09:08 抽检：`max_episodes=80` 硬上限让快 bot 提前空转（新 P1：BUG-046）
+
+### 已收官的两路（`status=completed`，但墙钟未满）
+
+| bot | 集数 | 实际墙钟 | 剩余 | 集状态分布 |
+|---|---|---|---|---|
+| `glm_5_midgame` | **80/80** | **10355s（2h53m）** | **1h02m 空转** | answered 57 / **429 15** / goal 3 / limit 3 / timeout 1 / paused 1 |
+| `glm_1_nether_fortress` | **80/80** | **12433s（3h27m）** | 28m 空转 | answered 58 / **429 16** / limit 5 / goal 1 |
+
+- 波次参数（stdout 实证）：`duration_s=14100.0 max_episodes=80`
+- `max_episodes` 与 `duration_s` **互相独立**：跑得快的 bot 先撞集数上限，剩下的墙钟全部浪费
+- **429 集同样吃配额**：`glm_1` 80 集里 **16 集是 429 报废**（20%），`glm_5` 15/80（19%）
+- 叠加效应：Qwen 通道同时损失 **18% 墙钟（退避）+ 19~20% 集数槽位**
+- **评测口径副作用**：快 bot 被截断、慢 bot 跑满 → 跨 bot 分数不可比（`glm_5` 名义 4h 实际 2h53m）
+
+### 当前战况（12 路，10 路在跑）
+
+| bot | 集 | 分数 |
+|---|---|---|
+| `glm_1_nether_fortress` | 80（已收） | **240** |
+| `glm_2_nether_bastion` | 30 | 270 |
+| `glm_5_midgame` | 80（已收） | 180 |
+| `ds_4_nether_fortress` | 53 | 210 |
+| `nju_guitest_01_nether` | 36 | 185 |
+| `nju_3_village_trade` | 44 | 150 |
+| `ds_2_cave_combat` | 56 | 150 |
+| `glm_4_brewing_alchemy` | 43 | 145 |
+| `ds_3_enchant_anvil` | 43 | 135 |
+| `ds_1_bare` | 34 | 105 |
+| `glm_3_village_trade` | 30 | 90 |
+| `nju_movetest_01_bare` | 28 | 70 |
+
+### hy4 审计轨 `hy4_audit_r28`（2.7h / 2.5h，1/4 收官）
+
+150 集、**0 retry / 0 429 / 0 502**、1 aborted；`hy4_2` 135、`hy4_6` 210、`hy4_9` 135、`hy4_5` 已收。
+注意：r28 集数（150）远高于 r27（126 / 3h），说明短集比例上升，需在收官时核对分数质量。
+
+## 4bt. hy4 审计轨 r28 终验（09:22，4/4，2.5h 波）
+
+| bot | 分数 | 集数 | 死亡 |
+|---|---|---|---|
+| `hy4_6_nether_bastion` | **210** | 24 | **17** |
+| `hy4_5_brewing_alchemy` | 165 | 50 | 4 |
+| `hy4_2_iron` | 135 | 50 | 5 |
+| `hy4_9_deep_water` | 135 | 43 | 4 |
+
+- **总分 645**（r27 3h 为 520；r28 只跑 2.5h 却更高）
+- **0 retry / 0 429 / 0 502 / 0 Traceback**（167 集，仅 1 次 retry）→ **四波审计轨累计 0 次 429**
+- 门禁 2 项 FAIL：
+  - `deaths 43`（>25）：`hy4_6` **17 次**（岩浆 7 + mob 8），堡垒场景仍是生存黑洞
+  - `cancel cooldown 200.6s`（>200，**仅超 0.6s**，边缘）
+- `mine_dfs` 269 次、零进展 **4.8%**；`depth_reset` **3 次**
+- `staircase`：**pillar_fallback 73 > time_budget 50 > completed 30** —— 本波"支柱上浮"成为主要失败路径（堡垒/深水场景）
+- `unstick` 101 次：中位 4.3s、max 41.6s
+- **BUG-043 第 5 路**：`hy4_9` EP3（shiny_gear）`lost_iron_pickaxe`
+
+### 四波审计轨汇总（hy4，4 路 + rpm=6）
+
+| 波次 | 时长 | 集数 | retry | 429 | 502 | 总分 |
+|---|---|---|---|---|---|---|
+| r25 | 20min | 17 | 0 | 0 | 0 | 335 |
+| r26 | 20min | 92 | 4 | 0 | 1 | 535 |
+| r27 | 3h | 126 | 0 | 0 | 0 | 520 |
+| r28 | 2.5h | 167 | 1 | 0 | 0 | 645 |
+
+→ **约 6.2 小时 / 402 集 / 0 次 429**：hy4 的 4 路 + rpm=6 配置可以定稿。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
