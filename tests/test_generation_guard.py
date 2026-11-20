@@ -3929,6 +3929,52 @@ def test_unstick_canopy_branch_shares_the_tool_budget(monkeypatch):
     assert events[-1]["type"] == "guardian.recovery_budget_exceeded"
 
 
+@pytest.mark.parametrize("entry", ["poll", "boundary"])
+@pytest.mark.parametrize("failure", ["timeout", "death"])
+def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    events = []
+    attempts = []
+    status = {"pos": [0.5, 35.0, 0.5], "health": 18, "food": 20, "dimension": "the_nether",
+              "ready": True, "alive": True, "on_ground": True}
+
+    class WallBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": []}
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "source": "in_wall"}]}
+            attempts.append((action, kwargs["timeout_s"]))
+            if action == "dig":
+                if failure == "timeout":
+                    clock[0] += kwargs["timeout_s"]
+                    raise httpx.ReadTimeout("wall dig reached its deadline")
+                status.update(health=0, ready=False, alive=False)
+            return {"ok": True}
+
+    monkeypatch.setattr(MacroSkills, "unstick", lambda self: self.bot.call("dig", {}, timeout_s=15))
+    guard = GenerationGuard(WallBot(), EventSink(events.append), checkpoint=lambda: None)
+    expected_action = "unstick_in_wall"
+    if entry == "boundary":
+        assert guard.stabilize_after_tools() is None
+        expected_action = "boundary_unstick_wall"
+    else:
+        assert guard.poll() is not None
+
+    completed, = [e for e in events if e["type"] == "guardian.action.completed"]
+    assert completed["action"] == expected_action
+    assert completed["ok"] is False
+    if failure == "timeout":
+        assert completed["result"]["reason"] == "time_budget"
+        assert attempts == [("dig", 6.0), ("stop", 1.5)]
+    else:
+        assert completed["result"]["respawned"] is True
+        assert attempts == [("dig", 6.0)]
+
+
 @pytest.mark.parametrize("starts_submerged", [True, False])
 def test_bug056_subcortical_water_escape_uses_budget_once(starts_submerged, monkeypatch):
     clock = [1000.0]
