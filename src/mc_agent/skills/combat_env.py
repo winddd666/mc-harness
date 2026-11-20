@@ -1514,16 +1514,25 @@ class CombatEnv:
         wait_for_ground: bool = False,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
-        st0 = self.bot.status()
-        if (
-            wait_for_ground and st0.get("pos") and st0.get("on_ground") is False
-            and st0.get("alive") is not False and st0.get("ready") is not False
-            and not st0.get("in_lava") and not st0.get("in_water")
-        ):
-            # Damage can be reported during the knockback hop.
-            before = st0
+        def respawned_since(before: dict[str, Any], after: dict[str, Any]) -> bool:
+            start, end = before.get("pos"), after.get("pos")
+            return bool(
+                after.get("alive") is False
+                or (after.get("dimension") and before.get("dimension") and after["dimension"] != before["dimension"])
+                or (after.get("last_death") is not None and after["last_death"] != before.get("last_death"))
+                or (start and end and math.hypot(end[0] - start[0], end[2] - start[2]) > 64.0)
+            )
+
+        def settle_airborne(status: dict[str, Any], life: dict[str, Any]) -> dict[str, Any]:
+            # The initial knockback and the retreat pulse can each end midair.
             deadline = time.monotonic() + 0.45
+            sample = status
             for _ in range(3):
+                if (
+                    sample.get("on_ground") is not False or sample.get("ready") is False
+                    or sample.get("in_water") or sample.get("in_lava") or respawned_since(life, sample)
+                ):
+                    break
                 if deadline - time.monotonic() <= 0.1:
                     break
                 time.sleep(0.1)
@@ -1531,26 +1540,30 @@ class CombatEnv:
                 if remaining <= 0:
                     break
                 try:
-                    landed = self.bot.call("status", method="GET", timeout_s=remaining, allow_reauth=False)
+                    observed = self.bot.call("status", method="GET", timeout_s=remaining, allow_reauth=False)
                 except (ApiError, httpx.HTTPError):
                     break
-                pos = landed.get("pos") or before["pos"]
-                if (
-                    landed.get("alive") is False
-                    or (landed.get("dimension") and before.get("dimension") and landed["dimension"] != before["dimension"])
-                    or (landed.get("last_death") is not None and landed["last_death"] != before.get("last_death"))
-                    or math.hypot(pos[0] - before["pos"][0], pos[2] - before["pos"][2]) > 64.0
-                ):
-                    return {"ok": False, "mode": "respawned", "respawned": True, "moved_dist": 0.0, "pos_after": pos}
-                if landed.get("on_ground") is True and not landed.get("in_water"):
-                    st0 = landed
-                    break
-                if landed.get("ready") is False or landed.get("in_water") or landed.get("in_lava"):
-                    break
+                sample = {**observed, "on_ground": observed.get("on_ground") is True}
+            return sample
+
+        st0 = self.bot.status()
+        entered_water = False
+        if (
+            wait_for_ground and st0.get("pos") and st0.get("on_ground") is False
+            and st0.get("alive") is not False and st0.get("ready") is not False
+        ):
+            before = st0
+            st0 = settle_airborne(before, before)
+            if respawned_since(before, st0):
+                return {
+                    "ok": False, "mode": "respawned", "respawned": True, "moved_dist": 0.0,
+                    "pos_after": st0.get("pos") or before["pos"],
+                }
+            entered_water = bool(st0.get("in_water") and not before.get("in_water"))
         pos0 = st0.get("pos")
         if not pos0 or st0.get("alive") is False or st0.get("ready") is False:
             return {"ok": False, "mode": "flee", "reason": "not_ready", "moved_dist": 0.0, "pos_after": pos0}
-        if st0.get("in_lava") or st0.get("on_ground") is False:
+        if st0.get("in_lava") or entered_water or st0.get("on_ground") is False:
             return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0, "pos_after": pos0}
         if threat_pos is None:
             nh = st0.get("nearest_hostile")
@@ -1612,12 +1625,7 @@ class CombatEnv:
         def retreat_result(st: dict[str, Any]) -> dict[str, Any]:
             pos = st.get("pos") or pos0
             moved = math.hypot(float(pos[0]) - float(pos0[0]), float(pos[2]) - float(pos0[2]))
-            respawned = (
-                st.get("alive") is False
-                or moved > 64.0
-                or (st.get("dimension") and st0.get("dimension") and st["dimension"] != st0["dimension"])
-                or (st.get("last_death") is not None and st["last_death"] != st0.get("last_death"))
-            )
+            respawned = respawned_since(st0, st)
             unsafe = (
                 st.get("ready") is False or st.get("in_lava") or st.get("in_water") or st.get("on_ground") is False
             )
@@ -1631,6 +1639,8 @@ class CombatEnv:
             }
 
         st_mid = self._safe_status({**st0, "ready": False})
+        if wait_for_ground:
+            st_mid = settle_airborne(st_mid, st0)
         result = retreat_result(st_mid)
         if short_step or result.get("respawned") or result.get("reason") == "unsafe_landing":
             return result
@@ -2567,7 +2577,7 @@ class SubcorticalInstinctController:
                             pass
                     fl = env.flee(
                         mob_pos, distance=14.0, urgent=True,
-                        wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0,
+                        wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon,
                     )
                     actions.append({
                         "action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist"),

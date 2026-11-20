@@ -4203,6 +4203,62 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
         assert retreat["respawned"] is True
 
 
+@pytest.mark.parametrize("landing", ["grounded", "still_airborne", "water", "respawned"])
+def test_unarmed_retreat_confirms_landing_after_short_pulse(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    threat = {"id": 42, "name": "spider", "dist": 2.0, "pos": [2.5, 74, 0.5]}
+    status = {
+        "pos": [0.5, 74, 0.5], "health": 14, "ready": True, "alive": True, "on_ground": True,
+        "is_day": True, "nearest_hostile": threat, "last_death": {"t": 1},
+    }
+    mutations = []
+
+    class RetreatBot:
+        def status(self):
+            if clock[0] >= 1000.15 and status.get("on_ground") is False:
+                if landing == "grounded":
+                    status.update(pos=[-1.8, 74, 0.5], on_ground=True)
+                elif landing == "water":
+                    status.update(in_water=True)
+                elif landing == "respawned":
+                    status.update(pos=[0.5, 74, 4.5], on_ground=True, last_death={"t": 2})
+            return dict(status)
+
+        def inventory(self):
+            return {"items": []}
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "get_entities":
+                return {"entities": [threat]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 74 else "air"}
+            if action == "control" and body.get("forward"):
+                assert status["on_ground"] is True
+                mutations.append(action)
+                status.update(pos=[-1.66, 74.6, 0.5], on_ground=False)
+            if action == "move_to":
+                assert status["on_ground"] is True
+                mutations.append(action)
+                status.update(pos=[body["x"], body["y"], body["z"]])
+            return {"ok": True}
+
+    env = CombatEnv(RetreatBot())
+    outcome = CombatControllerSlot().handle(
+        env, {"source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "spider"}
+    )
+    retreat = next(a for a in outcome["actions"] if a["action"] == "flee")
+    assert clock[0] <= 1000.45
+    assert retreat["ok"] is (landing == "grounded")
+    assert mutations == (["control", "move_to"] if landing == "grounded" else ["control"])
+    assert bool(retreat.get("respawned")) is (landing == "respawned")
+
+
 @pytest.mark.parametrize("outcome", ["same_life", "respawned_nearby", "time_budget"])
 def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch, outcome):
     clock = [1000.0]
