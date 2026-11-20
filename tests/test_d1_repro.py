@@ -15,6 +15,7 @@ import pathlib
 import sys
 import time
 
+import httpx
 import pytest
 
 V2_SRC = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated/src")
@@ -22,7 +23,7 @@ if str(V2_SRC) not in sys.path:
     sys.path.insert(0, str(V2_SRC))
 
 from mc_agent.bot import BotSession  # noqa: E402
-from mc_agent.harness.guardian import GenerationGuard  # noqa: E402
+from mc_agent.harness.guardian import GenerationGuard, _GuardSession  # noqa: E402
 from mc_agent.harness.mc_tools import _normalize_find_block_types  # noqa: E402
 from mc_agent.skills.crafting import material_shortage  # noqa: E402
 
@@ -119,3 +120,25 @@ def test_guard_live_deaths_deduplicate_event_ids():
 
     assert guard.cursor == 2
     assert len(bot.recent_deaths_in_window(60.0)) == 2
+
+
+@pytest.mark.xfail(strict=False, raises=TypeError, reason="BUG-072 nested mining propagates a phased Timeout")
+def test_guard_budget_preserves_httpx_timeout_phase_limits():
+    captured = []
+
+    def call(action, body, *, timeout_s, **kwargs):
+        assert action == "status"
+        captured.append(timeout_s)
+        return {"alive": True}
+
+    session = _GuardSession(
+        bot=None, checkpoint=lambda: None, deadline=time.monotonic() + 2.0, call_override=call,
+    )
+    requested = httpx.Timeout(24.0, connect=0.25, pool=0.2, write=0.4)
+
+    assert session.call("status", timeout_s=requested) == {"alive": True}
+    result, = captured
+    assert 0 < result.read <= 2.0
+    assert 0 < result.connect <= 0.25
+    assert 0 < result.pool <= 0.2
+    assert 0 < result.write <= 0.4
