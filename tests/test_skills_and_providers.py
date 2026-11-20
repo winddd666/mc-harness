@@ -2470,6 +2470,235 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
     assert operations[-1] == {"op": "take", "from": "output", "count": 2}
 
 
+class _SurfaceScoutBackend:
+    def __init__(self) -> None:
+        self.pos = [0.5, 64, 0.5]
+        self.health = 20
+        self.wet = False
+        self.hostile = None
+        self.moves = []
+        self.calls = []
+        self.target = None
+        self.move = self.arrive
+        self.released = True
+
+    def arrive(self, request, body):
+        self.pos = [body["x"], 64, body["z"]]
+        return self.ok({"pos": self.pos})
+
+    @staticmethod
+    def ok(result):
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def handle(self, request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        self.calls.append((route, self.pos[:], body))
+        if route == "status":
+            return self.ok({
+                "pos": self.pos,
+                "dimension": "overworld",
+                "biome": "plains",
+                "health": self.health,
+                "in_water": self.wet,
+                "nearest_hostile": self.hostile,
+            })
+        if route == "get_block":
+            return self.ok({"name": "grass_block"})
+        if route in {"find_blocks", "get_entities"}:
+            assert body["radius"] == 64
+            rows = []
+            if self.pos[0] > 50 and self.target in body["types"]:
+                row = {"name": self.target, "pos": [62, 64, 1], "biome": "meadow"}
+                if route == "get_entities":
+                    row["id"] = 17
+                rows.append(row)
+            if self.pos[0] > 20 and "obsidian" in body["types"]:
+                rows.append({"name": "obsidian", "pos": [41, 63, 0]})
+            key = "blocks" if route == "find_blocks" else "entities"
+            return self.ok({key: rows})
+        if route == "move_to":
+            assert "y" not in body
+            assert body["stop_on"] == ["hurt", "death"]
+            self.moves.append(body)
+            return self.move(request, body)
+        if route == "stop":
+            return self.ok({"stopped": True, "action": "move_to", "released": self.released})
+        raise AssertionError(route)
+
+
+@pytest.mark.parametrize("target,segments", [(None, 5), ("bell", 2), ("villager", 2)])
+def test_surface_scout_continues_and_scans_until_target(target, segments) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    backend = _SurfaceScoutBackend()
+    backend.target = target
+    arguments = {"target_types": ["minecraft:villager"]} if target == "villager" else {}
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        toolset = McToolset(bot, geofence=VoidGeofence())
+        registry = toolset.registry(profile="compact", extra_tools=("mc_skill_scout_surface",))
+        result = json.loads(registry.execute({
+            "function": {"name": "mc_skill_scout_surface", "arguments": json.dumps(arguments)},
+        }))
+        assert toolset._last_block_pos == [28 * segments, 64, 0]
+
+    assert result["ok"] is True
+    assert result["stop_reason"] == ("target_found" if target else "segment_limit")
+    assert result["segments_completed"] == len(backend.moves) == segments
+    assert result["distance_traveled"] == 28 * segments
+    assert result["final_pos"] == [28 * segments + 0.5, 64, 0.5]
+    assert sum(route == "get_entities" for route, _, _ in backend.calls) == segments + 1
+    assert [row["name"] for row in result["detected_pois"]].count("obsidian") == 1
+    if target:
+        key = "detected_entities" if target == "villager" else "detected_pois"
+        match = next(row for row in result[key] if row["name"] == target)
+        assert match["pos"] == [62, 64, 1]
+        assert match["dist"] == 5.5
+        assert match["biome"] == "meadow"
+        assert match["observer_biome"] == "plains"
+
+
+def test_surface_scout_detours_around_fence_and_server_timeout() -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+
+    backend = _SurfaceScoutBackend()
+    backend.pos = [15.5, 64, 0.5]
+    fence = VoidGeofence(radius=42, margin=0)
+
+    def move(request, body):
+        if len(backend.moves) == 1:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "timeout", "message": "path timeout"}})
+        return backend.arrive(request, body)
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        result = MacroSkills(bot, geofence=fence).scout_surface(direction="east")
+
+    assert result["segments_completed"] >= 1
+    assert backend.moves[0]["z"] < 0 < backend.moves[1]["z"]
+    assert all(fence.check_point(body["x"], body["z"]) is None for body in backend.moves)
+
+
+def test_surface_scout_checks_for_water_before_moving() -> None:
+    backend = _SurfaceScoutBackend()
+
+    def handle(request):
+        if request.url.path.endswith("/get_block") and json.loads(request.content)["pos"] == [14, 63, 0]:
+            return backend.ok({"name": "water"})
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east")
+
+    assert result["segments_completed"] == 5
+    assert backend.moves[0]["z"] < 0
+    assert len(backend.moves) == 5
+
+
+@pytest.mark.parametrize("released", [True, False])
+def test_surface_scout_confirmed_stop_before_retry_after_read_timeout(released) -> None:
+    backend = _SurfaceScoutBackend()
+    backend.released = released
+
+    def move(request, body):
+        if len(backend.moves) == 1:
+            raise httpx.ReadTimeout("offline movement timeout", request=request)
+        return backend.arrive(request, body)
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east")
+
+    actions = [route for route, _, _ in backend.calls if route in {"move_to", "stop"}]
+    if released:
+        assert actions[:3] == ["move_to", "stop", "move_to"]
+        assert backend.moves[1]["z"] < 0
+        assert result["segments_completed"] == 5
+    else:
+        assert actions == ["move_to", "stop"]
+        assert result["stop_reason"] == "move_timeout_unreleased"
+        assert result["requires_replan"] is True
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_surface_scout_water_retreat_yields_to_hurt(interrupted) -> None:
+    backend = _SurfaceScoutBackend()
+
+    def move(request, body):
+        backend.wet = len(backend.moves) == 1
+        receipt = backend.arrive(request, body)
+        if backend.wet and interrupted:
+            return backend.ok({"pos": backend.pos, "interrupted_by": "hurt"})
+        return receipt
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east")
+
+    if interrupted:
+        assert result["stop_reason"] == "hurt"
+        assert len(backend.moves) == 1
+    else:
+        assert [backend.moves[1][axis] for axis in ("x", "z")] == [0.5, 0.5]
+        assert backend.moves[2]["z"] < 0
+        assert result["segments_completed"] == 5
+
+
+def test_surface_scout_stops_for_hostile_at_landing() -> None:
+    backend = _SurfaceScoutBackend()
+
+    def move(request, body):
+        backend.hostile = {"dist": 6.0, "name": "zombie"}
+        return backend.arrive(request, body)
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east")
+
+    assert result["stop_reason"] == "nearby_hostile"
+    assert result["distance_traveled"] == 28
+    assert len(backend.moves) == 1
+    assert all(pos[0] == 0.5 for route, pos, _ in backend.calls if route == "find_blocks")
+
+
+@pytest.mark.parametrize("episode_remaining,cap", [(None, 50.0), (18.0, 14.0), (5.0, 0.0)])
+def test_surface_scout_clamps_entire_tool_budget(monkeypatch, episode_remaining, cap) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    backend = _SurfaceScoutBackend()
+    clock = [0.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+
+    def handle(request):
+        timeout = request.extensions["timeout"]["read"]
+        assert 0 < timeout <= cap - clock[0]
+        if request.url.path.endswith("/move_to"):
+            body = json.loads(request.content)
+            assert body["timeout"] / 1000 < timeout
+            step_time = min(10.0, body["timeout"] / 1000)
+            clock[0] += step_time
+            if step_time < 10.0:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "timeout", "message": "short hop"}})
+        else:
+            clock[0] += min(0.2, timeout)
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        toolset = McToolset(bot, geofence=VoidGeofence())
+        toolset._episode_deadline_mono = episode_remaining
+        result = json.loads(toolset.mc_skill_scout_surface(max_duration_s=120.0))
+
+    assert clock[0] <= cap
+    if cap == 0:
+        assert result["stop_reason"] == "episode_deadline_imminent"
+        assert backend.calls == []
+    else:
+        assert result["stop_reason"] == "time_budget"
+        assert result["segments_completed"] == (4 if cap == 50 else 1)
+
+
 def test_smelt_collect_survives_read_timeout() -> None:
     """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
     from mc_agent.harness.world_memory import WorldMemory

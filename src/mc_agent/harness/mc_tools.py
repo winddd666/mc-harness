@@ -2395,6 +2395,34 @@ class McToolset:
             )
         )
 
+    def mc_skill_scout_surface(
+        self,
+        direction: str = "auto",
+        target_types: list[str] | None = None,
+        max_duration_s: float = 45.0,
+        step_dist: float = 28.0,
+    ) -> str:
+        if not math.isfinite(max_duration_s):
+            return self._run_skill(lambda: self.skills.scout_surface(max_duration_s=max_duration_s))
+        budget_s, deadline_imminent = self._clamp_tool_budget(max_duration_s, max_s=50.0, min_s=0.0)
+        if deadline_imminent:
+            return json.dumps({
+                "ok": False,
+                "distance_traveled": 0.0,
+                "segments_completed": 0,
+                "final_pos": None,
+                "detected_pois": [],
+                "detected_entities": [],
+                "stop_reason": "episode_deadline_imminent",
+                "requires_replan": True,
+                "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过地表斥候。"},
+            }, ensure_ascii=False)
+        return self._run_skill(
+            lambda: self.skills.scout_surface(
+                direction=direction, target_types=target_types, max_duration_s=budget_s, step_dist=step_dist,
+            )
+        )
+
     def mc_skill_craft_gear(self, item: str, count: int = 1, equip_slot: str | None = None) -> str:
         count = max(1, min(64, int(count)))
         return self._run_skill(lambda: self.skills.craft_gear(item=item, count=count, equip_slot=equip_slot))
@@ -3128,6 +3156,21 @@ class McToolset:
                     concurrency="exclusive",
                 ),
                 Tool(
+                    name="mc_skill_scout_surface",
+                    description="地表寻村/探索优先用。连续推进最多5段，每段扫描64格，命中目标或遇近敌/受伤就停。",
+                    parameters={
+                        "direction": Parameter("auto优先未探索方向，也可指定north/east/south/west或对角方向", required=False),
+                        "target_types": Parameter(
+                            "目标方块ID或villager/iron_golem。省略时搜村庄方块和村民/铁傀儡",
+                            kind="string_array", required=False,
+                        ),
+                        "max_duration_s": Parameter("本次预算秒数，默认45，最多50", kind="number", required=False),
+                        "step_dist": Parameter("每段距离28至32格，默认28", kind="number", required=False),
+                    },
+                    handler=self.mc_skill_scout_surface,
+                    concurrency="exclusive",
+                ),
+                Tool(
                     name="mc_skill_harvest_logs",
                     description="宏技能：自动换斧砍树集原木，内置保护区(protected_region)坐标拉黑。",
                     parameters={
@@ -3288,6 +3331,7 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_events": "拉取新事件",
     "mc_advancements": "查进度状态",
     "mc_move_to": "寻路(x,z;禁y)",
+    "mc_skill_scout_surface": "地表寻村/探索，连走最多5段，命中或遇险即停",
     "mc_dig": "挖格拾取",
     "mc_place": "放方块",
     "mc_craft": "合成(3x3需桌)",

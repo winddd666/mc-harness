@@ -37,6 +37,12 @@ NETHER_STEM_TYPES: tuple[str, ...] = (
     "warped_stem",
 )
 
+SURFACE_SCOUT_DIRECTIONS = ("east", "southeast", "south", "southwest", "west", "northwest", "north", "northeast")
+SURFACE_SCOUT_BLOCKS = ("bell", "hay_block", "dirt_path", "composter", "lectern")
+SURFACE_SCOUT_ENTITIES = ("villager", "iron_golem")
+SURFACE_SCOUT_LANDMARKS = ("lava", "obsidian")
+SURFACE_SCOUT_PATH_ERRORS = frozenset({"path_not_found", "no_path", "timeout", "move_timeout", "stalled"})
+
 AXE_PRIORITY: tuple[str, ...] = (
     "netherite_axe",
     "diamond_axe",
@@ -1309,14 +1315,18 @@ class _SkillBudgetSession:
             return inv
         return self.bot.inventory()
 
-    def stop_pending(self) -> None:
+    def stop_pending(self) -> bool:
         remaining = self.finish_at - time.monotonic()
         if self.pending_action and remaining > 0 and self.supports_timeout:
             self.pending_action = False
             try:
-                self.bot.call("stop", {}, timeout_s=min(1.0, remaining), allow_reauth=False)
+                stopped = self.bot.call("stop", {}, timeout_s=min(1.0, remaining), allow_reauth=False)
             except (ApiError, httpx.HTTPError):
-                pass
+                return False
+            return stopped.get("released") is True or (
+                stopped.get("stopped") is True and "action" in stopped and stopped["action"] is None
+            )
+        return False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.bot, name)
@@ -1351,6 +1361,276 @@ class MacroSkills:
 
             self.world_memory = WorldMemory()
         return self.world_memory
+
+    def scout_surface(
+        self,
+        direction: str = "auto",
+        target_types: list[str] | None = None,
+        max_duration_s: float = 45.0,
+        step_dist: float = 28.0,
+    ) -> dict[str, Any]:
+        """Scout in bounded hops, measuring horizontal distance between observed positions."""
+        direction = direction.strip().lower()
+        result: dict[str, Any] = {
+            "ok": False,
+            "distance_traveled": 0.0,
+            "segments_completed": 0,
+            "final_pos": None,
+            "detected_pois": [],
+            "detected_entities": [],
+        }
+        if direction not in ("auto", *SURFACE_SCOUT_DIRECTIONS):
+            return {**result, "stop_reason": "invalid_direction", "requires_replan": True}
+        if not math.isfinite(max_duration_s) or not math.isfinite(step_dist):
+            return {**result, "stop_reason": "invalid_budget_or_step", "requires_replan": True}
+        targets = tuple(dict.fromkeys(
+            resolve_item_alias(name) for name in
+            (target_types or (*SURFACE_SCOUT_BLOCKS, *SURFACE_SCOUT_ENTITIES))
+        ))
+        blocks = [name for name in targets if name not in SURFACE_SCOUT_ENTITIES] or list(SURFACE_SCOUT_BLOCKS)
+        entities = [name for name in targets if name in SURFACE_SCOUT_ENTITIES] or list(SURFACE_SCOUT_ENTITIES)
+        step = max(28.0, min(32.0, step_dist))
+        session = _SkillBudgetSession(self.bot, min(50.0, max_duration_s))
+        memory = self._get_world_memory()
+        observations: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = {
+            "detected_pois": {}, "detected_entities": {},
+        }
+        landmarks = [name for name in SURFACE_SCOUT_LANDMARKS if name not in blocks]
+        distance = 0.0
+
+        def observe() -> dict[str, Any]:
+            nonlocal distance
+            status = session.call("status", method="GET", timeout_s=2.0, allow_reauth=False)
+            pos = status.get("pos")
+            prev_pos = result["final_pos"]
+            if isinstance(pos, (list, tuple)) and len(pos) == 3:
+                if prev_pos is not None:
+                    distance += math.hypot(pos[0] - prev_pos[0], pos[2] - prev_pos[2])
+                result["final_pos"] = list(pos)
+                result["biome"] = status.get("biome")
+                memory.observe_status(status)
+            else:
+                status["pos"] = None
+            return status
+
+        def scan(status: dict[str, Any]) -> bool:
+            dim = normalize_dimension(status.get("dimension"))
+            found = False
+            for route, key, receipt_key, types in (
+                ("find_blocks", "blocks", "detected_pois", blocks),
+                ("get_entities", "entities", "detected_entities", entities),
+                ("find_blocks", "blocks", "detected_pois", landmarks),
+            ):
+                if not types:
+                    continue
+                query = {"radius": 64, "types": types}
+                if key == "blocks":
+                    query["limit"] = 6
+                rows = session.call(route, query, timeout_s=3.0, allow_reauth=False).get(key, [])
+                matches = [
+                    row for row in rows[:6]
+                    if row.get("name") in types and isinstance(row.get("pos"), (list, tuple))
+                    and len(row["pos"]) == 3
+                ]
+                if key == "blocks":
+                    memory.observe_blocks(matches, dim=dim)
+                else:
+                    memory.observe_entities(matches, dim=dim)
+                for row in matches:
+                    name = row["name"]
+                    key_pos = (name, *row["pos"]) if name in targets else (name,)
+                    receipt = {
+                        "name": row["name"],
+                        "pos": row["pos"],
+                        "dist": round(math.dist(status["pos"], row["pos"]), 1),
+                        "biome": row.get("biome"),
+                        "observer_biome": status.get("biome"),
+                        "observer_pos": status["pos"],
+                        **({"id": row["id"]} if "id" in row else {}),
+                    }
+                    prior = observations[receipt_key].get(key_pos)
+                    if prior is None or receipt["dist"] < prior["dist"]:
+                        observations[receipt_key][key_pos] = receipt
+                    found |= name in targets
+            return found
+
+        def advance(heading: int) -> str:
+            nonlocal direction, status
+            x, y, z = status["pos"]
+            chosen = SURFACE_SCOUT_DIRECTIONS[heading]
+            angle = heading * math.pi / 4
+            dx, dz = step * math.cos(angle), step * math.sin(angle)
+            tx, tz = round(x + dx, 2), round(z + dz, 2)
+            if self.geofence and self.geofence.check_point(tx, tz, action="mc_skill_scout_surface"):
+                return "void_geofence_blocked"
+            if self._scout_route_has_liquid(session, x, y, z, tx - x, tz - z):
+                return "liquid_ahead"
+
+            health_before = status.get("health")
+            move_error = self._scout_move(session, tx, tz, seconds=10.0)
+            if move_error == "move_timeout_unreleased":
+                return move_error
+            status = observe()
+            danger = self._scout_danger(status, health_before=health_before, dimension=dimension)
+            if danger:
+                return danger
+            if move_error and move_error not in SURFACE_SCOUT_PATH_ERRORS:
+                return move_error
+            if status.get("in_water") or status.get("submerged"):
+                if self.geofence and self.geofence.check_point(x, z, action="mc_skill_scout_surface"):
+                    return "in_water"
+                health_before = status.get("health")
+                retreat_error = self._scout_move(session, x, z, seconds=5.0)
+                if retreat_error == "move_timeout_unreleased":
+                    return retreat_error
+                status = observe()
+                danger = self._scout_danger(status, health_before=health_before, dimension=dimension)
+                if danger:
+                    return danger
+                if retreat_error and retreat_error not in SURFACE_SCOUT_PATH_ERRORS:
+                    return retreat_error
+                if retreat_error or status.get("in_water") or status.get("submerged"):
+                    return "in_water"
+                return "liquid_ahead"
+            if move_error:
+                return move_error
+            px, _, pz = status["pos"]
+            if math.hypot(px - tx, pz - tz) > 3.0:
+                return "stalled"
+            direction = chosen
+            result["segments_completed"] += 1
+            return "target_found" if scan(status) else "segment_completed"
+
+        detour_reasons = SURFACE_SCOUT_PATH_ERRORS | {"void_geofence_blocked", "liquid_ahead"}
+        try:
+            status = observe()
+            dimension = normalize_dimension(status.get("dimension"))
+            danger = self._scout_danger(status, dimension=dimension)
+            if danger:
+                reason = danger
+            elif status.get("in_water") or status.get("submerged"):
+                reason = "in_water"
+            elif scan(status):
+                reason = "target_found"
+            else:
+                if direction == "auto":
+                    unexplored = memory.unexplored_directions(status["pos"], dim=dimension)
+                    direction = unexplored[0] if unexplored else "east"
+                for _ in range(5):
+                    health_before = status.get("health")
+                    status = observe()
+                    danger = self._scout_danger(status, health_before=health_before, dimension=dimension)
+                    if danger or status.get("in_water") or status.get("submerged"):
+                        reason = danger or "in_water"
+                        break
+                    heading = SURFACE_SCOUT_DIRECTIONS.index(direction)
+                    for offset in (0, -1, 1):
+                        reason = advance((heading + offset) % len(SURFACE_SCOUT_DIRECTIONS))
+                        if reason not in detour_reasons:
+                            break
+                    if reason != "segment_completed":
+                        break
+                else:
+                    reason = "segment_limit"
+        except _SkillDeadline:
+            session.stop_pending()
+            result["deadline_hit"] = True
+            reason = "target_found" if any(
+                row["name"] in targets for rows in observations.values() for row in rows.values()
+            ) else "time_budget"
+        except ApiError as exc:
+            reason = exc.code
+            result["error"] = {"code": exc.code, "message": exc.message}
+        except httpx.HTTPError:
+            reason = "transport_error"
+        result.update(
+            ok=reason == "target_found" or (
+                reason in {"segment_limit", "time_budget"} and result["segments_completed"] > 0
+            ),
+            stop_reason=reason,
+            distance_traveled=round(distance, 2),
+            pos_after=result["final_pos"],
+            direction=direction,
+        )
+        if not result["ok"]:
+            result["requires_replan"] = True
+            result.setdefault("error", {"code": reason})
+        for key, rows in observations.items():
+            result[key] = list(rows.values())
+        return result
+
+    @staticmethod
+    def _scout_danger(
+        status: dict[str, Any], *, dimension: str, health_before: float | None = None
+    ) -> str | None:
+        if normalize_dimension(status.get("dimension")) != dimension:
+            return "dimension_changed"
+        if status.get("in_lava") or status.get("on_fire"):
+            return "hazard"
+        health = status.get("health")
+        if status.get("alive") is False or (health is not None and health <= 0):
+            return "dead"
+        if health_before is not None and health is not None and health < health_before:
+            return "hurt"
+        hostile = status.get("nearest_hostile") or {}
+        distance = hostile.get("dist")
+        if isinstance(distance, (int, float)) and distance <= 8.0:
+            return "nearby_hostile"
+        if status.get("ready") is False or not status.get("pos"):
+            return "not_ready"
+        if status.get("busy"):
+            return "busy"
+        return None
+
+    @staticmethod
+    def _scout_route_has_liquid(
+        session: _SkillBudgetSession, x: float, y: float, z: float, dx: float, dz: float
+    ) -> bool:
+        for fraction in (0.5, 1.0):
+            pos = [math.floor(x + dx * fraction), math.floor(y) - 1, math.floor(z + dz * fraction)]
+            try:
+                block = session.call("get_block", {"pos": pos}, timeout_s=1.5, allow_reauth=False)
+            except ApiError as exc:
+                if exc.code == "not_loaded":
+                    continue
+                raise
+            if block.get("name") in {"water", "flowing_water", "bubble_column", "lava"}:
+                return True
+        return False
+
+    @staticmethod
+    def _scout_move(session: _SkillBudgetSession, x: float, z: float, *, seconds: float) -> str | None:
+        # Ask pathfinder to finish before the client timeout so it can release the action.
+        request_s = min(seconds + 1.0, session._remaining())
+        if request_s <= 1.0:
+            raise _SkillDeadline()
+        try:
+            moved = session.call(
+                "move_to",
+                {"x": x, "z": z, "range": 1.5, "timeout": int((request_s - 0.75) * 1000), "stop_on": ["hurt", "death"]},
+                timeout_s=request_s,
+                allow_reauth=False,
+            )
+        except _SkillDeadline:
+            if not session.pending_action:
+                raise
+            if not session.stop_pending():
+                return "move_timeout_unreleased"
+            session.timed_out = False
+            return "move_timeout"
+        except ApiError as exc:
+            if exc.code == "interrupted":
+                return str(exc.context.get("cause") or "interrupted")
+            if exc.code in SURFACE_SCOUT_PATH_ERRORS:
+                return exc.code
+            raise
+        except httpx.TransportError:
+            session.pending_action = True
+            session.stop_pending()
+            raise
+        if moved.get("dimension_changed"):
+            return "dimension_changed"
+        return moved.get("interrupted_by")
 
     def navigate_segmented(
         self,
