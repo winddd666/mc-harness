@@ -740,6 +740,10 @@ class GenerationGuard:
         oxygen = status.get("oxygen")
         low_oxygen = isinstance(oxygen, (int, float)) and oxygen < 240
         critical_drowning = isinstance(oxygen, (int, float)) and oxygen < 150
+        drowning = in_water and (
+            (status.get("submerged") and oxygen == 0)
+            or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
+        )
         no_water_active = now < self._no_water_until
         water_retry_gap = 8.0 if self._last_water_escape_failed else 1.5
         no_water_reentry = (
@@ -749,9 +753,14 @@ class GenerationGuard:
         )
         needs_float = (
             in_water
-            and not status.get("jumping")
-            and (bool(status.get("submerged")) or low_oxygen)
-            and (critical_drowning or (now - self._last_water_escape_at >= 20.0))
+            and (
+                drowning
+                or (
+                    not status.get("jumping")
+                    and (bool(status.get("submerged")) or low_oxygen)
+                    and (critical_drowning or (now - self._last_water_escape_at >= 20.0))
+                )
+            )
         )
         if (
             not in_water
@@ -834,6 +843,7 @@ class GenerationGuard:
             deaths
             or in_lava
             or needs_hot_floor_guard
+            or drowning
             or (effective_combat_hurt and in_water)
             or no_water_reentry
             or (pre_trigger is not None and pre_trigger.get("source") == "pre_hurt_creeper")
@@ -955,10 +965,14 @@ class GenerationGuard:
                         inv=inv,
                         attacker=status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None,
                     )
-                if no_water_reentry:
+                if no_water_reentry or drowning:
                     shore_act = self._action(
                         "escape_to_shore",
-                        lambda: self.combat_env.escape_deep_water_to_shore(nh_pos, keep_shield=has_shield),
+                        lambda: self.combat_env.escape_deep_water_to_shore(
+                            nh_pos,
+                            keep_shield=has_shield or bool(status.get("blocking")),
+                            **({"surface_first": True} if drowning else {}),
+                        ),
                     )
                     actions.append(shore_act)
                     shore_res = shore_act.get("result") if isinstance(shore_act, dict) and isinstance(shore_act.get("result"), dict) else {}
@@ -1049,7 +1063,7 @@ class GenerationGuard:
                 esc_succeeded = False
                 esc_respawned = False
                 esc_err_code: str | None = None
-                if not transient_err and not forced_water_shore and not no_water_reentry:
+                if not transient_err and not forced_water_shore and not no_water_reentry and not drowning:
                     if not _already("escape_water"):
                         actions.append(self._action("escape_water", lambda: self._escape_water(status)))
                     esc_act = next((a for a in actions if a.get("action") == "escape_water"), None)
@@ -1071,7 +1085,9 @@ class GenerationGuard:
                 ):
                     shore_act = self._action(
                         "escape_to_shore",
-                        lambda: self.combat_env.escape_deep_water_to_shore(att_pos_w, keep_shield=has_shield),
+                        lambda: self.combat_env.escape_deep_water_to_shore(
+                            att_pos_w, keep_shield=has_shield, **({"surface_first": True} if drowning else {}),
+                        ),
                     )
                     actions.append(shore_act)
                     shore_res = shore_act.get("result") if isinstance(shore_act, dict) and isinstance(shore_act.get("result"), dict) else {}

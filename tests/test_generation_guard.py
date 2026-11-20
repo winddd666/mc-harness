@@ -3726,14 +3726,24 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
-@pytest.mark.parametrize("scenario", ["surface", "close_respawn", "macro_respawn", "macro_close_respawn"])
-def test_r24_boundary_drowning_surfaces_first_and_checks_respawn(scenario):
+@pytest.mark.parametrize(
+    "entry, scenario",
+    [
+        ("boundary", "surface"),
+        ("boundary", "close_respawn"),
+        ("boundary", "macro_respawn"),
+        ("boundary", "macro_close_respawn"),
+        ("poll", "surface"),
+        ("poll", "oxygen_only"),
+    ],
+)
+def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, monkeypatch):
     events = []
     calls = []
     macro = scenario.startswith("macro_")
     state = {
         "pos": [9971.3, 47.2, 2897.3], "health": 18, "oxygen": 0,
-        "in_water": True, "submerged": True, "on_ground": False,
+        "in_water": True, "submerged": True, "on_ground": False, "jumping": True,
         "ready": True, "alive": True, "last_death": {"t": 10},
     }
 
@@ -3743,7 +3753,7 @@ def test_r24_boundary_drowning_surfaces_first_and_checks_respawn(scenario):
                 return dict(state)
             if action == "events":
                 hurt = {"seq": 1, "type": "hurt", "source": "drown"}
-                return {"events": [] if macro else [hurt]}
+                return {"events": [] if macro or scenario == "oxygen_only" else [hurt]}
             if action == "inventory":
                 return {"items": []}
             calls.append((action, body))
@@ -3764,7 +3774,12 @@ def test_r24_boundary_drowning_surfaces_first_and_checks_respawn(scenario):
     if macro:
         state["oxygen"] = 100
     guard = GenerationGuard(WaterBot(), EventSink(events.append), checkpoint=lambda: None, skills=EscapeMacro())
-    note = guard.stabilize_after_tools()
+    if entry == "poll":
+        monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
+        guard.last_reaction = 999.5
+        assert guard.poll() is not None
+    else:
+        note = guard.stabilize_after_tools()
     actions = [e for e in events if e["type"] == "guardian.action.completed"]
     assert len(actions) == 1
     if macro:
@@ -3774,10 +3789,10 @@ def test_r24_boundary_drowning_surfaces_first_and_checks_respawn(scenario):
         assert note is None
         assert calls == []
     else:
-        assert actions[0]["action"] == "boundary_escape_to_shore"
+        assert actions[0]["action"] == ("escape_to_shore" if entry == "poll" else "boundary_escape_to_shore")
         assert [action for action, _ in calls] == ["posture", "control"]
-        assert actions[0]["ok"] is (scenario == "surface")
-        assert actions[0]["result"]["mode"] == ("surfaced" if scenario == "surface" else "respawned")
+        assert actions[0]["ok"] is (scenario != "close_respawn")
+        assert actions[0]["result"]["mode"] == ("respawned" if scenario == "close_respawn" else "surfaced")
 
 
 @pytest.mark.parametrize(
