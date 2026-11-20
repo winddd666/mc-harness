@@ -773,7 +773,7 @@ class GenerationGuard:
         low_oxygen = isinstance(oxygen, (int, float)) and oxygen < 240
         critical_drowning = isinstance(oxygen, (int, float)) and oxygen < 150
         drowning = in_water and (
-            (status.get("submerged") and oxygen == 0)
+            oxygen == 0
             or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
         )
         no_water_active = now < self._no_water_until
@@ -1696,10 +1696,7 @@ class GenerationGuard:
                 now_pre = time.monotonic()
                 oxy_pre = st_pre.get("oxygen")
                 hurt_pre_water = trigger.get("source") in {"tool_interrupted_hurt", "boundary_threat", "pre_hurt_ranged"}
-                drowning_pre = (
-                    (bool(st_pre.get("submerged")) and oxy_pre == 0)
-                    or trigger.get("hurt_source") == "drown"
-                )
+                drowning_pre = oxy_pre == 0 or trigger.get("hurt_source") == "drown"
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
                     or (isinstance(oxy_pre, (int, float)) and oxy_pre < 180)
@@ -1756,17 +1753,22 @@ class GenerationGuard:
                             raise_on_http_error=False,
                         )
                         pre_actions.append(shore_pre)
+                        shore_result = shore_pre.get("result") or {}
+                        esc_pre_respawned = shore_result.get("mode") == "respawned"
                     try:
                         st_after = self.bot.status()
                     except (ApiError, httpx.HTTPError):
                         st_after = st_pre
-                    if (
+                    left_water = (
                         not bool(st_after.get("in_water"))
                         and st_after.get("ready", True)
                         and st_after.get("alive") is not False
-                    ):
+                        and not esc_pre_respawned
+                    )
+                    if left_water:
                         self._water_hurt_streak = 0
-                    summary = f"执行 {interrupted_name} 途中水下遇险，已优先举盾上浮脱困，当前 HP={st_after.get('health')}"
+                    recovery = "已脱离水域" if left_water else f"上浮后 in_water={bool(st_after.get('in_water'))}"
+                    summary = f"执行 {interrupted_name} 途中水下遇险，{recovery}，当前 HP={st_after.get('health')}"
                     outcome = {"handled": True, "mode": "water_surface", "summary": summary, "actions": pre_actions, "status_after": st_after}
                 else:
                     act = self._action(
@@ -1903,7 +1905,7 @@ class GenerationGuard:
             and status.get("on_ground") is True and not status.get("sneaking")
         )
         drowning = in_water and (
-            (status.get("submerged") and oxygen == 0)
+            oxygen == 0
             or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
         )
         nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)

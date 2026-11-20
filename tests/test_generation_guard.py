@@ -830,6 +830,7 @@ def test_underwater_drowned_preemption_surfaces_and_ignores_swim_pre_hurt(monkey
         interrupted_name="mc_skill_mine_dfs",
     )
     assert receipt["reflex_mode"] == "water_surface"
+    assert "上浮后 in_water=True" in receipt["message"]
     assert surfaced == ["escape_water"]
 
     # 2) CombatControllerSlot preserves jump=True when still submerged on exit
@@ -3774,6 +3775,8 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
 
     if macro:
         state["oxygen"] = 100
+    elif scenario == "oxygen_only":
+        state["submerged"] = False
     guard = GenerationGuard(WaterBot(), EventSink(events.append), checkpoint=lambda: None, skills=EscapeMacro())
     if entry == "poll":
         monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
