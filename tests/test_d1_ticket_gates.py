@@ -219,3 +219,23 @@ def test_acceptance_counts_missing_summaries_after_actor_start_as_runner_aborts(
     assert metrics["runner_abort"] == ["actor"]
     assert metrics["thread_errors"] == ["thread"]
     assert metrics["runtime_error"] == 0
+
+
+def test_negative_climb_is_detected_even_when_receipt_reports_time_slice(tmp_path):
+    bot = tmp_path / "hy4_hy_7_iron"
+    bot.mkdir()
+    events = _tool("climb", "mc_skill_mine_dfs", 0, 20, {"action": "climb_out"}, {
+        "ok": False, "action": "climb_out", "stop_reason": "climb_progress",
+        "climb": {"start_y": -9, "end_y": 21},
+    }) + _tool("regression", "mc_skill_mine_dfs", 21, 31, {"action": "climb_out"}, {
+        "ok": False, "action": "climb_out", "stop_reason": "time_slice",
+        "climb": {"start_y": 21, "end_y": 15},
+    }) + _tool("return", "mc_skill_mine_dfs", 32, 41, {"action": "return_collar"}, {
+        "ok": True, "action": "return_collar", "climb": {"start_y": 15, "end_y": 14},
+    }) + [{"type": "run.finished", "elapsed": 45}]
+    ep = _write_episode(bot, 1, events)
+    (bot / "wild-endurance-final.json").write_text(json.dumps({"curriculum_summary": {"episodes": [ep]}}))
+
+    gate = next(gate for gate in ticket_gates(tmp_path) if gate.metric.startswith("measured climb_out"))
+    assert (gate.status, gate.actual) == ("FAIL", "1/2")
+    assert gate.evidence.endswith("episode-1.events.jsonl:4")

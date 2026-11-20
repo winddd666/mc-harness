@@ -208,6 +208,16 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
                     metrics.count(reason, line)
                 if climb_streak == 3:
                     metrics.count("climb_streak", line)
+                if result.get("action") == "climb_out":
+                    climb = _object(result.get("climb"))
+                    start_y = _number(climb.get("start_y"))
+                    end_y = _number(climb.get("end_y"))
+                    if start_y is not None and end_y is not None:
+                        metrics.count("climb_height", line)
+                        if end_y < start_y:
+                            metrics.count("climb_height_loss", line)
+                    elif climb or reason in ("climb_progress", "climb_blocked", "surface_reached"):
+                        metrics.count("climb_height_missing", line)
         elif kind == "guardian.action.started" and event.get("action") == "boundary_escape_water":
             if elapsed is not None:
                 water_starts[scope] = elapsed
@@ -421,7 +431,18 @@ def ticket_gates(wave_dir: Path) -> list[TicketGate]:
         progress <= reached if progress or reached else None, progress_ref or climb_ref or "no climb outcomes")
     add("BUG-059", "episodes with >=3 consecutive climb_progress", str(len(streaks)), "<= 5",
         len(streaks) <= 5 if climb else None, streaks[0].at(streaks[0].first_lines["climb_streak"]) if streaks else climb_ref)
-    deep_returns = [ep for ep in episodes if ep.budget_class in ("deep", "expedition") and ep.counts["climb"]]
+    measured, measured_ref = total(episodes, "climb_height")
+    height_loss, loss_ref = total(episodes, "climb_height_loss")
+    missing_height, missing_height_ref = total(episodes, "climb_height_missing")
+    passed = False if height_loss else True if measured and not missing_height else None
+    add("BUG-059", "measured climb_out calls ending below starting Y",
+        f"{height_loss}/{measured}", "== 0", passed,
+        loss_ref or missing_height_ref or measured_ref or "no climb_out start/end Y receipts")
+
+    deep_returns = [
+        ep for ep in episodes
+        if ep.budget_class in ("deep", "expedition") and (ep.counts["climb"] or ep.counts["climb_height"])
+    ]
     suspect = [ep for ep in deep_returns if ep.status == "timeout"]
     add("BUG-059", "deep return timeouts", f"{len(suspect)} candidates / {len(deep_returns)} deep climbs", "== 0",
         True if deep_returns and not suspect else None,
