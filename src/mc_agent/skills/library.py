@@ -7732,6 +7732,13 @@ class MacroSkills:
         budget = max(0.0, min(35.0, max_duration_s))
         finish_at = time.monotonic() + budget
         session = _BudgetSession(self.bot, finish_at - min(1.0, budget / 4))
+        actor_call = session._call
+
+        def call_with_seconds(path: str, body: dict[str, Any] | None, *, timeout_s: httpx.Timeout, **kwargs: Any) -> dict[str, Any]:
+            # The actor guard clamps scalar seconds against its own deadline.
+            return actor_call(path, body, timeout_s=timeout_s.read, **kwargs)
+
+        session._call = call_with_seconds
         scoped = copy(self)
         scoped.bot = session.session
         engine = self._mining_dfs

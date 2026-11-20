@@ -3077,7 +3077,9 @@ def test_staircase_first_step_uses_total_budget(monkeypatch) -> None:
     [(None, 35.0, "move_to"), (13.0, 9.0, "place"), (17.0, 13.0, None)],
 )
 def test_flee_budget_reaches_shaft_waypoints_and_seals(monkeypatch, episode_budget, cap, slow_action) -> None:
+    from mc_agent.harness.events import EventSink
     from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.guardian import GenerationGuard
     from mc_agent.harness.mc_tools import McToolset
     from mc_agent.skills.mining_dfs import MiningDFSEngine, ShaftEdge, ShaftNode
 
@@ -3147,7 +3149,8 @@ def test_flee_budget_reaches_shaft_waypoints_and_seals(monkeypatch, episode_budg
         engine.collar_node_id = 1
         engine.active_node_id = 3
         original_call = bot.call
-        result = json.loads(toolset.mc_skill_flee())
+        guard = GenerationGuard(bot, EventSink(on_event=lambda event: None), checkpoint=lambda: None)
+        result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", toolset.mc_skill_flee))
         assert engine.active_node_id == (2 if slow_action else 1)
         assert engine.sealed_positions == set(placed)
         assert toolset.skills.mining_dfs is engine
