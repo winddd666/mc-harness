@@ -898,6 +898,14 @@ def _is_two_step_stair(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool
     return abs(a[1] - b[1]) == 2 and (abs(a[0] - b[0]), abs(a[2] - b[2])) in {(2, 0), (0, 2)}
 
 
+def _stair_midpoint_index(waypoints: list[tuple[int, int, int]], pos: tuple[int, int, int]) -> int | None:
+    return next((
+        index for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1)
+        if abs(a[1] - pos[1]) == 1 and _is_two_step_stair(a, b)
+        and _interpolate_cells(a, b)[1] == pos
+    ), None)
+
+
 def _interpolate_cells(a: tuple[int, int, int], b: tuple[int, int, int]) -> list[tuple[int, int, int]]:
     """Cell-by-cell straight line from a to b (each hop <= 1 block on every axis)."""
     steps = max(abs(b[0] - a[0]), abs(b[1] - a[1]), abs(b[2] - a[2]))
@@ -2006,11 +2014,7 @@ class MiningDFSEngine:
                         offset = waypoints.index(cur_pos)
                     elif edge.edge_kind in {"stair_down", "stair_up"}:
                         # Stairs save every second step. A slice can stop on the omitted step.
-                        offset = next((
-                            index for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1)
-                            if abs(a[1] - cur_pos[1]) == 1 and _is_two_step_stair(a, b)
-                            and _interpolate_cells(a, b)[1] == cur_pos
-                        ), None)
+                        offset = _stair_midpoint_index(waypoints, cur_pos)
                         if offset is None:
                             continue
                         waypoints = [*waypoints[:offset], cur_pos, *waypoints[offset:]]
@@ -2769,13 +2773,20 @@ class MiningDFSEngine:
             hd = math.hypot(cur_pos[0] - anc[0], cur_pos[2] - anc[2])
             vertical_near = abs(cur_pos[1] - anc[1]) <= 20
             if allow_retired or not vertical_near or hd > 36.0:
-                points = [tuple(n["anchor"]) for n in sh.get("nodes", []) if n.get("anchor")]
-                points.extend(tuple(wp) for n in sh.get("nodes", [])
-                              for wp in (n.get("edge_from_parent") or {}).get("waypoints", []))
+                nodes = sh.get("nodes", [])
+                edges = [
+                    (edge.get("edge_kind"), [tuple(wp) for wp in edge.get("waypoints", [])])
+                    for n in nodes if (edge := n.get("edge_from_parent"))
+                ]
+                points = [tuple(n["anchor"]) for n in nodes if n.get("anchor")]
+                points.extend(wp for _, waypoints in edges for wp in waypoints)
                 if allow_retired and points:
                     hd = min(math.dist(cur_pos, pt) for pt in points)
                     vertical_near = hd <= 6.0
-                elif cur_pos in points:
+                elif cur_pos in points or any(
+                    kind in {"stair_down", "stair_up"} and _stair_midpoint_index(waypoints, cur_pos) is not None
+                    for kind, waypoints in edges
+                ):
                     hd = 0.0
                     vertical_near = True
             if hd <= best_d and vertical_near:
@@ -5409,13 +5420,17 @@ class MiningDFSEngine:
             ):
                 # Live s01/s03: after a deep reset this path opened a "collar" at y=-54,
                 # so every later reset looked legitimate and the run churned underground.
-                if time.monotonic() + 6.0 >= deadline:
+                # An explore at or above the target layer must not spend its
+                # slice digging away from it when no shaft can be restored.
+                if cur_pos[1] >= self.target_y - SCAN_BAND or time.monotonic() + 6.0 >= deadline:
                     return {
                         "ok": False,
                         "requires_replan": True,
                         "action": act,
                         "strategy": self.strategy,
                         "stop_reason": "needs_surface_climb",
+                        "next_action": "climb_out",
+                        "pos_after": st0.get("pos"),
                         "message": self._surface_climb_hint(),
                         "tree": self.snapshot(),
                     }

@@ -3774,6 +3774,53 @@ def test_r24_nether_damage_retreat_refuses_lava_border():
     assert mutations == []
 
 
+def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    events = []
+    calls = []
+    status = {"pos": [0.5, 52, 0.5], "health": 20, "oxygen": 240, "in_water": True,
+              "submerged": True, "on_ground": False, "alive": True, "ready": True}
+
+    class DeepWaterBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            calls.append((action, kwargs["timeout_s"], clock[0]))
+            assert kwargs["allow_reauth"] is False
+            if action == "get_block":
+                timeout = kwargs["timeout_s"]
+                clock[0] += min(1.1, timeout)
+                if timeout < 1.1:
+                    raise httpx.ReadTimeout("water probe reached its deadline")
+                return {"name": "water"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            return {"ok": True}
+
+    bot = DeepWaterBot()
+    skills = MacroSkills(bot)
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
+
+    def reach_shore(*args, **kwargs):
+        assert calls[-1][:2] == ("stop", 1.5)
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools()
+    completed = [e for e in events if e["type"] == "guardian.action.completed"]
+    shallow, shore = completed
+    assert shallow["action"] == "boundary_escape_water"
+    assert shallow["duration"] == pytest.approx(20.0)
+    assert shallow["result"] == {"ok": False, "reason": "time_budget", "partial": True, "in_water": True}
+    assert shore["action"] == "boundary_escape_to_shore" and shore["ok"] is True
+    assert all(start + timeout <= 1020.0 for _, timeout, start in calls[:-1])
+    assert skills.bot is bot
+
+
 
 
 

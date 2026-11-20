@@ -2576,7 +2576,8 @@ def test_restored_deep_shaft_keeps_its_tip_when_rejoin_uses_multiple_slices(monk
     assert not world.dig_log
 
 
-def test_restore_accepts_known_waypoint_far_below_the_saved_collar() -> None:
+@pytest.mark.parametrize("midpoint_saved", [True, False])
+def test_restore_accepts_known_waypoint_far_below_the_saved_collar(midpoint_saved) -> None:
     import mc_agent.skills.mining_dfs as mining
 
     waypoint = (40, 20, 0)
@@ -2588,9 +2589,13 @@ def test_restore_accepts_known_waypoint_far_below_the_saved_collar() -> None:
         engine = MacroSkills(bot).mining_dfs
         collar = engine._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None, edge_from_parent=None, branches=[])
         engine.collar_node_id = collar.node_id
+        route = [collar.anchor, (39, 21, 0)]
+        if midpoint_saved:
+            route.append(waypoint)
+        route.append(tip_anchor)
         tip = engine._create_node(
             kind="switchback", anchor=tip_anchor, parent_id=collar.node_id,
-            edge_from_parent=ShaftEdge("stair_down", "east", [collar.anchor, waypoint, tip_anchor]),
+            edge_from_parent=ShaftEdge("stair_down", "east", route),
             branches=[mining.BranchSpec("stair_down", "east", 4)],
         )
         engine._archive_current_shaft_to_ledger()
@@ -2988,7 +2993,8 @@ def test_collar_reports_when_solid_station_is_outside_geofence() -> None:
     assert not world.dig_log
 
 
-def test_explore_continues_after_successful_automatic_climb(monkeypatch) -> None:
+@pytest.mark.parametrize("target_y", [60, 16])
+def test_explore_only_climbs_toward_a_higher_target(monkeypatch, target_y) -> None:
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)
     with BotSession("tok", bot_username="AutoClimb", transport=httpx.MockTransport(world.handler)) as bot:
         eng = MacroSkills(bot).mining_dfs
@@ -2999,10 +3005,17 @@ def test_explore_continues_after_successful_automatic_climb(monkeypatch) -> None
             return {"reached": True}
 
         monkeypatch.setattr(eng, "_climb_out", climb)
-        result = eng.run(target="iron", target_y=60, max_duration_s=10.0)
-    assert result["stop_reason"] != "needs_surface_climb"
-    assert result["tree"]["collar_node_id"] is not None
-    assert world.dig_log
+        result = eng.run(target="iron", target_y=target_y, max_duration_s=10.0)
+    if target_y == 60:
+        assert result["stop_reason"] != "needs_surface_climb"
+        assert result["tree"]["collar_node_id"] is not None
+        assert world.dig_log
+    else:
+        assert result["stop_reason"] == "needs_surface_climb"
+        assert result["next_action"] == "climb_out"
+        assert result["pos_after"] == [0.5, 20.0, 0.5]
+        assert world.pos[1] == 20
+        assert not world.dig_log
 
 
 def test_explore_does_not_open_a_fake_collar_after_a_disconnected_move(monkeypatch) -> None:
