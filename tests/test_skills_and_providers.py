@@ -2631,6 +2631,35 @@ def test_village_scan_retains_beds_and_hay_amid_path_blocks(entry) -> None:
         assert {"hay_block", "yellow_bed"} <= {row["name"] for row in remembered}
 
 
+@pytest.mark.parametrize(
+    "target_types,chest_y,expected_segments",
+    [(None, 33, 5), (["chest"], 33, 5), (["chest"], 64, 0)],
+)
+def test_surface_scout_ignores_underground_chests(target_types, chest_y, expected_segments) -> None:
+    backend = _SurfaceScoutBackend()
+    chest_queries = []
+
+    def handle(request):
+        if request.url.path.endswith("/find_blocks"):
+            types = json.loads(request.content)["types"]
+            if "chest" in types:
+                chest_queries.append(types)
+                return backend.ok({"blocks": [{"name": "chest", "pos": [1, chest_y, 0]}]})
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east", target_types=target_types)
+
+    assert result["segments_completed"] == len(backend.moves) == expected_segments
+    assert all(types == ["chest"] for types in chest_queries)
+    if chest_y < 64:
+        assert result["stop_reason"] == "segment_limit"
+        assert all(row["name"] != "chest" for row in result["detected_pois"])
+    else:
+        assert result["stop_reason"] == "target_found"
+        assert any(row["name"] == "chest" for row in result["detected_pois"])
+
+
 @pytest.mark.parametrize("valid_targets", [[], ["bell", "villager"]])
 def test_surface_scout_recovers_from_unknown_block_in_target_list(valid_targets) -> None:
     backend = _SurfaceScoutBackend()

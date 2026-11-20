@@ -1404,19 +1404,25 @@ class MacroSkills:
             return {**result, "stop_reason": "invalid_direction", "requires_replan": True}
         if not math.isfinite(max_duration_s) or not math.isfinite(step_dist):
             return {**result, "stop_reason": "invalid_budget_or_step", "requires_replan": True}
-        requested = [resolve_item_alias(name) for name in (target_types or (*VILLAGE_LANDMARK_BLOCKS, *SURFACE_SCOUT_ENTITIES))]
+        village_evidence = tuple(name for name in VILLAGE_LANDMARK_BLOCKS if name != "chest")
+        requested = [
+            resolve_item_alias(name)
+            for name in (target_types or (*village_evidence, *SURFACE_SCOUT_ENTITIES))
+        ]
         targets = tuple(dict.fromkeys(
             block for name in requested for block in (BED_BLOCK_TYPES if name in {"bed", "beds", "*_bed"} else (name,))
         ))
         remaining_targets = set(targets)
         blocks = [
-            name for name in targets if name not in SURFACE_SCOUT_ENTITIES and name not in VILLAGE_SURVEY_CLUTTER
+            name for name in targets
+            if name not in SURFACE_SCOUT_ENTITIES and name not in VILLAGE_SURVEY_CLUTTER and name != "chest"
         ]
+        chests = ["chest"]
         paths = ["dirt_path"]
         if "farmland" in targets:
             paths.append("farmland")
-        if not blocks and not any(name in VILLAGE_SURVEY_CLUTTER for name in targets):
-            blocks = list(VILLAGE_LANDMARK_BLOCKS)
+        if not blocks and not any(name in VILLAGE_SURVEY_CLUTTER or name == "chest" for name in targets):
+            blocks = list(village_evidence)
         entities = [name for name in targets if name in SURFACE_SCOUT_ENTITIES] or list(SURFACE_SCOUT_ENTITIES)
         step = max(28.0, min(32.0, step_dist))
         session = _SkillBudgetSession(self.bot, min(50.0, max_duration_s))
@@ -1448,14 +1454,17 @@ class MacroSkills:
             for route, key, receipt_key, types in (
                 ("find_blocks", "blocks", "detected_pois", blocks),
                 ("get_entities", "entities", "detected_entities", entities),
+                ("find_blocks", "blocks", "detected_pois", chests),
                 ("find_blocks", "blocks", "detected_pois", paths),
                 ("find_blocks", "blocks", "detected_pois", landmarks),
             ):
                 if not types or (types is paths and found):
                     continue
+                if types is chests and not found and "chest" not in targets:
+                    continue
                 query = {"radius": 64, "types": types}
                 if key == "blocks":
-                    query["limit"] = 6
+                    query["limit"] = 20 if types is chests else 6
                 while types:
                     try:
                         rows = session.call(route, query, timeout_s=3.0, allow_reauth=False).get(key, [])
@@ -1475,10 +1484,11 @@ class MacroSkills:
                 else:
                     continue
                 matches = [
-                    row for row in rows[:6]
+                    row for row in rows
                     if row.get("name") in types and isinstance(row.get("pos"), (list, tuple))
                     and len(row["pos"]) == 3
-                ]
+                    and (types is not chests or abs(row["pos"][1] - status["pos"][1]) <= 12)
+                ][:6]
                 if key == "blocks":
                     memory.observe_blocks(matches, dim=dim)
                 else:
