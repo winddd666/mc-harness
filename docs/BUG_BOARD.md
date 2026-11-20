@@ -1164,7 +1164,7 @@
 - **验收标准**：离线单测覆盖“同树干原地连砍 4 根原木不重寻路”、“木镐混传 `stone+iron_ore` 自动跳过 `iron_ore` 挖 `stone`”、“`scout_surface` 遇水先绕干岸”；实机 Day 1 `harvest_logs` 失败率从 100% 降至 `< 20%`，单次 15–20s 稳拿 6+ 根原木。
 - **D1 r47 终版复验**：r46→r47 已配对采木 **29→25**，排除反射后失败 **27/27→12/21（57.1%）**，仍高于 **20%**。技能耗时中位 **44.039→20.583s**，3 次净收至少 6 根，最快 **24.308s**，20s 内 **0/21**。按失败回执计 `time_budget` **15→4**、`unreachable_targets` **6→2**，另有一次 44.046s 收 6 根的超时部分成功。两条 r47 的 `tool_tier_insufficient` 均报告角色无镐，木镐混传暴露仍待新样本。Day 2 斥候有效回执 `in_water` **11/27→9/61**，新增 3 次 `shore_recoveries`，HY4_8 仍有 6 次涉水早停。 [最快六根](../runs/r47_day1_5bot/hy4_hy_1_bare/20261120-095716-917129.events.jsonl#L62) · [超时部分成功](../runs/r47_day1_5bot/hy4_hy_1_bare/20261120-100243-715803.events.jsonl#L71) · [无镐拒绝](../runs/r47_day1_5bot/hy4_hy_2_bare/20261120-101249-037804.events.jsonl#L116) · [上岸续跑](../runs/r47_day2_full_day_scout_9bot/nju_ds_1_iron/20261120-100224-945668.events.jsonl#L164)
 
-### BUG-080 | **P1（下界要塞 `mc_skill_tunnel:unsafe_or_unknown_floor` 29x + 下界高速斥候外推）** | Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: OPEN（`r48_nether_fortress_9bot` 实测）
+### BUG-080 | **P1（下界要塞 `mc_skill_tunnel:unsafe_or_unknown_floor` 29x + 下界高速斥候外推）** | Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: FIXED（`643f2f1` 已合入，待次日实机验收）
 
 - **一句话**：`r48_nether_fortress_9bot` 6/9 找到要塞，但导航阶段出现 **29 次 `mc_skill_tunnel:unsafe_or_unknown_floor`**（5 bots）、**33 次 `movement_not_confirmed`**（7 bots）、**28 次 `path_not_found`**（4 bots），且 `mc_skill_scout_surface` 尚未支持 `the_nether` 维度（导致下界仍靠手动短步寻路）。
 - **实测证据**：[r48_nether_fortress 榜单](../runs/r48_nether_fortress_9bot/triage-r48_nether_fortress_9bot.md)（9/9 完成，0 崩溃，0 慢调用，但 90 次导航失败）。
