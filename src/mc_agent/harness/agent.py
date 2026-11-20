@@ -124,6 +124,30 @@ def _infer_extra_tools_for_task(task: str, explicit: set[str] | list[str] | tupl
         extras.add("mc_equip")
     if any(k in low for k in ("弓", "弩", "bow", "crossbow", "arrow", "箭", "shoot", "射")):
         extras.update({"mc_shoot", "mc_posture"})
+    if any(
+        k in low
+        for k in (
+            "击杀",
+            "kill",
+            "blaze",
+            "烈焰",
+            "skeleton",
+            "骷髅",
+            "creeper",
+            "苦力怕",
+            "fortress",
+            "要塞",
+            "bastion",
+            "堡垒",
+            "combat",
+            "战斗",
+            "deflect",
+            "弹反",
+            "mob",
+            "敌对",
+        )
+    ):
+        extras.add("mc_skill_combat")
     if any(k in low for k in ("附魔", "enchant")):
         extras.add("mc_skill_enchant")
     if any(k in low for k in ("交易", "trade", "村民", "villager")):

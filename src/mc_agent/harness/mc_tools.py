@@ -20,6 +20,7 @@ from ..bot import BotSession
 from ..errors import ApiError, AuthError, BotNotReadyError, DeathLoopCooldownError
 from ..kb import assess_world_target, build_jit_error_hint, lookup_kb, normalize_dimension, resolve_item_alias
 from ..skills import MacroSkills, SafetyEmergency, check_and_stabilize, compute_advancement_frontier
+from ..skills.combat_adapter import run_combat_skill
 from ..skills.library import (
     BLOCK_MIN_PICKAXE_TIER,
     LOG_TYPES,
@@ -2391,6 +2392,26 @@ class McToolset:
         distance = max(8, min(22, int(distance)))
         return self._run_skill(lambda: self.skills.flee_hostiles(distance=float(distance), geofence=self.geofence))
 
+    def mc_skill_combat(
+        self,
+        mode: str = "auto",
+        target_name: str | None = None,
+        max_time_s: float = 20.0,
+        pillar_height: int = 3,
+    ) -> str:
+        """Tactical active combat macro backed by `combat_v1` via `BotSessionCombatAdapter`."""
+        return self._run_skill(
+            lambda: run_combat_skill(
+                self.bot,
+                mode=mode,
+                target_name=target_name,
+                max_time_s=float(max_time_s),
+                pillar_height=int(pillar_height),
+                geofence=self.geofence,
+                episode_deadline_mono=self._episode_deadline_mono,
+            )
+        )
+
     def _check_direction_geofence(self, direction: str, steps: int, action: str) -> str | None:
         if not self.geofence.enabled:
             return None
@@ -3136,6 +3157,18 @@ class McToolset:
                     concurrency="exclusive",
                 ),
                 Tool(
+                    name="mc_skill_combat",
+                    description="主动战术战斗宏技能（combat_v1）：自动选武器、控攻速与动态刹车接战。mode='auto' 按敌怪与装备自动路由（苦力怕风筝、远程/持盾走剑盾突进 rush、无盾近战 melee）；也可显式指定 rush/melee/creeper/skeleton_shield/skeleton_bow/pillar/crit/wtap/gap_foot/gap_head。受围栏、30s 硬预算与小脑低血抢占保护。",
+                    parameters={
+                        "mode": Parameter("战斗模式：auto(推荐)/melee/rush/creeper/skeleton_shield/skeleton_bow/pillar/crit/mcrit/wtap/gap_foot/gap_head", required=False),
+                        "target_name": Parameter("可选英文实体名，如 zombie/skeleton/blaze/creeper", required=False),
+                        "max_time_s": Parameter("最大接战时长(3-30s)，默认20", kind="number", required=False),
+                        "pillar_height": Parameter("仅 mode='pillar' 有效，搭高格数(1-4)，默认3", kind="integer", required=False),
+                    },
+                    handler=self.mc_skill_combat,
+                    concurrency="exclusive",
+                ),
+                Tool(
                     name="mc_skill_staircase",
                     description="阶梯升降辅助技能：主要用于向上修台阶重返地表(vertical='up'/'pillar')或短距地形升降；正规地下下井探铁/探钻请优先调用 mc_skill_mine_dfs。",
                     parameters={
@@ -3226,6 +3259,7 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_kb_lookup": "查配方/矿/成就",
     "mc_skill_bunker": "竖井避怪",
     "mc_skill_flee": "无遮挡遇险时封堵矿道或冲刺逃离",
+    "mc_skill_combat": "主动战术接战(auto/rush/melee/creeper/pillar/crit/wtap/gap)，受围栏与30s预算保护",
     "mc_skill_staircase": "爬出天坑/垫高(up/pillar)；下井探矿用mine_dfs",
     "mc_skill_tunnel": "定向凿墙平推(隔墙目标/绕水/下界穿墙；盲探矿用mine_dfs)",
     "mc_skill_mine_dfs": "路径压缩探矿DFS/返井口",
