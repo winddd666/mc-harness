@@ -1315,7 +1315,7 @@ def _build_day2_village_search_target(
             f"{biome_note}MC 村庄仅生成在 plains/savanna/desert/taiga/snowy_plains，若进入海洋/深森林/丛林/沼泽立刻换方向。"
             + hop_clause
             + "1) 若包内食物不足 6 块且途中 24m 内有猪/牛/羊，顺手用斧收 2~3 只；"
-            "2) 一旦 mc_skill_scout_surface 返回命中村庄方块(bell/dirt_path/hay_block/composter/lectern)或 villager/iron_golem，立即进村：①找带床/箱子的村民屋调 mc_skill_bind_bed 绑重生点占为据点；②顺手采 4~8 块 hay_block 合面包、开屋里箱子拿贵重战利品；③记录村庄坐标后立即收工（多人服不指望睡觉跳夜，下集直接交易或转地下挖钻）。"
+            "2) 一旦 mc_skill_scout_surface 返回命中村庄方块(bell/dirt_path/hay_block/composter/lectern)或 villager/iron_golem，立即停止继续 scout，直接进村收割：①调 mc_find_blocks(radius=48, types=['bed','chest','hay_block','bell'])（严禁混入 dirt_path 以免挤爆 limit，且必须用通用别名 'bed' 覆盖全部 16 色村民床）；②优先找带床/箱子的村民屋调 mc_skill_bind_bed 绑重生点占为据点；③顺手采 4~8 块 hay_block 合面包、开屋里箱子拿贵重战利品；④完成后立即收工（多人服不指望睡觉跳夜，下集直接交易或转地下挖钻）。"
         ),
         extra_tools=("mc_skill_scout_surface", "mc_skill_bind_bed", "mc_skill_container"),
         advancement_id=None,
