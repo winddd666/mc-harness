@@ -4101,6 +4101,46 @@ def test_guardian_damage_retreat_checks_terrain(dimension, health):
     assert mutations == []
 
 
+@pytest.mark.parametrize("water_state", ["surfaced", "submerged", "drowning"])
+def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypatch, water_state):
+    status = {"pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180,
+              "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True}
+    calls = []
+
+    class WetBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(WetBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def failed_water_macro(_status):
+        calls.append("water_macro")
+        return {"ok": False, "in_water": True}
+
+    def failed_shore(*args, surface_first=False, **kwargs):
+        calls.append("urgent_shore" if surface_first else "shore")
+        return {"ok": False, "in_water": True}
+
+    monkeypatch.setattr(guard, "_escape_water", failed_water_macro)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", failed_shore)
+    receipt = guard.handle_preemption({"source": "tool_interrupted_hurt"}, interrupted_name="mc_skill_mine_dfs")
+    assert receipt["reflex_mode"] == "water_surface"
+    assert calls == ["water_macro", "shore"]
+    calls.clear()
+    status.update(submerged=water_state != "surfaced", oxygen=0 if water_state == "drowning" else 180)
+
+    guard.stabilize_after_tools([json.dumps(receipt)])
+
+    expected = {"surfaced": [], "submerged": ["shore"], "drowning": ["urgent_shore"]}
+    assert calls == expected[water_state]
+
+
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])

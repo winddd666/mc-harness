@@ -1964,10 +1964,14 @@ class GenerationGuard:
                         st_after = st_pre
                     left_water = (
                         not bool(st_after.get("in_water"))
+                        and not st_after.get("in_lava")
+                        and st_after.get("on_ground") is not False
                         and st_after.get("ready", True)
                         and st_after.get("alive") is not False
                         and not esc_pre_respawned
                     )
+                    self._last_water_escape_at = time.monotonic()
+                    self._last_water_escape_failed = not left_water
                     if left_water:
                         self._water_hurt_streak = 0
                     recovery = "已脱离水域" if left_water else f"上浮后 in_water={bool(st_after.get('in_water'))}"
@@ -2144,7 +2148,21 @@ class GenerationGuard:
 
         no_water_reentry_b = in_water and now_b < self._no_water_until
         ended_wet_in_payload = any('"in_water": true' in str(r or "").lower() for r in (tool_results or []))
-        needs_water_escape = in_water and (
+        handled_water_in_tool = False
+        if in_water and tool_results:
+            try:
+                last_tool_result = json.loads(tool_results[-1])
+            except (TypeError, ValueError):
+                last_tool_result = None
+            handled_water_in_tool = (
+                isinstance(last_tool_result, dict)
+                and last_tool_result.get("preempted_by_reflex") is True
+                and last_tool_result.get("reflex_mode") == "water_surface"
+                and isinstance(last_tool_result.get("status_after"), dict)
+                and last_tool_result["status_after"].get("in_water") is True
+            )
+        retry_water_escape = not handled_water_in_tool or drowning or bool(hurts) or bool(status.get("submerged"))
+        needs_water_escape = in_water and retry_water_escape and (
             not status.get("on_ground")
             or status.get("submerged")
             or ended_wet_in_payload
@@ -2264,7 +2282,7 @@ class GenerationGuard:
                     if any(a.get("action") == "boundary_raise_shield" and a.get("ok") for a in b_actions):
                         notes.append("举盾护体")
 
-                forced_shore_b = self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
+                forced_shore_b = self._water_hurt_streak >= 3 or no_water_reentry_b or drowning or handled_water_in_tool
                 esc_b_ok = False
                 esc_b_respawned = False
                 if not forced_shore_b:
