@@ -8,7 +8,8 @@ Modes:
 Exit is deliberate: the caller (agent) is notified and re-arms, giving the
 requested "completion event or 45-minute spot check" cadence without polling.
 With --follow --since, discover every wave with recent fleet artifacts, announce
-existing and new waves, and keep watching across notices.
+existing and new waves, and keep watching across notices. A fresh Fleet report
+can also settle missing summaries accounted for as process crashes.
 
 Usage:
   python scripts/d1_overnight_watch.py --every-min 45 \
@@ -28,7 +29,7 @@ WT = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated")
 HTTP_FAILURE = re.compile(r"\bHTTP(?:\s+(?:status|error))?[\s:]+(429|502)\b|\[(429|502)\]", re.I)
 
 
-def snapshot(wave: pathlib.Path) -> dict:
+def snapshot(wave: pathlib.Path, *, final_only: bool = False) -> dict:
     bots = [p for p in wave.iterdir() if p.is_dir()]
     summaries = 0
     files = list(wave.glob("*/*.events.jsonl"))
@@ -36,7 +37,7 @@ def snapshot(wave: pathlib.Path) -> dict:
     episodes = collections.Counter()
     for bot in bots:
         finals = sorted(bot.glob("wild-endurance-*.json"))
-        candidates = finals or sorted(bot.glob("curriculum-*.json"))
+        candidates = finals or ([] if final_only else sorted(bot.glob("curriculum-*.json")))
         if not candidates:
             continue
         try:
@@ -119,7 +120,7 @@ def fleet_metadata(wave: pathlib.Path) -> tuple[int, int, float]:
     newest = 0.0
     for bot in bots:
         has_final = False
-        for pattern in ("wild-endurance-*.json", "curriculum-*.json", "*.events.jsonl"):
+        for pattern in ("wild-endurance-*.json", "curriculum-*.json", "*.events.jsonl", "stdout.log"):
             for path in bot.glob(pattern):
                 try:
                     newest = max(newest, path.stat().st_mtime)
@@ -130,9 +131,28 @@ def fleet_metadata(wave: pathlib.Path) -> tuple[int, int, float]:
     return len(bots), finals, newest
 
 
+def fleet_report_crashes(wave: pathlib.Path, bots: int, finals: int, newest: float) -> int:
+    """Trust a Fleet report only when it covers the current slots and artifacts."""
+    report = wave / f"triage-{wave.name}.md"
+    try:
+        if report.stat().st_mtime < newest:
+            return 0
+        with report.open(encoding="utf-8") as handle:
+            if handle.readline().rstrip() != f"# FLEET TRIAGE — `{wave.name}`":
+                return 0
+            handle.readline()
+            match = re.search(r"bot 目录 `(\d+)` · completed `\d+` · crash `(\d+)`", handle.readline())
+    except (OSError, ValueError):
+        return 0
+    if not match:
+        return 0
+    listed_bots, crashes = map(int, match.groups())
+    return crashes if listed_bots == bots and finals + crashes == bots else 0
+
+
 def follow(root: pathlib.Path, prefixes: list[str], since: float, every_min: float, idle: float) -> None:
     discovered: set[str] = set()
-    settled: dict[str, int] = {}
+    settled: dict[str, tuple[int, int]] = {}
     stalled: set[tuple[str, float]] = set()
     deadline = time.monotonic() + every_min * 60
     print(f"[overnight] follow prefixes={prefixes or 'all fleet waves'} every={every_min}m", flush=True)
@@ -145,7 +165,7 @@ def follow(root: pathlib.Path, prefixes: list[str], since: float, every_min: flo
             if not wave.is_dir() or (prefixes and not wave.name.startswith(tuple(prefixes))):
                 continue
             directory_changed = wave.stat().st_mtime_ns
-            if settled.get(wave.name) == directory_changed and not spotcheck:
+            if settled.get(wave.name) == (directory_changed, 0) and not spotcheck:
                 continue
             bots, finals, newest = fleet_metadata(wave)
             if not bots or not newest or newest < since:
@@ -153,18 +173,21 @@ def follow(root: pathlib.Path, prefixes: list[str], since: float, every_min: flo
             if wave.name not in discovered:
                 discovered.add(wave.name)
                 print(f"WAVE DISCOVERED {wave.name}: summaries={finals}/{bots}", flush=True)
-            if finals < bots and wave.name in settled:
+            crashes = fleet_report_crashes(wave, bots, finals, newest) if finals < bots else 0
+            terminal = finals + crashes == bots
+            if wave.name in settled and (not terminal or settled[wave.name][1] != crashes):
                 del settled[wave.name]
                 print(f"WAVE REOPENED {wave.name}: summaries={finals}/{bots}", flush=True)
-            if finals == bots and wave.name not in settled:
-                state = snapshot(wave)
-                if state["summaries"] == bots:
-                    settled[wave.name] = directory_changed
-                    print(f"WAVE SETTLED {line(state)} at {time.strftime('%T')}", flush=True)
+            if terminal and wave.name not in settled:
+                state = snapshot(wave, final_only=True)
+                if state["summaries"] + crashes == bots:
+                    settled[wave.name] = (directory_changed, crashes)
+                    outcome = f" WITH CRASHES ({crashes})" if crashes else ""
+                    print(f"WAVE SETTLED{outcome} {line(state)} at {time.strftime('%T')}", flush=True)
                     continue
             if wave.name in settled:
-                settled[wave.name] = directory_changed
-            if finals < bots and time.time() - newest >= idle and (wave.name, newest) not in stalled:
+                settled[wave.name] = (directory_changed, crashes)
+            if not terminal and time.time() - newest >= idle and (wave.name, newest) not in stalled:
                 stalled.add((wave.name, newest))
                 print(f"WAVE STALLED {wave.name}: summaries={finals}/{bots}", flush=True)
             if spotcheck:
