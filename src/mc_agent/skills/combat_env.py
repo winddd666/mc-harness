@@ -1915,7 +1915,7 @@ class SubcorticalInstinctController:
 
     @staticmethod
     def _latch_shield_at_threat(env: CombatEnv, target_id: int | None) -> bool:
-        """Face `target_id` (if known) and keep shield raised after a failed disengage."""
+        """Face `target_id` when known and keep the shield raised."""
         if target_id is not None:
             try:
                 env.bot.call("look", {"entity_id": int(target_id)})
@@ -2280,10 +2280,21 @@ class SubcorticalInstinctController:
                     })
                     self._recent_flee_streak += 1
                     self._last_flee_at = now_flee
-                    if not fl.get("ok") and not fl.get("respawned") and has_shield:
+                    flee_ok = bool(fl.get("ok"))
+                    check_ranged_guard = flee_ok and fl.get("mode") == "flee" and mob_name in RANGED_MOBS
+                    if (not flee_ok or check_ranged_guard) and not fl.get("respawned") and has_shield:
                         st_fl = env._safe_status(st)
+                        nearest = st_fl.get("nearest_hostile")
+                        still_exposed = (
+                            check_ranged_guard
+                            and isinstance(nearest, dict)
+                            and mob_id is not None and nearest.get("id") == mob_id
+                            and isinstance(nearest.get("dist"), (int, float)) and nearest["dist"] <= 12.0
+                            and isinstance(st_fl.get("health"), (int, float)) and st_fl["health"] <= 10.0
+                        )
                         if (
-                            st_fl.get("ready") is not False
+                            (not flee_ok or still_exposed)
+                            and st_fl.get("ready") is not False
                             and st_fl.get("alive") is not False
                             and not st_fl.get("in_water")
                             and not st_fl.get("in_lava")

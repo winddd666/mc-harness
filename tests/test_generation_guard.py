@@ -2936,6 +2936,46 @@ def test_r19_poll_skips_eat_in_close_melee_range_after_combat_timeout(monkeypatc
     assert latch_calls[-1] == ("posture", {"shield": True, "sneak": False, "jump": False})
 
 
+@pytest.mark.parametrize("distance_after, keep_shield", [(11.6, True), (16.0, False)])
+def test_low_health_retreat_keeps_shield_against_a_nearby_shooter(distance_after, keep_shield):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    pos = [0.5, 64.0, 0.5]
+    shooter = {"id": 77, "name": "skeleton", "pos": [9.6, 64.0, 0.5], "dist": 9.1}
+    posture_calls = []
+
+    class RetreatBot:
+        def status(self):
+            return {"pos": list(pos), "health": 7, "food": 20, "alive": True, "ready": True,
+                    "on_ground": True, "nearest_hostile": dict(shooter)}
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [dict(shooter)]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 64 else "air"}
+            if action == "control" and body.get("forward"):
+                pos[0] -= 2.5
+                shooter["dist"] = distance_after
+            if action in {"posture", "look"}:
+                posture_calls.append((action, body))
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(
+        CombatEnv(RetreatBot()), {"source": "pre_hurt_ranged", "primary_entity_id": 77, "primary_type": "skeleton"},
+    )
+    assert {"action": "flee", "ok": True, "moved": 2.5} in outcome["actions"]
+    assert outcome["latched_guard"] is keep_shield
+    if keep_shield:
+        assert posture_calls[-2:] == [
+            ("look", {"entity_id": 77}), ("posture", {"shield": True, "sneak": False, "jump": False}),
+        ]
+    else:
+        assert posture_calls[-1] == ("posture", {})
+
+
 def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsupported(monkeypatch):
     """Reproduces r20_short hy4_hy_6_nether_bastion: when underfoot place fails no_support/blocked_by_self, place side bridge against bank & step onto it."""
     from mc_agent.errors import ApiError
