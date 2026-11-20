@@ -388,6 +388,8 @@
   | `hy4_hy_9_deep_water` | 17 | -28 | 在 **y=2 / y=-6 已挖到 diamond ×2**，仍被 `target_y=-54` 牵着继续下潜 |
   | `hy4_hy_10_deep_water` | 11 | 18 | 未有效下潜 |
   合计 ~82 次深挖调用 ≈ **38 分钟**，0 次到达目标层。
+- **D1 过夜两波复核**：`overnight_12bot` **16 次**（`nju_guitest` 4、`ds_1` 4、`ds_2` 2、`glm_5` 2…）；`overnight_12bot_part2` **17 次**（`ds_1` 6、`nju_3` 5、`nju_movetest`/`nju_guitest`/`glm_2`/`glm_3`/`glm_5`/`ds_2` 各 1）。
+  → 频次稳定在 **~4 次/小时/12 路**，instrumentation 正常；**行为修复（导航到最深已挖节点而不是从浅层重开）仍未实现**，`nju_3` 单路 5 次最严重。
 
 ### BUG-031 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: FIXED（待 r19 长程实测验证）
 - **影响**：`glm_glm_5_midgame` 45 分钟长程中连续 **8 集 `objective_verified=False`**（EP08~EP15），后半程 ~20 分钟基本空转；`scripts/long_run_diag.py` 命中 `LONG-002:stalled_streak(8_eps)`
@@ -505,6 +507,8 @@
   3. `staircase(north, up, steps=20/30)` → **time_budget ×11**（每片只 done 部分，模式二）
   4. `mine_dfs(iron)` → `insufficient_pickaxe_tier`（只有木镐）
   → 三步互为前置，整轮 24 分钟停在 10 分。**修好模式二即可直接解锁**：入口 clamp `steps<=10` 或预算 `min(90, 8+steps*5)`。
+- **D1 过夜两波复核**：`overnight_12bot` **351 次** time_budget（342 `timeout_path=dig`、135 低镐文案、`steps_done` 中位 **1**）；`overnight_12bot_part2` **241 次**（225 dig、79 低镐、`steps_done` 中位 **2**、`dig_cell_avoided` 101）。
+  → `steps_done` 中位 1→2 说明快速失败路径有效，但**仍无"软方块方向优先"**；`pillar_fallback` 在 part2 升到 **140**（r28 hy4 更高：73），已成为与 time_budget 并列的主要失败路径。
 - **D1 r21 第三种模式（首步 movement_not_confirmed）**：`ds_ds_4_nether_fortress` 在下界 `[705,66,640]` 连续 `north/south` 都返回 `steps_done=0, dug_count=0, stop_reason=movement_not_confirmed`，但返回体里已有 `viable_directions=[south/east/west]`；模型却在对向反复试。
   → 建议：`steps_done==0 && dug_count==0` 时不返回泛化失败，而是自动 `unstick` 或改用 `viable_directions[0]`；同时把 `steps` 被 clamp 的事实显式回传（r22 已见 `steps_capped_from:20 / steps_clamped:true`，此项已满足）。
 
@@ -655,6 +659,10 @@
 - **建议（运维）**：① 立即按上述修 `_is_concurrency_limit_429` 关键词；② `v2_fleet.py launch` 增加熔断：连续 429 率 >20% 时暂停新波次或降并发/换 provider；③ curriculum 对 `transient_api_error` 的集暂停重排而不是报废
 - **验收标准**：r24 起长任务因 429/502 报废的集数 ≤1；`hy4_1`（或同类长任务）分数 ≥60
 
+- **P2-36** `staircase:pillar_fallback` **自锁**：`no_place_face` → `_dig_pillar_up(1)` → 返回 `ok=True, requires_replan=False` + hint"从新高度重试" → 模型原地再调一次 → 再 `no_place_face`。
+  - 实测：`overnight_12bot_part2` 140 次 pillar_fallback，**14 段连续 ≥3 次**，累计 **723s**；最长 `nju_guitest_01_nether` **连续 29 次**（188s，其间无任何其他工具调用）；`glm_2` 18 次（132s）。
+  - `hy4_audit_r28`：73 次，**10 段 ≥3 次**，累计 **437s**；`hy4_6` 最长 10 次（134s）。
+  - 修复（约 5 行）：同一 episode 内连续 `pillar_fallback` ≥2 时，返回 `requires_replan=True` 并建议 `mc_skill_unstick` / 水平换向；≥3 时直接给该 target 加 120s 冷却。
 - **P2-35** `agent.py:1617-1621` 新增的 `network_error` 状态（`not_loaded`/`chunk_not_loaded`/`world_not_ready` 等）未被 `curriculum._is_transient_llm_error`（`:887` 仅接受 `status=="runtime_error"`）识别 → **纯传输抖动会累计 strike**。实测 1 例：`ds_1` EP13 `sleep_in_bed`，`[not_loaded] chunk not loaded`，9 次请求后 `status=network_error`。修复：`_is_transient_llm_error` 接受 `network_error`（或 `status in {"runtime_error","network_error"}`）。
 - **P2-34** `overnight_12bot_part2 / ds_4_nether_fortress` EP9（`nether/get_wither_skull`）在 **连续两次死亡**（`mob_attack`，182s 内 health 20→0→重生→0）后以 `[not_connected] bot not connected` 结束，`status=runtime_error`，白烧 28 次 actor 请求。`not_connected` 本属 `agent.py:206 _TRANSIENT_CODES`，但该错误是在 run 循环收尾阶段抛出的，未被当作 transient → 整集报废。建议：run 循环对"死亡/掉线导致的 not_connected"执行一次 `mc_status` + 重连，再决定是否暂停该集。
 - **P2-33** `max_tokens` 截断：过夜双轨共 **65 次** `finish_reason=length` 事件，其中 **64 次被 `_filter_complete_prefix_calls` 救回**（`length_recovered`），仅 `hy4_audit_r27` **1 次**因无完整工具调用而报废整集。分布：`nju_guitest_01_nether` 27、`nju_3_village_trade` 13、`hy4_2_iron` 9。
@@ -710,6 +718,102 @@
 - **副作用（评测口径）**：快 bot 被截断、慢 bot 跑满 → **跨 bot/跨波次分数不可比**（`glm_5` 名义 4h 实际只跑了 2h53m）。
 - **最小修复**：① 波次按 `max_episodes = ceil(duration_s / 60)` 或直接 `None`（只靠 deadline）；② 429/502 等 `transient` 集**不占用**集数配额（或 `max_episodes` 只统计非 transient 集）。
 - **验收标准**：4h 波次所有 bot 实际墙钟 ≥ 0.95 × `duration_s`；`elapsed_s/duration_s` 比值分布 ≥0.95。
+
+### BUG-047 | P1 | Integrator（#1，`harness/mc_tools.py` + `bot.py`）| 状态: OPEN（overnight_12bot_part2 实测）
+- **影响**：**阻塞型工具调用不受 episode 预算约束**，单次可超出集时限 100s 以上；`move_to` 的 `busy` 预检对"僵尸租约"无效，33 次各白等 ~102s。
+- **证据 1（unstick 超预算）**：`ds_ds_1_bare` 一次 `mc_skill_unstick` **404.4s**，结果 `错误：工具执行中止，未取得正常结果。`，随后 `run.finished 运行总时限已到（300.0s）` → **超出集预算 104s**。
+- **证据 2（move_to busy 白等）**：`overnight_12bot_part2` 中 **33 次** `mc_move_to` 耗时 **102.2~103.1s**，全部返回
+  ```
+  {'code': 'busy', 'message': '动作锁仍被 其他动作 占用，move_to 未执行；请先脱困或等待 1~2 秒后重试'}
+  ```
+  涉及 `ds_3`、`glm_2`、`glm_5` 等多路。
+- **源码定位**：
+  - `mc_tools.py:1004-1024` 已有 `status` 预检（r12 修复），但当 `/status.busy` 为空、服务端租约仍被占时**预检通过**，随后 `_call_json("move_to")` 阻塞。
+  - `bot.py:34 timeout: float = 45.0` + `bot.py:120 for attempt in range(2)` → 单次 `call` 最长 ~90s；`unstick`/`stop`/`status` 等控制类调用沿用该默认值。
+  - episode 时限只在**调用之间**检查，工具内部阻塞期间不会被打断。
+- **最小修复**：① 控制类工具（`unstick`/`stop`/`status`/`move_to` 预检）显式传 `timeout_s=min(15, remaining_budget)`；② `move_to` 遇到 `busy` 时先 `/stop` 再重试一次，仍 busy 立即返回（不要等 90s）；③ `unstick` 内部总时长上限 30s，超时即返回 `ok=False, requires_replan=True`。
+- **验收标准**：单工具调用 p99 ≤ 60s；`unstick` 单次 ≤ 30s；`move_to` 返回 `busy` 的耗时 ≤ 20s；`elapsed_s` 不超过 `budget_timeout_s + 10`。
+
+### BUG-048 | P1 | Integrator（#1，`harness/geofence.py` + 工具层）| 状态: OPEN（过夜两波实测）
+- **影响**：`void_geofence_blocked` **不触发**"重复失败保护"，因为模型每次换一个略有差异的坐标 → 单 bot 连续被拦 **129~154 次**，每次都是一轮完整 LLM 往返。
+- **实测（两波）**：
+  | 波次 | bot | 被拦次数 | 不同坐标数 | 距离范围 | safe_radius |
+  |---|---|---|---|---|---|
+  | `overnight_12bot` | `nju_guitest_01_nether` | **154** | **118** | 554.5m ~ **12927.4m** | 212.0m |
+  | `overnight_12bot_part2` | `glm_4_brewing_alchemy` | **129** | **110** | 212.2m ~ 254.4m | 212.0m |
+  | `overnight_12bot_part2` | 其余 5 路 | 17 | — | — | — |
+  | `hy4_audit_r28` | `hy4_9_deep_water` | 5 | — | — | — |
+- **两种形态**：
+  1. **"差一点"型（`glm_4`）**：目标 212.2~254.4m，仅超出 0~42m —— 意图合理（去挖看见的矿），但围栏只拒绝不引导；`glm_4` 本波 **145 分（-50 vs wave1）**，129 次被拦 ≈ 8~12 分钟。
+  2. **"离谱坐标"型（`nju_guitest`）**：目标 554m~**12.9km**（最远 12927m），同一坐标重复 14 次 —— 明显是幻觉坐标/未换算的绝对坐标，工具层未做"距离明显异常"识别。
+- **源码定位**：`geofence.py:88-106 check_point` 已返回 `distance` / `safe_radius` / `center` / 中文提示，但：① 只**拒绝**不**钳制**；② 无按 target 的累计计数（`repeated_identical_failure_blocked` 按"完全相同的参数"匹配，坐标差 0.5 格就绕过了）。
+- **最小修复**：
+  1. `distance <= safe_radius * 1.25` 时**自动钳制**到安全边界内（把目标投影到半径 212m 上）并继续执行；
+  2. 距离 > `safe_radius * 3` 时直接返回 `requires_replan=True` + "坐标疑似错误，请用 mc_status 的 pos 重新定位"；
+  3. 每 episode 对 `void_geofence_blocked` 累计 ≥3 次 → 强制 `requires_replan=True` 并给该 target 加 120s 冷却。
+- **验收标准**：单 bot 单波 `void_geofence_blocked` ≤5；`glm_4` 类场景分数回到 ≥195。
+
+### BUG-049 | **P0（规划锁死）** | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（16 路过夜轨迹全量复盘）
+- **影响**：Bot 身处下界（`the_nether`）死亡丢镐后，规划器不看当前维度，把主世界 `bootstrap_stone_age` / `bootstrap_iron_age` 锁死在最高优先级，导致整局后半程几乎 100% 空转。
+- **轨迹实据**：`overnight_12bot_part2/glm_glm_1_nether_fortress`（80 集）中 **`bootstrap_stone_age` 0/52 + `bootstrap_iron_age` 0/23 = 75/80 集（94% 集数全废）**；下界不存在主世界橡木、圆石与铁矿石。
+- **源码定位**：`harness/curriculum.py` 选目标逻辑未按 `cur_dim == "the_nether"` 过滤主世界 `bootstrap_*` 剧本。
+- **最小修复**：当 `cur_dim == "the_nether"` 时，禁止派发主世界 `bootstrap_stone_age` / `bootstrap_iron_age`（或仅在存在黑石/下界木时走下界自救分支，或先回主世界门）。
+- **验收标准**：下界场景（`nether_fortress` / `nether_bastion`）4 小时长测中主世界 `bootstrap_stone/iron` 派发次数为 `0`。
+
+### BUG-050 | **P0（后 3h 停滞主因）** | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（16 路过夜轨迹全量复盘）
+- **影响**：缺少硬前置道具/群系门控 + 固定 20 分钟冷却（`cooldown_s = 1200s`）导致 4 小时内冷却反复到期（最多 12 次），波及全部 16 路长程，吃掉后半程 50%~75% 集数。
+- **轨迹实据**：
+  - 无鞍却派 `nether/ride_strider`：`ds_4` **0/13**、`glm_2` **0/6**、`hy4_6` **0/4**；
+  - 无钻石镐却派 `obtain_ancient_debris` / `obtain_crying_obsidian`：`ds_4` **0/12 + 0/10**、`nju_guitest` EP03；
+  - 无苍白花园/深暗之域/村庄/烈焰棒却反复强派：`glm_5`（手握 10 颗钻石+钻镐钻剑）被派 `lava_bucket` **0/14**、`make_a_sign_glow` **0/8**、`heart_transplanter` **0/7**；`hy4_9` `kill_mob_near_sculk_catalyst` **0/4** + `heart_transplanter` **0/4**；`glm_4`/`hy4_5` `cure_zombie_villager` 0/3~0/4、`follow_ender_eye` 0/3；
+  - 模型在 `final_answer` 中已多次明确输出“已扫描 8k~32k 格确认本岛无苍白橡木/无村民/无鞍，不可达，建议切换”，Harness 完全未感知。
+- **最小修复**：
+  1. 硬前置门控：`ride_strider` 需背包有 `saddle`；`obtain_ancient_debris` / `obtain_crying_obsidian` 需有 `diamond_pickaxe`/`netherite_pickaxe`；`follow_ender_eye` 需有 `ender_eye` 或（`blaze_rod`/`blaze_powder` + `ender_pearl`）；`heart_transplanter` / `kill_mob_near_sculk_catalyst` / `cure_zombie_villager` 未在 WorldMemory 观测到对应结构/实体前禁止盲派；
+  2. 冷却改为指数退避：第 1 次失败 20m → 第 2 次 60m → 第 3 次 ≥3h（10800s），若模型明确回报环境阻断/无目标则直接跳级至长冷却。
+- **验收标准**：4 小时长测中单个无进展非主线目标重复派发次数 ≤3；后 2 小时不再出现 `0/14`、`0/8`、`0/7` 式空转。
+
+### BUG-051 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（16 路过夜轨迹全量复盘）
+- **影响**：规划器高度/位置失明——Bot 挖矿留在地下 `y < 45` 时，连续派发 8 轮短预算的地表任务，导致每集全用来爬楼梯、连地表都见不到就超时。
+- **轨迹实据**：`overnight_12bot/glm_glm_4_brewing_alchemy` EP08 挖钻后停在 `y=23`，EP15~EP30 连续 17 集被派 `sleep_in_bed` / `breed_an_animal` / `plant_seed`（8 轮预算），EP19 光从 `y=23` 爬到 `y=29` 就耗光全集；`hy4_2` 在 `y=38` 被派 `make_a_sign_glow`。
+- **最小修复**：选定地表专属目标（`plant_seed`、`breed_an_animal`、`sleep_in_bed`、`tame_an_animal`、`trade`、`island_recon_sweep`）前检查 `cur_pos[1] < 50 and cur_dim == "overworld"`，先执行独立返地表步（或 `mine_dfs(climb_out)`）再开地表集。
+- **验收标准**：`y < 45` 状态下不再直接开启 8 轮地表短任务；地表任务开局时 Bot 位于地表或已带足够爬升前置。
+
+### BUG-052 | P1 | Slice C（#4）+ Integrator（#1）| 状态: OPEN（16 路过夜轨迹全量复盘）
+- **影响**：地底“缺 1 块木板/工作台”或“36 格杂物满包”导致高进展 Bot 硬卡 5~9 集（30~60 分钟）。
+- **轨迹实据**：
+  - `ds_ds_1_bare` EP25~33 手握 192 圆石 + 3 木板 + 4 木棍，只差 1 块木板合工作台，在 `y=40` 徒手挖石（25s/格）硬爬 9 集；
+  - `nju_nju_3_village_trade` EP11 已挖齐 4 颗钻石，却因缺 3 块木板卡在 `y=6` 合不出钻石靴；
+  - `glm_glm_4_brewing_alchemy` EP43~45 已挖 13 粗铁、烧出 4 铁锭，却因 36 格塞满杂物导致 `craft_gear` 连续报 `inventory_full`，模型只能逐格放圆石腾位，连卡 5 集。
+- **最小修复**：
+  1. `curriculum.py` 下矿（`shiny_gear`/`mine_diamond`/`bootstrap_iron_age`）前 `pre_ensure` 硬保底：`crafting_table >= 1` 且 `any_log >= 4`（或等效木板 ≥16）；
+  2. `library.py:craft_gear` 遇到 `inventory_full` 时自动按优先级丢弃 1~2 格低价值杂物（`rotten_flesh`、`seeds`、`granite`、`diorite`、`andesite`、`tuff`、`dirt`、超量 `cobblestone`）腾出空位后再合成。
+- **验收标准**：4 小时长测中 `craft_gear:inventory_full` 归零；不再出现“已有 4 钻石/4 铁锭却因缺工作台或满包卡 ≥2 集”。
+
+### BUG-053 | P1 | Integrator（#1）+ Slice D2（#6）| 状态: OPEN（16 路过夜轨迹全量复盘）
+- **影响**：开局现成场景资源未被优先收割，且预授成就与物理维度脱节，锁死主世界满装 Bot 的下界高分主线。
+- **轨迹实据**：
+  - `ds_ds_3_enchant_anvil` 出生在附魔台 + 书架 + 30 级经验平台，EP01 却先被派 `island_recon_sweep` 跑出平台掉水被溺尸击杀，30 级经验瞬间清零，后续 `enchant_item` 0/7；
+  - `glm_glm_4_brewing_alchemy` / `hy4_hy_5_brewing_alchemy` 开局预授 `story/enter_the_nether`，但 Bot 站在主世界；1 小时穿满钻甲到 195 分后，规划器误以为去过下界，后 3 小时再也不派建门进下界（`195→195→195→195`）。
+- **最小修复**：
+  1. `enchant_anvil` 切片同 `brewing_alchemy`/`village_trade` 一样加开局专属目标（优先附魔，不先跑 `island_recon_sweep`）；
+  2. 规划器判断“能否走下界高分线”看 `cur_dim == "the_nether"` 或已知传送门，而非仅看 `enter_the_nether` 成就位；主世界满钻装后若尚未在下界，主动派建门进下界。
+- **验收标准**：`enchant_anvil` 开局 2 集内完成首次附魔；主世界满钻装 4h 长测能主动进入下界继续推进至 ≥250 分。
+
+### BUG-054 | P1 | Integrator（#1）+ Slice C（#4）| 状态: OPEN（16 路过夜轨迹全量复盘）
+- **影响**：`husbandry/plant_seed` 与 `adventure/sleep_in_bed` 看似简单却长期接近 0% 成交，白烧大量集数。
+- **轨迹实据**：
+  - `plant_seed` 全场 16 路约 **0/39**（`glm_4` 0/6、`glm_5` 0/8、`glm_3` 0/8、`ds_2` 0/8、`hy4_2` 0/6、`hy4_9` 0/5、`hy4_5` 0/4）：预算仅 8 轮，打不到高差草丛拿种子、没来得及找水边耕地即结束；
+  - `sleep_in_bed` 全场仅 **2/25**（`glm_5` 1/6、`glm_4` 0/6、`ds_2` 0/6、`nju_guitest` 0/6）：模型已成功绑定床位，但**白天点床只设重生点、不触发睡觉成就**，导致反复重派。
+- **最小修复**：
+  1. `sleep_in_bed` 增加时间门控：仅在傍晚/夜晚（`not is_day` 或 `time_of_day >= 12000`）派发，白天跳过；
+  2. `plant_seed` 提高预算至 `medium`（14 轮）或仅在背包已有 `wheat_seeds`/`carrot`/`potato`/`beetroot_seeds` 或地表近距有 `short_grass`/`wheat` 时派发。
+- **验收标准**：`sleep_in_bed` 白天派发次数为 `0`、夜间成功率 ≥60%；`plant_seed` 成交率从 0% 提升至 ≥50%。
+
+### BUG-055 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（16 路过夜轨迹全量复盘，关联 P2-36）
+- **影响**：`mc_skill_staircase` 成功率仅 17.2% 且 `pillar_fallback` 返回 `ok=True, requires_replan=False` 形成同工具自锁（`nju_guitest_01` 29 连击白烧 188s，`part2` 累计白烧 723s），叠加 `bootstrap_stone_age` 反复回档，严重拖慢长程推进。
+- **轨迹实据**：`overnight_12bot_part2` 1180 次 `staircase` 仅 203 次 `completed`（17.2%），`pillar_fallback` 140 次；`ds_1`/`nju_3` 各耗 23~24 集重打 `bootstrap_stone/iron`。
+- **最小修复**：`pillar_fallback` 连续 ≥2 次返回 `requires_replan=True` 并建议水平换向/`unstick`；≥3 次给当前方向/target 加 120s 冷却（详见 `D1-r11-triage.md` 4bw 节）。
+- **验收标准**：`pillar_fallback` 连续 ≥3 段降至 0；单次 `bootstrap_stone_age` 平均 ≤2 集完成。
 
 ## P2 Backlog（不抢 P0/P1；KB/脚本类由 #6 随时消化，核心代码类由 #2/#3/#4 在各自 P0/P1 清零后顺延处理）
 
