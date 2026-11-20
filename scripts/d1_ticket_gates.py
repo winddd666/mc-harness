@@ -98,6 +98,7 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
     )
     life = LifecycleCounter(bot, seen_ids=seen_ids)
     starts: dict[str, tuple[str, float | None]] = {}
+    skipped_calls: set[str] = set()
     water_starts: dict[str, float] = {}
     retries: dict[tuple[str, int], tuple[int, int]] = {}
     climb_streak = 0
@@ -121,6 +122,7 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
             tool = str(fn.get("name") or event.get("tool") or "")
             args = _object(fn.get("arguments"))
             if event.get("call_id"):
+                skipped_calls.discard(event["call_id"])
                 starts[event["call_id"]] = (tool, elapsed)
             else:
                 metrics.count("untimed_tool", line)
@@ -133,9 +135,17 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
             elif tool == "mc_move_to" and args.get("entity_id") is not None:
                 metrics.count("entity_move", line)
         elif kind == "tool.skipped":
-            starts.pop(event.get("call_id"), None)
+            call_id = event.get("call_id")
+            starts.pop(call_id, None)
+            if call_id:
+                skipped_calls.add(call_id)
         elif kind == "tool.completed":
-            tool, start_time = starts.pop(event.get("call_id"), (str(event.get("tool") or ""), None))
+            call_id = event.get("call_id")
+            # The scheduler also emits a synthetic completion for skipped tools.
+            if call_id in skipped_calls:
+                skipped_calls.remove(call_id)
+                continue
+            tool, start_time = starts.pop(call_id, (str(event.get("tool") or ""), None))
             duration = elapsed - start_time if elapsed is not None and start_time is not None else None
             result = _object(event.get("result"))
             raw_error = result.get("error")
