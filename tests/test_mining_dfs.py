@@ -2513,6 +2513,42 @@ def test_climb_timeout_with_confirmed_ascent_can_resume(monkeypatch) -> None:
     assert second["stop_reason"] == "surface_reached"
 
 
+def test_climb_timeout_suggests_enough_budget_for_a_long_remaining_ascent(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 48.0, 0.5), surface_y=91)
+    with BotSession("tok", bot_username="ClimbBudgetHint", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        engine.collar_ceiling_y = 91
+
+        def climb_step(*, deadline, **kwargs):
+            if clock.now + 4.7 >= deadline:
+                clock.now = deadline
+                raise mining._MiningDeadline
+            world.pos[1] += 1
+            clock.now += 4.7
+            engine.bot.status()
+            return {"steps_done": 1}
+
+        monkeypatch.setattr(engine.skills, "dig_staircase", climb_step)
+        first = engine.run(action="climb_out", max_duration_s=32)
+        assert first["stop_reason"] == "climb_progress"
+        assert first["climb"]["end_y"] == 54
+        assert clock.now <= 1032
+
+        retry_with = first["suggested_next"]["retry_with"]
+        assert retry_with["max_duration_s"] == 55
+        second = engine.run(action="climb_out", **retry_with)
+        third = engine.run(action="climb_out", **retry_with)
+
+    assert second["stop_reason"] == "climb_progress"
+    assert second["climb"]["end_y"] == 65
+    assert third["stop_reason"] == "surface_reached"
+    assert third["climb"]["end_y"] == 73
+
+
 def test_climb_out_confirms_landing_before_reporting_arrival(monkeypatch) -> None:
     world = _MockMineWorld(start_pos=(0.5, 36.0, 0.5), surface_y=55, dimension="the_nether")
     world.blocks[(1, 38, 0)] = world.blocks[(1, 39, 0)] = "air"

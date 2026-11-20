@@ -5313,6 +5313,10 @@ class MiningDFSEngine:
                         stop_reason="climb_progress", next_action="climb_out",
                         message=f"本轮已爬到 y={end_y}，目标 y={target_height}。可从当前站位继续 climb_out。",
                     )
+                    remaining_height = target_height - 2 - end_y
+                    if 20 <= budget < 55 and remaining_height > end_y - start_y:
+                        result["suggested_next"] = {"retry_with": {"max_duration_s": 55}}
+                        result["message"] += "若本集时间允许，可保留其余参数，将 max_duration_s 调到 55 秒。"
             if act == "return_collar" and self.collar_node_id in self.nodes:
                 collar = self.nodes[self.collar_node_id].anchor
                 result["collar_anchor"] = list(collar)
