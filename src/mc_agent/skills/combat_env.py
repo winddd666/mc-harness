@@ -1593,6 +1593,10 @@ class CombatEnv:
                 "pos_after": pos,
             }
 
+        def swim_step_allowed(pos: Sequence[float], yaw: float) -> bool:
+            ux, uz = yaw_to_unit_xz(yaw)
+            return self._point_allowed(float(pos[0]) + 5.0 * ux, float(pos[2]) + 5.0 * uz, action="water_retreat")
+
         # Hold buoyancy + shield while locating shoreline or breaking surface.
         try:
             self.bot.call(
@@ -1604,10 +1608,11 @@ class CombatEnv:
 
         oxy0 = st0.get("oxygen")
         if surface_first or bool(st0.get("submerged")) or (isinstance(oxy0, (int, float)) and oxy0 < 260):
+            swim_forward = not surface_first and swim_step_allowed(pos0, float(st0.get("yaw") or 0.0))
             try:
                 self.bot.call(
                     "control",
-                    {"forward": not surface_first, "jump": True, "sprint": not surface_first, "ms": 750, "stop_on": ["death"]},
+                    {"forward": swim_forward, "jump": True, "sprint": swim_forward, "ms": 750, "stop_on": ["death"]},
                 )
                 actions.append("water_surface_surge")
             except ApiError:
@@ -1707,28 +1712,36 @@ class CombatEnv:
                     if isinstance(err, httpx.HTTPError):
                         self._best_effort_stop()
         else:
-            away_yaw = (
-                aim_yaw_pitch(threat_pos, pos0)[0]
-                if has_threat
-                else float(st0.get("yaw") or 0.0)
-            )
-            ux, uz = yaw_to_unit_xz(away_yaw)
-            step_dist = 12.0
-            sx, sy, sz = start_x + ux * step_dist, max(63.0, start_y + 1.0), start_z + uz * step_dist
-            if not self._point_allowed(sx, sz, action="water_retreat"):
-                sx, sz = start_x + ux * 5.0, start_z + uz * 5.0
-            try:
-                self.bot.call("look", {"yaw": away_yaw, "pitch": -15.0})
-            except (ApiError, httpx.HTTPError):
-                pass
-            if self._point_allowed(sx, sz, action="water_retreat"):
+            st_mid = self._safe_status(st0)
+            interruption = interrupted_water_escape(st_mid)
+            if interruption is not None:
+                return interruption
+            swim_pos = st_mid.get("pos") or pos0
+            pref_yaw = aim_yaw_pitch(threat_pos, swim_pos)[0] if has_threat else float(st0.get("yaw") or 0.0)
+            for deg in (0, 45, -45, 90, -90, 135, -135, 180):
+                away_yaw = pref_yaw + math.radians(deg)
+                if swim_step_allowed(swim_pos, away_yaw):
+                    break
+            else:
+                away_yaw = None
+
+            if away_yaw is None:
+                actions.append("surface_retreat_geofence_blocked")
+            elif st_mid.get("in_water"):
+                ux, uz = yaw_to_unit_xz(away_yaw)
+                px, py, pz = map(float, swim_pos[:3])
+                step_dist = 12.0 if self._point_allowed(px + ux * 12.0, pz + uz * 12.0, action="water_retreat") else 5.0
+                try:
+                    self.bot.call("look", {"yaw": away_yaw, "pitch": -15.0})
+                except (ApiError, httpx.HTTPError):
+                    pass
                 try:
                     self.bot.call(
                         "move_to",
                         {
-                            "x": sx,
-                            "y": sy,
-                            "z": sz,
+                            "x": px + ux * step_dist,
+                            "y": max(63.0, py + 1.0),
+                            "z": pz + uz * step_dist,
                             "range": 1.5,
                             "timeout": 2800,
                             "stop_on": ["death"],
@@ -1738,15 +1751,20 @@ class CombatEnv:
                 except (ApiError, httpx.HTTPError) as err:
                     if isinstance(err, httpx.HTTPError):
                         self._best_effort_stop()
-            try:
-                self.bot.call(
-                    "control",
-                    {"forward": True, "jump": True, "sprint": True, "ms": 950, "stop_on": ["death"]},
-                )
-                actions.append("surface_retreat_jump")
-            except (ApiError, httpx.HTTPError) as err:
-                if isinstance(err, httpx.HTTPError):
-                    self._best_effort_stop()
+                st_mid = self._safe_status(st_mid)
+                interruption = interrupted_water_escape(st_mid)
+                if interruption is not None:
+                    return interruption
+                if st_mid.get("in_water") and swim_step_allowed(st_mid.get("pos") or swim_pos, away_yaw):
+                    try:
+                        self.bot.call(
+                            "control",
+                            {"forward": True, "jump": True, "sprint": True, "yaw": away_yaw, "ms": 950, "stop_on": ["death"]},
+                        )
+                        actions.append("surface_retreat_jump")
+                    except (ApiError, httpx.HTTPError) as err:
+                        if isinstance(err, httpx.HTTPError):
+                            self._best_effort_stop()
 
         st_end = self._safe_status(st0)
         interruption = interrupted_water_escape(st_end)

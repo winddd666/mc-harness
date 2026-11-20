@@ -2340,6 +2340,43 @@ def test_bug028_real_void_geofence_across_escape_lava_water_and_lava_edge():
     assert placed_edge == [[235, 39, 235]]
 
 
+def test_water_retreat_turns_inward_at_geofence():
+    import math
+
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    geofence = VoidGeofence(radius=55.0, margin=5.0)
+    status = {"pos": [49.9, 62.0, 0.0], "yaw": -math.pi / 2, "in_water": True, "submerged": True}
+    motions = []
+
+    class WaterBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "water"}
+            if action == "move_to":
+                assert body["x"] < status["pos"][0]
+                assert geofence.check_point(body["x"], body["z"]) is None
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            if action == "control":
+                motions.append(body)
+                if body.get("forward"):
+                    x, _, z = status["pos"]
+                    ux, uz = yaw_to_unit_xz(body["yaw"])
+                    assert geofence.check_point(x + 5 * ux, z + 5 * uz) is None
+            return {"ok": True}
+
+    result = CombatEnv(WaterBot(), geofence=geofence).escape_deep_water_to_shore()
+    assert result["actions"] == ["water_surface_surge", "surface_retreat_move", "surface_retreat_jump"]
+    assert motions[0]["forward"] is False and motions[0]["jump"] is True
+    assert motions[1]["forward"] is True
+
+
 def test_bug031_watchdog_thread_and_readonly_status_never_raise_reflex_preempted():
     """BUG-031: background scene-watchdog threads and GET/status/inventory/events calls MUST never raise ReflexPreempted."""
     import threading
