@@ -36,6 +36,7 @@ from ..skills.library import (
     best_melee_weapon_in_inv,
     explain_material_craft_error,
     is_passable_sight_block,
+    rejected_find_block,
 )
 from ..skills.safety import SAFE_FOOD_PRIORITY
 from .geofence import VoidGeofence
@@ -798,10 +799,11 @@ class McToolset:
             except ValueError:
                 return raw
             err = parsed.get("error") if isinstance(parsed, dict) else None
-            unknown = (re.search(r"\bunknown block\s+([a-z0-9_:]+)", str(err.get("message") or ""), re.IGNORECASE)
-                       if isinstance(err, dict) and err.get("code") == "bad_args" else None)
-            bad_type = unknown.group(1).lower().removeprefix("minecraft:") if unknown else None
-            if not bad_type or not types or bad_type not in types:
+            bad_type = (
+                rejected_find_block(err.get("code"), str(err.get("message") or ""), types)
+                if isinstance(err, dict) else None
+            )
+            if not bad_type or not types:
                 break
             ignored.append(bad_type)
             types = [name for name in types if name != bad_type]

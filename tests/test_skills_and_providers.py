@@ -2577,6 +2577,37 @@ def test_surface_scout_continues_and_scans_until_target(target, segments) -> Non
         assert match["observer_biome"] == "plains"
 
 
+@pytest.mark.parametrize("valid_targets", [[], ["bell", "villager"]])
+def test_surface_scout_recovers_from_unknown_block_in_target_list(valid_targets) -> None:
+    backend = _SurfaceScoutBackend()
+    backend.target = "bell"
+    rejected = "d食物_path"
+    queries = []
+
+    def handle(request):
+        if request.url.path.endswith("/find_blocks"):
+            types = json.loads(request.content)["types"]
+            queries.append(types)
+            if rejected in types:
+                return httpx.Response(200, json={
+                    "ok": False, "error": {"code": "bad_args", "message": f"unknown block {rejected}"},
+                })
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = MacroSkills(bot).scout_surface(target_types=[rejected, *valid_targets])
+
+    assert result["ignored_types"] == [rejected]
+    assert all(rejected not in query for query in queries[1:])
+    if valid_targets:
+        assert result["stop_reason"] == "target_found"
+        assert result["segments_completed"] == 2
+        assert any(row["name"] == "bell" for row in result["detected_pois"])
+    else:
+        assert result["stop_reason"] == "invalid_target_types"
+        assert not backend.moves
+
+
 def test_surface_scout_detours_around_fence_and_server_timeout() -> None:
     from mc_agent.harness.geofence import VoidGeofence
 

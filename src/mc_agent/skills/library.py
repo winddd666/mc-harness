@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import copy
 import inspect
 import math
+import re
 import time
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -42,6 +43,16 @@ SURFACE_SCOUT_BLOCKS = ("bell", "hay_block", "dirt_path", "composter", "lectern"
 SURFACE_SCOUT_ENTITIES = ("villager", "iron_golem")
 SURFACE_SCOUT_LANDMARKS = ("lava", "obsidian")
 SURFACE_SCOUT_PATH_ERRORS = frozenset({"path_not_found", "no_path", "timeout", "move_timeout", "stalled"})
+
+
+def rejected_find_block(
+    code: str | None, message: str, names: list[str] | None
+) -> str | None:
+    if code != "bad_args" or not names:
+        return None
+    match = re.search(r"\bunknown block\s+(\S+)", message, re.IGNORECASE)
+    name = match.group(1).lower().removeprefix("minecraft:") if match else None
+    return name if name in names else None
 
 AXE_PRIORITY: tuple[str, ...] = (
     "netherite_axe",
@@ -1387,6 +1398,7 @@ class MacroSkills:
             resolve_item_alias(name) for name in
             (target_types or (*SURFACE_SCOUT_BLOCKS, *SURFACE_SCOUT_ENTITIES))
         ))
+        remaining_targets = set(targets)
         blocks = [name for name in targets if name not in SURFACE_SCOUT_ENTITIES] or list(SURFACE_SCOUT_BLOCKS)
         entities = [name for name in targets if name in SURFACE_SCOUT_ENTITIES] or list(SURFACE_SCOUT_ENTITIES)
         step = max(28.0, min(32.0, step_dist))
@@ -1426,7 +1438,24 @@ class MacroSkills:
                 query = {"radius": 64, "types": types}
                 if key == "blocks":
                     query["limit"] = 6
-                rows = session.call(route, query, timeout_s=3.0, allow_reauth=False).get(key, [])
+                while types:
+                    try:
+                        rows = session.call(route, query, timeout_s=3.0, allow_reauth=False).get(key, [])
+                        break
+                    except ApiError as exc:
+                        rejected = rejected_find_block(exc.code, exc.message, types) if key == "blocks" else None
+                        if rejected is None:
+                            raise
+                        types.remove(rejected)
+                        remaining_targets.discard(rejected)
+                        result.setdefault("ignored_types", []).append(rejected)
+                        if not remaining_targets:
+                            raise ApiError(
+                                code="invalid_target_types",
+                                message="没有可扫描的目标。请使用有效的方块 ID、villager 或 iron_golem，也可省略目标使用默认村庄扫描。",
+                            ) from None
+                else:
+                    continue
                 matches = [
                     row for row in rows[:6]
                     if row.get("name") in types and isinstance(row.get("pos"), (list, tuple))
