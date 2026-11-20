@@ -90,6 +90,14 @@ CANDIDATE_SITES: list[tuple[int, int]] = [
     (5200, 7600),
 ]
 
+NETHER_SITE_RADIUS = 600.0
+# Centers are 1800m apart, leaving at least 600m between accepted structure locations.
+NETHER_CANDIDATE_SITES = sorted(
+    ((1800 * x, 1800 * z) for x in range(-2, 3) for z in range(-2, 3)),
+    key=lambda site: math.hypot(*site),
+)
+NETHER_STRUCTURES = {"nether_fortress": "minecraft:fortress", "nether_bastion": "minecraft:bastion_remnant"}
+
 
 def rcon_batch(commands: list[str], *, timeout: int = 60) -> list[dict[str, str]]:
     payload = json.dumps(commands, ensure_ascii=False)
@@ -475,27 +483,17 @@ def select_nether_structure_site(
     silently fell back to the anchor because `#minecraft:fortress` is not a valid structure tag.
     """
     structure_id = structure_tag.lstrip("#")
-    candidates = (structure_id,)
-    search_anchors = [(0, 0), (800, 0), (-800, 0), (0, 800), (0, -800), (800, 800)]
-    nx: int | None = None
-    nz: int | None = None
-    for offset in range(len(search_anchors)):
-        sx, sz = search_anchors[(start_idx + offset) % len(search_anchors)]
-        for cand in candidates:
-            coords = _locate_structure("minecraft:the_nether", sx, sz, cand)
-            if coords is not None:
-                nx, nz = coords
-                break
-        if nx is not None:
+    region = NETHER_CANDIDATE_SITES[start_idx % len(NETHER_CANDIDATE_SITES)]
+    cx, cz = region
+    for dx, dz in ((0, 0), (360, 0), (-360, 0), (0, 360), (0, -360)):
+        coords = _locate_structure("minecraft:the_nether", cx + dx, cz + dz, structure_id)
+        if coords is not None and math.dist(region, coords) <= NETHER_SITE_RADIUS:
+            nx, nz = coords
             break
-    if nx is None:
-        nx, nz = search_anchors[start_idx % len(search_anchors)]
-        print(
-            f"[Scene] locate {structure_id} failed across {len(search_anchors)} anchors; "
-            f"falling back to ({nx}, {nz})",
-            flush=True,
-        )
+    else:
+        raise RuntimeError(f"Could not locate {structure_id} within {NETHER_SITE_RADIUS:g}m of the assigned Nether region")
     ny = 64
+    anchor = (nx + 0.5, float(ny), nz + 0.5)
     prep = prepare_scene_ground(
         bot_name, "nether_fortress", float(nx), float(ny), float(nz), dim="the_nether"
     )
@@ -507,17 +505,14 @@ def select_nether_structure_site(
         ]
     )
     rcon_batch(prep, timeout=45)
-    pos = _wait_settled(bot, timeout_s=8.0) or [float(nx) + 0.5, float(ny), float(nz) + 0.5]
+    pos = _wait_settled(bot, timeout_s=8.0) or anchor
     st = bot.status()
-    if "nether" not in str(st.get("dimension") or "").lower():
-        # `tp` may not have settled yet; never anchor the scene to a stale overworld position.
-        pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
-    elif abs(float(pos[1]) - float(ny)) > 6.0:
-        # The bot fell into the structure during the settle window (r16 HY_6 anchored at y=46.9
-        # inside a bastion and then died to fall/lava on every return). Re-carve the ledge and pin
-        # the anchor to the carved height instead of the fall-through position.
+    if "nether" in str(st.get("dimension") or "").lower() and (
+        abs(float(pos[1]) - ny) > 6.0 or math.hypot(float(pos[0]) - anchor[0], float(pos[2]) - anchor[2]) > 4.0
+    ):
+        # A stale position or a fall through the ledge must not move the slot's anchor.
         print(
-            f"[Scene] nether settle y={pos[1]:.1f} differs from ledge y={ny}; re-carving ledge",
+            f"[Scene] nether settle at {pos} missed assigned ledge {anchor}. Re-carving ledge.",
             flush=True,
         )
         rcon_batch(
@@ -525,8 +520,7 @@ def select_nether_structure_site(
             timeout=30,
         )
         time.sleep(1.0)
-        pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
-    return float(pos[0]), float(pos[1]), float(pos[2]), f"nether:{structure_tag.split(':')[-1]}"
+    return (*anchor, f"nether:{structure_id.split(':')[-1]}")
 
 
 def _deep_water_pad_cmds(bot_name: str, ix: int, iz: int, surface_y: int) -> list[str]:
@@ -1033,7 +1027,7 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
     return cmds
 
 
-NETHER_STAGES = frozenset({"nether_fortress", "nether_bastion"})
+NETHER_STAGES = frozenset(NETHER_STRUCTURES)
 LOCAL_FIXTURE_STAGES = frozenset({"brewing_alchemy", "cave_combat", "enchant_anvil", "village_trade"})
 
 # Surface slices where a night start is pure mob-farm noise (fleet passes --keep-time to every bot
@@ -2079,7 +2073,7 @@ def main() -> int:
         "--plan-pos",
         type=str,
         default=None,
-        help="Anchor x,y,z used by --print-plan (default: first CANDIDATE_SITES entry)",
+        help="Anchor x,y,z used by --print-plan (defaults to the slot's search origin)",
     )
     args = parser.parse_args()
     if args.max_episodes < 0:
@@ -2095,7 +2089,8 @@ def main() -> int:
             except ValueError:
                 raise SystemExit("--plan-pos must be 'x,y,z'")
         else:
-            ax, az = CANDIDATE_SITES[args.site_index % len(CANDIDATE_SITES)]
+            sites = NETHER_CANDIDATE_SITES if args.stage in NETHER_STAGES else CANDIDATE_SITES
+            ax, az = sites[args.site_index % len(sites)]
             px, py, pz = float(ax) + 0.5, 64.0, float(az) + 0.5
         dim = scene_dimension(args.stage)
         plan = {
@@ -2119,6 +2114,12 @@ def main() -> int:
             }
             plan["geofence_radius"] = STRONGHOLD_TRAVEL_RADIUS
             plan["focus"] = [FOLLOW_ENDER_EYE, ENTER_END] if args.focus_episodes > 0 else []
+        elif args.stage in NETHER_STAGES:
+            plan["site_search"] = {
+                "structure": NETHER_STRUCTURES[args.stage],
+                "origin_xz": NETHER_CANDIDATE_SITES[args.site_index % len(NETHER_CANDIDATE_SITES)],
+                "max_distance_xz_m": NETHER_SITE_RADIUS,
+            }
         print(json.dumps(plan, ensure_ascii=False, indent=2))
         return 0
 
@@ -2167,6 +2168,10 @@ def main() -> int:
                 starting_site, village_xz = select_day2_village_site(bot, bot_name, args.site_index)
             elif args.stage == STRONGHOLD_STAGE:
                 starting_site, village_xz, stronghold_xz = select_stronghold_village_site(bot, bot_name, args.site_index)
+            elif args.stage in NETHER_STAGES:
+                starting_site = select_nether_structure_site(
+                    bot, bot_name, NETHER_STRUCTURES[args.stage], start_idx=args.site_index,
+                )
         except Exception as exc:
             msg = str(exc) or exc.__class__.__name__
             print(f"[Startup] {bot_name} not ready: {msg}", flush=True)
@@ -2188,10 +2193,6 @@ def main() -> int:
                 bot_name,
                 start_idx=args.site_index,
             )
-        elif args.stage == "nether_fortress":
-            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:fortress", start_idx=args.site_index)
-        elif args.stage == "nether_bastion":
-            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:bastion_remnant", start_idx=args.site_index)
         elif args.stage == "deep_water":
             sx, sy, sz, biome = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
         else:
@@ -2209,7 +2210,7 @@ def main() -> int:
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
         entry_ok = verify_scene_entry(bot, bot_name, scene)
-        if args.stage in {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE} and not entry_ok:
+        if not entry_ok and args.stage in (NETHER_STAGES | {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE}):
             msg = f"Scene {args.stage} landing could not be verified"
             _write_not_ready_summary(
                 out_file,
