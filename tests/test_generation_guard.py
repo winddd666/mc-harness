@@ -4044,11 +4044,13 @@ def test_bug056_subcortical_water_escape_uses_budget_once(starts_submerged, monk
 
 
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
-def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, monkeypatch):
+@pytest.mark.parametrize("posture_state", ["normal", "stale", "blocked"])
+def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, posture_state, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     seq = [1]
     calls = []
+    saved_sneak = posture_state == "stale"
     status = {
         "pos": [724.3, 68, 636.7], "health": 16.5, "food": 17, "ready": True, "alive": True,
         "on_ground": True, "blocking": True, "sneaking": False, "dimension": "the_nether",
@@ -4057,26 +4059,33 @@ def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, monkeypa
 
     class MagmaBot:
         def call(self, action, body=None, **kwargs):
+            nonlocal saved_sneak
             if action == "status":
                 return dict(status)
+            if action == "inventory":
+                return {"items": []}
             if action == "events":
                 since = kwargs["params"]["since"]
                 hit = {"seq": seq[0], "type": "hurt", "source": "hot_floor"}
                 return {"events": [hit] if since < seq[0] else []}
             if action == "posture":
                 calls.append(body)
-                status["sneaking"] = body["sneak"]
+                if body["sneak"] != saved_sneak:
+                    saved_sneak = body["sneak"]
+                    status["sneaking"] = body["sneak"] and posture_state != "blocked"
                 return {"sneaking": status["sneaking"]}
             raise AssertionError(action)
 
     guard = GenerationGuard(MagmaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     if entry == "poll":
         incident = guard.poll()
-        assert incident["requires_replan"] is False
+        assert incident["requires_replan"] is (posture_state == "blocked")
         assert incident["reasons"] == ["hot_floor"]
     else:
-        assert "已潜行避伤" in guard.stabilize_after_tools()
-    assert calls == [{"sneak": True, "shield": True, "jump": False}]
+        note = guard.stabilize_after_tools()
+        assert ("已潜行避伤" in (note or "")) is (posture_state != "blocked")
+    expected_sneaks = [True] if posture_state == "normal" else [True, False, True]
+    assert calls == [{"sneak": sneak, "shield": True, "jump": False} for sneak in expected_sneaks]
 
     seq[0] += 1
     clock[0] += 4.0
@@ -4084,7 +4093,17 @@ def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, monkeypa
         assert guard.poll() is None
     else:
         assert guard.stabilize_after_tools() is None
-    assert len(calls) == 1
+    assert len(calls) == len(expected_sneaks)
+
+    if posture_state == "blocked":
+        status["pos"][0] += 1.0
+        seq[0] += 1
+        clock[0] += 0.5
+        if entry == "poll":
+            assert guard.poll()["requires_replan"] is True
+        else:
+            assert guard.stabilize_after_tools() is None
+        assert len(calls) == 2 * len(expected_sneaks)
 
 
 

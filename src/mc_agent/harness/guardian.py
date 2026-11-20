@@ -173,6 +173,7 @@ class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     UNSTICK_BUDGET_S = 30.0
+    HOT_FLOOR_RETRY_S = 5.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
@@ -212,6 +213,8 @@ class GenerationGuard:
         self._last_non_combat_alert_at = float("-inf")
         self._last_gear_check_at = float("-inf")
         self._last_torch_place_at = float("-inf")
+        self._hot_floor_retry_at = float("-inf")
+        self._hot_floor_retry_block: tuple[str, int, int, int] | None = None
         self.previous_health: float | None = None
         self.previous_ready: bool | None = None
         self.cursor = int(getattr(bot, "_last_event_seq", 0) or 0)
@@ -585,9 +588,32 @@ class GenerationGuard:
             return False
         return True
 
+    @staticmethod
+    def _hot_floor_block(status: dict[str, Any]) -> tuple[str, int, int, int] | None:
+        pos = status.get("pos")
+        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+            return None
+        x, y, z = pos[:3]
+        return str(status.get("dimension") or ""), math.floor(x), math.floor(y + 0.05), math.floor(z)
+
+    def _needs_hot_floor_stance(self, status: dict[str, Any], now: float) -> bool:
+        return status.get("on_ground") is True and not status.get("sneaking") and (
+            now >= self._hot_floor_retry_at or self._hot_floor_block(status) != self._hot_floor_retry_block
+        )
+
     def _sneak_on_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
-        result = self.bot.call("posture", {"sneak": True, "shield": bool(status.get("blocking")), "jump": False})
-        return {**result, "ok": result.get("sneaking") is not False}
+        self._hot_floor_retry_at = time.monotonic() + self.HOT_FLOOR_RETRY_S
+        self._hot_floor_retry_block = self._hot_floor_block(status)
+        posture = {"sneak": True, "shield": bool(status.get("blocking")), "jump": False}
+        result = self.bot.call("posture", posture, timeout_s=1.0)
+        if result.get("sneaking") is False:
+            # The saved posture can still say sneak=true after the backend clears the actual key.
+            self.bot.call("posture", {**posture, "sneak": False}, timeout_s=1.0)
+            result = self.bot.call("posture", posture, timeout_s=1.0)
+        ok = result.get("sneaking") is not False
+        if ok:
+            self._hot_floor_retry_at = float("-inf")
+        return {**result, "ok": ok}
 
     def _try_eat_food(self, food_name: str, eat_st: dict[str, Any], *, action_name: str = "eat") -> dict[str, Any] | None:
         """Eat via `use_item`; treat transient `not_ready`/`wrong_server` as deferred retry, not failure."""
@@ -767,7 +793,7 @@ class GenerationGuard:
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava
-            and status.get("on_ground") is True and not status.get("sneaking")
+            and self._needs_hot_floor_stance(status, now)
         )
         oxygen = status.get("oxygen")
         low_oxygen = isinstance(oxygen, (int, float)) and oxygen < 240
@@ -828,7 +854,7 @@ class GenerationGuard:
             self.retry_after_ready = False
         nh_name0, nh_dist0, _, _ = self._extract_hostile_info(status)
         eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
-        should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not needs_hot_floor_guard
+        should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not (hot_floor_only or needs_hot_floor_guard)
         hurt = bool(hurts) or dropped
         non_combat_only_hurt = (
             hurt
@@ -1902,7 +1928,7 @@ class GenerationGuard:
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava
-            and status.get("on_ground") is True and not status.get("sneaking")
+            and self._needs_hot_floor_stance(status, now_b)
         )
         drowning = in_water and (
             oxygen == 0
@@ -1936,7 +1962,11 @@ class GenerationGuard:
 
         hp = float(status.get("health") or 20.0)
         food = int(status.get("food") or 20)
-        needs_post_eat = not needs_hot_floor_guard and self._can_auto_eat_safely(status, min_dist=8.0) and (hp <= 13.0 or food <= 13) and food < 20
+        needs_post_eat = (
+            not (hot_floor_only or needs_hot_floor_guard)
+            and self._can_auto_eat_safely(status, min_dist=8.0)
+            and (hp <= 13.0 or food <= 13) and food < 20
+        )
         in_wall_hurt = any(str(h.get("source") or "") in IN_WALL_HURT_SOURCES for h in hurts)
         pos_b = status.get("pos") or [0.0, 64.0, 0.0]
         by_b = float(pos_b[1]) if isinstance(pos_b, (list, tuple)) and len(pos_b) >= 2 else 64.0
