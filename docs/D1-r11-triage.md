@@ -1666,6 +1666,58 @@ retries 846 | 429 49 | 502 0 | tracebacks 0
 7. **BUG-048 / BUG-055**（围栏钳制 + pillar 自锁）→ 各 ~300/213 次
 8. **BUG-030 / BUG-037**（depth_reset + 软方块路由）→ 长期效率
 
+## 4bz. 逐 target 复盘：18 个目标成功率 0%，吃掉 31.2% 集数
+
+（统计口径：6 波 1,581 集，按 `target` 聚合；`ok` = `goal_satisfied` 或 `objective_verified`）
+
+### 0% 成功率目标池
+
+| target | 集数 | 请求 | 得分 |
+|---|---|---|---|
+| `husbandry/make_a_sign_glow` | **116** | 2,402 | 30 |
+| `nether/ride_strider` | 57 | 1,581 | 25 |
+| `husbandry/breed_an_animal` | 51 | 665 | **0** |
+| `adventure/heart_transplanter` | 47 | 448 | **0** |
+| `nether/obtain_crying_obsidian` | 34 | 826 | **0** |
+| `island_recon_sweep` | 30 | 229 | 65 |
+| `adventure/kill_mob_near_sculk_catalyst` | 28 | 270 | **0** |
+| `nether/distract_piglin` | 25 | 344 | **0** |
+| `husbandry/tame_an_animal` | 18 | 149 | **0** |
+| `husbandry/fishy_business` | 18 | 233 | **0** |
+| `husbandry/allay_deliver_item_to_player` | 17 | 116 | **0** |
+| `nether/get_wither_skull` | 10 | 409 | **0** |
+| `husbandry/obtain_sniffer_egg` | 10 | 86 | **0** |
+| `story/cure_zombie_villager` | 9 | 90 | **0** |
+| `husbandry/ride_a_boat_with_a_goat` | 7 | 43 | **0** |
+| `adventure/trade_at_world_height` | 6 | 91 | **0** |
+| `husbandry/silk_touch_nest` | 6 | 19 | **0** |
+| `nether/find_bastion` | 5 | 77 | **0** |
+| **合计** | **494（31.2%）** | **8,078** | 120 |
+
+### ROI 排名（分/100 请求）
+
+| target | 分/100 请求 | 集数 | 成功率 |
+|---|---|---|---|
+| `nether/brew_potion` | **87.2** | 18 | 78% |
+| `adventure/use_lodestone` | **74.9** | 41 | 37% |
+| `story/shiny_gear` | **61.0** | 75 | 20% |
+| `adventure/kill_a_mob` | 46.2 | 8 | 50% |
+| `story/deflect_arrow` | 20.4 | 34 | 15% |
+| `story/mine_diamond` | 19.2 | 9 | 33% |
+| `nether/obtain_ancient_debris` | **11.6** | 91 | 2% |
+| `nether/find_fortress` | **5.9** | 45 | 4% |
+
+- **`shiny_gear` 一项贡献 1,245 分（占两波总分 3,845 的 32%）**，`brew_potion` + `use_lodestone` 再贡献 325 分
+- 而 18 个 0% 目标只贡献 120 分，却消耗 **8,078 次请求 / 494 集**
+- `obtain_ancient_debris` 91 集 3,237 请求只换 375 分（11.6 分/100 请求）→ **性价比低于 `shiny_gear` 5 倍**
+
+### 结论
+
+课程层的问题是**"派发不看 ROI、不看前置、不看维度"**（对应 BUG-049/050），已在本方数据里得到量化确认：
+- 31.2% 的集数花在 0% 成功率目标上
+- 分数高度集中在 3 个目标（`shiny_gear` / `brew_potion` / `use_lodestone`）
+- 建议：`curriculum.py` 用每波实测 `score_delta / actor_requests` 做滑动平均权重（P2-40），并把 0% 目标池在拿到前置（鞍/钻镐/结构观测）前直接跳过
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
