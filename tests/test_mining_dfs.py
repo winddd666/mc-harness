@@ -3665,6 +3665,56 @@ def test_explore_rejoins_a_recorded_stair_far_from_its_collar(monkeypatch) -> No
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("rejoinable", [True, False])
+def test_explore_keeps_a_far_collar_when_displaced_near_its_deep_tip(monkeypatch, rejoinable: bool) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    collar_anchor = (0, 75, 0)
+    tip_anchor = (-2, 21, -50)
+    displaced = (-8, 15, -53)
+    world = _MockMineWorld(start_pos=(-7.5, 15.0, -52.5), surface_y=75)
+    for x, y, z in (displaced, tip_anchor):
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(-3, 21, -50)] = "iron_ore"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+
+    with BotSession("tok", bot_username="RejoinFarDeepTip", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=collar_anchor, parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar_anchor[1]
+        tip = engine._create_node(
+            kind="switchback", anchor=tip_anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [collar_anchor, (0, 25, -50), tip_anchor]),
+            branches=[BranchSpec("stair_down", "west", 75)],
+        )
+        move_exact = engine._move_exact
+        attempted_rejoins = []
+
+        def move_to_tip(cell, **kwargs):
+            if tuple(math.floor(v) for v in world.pos) == displaced:
+                attempted_rejoins.append(cell)
+                if not rejoinable:
+                    return False
+            return move_exact(cell, **kwargs)
+
+        def open_new_collar(*args, **kwargs):
+            pytest.fail("opened a new underground collar beside the recorded descent")
+
+        monkeypatch.setattr(engine, "_move_exact", move_to_tip)
+        monkeypatch.setattr(engine, "_ensure_solid_collar_anchor", open_new_collar)
+        result = engine.run(target="iron", target_y=-54, goal_count=1, max_duration_s=20)
+
+    assert attempted_rejoins == [tip_anchor]
+    assert engine.nodes[collar.node_id] is collar
+    if rejoinable:
+        assert result["stop_reason"] == "quota_reached"
+    else:
+        assert result["stop_reason"] == "needs_surface_climb"
+        assert engine.nodes[tip.node_id] is tip
+        assert not world.dig_log
+
+
 @pytest.mark.parametrize("from_archive", [False, True])
 def test_explore_rejoins_a_sidestep_between_saved_waypoints(monkeypatch, from_archive) -> None:
     import mc_agent.skills.mining_dfs as mining

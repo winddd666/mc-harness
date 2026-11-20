@@ -271,6 +271,7 @@ VEIN_HOOK_FISHBONE_RADIUS = 4
 VEIN_HOOK_SCAN_RADIUS = 10
 SCAN_BAND = 3  # |anchor.y - target_y| <= SCAN_BAND counts as "in target band"
 OFFSET_RETRY_STEPS = 3
+NODE_REJOIN_DISTANCE = 16.0
 # fishbone skeleton never emits vertical branches; when the caller raises target depth
 # mid-shaft we still must descend, otherwise the spine tunnels sideways on the stale layer.
 SPINE_DESCEND_MIN_DELTA = 4
@@ -2131,7 +2132,7 @@ class MiningDFSEngine:
                 if d < best_near_d:
                     best_near_d = d
                     best_near_id = nid
-            if best_near_id is not None and best_near_d <= 16.0 and (
+            if best_near_id is not None and best_near_d <= NODE_REJOIN_DISTANCE and (
                 best_near_id == self.collar_node_id or best_near_d <= math.dist(cur_pos, anchor_now)
             ):
                 anchor = self.nodes[best_near_id].anchor
@@ -5792,6 +5793,12 @@ class MiningDFSEngine:
                 math.dist(cur_pos, active.anchor) > 6.0
                 and math.hypot(cur_pos[0] - collar.anchor[0], cur_pos[2] - collar.anchor[2]) > 48.0
                 and not self._is_recorded_shaft_position(cur_pos)
+                # Combat can leave us just outside the mine near a deep tip,
+                # far from the collar. Give local navigation a chance to rejoin.
+                and (
+                    cur_pos[1] > collar.anchor[1] - 20
+                    or math.dist(cur_pos, active.anchor) > NODE_REJOIN_DISTANCE
+                )
             ):
                 self._archive_current_shaft_to_ledger(mark_exhausted=False)
                 self._clear_active_tree_only()
