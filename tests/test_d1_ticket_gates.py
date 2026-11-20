@@ -83,3 +83,21 @@ def test_in_progress_snapshot_has_provisional_findings(tmp_path):
     results = ticket_gates(tmp_path)
     assert all(gate.status == "PENDING" and "0/1 final summaries" in gate.evidence for gate in results)
     assert next(gate.actual for gate in results if gate.metric == "boundary_escape_water max") == "45.000s (n=1)"
+
+
+def test_skipped_tool_completion_is_excluded_from_timing(tmp_path):
+    bot = tmp_path / "hy4_hy_9_deep_water"
+    bot.mkdir()
+    events = _tool("executed", "mc_move_to", 1, 15, {}, {"ok": False})
+    events.extend([
+        {"type": "tool.skipped", "call_id": "skipped", "reason": "previous_action_failed", "elapsed": 15},
+        {"type": "tool.completed", "call_id": "skipped", "result": {"ok": False}, "elapsed": 15},
+        {"type": "run.finished", "elapsed": 16},
+    ])
+    ep = _write_episode(bot, 1, events)
+    (bot / "wild-endurance-final.json").write_text(json.dumps({"curriculum_summary": {
+        "duration_s": 1200, "elapsed_s": 1200, "episodes": [ep],
+    }}))
+
+    metric = next(gate for gate in ticket_gates(tmp_path) if gate.metric == "tool p99")
+    assert (metric.status, metric.actual) == ("PASS", "14.000s (n=1)")

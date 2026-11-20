@@ -915,12 +915,24 @@ def _descent_start_beside_anchor(
     return drop in (1, 2) and (dx, dz) == DIRECTIONS[direction]
 
 
-def _stair_midpoint_index(waypoints: list[tuple[int, int, int]], pos: tuple[int, int, int]) -> int | None:
-    return next((
-        index for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1)
-        if abs(a[1] - pos[1]) == 1 and _is_two_step_stair(a, b)
-        and _interpolate_cells(a, b)[1] == pos
-    ), None)
+def _omitted_waypoint_index(
+    waypoints: list[tuple[int, int, int]], pos: tuple[int, int, int], edge_kind: str | None,
+) -> int | None:
+    for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1):
+        if edge_kind in {"stair_down", "stair_up"}:
+            if abs(a[1] - pos[1]) != 1 or not _is_two_step_stair(a, b):
+                continue
+        elif edge_kind in {"spine_forward", "branch_leaf", "offset_sidestep"}:
+            # Level excavation saves every third step. Only expand short,
+            # straight sections at the same height.
+            dx, dz = abs(a[0] - b[0]), abs(a[2] - b[2])
+            if a[1] != pos[1] or b[1] != pos[1] or (dx, dz) not in {(2, 0), (3, 0), (0, 2), (0, 3)}:
+                continue
+        else:
+            return None
+        if pos in _interpolate_cells(a, b)[1:-1]:
+            return index
+    return None
 
 
 def _interpolate_cells(a: tuple[int, int, int], b: tuple[int, int, int]) -> list[tuple[int, int, int]]:
@@ -1999,10 +2011,8 @@ class MiningDFSEngine:
                 return True
             edge = node.edge_from_parent
             if edge is not None and (
-                pos in edge.waypoints or (
-                    edge.edge_kind in {"stair_down", "stair_up"}
-                    and _stair_midpoint_index(edge.waypoints, pos) is not None
-                )
+                pos in edge.waypoints
+                or _omitted_waypoint_index(edge.waypoints, pos, edge.edge_kind) is not None
             ):
                 return True
             if any(
@@ -2062,14 +2072,11 @@ class MiningDFSEngine:
                     waypoints = edge.waypoints
                     if cur_pos in waypoints:
                         offset = waypoints.index(cur_pos)
-                    elif edge.edge_kind in {"stair_down", "stair_up"}:
-                        # Stairs save every second step. A slice can stop on the omitted step.
-                        offset = _stair_midpoint_index(waypoints, cur_pos)
+                    else:
+                        offset = _omitted_waypoint_index(waypoints, cur_pos, edge.edge_kind)
                         if offset is None:
                             continue
                         waypoints = [*waypoints[:offset], cur_pos, *waypoints[offset:]]
-                    else:
-                        continue
                     if node.node_id in goal_ancestors:
                         dest = node.node_id
                         route = waypoints[offset:]
@@ -2183,6 +2190,14 @@ class MiningDFSEngine:
             # Keep the mining destination so the next slice continues along the route.
             self.active_node_id = goal_node_id
             raise
+
+    def _should_resume_at_depth(self, node: ShaftNode, pos: tuple[int, int, int]) -> bool:
+        collar = self.nodes[self.collar_node_id]
+        return (
+            self.target_y - SCAN_BAND <= pos[1] <= collar.anchor[1] - 20
+            and node.anchor[1] > max(pos[1], self.target_y) + 8
+            and self._is_recorded_shaft_position(pos)
+        )
 
     def _resume_deepest_branch(
         self, node: ShaftNode, *, min_hp_ref: list[float], descendants_only: bool = False,
@@ -2844,6 +2859,7 @@ class MiningDFSEngine:
         allow_retired: bool = False,
         skip_collar: tuple[int, int, int] | None = None,
     ) -> bool:
+        """Restore a nearby shaft. A blocked deep rejoin leaves its graph loaded."""
         best_sh: dict[str, Any] | None = None
         best_d = 36.0
         for sh in self.ledger.saved_shafts:
@@ -2877,8 +2893,7 @@ class MiningDFSEngine:
                     hd = min(math.dist(cur_pos, pt) for pt in points)
                     vertical_near = hd <= 6.0
                 elif cur_pos in points or any(
-                    kind in {"stair_down", "stair_up"} and _stair_midpoint_index(waypoints, cur_pos) is not None
-                    for kind, waypoints in edges
+                    _omitted_waypoint_index(waypoints, cur_pos, kind) is not None for kind, waypoints in edges
                 ):
                     hd = 0.0
                     vertical_near = True
@@ -2961,7 +2976,10 @@ class MiningDFSEngine:
                 nearest_node_id=near_nid,
             )
 
-        ok_nav, _ = self._resume_shaft_tip(self.active_node_id, min_hp_ref=min_hp_ref)
+        active = self.nodes[self.active_node_id]
+        if self._should_resume_at_depth(active, cur_pos):
+            return self._resume_deepest_branch(active, min_hp_ref=min_hp_ref, max_y=cur_pos[1])
+        ok_nav, _ = self._resume_shaft_tip(active.node_id, min_hp_ref=min_hp_ref)
         if not ok_nav:
             self._clear_active_tree_only()
             return False
@@ -5324,6 +5342,20 @@ class MiningDFSEngine:
             result["error"] = fence_error["error"]
         return result
 
+    def _deep_shaft_rejoin_failure(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "requires_replan": True,
+            "action": "explore",
+            "strategy": self.strategy,
+            "stop_reason": "needs_surface_climb",
+            "message": (
+                "当前深度附近的待挖节点暂时无法接上。请先在同层调整站位，再继续 explore。"
+                "如果无法安全继续，可调用 climb_out 沿已记矿道回撤。"
+            ),
+            "tree": self.snapshot(),
+        }
+
     def _run(
         self,
         *,
@@ -5595,6 +5627,7 @@ class MiningDFSEngine:
             restored = self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref)
             if (
                 not restored
+                and self.collar_node_id not in self.nodes
                 and self.collar_ceiling_y is not None
                 and cur_pos[1] <= int(self.collar_ceiling_y) - 20
             ):
@@ -5632,6 +5665,8 @@ class MiningDFSEngine:
                 cur_pos = _floor_pos(self.bot.status().get("pos") or cur_pos)
                 restored = self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref)
             if not restored:
+                if self.collar_node_id in self.nodes:
+                    return self._deep_shaft_rejoin_failure()
                 solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
                     cur_pos,
                     geofence=geofence,
@@ -5673,6 +5708,8 @@ class MiningDFSEngine:
                 self._archive_current_shaft_to_ledger(mark_exhausted=False)
                 self._clear_active_tree_only()
                 if not self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref):
+                    if self.collar_node_id in self.nodes:
+                        return self._deep_shaft_rejoin_failure()
                     solid_pos, viable_dirs, anchor_err = self._ensure_solid_collar_anchor(
                         cur_pos,
                         geofence=geofence,
@@ -5683,11 +5720,7 @@ class MiningDFSEngine:
                         return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
             elif math.dist(cur_pos, active.anchor) > 3.5:
-                resume_at_depth = (
-                    self.target_y - SCAN_BAND <= cur_pos[1] <= collar.anchor[1] - 20
-                    and active.anchor[1] > max(cur_pos[1], self.target_y) + 8
-                    and self._is_recorded_shaft_position(cur_pos)
-                )
+                resume_at_depth = self._should_resume_at_depth(active, cur_pos)
                 if resume_at_depth:
                     ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref, max_y=cur_pos[1])
                 else:
@@ -5695,7 +5728,9 @@ class MiningDFSEngine:
                     if not ok_nav and active.kind == "switchback" and err_nav not in {"hurt", "not_ready", "not_grounded"}:
                         ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref)
                 if not ok_nav:
-                    if resume_at_depth or (
+                    if resume_at_depth:
+                        return self._deep_shaft_rejoin_failure()
+                    if (
                         self.collar_ceiling_y is not None
                         and cur_pos[1] <= int(self.collar_ceiling_y) - 20
                     ):
@@ -5708,11 +5743,8 @@ class MiningDFSEngine:
                             "strategy": self.strategy,
                             "stop_reason": "needs_surface_climb",
                             "message": (
-                                "当前深度附近的待挖节点暂时无法接上。请先在同层调整站位，再继续 explore。"
-                                "如果无法安全继续，可调用 climb_out 沿已记矿道回撤。"
-                                if resume_at_depth
-                                else f"回撤到当前节点失败，且你已在地下 y={cur_pos[1]}"
-                                     f"（最高井口 y={self.collar_ceiling_y}）。" + self._surface_climb_hint()
+                                f"回撤到当前节点失败，且你已在地下 y={cur_pos[1]}"
+                                f"（最高井口 y={self.collar_ceiling_y}）。" + self._surface_climb_hint()
                             ),
                             "tree": self.snapshot(),
                         }
