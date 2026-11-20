@@ -830,6 +830,7 @@ def test_underwater_drowned_preemption_surfaces_and_ignores_swim_pre_hurt(monkey
         interrupted_name="mc_skill_mine_dfs",
     )
     assert receipt["reflex_mode"] == "water_surface"
+    assert "上浮后 in_water=True" in receipt["message"]
     assert surfaced == ["escape_water"]
 
     # 2) CombatControllerSlot preserves jump=True when still submerged on exit
@@ -3735,6 +3736,7 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
         ("boundary", "macro_close_respawn"),
         ("poll", "surface"),
         ("poll", "oxygen_only"),
+        ("preemption", "oxygen_only"),
     ],
 )
 def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, monkeypatch):
@@ -3773,11 +3775,17 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
 
     if macro:
         state["oxygen"] = 100
+    elif scenario == "oxygen_only":
+        state["submerged"] = False
     guard = GenerationGuard(WaterBot(), EventSink(events.append), checkpoint=lambda: None, skills=EscapeMacro())
     if entry == "poll":
         monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
         guard.last_reaction = 999.5
         assert guard.poll() is not None
+    elif entry == "preemption":
+        receipt = guard.handle_preemption({"source": "tool_interrupted_hurt"}, interrupted_name="mc_skill_mine_dfs")
+        assert receipt["reflex_mode"] == "water_surface"
+        assert receipt["status_after"]["in_water"] is False
     else:
         note = guard.stabilize_after_tools()
     actions = [e for e in events if e["type"] == "guardian.action.completed"]
@@ -3789,7 +3797,7 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
         assert note is None
         assert calls == []
     else:
-        assert actions[0]["action"] == ("escape_to_shore" if entry == "poll" else "boundary_escape_to_shore")
+        assert actions[0]["action"] == ("boundary_escape_to_shore" if entry == "boundary" else "escape_to_shore")
         assert [action for action, _ in calls] == ["posture", "control"]
         assert actions[0]["ok"] is (scenario != "close_respawn")
         assert actions[0]["result"]["mode"] == ("respawned" if scenario == "close_respawn" else "surfaced")
@@ -3927,6 +3935,52 @@ def test_unstick_canopy_branch_shares_the_tool_budget(monkeypatch):
     assert all(start + timeout <= 1028.0 for _, start, timeout in calls[:-1])
     assert bot.call == original_call
     assert events[-1]["type"] == "guardian.recovery_budget_exceeded"
+
+
+@pytest.mark.parametrize("entry", ["poll", "boundary"])
+@pytest.mark.parametrize("failure", ["timeout", "death"])
+def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    events = []
+    attempts = []
+    status = {"pos": [0.5, 35.0, 0.5], "health": 18, "food": 20, "dimension": "the_nether",
+              "ready": True, "alive": True, "on_ground": True}
+
+    class WallBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": []}
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "source": "in_wall"}]}
+            attempts.append((action, kwargs["timeout_s"]))
+            if action == "dig":
+                if failure == "timeout":
+                    clock[0] += kwargs["timeout_s"]
+                    raise httpx.ReadTimeout("wall dig reached its deadline")
+                status.update(health=0, ready=False, alive=False)
+            return {"ok": True}
+
+    monkeypatch.setattr(MacroSkills, "unstick", lambda self: self.bot.call("dig", {}, timeout_s=15))
+    guard = GenerationGuard(WallBot(), EventSink(events.append), checkpoint=lambda: None)
+    expected_action = "unstick_in_wall"
+    if entry == "boundary":
+        assert guard.stabilize_after_tools() is None
+        expected_action = "boundary_unstick_wall"
+    else:
+        assert guard.poll() is not None
+
+    completed, = [e for e in events if e["type"] == "guardian.action.completed"]
+    assert completed["action"] == expected_action
+    assert completed["ok"] is False
+    if failure == "timeout":
+        assert completed["result"]["reason"] == "time_budget"
+        assert attempts == [("dig", 6.0), ("stop", 1.5)]
+    else:
+        assert completed["result"]["respawned"] is True
+        assert attempts == [("dig", 6.0)]
 
 
 @pytest.mark.parametrize("starts_submerged", [True, False])
