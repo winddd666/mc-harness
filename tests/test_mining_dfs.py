@@ -1985,6 +1985,39 @@ def test_sealing_cave_breaches_does_not_condemn_a_healthy_shaft() -> None:
         assert eng.fluid_aborts == 0
 
 
+def test_fluid_abort_keeps_a_dry_deep_junction_with_another_branch() -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec, FLUID_ABORT_LIMIT
+
+    world = _MockMineWorld(
+        start_pos=(0.5, -54.0, 0.5), surface_y=64,
+        inventory_items=[{"name": "iron_pickaxe", "count": 1, "slot": 9},
+                         {"name": "cobblestone", "count": 32, "slot": 10}],
+    )
+    anchor = (0, -54, 0)
+    world.blocks[anchor] = world.blocks[(0, -53, 0)] = "air"
+    world.blocks[(-1, -55, 0)] = "lava"
+    world.blocks[(3, -54, 0)] = "deepslate_diamond_ore"
+    with BotSession("tok", bot_username="DryDeepJunction", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="spine", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [collar.anchor, anchor]),
+            branches=[BranchSpec("branch_leaf", direction, 4) for direction in ("west", "east")],
+        )
+        engine.target_y = -54
+        engine.fluid_aborts = FLUID_ABORT_LIMIT - 1
+        result = engine.run(target="diamond", target_y=-54, goal_count=1, max_duration_s=15)
+
+    assert result["stop_reason"] == "quota_reached"
+    assert result["target_gained"] == 1
+    assert result["pos_after"][1] == -54
+    assert engine.collar_node_id == collar.node_id
+    assert world.blocks[(-1, -55, 0)] == "lava"
+
+
 def test_retired_shaft_keeps_its_walkable_route() -> None:
     """Live s12: record_exhausted_collar deleted the shaft, so the 120-block route was re-dug."""
     world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=64)

@@ -4039,6 +4039,23 @@ class MiningDFSEngine:
                 return True, auto_relocations + 1
         return False, auto_relocations
 
+    def _retry_dry_junction(
+        self,
+        node: ShaftNode,
+        *,
+        geofence: Any,
+        min_hp_ref: list[float],
+    ) -> bool:
+        collar = self.nodes.get(self.collar_node_id)
+        if collar is None or node.anchor[1] > collar.anchor[1] - 6:
+            return False
+        if not any(branch.status == "pending" for branch in node.branches):
+            return False
+        if self._probe_dry_descent(node.anchor, directions=(), geofence=geofence, min_hp_ref=min_hp_ref) is None:
+            return False
+        self.fluid_aborts = 0
+        return True
+
     def _pickaxe_redline_threshold(self, cur_y: int, counts_now: dict[str, int]) -> int:
         if self.collar_node_id in self.nodes:
             collar_y = self.nodes[self.collar_node_id].anchor[1]
@@ -5954,6 +5971,8 @@ class MiningDFSEngine:
                     if detoured:
                         self.fluid_aborts = 0
                         continue
+                    if not steps_done and self._retry_dry_junction(node, geofence=geofence, min_hp_ref=min_hp_ref):
+                        continue
                     moved, auto_relocations_this_slice = self._force_relocate_on_fluid(
                         geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref,
                         auto_relocations=auto_relocations_this_slice,
@@ -6102,6 +6121,8 @@ class MiningDFSEngine:
                 if self._note_fluid_abort(er):
                     next_branch.status = "pruned"
                     next_branch.prune_reason = er
+                    if not steps_done and self._retry_dry_junction(node, geofence=geofence, min_hp_ref=min_hp_ref):
+                        continue
                     moved, auto_relocations_this_slice = self._force_relocate_on_fluid(
                         geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref,
                         auto_relocations=auto_relocations_this_slice,
