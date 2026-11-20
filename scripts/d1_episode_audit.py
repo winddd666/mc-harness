@@ -17,6 +17,7 @@ import argparse
 import collections
 import json
 import pathlib
+import re
 
 if __package__:
     from .fleet_lifecycle import LifecycleCounter
@@ -44,12 +45,13 @@ def sig(err: str) -> str:
     e = (err or "").strip()
     if not e:
         return "(none)"
+    http_failure = re.search(r"\bHTTP(?:\s+(?:status|error))?[\s:]+(429|502)\b|\[(429|502)\]", e, re.I)
+    if http_failure:
+        return f"http_{http_failure.group(1) or http_failure.group(2)}"
     for marker, name in (
-        ("429", "http_429"),
         ("ReadTimeout", "mc_api_readtimeout"),
         ("not_connected", "not_connected"),
         ("not_loaded", "chunk_not_loaded"),
-        ("502", "http_502"),
         ("max_tokens", "max_tokens_trunc"),
         ("模型响应未正常完成", "finish_reason_bad"),
         ("运行总时限已到", "episode_timeout"),
