@@ -1,5 +1,6 @@
 """Generation-time damage/water response, using real harness cancellation boundaries."""
 import json
+import math
 
 import httpx
 import pytest
@@ -4049,6 +4050,66 @@ def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch
     elif outcome == "time_budget":
         assert retreat["result"] == {"ok": False, "reason": "time_budget", "partial": True}
         assert moves[1:] == [("stop", 1.5)]
+
+
+@pytest.mark.parametrize("after_first", ["close", "clear", "respawned"])
+def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_first):
+    pos = [0.5, 64.0, 0.5]
+    creeper_pos = [0.5, 64.0, 4.7]
+    yaw = 0.0
+    last_death = {"t": 10}
+    pulses = []
+
+    class CreekBot:
+        def call(self, action, body=None, **kwargs):
+            nonlocal yaw, last_death
+            creeper = {"id": 66, "name": "creeper", "pos": list(creeper_pos), "dist": math.dist(pos, creeper_pos)}
+            if action == "status":
+                return {
+                    "pos": list(pos), "health": 20, "food": 20, "on_ground": True, "yaw": yaw,
+                    "ready": True, "alive": True, "last_death": last_death, "nearest_hostile": creeper,
+                }
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [], "offhand": None}
+            if action == "get_entities":
+                return {"entities": [creeper]}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                supported = (-1 <= x <= 1 and -4 <= z <= 5) or (-5 <= x <= 1 and -3 <= z <= -1)
+                return {"name": "stone" if y == 63 and supported else "air"}
+            if action == "look":
+                yaw = body["yaw"]
+            if action == "control" and body.get("forward"):
+                assert body["jump"] is False and body["stop_on"] == ["death"]
+                pos[0] -= math.sin(yaw) * 2.3
+                pos[2] -= math.cos(yaw) * 2.3
+                pulses.append(list(pos))
+                if len(pulses) == 1 and after_first == "close":
+                    creeper_pos[:] = [5.1, 64.0, -1.8]
+                elif after_first == "respawned":
+                    last_death = {"t": 20}
+            if action in {"attack", "move_to"}:
+                pytest.fail(f"Unexpected {action} during short retreat")
+            return {"ok": True}
+
+    guard = GenerationGuard(CreekBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    reaction, = incident["actions"]
+    actions = reaction["result"]["actions"]
+    assert actions[0]["action"] == "retreat_from_creeper"
+    assert actions[0]["ok"] is (after_first == "clear")
+    assert pulses[0] == pytest.approx([0.5, 64.0, -1.8])
+    if after_first == "close":
+        assert actions[0]["creeper_distance"] == pytest.approx(4.6)
+        assert actions[1]["action"] == "creeper_followup_retreat" and actions[1]["ok"] is True
+        assert pulses[1] == pytest.approx([-1.8, 64.0, -1.8])
+    else:
+        assert len(pulses) == len(actions) == 1
 
 
 @pytest.mark.parametrize(("health", "fresh_hurt", "expect_retreat"), [(3.3, True, True), (8.0, True, False), (3.3, False, False)])
