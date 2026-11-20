@@ -1226,7 +1226,7 @@ class SceneWatchdog(threading.Thread):
         dead_signal = health <= 0.0 or alive is False
         if self.fence_repair is not None:
             try:
-                self.fence_repair()
+                self.fence_repair(st.get("dimension"))
             except (KeyboardInterrupt, SystemExit):
                 raise
             except BaseException:
@@ -1315,13 +1315,24 @@ class SceneWatchdog(threading.Thread):
                 print(f"[Scene Watchdog] {self.bot_name} tick error: {exc!r}", flush=True)
 
 
-def _reassert_scene_geofence(toolset: Any, scene: SceneAnchor, *, supervisor: Any = None) -> bool:
+def _reassert_scene_geofence(
+    toolset: Any,
+    scene: SceneAnchor,
+    *,
+    dimension: str | None,
+    supervisor: Any = None,
+) -> bool:
     """Rebuild the toolset geofence at the scene anchor if the HUD auto-recenter moved it (BUG-040).
 
     `harness/agent.py:1234-1250` re-centers the fence on the bot whenever it is >400m from the
     current center. When the scene teleport had not landed yet, the fence got pinned to the old
     position and every staircase/tunnel/move_to in the scene was then rejected as off-island.
+    A portal transition belongs to the curriculum's dimension-specific recentering.
     """
+    from mc_agent.kb import normalize_dimension
+
+    if not dimension or normalize_dimension(dimension) != scene.dim:
+        return False
     gf = getattr(toolset, "geofence", None)
     if gf is None:
         return False
@@ -1357,14 +1368,16 @@ def _reassert_scene_geofence(toolset: Any, scene: SceneAnchor, *, supervisor: An
 
 def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
     """Confirm the bot is in the scene dimension and within 64m of the anchor; retry via restock."""
+    from mc_agent.kb import normalize_dimension
+
     for i in range(attempts):
         try:
             st = bot.status()
         except Exception:
             st = {}
-        dim = str(st.get("dimension") or "overworld").lower()
+        dim = normalize_dimension(st.get("dimension"))
         pos = st.get("pos")
-        ok_dim = scene.dim != "the_nether" or "nether" in dim
+        ok_dim = dim == scene.dim
         ok_pos = isinstance(pos, (list, tuple)) and len(pos) >= 3 and (
             math.hypot(float(pos[0]) - scene.x, float(pos[2]) - scene.z) <= 64.0
         )
@@ -1377,7 +1390,8 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
             except Exception:
                 st2 = {}
             p2 = st2.get("pos")
-            if isinstance(p2, (list, tuple)) and len(p2) >= 3 and (
+            same_dim = normalize_dimension(st2.get("dimension")) == scene.dim
+            if same_dim and isinstance(p2, (list, tuple)) and len(p2) >= 3 and (
                 math.hypot(float(p2[0]) - scene.x, float(p2[2]) - scene.z) <= 64.0
             ):
                 print(
@@ -1729,7 +1743,7 @@ def main() -> int:
     parser.add_argument("--model", type=str, default=None, help="LLM model override (e.g. glm-5.3)")
     parser.add_argument("--runs-subdir", type=str, default="", help="Optional subdirectory under runs/ for multi-bot isolation")
     parser.add_argument("--duration-s", type=float, default=1800.0, help="Wall-clock budget for this wild run")
-    parser.add_argument("--max-episodes", type=int, default=12)
+    parser.add_argument("--max-episodes", type=int, default=12, help="Episode cap (0 runs to the wall-clock deadline)")
     parser.add_argument("--site-index", type=int, default=0)
     parser.add_argument(
         "--stage",
@@ -1770,6 +1784,8 @@ def main() -> int:
         help="Anchor x,y,z used by --print-plan (default: first CANDIDATE_SITES entry)",
     )
     args = parser.parse_args()
+    if args.max_episodes < 0:
+        parser.error("--max-episodes must be zero or positive")
 
     bot_name = args.bot
     if args.print_plan:
@@ -1921,8 +1937,7 @@ def main() -> int:
                     return
                 wrong_dim = scene.dim == "the_nether" and "nether" not in dim_cur
                 dist = math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz)
-                if _reassert_scene_geofence(toolset, scene, supervisor=sup):
-                    dist = math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz)
+                _reassert_scene_geofence(toolset, scene, dimension=st_cur.get("dimension"), supervisor=sup)
                 if wrong_dim or (scene.dim in dim_cur and dist > scene.drift_limit):
                     restock_scene(bot_name, scene, reason="episode_anchor_pullback")
                     print(
@@ -1935,8 +1950,8 @@ def main() -> int:
 
         scene_state: dict[str, Any] = {"sup": None}
 
-        def _repair_fence() -> None:
-            _reassert_scene_geofence(toolset, scene, supervisor=scene_state["sup"])
+        def _repair_fence(dimension: str | None) -> None:
+            _reassert_scene_geofence(toolset, scene, dimension=dimension, supervisor=scene_state["sup"])
 
         watchdog = SceneWatchdog(
             bot, bot_name, scene, near_container=_near_known_container, fence_repair=_repair_fence
@@ -1962,7 +1977,7 @@ def main() -> int:
                 on_episode_event=_guard_scene_anchor,
             )
             scene_state["sup"] = sup
-            summary = sup.run(max_episodes=args.max_episodes)
+            summary = sup.run(max_episodes=args.max_episodes or None)
         finally:
             if trader_keeper is not None:
                 trader_keeper.stop()
