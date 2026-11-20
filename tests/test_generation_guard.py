@@ -4634,6 +4634,68 @@ def test_bug076_unsafe_actor_exit_checks_another_route_when_a_hostile_is_close(t
         assert motions == []
 
 
+@pytest.mark.parametrize("terrain", ["wall", "unknown", "drifted_during_probe", "missed_landing"])
+def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing(terrain):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [0.5, 64.0, 0.5], "alive": True, "ready": True, "on_ground": True, "health": 5.0, "food": 20,
+        "nearest_hostile": {"id": 44, "name": "pillager", "dist": 8.0},
+    }
+    shooter = [8.5, 64.0, 0.5]
+    moves = []
+    status_reads = []
+
+    class CoverBot:
+        def status(self):
+            status_reads.append(True)
+            if terrain == "drifted_during_probe" and len(status_reads) >= 2:
+                status.update(pos=[1.0, 63.4, 0.5], on_ground=False)
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "source": "arrow"}] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": [], "offhand": None}
+            if action == "get_entities":
+                return {"entities": [{"id": 44, "name": "pillager", "pos": shooter}]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if y in (64, 65) and 3 <= x <= 5 and 1 <= z <= 2:
+                    if terrain == "unknown":
+                        raise httpx.ReadTimeout("cover voxel was not read")
+                    return {"name": "stone"}
+                return {"name": "stone" if y == 63 else "air"}
+            if action == "move_to":
+                moves.append(body)
+                if terrain != "missed_landing":
+                    status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    bot = CoverBot()
+    if terrain == "wall":
+        guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+        incident = guard.poll()
+        result = next(a["result"] for a in incident["actions"] if a["action"] == "combat_or_flee")
+    else:
+        result = CombatEnv(bot).seek_natural_cover(shooter)
+
+    if terrain in {"unknown", "drifted_during_probe"}:
+        assert result is None
+        assert moves == []
+    else:
+        goal, = moves
+        assert (goal["x"], goal["y"], goal["z"]) == pytest.approx((0.5, 64.0, 2.7))
+        assert result["ok"] is (terrain == "wall")
+        if terrain == "wall":
+            assert result["mode"] == "natural_cover"
+        else:
+            assert result["reason"] == "cover_unconfirmed"
+
+
 @pytest.mark.parametrize("action", ["control", "move_to"])
 @pytest.mark.parametrize("solid_exit", [True, False])
 @pytest.mark.parametrize("dimension", ["the_nether", "overworld"])

@@ -1408,6 +1408,82 @@ class CombatEnv:
                 pass
         return _lava_result(st_end)
 
+    def _blocks_shot(self, pos: Sequence[float], threat_pos: Sequence[float]) -> bool:
+        for height in (0.75, 1.6):
+            blocker = self.has_los(threat_pos, pos, dst_height=height).get("blocker")
+            if blocker is None:
+                return False
+            name = self._get_block_name(*blocker["pos"], strict=True)
+            if not name or _is_los_transparent(name):
+                return False
+        return True
+
+    def seek_natural_cover(self, threat_pos: Sequence[float]) -> dict[str, Any] | None:
+        """Find a close, supported position behind existing terrain and verify the landing."""
+        before = self.bot.status()
+        origin = before.get("pos")
+        if (
+            not origin or before.get("on_ground") is not True
+            or before.get("alive") is False or before.get("ready") is False
+            or before.get("in_water") or before.get("in_lava")
+        ):
+            return None
+        self.invalidate_block_cache()
+        already_covered = self._blocks_shot(origin, threat_pos)
+        if not already_covered:
+            away, _ = aim_yaw_pitch(threat_pos, origin)
+            for offset in (90, -90, 45, -45):
+                yaw = away + math.radians(offset)
+                route = self.probe_retreat(origin, yaw, 2.2)
+                if route is None:
+                    continue
+                ux, uz = yaw_to_unit_xz(yaw)
+                target = [origin[0] + ux * 2.2, route[0], origin[2] + uz * 2.2]
+                if self._blocks_shot(target, threat_pos):
+                    break
+            else:
+                return None
+
+        current = self._safe_status({"ready": False})
+        current_pos = current.get("pos")
+        if (
+            not current_pos or math.dist(current_pos[:3], origin[:3]) > 0.18
+            or current.get("on_ground") is not True
+            or current.get("alive") is False or current.get("ready") is False
+            or current.get("in_water") or current.get("in_lava")
+            or current.get("last_death") != before.get("last_death")
+            or current.get("dimension") != before.get("dimension")
+        ):
+            return None
+        if already_covered:
+            return {"ok": True, "mode": "natural_cover", "pos_after": current_pos, "moved_dist": 0.0}
+        try:
+            self.bot.call(
+                "move_to",
+                {"x": target[0], "y": target[1], "z": target[2], "range": 0.25,
+                 "timeout": 1200, "stop_on": ["death"]},
+                timeout_s=1.5, allow_reauth=False,
+            )
+        except (ApiError, httpx.HTTPError) as err:
+            if isinstance(err, httpx.HTTPError):
+                self._best_effort_stop()
+
+        after = self._safe_status({"ready": False})
+        final_pos = after.get("pos")
+        self.invalidate_block_cache()
+        confirmed = bool(
+            final_pos and math.dist(final_pos[:3], target) <= 0.6 and after.get("on_ground") is True
+            and after.get("ready") is not False and after.get("alive") is not False
+            and not after.get("in_water") and not after.get("in_lava")
+            and after.get("last_death") == before.get("last_death")
+            and after.get("dimension") == before.get("dimension")
+            and self._blocks_shot(final_pos, threat_pos)
+        )
+        return {
+            "ok": confirmed, "mode": "natural_cover", "pos_after": final_pos,
+            **({"reason": "cover_unconfirmed"} if not confirmed else {}),
+        }
+
     def flee(
         self,
         threat_pos: Sequence[float] | None = None,
