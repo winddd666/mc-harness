@@ -310,6 +310,120 @@ def test_mine_blocks_out_of_reach_ranking_and_drop_collection() -> None:
     assert moved_to and moved_to[0]["entity_id"] == 9001
 
 
+def test_harvest_logs_stops_after_four_unreachable_targets(monkeypatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    origins = [(x, 64, 0) for x in range(3, 9)]
+    attempts = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": []}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": list(pos), "name": "oak_log", "dist": pos[0]} for pos in origins]}
+        elif route == "get_block":
+            result = {"name": "air"}
+        elif route == "dig":
+            attempts.append(tuple(json.loads(request.content)["pos"]))
+            clock[0] += 2.75
+            return httpx.Response(200, json={"ok": False, "error": {"code": "path_not_found", "message": "blocked"}})
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        result = skills.harvest_logs(target_logs=16)
+        assert attempts == origins[:4]
+        assert clock[0] <= 12
+        clock[0] += 16
+        assert all(skills._is_block_avoided(pos) for pos in attempts)
+        clock[0] += 45
+        assert all(not skills._is_block_avoided(pos) for pos in attempts)
+
+    assert result["stop_reason"] == "unreachable_targets"
+    assert result["requires_replan"] is True
+    assert result["dug_count"] == 0
+    assert result["gained"] == {}
+
+
+def test_harvest_logs_prefers_low_trunk_over_closer_canopy() -> None:
+    low = [5, 64, 0]
+    high = [2, 67, 0]
+    attempted = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "status":
+            result = {"pos": [0.5, 64.4, 0.5], "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": []}
+        elif route == "find_blocks":
+            result = {"blocks": [
+                {"pos": high, "name": "oak_log", "dist": 2.0},
+                {"pos": low, "name": "oak_log", "dist": 5.0},
+            ]}
+        elif route == "dig":
+            attempted.append(json.loads(request.content)["pos"])
+            result = {"dug": "oak_log", "gained": {"oak_log": 1}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).harvest_logs(target_logs=1)
+
+    assert attempted == [low]
+    assert result["ok"] is True
+    assert result["target_gained"] == {"oak_log": 1}
+
+
+def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    attempts = []
+    calls = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        if route == "status":
+            clock[0] += 1.0
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": []}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": [1 + len(attempts), 64, 0], "name": "oak_log", "dist": 1.0}]}
+        elif route == "dig":
+            timeout = request.extensions["timeout"]["read"]
+            attempts.append(timeout)
+            if len(attempts) == 2:
+                clock[0] += timeout
+                raise httpx.ReadTimeout("slow dig", request=request)
+            clock[0] += 1.0
+            result = {"dug": "oak_log", "gained": {"oak_log": 1}}
+        elif route == "stop":
+            clock[0] += 0.5
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).harvest_logs(target_logs=4, max_duration_s=8.0)
+
+    assert result["ok"] is False
+    assert result["stop_reason"] == "time_budget"
+    assert result["gained"] == {"oak_log": 1}
+    assert result["dug_count"] == 1
+    assert attempts[1] <= 4.0
+    assert calls[-1] == "stop"
+    assert clock[0] <= 8.0
+
+
 def test_mine_blocks_single_dig_cannot_outlive_slice_deadline(monkeypatch) -> None:
     """r12: one un-timed obsidian dig let mine_blocks run ~300s."""
     import mc_agent.skills.library as library

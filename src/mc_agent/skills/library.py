@@ -1251,6 +1251,76 @@ class _StairSession:
         return getattr(self.bot, name)
 
 
+class _GatherDeadline(Exception):
+    """Stop a gathering skill when its shared request budget is spent."""
+
+
+class _GatherSession:
+    """Bound one gathering invocation without rebinding the shared bot."""
+
+    _READS = frozenset({"status", "inventory", "get_block", "find_blocks", "get_entities"})
+
+    def __init__(self, bot: BotSession, max_duration_s: float) -> None:
+        self.bot = bot
+        budget = max(0.0, min(45.0, float(max_duration_s)))
+        self.finish_at = time.monotonic() + budget
+        self.deadline = self.finish_at - min(1.0, budget / 4)
+        params = inspect.signature(bot.call).parameters
+        self.supports_timeout = "timeout_s" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        self.timed_out = False
+        self.pending_action = False
+        self.progress: dict[str, Any] = {"dug_count": 0, "gained": {}}
+
+    def _remaining(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if self.timed_out or remaining <= 0:
+            self.timed_out = True
+            raise _GatherDeadline()
+        return remaining
+
+    def call(
+        self, path: str, body: dict[str, Any] | None = None, *, timeout_s: float | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        remaining = self._remaining()
+        timeout = remaining if timeout_s is None else min(remaining, timeout_s)
+        try:
+            if self.supports_timeout:
+                return self.bot.call(path, body, timeout_s=timeout, **kwargs)
+            return self.bot.call(path, body)
+        except httpx.TimeoutException:
+            self.timed_out = True
+            self.pending_action = path not in self._READS
+            if path == "dig":
+                raise  # The dig loop records the target and preserves partial progress.
+            raise _GatherDeadline() from None
+
+    def status(self) -> dict[str, Any]:
+        self._remaining()
+        if isinstance(self.bot, BotSession):
+            return self.call("status", method="GET")
+        return self.bot.status()
+
+    def inventory(self) -> dict[str, Any]:
+        self._remaining()
+        if isinstance(self.bot, BotSession):
+            inv = self.call("inventory", method="GET")
+            self.bot._last_inventory = inv
+            return inv
+        return self.bot.inventory()
+
+    def stop_pending(self) -> None:
+        remaining = self.finish_at - time.monotonic()
+        if self.pending_action and remaining > 0 and self.supports_timeout:
+            self.pending_action = False
+            try:
+                self.bot.call("stop", {}, timeout_s=min(1.0, remaining), allow_reauth=False)
+            except (ApiError, httpx.HTTPError):
+                pass
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.bot, name)
+
+
 class MacroSkills:
     """Stateful skills with permanent protection and separate expiring failure records."""
 
@@ -2548,6 +2618,29 @@ class MacroSkills:
                 out["message"] = base_msg
         return out
 
+    def _gather_with_budget(
+        self, max_duration_s: float, gather: Callable[[MacroSkills], dict[str, Any]]
+    ) -> dict[str, Any]:
+        session = _GatherSession(self.bot, max_duration_s)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            result = gather(scoped)
+        except (_GatherDeadline, httpx.TimeoutException):
+            session.timed_out = True
+            result = {}
+        if session.timed_out and result.get("stop_reason") != "time_budget":
+            session.stop_pending()
+            return {
+                **session.progress,
+                **result,
+                "ok": False,
+                "requires_replan": True,
+                "stop_reason": "time_budget",
+                "message": "本轮采集已到时间预算。请按 gained 核对入包产物，再换近处可达目标或减少数量。",
+            }
+        return result
+
     def _dig_target_blocks(
         self,
         *,
@@ -2563,6 +2656,7 @@ class MacroSkills:
     ) -> dict[str, Any]:
         """Shared candidate scan, vertical reachability ranking, blacklist handling, and drop rescue."""
         expected_drops = _expected_drops_for_blocks(block_types)
+        harvesting_logs = all(name in LOG_TYPES or name in NETHER_STEM_TYPES for name in block_types)
 
         def _target_gain_sum(gain_map: dict[str, int]) -> int:
             return sum(
@@ -2577,8 +2671,13 @@ class MacroSkills:
         water_skipped = 0
         last_drop_scan: dict[str, Any] | None = None
         last_bot_pos: list[float] | None = None
-        mine_deadline = time.monotonic() + max(45.0, min(90.0, float(count) * 12.0))
+        session = self.bot if isinstance(self.bot, _GatherSession) else None
+        mine_deadline = session.deadline if session else time.monotonic() + 45.0
+        if session:
+            session.progress = {"requested_count": count, "dug_count": 0, "gained": gained}
         deadline_hit = False
+        consecutive_failures = 0
+        unreachable_targets = False
         try:
             dig_call_params = inspect.signature(self.bot.call).parameters
             dig_supports_timeout = "timeout_s" in dig_call_params or any(
@@ -2609,6 +2708,7 @@ class MacroSkills:
                 break
             st = self.bot.status()
             bot_y = float((st.get("pos") or [0, 64, 0])[1])
+            feet_y = math.floor(bot_y)
             candidates.sort(
                 key=lambda b: (
                     (
@@ -2617,6 +2717,7 @@ class MacroSkills:
                     )
                     * 4.5
                     + float(b.get("dist", 99))
+                    + (4.5 * abs(float(b["pos"][1]) - feet_y) if harvesting_logs else 0.0)
                 )
             )
             target = None
@@ -2649,6 +2750,9 @@ class MacroSkills:
                     else self.bot.call("dig", dig_body)
                 )
                 dug_count += 1
+                consecutive_failures = 0
+                if session:
+                    session.progress["dug_count"] = dug_count
                 for k, v in (res.get("gained") or {}).items():
                     gained[k] = gained.get(k, 0) + int(v)
                 if avoid_water and bool(self.bot.status().get("in_water")):
@@ -2688,7 +2792,13 @@ class MacroSkills:
                         if err.code == "out_of_reach" and float(pos[1]) > bot_y + above_tol
                         else 15.0
                     )
+                    if harvesting_logs and err.code in {"path_not_found", "no_path", "out_of_reach"}:
+                        avoid_secs = 60.0
                     self._avoid_temporarily(pos, err.code, seconds=avoid_secs)
+                    consecutive_failures += 1
+                    if harvesting_logs and consecutive_failures >= 4:
+                        unreachable_targets = True
+                        break
                 elif err.code == "interrupted":
                     self._avoid_temporarily(pos, err.code, 3.0)
                     esc = None
@@ -2717,10 +2827,13 @@ class MacroSkills:
                 # Do not let one server-side dig outlive the slice. Release the
                 # pending action before returning the confirmed partial result.
                 self._avoid_temporarily(pos, "dig_timeout", 30.0)
-                try:
-                    self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
-                except (ApiError, httpx.HTTPError):
-                    pass
+                if session:
+                    session.stop_pending()
+                else:
+                    try:
+                        self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                    except (ApiError, httpx.HTTPError):
+                        pass
                 return {
                     "ok": False,
                     "requires_replan": True,
@@ -2733,7 +2846,7 @@ class MacroSkills:
                     **self._avoidance_summary(),
                 }
 
-        if dug_count > 0 and _target_gain_sum(gained) == 0:
+        if not (deadline_hit or unreachable_targets) and dug_count > 0 and _target_gain_sum(gained) == 0:
             if last_drop_scan is None:
                 st = self.bot.status()
                 last_bot_pos = st.get("pos")
@@ -2822,6 +2935,13 @@ class MacroSkills:
             else:
                 out["message"] = f"本次只挖掘 {dug_count}/{count} 格；请按 gained 检查实际入包量。临时避让与保护区分别报告，改变站位或等待冷却后可重试临时失败。"
             out["requires_replan"] = True
+        if unreachable_targets:
+            out["stop_reason"] = "unreachable_targets"
+            out["error"] = "unreachable_targets"
+            out["requires_replan"] = True
+            out["message"] = (
+                "已连续 4 次未能挖到选中的原木。请用 mc_move_to 换到附近树干旁或更换站位，再采集低处原木。"
+            )
         if deadline_hit:
             out["stop_reason"] = "time_budget"
             out["requires_replan"] = True
@@ -2831,8 +2951,13 @@ class MacroSkills:
             )
         return out
 
-    def harvest_logs(self, target_logs: int = 4, radius: int = 32) -> dict[str, Any]:
-        """Chop up to target_logs trees (or nether stems in the_nether) while blacklisting protected blocks."""
+    def harvest_logs(
+        self, target_logs: int = 4, radius: int = 32, *, max_duration_s: float = 45.0
+    ) -> dict[str, Any]:
+        """Gather logs or nether stems within a shared skill budget."""
+        return self._gather_with_budget(max_duration_s, lambda skills: skills._harvest_logs(target_logs, radius))
+
+    def _harvest_logs(self, target_logs: int, radius: int) -> dict[str, Any]:
         target_logs = max(1, min(32, int(target_logs)))
         radius = max(4, min(64, int(radius)))
         st0: dict[str, Any] = {}
@@ -2871,7 +2996,11 @@ class MacroSkills:
         )
         if res.get("error") == "protected_region":
             return res
-        if res.get("dug_count", 0) == 0 and res.get("error") == "no_targets_available":
+        if (
+            res.get("stop_reason") != "time_budget"
+            and res.get("dug_count", 0) == 0
+            and res.get("error") == "no_targets_available"
+        ):
             enriched = self._enrich_ecology_unavailable(res, targets=wood_targets, radius=radius, counts=counts)
             if enriched is not None:
                 return {**enriched, "equipped_axe": equipped}
@@ -2890,7 +3019,11 @@ class MacroSkills:
                     return retry_res
                 res = retry_res
 
-        if int(res.get("dug_count") or 0) == 0 and self.temporary_avoidance:
+        if (
+            res.get("stop_reason") not in {"time_budget", "unreachable_targets"}
+            and int(res.get("dug_count") or 0) == 0
+            and self.temporary_avoidance
+        ):
             reach_entries = [
                 (pos_k, rec)
                 for pos_k, rec in self.temporary_avoidance.items()
@@ -3202,8 +3335,15 @@ class MacroSkills:
         block_types: list[str],
         count: int = 3,
         radius: int = 32,
+        *,
+        max_duration_s: float = 45.0,
     ) -> dict[str, Any]:
-        """Validate pickaxe tier against Minecraft harvest rules, equip best pickaxe, and dig count blocks."""
+        """Validate pickaxe tier and gather blocks within a shared skill budget."""
+        return self._gather_with_budget(
+            max_duration_s, lambda skills: skills._mine_blocks(block_types, count, radius)
+        )
+
+    def _mine_blocks(self, block_types: list[str], count: int, radius: int) -> dict[str, Any]:
         if not block_types:
             return {"ok": False, "error": "bad_args", "message": "block_types 不能为空。"}
         # Natural terrain has `stone`/`deepslate` rather than `cobblestone`; auto-expand so cobblestone requests work!
@@ -3276,7 +3416,7 @@ class MacroSkills:
             avoid_water=True,
             auto_dropped_names=auto_dropped_names or None,
         )
-        if res.get("error") == "protected_region":
+        if res.get("error") == "protected_region" or res.get("stop_reason") in {"time_budget", "unreachable_targets"}:
             return res
 
         if (
