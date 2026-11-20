@@ -3735,6 +3735,7 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
         ("boundary", "macro_close_respawn"),
         ("poll", "surface"),
         ("poll", "oxygen_only"),
+        ("preemption", "oxygen_only"),
     ],
 )
 def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, monkeypatch):
@@ -3778,6 +3779,10 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
         monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
         guard.last_reaction = 999.5
         assert guard.poll() is not None
+    elif entry == "preemption":
+        receipt = guard.handle_preemption({"source": "tool_interrupted_hurt"}, interrupted_name="mc_skill_mine_dfs")
+        assert receipt["reflex_mode"] == "water_surface"
+        assert receipt["status_after"]["in_water"] is False
     else:
         note = guard.stabilize_after_tools()
     actions = [e for e in events if e["type"] == "guardian.action.completed"]
@@ -3789,7 +3794,7 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
         assert note is None
         assert calls == []
     else:
-        assert actions[0]["action"] == ("escape_to_shore" if entry == "poll" else "boundary_escape_to_shore")
+        assert actions[0]["action"] == ("boundary_escape_to_shore" if entry == "boundary" else "escape_to_shore")
         assert [action for action, _ in calls] == ["posture", "control"]
         assert actions[0]["ok"] is (scenario != "close_respawn")
         assert actions[0]["result"]["mode"] == ("respawned" if scenario == "close_respawn" else "surfaced")

@@ -1696,9 +1696,14 @@ class GenerationGuard:
                 now_pre = time.monotonic()
                 oxy_pre = st_pre.get("oxygen")
                 hurt_pre_water = trigger.get("source") in {"tool_interrupted_hurt", "boundary_threat", "pre_hurt_ranged"}
+                drowning_pre = (
+                    (bool(st_pre.get("submerged")) and oxy_pre == 0)
+                    or trigger.get("hurt_source") == "drown"
+                )
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
                     or (isinstance(oxy_pre, (int, float)) and oxy_pre < 180)
+                    or drowning_pre
                     or trigger.get("primary_type") == "drowned"
                     or hurt_pre_water
                     or now_pre < self._no_water_until
@@ -1734,7 +1739,7 @@ class GenerationGuard:
 
                     esc_pre_ok = False
                     esc_pre_respawned = False
-                    if not forced_pre_shore:
+                    if not forced_pre_shore and not drowning_pre:
                         esc_act = self._action("escape_water", lambda: self._escape_water(st_pre), raise_on_http_error=False)
                         pre_actions.append(esc_act)
                         esc_pre_res = esc_act.get("result") if isinstance(esc_act, dict) and isinstance(esc_act.get("result"), dict) else {}
@@ -1746,6 +1751,7 @@ class GenerationGuard:
                             lambda: self.combat_env.escape_deep_water_to_shore(
                                 trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None),
                                 keep_shield=has_shield_pre,
+                                **({"surface_first": True} if drowning_pre else {}),
                             ),
                             raise_on_http_error=False,
                         )
