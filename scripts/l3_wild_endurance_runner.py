@@ -57,8 +57,7 @@ DAY2_VILLAGE_STAGE = "day2_village_near"
 VILLAGE_APPROACH_RANGE = (120.0, 180.0)
 
 CANDIDATE_SITES: list[tuple[int, int]] = [
-    # 24 anchors, each >= 2500m apart on both axes, so a 22-bot fleet can give every slot a
-    # unique site and avoid the friendly-fire / player_explosion deaths seen on shared islands.
+    # 24 spaced anchors give each slot its own site and keep bots off shared islands.
     (-6400, -6400),
     (6400, -6400),
     (-6400, 6400),
@@ -170,12 +169,16 @@ def select_dry_isolated_wild_site(
 
     start_idx %= len(CANDIDATE_SITES)
     if day1:
-        # Keep retries in this slot's assigned region. Global fallbacks brought two r41 bots
-        # to the same area around an existing portal.
+        # r41 global fallbacks sent two bots to a shared portal area. Translate the
+        # whole slot layout for backups, keeping the same separation in each region.
         x, z = CANDIDATE_SITES[start_idx]
         offsets = ((0, 0), (160, 0), (-160, 0), (0, 160), (0, -160),
                    (360, 0), (-360, 0), (0, 360), (0, -360))
-        candidates = [(x + dx, z + dz) for dx, dz in offsets]
+        candidates = [
+            (x + region_dx + dx, z + dz)
+            for region_dx in (0, 30_000, -30_000)
+            for dx, dz in offsets
+        ]
     else:
         candidates = CANDIDATE_SITES[start_idx:] + CANDIDATE_SITES[:start_idx]
     for cx, cz in candidates:
@@ -221,7 +224,7 @@ def select_dry_isolated_wild_site(
             continue
         return float(pos[0]), float(pos[1]), float(pos[2]), biome
     if day1:
-        raise RuntimeError("Could not find a wooded, portal-free Day 1 landing in the assigned region")
+        raise RuntimeError("Could not find a wooded, portal-free Day 1 landing in the assigned regions")
     raise RuntimeError("Could not find a wooded dry wild spawn site across CANDIDATE_SITES")
 
 
