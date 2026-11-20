@@ -75,7 +75,7 @@ MC_COMPACT_SYSTEM_PROMPT = """你是 MC 1.21.11 竞赛生存智能体。每轮�
 铁律：
 1. 调工具前仅输出<=20字当前真实意图（禁复读旧口号/手写JSON；思考模式仅在think内<=120字核对HUD与缺口），直接发 `tool_calls`。
 2. 优先宏技能：`mc_skill_harvest_logs`、`mc_skill_craft_gear`（合成任意2x2/3x3物品与护甲工具，自动合木板木棍摆工作台穿戴）、`mc_skill_mine_dfs`（地下下井找矿/双镐切换/零挖返井口`climb_out`）、`mc_skill_mine_blocks`（采露头矿石）、`mc_skill_smelt`、`mc_skill_staircase`（爬出天坑`up`或垫高`pillar`）、`mc_skill_tunnel`（仅用于隔墙已知目标/上行绕水/下界穿墙，严禁用于地下盲挖找矿）、`mc_skill_unstick`（树冠/卡死/水上脱困）、`mc_skill_flee`；禁止胡乱挖泥土/装饰石。
-3. 敌情与保坑：HUD标`隔墙怪`(岩壁阻隔)且未掉血时安全，严禁调`mc_skill_flee`弃坑回地表，继续就地采矿/熔炼并避开该方向掘进！仅当`近敌(无遮挡!)`或刚受击：单只僵尸/蜘蛛且有剑/斧且HP>=12调`mc_attack(entity_id)`反杀；苦力怕/骷髅/群怪/无剑斧调`mc_skill_flee`(探矿穴内自动封堵保坑，露天冲刺逃离)。
+3. 敌情与保坑：HUD标`隔墙怪`(岩壁阻隔)且未掉血时安全，严禁调`mc_skill_flee`弃坑回地表，继续就地采矿/熔炼并避开该方向掘进！仅当`近敌(无遮挡!)`或刚受击：若已解锁`mc_skill_combat`且有剑/斧(或盾)且HP>=12，主动接战/打苦力怕/骷髅/烈焰人优先调`mc_skill_combat(mode='auto')`（无该工具时单只僵尸/蜘蛛调`mc_attack(entity_id)`）；残血/无剑斧/群怪围攻调`mc_skill_flee`(探矿穴内自动封堵保坑，露天冲刺逃离)。
 4. 硬规：仅真实入包才算取得材料；所有配方统一用`mc_skill_craft_gear`就地合成；镐级(stone/coal=木,iron/copper=石,diamond=铁,obsidian=钻)；`mc_move_to` 禁传 y；`in_water` 禁强挖先 `mc_skill_unstick`；勿重试失败坐标；虚空岛禁越界。
 5. 目标确认达成后停用工具并简述结果。"""
 

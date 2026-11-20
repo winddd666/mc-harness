@@ -327,9 +327,10 @@ def cmd_launch(
     max_slot_duration: int | None = None,
     bots_filter: set[str] | None = None,
     rpm_override: int | None = None,
+    stage_override: str | None = None,
 ) -> int:
     selected_raw = [
-        s
+        dataclasses.replace(s, stage=stage_override) if stage_override else s
         for s in FLEET
         if s.squad in squads
         and (min_slot_duration is None or s.duration_s >= min_slot_duration)
@@ -932,6 +933,7 @@ def main() -> int:
     lp.add_argument("--squads", default="nju,glm,hy4")
     lp.add_argument("--bots", default=None, help="Optional comma-separated bot names filter (e.g. HY_2,HY_5,HY_6,HY_9)")
     lp.add_argument("--rpm-override", type=int, default=None, help="Optional per-bot RPM budget override for selected slots")
+    lp.add_argument("--stage-override", default=None, help="Optional stage override for all selected slots (e.g. bare)")
     lp.add_argument("--stagger", type=float, default=1.5)
     tp = sub.add_parser("triage")
     tp.add_argument("--wave", required=True)
@@ -958,6 +960,7 @@ def main() -> int:
             max_slot_duration=args.max_slot_duration,
             bots_filter=bots_filter,
             rpm_override=args.rpm_override,
+            stage_override=args.stage_override,
         )
     md: str | bool | None = False if args.no_markdown else args.markdown
     return cmd_triage(args.wave, md, pathlib.Path(args.runs_root).expanduser() if args.runs_root else None)

@@ -435,37 +435,41 @@ def resolve_episode_budget(
 CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
     "bootstrap_stone_age": CurriculumTarget(
         key="bootstrap_stone_age",
-        title="石器基建：原木/工作台/木镐/石镐",
+        title="Day 1 早晨石器与据点箱：半组原木/木斧/石镐/据点留底箱",
         points=10,
         tier=0,
         budget_class="short",
         pre_ensure=(("stone_pickaxe", 1),),
         task=(
-            "确保完成石器基建：0) 若包内已有 cobblestone>=3 且有木棍/木板或工作台，直接就地调 mc_skill_craft_gear('stone_pickaxe')，切勿在地下去砍树或重做木镐；"
+            "确保完成 Day 1 早晨石器与据点箱基建：0) 若包内已有 cobblestone>=3 且有木棍/木板或工作台，直接就地调 mc_skill_craft_gear('stone_pickaxe')，切勿在地下砍树；"
             "1) 若在水中先调 mc_skill_unstick 上岸；"
-            "2) 仅在木料不足时用 mc_skill_harvest_logs 凑足至少 4 块原木；"
-            "3) 合工作台并用 mc_skill_craft_gear('wooden_pickaxe') 合木镐；"
-            "4) 挖掘至少 11 块圆石并用 mc_skill_craft_gear('stone_pickaxe') 与 stone_sword/furnace 完成石器工具。"
+            "2) 在地表优先用 mc_skill_harvest_logs(target_logs=16) 收集约半组原木（16~20 块，凑足 12 块以上即可推进，不死磕）；"
+            "3) 合工作台、wooden_axe（木斧，跳劈可 1 斧秒猪/牛/羊）与 wooden_pickaxe；"
+            "4) 挖掘至少 11 块圆石合出 stone_pickaxe、stone_sword 与 furnace；"
+            "5) 若在出生安全地表且木板充足，顺手合 1 个 chest 并放置为据点箱，把多余原木（随身留 6~8 块）存箱留底，防死亡爆装返贫。"
         ),
+        extra_tools=("mc_skill_container",),
         advancement_id="minecraft:story/upgrade_tools",
     ),
     "bootstrap_iron_age": CurriculumTarget(
         key="bootstrap_iron_age",
-        title="铁器基建：采集煤铁并合出 iron_pickaxe",
+        title="Day 1 铁煤层发育：封口下矿凑 8 铁+8 煤，合出铁镐+盾牌+铁甲",
         points=10,
         tier=0,
         budget_class="medium",
         # D3 根治：仅客观保底石镐（若包/近箱已有铁料则由督导器动态直出铁镐，绝不在 pre_ensure 盲挖地下矿井）
         pre_ensure=(("stone_pickaxe", 1),),
         task=(
-            "将装备升级至铁器：1) 用石镐调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=4) 或采露头煤铁凑齐至少 3~4 块 raw_iron；"
-            "2) 调 mc_skill_smelt('raw_iron', count=4) 熔炼铁锭；"
-            "3) 立即调 mc_skill_craft_gear('iron_pickaxe') 完成铁镐基建（合出即停，切勿继续乱挖损耗铁镐）。"
+            "将装备升级至铁器并完成铁煤层发育：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
+            "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
+            "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（若包内有生肉可顺手烤熟）；"
+            "4) 优先调 mc_skill_craft_gear('iron_pickaxe')，铁锭充裕时顺手合出 shield（副手盾）与 1 件铁甲（如 iron_boots/iron_chestplate）完成安全成型即收工。"
         ),
         post_ensure_task=(
-            "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=4) 采入；"
-            "若地表无暴露铁矿再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=4) 下井探铁；随后调 mc_skill_smelt('raw_iron', count=4) -> mc_skill_craft_gear('iron_pickaxe')，合出铁镐立即收工。"
+            "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=6) 采入；"
+            "若地表无暴露铁矿再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6) -> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
         ),
+        extra_tools=("mc_skill_container",),
         advancement_id="minecraft:story/iron_tools",
     ),
     "minecraft:story/shiny_gear": CurriculumTarget(
@@ -1270,15 +1274,16 @@ def _build_island_recon_target(
         )
     return CurriculumTarget(
         key="island_recon_sweep",
-        title="环岛摸底侦察：扫描村庄/岩浆池/动物聚落充实 WorldMemory",
+        title="Day 1 白天肉食补给与环岛摸底：木斧收肉 + 探浅矿洞/村庄/岩浆并选下矿点",
         points=20,
         tier=tier,
         budget_class="micro",
         task=(
-            "执行一次紧凑地表环岛摸底探索（严禁挖矿、严禁入海）："
+            "执行一次紧凑 Day 1 白天地表补给与环岛摸底（严禁挖矿、严禁入海）："
             + anchor_clause
-            + "每到一处陆地调 mc_find_blocks(radius=32, types=['lava','water','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])"
-            "与 mc_get_entities(radius=32)（不传 types 以同时扫描 villager 与动物鱼群），探明 2 个方向后回到干燥陆地汇报收工。"
+            + "1) 若途中 24m 内发现猪/牛/羊且包内食物不足 6 块，顺手装备木斧/石斧调 mc_attack 收 2~3 只基础肉类与羊毛（无动物则直接跳过，绝不纠缠）；"
+            "2) 每到一处干燥陆地调 mc_find_blocks(radius=32, types=['lava','water','coal_ore','iron_ore','chest','bell','lectern','hay_block','sugar_cane','pumpkin','obsidian'])"
+            "与 mc_get_entities(radius=32)（不传 types 同时扫描 villager 与动物），探明附近浅矿洞/露头煤铁并选定干燥平地作为晚上下矿点，探明 2 个方向后回到干燥陆地汇报收工。"
         ),
         extra_tools=(),
         advancement_id=None,
@@ -1309,6 +1314,7 @@ def select_next_target(
     origin_pos: list[float] | None = None
     cur_dim = "overworld"
     is_day_now = True
+    time_of_day: int | None = None
     has_hostile_now = False
     try:
         st = bot.status()
@@ -1316,10 +1322,14 @@ def select_next_target(
             origin_pos = [float(st["pos"][0]), float(st["pos"][1]), float(st["pos"][2])]
         cur_dim = normalize_dimension(st.get("dimension"))
         is_day_now = bool(st.get("is_day", True))
+        raw_tod = st.get("time_of_day")
+        if isinstance(raw_tod, (int, float)):
+            time_of_day = int(raw_tod) % 24000
         nh_s = st.get("nearest_hostile")
         has_hostile_now = isinstance(nh_s, dict) and bool(nh_s.get("name"))
     except Exception:
         pass
+    is_dusk_or_night = (not is_day_now) or (time_of_day is not None and 11000 <= time_of_day < 23200)
 
     inv = bot.inventory()
     bag_counts, chest_counts, raw_combined = _combined_available_counts(
@@ -1377,10 +1387,11 @@ def select_next_target(
                     ),
                 )
             return pb0, frontier_data
-        # Run 1 fast daytime surface recon right after stone_pickaxe (while guaranteed at surface Y>=54!) before plunging underground!
+        # Run 1 fast daytime surface recon right after stone_pickaxe (ONLY during safe daytime; dusk/night skips straight underground!)
         if (
             enable_island_recon
             and not recon_done
+            and not is_dusk_or_night
             and world_memory is not None
             and cur_dim == "overworld"
             and (origin_pos is None or float(origin_pos[1]) >= 52.0)
@@ -1400,6 +1411,16 @@ def select_next_target(
                 origin=origin_pos,
                 dim=cur_dim,
             )
+            if is_dusk_or_night:
+                night_banner = (
+                    "[入夜强制转地下铁煤层发育：天已入黄昏/黑夜，下井前 2 步先用圆石封堵井口防夜怪跌入！"
+                    "请安心在 Y=16 铁/煤层凑足 6~8 块铁与 8+ 煤，就地熔炼并合出 iron_pickaxe + shield + 1 件铁甲，天亮前勿盲目回地表！]\n"
+                )
+                pb1 = dataclasses.replace(
+                    pb1,
+                    task=night_banner + pb1.task,
+                    post_ensure_task=(night_banner + pb1.post_ensure_task) if pb1.post_ensure_task else None,
+                )
             return pb1, frontier_data
 
     candidates: list[tuple[tuple[int, int, int, str], CurriculumTarget]] = []
