@@ -162,6 +162,7 @@ class McToolset:
         self._entity_observations: dict[int, dict[str, Any]] = {}
         self._entity_observed_mono: float = 0.0
         self._entity_observed_dimension: str = "overworld"
+        self._geofence_blocked_count: int = 0
         self.geofence = geofence if geofence is not None else VoidGeofence.from_env()
         self.world_memory = (
             world_memory
@@ -186,6 +187,29 @@ class McToolset:
             self._wait_for_cooldown = bool(wait_for_cooldown)
         self._stop_check = stop_check
         self._on_cooldown_wait = on_cooldown_wait
+        self._geofence_blocked_count = 0
+
+    def _record_geofence_block(
+        self,
+        blocked: dict[str, Any],
+        *,
+        safe_directions: list[str] | None = None,
+    ) -> str:
+        """BUG-048: track per-episode geofence blocks and escalate to requires_replan after 3 hits."""
+        with self._state_lock:
+            self._geofence_blocked_count += 1
+            count = self._geofence_blocked_count
+        out = dict(blocked)
+        out["geofence_blocked_count"] = count
+        if safe_directions is not None:
+            out["suggested_safe_directions"] = list(safe_directions)
+        if count >= 3:
+            out["requires_replan"] = True
+            out["hint"] = (
+                f"本集已连续 {count} 次触发安全围栏拦截，请放弃当前越界方向/目标，"
+                "先调用 mc_status 确认当前位置并向安全中心方向换新目标，不要继续微调越界坐标。"
+            )
+        return json.dumps(out, ensure_ascii=False)
 
     def _set_last_event_seq(self, seq: int) -> None:
         with self._state_lock:
@@ -962,10 +986,21 @@ class McToolset:
     ) -> str:
         range = max(0.2, min(16.0, float(range)))
         payload: dict[str, Any] = {"range": range}
+        geofence_clamped_info: dict[str, Any] | None = None
         if x is not None and z is not None:
-            blocked = self.geofence.check_point(float(x), float(z), action="mc_move_to")
-            if blocked is not None:
-                return json.dumps(blocked, ensure_ascii=False)
+            orig_x, orig_z = float(x), float(z)
+            clamped = self.geofence.clamped_move_target(orig_x, orig_z)
+            if clamped is not None:
+                x, z = clamped[0], clamped[1]
+                geofence_clamped_info = {
+                    "geofence_clamped": True,
+                    "geofence_original_xz": [round(orig_x, 1), round(orig_z, 1)],
+                    "geofence_clamped_xz": [round(float(x), 1), round(float(z), 1)],
+                }
+            else:
+                blocked = self.geofence.check_point(orig_x, orig_z, action="mc_move_to")
+                if blocked is not None:
+                    return self._record_geofence_block(blocked)
             payload["x"] = x
             payload["z"] = z
             if y is not None:
@@ -1141,12 +1176,21 @@ class McToolset:
                     )
             except (TypeError, ValueError):
                 pass
-        return self._annotate_stale_entity(raw, entity_id)
+        out_raw = self._annotate_stale_entity(raw, entity_id)
+        if geofence_clamped_info is not None:
+            try:
+                parsed_out = json.loads(out_raw)
+                if isinstance(parsed_out, dict):
+                    parsed_out.update(geofence_clamped_info)
+                    out_raw = json.dumps(parsed_out, ensure_ascii=False)
+            except (TypeError, ValueError):
+                pass
+        return out_raw
 
     def mc_dig(self, x: int, y: int, z: int, collect: bool = True) -> str:
         blocked = self.geofence.check_point(float(x), float(z), action="mc_dig")
         if blocked is not None:
-            return json.dumps(blocked, ensure_ascii=False)
+            return self._record_geofence_block(blocked)
         try:
             bname = self._get_block_name(x, y, z)
         except Exception:
@@ -1249,7 +1293,7 @@ class McToolset:
         if x is not None and y is not None and z is not None:
             blocked = self.geofence.check_point(float(x), float(z), action="mc_place")
             if blocked is not None:
-                return json.dumps(blocked, ensure_ascii=False)
+                return self._record_geofence_block(blocked)
             payload["pos"] = [x, y, z]
         elif any(v is not None for v in (x, y, z)):
             return json.dumps(
@@ -2164,7 +2208,14 @@ class McToolset:
         if not isinstance(pos, (list, tuple)) or len(pos) < 3:
             return None
         blocked = self.geofence.check_ray(float(pos[0]), float(pos[2]), direction, steps, action=action)
-        return json.dumps(blocked, ensure_ascii=False) if blocked is not None else None
+        if blocked is None:
+            return None
+        safe_dirs = [
+            cand
+            for cand in ("north", "east", "south", "west")
+            if self.geofence.check_ray(float(pos[0]), float(pos[2]), cand, steps, action=action) is None
+        ]
+        return self._record_geofence_block(blocked, safe_directions=safe_dirs)
 
     def _pick_staircase_direction(self, steps: int, *, vertical: str = "down") -> str:
         try:
@@ -2213,7 +2264,7 @@ class McToolset:
                 if isinstance(pos, (list, tuple)) and len(pos) >= 3:
                     blocked = self.geofence.check_point(float(pos[0]), float(pos[2]), action="mc_skill_staircase")
                     if blocked is not None:
-                        return json.dumps(blocked, ensure_ascii=False)
+                        return self._record_geofence_block(blocked)
             return self._run_skill(
                 lambda: self.skills.dig_staircase(
                     direction="pillar",

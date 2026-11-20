@@ -103,6 +103,58 @@ def test_void_geofence_blocks_out_of_bounds_actions_and_allows_inside() -> None:
         assert "/move_to" in called_paths
 
 
+def test_bug048_geofence_clamps_mild_overshoot_and_escalates_repeated_or_implausible_blocks() -> None:
+    gf = VoidGeofence(center_x=100.0, center_z=-200.0, radius=220.0, margin=8.0)  # safe_radius = 212.0
+    move_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [308.5, 64.0, -200.0], "ready": True}})
+        if path == "/move_to":
+            move_payloads.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"ok": True, "result": {"ok": True}})
+        return httpx.Response(200, json={"ok": True, "result": {"ok": True}})
+
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot:
+        ts = McToolset(bot, geofence=gf)
+
+        # 1) Mild overshoot (dist=240 <= 212 * 1.25 = 265) clamps inside safe_radius-1 and executes.
+        clamped_out = json.loads(ts.mc_move_to(x=340.0, z=-200.0))
+        assert clamped_out["ok"] is True
+        assert clamped_out["geofence_clamped"] is True
+        assert clamped_out["geofence_clamped_xz"] == [311.0, -200.0]
+        assert move_payloads[-1]["x"] == 311.0
+        assert move_payloads[-1]["z"] == -200.0
+
+        # 2) Implausible coordinate (> 3 * safe_radius) immediately demands replan.
+        far_out = json.loads(ts.mc_move_to(x=1500.0, z=-200.0))
+        assert far_out["ok"] is False
+        assert far_out["requires_replan"] is True
+        assert far_out["error"]["code"] == "void_geofence_blocked"
+        assert far_out["error"]["reason"] == "implausible_distance"
+        assert far_out["geofence_blocked_count"] == 1
+
+        # 3) Distinct moderate out-of-bounds targets escalate on 3rd hit; tunnel suggests inward dirs.
+        b2 = json.loads(ts.mc_move_to(x=450.0, z=-200.0))
+        assert b2["ok"] is False
+        assert b2.get("requires_replan") is not True
+        assert b2["geofence_blocked_count"] == 2
+
+        b3 = json.loads(ts.mc_skill_tunnel(direction="east", steps=6))
+        assert b3["ok"] is False
+        assert b3["error"]["code"] == "void_geofence_blocked"
+        assert b3["geofence_blocked_count"] == 3
+        assert b3["requires_replan"] is True
+        assert "west" in b3["suggested_safe_directions"]
+
+        # 4) Episode rebind resets the counter.
+        ts.rebind_runtime_hooks(geofence=gf)
+        b_reset = json.loads(ts.mc_move_to(x=451.0, z=-200.0))
+        assert b_reset["geofence_blocked_count"] == 1
+        assert b_reset.get("requires_replan") is not True
+
+
 def test_world_hud_renders_compact_coords_durability_and_gaps() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix("/api/v1")
