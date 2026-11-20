@@ -3266,6 +3266,39 @@ def test_explore_from_low_waypoint_does_not_rejoin_a_shallow_active_node(monkeyp
     assert engine.collar_node_id == collar.node_id
 
 
+def test_explore_rejoins_a_recorded_stair_far_from_its_collar(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 11.0, 53.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    stairs = [(0, y, 64 - y) for y in range(64, 3, -1)]
+    for x, y, z in stairs:
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(1, 3, 60)] = "ancient_debris"
+    with BotSession("tok", bot_username="FarFromCollar", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=stairs[0], parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=stairs[-1], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", stairs[::2]),
+            branches=[mining.BranchSpec("stair_down", "east", 2)],
+        )
+
+        def restore_unrelated_shaft(*args, **kwargs):
+            pytest.fail("discarded the active route while standing on one of its steps")
+
+        monkeypatch.setattr(engine, "_try_restore_saved_shaft", restore_unrelated_shaft)
+        result = engine.run(target="ancient_debris", target_y=3, goal_count=1, max_duration_s=32)
+
+    assert result["stop_reason"] == "quota_reached"
+    assert result["target_gained"] == 1
+    assert result["pos_after"][1] <= 4
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_level_hazard_can_rejoin_a_dry_parent_with_pending_work() -> None:
     import mc_agent.skills.mining_dfs as mining
 
