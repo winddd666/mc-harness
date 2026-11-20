@@ -1545,8 +1545,8 @@ def test_deep_pickaxe_low_with_no_wood_requests_climb_before_harvesting() -> Non
     assert not world.dig_log
 
 
-@pytest.mark.parametrize("available_supply", ["raw_iron", "crafting_table"])
-def test_worn_pickaxe_without_sticks_does_not_auto_return_to_collar(monkeypatch, available_supply) -> None:
+@pytest.mark.parametrize("available_supply", ["raw_iron", "crafting_table", "sticks"])
+def test_worn_pickaxe_resupply_preserves_mining_tip(monkeypatch, available_supply) -> None:
     from mc_agent.skills import mining_dfs as mining
 
     clock = _MiningClock()
@@ -1562,7 +1562,9 @@ def test_worn_pickaxe_without_sticks_does_not_auto_return_to_collar(monkeypatch,
     world.blocks[(0, 16, 0)] = world.blocks[(0, 17, 0)] = "air"
     if available_supply == "raw_iron":
         world._add_item("raw_iron")
-    with BotSession("tok", bot_username="WoodlessResupply", transport=httpx.MockTransport(world.handler)) as bot:
+    if available_supply == "sticks":
+        world._add_item("stick", 4)
+    with BotSession("tok", bot_username="CollarResupply", transport=httpx.MockTransport(world.handler)) as bot:
         engine = MacroSkills(bot).mining_dfs
         collar = engine._create_node(kind="collar", anchor=(0, 64, -48), parent_id=None,
                                      edge_from_parent=None, branches=[])
@@ -1576,22 +1578,41 @@ def test_worn_pickaxe_without_sticks_does_not_auto_return_to_collar(monkeypatch,
         if available_supply == "crafting_table":
             engine.ledger.record_utility("crafting_table", (1, 64, -48))
         return_goals = []
+        navigation_origins = []
 
-        def interrupted_return(goal_node_id, **kwargs):
+        def navigate_back(goal_node_id, **kwargs):
             return_goals.append(goal_node_id)
-            world.pos = [0.5, 53.0, -36.5]
-            engine.bot.status()
-            clock.now = engine._deadline
-            engine.bot.status()
+            navigation_origins.append(engine.active_node_id)
+            if len(return_goals) == 1:
+                world.pos = [0.5, 53.0, -36.5]
+                engine.active_node_id = collar.node_id
+                engine.bot.status()
+                clock.now = engine._deadline
+                engine.bot.status()
+            world.pos = [0.5, 64.0, -47.5]
+            engine.active_node_id = collar.node_id
+            return True, None
 
-        monkeypatch.setattr(engine, "_navigate_to_node", interrupted_return)
+        monkeypatch.setattr(engine, "_navigate_to_node", navigate_back)
         result = engine.run(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
 
-    assert result["stop_reason"] == "pickaxe_low"
-    assert result["next_action"] == "climb_out"
-    assert result["pos_after"][1] <= 16
-    assert not return_goals
-    assert engine.collar_node_id == collar.node_id
+        assert result["stop_reason"] == "pickaxe_low"
+        if available_supply == "sticks":
+            assert result["next_action"] == "return_collar"
+            assert result["pos_after"][1] == 53
+            tip = engine.nodes[navigation_origins[0]]
+            assert tip.anchor[1] <= 16
+            assert engine.active_node_id == tip.node_id
+            assert any(branch.status == "pending" for branch in tip.branches)
+            continued = engine.run(action="return_collar", max_duration_s=32)
+            assert continued["stop_reason"] == "returned_to_collar"
+            assert engine.active_node_id == tip.node_id
+            assert return_goals == [collar.node_id, collar.node_id]
+        else:
+            assert result["next_action"] == "climb_out"
+            assert result["pos_after"][1] <= 16
+            assert not return_goals
+        assert engine.collar_node_id == collar.node_id
 
 
 def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -> None:
@@ -2431,6 +2452,39 @@ def test_climb_timeout_with_confirmed_ascent_can_resume(monkeypatch) -> None:
     assert second["stop_reason"] == "surface_reached"
 
 
+def test_climb_out_confirms_landing_before_reporting_arrival(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 36.0, 0.5), surface_y=55, dimension="the_nether")
+    world.blocks[(1, 38, 0)] = world.blocks[(1, 39, 0)] = "air"
+
+    def handler(request):
+        response = world.handler(request)
+        if request.url.path.endswith("/status") and world.pos[1] == 38.4:
+            payload = response.json()
+            payload["result"]["on_ground"] = False
+            return httpx.Response(200, json=payload)
+        return response
+
+    def step(**kwargs):
+        world.pos = [1.5, 38.4, 0.5]
+        return {"ok": True}
+
+    with BotSession("tok", bot_username="ConfirmClimbLanding", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        engine.collar_ceiling_y = 55
+        monkeypatch.setattr(engine.skills, "dig_staircase", step)
+        airborne = engine.run(action="climb_out", max_duration_s=5)
+        assert airborne["ok"] is False
+        assert airborne["stop_reason"] == "climb_progress"
+        assert airborne["climb"]["target_y"] == 39
+        assert airborne["climb"]["reached"] is False
+
+        world.pos[1] = 38.0
+        landed = engine.run(action="climb_out", max_duration_s=5)
+
+    assert landed["stop_reason"] == "surface_reached"
+    assert landed["climb"]["reached"] is True
+
+
 def test_climb_timeout_keeps_success_when_the_collar_was_already_reached(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 
@@ -2660,7 +2714,8 @@ def test_first_dig_timeout_does_not_block_the_next_safe_descent(monkeypatch) -> 
     assert engine.collar_node_id == collar.node_id
 
 
-def test_descent_defers_a_timed_out_cell_shared_by_branches_until_retry(monkeypatch) -> None:
+@pytest.mark.parametrize("first_slice_budget", [32.0, 2.16])
+def test_descent_cooldown_requires_time_to_dig(monkeypatch, first_slice_budget) -> None:
     import mc_agent.skills.mining_dfs as mining
 
     clock = _MiningClock()
@@ -2675,9 +2730,10 @@ def test_descent_defers_a_timed_out_cell_shared_by_branches_until_retry(monkeypa
 
     def handler(request):
         if request.url.path.endswith("/dig") and tuple(json.loads(request.content)["pos"]) == stalled:
-            attempts.append(clock.now)
-            if clock.now < 1030:
-                clock.now += request.extensions["timeout"]["read"]
+            read_s = request.extensions["timeout"]["read"]
+            attempts.append(read_s)
+            if len(attempts) == 1 or (first_slice_budget == 32.0 and clock.now < 1030):
+                clock.now += read_s
                 raise httpx.ReadTimeout("gravel dig stalled", request=request)
         return world.handler(request)
 
@@ -2689,38 +2745,44 @@ def test_descent_defers_a_timed_out_cell_shared_by_branches_until_retry(monkeypa
         )
         engine.collar_node_id = collar.node_id
         args = dict(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=32)
-        first = engine.run(**args)
-        second = engine.run(**args)
+        first = engine.run(**{**args, "max_duration_s": first_slice_budget})
         assert first["stop_reason"] == "time_slice"
-        assert second["stop_reason"] == "dig_cell_avoided"
-        assert len(attempts) == 1
-        assert all(branch.status == "pending" for branch in collar.branches)
-        clock.now += 31
-        third = engine.run(**args)
+        resumed = engine.run(**args)
+        if first_slice_budget == 32.0:
+            assert resumed["stop_reason"] == "dig_cell_avoided"
+            assert len(attempts) == 1
+            assert all(branch.status == "pending" for branch in collar.branches)
+            clock.now += 31
+            resumed = engine.run(**args)
+        else:
+            assert attempts[0] < 1.0
 
-    assert third["stop_reason"] == "quota_reached"
-    assert third["target_gained"] == 1
+    assert resumed["stop_reason"] == "quota_reached"
+    assert resumed["target_gained"] == 1
     assert len(attempts) == 2
     assert engine.collar_node_id == collar.node_id
 
 
-def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypatch) -> None:
+@pytest.mark.parametrize("start_cell", [(0, 14, 0), (1, 14, 0), (1, 12, 0)])
+def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypatch, start_cell) -> None:
     import mc_agent.skills.mining_dfs as mining
 
     clock = _MiningClock()
     monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(mining.time, "sleep", clock.sleep)
-    world = _MockMineWorld(start_pos=(0.5, 14.0, 0.5), surface_y=64,
+    start_x, start_y, _ = start_cell
+    world = _MockMineWorld(start_pos=(start_x + 0.5, float(start_y), 0.5), surface_y=64,
                            inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
-    world.blocks[(0, 14, 0)] = world.blocks[(0, 15, 0)] = "air"
-    world.blocks[(3, 11, 0)] = "diamond_ore"
-    stalled = (2, 14, 0)
+    for x, y in ((0, 14), (start_x, start_y)):
+        world.blocks[(x, y, 0)] = world.blocks[(x, y + 1, 0)] = "air"
+    world.blocks[(start_x + 3, start_y - 3, 0)] = "diamond_ore"
+    stalled = (start_x + 2, start_y, 0)
     attempts = []
 
     def handler(request):
         if request.url.path.endswith("/dig"):
             pos = tuple(json.loads(request.content)["pos"])
-            if pos[0] == 1:
+            if pos[0] == start_x + 1:
                 clock.now += 6.0
             if pos == stalled:
                 attempts.append(clock.now)
@@ -2741,7 +2803,12 @@ def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypat
         assert first["stop_reason"] == "time_slice_progress"
         assert first["dig_target"] == list(stalled)
         assert first["dug_count"] > 0
-        assert first["pos_after"][1] == 13
+        assert first["pos_after"][1] == start_y - 1
+        tip = engine.nodes[engine.active_node_id]
+        assert tip.anchor == (start_x + 1, start_y - 1, 0)
+        assert tip.parent_id == collar.node_id
+        assert tip.edge_from_parent.waypoints[0] == collar.anchor
+        assert start_cell in tip.edge_from_parent.waypoints
 
         second = engine.run(**args)
 

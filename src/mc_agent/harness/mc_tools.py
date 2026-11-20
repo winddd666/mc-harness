@@ -166,6 +166,7 @@ class McToolset:
         self._entity_observed_dimension: str = "overworld"
         self._geofence_blocked_count: int = 0
         self._path_not_found_targets: list[tuple[float, float]] = []
+        self._empty_max_scans: dict[tuple[str, tuple[str, ...]], tuple[int, tuple[float, float] | None]] = {}
         self.geofence = geofence if geofence is not None else VoidGeofence.from_env()
         self.world_memory = (
             world_memory
@@ -194,6 +195,60 @@ class McToolset:
         self._episode_deadline_mono = episode_deadline_mono
         self._geofence_blocked_count = 0
         self._path_not_found_targets.clear()
+        self._empty_max_scans.clear()
+
+    def _annotate_scan_ceiling(
+        self,
+        parsed: dict[str, Any],
+        res_obj: dict[str, Any] | None,
+        *,
+        tool_name: str,
+        requested_radius: int,
+        effective_radius: int,
+        query_types: list[str] | None,
+        empty: bool,
+        cur_pos: tuple[float, float, float] | list[float] | None,
+    ) -> bool:
+        """Surface the 64m scan ceiling and break futile radius-doubling loops (long-run Bottleneck #1)."""
+        changed = False
+        if requested_radius > effective_radius and isinstance(res_obj, dict):
+            res_obj["radius_clamped_from"] = requested_radius
+            res_obj["radius_effective"] = effective_radius
+            res_obj["hint"] = (
+                f"{tool_name} 最大扫描半径硬上限为 {effective_radius}m（已将 radius={requested_radius} 钳制为 {effective_radius}m）。"
+                "原地继续放大 radius 不会扫描到更远区块；若当前 64m 内无目标，请先移动 >=40 格换区，或直接输出阻断结论切换目标。"
+            )
+            changed = True
+        if not empty or (effective_radius < 48 and requested_radius <= 64):
+            return changed
+        norm_key = (
+            tool_name,
+            tuple(sorted(str(t).strip().lower().removeprefix("minecraft:") for t in (query_types or []))),
+        )
+        pos_xz = (float(cur_pos[0]), float(cur_pos[2])) if cur_pos is not None and len(cur_pos) >= 3 else None
+        with self._state_lock:
+            prev_count, prev_xz = self._empty_max_scans.get(norm_key, (0, None))
+            moved_far = (
+                pos_xz is not None
+                and prev_xz is not None
+                and math.hypot(pos_xz[0] - prev_xz[0], pos_xz[1] - prev_xz[1]) >= 24.0
+            )
+            count = 1 if moved_far else prev_count + 1
+            self._empty_max_scans[norm_key] = (count, pos_xz if pos_xz is not None else prev_xz)
+        if count >= 2:
+            parsed["requires_replan"] = True
+            parsed["scan_exhausted"] = True
+            parsed["empty_max_scan_count"] = count
+            msg = (
+                f"你在当前位置附近已连续 {count} 次执行大半径({effective_radius}m)扫描且结果为 0。"
+                "服务端仅加载玩家周围约 64m 区块，严禁继续放大 radius 或原地重复扫描！"
+                "请立即移动 >=40 格换区，或直接结束本集汇报目标阻断。"
+            )
+            parsed["hint"] = msg
+            if isinstance(res_obj, dict):
+                res_obj["hint"] = msg
+            changed = True
+        return changed
 
     def _clamp_tool_budget(
         self,
@@ -675,7 +730,8 @@ class McToolset:
         limit: int = 20,
         mature: bool | None = None,
     ) -> str:
-        radius = max(1, min(64, radius))
+        requested_radius = int(radius)
+        radius = max(1, min(64, requested_radius))
         limit = max(1, min(60, limit))
         payload: dict[str, Any] = {"radius": radius, "limit": limit}
         ignored: list[str] = []
@@ -767,13 +823,27 @@ class McToolset:
                     res_obj["ecology_check"] = check
                     res_obj["hint"] = check["hint"]
                     return json.dumps(parsed, ensure_ascii=False)
+        if isinstance(parsed, dict) and parsed.get("ok") is True and isinstance(res_obj, dict):
+            _, cur_pos, _ = self._cached_env(fetch_if_missing=False)
+            if self._annotate_scan_ceiling(
+                parsed,
+                res_obj,
+                tool_name="mc_find_blocks",
+                requested_radius=requested_radius,
+                effective_radius=radius,
+                query_types=types,
+                empty=(isinstance(blocks, list) and len(blocks) == 0),
+                cur_pos=cur_pos,
+            ):
+                return json.dumps(parsed, ensure_ascii=False)
         return raw
 
     def mc_get_block(self, x: int, y: int, z: int) -> str:
         return self._call_json("get_block", {"pos": [x, y, z]})
 
     def mc_get_entities(self, radius: int = 32, types: list[str] | None = None) -> str:
-        radius = max(1, min(64, radius))
+        requested_radius = int(radius)
+        radius = max(1, min(64, requested_radius))
         payload: dict[str, Any] = {"radius": radius}
         if types:
             payload["types"] = types
@@ -817,6 +887,18 @@ class McToolset:
                         ent["blocked_by_wall"] = blocker is not None
                         if blocker is not None:
                             ent["blocking_block"] = blocker
+                    return json.dumps(parsed, ensure_ascii=False)
+            if isinstance(parsed, dict) and parsed.get("ok") is True and isinstance(res_ent, dict):
+                if self._annotate_scan_ceiling(
+                    parsed,
+                    res_ent,
+                    tool_name="mc_get_entities",
+                    requested_radius=requested_radius,
+                    effective_radius=radius,
+                    query_types=types,
+                    empty=(len(ents) == 0),
+                    cur_pos=pos_ent,
+                ):
                     return json.dumps(parsed, ensure_ascii=False)
         except Exception:
             pass

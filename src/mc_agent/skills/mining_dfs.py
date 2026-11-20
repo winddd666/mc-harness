@@ -311,6 +311,10 @@ class _MiningDeadline(Exception):
     """Unwind nested mining work without being swallowed as a recoverable ApiError."""
 
 
+class _CollarResupplyDeadline(_MiningDeadline):
+    """A mining slice expired while following the route back for a replacement pickaxe."""
+
+
 class _BudgetSession:
     """Private session copy: nested skills share a budget without changing the live bot.
 
@@ -328,6 +332,7 @@ class _BudgetSession:
         self.last_inventory: dict[str, Any] | None = None
         self.timeout_path: str | None = None
         self.timeout_dig_pos: tuple[int, int, int] | None = None
+        self.timeout_dig_read_s = 0.0
         self.dug_count = 0
         self.positions: list[tuple[int, int, int]] = []
         self.session = copy.copy(bot)
@@ -377,6 +382,7 @@ class _BudgetSession:
                 dig_pos = (payload or {}).get("pos")
                 if endpoint == "dig" and isinstance(dig_pos, (list, tuple)) and len(dig_pos) >= 3:
                     self.timeout_dig_pos = _floor_pos(dig_pos)
+                    self.timeout_dig_read_s = read_timeout
                 raise _MiningDeadline from exc
         if endpoint == "dig" and result.get("dug"):
             self.dug_count += 1
@@ -896,6 +902,17 @@ def _can_stack_expected_drop(inv_raw: dict[str, Any], expected_drops: set[str] |
 
 def _is_two_step_stair(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool:
     return abs(a[1] - b[1]) == 2 and (abs(a[0] - b[0]), abs(a[2] - b[2])) in {(2, 0), (0, 2)}
+
+
+def _descent_start_beside_anchor(
+    start: tuple[int, int, int], anchor: tuple[int, int, int], direction: str,
+) -> bool:
+    dx = start[0] - anchor[0]
+    dz = start[2] - anchor[2]
+    drop = anchor[1] - start[1]
+    if drop == 0:
+        return abs(dx) + abs(dz) == 1
+    return drop in (1, 2) and (dx, dz) == DIRECTIONS[direction]
 
 
 def _stair_midpoint_index(waypoints: list[tuple[int, int, int]], pos: tuple[int, int, int]) -> int | None:
@@ -2116,6 +2133,15 @@ class MiningDFSEngine:
             return False, "no_recorded_route"
         return True, None
 
+    def _walk_to_collar(
+        self, collar_id: int, *, min_hp_ref: list[float], deadline: float | None = None,
+    ) -> tuple[bool, str | None]:
+        mining_node_id = self.active_node_id
+        try:
+            return self._navigate_to_node(collar_id, min_hp_ref=min_hp_ref, deadline=deadline)
+        finally:
+            self.active_node_id = mining_node_id
+
     def _resume_shaft_tip(self, goal_node_id: int, *, min_hp_ref: list[float]) -> tuple[bool, str | None]:
         try:
             ok, reason = self._navigate_to_node(goal_node_id, min_hp_ref=min_hp_ref)
@@ -3066,6 +3092,16 @@ class MiningDFSEngine:
             kwargs["deadline"] = deadline
         return skill(**kwargs)
 
+    @staticmethod
+    def _climb_target_reached(status: dict[str, Any], target_y: int) -> bool:
+        pos = status.get("pos")
+        return (
+            bool(pos) and bool(status.get("on_ground", True))
+            and status.get("alive") is not False and status.get("ready") is not False
+            and not (status.get("in_water") or status.get("in_lava"))
+            and _floor_pos(pos)[1] >= target_y - 2
+        )
+
     def _climb_out(self, *, deadline: float, max_attempts: int = 40) -> dict[str, Any]:
         """Climb to the surface datum in ONE call: probe directions and keep going.
 
@@ -3091,17 +3127,13 @@ class MiningDFSEngine:
         attempted_collar = None
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
             attempted_collar = self.nodes[self.collar_node_id].anchor
-            mining_node_id = self.active_node_id
-            try:
-                ok_walk, _err_walk = self._navigate_to_node(
-                    self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
-                )
-            finally:
-                # A supply trip should leave the mining destination available to explore.
-                self.active_node_id = mining_node_id
+            ok_walk, _err_walk = self._walk_to_collar(
+                self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline,
+            )
             walked = bool(ok_walk)
             if not walked:
-                y_part = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
+                partial_status = self.bot.status()
+                y_part = _floor_pos(partial_status.get("pos") or [0, start_y, 0])[1]
                 walk_gain = int(y_part) - int(start_y)
                 if walk_gain >= 3:
                     # The corridor walk is working, it just ran out of slice. Report progress so
@@ -3111,7 +3143,7 @@ class MiningDFSEngine:
                         "end_y": y_part,
                         "climbed": walk_gain,
                         "target_y": target_y,
-                        "reached": y_part >= target_y,
+                        "reached": self._climb_target_reached(partial_status, target_y),
                         "attempts": 0,
                         "method": "walk",
                     }
@@ -3136,8 +3168,9 @@ class MiningDFSEngine:
                 walked = False
         if walked:
             method = "walk"
-            y_walk = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
-            if y_walk >= target_y - 2:
+            walk_status = self.bot.status()
+            y_walk = _floor_pos(walk_status.get("pos") or [0, start_y, 0])[1]
+            if self._climb_target_reached(walk_status, target_y):
                 return {
                     "start_y": start_y,
                     "end_y": y_walk,
@@ -3217,13 +3250,14 @@ class MiningDFSEngine:
             if escaped:
                 continue
             break
-        end_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+        end_status = self.bot.status()
+        end_y = _floor_pos(end_status.get("pos") or [0, 64, 0])[1]
         return {
             "start_y": start_y,
             "end_y": end_y,
             "climbed": end_y - start_y,
             "target_y": target_y,
-            "reached": end_y >= target_y - 2,
+            "reached": self._climb_target_reached(end_status, target_y),
             "attempts": attempts,
             "method": method if not walked else f"{method}+stair",
         }
@@ -4972,7 +5006,12 @@ class MiningDFSEngine:
             return False
         if not _has_collar_resupply_materials(counts_now) and self.ledger.nearest_utility("crafting_table", self.nodes[self.collar_node_id].anchor, max_dist=16.0) is None:
             return False
-        ok_ret, _ = self._navigate_to_node(self.collar_node_id, min_hp_ref=min_hp_ref)
+        try:
+            ok_ret, reason = self._walk_to_collar(self.collar_node_id, min_hp_ref=min_hp_ref)
+        except _MiningDeadline as exc:
+            raise _CollarResupplyDeadline from exc
+        if reason == "walk_time_slice":
+            raise _CollarResupplyDeadline
         return ok_ret
 
     def _pickaxe_low_recovery(self, counts: dict[str, int], pos: list[float] | None) -> dict[str, Any]:
@@ -5025,10 +5064,14 @@ class MiningDFSEngine:
                 result["goal_met"] = int(result.get("target_gained", 0)) >= requested
                 self._report_explore_depth(result, target_y=self.target_y, budget=budget)
             return result
-        except _MiningDeadline:
+        except _MiningDeadline as exc:
+            resupply_interrupted = isinstance(exc, _CollarResupplyDeadline)
             moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
-            # A dig interrupted after progress can get a fresh budget on the preserved route.
-            if scoped.timeout_dig_pos is not None and not (moved or scoped.dug_count):
+            # Give productive slices and digs with a subsecond read allowance a fresh budget.
+            if (
+                scoped.timeout_dig_pos is not None and scoped.timeout_dig_read_s >= 1.0
+                and not (moved or scoped.dug_count)
+            ):
                 self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", 30.0)
             # Keep interrupted branches retryable. Preserve the observed return route if
             # the cutoff landed inside an edge before its local waypoints were committed.
@@ -5037,6 +5080,8 @@ class MiningDFSEngine:
                 for index, branch in enumerate(node.branches):
                     if branch.status == "active":
                         branch.status = "pending"
+                        if resupply_interrupted:
+                            break
                         if scoped.timeout_path == "dig" and not scoped.dug_count:
                             # Let the remaining branches try their first step before
                             # spending another slice on this unconfirmed dig.
@@ -5048,13 +5093,13 @@ class MiningDFSEngine:
                         elif (
                             branch.kind == "stair_down" and len(route) > 1
                             and route[0] in self.known_corridor_positions
-                            and route[0][1] == node.anchor[1] and math.dist(route[0], node.anchor) == 1
+                            and _descent_start_beside_anchor(route[0], node.anchor, branch.direction)
                             and route[-1][1] < node.anchor[1]
                             and not (scoped.last_status.get("in_water") or scoped.last_status.get("in_lava"))
                             and all(math.dist(a, b) <= math.sqrt(2) and b[1] <= a[1] for a, b in zip(route, route[1:]))
                         ):
-                            # The bot can start digging one cell beside a node on the same floor.
-                            # Join the observed stairs by a single level step and keep the same collar.
+                            # A slice can start next to the node or below its first stair.
+                            # Connect the observed descent to the existing shaft.
                             steps_taken = node.anchor[1] - route[-1][1]
                             route = [node.anchor, *route]
                         else:
@@ -5101,24 +5146,26 @@ class MiningDFSEngine:
                     gained=gained,
                     dug_count=scoped.dug_count,
                 )
-                if moved or scoped.dug_count or gained:
+                if resupply_interrupted:
                     result.update(
-                        ok=True,
-                        requires_replan=False,
-                        stop_reason="quota_reached" if result["goal_met"] else "time_slice_progress",
-                        message="本轮已保留确认的采掘进展和回撤路径，可以继续 explore。",
+                        stop_reason="pickaxe_low", next_action="return_collar", budget_effective_s=budget,
+                        message="镐耐久不足，回井口补给途中达到时间上限。请继续 action='return_collar'，补好镐后再 explore。",
                     )
-                self._report_explore_depth(result, target_y=int(profile["target_y"]), budget=budget)
+                else:
+                    if moved or scoped.dug_count or gained:
+                        result.update(
+                            ok=True,
+                            requires_replan=False,
+                            stop_reason="quota_reached" if result["goal_met"] else "time_slice_progress",
+                            message="本轮已保留确认的采掘进展和回撤路径，可以继续 explore。",
+                        )
+                    self._report_explore_depth(result, target_y=int(profile["target_y"]), budget=budget)
             if act in {"climb_out", "climb"} and scoped.positions:
                 start_y, end_y = scoped.positions[0][1], scoped.positions[-1][1]
                 target_height = int(self.collar_ceiling_y) - 16 if self.collar_ceiling_y is not None else start_y
                 status = scoped.last_status
                 in_fluid = status.get("in_water") or status.get("in_lava")
-                reached = (
-                    end_y >= target_height - 2 and bool(status.get("pos"))
-                    and status.get("on_ground", True) and not in_fluid
-                    and status.get("alive") is not False and status.get("ready") is not False
-                )
+                reached = self._climb_target_reached(status, target_height)
                 result["climb"] = {
                     "start_y": start_y, "end_y": end_y, "climbed": end_y - start_y,
                     "target_y": target_height, "reached": reached,
@@ -5426,7 +5473,7 @@ class MiningDFSEngine:
             if self.collar_node_id is None or self.collar_node_id not in self.nodes:
                 return {"ok": False, "requires_replan": True, "strategy": self.strategy, "stop_reason": "no_collar_recorded", "tree": self.snapshot()}
             dug_before = self.dug_during_return
-            ok_ret, err_ret = self._navigate_to_node(
+            ok_ret, err_ret = self._walk_to_collar(
                 self.collar_node_id,
                 min_hp_ref=min_hp_ref,
                 deadline=deadline,
