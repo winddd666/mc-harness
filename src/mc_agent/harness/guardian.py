@@ -1485,6 +1485,15 @@ class GenerationGuard:
                             self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                         if cf_mode == "flee":
                             self._consecutive_flees += 1
+                            if (
+                                cf.get("ok") and has_shield and isinstance(att_id_r, int)
+                                and hp_val <= LOW_HP_BUNKER_MAX
+                                and (already_blocking or any(a["action"] == "raise_shield" and a["ok"] for a in actions))
+                            ):
+                                actions.append(self._action(
+                                    "face_attacker_after_retreat",
+                                    lambda: self.bot.call("look", {"entity_id": att_id_r}, timeout_s=0.9),
+                                ))
                         else:
                             self._consecutive_flees = 0
                 else:

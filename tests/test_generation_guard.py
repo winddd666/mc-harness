@@ -4085,6 +4085,60 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
+@pytest.mark.parametrize("respawned", [False, True])
+def test_low_health_shield_faces_the_shooter_again_after_retreat(respawned):
+    status = {
+        "pos": [-11014.4, 76, -11004.5], "yaw": 0.1, "health": 1.0, "food": 17, "ready": True,
+        "alive": True, "on_ground": True, "blocking": True, "last_death": {"t": 10},
+        "nearest_hostile": {"id": 42, "name": "skeleton", "dist": 8.0},
+    }
+    movements = []
+
+    class ShieldedBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": {"id": 42, "name": "skeleton"}}
+                return {"events": [hurt] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield", "count": 1}}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 76 else "air"}
+            if action == "look":
+                if "entity_id" in body:
+                    assert body["entity_id"] == 42
+                    status["yaw"] = -0.267
+                    movements.append("face_shooter")
+                else:
+                    status["yaw"] = body["yaw"]
+                    movements.append("turn_to_retreat")
+            if action == "control" and body.get("forward"):
+                movements.append("sprint")
+                status["pos"] = [-11014.3, 76, -11006.8]
+                if respawned:
+                    status.update(health=20, last_death={"t": 20})
+            if action == "move_to":
+                movements.append("move_to")
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    guard = GenerationGuard(ShieldedBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    names = [action["action"] for action in incident["actions"]]
+    assert movements[:3] == ["face_shooter", "turn_to_retreat", "sprint"]
+    if respawned:
+        assert "face_attacker_after_retreat" not in names
+        assert movements[-1] == "sprint"
+    else:
+        assert names[-1] == "face_attacker_after_retreat"
+        assert movements[-1] == "face_shooter"
+        assert status["yaw"] == -0.267
+
+
 @pytest.mark.parametrize("landing", ["grounded", "still_airborne", "respawned"])
 @pytest.mark.parametrize("entry", ["poll_ranged", "poll_melee", "subcortical_ranged", "subcortical_melee"])
 def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing, entry):
