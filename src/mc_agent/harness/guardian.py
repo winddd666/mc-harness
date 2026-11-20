@@ -203,6 +203,7 @@ class _GuardSession:
 class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
     WATER_SHORE_MAX_HP = 6.0
+    WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     COMBAT_RECOVERY_BUDGET_S = 8.0
     UNSTICK_BUDGET_S = 30.0
@@ -910,7 +911,7 @@ class GenerationGuard:
         low_oxygen = isinstance(oxygen, (int, float)) and oxygen < 240
         critical_drowning = isinstance(oxygen, (int, float)) and oxygen < 150
         drowning = in_water and (
-            oxygen == 0
+            (isinstance(oxygen, (int, float)) and oxygen <= 0)
             or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
         )
         no_water_active = now < self._no_water_until
@@ -2019,7 +2020,9 @@ class GenerationGuard:
                 now_pre = time.monotonic()
                 oxy_pre = st_pre.get("oxygen")
                 hurt_pre_water = trigger.get("source") in {"tool_interrupted_hurt", "boundary_threat", "pre_hurt_ranged"}
-                drowning_pre = oxy_pre == 0 or trigger.get("hurt_source") == "drown"
+                drowning_pre = (
+                    (isinstance(oxy_pre, (int, float)) and oxy_pre <= 0) or trigger.get("hurt_source") == "drown"
+                )
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
                     or (isinstance(oxy_pre, (int, float)) and oxy_pre < 180)
@@ -2274,13 +2277,14 @@ class GenerationGuard:
             and self._needs_hot_floor_stance(status, now_b)
         )
         drowning = in_water and (
-            oxygen == 0
+            (isinstance(oxygen, (int, float)) and oxygen <= 0)
             or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
         )
         nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
 
         if not in_water and not in_lava:
             self._water_hurt_streak = 0
+            self._last_water_escape_failed = False
 
         no_water_reentry_b = in_water and now_b < self._no_water_until
         ended_wet_in_payload = any('"in_water": true' in str(r or "").lower() for r in (tool_results or []))
@@ -2424,9 +2428,17 @@ class GenerationGuard:
                     if any(a.get("action") == "boundary_raise_shield" and a.get("ok") for a in b_actions):
                         notes.append("举盾护体")
 
+                continuing_water_escape = (
+                    self._last_water_escape_failed
+                    and not handled_water_in_tool
+                    and now_b - self._last_water_escape_at < self.WATER_ESCAPE_RETRY_WINDOW_S
+                    and (bool(status.get("submerged")) or status.get("on_ground") is False)
+                )
+                surface_first = drowning or (continuing_water_escape and bool(status.get("submerged")))
                 forced_shore_b = (
                     self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
                     or handled_water_in_tool or unstick_still_wet or self._swimming_at_low_health(status)
+                    or continuing_water_escape
                 )
                 esc_b_ok = False
                 esc_b_respawned = False
@@ -2446,7 +2458,7 @@ class GenerationGuard:
                     shore_b = self._action(
                         "boundary_escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
-                            nh_pos, keep_shield=has_shield_b, **({"surface_first": True} if drowning else {}),
+                            nh_pos, keep_shield=has_shield_b, **({"surface_first": True} if surface_first else {}),
                         ),
                         raise_on_http_error=False,
                     )

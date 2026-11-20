@@ -4183,9 +4183,12 @@ def test_ranged_retreat_without_shield_resolves_the_shooter_from_live_entities(m
         ("boundary", "close_respawn"),
         ("boundary", "macro_respawn"),
         ("boundary", "macro_close_respawn"),
+        ("boundary", "negative_oxygen"),
         ("poll", "surface"),
         ("poll", "oxygen_only"),
+        ("poll", "negative_oxygen"),
         ("preemption", "oxygen_only"),
+        ("preemption", "negative_oxygen"),
     ],
 )
 def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, monkeypatch):
@@ -4204,7 +4207,7 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
                 return dict(state)
             if action == "events":
                 hurt = {"seq": 1, "type": "hurt", "source": "drown"}
-                return {"events": [] if macro or scenario == "oxygen_only" else [hurt]}
+                return {"events": [] if macro or scenario in {"oxygen_only", "negative_oxygen"} else [hurt]}
             if action == "inventory":
                 return {"items": []}
             calls.append((action, body))
@@ -4226,6 +4229,8 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
         state["oxygen"] = 100
     elif scenario == "oxygen_only":
         state["submerged"] = False
+    elif scenario == "negative_oxygen":
+        state["oxygen"] = -1
     guard = GenerationGuard(WaterBot(), EventSink(events.append), checkpoint=lambda: None, skills=EscapeMacro())
     if entry == "poll":
         monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
@@ -4410,6 +4415,51 @@ def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypa
 
     expected = {"surfaced": [], "submerged": ["shore"], "drowning": ["urgent_shore"], "failed_unstick": ["shore"]}
     assert calls == expected[water_state]
+
+
+@pytest.mark.parametrize("reentry", ["still_submerged", "observed_dry", "retry_window_expired"])
+def test_boundary_retries_shore_directly_after_water_macro_times_out(monkeypatch, reentry):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [6383.3, 56.2, -6537.3], "health": 18, "food": 20, "oxygen": 100,
+        "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    attempts = []
+
+    class FloodedCaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            assert action == "stop"
+            return {"ok": True}
+
+    def timed_out_water_macro(_status):
+        attempts.append("water_macro")
+        raise httpx.ReadTimeout("water macro timed out")
+
+    def missed_shore(*args, surface_first=False, **kwargs):
+        attempts.append("surface_then_shore" if surface_first else "shore")
+        return {"ok": False, "in_water": True}
+
+    guard = GenerationGuard(FloodedCaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_escape_water", timed_out_water_macro)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", missed_shore)
+    guard.stabilize_after_tools()
+    assert attempts == ["water_macro", "shore"]
+    attempts.clear()
+
+    clock[0] += 31.0 if reentry == "retry_window_expired" else 4.25
+    if reentry == "observed_dry":
+        status.update(in_water=False, submerged=False, on_ground=True)
+        guard.stabilize_after_tools()
+        status.update(in_water=True, submerged=True, on_ground=False)
+    guard.stabilize_after_tools()
+
+    expected = ["surface_then_shore"] if reentry == "still_submerged" else ["water_macro", "shore"]
+    assert attempts == expected
 
 
 @pytest.mark.parametrize("entry", ["poll_float", "poll_hurt", "boundary", "tool_preemption"])
