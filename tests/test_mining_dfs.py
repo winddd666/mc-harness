@@ -2818,6 +2818,61 @@ def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypat
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("steps_before_preemption", [0, 6])
+def test_descent_resumes_after_guardian_preemption(monkeypatch, steps_before_preemption) -> None:
+    from mc_agent.harness.guardian import ReflexPreempted
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    clock = _MiningClock()
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", clock.sleep)
+    start = (0, -22, 0)
+    world = _MockMineWorld(
+        start_pos=(0.5, -22.0, 0.5), surface_y=64,
+        inventory_items=[{"name": "iron_pickaxe", "count": 1, "slot": 9}],
+    )
+    world.blocks[start] = world.blocks[(0, -21, 0)] = "air"
+    interrupted = False
+
+    def handler(request):
+        nonlocal interrupted
+        if (
+            request.url.path.endswith("/dig") and not interrupted
+            and world.pos[0] == steps_before_preemption + 0.5
+        ):
+            interrupted = True
+            raise ReflexPreempted({"source": "pre_hurt_creeper"})
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="ResumeAfterGuardian", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, 86), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=start, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [collar.anchor, start]),
+            branches=[BranchSpec("stair_down", "east", 32)],
+        )
+        args = dict(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
+        with pytest.raises(ReflexPreempted):
+            engine.run(**args)
+
+        tip = engine.nodes[engine.active_node_id]
+        assert engine.bot is bot
+        assert tip.anchor == (steps_before_preemption, start[1] - steps_before_preemption, 0)
+        assert [(b.status, b.steps) for b in tip.branches] == [("pending", 32 - steps_before_preemption)]
+        assert engine.ledger.saved_shafts[0]["active_node_id"] == tip.node_id
+
+        world.blocks[(tip.anchor[0] + 2, tip.anchor[1] - 2, 0)] = "diamond_ore"
+        resumed = engine.run(**args)
+
+    assert resumed["stop_reason"] == "quota_reached"
+    assert resumed["target_gained"] == 1
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_waypoint_interpolation_checks_deadline_between_hops(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 

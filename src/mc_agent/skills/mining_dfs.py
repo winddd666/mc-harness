@@ -5108,6 +5108,68 @@ class MiningDFSEngine:
             }
         return {"message": _pickaxe_low_hint(counts)}
 
+    def _preserve_interrupted_branch(
+        self, scoped: _BudgetSession, *, deadline_failure: _MiningDeadline | None,
+    ) -> bool:
+        node = self.nodes.get(self.active_node_id)
+        if node is None:
+            return False
+        for index, branch in enumerate(node.branches):
+            if branch.status == "active":
+                break
+        else:
+            return False
+
+        branch.status = "pending"
+        if isinstance(deadline_failure, _CollarResupplyDeadline):
+            return True
+        if scoped.timeout_path == "dig" and not scoped.dug_count:
+            # Give the other branches a first step before retrying an unconfirmed dig.
+            node.branches.append(node.branches.pop(index))
+        route = scoped.positions
+        if node.anchor in route:
+            route = route[len(route) - 1 - list(reversed(route)).index(node.anchor):]
+            steps_taken = len(route) - 1
+        elif (
+            branch.kind == "stair_down" and len(route) > 1
+            and route[0] in self.known_corridor_positions
+            and _descent_start_beside_anchor(route[0], node.anchor, branch.direction)
+            and route[-1][1] < node.anchor[1]
+            and not (scoped.last_status.get("in_water") or scoped.last_status.get("in_lava"))
+            and all(math.dist(a, b) <= math.sqrt(2) and b[1] <= a[1] for a, b in zip(route, route[1:]))
+        ):
+            # Connect a descent that began one cell away from the saved node.
+            steps_taken = node.anchor[1] - route[-1][1]
+            route = [node.anchor, *route]
+        else:
+            return True
+        if steps_taken <= 0 or route[-1] == node.anchor:
+            return True
+        if deadline_failure is None:
+            # External interruption can occur during movement or resupply.
+            # Only promote the contiguous, confirmed part of a descending branch.
+            status = scoped.last_status
+            if (
+                branch.kind != "stair_down" or route[-1][1] >= node.anchor[1]
+                or status.get("in_water") or status.get("in_lava")
+                or status.get("alive") is False or status.get("ready") is False
+                or any(pt not in self.known_corridor_positions for pt in route[1:])
+                or any(math.dist(a, b) > math.sqrt(2) or b[1] > a[1] for a, b in zip(route, route[1:]))
+            ):
+                return True
+            steps_taken = node.anchor[1] - route[-1][1]
+        branch.status = "completed"
+        self._create_node(
+            kind="switchback" if branch.kind.startswith("stair") else "spine",
+            anchor=route[-1], parent_id=node.node_id,
+            edge_from_parent=ShaftEdge(branch.kind, branch.direction, list(route)),
+            branches=[dataclasses.replace(
+                branch, status="pending", completed_waypoints=[],
+                steps=max(1, branch.steps - steps_taken),
+            )],
+        )
+        return True
+
     # ---- Public Entrypoint ----
 
     def run(
@@ -5150,49 +5212,7 @@ class MiningDFSEngine:
                 and not (moved or scoped.dug_count)
             ):
                 self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", 30.0)
-            # Keep interrupted branches retryable. Preserve the observed return route if
-            # the cutoff landed inside an edge before its local waypoints were committed.
-            node = self.nodes.get(self.active_node_id)
-            if node is not None:
-                for index, branch in enumerate(node.branches):
-                    if branch.status == "active":
-                        branch.status = "pending"
-                        if resupply_interrupted:
-                            break
-                        if scoped.timeout_path == "dig" and not scoped.dug_count:
-                            # Let the remaining branches try their first step before
-                            # spending another slice on this unconfirmed dig.
-                            node.branches.append(node.branches.pop(index))
-                        route = scoped.positions
-                        if node.anchor in route:
-                            route = route[len(route) - 1 - list(reversed(route)).index(node.anchor):]
-                            steps_taken = len(route) - 1
-                        elif (
-                            branch.kind == "stair_down" and len(route) > 1
-                            and route[0] in self.known_corridor_positions
-                            and _descent_start_beside_anchor(route[0], node.anchor, branch.direction)
-                            and route[-1][1] < node.anchor[1]
-                            and not (scoped.last_status.get("in_water") or scoped.last_status.get("in_lava"))
-                            and all(math.dist(a, b) <= math.sqrt(2) and b[1] <= a[1] for a, b in zip(route, route[1:]))
-                        ):
-                            # A slice can start next to the node or below its first stair.
-                            # Connect the observed descent to the existing shaft.
-                            steps_taken = node.anchor[1] - route[-1][1]
-                            route = [node.anchor, *route]
-                        else:
-                            break
-                        if steps_taken > 0 and route[-1] != node.anchor:
-                            branch.status = "completed"
-                            self._create_node(
-                                kind="switchback" if branch.kind.startswith("stair") else "spine",
-                                anchor=route[-1], parent_id=node.node_id,
-                                edge_from_parent=ShaftEdge(branch.kind, branch.direction, list(route)),
-                                branches=[dataclasses.replace(
-                                    branch, status="pending", completed_waypoints=[],
-                                    steps=max(1, branch.steps - steps_taken),
-                                )],
-                            )
-                        break
+            self._preserve_interrupted_branch(scoped, deadline_failure=exc)
             self._archive_current_shaft_to_ledger(mark_exhausted=False)
             result: dict[str, Any] = {
                 "ok": False, "requires_replan": True, "action": act,
@@ -5282,7 +5302,13 @@ class MiningDFSEngine:
                     result["message"] += "若路线畅通，可按 retry_with 调大预算并保留其余参数。"
                 result["suggested_next"] = next_steps
             return result
+        except BaseException:
+            if act == "explore" and self._preserve_interrupted_branch(scoped, deadline_failure=None):
+                self._archive_current_shaft_to_ledger(mark_exhausted=False)
+            raise
         finally:
+            self.bot, self.skills = original_bot, original_skills
+            self._deadline = previous_deadline
             # Stop a request that may still be running server-side, within the reserved
             # portion of the caller's budget. Never reconnect or reauthenticate here.
             remaining = deadline - time.monotonic()
@@ -5292,8 +5318,6 @@ class MiningDFSEngine:
                     scoped.call("stop", {}, timeout_s=0.25)
                 except (_MiningDeadline, ApiError, httpx.HTTPError):
                     pass
-            self.bot, self.skills = original_bot, original_skills
-            self._deadline = previous_deadline
 
     @staticmethod
     def _report_explore_depth(result: dict[str, Any], *, target_y: int, budget: float) -> None:
