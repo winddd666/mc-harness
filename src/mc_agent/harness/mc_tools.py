@@ -1358,6 +1358,22 @@ class McToolset:
         entity_id: int | None = None,
         item: str | None = None,
     ) -> str:
+        item_name = str(item or "").removeprefix("minecraft:")
+        if entity_id is None and item_name == "fishing_rod":
+            return json.dumps(
+                {
+                    "ok": False,
+                    "requires_replan": True,
+                    "error": {
+                        "code": "use_item_api",
+                        "message": (
+                            "钓鱼需要从岸边向开阔水面抛竿。请选择水面坐标，"
+                            "调用 mc_use_item(item='fishing_rod', x=..., y=..., z=...) 抛竿并等待收竿。"
+                        ),
+                    },
+                },
+                ensure_ascii=False,
+            )
         physics_block = self._check_dimension_physics(item)
         if physics_block is not None:
             return physics_block
@@ -1426,7 +1442,7 @@ class McToolset:
             except Exception:
                 pass
         raw = self._call_json("interact", payload)
-        is_bottle = "pos" in payload and (item or "").removeprefix("minecraft:") == "glass_bottle"
+        is_bottle = "pos" in payload and item_name == "glass_bottle"
         if not (is_bucket or is_bottle):
             return raw
         try:

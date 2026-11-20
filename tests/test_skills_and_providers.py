@@ -2147,6 +2147,47 @@ def test_glass_bottle_interact_with_water_requires_confirmed_fill(
         assert "level=0" in result["error"]["message"]
 
 
+@pytest.mark.parametrize(
+    "item,interact_target",
+    [
+        ("fishing_rod", {"x": 1, "y": 62, "z": 3}),
+        ("fishing_rod", {}),
+        ("minecraft:fishing_rod", {"x": 1, "y": 62, "z": 3}),
+    ],
+)
+def test_interact_with_fishing_rod_recommends_cast_at_open_water(item, interact_target) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    routes = []
+    receipt = {"caught": {"cod": 1}, "casts": 1}
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        routes.append(route)
+        if route == "interact":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"block": "water", "changed": False}},
+            )
+        assert route == "use_item"
+        assert json.loads(request.content) == {"item": "fishing_rod", "target": {"pos": [1, 62, 3]}}
+        return httpx.Response(200, json={"ok": True, "result": receipt})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        rejected = json.loads(toolset.mc_interact(item=item, **interact_target))
+        assert rejected["ok"] is False
+        assert rejected["requires_replan"] is True
+        assert rejected["error"]["code"] == "use_item_api"
+        assert "mc_use_item(item='fishing_rod'" in rejected["error"]["message"]
+        assert routes == []
+
+        cast = json.loads(toolset.mc_use_item(item="fishing_rod", x=1, y=62, z=3))
+
+    assert routes == ["use_item"]
+    assert cast == {"ok": True, "result": receipt}
+
+
 def test_window_view_rejects_entity_at_12m_before_no_window() -> None:
     """r16 BUG-027: goNear silently failed, then no_window from 12m."""
     from mc_agent.harness.mc_tools import McToolset
