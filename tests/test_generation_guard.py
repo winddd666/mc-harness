@@ -2779,6 +2779,43 @@ def test_bug034_ranged_combat_stance_blocking_and_cover_exempt_cancels(monkeypat
     assert rep["guardian"]["cancelled_generations"] == 1
 
 
+def test_deep_lava_keeps_swimming_up_while_the_head_is_submerged():
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [0.5, 30.0, 0.5], "in_lava": True, "alive": True,
+        "ready": True, "on_ground": False, "dimension": "the_nether",
+    }
+    controls = []
+
+    class LavaBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if (x, z) == (0, 0) and y <= 33:
+                    return {"name": "lava"}
+                return {"name": "netherrack" if y <= 32 else "air"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "control":
+                controls.append(body["forward"])
+                if body["forward"]:
+                    assert status["pos"][1] >= 33
+                    status.update(in_lava=False, on_ground=True, pos=[2.5, 33.0, 0.5])
+                else:
+                    status["pos"] = [0.5, status["pos"][1] + 1.0, 0.5]
+            return {"ok": True}
+
+    result = CombatEnv(LavaBot()).escape_lava()
+    assert controls == [False, False, False, True]
+    assert result["ok"] is True and result["in_lava"] is False
+
+
 def test_r19_lava_pit_places_netherrack_filler_before_second_sprint(monkeypatch):
     """Reproduces r19_short hy4_hy_8_nether: boxed Nether pit must try netherrack bridge right after first sprint instead of starving."""
     from mc_agent.skills.combat_env import CombatEnv

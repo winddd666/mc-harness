@@ -1180,8 +1180,11 @@ class CombatEnv:
                 **({"airborne_above_lava": True} if airborne_over_lava else {}),
             }
 
-        head_bx, head_by, head_bz = math.floor(float(pos0[0])), math.floor(float(pos0[1])) + 1, math.floor(float(pos0[2]))
-        if self._get_block_name(head_bx, head_by, head_bz) in {"lava", "flowing_lava"}:
+        for _ in range(3):
+            px, py, pz = map(float, pos0[:3])
+            head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz))
+            if not _is_lava_block(head) or time.monotonic() >= lava_deadline:
+                break
             try:
                 # The current yaw can still face the attacker that knocked us in.
                 # Preserve the horizontal position until the shore probe picks a heading.
@@ -1196,6 +1199,8 @@ class CombatEnv:
             if _should_exit_lava(st):
                 return _lava_result(st)
             pos0 = st.get("pos") or pos0
+            if float(pos0[1]) - py < 0.1:
+                break
 
         # 2. Try scanning safe non-lava exits (including 1-block step-ups, plus wide shore search) and jump-sprinting out
         scan = self.scan_safe_yaws(
