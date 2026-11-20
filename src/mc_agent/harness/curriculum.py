@@ -1298,30 +1298,26 @@ def _build_day2_village_search_target(
 ) -> CurriculumTarget:
     dirs = list(unexp[:3]) if unexp else ["east", "north", "south"]
     dir_hint = "/".join(dirs)
-    if origin_pos is not None and len(origin_pos) >= 3:
-        ox = int(round(float(origin_pos[0])))
-        oz = int(round(float(origin_pos[2])))
-        dir_vec = {"north": (0, -90), "south": (0, 90), "east": (90, 0), "west": (-90, 0)}
-        examples = [f"{d}->mc_move_to(x={ox + dir_vec.get(d, (90, 0))[0]}, z={oz + dir_vec.get(d, (90, 0))[1]}, range=4)" for d in dirs[:2]]
-        hop_clause = f"当前基准坐标 ({ox}, {oz})，沿未探索方向({dir_hint})每次推进 80~100 格（示例：{'，'.join(examples)}；遇水域立刻绕开/换向）。"
-    else:
-        hop_clause = f"读取最新 `[实时HUD]` 坐标，沿未探索方向({dir_hint})每次推进 80~100 格（遇水域立刻绕开/换向）。"
+    first_dir = dirs[0] if dirs else "auto"
+    hop_clause = (
+        f"优先直接调用高速复合斥候工具 mc_skill_scout_surface(direction='{first_dir}', max_duration_s=45, step_dist=30) "
+        f"（单次零LLM往返连跑 5 段 150m 并自动 64m 扫村/扫村民/避水避围栏；未命中时顺次换未探索方向 {dir_hint} 或 'auto' 再跑 1~2 次，不要手写循环调 mc_move_to+mc_find_blocks）。"
+    )
     biome_note = f"当前群系={biome}；" if biome else ""
     return CurriculumTarget(
         key="day2_village_search",
-        title="Day 2 白天食物补给与系统寻村：生态筛选 + 进村占房绑床/干草块/箱子",
+        title="Day 2 白天食物补给与系统寻村：高速斥候 + 进村占房绑床/干草块/箱子",
         points=45,
         tier=1,
         budget_class="short",
         task=(
-            "执行 Day 2 白天食物补给与系统寻村（入夜自动止损，绝不死磕）："
+            "执行 Day 2 白天食物补给与高速系统寻村（入夜或本集结束自动止损，绝不死磕）："
             f"{biome_note}MC 村庄仅生成在 plains/savanna/desert/taiga/snowy_plains，若进入海洋/深森林/丛林/沼泽立刻换方向。"
             + hop_clause
             + "1) 若包内食物不足 6 块且途中 24m 内有猪/牛/羊，顺手用斧收 2~3 只；"
-            "2) 每到一处平地调 mc_find_blocks(radius=64, types=['bell','dirt_path','hay_block','composter','lectern','farmland','fletching_table','white_bed','yellow_bed']) 与 mc_get_entities(radius=48)；"
-            "3) 一旦命中村庄方块或村民，立即进村：①找带床/箱子的村民屋调 mc_skill_bind_bed 绑重生点占为据点；②顺手采 4~8 块 hay_block 合面包、开屋里箱子拿贵重战利品；③记录村庄坐标后立即收工（多人服不指望睡觉跳夜，下集直接交易或转地下挖钻）。"
+            "2) 一旦 mc_skill_scout_surface 返回命中村庄方块(bell/dirt_path/hay_block/composter/lectern)或 villager/iron_golem，立即进村：①找带床/箱子的村民屋调 mc_skill_bind_bed 绑重生点占为据点；②顺手采 4~8 块 hay_block 合面包、开屋里箱子拿贵重战利品；③记录村庄坐标后立即收工（多人服不指望睡觉跳夜，下集直接交易或转地下挖钻）。"
         ),
-        extra_tools=("mc_skill_bind_bed", "mc_skill_container"),
+        extra_tools=("mc_skill_scout_surface", "mc_skill_bind_bed", "mc_skill_container"),
         advancement_id=None,
     )
 
