@@ -227,6 +227,46 @@ def test_bug047_mine_dfs_clamps_to_55s_and_episode_deadline(monkeypatch: pytest.
         assert len(seen_budgets) == count_before
 
 
+def test_bug064_scan_ceiling_surfaces_clamp_and_stops_radius_doubling() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"pos": [100.5, 64.0, 200.5], "dimension": "overworld", "ready": True}},
+            )
+        if path == "/find_blocks":
+            return httpx.Response(200, json={"ok": True, "result": {"blocks": [], "total": 0}})
+        if path == "/get_entities":
+            return httpx.Response(200, json={"ok": True, "result": {"entities": []}})
+        return httpx.Response(200, json={"ok": True, "result": {"ok": True}})
+
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot:
+        ts = McToolset(bot, geofence=VoidGeofence(radius=0.0))
+
+        first = json.loads(ts.mc_find_blocks(radius=256, types=["lava"]))
+        assert first["result"]["radius_clamped_from"] == 256
+        assert first["result"]["radius_effective"] == 64
+        assert first.get("requires_replan") is not True
+
+        second = json.loads(ts.mc_find_blocks(radius=512, types=["lava"]))
+        assert second["requires_replan"] is True
+        assert second["scan_exhausted"] is True
+        assert second["empty_max_scan_count"] == 2
+
+        e1 = json.loads(ts.mc_get_entities(radius=2048, types=["wolf"]))
+        assert e1["result"]["radius_clamped_from"] == 2048
+        assert e1.get("requires_replan") is not True
+
+        e2 = json.loads(ts.mc_get_entities(radius=4096, types=["wolf"]))
+        assert e2["requires_replan"] is True
+        assert e2["scan_exhausted"] is True
+
+        ts.rebind_runtime_hooks()
+        e3 = json.loads(ts.mc_get_entities(radius=64, types=["wolf"]))
+        assert e3.get("requires_replan") is not True
+
+
 def test_world_hud_renders_compact_coords_durability_and_gaps() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix("/api/v1")
