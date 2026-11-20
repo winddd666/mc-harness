@@ -1,4 +1,4 @@
-"""D1 minimal failing repros for r11_22bot P0/P1 tickets.
+"""D1 minimal offline reproductions for P0/P1 tickets.
 
 Run against the shared source (do NOT install):
   PYTHONPATH=/home/xzq/projects/mc/.worktrees/v2-integrated/src \
@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+import time
 
 import pytest
 
@@ -20,6 +21,8 @@ V2_SRC = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated/src")
 if str(V2_SRC) not in sys.path:
     sys.path.insert(0, str(V2_SRC))
 
+from mc_agent.bot import BotSession  # noqa: E402
+from mc_agent.harness.guardian import GenerationGuard  # noqa: E402
 from mc_agent.harness.mc_tools import _normalize_find_block_types  # noqa: E402
 from mc_agent.skills.crafting import material_shortage  # noqa: E402
 
@@ -62,3 +65,57 @@ def test_triage_summary_uses_real_field_paths():
     assert "final_score" not in d, "sanity: score lives under curriculum_summary"
     assert d["curriculum_summary"]["final_score"] == 10
     assert d["curriculum_summary"]["episodes"], "episodes live under curriculum_summary"
+
+
+class _OfflineDeathReplayBot:
+    record_death_event = BotSession.record_death_event
+    recent_deaths_in_window = BotSession.recent_deaths_in_window
+
+    def __init__(self, events):
+        self.events = events
+        self._seen_death_keys = set()
+        self._death_mono_times = []
+
+    def call(self, action, body=None, *, params=None, **kwargs):
+        if action == "status":
+            return {"health": 20, "alive": True, "ready": True}
+        if action == "inventory":
+            return {}
+        if action == "events":
+            cursor = params["since"]
+            return {
+                "last_seq": max((row["seq"] for row in self.events), default=cursor),
+                "has_more": False,
+                "events": [row for row in self.events if row["seq"] > cursor],
+            }
+        raise AssertionError(f"unexpected offline action: {action}")
+
+
+@pytest.mark.xfail(strict=False, raises=AssertionError, reason="BUG-077 historical records use arrival time")
+def test_guard_prime_does_not_count_stale_deaths_as_recent():
+    old_wall_time_ms = int(time.time() * 1000) - 2_400_000
+    history = [{"type": "death", "seq": seq, "t": old_wall_time_ms + 500 * seq}
+               for seq in range(1, 9)]
+    bot = _OfflineDeathReplayBot(history)
+    guard = GenerationGuard(bot, events=None, checkpoint=lambda: None)
+
+    guard.prime()
+
+    assert guard.cursor == 8
+    assert not bot.recent_deaths_in_window(60.0), "40-minute-old records became recent on prime"
+
+
+def test_guard_live_deaths_deduplicate_event_ids():
+    now_ms = int(time.time() * 1000)
+    bot = _OfflineDeathReplayBot([])
+    guard = GenerationGuard(bot, events=None, checkpoint=lambda: None)
+    guard.prime()
+    first = {"type": "death", "seq": 1, "t": now_ms - 500}
+    second = {"type": "death", "seq": 2, "t": now_ms}
+    bot.events = [first, first.copy(), second]
+
+    guard._drain_events_pages()
+    guard._drain_events_pages()
+
+    assert guard.cursor == 2
+    assert len(bot.recent_deaths_in_window(60.0)) == 2

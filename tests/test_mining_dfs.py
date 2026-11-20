@@ -2879,6 +2879,41 @@ def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypat
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("start_pos", [(0.5, 48.0, 1.5), (1.5, 47.0, 1.5)])
+def test_descent_rejoins_the_saved_node_from_an_offset_stance(monkeypatch, start_pos) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    anchor = (0, 47, 0)
+    world = _MockMineWorld(start_pos=start_pos, surface_y=68)
+    world.blocks[anchor] = world.blocks[(0, 48, 0)] = "air"
+    world.blocks[(1, 46, 0)] = "iron_ore"
+    with BotSession("tok", bot_username="ResumeFromHigherStep", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 68, -21), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        active = engine._create_node(
+            kind="switchback", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, anchor]),
+            branches=[mining.BranchSpec("stair_down", "east", 31)],
+        )
+        descend = engine._dig_stair_down_edge
+
+        def dig_from_saved_node(**kwargs):
+            assert mining._floor_pos(world.pos) == anchor
+            return descend(**kwargs)
+
+        monkeypatch.setattr(engine, "_dig_stair_down_edge", dig_from_saved_node)
+        result = engine.run(target="iron", target_y=16, goal_count=1, max_duration_s=32)
+
+    assert result["stop_reason"] == "quota_reached"
+    tip = engine.nodes[engine.active_node_id]
+    assert tip.parent_id == active.node_id
+    assert tip.edge_from_parent.waypoints[0] == anchor
+    assert tip.anchor == (1, 46, 0)
+
+
 @pytest.mark.parametrize("steps_before_preemption", [0, 6])
 def test_descent_resumes_after_guardian_preemption(monkeypatch, steps_before_preemption) -> None:
     from mc_agent.harness.guardian import ReflexPreempted

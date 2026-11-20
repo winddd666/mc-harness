@@ -156,10 +156,27 @@ class _GuardSession:
     def call(self, action: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         self.checkpoint()
         readonly = action in {"status", "events", "inventory", "get_entities", "get_block", "find_blocks"}
-        if kwargs.get("timeout_s") is None:
-            kwargs["timeout_s"] = 2.0 if readonly else 8.0
+        timeout = kwargs.get("timeout_s")
+        if timeout is None:
+            timeout = 2.0 if readonly else 8.0
         if self.deadline is not None:
-            kwargs["timeout_s"] = min(kwargs["timeout_s"], self._time_remaining())
+            remaining = self._time_remaining()
+            if isinstance(timeout, httpx.Timeout):
+                # BotSession can retry a closed keepalive after a 150ms delay.
+                attempt_budget = (remaining - 0.15) / 2
+                if attempt_budget <= 0:
+                    raise _RecoveryBudgetExceeded
+                phase_budget = attempt_budget / 4
+                overhead = {
+                    phase: min(seconds, phase_budget) if seconds is not None else phase_budget
+                    for phase, seconds in timeout.as_dict().items() if phase != "read"
+                }
+                read_budget = attempt_budget - sum(overhead.values())
+                read_timeout = min(timeout.read, read_budget) if timeout.read is not None else read_budget
+                timeout = httpx.Timeout(read_timeout, **overhead)
+            else:
+                timeout = min(timeout, remaining)
+        kwargs["timeout_s"] = timeout
         kwargs["allow_reauth"] = False
         try:
             call = self._call_override if self._call_override is not None else self.bot.call
@@ -397,7 +414,8 @@ class GenerationGuard:
         return self._run_recovery_macro(before, lambda skills: skills.unstick(), budget_s=self.IN_WALL_RECOVERY_BUDGET_S)
 
     def _defend_or_flee(
-        self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int], *, ranged: bool = False,
+        self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
+        *, ranged: bool = False, prefer_cover: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
@@ -408,6 +426,15 @@ class GenerationGuard:
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
             if not pos:
                 _, _, _, pos = self._extract_hostile_info(status)
+            if prefer_cover and pos:
+                cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.25)
+                try:
+                    cover = CombatEnv(cover_bot, geofence=self.geofence).seek_natural_cover(pos)
+                except _RecoveryBudgetExceeded:
+                    self._stop_after_recovery_timeout()
+                    cover = None
+                if cover is not None:
+                    return cover
             return self.combat_env.flee(pos, wait_for_ground=ranged)
         return skills.defend_or_flee(
             attacker=attacker, counts=counts, health=health, urgent=True, geofence=self.geofence,
@@ -1425,10 +1452,15 @@ class GenerationGuard:
                                 attacker = {**(att_obj or {}), "pos": shooter_pos}
                         cf = self._action(
                             "combat_or_flee",
-                            lambda: self._defend_or_flee(status, attacker, counts, ranged=True),
+                            lambda: self._defend_or_flee(
+                                status, attacker, counts, ranged=True, prefer_cover=not has_shield and hp_val <= LOW_HP_BUNKER_MAX,
+                            ),
                         )
                         actions.append(cf)
-                        if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":
+                        cf_mode = (cf.get("result") or {}).get("mode")
+                        if cf.get("ok") and cf_mode == "natural_cover":
+                            self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
+                        if cf_mode == "flee":
                             self._consecutive_flees += 1
                         else:
                             self._consecutive_flees = 0
