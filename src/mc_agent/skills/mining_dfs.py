@@ -3173,30 +3173,41 @@ class MiningDFSEngine:
 
         # 1) Preferred: walk our own corridor (no digging at all).
         walked = False
-        walk_gain = 0
         attempted_collar = None
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
             attempted_collar = self.nodes[self.collar_node_id].anchor
-            ok_walk, _err_walk = self._walk_to_collar(
-                self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline,
-            )
-            walked = bool(ok_walk)
-            if not walked:
+            previous_y = start_y
+            while True:
+                walked, walk_error = self._walk_to_collar(
+                    self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline,
+                )
+                if walked:
+                    break
                 partial_status = self.bot.status()
                 y_part = _floor_pos(partial_status.get("pos") or [0, start_y, 0])[1]
-                walk_gain = int(y_part) - int(start_y)
-                if walk_gain >= 3:
-                    # The corridor walk is working, it just ran out of slice. Report progress so
-                    # the next climb_out continues walking instead of switching to new stairs.
+                reached = self._climb_target_reached(partial_status, target_y)
+                eligible_to_retry = (
+                    walk_error not in {"walk_time_slice", "hurt", "not_ready", "not_grounded"}
+                    and deadline - time.monotonic() >= 10.0
+                    and partial_status.get("on_ground", True)
+                    and partial_status.get("alive") is not False and partial_status.get("ready") is not False
+                    and not (partial_status.get("in_water") or partial_status.get("in_lava"))
+                )
+                if reached or (y_part > start_y and not eligible_to_retry):
                     return {
                         "start_y": start_y,
                         "end_y": y_part,
-                        "climbed": walk_gain,
+                        "climbed": y_part - start_y,
                         "target_y": target_y,
-                        "reached": self._climb_target_reached(partial_status, target_y),
+                        "reached": reached,
                         "attempts": 0,
                         "method": "walk",
                     }
+                # A recorded walk can stop at an obstruction after making progress.
+                # Rejoin once from the new height before trying an alternate escape.
+                if not eligible_to_retry or y_part <= previous_y:
+                    break
+                previous_y = y_part
         # 2) Look for a different nearby saved route before cutting new stairs.
         if not walked:
             cur_now = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])
