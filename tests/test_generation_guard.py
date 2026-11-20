@@ -3996,7 +3996,7 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
 
 
 @pytest.mark.parametrize("landing", ["grounded", "still_airborne", "respawned"])
-@pytest.mark.parametrize("entry", ["poll_ranged", "poll_melee", "subcortical"])
+@pytest.mark.parametrize("entry", ["poll_ranged", "poll_melee", "subcortical_ranged", "subcortical_melee"])
 def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing, entry):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
@@ -4008,9 +4008,9 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
         "on_ground": False, "dimension": "overworld", "last_death": {"t": 10},
         "nearest_hostile": {"id": 42, "name": "skeleton", "dist": 9.0, "pos": [-5182.5, 70.0, -7616.2]},
     }
-    hurt_source = "arrow"
-    if entry == "poll_melee":
-        hurt_source = "mob_attack"
+    melee = entry.endswith("_melee")
+    hurt_source = "mob_attack" if melee else "arrow"
+    if melee:
         status["nearest_hostile"] = {"id": 42, "name": "zombie", "dist": 0.6, "pos": [-5191.2, 69.6, -7616.0]}
     moves = []
 
@@ -4040,13 +4040,17 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
             return {"ok": True}
 
     bot = KnockbackBot()
-    if entry != "subcortical":
+    if entry.startswith("poll_"):
         guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
         incident = guard.poll()
         retreat = next(a["result"] for a in incident["actions"] if a["action"] == "combat_or_flee")
     else:
         outcome = CombatControllerSlot().handle(
-            CombatEnv(bot), {"source": "pre_hurt_ranged", "primary_type": "skeleton", "primary_entity_id": 42},
+            CombatEnv(bot), {
+                "source": "pre_hurt_melee" if melee else "pre_hurt_ranged",
+                "primary_type": "zombie" if melee else "skeleton",
+                "primary_entity_id": 42,
+            },
         )
         retreat = next(a for a in outcome["actions"] if a["action"] == "flee")
     assert bool(moves) is (landing == "grounded")

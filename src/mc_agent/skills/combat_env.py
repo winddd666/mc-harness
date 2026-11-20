@@ -2548,7 +2548,10 @@ class SubcorticalInstinctController:
                             env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                         except (ApiError, httpx.HTTPError):
                             pass
-                    fl = env.flee(mob_pos, distance=14.0, urgent=True, wait_for_ground=mob_name in RANGED_MOBS)
+                    fl = env.flee(
+                        mob_pos, distance=14.0, urgent=True,
+                        wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0,
+                    )
                     actions.append({
                         "action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist"),
                         **({"reason": fl["reason"]} if fl.get("reason") else {}),
