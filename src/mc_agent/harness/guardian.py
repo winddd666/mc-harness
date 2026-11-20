@@ -399,7 +399,7 @@ class GenerationGuard:
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
             if not pos:
                 _, _, _, pos = self._extract_hostile_info(status)
-            return self.combat_env.flee(pos)
+            return self.combat_env.flee(pos, wait_for_ground=ranged)
         return skills.defend_or_flee(
             attacker=attacker, counts=counts, health=health, urgent=True, geofence=self.geofence,
         )

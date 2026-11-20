@@ -3889,6 +3889,50 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
+@pytest.mark.parametrize("landing", ["grounded", "still_airborne", "respawned"])
+def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    status = {
+        "pos": [-5191.8, 69.6, -7616.0], "health": 7.7, "food": 20, "ready": True, "alive": True,
+        "on_ground": False, "dimension": "overworld", "last_death": {"t": 10},
+        "nearest_hostile": {"id": 42, "name": "skeleton", "dist": 9.0, "pos": [-5182.5, 70.0, -7616.2]},
+    }
+    moves = []
+
+    class KnockbackBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if clock[0] >= 1000.15:
+                    if landing == "grounded":
+                        status.update(pos=[-5192.2, 69.0, -7616.0], on_ground=True)
+                    elif landing == "respawned":
+                        status.update(pos=[-5184.5, 70.1, -7614.5], health=20, on_ground=True, last_death={"t": 20})
+                return dict(status)
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "source": "arrow"}] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": []}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 69 else "air"}
+            if action in {"move_to", "control"}:
+                assert status["on_ground"] is True
+                moves.append(action)
+            return {"ok": True}
+
+    guard = GenerationGuard(KnockbackBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    retreat = next(a for a in incident["actions"] if a["action"] == "combat_or_flee")
+    assert bool(moves) is (landing == "grounded")
+    assert clock[0] <= 1000.45
+    if landing == "respawned":
+        assert retreat["result"]["respawned"] is True
+
+
 @pytest.mark.parametrize(
     "entry, scenario",
     [

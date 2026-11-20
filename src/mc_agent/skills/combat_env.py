@@ -1415,9 +1415,42 @@ class CombatEnv:
         distance: float = 14.0,
         urgent: bool = True,
         allow_shaft_seal: bool = True,
+        wait_for_ground: bool = False,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
         st0 = self.bot.status()
+        if (
+            wait_for_ground and st0.get("pos") and st0.get("on_ground") is False
+            and st0.get("alive") is not False and st0.get("ready") is not False
+            and not st0.get("in_lava") and not st0.get("in_water")
+        ):
+            # Ranged hurt is often reported during the knockback hop.
+            before = st0
+            deadline = time.monotonic() + 0.45
+            for _ in range(3):
+                if deadline - time.monotonic() <= 0.1:
+                    break
+                time.sleep(0.1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    landed = self.bot.call("status", method="GET", timeout_s=remaining, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    break
+                pos = landed.get("pos") or before["pos"]
+                if (
+                    landed.get("alive") is False
+                    or (landed.get("dimension") and before.get("dimension") and landed["dimension"] != before["dimension"])
+                    or (landed.get("last_death") is not None and landed["last_death"] != before.get("last_death"))
+                    or math.hypot(pos[0] - before["pos"][0], pos[2] - before["pos"][2]) > 64.0
+                ):
+                    return {"ok": False, "mode": "respawned", "respawned": True, "moved_dist": 0.0, "pos_after": pos}
+                if landed.get("on_ground") is True and not landed.get("in_water"):
+                    st0 = landed
+                    break
+                if landed.get("ready") is False or landed.get("in_water") or landed.get("in_lava"):
+                    break
         pos0 = st0.get("pos")
         if not pos0 or st0.get("alive") is False or st0.get("ready") is False:
             return {"ok": False, "mode": "flee", "reason": "not_ready", "moved_dist": 0.0, "pos_after": pos0}
