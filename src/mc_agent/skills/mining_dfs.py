@@ -5778,10 +5778,14 @@ class MiningDFSEngine:
                     if not viable_dirs:
                         return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
-            # Rejoin the saved anchor before starting a descent from a higher cell.
+            # Rejoin the saved anchor when the current stance cannot connect to the descent.
             elif math.dist(cur_pos, active.anchor) > 3.5 or (
-                cur_pos[1] > active.anchor[1]
-                and any(b.kind == "stair_down" and b.status == "pending" for b in active.branches)
+                cur_pos[1] >= active.anchor[1] and cur_pos != active.anchor
+                and any(
+                    branch.kind == "stair_down" and branch.status == "pending"
+                    and not _descent_start_beside_anchor(cur_pos, active.anchor, branch.direction)
+                    for branch in active.branches
+                )
             ):
                 resume_at_depth = self._should_resume_at_depth(active, cur_pos)
                 if resume_at_depth:

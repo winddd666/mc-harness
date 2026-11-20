@@ -2879,11 +2879,12 @@ def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypat
     assert engine.collar_node_id == collar.node_id
 
 
-def test_descent_rejoins_the_saved_node_from_one_block_higher(monkeypatch) -> None:
+@pytest.mark.parametrize("start_pos", [(0.5, 48.0, 1.5), (1.5, 47.0, 1.5)])
+def test_descent_rejoins_the_saved_node_from_an_offset_stance(monkeypatch, start_pos) -> None:
     import mc_agent.skills.mining_dfs as mining
 
     anchor = (0, 47, 0)
-    world = _MockMineWorld(start_pos=(0.5, 48.0, 1.5), surface_y=68)
+    world = _MockMineWorld(start_pos=start_pos, surface_y=68)
     world.blocks[anchor] = world.blocks[(0, 48, 0)] = "air"
     world.blocks[(1, 46, 0)] = "iron_ore"
     with BotSession("tok", bot_username="ResumeFromHigherStep", transport=httpx.MockTransport(world.handler)) as bot:
