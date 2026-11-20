@@ -1361,6 +1361,21 @@ def select_next_target(
                 origin=origin_pos,
                 dim=cur_dim,
             )
+            has_wood_for_pick = (
+                counts.get("stick", 0) >= 2
+                or any(k.endswith("_planks") and v >= 2 for k, v in counts.items())
+                or any(k.endswith("_log") and v >= 1 for k, v in counts.items())
+            )
+            if origin_pos is not None and float(origin_pos[1]) < 55.0 and not has_wood_for_pick:
+                pb0 = dataclasses.replace(
+                    pb0,
+                    task=(
+                        f"[地下无树警示：你当前位于地下 y={int(origin_pos[1])}，地下不存在原木且包内缺木料！"
+                        "请先调 mc_skill_mine_dfs(action='climb_out') 或 mc_skill_staircase(vertical='up', steps=10) 爬回地表 y>=60 后再砍树，"
+                        "严禁在地下调 mc_skill_harvest_logs 或反复调用缺木棍的 mc_skill_craft_gear！]\n"
+                        + pb0.task
+                    ),
+                )
             return pb0, frontier_data
         # Run 1 fast daytime surface recon right after stone_pickaxe (while guaranteed at surface Y>=54!) before plunging underground!
         if (
