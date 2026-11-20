@@ -3299,6 +3299,71 @@ def test_explore_rejoins_a_recorded_stair_far_from_its_collar(monkeypatch) -> No
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("from_archive", [False, True])
+def test_explore_rejoins_a_sidestep_between_saved_waypoints(monkeypatch, from_archive) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    sidestep_start = (0, -23, 87)
+    mid_sidestep = (1, -23, 87)
+    sidestep_end = (3, -23, 87)
+    tip_anchor = (3, -54, 118)
+    world = _MockMineWorld(
+        start_pos=(1.5, -23, 87.5), surface_y=64,
+        inventory_items=[{"name": "iron_pickaxe", "count": 1, "slot": 9}],
+    )
+    with BotSession("tok", bot_username="ResumeSidestep", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        stair = engine._create_node(
+            kind="switchback", anchor=sidestep_start, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, sidestep_start]),
+            branches=[],
+        )
+        turn = engine._create_node(
+            kind="switchback", anchor=sidestep_end, parent_id=stair.node_id,
+            edge_from_parent=ShaftEdge("offset_sidestep", "east", [sidestep_start, sidestep_end]),
+            branches=[],
+        )
+        tip = engine._create_node(
+            kind="spine", anchor=tip_anchor, parent_id=turn.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [sidestep_end, tip_anchor]),
+            branches=[mining.BranchSpec("spine_forward", "east", 4)],
+        )
+        engine.target_y = -54
+        if from_archive:
+            engine._archive_current_shaft_to_ledger()
+            engine._clear_active_tree_only()
+        walked = []
+
+        def walk(waypoints, **kwargs):
+            walked.append(waypoints)
+            x, y, z = waypoints[-1]
+            world.pos = [x + 0.5, y, z + 0.5]
+            engine.bot.status()
+            if waypoints[-1] == tip_anchor:
+                clock.now = engine._deadline
+                return False, "walk_time_slice"
+            return True, None
+
+        def open_new_collar(*args, **kwargs):
+            pytest.fail("opened a new collar while standing on a saved sidestep")
+
+        monkeypatch.setattr(engine, "_walk_waypoints", walk)
+        monkeypatch.setattr(engine, "_ensure_solid_collar_anchor", open_new_collar)
+        result = engine.run(target="diamond", target_y=-54, max_duration_s=32)
+
+    assert walked == [[mid_sidestep, sidestep_end], [sidestep_end, tip_anchor]]
+    assert result["stop_reason"] == "time_slice_progress"
+    assert result["pos_after"][1] == -54
+    assert engine.collar_node_id == collar.node_id
+    assert engine.active_node_id == tip.node_id
+    assert not world.dig_log
+
+
 def test_completed_one_step_spine_keeps_the_forward_route(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 
