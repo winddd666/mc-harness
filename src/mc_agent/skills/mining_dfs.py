@@ -2128,14 +2128,21 @@ class MiningDFSEngine:
             self.active_node_id = goal_node_id
             raise
 
-    def _resume_deepest_branch(self, node: ShaftNode, *, min_hp_ref: list[float]) -> bool:
-        deepest = min(
-            (candidate for candidate in self.nodes.values()
-             if candidate.node_id != node.node_id and candidate.anchor[1] <= node.anchor[1]
-             and any(branch.status == "pending" for branch in candidate.branches)),
-            key=lambda candidate: candidate.anchor[1],
-            default=None,
-        )
+    def _resume_deepest_branch(
+        self, node: ShaftNode, *, min_hp_ref: list[float], descendants_only: bool = False,
+    ) -> bool:
+        candidates = []
+        for candidate in self.nodes.values():
+            if candidate.node_id == node.node_id or candidate.anchor[1] > node.anchor[1]:
+                continue
+            if not any(branch.status == "pending" for branch in candidate.branches):
+                continue
+            if descendants_only:
+                route = self._find_node_path(node.node_id, candidate.node_id)
+                if not route or any(reverse for _, reverse, _ in route):
+                    continue
+            candidates.append(candidate)
+        deepest = min(candidates, key=lambda candidate: candidate.anchor[1], default=None)
         if deepest is None:
             return False
         reached, _ = self._resume_shaft_tip(deepest.node_id, min_hp_ref=min_hp_ref)
@@ -5154,7 +5161,7 @@ class MiningDFSEngine:
         if not before or not after or result["goal_met"]:
             return
         start_y, end_y = _floor_pos(before)[1], _floor_pos(after)[1]
-        if start_y > target_y + 8 and end_y > start_y + 8:
+        if end_y > max(start_y, target_y) + 8:
             result["progress_lost"] = True
             result["depth_lost"] = end_y - start_y
             if result.get("stop_reason") == "time_slice_progress":
@@ -5839,6 +5846,12 @@ class MiningDFSEngine:
                         )
                         for branch in tuple(node.branches) if branch.status == "pruned"
                     ):
+                        continue
+                parent = self.nodes.get(node.parent_id)
+                if parent is not None and parent.anchor[1] > node.anchor[1]:
+                    # Resuming at a cleared transit node should lead back down
+                    # to unfinished work below it before walking up the shaft.
+                    if self._resume_deepest_branch(node, min_hp_ref=min_hp_ref, descendants_only=True):
                         continue
                 ok_bt, err_bt = self._walk_waypoints(edge.waypoints, reverse=True, min_hp_ref=min_hp_ref)
                 if not ok_bt:

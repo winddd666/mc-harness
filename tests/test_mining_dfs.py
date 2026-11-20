@@ -2801,13 +2801,13 @@ def test_budget_cutoff_preserves_partial_edge_for_the_next_call(monkeypatch, sta
     assert not world.dig_log
 
 
-@pytest.mark.parametrize("end_y", [20, 45])
-def test_deep_explore_reports_descent_or_lost_depth_without_raising_budget(monkeypatch, end_y) -> None:
+@pytest.mark.parametrize(("start_y", "end_y"), [(28, 20), (28, 45), (-54, -26)])
+def test_deep_explore_reports_descent_or_lost_depth_without_raising_budget(monkeypatch, start_y, end_y) -> None:
     import mc_agent.skills.mining_dfs as mining
 
     clock = _MiningClock()
     monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
-    world = _MockMineWorld(start_pos=(0.5, 28.0, 0.5), surface_y=64)
+    world = _MockMineWorld(start_pos=(0.5, float(start_y), 0.5), surface_y=64)
     with BotSession("tok", bot_username="DescentReceipt", transport=httpx.MockTransport(world.handler)) as bot:
         engine = MacroSkills(bot).mining_dfs
 
@@ -2825,7 +2825,7 @@ def test_deep_explore_reports_descent_or_lost_depth_without_raising_budget(monke
     assert result["budget_effective_s"] == 32
     assert clock.now <= 1032.0
     assert result["goal_met"] is False
-    if end_y > 28:
+    if end_y > start_y:
         assert result["stop_reason"] == "depth_reset"
         assert result["progress_lost"] is True
         assert result["ok"] is False and result["requires_replan"] is True
@@ -2942,6 +2942,45 @@ def test_blocked_descent_backtrack_resumes_the_deepest_pending_node(monkeypatch)
     assert result["stop_reason"] == "quota_reached"
     assert engine.collar_node_id == collar.node_id
     assert result["pos_after"][1] <= 26
+
+
+def test_exhausted_transit_node_uses_its_deeper_pending_branch_before_ascending(monkeypatch) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec, DIRECTIONS
+
+    world = _MockMineWorld(start_pos=(0.5, 28.0, 0.5), surface_y=64)
+    route = [(0, 28, 0), (1, 27, 0), (2, 26, 0)]
+    for x, y, z in route:
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(3, 25, 0)] = "iron_ore"
+    with BotSession("tok", bot_username="DeeperPendingBranch", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -36), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        transit = engine._create_node(
+            kind="switchback", anchor=route[0], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, route[0]]),
+            branches=[BranchSpec("stair_down", d, 46, status="completed") for d in DIRECTIONS],
+        )
+        engine._create_node(
+            kind="switchback", anchor=route[-1], parent_id=transit.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", route),
+            branches=[BranchSpec("stair_down", "east", 46, branch_target_y=-20)],
+        )
+        engine.active_node_id = transit.node_id
+        walk = engine._walk_waypoints
+
+        def walk_at_depth(points, *, reverse=False, **kwargs):
+            assert not reverse, "ascended despite a deeper pending branch"
+            return walk(points, **kwargs)
+
+        monkeypatch.setattr(engine, "_walk_waypoints", walk_at_depth)
+        result = engine.run(target="iron", target_y=-20, goal_count=1, max_duration_s=15)
+
+    assert result["stop_reason"] == "quota_reached"
+    assert result["pos_after"][1] <= 26
+    assert engine.collar_node_id == collar.node_id
 
 
 def test_climb_remembers_all_blocked_primitives_at_the_same_cell(monkeypatch) -> None:
