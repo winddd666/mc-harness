@@ -5024,7 +5024,9 @@ class MiningDFSEngine:
                 self._report_explore_depth(result, target_y=self.target_y, budget=budget)
             return result
         except _MiningDeadline:
-            if scoped.timeout_dig_pos is not None:
+            moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
+            # A dig interrupted after progress can get a fresh budget on the preserved route.
+            if scoped.timeout_dig_pos is not None and not (moved or scoped.dug_count):
                 self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", 30.0)
             # Keep interrupted branches retryable. Preserve the observed return route if
             # the cutoff landed inside an edge before its local waypoints were committed.
@@ -5090,7 +5092,6 @@ class MiningDFSEngine:
                 )
                 target_gained = sum(gained.get(item, 0) for item in profile["expected_items"])
                 requested = max(1, min(64, int(goal_count)))
-                moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
                 result.update(
                     goal_met=target_gained >= requested,
                     goal_count=requested,

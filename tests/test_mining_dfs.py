@@ -2604,6 +2604,53 @@ def test_descent_defers_a_timed_out_cell_shared_by_branches_until_retry(monkeypa
     assert engine.collar_node_id == collar.node_id
 
 
+def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 14.0, 0.5), surface_y=64,
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    world.blocks[(0, 14, 0)] = world.blocks[(0, 15, 0)] = "air"
+    world.blocks[(3, 11, 0)] = "diamond_ore"
+    stalled = (2, 14, 0)
+    attempts = []
+
+    def handler(request):
+        if request.url.path.endswith("/dig"):
+            pos = tuple(json.loads(request.content)["pos"])
+            if pos[0] == 1:
+                clock.now += 6.0
+            if pos == stalled:
+                attempts.append(clock.now)
+                if len(attempts) == 1:
+                    clock.now += request.extensions["timeout"]["read"]
+                    raise httpx.ReadTimeout("next stair dig ran out of time", request=request)
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="ResumeAfterDigTimeout", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=(0, 14, 0), parent_id=None, edge_from_parent=None,
+            branches=[mining.BranchSpec("stair_down", "east", 68)],
+        )
+        engine.collar_node_id = collar.node_id
+        args = dict(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
+        first = engine.run(**args)
+        assert first["stop_reason"] == "time_slice_progress"
+        assert first["dig_target"] == list(stalled)
+        assert first["dug_count"] > 0
+        assert first["pos_after"][1] == 13
+
+        second = engine.run(**args)
+
+    assert second["stop_reason"] == "quota_reached"
+    assert second["target_gained"] == 1
+    assert len(attempts) == 2 and attempts[1] - attempts[0] < 30
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_waypoint_interpolation_checks_deadline_between_hops(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 
