@@ -1490,6 +1490,38 @@ retries 846 | 429 49 | 502 0 | tracebacks 0
 - 单次 pillar 仅 3~4s，但每段包含 N 次 **LLM 往返**，所以 29 连击 ≈ 3 分钟
 - 修复（约 5 行）：连续 ≥2 次返回 `requires_replan=True` 并建议 `unstick`/水平换向；≥3 次给 target 加 120s 冷却
 
+## 4bx. 11:45 深挖：`void_geofence_blocked` 是隐藏的大 churn（新 P1：BUG-048）
+
+### 先排除一个假疑点
+
+`staircase` 的 123 次 `stop_reason=None` **不是 bug**，是三段正常错误路径：
+- `void_geofence_blocked` 66
+- `preempted_by_reflex` 36（`cover_or_flee` 20 / `creeper_evade` 7 / `counter_killed` 3 / `cover_pocket` 3 / `flee` 2 / `shield_rush_ranged` 1）
+- `repeated_identical_failure_blocked` 21
+
+### 真问题：`void_geofence_blocked` 不触发重复失败保护
+
+| 波次 | bot | 被拦次数 | 不同坐标数 | 距离范围 | safe_radius |
+|---|---|---|---|---|---|
+| `overnight_12bot` | `nju_guitest_01_nether` | **154** | **118** | 554.5m ~ **12927.4m** | 212.0m |
+| `overnight_12bot_part2` | `glm_4_brewing_alchemy` | **129** | **110** | 212.2m ~ 254.4m | 212.0m |
+| `part2` 其余 5 路 | — | 17 | — | — | — |
+| `hy4_audit_r28` | `hy4_9_deep_water` | 5 | — | — | — |
+
+**两种形态**：
+
+1. **"差一点"型（`glm_4`）**：目标 212.2~254.4m，只超出 0~42m —— 意图合理（去挖看见的矿），但围栏只拒绝不引导。`glm_4` 本波 **145 分（-50 vs wave1）**，129 次被拦 ≈ 8~12 分钟。
+2. **"离谱坐标"型（`nju_guitest`）**：目标 554m~**12.9km**（最远 12927m），同一坐标重复 14 次 —— 幻觉坐标，工具层未识别"距离明显异常"。
+
+**为什么保护失效**：`repeated_identical_failure_blocked` 按"完全相同的参数"匹配，模型每次换一个差 0.5~5 格的坐标就绕过了（`glm_4` 129 次里 110 个不同坐标）。
+
+**修复**：
+1. `distance ≤ safe_radius × 1.25` → **自动钳制**到边界内继续执行（意图本来是对的）
+2. `distance > safe_radius × 3` → 立即 `requires_replan=True` + "坐标疑似错误，请用 mc_status 的 pos 重新定位"
+3. 每 episode 累计 ≥3 次 → 强制 `requires_replan=True` + target 冷却 120s
+
+**验收**：单 bot 单波 ≤5 次；`glm_4` 类场景分数回到 ≥195。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
