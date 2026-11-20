@@ -1330,6 +1330,77 @@ retries 846 | 429 49 | 502 0 | tracebacks 0
 
 → **约 6.2 小时 / 402 集 / 0 次 429**：hy4 的 4 路 + rpm=6 配置可以定稿。
 
+## 4bu. 主轨第二波 `overnight_12bot_part2` 终验（12/12，09:28）
+
+### 12 路对照（同配置、同场景、连续两波）
+
+| bot | wave1 | part2 | Δ | over-cap (part2) |
+|---|---|---|---|---|
+| `glm_2_nether_bastion` | 270 | **270** | 0 | — |
+| `glm_1_nether_fortress` | 205 | **240** | **+35** | — |
+| `ds_4_nether_fortress` | 210 | 210 | 0 | — |
+| `nju_guitest_01_nether` | 180 | **200** | +20 | — |
+| `glm_5_midgame` | 185 | 180 | -5 | — |
+| `nju_3_village_trade` | 150 | 150 | 0 | — |
+| `ds_2_cave_combat` | 120 | **150** | +30 | — |
+| `glm_4_brewing_alchemy` | 195 | 145 | **-50** | deepslate 333 + cobble 225 |
+| `ds_3_enchant_anvil` | 150 | 135 | -15 | — |
+| `ds_1_bare` | 55 | **105** | **+50** | — |
+| `glm_3_village_trade` | 155 | 90 | **-65** | — |
+| `nju_movetest_01_bare` | 25 | **70** | **+45** | cobble 273 |
+| **合计** | **1900** | **1945** | **+45** | |
+
+- 总分 1900 → **1945**（+2.4%），集数 582 → 596
+- **退步全在 Qwen**：`glm_3` -65、`glm_4` -50 —— 正是 429 硬失败最多的两路（2 次 / 8 次）加上 `glm_4` 背包超限
+- **进步全在弱项**：`ds_1` +50、`nju_movetest` +45、`glm_1` +35、`ds_2` +30（裸开/低分 bot 提升明显）
+
+### 门禁
+
+| 项 | 值 | 判定 |
+|---|---|---|
+| startup crash / stick craft / thread exc | 0 | PASS |
+| no_support | 5 | PASS（边缘） |
+| mine dur/budget med | 0.91 | PASS |
+| mine zero-slice | 3.0% | PASS |
+| trade / brew | 2 / 4 | PASS |
+| **deaths (incidents)** | **207** | **FAIL** |
+| **cancel cooldown** | **1663.2s** | **FAIL** |
+| **runtime_error** | **58** | **FAIL** |
+| **over-cap bots** | **2** | **FAIL** |
+
+### 关键指标（wave1 → part2）
+
+| 指标 | wave1 | part2 |
+|---|---|---|
+| `mine_dfs` 次数 | 1025 | 1137 |
+| 零进展占比 | 3.6% | **3.0%** |
+| `depth_reset` | 16 | 17 |
+| `staircase` time_budget | 351 | **241** |
+| `steps_done` 中位 | 1 | **2** |
+| `pillar_fallback` | 137 | **140** |
+| `unstick` 中位 / p90 / max | 5.4 / 25.2 / 55.1s | 5.1 / 17.6 / **404.4s** |
+| notable 死亡 | 110 | **153** |
+| 429 硬失败 | 9 | **52** |
+| retry 总数 | 879 | 931 |
+
+- **死亡恶化**：`ds_4` 单路 **53 次**（wave1 41）、`glm_1` 18、`glm_2` 16；死因 `mob 49 / lava 25 / arrow 21 / hot_floor 18`
+- **`staircase:time_budget` 351→241**（-31%），`steps_done` 中位 1→2 → BUG-041 的快速失败在持续生效
+- **`unstick` max 404.4s**：`ds_1` 一次 unstick 被集时限中止，但**实际超预算 104s**
+
+### 新 P1：BUG-047（阻塞调用不受预算约束）
+
+- `ds_1` 一次 `mc_skill_unstick` **404.4s** → 结果 `工具执行中止`，随后 `运行总时限已到（300.0s）`
+- **33 次** `mc_move_to` 耗时 **102~103s** 后返回 `busy`（预检 `/status.busy` 为空但租约仍被占）
+- 根因：`bot.py:34 timeout=45.0` + `call()` 重试一次 ≈ 90s/次；控制类工具沿用默认超时；episode 时限只在调用之间检查
+- 修复：控制类工具传 `timeout_s=min(15, remaining)`；`move_to` 遇 `busy` 先 `/stop` 再试一次，仍 busy 立即返回；`unstick` 总时长上限 30s
+
+### 两波主轨合计
+
+```
+26.5 bot-小时 × 12 路，1178 集，总分 3845
+429 硬失败 61（其中 part2 52）| 502 0 | Traceback 0
+```
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
