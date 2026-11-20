@@ -2632,11 +2632,14 @@ def test_village_scan_retains_beds_and_hay_amid_path_blocks(entry) -> None:
 
 
 @pytest.mark.parametrize(
-    "target_types,chest_y,expected_segments",
-    [(None, 33, 5), (["chest"], 33, 5), (["chest"], 64, 0)],
+    "target_types,chest_y,village_marker,expected_segments",
+    [(None, 15, None, 5), (None, 64, None, 5), (None, 15, "bell", 2), (["chest"], 15, None, 0)],
 )
-def test_surface_scout_ignores_underground_chests(target_types, chest_y, expected_segments) -> None:
+def test_surface_scout_keeps_chest_observations_without_ending_village_search(
+    target_types, chest_y, village_marker, expected_segments,
+) -> None:
     backend = _SurfaceScoutBackend()
+    backend.target = village_marker
     chest_queries = []
 
     def handle(request):
@@ -2645,19 +2648,20 @@ def test_surface_scout_ignores_underground_chests(target_types, chest_y, expecte
             if "chest" in types:
                 chest_queries.append(types)
                 return backend.ok({"blocks": [{"name": "chest", "pos": [1, chest_y, 0]}]})
+            if types == ["dirt_path"]:
+                return backend.ok({"blocks": [{"name": "dirt_path", "pos": [2, 64, 0]}]})
         return backend.handle(request)
 
     with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
         result = MacroSkills(bot).scout_surface(direction="east", target_types=target_types)
 
     assert result["segments_completed"] == len(backend.moves) == expected_segments
-    assert all(types == ["chest"] for types in chest_queries)
-    if chest_y < 64:
-        assert result["stop_reason"] == "segment_limit"
-        assert all(row["name"] != "chest" for row in result["detected_pois"])
-    else:
-        assert result["stop_reason"] == "target_found"
-        assert any(row["name"] == "chest" for row in result["detected_pois"])
+    assert chest_queries and all(types == ["chest"] for types in chest_queries)
+    observed = {row["name"]: row for row in result["detected_pois"]}
+    assert observed["chest"]["height_delta"] == chest_y - 64
+    assert result["stop_reason"] == ("target_found" if target_types or village_marker else "segment_limit")
+    if target_types is None:
+        assert "dirt_path" in observed
 
 
 @pytest.mark.parametrize("valid_targets", [[], ["bell", "villager"]])

@@ -1404,6 +1404,7 @@ class MacroSkills:
             return {**result, "stop_reason": "invalid_direction", "requires_replan": True}
         if not math.isfinite(max_duration_s) or not math.isfinite(step_dist):
             return {**result, "stop_reason": "invalid_budget_or_step", "requires_replan": True}
+        default_village_search = not target_types
         village_evidence = tuple(name for name in VILLAGE_LANDMARK_BLOCKS if name != "chest")
         requested = [
             resolve_item_alias(name)
@@ -1432,6 +1433,7 @@ class MacroSkills:
         }
         landmarks = [name for name in SURFACE_SCOUT_LANDMARKS if name not in blocks]
         distance = 0.0
+        found_target = False
 
         def observe() -> dict[str, Any]:
             nonlocal distance
@@ -1449,8 +1451,8 @@ class MacroSkills:
             return status
 
         def scan(status: dict[str, Any]) -> bool:
+            nonlocal found_target
             dim = normalize_dimension(status.get("dimension"))
-            found = False
             for route, key, receipt_key, types in (
                 ("find_blocks", "blocks", "detected_pois", blocks),
                 ("get_entities", "entities", "detected_entities", entities),
@@ -1458,9 +1460,7 @@ class MacroSkills:
                 ("find_blocks", "blocks", "detected_pois", paths),
                 ("find_blocks", "blocks", "detected_pois", landmarks),
             ):
-                if not types or (types is paths and found):
-                    continue
-                if types is chests and not found and "chest" not in targets:
+                if not types or (types is paths and found_target):
                     continue
                 query = {"radius": 64, "types": types}
                 if key == "blocks":
@@ -1485,9 +1485,8 @@ class MacroSkills:
                     continue
                 matches = [
                     row for row in rows
-                    if row.get("name") in types and isinstance(row.get("pos"), (list, tuple))
+                    if isinstance(row, dict) and row.get("name") in types and isinstance(row.get("pos"), (list, tuple))
                     and len(row["pos"]) == 3
-                    and (types is not chests or abs(row["pos"][1] - status["pos"][1]) <= 12)
                 ][:6]
                 if key == "blocks":
                     memory.observe_blocks(matches, dim=dim)
@@ -1495,6 +1494,8 @@ class MacroSkills:
                     memory.observe_entities(matches, dim=dim)
                 for row in matches:
                     name = row["name"]
+                    height_delta = row["pos"][1] - status["pos"][1]
+                    is_target = name in targets and (not default_village_search or abs(height_delta) <= 12)
                     key_pos = (name, *row["pos"]) if name in targets else (name,)
                     receipt = {
                         "name": row["name"],
@@ -1503,13 +1504,14 @@ class MacroSkills:
                         "biome": row.get("biome"),
                         "observer_biome": status.get("biome"),
                         "observer_pos": status["pos"],
+                        **({"height_delta": round(height_delta, 1)} if types is chests else {}),
                         **({"id": row["id"]} if "id" in row else {}),
                     }
                     prior = observations[receipt_key].get(key_pos)
                     if prior is None or receipt["dist"] < prior["dist"]:
                         observations[receipt_key][key_pos] = receipt
-                    found |= name in targets
-            return found
+                    found_target |= is_target
+            return found_target
 
         def waypoint(heading: int, length: float) -> tuple[float, float]:
             x, _, z = status["pos"]
@@ -1626,9 +1628,7 @@ class MacroSkills:
         except _SkillDeadline:
             session.stop_pending()
             result["deadline_hit"] = True
-            reason = "target_found" if any(
-                row["name"] in targets for rows in observations.values() for row in rows.values()
-            ) else "time_budget"
+            reason = "target_found" if found_target else "time_budget"
         except ApiError as exc:
             reason = exc.code
             result["error"] = {"code": exc.code, "message": exc.message}
