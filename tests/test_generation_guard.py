@@ -4011,6 +4011,39 @@ def test_unstick_canopy_branch_shares_the_tool_budget(monkeypatch):
     assert events[-1]["type"] == "guardian.recovery_budget_exceeded"
 
 
+@pytest.mark.parametrize("solid_exit", [True, False])
+def test_guardian_checks_support_before_unstick_moves(solid_exit):
+    movements = []
+
+    class LedgeBot:
+        def status(self):
+            return self.call("status", method="GET")
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [0.5, 44, 0.5], "ready": True, "alive": True, "on_ground": True}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if y == 43 and (solid_exit or (x, z) == (0, 0)):
+                    return {"name": "stone", "diggable": True}
+                return {"name": "air"}
+            if action == "control":
+                movements.append(body)
+            return {"ok": True}
+
+    bot = LedgeBot()
+    skills = MacroSkills(bot)
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=skills)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_unstick", lambda: json.dumps(skills.unstick())))
+    assert result["ok"] is solid_exit
+    if solid_exit:
+        step, = movements
+        assert step["ms"] == 350 and not step["jump"] and not step["sprint"]
+    else:
+        assert result["error"]["code"] == "unsafe_landing" and result["requires_replan"] is True
+        assert movements == []
+
+
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
 @pytest.mark.parametrize("failure", ["timeout", "death"])
 def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monkeypatch):

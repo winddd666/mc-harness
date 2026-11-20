@@ -125,6 +125,10 @@ class _RecoveryBudgetExceeded(BaseException):
     """Unwind a recovery macro through its transport and retry handlers."""
 
 
+class _UnsafeUnstickExit(BaseException):
+    """Unwind an unstick whose final movement has no verified footing."""
+
+
 class _GuardSession:
     def __init__(
         self,
@@ -1552,8 +1556,27 @@ class GenerationGuard:
 
     # ---- Layer 2: Active Macro-Tool & `pre_ensure` Preemption ----
 
+    def _verify_unstick_exit(self, body: dict[str, Any]) -> dict[str, Any]:
+        status = self.bot.status()
+        if status.get("in_water"):
+            return body
+        pos = status.get("pos")
+        if (
+            not pos or status.get("ready") is False or status.get("alive") is False
+            or status.get("on_ground") is False or status.get("in_lava")
+        ):
+            raise _UnsafeUnstickExit
+        self.combat_env.invalidate_block_cache()
+        route = self.combat_env.probe_retreat(pos, float(body["yaw"]), 2.2)
+        if route is None:
+            raise _UnsafeUnstickExit
+        _, needs_jump = route
+        return {**body, "sprint": False, "jump": needs_jump, "ms": min(int(body.get("ms") or 350), 350)}
+
     @contextmanager
-    def _intercept_bot_calls(self, *, enable_creeper_watcher: bool = True, deadline: float | None = None):
+    def _intercept_bot_calls(
+        self, *, enable_creeper_watcher: bool = True, deadline: float | None = None, check_unstick_exit: bool = False,
+    ):
         """Intercept `interrupted_by=='hurt'` and silent creeper approach inside multi-step macro skills."""
         orig_call = getattr(self.raw_bot, "call", None)
         if not callable(orig_call) or self._in_reflex:
@@ -1648,6 +1671,13 @@ class GenerationGuard:
                 return actor_call(path, body, **kwargs)
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
+            if (
+                check_unstick_exit and clean_path == "control" and isinstance(body, dict)
+                and body.get("forward") and body.get("stop_on") == [] and isinstance(body.get("yaw"), (int, float))
+            ):
+                body = self._verify_unstick_exit(body)
+                if pending_trigger and not self._in_reflex:
+                    raise ReflexPreempted(pending_trigger[0])
             # Do not preempt explicit stop_on=['death'] emergency swim/trap digs
             caller_ignores_hurt = isinstance(body, dict) and body.get("stop_on") == ["death"]
             try:
@@ -1941,14 +1971,22 @@ class GenerationGuard:
                 return receipt
         if tool_name in NON_PREEMPTABLE_TOOLS or self._in_reflex:
             return invoke_fn()
+        is_unstick = tool_name == "mc_skill_unstick"
         # Leave time for the watcher to exit and for the final bounded stop request.
-        deadline = time.monotonic() + self.UNSTICK_BUDGET_S - 2.0 if tool_name == "mc_skill_unstick" else None
+        deadline = time.monotonic() + self.UNSTICK_BUDGET_S - 2.0 if is_unstick else None
         try:
-            with self._intercept_bot_calls(enable_creeper_watcher=True, deadline=deadline):
+            with self._intercept_bot_calls(deadline=deadline, check_unstick_exit=is_unstick):
                 result = invoke_fn()
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _RecoveryBudgetExceeded
                 return result
+        except _UnsafeUnstickExit:
+            self.events.emit("guardian.unstick_exit_blocked", tool=tool_name)
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {"code": "unsafe_landing", "message": "脱困出口缺少安全落脚点，请从当前位置寻找另一条路线。"},
+            }, ensure_ascii=False)
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             self.events.emit("guardian.recovery_budget_exceeded", tool=tool_name, budget_s=self.UNSTICK_BUDGET_S)
