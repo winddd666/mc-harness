@@ -1060,8 +1060,10 @@
 
 - **一句话**：`r43_day2_village_near_9bot` 中 `mc_skill_mine_dfs:unknown_fail` 仍出现 **11 次 / 3 bots**（`hy4_hy_6/7`、`nju_nju_3`），虽 `climb_progress` 已从 8→2，但仍有未带结构化 `error.code` 的失败返回路径。
 - **最小修复**：排查 `r43_day2_village_near_9bot` 中这 11 条 `mine_dfs` 返回体，补齐所有 `ok=False` 分支的 `error.code` 与可操作恢复建议，使 `unknown_fail = 0`。
+- **D1 确认是抢占分类缺口**：原榜单这三路的 **11/11** 均为 `preempted_by_reflex=true`，Day 2 终版按同集真实调用复核共 **13 条／5 路**，其余两条在 DS_1、HY4_9。它们来自 Guardian 生成的结构化抢占回执，分类器忽略该字段，落入 `unknown_fail`。建议把抢占单独计入 `reflex_preempted`（或给 Guardian 回执补对应 code），保留 `mine_dfs` 真失败的独立门槛。 [三路样本](../runs/r43_day2_village_near_9bot/hy4_hy_6_day2_village_near/20261120-072048-411226.events.jsonl#L174) · [DS_1](../runs/r43_day2_village_near_9bot/nju_ds_1_day2_village_near/20261120-072028-965473.events.jsonl#L209) · [HY4_9](../runs/r43_day2_village_near_9bot/hy4_hy_9_day2_village_near/20261120-071926-878155.events.jsonl#L143) · [回执生成](../src/mc_agent/harness/guardian.py#L2060) · [榜单分类](../scripts/v2_fleet.py#L422)
+- **r44 对照**：D1 对照器 `cd99106` 已读结构化字段，Day 2 实际 **16** 条采矿抢占、未分类真实采矿结束回执 **0**。Fleet 的 `d8bb2fa` 已在 r44 后并入，待新进程实机。 [D1 分类](../../s-triage/scripts/d1_compare.py#L93)
 
-### BUG-074 | **P1（`mc_skill_scout_surface` 40% 调用被 `in_water`/`liquid_ahead`/`void_geofence_blocked` 早停 + 字符串数字参数崩溃）** | Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: OPEN（`r44_day2_wild_scout_9bot` 轨迹取证）
+### BUG-074 | **P1（`mc_skill_scout_surface` 40% 调用被 `in_water`/`liquid_ahead`/`void_geofence_blocked` 早停 + 字符串数字参数崩溃）** | Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: FIXED（`c18e95d` 已合入，待 r45 纯随机实机验收）
 
 - **一句话**：`r44` 全波 43 次 `mc_skill_scout_surface` 中，**17 次（40%）**因 `in_water`（9x）、`void_geofence_blocked`（5x）、`liquid_ahead`（3x）早停（大量返回 `0.0m`），且 `direction="auto"` 在围栏边缘仍反复选出撞墙方向；另有模型传字符串 `"45"`/`"30"` 触发类型报错。
 - **实测证据**：
@@ -1074,7 +1076,7 @@
   4. 返回体附带当前 `biome`（从 `status()` 读取，不要恒为 `null`），遇到海洋/深林/丛林提示模型立即换向。
 - **验收标准**：离线单测覆盖“贴近围栏 `auto` 自动向内折返”、“单侧水域自动 90° 绕行”、“字符串数字参数兼容”；实机 `scout_surface` `0m` 空转率大幅下降、`void_geofence_blocked` 归零。
 
-### BUG-075 | **P1（`mc_find_blocks` 多类型查询被高频 `dirt_path`/`farmland` 挤爆 `limit`，淹没床/箱子/干草/钟）** | Slice C（#4 Codex #2，`harness/mc_tools.py` + `skills/library.py`）| 状态: OPEN（`r43`/`r44` 进村轨迹取证）
+### BUG-075 | **P1（`mc_find_blocks` 多类型查询被高频 `dirt_path`/`farmland` 挤爆 `limit`，淹没床/箱子/干草/钟）** | Slice C（#4 Codex #2，`harness/mc_tools.py` + `skills/library.py`）| 状态: FIXED（`76a5d5a` 已合入，待 r45 实机验收）
 
 - **一句话**：Bot 进村后调 `mc_find_blocks(types=["bell","dirt_path","hay_block","composter","lectern","bed","chest"], limit=20)`，返回 `total=833` 但前 20 条**100% 全是 `dirt_path`**，把近在咫尺的 `hay_block`/`bed`/`chest`/`bell` 彻底挤掉，导致 `DS_1` 站在村中心还误判“没找到干草块和床”。
 - **实测证据**：`r43_day2_village_near_9bot/nju_ds_1_day2_village_near` 调 `mc_find_blocks(limit=20, radius=64, types=[...])` 返回 `total: 833`，前 20 条全为 `dirt_path`；随后模型误判“未找到 hay_block”，而下一集扫描发现 `hay_block` 距脚边仅 2.1m。
@@ -1083,14 +1085,32 @@
   2. 在 `mc_tools.py:mc_find_blocks` 当 `len(types) >= 2` 且单类方块霸占返回列表导致其他稀有目标被截断时，对结果做按类型保底或提示高计数方块（或在 `scout_surface` 中分两批小查询），确保 `bell`/`hay_block`/`bed`/`chest` 绝不被 `dirt_path` 淹没。
 - **验收标准**：离线单测覆盖“200 个 `dirt_path` + 1 个 `hay_block` + 1 个 `yellow_bed` 时，进村扫描必返回 `hay_block` 与 `bed`”；实机进村后绑床/薅干草/开箱转化率显著提升。
 
-### BUG-076 | P1（`r43`/`r44` 裸装 Day 1 `hy4_hy_1_bare` 连续两波 7–8 死异常回路）| Slice D1（#5 DeepSeek #1 取证）+ Slice B（#2 子 AGY 修复）| 状态: OPEN
+### BUG-076 | P1（`r43`/`r44` 裸装 Day 1 `hy4_hy_1_bare` 连续两波 7–8 死异常回路）| Slice D1（#5 DeepSeek #1 取证）+ Slice B（#2 子 AGY 修复）| 状态: FIXED（`45de9b1` + `92605ca` 已合入，待 r45 实机验收）
 
 - **一句话**：`r43_day1_5bot`（8 死，`guard=37`）与 `r44_day1_5bot`（7 死，`guard=41`）其余 Bot 几乎全 0 死，唯独 `hy4_hy_1_bare` 连续两波陷入高频死亡循环（伴随 `mc_skill_flee:unsafe_landing` / `mc_skill_unstick:unsafe_landing`）。
 - **分工**：
   - `#5 D1`：审计 `runs/r44_day1_5bot/hy4_hy_1_bare` 7 次死亡的精确伤害源、坐标、`unsafe_landing` 时间线写入本看板；
   - `#2 子 AGY`：针对裸装开局在地形陡坡/夜怪围堵下 `flee:unsafe_landing` 连续触发致死的缺口补齐兜底动作。
-- **D1 确认是抢占分类缺口**：原榜单这三路的 **11/11** 均为 `preempted_by_reflex=true`，Day 2 终版按同集真实调用复核共 **13 条／5 路**，其余两条在 DS_1、HY4_9。它们来自 Guardian 生成的结构化抢占回执，分类器忽略该字段，落入 `unknown_fail`。建议把抢占单独计入 `reflex_preempted`（或给 Guardian 回执补对应 code），保留 `mine_dfs` 真失败的独立门槛。 [三路样本](../runs/r43_day2_village_near_9bot/hy4_hy_6_day2_village_near/20261120-072048-411226.events.jsonl#L174) · [DS_1](../runs/r43_day2_village_near_9bot/nju_ds_1_day2_village_near/20261120-072028-965473.events.jsonl#L209) · [HY4_9](../runs/r43_day2_village_near_9bot/hy4_hy_9_day2_village_near/20261120-071926-878155.events.jsonl#L143) · [回执生成](../src/mc_agent/harness/guardian.py#L2060) · [榜单分类](../scripts/v2_fleet.py#L422)
-- **r44 对照**：D1 对照器 `cd99106` 已读结构化字段，Day 2 实际 **16** 条采矿抢占、未分类真实采矿结束回执 **0**。Fleet 的 `d8bb2fa` 已在 r44 后并入，待新进程实机。 [D1 分类](../../s-triage/scripts/d1_compare.py#L93)
+- **D1 实测**：r44 七条显式死亡为 **3 箭伤、4 近战**。同一命中回执的 HP=0 伤害用于归因。五次在本集该次死亡前见过 `unsafe_landing`，末 20s 内有字面拒绝的仅两次。七次均回到 `(-10988.5,69.1,-11017.5)`。r43 八死均箭伤，全部回同一原锚点。r44 EP01、EP06 首死距 r43 两处箭伤点分别约 **11.0／3.3 格**，反复经过锚点附近河岸。日间样本已有掠夺者与近战。
+
+  | r44 EP / 单集相对秒 | 致命伤与坐标 | 死前退路证据 |
+  |---|---|---|
+  | EP01 +194.436 | [箭伤 `(-10933,62,-10981.9)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074025-497605.events.jsonl#L268) | [L236 见掠夺者，未着甲无副手](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074025-497605.events.jsonl#L236)，[L245/L255 两次 `unsafe_landing` 且位移 0](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074025-497605.events.jsonl#L255) |
+  | EP04 +157.478 | [近战 `(-11052.3,70,-11087.6)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074629-758857.events.jsonl#L171) | [L78 actor 撤退拒绝](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074629-758857.events.jsonl#L78) 已早 126.7s。后在 [L166–170 挖矿被抢占](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074629-758857.events.jsonl#L166)，Guard 回执 `not_ready`、HP0 |
+  | EP05 +47.611 | [近战 `(-11019.8,79.2,-11066)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L67) | [L10 `unsafe_landing`，近僵尸](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L10)，[L52 已移动 12.6 格](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L52)，仍被追上 |
+  | EP05 +134.917 | [箭伤 `(-10968.5,75,-10975.4)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L223) | [L114 actor 撤退拒绝](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L114)，[L199/209 后两次撤退成功](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L209)，终点仍中箭 |
+  | EP06 +28.617 | [箭伤 `(-10955.9,64.2,-10979.5)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L48) | [L12 近掠夺者、无安全退路](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L12)，[L44 水中退避失败](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L44) |
+  | EP06 +73.004 | [近战 `(-10964.7,71,-11006.9)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L104) | [L75 近僵尸、落脚拒绝](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L75)，[L85/L98 无屋顶](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L98)，两次分别只撤 1.75／2.02 格 |
+  | EP07 +42.825 | [近战 `(-10932.3,62.4,-11016.7)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075653-135717.events.jsonl#L55) | [L9 近僵尸，HP3.86](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075653-135717.events.jsonl#L9)，[L19–20 撤 13.1 格后入水、HP0.86](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075653-135717.events.jsonl#L20)，[L30／L32 浮水及上岸失败](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075653-135717.events.jsonl#L32) |
+
+- **源码与验收补充**：核对 `_defend_or_flee` 在裸装无法格挡时的实际退路，`flee` 失败时保留安全落脚拒绝，增加可验证的掩体或干岸落点。撤退的 `ok=true` 只说明位移，验收再查脱离射线或取得地形遮挡。实机用原 HY4_1 区域及替代点对照，按显式死、伤害源和回出生点后的再遭遇分别计数。EP04 另覆盖长挖矿被近敌接管时，死亡前能否及时停工具。 [Guardian 防守入口](../src/mc_agent/harness/guardian.py#L391) · [撤退落脚检查](../src/mc_agent/skills/combat_env.py#L1458)
+
+### BUG-077 | P1（启动预准备回放把历史死亡计入最近 60 秒，误触发避难）| Integrator（`harness/guardian.py` + `bot.py`）| 状态: OPEN（实机与 D1 离线复现）
+
+- **影响**：课程首集可在 actor 作出首个决策前报告 8–9 次“近期死亡”，提前执行紧急掩体或撤退。若掩体建成，当前入口还会等待由虚假时间戳计算的冷却窗口。此问题影响实机控制，Fleet 的 BUG-063 对账仍单独计算显式死亡。
+- **实据**：r43 HY4_1 EP01 +1.510s 报 `recent_deaths=8`，掩体 `not_grounded`，接着实际撤退 5.5 格。L13 的后端 `last_death.t` 为 **14:36:43.709 UTC**，距告警 **2416.537s**。本集第一条显式死亡在 +33.981s。r44 同槽 EP01 +1.474s 又报 9，并实际撤 6.2 格。离线用真实 `GenerationGuard.prime()` 回放八个带不同事件 ID、约 40 分钟前的死亡，现版错误地计为 **8**。 [r43 告警](../runs/r43_day1_5bot/hy4_hy_1_bare/20261120-071624-552133.events.jsonl#L8) · [后端时间戳](../runs/r43_day1_5bot/hy4_hy_1_bare/20261120-071624-552133.events.jsonl#L13) · [首条本集死亡](../runs/r43_day1_5bot/hy4_hy_1_bare/20261120-071624-552133.events.jsonl#L84) · [r44 告警](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074025-497605.events.jsonl#L5)
+- **源码与最小修复**：`prime` 推进历史游标时复用读取函数。后者在关闭战斗观察时仍将死亡 ID 送给计数器，未携带原始事件时间。计数器用当前单调时间补值，actor 到 2 条即触发避难。保留游标和去重，在登记到 60 秒窗前按事件时间定龄。启动历史事件缺可校验时间时不得用观测到达时刻当作新死亡。 [启动预准备](../src/mc_agent/harness/curriculum.py#L2194) · [初始化](../src/mc_agent/harness/guardian.py#L321) · [读取时登记](../src/mc_agent/harness/guardian.py#L465) · [历史时间被覆盖](../src/mc_agent/bot.py#L52) · [避难门槛](../src/mc_agent/harness/agent.py#L1288)
+- **验收标准**：挂载旧轨迹启动时，历史游标推进到最新且 `recent_deaths=0`。再发入窗的两条不同 ID 的真实新死亡，重复回放同一个 ID 后仍只计两条，保护照常触发。实机用之前跑过的同槽，启动前 60 秒无真实死亡时不得出现历史误避难。 [D1 离线夹具](../../s-triage/tests/test_d1_repro.py)
 
 ## P2 Backlog（不抢 P0/P1；KB/脚本类由 #6 随时消化，核心代码类由 #2/#3/#4 在各自 P0/P1 清零后顺延处理）
 
