@@ -1422,11 +1422,23 @@ class GenerationGuard:
                         or att_name_r in {"blaze", "ghast"}
                         or bool(status.get("on_fire"))
                     )
-                    cur_blk_r = (
-                        (math.floor(float(pos_r[0])), math.floor(float(pos_r[1]) + 0.05), math.floor(float(pos_r[2])))
-                        if isinstance(pos_r, (list, tuple)) and len(pos_r) >= 3
-                        else None
-                    )
+                    def cover_block(pos: Any) -> tuple[int, int, int] | None:
+                        if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                            return math.floor(float(pos[0])), math.floor(float(pos[1]) + 0.05), math.floor(float(pos[2]))
+                        return None
+
+                    def try_cover(block: tuple[int, int, int] | None) -> dict[str, Any]:
+                        result = self._action("dig_cover", lambda: self.combat_env.dig_cover_pocket(self._skills()))
+                        actions.append(result)
+                        self._last_dig_cover_block = block
+                        self._last_dig_cover_at = time.monotonic()
+                        if result.get("ok"):
+                            self._mark_ranged_engagement(now, attacker=att_obj, in_cover=True)
+                        else:
+                            self._last_dig_cover_fail_at = now
+                        return result
+
+                    cur_blk_r = cover_block(pos_r)
                     same_spot_cover_ineffective = (
                         cur_blk_r is not None
                         and cur_blk_r == self._last_dig_cover_block
@@ -1441,7 +1453,6 @@ class GenerationGuard:
                     )
                     recent_cover_fail = already_blocking and ranged_hurt_only and hp_val > 10.0 and (now - self._last_dig_cover_fail_at < 15.0)
                     cover: dict[str, Any] | None = None
-                    skills = self._skills()
                     if (
                         status.get("on_ground") is not False
                         and not skip_cover_for_blast
@@ -1449,14 +1460,7 @@ class GenerationGuard:
                         and not already_in_dug_cover
                         and not recent_cover_fail
                     ):
-                        cover = self._action("dig_cover", lambda: self.combat_env.dig_cover_pocket(skills))
-                        actions.append(cover)
-                        self._last_dig_cover_block = cur_blk_r
-                        self._last_dig_cover_at = time.monotonic()
-                        if cover.get("ok"):
-                            self._mark_ranged_engagement(now, attacker=att_obj, in_cover=True)
-                        else:
-                            self._last_dig_cover_fail_at = now
+                        cover = try_cover(cur_blk_r)
                     cover_ok = bool(cover and cover.get("ok")) or already_in_dug_cover
                     if not cover_ok and (
                         skip_cover_for_blast or not already_blocking or hp_val <= 10.0 or not ranged_hurt_only
@@ -1485,11 +1489,31 @@ class GenerationGuard:
                             ),
                         )
                         actions.append(cf)
-                        cf_mode = (cf.get("result") or {}).get("mode")
+                        cf_result = cf.get("result") or {}
+                        cf_mode = cf_result.get("mode")
                         if cf.get("ok") and cf_mode == "natural_cover":
                             self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                         if cf_mode == "flee":
                             self._consecutive_flees += 1
+                            if (
+                                not has_shield and not skip_cover_for_blast
+                                and status.get("on_ground") is False
+                                and cf_result.get("reason") == "no_safe_retreat"
+                            ):
+                                # The retreat waited out knockback but found no route.
+                                landing = self.combat_env._safe_status({"ready": False})
+                                landing_block = cover_block(landing.get("pos"))
+                                if (
+                                    landing_block is not None and landing.get("on_ground") is True
+                                    and landing.get("ready") is not False and landing.get("alive") is not False
+                                    and not landing.get("in_water") and not landing.get("in_lava") and not landing.get("on_fire")
+                                    and landing.get("last_death") == status.get("last_death")
+                                    and landing.get("dimension") == status.get("dimension")
+                                    and (
+                                        landing_block != self._last_dig_cover_block or now - self._last_dig_cover_at >= 20.0
+                                    )
+                                ):
+                                    try_cover(landing_block)
                             if (
                                 cf.get("ok") and has_shield and isinstance(att_id_r, int)
                                 and hp_val <= LOW_HP_BUNKER_MAX
