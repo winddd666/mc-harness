@@ -4245,6 +4245,50 @@ def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypa
     assert calls == expected[water_state]
 
 
+@pytest.mark.parametrize("entry", ["poll_float", "poll_hurt", "boundary", "tool_preemption"])
+def test_critical_health_water_recovery_heads_to_shore_before_slow_float(monkeypatch, entry):
+    status = {
+        "pos": [-10955.9, 62.4, -10979.5], "health": 5.3, "food": 17, "oxygen": 180,
+        "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    calls = []
+
+    class WetBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                if entry == "poll_hurt" and kwargs["params"]["since"] < 1:
+                    return {"events": [{"seq": 1, "type": "hurt", "source": "arrow"}]}
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    def slow_float(_status):
+        calls.append("float")
+        return {"ok": False, "in_water": True}
+
+    def reach_shore(*args, **kwargs):
+        calls.append("shore")
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    guard = GenerationGuard(WetBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_escape_water", slow_float)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+
+    if entry == "boundary":
+        guard.stabilize_after_tools()
+    elif entry == "tool_preemption":
+        guard.handle_preemption({"source": "tool_interrupted_hurt"}, interrupted_name="mc_move_to")
+    else:
+        guard.poll()
+
+    assert calls == ["shore"]
+    assert not status["in_water"]
+
+
 def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_position():
     status = {
         "pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180, "yaw": -1.5708,

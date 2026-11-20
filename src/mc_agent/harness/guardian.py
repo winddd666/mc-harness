@@ -180,6 +180,7 @@ class _GuardSession:
 
 class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
+    WATER_SHORE_MAX_HP = 6.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     UNSTICK_BUDGET_S = 30.0
     FLEE_BUDGET_S = 35.0
@@ -383,6 +384,13 @@ class GenerationGuard:
         return self._run_recovery_macro(
             before, lambda skills: skills.escape_water(), budget_s=self.WATER_ESCAPE_BUDGET_S,
             timeout_details={"in_water": True},
+        )
+
+    def _swimming_at_low_health(self, status: dict[str, Any]) -> bool:
+        health = status.get("health")
+        return (
+            isinstance(health, (int, float)) and health <= self.WATER_SHORE_MAX_HP
+            and (status.get("on_ground") is False or bool(status.get("submerged")))
         )
 
     def _unstick_in_wall(self, before: dict[str, Any]) -> dict[str, Any]:
@@ -1088,7 +1096,7 @@ class GenerationGuard:
                         inv=inv,
                         attacker=status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None,
                     )
-                if no_water_reentry or drowning:
+                if no_water_reentry or drowning or self._swimming_at_low_health(status):
                     shore_act = self._action(
                         "escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
@@ -1186,7 +1194,10 @@ class GenerationGuard:
                 esc_succeeded = False
                 esc_respawned = False
                 esc_err_code: str | None = None
-                if not transient_err and not forced_water_shore and not no_water_reentry and not drowning:
+                if (
+                    not transient_err and not forced_water_shore and not no_water_reentry and not drowning
+                    and not self._swimming_at_low_health(status)
+                ):
                     if not _already("escape_water"):
                         actions.append(self._action("escape_water", lambda: self._escape_water(status)))
                     esc_act = next((a for a in actions if a.get("action") == "escape_water"), None)
@@ -1941,7 +1952,10 @@ class GenerationGuard:
                     pre_actions: list[dict[str, Any]] = []
                     if hurt_pre_water:
                         self._water_hurt_streak += 1
-                    forced_pre_shore = self._water_hurt_streak >= 3 or now_pre < self._no_water_until
+                    forced_pre_shore = (
+                        self._water_hurt_streak >= 3 or now_pre < self._no_water_until
+                        or self._swimming_at_low_health(st_pre)
+                    )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
                         self.events.emit("guardian.no_water_cooldown", duration_s=30.0, streak=self._water_hurt_streak)
@@ -2331,7 +2345,7 @@ class GenerationGuard:
 
                 forced_shore_b = (
                     self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
-                    or handled_water_in_tool or unstick_still_wet
+                    or handled_water_in_tool or unstick_still_wet or self._swimming_at_low_health(status)
                 )
                 esc_b_ok = False
                 esc_b_respawned = False
