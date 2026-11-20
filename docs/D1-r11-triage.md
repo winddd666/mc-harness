@@ -2030,6 +2030,12 @@ r43 HY4_1 EP01 在 +1.510s 告警最近死亡 8 次，掩体因 `not_grounded` �
 
 集成 `2044a63` 包含 `16df57e`，回地面时跳过不高于当前站位的现役矿口和归档矿口。另有 `50adb01`，剩余爬升超过首片进展且预算较小时提示下一片 55s。现役、归档及续片提示 3 个离线用例通过。`4757c8a` 的退路被拒后只对贴身单个近战进行一次反击，4 个离线用例通过。r46 的 `b0882ad` 尚未包含这些变更，下一次实机需先核对指纹，再查低位矿口和受阻反击是否得到暴露。 [两类矿口夹具](../../v2-integrated/tests/test_mining_dfs.py#L2443) · [续片夹具](../../v2-integrated/tests/test_mining_dfs.py#L2548) · [反击夹具](../../v2-integrated/tests/test_generation_guard.py#L1714)
 
+## 4cu. 六木石器与三集寻村的上线前基线
+
+**Day 1 石器。** `896a146` 把 `bootstrap_stone_age` 的首轮采木目标改成 6 根，并提示先做木镐、再用石斧补木。r46 Day 1 的 9 集石器任务共调用采木 **11 次**，其中 **9 次**请求 16 根，另两次请求 8、10 根。全波唯一一次请求 6 根发生在 **HY4_1 EP04 铁器任务**，同一调用从 +50.558s 到 +94.614s，共 **44.056s**，实际入包 3 根橡木，`time_budget`。上线后按石器任务单看请求量、单次实际入包与先后做出木镐、石镐、石斧的回执，再对照 BUG-079 的同树采集、15–20s 入包至少 6 根和失败率门槛。 [新任务文案](../../v2-integrated/src/mc_agent/harness/curriculum.py#L446) · [HY4_1 EP01 请求 16 根](../../v2-integrated/runs/r46_day1_5bot/hy4_hy_1_bare/20261120-090007-333544.events.jsonl#L221) · [EP04 终版任务](../../v2-integrated/runs/r46_day1_5bot/hy4_hy_1_bare/wild-endurance-r46_day1_5bot_hy_1_bare-20261120-085955.json#L254) · [EP04 请求](../../v2-integrated/runs/r46_day1_5bot/hy4_hy_1_bare/20261120-090707-865488.events.jsonl#L35) · [EP04 回执](../../v2-integrated/runs/r46_day1_5bot/hy4_hy_1_bare/20261120-090707-865488.events.jsonl#L36)
+
+**Day 2 寻村。** 按终版 `curriculum_summary`，r44 的 9 槽均派过 1 集寻村，r46 为 6 槽各 1 集、3 槽零集。两波实际派发均在 EP02，首选方向 r44 为东 7／北 2，r46 为东 5／南 1。`896a146` 改为第三集结算后冷却 20 分钟，黄昏和已知村庄仍在选任务时判定。集数增加能测到派发变化，扇区覆盖要另外核对实际首个斥候方向和轨迹起止坐标。离线用同一坐标和空 `WorldMemory` 连续调用现有方向选择与任务构造三次，三次首选均为东。若位置与已访问区块都没变化，集数本身不会轮换方向。 [r44 HY4_6 EP02](../../v2-integrated/runs/r44_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-074154-571352.events.jsonl#L1) · [r46 HY4_6 EP02](../../v2-integrated/runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L1) · [第三集冷却](../../v2-integrated/src/mc_agent/harness/curriculum.py#L2446) · [派发判定](../../v2-integrated/src/mc_agent/harness/curriculum.py#L1478) · [方向计算](../../v2-integrated/src/mc_agent/harness/world_memory.py#L1096) · [首选方向](../../v2-integrated/src/mc_agent/harness/curriculum.py#L1299)
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
