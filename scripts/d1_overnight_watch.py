@@ -90,6 +90,20 @@ def snapshot(wave: pathlib.Path) -> dict:
     }
 
 
+def fp(s: dict) -> tuple:
+    """Stable fingerprint of a wave snapshot (excludes volatile `idle`)."""
+    return (
+        s["wave"],
+        s["summaries"],
+        s["bots"],
+        tuple(sorted((s["episodes"] or {}).items())),
+        s["retries"],
+        s["failed429"],
+        s["failed502"],
+        s["tracebacks"],
+    )
+
+
 def line(s: dict) -> str:
     return (
         f"{s['wave']}: summaries={s['summaries']}/{s['bots']} idle={s['idle']:.0f}s "
@@ -164,6 +178,12 @@ def main() -> int:
     ap.add_argument("--prefix", action="append", default=[])
     ap.add_argument("--idle", type=float, default=600.0)
     ap.add_argument("--follow", action="store_true")
+    ap.add_argument(
+        "--quiet-idle",
+        action="store_true",
+        help="keep waiting (up to --max-hours) while every spotcheck is identical; avoids idle spam",
+    )
+    ap.add_argument("--max-hours", type=float, default=4.0)
     ap.add_argument("--since", help="ISO-8601 cutoff with timezone, applied to fleet artifact mtime")
     ap.add_argument("--runs-root", type=pathlib.Path, default=WT / "runs")
     args = ap.parse_args()
@@ -202,8 +222,21 @@ def main() -> int:
             seen[w.name] = newest
 
     deadline = time.monotonic() + args.every_min * 60.0
+    hard_deadline = time.monotonic() + max(args.max_hours, args.every_min / 60.0) * 3600.0
+    last_fps: list[tuple] | None = [fp(snapshot(w)) for w in waves()]
     print(f"[overnight] start {time.strftime('%T')} prefixes={prefixes} every={args.every_min}m", flush=True)
-    while time.monotonic() < deadline:
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            snaps = [snapshot(w) for w in waves()]
+            fps = [fp(s) for s in snaps]
+            if args.quiet_idle and fps == last_fps and now < hard_deadline:
+                deadline = now + args.every_min * 60.0
+                continue
+            print(f"SPOTCHECK {time.strftime('%T')}", flush=True)
+            for s in snaps:
+                print("  " + line(s), flush=True)
+            return 0
         for w in waves():
             s = snapshot(w)
             settled = (s["summaries"] >= max(1, s["bots"])) or (
@@ -216,10 +249,6 @@ def main() -> int:
                 print(f"WAVE SETTLED {line(s)} at {time.strftime('%T')}", flush=True)
                 return 0
         time.sleep(60)
-    print(f"SPOTCHECK {time.strftime('%T')}", flush=True)
-    for w in waves():
-        print("  " + line(snapshot(w)), flush=True)
-    return 0
 
 
 if __name__ == "__main__":
