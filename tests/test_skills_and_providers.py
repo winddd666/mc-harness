@@ -2658,6 +2658,33 @@ def test_unstick_shares_deadline_with_water_escape(monkeypatch) -> None:
     assert calls[-1] == "stop"
 
 
+def test_unstick_reports_failure_when_still_in_water() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    pos = [-10945.7, 62.3, -11027.2]
+    replies = {
+        "status": {"pos": pos, "in_water": True, "jumping": True},
+        "get_block": {"name": "water", "diggable": False},
+        "control": {"pos": pos},
+        "find_blocks": {"blocks": []},
+    }
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"ok": True, "result": replies[route]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_unstick())
+
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert result["error"]["code"] == "water_escape_failed"
+    assert result["in_water"] is True
+    assert result["escaped_water"] is False
+    assert result["pos_after"] == pos
+    assert "deadline_hit" not in result
+
+
 def test_unstick_fast_path_has_no_deadline_flag() -> None:
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]

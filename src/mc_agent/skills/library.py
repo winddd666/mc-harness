@@ -5238,8 +5238,9 @@ class MacroSkills:
                     "in_water": bool(water_session.last_status.get("in_water", True)),
                     "pos_after": water_session.last_status.get("pos") or pos_before,
                 }
-            return _finish({
-                "ok": bool(esc.get("ok")) or not timed_out,
+            escaped_water = bool(esc.get("ok"))
+            result = {
+                "ok": escaped_water,
                 "foot_block_before": [bx, by, bz],
                 "hitbox_xs": xs,
                 "hitbox_zs": zs,
@@ -5247,9 +5248,16 @@ class MacroSkills:
                 "pos_after": esc.get("pos_after", pos_before),
                 "dug": esc.get("dug", []),
                 "control": esc.get("control", {}),
-                "escaped_water": esc.get("ok", False),
+                "escaped_water": escaped_water,
                 "in_water": esc.get("in_water", False),
-            })
+            }
+            if not escaped_water and not timed_out:
+                result["requires_replan"] = True
+                result["error"] = {
+                    "code": "water_escape_failed",
+                    "message": "未能离开水体。请用 mc_status 确认位置，再朝可达岸边短移或向上脱困。",
+                }
+            return _finish(result)
 
         canopy = self.descend_canopy()
         if canopy.get("on_canopy") and canopy.get("dug"):
