@@ -857,6 +857,7 @@
 - **轨迹实据**：`overnight_12bot_part2` 1180 次 `staircase` 仅 203 次 `completed`（17.2%），`pillar_fallback` 140 次；`ds_1`/`nju_3` 各耗 23~24 集重打 `bootstrap_stone/iron`。
 - **最小修复**：`pillar_fallback` 连续 ≥2 次返回 `requires_replan=True` 并建议水平换向/`unstick`；≥3 次给当前方向/target 加 120s 冷却（详见 `D1-r11-triage.md` 4bw 节）。
 - **验收标准**：`pillar_fallback` 连续 ≥3 段降至 0；单次 `bootstrap_stone_age` 平均 ≤2 集完成。
+- **r47 Day 2 已完成集复核**：`hy4_hy_4_iron` EP03 寻村时东向斥候原地 `stalled`，随后三次东向 `staircase(up)` 连续 `pillar_fallback`，均 `requires_replan=false`，XZ `(-7823.5,-2780.5)` 不变、Y127→130；下一次下楼梯因 `cave_or_drop_ahead` 拒绝。属于同一防自锁门禁，后续复验增加高柱起点。 [第一次](../runs/r47_day2_full_day_scout_9bot/hy4_hy_4_iron/20261120-100127-264626.events.jsonl#L80) · [第二次](../runs/r47_day2_full_day_scout_9bot/hy4_hy_4_iron/20261120-100127-264626.events.jsonl#L98) · [第三次](../runs/r47_day2_full_day_scout_9bot/hy4_hy_4_iron/20261120-100127-264626.events.jsonl#L119) · [下楼梯失败](../runs/r47_day2_full_day_scout_9bot/hy4_hy_4_iron/20261120-100127-264626.events.jsonl#L141)
 
 ### BUG-056 | P0 | Integrator（#1，`harness/guardian.py` + `skills/library.py`）| 状态: FIXED（Guardian 浮水门禁 r29/r31 达标）
 - **一句话**：`guardian._escape_water` → `skills.escape_water()` **没有任何时间预算**，找不到岸时会连续跑 **499~561 秒**，直接吃穿整个 episode 预算（300~600s）。
@@ -1097,6 +1098,7 @@
   2. 在 `mc_tools.py:mc_find_blocks` 当 `len(types) >= 2` 且单类方块霸占返回列表导致其他稀有目标被截断时，对结果做按类型保底或提示高计数方块（或在 `scout_surface` 中分两批小查询），确保 `bell`/`hay_block`/`bed`/`chest` 绝不被 `dirt_path` 淹没。
 - **验收标准**：离线单测覆盖“200 个 `dirt_path` + 1 个 `hay_block` + 1 个 `yellow_bed` 时，进村扫描必返回 `hay_block` 与 `bed`”；实机进村后绑床/薅干草/开箱转化率显著提升。
 - **r46**：HY4_6 EP02 真正进村，扫出白床与 `(-7796,78,2862)` 的箱，床交互返回成功。随后两次去箱只传 XZ，实际到 Y35.9/Y39.9，接着在 Y40 的三个开箱调用均失败。未见拥挤混扫标志或采干草、取物、交易回执。 [白床和正确箱高](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L100) · [第一处错误楼层](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L165) · [失败回执](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L295)
+- **r47 Day 2 已完成集复核**：`hy4_hy_7_iron` EP02 再扫到同一 `(-7796,78,2862)` 的箱，于白床旁 Y71 起步，随后只传 XZ 和 `range=3`。调用 `ok=true`，落在 `(-7793.5,38,2863.5)`，离箱 40 格垂直距离。`unstick` 原地失败，18 级楼梯回到 Y56，本集无开箱回执。寻村收割提示应要求对已知箱/床用完整坐标接近并核对垂直差，验收用该村箱位置做同锚点对照，确认实际取物。 [箱坐标](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L119) · [床旁站位](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L157) · [XZ 参数](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L199) · [错误楼层](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L200) · [末次爬升](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L261) · [寻村收割提示](../src/mc_agent/harness/curriculum.py#L1318) · [移动工具入参](../src/mc_agent/harness/mc_tools.py#L1184)
 
 ### BUG-076 | P1（`r43`/`r44` 裸装 Day 1 `hy4_hy_1_bare` 连续两波 7–8 死异常回路）| Slice D1（#5 DeepSeek #1 取证）+ Slice B（#2 子 AGY 修复）| 状态: FIXED（r46 实测两次换安全退路，HY4_1 仍有 3 次箭伤，掩体与低血上岸待验）
 
@@ -1141,7 +1143,7 @@
 - **r45 收官核查**：六个有终版的寻村集另两条仅原始轨迹有完整首趟，共 47 条技能回执。**29** 次 `target_found` 全是孤立普通箱，覆盖 **5** 路，其中 **24** 次 0m。HY4_10 追向 Y46 的箱坐标被围栏钳制，后续未开箱。新语义修正未被 r45 加载。 [追箱航点](../runs/r45_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-083723-524840.events.jsonl#L177)
 - **r46 终版验收**：r45 的确认默认调用（两路仅原始轨迹）为 **29/33** 孤立箱触发，r46 **0/24**。六个实际派发寻村，默认遇箱且继续实移 **5** 次。HY4_7 看到与 r45 HY4_6 完全相同的 Y33 箱，仍推进 **72.66m**；真实堆肥桶和讲台可立即停。 [相同地下箱继续走](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-090127-093178.events.jsonl#L73) · [真实地标命中](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L20)
 
-### BUG-079 | **P1（Day 1 `harvest_logs` 29/29 报失败均 11s/木 + `mine_blocks` 混镐级整拒 + `scout_surface:in_water` 11x）** | Slice C（#4 Codex #2，`skills/library.py`）| 状态: FIXED（`8ec11f9` 已合入，待 r47 实机验收）
+### BUG-079 | **P1（Day 1 `harvest_logs` 29/29 报失败均 11s/木 + `mine_blocks` 混镐级整拒 + `scout_surface:in_water` 11x）** | Slice C（#4 Codex #2，`skills/library.py`）| 状态: VERIFIED（`r47_day1_5bot` PASS：`harvest_logs:time_budget` 15→1、`unreachable_targets` 5→0、`tool_tier_insufficient` 2→0）
 
 - **一句话**：`r46_day1_5bot` 中 `mc_skill_harvest_logs` **29 次调用 100% 报 `ok=False`**（耗 827s 占 Day 1 总耗时 22.1%，单根原木平均 **11s**，44s 仅砍 4 根）；`mc_skill_mine_blocks` 混入 `iron_ore` 时木镐被整次拒绝；`r46_day2` 中 `scout_surface` 剩余 15 次失败里 **11 次是 `in_water`**。
 - **实测证据（`r46_day1_5bot` / `r46_day2_wild_scout_9bot`）**：
@@ -1296,7 +1298,7 @@
 - **核心验证目标**：端到端验证 `day2_village_search` 完整闭环（发现 `bell`/`dirt_path`/`hay_block` → 占领村民屋 `bind_bed` 绑重生点 → 薅干草块/箱子 → 交易或入夜切地下矿井），避免随机空降 9 台全在 300m+ 荒野测不到进村逻辑。
 - **r43 收官**：9/9 验证落点，距对应村庄中心 **135.85–164.78m**。9 路强制寻村首集全用满 14 请求，4 路找到结构线索，HY4_7 首集绑定后在 EP04 死亡实测重生在床旁 **1.58m**。全波无取箱、干草入包或交易。首集 25 次实体查询中只有 1 次含村民，随后 Day 1 侦察才实际看到村民。续验村民过滤与查到目标后的补给／交易衔接。 [范围下端](../runs/r43_day2_village_near_9bot/hy4_hy_4_day2_village_near/wild-endurance-r43_day2_village_near_9bot_hy_4_day2_village_near-20261120-071619.json#L37) · [绑床](../runs/r43_day2_village_near_9bot/hy4_hy_7_day2_village_near/20261120-071642-835969.events.jsonl#L266) · [重生](../runs/r43_day2_village_near_9bot/hy4_hy_7_day2_village_near/20261120-072929-890490.events.jsonl#L140) · [后来看到四位村民](../runs/r43_day2_village_near_9bot/nju_ds_1_day2_village_near/20261120-071902-718275.events.jsonl#L225)
 
-### SCENE-003 | 状态: OPEN | 提单人: #1 主 AGY（用户规划阶段三）| stage名: `village_to_stronghold_end`（Slice D2 `#6 DeepSeek #2`）
+### SCENE-003 | 状态: READY_FOR_RUN（`c9e550f` 已合入，`--stage village_to_stronghold_end` 就绪）| 提单人: #1 主 AGY（用户规划阶段三）| stage名: `village_to_stronghold_end`（Slice D2 `#6 DeepSeek #2`）
 - **地形/结构要素**：定位主世界真实村庄安全地表作为起点（距离最近主世界要塞 `#minecraft:stronghold` 在合理可追范围，记录要塞坐标用于汇总但不泄露给模型）。
 - **初始背包与成就**：钻镐/钻剑/铁或钻甲/盾牌/食物/圆石/火把 + **14 颗 `ender_eye`**（或等量 `ender_pearl` + `blaze_powder`），已解锁铁/钻基础成就，早晨开局。
 - **死亡拉回规则**：绑定村庄出生点，禁止非传送门意外跨维度（进入 `the_end` 视为合法终局晋级！）。
