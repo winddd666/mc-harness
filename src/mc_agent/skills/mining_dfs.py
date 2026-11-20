@@ -904,6 +904,17 @@ def _is_two_step_stair(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool
     return abs(a[1] - b[1]) == 2 and (abs(a[0] - b[0]), abs(a[2] - b[2])) in {(2, 0), (0, 2)}
 
 
+def _descent_start_beside_anchor(
+    start: tuple[int, int, int], anchor: tuple[int, int, int], direction: str,
+) -> bool:
+    dx = start[0] - anchor[0]
+    dz = start[2] - anchor[2]
+    drop = anchor[1] - start[1]
+    if drop == 0:
+        return abs(dx) + abs(dz) == 1
+    return drop in (1, 2) and (dx, dz) == DIRECTIONS[direction]
+
+
 def _stair_midpoint_index(waypoints: list[tuple[int, int, int]], pos: tuple[int, int, int]) -> int | None:
     return next((
         index for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1)
@@ -5082,13 +5093,13 @@ class MiningDFSEngine:
                         elif (
                             branch.kind == "stair_down" and len(route) > 1
                             and route[0] in self.known_corridor_positions
-                            and route[0][1] == node.anchor[1] and math.dist(route[0], node.anchor) == 1
+                            and _descent_start_beside_anchor(route[0], node.anchor, branch.direction)
                             and route[-1][1] < node.anchor[1]
                             and not (scoped.last_status.get("in_water") or scoped.last_status.get("in_lava"))
                             and all(math.dist(a, b) <= math.sqrt(2) and b[1] <= a[1] for a, b in zip(route, route[1:]))
                         ):
-                            # The bot can start digging one cell beside a node on the same floor.
-                            # Join the observed stairs by a single level step and keep the same collar.
+                            # A slice can start next to the node or below its first stair.
+                            # Connect the observed descent to the existing shaft.
                             steps_taken = node.anchor[1] - route[-1][1]
                             route = [node.anchor, *route]
                         else:

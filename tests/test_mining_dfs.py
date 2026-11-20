@@ -2763,23 +2763,26 @@ def test_descent_cooldown_requires_time_to_dig(monkeypatch, first_slice_budget) 
     assert engine.collar_node_id == collar.node_id
 
 
-def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypatch) -> None:
+@pytest.mark.parametrize("start_cell", [(0, 14, 0), (1, 14, 0), (1, 12, 0)])
+def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypatch, start_cell) -> None:
     import mc_agent.skills.mining_dfs as mining
 
     clock = _MiningClock()
     monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(mining.time, "sleep", clock.sleep)
-    world = _MockMineWorld(start_pos=(0.5, 14.0, 0.5), surface_y=64,
+    start_x, start_y, _ = start_cell
+    world = _MockMineWorld(start_pos=(start_x + 0.5, float(start_y), 0.5), surface_y=64,
                            inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
-    world.blocks[(0, 14, 0)] = world.blocks[(0, 15, 0)] = "air"
-    world.blocks[(3, 11, 0)] = "diamond_ore"
-    stalled = (2, 14, 0)
+    for x, y in ((0, 14), (start_x, start_y)):
+        world.blocks[(x, y, 0)] = world.blocks[(x, y + 1, 0)] = "air"
+    world.blocks[(start_x + 3, start_y - 3, 0)] = "diamond_ore"
+    stalled = (start_x + 2, start_y, 0)
     attempts = []
 
     def handler(request):
         if request.url.path.endswith("/dig"):
             pos = tuple(json.loads(request.content)["pos"])
-            if pos[0] == 1:
+            if pos[0] == start_x + 1:
                 clock.now += 6.0
             if pos == stalled:
                 attempts.append(clock.now)
@@ -2800,7 +2803,12 @@ def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypat
         assert first["stop_reason"] == "time_slice_progress"
         assert first["dig_target"] == list(stalled)
         assert first["dug_count"] > 0
-        assert first["pos_after"][1] == 13
+        assert first["pos_after"][1] == start_y - 1
+        tip = engine.nodes[engine.active_node_id]
+        assert tip.anchor == (start_x + 1, start_y - 1, 0)
+        assert tip.parent_id == collar.node_id
+        assert tip.edge_from_parent.waypoints[0] == collar.anchor
+        assert start_cell in tip.edge_from_parent.waypoints
 
         second = engine.run(**args)
 
