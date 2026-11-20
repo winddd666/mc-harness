@@ -204,6 +204,7 @@ class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
     WATER_SHORE_MAX_HP = 6.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
+    COMBAT_RECOVERY_BUDGET_S = 8.0
     UNSTICK_BUDGET_S = 30.0
     FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
@@ -425,8 +426,8 @@ class GenerationGuard:
         skills = self._skills()
         health = status.get("health")
         # The legacy macro cannot counter below 11 HP and falls through to an unchecked sprint-jump.
-        low_health_on_ground = status.get("on_ground") is True and isinstance(health, (int, float)) and health < 11.0
-        retreat_only = ranged or low_health_on_ground
+        low_health = isinstance(health, (int, float)) and health < 11.0
+        retreat_only = ranged or low_health
         if "nether" in str(status.get("dimension") or "").lower() or (retreat_only and isinstance(skills, MacroSkills)):
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
             if not pos:
@@ -440,9 +441,13 @@ class GenerationGuard:
                     cover = None
                 if cover is not None:
                     return cover
-            return self.combat_env.flee(pos, wait_for_ground=ranged)
-        return skills.defend_or_flee(
-            attacker=attacker, counts=counts, health=health, urgent=True, geofence=self.geofence,
+            return self.combat_env.flee(pos, wait_for_ground=retreat_only)
+        return self._run_recovery_macro(
+            status,
+            lambda skills: skills.defend_or_flee(
+                attacker=attacker, counts=counts, health=health, urgent=True, geofence=self.geofence,
+            ),
+            budget_s=self.COMBAT_RECOVERY_BUDGET_S,
         )
 
     def _inside_own_shaft(self) -> bool:

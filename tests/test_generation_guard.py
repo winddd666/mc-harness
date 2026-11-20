@@ -3939,8 +3939,8 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
 
 
 @pytest.mark.parametrize("landing", ["grounded", "still_airborne", "respawned"])
-@pytest.mark.parametrize("entry", ["poll", "subcortical"])
-def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing, entry):
+@pytest.mark.parametrize("entry", ["poll_ranged", "poll_melee", "subcortical"])
+def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing, entry):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
     clock = [1000.0]
@@ -3951,6 +3951,10 @@ def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, l
         "on_ground": False, "dimension": "overworld", "last_death": {"t": 10},
         "nearest_hostile": {"id": 42, "name": "skeleton", "dist": 9.0, "pos": [-5182.5, 70.0, -7616.2]},
     }
+    hurt_source = "arrow"
+    if entry == "poll_melee":
+        hurt_source = "mob_attack"
+        status["nearest_hostile"] = {"id": 42, "name": "zombie", "dist": 0.6, "pos": [-5191.2, 69.6, -7616.0]}
     moves = []
 
     class KnockbackBot:
@@ -3966,7 +3970,7 @@ def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, l
                         status.update(pos=[-5184.5, 70.1, -7614.5], health=20, on_ground=True, last_death={"t": 20})
                 return dict(status)
             if action == "events":
-                return {"events": [{"seq": 1, "type": "hurt", "source": "arrow"}] if kwargs["params"]["since"] < 1 else []}
+                return {"events": [{"seq": 1, "type": "hurt", "source": hurt_source}] if kwargs["params"]["since"] < 1 else []}
             if action == "inventory":
                 return {"items": []}
             if action == "find_blocks":
@@ -3979,7 +3983,7 @@ def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, l
             return {"ok": True}
 
     bot = KnockbackBot()
-    if entry == "poll":
+    if entry != "subcortical":
         guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
         incident = guard.poll()
         retreat = next(a["result"] for a in incident["actions"] if a["action"] == "combat_or_flee")
@@ -3992,6 +3996,59 @@ def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, l
     assert clock[0] <= 1000.45
     if landing == "respawned":
         assert retreat["respawned"] is True
+
+
+@pytest.mark.parametrize("outcome", ["same_life", "respawned_nearby", "time_budget"])
+def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch, outcome):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [11032.5, 0.6, -11040.3], "health": 14.0, "food": 20,
+        "ready": True, "alive": True, "on_ground": False, "last_death": {"t": 10},
+    }
+    moves = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                since = kwargs["params"]["since"]
+                return {"events": [{"seq": 1, "type": "hurt", "source": "mob_attack"}] if since < 1 else []}
+            if action == "get_entities":
+                return {"entities": []}
+            if action == "inventory":
+                return {"items": []}
+            moves.append((action, kwargs["timeout_s"]))
+            if action == "control":
+                if outcome == "time_budget":
+                    clock[0] += kwargs["timeout_s"]
+                    raise httpx.ReadTimeout("retreat reached its deadline")
+                status.update(pos=[11032.5, 6.2, -11035.2], on_ground=True)
+                if outcome == "respawned_nearby":
+                    status.update(health=20, last_death={"t": 20})
+            return {"ok": True}
+
+    def leave_cave(scoped, **kwargs):
+        scoped.bot.call("control", {"forward": True, "ms": 1200, "stop_on": ["death"]}, timeout_s=40.0)
+        return {"ok": True, "mode": "flee", "pos_after": status["pos"], "respawned": False}
+
+    monkeypatch.setattr(MacroSkills, "_flee_hostiles", leave_cave)
+    bot = CaveBot()
+    skills = MacroSkills(bot)
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=skills)
+    incident = guard.poll()
+
+    retreat, = incident["actions"]
+    assert retreat["action"] == "combat_or_flee"
+    assert retreat["ok"] is (outcome == "same_life")
+    assert skills.bot is bot
+    assert moves[0] == ("control", 8.0)
+    if outcome == "respawned_nearby":
+        assert retreat["result"]["respawned"] is True
+    elif outcome == "time_budget":
+        assert retreat["result"] == {"ok": False, "reason": "time_budget", "partial": True}
+        assert moves[1:] == [("stop", 1.5)]
 
 
 @pytest.mark.parametrize(("health", "fresh_hurt", "expect_retreat"), [(3.3, True, True), (8.0, True, False), (3.3, False, False)])

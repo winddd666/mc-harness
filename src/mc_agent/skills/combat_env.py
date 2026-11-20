@@ -1500,7 +1500,7 @@ class CombatEnv:
             and st0.get("alive") is not False and st0.get("ready") is not False
             and not st0.get("in_lava") and not st0.get("in_water")
         ):
-            # Ranged hurt is often reported during the knockback hop.
+            # Damage can be reported during the knockback hop.
             before = st0
             deadline = time.monotonic() + 0.45
             for _ in range(3):
