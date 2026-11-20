@@ -2613,6 +2613,51 @@ def test_unstick_sends_stop_and_reports_deadline_hit(monkeypatch) -> None:
     assert "stop" in calls
 
 
+def test_unstick_shares_deadline_with_water_escape(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    calls = []
+    pos = [-7824.7, 110.2, -2771.3]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "status":
+            result = {"pos": pos, "in_water": True, "jumping": True}
+        elif path == "get_block":
+            timeout = request.extensions["timeout"]["read"]
+            clock[0] += min(2.5, timeout)
+            if timeout < 2.5:
+                raise httpx.ReadTimeout("water probe exceeded the remaining budget", request=request)
+            result = {"name": "water", "diggable": False}
+        elif path == "control":
+            result = {"pos": pos}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        elif path == "stop":
+            clock[0] += 0.25
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_unstick())
+        assert toolset.skills.bot is bot
+
+    assert result["ok"] is False
+    assert result["in_water"] is True
+    assert result["escaped_water"] is False
+    assert result["pos_after"] == pos
+    assert result["deadline_hit"] is True
+    assert result["requires_replan"] is True
+    assert clock[0] <= 45.0
+    assert calls[-1] == "stop"
+
+
 def test_unstick_fast_path_has_no_deadline_flag() -> None:
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
