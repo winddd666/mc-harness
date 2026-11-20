@@ -4112,6 +4112,33 @@ class MiningDFSEngine:
         self.fluid_aborts = 0
         return True
 
+    def _retry_dry_parent_after_level_abort(
+        self, node: ShaftNode, waypoints: list[tuple[int, int, int]],
+        *, geofence: Any, min_hp_ref: list[float],
+    ) -> bool:
+        parent = self.nodes.get(node.parent_id)
+        collar = self.nodes.get(self.collar_node_id)
+        edge = node.edge_from_parent
+        if (
+            parent is None or collar is None or edge is None
+            or parent.anchor[1] != node.anchor[1] or parent.anchor[1] > collar.anchor[1] - 6
+            or not any(branch.status == "pending" for branch in parent.branches)
+            or not waypoints or waypoints[0] != node.anchor
+            or not edge.waypoints or edge.waypoints[0] != parent.anchor or edge.waypoints[-1] != node.anchor
+        ):
+            return False
+
+        retreat = [*reversed(waypoints), *reversed(edge.waypoints[:-1])]
+        if any(cell[1] != parent.anchor[1] for cell in retreat):
+            return False
+        if self._probe_dry_descent(retreat[0], directions=(), geofence=geofence, min_hp_ref=min_hp_ref) is None:
+            return False
+        walked, _ = self._walk_waypoints(retreat, min_hp_ref=min_hp_ref)
+        if not walked or not self._retry_dry_junction(parent, geofence=geofence, min_hp_ref=min_hp_ref):
+            return False
+        self.active_node_id = parent.node_id
+        return True
+
     def _pickaxe_redline_threshold(self, cur_y: int, counts_now: dict[str, int]) -> int:
         if self.collar_node_id in self.nodes:
             collar_y = self.nodes[self.collar_node_id].anchor[1]
@@ -6226,6 +6253,10 @@ class MiningDFSEngine:
                     next_branch.status = "pruned"
                     next_branch.prune_reason = er
                     if not steps_done and self._retry_dry_junction(node, geofence=geofence, min_hp_ref=min_hp_ref):
+                        continue
+                    if self._retry_dry_parent_after_level_abort(
+                        node, edge_res["waypoints"], geofence=geofence, min_hp_ref=min_hp_ref,
+                    ):
                         continue
                     moved, auto_relocations_this_slice = self._force_relocate_on_fluid(
                         geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref,

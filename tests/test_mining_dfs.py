@@ -3266,6 +3266,45 @@ def test_explore_from_low_waypoint_does_not_rejoin_a_shallow_active_node(monkeyp
     assert engine.collar_node_id == collar.node_id
 
 
+def test_level_hazard_can_rejoin_a_dry_parent_with_pending_work() -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, -54.0, 2.5), surface_y=64,
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    route = [(0, -54, z) for z in range(3)]
+    for x, y, z in route:
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(0, -55, 4)] = "lava"
+    world.blocks[(2, -54, 0)] = "deepslate_diamond_ore"
+
+    with BotSession("tok", bot_username="DryParentAfterHazard", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -118), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        junction = engine._create_node(
+            kind="spine", anchor=route[0], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, route[0]]),
+            branches=[mining.BranchSpec("spine_forward", "east", 4)],
+        )
+        leaf = engine._create_node(
+            kind="spine", anchor=route[-1], parent_id=junction.node_id,
+            edge_from_parent=ShaftEdge("branch_leaf", "south", route),
+            branches=[mining.BranchSpec("branch_leaf", "south", 4)],
+        )
+        engine.fluid_aborts = mining.FLUID_ABORT_LIMIT - 1
+        result = engine.run(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
+
+    assert leaf.branches[0].prune_reason == "fluid_or_bedrock"
+    assert (0, -54, 3) in engine.known_corridor_positions
+    assert result["stop_reason"] == "quota_reached"
+    assert result["target_gained"] == 1
+    assert result["pos_after"][1] == -54
+    assert engine.collar_node_id == collar.node_id
+    assert collar.anchor not in engine.exhausted_collars
+
+
 def test_exhausted_transit_node_uses_its_deeper_pending_branch_before_ascending(monkeypatch) -> None:
     from mc_agent.skills.mining_dfs import BranchSpec, DIRECTIONS
 
