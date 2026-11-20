@@ -2513,7 +2513,7 @@ class McToolset:
         radius = max(4, min(64, int(radius)))
         return self._run_skill(
             lambda: self._cleanup_inventory_after(
-                self.skills.mine_blocks(block_types=block_types, count=count, radius=radius)
+                self.skills.mine_blocks(block_types=block_types, count=count, radius=radius, skip_unmineable=True)
             )
         )
 

@@ -425,6 +425,103 @@ def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch)
     assert clock[0] <= 8.0
 
 
+@pytest.mark.parametrize("timeout_after_column", [False, True])
+def test_harvest_logs_chops_one_column_and_collects_at_the_end(monkeypatch, timeout_after_column) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    standing = [0.5, 64.0, 0.5]
+    trunk = [[5, y, 0] for y in range(64, 68)]
+    scans = []
+    moves = []
+    digs = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": standing, "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": []}
+        elif route == "find_blocks":
+            scans.append(body)
+            cells = [*trunk, [8, 64, 0]] if len(scans) == 1 else [[8, 64, 0]]
+            result = {"blocks": [{"name": "oak_log", "pos": p, "dist": float(p[0])} for p in cells]}
+        elif route == "move_to":
+            moves.append(body)
+            standing[:] = [4.1, 64.0, 0.5]
+            clock[0] += 2.0
+            result = {"pos": standing}
+        elif route == "dig":
+            digs.append(body)
+            if len(digs) > 4:
+                clock[0] += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("slow second trunk", request=request)
+            clock[0] += 1.0
+            result = {"dug": "oak_log", "gained": {"oak_log": 4} if body["collect"] else {}}
+        elif route == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        outcome = MacroSkills(bot).harvest_logs(
+            target_logs=6 if timeout_after_column else 4, max_duration_s=14.0,
+        )
+
+    assert [d["pos"] for d in digs[:4]] == trunk
+    assert [d["collect"] for d in digs[:4]] == [False, False, False, True]
+    assert len(moves) == 1
+    assert [moves[0]["x"], moves[0]["z"]] == [5.5, 0.5]
+    assert len(scans) == 1 + timeout_after_column
+    assert outcome["ok"] is True
+    assert outcome["dug_count"] == 4
+    assert outcome["target_gained"] == {"oak_log": 4}
+    if timeout_after_column:
+        assert outcome["stop_reason"] == "time_budget"
+        assert outcome["partial_progress"] is True
+    else:
+        assert clock[0] == 6.0
+
+
+def test_mine_blocks_with_wooden_pick_skips_only_unmineable_types() -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    queries = []
+    digs = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": "wooden_pickaxe", "count": 1}]}
+        elif route == "status":
+            result = {"pos": [0.5, 64.0, 0.5]}
+        elif route == "equip":
+            assert body["item"] == "wooden_pickaxe"
+            result = {}
+        elif route == "find_blocks":
+            queries.append(body["types"])
+            result = {"blocks": [{"name": "stone", "pos": [1, 64, 0], "dist": 1.0}]}
+        elif route == "dig":
+            digs.append(body["pos"])
+            result = {"dug": "stone", "gained": {"cobblestone": 1}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, geofence=VoidGeofence())
+        outcome = json.loads(toolset.mc_skill_mine_blocks(["stone", "iron_ore", "coal_ore"], count=1))
+
+    assert outcome["ok"] is True
+    assert outcome["skipped_unmineable"] == ["iron_ore"]
+    assert outcome["target_gained"] == {"cobblestone": 1}
+    assert queries == [["stone", "coal_ore"]]
+    assert digs == [[1, 64, 0]]
+
+
 def test_mine_blocks_single_dig_cannot_outlive_slice_deadline(monkeypatch) -> None:
     """r12: one un-timed obsidian dig let mine_blocks run ~300s."""
     import mc_agent.skills.library as library
@@ -2494,6 +2591,7 @@ class _SurfaceScoutBackend:
         self.biome = "plains"
         self.health = 20
         self.wet = False
+        self.submerged = False
         self.hostile = None
         self.moves = []
         self.calls = []
@@ -2502,7 +2600,7 @@ class _SurfaceScoutBackend:
         self.released = True
 
     def arrive(self, request, body):
-        self.pos = [body["x"], 64, body["z"]]
+        self.pos = [body["x"], body.get("y", 64), body["z"]]
         return self.ok({"pos": self.pos})
 
     @staticmethod
@@ -2520,6 +2618,7 @@ class _SurfaceScoutBackend:
                 "biome": self.biome,
                 "health": self.health,
                 "in_water": self.wet,
+                "submerged": self.submerged,
                 "nearest_hostile": self.hostile,
             })
         if route == "get_block":
@@ -2537,7 +2636,7 @@ class _SurfaceScoutBackend:
             key = "blocks" if route == "find_blocks" else "entities"
             return self.ok({key: rows})
         if route == "move_to":
-            assert "y" not in body
+            assert ("y" in body) is (body["range"] == 0.5)
             assert body["stop_on"] == ["hurt", "death"]
             self.moves.append(body)
             return self.move(request, body)
@@ -2765,14 +2864,21 @@ def test_surface_scout_turns_ninety_degrees_along_dry_bank() -> None:
     assert backend.moves[0]["z"] == -27.5
 
 
-def test_surface_scout_can_take_one_short_step_out_of_shallow_water() -> None:
+@pytest.mark.parametrize("submerged", [False, True])
+def test_surface_scout_can_take_one_short_step_out_of_shallow_water(submerged) -> None:
     backend = _SurfaceScoutBackend()
     backend.wet = True
+    backend.submerged = submerged
+    surfacing = []
 
     def handle(request):
-        if request.url.path.endswith("/find_blocks") and json.loads(request.content)["radius"] == 8:
-            return backend.ok({"blocks": [{"name": "grass_block", "pos": [0, 63, 3]}]})
-        if request.url.path.endswith("/get_block") and json.loads(request.content)["pos"] in ([0, 64, 3], [0, 65, 3]):
+        if request.url.path.endswith("/control"):
+            surfacing.append(json.loads(request.content))
+            backend.submerged = False
+            return backend.ok({})
+        if request.url.path.endswith("/find_blocks") and json.loads(request.content)["radius"] == 10:
+            return backend.ok({"blocks": [{"name": "grass_block", "pos": [0, 63, 7]}]})
+        if request.url.path.endswith("/get_block") and json.loads(request.content)["pos"] in ([0, 64, 7], [0, 65, 7]):
             return backend.ok({"name": "air"})
         return backend.handle(request)
 
@@ -2785,9 +2891,12 @@ def test_surface_scout_can_take_one_short_step_out_of_shallow_water() -> None:
         result = MacroSkills(bot).scout_surface(direction="east")
 
     assert backend.moves[0]["range"] == 0.5
-    assert [backend.moves[0][axis] for axis in ("x", "z")] == [0.5, 3.5]
+    assert [backend.moves[0][axis] for axis in ("x", "y", "z")] == [0.5, 64, 7.5]
+    assert bool(surfacing) is submerged
+    assert len(surfacing) <= 1
+    assert result["shore_recoveries"] == 1
     assert result["segments_completed"] == 5
-    assert result["distance_traveled"] == 143
+    assert result["distance_traveled"] == 147
 
 
 @pytest.mark.parametrize("profile", ["full", "compact"])
