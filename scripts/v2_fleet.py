@@ -47,6 +47,7 @@ RUNS_ROOT = pathlib.Path(os.environ.get("MC_FLEET_RUNS_ROOT") or (WT_ROOT / "run
 LOCK_DIR = WT_ROOT / ".state-fleet" / "locks"
 SLOW_TOOL_THRESHOLD_S = 60.0
 KNOWN_STAGES: tuple[str, ...] = (
+    "day2_village_near",
     "nether_fortress",
     "brewing_alchemy",
     "nether_bastion",
