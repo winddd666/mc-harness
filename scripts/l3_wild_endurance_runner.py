@@ -1321,13 +1321,17 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
             except Exception:
                 st = {}
             dim, pos = normalize_dimension(st.get("dimension")), st.get("pos")
-            if (
-                dim != scene.dim
-                or not isinstance(pos, (list, tuple))
-                or len(pos) < 3
-                or math.hypot(float(pos[0]) - scene.x, float(pos[2]) - scene.z) > radius
-                or (local_fixture and abs(float(pos[1]) - scene.y) > 1.0)
-            ):
+            if dim != scene.dim or not isinstance(pos, (list, tuple)) or len(pos) < 3:
+                break
+            dx = float(pos[0]) - scene.x
+            dy = float(pos[1]) - scene.y
+            dz = float(pos[2]) - scene.z
+            if scene.stage == "cave_combat":
+                # Knockback can carry the bot across the 9x9 interior before verification.
+                inside = max(abs(dx), abs(dz)) < 4.5 and 0.0 <= dy <= 2.0
+            else:
+                inside = math.hypot(dx, dz) <= radius and (not local_fixture or abs(dy) <= 1.0)
+            if not inside:
                 break
             if sample == 0:
                 time.sleep(1.2)
