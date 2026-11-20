@@ -1,0 +1,10 @@
+{"seq":1,"type":"guardian.incident","reasons":["death_or_connection_changed"],"events":[{"type":"death","seq":101,"cause":"lava"}]}
+{"seq":2,"type":"mc.notable_events","events":[{"type":"death","event_id":"101","cause":"lava"}],"text":"[死亡 pos=[1, 64, 1] lava]"}
+{"seq":3,"type":"guardian.incident","reasons":["death_or_connection_changed"],"events":[{"type":"disconnected","seq":102}]}
+{"seq":4,"type":"mc.connection_changed","event_id":102}
+{"seq":5,"type":"mc.respawn","event_id":103}
+{"seq":6,"type":"guardian.incident","reasons":["death_or_connection_changed"],"event_seqs":[105,106]}
+{"seq":7,"type":"mc.notable_events","text":"[死亡 pos=[1, 64, 1] lava]; [死亡 pos=[2, 62, 1] fall]; [已重生 pos=[9, 64, 9]]"}
+{"seq":8,"type":"mc.notable_events","text":"[死亡 pos=None lava]×2; [不可信玩家公屏消息 test: 死亡]"}
+{"seq":9,"type":"mc.notable_events","text":"[不可信玩家公屏消息 test: 死亡]"}
+{"seq":10,"type":"death_loop","event_id":104,"deaths":3}

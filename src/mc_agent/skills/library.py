@@ -5142,8 +5142,9 @@ class MacroSkills:
         (default 45s) so a stuck server action can never turn this into a
         150~270s call (r22/r23/r24).
         """
-        deadline = time.monotonic() + max(5.0, float(max_duration_s))
         started = time.monotonic()
+        budget_s = max(5.0, float(max_duration_s))
+        deadline = started + budget_s
         params = inspect.signature(self.bot.call).parameters
         supports_timeout = "timeout_s" in params or any(
             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
@@ -5154,7 +5155,9 @@ class MacroSkills:
 
         timed_out = False
 
-        def _call(path: str, body: dict[str, Any] | None = None, cap: float = 3.0) -> dict[str, Any]:
+        def _call(
+            path: str, body: dict[str, Any] | None = None, cap: float = 3.0, **kwargs: Any
+        ) -> dict[str, Any]:
             nonlocal timed_out
             remaining = deadline - time.monotonic()
             if remaining <= 0.2:
@@ -5163,15 +5166,14 @@ class MacroSkills:
             timeout = min(remaining, cap)
             try:
                 if supports_timeout:
-                    return self.bot.call(path, body, timeout_s=timeout)
+                    return self.bot.call(path, body, timeout_s=timeout, **kwargs)
                 return self.bot.call(path, body)
             except httpx.TimeoutException:
                 timed_out = True
                 raise _UnstickDeadline() from None
 
         def _finish(payload: dict[str, Any]) -> dict[str, Any]:
-            payload["elapsed_s"] = round(time.monotonic() - started, 2)
-            payload["budget_s"] = round(max(5.0, float(max_duration_s)), 2)
+            payload["budget_s"] = round(budget_s, 2)
             if timed_out:
                 payload["deadline_hit"] = True
                 payload["timed_out"] = True
@@ -5185,6 +5187,7 @@ class MacroSkills:
                     self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
                 except (ApiError, httpx.HTTPError):
                     pass
+            payload["elapsed_s"] = round(time.monotonic() - started, 2)
             return payload
 
         st = self.bot.status()
@@ -5195,9 +5198,39 @@ class MacroSkills:
         xs = sorted({math.floor(px - 0.38), bx, math.floor(px + 0.38)})
         zs = sorted({math.floor(pz - 0.38), bz, math.floor(pz + 0.38)})
         if bool(st.get("in_water")):
-            esc = self.escape_water()
+            # Leave time for stop if a water probe or movement exhausts the budget.
+            deadline -= 1.0
+            bot = self.bot
+
+            class _WaterSession:
+                def __init__(self) -> None:
+                    self.last_status = st
+
+                def call(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+                    cap = 15.0 if path == "dig" else 6.0 if path == "move_to" else 3.0
+                    return _call(path, body, cap=cap)
+
+                def status(self) -> dict[str, Any]:
+                    self.last_status = _call("status", method="GET") if isinstance(bot, BotSession) else bot.status()
+                    return self.last_status
+
+                def inventory(self) -> dict[str, Any]:
+                    return _call("inventory", method="GET") if isinstance(bot, BotSession) else bot.inventory()
+
+            water_session = _WaterSession()
+            scoped = copy(self)
+            scoped.bot = water_session
+            try:
+                esc = scoped.escape_water()
+                timed_out = time.monotonic() >= deadline
+            except _UnstickDeadline:
+                esc = {
+                    "ok": False,
+                    "in_water": bool(water_session.last_status.get("in_water", True)),
+                    "pos_after": water_session.last_status.get("pos") or pos_before,
+                }
             return _finish({
-                "ok": True,
+                "ok": bool(esc.get("ok")) or not timed_out,
                 "foot_block_before": [bx, by, bz],
                 "hitbox_xs": xs,
                 "hitbox_zs": zs,

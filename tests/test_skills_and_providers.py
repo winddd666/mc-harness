@@ -2102,6 +2102,92 @@ def test_bucket_interact_inventory_delta_overrides_stale_block_snapshot(used, ga
         assert "error" not in result
 
 
+@pytest.mark.parametrize(
+    "item,level,changed,used,gained,filled",
+    [
+        ("glass_bottle", 1, False, {}, {}, False),
+        ("glass_bottle", 8, False, {}, {}, False),
+        ("glass_bottle", 0, False, {"glass_bottle": 1}, {}, False),
+        ("glass_bottle", 0, True, {"glass_bottle": 1}, {"kelp": 1}, False),
+        ("glass_bottle", 0, False, {"glass_bottle": 1}, {"potion": 1}, True),
+        ("minecraft:glass_bottle", 0, False, {"glass_bottle": 1}, {"potion": 1}, True),
+    ],
+)
+def test_glass_bottle_interact_with_water_requires_confirmed_fill(
+    item, level, changed, used, gained, filled
+) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    receipt = {
+        "block": "water",
+        "before": {"level": level},
+        "after": {"name": "water", "properties": {"level": level}},
+        "changed": changed,
+    }
+    if used:
+        receipt["used"] = used
+    if gained:
+        receipt["gained"] = gained
+
+    def handler(request):
+        assert request.url.path.endswith("/interact")
+        assert json.loads(request.content)["item"] == item
+        return httpx.Response(200, json={"ok": True, "result": receipt})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_interact(x=1, y=64, z=0, item=item))
+
+    assert result["ok"] is filled
+    assert result["result"] == receipt
+    if filled:
+        assert "error" not in result
+    else:
+        assert result["requires_replan"] is True
+        assert result["error"]["code"] == "interact_no_effect"
+        assert "level=0" in result["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "item,interact_target",
+    [
+        ("fishing_rod", {"x": 1, "y": 62, "z": 3}),
+        ("fishing_rod", {}),
+        ("minecraft:fishing_rod", {"x": 1, "y": 62, "z": 3}),
+    ],
+)
+def test_interact_with_fishing_rod_recommends_cast_at_open_water(item, interact_target) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    routes = []
+    receipt = {"caught": {"cod": 1}, "casts": 1}
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        routes.append(route)
+        if route == "interact":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"block": "water", "changed": False}},
+            )
+        assert route == "use_item"
+        assert json.loads(request.content) == {"item": "fishing_rod", "target": {"pos": [1, 62, 3]}}
+        return httpx.Response(200, json={"ok": True, "result": receipt})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        rejected = json.loads(toolset.mc_interact(item=item, **interact_target))
+        assert rejected["ok"] is False
+        assert rejected["requires_replan"] is True
+        assert rejected["error"]["code"] == "use_item_api"
+        assert "mc_use_item(item='fishing_rod'" in rejected["error"]["message"]
+        assert routes == []
+
+        cast = json.loads(toolset.mc_use_item(item="fishing_rod", x=1, y=62, z=3))
+
+    assert routes == ["use_item"]
+    assert cast == {"ok": True, "result": receipt}
+
+
 def test_window_view_rejects_entity_at_12m_before_no_window() -> None:
     """r16 BUG-027: goNear silently failed, then no_window from 12m."""
     from mc_agent.harness.mc_tools import McToolset
@@ -2525,6 +2611,51 @@ def test_unstick_sends_stop_and_reports_deadline_hit(monkeypatch) -> None:
     assert result["budget_s"] == pytest.approx(45.0)
     assert "不要连续重复调用 unstick" in result["hint"]
     assert "stop" in calls
+
+
+def test_unstick_shares_deadline_with_water_escape(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    calls = []
+    pos = [-7824.7, 110.2, -2771.3]
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        calls.append(path)
+        if path == "status":
+            result = {"pos": pos, "in_water": True, "jumping": True}
+        elif path == "get_block":
+            timeout = request.extensions["timeout"]["read"]
+            clock[0] += min(2.5, timeout)
+            if timeout < 2.5:
+                raise httpx.ReadTimeout("water probe exceeded the remaining budget", request=request)
+            result = {"name": "water", "diggable": False}
+        elif path == "control":
+            result = {"pos": pos}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        elif path == "stop":
+            clock[0] += 0.25
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_unstick())
+        assert toolset.skills.bot is bot
+
+    assert result["ok"] is False
+    assert result["in_water"] is True
+    assert result["escaped_water"] is False
+    assert result["pos_after"] == pos
+    assert result["deadline_hit"] is True
+    assert result["requires_replan"] is True
+    assert clock[0] <= 45.0
+    assert calls[-1] == "stop"
 
 
 def test_unstick_fast_path_has_no_deadline_flag() -> None:

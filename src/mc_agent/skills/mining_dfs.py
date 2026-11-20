@@ -5009,6 +5009,7 @@ class MiningDFSEngine:
         act = str(action or "explore").strip().lower()
         original_bot, original_skills = self.bot, self.skills
         previous_deadline = getattr(self, "_deadline", None)
+        return_dug_before = self.dug_during_return
         scoped = _BudgetSession(original_bot, deadline - min(0.5, budget / 10))
         self._deadline = scoped.deadline
         self.bot = scoped.session
@@ -5024,7 +5025,9 @@ class MiningDFSEngine:
                 self._report_explore_depth(result, target_y=self.target_y, budget=budget)
             return result
         except _MiningDeadline:
-            if scoped.timeout_dig_pos is not None:
+            moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
+            # A dig interrupted after progress can get a fresh budget on the preserved route.
+            if scoped.timeout_dig_pos is not None and not (moved or scoped.dug_count):
                 self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", 30.0)
             # Keep interrupted branches retryable. Preserve the observed return route if
             # the cutoff landed inside an edge before its local waypoints were committed.
@@ -5090,7 +5093,6 @@ class MiningDFSEngine:
                 )
                 target_gained = sum(gained.get(item, 0) for item in profile["expected_items"])
                 requested = max(1, min(64, int(goal_count)))
-                moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
                 result.update(
                     goal_met=target_gained >= requested,
                     goal_count=requested,
@@ -5130,6 +5132,20 @@ class MiningDFSEngine:
                     result.update(
                         stop_reason="climb_progress", next_action="climb_out",
                         message=f"本轮已爬到 y={end_y}，目标 y={target_height}。可从当前站位继续 climb_out。",
+                    )
+            if act == "return_collar" and self.collar_node_id in self.nodes:
+                collar = self.nodes[self.collar_node_id].anchor
+                result["collar_anchor"] = list(collar)
+                result["dug_during_return"] = self.dug_during_return - return_dug_before
+                status = scoped.last_status
+                if (
+                    moved and not (status.get("in_water") or status.get("in_lava"))
+                    and status.get("alive") is not False and status.get("ready") is not False
+                    and math.dist(scoped.positions[-1], collar) < math.dist(scoped.positions[0], collar)
+                ):
+                    result.update(
+                        requires_replan=False, stop_reason="return_collar_progress", next_action="return_collar",
+                        message="本轮已沿矿道向井口回撤。请从当前站位继续 action='return_collar'。",
                     )
             if result["stop_reason"] == "time_slice":
                 next_steps: dict[str, Any] = {
@@ -5414,6 +5430,8 @@ class MiningDFSEngine:
                 min_hp_ref=min_hp_ref,
                 deadline=deadline,
             )
+            if err_ret == "walk_time_slice":
+                raise _MiningDeadline
             st_after = self.bot.status()
             return {
                 "ok": ok_ret,

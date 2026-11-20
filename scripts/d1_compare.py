@@ -19,6 +19,13 @@ import json
 import pathlib
 import statistics
 
+if __package__:
+    from .d1_ticket_gates import ticket_gates
+    from .fleet_lifecycle import LifecycleCounter
+else:
+    from d1_ticket_gates import ticket_gates
+    from fleet_lifecycle import LifecycleCounter
+
 WT = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated")
 
 
@@ -43,6 +50,7 @@ def analyze(wave: str) -> dict:
     ep_verified: collections.Counter[bool] = collections.Counter()
     scores: dict[str, int] = {}
     deaths = collections.Counter()
+    death_receipts = collections.Counter()
 
     for bd in sorted(p for p in root.iterdir() if p.is_dir()):
         bot = bd.name
@@ -55,7 +63,9 @@ def analyze(wave: str) -> dict:
                 ep_status[str(ep.get("status"))] += 1
                 ep_verified[bool(ep.get("objective_verified"))] += 1
         starts: dict[str, tuple[str, float]] = {}
+        lifecycle = LifecycleCounter(bot)
         for evf in sorted(bd.glob("*.events.jsonl")):
+            starts.clear()
             for ln in evf.read_text(errors="ignore").splitlines():
                 if not ln.strip():
                     continue
@@ -63,6 +73,7 @@ def analyze(wave: str) -> dict:
                     ev = json.loads(ln)
                 except Exception:
                     continue
+                lifecycle.observe(ev)
                 t = ev.get("type")
                 if t == "tool.started":
                     fn = ev.get("function") or {}
@@ -89,12 +100,13 @@ def analyze(wave: str) -> dict:
                     model_cancel += 1
                 elif t == "model.cancel_cooldown_wait":
                     cancel_wait += float(ev.get("wait_s") or 0)
-                elif t == "guardian.incident" and "death_or_connection_changed" in (ev.get("reasons") or []):
-                    deaths[bot] += 1
+        deaths[bot] = lifecycle.deaths
+        death_receipts[bot] = lifecycle.death_receipts
     return {
         "err_cnt": err_cnt, "err_bots": err_bots, "preempt": preempt, "dur": dur,
         "model_cancel": model_cancel, "cancel_wait": cancel_wait,
         "ep_status": ep_status, "ep_verified": ep_verified, "scores": scores, "deaths": deaths,
+        "death_receipts": death_receipts,
     }
 
 
@@ -110,6 +122,7 @@ def main() -> int:
     ap.add_argument("before")
     ap.add_argument("after")
     ap.add_argument("--keys", nargs="*", default=[])
+    ap.add_argument("--ticket", action="append", default=[], metavar="BUG-NNN")
     args = ap.parse_args()
 
     a = analyze(args.before)
@@ -148,12 +161,26 @@ def main() -> int:
     print(f"  objective_verified: {dict(a['ep_verified'])} -> {dict(b['ep_verified'])}")
     print(f"  score sum       : {sum(a['scores'].values())} -> {sum(b['scores'].values())} "
           f"({len(a['scores'])} vs {len(b['scores'])} bots reported)")
-    print(f"  deaths total    : {sum(a['deaths'].values())} -> {sum(b['deaths'].values())}")
+    print(f"  observed deaths : {sum(a['deaths'].values())} -> {sum(b['deaths'].values())} "
+          f"(ID-less: {sum(a['death_receipts'].values())} -> {sum(b['death_receipts'].values())})")
 
     if args.keys:
         print("\n-- ticket spot-check --")
         for k in args.keys:
             print(f"  {k:52s} {a['err_cnt'][k]:4d} -> {b['err_cnt'][k]:4d}")
+    if args.ticket:
+        before = {
+            (gate.ticket, gate.metric): gate
+            for gate in ticket_gates(WT / "runs" / args.before) if gate.ticket in args.ticket
+        }
+        print("\n-- assigned ticket metrics --")
+        for gate in ticket_gates(WT / "runs" / args.after):
+            old = before.get((gate.ticket, gate.metric))
+            if old:
+                print(f"  {gate.ticket} {gate.metric}: "
+                      f"{old.actual} [{old.status}] -> {gate.actual} [{gate.status}]  target {gate.threshold}")
+                if gate.evidence:
+                    print(f"    {gate.evidence}")
     return 0
 
 

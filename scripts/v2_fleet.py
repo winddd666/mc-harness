@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fcntl
 import glob
 import json
 import os
@@ -29,6 +30,12 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
+from typing import TextIO
+
+if __package__:
+    from .fleet_lifecycle import LifecycleCounter
+else:
+    from fleet_lifecycle import LifecycleCounter
 
 WT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN_ROOT = pathlib.Path("/home/xzq/projects/mc")
@@ -87,33 +94,32 @@ class FleetSlot:
     site_index: int
     token_file: str
     duration_s: int = 1200
-    max_episodes: int = 20
 
 
 FLEET: tuple[FleetSlot, ...] = (
     # --- Squad 1: NJU Competition Benchmark (5 bots, soft-oversubscribed at rpm=6 <= 30 cap) ---
-    FleetSlot("MoveTest_01", "nju", "nju", None, 6, "bare", 0, str(MAIN_ROOT / ".state-move-test/tokens.json"), duration_s=2700, max_episodes=45),
-    FleetSlot("GuiTest_01", "nju", "nju", None, 6, "nether", 1, str(MAIN_ROOT / ".state-gui-test/tokens.json"), duration_s=1200, max_episodes=20),
-    FleetSlot("NJU_3", "nju", "nju", None, 6, "village_trade", 2, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("DS_1", "nju", "nju", None, 6, "iron", 8, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("DS_2", "nju", "nju", None, 6, "cave_combat", 9, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("MoveTest_01", "nju", "nju", None, 6, "bare", 0, str(MAIN_ROOT / ".state-move-test/tokens.json"), duration_s=2700),
+    FleetSlot("GuiTest_01", "nju", "nju", None, 6, "nether", 1, str(MAIN_ROOT / ".state-gui-test/tokens.json"), duration_s=1200),
+    FleetSlot("NJU_3", "nju", "nju", None, 6, "village_trade", 2, str(FLEET_TOKEN_FILE), duration_s=1200),
+    FleetSlot("DS_1", "nju", "nju", None, 6, "iron", 8, str(FLEET_TOKEN_FILE), duration_s=1200),
+    FleetSlot("DS_2", "nju", "nju", None, 6, "cave_combat", 9, str(FLEET_TOKEN_FILE), duration_s=900),
     # --- Squad 2: GLM-5.3 Mid/Late-Game Strike Team (5 bots, rpm=10 anti-burst) ---
-    FleetSlot("GLM_1", "glm", "opencode", "glm-5.3", 10, "nether_fortress", 3, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
-    FleetSlot("GLM_2", "glm", "opencode", "glm-5.3", 10, "nether_bastion", 4, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
-    FleetSlot("GLM_3", "glm", "opencode", "glm-5.3", 10, "village_trade", 5, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
-    FleetSlot("GLM_4", "glm", "opencode", "glm-5.3", 10, "brewing_alchemy", 6, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=900, max_episodes=15),
-    FleetSlot("GLM_5", "glm", "opencode", "glm-5.3", 10, "midgame", 7, str(MAIN_ROOT / ".state-glm5/tokens.json"), duration_s=2700, max_episodes=45),
+    FleetSlot("GLM_1", "glm", "opencode", "glm-5.3", 10, "nether_fortress", 3, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200),
+    FleetSlot("GLM_2", "glm", "opencode", "glm-5.3", 10, "nether_bastion", 4, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200),
+    FleetSlot("GLM_3", "glm", "opencode", "glm-5.3", 10, "village_trade", 5, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200),
+    FleetSlot("GLM_4", "glm", "opencode", "glm-5.3", 10, "brewing_alchemy", 6, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=900),
+    FleetSlot("GLM_5", "glm", "opencode", "glm-5.3", 10, "midgame", 7, str(MAIN_ROOT / ".state-glm5/tokens.json"), duration_s=2700),
     # --- Squad 3: HY4-flash-free Broad Sweeper (10 bots, rpm=6 anti-429, 100% free) ---
-    FleetSlot("HY_1", "hy4", "opencode", "hy4-flash-free", 6, "bare", 12, str(FLEET_TOKEN_FILE), duration_s=2700, max_episodes=45),
-    FleetSlot("HY_2", "hy4", "opencode", "hy4-flash-free", 6, "iron", 13, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_3", "hy4", "opencode", "hy4-flash-free", 6, "midgame", 14, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_4", "hy4", "opencode", "hy4-flash-free", 6, "cave_combat", 15, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
-    FleetSlot("HY_5", "hy4", "opencode", "hy4-flash-free", 6, "brewing_alchemy", 16, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
-    FleetSlot("HY_6", "hy4", "opencode", "hy4-flash-free", 6, "nether_bastion", 17, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_7", "hy4", "opencode", "hy4-flash-free", 6, "village", 18, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_8", "hy4", "opencode", "hy4-flash-free", 6, "nether", 19, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_9", "hy4", "opencode", "hy4-flash-free", 6, "deep_water", 20, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
-    FleetSlot("HY_10", "hy4", "opencode", "hy4-flash-free", 6, "enchant_anvil", 21, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("HY_1", "hy4", "opencode", "hy4-flash-free", 6, "bare", 12, str(FLEET_TOKEN_FILE), duration_s=2700),
+    FleetSlot("HY_2", "hy4", "opencode", "hy4-flash-free", 6, "iron", 13, str(FLEET_TOKEN_FILE), duration_s=1200),
+    FleetSlot("HY_3", "hy4", "opencode", "hy4-flash-free", 6, "midgame", 14, str(FLEET_TOKEN_FILE), duration_s=1200),
+    FleetSlot("HY_4", "hy4", "opencode", "hy4-flash-free", 6, "cave_combat", 15, str(FLEET_TOKEN_FILE), duration_s=900),
+    FleetSlot("HY_5", "hy4", "opencode", "hy4-flash-free", 6, "brewing_alchemy", 16, str(FLEET_TOKEN_FILE), duration_s=900),
+    FleetSlot("HY_6", "hy4", "opencode", "hy4-flash-free", 6, "nether_bastion", 17, str(FLEET_TOKEN_FILE), duration_s=1200),
+    FleetSlot("HY_7", "hy4", "opencode", "hy4-flash-free", 6, "village", 18, str(FLEET_TOKEN_FILE), duration_s=1200),
+    FleetSlot("HY_8", "hy4", "opencode", "hy4-flash-free", 6, "nether", 19, str(FLEET_TOKEN_FILE), duration_s=1200),
+    FleetSlot("HY_9", "hy4", "opencode", "hy4-flash-free", 6, "deep_water", 20, str(FLEET_TOKEN_FILE), duration_s=900),
+    FleetSlot("HY_10", "hy4", "opencode", "hy4-flash-free", 6, "enchant_anvil", 21, str(FLEET_TOKEN_FILE), duration_s=900),
 )
 
 
@@ -266,50 +272,48 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _acquire_bot_locks(selected: list[FleetSlot], wave: str) -> list[pathlib.Path]:
-    """Refuse to launch a bot that is still running in another wave (BUG-036 single-token mutex)."""
+def _acquire_bot_locks(selected: list[FleetSlot], wave: str) -> dict[str, TextIO]:
+    """Hold an exclusive lock for each bot's live session (BUG-036 single-token mutex)."""
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    acquired: list[pathlib.Path] = []
-    conflicts: list[tuple[str, str, int]] = []
-    for slot in selected:
-        path = LOCK_DIR / f"{slot.bot.lower()}.json"
-        if path.is_file():
+    acquired: dict[str, TextIO] = {}
+    try:
+        for slot in selected:
+            name = slot.bot.lower()
+            if name in acquired:
+                raise RuntimeError(f"Refusing to launch: {slot.bot} appears twice in wave '{wave}'.")
+            lock = (LOCK_DIR / f"{name}.json").open("a+", encoding="utf-8")
+            acquired[name] = lock
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError(f"Refusing to launch: {slot.bot} already has an active fleet lock.") from None
+
+            lock.seek(0)
+            try:
+                data = json.load(lock)
+            except ValueError:
                 data = {}
-            other_wave = str(data.get("wave") or "?")
-            other_pid = int(data.get("pid") or 0)
-            if other_wave != wave and _pid_alive(other_pid):
-                conflicts.append((slot.bot, other_wave, other_pid))
-                continue
-        path.write_text(
-            json.dumps({"bot": slot.bot, "wave": wave, "pid": os.getpid()}),
-            encoding="utf-8",
-        )
-        acquired.append(path)
-    if conflicts:
-        for p in acquired:
-            try:
-                p.unlink()
-            except OSError:
-                pass
-        detail = "\n".join(
-            f"  - {bot}: already running in wave '{w}' (pid {pid})" for bot, w, pid in conflicts
-        )
-        raise RuntimeError(
-            "Refusing to launch: the same bot is active in another wave. A second `login` would "
-            "revoke the running token (single-token mutex).\n" + detail
-        )
+            # Earlier launchers wrote PID metadata without taking an OS lock.
+            if isinstance(data, dict) and not data.get("flock"):
+                legacy_pid = data.get("pid")
+                if isinstance(legacy_pid, int) and _pid_alive(legacy_pid):
+                    raise RuntimeError(
+                        f"Refusing to launch: {slot.bot} is active in wave '{data.get('wave')}' (pid {legacy_pid})."
+                    )
+            lock.seek(0)
+            lock.truncate()
+            json.dump({"bot": slot.bot, "wave": wave, "pid": os.getpid(), "flock": True}, lock)
+            lock.flush()
+    except BaseException:
+        _release_bot_locks(acquired)
+        raise
     return acquired
 
 
-def _release_bot_locks(paths: list[pathlib.Path]) -> None:
-    for p in paths:
-        try:
-            p.unlink()
-        except OSError:
-            pass
+def _release_bot_locks(locks: dict[str, TextIO]) -> None:
+    for lock in locks.values():
+        # Keep the inode in place. The child can still hold the same open file description.
+        lock.close()
 
 
 def cmd_launch(
@@ -337,8 +341,8 @@ def cmd_launch(
         return 1
     selected = _assign_isolated_sites(selected_raw)
     try:
-        lock_paths = _acquire_bot_locks(selected, wave)
-    except RuntimeError as exc:
+        locks = _acquire_bot_locks(selected, wave)
+    except (OSError, RuntimeError) as exc:
         print(str(exc))
         return 2
     try:
@@ -346,10 +350,9 @@ def cmd_launch(
         env["PYTHONPATH"] = str(WT_ROOT / "src")
         procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path]] = []
         dur_label = "per-slot" if use_slot_durations else str(duration_s)
-        print(f"[Fleet Launch] wave={wave} bots={len(selected)} duration_s={dur_label} max_eps={max_episodes}")
+        print(f"[Fleet Launch] wave={wave} bots={len(selected)} duration_s={dur_label} max_eps={max_episodes or 'deadline'}")
         for idx, slot in enumerate(selected):
-            slot_dur = int(slot.duration_s) if use_slot_durations else int(duration_s)
-            slot_eps = int(slot.max_episodes) if use_slot_durations else int(max_episodes)
+            slot_dur = slot.duration_s if use_slot_durations else duration_s
             subdir = f"{wave}/{slot.squad}_{slot.bot.lower()}_{slot.stage}"
             log_dir = RUNS_ROOT / subdir
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -365,17 +368,23 @@ def cmd_launch(
                 "--runs-subdir", subdir,
                 "--site-index", str(slot.site_index),
                 "--duration-s", str(slot_dur),
-                "--max-episodes", str(slot_eps),
+                "--max-episodes", str(max_episodes),
                 "--tag", f"{wave}_{slot.bot.lower()}_{slot.stage}",
             ]
             if slot.model:
                 cmd.extend(["--model", slot.model])
             if idx > 0:
                 cmd.append("--keep-time")
-            lf = open(log_path, "wb")
-            proc = subprocess.Popen(cmd, env=env, stdout=lf, stderr=subprocess.STDOUT)
+            with log_path.open("wb") as log_file:
+                proc = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    pass_fds=(locks[slot.bot.lower()].fileno(),),
+                )
             procs.append((slot, proc, log_path))
-            print(f"  [{idx+1:2d}/{len(selected):2d}] started {slot.bot:12s} ({slot.squad:3s}/{slot.model or 'nju':19s}) stage={slot.stage:15s} dur={slot_dur:4d}s pid={proc.pid}", flush=True)
+            print(f"  [{idx+1:2d}/{len(selected):2d}] started {slot.bot:12s} ({slot.squad:3s}/{slot.model or 'nju':19s}) stage={slot.stage:15s} dur={slot_dur:g}s pid={proc.pid}", flush=True)
             if idx + 1 < len(selected):
                 time.sleep(stagger_s)
 
@@ -388,7 +397,7 @@ def cmd_launch(
             print(f"  [DONE] {slot.bot:12s} ({slot.stage:15s}) rc={rc}", flush=True)
         print(f"[Fleet Complete] wave={wave} total={len(procs)} failed={failed}")
     finally:
-        _release_bot_locks(lock_paths)
+        _release_bot_locks(locks)
     return cmd_triage(wave)
 
 
@@ -454,6 +463,10 @@ class BotRow:
     baseline_points: int | None = None
     earned_points: int | None = None
     error: str = ""
+    death_receipts: int = 0
+    respawns: int = 0
+    connection_changes: int = 0
+    mixed_guardian_incidents: int = 0
 
     @property
     def gained_short(self) -> list[str]:
@@ -514,7 +527,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     tool_fails: Counter[str] = Counter()
     err_codes: Counter[str] = Counter()
     slow_calls: list[tuple[float, str, str]] = []
-    event_deaths = 0
+    lifecycle = LifecycleCounter(name)
     http_429 = 0
     rate_waits = 0
     event_preemptions = 0
@@ -534,6 +547,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 ev = json.loads(ln)
             except Exception:
                 continue
+            lifecycle.observe(ev)
             tp = str(ev.get("type") or "")
             el = float(ev.get("elapsed") or 0.0)
             if tp in ("tool.started", "tool.ready"):
@@ -563,14 +577,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                     event_preemptions += 1
                 if dt >= SLOW_TOOL_THRESHOLD_S:
                     slow_calls.append((dt, name, tname))
-            elif tp == "guardian.incident":
-                reasons = ev.get("reasons") or []
-                if "death_or_connection_changed" in reasons:
-                    event_deaths += 1
             elif tp == "guardian.preempted_tool":
                 event_preemptions += 1
-            elif tp == "mc.notable_events" and "死亡" in str(ev.get("text") or ""):
-                event_deaths += 1
             elif tp == "model.rate_wait":
                 if float(ev.get("wait_s") or 0.0) > 0:
                     rate_waits += 1
@@ -594,9 +602,13 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         a = scene_meta["anchor"]
         scene_anchor = f"({a.get('x')}, {a.get('y')}, {a.get('z')})"
     baseline_raw = scene_meta.get("baseline_points")
-    baseline_points = (
-        int(baseline_raw) if isinstance(baseline_raw, int) else baseline_points_for_stage(stage)
-    )
+    if isinstance(baseline_raw, int):
+        baseline_points = baseline_raw
+    elif stage == "brewing_alchemy" and summaries and summary.get("spawn") is not None:
+        # Finished summaries before P2-32 predate removal of the 30-point Nether travel grant.
+        baseline_points = 50
+    else:
+        baseline_points = baseline_points_for_stage(stage)
     return BotRow(
         name=name,
         squad=squad,
@@ -605,7 +617,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         score=score,
         episodes_done=len(episodes),
         elapsed_s=elapsed_s,
-        deaths=event_deaths,
+        deaths=lifecycle.deaths,
         guardian_incidents=guardian_incidents,
         preemptions=max(preemptions, event_preemptions),
         http_429=http_429,
@@ -627,6 +639,10 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         baseline_points=baseline_points,
         earned_points=score - baseline_points,
         error=str(cs.get("error") or summary.get("error") or scene_meta.get("error") or ""),
+        death_receipts=lifecycle.death_receipts,
+        respawns=lifecycle.respawns,
+        connection_changes=lifecycle.connection_changes,
+        mixed_guardian_incidents=lifecycle.mixed_guardian_incidents,
     )
 
 
@@ -705,21 +721,24 @@ def _write_markdown(
         "",
         "## 1. 各路成绩总览（baseline = 场景 loadout 预授分，earned = 实机净增分）",
         "",
-        "| Squad | Bot | Stage | Status | Score | Baseline | Earned | Eps | Deaths | Guard | Preempt | 429 | Gained |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Squad | Bot | Stage | Status | Score | Baseline | Earned | Eps | Deaths | ID-less deaths | Respawn/spawn | Connection changes | Mixed guardian | Guard | Preempt | 429 | Gained |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in sorted(rows, key=lambda x: (x.squad, x.name)):
         g = ", ".join(r.gained_short[:4])
         lines.append(
             f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.score} | "
             f"{int(r.baseline_points or 0)} | {int(r.earned_points or 0)} | {r.episodes_done} | "
-            f"{r.deaths} | {r.guardian_incidents} | {r.preemptions} | {r.http_429} | {g} |"
+            f"{r.deaths} | {r.death_receipts} | {r.respawns} | {r.connection_changes} | "
+            f"{r.mixed_guardian_incidents} | {r.guardian_incidents} | {r.preemptions} | {r.http_429} | {g} |"
         )
     lines.extend(
         [
             "",
             "> `Score` = `final_score`（含 loadout 预授）；`Baseline` = 场景 loadout 预授予的成就分；"
             "`Earned` = Score - Baseline，跨场景横向比较请看 Earned。",
+            "> `Deaths` 为按 Bot 和源事件 ID 去重的死亡，加上无 ID 的明确死亡回执。"
+            "`Connection changes` 仅统计带类型的连接变化，`Mixed guardian` 记录旧的混合告警。",
         ]
     )
     lines.extend(["", "## 2. 模型维度聚合（跨模型对比）", ""])
@@ -848,7 +867,9 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"  [{r.squad:3s}] {r.name:30s} {r.status:10s} score={r.score:3d} "
             f"base={int(r.baseline_points or 0):3d} earned={int(r.earned_points or 0):3d} "
             f"eps={r.episodes_done:2d} "
-            f"deaths={r.deaths:2d} guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
+            f"deaths={r.deaths:2d} (idless={r.death_receipts}) respawn/spawn={r.respawns} "
+            f"connection_changes={r.connection_changes} guard_mixed={r.mixed_guardian_incidents} "
+            f"guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
             f"429={r.http_429:2d} gained=[{','.join(r.gained_short[:4])}]"
             + (" scene=BAD" if r.scene_ok is False else "")
             + (f" wd={r.scene_ticks}skips={r.scene_preempt_skips}" if r.scene_ticks is not None else "")
@@ -904,10 +925,10 @@ def main() -> int:
     lp = sub.add_parser("launch")
     lp.add_argument("--wave", required=True)
     lp.add_argument("--duration", type=float, default=1200.0)
-    lp.add_argument("--slot-durations", action="store_true", help="Use each FleetSlot's per-stage duration_s/max_episodes")
+    lp.add_argument("--slot-durations", action="store_true", help="Use each FleetSlot's wall-clock duration")
     lp.add_argument("--min-slot-duration", type=int, default=None, help="Only launch slots with duration_s >= N (decouples long runs)")
     lp.add_argument("--max-slot-duration", type=int, default=None, help="Only launch slots with duration_s <= N (decouples short/mid runs)")
-    lp.add_argument("--max-episodes", type=int, default=20)
+    lp.add_argument("--max-episodes", type=int, default=0, help="Optional per-bot episode cap (0 runs to the wall-clock deadline)")
     lp.add_argument("--squads", default="nju,glm,hy4")
     lp.add_argument("--bots", default=None, help="Optional comma-separated bot names filter (e.g. HY_2,HY_5,HY_6,HY_9)")
     lp.add_argument("--rpm-override", type=int, default=None, help="Optional per-bot RPM budget override for selected slots")
@@ -923,6 +944,8 @@ def main() -> int:
     if args.cmd == "sites":
         return cmd_sites()
     if args.cmd == "launch":
+        if args.max_episodes < 0:
+            lp.error("--max-episodes must be zero or positive")
         bots_filter = {b.strip().lower() for b in args.bots.split(",") if b.strip()} if args.bots else None
         return cmd_launch(
             args.wave,
