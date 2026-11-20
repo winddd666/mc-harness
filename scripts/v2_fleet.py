@@ -594,9 +594,13 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         a = scene_meta["anchor"]
         scene_anchor = f"({a.get('x')}, {a.get('y')}, {a.get('z')})"
     baseline_raw = scene_meta.get("baseline_points")
-    baseline_points = (
-        int(baseline_raw) if isinstance(baseline_raw, int) else baseline_points_for_stage(stage)
-    )
+    if isinstance(baseline_raw, int):
+        baseline_points = baseline_raw
+    elif stage == "brewing_alchemy" and summaries and summary.get("spawn") is not None:
+        # Finished summaries before P2-32 predate removal of the 30-point Nether travel grant.
+        baseline_points = 50
+    else:
+        baseline_points = baseline_points_for_stage(stage)
     return BotRow(
         name=name,
         squad=squad,

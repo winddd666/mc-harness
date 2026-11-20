@@ -461,7 +461,7 @@ def _deep_water_pad_cmds(bot_name: str, ix: int, iz: int, surface_y: int) -> lis
         f"fill {ix - 3} {surface_y} {iz - 2} {ix - 3} {surface_y} {iz + 2} minecraft:cobblestone",
         f"fill {ix + 3} {surface_y} {iz - 3} {ix + 3} {surface_y} {iz - 1} minecraft:cobblestone",
         f"fill {ix + 3} {surface_y} {iz + 1} {ix + 3} {surface_y} {iz + 3} minecraft:cobblestone",
-        f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
+        f"tp {bot_name} {ix + 0.5} {surface_y} {iz + 0.5}",
         f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
         # Clear the drowned/trident camp that otherwise farms the bot on respawn (r13/r14: 100% of
         # pad damage was `by trident`).
@@ -516,7 +516,7 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
     # a floating platform tens of blocks above the ocean surface. Wait until y stabilises first.
     pos = _wait_settled(bot, timeout_s=15.0) or [float(staging_x), 70.0, float(staging_z)]
     st = bot.status()
-    ix, iz = int(pos[0]), int(pos[2])
+    ix, iz = math.floor(pos[0]), math.floor(pos[2])
     biome = str(st.get("biome") or "deep_ocean").lower()
     # Trust the live `in_water` flag; only treat the ocean/river biome as wet when the bot is below
     # sea level, otherwise a dry sandbar/beach on a deep_ocean column would get a needless pad.
@@ -536,7 +536,7 @@ def select_deep_water_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple
         surface_y = int(round(pos[1]))
         prep = [
             f"forceload add {ix - 16} {iz - 16} {ix + 16} {iz + 16}",
-            f"tp {bot_name} {ix}.5 {surface_y} {iz}.5",
+            f"tp {bot_name} {ix + 0.5} {surface_y} {iz + 0.5}",
             f"spawnpoint {bot_name} {ix} {surface_y} {iz}",
             f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:drowned,distance=..32]",
             f"execute positioned {ix} {surface_y} {iz} run kill @e[type=minecraft:trident,distance=..32]",
@@ -561,7 +561,7 @@ def prepare_scene_ground(
     Returns the RCON command list (callers may append scene-specific effects before batching).
     All fills are absolute and idempotent so this can be re-run after a death without drifting.
     """
-    ix, iy, iz = int(round(sx)), int(round(sy)), int(round(sz))
+    ix, iy, iz = math.floor(sx), int(round(sy)), math.floor(sz)
     cmds: list[str] = []
     if dim == "the_nether":
         # Obsidian ledge (lava-proof), 3-block headroom, charged respawn anchor for in-Nether respawns.
@@ -582,7 +582,7 @@ def prepare_scene_ground(
                 f"{pre} fill {ix - 3} {iy} {iz - 2} {ix - 3} {iy + 3} {iz + 2} minecraft:obsidian",
                 f"{pre} fill {ix + 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 1} minecraft:obsidian",
                 f"{pre} fill {ix + 3} {iy} {iz + 1} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
-                f"{pre} tp {bot_name} {ix}.5 {iy} {iz}.5",
+                f"{pre} tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
         )
@@ -598,27 +598,30 @@ def prepare_scene_ground(
                 f"setblock {ix + 4} {iy} {iz} minecraft:bookshelf",
                 f"setblock {ix + 4} {iy} {iz - 1} minecraft:bookshelf",
                 f"setblock {ix + 4} {iy} {iz + 1} minecraft:bookshelf",
-                f"tp {bot_name} {ix}.5 {iy} {iz}.5",
+                f"setblock {ix - 2} {iy} {iz - 2} minecraft:torch",
+                f"setblock {ix + 4} {iy} {iz + 2} minecraft:torch",
+                f"tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
                 f"spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
         )
         return cmds
     if stage == "brewing_alchemy":
-        # 9x7 cobblestone pad with brewing stand, 2x2 infinite water source, and crafting table.
+        # The pad encloses the basin on four sides. A solid bottom keeps it from spilling on slopes.
         cmds.extend(
             [
                 f"fill {ix - 3} {iy - 1} {iz - 3} {ix + 5} {iy - 1} {iz + 3} minecraft:cobblestone",
                 f"fill {ix - 3} {iy} {iz - 3} {ix + 5} {iy + 3} {iz + 3} minecraft:air",
                 f"setblock {ix + 2} {iy} {iz} minecraft:brewing_stand",
                 f"setblock {ix + 2} {iy} {iz + 2} minecraft:crafting_table",
-                f"fill {ix + 3} {iy - 1} {iz - 2} {ix + 4} {iy - 1} {iz - 1} minecraft:water",
+                f"fill {ix - 2} {iy - 2} {iz - 1} {ix - 1} {iy - 2} {iz} minecraft:cobblestone",
+                f"fill {ix - 2} {iy - 1} {iz - 1} {ix - 1} {iy - 1} {iz} minecraft:water[level=0]",
                 # BUG-026 scene side: light the pad so the brewing/trade slices are not a night-time
                 # mob farm while the model stands still at the stand.
                 f"setblock {ix - 2} {iy} {iz - 2} minecraft:torch",
                 f"setblock {ix + 4} {iy} {iz - 2} minecraft:torch",
                 f"setblock {ix - 2} {iy} {iz + 2} minecraft:torch",
                 f"setblock {ix + 4} {iy} {iz + 2} minecraft:torch",
-                f"tp {bot_name} {ix}.5 {iy} {iz}.5",
+                f"tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
                 f"spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
         )
@@ -645,9 +648,9 @@ def prepare_scene_ground(
                 # Conditional summon: this prep also runs on every death-return restock, so an
                 # unconditional summon would stack a new pair of mobs inside the arena each death
                 # and turn the slice into an instant death loop.
-                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:zombie,distance=..24] run summon minecraft:zombie {ix + 3}.5 {iy} {iz}.5",
-                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:skeleton,distance=..24] run summon minecraft:skeleton {ix - 3}.5 {iy} {iz + 3}.5",
-                f"tp {bot_name} {ix}.5 {iy} {iz}.5",
+                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:zombie,distance=..24] run summon minecraft:zombie {ix + 3.5} {iy} {iz + 0.5}",
+                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:skeleton,distance=..24] run summon minecraft:skeleton {ix - 2.5} {iy} {iz + 3.5}",
+                f"tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
                 f"spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
         )
@@ -836,7 +839,6 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
                 f"advancement grant {bot_name} only minecraft:story/smelt_iron",
                 f"advancement grant {bot_name} only minecraft:story/iron_tools",
-                f"advancement grant {bot_name} only minecraft:story/enter_the_nether",
                 f"give {bot_name} minecraft:blaze_powder 8",
                 f"give {bot_name} minecraft:nether_wart 8",
                 f"give {bot_name} minecraft:glass_bottle 9",
@@ -1007,7 +1009,7 @@ def build_reset_cmds(
 ) -> list[str]:
     """Build the checkpoint reset RCON batch (dimension-aware; shared by live reset and --print-plan)."""
     dim = dim or scene_dimension(stage)
-    ix, iy, iz = int(round(sx)), int(round(sy)), int(round(sz))
+    ix, iy, iz = math.floor(sx), int(round(sy)), math.floor(sz)
     cmds: list[str] = ["difficulty normal", f"gamemode survival {bot_name}", f"clear {bot_name}"]
     if dim == "the_nether":
         cmds.extend(
@@ -1077,7 +1079,7 @@ def reset_wild_bot(
 
 def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inventory: bool = False) -> None:
     """Death-return / drift-return: teleport back to the scene anchor, and re-issue loadout on death."""
-    ix, iy, iz = int(round(scene.x)), int(round(scene.y)), int(round(scene.z))
+    ix, iy, iz = math.floor(scene.x), int(round(scene.y)), math.floor(scene.z)
     cmds = [
         f"gamemode survival {bot_name}",
         f"effect clear {bot_name}",
@@ -1478,8 +1480,7 @@ def ensure_bot_ready(
 
 
 SCENE_FOCUS: dict[str, dict[str, Any]] = {
-    # SCENE-001: the three scenario stages must open with a stage-specific target instead of the
-    # generic island_recon -> shiny_gear curriculum, otherwise their scores measure nothing.
+    # Prioritize the local fixture while its opening supplies are within reach.
     "village_trade": {
         "key": "minecraft:adventure/trade",
         "title": "15分：与村民完成一次交易",
@@ -1506,14 +1507,29 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "budget_class": "short",
         "episodes": 3,
         "task": (
-            "出生点已放好酿造台与 2x2 无限水源，背包有 glass_bottle 9 / nether_wart 8 / sugar 4 / blaze_powder 8。"
-            "步骤：① 用玻璃瓶对水源 mc_interact 装 3 瓶水；② mc_skill_brew(bottles=3, ingredient='nether_wart') "
-            "酿成 awkward；③ **必须**用 mc_window_act(ops=[{'op':'take','from':'bottles'}], block='brewing_stand') "
-            "把药水取回背包，advancement 只在取回时触发，留在酿造台里不算；④ 若要更稳，取 1 瓶 awkward 放回并加 sugar "
-            "再酿 swiftness 后取回。fuel 用 blaze_powder，轮询 brew_time_left 到 0 再操作。不要离开出生点去挖矿。"
+            "出生点西侧是低一格的 2x2 水池，东侧是酿造台。用 mc_find_blocks(radius=6, types=['water','brewing_stand']) "
+            "找到 properties.level=0 的水源，站在干燥台面用 mc_interact(x=..., y=..., z=..., item='glass_bottle') 装水。"
+            "每次核对 used.glass_bottle=1、gained.potion=1 或背包增量。没有增量就换一个可见的 level=0 水格。"
+            "拿到一瓶即可调用 mc_skill_brew(bottles=[{'item':'potion','potion':'water','count':1}], "
+            "ingredient_item='nether_wart', fuel_item='blaze_powder', wait=True)。待 brew_time_left=0 后用 "
+            "mc_window_act(block='brewing_stand', ops=[{'op':'take','from':'bottles','count':1}]) 取回药水以触发成就。"
         ),
         "extra_tools": ("mc_skill_brew", "mc_window_act", "mc_window_view", "mc_interact"),
         "advancement_id": "minecraft:nether/brew_potion",
+    },
+    "enchant_anvil": {
+        "key": "minecraft:story/enchant_item",
+        "title": "30分：在出生点完成一次附魔",
+        "points": 30,
+        "tier": 2,
+        "budget_class": "short",
+        "task": (
+            "出生台面东侧已有附魔台，背包有钻石剑、青金石，已有 30 级经验。留在台面，"
+            "立刻用 mc_skill_enchant(item='diamond_sword', option=0, block='enchanting_table', take=True) "
+            "完成附魔并确认钻石剑已带附魔。需要坐标时用 mc_find_blocks(radius=6, types=['enchanting_table'])。"
+        ),
+        "extra_tools": ("mc_skill_enchant",),
+        "advancement_id": "minecraft:story/enchant_item",
     },
     "cave_combat": {
         "key": "minecraft:adventure/kill_a_mob",
@@ -1546,18 +1562,21 @@ def install_scene_focus(stage: str, episodes: int = 2) -> bool:
 
     target_kwargs = {k: v for k, v in spec.items() if k != "episodes"}
     target = cur.CurriculumTarget(**target_kwargs)
-    state = {"remaining": int(spec.get("episodes", episodes))}
+    remaining = int(spec.get("episodes", episodes))
     original = cur.select_next_target
 
-    def _wrapped(*args: Any, **kwargs: Any):
-        fallback, frontier = original(*args, **kwargs)
-        if state["remaining"] > 0:
-            state["remaining"] -= 1
-            return target, frontier
-        return fallback, frontier
+    def _wrapped(bot: Any, **kwargs: Any):
+        nonlocal remaining
+        if remaining > 0:
+            frontier = cur.compute_advancement_frontier(bot, limit=50)
+            if target.advancement_id not in (frontier.get("completed_ids") or []):
+                remaining -= 1
+                return target, frontier
+            remaining = 0
+        return original(bot, **kwargs)
 
     cur.select_next_target = _wrapped
-    print(f"[Scene Focus] stage={stage} first {state['remaining']} episode(s) -> {target.key}", flush=True)
+    print(f"[Scene Focus] stage={stage} up to {remaining} opening episode(s) -> {target.key}", flush=True)
     return True
 
 

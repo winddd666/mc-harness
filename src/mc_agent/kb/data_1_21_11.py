@@ -710,7 +710,7 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
         "id": "find_blocks_queries",
         "category": "api_mechanic",
         "keywords": ["find_blocks", "bad_args", "radius", "方块查询", "unknown block", "water", "10000"],
-        "rule": "find_blocks 的 types 只传规范方块 ID（oak_log/spruce_log…，不要传 log/planks/bed/shield 这类别名或实体名），radius 控制在 16~48；查水/岩浆这类大面积方块时不要开 radius>=96（会返回上万条），改用 status.in_water 或小半径单点探测。",
+        "rule": "find_blocks 的 types 传规范方块 ID（如 oak_log、spruce_log），radius 通常用 16~48，水和岩浆优先查小半径。mc_find_blocks 与 mc_get_entities 的 radius 上限均为 64；附近两次搜空就沿安全可走的方向分段探索，每到新位置再扫。找床可先用 mc_get_entities(types=['animal'], radius=64) 找羊补羊毛。",
     },
     "mine_dfs_reset_semantics": {
         "id": "mine_dfs_reset_semantics",
@@ -975,7 +975,12 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:nether/brew_potion": {
         "difficulty": "medium",
-        "how_to": "酿造台放烈焰粉燃料+水瓶+下界疣，酿出任意药水。",
+        "how_to": (
+            "用 mc_interact(item='glass_bottle', x=..., y=..., z=...) 对 level=0 水源装水，"
+            "确认 glass_bottle 消耗和 potion 入包。用 mc_skill_brew(bottles=[{'item':'potion','potion':'water','count':1}], "
+            "ingredient_item='nether_wart', fuel_item='blaze_powder', wait=True) 配制粗制药水。"
+            "brew_time_left=0 后用 mc_window_act(block='brewing_stand', ops=[{'op':'take','from':'bottles','count':1}]) 取回药水触发成就。"
+        ),
     },
     "minecraft:nether/obtain_crying_obsidian": {
         "difficulty": "medium",
