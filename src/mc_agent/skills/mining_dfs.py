@@ -1082,6 +1082,15 @@ class MiningDFSEngine:
                 return True
         return False
 
+    def _active_deep_branch_pending(self) -> bool:
+        active = self.nodes.get(self.active_node_id)
+        collar = self.nodes.get(self.collar_node_id)
+        return (
+            active is not None and collar is not None
+            and active.anchor[1] <= collar.anchor[1] - 20
+            and any(branch.status == "pending" for branch in active.branches)
+        )
+
     def reset(self, *, geofence: Any = None) -> dict[str, Any]:
         if not self.nodes and self.collar_node_id is None:
             # Live s07/s08: an empty tree made reset a free "ok" no-op, so the model pressed it
@@ -5784,6 +5793,9 @@ class MiningDFSEngine:
                 # 10s, so a 4-iteration threshold may never fit inside a 32s slice (live: five
                 # consecutive no-op calls each burned the full slice).
                 if idle_streak >= MAX_IDLE_ITERATIONS or (time.monotonic() - idle_since) >= MAX_IDLE_SECONDS:
+                    if self._active_deep_branch_pending():
+                        stop_reason = "no_progress"
+                        break
                     idle_streak = 0
                     idle_since = time.monotonic()
                     # Stuck tree: try one in-slice relocation to a fresh collar before giving up,
@@ -6358,10 +6370,13 @@ class MiningDFSEngine:
         if stop_reason == "dig_cell_avoided":
             out_res["message"] = "当前可走分支的挖掘格处于超时冷却。请先处理障碍，或改从同层的安全站位进矿。"
         if stop_reason == "no_progress":
-            out_res["message"] = (
-                "在原地连续多次既没挖到方块也没推进矿井节点（可能卡在死胡同反复重试），已提前结束本轮而不是空耗时间。"
-                "请先调整站位；有井口记录时用 return_collar 回撤，空间树为空时直接 explore 开新井。"
-            )
+            if self._active_deep_branch_pending():
+                out_res["message"] = "已保留当前深度的矿道和待挖分支。请在同层确认安全站位，再继续 explore。"
+            else:
+                out_res["message"] = (
+                    "在原地连续多次既没挖到方块也没推进矿井节点（可能卡在死胡同反复重试），已提前结束本轮而不是空耗时间。"
+                    "请先调整站位；有井口记录时用 return_collar 回撤，空间树为空时直接 explore 开新井。"
+                )
         if stop_reason == "shaft_exhausted" and not self.fluid_abandoned_deep:
             out_res["message"] = (
                 "当前矿井分支与偏移重试均已穷尽；请先移到 16 格以外的安全新点位，再直接 explore。"
