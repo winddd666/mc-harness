@@ -311,6 +311,10 @@ class _MiningDeadline(Exception):
     """Unwind nested mining work without being swallowed as a recoverable ApiError."""
 
 
+class _CollarResupplyDeadline(_MiningDeadline):
+    """A mining slice expired while following the route back for a replacement pickaxe."""
+
+
 class _BudgetSession:
     """Private session copy: nested skills share a budget without changing the live bot.
 
@@ -2116,6 +2120,15 @@ class MiningDFSEngine:
             return False, "no_recorded_route"
         return True, None
 
+    def _walk_to_collar(
+        self, collar_id: int, *, min_hp_ref: list[float], deadline: float | None = None,
+    ) -> tuple[bool, str | None]:
+        mining_node_id = self.active_node_id
+        try:
+            return self._navigate_to_node(collar_id, min_hp_ref=min_hp_ref, deadline=deadline)
+        finally:
+            self.active_node_id = mining_node_id
+
     def _resume_shaft_tip(self, goal_node_id: int, *, min_hp_ref: list[float]) -> tuple[bool, str | None]:
         try:
             ok, reason = self._navigate_to_node(goal_node_id, min_hp_ref=min_hp_ref)
@@ -3091,14 +3104,9 @@ class MiningDFSEngine:
         attempted_collar = None
         if self.collar_node_id is not None and self.collar_node_id in self.nodes:
             attempted_collar = self.nodes[self.collar_node_id].anchor
-            mining_node_id = self.active_node_id
-            try:
-                ok_walk, _err_walk = self._navigate_to_node(
-                    self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline
-                )
-            finally:
-                # A supply trip should leave the mining destination available to explore.
-                self.active_node_id = mining_node_id
+            ok_walk, _err_walk = self._walk_to_collar(
+                self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline,
+            )
             walked = bool(ok_walk)
             if not walked:
                 y_part = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
@@ -4972,7 +4980,12 @@ class MiningDFSEngine:
             return False
         if not _has_collar_resupply_materials(counts_now) and self.ledger.nearest_utility("crafting_table", self.nodes[self.collar_node_id].anchor, max_dist=16.0) is None:
             return False
-        ok_ret, _ = self._navigate_to_node(self.collar_node_id, min_hp_ref=min_hp_ref)
+        try:
+            ok_ret, reason = self._walk_to_collar(self.collar_node_id, min_hp_ref=min_hp_ref)
+        except _MiningDeadline as exc:
+            raise _CollarResupplyDeadline from exc
+        if reason == "walk_time_slice":
+            raise _CollarResupplyDeadline
         return ok_ret
 
     def _pickaxe_low_recovery(self, counts: dict[str, int], pos: list[float] | None) -> dict[str, Any]:
@@ -5025,7 +5038,8 @@ class MiningDFSEngine:
                 result["goal_met"] = int(result.get("target_gained", 0)) >= requested
                 self._report_explore_depth(result, target_y=self.target_y, budget=budget)
             return result
-        except _MiningDeadline:
+        except _MiningDeadline as exc:
+            resupply_interrupted = isinstance(exc, _CollarResupplyDeadline)
             moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
             # A dig interrupted after progress can get a fresh budget on the preserved route.
             if scoped.timeout_dig_pos is not None and not (moved or scoped.dug_count):
@@ -5037,6 +5051,8 @@ class MiningDFSEngine:
                 for index, branch in enumerate(node.branches):
                     if branch.status == "active":
                         branch.status = "pending"
+                        if resupply_interrupted:
+                            break
                         if scoped.timeout_path == "dig" and not scoped.dug_count:
                             # Let the remaining branches try their first step before
                             # spending another slice on this unconfirmed dig.
@@ -5101,14 +5117,20 @@ class MiningDFSEngine:
                     gained=gained,
                     dug_count=scoped.dug_count,
                 )
-                if moved or scoped.dug_count or gained:
+                if resupply_interrupted:
                     result.update(
-                        ok=True,
-                        requires_replan=False,
-                        stop_reason="quota_reached" if result["goal_met"] else "time_slice_progress",
-                        message="本轮已保留确认的采掘进展和回撤路径，可以继续 explore。",
+                        stop_reason="pickaxe_low", next_action="return_collar", budget_effective_s=budget,
+                        message="镐耐久不足，回井口补给途中达到时间上限。请继续 action='return_collar'，补好镐后再 explore。",
                     )
-                self._report_explore_depth(result, target_y=int(profile["target_y"]), budget=budget)
+                else:
+                    if moved or scoped.dug_count or gained:
+                        result.update(
+                            ok=True,
+                            requires_replan=False,
+                            stop_reason="quota_reached" if result["goal_met"] else "time_slice_progress",
+                            message="本轮已保留确认的采掘进展和回撤路径，可以继续 explore。",
+                        )
+                    self._report_explore_depth(result, target_y=int(profile["target_y"]), budget=budget)
             if act in {"climb_out", "climb"} and scoped.positions:
                 start_y, end_y = scoped.positions[0][1], scoped.positions[-1][1]
                 target_height = int(self.collar_ceiling_y) - 16 if self.collar_ceiling_y is not None else start_y
@@ -5426,7 +5448,7 @@ class MiningDFSEngine:
             if self.collar_node_id is None or self.collar_node_id not in self.nodes:
                 return {"ok": False, "requires_replan": True, "strategy": self.strategy, "stop_reason": "no_collar_recorded", "tree": self.snapshot()}
             dug_before = self.dug_during_return
-            ok_ret, err_ret = self._navigate_to_node(
+            ok_ret, err_ret = self._walk_to_collar(
                 self.collar_node_id,
                 min_hp_ref=min_hp_ref,
                 deadline=deadline,

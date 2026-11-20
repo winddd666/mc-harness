@@ -46,6 +46,7 @@ LOW_HP_BUNKER_MAX = 10.0
 
 # Ranged damage: sprinting away in open cave air just makes the firing line longer.
 RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "wither_skull", "skeleton"})
+MELEE_HURT_SOURCES = frozenset({"mob_attack", "player_attack"})
 
 # Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
 LAVA_HURT_SOURCES = frozenset({"lava"})
@@ -174,6 +175,7 @@ class GenerationGuard:
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     UNSTICK_BUDGET_S = 30.0
     HOT_FLOOR_RETRY_S = 5.0
+    MELEE_EAT_DEFER_S = 10.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
@@ -231,6 +233,7 @@ class GenerationGuard:
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
         self._last_ranged_hurt_at = float("-inf")
+        self._last_melee_hurt_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
@@ -312,7 +315,7 @@ class GenerationGuard:
             st = self.bot.status()
             self.previous_health = float(st["health"]) if isinstance(st.get("health"), (int, float)) else None
             self.previous_ready = bool(st.get("ready", st.get("alive", True)))
-            self._drain_events_pages(observe_ranged_hurt=False)
+            self._drain_events_pages(observe_combat_hurt=False)
             setattr(self.raw_bot, "_last_event_seq", self.cursor)
             if st.get("ready", True) and st.get("alive") is not False:
                 inv = self.bot.inventory()
@@ -445,7 +448,7 @@ class GenerationGuard:
         self.events.emit("guardian.action.completed", duration=time.monotonic() - started, **outcome)
         return outcome
 
-    def _drain_events_pages(self, *, observe_ranged_hurt: bool = True) -> list[dict[str, Any]]:
+    def _drain_events_pages(self, *, observe_combat_hurt: bool = True) -> list[dict[str, Any]]:
         fresh: list[dict[str, Any]] = []
         for _ in range(5):
             page = self.bot.call("events", method="GET", params={"since": self.cursor, "limit": 100})
@@ -459,14 +462,19 @@ class GenerationGuard:
             self.cursor = max([self.cursor, int(page.get("last_seq", 0))] + [int(e.get("seq", 0)) for e in rows])
             if not page.get("has_more") or not rows:
                 break
-        if observe_ranged_hurt:
-            for event in reversed(fresh):
+        if observe_combat_hurt and fresh:
+            now = time.monotonic()
+            for event in fresh:
                 if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
                     self._last_ranged_hurt_at = float("-inf")
-                    break
-                if event.get("type") == "hurt" and str(event.get("source") or "").strip().lower() in RANGED_HURT_SOURCES:
-                    self._last_ranged_hurt_at = time.monotonic()
-                    break
+                    self._last_melee_hurt_at = float("-inf")
+                elif event.get("type") == "hurt":
+                    source = str(event.get("source") or "").strip().lower()
+                    if source in RANGED_HURT_SOURCES:
+                        self._last_ranged_hurt_at = now
+                        self._last_melee_hurt_at = float("-inf")
+                    elif source in MELEE_HURT_SOURCES:
+                        self._last_melee_hurt_at = now
         return fresh
 
     @staticmethod
@@ -583,7 +591,10 @@ class GenerationGuard:
         if nh_name and nh_dist <= min_dist:
             return False
         ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
-        protecting_against_recent_hit = status.get("blocking") and time.monotonic() - self._last_ranged_hurt_at < 8.0
+        now = time.monotonic()
+        protecting_against_recent_hit = status.get("blocking") and (
+            now - self._last_ranged_hurt_at < 8.0 or now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
+        )
         if (ranged_in_range or protecting_against_recent_hit) and not self._inside_own_shaft():
             return False
         return True
@@ -1385,6 +1396,9 @@ class GenerationGuard:
                         actions.append(bunker)
                         if bunker["ok"]:
                             self._consecutive_flees = 0
+                            bunker_result = bunker.get("result") or {}
+                            if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
+                                self._last_melee_hurt_at = float("-inf")
                         else:
                             cf = self._action(
                                 "combat_or_flee",
