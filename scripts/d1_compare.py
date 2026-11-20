@@ -5,7 +5,7 @@ Prints only the deltas that matter for the filed tickets:
   - tool failure code: count, bots affected
   - tool single-call duration: median / p90 / max (start->finish delta)
   - model cancelled count and cancel cooldown seconds
-  - episode status counts + objective_verified
+  - episode status counts + verified goals
 
 Usage:
   python scripts/d1_compare.py r11_22bot r12_22bot [--keys mc_skill_build_portal:unknown]
@@ -60,8 +60,9 @@ def analyze(wave: str) -> dict:
             cs = d.get("curriculum_summary") or {}
             scores[bot] = int(cs.get("final_score") or 0)
             for ep in cs.get("episodes") or []:
-                ep_status[str(ep.get("status"))] += 1
-                ep_verified[bool(ep.get("objective_verified"))] += 1
+                status = str(ep.get("status"))
+                ep_status[status] += 1
+                ep_verified[ep.get("objective_verified") is True or status == "goal_satisfied"] += 1
         starts: dict[str, tuple[str, float]] = {}
         lifecycle = LifecycleCounter(bot)
         for evf in sorted(bd.glob("*.events.jsonl")):
@@ -79,6 +80,8 @@ def analyze(wave: str) -> dict:
                     fn = ev.get("function") or {}
                     starts[str(ev.get("call_id"))] = (
                         str(fn.get("name") or "?"), float(ev.get("elapsed") or 0))
+                elif t == "tool.skipped":
+                    starts.pop(str(ev.get("call_id")), None)
                 elif t == "tool.completed":
                     st = starts.pop(str(ev.get("call_id")), None)
                     if not st:
@@ -87,15 +90,21 @@ def analyze(wave: str) -> dict:
                     dur[tool].append(max(0.0, float(ev.get("elapsed") or 0) - t0))
                     o = L(ev.get("result"))
                     if o.get("ok") is False:
-                        err = o.get("error")
-                        code = err.get("code") if isinstance(err, dict) else err
-                        msg = o.get("message") or (err or {}).get("message") if isinstance(err, dict) else o.get("message")
-                        if code is None and "小脑本能抢占接管" in str(msg or ""):
+                        if o.get("preempted_by_reflex") is True:
                             preempt[tool] += 1
-                        else:
-                            key = f"{tool}:{code or 'unknown'}"
-                            err_cnt[key] += 1
-                            err_bots[key].add(bot)
+                            continue
+                        err = o.get("error")
+                        code = (err.get("code") or err.get("reason")) if isinstance(err, dict) else err
+                        message = o.get("message") or (err.get("message") if isinstance(err, dict) else "")
+                        if not code and "小脑本能抢占接管" in str(message):
+                            preempt[tool] += 1
+                            continue
+                        code = code or o.get("stop_reason") or o.get("failure_reason") or o.get("reason")
+                        partial = o.get("partial_error")
+                        code = code or (partial.get("code") if isinstance(partial, dict) else partial)
+                        key = f"{tool}:{code or 'unknown'}"
+                        err_cnt[key] += 1
+                        err_bots[key].add(bot)
                 elif t == "model.failed" and ev.get("cancelled"):
                     model_cancel += 1
                 elif t == "model.cancel_cooldown_wait":
@@ -158,7 +167,7 @@ def main() -> int:
 
     print("\n-- episodes / score --")
     print(f"  episode status  : {dict(a['ep_status'])} -> {dict(b['ep_status'])}")
-    print(f"  objective_verified: {dict(a['ep_verified'])} -> {dict(b['ep_verified'])}")
+    print(f"  verified goals  : {dict(a['ep_verified'])} -> {dict(b['ep_verified'])}")
     print(f"  score sum       : {sum(a['scores'].values())} -> {sum(b['scores'].values())} "
           f"({len(a['scores'])} vs {len(b['scores'])} bots reported)")
     print(f"  observed deaths : {sum(a['deaths'].values())} -> {sum(b['deaths'].values())} "
