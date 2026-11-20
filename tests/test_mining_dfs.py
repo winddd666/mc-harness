@@ -910,6 +910,47 @@ def test_mining_dfs_offset_sidestep_retry_bypasses_local_obstruction() -> None:
     assert res["target_gained"] >= 2
 
 
+@pytest.mark.parametrize("already_queued", [False, True])
+def test_descent_offset_preserves_the_stair_back_to_the_collar(monkeypatch, already_queued: bool) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    anchor = (0, 109, 0)
+    route = [(-6, 115, 0), (-4, 113, 0), (-2, 111, 0), anchor]
+    world = _MockMineWorld(start_pos=(0.5, 109.0, 0.5), surface_y=120)
+    for step in range(7):
+        for dy in range(3):
+            world.blocks[(-step, anchor[1] + step + dy, 0)] = "air"
+    for blocked in ((0, 107, -1), (0, 107, 1), (1, 107, 0)):
+        world.blocks[blocked] = "bedrock"
+    world.blocks[(3, 108, -1)] = "iron_ore"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+    failed_descent = BranchSpec("stair_down", "north", 19)
+    branches = [failed_descent]
+    if already_queued:
+        failed_descent.status = "pruned"
+        failed_descent.prune_reason = "fluid_or_bedrock"
+        branches.append(BranchSpec(
+            "offset_retry", "north", 19, offset_tried=True, sidestep_dir="west", resume_kind="stair_down",
+        ))
+
+    with BotSession("tok", bot_username="PreserveDescentStair", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=route[0], parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", route), branches=branches,
+        )
+        result = engine.run(target="iron", target_y=90, goal_count=1, max_duration_s=20)
+
+    assert world.block_at((-1, 109, 0)) == "stone"
+    assert world.block_at((-2, 110, 0)) == "stone"
+    assert result["stop_reason"] == "quota_reached"
+    assert any(pt[0] == 3 for pt, _, _ in world.dig_log)
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_mining_dfs_64_block_radar_steers_spine_toward_distant_diamond() -> None:
     """P1-5 fix: 64-block radar detects exposed diamond ore 18 blocks east in cave wall and steers Spine east."""
     world = _MockMineWorld(

@@ -270,6 +270,7 @@ VEIN_HOOK_FISHBONE_RADIUS = 4
 # fishbone_scan: fishbone skeleton + read-only widened ore reach ONLY within the target band
 VEIN_HOOK_SCAN_RADIUS = 10
 SCAN_BAND = 3  # |anchor.y - target_y| <= SCAN_BAND counts as "in target band"
+OFFSET_RETRY_STEPS = 3
 # fishbone skeleton never emits vertical branches; when the caller raises target depth
 # mid-shaft we still must descend, otherwise the spine tunnels sideways on the stale layer.
 SPINE_DESCEND_MIN_DELTA = 4
@@ -5032,6 +5033,23 @@ class MiningDFSEngine:
             out.append(BranchSpec(kind="stair_down", direction=d, steps=depth, branch_target_y=target_y))
         return out
 
+    def _offset_cuts_incoming_stair(self, node: ShaftNode, direction: str) -> bool:
+        edge = node.edge_from_parent
+        if edge is None or edge.edge_kind != "stair_down":
+            return False
+        x, y, z = node.anchor
+        dx, dz = DIRECTIONS[direction]
+        # The offset cuts two blocks high. Either block can be the floor of
+        # the return stair, including a step omitted from the waypoint list.
+        for step in range(1, OFFSET_RETRY_STEPS + 1):
+            for rise in (1, 2):
+                stair_cell = (x + dx * step, y + rise, z + dz * step)
+                if stair_cell in edge.waypoints or _omitted_waypoint_index(
+                    edge.waypoints, stair_cell, edge.edge_kind,
+                ) is not None:
+                    return True
+        return False
+
     def _enqueue_offset_retry_if_eligible(
         self,
         node: ShaftNode,
@@ -5054,8 +5072,13 @@ class MiningDFSEngine:
 
         left_d, right_d = LEFT_RIGHT_DIRS[failed_branch.direction]
         for lat_d in (left_d, right_d):
+            if self._offset_cuts_incoming_stair(node, lat_d):
+                continue
             lx, lz = DIRECTIONS[lat_d]
-            if self._geofence_blocked(geofence, node.anchor[0] + lx * 3, node.anchor[2] + lz * 3, action="mine_dfs_offset") is not None:
+            if self._geofence_blocked(
+                geofence, node.anchor[0] + lx * OFFSET_RETRY_STEPS,
+                node.anchor[2] + lz * OFFSET_RETRY_STEPS, action="mine_dfs_offset",
+            ) is not None:
                 continue
             already = any(
                 b.kind == "offset_retry" and b.direction == failed_branch.direction and b.sidestep_dir == lat_d
@@ -6124,11 +6147,15 @@ class MiningDFSEngine:
                 self.active_node_id = node.parent_id
                 continue
 
-            next_branch.status = "active"
             branch_kind = next_branch.kind
             if branch_kind == "offset_retry":
                 lat_dir = next_branch.sidestep_dir or LEFT_RIGHT_DIRS[next_branch.direction][0]
+                if self._offset_cuts_incoming_stair(node, lat_dir):
+                    next_branch.status = "pruned"
+                    next_branch.prune_reason = "stair_support"
+                    continue
                 resume_k = next_branch.resume_kind or "stair_down"
+            next_branch.status = "active"
             if branch_kind in {"stair_down", "stair_up"}:
                 is_up = branch_kind == "stair_up"
                 eff_y = next_branch.branch_target_y if next_branch.branch_target_y is not None else self.target_y
@@ -6148,7 +6175,7 @@ class MiningDFSEngine:
             else:
                 edge_res = self._dig_level_edge(
                     direction=lat_dir if branch_kind == "offset_retry" else next_branch.direction,
-                    steps=3 if branch_kind == "offset_retry" else next_branch.steps,
+                    steps=OFFSET_RETRY_STEPS if branch_kind == "offset_retry" else next_branch.steps,
                     target_blocks=target_blocks,
                     parent_node_id=node.node_id,
                     geofence=geofence,
