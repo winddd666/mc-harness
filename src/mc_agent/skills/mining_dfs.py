@@ -1993,6 +1993,27 @@ class MiningDFSEngine:
                 segments.append((node.edge_from_parent.waypoints, False, child_id))
         return segments
 
+    def _is_recorded_shaft_position(self, pos: tuple[int, int, int]) -> bool:
+        for node in self.nodes.values():
+            if pos == node.anchor:
+                return True
+            edge = node.edge_from_parent
+            if edge is not None and (
+                pos in edge.waypoints or (
+                    edge.edge_kind in {"stair_down", "stair_up"}
+                    and _stair_midpoint_index(edge.waypoints, pos) is not None
+                )
+            ):
+                return True
+            if any(
+                branch.kind == "branch_leaf" and branch.status == "completed"
+                and branch.completed_waypoints and branch.completed_waypoints[0] == node.anchor
+                and pos in branch.completed_waypoints
+                for branch in node.branches
+            ):
+                return True
+        return False
+
     def _navigate_to_node(
         self,
         goal_node_id: int,
@@ -5644,7 +5665,11 @@ class MiningDFSEngine:
                 self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
             elif active is None:
                 self.active_node_id = collar.node_id
-            elif math.dist(cur_pos, active.anchor) > 6.0 and math.hypot(cur_pos[0] - collar.anchor[0], cur_pos[2] - collar.anchor[2]) > 48.0:
+            elif (
+                math.dist(cur_pos, active.anchor) > 6.0
+                and math.hypot(cur_pos[0] - collar.anchor[0], cur_pos[2] - collar.anchor[2]) > 48.0
+                and not self._is_recorded_shaft_position(cur_pos)
+            ):
                 self._archive_current_shaft_to_ledger(mark_exhausted=False)
                 self._clear_active_tree_only()
                 if not self._try_restore_saved_shaft(cur_pos, min_hp_ref=min_hp_ref):
@@ -5661,7 +5686,7 @@ class MiningDFSEngine:
                 resume_at_depth = (
                     self.target_y - SCAN_BAND <= cur_pos[1] <= collar.anchor[1] - 20
                     and active.anchor[1] > max(cur_pos[1], self.target_y) + 8
-                    and cur_pos in self.known_corridor_positions
+                    and self._is_recorded_shaft_position(cur_pos)
                 )
                 if resume_at_depth:
                     ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref, max_y=cur_pos[1])
@@ -6327,7 +6352,7 @@ class MiningDFSEngine:
                     if (
                         er in {"completed", "time_slice"}
                         and end_anchor != node.anchor
-                        and (steps_done >= 2 or (er == "time_slice" and steps_done >= 1))
+                        and steps_done >= 1
                     ):
                         next_branch.status = "completed"
                         sp_node = self._create_node(
