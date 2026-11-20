@@ -34,8 +34,10 @@ from typing import TextIO
 
 if __package__:
     from .fleet_lifecycle import LifecycleCounter
+    from .v2_triage import is_http_429_failure
 else:
     from fleet_lifecycle import LifecycleCounter
+    from v2_triage import is_http_429_failure
 
 WT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN_ROOT = pathlib.Path("/home/xzq/projects/mc")
@@ -471,6 +473,7 @@ class BotRow:
     respawns: int = 0
     connection_changes: int = 0
     mixed_guardian_incidents: int = 0
+    http_429_retries: int = 0
 
     @property
     def gained_short(self) -> list[str]:
@@ -533,6 +536,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     slow_calls: list[tuple[float, str, str]] = []
     lifecycle = LifecycleCounter(name)
     http_429 = 0
+    http_429_retries = 0
     rate_waits = 0
     event_preemptions = 0
     has_events = False
@@ -586,7 +590,9 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
             elif tp == "model.rate_wait":
                 if float(ev.get("wait_s") or 0.0) > 0:
                     rate_waits += 1
-            if "429" in str(ev.get("error") or ""):
+            elif tp == "model.http_retry" and ev.get("status_code") in (429, "429"):
+                http_429_retries += 1
+            elif tp == "model.failed" and is_http_429_failure(ev):
                 http_429 += 1
 
     if summaries:
@@ -625,6 +631,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         guardian_incidents=guardian_incidents,
         preemptions=max(preemptions, event_preemptions),
         http_429=http_429,
+        http_429_retries=http_429_retries,
         rate_waits=rate_waits,
         gained=sorted(set(gained)),
         top_tools=[(k, tool_calls[k], tool_fails[k]) for k in sorted(tool_calls, key=lambda t: -tool_calls[t])[:6]],
@@ -698,6 +705,7 @@ def aggregate_by_squad(rows: list[BotRow]) -> list[dict[str, Any]]:
                 "total_deaths": sum(r.deaths for r in group),
                 "avg_deaths": round(sum(r.deaths for r in group) / len(group), 2) if group else 0.0,
                 "http_429": sum(r.http_429 for r in group),
+                "http_429_retries": sum(r.http_429_retries for r in group),
                 "top_error": errors.most_common(1)[0][0] if errors else "-",
             }
         )
@@ -725,8 +733,8 @@ def _write_markdown(
         "",
         "## 1. 各路成绩总览（baseline = 场景 loadout 预授分，earned = 实机净增分）",
         "",
-        "| Squad | Bot | Stage | Status | Score | Baseline | Earned | Eps | Deaths | ID-less deaths | Respawn/spawn | Connection changes | Mixed guardian | Guard | Preempt | 429 | Gained |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Squad | Bot | Stage | Status | Score | Baseline | Earned | Eps | Deaths | ID-less deaths | Respawn/spawn | Connection changes | Mixed guardian | Guard | Preempt | 429 Failures | 429 Retries | Gained |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in sorted(rows, key=lambda x: (x.squad, x.name)):
         g = ", ".join(r.gained_short[:4])
@@ -734,7 +742,8 @@ def _write_markdown(
             f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.score} | "
             f"{int(r.baseline_points or 0)} | {int(r.earned_points or 0)} | {r.episodes_done} | "
             f"{r.deaths} | {r.death_receipts} | {r.respawns} | {r.connection_changes} | "
-            f"{r.mixed_guardian_incidents} | {r.guardian_incidents} | {r.preemptions} | {r.http_429} | {g} |"
+            f"{r.mixed_guardian_incidents} | {r.guardian_incidents} | {r.preemptions} | "
+            f"{r.http_429} | {r.http_429_retries} | {g} |"
         )
     lines.extend(
         [
@@ -749,15 +758,15 @@ def _write_markdown(
     agg = aggregate_by_squad(rows)
     lines.extend(
         [
-            "| 模型 | Bots | Completed | Crash | 平均分 | 平均 Baseline | 平均 Earned | 总死亡 | 场均死亡 | 429 | 头号错误 |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| 模型 | Bots | Completed | Crash | 平均分 | 平均 Baseline | 平均 Earned | 总死亡 | 场均死亡 | 429 Failures | 429 Retries | 头号错误 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for a in agg:
         lines.append(
             f"| {a['label']} | {a['bots']} | {a['completed']} | {a['crashed']} | {a['avg_score']} | "
             f"{a['avg_baseline']} | {a['avg_earned']} | {a['total_deaths']} | {a['avg_deaths']} | "
-            f"{a['http_429']} | `{a['top_error']}` |"
+            f"{a['http_429']} | {a['http_429_retries']} | `{a['top_error']}` |"
         )
     scene_bad = [r for r in rows if r.scene_ok is False]
     lines.extend(["", "## 3. 场景入口校验", ""])
@@ -874,7 +883,7 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"deaths={r.deaths:2d} (idless={r.death_receipts}) respawn/spawn={r.respawns} "
             f"connection_changes={r.connection_changes} guard_mixed={r.mixed_guardian_incidents} "
             f"guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
-            f"429={r.http_429:2d} gained=[{','.join(r.gained_short[:4])}]"
+            f"429_failed={r.http_429:2d} 429_retries={r.http_429_retries:2d} gained=[{','.join(r.gained_short[:4])}]"
             + (" scene=BAD" if r.scene_ok is False else "")
             + (f" wd={r.scene_ticks}skips={r.scene_preempt_skips}" if r.scene_ticks is not None else "")
         )
@@ -890,7 +899,8 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"  {a['label']:22s} bots={a['bots']:2d} done={a['completed']:2d} crash={a['crashed']:d} "
             f"avg_score={a['avg_score']:6.1f} avg_base={a['avg_baseline']:5.1f} "
             f"avg_earned={a['avg_earned']:6.1f} deaths={a['total_deaths']:3d} "
-            f"avg_deaths={a['avg_deaths']:4.2f} 429={a['http_429']:d} top={a['top_error']}"
+            f"avg_deaths={a['avg_deaths']:4.2f} 429_failed={a['http_429']:d} "
+            f"429_retries={a['http_429_retries']:d} top={a['top_error']}"
         )
 
     print("\n--- CROSS-MODEL P0/P1 BUG LEADERBOARD (ranked by affected_bots x count) ---")

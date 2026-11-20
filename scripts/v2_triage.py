@@ -10,6 +10,7 @@ from __future__ import annotations
 import collections
 import json
 import pathlib
+import re
 import sys
 from typing import Any
 
@@ -17,6 +18,17 @@ if __package__:
     from .fleet_lifecycle import LifecycleCounter
 else:
     from fleet_lifecycle import LifecycleCounter
+
+_HTTP_FAILURE = re.compile(r"\b(?:HTTP(?:\s+(?:status|error))?[\s:]+|failed:\s*\[)([1-5]\d{2})\b", re.I)
+
+
+def is_http_429_failure(event: dict[str, Any]) -> bool:
+    """Read the HTTP status from current or historical model.failed events."""
+    status = event.get("status_code")
+    if status is not None:
+        return status in (429, "429")
+    match = _HTTP_FAILURE.search(str(event.get("error") or ""))
+    return match is not None and match[1] == "429"
 
 
 def _extract_error_code(output_text: str) -> str:
@@ -50,6 +62,7 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
     call_start: dict[str, tuple[float, str]] = {}
     rate_waits: list[float] = []
     http_429 = 0
+    http_429_retries = 0
     lifecycle = LifecycleCounter(run_dir.name)
     guardian_incidents = 0
     tool_preemptions = 0
@@ -73,6 +86,10 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
                 w = float(r.get("wait_s") or 0.0)
                 if w > 0:
                     rate_waits.append(w)
+            elif t == "model.http_retry" and r.get("status_code") in (429, "429"):
+                http_429_retries += 1
+            elif t == "model.failed" and is_http_429_failure(r):
+                http_429 += 1
             elif t in ("tool.started", "tool.ready"):
                 cid = str(r.get("call_id") or "")
                 tname = str(r.get("tool") or r.get("name") or (r.get("function") or {}).get("name") or "unknown")
@@ -96,8 +113,6 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
                     slow_calls.append((dur, tname, ef.name))
             elif t == "guardian.incident":
                 guardian_incidents += 1
-            if "429" in str(r.get("error") or ""):
-                http_429 += 1
 
     slow_calls.sort(reverse=True)
     score = summary.get("final_score", summary.get("current_score", 0))
@@ -114,6 +129,7 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
         "deaths": lifecycle.deaths,
         "death_receipts": lifecycle.death_receipts,
         "http_429": http_429,
+        "http_429_retries": http_429_retries,
         "rate_waits": len(rate_waits),
         "max_rate_wait_s": round(max(rate_waits, default=0.0), 2),
         "guardian_incidents": guardian_incidents,
@@ -143,7 +159,7 @@ def main(argv: list[str]) -> int:
             f"[{rep['dir']}] status={rep['status']} elapsed={rep['elapsed_s']:.0f}s "
             f"score={rep['score']} ({rep['pts_per_10m']} pts/10m) eps={rep['episodes_done']} "
             f"llm_reqs={rep['llm_requests']} deaths={rep['deaths']} "
-            f"(idless={rep['death_receipts']}) 429={rep['http_429']} "
+            f"(idless={rep['death_receipts']}) 429_failed={rep['http_429']} 429_retries={rep['http_429_retries']} "
             f"rate_waits={rep['rate_waits']}(max={rep['max_rate_wait_s']}s) "
             f"guardian={rep['guardian_incidents']}/{rep['tool_preemptions']}preempt"
         )
