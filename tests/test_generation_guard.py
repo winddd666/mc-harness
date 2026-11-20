@@ -646,6 +646,61 @@ def test_arrow_hit_falls_back_to_flee_when_no_wall_for_cover():
     assert [a["action"] for a in incident["actions"]] == ["dig_cover", "combat_or_flee"]
 
 
+@pytest.mark.parametrize("entry", ["poll", "boundary"])
+def test_sealed_cover_receipt_outside_pocket_does_not_stop_retreat(monkeypatch, entry):
+    pos = [6392.5, 22, -6631.3]
+    shooter = {"id": 42, "name": "skeleton", "dist": 6.4, "pos": [6392.5, 22, -6624.9]}
+    nearest = {key: shooter[key] for key in ("id", "name", "dist")}
+    moves = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": list(pos), "ready": True, "alive": True, "on_ground": True,
+                        "health": 12.3, "food": 20, "nearest_hostile": nearest}
+            if action == "events":
+                since = kwargs["params"]["since"]
+                return {"events": [{"seq": 1, "type": "hurt", "source": "arrow"}] if since < 1 else []}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 40}], "offhand": None}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_entities":
+                return {"entities": [shooter]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                is_ceiling = (x, y, z) == (6392, 24, -6632)
+                return {"name": "stone" if y < 22 or is_ceiling else "air"}
+            if action == "control" and body.get("forward"):
+                pos[2] -= 2.3
+                moves.append(list(pos))
+            return {"ok": True}
+
+    def sealed_but_empty_pocket():
+        return {
+            "ok": True, "mode": "cover_pocket", "requires_replan": False, "sealed": [True, True],
+            "pocket": [[6393, 22, -6632], [6393, 23, -6632]], "pos_after": list(pos),
+        }
+
+    events = []
+    bot = CaveBot()
+    skills = MacroSkills(bot)
+    monkeypatch.setattr(skills, "dig_cover_pocket", sealed_but_empty_pocket)
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
+    if entry == "poll":
+        incident = guard.poll()
+        cover, retreat = incident["actions"]
+        assert cover["result"]["reason"] == "cover_not_entered"
+    else:
+        guard.stabilize_after_tools()
+        completed, = [event for event in events if event["type"] == "guardian.action.completed"]
+        cover, retreat = completed["result"]["actions"]
+        assert cover["reason"] == "cover_not_entered"
+    assert cover["ok"] is False and retreat["ok"] is True
+    move, = moves
+    assert move == pytest.approx([6392.5, 22, -6633.6])
+
+
 def test_escape_lava_does_not_trust_in_water_false_and_nether_skips_water_bucket(monkeypatch):
     """Reproduces hy4_hy_7_village: escape_water() lied ok=True in lava, looping 11 ticks to death."""
     from mc_agent.skills.safety import SafetyEmergency, check_and_stabilize

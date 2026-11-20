@@ -878,6 +878,17 @@ class CombatEnv:
                 return name
         return None
 
+    def dig_cover_pocket(self, skills: Any) -> dict[str, Any]:
+        result = skills.dig_cover_pocket()
+        self.invalidate_block_cache()
+        pocket = result.get("pocket")
+        if not result.get("ok") or not pocket:
+            return result
+        pos = result.get("pos_after")
+        if pos and [math.floor(pos[0]), math.floor(pos[1] + 0.05), math.floor(pos[2])] == pocket[0]:
+            return result
+        return {**result, "ok": False, "requires_replan": True, "reason": "cover_not_entered"}
+
     def build_tactical(
         self,
         mode: str,
@@ -910,8 +921,7 @@ class CombatEnv:
 
         if norm_mode == "cover_pocket":
             if self.skills is not None and hasattr(self.skills, "dig_cover_pocket"):
-                res = self.skills.dig_cover_pocket()
-                self.invalidate_block_cache()
+                res = self.dig_cover_pocket(self.skills)
                 return {
                     "ok": bool(res.get("ok")),
                     "mode": "cover_pocket",
@@ -2498,6 +2508,8 @@ class SubcorticalInstinctController:
                         covered = True
                         mode = "cover_pocket"
                         actions.append({"action": "cover_pocket", "ok": True})
+                    elif cov.get("reason") == "cover_not_entered":
+                        actions.append({"action": "cover_pocket", "ok": False, "reason": "cover_not_entered"})
                 now_flee = time.monotonic()
                 if now_flee - self._last_flee_at > 25.0:
                     self._recent_flee_streak = 0

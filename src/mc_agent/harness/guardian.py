@@ -1432,7 +1432,7 @@ class GenerationGuard:
                         and not already_in_dug_cover
                         and not recent_cover_fail
                     ):
-                        cover = self._action("dig_cover", skills.dig_cover_pocket)
+                        cover = self._action("dig_cover", lambda: self.combat_env.dig_cover_pocket(skills))
                         actions.append(cover)
                         self._last_dig_cover_block = cur_blk_r
                         self._last_dig_cover_at = time.monotonic()
