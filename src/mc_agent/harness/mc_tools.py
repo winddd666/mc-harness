@@ -2487,7 +2487,19 @@ class McToolset:
 
     def mc_skill_flee(self, distance: int = 14) -> str:
         distance = max(8, min(22, int(distance)))
-        return self._run_skill(lambda: self.skills.flee_hostiles(distance=float(distance), geofence=self.geofence))
+        budget_s, deadline_imminent = self._clamp_tool_budget(35.0, max_s=35.0)
+        if deadline_imminent:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "stop_reason": "episode_deadline_imminent",
+                "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，未发起长距离撤退。"},
+            }, ensure_ascii=False)
+        return self._run_skill(
+            lambda: self.skills.flee_hostiles(
+                distance=float(distance), geofence=self.geofence, max_duration_s=budget_s,
+            )
+        )
 
     def mc_skill_combat(
         self,

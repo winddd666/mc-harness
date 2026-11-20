@@ -2903,6 +2903,103 @@ def test_staircase_first_step_uses_total_budget(monkeypatch) -> None:
     assert result["steps_done"] == 1
 
 
+@pytest.mark.parametrize(
+    "episode_budget,cap,slow_action",
+    [(None, 35.0, "move_to"), (13.0, 9.0, "place"), (17.0, 13.0, None)],
+)
+def test_flee_budget_reaches_shaft_waypoints_and_seals(monkeypatch, episode_budget, cap, slow_action) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+    from mc_agent.skills.mining_dfs import MiningDFSEngine, ShaftEdge, ShaftNode
+
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    pos = [0.5, 30, 2.5]
+    moves = []
+    placed = []
+    actions = []
+    start = clock[0]
+
+    def walk_waypoints(engine, waypoints, *, reverse, min_hp_ref):
+        assert reverse is True
+        x, y, z = waypoints[0]
+        engine.bot.call("move_to", {"x": x + 0.5, "y": y, "z": z + 0.5, "timeout": 60_000})
+        engine.bot.status()
+        return True, None
+
+    monkeypatch.setattr(MiningDFSEngine, "_walk_waypoints", walk_waypoints)
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        timeout = request.extensions["timeout"]["read"]
+        assert 0.0 < timeout <= start + cap - clock[0]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": pos[:], "health": 20, "alive": True, "ready": True}
+        elif path == "get_block":
+            result = {"name": "stone" if body["pos"][1] < 30 else "air"}
+        elif path == "get_entities":
+            result = {"entities": []}
+        elif path == "inventory":
+            result = {"items": [{"name": "cobblestone", "count": 64}]}
+        elif path == "move_to":
+            actions.append(path)
+            moves.append([body["x"], body["y"], body["z"]])
+            assert 0 < body["timeout"] / 1000 < timeout
+            if len(moves) == 2 and slow_action == path:
+                clock[0] += timeout
+                raise httpx.ReadTimeout("offline slow shaft waypoint", request=request)
+            clock[0] += min(1.0, timeout)
+            pos[:] = moves[-1]
+            result = {"pos": pos[:]}
+        elif path == "place":
+            actions.append(path)
+            if slow_action == path:
+                clock[0] += timeout
+                raise httpx.ReadTimeout("offline slow shaft seal", request=request)
+            placed.append(tuple(body["pos"]))
+            result = {"placed": True}
+        elif path == "stop":
+            actions.append(path)
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, geofence=VoidGeofence())
+        toolset._episode_deadline_mono = None if episode_budget is None else start + episode_budget
+        engine = toolset.skills.mining_dfs
+        engine.nodes = {
+            1: ShaftNode(1, "collar", (0, 30, 0), None, None, []),
+            2: ShaftNode(2, "spine", (0, 30, 1), 1, ShaftEdge("spine_forward", "south", [(0, 30, 0)]), []),
+            3: ShaftNode(3, "spine", (0, 30, 2), 2, ShaftEdge("spine_forward", "south", [(0, 30, 1)]), []),
+        }
+        engine.collar_node_id = 1
+        engine.active_node_id = 3
+        original_call = bot.call
+        result = json.loads(toolset.mc_skill_flee())
+        assert engine.active_node_id == (2 if slow_action else 1)
+        assert engine.sealed_positions == set(placed)
+        assert toolset.skills.mining_dfs is engine
+        assert engine.bot is bot and bot.call == original_call
+
+    assert clock[0] - start <= cap
+    assert moves[0] == [0.5, 30, 1.5]
+    if slow_action:
+        assert result["ok"] is False
+        assert result["stop_reason"] == "time_budget"
+        assert result["timeout_path"] == slow_action
+        assert result["pos_after"] == [0.5, 30, 1.5]
+        assert actions[-2:] == [slow_action, "stop"]
+    else:
+        assert result["ok"] is True
+        assert result["mode"] == "retreat_shaft"
+        assert result["hops"] == 2
+        assert result["sealed"] == 6
+        assert "stop" not in actions
+
+
 def test_staircase_tool_caps_long_steps() -> None:
     from mc_agent.harness.mc_tools import McToolset
 

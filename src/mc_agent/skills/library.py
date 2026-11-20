@@ -7636,6 +7636,71 @@ class MacroSkills:
         urgent: bool = False,
         geofence: Any | None = None,
         threat_pos: list[float] | None = None,
+        max_duration_s: float | None = None,
+    ) -> dict[str, Any]:
+        if max_duration_s is None:
+            return self._flee_hostiles(distance=distance, urgent=urgent, geofence=geofence, threat_pos=threat_pos)
+
+        from .mining_dfs import _BudgetSession, _MiningDeadline
+
+        budget = max(0.0, min(35.0, max_duration_s))
+        finish_at = time.monotonic() + budget
+        session = _BudgetSession(self.bot, finish_at - min(1.0, budget / 4))
+        scoped = copy(self)
+        scoped.bot = session.session
+        engine = self._mining_dfs
+        scoped_engine = None
+        if engine is not None and engine.nodes:
+            # Share the map and seal ledger. Leave the live engine and BotSession
+            # wired to their existing callers during the retreat.
+            scoped_engine = copy(engine)
+            scoped_engine.bot = scoped.bot
+            scoped_engine.skills = scoped
+            scoped_engine._deadline = session.deadline
+            scoped._mining_dfs = scoped_engine
+
+        def failed(code: str, message: str) -> dict[str, Any]:
+            return {
+                "ok": False, "requires_replan": True, "stop_reason": code,
+                "error": {"code": code, "message": message},
+                "pos_before": session.first_pos, "pos_after": session.last_status.get("pos"),
+            }
+
+        def stop_pending() -> None:
+            session.deadline = finish_at
+            try:
+                session.call("stop", {}, timeout_s=0.25)
+            except (_MiningDeadline, ApiError, httpx.HTTPError):
+                pass
+
+        try:
+            return scoped._flee_hostiles(distance=distance, urgent=urgent, geofence=geofence, threat_pos=threat_pos)
+        except _MiningDeadline:
+            if session.timeout_path and session.timeout_path not in session._RETRYABLE_PROBES:
+                stop_pending()
+            result = failed("time_budget", "撤退已达到时间预算，请检查最后确认的位置并选择安全站位。")
+            result["deadline_hit"] = True
+            result["timeout_path"] = session.timeout_path
+            return result
+        except ApiError as exc:
+            if exc.code in {"not_connected", "action_quarantined", "action_timeout", "death_loop_cooldown"}:
+                return failed(exc.code, exc.message)
+            raise
+        except httpx.TransportError:
+            stop_pending()
+            return failed("transport_error", "撤退请求中断，请确认当前位置与动作状态。")
+        finally:
+            if scoped_engine is not None:
+                engine.active_node_id = scoped_engine.active_node_id
+                engine.dug_during_return = scoped_engine.dug_during_return
+
+    def _flee_hostiles(
+        self,
+        *,
+        distance: float = 14.0,
+        urgent: bool = False,
+        geofence: Any | None = None,
+        threat_pos: list[float] | None = None,
     ) -> dict[str, Any]:
         """Hold/seal inside a carved shaft when safe or sealable, else sprint-jump flee with death-only stop."""
         target_d = max(8.0, min(22.0, float(distance)))
