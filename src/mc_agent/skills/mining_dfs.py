@@ -1452,6 +1452,9 @@ class MiningDFSEngine:
         if bname in PASSABLE_BLOCKS:
             cache[dpos] = bname
             return True, None, False, 0
+        avoidance = self.skills.temporary_avoidance.get(dpos)
+        if avoidance and avoidance.get("reason") == "dig_timeout" and self.skills._is_block_avoided(dpos):
+            return False, "dig_cell_avoided", False, 0
 
         is_tracked = bname in TRACKED_ORES
         expected_ore_drops = _expected_drops_for_blocks([bname]) if is_tracked else frozenset()
@@ -5066,6 +5069,8 @@ class MiningDFSEngine:
             }
             if scoped.timeout_path is not None:
                 result["timeout_path"] = scoped.timeout_path
+            if scoped.timeout_dig_pos is not None:
+                result["dig_target"] = list(scoped.timeout_dig_pos)
             if act == "explore":
                 gained = {}
                 if scoped.first_inventory is not None and scoped.last_inventory is not None:
@@ -5686,6 +5691,7 @@ class MiningDFSEngine:
                 break
 
         # Priority 2: main DFS loop
+        blocked_branches: set[int] = set()
         idle_streak = 0
         idle_since = time.monotonic()
         last_excavated = len(self.excavated_positions)
@@ -5754,8 +5760,11 @@ class MiningDFSEngine:
                 stop_reason = "quota_reached"
                 break
 
-            next_branch = next((b for b in node.branches if b.status == "pending"), None)
+            next_branch = next((b for b in node.branches if b.status == "pending" and id(b) not in blocked_branches), None)
             if next_branch is None:
+                if any(b.status == "pending" for b in node.branches):
+                    stop_reason = "dig_cell_avoided"
+                    break
                 spine_blocked = any(b.kind == "spine_forward" and b.status == "pruned" for b in node.branches)
                 if node.kind == "spine" and spine_blocked:
                     promo = max(
@@ -5854,12 +5863,18 @@ class MiningDFSEngine:
                 continue
 
             next_branch.status = "active"
-            if next_branch.kind == "offset_retry":
+            branch_kind = next_branch.kind
+            if branch_kind == "offset_retry":
                 lat_dir = next_branch.sidestep_dir or LEFT_RIGHT_DIRS[next_branch.direction][0]
                 resume_k = next_branch.resume_kind or "stair_down"
-                edge_res = self._dig_level_edge(
-                    direction=lat_dir,
-                    steps=3,
+            if branch_kind in {"stair_down", "stair_up"}:
+                is_up = branch_kind == "stair_up"
+                eff_y = next_branch.branch_target_y if next_branch.branch_target_y is not None else self.target_y
+                stair_fn = self._dig_stair_up_edge if is_up else self._dig_stair_down_edge
+                edge_res = stair_fn(
+                    direction=next_branch.direction,
+                    max_steps=next_branch.steps,
+                    target_y=eff_y,
                     target_blocks=target_blocks,
                     parent_node_id=node.node_id,
                     geofence=geofence,
@@ -5868,13 +5883,35 @@ class MiningDFSEngine:
                     min_target_tier=min_target_tier,
                     quota_met=_quota_met,
                 )
-                steps_done = int(edge_res["steps_done"])
-                er = str(edge_res["stop_reason"])
-                breaches_sealed += int(edge_res["breaches_sealed"])
-                catch_placed += int(edge_res["catch_placed"])
-                deferred_added += int(edge_res["deferred_added"])
-                mined_ores.extend(edge_res["mined_ores"])
+            else:
+                edge_res = self._dig_level_edge(
+                    direction=lat_dir if branch_kind == "offset_retry" else next_branch.direction,
+                    steps=3 if branch_kind == "offset_retry" else next_branch.steps,
+                    target_blocks=target_blocks,
+                    parent_node_id=node.node_id,
+                    geofence=geofence,
+                    deadline=deadline,
+                    min_hp_ref=min_hp_ref,
+                    min_target_tier=min_target_tier,
+                    quota_met=_quota_met,
+                )
+            steps_done = int(edge_res["steps_done"])
+            er = str(edge_res["stop_reason"])
+            breaches_sealed += int(edge_res["breaches_sealed"])
+            catch_placed += int(edge_res["catch_placed"])
+            deferred_added += int(edge_res["deferred_added"])
+            mined_ores.extend(edge_res["mined_ores"])
+            if er == "dig_cell_avoided":
+                if steps_done == 0:
+                    next_branch.status = "pending"
+                    blocked_branches.add(id(next_branch))
+                    idle_streak = 0
+                    idle_since = time.monotonic()
+                    continue
+                # Keep the traversed edge and resume after the cooldown.
+                er = "time_slice"
 
+            if branch_kind == "offset_retry":
                 if er == "quota_reached":
                     next_branch.status = "completed"
                     if steps_done >= 1:
@@ -5935,28 +5972,7 @@ class MiningDFSEngine:
                     if steps_done > 0:
                         self._walk_waypoints(edge_res["waypoints"], reverse=True, min_hp_ref=min_hp_ref)
 
-            elif next_branch.kind in {"stair_down", "stair_up"}:
-                is_up = next_branch.kind == "stair_up"
-                eff_y = next_branch.branch_target_y if next_branch.branch_target_y is not None else self.target_y
-                stair_fn = self._dig_stair_up_edge if is_up else self._dig_stair_down_edge
-                edge_res = stair_fn(
-                    direction=next_branch.direction,
-                    max_steps=next_branch.steps,
-                    target_y=eff_y,
-                    target_blocks=target_blocks,
-                    parent_node_id=node.node_id,
-                    geofence=geofence,
-                    deadline=deadline,
-                    min_hp_ref=min_hp_ref,
-                    min_target_tier=min_target_tier,
-                    quota_met=_quota_met,
-                )
-                steps_done = int(edge_res["steps_done"])
-                er = str(edge_res["stop_reason"])
-                breaches_sealed += int(edge_res["breaches_sealed"])
-                catch_placed += int(edge_res["catch_placed"])
-                deferred_added += int(edge_res["deferred_added"])
-                mined_ores.extend(edge_res["mined_ores"])
+            elif branch_kind in {"stair_down", "stair_up"}:
                 end_anchor = tuple(edge_res["end_anchor"])
                 reached_band = (end_anchor[1] >= eff_y - 1) if is_up else (end_anchor[1] <= eff_y + 2)
 
@@ -6101,24 +6117,6 @@ class MiningDFSEngine:
 
             else:
                 # "branch_leaf" or "spine_forward"
-                edge_res = self._dig_level_edge(
-                    direction=next_branch.direction,
-                    steps=next_branch.steps,
-                    target_blocks=target_blocks,
-                    parent_node_id=node.node_id,
-                    geofence=geofence,
-                    deadline=deadline,
-                    min_hp_ref=min_hp_ref,
-                    min_target_tier=min_target_tier,
-                    quota_met=_quota_met,
-                )
-                steps_done = int(edge_res["steps_done"])
-                er = str(edge_res["stop_reason"])
-                breaches_sealed += int(edge_res["breaches_sealed"])
-                catch_placed += int(edge_res["catch_placed"])
-                deferred_added += int(edge_res["deferred_added"])
-                mined_ores.extend(edge_res["mined_ores"])
-
                 if self._note_fluid_abort(er):
                     next_branch.status = "pruned"
                     next_branch.prune_reason = er
@@ -6277,6 +6275,8 @@ class MiningDFSEngine:
             )
         if stop_reason == "pickaxe_low":
             out_res.update(self._pickaxe_low_recovery(counts_after, st_end.get("pos")))
+        if stop_reason == "dig_cell_avoided":
+            out_res["message"] = "当前可走分支的挖掘格处于超时冷却。请先处理障碍，或改从同层的安全站位进矿。"
         if stop_reason == "no_progress":
             out_res["message"] = (
                 "在原地连续多次既没挖到方块也没推进矿井节点（可能卡在死胡同反复重试），已提前结束本轮而不是空耗时间。"

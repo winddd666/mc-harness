@@ -2560,6 +2560,50 @@ def test_first_dig_timeout_does_not_block_the_next_safe_descent(monkeypatch) -> 
     assert engine.collar_node_id == collar.node_id
 
 
+def test_descent_defers_a_timed_out_cell_shared_by_branches_until_retry(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 64.0, 0.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    stalled = (0, 65, 0)
+    world.blocks[stalled] = "gravel"
+    world.blocks[(0, 62, -2)] = "ancient_debris"
+    attempts = []
+
+    def handler(request):
+        if request.url.path.endswith("/dig") and tuple(json.loads(request.content)["pos"]) == stalled:
+            attempts.append(clock.now)
+            if clock.now < 1030:
+                clock.now += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("gravel dig stalled", request=request)
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="SharedDigTimeout", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=(0, 64, 0), parent_id=None, edge_from_parent=None,
+            branches=[mining.BranchSpec("stair_down", direction, 49) for direction in ("east", "north")],
+        )
+        engine.collar_node_id = collar.node_id
+        args = dict(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=32)
+        first = engine.run(**args)
+        second = engine.run(**args)
+        assert first["stop_reason"] == "time_slice"
+        assert second["stop_reason"] == "dig_cell_avoided"
+        assert len(attempts) == 1
+        assert all(branch.status == "pending" for branch in collar.branches)
+        clock.now += 31
+        third = engine.run(**args)
+
+    assert third["stop_reason"] == "quota_reached"
+    assert third["target_gained"] == 1
+    assert len(attempts) == 2
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_waypoint_interpolation_checks_deadline_between_hops(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 
