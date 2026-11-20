@@ -6352,7 +6352,7 @@ class MiningDFSEngine:
                     if (
                         er in {"completed", "time_slice"}
                         and end_anchor != node.anchor
-                        and (steps_done >= 2 or (er == "time_slice" and steps_done >= 1))
+                        and steps_done >= 1
                     ):
                         next_branch.status = "completed"
                         sp_node = self._create_node(

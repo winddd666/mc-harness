@@ -3299,6 +3299,45 @@ def test_explore_rejoins_a_recorded_stair_far_from_its_collar(monkeypatch) -> No
     assert engine.collar_node_id == collar.node_id
 
 
+def test_completed_one_step_spine_keeps_the_forward_route(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 15.0, 0.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    anchor = (0, 15, 0)
+    world.blocks[anchor] = world.blocks[(0, 16, 0)] = "air"
+    world.blocks[(3, 15, 0)] = "ancient_debris"
+
+    with BotSession("tok", bot_username="OneStepSpine", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=(0, 41, -26), parent_id=None, edge_from_parent=None,
+            branches=[mining.BranchSpec("stair_down", "west", 26)],
+        )
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        node = engine._create_node(
+            kind="spine", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, anchor]),
+            branches=[mining.BranchSpec("spine_forward", "east", 1)],
+        )
+        walk = engine._walk_waypoints
+
+        def walk_at_depth(waypoints, *, reverse=False, **kwargs):
+            assert not (reverse and waypoints == [anchor, (1, 15, 0)])
+            assert all(y <= 15 for _, y, _ in waypoints)
+            return walk(waypoints, reverse=reverse, **kwargs)
+
+        monkeypatch.setattr(engine, "_walk_waypoints", walk_at_depth)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=32)
+
+    assert result["stop_reason"] == "quota_reached"
+    assert result["target_gained"] == 1
+    assert result["pos_after"][1] == 15
+    assert node.branches[0].status == "completed"
+    assert any(child.parent_id == node.node_id and child.anchor == (1, 15, 0) for child in engine.nodes.values())
+
+
 def test_level_hazard_can_rejoin_a_dry_parent_with_pending_work() -> None:
     import mc_agent.skills.mining_dfs as mining
 
