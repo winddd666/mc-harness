@@ -3615,8 +3615,32 @@ class MacroSkills:
         item: str,
         count: int = 1,
         equip_slot: str | None = None,
+        *,
+        max_duration_s: float | None = None,
     ) -> dict[str, Any]:
         """Auto-craft intermediate planks/sticks, ensure crafting_table when needed, craft item, and optionally equip."""
+        if max_duration_s is None:
+            return self._craft_gear(item, count, equip_slot)
+        session = _SkillBudgetSession(self.bot, max_duration_s)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            result = scoped._craft_gear(item, count, equip_slot)
+        except (_SkillDeadline, httpx.TimeoutException):
+            session.stop_pending()
+            return {
+                "ok": False,
+                "error": "time_budget",
+                "stop_reason": "time_budget",
+                "requires_replan": True,
+                "message": "合成预算已用尽。请核对背包中的产物和中间材料，再决定是否重试。",
+            }
+        if session.timed_out:
+            session.stop_pending()
+            result["deadline_hit"] = True
+        return result
+
+    def _craft_gear(self, item: str, count: int, equip_slot: str | None) -> dict[str, Any]:
         item = resolve_item_alias(item)
         count = max(1, min(64, count))
         inv_raw, initial = _inventory_snapshot_and_counts(self.bot)
@@ -3796,7 +3820,7 @@ class MacroSkills:
         if slot:
             try:
                 equipped_res = self.bot.call("equip", {"item": item, "slot": slot})
-            except ApiError:
+            except (ApiError, _SkillDeadline):
                 equipped_res = None
 
         out_craft: dict[str, Any] = {

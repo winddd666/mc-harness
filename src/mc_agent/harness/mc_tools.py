@@ -31,6 +31,8 @@ from ..skills.library import (
     TABLE_RECIPES,
     VILLAGE_LANDMARK_BLOCKS,
     VILLAGE_SURVEY_CLUTTER,
+    _SkillBudgetSession,
+    _SkillDeadline,
     _StairDeadline,
     _StairSession,
     _best_pickaxe_in_inv,
@@ -404,8 +406,8 @@ class McToolset:
         with self._state_lock:
             return self._in_water
 
-    def _get_block_name(self, x: int, y: int, z: int) -> str:
-        res = self.bot.call("get_block", {"pos": [x, y, z]})
+    def _get_block_name(self, x: int, y: int, z: int, *, session: _SkillBudgetSession | None = None) -> str:
+        res = (session or self.bot).call("get_block", {"pos": [x, y, z]})
         raw = res.get("name") or res.get("block") or "air"
         return str(raw).removeprefix("minecraft:")
 
@@ -536,17 +538,20 @@ class McToolset:
         *,
         method: str = "POST",
         timeout_s: float | None = None,
+        session: _SkillBudgetSession | None = None,
     ) -> str:
         call_kw: dict[str, Any] = {"method": method}
         if timeout_s is not None:
             call_kw["timeout_s"] = float(timeout_s)
         try:
-            result = self.bot.call(path, body, **call_kw)
+            result = (session or self.bot).call(path, body, **call_kw)
         except AuthError as exc:
             raise RuntimeError(f"MC API 会话不可继续：{exc}") from None
         except DeathLoopCooldownError as exc:
             if not self._wait_for_cooldown:
                 raise RuntimeError(f"MC API 会话不可继续：{exc}") from None
+            if session is not None:
+                return self._format_api_error(path, body or {}, exc)
             try:
                 self._reconnect_once(quarantined=False)
                 result = self.bot.call(path, body, **call_kw)
@@ -561,7 +566,7 @@ class McToolset:
                 raise RuntimeError(f"MC API 网络请求异常（{type(retry_http_exc).__name__}）：{retry_http_exc}") from None
         except ApiError as exc:
             self.update_block_pos(exc.context.get("pos") or exc.context.get("from"))
-            if exc.code not in ("not_connected", "action_quarantined"):
+            if session is not None or exc.code not in ("not_connected", "action_quarantined"):
                 return self._format_api_error(path, body or {}, exc)
             try:
                 self._reconnect_once(quarantined=(exc.code == "action_quarantined"))
@@ -576,6 +581,8 @@ class McToolset:
             except httpx.HTTPError as retry_http_exc:
                 raise RuntimeError(f"MC API 网络请求异常（{type(retry_http_exc).__name__}）：{retry_http_exc}") from None
         except httpx.TimeoutException:
+            if session is not None:
+                raise
             if timeout_s is not None and path == "move_to":
                 try:
                     self.bot.call("stop", {}, timeout_s=2.0, allow_reauth=False)
@@ -605,6 +612,8 @@ class McToolset:
             except httpx.HTTPError as retry_http_exc:
                 raise RuntimeError(f"MC API 网络请求异常（{type(retry_http_exc).__name__}）：{retry_http_exc}") from None
         except httpx.HTTPError as exc:
+            if session is not None:
+                raise RuntimeError(f"MC API 网络请求异常（{type(exc).__name__}）：{exc}") from None
             # A timed-out action may still be running server-side. Recover the
             # quarantined session and retry the same request once.
             try:
@@ -1501,14 +1510,43 @@ class McToolset:
         blocked = self.geofence.check_point(float(x), float(z), action="mc_dig")
         if blocked is not None:
             return self._record_geofence_block(blocked)
+        if self._episode_deadline_mono is None:
+            return self._dig_block(x, y, z, collect)
+        budget_s, deadline_imminent = self._clamp_tool_budget(55.0)
+        if deadline_imminent:
+            return json.dumps({
+                "ok": False,
+                "stop_reason": "episode_deadline_imminent",
+                "requires_replan": True,
+                "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过挖掘。"},
+            }, ensure_ascii=False)
+        session = _SkillBudgetSession(self.bot, budget_s)
         try:
-            bname = self._get_block_name(x, y, z)
+            return self._dig_block(x, y, z, collect, session=session)
+        except (_SkillDeadline, httpx.TimeoutException):
+            stop_confirmed = session.stop_pending()
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "stop_reason": "time_budget",
+                "stop_confirmed": stop_confirmed,
+                "error": {"code": "time_budget", "message": "挖掘预算已用尽。请核对目标方块和背包后再行动。"},
+            }, ensure_ascii=False)
+
+    def _dig_block(
+        self, x: int, y: int, z: int, collect: bool, *, session: _SkillBudgetSession | None = None,
+    ) -> str:
+        bot = session or self.bot
+        try:
+            bname = self._get_block_name(x, y, z, session=session)
+        except _SkillDeadline:
+            raise
         except Exception:
             bname = ""
         req_tier = BLOCK_MIN_PICKAXE_TIER.get(bname, 0)
         if req_tier > 0:
             try:
-                inv = self.bot.inventory()
+                inv = bot.inventory()
                 counts: dict[str, int] = {}
                 for row in inv.get("items") or []:
                     iname = row.get("name")
@@ -1517,6 +1555,8 @@ class McToolset:
                         counts[iname] = counts.get(iname, 0) + icnt
                 best_pick, best_tier = _best_pickaxe_in_inv(counts)
                 held_name = (inv.get("held") or {}).get("name") if isinstance(inv.get("held"), dict) else None
+            except _SkillDeadline:
+                raise
             except Exception:
                 best_pick, best_tier, held_name = None, 0, None
             if best_tier < req_tier:
@@ -1535,10 +1575,10 @@ class McToolset:
                 )
             if best_pick and held_name != best_pick:
                 try:
-                    self.bot.call("equip", {"item": best_pick, "slot": "hand"})
+                    bot.call("equip", {"item": best_pick, "slot": "hand"})
                 except ApiError:
                     pass
-        raw_dig = self._call_json("dig", {"pos": [x, y, z], "collect": collect})
+        raw_dig = self._call_json("dig", {"pos": [x, y, z], "collect": collect}, session=session)
         try:
             parsed_dig = json.loads(raw_dig)
             if isinstance(parsed_dig, dict) and parsed_dig.get("ok") is True:
@@ -2491,7 +2531,21 @@ class McToolset:
 
     def mc_skill_craft_gear(self, item: str, count: int = 1, equip_slot: str | None = None) -> str:
         count = max(1, min(64, int(count)))
-        return self._run_skill(lambda: self.skills.craft_gear(item=item, count=count, equip_slot=equip_slot))
+
+        def craft() -> dict[str, Any]:
+            if self._episode_deadline_mono is None:
+                return self.skills.craft_gear(item=item, count=count, equip_slot=equip_slot)
+            budget_s, deadline_imminent = self._clamp_tool_budget(55.0)
+            if deadline_imminent:
+                return {
+                    "ok": False,
+                    "stop_reason": "episode_deadline_imminent",
+                    "requires_replan": True,
+                    "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过合成。"},
+                }
+            return self.skills.craft_gear(item=item, count=count, equip_slot=equip_slot, max_duration_s=budget_s)
+
+        return self._run_skill(craft)
 
     def mc_skill_ensure_items(
         self,

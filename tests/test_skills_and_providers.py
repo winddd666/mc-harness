@@ -3066,6 +3066,92 @@ def test_surface_scout_clamps_entire_tool_budget(monkeypatch, episode_remaining,
         assert result["segments_completed"] == (4 if cap == 50 else 1)
 
 
+@pytest.mark.parametrize("episode_remaining", [5.0, 13.0])
+def test_dig_shares_episode_budget_across_pickaxe_preflight(monkeypatch, episode_remaining) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        timeout = request.extensions["timeout"]["read"]
+        calls.append(route)
+        if route == "dig":
+            assert timeout == pytest.approx(5.0)
+            clock[0] += timeout
+            raise httpx.ReadTimeout("offline slow dig", request=request)
+        results = {
+            "get_block": {"name": "iron_ore"},
+            "inventory": {"items": [{"name": "stone_pickaxe", "count": 1, "slot": 0}]},
+            "equip": {"equipped": "stone_pickaxe"},
+            "stop": {"released": True},
+        }
+        clock[0] += min(1.0, timeout)
+        return httpx.Response(200, json={"ok": True, "result": results[route]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence())
+        tools._episode_deadline_mono = episode_remaining
+        result = json.loads(tools.mc_dig(1, 64, 1))
+
+    assert result["ok"] is False
+    assert clock[0] <= episode_remaining
+    if episode_remaining == 5.0:
+        assert calls == []
+        assert result["stop_reason"] == "episode_deadline_imminent"
+    else:
+        assert calls == ["get_block", "inventory", "equip", "dig", "stop"]
+        assert result["stop_reason"] == "time_budget"
+        assert result["stop_confirmed"] is True
+
+
+@pytest.mark.parametrize("slow_route", ["craft", "equip"])
+def test_craft_gear_shares_episode_budget_and_keeps_completed_craft(monkeypatch, slow_route) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        timeout = request.extensions["timeout"]["read"]
+        assert 0.0 < timeout <= 8.0 - clock[0]
+        calls.append(route)
+        if route == slow_route:
+            assert timeout == pytest.approx(7.0 - clock[0])
+            clock[0] += timeout
+            raise httpx.ReadTimeout(f"offline slow {route}", request=request)
+        results = {
+            "inventory": {"items": [{"name": "oak_planks", "count": 8, "slot": 0}]},
+            "craft": {"gained": {"stick": 4}},
+            "stop": {"released": True},
+        }
+        clock[0] += min(1.0, timeout)
+        return httpx.Response(200, json={"ok": True, "result": results[route]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence())
+        tools._episode_deadline_mono = 12.0
+        result = json.loads(tools.mc_skill_craft_gear("stick", equip_slot="hand"))
+
+    assert calls[-2:] == [slow_route, "stop"]
+    assert calls.count("craft") == 1
+    assert clock[0] <= 12.0
+    if slow_route == "craft":
+        assert result["ok"] is False
+        assert result["stop_reason"] == "time_budget"
+    else:
+        assert result["ok"] is True
+        assert result["gained"] == {"stick": 4}
+        assert result["deadline_hit"] is True
+        assert result["equipped_slot"] is None
+
+
 def test_smelt_collect_survives_read_timeout() -> None:
     """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
     from mc_agent.harness.world_memory import WorldMemory
