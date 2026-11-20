@@ -2011,8 +2011,13 @@ def test_staircase_up_retries_transient_place_failed() -> None:
     assert len(placement_attempts) == 3
 
 
-@pytest.mark.parametrize("timeout_path", ["get_block", "move_to", "dig"])
-def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypatch, timeout_path) -> None:
+@pytest.mark.parametrize(
+    "timeout_path,episode_budget",
+    [("get_block", None), ("move_to", None), ("dig", None), ("dig", 9.0)],
+)
+def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypatch, timeout_path, episode_budget) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
     import mc_agent.skills.library as library
 
     clock = [0.0]
@@ -2030,6 +2035,8 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
             # BUG-037/r24: the step-0 dig may use up to 40s of the session
             # budget instead of the old flat 15s cap; nothing may exceed it.
             limit = 40 if timeout_path == "dig" else 15
+            if episode_budget is not None:
+                limit = episode_budget - 3.0 - clock[0]
             assert 0 < timeout <= limit + 0.01
             if path == "get_block":
                 # Reading safety probes also consumes the same total budget.
@@ -2056,9 +2063,15 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        skills = MacroSkills(bot)
         original_call = bot.call
-        result = skills.dig_staircase(direction="north", steps=25, stop_on_ore=False)
+        if episode_budget is None:
+            skills = MacroSkills(bot)
+            result = skills.dig_staircase(direction="north", steps=25, stop_on_ore=False)
+        else:
+            toolset = McToolset(bot, geofence=VoidGeofence())
+            toolset._episode_deadline_mono = episode_budget
+            skills = toolset.skills
+            result = json.loads(toolset.mc_skill_staircase(direction="north", steps=6, stop_on_ore=False))
         assert skills.bot is bot
         assert bot.call == original_call
     assert result["ok"] is False
@@ -2069,7 +2082,12 @@ def test_staircase_deadline_covers_inner_calls_and_stops_pending_action(monkeypa
     assert calls.count("stop") == 1
     if timeout_path == "dig":
         assert result["dig_target"]
-        assert "mc_skill_unstick" in result["error"]["message"]
+        if episode_budget is None:
+            assert "mc_skill_unstick" in result["error"]["message"]
+        else:
+            assert clock[0] == episode_budget - 3.0
+            assert skills.failed_stair_dirs == {}
+            assert skills.temporary_avoidance == {}
 
 
 def test_stair_session_leaves_time_for_obsidian_dig(monkeypatch) -> None:
@@ -2901,19 +2919,25 @@ def test_staircase_tool_caps_long_steps() -> None:
     assert result["steps_clamped"] is True
 
 
-def test_staircase_tool_auto_retries_viable_direction_on_zero_progress() -> None:
+def test_staircase_tool_auto_retries_viable_direction_on_zero_progress(monkeypatch) -> None:
     from mc_agent.harness.mc_tools import McToolset
+
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
 
     def handler(request):
         raise AssertionError("no API call expected")
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         toolset = McToolset(bot)
+        toolset._episode_deadline_mono = 109.0
         calls = []
 
         def fake_dig(**kwargs):
+            assert kwargs["deadline"] == 106.0
             calls.append(kwargs["direction"])
             if kwargs["direction"] == "north":
+                clock[0] += 4.0
                 return {
                     "ok": False, "stop_reason": "movement_not_confirmed",
                     "steps_done": 0, "dug_count": 0,
@@ -2926,6 +2950,60 @@ def test_staircase_tool_auto_retries_viable_direction_on_zero_progress() -> None
     assert calls == ["north", "south"]
     assert result["ok"] is True
     assert result["auto_retry_direction"] == "south"
+
+
+def test_staircase_tool_skips_action_with_no_episode_budget(monkeypatch) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: 100.0)
+
+    def handler(request):
+        raise AssertionError("no API call expected")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, geofence=VoidGeofence(radius=100))
+        toolset._episode_deadline_mono = 105.0
+        result = json.loads(toolset.mc_skill_staircase(vertical="pillar"))
+
+    assert result["stop_reason"] == "episode_deadline_imminent"
+    assert result["steps_done"] == 0
+
+
+@pytest.mark.parametrize("direction,vertical", [(None, "up"), ("pillar", "pillar")])
+def test_staircase_tool_shares_episode_budget_with_direction_and_fence_probes(monkeypatch, direction, vertical) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    paths = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        paths.append(path)
+        assert path in {"status", "inventory", "get_block"}
+        timeout = request.extensions["timeout"]["read"]
+        assert timeout <= 106.0 - clock[0]
+        clock[0] += timeout if direction == "pillar" else min(1.5, timeout)
+        result = {
+            "status": {"pos": [0.5, 30, 0.5], "on_ground": True},
+            "inventory": {"items": [{"name": "cobblestone", "count": 64}]},
+            "get_block": {"name": "stone"},
+        }
+        if direction == "pillar":
+            raise httpx.ReadTimeout("offline preflight timeout", request=request)
+        return httpx.Response(200, json={"ok": True, "result": result[path]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, geofence=VoidGeofence(radius=100))
+        toolset._episode_deadline_mono = 109.0
+        result = json.loads(toolset.mc_skill_staircase(direction=direction, vertical=vertical))
+
+    assert result["stop_reason"] == "time_budget"
+    assert result["steps_done"] == 0
+    assert clock[0] == 106.0
+    assert ("get_block" in paths) is (direction is None)
 
 
 def test_tunnel_triggers_retention_cleanup() -> None:

@@ -6561,12 +6561,14 @@ class MacroSkills:
         deadline: float | None = None,
         per_step_timeout: float = 15.0,
     ) -> dict[str, Any]:
+        parent_limits_first_dig = deadline is not None and deadline - time.monotonic() < 40.0
         session = _StairSession(self.bot, 45.0, deadline=deadline, per_step_timeout=per_step_timeout)
         scoped = copy(self)
         scoped.bot = session
         try:
             return scoped._dig_staircase(direction, steps, vertical, stop_on_ore)
         except _StairDeadline:
+            parent_budget_spent = parent_limits_first_dig and time.monotonic() >= session.deadline
             cleanup: dict[str, Any] = {}
             try:
                 cleanup = self.bot.call("stop", {}, timeout_s=1.0, allow_reauth=False)
@@ -6582,7 +6584,7 @@ class MacroSkills:
             timeout_message = "阶梯总预算或单步等待耗尽；请根据实际位置重新规划。"
             pick_tier = getattr(session, "pickaxe_tier", None)
             low_tier_slow_dig = False
-            if session.last_timeout_path == "dig":
+            if session.last_timeout_path == "dig" and not parent_budget_spent:
                 timeout_message = (
                     f"单步挖掘未在预算内确认（目标 {session.last_dig_pos}）。"
                     "若目标位于脚下、为黑曜石/高硬度方块，或同一平台连续超时，"

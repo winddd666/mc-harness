@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from copy import copy
 import json
 import math
 import re
@@ -26,6 +27,8 @@ from ..skills.library import (
     LOG_TYPES,
     NETHER_STEM_TYPES,
     TABLE_RECIPES,
+    _StairDeadline,
+    _StairSession,
     _best_pickaxe_in_inv,
     _can_fit_item_in_inventory,
     _compute_empty_slots,
@@ -2506,16 +2509,23 @@ class McToolset:
             )
         )
 
-    def _check_direction_geofence(self, direction: str, steps: int, action: str) -> str | None:
+    def _check_direction_geofence(
+        self, direction: str, steps: int, action: str, *, status: Callable[[], dict[str, Any]] | None = None
+    ) -> str | None:
         if not self.geofence.enabled:
             return None
         try:
-            st = self.bot.status()
+            st = (status or self.bot.status)()
+        except _StairDeadline:
+            raise
         except Exception:
             return None
         pos = st.get("pos") or []
         if not isinstance(pos, (list, tuple)) or len(pos) < 3:
             return None
+        if direction == "pillar":
+            blocked = self.geofence.check_point(float(pos[0]), float(pos[2]), action=action)
+            return self._record_geofence_block(blocked) if blocked is not None else None
         blocked = self.geofence.check_ray(float(pos[0]), float(pos[2]), direction, steps, action=action)
         if blocked is None:
             return None
@@ -2526,9 +2536,11 @@ class McToolset:
         ]
         return self._record_geofence_block(blocked, safe_directions=safe_dirs)
 
-    def _pick_staircase_direction(self, steps: int, *, vertical: str = "down") -> str:
+    def _pick_staircase_direction(self, steps: int, *, vertical: str, skills: MacroSkills) -> str:
         try:
-            st = self.bot.status() or {}
+            st = skills.bot.status() or {}
+        except _StairDeadline:
+            raise
         except Exception:
             return "north"
         pos = st.get("pos") or []
@@ -2539,12 +2551,14 @@ class McToolset:
         candidates: list[str] = ["north", "east", "south", "west"]
         try:
             probed = (
-                self.skills._probe_viable_up_stair_dirs(bx, by, bz)
+                skills._probe_viable_up_stair_dirs(bx, by, bz)
                 if vertical == "up"
-                else self.skills._probe_viable_down_stair_dirs(bx, by, bz)
+                else skills._probe_viable_down_stair_dirs(bx, by, bz)
             )
             if probed:
                 candidates = probed
+        except _StairDeadline:
+            raise
         except Exception:
             pass
         if self.geofence.enabled:
@@ -2560,55 +2574,65 @@ class McToolset:
         vertical: str = "down",
         stop_on_ore: bool | None = None,
     ) -> str:
+        started = time.monotonic()
+        budget_s, deadline_imminent = self._clamp_tool_budget(45.0, max_s=45.0, reserve_s=3.0)
+        deadline = started + budget_s
+        episode_budget = {"deadline": deadline} if self._episode_deadline_mono is not None else {}
+        if deadline_imminent:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "steps_done": 0,
+                "stop_reason": "episode_deadline_imminent",
+                "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过阶梯施工。"},
+            }, ensure_ascii=False)
+
         d_norm = str(direction or "").strip().lower()
         v_norm = str(vertical or "down").strip().lower()
-        if d_norm == "pillar" or v_norm == "pillar":
-            steps = max(1, min(12, int(steps)))
-            resolved_stop_pillar = False if stop_on_ore is None else bool(stop_on_ore)
-            if self.geofence.enabled:
-                try:
-                    pos = (self.bot.status() or {}).get("pos") or []
-                except Exception:
-                    pos = []
-                if isinstance(pos, (list, tuple)) and len(pos) >= 3:
-                    blocked = self.geofence.check_point(float(pos[0]), float(pos[2]), action="mc_skill_staircase")
-                    if blocked is not None:
-                        return self._record_geofence_block(blocked)
-            return self._run_skill(
-                lambda: self.skills.dig_staircase(
-                    direction="pillar",
-                    steps=steps,
-                    vertical="pillar",
-                    stop_on_ore=resolved_stop_pillar,
-                )
-            )
+        is_pillar = d_norm == "pillar" or v_norm == "pillar"
         original_steps = max(1, int(steps))
         requested_steps = min(25, original_steps)
         # BUG-037: a 45s call cannot finish long requests (models often ask
         # for 40); cap at 10 so the model gets progress instead of another
         # zero/low-progress time_budget.
-        steps = min(requested_steps, 10)
-        if d_norm in ("down", "up"):
-            vertical = d_norm if (v_norm not in ("down", "up") or (v_norm == "down" and d_norm == "up")) else v_norm
-            v_norm = str(vertical).strip().lower()
-            direction = self._pick_staircase_direction(steps, vertical=v_norm)
-        elif not d_norm:
-            direction = self._pick_staircase_direction(steps, vertical=v_norm)
-        else:
-            direction = d_norm
+        steps = min(requested_steps, 12 if is_pillar else 10)
+        if is_pillar:
+            d_norm = v_norm = "pillar"
+        elif d_norm in ("down", "up"):
+            if v_norm not in ("down", "up") or (v_norm == "down" and d_norm == "up"):
+                v_norm = d_norm
+            d_norm = ""
         resolved_stop = (v_norm == "down") if stop_on_ore is None else bool(stop_on_ore)
-        blocked = self._check_direction_geofence(direction, steps, "mc_skill_staircase")
-        if blocked is not None:
-            return blocked
-        def _invoke(dir_key: str) -> dict[str, Any]:
-            return self.skills.dig_staircase(
-                direction=dir_key,
-                steps=steps,
-                vertical=vertical,
-                stop_on_ore=resolved_stop,
+        preflight = copy(self.skills)
+        preflight.bot = _StairSession(self.bot, 45.0, deadline=deadline)
+
+        def _invoke(dir_key: str) -> str:
+            blocked = self._check_direction_geofence(
+                dir_key, steps, "mc_skill_staircase", status=preflight.bot.status
+            )
+            if blocked is not None:
+                return blocked
+            return self._run_skill(
+                lambda: self.skills.dig_staircase(
+                    direction=dir_key, steps=steps, vertical=v_norm, stop_on_ore=resolved_stop, **episode_budget,
+                )
             )
 
-        raw = self._run_skill(lambda: _invoke(direction))
+        try:
+            direction = d_norm or self._pick_staircase_direction(steps, vertical=v_norm, skills=preflight)
+            raw = _invoke(direction)
+        except _StairDeadline:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "direction": d_norm or None,
+                "vertical": v_norm,
+                "steps_done": 0,
+                "stop_reason": "time_budget",
+                "error": {"code": "time_budget", "message": "阶梯方向或围栏预检已用完预算。"},
+            }, ensure_ascii=False)
+        if is_pillar:
+            return raw
         try:
             parsed = json.loads(raw)
         except (TypeError, ValueError):
@@ -2628,8 +2652,11 @@ class McToolset:
         ):
             viable = [d for d in (parsed.get("viable_directions") or []) if isinstance(d, str)]
             alt = next((d for d in viable if d != direction), None)
-            if alt:
-                retry_raw = self._run_skill(lambda: _invoke(alt))
+            if alt and time.monotonic() < deadline:
+                try:
+                    retry_raw = _invoke(alt)
+                except _StairDeadline:
+                    return json.dumps(parsed, ensure_ascii=False)
                 try:
                     retry_parsed = json.loads(retry_raw)
                 except (TypeError, ValueError):
