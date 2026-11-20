@@ -679,8 +679,16 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
     "move_to_omit_y": {
         "id": "move_to_omit_y",
         "category": "api_mechanic",
-        "keywords": ["寻路", "move_to", "path_not_found", "跑图", "探索", "movement_not_confirmed", "stalled", "busy", "void_geofence", "原点"],
-        "rule": "水平跨区移动/探索时，mc_move_to 务必只传 (x, z) 省略 y！硬传地下或山顶 y 极易导致 path_not_found；遇 8s 卡死(stalled)先调 mc_skill_unstick。若 path_not_found 连续出现两次以上，先 unstick 再换成附近的中间点分段走，不要原样重试同一坐标。任何向 (0,0) 世界原点 / 场景中心 220m 外平移的目标都会被 void_geofence_blocked 拦截，属于场景围栏正常保护，应改为在当前可行走范围内选目标。",
+        "keywords": [
+            "寻路", "move_to", "path_not_found", "跑图", "探索", "movement_not_confirmed", "stalled",
+            "busy", "void_geofence_blocked", "implausible_distance", "绝对坐标", "原点",
+        ],
+        "rule": (
+            "水平探索先读 mc_status 的 pos。mc_move_to 的 x、z 是绝对世界坐标，"
+            "如向东走 30 格，传 x=pos[0]+30、z=pos[2]，省略 y。不要把 (0,0) 或 (50,50) 当成默认航点。"
+            "遇 void_geofence_blocked，按回执的 center 与 safe_radius 选圈内可走的新航点。"
+            "遇 path_not_found，先省略水平跑图的 y，再换附近的中间点分段走。stalled 无位移时先调 mc_skill_unstick。"
+        ),
     },
     "move_to_precision": {
         "id": "move_to_precision",
