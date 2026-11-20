@@ -1751,6 +1751,7 @@ class CombatEnv:
         *,
         max_radius: int = 24,
         keep_shield: bool = False,
+        shield_target_id: int | None = None,
         surface_first: bool = False,
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
@@ -2014,6 +2015,12 @@ class CombatEnv:
                     self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": True})
                 except ApiError:
                     pass
+        if keep_shield and isinstance(shield_target_id, int):
+            try:
+                self.bot.call("look", {"entity_id": shield_target_id}, timeout_s=0.9, allow_reauth=False)
+                actions.append("face_water_attacker")
+            except (ApiError, httpx.HTTPError):
+                pass
         landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")
         return {
             "ok": not still_wet and landed,
@@ -2275,7 +2282,7 @@ class SubcorticalInstinctController:
             esc = env.surface_from_water(st)
             actions.append({"action": "water_surface", **esc})
             if not esc.get("respawned") and (not esc.get("ok") or esc.get("in_water")):
-                shore = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield)
+                shore = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield, shield_target_id=mob_id)
                 actions.append({"action": "water_surface_shore", "ok": bool(shore.get("ok"))})
 
         # 1) Creeper emergency: NEVER melee in blast radius — shield & retreat / seal shaft
@@ -2385,7 +2392,7 @@ class SubcorticalInstinctController:
                     if not esc_cur.get("respawned") and (
                         not esc_cur.get("ok") or esc_cur.get("in_water") or st_w.get("in_water")
                     ):
-                        shore_w = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield)
+                        shore_w = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield, shield_target_id=mob_id)
                         actions.append({"action": "water_surface_shore", "ok": bool(shore_w.get("ok"))})
                         st_w = env._safe_status(st_w)
                     nh_w = st_w.get("nearest_hostile")

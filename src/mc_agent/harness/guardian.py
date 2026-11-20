@@ -1142,6 +1142,7 @@ class GenerationGuard:
                         lambda: self.combat_env.escape_deep_water_to_shore(
                             nh_pos,
                             keep_shield=has_shield or bool(status.get("blocking")),
+                            shield_target_id=nh_id,
                             **({"surface_first": True} if drowning else {}),
                         ),
                     )
@@ -1157,7 +1158,9 @@ class GenerationGuard:
                     if not esc_f_ok and not esc_f_res.get("respawned") and esc_f_err not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}:
                         shore_f = self._action(
                             "escape_to_shore",
-                            lambda: self.combat_env.escape_deep_water_to_shore(nh_pos, keep_shield=has_shield),
+                            lambda: self.combat_env.escape_deep_water_to_shore(
+                                nh_pos, keep_shield=has_shield, shield_target_id=nh_id,
+                            ),
                         )
                         actions.append(shore_f)
                         shore_f_res = shore_f.get("result") if isinstance(shore_f, dict) and isinstance(shore_f.get("result"), dict) else {}
@@ -1260,7 +1263,9 @@ class GenerationGuard:
                     shore_act = self._action(
                         "escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
-                            att_pos_w, keep_shield=has_shield, **({"surface_first": True} if drowning else {}),
+                            att_pos_w, keep_shield=has_shield,
+                            shield_target_id=att_w_dict.get("id") if att_w_dict else nh_id,
+                            **({"surface_first": True} if drowning else {}),
                         ),
                     )
                     actions.append(shore_act)
@@ -2098,6 +2103,7 @@ class GenerationGuard:
                             lambda: self.combat_env.escape_deep_water_to_shore(
                                 trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None),
                                 keep_shield=has_shield_pre,
+                                shield_target_id=att_pre.get("id") if isinstance(att_pre, dict) else None,
                                 **({"surface_first": True} if drowning_pre else {}),
                             ),
                             raise_on_http_error=False,
@@ -2425,6 +2431,7 @@ class GenerationGuard:
                         self._no_water_until = max(self._no_water_until, now_b + 30.0)
                         self.events.emit("guardian.no_water_cooldown", duration_s=30.0, streak=self._water_hurt_streak)
                 has_shield_b = False
+                shield_target_b = nh_id
                 if hurts or nh_name or no_water_reentry_b:
                     try:
                         inv_b = self.bot.inventory()
@@ -2438,6 +2445,8 @@ class GenerationGuard:
                         if hurts
                         else None
                     ) or (status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None)
+                    if isinstance(att_b, dict) and isinstance(att_b.get("id"), int):
+                        shield_target_b = att_b["id"]
                     has_shield_b, _ = self._equip_and_raise_shield_for_water(
                         status,
                         b_actions,
@@ -2479,7 +2488,8 @@ class GenerationGuard:
                     shore_b = self._action(
                         "boundary_escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
-                            nh_pos, keep_shield=has_shield_b, **({"surface_first": True} if surface_first else {}),
+                            nh_pos, keep_shield=has_shield_b, shield_target_id=shield_target_b,
+                            **({"surface_first": True} if surface_first else {}),
                         ),
                         raise_on_http_error=False,
                     )

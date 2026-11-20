@@ -4720,6 +4720,60 @@ def test_boundary_retries_shore_directly_after_water_macro_times_out(monkeypatch
     assert attempts == expected
 
 
+@pytest.mark.parametrize("respawned", [False, True])
+def test_trident_preemption_restores_shield_facing_after_shore_attempt(respawned):
+    status = {
+        "pos": [-11031.7, 62.2, 11119.6], "in_water": True, "submerged": True, "on_ground": False,
+        "health": 9.6, "oxygen": 240, "ready": True, "alive": True, "last_death": {"t": 10},
+        "nearest_hostile": {"id": 44, "name": "drowned", "dist": 7.0},
+    }
+    look_calls = []
+    events = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield", "count": 1}}
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": [-11016, 62, 11119]}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "look":
+                look_calls.append(body)
+            if action == "move_to":
+                if respawned:
+                    status.update(in_water=False, health=20, last_death={"t": 20})
+                else:
+                    status["pos"] = [-11023.0, 62.6, 11119.6]
+                raise ApiError("path_not_found", "shore not reached")
+            return {"ok": True}
+
+    class WaterSkills:
+        def escape_water(self):
+            return {"ok": False, "in_water": True}
+
+    guard = GenerationGuard(RiverBot(), EventSink(events.append), checkpoint=lambda: None, skills=WaterSkills())
+    trigger = {
+        "source": "tool_interrupted_hurt", "hurt_source": "trident", "primary_type": "drowned",
+        "primary_entity_id": 44, "primary_pos": [-11038.7, 62.0, 11119.6],
+    }
+    guard.handle_preemption(trigger, interrupted_name="mc_skill_scout_surface")
+
+    shore, = [e["result"] for e in events if e["type"] == "guardian.action.completed" and e["action"] == "escape_to_shore"]
+    assert look_calls[0] == {"entity_id": 44}
+    assert "yaw" in look_calls[1]
+    assert shore["ok"] is False
+    if respawned:
+        assert shore["mode"] == "respawned"
+        assert look_calls.count({"entity_id": 44}) == 1
+    else:
+        assert shore["in_water"] is True
+        assert look_calls[-1] == {"entity_id": 44}
+        assert shore["actions"][-1] == "face_water_attacker"
+
+
 @pytest.mark.parametrize("entry", ["poll_float", "poll_hurt", "boundary", "tool_preemption"])
 def test_critical_health_water_recovery_heads_to_shore_before_slow_float(monkeypatch, entry):
     status = {
