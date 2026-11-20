@@ -4102,6 +4102,45 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert skills.bot is bot
 
 
+@pytest.mark.parametrize("terrain", ["scan", "radial", "open_water"])
+def test_flooded_cave_escape_uses_local_water_level(terrain):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {"pos": [2930.5, 39.2, -10120.5], "in_water": True, "on_ground": False, "alive": True, "ready": True}
+    local_ledge = [2930, 39, -10125]
+    moves = []
+
+    class FloodedCaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "find_blocks":
+                distant_lip = {"name": "grass_block", "pos": [2930, 62, -10121]}
+                ledge = {"name": "stone", "pos": local_ledge}
+                return {"blocks": [distant_lip, ledge] if terrain == "scan" else []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                return {"name": "stone" if terrain != "open_water" and [x, y, z] == local_ledge else "air"}
+            if action == "move_to":
+                goal = [body["x"], body["y"], body["z"]]
+                moves.append(goal)
+                if goal == [2930.5, 40.0, -10124.5]:
+                    status.update(pos=goal, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(FloodedCaveBot()).escape_deep_water_to_shore()
+
+    goal, = moves
+    if terrain == "open_water":
+        assert goal == pytest.approx([2930.5, 40.2, -10132.5])
+        assert result["mode"] == "surface_retreat"
+        assert result["ok"] is False and result["in_water"] is True
+    else:
+        assert goal == [2930.5, 40.0, -10124.5]
+        assert result["ok"] is True and result["in_water"] is False
+
+
 @pytest.mark.parametrize("landing", ["grounded", "airborne", "in_water"])
 def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
     from mc_agent.skills.combat_env import CombatEnv

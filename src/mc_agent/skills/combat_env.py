@@ -1663,7 +1663,7 @@ class CombatEnv:
 
         pos0 = st0.get("pos") or [0.0, 64.0, 0.0]
         start_x, start_y, start_z = float(pos0[0]), float(pos0[1]), float(pos0[2])
-        bx, by, bz = math.floor(start_x), math.floor(start_y + 0.05), math.floor(start_z)
+        by = math.floor(start_y + 0.05)
         actions: list[str] = []
         shore_target: list[float] | None = None
 
@@ -1719,13 +1719,14 @@ class CombatEnv:
                         "actions": actions, "pos_after": st_surface.get("pos"),
                     }
 
-        # 1. Search nearby solid dry shoreline via find_blocks (filtering out ocean floor below waterline).
+        # Look for reachable dry ledges at the local water level, including flooded caves.
         has_threat = isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3
         shore_target = self._find_walkable_shore_target(
             pos0,
             block_types=SHORE_LAND_BLOCKS,
             max_radius=max_radius,
-            min_y=max(61, by - 1),
+            min_y=by - 1,
+            max_y=by + 2,
             threat_pos=threat_pos,
         )
 
@@ -1736,7 +1737,7 @@ class CombatEnv:
                 if has_threat
                 else float(st0.get("yaw") or 0.0)
             )
-            y_probe = max(62, by)
+            y_probe = by
             for deg in (0, 45, -45, 90, -90, 135, -135, 180):
                 cyaw = base_yaw + math.radians(deg)
                 ux, uz = yaw_to_unit_xz(cyaw)
@@ -1745,10 +1746,10 @@ class CombatEnv:
                     pz = math.floor(start_z + uz * dist)
                     if not self._point_allowed(px + 0.5, pz + 0.5, action="water_shore"):
                         continue
-                    g_name = self._get_block_name(px, y_probe, pz)
-                    if _is_solid_ground(g_name):
-                        foot_p = self._get_block_name(px, y_probe + 1, pz)
-                        head_p = self._get_block_name(px, y_probe + 2, pz)
+                    g_name = self._get_block_name(px, y_probe, pz, strict=True)
+                    if g_name and g_name not in HAZARD_BLOCK_TYPES and _is_solid_ground(g_name):
+                        foot_p = self._get_block_name(px, y_probe + 1, pz, strict=True)
+                        head_p = self._get_block_name(px, y_probe + 2, pz, strict=True)
                         if _is_passable(foot_p) and _is_passable(head_p):
                             shore_target = [px + 0.5, float(y_probe + 1), pz + 0.5]
                             break
@@ -1831,7 +1832,7 @@ class CombatEnv:
                         "move_to",
                         {
                             "x": px + ux * step_dist,
-                            "y": max(63.0, py + 1.0),
+                            "y": max(63.0, py + 1.0) if py >= 61.0 else py + 1.0,
                             "z": pz + uz * step_dist,
                             "range": 1.5,
                             "timeout": 2800,
