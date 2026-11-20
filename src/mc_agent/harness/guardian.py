@@ -171,7 +171,7 @@ class _GuardSession:
 
 class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
-    UNSTICK_BUDGET_S = 45.0
+    UNSTICK_BUDGET_S = 30.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
@@ -1830,7 +1830,8 @@ class GenerationGuard:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
         if tool_name in NON_PREEMPTABLE_TOOLS or self._in_reflex:
             return invoke_fn()
-        deadline = time.monotonic() + self.UNSTICK_BUDGET_S if tool_name == "mc_skill_unstick" else None
+        # Leave time for the watcher to exit and for the final bounded stop request.
+        deadline = time.monotonic() + self.UNSTICK_BUDGET_S - 2.0 if tool_name == "mc_skill_unstick" else None
         try:
             with self._intercept_bot_calls(enable_creeper_watcher=True, deadline=deadline):
                 result = invoke_fn()
