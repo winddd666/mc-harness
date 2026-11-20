@@ -4306,7 +4306,7 @@ def test_unarmed_retreat_confirms_landing_after_short_pulse(monkeypatch, landing
     assert bool(retreat.get("respawned")) is (landing == "respawned")
 
 
-@pytest.mark.parametrize("outcome", ["same_life", "respawned_nearby", "time_budget"])
+@pytest.mark.parametrize("outcome", ["same_life", "respawned_nearby", "time_budget", "retreat_into_lava"])
 def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch, outcome):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
@@ -4335,6 +4335,8 @@ def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch
                 status.update(pos=[11032.5, 6.2, -11035.2], on_ground=True)
                 if outcome == "respawned_nearby":
                     status.update(health=20, last_death={"t": 20})
+                if outcome == "retreat_into_lava":
+                    status.update(health=0.33, in_lava=True, on_ground=False)
             return {"ok": True}
 
     def leave_cave(scoped, **kwargs):
@@ -4345,6 +4347,13 @@ def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch
     bot = CaveBot()
     skills = MacroSkills(bot)
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=skills)
+
+    def escape_lava():
+        assert status["in_lava"] is True
+        status.update(in_lava=False, on_ground=True)
+        return {"ok": True, "in_lava": False}
+
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape_lava)
     incident = guard.poll()
 
     retreat, = incident["actions"]
@@ -4352,6 +4361,10 @@ def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch
     assert retreat["ok"] is (outcome == "same_life")
     assert skills.bot is bot
     assert moves[0] == ("control", 8.0)
+    if outcome == "retreat_into_lava":
+        assert retreat["result"]["reason"] == "retreat_into_lava"
+        assert retreat["result"]["lava_recovery"]["ok"] is True
+        assert incident["status"]["in_lava"] is False
     if outcome == "respawned_nearby":
         assert retreat["result"]["respawned"] is True
     elif outcome == "time_budget":

@@ -402,6 +402,8 @@ class GenerationGuard:
             return {**result, "ok": False, "respawned": True}
         if after.get("ready") is False:
             return {**result, "ok": False, "reason": "not_ready"}
+        if result.get("mode") == "flee" and after.get("in_lava"):
+            return {**result, "ok": False, "reason": "retreat_into_lava", "pos_after": after.get("pos") or end}
         return result
 
     def _escape_water(self, before: dict[str, Any]) -> dict[str, Any]:
@@ -443,13 +445,17 @@ class GenerationGuard:
                 if cover is not None:
                     return cover
             return self.combat_env.flee(pos, wait_for_ground=retreat_only)
-        return self._run_recovery_macro(
+        result = self._run_recovery_macro(
             status,
             lambda skills: skills.defend_or_flee(
                 attacker=attacker, counts=counts, health=health, urgent=True, geofence=self.geofence,
             ),
             budget_s=self.COMBAT_RECOVERY_BUDGET_S,
         )
+        if result.get("reason") == "retreat_into_lava":
+            recovery = self._action("escape_lava", self.combat_env.escape_lava)
+            return {**result, "lava_recovery": recovery}
+        return result
 
     def _inside_own_shaft(self) -> bool:
         """Only bunker-in-place when we are inside our own carved tunnel (never in open cave air)."""
