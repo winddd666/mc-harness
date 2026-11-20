@@ -374,6 +374,8 @@ def cmd_launch(
             ]
             if slot.model:
                 cmd.extend(["--model", slot.model])
+            if stage_override == "bare":
+                cmd.append("--day1")
             if idx > 0:
                 cmd.append("--keep-time")
             with log_path.open("wb") as log_file:
@@ -933,7 +935,7 @@ def main() -> int:
     lp.add_argument("--squads", default="nju,glm,hy4")
     lp.add_argument("--bots", default=None, help="Optional comma-separated bot names filter (e.g. HY_2,HY_5,HY_6,HY_9)")
     lp.add_argument("--rpm-override", type=int, default=None, help="Optional per-bot RPM budget override for selected slots")
-    lp.add_argument("--stage-override", default=None, help="Optional stage override for all selected slots (e.g. bare)")
+    lp.add_argument("--stage-override", choices=KNOWN_STAGES, help="Override all selected slots (bare uses portal-safe Day 1 setup)")
     lp.add_argument("--stagger", type=float, default=1.5)
     tp = sub.add_parser("triage")
     tp.add_argument("--wave", required=True)

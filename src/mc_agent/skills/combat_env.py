@@ -1415,9 +1415,42 @@ class CombatEnv:
         distance: float = 14.0,
         urgent: bool = True,
         allow_shaft_seal: bool = True,
+        wait_for_ground: bool = False,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
         st0 = self.bot.status()
+        if (
+            wait_for_ground and st0.get("pos") and st0.get("on_ground") is False
+            and st0.get("alive") is not False and st0.get("ready") is not False
+            and not st0.get("in_lava") and not st0.get("in_water")
+        ):
+            # Ranged hurt is often reported during the knockback hop.
+            before = st0
+            deadline = time.monotonic() + 0.45
+            for _ in range(3):
+                if deadline - time.monotonic() <= 0.1:
+                    break
+                time.sleep(0.1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    landed = self.bot.call("status", method="GET", timeout_s=remaining, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    break
+                pos = landed.get("pos") or before["pos"]
+                if (
+                    landed.get("alive") is False
+                    or (landed.get("dimension") and before.get("dimension") and landed["dimension"] != before["dimension"])
+                    or (landed.get("last_death") is not None and landed["last_death"] != before.get("last_death"))
+                    or math.hypot(pos[0] - before["pos"][0], pos[2] - before["pos"][2]) > 64.0
+                ):
+                    return {"ok": False, "mode": "respawned", "respawned": True, "moved_dist": 0.0, "pos_after": pos}
+                if landed.get("on_ground") is True and not landed.get("in_water"):
+                    st0 = landed
+                    break
+                if landed.get("ready") is False or landed.get("in_water") or landed.get("in_lava"):
+                    break
         pos0 = st0.get("pos")
         if not pos0 or st0.get("alive") is False or st0.get("ready") is False:
             return {"ok": False, "mode": "flee", "reason": "not_ready", "moved_dist": 0.0, "pos_after": pos0}
@@ -1513,6 +1546,9 @@ class CombatEnv:
             return result
         self.invalidate_block_cache()
         route = self.probe_retreat(mid_pos, chosen_yaw, remaining)
+        if route is None and remaining > 3.5:
+            remaining = 3.5
+            route = self.probe_retreat(mid_pos, chosen_yaw, remaining)
         if route is None:
             return result
         goal_y, _ = route
@@ -1620,16 +1656,17 @@ class CombatEnv:
                 "pos_after": st0.get("pos"),
             }
         if not bool(st0.get("in_water")):
+            landed = st0.get("on_ground") is not False
             return {
-                "ok": True,
+                "ok": landed,
                 "in_water": False,
-                "mode": "already_dry",
+                "mode": "already_dry" if landed else "shore_landing_unconfirmed",
                 "pos_after": st0.get("pos"),
             }
 
         pos0 = st0.get("pos") or [0.0, 64.0, 0.0]
         start_x, start_y, start_z = float(pos0[0]), float(pos0[1]), float(pos0[2])
-        bx, by, bz = math.floor(start_x), math.floor(start_y + 0.05), math.floor(start_z)
+        by = math.floor(start_y + 0.05)
         actions: list[str] = []
         shore_target: list[float] | None = None
 
@@ -1685,13 +1722,14 @@ class CombatEnv:
                         "actions": actions, "pos_after": st_surface.get("pos"),
                     }
 
-        # 1. Search nearby solid dry shoreline via find_blocks (filtering out ocean floor below waterline).
+        # Look for reachable dry ledges at the local water level, including flooded caves.
         has_threat = isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3
         shore_target = self._find_walkable_shore_target(
             pos0,
             block_types=SHORE_LAND_BLOCKS,
             max_radius=max_radius,
-            min_y=max(61, by - 1),
+            min_y=by - 1,
+            max_y=by + 2,
             threat_pos=threat_pos,
         )
 
@@ -1702,7 +1740,7 @@ class CombatEnv:
                 if has_threat
                 else float(st0.get("yaw") or 0.0)
             )
-            y_probe = max(62, by)
+            y_probe = by
             for deg in (0, 45, -45, 90, -90, 135, -135, 180):
                 cyaw = base_yaw + math.radians(deg)
                 ux, uz = yaw_to_unit_xz(cyaw)
@@ -1711,10 +1749,10 @@ class CombatEnv:
                     pz = math.floor(start_z + uz * dist)
                     if not self._point_allowed(px + 0.5, pz + 0.5, action="water_shore"):
                         continue
-                    g_name = self._get_block_name(px, y_probe, pz)
-                    if _is_solid_ground(g_name):
-                        foot_p = self._get_block_name(px, y_probe + 1, pz)
-                        head_p = self._get_block_name(px, y_probe + 2, pz)
+                    g_name = self._get_block_name(px, y_probe, pz, strict=True)
+                    if g_name and g_name not in HAZARD_BLOCK_TYPES and _is_solid_ground(g_name):
+                        foot_p = self._get_block_name(px, y_probe + 1, pz, strict=True)
+                        head_p = self._get_block_name(px, y_probe + 2, pz, strict=True)
                         if _is_passable(foot_p) and _is_passable(head_p):
                             shore_target = [px + 0.5, float(y_probe + 1), pz + 0.5]
                             break
@@ -1797,7 +1835,7 @@ class CombatEnv:
                         "move_to",
                         {
                             "x": px + ux * step_dist,
-                            "y": max(63.0, py + 1.0),
+                            "y": max(63.0, py + 1.0) if py >= 61.0 else py + 1.0,
                             "z": pz + uz * step_dist,
                             "range": 1.5,
                             "timeout": 2800,
@@ -1837,13 +1875,44 @@ class CombatEnv:
             )
         except ApiError:
             pass
+        # A jump can clear the water flag before the bot has reached the bank.
+        if (
+            shore_target is not None and not still_wet and st_end.get("on_ground") is False
+            and not st_end.get("in_lava") and math.dist(pos_end[:3], shore_target) <= 2.0
+        ):
+            try:
+                self.bot.call(
+                    "move_to",
+                    {
+                        "x": shore_target[0], "y": shore_target[1], "z": shore_target[2],
+                        "range": 0.25, "timeout": 1600, "stop_on": ["death"],
+                    },
+                    timeout_s=2.5, allow_reauth=False,
+                )
+                actions.append("shore_landing")
+            except (ApiError, httpx.HTTPError) as err:
+                if isinstance(err, httpx.HTTPError):
+                    self._best_effort_stop()
+            st_end = self._safe_status({**st_end, "ready": False})
+            interruption = interrupted_water_escape(st_end)
+            if interruption is not None:
+                return interruption
+            pos_end = st_end.get("pos") or pos_end
+            still_wet = bool(st_end.get("in_water"))
+            if still_wet:
+                try:
+                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": True})
+                except ApiError:
+                    pass
+        landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")
         return {
-            "ok": not still_wet,
+            "ok": not still_wet and landed,
             "in_water": still_wet,
             "mode": "move_to_shore" if shore_target is not None else "surface_retreat",
             "shore_target": shore_target,
             "actions": actions,
             "pos_after": pos_end,
+            **({"reason": "shore_landing_unconfirmed"} if not still_wet and not landed else {}),
         }
 
     def guard_lava_edge(
@@ -2330,10 +2399,11 @@ class SubcorticalInstinctController:
                             env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                         except (ApiError, httpx.HTTPError):
                             pass
-                    fl = env.flee(mob_pos, distance=14.0, urgent=True)
+                    fl = env.flee(mob_pos, distance=14.0, urgent=True, wait_for_ground=mob_name in RANGED_MOBS)
                     actions.append({
                         "action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist"),
                         **({"reason": fl["reason"]} if fl.get("reason") else {}),
+                        **({"respawned": True} if fl.get("respawned") else {}),
                     })
                     self._recent_flee_streak += 1
                     self._last_flee_at = now_flee
@@ -2361,8 +2431,32 @@ class SubcorticalInstinctController:
                                 int(mob_id) if mob_id is not None else None,
                             )
 
-        # 4) Post-combat food recovery when safe and ready
+        # 4) Check for a surviving attacker before handing back control or eating.
         st_post = env._safe_status(st)
+        nh_post = st_post.get("nearest_hostile")
+        if (
+            mode == "counter_killed" and float(st_post.get("health") or 20.0) <= 8.0
+            and isinstance(nh_post, dict) and nh_post.get("name") and nh_post.get("id") != mob_id
+            and self._entity_dist(st_post.get("pos"), nh_post) <= 5.0
+            and st_post.get("ready") is not False and st_post.get("alive") is not False
+            and not st_post.get("in_water") and not st_post.get("in_lava")
+        ):
+            survivor_id = nh_post.get("id")
+            survivor_pos = nh_post.get("pos")
+            if survivor_pos is None and survivor_id is not None:
+                survivors = self._find_live_hostiles(env, radius=6)
+                survivor = next((hostile for hostile in survivors if hostile.get("id") == survivor_id), {})
+                survivor_pos = survivor.get("pos")
+            retreat = env.flee(survivor_pos, distance=12.0, urgent=True)
+            actions.append({"action": "low_hp_abort_flee", "ok": bool(retreat.get("ok")), "entity_id": survivor_id})
+            mode = "low_hp_disengage"
+            st_post = env._safe_status(st_post)
+            if (
+                has_shield and not retreat.get("ok") and not retreat.get("respawned")
+                and st_post.get("ready") is not False and st_post.get("alive") is not False
+                and not st_post.get("in_water") and not st_post.get("in_lava")
+            ):
+                latched_guard = self._latch_shield_at_threat(env, survivor_id)
         hp_post = float(st_post.get("health") or 20.0)
         food_post = int(st_post.get("food") or 20)
         nh_post = st_post.get("nearest_hostile")

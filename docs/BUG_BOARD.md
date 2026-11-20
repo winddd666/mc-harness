@@ -918,6 +918,7 @@
 - **r31_long/r33_short 复验失败**：回程比分别 **13/3、11/6**。r31 GLM5 EP08 三次回程耗时 164.929s，从 Y−55 到 −31，目标 Y−12，最终超时。r33 GLM3 EP04 在约 44s 余量下执行 83.776s 回程，到 Y49/59，越过集时限。r33 四条候选中有两条带未完成回程，另两条已返回地表后再下探。 [r31 GLM5 EP08](../runs/r31_long/glm_glm_5_midgame/20261119-223935-867850.events.jsonl#L176) · [r33 GLM3 EP04](../runs/r33_short/glm_glm_3_village_trade/20261119-224742-727958.events.jsonl#L141) · [r33 DS2 EP04](../runs/r33_short/nju_ds_2_cave_combat/20261119-225515-225063.events.jsonl#L217)
 - **r38→r39**：回程比 **11/5→4/6**。r38 HY4_2 EP02 从 Y−12 连续六次到 Y31，仍距目标 Y51，随后超时。r39 三个深挖超时初筛全部已到地表后再下探，≥3 连击集为 **1**。r39 短波过门槛，更深的 r38 型回程暴露待新版本长波。 [r38 第六次回程](../runs/r38_short/hy4_hy_2_iron/20261120-004253-882042.events.jsonl#L411) · [r39 HY4_9 EP03 归地表](../runs/r39_short/hy4_hy_9_deep_water/20261120-011527-319926.events.jsonl#L114) · [回程入口](../src/mc_agent/skills/mining_dfs.py#L3137)
 - **r40 复验**：回程比 **3/1**，超过门槛。HY4_2 EP02 已走到 Y52 后再次探矿才超时。HY4_3 EP08 在波末仅分到 **92.32s**，战斗抢占了首次爬升，后续只到 Y23，最后一次回程因余量不足被拒，收尾时未完成回程。 [HY4_2 回到地表](../runs/r40_hy4_combat/hy4_hy_2_iron/20261120-051923-764129.events.jsonl#L564) · [HY4_3 末次拒绝](../runs/r40_hy4_combat/hy4_hy_3_midgame/20261120-053640-739752.events.jsonl#L184)
+- **r42 Day 2 复验**：回程比 **8/3**。DS_1 EP03 连续 5 次回程共约 120s，从 Y−26 到 Y4，距目标 Y21 仍差 17 格。下一集延续矿道并到达回程阈值，随后再下探。其余两条深挖超时候选均已回到地表后继续采矿。 [首次回程超时](../runs/r42_day2_village_9bot/nju_ds_1_iron/20261120-063526-419884.events.jsonl#L361) · [下一集完成回程](../runs/r42_day2_village_9bot/nju_ds_1_iron/20261120-064426-706446.events.jsonl#L102)
 
 ### BUG-060 | P2 | Integrator（#1，`harness/mc_tools.py`）| 状态: FIXED（同场景长波门禁通过）
 - **一句话**：实体类目标（发光鱿鱼/动物）会陷入"实体 id 失效 → 重新扫描 → 再失效"的循环。
@@ -947,7 +948,7 @@
 - D1 用只读回放复现 `hy4_audit_r26/hy4_hy_6_nether_bastion` 的 **51 = 31 条混合 Guardian 事件 + 20 条含死亡的消息**。新 Fleet 输出为 **20 次明确死亡（全部无源 ID）**、**22 次重生或出生回执**、**0 条显式连接变化**、**31 条混合事件**。旧日志的连接变化总数未知。离线夹具通过双发、掉线、同批两死、`×N` 和跨 Bot 去重。 [EP02 混合事件](../runs/hy4_audit_r26/hy4_hy_6_nether_bastion/20261119-094622-266718.events.jsonl#L1017) · [EP02 死亡与重生回执](../runs/hy4_audit_r26/hy4_hy_6_nether_bastion/20261119-094622-266718.events.jsonl#L1020) · [D1 报告](../../s-triage/docs/D1-r11-triage.md#4ca-bug-063-fleet-死亡口径与-r26-对账)
 - `r31_short` 的真实 Fleet 导出已显示对应列。GUITest 分别计 **5** 条无 ID 死亡、**7** 条重生或出生、**8** 条混合 Guardian 事件。 [r31 榜单](../runs/r31_short/triage-r31_short.md#L24)
 
-### BUG-064 | **P1（Day 1 砍树效率与 `BUG-047` 残余慢调用）** | Slice C（#4，`skills/library.py`）+ Integrator（`harness/mc_tools.py`）| 状态: OPEN（`r41_day1_15bot` 15 并发实测）
+### BUG-064 | **P1（Day 1 砍树效率与 `BUG-047` 残余慢调用）** | Slice C（#4，`skills/library.py`）+ Integrator（`harness/mc_tools.py`）| 状态: FIXED（`28052f1` 已合入，待 r43 实机验收）
 
 - **一句话**：`mc_skill_harvest_logs`（底层 `_dig_target_blocks`）在树林/地形遮挡下会反复撞同一批不可达原木空转 **90 秒（0 块入包）**，且单次 deadline 高达 90s，既直接拖垮 Day 1 砍树效率（`MoveTest_01` 连撞 4 次耗时 6 分钟+），又是全队 `>=60s` 慢调用榜与 `BUG-047` 集超时最后的残余源头。
 - **实测（`r41_day1_15bot`，5 NJU + 10 HY4 = 15 并发 `bare` 20m）**：
@@ -962,12 +963,65 @@
   2. 下调木头/采块 `mine_deadline` 上限至 **`40–45s`**，并新增可选 `max_duration_s` 参数由 [mc_tools.py](../src/mc_agent/harness/mc_tools.py) 接入 `_clamp_tool_budget` 受 `episode_deadline_mono` 钳制；
   3. 砍树候选排序优先脚平齐的低处树干（`y` 贴近 `bot_y`），提高单次入包率。
 - **验收标准**：`mc_skill_harvest_logs` 离线单测覆盖“连续 4 次不可达 12s 内早停”与“低处树干优先”；实机 15 并发 Day 1 波次中 `harvest_logs >= 60s` 慢调用为 **0**，0 产出 90s 空转为 **0**，`BUG-047 episode elapsed - budget max <= 10s`。
+- **发布与复验**：r42 Day 1 仍在旧 Python 指纹，工具 p99 **91.048s**，HY4_3 EP01 的第二次采木耗时约 91s、整集超 **57.027s**。`28052f1` 后续已合入，待新版本 Day 1 复验。 [r42 采木](../runs/r42_day1_5bot/hy4_hy_3_bare/20261120-063104-637104.events.jsonl#L77)
+
+### BUG-066 | P1（Day 1 场景跑偏）| Slice D2（场景）+ Integrator（runner）| 状态: FIXED（`5e871e6` 已合入，待 r43 实机验收）
+
+- **影响**：`r41_day1_15bot` 的 HY4_6、HY4_7 以 `bare/overworld` 通过入口。两路 EP01 都获得 `enter_the_nether`，随后 **5 集**被派下界堡垒或遗迹，**0/5** 验证，消耗 **2006.324 Bot·s**（按各集 UTC 起止计，约占两路计划时长 **83.6%**）。两路均未验证石器或铁器，进下界各得 30 分。 [HY4_6 终版](../runs/r41_day1_15bot/hy4_hy_6_bare/wild-endurance-r41_day1_15bot_hy_6_bare-20261120-060107.json) · [HY4_7 终版](../runs/r41_day1_15bot/hy4_hy_7_bare/wild-endurance-r41_day1_15bot_hy_7_bare-20261120-060109.json)
+- **实据**：两路首个 actor 工具之前已出现相邻的出场坐标回执（约 `[972,56,350.5]`），随后 watchdog 心跳确认 `the_nether`。HY4_6 曾短暂回到主世界，后续心跳又回到下界。日志未记录触发跨维度的具体传送门或指令。 [HY4_6 EP01](../runs/r41_day1_15bot/hy4_hy_6_bare/20261120-060123-062890.events.jsonl#L12) · [HY4_7 EP01](../runs/r41_day1_15bot/hy4_hy_7_bare/20261120-060119-514673.events.jsonl#L15) · [HY4_6 心跳](../runs/r41_day1_15bot/hy4_hy_6_bare/stdout.log#L38) · [HY4_7 心跳](../runs/r41_day1_15bot/hy4_hy_7_bare/stdout.log#L47)
+- **源码与最小修复**：watchdog 和集入口只把下界场景离开下界视为维度偏离。主世界场景向下界发展原本用于合法传送门进度。为 Day 1 裸装基准配置无传送门干扰的开局，且在预准备后、派题前校验维度。识别通过明确传送门目标进入下界的正常晋级。 [看门狗](../scripts/l3_wild_endurance_runner.py#L1180) · [集入口](../scripts/l3_wild_endurance_runner.py#L1902)
+- **验收标准**：同一 15 路 Day 1 配置下，明确传送门晋级前无裸装 Bot 因维度偏离获派下界目标。复测显式传送门目标仍能完成合法跨维度链。
+
+### BUG-067 | P1（`mc_skill_smelt` 93.6s 超时穿透 + 地表长距 `mc_move_to:move_timeout` 22x）| Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: OPEN（`r42_day1_5bot` / `r42_day2_village_9bot` 实测）
+
+- **一句话**：① `mc_skill_smelt` 默认 `wait_timeout_s=95.0` 未受 `BUG-047` 单次 `<=55s` 与 `episode_deadline_mono` 钳制，单次熔炼 7 粗铜吃满 **93.6s**；② 地表寻村/探索时模型直接传 60–140m 远坐标给 `mc_move_to`，撞满 25s 预算触发 **9/9 bots、22 次 `move_timeout`**，把 10 分钟白天的有效推进半径锁死在 94–155m。
+- **实测证据**：
+  - `r42_day1_5bot`：`nju_guitest_01_bare` `mc_skill_smelt(raw_copper, count=7)` 耗时 **93.6s**（[r42_day1 榜单](../runs/r42_day1_5bot/triage-r42_day1_5bot.md)）。
+  - `r42_day2_village_9bot`：`mc_move_to:move_timeout` 居全波第 1（**9 bots / 22 次**），例如 `hy4_hy_10_iron` 连续 5 次长距 `mc_move_to` 全部超时（[r42_day2 榜单](../runs/r42_day2_village_9bot/triage-r42_day2_village_9bot.md)）。
+- **源码定位**：
+  - [library.py](../src/mc_agent/skills/library.py#L4382-L4388)：`smelt_items(..., wait_timeout_s: float = 95.0)` 未在 `mc_tools.py` 经 `_clamp_tool_budget` 钳制。
+  - [mc_tools.py](../src/mc_agent/harness/mc_tools.py#L1209-L1225)：`mc_move_to` 只钳制了 `eff_move_timeout <= 25s`，未对水平目标距离 `> 36m` 的地表长距寻路做分段步长截断（25s 内根本走不完 80–140m 复杂地形）。
+- **最小修复**：
+  1. `mc_tools.py` 调用 `smelt_items` 前用 `_clamp_tool_budget(..., hard_cap_s=55.0)` 钳制 `wait_timeout_s`（且 `smelt_items` 到点前自动取出炉内已烧出成品并返回 `partial_smelt`），确保任何 `mc_skill_smelt <= 55s`；
+  2. `mc_move_to` 在水平距离 `> 36m` 且未指定 `entity_id` 时，自动按方向截断为 `<= 32m` 中途航点并在成功/超时后返回当前坐标与 `remaining_dist`，避免 100m 直连必撞 25s 超时；
+  3. 顺手收尾 `P2-41`（`library.py:5325` `unstick` 四向安全出口）。
+- **验收标准**：补离线单测覆盖 `smelt_items` 受集预算钳制（`<=55s`）与 `mc_move_to` 超 36m 自动截断航点；实机 `mc_skill_smelt >= 60s` 为 0，`day2_village` 探索 `move_timeout` 显著下降且单集推进半径 `>= 180m`。
+
+### BUG-068 | P1（`mine_dfs` 地下 `climb_progress` 8 连切片 + `unknown_fail` 6x）| Slice A（#3 Codex #1，`skills/mining_dfs.py`）| 状态: OPEN（`r42_day1_5bot` / `r42_day2_village_9bot` 实测）
+
+- **一句话**：地下回地表时 `mc_skill_mine_dfs(action="climb_out")` 每爬 1–5 格就提前退出报 `climb_progress`（单机连刷 **8 次**），且 `mine_dfs` 在 `r42` 两波中出现 **6 次 `unknown_fail`** 未暴露结构化原因。
+- **实测证据**：
+  - `r42_day2_village_9bot`：`nju_ds_1_iron` 连续 8 次 `climb_progress`（`y=-26→-6→-3→-2→3→4`），并夹杂 2 次 `needs_surface_climb`；`hy4_hy_7/9_iron`、`nju_ds_1_iron` 合计 4 次 `mc_skill_mine_dfs:unknown_fail`（[r42_day2 榜单](../runs/r42_day2_village_9bot/triage-r42_day2_village_9bot.md)）。
+  - `r42_day1_5bot`：`nju_guitest_01_bare` 2 次 `mc_skill_mine_dfs:unknown_fail`（[r42_day1 榜单](../runs/r42_day1_5bot/triage-r42_day1_5bot.md)）。
+- **最小修复**：
+  1. 在 `mining_dfs.py` `climb_out` 循环内遇到小幅阻挡/单步 `staircase` 部分进展时，只要剩余时间预算 `>= 10s` 且有垂直进展（`dy >= 1`），继续在同一调用内推进而非立刻退出报 `climb_progress`；
+  2. 审计 `mine_dfs` 所有 `ok=False` 返回分支，补齐结构化 `error.code` / `stop_reason`，消除 `unknown_fail`。
+- **验收标准**：离线单测覆盖“多步连续爬升合并为单次调用”和“异常分支无 `unknown_fail`”；实机单集 `climb_progress <= 2`、`unknown_fail = 0`。
+
+### BUG-069 | P1（地表涉水 `y=62` 与坡地撤退 `unsafe_landing` 致 4 台铁装 Bot 各 2 死）| Slice B（#2 子 AGY，`harness/guardian.py` + `skills/combat_env.py`）| 状态: OPEN（`r42_day2_village_9bot` 实测）
+
+- **一句话**：铁装 Bot 在地表探索遇河/夜幕骷髅时反复触发 `water_escape_failed`（`y=62`）与 `unsafe_landing`（撤退方向无安全落脚点），导致 4 台 HY4 Bot 各死亡 2 次（共 8 死，全部伴随 `guard=9..17`、`guard_mixed=2..3`）。
+- **实测证据**：`r42_day2_village_9bot` 中 `hy4_hy_4/6/8/9_iron` 各 2 死；`hy4_hy_6/8_iron` 报 `mc_skill_unstick:water_escape_failed`（`y=62.2..62.8`），`hy4_hy_5/6/9_iron` 多次报 `unsafe_landing`（[r42_day2 榜单](../runs/r42_day2_village_9bot/triage-r42_day2_village_9bot.md)）。
+- **最小修复**：
+  1. 核验刚合入的 `cf89eb0` 5 连提交是否已覆盖 `y=62` 地表开阔河流脱困；
+  2. 当撤退方向全部被 `unsafe_landing` 拦截且受到远程/近战持续伤害时，优先触发 `raise_shield` / 反击或短距横向避障，严禁原地反复报 `unsafe_landing` 挨打致死。
+- **验收标准**：离线单测覆盖“地表 `y=62` 涉水遇骷髅”与“撤退全被 `unsafe_landing` 拦截时切举盾/反击”；实机地表铁装波次死亡率明显下降、`water_escape_failed = 0`。
+
+### BUG-070 | P1（`r42_day1_5bot` & `r42_day2_village_9bot` 闭环深度取证）| Slice D1（#5 DeepSeek #1，只读 `runs/r42_*`）| 状态: OPEN
+
+- **核查清单**：
+  1. `r42_day2_village_9bot`：`hy4_hy_7_iron` 命中 `dirt_path` 后为何未继续找到村庄主体（坐标/时间/工具链）？
+  2. `r42_day2_village_9bot`：`hy4_hy_4/6/8/9_iron` 共 8 次死亡的精确伤害源与 `guard_mixed` 时间线；
+  3. `r42_day1_5bot`：`nju_movetest_01_bare` 3 次死亡原因，以及 NJU 2 台下矿仅采到 1 块 `raw_iron`、却采了 7–20 块 `raw_copper` 的矿层/耗时账本。
+- **交付**：把精确行号、时间线和必要的新工单/修订写回本看板与 `docs/D1-r11-triage.md`。
+- **发布与复验**：`5e871e6` 已合入集成树。r42 的五个裸装槽没有重跑 HY4_6/7，且启动早于该补丁，0 次偏离是这五槽的观察。复验核对带保护的实际 runner 与受影响槽。 [r42 五槽终版](../runs/r42_day1_5bot/triage-r42_day1_5bot.md)
 
 ## P2 Backlog（不抢 P0/P1；KB/脚本类由 #6 随时消化，核心代码类由 #2/#3/#4 在各自 P0/P1 清零后顺延处理）
 
 > 来源：Slice D1 `/home/xzq/projects/mc/.worktrees/s-triage/docs/D1-r11-triage.md`（`r11_22bot` 22 路轨迹）。以下均为策略/提示/非阻塞小优化，不丢弃。
 
 - **P2-41** `unstick` 只尝试东向出口。r40 的 37 次执行中 **30** 次被 `guardian.unstick_exit_blocked` 拦截，涉及 **7 路、16 集**，中位 **1.466s**，最长 **11.777s**。出口循环设置首个东向并无条件退出，Guardian 随后只验证该朝向。最小修复是在同一预算内按方向寻找经过现有落脚判定的出口。全部不合格时保留拒绝。验收覆盖东侧悬空但另一方向安全、四向均不安全两个夹具。 [HY4_4 EP03 拒绝](../runs/r40_hy4_combat/hy4_hy_4_cave_combat/20261120-052020-665582.events.jsonl#L48) · [候选朝向](../src/mc_agent/skills/library.py#L5325) · [安全判定](../src/mc_agent/harness/guardian.py#L1563)
+- **P2-42** Day 1 黄昏提示在零模型预准备后丢失。选择器给铁器目标添加夜间封井提示，预准备后的成功与失败分支都从静态 playbook 重新生成任务。离线按同一调用顺序回放，两条路径均丢失提示。r41 的 25 次铁器派发均走预准备（7 成功、18 失败），actor 任务里均无该提示，实际选中黄昏分支的次数未记录。最小修复是保留带条件的提示，再按新库存更新材料提示。验收覆盖预准备成功、失败各一例，最终 actor 任务保留黄昏提示。 [选择器](../src/mc_agent/harness/curriculum.py#L1414) · [成功重渲染](../src/mc_agent/harness/curriculum.py#L2215) · [失败重渲染](../src/mc_agent/harness/curriculum.py#L2230) · [r41 失败样本](../runs/r41_day1_15bot/hy4_hy_10_bare/20261120-061436-382140.events.jsonl#L2)
 
 - **P2-1** `mc_move_to` 微距 `range=0.1` 反复 `movement_not_confirmed`：`6f54b6f` 已把"已在 range 内"转为成功；r17 仍剩 10 次（2 次 `entity_id` 目标未覆盖、其余为 `status()` 失败或 range 被后端改写的边界）。建议转换逻辑扩展到 entity_id，并用 error 内 `pos` 兜底。
 - **P2-2** `mc_move_to:path_not_found` 59 次 / 11 bots，短距失败后不自动 `unstick`，其中 15 次显式硬传 `y`。KB `data_1_21_11.py:682-683` 已有规则，需在提示/上下文层加强。
@@ -981,6 +1035,7 @@
 - **P2-10** `out_of_reach_vertical` 桶交互（y 差 6.8/9.0）：3 次。已有可执行提示，属策略层。
 - **P2-11** `mine_dfs` 未达成目标时仍返回 `ok=true`（`quota_reached`/`shaft_exhausted`/`time_slice_progress`）：约 130 次。建议 `ok` 与 `goal_met` 分离，避免模型误判进度。
 - **P2-12** `island_recon_sweep` 24 次 `objective_verified=false`：该 target 无 `advancement_id`，`curriculum.py:220-228` 必然落到 `return False`。仅影响报表字段，请勿用它做晋级门槛（进度看 `material_progress/chunks_after`）。
+  r42 的 `day2_village_search` 同样无成就验证器。HY4_7 EP02 已实际取箱并绑床，但两种报表进展字段均为 false。验收 Day 2 据点时逐项引用工具回执。 [取箱](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L170) · [绑床](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L229) · [Day 2 配置](../src/mc_agent/harness/curriculum.py#L1326)
 - **P2-13**（原 BUG-004 降级）`dig_staircase` 地形边界停止：`movement_not_confirmed 9 / missing_step_support 7 / fluid_or_bedrock 8 / cave_or_drop_ahead 4`；66 次调用中位 17.9s、仅 5 次 >60s、max 92.3s。属正常地形判定，已有可执行 hint；只需优化"换向/垫脚"提示与失败方向记忆，不占 P1。
 - **P2-14**（持续发生，建议 D2 顺手改）下界 prompt 歧义：任务文本"钻石镐在下界Y8-22挖ancient_debris"被模型读成"在下界挖钻石"。`bad_target_for_dimension` 每波稳定触发 **4~7 次**（r13 5 / r15 4 / r18 7 / r19 7 / r21 6 / r22 6 / r23 4），每次浪费一个模型轮次。建议改为"用钻石镐挖 ancient_debris（下界 Y8-22）；钻石仅存在于主世界"。
 - **P2-15** 长尾工具耗时（r12）：`mine_blocks` 单次 **300.6s**（obsidian×4，`temporarily_avoided:1/timeout`，0 产出）、`smelt` 102s（12→9）、`harvest_logs` 87~91s（部分产出）。`mine_blocks` 内部 `mine_deadline` 仅 45~90s（`library.py:2524`），但 `dig`（:2568）未传 `timeout_s`，单次服务器超时即可吃掉全预算。建议同 `_StairSession` 加硬 deadline。
@@ -1095,6 +1150,12 @@
   - `brewing_alchemy` → 首集 `minecraft:nether/brew_potion`（已有 blaze_powder/nether_wart/glass_bottle）
   - `cave_combat` → 首集 `minecraft:adventure/kill_a_mob` + 存活 ≥180s（已有铁甲/弓/盾）
 - **验收目标**：r16 起三 stage 的首集 target 与 stage 语义一致，分数可横向比较；`mc_window_view` stalled ≤1。
+
+### SCENE-002 | 状态: OPEN | 提单人: #1 主 AGY | stage名: `day2_village_near`（Slice D2 `#6 DeepSeek #2`）
+- **地形/结构要素**：用 `locate structure #minecraft:village` 定位真实村庄，但把 Bot 出生点设在村庄外围 **120–180m** 的主世界安全地表（避免直接降落在村中心，专门考验中距发现+进村）。
+- **初始背包与成就**：同 `iron` 阶段（铁镐/铁斧/铁盾/火把/圆石/面包/木头），时间设为 **Day 2 早晨（`time set 1000`）**，确保有完整白天验证寻村与占屋。
+- **死亡拉回规则**：沿用主世界安全地表出生点，禁止误跨维度（复用 `5e871e6` 护栏）。
+- **核心验证目标**：端到端验证 `day2_village_search` 完整闭环（发现 `bell`/`dirt_path`/`hay_block` → 占领村民屋 `bind_bed` 绑重生点 → 薅干草块/箱子 → 交易或入夜切地下矿井），避免随机空降 9 台全在 300m+ 荒野测不到进村逻辑。
 
 > 任何会话需要特定实机复现/验收环境时，按以下 5 行模板追加需求单；`#6` 实现为 `l3_wild_endurance_runner.py --stage <name>` 并接入 `v2_fleet.py` 后标为 `READY_FOR_RUN`，由 `#1 主 AGY` 合入上机。
 >
