@@ -4224,6 +4224,50 @@ def test_hot_floor_guard_verifies_dry_landing_after_crouch_failure(landing_safe)
         assert step["result"]["reason"] == "unsafe_landing"
 
 
+@pytest.mark.parametrize("still_magma", [True, False])
+def test_attack_replans_only_on_confirmed_magma(still_magma):
+    status = {"pos": [0.5, 64, 0.5], "health": 17, "food": 20, "ready": True, "alive": True, "on_ground": True}
+    moves = []
+    attacks = []
+
+    class MagmaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                since = kwargs["params"]["since"]
+                return {"events": [] if since else [{"seq": 1, "type": "hurt", "source": "hot_floor"}]}
+            if action == "posture":
+                return {"sneaking": True}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if y >= 64:
+                    return {"name": "air"}
+                return {"name": "magma_block" if still_magma and (x, z) == (0, 0) else "stone"}
+            if action == "move_to":
+                moves.append(body)
+                status["pos"] = [body[k] for k in ("x", "y", "z")]
+                return {"ok": True}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(MagmaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    assert guard.poll()["actions"][0]["ok"] is True
+
+    def attack():
+        attacks.append(True)
+        raise httpx.ReadTimeout("attack timed out")
+
+    if still_magma:
+        result = json.loads(guard.run_tool_with_reflex("mc_attack", attack))
+        assert result["requires_replan"] is True and result["error"]["code"] == "hot_floor"
+        assert result["recovery"]["result"]["mode"] == "stepped_off"
+        assert len(moves) == 1 and attacks == []
+    else:
+        with pytest.raises(httpx.ReadTimeout, match="attack timed out"):
+            guard.run_tool_with_reflex("mc_attack", attack)
+        assert attacks == [True] and moves == []
+
+
 
 
 

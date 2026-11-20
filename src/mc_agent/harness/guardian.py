@@ -216,7 +216,7 @@ class GenerationGuard:
         self._last_gear_check_at = float("-inf")
         self._last_torch_place_at = float("-inf")
         self._hot_floor_retry_at = float("-inf")
-        self._hot_floor_retry_block: tuple[str, int, int, int] | None = None
+        self._last_hot_floor_block: tuple[str, int, int, int] | None = None
         self.previous_health: float | None = None
         self.previous_ready: bool | None = None
         self.cursor = int(getattr(bot, "_last_event_seq", 0) or 0)
@@ -609,12 +609,12 @@ class GenerationGuard:
 
     def _needs_hot_floor_stance(self, status: dict[str, Any], now: float) -> bool:
         return status.get("on_ground") is True and not status.get("sneaking") and (
-            now >= self._hot_floor_retry_at or self._hot_floor_block(status) != self._hot_floor_retry_block
+            now >= self._hot_floor_retry_at or self._hot_floor_block(status) != self._last_hot_floor_block
         )
 
     def _sneak_on_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
         self._hot_floor_retry_at = time.monotonic() + self.HOT_FLOOR_RETRY_S
-        self._hot_floor_retry_block = self._hot_floor_block(status)
+        self._last_hot_floor_block = self._hot_floor_block(status)
         posture = {"sneak": True, "shield": bool(status.get("blocking")), "jump": False}
         result = self.bot.call("posture", posture, timeout_s=1.0)
         if result.get("sneaking") is False:
@@ -626,15 +626,42 @@ class GenerationGuard:
             self._hot_floor_retry_at = float("-inf")
             return {**result, "ok": True}
 
+        step = self._step_off_hot_floor(status)
+        self._hot_floor_retry_at = float("-inf") if step.get("ok") else time.monotonic() + self.HOT_FLOOR_RETRY_S
+        return {**result, **step}
+
+    def _step_off_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
         step_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 3.0)
         step_env = CombatEnv(step_bot, geofence=self.geofence)
         try:
-            step = step_env.step_off_hot_floor(status)
+            return step_env.step_off_hot_floor(status)
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
-            step = {"ok": False, "reason": "time_budget"}
-        self._hot_floor_retry_at = float("-inf") if step.get("ok") else time.monotonic() + self.HOT_FLOOR_RETRY_S
-        return {**result, **step}
+            return {"ok": False, "reason": "time_budget"}
+
+    def _protect_attack_on_hot_floor(self) -> str | None:
+        if self._last_hot_floor_block is None:
+            return None
+        try:
+            status = self.bot.status()
+        except (ApiError, httpx.HTTPError):
+            return None
+        if (
+            status.get("ready") is False or status.get("alive") is False or status.get("on_ground") is not True
+            or status.get("in_water") or status.get("in_lava")
+            or self._hot_floor_block(status) != self._last_hot_floor_block
+        ):
+            return None
+        self.combat_env.invalidate_block_cache()
+        if not self.combat_env.is_on_hot_floor(status["pos"]):
+            return None
+        step = self._action("hot_floor_exit_before_attack", lambda: self._step_off_hot_floor(status))
+        return json.dumps({
+            "ok": False,
+            "requires_replan": True,
+            "error": {"code": "hot_floor", "message": "脚下是岩浆块，请确认安全落脚后重新选择攻击目标。"},
+            "recovery": step,
+        }, ensure_ascii=False)
 
     def _try_eat_food(self, food_name: str, eat_st: dict[str, Any], *, action_name: str = "eat") -> dict[str, Any] | None:
         """Eat via `use_item`; treat transient `not_ready`/`wrong_server` as deferred retry, not failure."""
@@ -1908,6 +1935,10 @@ class GenerationGuard:
 
     def run_tool_with_reflex(self, tool_name: str, invoke_fn: Callable[[], str]) -> str:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
+        if tool_name == "mc_attack" and not self._in_reflex:
+            receipt = self._protect_attack_on_hot_floor()
+            if receipt is not None:
+                return receipt
         if tool_name in NON_PREEMPTABLE_TOOLS or self._in_reflex:
             return invoke_fn()
         # Leave time for the watcher to exit and for the final bounded stop request.

@@ -657,6 +657,11 @@ class CombatEnv:
                     return None
         return walk_y, needs_jump
 
+    def is_on_hot_floor(self, pos: Sequence[float]) -> bool:
+        x, y, z = map(float, pos[:3])
+        ground_y = math.floor(y + 0.05) - 1
+        return any(self._get_block_name(bx, ground_y, bz, strict=True) == "magma_block" for bx, bz in _hitbox_columns(x, z))
+
     def step_off_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
         pos = status.get("pos")
         if not pos or status.get("on_ground") is not True:
