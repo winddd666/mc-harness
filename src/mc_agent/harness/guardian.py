@@ -508,10 +508,12 @@ class GenerationGuard:
         pos = list(nh["pos"]) if isinstance(nh.get("pos"), (list, tuple)) and len(nh["pos"]) >= 3 else None
         return name, dist, eid, pos
 
-    def _find_hostile_position(self, entity_id: int | None, entity_name: str) -> list[float] | None:
+    def _find_hostile_position(
+        self, entity_id: int | None, entity_name: str, *, session: _GuardSession | None = None,
+    ) -> list[float] | None:
         # Live status identifies the nearest hostile without always including coordinates.
         try:
-            response = self.bot.call("get_entities", {"radius": 16})
+            response = (session or self.bot).call("get_entities", {"radius": 16})
         except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
             raise
         except Exception:
@@ -1646,6 +1648,43 @@ class GenerationGuard:
         fraction = distance / desired_distance
         return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": 1.0}
 
+    def _retreat_after_unsafe_exit(self, deadline: float | None) -> dict[str, Any] | None:
+        now = time.monotonic()
+        if deadline is None or now >= deadline:
+            return None
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=min(now + 4.0, deadline))
+        try:
+            status = bot.status()
+            if (
+                status.get("ready") is False or status.get("alive") is False
+                or status.get("in_water") or status.get("in_lava")
+            ):
+                return None
+            name, distance, entity_id, threat_pos = self._extract_hostile_info(status)
+            ranged = name in RANGED_MOBS
+            if not name or distance > (16.0 if ranged else 6.0):
+                return None
+            if threat_pos is None:
+                threat_pos = self._find_hostile_position(entity_id, name, session=bot)
+            env = CombatEnv(bot, geofence=self.geofence)
+            recovery = self._action(
+                "unsafe_exit_retreat",
+                lambda: env.flee(threat_pos, distance=8.0, allow_shaft_seal=False, wait_for_ground=ranged),
+                raise_on_http_error=False,
+            )
+            result = recovery.get("result")
+            if recovery.get("ok") and isinstance(result, dict):
+                return {**result, "requires_replan": True, "pos_before": status.get("pos")}
+            return None
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return None
+        except RunTimedOut:
+            self._stop_after_recovery_timeout()
+            raise
+        except (ApiError, httpx.HTTPError):
+            return None
+
     @contextmanager
     def _intercept_bot_calls(
         self,
@@ -2130,19 +2169,19 @@ class GenerationGuard:
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _RecoveryBudgetExceeded
                 return result
-        except _UnsafeFleeExit:
-            self.events.emit("guardian.flee_exit_blocked", tool=tool_name)
+        except (_UnsafeFleeExit, _UnsafeUnstickExit):
+            self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
+            recovery = self._retreat_after_unsafe_exit(deadline)
+            if recovery is not None:
+                return json.dumps(recovery, ensure_ascii=False)
+            message = (
+                "撤退方向缺少安全落脚点，请改从有支撑的方向离开。"
+                if is_flee else "脱困出口缺少安全落脚点，请从当前位置寻找另一条路线。"
+            )
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
-                "error": {"code": "unsafe_landing", "message": "撤退方向缺少安全落脚点，请改从有支撑的方向离开。"},
-            }, ensure_ascii=False)
-        except _UnsafeUnstickExit:
-            self.events.emit("guardian.unstick_exit_blocked", tool=tool_name)
-            return json.dumps({
-                "ok": False,
-                "requires_replan": True,
-                "error": {"code": "unsafe_landing", "message": "脱困出口缺少安全落脚点，请从当前位置寻找另一条路线。"},
+                "error": {"code": "unsafe_landing", "message": message},
             }, ensure_ascii=False)
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()

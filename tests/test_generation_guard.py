@@ -4586,6 +4586,54 @@ def test_bug072_flee_bounds_nested_shaft_moves_and_stops_on_timeout(monkeypatch,
     assert bot.call == orig_call
 
 
+@pytest.mark.parametrize("tool", ["mc_skill_flee", "mc_skill_unstick"])
+@pytest.mark.parametrize("safe_exit", [True, False])
+def test_bug076_unsafe_actor_exit_checks_another_route_when_a_hostile_is_close(tool, safe_exit):
+    from mc_agent.skills.combat_env import yaw_to_unit_xz
+
+    status = {
+        "pos": [0.5, 64, 0.5], "alive": True, "ready": True, "on_ground": True, "health": 5.0,
+        "nearest_hostile": {"id": 7, "name": "pillager", "dist": 2.0, "pos": [2.5, 64, 0.5]},
+    }
+    motions = []
+    yaw = [0.0]
+
+    class RiverbankBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                x, y, z = body["pos"]
+                supported = x <= 0 if safe_exit else (x == 0 and z == 0)
+                return {"name": "stone" if y == 63 and supported else "air"}
+            if action == "look":
+                yaw[0] = body["yaw"]
+            if action == "control":
+                motions.append(action)
+                dx, dz = yaw_to_unit_xz(yaw[0])
+                status["pos"] = [0.5 + 2.3 * dx, 64.0, 0.5 + 2.3 * dz]
+            if action == "move_to":
+                motions.append(action)
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    bot = RiverbankBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    stop_on = ["death"] if tool == "mc_skill_flee" else []
+    first_choice = {"forward": True, "yaw": -1.5708, "ms": 900, "stop_on": stop_on}
+
+    result = json.loads(guard.run_tool_with_reflex(tool, lambda: json.dumps(bot.call("control", first_choice))))
+
+    assert result["requires_replan"] is True
+    assert result["ok"] is safe_exit
+    if safe_exit:
+        assert motions[0] == "control"
+        assert status["pos"][0] < 0
+    else:
+        assert result["error"]["code"] == "unsafe_landing"
+        assert motions == []
+
+
 @pytest.mark.parametrize("action", ["control", "move_to"])
 @pytest.mark.parametrize("solid_exit", [True, False])
 @pytest.mark.parametrize("dimension", ["the_nether", "overworld"])
