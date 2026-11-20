@@ -971,6 +971,7 @@
 - **实据**：两路首个 actor 工具之前已出现相邻的出场坐标回执（约 `[972,56,350.5]`），随后 watchdog 心跳确认 `the_nether`。HY4_6 曾短暂回到主世界，后续心跳又回到下界。日志未记录触发跨维度的具体传送门或指令。 [HY4_6 EP01](../runs/r41_day1_15bot/hy4_hy_6_bare/20261120-060123-062890.events.jsonl#L12) · [HY4_7 EP01](../runs/r41_day1_15bot/hy4_hy_7_bare/20261120-060119-514673.events.jsonl#L15) · [HY4_6 心跳](../runs/r41_day1_15bot/hy4_hy_6_bare/stdout.log#L38) · [HY4_7 心跳](../runs/r41_day1_15bot/hy4_hy_7_bare/stdout.log#L47)
 - **源码与最小修复**：watchdog 和集入口只把下界场景离开下界视为维度偏离。主世界场景向下界发展原本用于合法传送门进度。为 Day 1 裸装基准配置无传送门干扰的开局，且在预准备后、派题前校验维度。识别通过明确传送门目标进入下界的正常晋级。 [看门狗](../scripts/l3_wild_endurance_runner.py#L1180) · [集入口](../scripts/l3_wild_endurance_runner.py#L1902)
 - **验收标准**：同一 15 路 Day 1 配置下，明确传送门晋级前无裸装 Bot 因维度偏离获派下界目标。复测显式传送门目标仍能完成合法跨维度链。
+- **r43 五槽启动观察**：三路 HY4 和 MoveTest 通过主世界入口。GuiTest 在 `(6400,-6400)` 与 `(6400,-6560)` 两处候选未通过传送门安全检查，最终 `not_ready`、0 集。拒绝回执未区分真的扫到门与无法确认扫描结果，也没有记录其他被过滤候选的原因。15 路配置、HY4_6/7 和显式传送门均待实机复验。 [GuiTest 启动](../runs/r43_day1_5bot/nju_guitest_01_bare/stdout.log#L1) · [GuiTest 终版](../runs/r43_day1_5bot/nju_guitest_01_bare/wild-endurance-r43_day1_5bot_guitest_01_bare-20261120-071614.json#L17) · [MoveTest 选到替代点](../runs/r43_day1_5bot/nju_movetest_01_bare/stdout.log#L1) · [扫描判定](../scripts/l3_wild_endurance_runner.py#L160)
 
 ### BUG-067 | P1（`mc_skill_smelt` 93.6s 超时穿透 + 地表长距 `mc_move_to:move_timeout` 22x）| Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: FIXED（`0dfc0fe` 已合入，待 r43 实机验收）
 
@@ -1014,6 +1015,17 @@
   2. `r42_day2_village_9bot`：`hy4_hy_4/6/8/9_iron` 共 8 次死亡的精确伤害源与 `guard_mixed` 时间线；
   3. `r42_day1_5bot`：`nju_movetest_01_bare` 3 次死亡原因，以及 NJU 2 台下矿仅采到 1 块 `raw_iron`、却采了 7–20 块 `raw_copper` 的矿层/耗时账本。
 - **交付**：把精确行号、时间线和必要的新工单/修订写回本看板与 `docs/D1-r11-triage.md`。
+
+### BUG-071 | **P1（地表移动与搜寻效率极低：10 分钟仅推进 94–155m，缺少零 LLM 往返高速斥候技能）** | Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: OPEN（用户实测指正 + `r42_day2_village_9bot` 量化）
+
+- **一句话**：目前地表探索/寻村完全依赖 LLM 手动循环调用 `mc_move_to` + `mc_find_blocks` + `mc_get_entities`，每推进 ~30m 就要付 3 次 LLM 往返（15–30s），导致 10 分钟白天有效推进半径仅 **94–155m**（均速 **~0.25 格/秒**，比正常玩家疾跑慢 20 倍），远低于原版村庄 300–500m 的平均间距。
+- **实测证据**：`r42_day2_village_9bot` 9 台 Bot 跑满整个白天，最大位移仅 `33–155m`，全波 22 次 `move_timeout`；且 `library.py` 当前无任何地表高速推进/巡航复合技能。
+- **最小修复（新增 `mc_skill_scout_surface` 复合技能并暴露为工具）**：
+  1. **零 LLM 往返多段连续推进**：在 `library.py` 新增 `scout_surface(direction="auto", target_types=None, max_duration_s=45.0, step_dist=28.0)`，受 `mc_tools.py:_clamp_tool_budget(..., hard_cap_s=50.0)` 与 `episode_deadline_mono` 严格钳制；单次调用内自动沿选定/未探索方向连续推进 **3–5 段 × 28–32m**（目标单次调用推进 **100–150m**，1 集即可覆盖 **350–500m**）。
+  2. **每段落地零开销自动扫描 + 命中即早停**：每完成一段自动执行 `find_blocks(radius=64)` 搜村庄特征（`bell`, `hay_block`, `dirt_path`, `composter`, `lectern`）+ `get_entities(radius=64)` 搜 `villager`/`iron_golem`（同时把途经 `lava`/`obsidian` 记入结果），**一旦命中目标立刻早停并返回精确坐标、距离与群系**。
+  3. **自动避水/避围栏/遇险早停**：每步出发前检查 `VoidGeofence`；若某段 `move_timeout` / `path_not_found` / 落入水格，自动向 ±45° 偏航绕行而非原地死磕或下河游泳；检测到近距敌怪或受击立即早停交还控制权。
+  4. **单集推进效率可量化**：返回值包含 `distance_traveled`、`segments_completed`、`final_pos`、`detected_pois`、`detected_entities`、`stop_reason`。
+- **验收标准**：补离线单测覆盖“多段零 LLM 连续推进 + 中途命中 `bell`/`villager` 立即早停 + 遇围栏/超时偏航绕开 + 严守 `<=50s` 预算”；实机纯随机空降（非 `day2_village_near`）1 集（~4–5 分钟）有效探索半径从 94–155m 提升至 **`>= 280m`**。
 - **D1 已补取证**（审计报告 §4cl）：HY4_7 EP02 在土路后已到村庄建筑、从箱中取出物品并完成床交互。三次实体查询均缺 `villager`，无村民回执，终版验证字段仍为 false。四路铁装的 8 死为 5 箭伤、2 爆炸、1 近战。9 条混合事件中 1 条是重生后的连接恢复，3 次浮水失败均在无显式死亡的其他集。MoveTest 三死为两次箭伤与一次近战。两台 NJU 的 `raw_iron=1`、`raw_copper=7/20` 都有同期库存回执，逐次采矿、熔炼和死亡账见报告。 [土路](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L24) · [取箱](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L170) · [实体过滤](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L286) · [连接恢复](../runs/r42_day2_village_9bot/hy4_hy_4_iron/20261120-064217-563301.events.jsonl#L131) · [MoveTest 库存](../runs/r42_day1_5bot/nju_movetest_01_bare/20261120-064425-812878.events.jsonl#L98) · [GUITest 库存](../runs/r42_day1_5bot/nju_guitest_01_bare/20261120-063800-887294.events.jsonl#L88)
 - **SCENE-002 复验补充**：命中村庄方块后直接查 `villager` 并核对仍可见的床、箱和交易对象。HY4_5 EP03 跨过黄昏阈值后仍开始移动与扫描，记录在 §4cl，场景需覆盖派发时为白天、执行中跨黄昏的路径。 [黄昏](../runs/r42_day2_village_9bot/hy4_hy_5_iron/20261120-063759-468845.events.jsonl#L244) · [后续移动](../runs/r42_day2_village_9bot/hy4_hy_5_iron/20261120-063759-468845.events.jsonl#L266) · [只在派发时的黄昏门禁](../src/mc_agent/harness/curriculum.py#L1487)
 - **发布与复验**：`5e871e6` 已合入集成树。r42 的五个裸装槽没有重跑 HY4_6/7，且启动早于该补丁，0 次偏离是这五槽的观察。复验核对带保护的实际 runner 与受影响槽。 [r42 五槽终版](../runs/r42_day1_5bot/triage-r42_day1_5bot.md)
