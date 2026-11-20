@@ -174,7 +174,7 @@ class McToolset:
             if world_memory is not None
             else WorldMemory(default_memory_path_for_bot(bot))
         )
-        self.skills = MacroSkills(bot)
+        self.skills = MacroSkills(bot, geofence=self.geofence)
         self.skills.world_memory = self.world_memory
 
     def rebind_runtime_hooks(
@@ -189,6 +189,7 @@ class McToolset:
         """Rebind per-episode timeout/cooldown callbacks on a persistent shared McToolset."""
         if geofence is not None:
             self.geofence = geofence
+            self.skills.geofence = geofence
         if wait_for_cooldown is not None:
             self._wait_for_cooldown = bool(wait_for_cooldown)
         self._stop_check = stop_check
@@ -1182,9 +1183,11 @@ class McToolset:
         # r12: a stale action lease made /move_to block ~101s before returning
         # busy. /status already exposes the lease owner, so probe it cheaply and
         # fail fast instead of queueing a long path behind an unrelated action.
+        origin_pos = None
         try:
             pre = self.bot.call("status", timeout_s=2.0)
             if isinstance(pre, dict):
+                origin_pos = pre.get("pos")
                 self._update_status_cache(pre)
                 busy_action = str(pre.get("busy") or "")
                 if busy_action:
@@ -1221,6 +1224,24 @@ class McToolset:
                 },
                 ensure_ascii=False,
             )
+        waypoint = None
+        # Budgeted episodes return after one hop so the actor can reassess terrain.
+        if (
+            self._episode_deadline_mono is not None
+            and entity_id is None and x is not None and z is not None
+            and isinstance(origin_pos, (list, tuple)) and len(origin_pos) >= 3
+            and all(isinstance(origin_pos[i], (int, float)) and math.isfinite(origin_pos[i]) for i in (0, 2))
+        ):
+            dx, dz = float(x) - origin_pos[0], float(z) - origin_pos[2]
+            distance = math.hypot(dx, dz)
+            if math.isfinite(distance) and distance > 36.0:
+                waypoint = [origin_pos[0] + 32.0 * dx / distance, origin_pos[2] + 32.0 * dz / distance]
+                blocked = self.geofence.check_point(*waypoint, action="mc_move_to")
+                if blocked is not None:
+                    return self._record_geofence_block(blocked)
+                payload["x"], payload["z"] = waypoint
+                payload.pop("y", None)
+
         raw = self._call_json("move_to", payload, timeout_s=eff_move_timeout)
         try:
             first = json.loads(raw)
@@ -1236,6 +1257,8 @@ class McToolset:
                         raw = self._call_json("move_to", payload, timeout_s=retry_timeout)
         except (ValueError, ApiError, httpx.HTTPError):
             pass
+        if waypoint is not None:
+            return self._move_waypoint_receipt(raw, waypoint, [float(x), float(z)], geofence_clamped_info)
         if x is not None and z is not None:
             try:
                 parsed = json.loads(raw)
@@ -1381,6 +1404,38 @@ class McToolset:
             except (TypeError, ValueError):
                 pass
         return out_raw
+
+    def _move_waypoint_receipt(
+        self, raw: str, waypoint: list[float], target: list[float], geofence_info: dict[str, Any] | None
+    ) -> str:
+        receipt = json.loads(raw)
+        result = receipt.get("result") or {}
+        error = receipt.get("error") or {}
+        pos = result.get("pos") or result.get("pos_after") or error.get("pos")
+        if receipt.get("ok") is False:
+            receipt["requires_replan"] = True
+        if pos is None or receipt.get("ok") is False:
+            try:
+                status = self.bot.call("status", method="GET", timeout_s=1.0)
+                self._update_status_cache(status)
+                pos = status.get("pos") or pos
+            except (ApiError, httpx.HTTPError):
+                pass
+        remaining = None
+        if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+            remaining = round(math.hypot(target[0] - float(pos[0]), target[1] - float(pos[2])), 1)
+        receipt["result"] = {
+            **result,
+            "partial_move": True,
+            "waypoint_xz": waypoint,
+            "target_xz": target,
+            "pos": pos,
+            "remaining_dist": remaining,
+            "hint": "本次执行途中航点。请根据当前位置和剩余距离继续分段移动或换方向。",
+        }
+        if geofence_info:
+            receipt.update(geofence_info)
+        return json.dumps(receipt, ensure_ascii=False)
 
     def mc_dig(self, x: int, y: int, z: int, collect: bool = True) -> str:
         blocked = self.geofence.check_point(float(x), float(z), action="mc_dig")
@@ -2370,8 +2425,19 @@ class McToolset:
 
     def mc_skill_smelt(self, input_item: str, count: int = 1, fuel_item: str | None = None) -> str:
         count = max(1, min(64, int(count)))
+        budget_s, deadline_imminent = self._clamp_tool_budget(55.0)
+        if deadline_imminent:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过熔炼。"},
+                },
+                ensure_ascii=False,
+            )
         return self._run_skill(
-            lambda: self.skills.smelt_items(input_item=input_item, count=count, fuel_item=fuel_item)
+            lambda: self.skills.smelt_items(
+                input_item=input_item, count=count, fuel_item=fuel_item, wait_timeout_s=budget_s
+            )
         )
 
     def mc_skill_collect_drops(self, radius: int = 12, max_pickups: int = 8) -> str:

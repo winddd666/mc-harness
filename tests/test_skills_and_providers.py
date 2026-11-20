@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 import pytest
@@ -551,7 +552,7 @@ def test_unstick_uses_floor_on_negative_coords_and_clears_hitbox() -> None:
             return httpx.Response(200, json={"ok": True, "result": {"pos": [-3.3, 102.0, -5.3], "health": 20, "food": 20}})
         if path == "/get_block":
             pos = tuple(body["pos"])
-            name = solid_blocks.get(pos, "air")
+            name = solid_blocks.get(pos, "stone" if pos[1] == 101 else "air")
             return httpx.Response(200, json={"ok": True, "result": {"name": name, "diggable": name != "air"}})
         if path == "/dig":
             pos = tuple(body["pos"])
@@ -573,7 +574,7 @@ def test_unstick_uses_floor_on_negative_coords_and_clears_hitbox() -> None:
     assert (-4, 103, -6) in dug_coords
     assert (-4, 102, -5) in dug_coords
     assert (-3, 103, -5) in dug_coords
-    assert controls and controls[0]["jump"] is True
+    assert controls and controls[0]["jump"] is False
 
 
 def test_kb_lookup_jit_hints_and_path_not_found_recovery() -> None:
@@ -907,7 +908,8 @@ def test_unstick_ignores_suffocation_hurt_and_harvest_logs_inv_delta() -> None:
                 # Gravel refills the cell once after the first dig, then clears on the second dig
                 name = "gravel" if state["gravel_hits"] < 2 else "air"
                 return httpx.Response(200, json={"ok": True, "result": {"name": name, "diggable": name != "air"}})
-            return httpx.Response(200, json={"ok": True, "result": {"name": "air", "diggable": False}})
+            name = "stone" if key[1] == 95 else "air"
+            return httpx.Response(200, json={"ok": True, "result": {"name": name, "diggable": False}})
         if path == "/dig":
             state["dig_bodies"].append(body)
             pos = tuple(int(v) for v in body["pos"])
@@ -1529,6 +1531,50 @@ def test_move_to_busy_retries_only_after_lease_release(release) -> None:
         assert result["requires_replan"] is True
         assert result["error"]["code"] == "busy"
         assert "动作锁仍被" in result["error"]["message"]
+
+
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_move_to_far_coordinates_reports_one_waypoint_and_remaining_distance(timed_out) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    calls = []
+    pos = [0.0, 70.0, 0.0]
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append((route, body))
+        if route == "status":
+            result = {"pos": list(pos), "dimension": "overworld"}
+        elif route == "move_to":
+            pos[:] = [6.0, 71.0, 8.0] if timed_out else [body["x"], 71.0, body["z"]]
+            if timed_out:
+                raise httpx.ReadTimeout("long walk", request=request)
+            result = {"pos": list(pos)}
+        elif route == "stop":
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=time.monotonic() + 60)
+        response = json.loads(toolset.mc_move_to(x=96, y=74, z=128))
+
+    move_calls = [body for route, body in calls if route == "move_to"]
+    assert len(move_calls) == 1
+    assert move_calls[0]["x"] == pytest.approx(19.2)
+    assert move_calls[0]["z"] == pytest.approx(25.6)
+    assert "y" not in move_calls[0]
+    assert response["ok"] is not timed_out
+    result = response["result"]
+    assert result["partial_move"] is True
+    assert result["pos"] == pos
+    assert result["target_xz"] == [96, 128]
+    assert result["remaining_dist"] == pytest.approx(150.0 if timed_out else 128.0)
+    if timed_out:
+        assert response["error"]["code"] == "move_timeout"
+        assert response["requires_replan"] is True
 
 
 def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
@@ -2378,6 +2424,52 @@ def test_smelt_missing_fuel_gives_harvest_next_action() -> None:
     assert "mc_skill_harvest_logs" in result["message"]
 
 
+@pytest.mark.parametrize("episode_budget,cap", [(None, 55.0), (14.0, 10.0)])
+def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, episode_budget, cap) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    operations = []
+
+    def handler(request):
+        route = request.url.path
+        body = json.loads(request.content) if request.content else {}
+        timeout = request.extensions["timeout"]["read"]
+        if route.endswith("/inventory"):
+            result = {"items": [{"name": "raw_copper", "count": 7}, {"name": "coal", "count": 1}]}
+        elif route.endswith("/find_blocks"):
+            assert timeout <= cap
+            clock[0] += 2.0
+            result = {"blocks": [{"name": "furnace", "pos": [1, 64, 0], "dist": 1.0}]}
+        elif route.endswith("/status"):
+            result = {"pos": [0.5, 64, 0.5], "health": 20, "food": 20}
+        elif route.endswith("/window/view"):
+            result = {
+                "sections": {"input": [{"name": "raw_copper", "count": 5}], "output": [{"name": "copper_ingot", "count": 2}]},
+                "info": {"burning": True},
+            }
+        elif route.endswith("/window/act"):
+            operations.extend(body["ops"])
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        toolset._episode_deadline_mono = episode_budget
+        outcome = json.loads(toolset.mc_skill_smelt("raw_copper", count=7))
+
+    assert clock[0] <= cap
+    assert outcome["ok"] is False
+    assert outcome["error"] == "partial_smelt"
+    assert outcome["requires_replan"] is True
+    assert outcome["collected"] == [{"name": "copper_ingot", "count": 2}]
+    assert operations[-1] == {"op": "take", "from": "output", "count": 2}
+
+
 def test_smelt_collect_survives_read_timeout() -> None:
     """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
     from mc_agent.harness.world_memory import WorldMemory
@@ -2799,13 +2891,51 @@ def test_unstick_reports_failure_when_still_in_water() -> None:
     assert "deadline_hit" not in result
 
 
+@pytest.mark.parametrize("north_has_support", [True, False])
+def test_unstick_uses_another_direction_when_east_has_no_landing(north_has_support) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    moves = []
+    origin = [0.5, 64.0, 0.5]
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": origin, "on_ground": True, "ready": True, "alive": True}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            ground = y == 63 and x == 0 and (z == 0 or (north_has_support and z < 0))
+            result = {"name": "stone" if ground else "air", "diggable": ground}
+        elif route == "control":
+            moves.append(body)
+            result = {"pos": [0.5, 64.0, -0.5], "moved": 1.0}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_unstick())
+
+    assert result["ok"] is north_has_support
+    if north_has_support:
+        assert len(moves) == 1
+        assert moves[0]["yaw"] == pytest.approx(0.0)
+        assert moves[0]["jump"] is False
+    else:
+        assert result["error"]["code"] == "unsafe_landing"
+        assert result["requires_replan"] is True
+        assert moves == []
+
+
 def test_unstick_fast_path_has_no_deadline_flag() -> None:
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
         if path == "status":
             result = {"pos": [0.5, 64.0, 0.5], "in_water": False}
         elif path == "get_block":
-            result = {"name": "air", "diggable": False}
+            y = json.loads(request.content)["pos"][1]
+            result = {"name": "stone" if y == 63 else "air", "diggable": False}
         elif path == "control":
             result = {"pos": [1.5, 64.0, 0.5], "moved": 1.0}
         else:

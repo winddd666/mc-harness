@@ -6,6 +6,7 @@ from copy import copy
 import inspect
 import math
 import time
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import httpx
@@ -1251,31 +1252,31 @@ class _StairSession:
         return getattr(self.bot, name)
 
 
-class _GatherDeadline(Exception):
-    """Stop a gathering skill when its shared request budget is spent."""
+class _SkillDeadline(Exception):
+    """Stop a skill when its shared request budget is spent."""
 
 
-class _GatherSession:
-    """Bound one gathering invocation without rebinding the shared bot."""
+class _SkillBudgetSession:
+    """Bound one skill invocation without rebinding the shared bot."""
 
-    _READS = frozenset({"status", "inventory", "get_block", "find_blocks", "get_entities"})
+    _READS = frozenset({"status", "inventory", "get_block", "find_blocks", "get_entities", "window/view"})
 
     def __init__(self, bot: BotSession, max_duration_s: float) -> None:
         self.bot = bot
-        budget = max(0.0, min(45.0, float(max_duration_s)))
+        budget = max(0.0, float(max_duration_s))
         self.finish_at = time.monotonic() + budget
         self.deadline = self.finish_at - min(1.0, budget / 4)
         params = inspect.signature(bot.call).parameters
         self.supports_timeout = "timeout_s" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
         self.timed_out = False
         self.pending_action = False
-        self.progress: dict[str, Any] = {"dug_count": 0, "gained": {}}
+        self.progress: dict[str, Any] = {}
 
     def _remaining(self) -> float:
         remaining = self.deadline - time.monotonic()
         if self.timed_out or remaining <= 0:
             self.timed_out = True
-            raise _GatherDeadline()
+            raise _SkillDeadline()
         return remaining
 
     def call(
@@ -1292,7 +1293,7 @@ class _GatherSession:
             self.pending_action = path not in self._READS
             if path == "dig":
                 raise  # The dig loop records the target and preserves partial progress.
-            raise _GatherDeadline() from None
+            raise _SkillDeadline() from None
 
     def status(self) -> dict[str, Any]:
         self._remaining()
@@ -1324,8 +1325,9 @@ class _GatherSession:
 class MacroSkills:
     """Stateful skills with permanent protection and separate expiring failure records."""
 
-    def __init__(self, bot: BotSession) -> None:
+    def __init__(self, bot: BotSession, *, geofence: Any | None = None) -> None:
         self.bot = bot
+        self.geofence = geofence
         self.protected_positions: set[tuple[int, int, int]] = set()
         self.temporary_avoidance: dict[tuple[int, int, int], dict[str, Any]] = {}
         self.failed_stair_dirs: dict[tuple[int, int, int, str], dict[str, tuple[float, str]]] = {}
@@ -2621,12 +2623,13 @@ class MacroSkills:
     def _gather_with_budget(
         self, max_duration_s: float, gather: Callable[[MacroSkills], dict[str, Any]]
     ) -> dict[str, Any]:
-        session = _GatherSession(self.bot, max_duration_s)
+        session = _SkillBudgetSession(self.bot, min(45.0, float(max_duration_s)))
+        session.progress = {"dug_count": 0, "gained": {}}
         scoped = copy(self)
         scoped.bot = session
         try:
             result = gather(scoped)
-        except (_GatherDeadline, httpx.TimeoutException):
+        except (_SkillDeadline, httpx.TimeoutException):
             session.timed_out = True
             result = {}
         if session.timed_out and result.get("stop_reason") != "time_budget":
@@ -2671,7 +2674,7 @@ class MacroSkills:
         water_skipped = 0
         last_drop_scan: dict[str, Any] | None = None
         last_bot_pos: list[float] | None = None
-        session = self.bot if isinstance(self.bot, _GatherSession) else None
+        session = self.bot if isinstance(self.bot, _SkillBudgetSession) else None
         mine_deadline = session.deadline if session else time.monotonic() + 45.0
         if session:
             session.progress = {"requested_count": count, "dug_count": 0, "gained": gained}
@@ -4386,7 +4389,37 @@ class MacroSkills:
         fuel_item: str | None = None,
         wait_timeout_s: float = 95.0,
     ) -> dict[str, Any]:
-        """Ensure nearby furnace, compute exact ceil(n/8) coal/charcoal or wood fallback, smelt, guard health, and collect output."""
+        """Load, poll and collect from a furnace within one budget."""
+        session = _SkillBudgetSession(self.bot, wait_timeout_s)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            return scoped._smelt_items(input_item, count, fuel_item, session)
+        except (_SkillDeadline, httpx.TimeoutException):
+            session.stop_pending()
+            if "fuel" in session.progress:
+                return self._partial_smelt(session.progress)
+            return {
+                **session.progress,
+                "ok": False,
+                "error": "smelt_timeout",
+                "requires_replan": True,
+                "message": "熔炼准备未在预算内确认。请先用 mc_window_view 检查炉内原料和燃料，再决定是否补料。",
+            }
+
+    @staticmethod
+    def _partial_smelt(progress: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **progress,
+            "ok": False,
+            "error": "partial_smelt",
+            "requires_replan": True,
+            "message": "只取出了已确认完成的产物。请用 mc_window_view 查看炉内剩余原料，后续用 mc_window_act 取出成品。",
+        }
+
+    def _smelt_items(
+        self, input_item: str, count: int, fuel_item: str | None, session: _SkillBudgetSession
+    ) -> dict[str, Any]:
         inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
         avail_in = counts.get(input_item, 0)
         if avail_in < 1:
@@ -4499,6 +4532,8 @@ class MacroSkills:
                 ),
             }
 
+        collected: list[dict[str, Any]] = []
+        session.progress.update(furnace_pos=furnace_pos, input=input_item, requested_count=smelt_n, collected=collected)
         self.bot.call(
             "window/act",
             {
@@ -4510,22 +4545,28 @@ class MacroSkills:
             },
         )
 
-        # Poll window/view while running L0 health/hunger/water guard
-        deadline = time.monotonic() + max(15.0, wait_timeout_s)
-        while time.monotonic() < deadline:
-            check_and_stabilize(self.bot, raise_on_low_health=False)
-            view = self.bot.call("window/view", {"target": target})
-            sections = view.get("sections") or {}
-            inputs_left = sum(int(x.get("count") or 0) for x in (sections.get("input") or []))
-            outputs = sections.get("output") or []
-            out_total = sum(int(x.get("count") or 0) for x in outputs)
-            info = view.get("info") or {}
-            burning = bool(info.get("burning"))
-            if out_total >= smelt_n or (inputs_left == 0 and not burning):
-                break
-            time.sleep(2.5)
+        session.progress["fuel"] = {"item": chosen_fuel, "count": fuel_count}
+        # Reserve time to reopen the furnace and take confirmed output.
+        finish_at = session.deadline
+        poll_until = finish_at - min(6.0, max(0.0, (finish_at - time.monotonic()) / 2))
+        session.deadline = poll_until
+        try:
+            while time.monotonic() < poll_until:
+                check_and_stabilize(self.bot, raise_on_low_health=False)
+                view = self.bot.call("window/view", {"target": target})
+                sections = view.get("sections") or {}
+                inputs_left = sum(int(x.get("count") or 0) for x in (sections.get("input") or []))
+                out_total = sum(int(x.get("count") or 0) for x in (sections.get("output") or []))
+                if out_total >= smelt_n or (inputs_left == 0 and not (view.get("info") or {}).get("burning")):
+                    break
+                time.sleep(min(2.5, max(0.0, poll_until - time.monotonic())))
+        except _SkillDeadline:
+            if session.pending_action:
+                raise
+            session.timed_out = False
+        finally:
+            session.deadline = finish_at
 
-        collected: list[dict[str, Any]] = []
         view = self.bot.call("window/view", {"target": target})
         outputs_to_take = [
             o for o in ((view.get("sections") or {}).get("output") or []) if int(o.get("count") or 0) > 0
@@ -4559,17 +4600,11 @@ class MacroSkills:
             )
             collected.append({"name": out_item.get("name"), "count": cnt})
 
-        out_smelt: dict[str, Any] = {
-            "ok": True,
-            "furnace_pos": furnace_pos,
-            "input": input_item,
-            "requested_count": smelt_n,
-            "fuel": {"item": chosen_fuel, "count": fuel_count},
-            "collected": collected,
-        }
         if pre_dropped:
-            out_smelt["auto_dropped"] = pre_dropped
-        return out_smelt
+            session.progress["auto_dropped"] = pre_dropped
+        if sum(item["count"] for item in collected) < smelt_n:
+            return self._partial_smelt(session.progress)
+        return {"ok": True, **session.progress}
 
     # ---- 比赛窗口接口（window/view + window/act）无策略原子封装 ----
     # 以下函数只做“给定明确参数 -> 调窗口接口 -> 原样返回结果”，
@@ -5300,7 +5335,7 @@ class MacroSkills:
         ) -> dict[str, Any]:
             nonlocal timed_out
             remaining = deadline - time.monotonic()
-            if remaining <= 0.2:
+            if timed_out or remaining <= 0.2:
                 timed_out = True
                 raise _UnstickDeadline()
             timeout = min(remaining, cap)
@@ -5458,50 +5493,92 @@ class MacroSkills:
                     _try_dig_if_solid(cx, cy, cz, retries=2)
         _try_dig_if_solid(bx, by + 2, bz, retries=2)
 
-        # 2. Clear one cardinal 3-high escape slot and nudge out with control()
-        mv_res: dict[str, Any] = {}
-        exit_yaw = -math.pi / 2
-        if not timed_out:
-            for dx, dz, yaw in (
-                (1, 0, -math.pi / 2),
-                (0, -1, 0.0),
-                (-1, 0, math.pi / 2),
-                (0, 1, math.pi),
-            ):
-                ex, ez = bx + dx, bz + dz
-                _try_dig_if_solid(ex, by + 1, ez)
-                _try_dig_if_solid(ex, by + 2, ez)
-                _try_dig_if_solid(ex, by, ez)
-                exit_yaw = yaw
-                break
+        # Probe each exit against the same support rules as the Guardian.
+        from .combat_env import CombatEnv
 
+        def _read_status() -> dict[str, Any]:
+            if isinstance(self.bot, BotSession):
+                return _call("status", method="GET")
+            return self.bot.status()
+
+        mv_res: dict[str, Any] = {}
+        exit_status: dict[str, Any] = {}
+        exit_move = None
         if not timed_out:
             try:
-                mv_res = _call(
-                    "control",
-                    {"forward": True, "jump": True, "yaw": exit_yaw, "ms": 900, "stop_on": []},
-                    cap=3.0,
-                )
+                exit_status = _read_status()
+            except (_UnstickDeadline, ApiError, httpx.HTTPError):
+                pass
+        exit_pos = exit_status.get("pos")
+        if (
+            exit_pos and not timed_out and exit_status.get("on_ground") is not False
+            and exit_status.get("alive") is not False and exit_status.get("ready") is not False
+            and not exit_status.get("in_lava") and not exit_status.get("in_water")
+        ):
+            projected_clear: set[tuple[int, int, int]] = set()
+
+            def _probe_call(path: str, body: dict[str, Any]) -> dict[str, Any]:
+                block = _call(path, body)
+                p = tuple(body["pos"])
+                if p in projected_clear and block.get("diggable") and not self._is_block_avoided(p):
+                    name = str(block.get("name") or "").removeprefix("minecraft:")
+                    if name and name not in skip_names | {"flowing_water", "flowing_lava"}:
+                        return {**block, "name": "air"}
+                return block
+
+            probe = CombatEnv(SimpleNamespace(call=_probe_call), geofence=self.geofence)
+            fx, fy, fz = math.floor(exit_pos[0]), math.floor(exit_pos[1]), math.floor(exit_pos[2])
+            for dx, dz, yaw in ((1, 0, -math.pi / 2), (0, -1, 0.0), (-1, 0, math.pi / 2), (0, 1, math.pi)):
+                if timed_out:
+                    break
+                route = probe.probe_retreat(exit_pos, yaw, 2.2)
+                if route is None and not timed_out:
+                    cells = [(fx + dx, y, fz + dz) for y in (fy + 1, fy + 2, fy)]
+                    projected_clear.update(cells)
+                    probe.invalidate_block_cache()
+                    can_clear_exit = probe.probe_retreat(exit_pos, yaw, 2.2) is not None
+                    projected_clear.clear()
+                    probe.invalidate_block_cache()
+                    if can_clear_exit and not timed_out:
+                        for cell in cells:
+                            _try_dig_if_solid(*cell)
+                        route = probe.probe_retreat(exit_pos, yaw, 2.2)
+                if route is not None:
+                    exit_move = {"forward": True, "jump": route[1], "yaw": yaw, "ms": 350, "stop_on": []}
+                    break
+
+        if exit_move is not None and not timed_out:
+            try:
+                mv_res = _call("control", exit_move, cap=3.0)
             except _UnstickDeadline:
                 mv_res = {"error": "deadline", "message": "control skipped: unstick budget exhausted"}
             except ApiError as err:
                 mv_res = {"error": err.code, "message": err.message}
 
-        try:
-            st_after = self.bot.status()
-        except (ApiError, httpx.HTTPError):
-            st_after = {"pos": pos_before}
-        pos_after = st_after.get("pos") or pos_before
-        return _finish({
-            "ok": bool(dug) or not timed_out,
+        st_after = exit_status
+        if exit_move is not None and not timed_out:
+            try:
+                st_after = _read_status()
+            except (_UnstickDeadline, ApiError, httpx.HTTPError):
+                pass
+        result = {
+            "ok": bool(dug) or exit_move is not None and not timed_out,
             "foot_block_before": [bx, by, bz],
             "hitbox_xs": xs,
             "hitbox_zs": zs,
             "pos_before": pos_before,
-            "pos_after": pos_after,
+            "pos_after": st_after.get("pos") or mv_res.get("pos") or pos_before,
             "dug": dug,
             "control": mv_res,
-        })
+        }
+        if exit_move is None and not timed_out:
+            result["ok"] = False
+            result["requires_replan"] = True
+            result["error"] = {
+                "code": "unsafe_landing",
+                "message": "四个方向都未确认安全落脚点。请检查当前位置，再选择有支撑的路线。",
+            }
+        return _finish(result)
 
     def dig_safety_bunker(self, *, urgent: bool = False) -> dict[str, Any]:
         """Dig a 1x3 vertical shaft under the bot and seal the top to block night mobs."""
