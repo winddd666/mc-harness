@@ -568,6 +568,7 @@ def prepare_scene_ground(
         ]
     if stage == "cave_combat":
         # Enclosed 11x11x4 cobblestone combat arena with roof (prevents sunburn) and torches at corners.
+        interior = f"x={ix - 4},y={iy},z={iz - 4},dx=8,dy=3,dz=8"
         cmds.extend(
             [
                 f"fill {ix - 5} {iy - 1} {iz - 5} {ix + 5} {iy - 1} {iz + 5} minecraft:cobblestone",
@@ -585,11 +586,9 @@ def prepare_scene_ground(
                 f"setblock {ix} {iy} {iz + 4} minecraft:torch",
                 f"setblock {ix - 4} {iy} {iz} minecraft:torch",
                 f"setblock {ix + 4} {iy} {iz} minecraft:torch",
-                # Conditional summon: this prep also runs on every death-return restock, so an
-                # unconditional summon would stack a new pair of mobs inside the arena each death
-                # and turn the slice into an instant death loop.
-                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:zombie,distance=..24] run summon minecraft:zombie {ix + 3.5} {iy} {iz + 0.5}",
-                f"execute positioned {ix} {iy} {iz} unless entity @e[type=minecraft:skeleton,distance=..24] run summon minecraft:skeleton {ix - 2.5} {iy} {iz + 3.5}",
+                # Scope the duplicate check to the arena so nearby wild mobs do not suppress the fixture.
+                f"execute unless entity @e[type=minecraft:zombie,{interior}] run summon minecraft:zombie {ix + 3.5} {iy} {iz + 0.5}",
+                f"execute unless entity @e[type=minecraft:skeleton,{interior}] run summon minecraft:skeleton {ix - 2.5} {iy} {iz + 3.5}",
                 f"tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
                 f"spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
@@ -857,6 +856,7 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
 
 
 NETHER_STAGES = frozenset({"nether_fortress", "nether_bastion"})
+LOCAL_FIXTURE_STAGES = frozenset({"brewing_alchemy", "cave_combat", "enchant_anvil", "village_trade"})
 
 # Surface slices where a night start is pure mob-farm noise (fleet passes --keep-time to every bot
 # except the first, so without this the village/brewing scenes would open at night).
@@ -1307,44 +1307,54 @@ def _reassert_scene_geofence(
 
 
 def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
-    """Confirm the bot is in the scene dimension and within 64m of the anchor; retry via restock."""
+    """Confirm two entry samples are in the scene dimension and near the appropriate anchor."""
     from mc_agent.kb import normalize_dimension
 
+    local_fixture = scene.stage in LOCAL_FIXTURE_STAGES
+    radius = 2.0 if local_fixture else 64.0
+    station = {"brewing_alchemy": "brewing_stand", "enchant_anvil": "enchanting_table"}.get(scene.stage)
+    station_pos = [math.floor(scene.x) + 2, round(scene.y), math.floor(scene.z)]
     for i in range(attempts):
-        try:
-            st = bot.status()
-        except Exception:
-            st = {}
-        dim = normalize_dimension(st.get("dimension"))
-        pos = st.get("pos")
-        ok_dim = dim == scene.dim
-        ok_pos = isinstance(pos, (list, tuple)) and len(pos) >= 3 and (
-            math.hypot(float(pos[0]) - scene.x, float(pos[2]) - scene.z) <= 64.0
-        )
-        if ok_dim and ok_pos:
-            # Re-poll once to rule out a stale pre-teleport snapshot (BUG-040: the HUD auto-recenter
-            # used an old position and pinned the geofence off-anchor).
-            time.sleep(1.2)
+        for sample in range(2):
             try:
-                st2 = bot.status()
+                st = bot.status()
             except Exception:
-                st2 = {}
-            p2 = st2.get("pos")
-            same_dim = normalize_dimension(st2.get("dimension")) == scene.dim
-            if same_dim and isinstance(p2, (list, tuple)) and len(p2) >= 3 and (
-                math.hypot(float(p2[0]) - scene.x, float(p2[2]) - scene.z) <= 64.0
+                st = {}
+            dim, pos = normalize_dimension(st.get("dimension")), st.get("pos")
+            if (
+                dim != scene.dim
+                or not isinstance(pos, (list, tuple))
+                or len(pos) < 3
+                or math.hypot(float(pos[0]) - scene.x, float(pos[2]) - scene.z) > radius
+                or (local_fixture and abs(float(pos[1]) - scene.y) > 1.0)
             ):
+                break
+            if sample == 0:
+                time.sleep(1.2)
+        else:
+            try:
+                block = bot.call("get_block", {"pos": station_pos}, timeout_s=5.0) if station else {}
+                actual = str((block or {}).get("name") or "").removeprefix("minecraft:")
+            except Exception:
+                actual = ""
+            if not station or actual == station:
                 print(
                     f"[Scene] entry verified bot={bot_name} dim={dim} "
-                    f"pos=({float(p2[0]):.1f}, {float(p2[1]):.1f}, {float(p2[2]):.1f})",
+                    f"pos=({float(pos[0]):.1f}, {float(pos[1]):.1f}, {float(pos[2]):.1f})",
                     flush=True,
                 )
                 return True
+            print(f"[Scene] expected {station} at {station_pos}, got {actual or '?'}", flush=True)
         print(
             f"[Scene] entry verify failed (attempt {i + 1}/{attempts}) bot={bot_name} "
             f"dim={dim} pos={pos} expected {scene.dim}@({scene.x:.1f},{scene.y:.1f},{scene.z:.1f})",
             flush=True,
         )
+        if local_fixture:
+            try:
+                bot.call("stop", {}, timeout_s=5.0)
+            except Exception:
+                pass
         try:
             restock_scene(bot_name, scene, reason="scene_entry_verify")
         except Exception as exc:
@@ -1807,8 +1817,6 @@ def main() -> int:
                 bot_name,
                 start_idx=args.site_index,
             )
-            if args.stage == "village_trade":
-                sx, sy, sz = math.floor(sx) + 0.5, float(round(sy)), math.floor(sz) + 0.5
         elif args.stage == "nether_fortress":
             sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:fortress", start_idx=args.site_index)
         elif args.stage == "nether_bastion":
@@ -1817,6 +1825,8 @@ def main() -> int:
             sx, sy, sz, biome = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
         else:
             sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
+        if args.stage in LOCAL_FIXTURE_STAGES:
+            sx, sy, sz = math.floor(sx) + 0.5, float(round(sy)), math.floor(sz) + 0.5
         dim = scene_dimension(args.stage)
         scene = SceneAnchor(stage=args.stage, dim=dim, x=sx, y=sy, z=sz)
         baseline = compute_stage_baseline(args.stage)
