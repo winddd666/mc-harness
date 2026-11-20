@@ -3222,6 +3222,50 @@ def test_blocked_target_level_backtrack_preserves_the_shaft(monkeypatch, local_b
     assert spent.node_id in engine.nodes
 
 
+@pytest.mark.parametrize("deeper_branch_pending", [True, False])
+def test_explore_from_low_waypoint_does_not_rejoin_a_shallow_active_node(monkeypatch, deeper_branch_pending) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 44.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    route = [(0, y, 64 - y) for y in range(64, 16, -1)]
+    for x, y, z in route:
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(1, 16, 47)] = "ancient_debris"
+    with BotSession("tok", bot_username="ExploreFromDeepWayPoint", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=route[0], parent_id=None, edge_from_parent=None,
+            branches=[mining.BranchSpec("stair_down", "east", 49)],
+        )
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=route[-1], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", route),
+            branches=[mining.BranchSpec("stair_down", "east", 2)] if deeper_branch_pending else [],
+        )
+        engine.active_node_id = collar.node_id
+        engine._record_corridor((0, 20, 44))
+        walk = engine._walk_waypoints
+
+        def walk_at_depth(waypoints, **kwargs):
+            assert max(y for _, y, _ in waypoints) <= 20
+            return walk(waypoints, **kwargs)
+
+        monkeypatch.setattr(engine, "_walk_waypoints", walk_at_depth)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=32)
+
+    if deeper_branch_pending:
+        assert result["stop_reason"] == "quota_reached"
+        assert result["target_gained"] == 1
+    else:
+        assert result["stop_reason"] == "needs_surface_climb"
+        assert world.pos == [0.5, 20.0, 44.5]
+        assert not world.dig_log
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_exhausted_transit_node_uses_its_deeper_pending_branch_before_ascending(monkeypatch) -> None:
     from mc_agent.skills.mining_dfs import BranchSpec, DIRECTIONS
 
@@ -3408,6 +3452,63 @@ def test_no_progress_hint_does_not_recommend_a_redundant_reset(monkeypatch) -> N
     assert "reset" not in result["message"]
     assert "空间树为空时直接 explore" in result["message"]
     assert result["goal_met"] is False
+
+
+def test_deep_idle_slice_keeps_the_shaft_and_tries_its_other_branch(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 16.0, 0.5), surface_y=64,
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    anchor = (0, 16, 0)
+    world.blocks[anchor] = world.blocks[(0, 17, 0)] = "air"
+    world.blocks[(0, 14, -2)] = "diamond_ore"
+    with BotSession("tok", bot_username="DeepIdleBranch", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, 48), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        tip = engine._create_node(
+            kind="switchback", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [collar.anchor, anchor]),
+            branches=[mining.BranchSpec("stair_down", direction, 70) for direction in ("east", "north")],
+        )
+        dig_stair = engine._dig_stair_down_edge
+        relocation_starts = []
+
+        def dig_edge(*, direction, **kwargs):
+            if direction == "east":
+                clock.now += mining.MAX_IDLE_SECONDS
+                return {
+                    "steps_done": 0, "stop_reason": "movement_not_confirmed", "breaches_sealed": 0,
+                    "catch_placed": 0, "deferred_added": 0, "mined_ores": [],
+                    "waypoints": [anchor], "end_anchor": anchor,
+                }
+            return dig_stair(direction=direction, **kwargs)
+
+        def no_new_site(pos, **kwargs):
+            relocation_starts.append(pos)
+            return pos
+
+        monkeypatch.setattr(engine, "_dig_stair_down_edge", dig_edge)
+        monkeypatch.setattr(engine, "_relocate_to_fresh_collar_site", no_new_site)
+        args = dict(target="diamond", target_y=-54, goal_count=1, max_duration_s=55)
+        first = engine.run(**args)
+        assert first["stop_reason"] == "no_progress"
+        assert engine.active_node_id == tip.node_id
+        assert tip.branches[1].status == "pending"
+        assert collar.anchor not in engine.exhausted_collars
+        assert "同层" in first["message"]
+
+        second = engine.run(**args)
+
+    assert second["stop_reason"] == "quota_reached"
+    assert second["target_gained"] == 1
+    assert engine.collar_node_id == collar.node_id
+    assert not relocation_starts
 
 
 def test_collar_at_nether_target_layer_can_mine_over_bedrock() -> None:

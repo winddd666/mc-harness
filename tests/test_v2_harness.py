@@ -267,6 +267,41 @@ def test_bug064_scan_ceiling_surfaces_clamp_and_stops_radius_doubling() -> None:
         assert e3.get("requires_replan") is not True
 
 
+def test_bug047_move_to_clamps_timeout_and_stops_cleanly_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [2000.0]
+    monkeypatch.setattr("mc_agent.harness.mc_tools.time.monotonic", lambda: now[0])
+    seen_calls: list[tuple[str, float | None]] = []
+
+    class FakeBot:
+        def call(self, path: str, body=None, **kwargs):
+            seen_calls.append((path, kwargs.get("timeout_s")))
+            if path == "status":
+                return {"pos": [100.5, 64.0, 200.5], "dimension": "overworld", "ready": True}
+            if path == "move_to":
+                raise httpx.ReadTimeout("move timed out")
+            return {"ok": True}
+
+    bot = FakeBot()
+    ts = McToolset(bot, geofence=VoidGeofence(radius=0.0))  # type: ignore[arg-type]
+
+    # 1) Tight episode deadline (11s remaining -> 8s budget) stops cleanly without raising.
+    ts.rebind_runtime_hooks(episode_deadline_mono=2011.0)
+    out = json.loads(ts.mc_move_to(x=120.0, z=200.0))
+    assert out["ok"] is False
+    assert out["requires_replan"] is True
+    assert out["error"]["code"] == "move_timeout"
+    assert ("move_to", 8.0) in seen_calls
+    assert seen_calls[-1][0] == "stop"
+
+    # 2) Imminent deadline (4s remaining) short-circuits before issuing move_to.
+    ts.rebind_runtime_hooks(episode_deadline_mono=2004.0)
+    before_n = len(seen_calls)
+    out2 = json.loads(ts.mc_move_to(x=120.0, z=200.0))
+    assert out2["ok"] is False
+    assert out2["error"]["code"] == "episode_deadline_imminent"
+    assert len(seen_calls) == before_n or all(p != "move_to" for p, _ in seen_calls[before_n:])
+
+
 def test_world_hud_renders_compact_coords_durability_and_gaps() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix("/api/v1")
