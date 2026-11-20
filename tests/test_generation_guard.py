@@ -2976,6 +2976,40 @@ def test_low_health_retreat_keeps_shield_against_a_nearby_shooter(distance_after
         assert posture_calls[-1] == ("posture", {})
 
 
+@pytest.mark.parametrize("entry", ["poll", "boundary"])
+def test_recent_melee_damage_defers_eating_with_shield_up(entry, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    actions = []
+
+    class ShieldBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [814.2, 78, -850.7], "health": 12, "food": 13, "on_ground": True,
+                    "blocking": True, "ready": True, "alive": True,
+                    "nearest_hostile": {"name": "enderman", "dist": 17.7},
+                }
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack"}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 1}]}
+            actions.append((action, body))
+            return {"ok": True}
+
+    guard = GenerationGuard(ShieldBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._drain_events_pages()
+    check = guard.poll if entry == "poll" else guard.stabilize_after_tools
+    clock[0] += 8.0
+    assert check() is None
+    assert actions == []
+
+    clock[0] += 2.5
+    assert check() is not None
+    assert actions == [("posture", {"shield": False}), ("use_item", {"item": "cooked_beef"})]
+
+
 def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsupported(monkeypatch):
     """Reproduces r20_short hy4_hy_6_nether_bastion: when underfoot place fails no_support/blocked_by_self, place side bridge against bank & step onto it."""
     from mc_agent.errors import ApiError
