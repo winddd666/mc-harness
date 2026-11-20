@@ -2517,12 +2517,18 @@ class SubcorticalInstinctController:
                     )
                 )
                 if should_bunker:
-                    bunk = env.skills.dig_safety_bunker(urgent=True)
-                    if bunk.get("ok"):
-                        covered = True
-                        mode = "bunker_sealed"
-                        self._recent_flee_streak = 0
-                        actions.append({"action": "emergency_bunker", "ok": True})
+                    try:
+                        bunk = env.skills.dig_safety_bunker(urgent=True)
+                    except ApiError as err:
+                        if err.code != "missing_item":
+                            raise
+                        actions.append({"action": "emergency_bunker", "ok": False, "code": err.code})
+                    else:
+                        if bunk.get("ok"):
+                            covered = True
+                            mode = "bunker_sealed"
+                            self._recent_flee_streak = 0
+                            actions.append({"action": "emergency_bunker", "ok": True})
                 if not covered:
                     if has_shield and mob_id is not None:
                         try:

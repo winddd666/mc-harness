@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from mc_agent.bot import BotSession
+from mc_agent.errors import ApiError
 from mc_agent.harness.agent import run_mc_agent
 from mc_agent.harness.control import check_control
 from mc_agent.harness.events import EventSink
@@ -4110,6 +4111,60 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert pulses[1] == pytest.approx([-1.8, 64.0, -1.8])
     else:
         assert len(pulses) == len(actions) == 1
+
+
+def test_missing_offhand_pickaxe_for_bunker_still_allows_boundary_retreat():
+    pos = [5199.5, 84, 7615.5]
+    shooter = {"id": 42, "name": "skeleton", "dist": 8.0, "pos": [5207.5, 84, 7615.5]}
+    moves = []
+
+    class RidgeBot:
+        def status(self):
+            return {
+                "pos": list(pos), "health": 3.5, "food": 20, "ready": True, "alive": True,
+                "on_ground": True, "nearest_hostile": shooter,
+            }
+
+        def inventory(self):
+            return {
+                "items": [{"name": "stone_sword", "count": 1}, {"name": "stone_pickaxe", "count": 1},
+                          {"name": "cobblestone", "count": 16}],
+                "offhand": {"name": "iron_pickaxe", "count": 1}, "held": {"name": "stone_sword"},
+            }
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return self.inventory()
+            if action == "events":
+                return {"events": []}
+            if action == "get_entities":
+                return {"entities": [shooter]}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 84 else "air"}
+            if action == "equip" and body["item"] == "iron_pickaxe":
+                raise ApiError("missing_item", "no iron_pickaxe in inventory")
+            if action == "control" and body.get("forward"):
+                assert body["jump"] is False
+                pos[0] -= 2.3
+                moves.append(list(pos))
+            assert action not in {"dig", "attack"}
+            return {"ok": True}
+
+    events = []
+    bot = RidgeBot()
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=MacroSkills(bot))
+    guard.stabilize_after_tools()
+
+    reflex, = [event for event in events if event["type"] == "guardian.action.completed"]
+    assert reflex["action"] == "boundary_subcortical_combat"
+    bunker, retreat = reflex["result"]["actions"]
+    assert bunker == {"action": "emergency_bunker", "ok": False, "code": "missing_item"}
+    assert retreat["action"] == "flee" and retreat["ok"] is True
+    assert moves == [[5197.2, 84, 7615.5]]
 
 
 @pytest.mark.parametrize(("health", "fresh_hurt", "expect_retreat"), [(3.3, True, True), (8.0, True, False), (3.3, False, False)])
