@@ -1526,19 +1526,29 @@ class MacroSkills:
             from .combat_env import CombatEnv, SHORE_LAND_BLOCKS
 
             if status.get("submerged"):
-                return "in_water"
+                health_before = status.get("health")
+                surfaced = session.call(
+                    "control", {"jump": True, "ms": 550, "stop_on": ["hurt", "death"]},
+                    timeout_s=1.8, allow_reauth=False,
+                )
+                status = observe()
+                danger = self._scout_danger(status, health_before=health_before, dimension=dimension)
+                if danger or surfaced.get("interrupted_by"):
+                    return danger or surfaced["interrupted_by"]
+                if status.get("submerged"):
+                    return "in_water"
             x, y, z = status["pos"]
             shore = dry_origin
-            if shore is None or math.hypot(x - shore[0], z - shore[2]) > 6.0 or not fence_allows(shore[0], shore[2]):
+            if shore is None or math.hypot(x - shore[0], z - shore[2]) > 8.0 or not fence_allows(shore[0], shore[2]):
                 shore = CombatEnv(session, geofence=self.geofence)._find_walkable_shore_target(
-                    status["pos"], block_types=SHORE_LAND_BLOCKS, max_radius=8,
-                    min_y=math.floor(y) - 1, max_y=math.floor(y) + 1, max_candidates=6,
+                    status["pos"], block_types=SHORE_LAND_BLOCKS, max_radius=10,
+                    min_y=math.floor(y) - 2, max_y=math.floor(y) + 1, max_candidates=6,
                 )
                 session._remaining()
-            if shore is None or math.hypot(x - shore[0], z - shore[2]) > 6.0 or not fence_allows(shore[0], shore[2]):
+            if shore is None or math.hypot(x - shore[0], z - shore[2]) > 8.0 or not fence_allows(shore[0], shore[2]):
                 return "in_water"
             health_before = status.get("health")
-            error = self._scout_move(session, shore[0], shore[2], seconds=5.0, range_m=0.5)
+            error = self._scout_move(session, shore[0], shore[2], seconds=5.0, range_m=0.5, y=shore[1])
             if error == "move_timeout_unreleased":
                 return error
             status = observe()
@@ -1549,6 +1559,7 @@ class MacroSkills:
                 return error
             if status.get("in_water") or status.get("submerged") or status.get("on_ground") is False:
                 return "in_water"
+            result["shore_recoveries"] = result.get("shore_recoveries", 0) + 1
             return None
 
         def advance(heading: int) -> str:
@@ -1694,18 +1705,18 @@ class MacroSkills:
 
     @staticmethod
     def _scout_move(
-        session: _SkillBudgetSession, x: float, z: float, *, seconds: float, range_m: float = 1.5
+        session: _SkillBudgetSession, x: float, z: float, *, seconds: float, range_m: float = 1.5, y: float | None = None
     ) -> str | None:
         # Ask pathfinder to finish before the client timeout so it can release the action.
         request_s = min(seconds + 1.0, session._remaining())
         if request_s <= 1.0:
             raise _SkillDeadline()
+        payload = {"x": x, "z": z, "range": range_m, "timeout": int((request_s - 0.75) * 1000), "stop_on": ["hurt", "death"]}
+        if y is not None:
+            payload["y"] = y
         try:
             moved = session.call(
-                "move_to",
-                {"x": x, "z": z, "range": range_m, "timeout": int((request_s - 0.75) * 1000), "stop_on": ["hurt", "death"]},
-                timeout_s=request_s,
-                allow_reauth=False,
+                "move_to", payload, timeout_s=request_s, allow_reauth=False,
             )
         except _SkillDeadline:
             if not session.pending_action:
@@ -3020,6 +3031,54 @@ class MacroSkills:
             }
         return result
 
+    def _reachable_log_column(
+        self,
+        target: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        standing: list[float],
+        count: int,
+        deadline: float,
+    ) -> list[dict[str, Any]]:
+        x, y, z = target["pos"]
+        by_pos = {tuple(row["pos"]): row for row in candidates if row.get("name") == target.get("name")}
+        column = [target]
+        for dy in range(1, min(count, 4)):
+            next_log = by_pos.get((x, y + dy, z))
+            if next_log is None:
+                break
+            column.append(next_log)
+        if len(column) == 1:
+            return column
+
+        def reachable(pos: list[float]) -> bool:
+            # The dig endpoint skips pathfinding when the block is already within four blocks.
+            return (math.floor(pos[0]), math.floor(pos[2])) != (x, z) and all(
+                math.dist(pos, row["pos"]) <= 4.0 for row in column
+            )
+
+        if reachable(standing):
+            return column
+        tx, tz = x + 0.5, z + 0.5
+        if self.geofence and self.geofence.check_point(tx, tz, action="mc_skill_harvest_logs"):
+            return [target]
+        remaining = min(8.0, deadline - time.monotonic())
+        if remaining <= 2.0:
+            return [target]
+        try:
+            moved = self.bot.call(
+                "move_to",
+                {"x": tx, "z": tz, "range": 1.5, "timeout": int((remaining - 0.5) * 1000), "stop_on": ["hurt", "death"]},
+                timeout_s=remaining,
+            )
+        except ApiError as exc:
+            if exc.code in _TRANSIENT_BLOCK_ERRORS:
+                return [target]
+            raise
+        if moved.get("interrupted_by"):
+            raise ApiError(code="interrupted", message="接近树干时移动被中断。")
+        pos = moved.get("pos") or self.bot.status().get("pos")
+        return column if isinstance(pos, list) and len(pos) == 3 and reachable(pos) else [target]
+
     def _dig_target_blocks(
         self,
         *,
@@ -3053,10 +3112,11 @@ class MacroSkills:
         session = self.bot if isinstance(self.bot, _SkillBudgetSession) else None
         mine_deadline = session.deadline if session else time.monotonic() + 45.0
         if session:
-            session.progress = {"requested_count": count, "dug_count": 0, "gained": gained}
+            session.progress.update(requested_count=count, dug_count=0, gained=gained)
         deadline_hit = False
         consecutive_failures = 0
         unreachable_targets = False
+        trunk_queue: list[dict[str, Any]] = []
         try:
             dig_call_params = inspect.signature(self.bot.call).parameters
             dig_supports_timeout = "timeout_s" in dig_call_params or any(
@@ -3071,45 +3131,51 @@ class MacroSkills:
             if time.monotonic() >= mine_deadline:
                 deadline_hit = True
                 break
-            for apos in list(self.temporary_avoidance):
-                self._is_block_avoided(apos)
-            scan_limit = min(60, 30 + len(self.temporary_avoidance))
-            found = self.bot.call(
-                "find_blocks",
-                {"radius": max(4, min(64, radius)), "types": block_types, "limit": scan_limit},
-            )
-            candidates = [
-                b
-                for b in (found.get("blocks") or [])
-                if not self._is_block_avoided(tuple(b.get("pos") or ()))
-            ]
-            if not candidates:
-                break
-            st = self.bot.status()
-            bot_y = float((st.get("pos") or [0, 64, 0])[1])
-            feet_y = math.floor(bot_y)
-            candidates.sort(
-                key=lambda b: (
-                    (
-                        max(0.0, (bot_y - below_tol) - float(b["pos"][1]))
-                        + max(0.0, float(b["pos"][1]) - (bot_y + above_tol))
-                    )
-                    * 4.5
-                    + float(b.get("dist", 99))
-                    + (4.5 * abs(float(b["pos"][1]) - feet_y) if harvesting_logs else 0.0)
+            if trunk_queue:
+                target = trunk_queue.pop(0)
+            else:
+                for apos in list(self.temporary_avoidance):
+                    self._is_block_avoided(apos)
+                scan_limit = min(60, 30 + len(self.temporary_avoidance))
+                found = self.bot.call(
+                    "find_blocks",
+                    {"radius": max(4, min(64, radius)), "types": block_types, "limit": scan_limit},
                 )
-            )
-            target = None
-            for cand in candidates:
-                cpos = tuple(cand["pos"])
-                if avoid_water and float(cand["pos"][1]) < bot_y - 0.5 and self._is_water_covered(cpos):
-                    self._avoid_temporarily(cpos, "water_covered", 30.0)
-                    water_skipped += 1
-                    continue
-                target = cand
-                break
-            if target is None:
-                break
+                candidates = [
+                    b
+                    for b in (found.get("blocks") or [])
+                    if not self._is_block_avoided(tuple(b.get("pos") or ()))
+                ]
+                if not candidates:
+                    break
+                st = self.bot.status()
+                standing = st.get("pos") or [0, 64, 0]
+                bot_y = float(standing[1])
+                feet_y = math.floor(bot_y)
+                candidates.sort(
+                    key=lambda b: (
+                        (
+                            max(0.0, (bot_y - below_tol) - float(b["pos"][1]))
+                            + max(0.0, float(b["pos"][1]) - (bot_y + above_tol))
+                        )
+                        * 4.5
+                        + float(b.get("dist", 99))
+                        + (4.5 * abs(float(b["pos"][1]) - feet_y) if harvesting_logs else 0.0)
+                    )
+                )
+                target = None
+                for cand in candidates:
+                    cpos = tuple(cand["pos"])
+                    if avoid_water and float(cand["pos"][1]) < bot_y - 0.5 and self._is_water_covered(cpos):
+                        self._avoid_temporarily(cpos, "water_covered", 30.0)
+                        water_skipped += 1
+                        continue
+                    target = cand
+                    break
+                if target is None:
+                    break
+                if harvesting_logs and count - dug_count > 1:
+                    trunk_queue = self._reachable_log_column(target, candidates, standing, count - dug_count, mine_deadline)[1:]
             pos = tuple(target["pos"])
             remaining = mine_deadline - time.monotonic()
             if remaining <= 1.0:
@@ -3122,7 +3188,7 @@ class MacroSkills:
             # still leaves the total bounded by mine_deadline.
             per_dig = max(15.0, min(30.0, remaining / max(1, count - dug_count)))
             try:
-                dig_body = {"pos": list(pos), "collect": True}
+                dig_body = {"pos": list(pos), "collect": not trunk_queue}
                 res = (
                     self.bot.call("dig", dig_body, timeout_s=min(remaining, per_dig))
                     if dig_supports_timeout
@@ -3139,10 +3205,10 @@ class MacroSkills:
                     if esc.get("in_water"):
                         break
                 # Guard against repeatedly digging blocks whose expected target drops fall out of reach
-                if dug_count >= 2 and _target_gain_sum(gained) == 0:
-                    last_bot_pos = st.get("pos")
+                if not trunk_queue and dug_count >= 2 and _target_gain_sum(gained) == 0:
+                    last_bot_pos = self.bot.status().get("pos") if harvesting_logs else st.get("pos")
                     last_drop_scan = self._collect_nearby_items(
-                        bot_y=bot_y,
+                        bot_y=float(last_bot_pos[1]) if last_bot_pos else bot_y,
                         radius=12,
                         target_items=expected_drops,
                         exclude_items=auto_dropped_names,
@@ -3155,6 +3221,7 @@ class MacroSkills:
                             continue
                     break
             except ApiError as err:
+                trunk_queue.clear()
                 if _is_protected_err(err):
                     self.protected_positions.add(pos)
                     protected_hits += 1
@@ -3334,7 +3401,20 @@ class MacroSkills:
         self, target_logs: int = 4, radius: int = 32, *, max_duration_s: float = 45.0
     ) -> dict[str, Any]:
         """Gather logs or nether stems within a shared skill budget."""
-        return self._gather_with_budget(max_duration_s, lambda skills: skills._harvest_logs(target_logs, radius))
+        result = self._gather_with_budget(max_duration_s, lambda skills: skills._harvest_logs(target_logs, radius))
+        if result.get("stop_reason") == "time_budget":
+            logs = {
+                name: amount for name, amount in (result.get("gained") or {}).items()
+                if name.removeprefix("minecraft:") in (*LOG_TYPES, *NETHER_STEM_TYPES)
+            }
+            collected = sum(logs.values())
+            if collected >= 4:
+                result.update(
+                    ok=True, partial_progress=True, requires_replan=False, target_gained=logs,
+                    message=f"采木时间已到，已确认 {collected} 根原木入包。可直接用已有木料制作。",
+                )
+                result.pop("error", None)
+        return result
 
     def _harvest_logs(self, target_logs: int, radius: int) -> dict[str, Any]:
         target_logs = max(1, min(32, int(target_logs)))
@@ -3716,13 +3796,16 @@ class MacroSkills:
         radius: int = 32,
         *,
         max_duration_s: float = 45.0,
+        skip_unmineable: bool = False,
     ) -> dict[str, Any]:
         """Validate pickaxe tier and gather blocks within a shared skill budget."""
         return self._gather_with_budget(
-            max_duration_s, lambda skills: skills._mine_blocks(block_types, count, radius)
+            max_duration_s, lambda skills: skills._mine_blocks(block_types, count, radius, skip_unmineable=skip_unmineable)
         )
 
-    def _mine_blocks(self, block_types: list[str], count: int, radius: int) -> dict[str, Any]:
+    def _mine_blocks(
+        self, block_types: list[str], count: int, radius: int, *, skip_unmineable: bool
+    ) -> dict[str, Any]:
         if not block_types:
             return {"ok": False, "error": "bad_args", "message": "block_types 不能为空。"}
         # Natural terrain has `stone`/`deepslate` rather than `cobblestone`; auto-expand so cobblestone requests work!
@@ -3731,23 +3814,27 @@ class MacroSkills:
             block_types.append("stone")
         count = max(1, min(32, int(count)))
         radius = max(4, min(64, int(radius)))
-        req_tier = max((BLOCK_MIN_PICKAXE_TIER.get(b, 0) for b in block_types), default=0)
-
         inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
         best_pick, best_tier = _best_pickaxe_in_inv(counts)
-        if req_tier > 0 and best_tier < req_tier:
+        allowed = [name for name in block_types if BLOCK_MIN_PICKAXE_TIER.get(name, 0) <= best_tier]
+        blocked = {name: BLOCK_MIN_PICKAXE_TIER[name] for name in block_types if name not in allowed}
+        if blocked and (not allowed or not skip_unmineable):
+            req_tier = max(blocked.values())
             tier_names = {1: "wooden_pickaxe(木镐)", 2: "stone_pickaxe(石镐)", 3: "iron_pickaxe(铁镐)", 4: "diamond_pickaxe(钻石镐)"}
-            allowed = [b for b in block_types if BLOCK_MIN_PICKAXE_TIER.get(b, 0) <= best_tier]
-            blocked = {b: BLOCK_MIN_PICKAXE_TIER[b] for b in block_types if BLOCK_MIN_PICKAXE_TIER.get(b, 0) > best_tier}
+            allowed_hint = f"当前允许 {allowed}，可单独请求。" if allowed else ""
             return {
                 "ok": False,
                 "error": "tool_tier_insufficient",
-                "message": f"本次混合请求包含工具等级不足的目标 {list(blocked)}，当前最高 {best_pick or '无镐'}。当前允许 {allowed}，可单独请求这些类型；其余至少需要 {tier_names.get(req_tier, req_tier)}。本次没有执行挖掘。",
+                "message": f"当前最高 {best_pick or '无镐'}，请求的目标 {list(blocked)} 至少需要 {tier_names.get(req_tier, req_tier)}。{allowed_hint}本次没有执行挖掘。",
                 "required_tier": req_tier,
                 "current_pickaxe": best_pick,
                 "allowed_types": allowed,
                 "blocked_types": blocked,
             }
+        block_types = allowed
+        skipped = {"skipped_unmineable": list(blocked)} if blocked else {}
+        if isinstance(self.bot, _SkillBudgetSession):
+            self.bot.progress.update(skipped)
 
         st = self.bot.status()
         raw_yaw = st.get("yaw")
@@ -3774,6 +3861,7 @@ class MacroSkills:
                     "error": "in_water",
                     "message": "角色当前仍在水中，水下挖掘极慢且易溺水中断；请先脱离水体登上干燥地面再挖矿。",
                     "water_escape": esc,
+                    **skipped,
                 }
             counts = _inventory_counts(self.bot)
             best_pick, _ = _best_pickaxe_in_inv(counts)
@@ -3796,7 +3884,7 @@ class MacroSkills:
             auto_dropped_names=auto_dropped_names or None,
         )
         if res.get("error") == "protected_region" or res.get("stop_reason") in {"time_budget", "unreachable_targets"}:
-            return res
+            return {**res, **skipped}
 
         if (
             int(res.get("dug_count") or 0) == 0
@@ -3859,6 +3947,7 @@ class MacroSkills:
                 if int(res2.get("dug_count") or 0) > 0:
                     return {
                         **res2,
+                        **skipped,
                         "pickaxe_used": best_pick,
                         "occluded_tunnel": tunnel_attempt,
                     }
@@ -3925,7 +4014,7 @@ class MacroSkills:
                 if mem_recall is not None:
                     if auto_dropped:
                         mem_recall["auto_dropped"] = auto_dropped
-                    return mem_recall
+                    return {**mem_recall, **skipped}
 
         if (
             int(res.get("dug_count") or 0) == 0
@@ -3938,6 +4027,7 @@ class MacroSkills:
 
         out_mine: dict[str, Any] = {
             **res,
+            **skipped,
             "pickaxe_used": best_pick,
         }
         if auto_dropped:
