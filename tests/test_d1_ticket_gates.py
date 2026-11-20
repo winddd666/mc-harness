@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from scripts import d1_acceptance
 from scripts.d1_ticket_gates import ticket_gates
 
 
@@ -193,3 +194,28 @@ def test_late_staircase_and_shaft_retreat_gates_have_separate_exposure(tmp_path)
     assert gates["actor flee max"].status == "FAIL"
     assert gates["actor retreat_shaft max"].actual == "79.500s (n=1)"
     assert gates["actor retreat_shaft max"].status == "FAIL"
+
+
+def test_acceptance_counts_missing_summaries_after_actor_start_as_runner_aborts(tmp_path, monkeypatch):
+    monkeypatch.setattr(d1_acceptance, "WT", tmp_path)
+    wave = tmp_path / "runs" / "fixture"
+    startup = wave / "startup"
+    actor = wave / "actor"
+    thread = wave / "thread"
+    for bot in (startup, actor, thread):
+        bot.mkdir(parents=True)
+    traceback = 'Traceback (most recent call last):\n  File "l3_wild_endurance_runner.py", line 2, in <module>\n'
+    (startup / "stdout.log").write_text(traceback)
+    (actor / "stdout.log").write_text(traceback)
+    (thread / "stdout.log").write_text("Exception in thread watchdog:\nTraceback (most recent call last):\n")
+    _write_episode(actor, 1, [
+        {"type": "run.started", "scope": "actor", "elapsed": 0},
+        {"type": "run.finished", "scope": "actor", "elapsed": 12, "status": "runtime_error"},
+    ])
+
+    metrics = d1_acceptance.collect("fixture")
+
+    assert metrics["startup_crash"] == ["startup"]
+    assert metrics["runner_abort"] == ["actor"]
+    assert metrics["thread_errors"] == ["thread"]
+    assert metrics["runtime_error"] == 0
