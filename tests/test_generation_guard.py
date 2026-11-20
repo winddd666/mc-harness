@@ -2506,6 +2506,9 @@ def test_r18_lava_airborne_swim_timeout_and_creeper_flee_timeout_hardening(monke
                 p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
                 state_l["placed_solid"].add(p)
                 state_l["in_lava"] = False
+                if p in {(234, 35, 193), (234, 34, 193)}:
+                    state_l["pos"] = [234.5, float(p[1] + 1), 193.5]
+                    state_l["on_ground"] = True
                 return {"ok": True}
             return {"ok": True}
 
@@ -2951,7 +2954,8 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
     assert "lava_step_bridge" in out_b["actions"]
 
 
-def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(monkeypatch):
+@pytest.mark.parametrize("bridge_edge", [False, True])
+def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(monkeypatch, bridge_edge):
     """Reproduces r20_short ds_ds_4_nether_fortress:
     1) Mid-air pos `[705.9, 64.6, 640]` whose 0.3m hitbox clips `(706, 64, 640)` lava stays in escape_lava until grounded dry.
     2) `hurt(source="lava")` while `status["in_lava"]` fluctuates False routes to `escape_lava`, NEVER `emergency_bunker`.
@@ -2961,9 +2965,9 @@ def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(mo
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
 
     rim_state: dict[str, Any] = {
-        "in_lava": True,
+        "in_lava": not bridge_edge,
         "on_ground": False,
-        "pos": [706.5, 64.0, 640.5],
+        "pos": [705.9, 64.6, 640.0] if bridge_edge else [706.5, 64.0, 640.5],
         "placed": set(),
     }
 
@@ -2992,9 +2996,9 @@ def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(mo
                 p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
                 if p in rim_state["placed"]:
                     return {"name": "cobblestone"}
-                if p[0] <= 704 and p[1] == 63:
+                if p[0] <= (705 if bridge_edge else 704) and p[1] == 63:
                     return {"name": "netherrack"}
-                if p[0] >= 706 and p[1] in (63, 64):
+                if p[0] >= 706 and (p[1] == 63 or (p[1] == 64 and not bridge_edge)):
                     return {"name": "lava"}
                 return {"name": "air"}
             if action == "control" and pl.get("forward") and not rim_state["placed"]:

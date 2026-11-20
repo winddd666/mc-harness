@@ -1001,19 +1001,12 @@ class CombatEnv:
             px, py_f, pz = float(p_now[0]), float(p_now[1]), float(p_now[2])
             if math.hypot(px - float(start_pos[0]), pz - float(start_pos[2])) > 64.0:
                 return False
-            bx, by, bz = math.floor(px), math.floor(py_f + 0.05), math.floor(pz)
+            by = math.floor(py_f + 0.05)
         except (TypeError, ValueError, IndexError):
             return False
-        cols = _hitbox_columns(px, pz)
-        if any(_is_lava_block(self._get_block_name(hx, by, hz)) for hx, hz in cols):
-            return True
-        below1 = self._get_block_name(bx, by - 1, bz)
-        if _is_solid_ground(below1):
-            return False
-        below2 = self._get_block_name(bx, by - 2, bz)
-        if _is_passable(below1) and _is_solid_ground(below2):
-            return False
-        for hx, hz in cols:
+        for hx, hz in _hitbox_columns(px, pz):
+            if _is_lava_block(self._get_block_name(hx, by, hz)):
+                return True
             b1 = self._get_block_name(hx, by - 1, hz)
             if _is_lava_block(b1):
                 return True
@@ -1036,9 +1029,12 @@ class CombatEnv:
             }
         rim_lava_active = False
         if not bool(st.get("in_lava")):
-            if force_rim_escape and st.get("alive") is not False and st.get("ready") is not False:
+            if st.get("alive") is not False and st.get("ready") is not False:
+                self.invalidate_block_cache()
                 pos_chk = st.get("pos") or [0.0, 64.0, 0.0]
-                rim_lava_active = self._is_airborne_above_lava(st, start_pos=pos_chk) or self._is_near_or_over_lava(st)
+                rim_lava_active = self._is_airborne_above_lava(st, start_pos=pos_chk) or (
+                    force_rim_escape and self._is_near_or_over_lava(st)
+                )
             if not rim_lava_active:
                 return {
                     "ok": True,
