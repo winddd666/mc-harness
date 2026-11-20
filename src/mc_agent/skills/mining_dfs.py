@@ -2226,13 +2226,14 @@ class MiningDFSEngine:
                 if not route or any(reverse for _, reverse, _ in route):
                     continue
             candidates.append(candidate)
-        deepest = min(candidates, key=lambda candidate: candidate.anchor[1], default=None)
-        if deepest is None:
-            return False
-        reached, _ = self._resume_shaft_tip(deepest.node_id, min_hp_ref=min_hp_ref)
-        if not reached:
+        for candidate in sorted(candidates, key=lambda candidate: candidate.anchor[1]):
+            reached, reason = self._resume_shaft_tip(candidate.node_id, min_hp_ref=min_hp_ref)
+            if reached:
+                return True
             self.active_node_id = node.node_id
-        return reached
+            if reason in {"hurt", "not_ready", "not_grounded"}:
+                break
+        return False
 
     # ---- Long-Range 64-Block Cluster Radar & Hostile Threat Triage ('radar' strategy) ----
 

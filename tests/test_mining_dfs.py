@@ -3321,6 +3321,58 @@ def test_blocked_descent_backtrack_resumes_the_deepest_pending_node(monkeypatch)
     assert result["pos_after"][1] <= 26
 
 
+def test_backtrack_tries_another_lower_branch_when_the_deepest_is_sealed(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 39.0, 21.5), surface_y=64)
+    world.blocks[(0, 37, 23)] = world.blocks[(0, 38, 23)] = "air"
+    world.blocks[(1, 36, 23)] = "iron_ore"
+    attempted = []
+    with BotSession("tok", bot_username="ResumeAfterSealing", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, 0), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        transit = engine._create_node(
+            kind="switchback", anchor=(0, 41, 19), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, (0, 41, 19)]),
+            branches=[mining.BranchSpec("stair_down", direction, 25, status="completed") for direction in mining.DIRECTIONS],
+        )
+        nearby = engine._create_node(
+            kind="switchback", anchor=(0, 37, 23), parent_id=transit.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [transit.anchor, (0, 39, 21), (0, 37, 23)]),
+            branches=[mining.BranchSpec("stair_down", "east", 21)],
+        )
+        deepest = engine._create_node(
+            kind="switchback", anchor=(0, 15, 45), parent_id=nearby.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [nearby.anchor, (0, 15, 45)]),
+            branches=[mining.BranchSpec("stair_down", "south", 35)],
+        )
+        engine.active_node_id = transit.node_id
+
+        def navigate(goal, **kwargs):
+            attempted.append(goal)
+            if goal == deepest.node_id:
+                return False, "backtrack_blocked"
+            assert goal == nearby.node_id
+            world.pos = [0.5, 37.0, 23.5]
+            engine.active_node_id = goal
+            return True, None
+
+        def walk_up(*args, **kwargs):
+            pytest.fail("backtracked upward before trying the nearby pending branch")
+
+        monkeypatch.setattr(engine, "_navigate_to_node", navigate)
+        monkeypatch.setattr(engine, "_walk_waypoints", walk_up)
+        result = engine.run(target="iron", target_y=16, goal_count=1, max_duration_s=32)
+
+    assert attempted == [deepest.node_id, nearby.node_id]
+    assert result["stop_reason"] == "quota_reached"
+    assert result["pos_after"][1] <= nearby.anchor[1]
+    assert engine.collar_node_id == collar.node_id
+
+
 @pytest.mark.parametrize("local_branch_available", [True, False])
 def test_blocked_target_level_backtrack_preserves_the_shaft(monkeypatch, local_branch_available) -> None:
     import mc_agent.skills.mining_dfs as mining
