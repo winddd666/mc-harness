@@ -3888,13 +3888,14 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert skills.bot is bot
 
 
-def test_unstick_water_branch_shares_the_tool_budget(monkeypatch):
+def test_unstick_canopy_branch_shares_the_tool_budget(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda _: None)
     calls = []
     events = []
 
-    class WetBot:
+    class CanopyBot:
         def status(self):
             return self.call("status", method="GET")
 
@@ -3903,20 +3904,16 @@ def test_unstick_water_branch_shares_the_tool_budget(monkeypatch):
             assert kwargs["allow_reauth"] is False
             calls.append((action, clock[0], timeout))
             if action == "status":
-                return {"pos": [0.5, 52.0, 0.5], "in_water": True, "submerged": True, "ready": True, "alive": True}
-            if action == "move_to":
+                return {"pos": [0.5, 52.0, 0.5], "ready": True, "alive": True, "on_ground": True}
+            if action == "get_block":
+                return {"name": "oak_leaves" if body["pos"][1] == 51 else "oak_log", "diggable": True}
+            if action == "dig":
                 clock[0] += timeout
-                if clock[0] >= 1045.0:
-                    raise httpx.ReadTimeout("water move reached the tool budget")
+                if clock[0] >= 1028.0:
+                    raise httpx.ReadTimeout("canopy dig reached the tool budget")
             return {"ok": True}
 
-    def slow_water_escape(skills):
-        for _ in range(6):
-            skills.bot.call("move_to", {}, timeout_s=None)
-        return {"ok": False, "in_water": True}
-
-    monkeypatch.setattr(MacroSkills, "escape_water", slow_water_escape)
-    bot = WetBot()
+    bot = CanopyBot()
     skills = MacroSkills(bot)
     guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
     original_call = bot.call
@@ -3924,8 +3921,8 @@ def test_unstick_water_branch_shares_the_tool_budget(monkeypatch):
 
     assert result["ok"] is False and result["requires_replan"] is True
     assert result["error"]["code"] == "time_budget"
-    assert calls[-1] == ("stop", 1045.0, 1.5)
-    assert all(start + timeout <= 1045.0 for _, start, timeout in calls[:-1])
+    assert calls[-1] == ("stop", 1028.0, 1.5)
+    assert all(start + timeout <= 1028.0 for _, start, timeout in calls[:-1])
     assert bot.call == original_call
     assert events[-1]["type"] == "guardian.recovery_budget_exceeded"
 
