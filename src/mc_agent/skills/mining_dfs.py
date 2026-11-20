@@ -3079,6 +3079,16 @@ class MiningDFSEngine:
             kwargs["deadline"] = deadline
         return skill(**kwargs)
 
+    @staticmethod
+    def _climb_target_reached(status: dict[str, Any], target_y: int) -> bool:
+        pos = status.get("pos")
+        return (
+            bool(pos) and bool(status.get("on_ground", True))
+            and status.get("alive") is not False and status.get("ready") is not False
+            and not (status.get("in_water") or status.get("in_lava"))
+            and _floor_pos(pos)[1] >= target_y - 2
+        )
+
     def _climb_out(self, *, deadline: float, max_attempts: int = 40) -> dict[str, Any]:
         """Climb to the surface datum in ONE call: probe directions and keep going.
 
@@ -3109,7 +3119,8 @@ class MiningDFSEngine:
             )
             walked = bool(ok_walk)
             if not walked:
-                y_part = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
+                partial_status = self.bot.status()
+                y_part = _floor_pos(partial_status.get("pos") or [0, start_y, 0])[1]
                 walk_gain = int(y_part) - int(start_y)
                 if walk_gain >= 3:
                     # The corridor walk is working, it just ran out of slice. Report progress so
@@ -3119,7 +3130,7 @@ class MiningDFSEngine:
                         "end_y": y_part,
                         "climbed": walk_gain,
                         "target_y": target_y,
-                        "reached": y_part >= target_y,
+                        "reached": self._climb_target_reached(partial_status, target_y),
                         "attempts": 0,
                         "method": "walk",
                     }
@@ -3144,8 +3155,9 @@ class MiningDFSEngine:
                 walked = False
         if walked:
             method = "walk"
-            y_walk = _floor_pos(self.bot.status().get("pos") or [0, start_y, 0])[1]
-            if y_walk >= target_y - 2:
+            walk_status = self.bot.status()
+            y_walk = _floor_pos(walk_status.get("pos") or [0, start_y, 0])[1]
+            if self._climb_target_reached(walk_status, target_y):
                 return {
                     "start_y": start_y,
                     "end_y": y_walk,
@@ -3225,13 +3237,14 @@ class MiningDFSEngine:
             if escaped:
                 continue
             break
-        end_y = _floor_pos(self.bot.status().get("pos") or [0, 64, 0])[1]
+        end_status = self.bot.status()
+        end_y = _floor_pos(end_status.get("pos") or [0, 64, 0])[1]
         return {
             "start_y": start_y,
             "end_y": end_y,
             "climbed": end_y - start_y,
             "target_y": target_y,
-            "reached": end_y >= target_y - 2,
+            "reached": self._climb_target_reached(end_status, target_y),
             "attempts": attempts,
             "method": method if not walked else f"{method}+stair",
         }
@@ -5136,11 +5149,7 @@ class MiningDFSEngine:
                 target_height = int(self.collar_ceiling_y) - 16 if self.collar_ceiling_y is not None else start_y
                 status = scoped.last_status
                 in_fluid = status.get("in_water") or status.get("in_lava")
-                reached = (
-                    end_y >= target_height - 2 and bool(status.get("pos"))
-                    and status.get("on_ground", True) and not in_fluid
-                    and status.get("alive") is not False and status.get("ready") is not False
-                )
+                reached = self._climb_target_reached(status, target_height)
                 result["climb"] = {
                     "start_y": start_y, "end_y": end_y, "climbed": end_y - start_y,
                     "target_y": target_height, "reached": reached,

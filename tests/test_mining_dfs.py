@@ -2452,6 +2452,39 @@ def test_climb_timeout_with_confirmed_ascent_can_resume(monkeypatch) -> None:
     assert second["stop_reason"] == "surface_reached"
 
 
+def test_climb_out_confirms_landing_before_reporting_arrival(monkeypatch) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 36.0, 0.5), surface_y=55, dimension="the_nether")
+    world.blocks[(1, 38, 0)] = world.blocks[(1, 39, 0)] = "air"
+
+    def handler(request):
+        response = world.handler(request)
+        if request.url.path.endswith("/status") and world.pos[1] == 38.4:
+            payload = response.json()
+            payload["result"]["on_ground"] = False
+            return httpx.Response(200, json=payload)
+        return response
+
+    def step(**kwargs):
+        world.pos = [1.5, 38.4, 0.5]
+        return {"ok": True}
+
+    with BotSession("tok", bot_username="ConfirmClimbLanding", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        engine.collar_ceiling_y = 55
+        monkeypatch.setattr(engine.skills, "dig_staircase", step)
+        airborne = engine.run(action="climb_out", max_duration_s=5)
+        assert airborne["ok"] is False
+        assert airborne["stop_reason"] == "climb_progress"
+        assert airborne["climb"]["target_y"] == 39
+        assert airborne["climb"]["reached"] is False
+
+        world.pos[1] = 38.0
+        landed = engine.run(action="climb_out", max_duration_s=5)
+
+    assert landed["stop_reason"] == "surface_reached"
+    assert landed["climb"]["reached"] is True
+
+
 def test_climb_timeout_keeps_success_when_the_collar_was_already_reached(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 
