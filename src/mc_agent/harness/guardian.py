@@ -1575,7 +1575,12 @@ class GenerationGuard:
 
     @contextmanager
     def _intercept_bot_calls(
-        self, *, enable_creeper_watcher: bool = True, deadline: float | None = None, check_unstick_exit: bool = False,
+        self,
+        *,
+        enable_creeper_watcher: bool = True,
+        deadline: float | None = None,
+        check_unstick_exit: bool = False,
+        watch_hot_floor: bool = False,
     ):
         """Intercept `interrupted_by=='hurt'` and silent creeper approach inside multi-step macro skills."""
         orig_call = getattr(self.raw_bot, "call", None)
@@ -1596,6 +1601,7 @@ class GenerationGuard:
             if stop_evt.wait(0.30):
                 return
             watch_hp0: float | None = None
+            previous_tile = checked_hot_floor = None
             while not stop_evt.is_set():
                 try:
                     st = orig_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
@@ -1624,14 +1630,34 @@ class GenerationGuard:
                         and nh_dist <= 4.5
                         and not self._is_pre_hurt_debounced(nh_id, nh_name)
                     )
-                    if bool(st.get("in_lava")) or creeper_close or melee_ambush or hp_dropped:
-                        in_lava_now = bool(st.get("in_lava"))
+                    in_lava_now = bool(st.get("in_lava"))
+                    hot_floor_now = False
+                    if watch_hot_floor and not (in_lava_now or creeper_close or melee_ambush or hp_dropped):
+                        tile = self._hot_floor_block(st)
+                        if (
+                            tile is not None and tile == previous_tile and tile != checked_hot_floor
+                            and "nether" in tile[0].lower() and st.get("ready") is not False and st.get("alive") is not False
+                            and not st.get("in_water")
+                            and isinstance(cur_hp, (int, float)) and cur_hp < 20
+                            and self._needs_hot_floor_stance(st, time.monotonic())
+                        ):
+                            checked_hot_floor = tile
+                            _, x, y, z = tile
+                            try:
+                                floor = orig_call("get_block", {"pos": [x, y - 1, z]}, timeout_s=0.8, allow_reauth=False)
+                                hot_floor_now = str(floor.get("name") or "").removeprefix("minecraft:") == "magma_block"
+                            except (ApiError, httpx.HTTPError):
+                                pass
+                        previous_tile = tile
+                    if in_lava_now or creeper_close or melee_ambush or hp_dropped or hot_floor_now:
                         if in_lava_now:
                             src_w, eid_w, tp_w, pos_w, dist_w = "boundary_threat", None, "lava", None, 0.0
                         elif creeper_close:
                             src_w, eid_w, tp_w, pos_w, dist_w = "pre_hurt_creeper", nh_id, "creeper", nh_pos, nh_dist
                         elif hp_dropped:
                             src_w, eid_w, tp_w, pos_w, dist_w = "tool_interrupted_hurt", nh_id, (nh_name or "hostile"), nh_pos, nh_dist
+                        elif hot_floor_now:
+                            src_w, eid_w, tp_w, pos_w, dist_w = "tool_interrupted_hurt", None, "hot_floor", st.get("pos"), 0.0
                         else:
                             src_w, eid_w, tp_w, pos_w, dist_w = "pre_hurt_melee", nh_id, nh_name, nh_pos, nh_dist
                         pending_trigger.append(
@@ -1803,6 +1829,22 @@ class GenerationGuard:
                     "status_after": st_after,
                     **({"respawned": True} if lava_died else {}),
                 }
+            elif trigger.get("primary_type") == "hot_floor":
+                actions = []
+                st_after = st_pre
+                if st_pre.get("ready") is not False and st_pre.get("alive") is not False and (
+                    st_pre.get("on_ground") is True and not st_pre.get("in_water") and st_pre.get("pos")
+                ):
+                    self.combat_env.invalidate_block_cache()
+                    if self.combat_env.is_on_hot_floor(st_pre["pos"]):
+                        actions.append(self._action("hot_floor_sneak", lambda: self._sneak_on_hot_floor(st_pre)))
+                        self._hot_floor_retry_at = time.monotonic() + self.HOT_FLOOR_RETRY_S
+                        try:
+                            st_after = self.bot.status()
+                        except (ApiError, httpx.HTTPError):
+                            pass
+                summary = f"执行 {interrupted_name} 途中踩到岩浆块，已中断当前动作，当前 HP={st_after.get('health')}"
+                outcome = {"handled": bool(actions and actions[0].get("ok")), "mode": "hot_floor", "actions": actions}
             else:
                 now_pre = time.monotonic()
                 oxy_pre = st_pre.get("oxygen")
@@ -1975,7 +2017,11 @@ class GenerationGuard:
         # Leave time for the watcher to exit and for the final bounded stop request.
         deadline = time.monotonic() + self.UNSTICK_BUDGET_S - 2.0 if is_unstick else None
         try:
-            with self._intercept_bot_calls(deadline=deadline, check_unstick_exit=is_unstick):
+            with self._intercept_bot_calls(
+                deadline=deadline,
+                check_unstick_exit=is_unstick,
+                watch_hot_floor=tool_name in {"mc_skill_mine_dfs", "mc_skill_staircase"},
+            ):
                 result = invoke_fn()
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _RecoveryBudgetExceeded

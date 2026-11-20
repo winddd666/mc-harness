@@ -4338,6 +4338,46 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
         assert attacks == [True] and moves == []
 
 
+def test_mining_on_magma_is_interrupted_before_the_boundary():
+    import threading
+
+    stopped = threading.Event()
+    status = {
+        "pos": [0.5, 38.0, 0.5], "health": 19.5, "food": 20, "on_ground": True,
+        "ready": True, "alive": True, "dimension": "the_nether", "sneaking": False,
+    }
+    actions = []
+
+    class MiningBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "get_block":
+                assert body["pos"] == [0, 37, 0]
+                return {"name": "magma_block"}
+            if action == "dig":
+                assert stopped.wait(3.0)
+                return {"interrupted_by": "hurt"}
+            if action == "stop":
+                actions.append("stop")
+                stopped.set()
+            if action == "posture":
+                actions.append("sneak")
+                status["sneaking"] = body["sneak"]
+                return {"sneaking": status["sneaking"]}
+            return {"ok": True}
+
+    bot = MiningBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(bot.call("dig", {}))))
+    assert result["reflex_mode"] == "hot_floor"
+    assert result["requires_replan"] is True
+    assert status["sneaking"] is True
+    assert actions == ["stop", "sneak"]
+
+
 
 
 
