@@ -14,6 +14,7 @@ import json
 import pathlib
 import sys
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -23,6 +24,7 @@ if str(V2_SRC) not in sys.path:
     sys.path.insert(0, str(V2_SRC))
 
 from mc_agent.bot import BotSession  # noqa: E402
+from mc_agent.harness.curriculum import select_next_target  # noqa: E402
 from mc_agent.harness.guardian import GenerationGuard, _GuardSession  # noqa: E402
 from mc_agent.harness.mc_tools import _normalize_find_block_types  # noqa: E402
 from mc_agent.skills.crafting import material_shortage  # noqa: E402
@@ -142,3 +144,36 @@ def test_guard_budget_preserves_httpx_timeout_phase_limits():
     assert 0 < result.connect <= 0.25
     assert 0 < result.pool <= 0.2
     assert 0 < result.write <= 0.4
+
+
+@pytest.mark.parametrize(
+    ("cooldown_until", "expected"),
+    [
+        (0.0, "minecraft:nether/find_fortress"),
+        pytest.param(
+            1200.0,
+            "free_explore_scoring",
+            marks=pytest.mark.xfail(strict=False, raises=AssertionError, reason="BUG-050 fallback clears unexpired cooldowns"),
+        ),
+        pytest.param(
+            10800.0,
+            "free_explore_scoring",
+            marks=pytest.mark.xfail(strict=False, raises=AssertionError, reason="BUG-050 fallback clears unexpired cooldowns"),
+        ),
+    ],
+)
+def test_only_fortress_candidate_respects_cooldown(monkeypatch, cooldown_until, expected):
+    fortress = "minecraft:nether/find_fortress"
+    bot = SimpleNamespace(
+        status=lambda: {"pos": [0, 70, 0], "dimension": "the_nether"},
+        inventory=lambda: {"items": [{"name": "diamond_pickaxe", "count": 1}]},
+    )
+    frontier = {
+        "completed_ids": ["minecraft:story/enter_the_nether", "minecraft:story/shiny_gear"],
+        "frontier": [{"id": fortress}],
+    }
+    monkeypatch.setattr("mc_agent.harness.curriculum.compute_advancement_frontier", lambda *args, **kwargs: frontier)
+
+    target, _ = select_next_target(bot, now=1.0, cooldowns={fortress: cooldown_until})
+
+    assert target.key == expected

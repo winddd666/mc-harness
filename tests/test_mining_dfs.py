@@ -910,6 +910,47 @@ def test_mining_dfs_offset_sidestep_retry_bypasses_local_obstruction() -> None:
     assert res["target_gained"] >= 2
 
 
+@pytest.mark.parametrize("already_queued", [False, True])
+def test_descent_offset_preserves_the_stair_back_to_the_collar(monkeypatch, already_queued: bool) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    anchor = (0, 109, 0)
+    route = [(-6, 115, 0), (-4, 113, 0), (-2, 111, 0), anchor]
+    world = _MockMineWorld(start_pos=(0.5, 109.0, 0.5), surface_y=120)
+    for step in range(7):
+        for dy in range(3):
+            world.blocks[(-step, anchor[1] + step + dy, 0)] = "air"
+    for blocked in ((0, 107, -1), (0, 107, 1), (1, 107, 0)):
+        world.blocks[blocked] = "bedrock"
+    world.blocks[(3, 108, -1)] = "iron_ore"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+    failed_descent = BranchSpec("stair_down", "north", 19)
+    branches = [failed_descent]
+    if already_queued:
+        failed_descent.status = "pruned"
+        failed_descent.prune_reason = "fluid_or_bedrock"
+        branches.append(BranchSpec(
+            "offset_retry", "north", 19, offset_tried=True, sidestep_dir="west", resume_kind="stair_down",
+        ))
+
+    with BotSession("tok", bot_username="PreserveDescentStair", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=route[0], parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", route), branches=branches,
+        )
+        result = engine.run(target="iron", target_y=90, goal_count=1, max_duration_s=20)
+
+    assert world.block_at((-1, 109, 0)) == "stone"
+    assert world.block_at((-2, 110, 0)) == "stone"
+    assert result["stop_reason"] == "quota_reached"
+    assert any(pt[0] == 3 for pt, _, _ in world.dig_log)
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_mining_dfs_64_block_radar_steers_spine_toward_distant_diamond() -> None:
     """P1-5 fix: 64-block radar detects exposed diamond ore 18 blocks east in cave wall and steers Spine east."""
     world = _MockMineWorld(
@@ -2843,6 +2884,63 @@ def test_first_dig_timeout_does_not_block_the_next_safe_descent(monkeypatch) -> 
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("dry_turn", [True, False])
+def test_timeout_after_walking_to_a_nether_switchback_cools_its_first_dig(monkeypatch, dry_turn: bool) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 65.0, 0.5), surface_y=70, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    collar_anchor, junction_anchor = (0, 65, 0), (0, 64, 1)
+    for x, y, z in (collar_anchor, junction_anchor):
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(0, 66, 1)] = "air"
+    world.blocks[(-1, 62, 1)] = "bedrock"
+    if dry_turn:
+        world.blocks[(2, 62, 1)] = "ancient_debris"
+    else:
+        world.blocks[(1, 62, 1)] = "bedrock"
+    stalled = (0, 65, 2)
+    attempts = []
+
+    def handler(request):
+        if request.url.path.endswith("/dig") and tuple(json.loads(request.content)["pos"]) == stalled:
+            attempts.append(clock.now)
+            clock.now += request.extensions["timeout"]["read"]
+            raise httpx.ReadTimeout("dig beside the existing stair stalled", request=request)
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="NetherSwitchbackCooldown", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=collar_anchor, parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        branch = mining.BranchSpec("stair_down", "south", 49)
+        junction = engine._create_node(
+            kind="switchback", anchor=junction_anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar_anchor, junction_anchor]),
+            branches=[branch],
+        )
+        args = dict(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=55)
+        first = engine.run(**args)
+        second = engine.run(**args)
+
+    assert first["stop_reason"] == "time_slice_progress"
+    assert first["dug_count"] == 0 and first["dig_target"] == list(stalled)
+    assert len(attempts) == 1
+    assert engine.nodes[collar.node_id] is collar
+    assert engine.nodes[junction.node_id] is junction and branch.status == "pending"
+    if dry_turn:
+        assert second["stop_reason"] == "quota_reached"
+        assert second["target_gained"] == 1
+    else:
+        assert second["stop_reason"] == "dig_cell_avoided"
+        assert second["pos_after"][1] == junction_anchor[1]
+        assert not world.dig_log
+
+
 @pytest.mark.parametrize("first_slice_budget", [32.0, 2.16])
 def test_descent_cooldown_requires_time_to_dig(monkeypatch, first_slice_budget) -> None:
     import mc_agent.skills.mining_dfs as mining
@@ -3622,6 +3720,56 @@ def test_explore_rejoins_a_recorded_stair_far_from_its_collar(monkeypatch) -> No
     assert result["target_gained"] == 1
     assert result["pos_after"][1] <= 4
     assert engine.collar_node_id == collar.node_id
+
+
+@pytest.mark.parametrize("rejoinable", [True, False])
+def test_explore_keeps_a_far_collar_when_displaced_near_its_deep_tip(monkeypatch, rejoinable: bool) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    collar_anchor = (0, 75, 0)
+    tip_anchor = (-2, 21, -50)
+    displaced = (-8, 15, -53)
+    world = _MockMineWorld(start_pos=(-7.5, 15.0, -52.5), surface_y=75)
+    for x, y, z in (displaced, tip_anchor):
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(-3, 21, -50)] = "iron_ore"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+
+    with BotSession("tok", bot_username="RejoinFarDeepTip", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=collar_anchor, parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar_anchor[1]
+        tip = engine._create_node(
+            kind="switchback", anchor=tip_anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [collar_anchor, (0, 25, -50), tip_anchor]),
+            branches=[BranchSpec("stair_down", "west", 75)],
+        )
+        move_exact = engine._move_exact
+        attempted_rejoins = []
+
+        def move_to_tip(cell, **kwargs):
+            if tuple(math.floor(v) for v in world.pos) == displaced:
+                attempted_rejoins.append(cell)
+                if not rejoinable:
+                    return False
+            return move_exact(cell, **kwargs)
+
+        def open_new_collar(*args, **kwargs):
+            pytest.fail("opened a new underground collar beside the recorded descent")
+
+        monkeypatch.setattr(engine, "_move_exact", move_to_tip)
+        monkeypatch.setattr(engine, "_ensure_solid_collar_anchor", open_new_collar)
+        result = engine.run(target="iron", target_y=-54, goal_count=1, max_duration_s=20)
+
+    assert attempted_rejoins == [tip_anchor]
+    assert engine.nodes[collar.node_id] is collar
+    if rejoinable:
+        assert result["stop_reason"] == "quota_reached"
+    else:
+        assert result["stop_reason"] == "needs_surface_climb"
+        assert engine.nodes[tip.node_id] is tip
+        assert not world.dig_log
 
 
 @pytest.mark.parametrize("from_archive", [False, True])
