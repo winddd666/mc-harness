@@ -5267,10 +5267,11 @@ class MiningDFSEngine:
         except _MiningDeadline as exc:
             resupply_interrupted = isinstance(exc, _CollarResupplyDeadline)
             moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
-            # Give productive slices and digs with a subsecond read allowance a fresh budget.
+            # Walking to an existing stair can precede a stall on the first dig.
+            # Keep the cooldown for that cell if no dig has succeeded this slice.
             if (
                 scoped.timeout_dig_pos is not None and scoped.timeout_dig_read_s >= 1.0
-                and not (moved or scoped.dug_count)
+                and not scoped.dug_count
             ):
                 self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", 30.0)
             self._preserve_interrupted_branch(scoped, deadline_failure=exc)
@@ -6047,6 +6048,21 @@ class MiningDFSEngine:
 
             next_branch = next((b for b in node.branches if b.status == "pending" and id(b) not in blocked_branches), None)
             if next_branch is None:
+                edge = node.edge_from_parent
+                descending = (
+                    edge is not None and node.kind == "switchback" and node.anchor[1] > self.target_y + SCAN_BAND
+                )
+                alternatives = None
+                if descending:
+                    # Check untried dry turns even if the existing descent is cooling down.
+                    tried = {b.direction for b in node.branches} | {OPPOSITE_DIR.get(edge.direction)}
+                    directions = tuple(d for d in DIRECTIONS if d not in tried)
+                    alternatives = self._probe_dry_descent(
+                        node.anchor, directions=directions, geofence=geofence, min_hp_ref=min_hp_ref,
+                    )
+                    if alternatives:
+                        node.branches.extend(alternatives)
+                        continue
                 if any(b.status == "pending" for b in node.branches):
                     stop_reason = "dig_cell_avoided"
                     break
@@ -6088,7 +6104,7 @@ class MiningDFSEngine:
                         self._maybe_place_torch_at_node(sp_node)
                         continue
 
-                if node.parent_id is None or node.edge_from_parent is None:
+                if node.parent_id is None or edge is None:
                     self._archive_current_shaft_to_ledger(mark_exhausted=True)
                     if auto_relocations_this_slice < 1 and time.monotonic() + 8.0 < deadline:
                         auto_relocations_this_slice += 1
@@ -6106,17 +6122,7 @@ class MiningDFSEngine:
                             continue
                     stop_reason = "shaft_exhausted"
                     break
-                edge = node.edge_from_parent
-                descending = node.kind == "switchback" and node.anchor[1] > self.target_y + SCAN_BAND
                 if descending:
-                    tried = {b.direction for b in node.branches} | {OPPOSITE_DIR.get(edge.direction)}
-                    directions = tuple(d for d in DIRECTIONS if d not in tried)
-                    alternatives = self._probe_dry_descent(
-                        node.anchor, directions=directions, geofence=geofence, min_hp_ref=min_hp_ref,
-                    )
-                    if alternatives:
-                        node.branches.extend(alternatives)
-                        continue
                     # A failed first sidestep leaves the other side of that descent untested.
                     if alternatives is not None and any(
                         self._enqueue_offset_retry_if_eligible(

@@ -2884,6 +2884,63 @@ def test_first_dig_timeout_does_not_block_the_next_safe_descent(monkeypatch) -> 
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("dry_turn", [True, False])
+def test_timeout_after_walking_to_a_nether_switchback_cools_its_first_dig(monkeypatch, dry_turn: bool) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 65.0, 0.5), surface_y=70, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    collar_anchor, junction_anchor = (0, 65, 0), (0, 64, 1)
+    for x, y, z in (collar_anchor, junction_anchor):
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(0, 66, 1)] = "air"
+    world.blocks[(-1, 62, 1)] = "bedrock"
+    if dry_turn:
+        world.blocks[(2, 62, 1)] = "ancient_debris"
+    else:
+        world.blocks[(1, 62, 1)] = "bedrock"
+    stalled = (0, 65, 2)
+    attempts = []
+
+    def handler(request):
+        if request.url.path.endswith("/dig") and tuple(json.loads(request.content)["pos"]) == stalled:
+            attempts.append(clock.now)
+            clock.now += request.extensions["timeout"]["read"]
+            raise httpx.ReadTimeout("dig beside the existing stair stalled", request=request)
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="NetherSwitchbackCooldown", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=collar_anchor, parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        branch = mining.BranchSpec("stair_down", "south", 49)
+        junction = engine._create_node(
+            kind="switchback", anchor=junction_anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar_anchor, junction_anchor]),
+            branches=[branch],
+        )
+        args = dict(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=55)
+        first = engine.run(**args)
+        second = engine.run(**args)
+
+    assert first["stop_reason"] == "time_slice_progress"
+    assert first["dug_count"] == 0 and first["dig_target"] == list(stalled)
+    assert len(attempts) == 1
+    assert engine.nodes[collar.node_id] is collar
+    assert engine.nodes[junction.node_id] is junction and branch.status == "pending"
+    if dry_turn:
+        assert second["stop_reason"] == "quota_reached"
+        assert second["target_gained"] == 1
+    else:
+        assert second["stop_reason"] == "dig_cell_avoided"
+        assert second["pos_after"][1] == junction_anchor[1]
+        assert not world.dig_log
+
+
 @pytest.mark.parametrize("first_slice_budget", [32.0, 2.16])
 def test_descent_cooldown_requires_time_to_dig(monkeypatch, first_slice_budget) -> None:
     import mc_agent.skills.mining_dfs as mining
