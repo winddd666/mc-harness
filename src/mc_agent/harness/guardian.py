@@ -13,6 +13,7 @@ Covers all four previously vulnerable windows without competing for the server a
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import copy
 import json
 import math
 import threading
@@ -119,18 +120,36 @@ class ReflexPreempted(BaseException):
         self.trigger = trigger
 
 
+class _WaterEscapeBudgetExceeded(Exception):
+    """End the water macro without swallowing episode cancellation."""
+
+
 class _GuardSession:
-    def __init__(self, bot: Any, checkpoint: Callable[[], None]) -> None:
+    def __init__(self, bot: Any, checkpoint: Callable[[], None], *, deadline: float | None = None) -> None:
         self.bot = bot
         self.checkpoint = checkpoint
+        self.deadline = deadline
+
+    def _time_remaining(self) -> float:
+        remaining = float("inf") if self.deadline is None else self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise _WaterEscapeBudgetExceeded
+        return remaining
 
     def call(self, action: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         self.checkpoint()
         readonly = action in {"status", "events", "inventory", "get_entities", "get_block", "find_blocks"}
         kwargs.setdefault("timeout_s", 2.0 if readonly else 8.0)
+        if self.deadline is not None:
+            kwargs["timeout_s"] = min(kwargs["timeout_s"], self._time_remaining())
         kwargs["allow_reauth"] = False
-        result = self.bot.call(action, body, **kwargs)
+        try:
+            result = self.bot.call(action, body, **kwargs)
+        except httpx.TimeoutException:
+            self._time_remaining()
+            raise
         self.checkpoint()
+        self._time_remaining()
         return result
 
     def status(self) -> dict[str, Any]:
@@ -141,6 +160,7 @@ class _GuardSession:
 
 
 class GenerationGuard:
+    WATER_ESCAPE_BUDGET_S = 20.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
@@ -292,10 +312,25 @@ class GenerationGuard:
         return self.skills if self.skills is not None else MacroSkills(self.bot)
 
     def _escape_water(self, before: dict[str, Any]) -> dict[str, Any]:
-        result = self._skills().escape_water()
-        if not result.get("ok"):
-            return result
-        after = self.bot.status()
+        skills = self._skills()
+        escape_bot = _GuardSession(
+            self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + self.WATER_ESCAPE_BUDGET_S,
+        )
+        if isinstance(skills, MacroSkills):
+            # Keep the shared avoidance records while leaving the tool runner's session binding intact.
+            skills = copy(skills)
+            skills.bot = escape_bot
+        try:
+            result = skills.escape_water()
+            if not result.get("ok"):
+                return result
+            after = escape_bot.status()
+        except _WaterEscapeBudgetExceeded:
+            try:
+                self.raw_bot.call("stop", {}, timeout_s=1.5, allow_reauth=False)
+            except (ApiError, httpx.HTTPError):
+                pass
+            return {"ok": False, "reason": "time_budget", "partial": True, "in_water": True}
         start, end = before.get("pos"), after.get("pos") or result.get("pos_after")
         if (
             (start and end and math.hypot(end[0] - start[0], end[2] - start[2]) > 64.0)
@@ -903,12 +938,12 @@ class GenerationGuard:
                     shore_res = shore_act.get("result") if isinstance(shore_act, dict) and isinstance(shore_act.get("result"), dict) else {}
                     self._last_water_escape_failed = not bool(shore_act.get("ok") and shore_res.get("in_water") is not True)
                 else:
-                    esc_f = self._action("escape_water", lambda: self._skills().escape_water())
+                    esc_f = self._action("escape_water", lambda: self._escape_water(status))
                     actions.append(esc_f)
                     esc_f_res = esc_f.get("result") if isinstance(esc_f.get("result"), dict) else {}
                     esc_f_ok = bool(esc_f.get("ok") and esc_f_res.get("in_water") is not True)
                     esc_f_err = esc_f["error"].get("code") if isinstance(esc_f.get("error"), dict) else None
-                    if not esc_f_ok and esc_f_err not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}:
+                    if not esc_f_ok and not esc_f_res.get("respawned") and esc_f_err not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}:
                         shore_f = self._action(
                             "escape_to_shore",
                             lambda: self.combat_env.escape_deep_water_to_shore(nh_pos, keep_shield=has_shield),
@@ -986,13 +1021,15 @@ class GenerationGuard:
                         reasons.append("water_avoid_cooldown")
 
                 esc_succeeded = False
+                esc_respawned = False
                 esc_err_code: str | None = None
                 if not transient_err and not forced_water_shore and not no_water_reentry:
                     if not _already("escape_water"):
-                        actions.append(self._action("escape_water", lambda: self._skills().escape_water()))
+                        actions.append(self._action("escape_water", lambda: self._escape_water(status)))
                     esc_act = next((a for a in actions if a.get("action") == "escape_water"), None)
                     esc_res = esc_act.get("result") if isinstance(esc_act, dict) and isinstance(esc_act.get("result"), dict) else {}
                     esc_succeeded = bool(esc_act and esc_act.get("ok") and esc_res.get("in_water") is not True)
+                    esc_respawned = bool(esc_res.get("respawned"))
                     esc_err_code = (
                         esc_act["error"].get("code")
                         if isinstance(esc_act, dict) and isinstance(esc_act.get("error"), dict)
@@ -1003,6 +1040,7 @@ class GenerationGuard:
                 if (
                     not transient_err
                     and not esc_succeeded
+                    and not esc_respawned
                     and esc_err_code not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}
                 ):
                     shore_act = self._action(
@@ -1022,6 +1060,7 @@ class GenerationGuard:
                 if (
                     not shore_succeeded
                     and not transient_err
+                    and not esc_respawned
                     and should_shield_water
                     and not _already("raise_shield")
                     and esc_err_code not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}
@@ -1609,12 +1648,14 @@ class GenerationGuard:
                         )
 
                     esc_pre_ok = False
+                    esc_pre_respawned = False
                     if not forced_pre_shore:
-                        esc_act = self._action("escape_water", lambda: self._skills().escape_water(), raise_on_http_error=False)
+                        esc_act = self._action("escape_water", lambda: self._escape_water(st_pre), raise_on_http_error=False)
                         pre_actions.append(esc_act)
                         esc_pre_res = esc_act.get("result") if isinstance(esc_act, dict) and isinstance(esc_act.get("result"), dict) else {}
                         esc_pre_ok = bool(esc_act.get("ok") and esc_pre_res.get("in_water") is not True)
-                    if not esc_pre_ok:
+                        esc_pre_respawned = bool(esc_pre_res.get("respawned"))
+                    if not esc_pre_ok and not esc_pre_respawned:
                         shore_pre = self._action(
                             "escape_to_shore",
                             lambda: self.combat_env.escape_deep_water_to_shore(
@@ -1674,9 +1715,9 @@ class GenerationGuard:
                             or (isinstance(st_after.get("oxygen"), (int, float)) and st_after["oxygen"] < 180)
                             or time.monotonic() < self._no_water_until
                         ):
-                            esc_post = self._action("escape_water", lambda: self._skills().escape_water(), raise_on_http_error=False)
+                            esc_post = self._action("escape_water", lambda: self._escape_water(st_after), raise_on_http_error=False)
                             esc_post_res = esc_post.get("result") if isinstance(esc_post.get("result"), dict) else {}
-                            if not (esc_post.get("ok") and esc_post_res.get("in_water") is not True):
+                            if not esc_post_res.get("respawned") and not (esc_post.get("ok") and esc_post_res.get("in_water") is not True):
                                 self._action(
                                     "escape_to_shore",
                                     lambda: self.combat_env.escape_deep_water_to_shore(trigger.get("primary_pos")),
