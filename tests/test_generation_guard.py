@@ -4634,6 +4634,40 @@ def test_bug076_unsafe_actor_exit_checks_another_route_when_a_hostile_is_close(t
         assert motions == []
 
 
+def test_bug072_real_flee_entry_accepts_the_mining_sessions_httpx_timeout(monkeypatch):
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    request_timeouts = []
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            request_timeouts.append(kwargs["timeout_s"])
+            return {"pos": [0.5, 64, 0.5], "on_ground": True}
+
+    def retreat(scoped, **kwargs):
+        scoped.bot.call("status", method="GET")
+        clock[0] += 32.6
+        scoped.bot.call("status", method="GET")
+        return {"ok": True, "mode": "retreat_shaft", "pos_after": [1.5, 64, 0.5]}
+
+    monkeypatch.setattr(MacroSkills, "_flee_hostiles", retreat)
+    bot = ShaftBot()
+    toolset = McToolset(bot)
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", toolset.mc_skill_flee))
+
+    assert result["ok"] is True and result["mode"] == "retreat_shaft"
+    initial, final = request_timeouts
+    assert isinstance(initial, httpx.Timeout) and isinstance(final, httpx.Timeout)
+    assert initial.read == 5.0
+    assert initial.connect == initial.write == initial.pool == 0.5
+    assert 2 * sum(final.as_dict().values()) + 0.15 <= 1033.0 - clock[0]
+    assert final.connect <= 0.5 and final.write <= 0.5 and final.pool <= 0.5
+
+
 @pytest.mark.parametrize("terrain", ["wall", "unknown", "drifted_during_probe", "missed_landing"])
 def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing(terrain):
     from mc_agent.skills.combat_env import CombatEnv

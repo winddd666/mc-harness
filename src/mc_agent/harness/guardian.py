@@ -156,10 +156,27 @@ class _GuardSession:
     def call(self, action: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         self.checkpoint()
         readonly = action in {"status", "events", "inventory", "get_entities", "get_block", "find_blocks"}
-        if kwargs.get("timeout_s") is None:
-            kwargs["timeout_s"] = 2.0 if readonly else 8.0
+        timeout = kwargs.get("timeout_s")
+        if timeout is None:
+            timeout = 2.0 if readonly else 8.0
         if self.deadline is not None:
-            kwargs["timeout_s"] = min(kwargs["timeout_s"], self._time_remaining())
+            remaining = self._time_remaining()
+            if isinstance(timeout, httpx.Timeout):
+                # BotSession can retry a closed keepalive after a 150ms delay.
+                attempt_budget = (remaining - 0.15) / 2
+                if attempt_budget <= 0:
+                    raise _RecoveryBudgetExceeded
+                phase_budget = attempt_budget / 4
+                overhead = {
+                    phase: min(seconds, phase_budget) if seconds is not None else phase_budget
+                    for phase, seconds in timeout.as_dict().items() if phase != "read"
+                }
+                read_budget = attempt_budget - sum(overhead.values())
+                read_timeout = min(timeout.read, read_budget) if timeout.read is not None else read_budget
+                timeout = httpx.Timeout(read_timeout, **overhead)
+            else:
+                timeout = min(timeout, remaining)
+        kwargs["timeout_s"] = timeout
         kwargs["allow_reauth"] = False
         try:
             call = self._call_override if self._call_override is not None else self.bot.call
