@@ -2026,7 +2026,7 @@ r43 HY4_1 EP01 在 +1.510s 告警最近死亡 8 次，掩体因 `not_grounded` �
 
 ## 4ct. 回程净降高门禁与新版离线复验
 
-`d1_acceptance.py` 增加 `climb_out` 起止 Y 对账。即使工具以 `time_slice` 返回，只要结束 Y 低于起始 Y 就单列失败。仅 `return_collar` 的移动不计入。r46 Day 1 为 **0/2**，Day 2 为 **2/12**。两条失败都在 HY4_7 EP04，实际各掉 **6／18** 格。无起止 Y 的波次仍待样本，整集真实回程超时继续以逐集追踪裁定。 [门禁](../scripts/d1_ticket_gates.py#L438) · [首次倒退](../../v2-integrated/runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L314) · [第二次倒退](../../v2-integrated/runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L340)
+`d1_acceptance.py` 增加 `climb_out` 起止 Y 对账。即使工具以 `time_slice` 返回，只要结束 Y 低于起始 Y 就单列失败。仅 `return_collar` 的移动不计入。r46 Day 1 为 **0/2**，Day 2 为 **2/12**。两条失败都在 HY4_7 EP04，实际各掉 **6／18** 格。第一片结束在 Y21，随后第一次倒退结束在 Y15，两份回执都还记录现役矿口 `(-7877,-9,2666)`，符合旧版重入后会尝试走回低矿口的条件。无起止 Y 的波次仍待样本，整集真实回程超时继续以逐集追踪裁定。 [门禁](../scripts/d1_ticket_gates.py#L438) · [首次倒退](../../v2-integrated/runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L314) · [第二次倒退](../../v2-integrated/runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L340)
 
 集成 `2044a63` 包含 `16df57e`，回地面时跳过不高于当前站位的现役矿口和归档矿口。另有 `50adb01`，剩余爬升超过首片进展且预算较小时提示下一片 55s。现役、归档及续片提示 3 个离线用例通过。`4757c8a` 的退路被拒后只对贴身单个近战进行一次反击，4 个离线用例通过。r46 的 `b0882ad` 尚未包含这些变更，下一次实机需先核对指纹，再查低位矿口和受阻反击是否得到暴露。 [两类矿口夹具](../../v2-integrated/tests/test_mining_dfs.py#L2443) · [续片夹具](../../v2-integrated/tests/test_mining_dfs.py#L2548) · [反击夹具](../../v2-integrated/tests/test_generation_guard.py#L1714)
 
