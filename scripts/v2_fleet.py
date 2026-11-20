@@ -543,6 +543,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
 
     for evf in sorted(bd.glob("*.events.jsonl")):
         call_start: dict[str, tuple[float, str]] = {}
+        guardian_preemptions = 0
+        preemption_receipts = 0
         try:
             lines = evf.read_text(encoding="utf-8", errors="ignore").splitlines()
         except OSError:
@@ -577,16 +579,16 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 dt = max(0.0, el - st_info[0]) if st_info else float(ev.get("duration") or 0.0)
                 tool_calls[tname] += 1
                 payload = _decode_payload(ev.get("result") if "result" in ev else ev.get("output"))
-                if payload.get("ok") is False:
+                if payload.get("preempted_by_reflex") is True:
+                    preemption_receipts += 1
+                elif payload.get("ok") is False:
                     code = _extract_error_code(payload)
                     tool_fails[tname] += 1
                     err_codes[f"{tname}:{code}"] += 1
-                if payload.get("preempted_by_reflex") is True:
-                    event_preemptions += 1
                 if dt >= SLOW_TOOL_THRESHOLD_S:
                     slow_calls.append((dt, name, tname))
             elif tp == "guardian.preempted_tool":
-                event_preemptions += 1
+                guardian_preemptions += 1
             elif tp == "model.rate_wait":
                 if float(ev.get("wait_s") or 0.0) > 0:
                     rate_waits += 1
@@ -594,6 +596,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 http_429_retries += 1
             elif tp == "model.failed" and is_http_429_failure(ev):
                 http_429 += 1
+        # Guardian emits both a dedicated event and the resulting tool receipt.
+        event_preemptions += max(guardian_preemptions, preemption_receipts)
 
     if summaries:
         status = str(cs.get("status") or "done")

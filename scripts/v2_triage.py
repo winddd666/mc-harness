@@ -31,13 +31,17 @@ def is_http_429_failure(event: dict[str, Any]) -> bool:
     return match is not None and match[1] == "429"
 
 
-def _extract_error_code(output_text: str) -> str:
-    try:
-        obj = json.loads(output_text)
-    except Exception:
-        return "non_json"
+def _extract_error_code(output: object) -> str:
+    obj = output
+    if isinstance(output, str):
+        try:
+            obj = json.loads(output)
+        except ValueError:
+            return "non_json"
     if not isinstance(obj, dict):
         return "non_dict"
+    if obj.get("preempted_by_reflex") is True:
+        return "reflex_preempted"
     err = obj.get("error")
     if isinstance(err, dict):
         return str(err.get("code") or err.get("reason") or "err_dict")
@@ -70,6 +74,8 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
 
     for ef in sorted(run_dir.glob("*.events.jsonl")):
         call_start.clear()
+        guardian_preemptions = 0
+        preemption_receipts = 0
         for raw in ef.read_text(encoding="utf-8").splitlines():
             if not raw.strip():
                 continue
@@ -100,19 +106,27 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
                 st_info = call_start.pop(cid, None)
                 tname = str(r.get("tool") or r.get("name") or (st_info[1] if st_info else "unknown"))
                 dur = float(r.get("duration") or (max(0.0, el - st_info[0]) if st_info else 0.0))
-                out = str(r.get("output") or r.get("result") or "")
+                out = r.get("output") or r.get("result") or ""
                 tool_calls[tname] += 1
-                ok_flag = r.get("ok")
-                is_fail = (ok_flag is False) or ('"ok": false' in out) or ('"ok":false' in out)
+                if isinstance(out, dict):
+                    is_fail = r.get("ok") is False or out.get("ok") is False
+                else:
+                    out = str(out)
+                    is_fail = r.get("ok") is False or '"ok": false' in out or '"ok":false' in out
                 if is_fail:
-                    tool_fails[tname] += 1
-                    error_codes[f"{tname}:{_extract_error_code(out)}"] += 1
-                if '"preempted_by_reflex": true' in out:
-                    tool_preemptions += 1
+                    code = _extract_error_code(out)
+                    if code == "reflex_preempted":
+                        preemption_receipts += 1
+                    else:
+                        tool_fails[tname] += 1
+                        error_codes[f"{tname}:{code}"] += 1
                 if dur >= 35.0:
                     slow_calls.append((dur, tname, ef.name))
             elif t == "guardian.incident":
                 guardian_incidents += 1
+            elif t == "guardian.preempted_tool":
+                guardian_preemptions += 1
+        tool_preemptions += max(guardian_preemptions, preemption_receipts)
 
     slow_calls.sort(reverse=True)
     score = summary.get("final_score", summary.get("current_score", 0))
