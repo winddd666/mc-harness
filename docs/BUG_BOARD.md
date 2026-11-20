@@ -1296,6 +1296,12 @@
 - **核心验证目标**：端到端验证 `day2_village_search` 完整闭环（发现 `bell`/`dirt_path`/`hay_block` → 占领村民屋 `bind_bed` 绑重生点 → 薅干草块/箱子 → 交易或入夜切地下矿井），避免随机空降 9 台全在 300m+ 荒野测不到进村逻辑。
 - **r43 收官**：9/9 验证落点，距对应村庄中心 **135.85–164.78m**。9 路强制寻村首集全用满 14 请求，4 路找到结构线索，HY4_7 首集绑定后在 EP04 死亡实测重生在床旁 **1.58m**。全波无取箱、干草入包或交易。首集 25 次实体查询中只有 1 次含村民，随后 Day 1 侦察才实际看到村民。续验村民过滤与查到目标后的补给／交易衔接。 [范围下端](../runs/r43_day2_village_near_9bot/hy4_hy_4_day2_village_near/wild-endurance-r43_day2_village_near_9bot_hy_4_day2_village_near-20261120-071619.json#L37) · [绑床](../runs/r43_day2_village_near_9bot/hy4_hy_7_day2_village_near/20261120-071642-835969.events.jsonl#L266) · [重生](../runs/r43_day2_village_near_9bot/hy4_hy_7_day2_village_near/20261120-072929-890490.events.jsonl#L140) · [后来看到四位村民](../runs/r43_day2_village_near_9bot/nju_ds_1_day2_village_near/20261120-071902-718275.events.jsonl#L225)
 
+### SCENE-003 | 状态: OPEN | 提单人: #1 主 AGY（用户规划阶段三）| stage名: `village_to_stronghold_end`（Slice D2 `#6 DeepSeek #2`）
+- **地形/结构要素**：定位主世界真实村庄安全地表作为起点（距离最近主世界要塞 `#minecraft:stronghold` 在合理可追范围，记录要塞坐标用于汇总但不泄露给模型）。
+- **初始背包与成就**：钻镐/钻剑/铁或钻甲/盾牌/食物/圆石/火把 + **14 颗 `ender_eye`**（或等量 `ender_pearl` + `blaze_powder`），已解锁铁/钻基础成就，早晨开局。
+- **死亡拉回规则**：绑定村庄出生点，禁止非传送门意外跨维度（进入 `the_end` 视为合法终局晋级！）。
+- **核心验证目标**：端到端验证“从村庄据点出发 → 掷末影之眼测向 → 复用高速斥候追眼定位要塞 → 下挖进传送门房 → 填眼激活进入末地（`follow_ender_eye` + `enter_the_end`）”。
+
 > 任何会话需要特定实机复现/验收环境时，按以下 5 行模板追加需求单；`#6` 实现为 `l3_wild_endurance_runner.py --stage <name>` 并接入 `v2_fleet.py` 后标为 `READY_FOR_RUN`，由 `#1 主 AGY` 合入上机。
 >
 > ```markdown
