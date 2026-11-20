@@ -519,9 +519,19 @@ class McToolset:
         elif checked:
             assessment["note"] = "已检查怪物的当前射线均有遮挡，可保持现有掩体；仍需留意未检查实体、绕路和新受伤，勿据此认定绝对安全或盲目冲向地表。"
 
-    def _call_json(self, path: str, body: dict[str, Any] | None = None, *, method: str = "POST") -> str:
+    def _call_json(
+        self,
+        path: str,
+        body: dict[str, Any] | None = None,
+        *,
+        method: str = "POST",
+        timeout_s: float | None = None,
+    ) -> str:
+        call_kw: dict[str, Any] = {"method": method}
+        if timeout_s is not None:
+            call_kw["timeout_s"] = float(timeout_s)
         try:
-            result = self.bot.call(path, body, method=method)
+            result = self.bot.call(path, body, **call_kw)
         except AuthError as exc:
             raise RuntimeError(f"MC API 会话不可继续：{exc}") from None
         except DeathLoopCooldownError as exc:
@@ -529,7 +539,7 @@ class McToolset:
                 raise RuntimeError(f"MC API 会话不可继续：{exc}") from None
             try:
                 self._reconnect_once(quarantined=False)
-                result = self.bot.call(path, body, method=method)
+                result = self.bot.call(path, body, **call_kw)
             except (AuthError, DeathLoopCooldownError) as re_exc:
                 raise RuntimeError(f"MC API 会话不可继续：{re_exc}") from None
             except BotNotReadyError:
@@ -545,11 +555,40 @@ class McToolset:
                 return self._format_api_error(path, body or {}, exc)
             try:
                 self._reconnect_once(quarantined=(exc.code == "action_quarantined"))
-                result = self.bot.call(path, body, method=method)
+                result = self.bot.call(path, body, **call_kw)
             except (AuthError, DeathLoopCooldownError) as re_exc:
                 raise RuntimeError(f"MC API 会话不可继续：{re_exc}") from None
             except BotNotReadyError:
                 return self._format_api_error(path, body or {}, exc)
+            except ApiError as retry_exc:
+                self.update_block_pos(retry_exc.context.get("pos") or retry_exc.context.get("from"))
+                return self._format_api_error(path, body or {}, retry_exc)
+            except httpx.HTTPError as retry_http_exc:
+                raise RuntimeError(f"MC API 网络请求异常（{type(retry_http_exc).__name__}）：{retry_http_exc}") from None
+        except httpx.TimeoutException:
+            if timeout_s is not None and path == "move_to":
+                try:
+                    self.bot.call("stop", {}, timeout_s=2.0, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "requires_replan": True,
+                        "error": {
+                            "code": "move_timeout",
+                            "message": f"move_to 超过 {round(float(timeout_s), 1)}s 预算已中止移动，请缩短步长或更换路径。",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            try:
+                self._reconnect_once(quarantined=True)
+                result = self.bot.call(path, body, **call_kw)
+            except (AuthError, DeathLoopCooldownError) as re_exc:
+                raise RuntimeError(f"MC API 会话不可继续：{re_exc}") from None
+            except BotNotReadyError as retry_not_ready:
+                return self._format_api_error(path, body or {}, retry_not_ready)
             except ApiError as retry_exc:
                 self.update_block_pos(retry_exc.context.get("pos") or retry_exc.context.get("from"))
                 return self._format_api_error(path, body or {}, retry_exc)
@@ -560,7 +599,7 @@ class McToolset:
             # quarantined session and retry the same request once.
             try:
                 self._reconnect_once(quarantined=True)
-                result = self.bot.call(path, body, method=method)
+                result = self.bot.call(path, body, **call_kw)
             except (AuthError, DeathLoopCooldownError) as re_exc:
                 raise RuntimeError(f"MC API 会话不可继续：{re_exc}") from None
             except BotNotReadyError:
@@ -1166,7 +1205,22 @@ class McToolset:
                     )
         except (ApiError, httpx.HTTPError, RuntimeError, ValueError):
             pass
-        raw = self._call_json("move_to", payload)
+        eff_move_timeout, move_deadline_imminent = self._clamp_tool_budget(
+            25.0, max_s=25.0, min_s=3.0, reserve_s=3.0
+        )
+        if move_deadline_imminent:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "requires_replan": False,
+                    "error": {
+                        "code": "episode_deadline_imminent",
+                        "message": "本集剩余时间不足 5s，已跳过 move_to 以避免超时越界。",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        raw = self._call_json("move_to", payload, timeout_s=eff_move_timeout)
         try:
             first = json.loads(raw)
             if first.get("ok") is False and (first.get("error") or {}).get("code") == "busy":
@@ -1174,7 +1228,11 @@ class McToolset:
                 # after the server confirms release; never spin on busy.
                 stopped = self.bot.call("stop", {}, timeout_s=5.5)
                 if stopped.get("released") is True or (stopped.get("stopped") is True and stopped.get("action") is None):
-                    raw = self._call_json("move_to", payload)
+                    retry_timeout, retry_imminent = self._clamp_tool_budget(
+                        15.0, max_s=15.0, min_s=3.0, reserve_s=3.0
+                    )
+                    if not retry_imminent:
+                        raw = self._call_json("move_to", payload, timeout_s=retry_timeout)
         except (ValueError, ApiError, httpx.HTTPError):
             pass
         if x is not None and z is not None:
