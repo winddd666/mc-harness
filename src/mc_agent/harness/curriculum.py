@@ -443,9 +443,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         task=(
             "确保完成 Day 1 早晨石器与据点箱基建：0) 若包内已有 cobblestone>=3 且有木棍/木板或工作台，直接就地调 mc_skill_craft_gear('stone_pickaxe')，切勿在地下砍树；"
             "1) 若在水中先调 mc_skill_unstick 上岸；"
-            "2) 在地表优先用 mc_skill_harvest_logs(target_logs=16) 收集约半组原木（16~20 块，凑足 12 块以上即可推进，不死磕）；"
-            "3) 合工作台、wooden_axe（木斧，跳劈可 1 斧秒猪/牛/羊）与 wooden_pickaxe；"
-            "4) 挖掘至少 11 块圆石合出 stone_pickaxe、stone_sword 与 furnace；"
+            "2) 在地表先调 mc_skill_harvest_logs(target_logs=6) 速砍 1~2 棵树（严禁徒手硬砍 16 根，凑足 4~6 根原木立刻合工作台+wooden_pickaxe，挖 11 块圆石直出 stone_pickaxe + stone_axe + furnace；有了石斧再按需补 6~8 根原木速度快 4 倍）；"
+            "3) 合工作台、wooden_pickaxe（挖 11+ 圆石后立刻升级 stone_pickaxe + stone_axe/stone_sword + furnace）；"
+            "4) 挖掘至少 11 块圆石合出 stone_pickaxe、stone_axe（跳劈可高伤收猪/牛/羊且砍树极快）与 furnace；"
             "5) 若在出生安全地表且木板充足，顺手合 1 个 chest 并放置为据点箱，把多余原木（随身留 6~8 块）存箱留底，防死亡爆装返贫。"
         ),
         extra_tools=("mc_skill_container",),
@@ -2444,8 +2444,12 @@ class CurriculumSupervisor:
             if target.key == "island_recon_sweep" and report.get("status") not in {"paused", "paused_for_world_job"}:
                 self.recon_completed = True
             if target.key == "day2_village_search" and report.get("status") not in {"paused", "paused_for_world_job"}:
-                # Cap daytime village search to 1 bounded episode per 30m to prevent sunk-cost 0-score wandering
-                self.cooldowns["day2_village_search"] = time.monotonic() + 1800.0
+                # Allow full Day 2 daytime village search (up to 3 episodes across different sectors);
+                # stops automatically as soon as a village is found in WorldMemory OR dusk/night hits (time_of_day >= 11000).
+                self._day2_village_eps = int(getattr(self, "_day2_village_eps", 0)) + 1
+                if self._day2_village_eps >= 3:
+                    self.cooldowns["day2_village_search"] = time.monotonic() + 1200.0
+                    self._day2_village_eps = 0
 
             report["curriculum_episode"] = ep_index
             report["curriculum_target"] = target.key
