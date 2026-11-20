@@ -1710,6 +1710,55 @@ def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush():
     assert any(a["action"] == "shield_rush_attack" and a.get("killed") is True for a in out_s["actions"])
 
 
+@pytest.mark.parametrize("scenario", ["cornered", "escaped", "second_hostile", "out_of_reach"])
+def test_cornered_unshielded_bot_strikes_once_only_against_a_close_lone_melee_mob(monkeypatch, scenario):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    distance = 2.5 if scenario == "out_of_reach" else 0.6
+    zombie = {"id": 11, "name": "zombie", "dist": distance, "pos": [0.5 + distance, 64.0, 0.5]}
+    calls = []
+
+    class CaveBot:
+        def status(self):
+            return {
+                "pos": [0.5, 64.0, 0.5], "health": 2.7, "food": 20, "alive": True, "ready": True,
+                "on_ground": True, "nearest_hostile": zombie,
+            }
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "stone_sword", "count": 1}], "held": {"name": "dirt"}}
+            if action == "get_entities":
+                mobs = [zombie]
+                if scenario == "second_hostile":
+                    mobs.append({"id": 12, "name": "zombie", "dist": 1.7, "pos": [2.2, 64, 0.5]})
+                return {"entities": mobs}
+            if action == "get_block":
+                return {"name": "air"}
+            if action in {"equip", "attack"}:
+                calls.append((action, body))
+            return {"hits": 1} if action == "attack" else {"ok": True}
+
+    def flee(*args, **kwargs):
+        if scenario == "escaped":
+            return {"ok": True, "mode": "flee", "moved_dist": 5.0}
+        return {"ok": False, "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    result = CombatControllerSlot().handle(
+        CombatEnv(CaveBot()), {"source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": 11},
+    )
+
+    attacks = [body for action, body in calls if action == "attack"]
+    if scenario == "cornered":
+        attack, = attacks
+        assert calls[0] == ("equip", {"item": "stone_sword", "slot": "hand"})
+        assert attack["entity_id"] == 11 and attack["max_hits"] == 1 and attack["timeout"] <= 350
+        assert result["actions"][-1]["ok"] is True
+    else:
+        assert attacks == []
+
+
 @pytest.mark.parametrize(("remaining_hostile", "retreat_works"), [(True, True), (True, False), (False, True)])
 def test_counter_kill_disengages_from_second_hostile_at_critical_health(monkeypatch, remaining_hostile, retreat_works):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv

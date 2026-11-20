@@ -59,6 +59,7 @@ def collect(wave: str) -> dict:
         "runtime_error": 0,
         "dw_trident": 0,
         "startup_crash": [],
+        "runner_abort": [],
         "thread_errors": [],
         "deep_water": None,
         "iron_scores": [],
@@ -84,13 +85,16 @@ def collect(wave: str) -> dict:
                 out["runtime_error"] += 1
         log = sd / "stdout.log"
         txt = log.read_text(errors="ignore") if log.exists() else ""
-        if "Traceback" in txt:
-            if "Exception in thread" in txt:
-                # A dead background thread (e.g. ReflexPreempted in a watchdog) is
-                # not a process crash; report it separately (BUG-031).
-                out["thread_errors"].append(bot)
-            elif not sums:
-                out["startup_crash"].append(bot)
+        has_thread_error = "Traceback" in txt and "Exception in thread" in txt
+        if has_thread_error:
+            out["thread_errors"].append(bot)
+        has_runner_traceback = "Traceback" in txt and (
+            not has_thread_error or any(
+                "l3_wild_endurance_runner.py" in line and "in <module>" in line
+                for line in txt.splitlines()
+            )
+        )
+        actor_started = False
         starts: dict[str, tuple[str, float, dict]] = {}
         lifecycle = LifecycleCounter(bot)
         for evf in sorted(sd.glob("*.events.jsonl")):
@@ -103,7 +107,9 @@ def collect(wave: str) -> dict:
                     continue
                 lifecycle.observe(ev)
                 t = ev.get("type")
-                if t == "tool.started":
+                if t == "run.started" and ev.get("scope") == "actor":
+                    actor_started = True
+                elif t == "tool.started":
                     fn = ev.get("function") or {}
                     starts[str(ev.get("call_id"))] = (
                         str(fn.get("name") or "?"),
@@ -159,6 +165,8 @@ def collect(wave: str) -> dict:
                     out["cancel"] += 1
                 elif t == "model.cancel_cooldown_wait":
                     out["cancel_wait"] += float(ev.get("wait_s") or 0)
+        if has_runner_traceback and not sums:
+            out["runner_abort" if actor_started else "startup_crash"].append(bot)
         out["deaths"][bot] = lifecycle.deaths
         out["death_receipts"] += lifecycle.death_receipts
         out["death_or_connection_incidents"] += lifecycle.mixed_guardian_incidents
@@ -203,7 +211,8 @@ def main() -> int:
         ("BUG-026 cancel cooldown s", round(o["cancel_wait"], 1), "<= 200"),
         ("BUG-018 mine dur/budget med", round(ratio_med, 2), "<= 1.2"),
         ("BUG-018 mine zero-slice %", round(zero_pct, 1), "< 10"),
-        ("BUG-020 runtime_error", o["runtime_error"], "<= 2"),
+        ("BUG-020 runtime_error in summaries", o["runtime_error"], "<= 2"),
+        ("BUG-020 runner abort without final", len(o["runner_abort"]), "== 0"),
         ("BUG-029 over-cap bots", over_cap, "== 0", bool(o["summaries"])),
         ("BUG-033 thread exceptions", len(o["thread_errors"]), "== 0"),
         ("BUG-023 deep_water trident deaths", o["dw_trident"], "<= 2", has_dw),
@@ -237,6 +246,8 @@ def main() -> int:
     print(f"  top failures: {o['errs'].most_common(5)}")
     if o["startup_crash"]:
         print(f"  startup crashes: {o['startup_crash']}")
+    if o["runner_abort"]:
+        print(f"  runner aborted after actor start without final summary: {o['runner_abort']}")
     if o["thread_errors"]:
         print(f"  dead background threads: {o['thread_errors']}")
     print("\n===== ASSIGNED D1 TICKETS =====")
