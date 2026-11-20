@@ -3313,15 +3313,15 @@ class McToolset:
                 ),
                 Tool(
                     name="mc_skill_scout_surface",
-                    description="地表寻村/探索优先用。连续推进最多5段，每段扫描64格，命中目标或遇近敌/受伤就停。",
+                    description="主世界寻村或下界搜要塞。连续推进最多5段，每段扫描64格，命中目标或遇近敌/受伤就停。",
                     parameters={
                         "direction": Parameter("auto优先未探索方向，也可指定north/east/south/west或对角方向", required=False),
                         "target_types": Parameter(
-                            "目标方块ID或villager/iron_golem。省略时搜村庄方块和村民/铁傀儡",
+                            "目标方块ID或villager、iron_golem、blaze、wither_skeleton。省略时按维度搜村庄或下界要塞特征",
                             kind="string_array", required=False,
                         ),
                         "max_duration_s": _ScoutNumberParameter("本次预算秒数，默认45，最多50", kind="scout_number", required=False),
-                        "step_dist": _ScoutNumberParameter("每段距离28至32格，默认28", kind="scout_number", required=False),
+                        "step_dist": _ScoutNumberParameter("每段距离主世界28至32格（默认28），下界16至20格（默认20）", kind="scout_number", required=False),
                     },
                     handler=self.mc_skill_scout_surface,
                     concurrency="exclusive",
@@ -3487,7 +3487,7 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_events": "拉取新事件",
     "mc_advancements": "查进度状态",
     "mc_move_to": "寻路(x,z;禁y)",
-    "mc_skill_scout_surface": "地表寻村/探索，连走最多5段，命中或遇险即停",
+    "mc_skill_scout_surface": "主世界寻村或下界搜要塞，连走最多5段，命中或遇险即停",
     "mc_dig": "挖格拾取",
     "mc_place": "放方块",
     "mc_craft": "合成(3x3需桌)",

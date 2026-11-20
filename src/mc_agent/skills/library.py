@@ -51,6 +51,9 @@ VILLAGE_SURVEY_CLUTTER = frozenset({"dirt_path", "farmland"})
 SURFACE_SCOUT_DIRECTIONS = ("east", "southeast", "south", "southwest", "west", "northwest", "north", "northeast")
 SURFACE_SCOUT_ENTITIES = ("villager", "iron_golem")
 SURFACE_SCOUT_LANDMARKS = ("lava", "obsidian")
+NETHER_SCOUT_TARGET_BLOCKS = ("nether_bricks", "spawner", "nether_wart")
+NETHER_SCOUT_TARGET_ENTITIES = ("blaze", "wither_skeleton")
+NETHER_TUNNEL_UNSUPPORTED_FLOORS = frozenset({"netherrack", "nether_bricks", "basalt", "blackstone", "obsidian"})
 SURFACE_SCOUT_PATH_ERRORS = frozenset({"path_not_found", "no_path", "timeout", "move_timeout", "stalled"})
 
 
@@ -1404,34 +1407,11 @@ class MacroSkills:
             return {**result, "stop_reason": "invalid_direction", "requires_replan": True}
         if not math.isfinite(max_duration_s) or not math.isfinite(step_dist):
             return {**result, "stop_reason": "invalid_budget_or_step", "requires_replan": True}
-        default_village_search = not target_types
-        village_evidence = tuple(name for name in VILLAGE_LANDMARK_BLOCKS if name != "chest")
-        requested = [
-            resolve_item_alias(name)
-            for name in (target_types or (*village_evidence, *SURFACE_SCOUT_ENTITIES))
-        ]
-        targets = tuple(dict.fromkeys(
-            block for name in requested for block in (BED_BLOCK_TYPES if name in {"bed", "beds", "*_bed"} else (name,))
-        ))
-        remaining_targets = set(targets)
-        blocks = [
-            name for name in targets
-            if name not in SURFACE_SCOUT_ENTITIES and name not in VILLAGE_SURVEY_CLUTTER and name != "chest"
-        ]
-        chests = ["chest"]
-        paths = ["dirt_path"]
-        if "farmland" in targets:
-            paths.append("farmland")
-        if not blocks and not any(name in VILLAGE_SURVEY_CLUTTER or name == "chest" for name in targets):
-            blocks = list(village_evidence)
-        entities = [name for name in targets if name in SURFACE_SCOUT_ENTITIES] or list(SURFACE_SCOUT_ENTITIES)
-        step = max(28.0, min(32.0, step_dist))
         session = _SkillBudgetSession(self.bot, min(50.0, max_duration_s))
         memory = self._get_world_memory()
         observations: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = {
             "detected_pois": {}, "detected_entities": {},
         }
-        landmarks = [name for name in SURFACE_SCOUT_LANDMARKS if name not in blocks]
         distance = 0.0
         found_target = False
 
@@ -1479,7 +1459,7 @@ class MacroSkills:
                         if not remaining_targets:
                             raise ApiError(
                                 code="invalid_target_types",
-                                message="没有可扫描的目标。请使用有效的方块 ID、villager 或 iron_golem，也可省略目标使用默认村庄扫描。",
+                                message="没有可扫描的目标。请使用有效的方块或实体 ID，也可省略目标使用当前维度的默认扫描。",
                             ) from None
                 else:
                     continue
@@ -1568,16 +1548,29 @@ class MacroSkills:
             tx, tz = waypoint(heading, step)
             if not fence_allows(tx, tz):
                 return "void_geofence_blocked"
-            if self._scout_route_has_liquid(session, x, y, z, tx - x, tz - z):
+            landing_y = None
+            if nether_probe is not None:
+                if status.get("on_ground") is not True:
+                    return "not_grounded"
+                route = nether_probe.probe_retreat(status["pos"], _yaw_toward(x, z, tx, tz), math.hypot(tx - x, tz - z))
+                session._remaining()
+                if route is None:
+                    return "unsafe_nether_route"
+                landing_y, _ = route
+            elif self._scout_route_has_liquid(session, x, y, z, tx - x, tz - z):
                 return "liquid_ahead"
 
             health_before = status.get("health")
-            move_error = self._scout_move(session, tx, tz, seconds=10.0)
+            move_error = self._scout_move(
+                session, tx, tz, seconds=10.0, y=landing_y, range_m=0.5 if nether else 1.5,
+            )
             if move_error == "move_timeout_unreleased":
                 return move_error
             status = observe()
             danger = self._scout_danger(status, health_before=health_before, dimension=dimension)
             if danger:
+                if nether and danger == "nearby_hostile" and scan(status):
+                    return "target_found"
                 return danger
             if move_error and move_error not in SURFACE_SCOUT_PATH_ERRORS:
                 return move_error
@@ -1585,23 +1578,63 @@ class MacroSkills:
                 return reach_dry_bank([x, y, z]) or "liquid_ahead"
             if move_error:
                 return move_error
-            px, _, pz = status["pos"]
+            px, py, pz = status["pos"]
+            if nether_probe is not None:
+                if status.get("on_ground") is not True or abs(py - landing_y) > 0.75:
+                    return "unsafe_nether_landing"
+                landing = nether_probe.probe_retreat(status["pos"], 0.0, 0.0)
+                session._remaining()
+                if landing is None:
+                    return "unsafe_nether_landing"
             if math.hypot(px - tx, pz - tz) > 3.0:
                 return "stalled"
             direction = SURFACE_SCOUT_DIRECTIONS[heading]
             result["segments_completed"] += 1
             return "target_found" if scan(status) else "segment_completed"
 
-        terrain_blocks = {"void_geofence_blocked", "liquid_ahead"}
+        terrain_blocks = {"void_geofence_blocked", "liquid_ahead", "unsafe_nether_route"}
         detour_reasons = SURFACE_SCOUT_PATH_ERRORS | terrain_blocks
         try:
             status = observe()
             dimension = normalize_dimension(status.get("dimension"))
+            nether = dimension == "the_nether"
+            nether_probe = None
+            if nether:
+                from .combat_env import CombatEnv
+
+                nether_probe = CombatEnv(session, geofence=self.geofence)
+            default_village_search = not nether and not target_types
+            default_blocks = NETHER_SCOUT_TARGET_BLOCKS if nether else tuple(
+                name for name in VILLAGE_LANDMARK_BLOCKS if name != "chest"
+            )
+            default_entities = NETHER_SCOUT_TARGET_ENTITIES if nether else SURFACE_SCOUT_ENTITIES
+            requested = [resolve_item_alias(name) for name in (target_types or (*default_blocks, *default_entities))]
+            if nether and any(name in (*default_blocks, *default_entities) for name in requested):
+                # Bulk terrain can neither crowd out fortress markers nor end a fortress scan.
+                requested = [name for name in requested if name != "netherrack"]
+            targets = tuple(dict.fromkeys(
+                block for name in requested for block in (BED_BLOCK_TYPES if name in {"bed", "beds", "*_bed"} else (name,))
+            ))
+            remaining_targets = set(targets)
+            known_entities = (*SURFACE_SCOUT_ENTITIES, *NETHER_SCOUT_TARGET_ENTITIES)
+            blocks = [
+                name for name in targets
+                if name not in known_entities and name not in VILLAGE_SURVEY_CLUTTER and name != "chest"
+            ]
+            chests = ["chest"] if not nether or "chest" in targets else []
+            paths = ["dirt_path"] if not nether or "dirt_path" in targets else []
+            if "farmland" in targets:
+                paths.append("farmland")
+            if not blocks and not any(name in VILLAGE_SURVEY_CLUTTER or name == "chest" for name in targets):
+                blocks = list(default_blocks)
+            entities = [name for name in targets if name in known_entities] or list(default_entities)
+            landmarks = [name for name in SURFACE_SCOUT_LANDMARKS if name not in blocks]
+            step = max(16.0, min(20.0, step_dist)) if nether else max(28.0, min(32.0, step_dist))
             danger = self._scout_danger(status, dimension=dimension)
             if not danger and (status.get("in_water") or status.get("submerged")):
                 danger = reach_dry_bank()
             if danger:
-                reason = danger
+                reason = "target_found" if nether and danger == "nearby_hostile" and scan(status) else danger
             elif scan(status):
                 reason = "target_found"
             else:
@@ -1610,7 +1643,7 @@ class MacroSkills:
                     preferences = list(dict.fromkeys((*unexplored, *SURFACE_SCOUT_DIRECTIONS)))
                     direction = next((
                         name for name in preferences
-                        if fence_allows(*waypoint(SURFACE_SCOUT_DIRECTIONS.index(name), 40.0))
+                        if fence_allows(*waypoint(SURFACE_SCOUT_DIRECTIONS.index(name), 2 * step if nether else 40.0))
                     ), preferences[0])
                 for _ in range(5):
                     health_before = status.get("health")
@@ -1619,7 +1652,7 @@ class MacroSkills:
                     if not danger and (status.get("in_water") or status.get("submerged")):
                         danger = reach_dry_bank()
                     if danger:
-                        reason = danger
+                        reason = "target_found" if nether and danger == "nearby_hostile" and scan(status) else danger
                         break
                     heading = SURFACE_SCOUT_DIRECTIONS.index(direction)
                     reason = advance(heading)
@@ -6337,11 +6370,27 @@ class MacroSkills:
         return {"ok": False, "requires_replan": True, "reason": "no_solid_wall"}
 
     def dig_level_tunnel(self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> dict[str, Any]:
-        from .tunnel import dig_level_tunnel
+        from .tunnel import AIR, dig_level_tunnel
 
         res = dig_level_tunnel(self.bot, direction, steps, stop_on_ore)
         d_key = str(direction).strip().lower()
         stop_reason = str(res.get("stop_reason") or "")
+        if stop_reason == "unsafe_or_unknown_floor":
+            blocker = res.get("blocker") or {}
+            floor = blocker.get("block")
+            if floor in AIR or floor in NETHER_TUNNEL_UNSUPPORTED_FLOORS:
+                try:
+                    dimension = normalize_dimension(_SkillBudgetSession(self.bot, 2.0).status().get("dimension"))
+                except (_SkillDeadline, ApiError, httpx.HTTPError):
+                    dimension = None
+                if dimension == "the_nether":
+                    if floor in AIR:
+                        res["stop_reason"] = "bridge_gap_ahead"
+                        res["hint"] = "前方脚下是空隙。请沿有支撑的路线改向，或退回上一处安全落脚点。"
+                    else:
+                        res["stop_reason"] = "nether_tunnel_floor_unsupported"
+                        res["hint"] = f"水平矿道当前不支持以 {floor} 为支撑。请改走已确认安全的实心通路，或换方向侦察。"
+                    return res
         terrain_failures = {
             "unsafe_or_unknown_floor",
             "fluid_adjacent",

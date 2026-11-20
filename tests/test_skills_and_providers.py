@@ -2716,6 +2716,89 @@ def test_surface_scout_continues_and_scans_until_target(target, segments) -> Non
         assert match["observer_biome"] == "plains"
 
 
+@pytest.mark.parametrize("hazard,target", [("lava", "nether_bricks"), ("magma_block", "blaze"), ("cave_air", "nether_bricks")])
+def test_nether_scout_detours_unsafe_floor_and_stops_at_fortress_evidence(hazard, target) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    pos = [0.5, 64, 0.5]
+    moves = []
+    probes = []
+    queries = []
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            hostile = {"type": "blaze", "dist": 4} if moves and target == "blaze" else None
+            return _SurfaceScoutBackend.ok({
+                "pos": pos, "dimension": "the_nether", "biome": "nether_wastes",
+                "on_ground": True, "health": 20, "nearest_hostile": hostile,
+            })
+        if route == "get_block":
+            x, y, z = body["pos"]
+            name = "air" if y > 63 else "netherrack"
+            if (x, y, z) == (4, 63, 0):
+                name = hazard
+                probes.append(name)
+            return _SurfaceScoutBackend.ok({"name": name})
+        if route in {"find_blocks", "get_entities"}:
+            queries.append(body["types"])
+            rows = [{"name": target, "pos": [1, 64, -23]}] if moves and target in body["types"] else []
+            return _SurfaceScoutBackend.ok({"blocks" if route == "find_blocks" else "entities": rows})
+        if route == "move_to":
+            moves.append(body)
+            pos[:] = [body["x"], body["y"], body["z"]]
+            return _SurfaceScoutBackend.ok({"pos": pos})
+        raise AssertionError(route)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence())
+        registry = tools.registry(profile="compact", extra_tools=("mc_skill_scout_surface",))
+        args = {"direction": "east"}
+        if target == "blaze":
+            args["target_types"] = ["netherrack", "blaze"]
+        result = json.loads(registry.execute({
+            "function": {"name": "mc_skill_scout_surface", "arguments": json.dumps(args)},
+        }))
+
+    assert probes == [hazard]
+    assert len(moves) == 1
+    assert moves[0]["x"] == 0.5 and moves[0]["z"] == -19.5 and moves[0]["y"] == 64
+    assert result["stop_reason"] == "target_found"
+    expect = result["detected_entities"] if target == "blaze" else result["detected_pois"]
+    assert any(row["name"] == target for row in expect)
+    assert all("netherrack" not in types for types in queries)
+
+
+@pytest.mark.parametrize("floor,reason", [("cave_air", "bridge_gap_ahead"), ("netherrack", "nether_tunnel_floor_unsupported")])
+def test_nether_tunnel_reports_the_actual_floor_blocker(floor, reason) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        responses = {
+            "status": {
+                "pos": [0.5, 64, 0.5], "dimension": "the_nether", "on_ground": True,
+                "health": 20, "held": "stone_pickaxe",
+            },
+            "inventory": {"items": [{"name": "stone_pickaxe", "count": 1, "slot": 0}]},
+            "get_block": {"name": floor},
+        }
+        return _SurfaceScoutBackend.ok(responses[route])
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence())
+        result = json.loads(tools.mc_skill_tunnel(direction="east", steps=2))
+
+    assert result["stop_reason"] == reason
+    assert result["requires_replan"] is True
+    assert result["blocker"] == {"block": floor, "pos": [1, 63, 0], "relation": "unsafe_floor"}
+    assert result["steps_done"] == 0
+    assert "改" in result["hint"]
+
+
 @pytest.mark.parametrize("entry", ["find_blocks", "scout_surface"])
 def test_village_scan_retains_beds_and_hay_amid_path_blocks(entry) -> None:
     from mc_agent.harness.geofence import VoidGeofence
