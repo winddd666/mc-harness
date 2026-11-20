@@ -182,6 +182,7 @@ class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     UNSTICK_BUDGET_S = 30.0
+    FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
     MELEE_EAT_DEFER_S = 10.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
@@ -1589,7 +1590,9 @@ class GenerationGuard:
         _, needs_jump = route
         return {**body, "sprint": False, "jump": needs_jump, "ms": min(int(body.get("ms") or 350), 350)}
 
-    def _verify_flee_step(self, action: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _verify_flee_step(
+        self, action: str, body: dict[str, Any], *, deadline: float | None = None,
+    ) -> dict[str, Any]:
         status = self.bot.status()
         if status.get("in_water") and status.get("alive") is not False and status.get("ready") is not False:
             return body
@@ -1600,13 +1603,18 @@ class GenerationGuard:
         ):
             raise _UnsafeFleeExit
 
-        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.0)
+        probe_deadline = time.monotonic() + 2.0
+        if deadline is not None:
+            probe_deadline = min(probe_deadline, deadline)
+        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=probe_deadline)
         probe_env = CombatEnv(probe_bot, geofence=self.geofence)
 
         def probe(yaw: float, distance: float) -> tuple[int, bool]:
             try:
                 route = probe_env.probe_retreat(pos, yaw, distance)
             except _RecoveryBudgetExceeded:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise
                 route = None
             if route is None:
                 raise _UnsafeFleeExit
@@ -1753,8 +1761,16 @@ class GenerationGuard:
                     (clean_path == "control" and body.get("forward") and isinstance(body.get("yaw"), (int, float)))
                     or (clean_path == "move_to" and "y" not in body and all(k in body for k in ("x", "z")))
                 ):
-                    body = self._verify_flee_step(clean_path, body)
-                return orig_call(path, body, **kwargs)
+                    body = self._verify_flee_step(clean_path, body, deadline=deadline)
+                if clean_path == "move_to" and isinstance(body, dict) and deadline is not None:
+                    remaining_ms = math.floor((deadline - time.monotonic()) * 1000)
+                    if remaining_ms <= 0:
+                        raise _RecoveryBudgetExceeded
+                    timeout_ms = body.get("timeout")
+                    if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
+                        remaining_ms = min(remaining_ms, int(timeout_ms))
+                    body = {**body, "timeout": remaining_ms}
+                return actor_call(path, body, **kwargs)
             if is_readonly_poll:
                 return actor_call(path, body, **kwargs)
             if pending_trigger and not self._in_reflex:
@@ -2081,8 +2097,13 @@ class GenerationGuard:
         if (tool_name in NON_PREEMPTABLE_TOOLS and not is_flee) or self._in_reflex:
             return invoke_fn()
         is_unstick = tool_name == "mc_skill_unstick"
+        budget_s = None
+        if is_flee:
+            budget_s = self.FLEE_BUDGET_S
+        elif is_unstick:
+            budget_s = self.UNSTICK_BUDGET_S
         # Leave time for the watcher to exit and for the final bounded stop request.
-        deadline = time.monotonic() + self.UNSTICK_BUDGET_S - 2.0 if is_unstick else None
+        deadline = time.monotonic() + budget_s - 2.0 if budget_s is not None else None
         try:
             with self._intercept_bot_calls(
                 enable_creeper_watcher=not is_flee,
@@ -2111,12 +2132,20 @@ class GenerationGuard:
             }, ensure_ascii=False)
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
-            self.events.emit("guardian.recovery_budget_exceeded", tool=tool_name, budget_s=self.UNSTICK_BUDGET_S)
+            self.events.emit("guardian.recovery_budget_exceeded", tool=tool_name, budget_s=budget_s)
+            message = (
+                "撤退超过时间预算，已请求停止移动，请根据当前位置换安全路线。"
+                if is_flee else "脱困超过时间预算，已请求停止动作，请按当前位置调整方案。"
+            )
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
-                "error": {"code": "time_budget", "message": "脱困超过时间预算，已请求停止动作，请按当前位置调整方案。"},
+                "error": {"code": "time_budget", "message": message},
             }, ensure_ascii=False)
+        except RunTimedOut:
+            if is_flee:
+                self._stop_after_recovery_timeout()
+            raise
         except ReflexPreempted as preempt:
             receipt = self.handle_preemption(preempt.trigger, interrupted_name=tool_name)
             return json.dumps(receipt, ensure_ascii=False)
