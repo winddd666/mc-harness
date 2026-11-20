@@ -1459,6 +1459,37 @@ retries 846 | 429 49 | 502 0 | tracebacks 0
 4. `lost_iron_pickaxe` 前置检查 + abort 冷却
 5. MC API 只读请求短退避 + `transient_api_error` 暂停重排
 
+## 4bw. 10:59 深挖：`staircase` 成功率与 `pillar_fallback` 自锁（P2-36）
+
+### `staircase` 全量分布（`overnight_12bot_part2`，1180 次调用）
+
+| stop_reason | 次数 | 占比 |
+|---|---|---|
+| `time_budget` | 241 | 20.4% |
+| `completed` | **203** | **17.2%** |
+| `pillar_fallback` | 140 | 11.9% |
+| `None`（异常返回） | 123 | 10.4% |
+| `dig_cell_avoided` | 101 | 8.6% |
+| `fluid_or_bedrock` | 86 | 7.3% |
+| `dig_failed` | 68 | 5.8% |
+| `cave_or_drop_ahead` | 68 | 5.8% |
+
+→ **成功率仅 17.2%**，与 BUG-037 的判断一致：阶梯下潜仍是最大 churn。
+
+### `pillar_fallback` 是"安全垫高"，但会自锁
+
+- 语义（`library.py:6634-6639`）：目标台阶四周没有可放置面 → `_dig_pillar_up(steps=1)` → `stop_reason=pillar_fallback`，返回 **`ok=True, requires_replan=False`** + 提示"从新高度重试"
+- 模型照做 → 再次 `no_place_face` → 再垫高 1 格 …… 形成**同工具连续失败循环**
+
+| 波次 | pillar 次数 | 连续 ≥3 段 | 累计耗时 | 最长一段 |
+|---|---|---|---|---|
+| `overnight_12bot_part2` | 140 | 14 | **723s** | `nju_guitest_01_nether` **29 连击**（188s） |
+| `hy4_audit_r28` | 73 | 10 | **437s** | `hy4_6_nether_bastion` 10 连击（134s） |
+
+- 已核验：那 29 次**之间没有任何其他工具调用**（窗口内工具序列全为 `mc_skill_staircase`）→ 真·自锁，不是交替重试
+- 单次 pillar 仅 3~4s，但每段包含 N 次 **LLM 往返**，所以 29 连击 ≈ 3 分钟
+- 修复（约 5 行）：连续 ≥2 次返回 `requires_replan=True` 并建议 `unstick`/水平换向；≥3 次给 target 加 120s 冷却
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
