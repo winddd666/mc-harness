@@ -2491,6 +2491,7 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
 class _SurfaceScoutBackend:
     def __init__(self) -> None:
         self.pos = [0.5, 64, 0.5]
+        self.biome = "plains"
         self.health = 20
         self.wet = False
         self.hostile = None
@@ -2516,7 +2517,7 @@ class _SurfaceScoutBackend:
             return self.ok({
                 "pos": self.pos,
                 "dimension": "overworld",
-                "biome": "plains",
+                "biome": self.biome,
                 "health": self.health,
                 "in_water": self.wet,
                 "nearest_hostile": self.hostile,
@@ -2645,6 +2646,88 @@ def test_surface_scout_checks_for_water_before_moving() -> None:
     assert len(backend.moves) == 5
 
 
+@pytest.mark.parametrize("direction", ["auto", "east"])
+def test_surface_scout_turns_inward_at_geofence_edge(direction) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+
+    backend = _SurfaceScoutBackend()
+    backend.pos = [39.5, 64, 0.5]
+    fence = VoidGeofence(radius=42, margin=0)
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        result = MacroSkills(bot, geofence=fence).scout_surface(direction=direction)
+
+    assert result["segments_completed"] > 0
+    assert backend.moves[0]["x"] < 39.5
+    assert all(fence.check_point(move["x"], move["z"]) is None for move in backend.moves)
+    if direction == "auto":
+        assert backend.moves[0]["z"] == 0.5
+
+
+def test_surface_scout_turns_ninety_degrees_along_dry_bank() -> None:
+    backend = _SurfaceScoutBackend()
+
+    def handle(request):
+        if request.url.path.endswith("/get_block") and json.loads(request.content)["pos"][0] > 2:
+            return backend.ok({"name": "water"})
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east")
+
+    assert result["segments_completed"] == 5
+    assert backend.moves[0]["x"] == 0.5
+    assert backend.moves[0]["z"] == -27.5
+
+
+def test_surface_scout_can_take_one_short_step_out_of_shallow_water() -> None:
+    backend = _SurfaceScoutBackend()
+    backend.wet = True
+
+    def handle(request):
+        if request.url.path.endswith("/find_blocks") and json.loads(request.content)["radius"] == 8:
+            return backend.ok({"blocks": [{"name": "grass_block", "pos": [0, 63, 3]}]})
+        if request.url.path.endswith("/get_block") and json.loads(request.content)["pos"] in ([0, 64, 3], [0, 65, 3]):
+            return backend.ok({"name": "air"})
+        return backend.handle(request)
+
+    def move(request, body):
+        backend.wet = False
+        return backend.arrive(request, body)
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east")
+
+    assert backend.moves[0]["range"] == 0.5
+    assert [backend.moves[0][axis] for axis in ("x", "z")] == [0.5, 3.5]
+    assert result["segments_completed"] == 5
+    assert result["distance_traveled"] == 143
+
+
+@pytest.mark.parametrize("profile", ["full", "compact"])
+def test_surface_scout_tool_registry_accepts_numeric_strings(profile) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    backend = _SurfaceScoutBackend()
+    backend.biome = "deep_ocean"
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        registry = McToolset(bot, geofence=VoidGeofence()).registry(
+            profile=profile, extra_tools=("mc_skill_scout_surface",),
+        ).map_tools(lambda tool: tool)
+        result = json.loads(registry.execute({
+            "function": {
+                "name": "mc_skill_scout_surface",
+                "arguments": '{"direction":"east","max_duration_s":"45","step_dist":"30"}',
+            },
+        }))
+
+    assert result["segments_completed"] == 5
+    assert result["distance_traveled"] == 150
+    assert result["biome"] == "deep_ocean"
+    assert "方向" in result["biome_hint"]
+
+
 @pytest.mark.parametrize("released", [True, False])
 def test_surface_scout_confirmed_stop_before_retry_after_read_timeout(released) -> None:
     backend = _SurfaceScoutBackend()
@@ -2676,6 +2759,8 @@ def test_surface_scout_water_retreat_yields_to_hurt(interrupted) -> None:
 
     def move(request, body):
         backend.wet = len(backend.moves) == 1
+        if backend.wet:
+            body = {**body, "x": 3.5}
         receipt = backend.arrive(request, body)
         if backend.wet and interrupted:
             return backend.ok({"pos": backend.pos, "interrupted_by": "hurt"})

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from copy import copy
+from dataclasses import replace
 import json
 import math
 import re
@@ -51,6 +52,16 @@ _BED_BLOCK_TYPES: tuple[str, ...] = tuple(
         "brown", "green", "red", "black",
     )
 )
+
+
+class _ScoutNumberParameter(Parameter):
+    """Keep a numeric schema and validate number strings in the scout handler."""
+
+    def __post_init__(self) -> None:
+        pass
+
+    def json_schema(self) -> dict[str, Any]:
+        return {"type": "number", "description": self.description}
 
 
 _BLOCK_COLORS: tuple[str, ...] = tuple(name.removesuffix("_bed") for name in _BED_BLOCK_TYPES)
@@ -2404,12 +2415,18 @@ class McToolset:
         self,
         direction: str = "auto",
         target_types: list[str] | None = None,
-        max_duration_s: float = 45.0,
-        step_dist: float = 28.0,
+        max_duration_s: float | str = 45.0,
+        step_dist: float | str = 28.0,
     ) -> str:
-        if not math.isfinite(max_duration_s):
-            return self._run_skill(lambda: self.skills.scout_surface(max_duration_s=max_duration_s))
-        budget_s, deadline_imminent = self._clamp_tool_budget(max_duration_s, max_s=50.0, min_s=0.0)
+        try:
+            if any(isinstance(v, bool) for v in (max_duration_s, step_dist)):
+                raise ValueError()
+            duration, step = float(max_duration_s), float(step_dist)
+        except (TypeError, ValueError, OverflowError):
+            duration = step = math.nan
+        if not math.isfinite(duration) or not math.isfinite(step):
+            return self._run_skill(lambda: self.skills.scout_surface(max_duration_s=duration, step_dist=step))
+        budget_s, deadline_imminent = self._clamp_tool_budget(duration, max_s=50.0, min_s=0.0)
         if deadline_imminent:
             return json.dumps({
                 "ok": False,
@@ -2424,7 +2441,7 @@ class McToolset:
             }, ensure_ascii=False)
         return self._run_skill(
             lambda: self.skills.scout_surface(
-                direction=direction, target_types=target_types, max_duration_s=budget_s, step_dist=step_dist,
+                direction=direction, target_types=target_types, max_duration_s=budget_s, step_dist=step,
             )
         )
 
@@ -3205,8 +3222,8 @@ class McToolset:
                             "目标方块ID或villager/iron_golem。省略时搜村庄方块和村民/铁傀儡",
                             kind="string_array", required=False,
                         ),
-                        "max_duration_s": Parameter("本次预算秒数，默认45，最多50", kind="number", required=False),
-                        "step_dist": Parameter("每段距离28至32格，默认28", kind="number", required=False),
+                        "max_duration_s": _ScoutNumberParameter("本次预算秒数，默认45，最多50", kind="scout_number", required=False),
+                        "step_dist": _ScoutNumberParameter("每段距离28至32格，默认28", kind="scout_number", required=False),
                     },
                     handler=self.mc_skill_scout_surface,
                     concurrency="exclusive",
@@ -3455,7 +3472,7 @@ def _compactify_tool(tool: Tool) -> Tool:
             pdesc = ""
         else:
             pdesc = p.description[:26]
-        new_params[pname] = Parameter(description=pdesc, kind=p.kind, required=p.required)
+        new_params[pname] = replace(p, description=pdesc)
     return Tool(
         name=tool.name,
         description=_COMPACT_TOOL_DESC.get(tool.name, tool.description[:40]),

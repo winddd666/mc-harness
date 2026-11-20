@@ -1387,6 +1387,7 @@ class MacroSkills:
             "distance_traveled": 0.0,
             "segments_completed": 0,
             "final_pos": None,
+            "biome": None,
             "detected_pois": [],
             "detected_entities": [],
         }
@@ -1419,7 +1420,7 @@ class MacroSkills:
                 if prev_pos is not None:
                     distance += math.hypot(pos[0] - prev_pos[0], pos[2] - prev_pos[2])
                 result["final_pos"] = list(pos)
-                result["biome"] = status.get("biome")
+                result["biome"] = status.get("biome") or None
                 memory.observe_status(status)
             else:
                 status["pos"] = None
@@ -1483,14 +1484,49 @@ class MacroSkills:
                     found |= name in targets
             return found
 
+        def waypoint(heading: int, length: float) -> tuple[float, float]:
+            x, _, z = status["pos"]
+            angle = heading * math.pi / 4
+            return round(x + length * math.cos(angle), 2), round(z + length * math.sin(angle), 2)
+
+        def fence_allows(x: float, z: float) -> bool:
+            return self.geofence is None or self.geofence.check_point(x, z, action="mc_skill_scout_surface") is None
+
+        def reach_dry_bank(dry_origin: list[float] | None = None) -> str | None:
+            nonlocal status
+            from .combat_env import CombatEnv, SHORE_LAND_BLOCKS
+
+            if status.get("submerged"):
+                return "in_water"
+            x, y, z = status["pos"]
+            shore = dry_origin
+            if shore is None or math.hypot(x - shore[0], z - shore[2]) > 6.0 or not fence_allows(shore[0], shore[2]):
+                shore = CombatEnv(session, geofence=self.geofence)._find_walkable_shore_target(
+                    status["pos"], block_types=SHORE_LAND_BLOCKS, max_radius=8,
+                    min_y=math.floor(y) - 1, max_y=math.floor(y) + 1, max_candidates=6,
+                )
+                session._remaining()
+            if shore is None or math.hypot(x - shore[0], z - shore[2]) > 6.0 or not fence_allows(shore[0], shore[2]):
+                return "in_water"
+            health_before = status.get("health")
+            error = self._scout_move(session, shore[0], shore[2], seconds=5.0, range_m=0.5)
+            if error == "move_timeout_unreleased":
+                return error
+            status = observe()
+            danger = self._scout_danger(status, health_before=health_before, dimension=dimension)
+            if danger:
+                return danger
+            if error and error not in SURFACE_SCOUT_PATH_ERRORS:
+                return error
+            if status.get("in_water") or status.get("submerged") or status.get("on_ground") is False:
+                return "in_water"
+            return None
+
         def advance(heading: int) -> str:
             nonlocal direction, status
             x, y, z = status["pos"]
-            chosen = SURFACE_SCOUT_DIRECTIONS[heading]
-            angle = heading * math.pi / 4
-            dx, dz = step * math.cos(angle), step * math.sin(angle)
-            tx, tz = round(x + dx, 2), round(z + dz, 2)
-            if self.geofence and self.geofence.check_point(tx, tz, action="mc_skill_scout_surface"):
+            tx, tz = waypoint(heading, step)
+            if not fence_allows(tx, tz):
                 return "void_geofence_blocked"
             if self._scout_route_has_liquid(session, x, y, z, tx - x, tz - z):
                 return "liquid_ahead"
@@ -1506,57 +1542,56 @@ class MacroSkills:
             if move_error and move_error not in SURFACE_SCOUT_PATH_ERRORS:
                 return move_error
             if status.get("in_water") or status.get("submerged"):
-                if self.geofence and self.geofence.check_point(x, z, action="mc_skill_scout_surface"):
-                    return "in_water"
-                health_before = status.get("health")
-                retreat_error = self._scout_move(session, x, z, seconds=5.0)
-                if retreat_error == "move_timeout_unreleased":
-                    return retreat_error
-                status = observe()
-                danger = self._scout_danger(status, health_before=health_before, dimension=dimension)
-                if danger:
-                    return danger
-                if retreat_error and retreat_error not in SURFACE_SCOUT_PATH_ERRORS:
-                    return retreat_error
-                if retreat_error or status.get("in_water") or status.get("submerged"):
-                    return "in_water"
-                return "liquid_ahead"
+                return reach_dry_bank([x, y, z]) or "liquid_ahead"
             if move_error:
                 return move_error
             px, _, pz = status["pos"]
             if math.hypot(px - tx, pz - tz) > 3.0:
                 return "stalled"
-            direction = chosen
+            direction = SURFACE_SCOUT_DIRECTIONS[heading]
             result["segments_completed"] += 1
             return "target_found" if scan(status) else "segment_completed"
 
-        detour_reasons = SURFACE_SCOUT_PATH_ERRORS | {"void_geofence_blocked", "liquid_ahead"}
+        terrain_blocks = {"void_geofence_blocked", "liquid_ahead"}
+        detour_reasons = SURFACE_SCOUT_PATH_ERRORS | terrain_blocks
         try:
             status = observe()
             dimension = normalize_dimension(status.get("dimension"))
             danger = self._scout_danger(status, dimension=dimension)
+            if not danger and (status.get("in_water") or status.get("submerged")):
+                danger = reach_dry_bank()
             if danger:
                 reason = danger
-            elif status.get("in_water") or status.get("submerged"):
-                reason = "in_water"
             elif scan(status):
                 reason = "target_found"
             else:
                 if direction == "auto":
                     unexplored = memory.unexplored_directions(status["pos"], dim=dimension)
-                    direction = unexplored[0] if unexplored else "east"
+                    preferences = list(dict.fromkeys((*unexplored, *SURFACE_SCOUT_DIRECTIONS)))
+                    direction = next((
+                        name for name in preferences
+                        if fence_allows(*waypoint(SURFACE_SCOUT_DIRECTIONS.index(name), 40.0))
+                    ), preferences[0])
                 for _ in range(5):
                     health_before = status.get("health")
                     status = observe()
                     danger = self._scout_danger(status, health_before=health_before, dimension=dimension)
-                    if danger or status.get("in_water") or status.get("submerged"):
-                        reason = danger or "in_water"
+                    if not danger and (status.get("in_water") or status.get("submerged")):
+                        danger = reach_dry_bank()
+                    if danger:
+                        reason = danger
                         break
                     heading = SURFACE_SCOUT_DIRECTIONS.index(direction)
-                    for offset in (0, -1, 1):
-                        reason = advance((heading + offset) % len(SURFACE_SCOUT_DIRECTIONS))
+                    reason = advance(heading)
+                    explore_wider = reason in terrain_blocks
+                    offsets = (-2, 2, -3, 3, -1, 1, 4) if explore_wider else (-1, 1, -2, 2, -3, 3, 4)
+                    for offset in offsets:
                         if reason not in detour_reasons:
                             break
+                        if abs(offset) > 1 and not explore_wider:
+                            break
+                        reason = advance((heading + offset) % len(SURFACE_SCOUT_DIRECTIONS))
+                        explore_wider |= reason in terrain_blocks
                     if reason != "segment_completed":
                         break
                 else:
@@ -1584,6 +1619,9 @@ class MacroSkills:
         if not result["ok"]:
             result["requires_replan"] = True
             result.setdefault("error", {"code": reason})
+        biome = str(result["biome"] or "").lower()
+        if any(part in biome for part in ("ocean", "dark_forest", "jungle")):
+            result["biome_hint"] = "当前群系不利于寻村，请改走朝向平原、草原或其他开阔干地的方向。"
         for key, rows in observations.items():
             result[key] = list(rows.values())
         return result
@@ -1628,7 +1666,9 @@ class MacroSkills:
         return False
 
     @staticmethod
-    def _scout_move(session: _SkillBudgetSession, x: float, z: float, *, seconds: float) -> str | None:
+    def _scout_move(
+        session: _SkillBudgetSession, x: float, z: float, *, seconds: float, range_m: float = 1.5
+    ) -> str | None:
         # Ask pathfinder to finish before the client timeout so it can release the action.
         request_s = min(seconds + 1.0, session._remaining())
         if request_s <= 1.0:
@@ -1636,7 +1676,7 @@ class MacroSkills:
         try:
             moved = session.call(
                 "move_to",
-                {"x": x, "z": z, "range": 1.5, "timeout": int((request_s - 0.75) * 1000), "stop_on": ["hurt", "death"]},
+                {"x": x, "z": z, "range": range_m, "timeout": int((request_s - 0.75) * 1000), "stop_on": ["hurt", "death"]},
                 timeout_s=request_s,
                 allow_reauth=False,
             )
