@@ -3888,6 +3888,48 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert skills.bot is bot
 
 
+def test_unstick_water_branch_shares_the_tool_budget(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    calls = []
+    events = []
+
+    class WetBot:
+        def status(self):
+            return self.call("status", method="GET")
+
+        def call(self, action, body=None, **kwargs):
+            timeout = kwargs["timeout_s"]
+            assert kwargs["allow_reauth"] is False
+            calls.append((action, clock[0], timeout))
+            if action == "status":
+                return {"pos": [0.5, 52.0, 0.5], "in_water": True, "submerged": True, "ready": True, "alive": True}
+            if action == "move_to":
+                clock[0] += timeout
+                if clock[0] >= 1045.0:
+                    raise httpx.ReadTimeout("water move reached the tool budget")
+            return {"ok": True}
+
+    def slow_water_escape(skills):
+        for _ in range(6):
+            skills.bot.call("move_to", {}, timeout_s=None)
+        return {"ok": False, "in_water": True}
+
+    monkeypatch.setattr(MacroSkills, "escape_water", slow_water_escape)
+    bot = WetBot()
+    skills = MacroSkills(bot)
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
+    original_call = bot.call
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_unstick", lambda: json.dumps(skills.unstick())))
+
+    assert result["ok"] is False and result["requires_replan"] is True
+    assert result["error"]["code"] == "time_budget"
+    assert calls[-1] == ("stop", 1045.0, 1.5)
+    assert all(start + timeout <= 1045.0 for _, start, timeout in calls[:-1])
+    assert bot.call == original_call
+    assert events[-1]["type"] == "guardian.recovery_budget_exceeded"
+
+
 @pytest.mark.parametrize("starts_submerged", [True, False])
 def test_bug056_subcortical_water_escape_uses_budget_once(starts_submerged, monkeypatch):
     clock = [1000.0]

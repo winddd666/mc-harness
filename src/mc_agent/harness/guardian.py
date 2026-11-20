@@ -120,31 +120,41 @@ class ReflexPreempted(BaseException):
         self.trigger = trigger
 
 
-class _WaterEscapeBudgetExceeded(Exception):
-    """End the water macro without swallowing episode cancellation."""
+class _RecoveryBudgetExceeded(BaseException):
+    """Unwind a recovery macro through its transport and retry handlers."""
 
 
 class _GuardSession:
-    def __init__(self, bot: Any, checkpoint: Callable[[], None], *, deadline: float | None = None) -> None:
+    def __init__(
+        self,
+        bot: Any,
+        checkpoint: Callable[[], None],
+        *,
+        deadline: float | None = None,
+        call_override: Callable[..., dict[str, Any]] | None = None,
+    ) -> None:
         self.bot = bot
         self.checkpoint = checkpoint
         self.deadline = deadline
+        self._call_override = call_override
 
     def _time_remaining(self) -> float:
         remaining = float("inf") if self.deadline is None else self.deadline - time.monotonic()
         if remaining <= 0:
-            raise _WaterEscapeBudgetExceeded
+            raise _RecoveryBudgetExceeded
         return remaining
 
     def call(self, action: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         self.checkpoint()
         readonly = action in {"status", "events", "inventory", "get_entities", "get_block", "find_blocks"}
-        kwargs.setdefault("timeout_s", 2.0 if readonly else 8.0)
+        if kwargs.get("timeout_s") is None:
+            kwargs["timeout_s"] = 2.0 if readonly else 8.0
         if self.deadline is not None:
             kwargs["timeout_s"] = min(kwargs["timeout_s"], self._time_remaining())
         kwargs["allow_reauth"] = False
         try:
-            result = self.bot.call(action, body, **kwargs)
+            call = self._call_override if self._call_override is not None else self.bot.call
+            result = call(action, body, **kwargs)
         except httpx.TimeoutException:
             self._time_remaining()
             raise
@@ -161,6 +171,7 @@ class _GuardSession:
 
 class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
+    UNSTICK_BUDGET_S = 45.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
@@ -313,6 +324,12 @@ class GenerationGuard:
         """Live MacroSkills (with MiningDFS shaft state) when wired, else a throwaway binding."""
         return self.skills if self.skills is not None else MacroSkills(self.bot)
 
+    def _stop_after_recovery_timeout(self) -> None:
+        try:
+            self.raw_bot.call("stop", {}, timeout_s=1.5, allow_reauth=False)
+        except (ApiError, httpx.HTTPError):
+            pass
+
     def _escape_water(self, before: dict[str, Any]) -> dict[str, Any]:
         skills = self._skills()
         escape_bot = _GuardSession(
@@ -327,11 +344,8 @@ class GenerationGuard:
             if not result.get("ok"):
                 return result
             after = escape_bot.status()
-        except _WaterEscapeBudgetExceeded:
-            try:
-                self.raw_bot.call("stop", {}, timeout_s=1.5, allow_reauth=False)
-            except (ApiError, httpx.HTTPError):
-                pass
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget", "partial": True, "in_water": True}
         start, end = before.get("pos"), after.get("pos") or result.get("pos_after")
         if (
@@ -1440,12 +1454,16 @@ class GenerationGuard:
     # ---- Layer 2: Active Macro-Tool & `pre_ensure` Preemption ----
 
     @contextmanager
-    def _intercept_bot_calls(self, *, enable_creeper_watcher: bool = True):
+    def _intercept_bot_calls(self, *, enable_creeper_watcher: bool = True, deadline: float | None = None):
         """Intercept `interrupted_by=='hurt'` and silent creeper approach inside multi-step macro skills."""
         orig_call = getattr(self.raw_bot, "call", None)
         if not callable(orig_call) or self._in_reflex:
             yield
             return
+
+        actor_call = orig_call
+        if deadline is not None:
+            actor_call = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline, call_override=orig_call).call
 
         stop_evt = threading.Event()
         actor_thread_id = threading.get_ident()
@@ -1525,14 +1543,20 @@ class GenerationGuard:
                 str(kwargs.get("method") or "").upper() == "GET"
                 or clean_path in READ_ONLY_POLL_ENDPOINTS
             )
-            if not is_actor_thread or is_readonly_poll:
+            if not is_actor_thread:
                 return orig_call(path, body, **kwargs)
+            if is_readonly_poll:
+                return actor_call(path, body, **kwargs)
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
             # Do not preempt explicit stop_on=['death'] emergency swim/trap digs
             caller_ignores_hurt = isinstance(body, dict) and body.get("stop_on") == ["death"]
             try:
-                res = orig_call(path, body, **kwargs)
+                res = actor_call(path, body, **kwargs)
+            except _RecoveryBudgetExceeded:
+                if pending_trigger and not self._in_reflex:
+                    raise ReflexPreempted(pending_trigger[0]) from None
+                raise
             except ApiError as err:
                 if not self._in_reflex and not caller_ignores_hurt:
                     if pending_trigger:
@@ -1540,7 +1564,7 @@ class GenerationGuard:
                     if err.code == "interrupted" and clean_path in ACTION_LOCK_ENDPOINTS:
                         st_err = {}
                         try:
-                            st_err = orig_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
+                            st_err = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
                         except Exception:
                             pass
                         if isinstance(st_err, dict) and bool(st_err.get("in_lava")):
@@ -1572,7 +1596,7 @@ class GenerationGuard:
                 if isinstance(res, dict) and res.get("interrupted_by") == "hurt" and clean_path in ACTION_LOCK_ENDPOINTS:
                     st_int = {}
                     try:
-                        st_int = orig_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
+                        st_int = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
                     except Exception:
                         pass
                     nh_n, nh_d, nh_i, nh_p = self._extract_hostile_info(st_int)
@@ -1806,9 +1830,21 @@ class GenerationGuard:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
         if tool_name in NON_PREEMPTABLE_TOOLS or self._in_reflex:
             return invoke_fn()
+        deadline = time.monotonic() + self.UNSTICK_BUDGET_S if tool_name == "mc_skill_unstick" else None
         try:
-            with self._intercept_bot_calls(enable_creeper_watcher=True):
-                return invoke_fn()
+            with self._intercept_bot_calls(enable_creeper_watcher=True, deadline=deadline):
+                result = invoke_fn()
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise _RecoveryBudgetExceeded
+                return result
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            self.events.emit("guardian.recovery_budget_exceeded", tool=tool_name, budget_s=self.UNSTICK_BUDGET_S)
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {"code": "time_budget", "message": "脱困超过时间预算，已请求停止动作，请按当前位置调整方案。"},
+            }, ensure_ascii=False)
         except ReflexPreempted as preempt:
             receipt = self.handle_preemption(preempt.trigger, interrupted_name=tool_name)
             return json.dumps(receipt, ensure_ascii=False)
