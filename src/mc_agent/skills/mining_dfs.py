@@ -2866,6 +2866,10 @@ class MiningDFSEngine:
         if not allow_retired and not self._tree_has_pending_branches():
             self._clear_active_tree_only()
             return False
+        if allow_retired:
+            # A return trip only needs the route. Leave saved ores for explore
+            # to verify when it restores a mining shaft.
+            return True
 
         for o_pt, meta in list(self.ledger.discovered_ores.items()):
             if o_pt in self.mined_ore_positions or o_pt in self.deferred_ores:
@@ -2889,9 +2893,6 @@ class MiningDFSEngine:
                 nearest_node_id=near_nid,
             )
 
-        if allow_retired:
-            # The caller is climbing: do not detour back to the saved mining tip first.
-            return True
         ok_nav, _ = self._resume_shaft_tip(self.active_node_id, min_hp_ref=min_hp_ref)
         if not ok_nav:
             self._clear_active_tree_only()

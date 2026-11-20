@@ -2081,8 +2081,11 @@ def test_climb_out_rejoins_a_completed_side_branch_before_cutting_stairs(monkeyp
     world = _MockMineWorld(start_pos=(9.5, 20.0, 0.5), surface_y=40)
     stair = [(0, y, y - 20) for y in range(40, 19, -1)]
     leaf = [(x, 20, 0) for x in range(10)]
+    cached_ore = (200, -54, 0)
 
     def short_moves_only(request):
+        if request.url.path.endswith("/get_block") and tuple(json.loads(request.content)["pos"]) == cached_ore:
+            pytest.fail("checked an unrelated cached ore during climb_out")
         if request.url.path.endswith("/move_to"):
             args = json.loads(request.content)
             goal = (args["x"], args.get("y", world.pos[1]), args["z"])
@@ -2107,6 +2110,9 @@ def test_climb_out_rejoins_a_completed_side_branch_before_cutting_stairs(monkeyp
         if retired:
             engine._archive_current_shaft_to_ledger(mark_exhausted=True)
             engine._clear_active_tree_only()
+            engine.ledger.discovered_ores[cached_ore] = {
+                "block": "deepslate_diamond_ore", "required_tier": 3, "from_disk": True,
+            }
         monkeypatch.setattr(engine.skills, "dig_staircase", lambda **kw: pytest.fail("re-dug the return route"))
         result = engine.run(action="climb_out", max_duration_s=20)
 
