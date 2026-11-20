@@ -3223,7 +3223,10 @@ def test_blocked_target_level_backtrack_preserves_the_shaft(monkeypatch, local_b
 
 
 @pytest.mark.parametrize("deeper_branch_pending", [True, False])
-def test_explore_from_low_waypoint_does_not_rejoin_a_shallow_active_node(monkeypatch, deeper_branch_pending) -> None:
+@pytest.mark.parametrize("from_archive", [False, True])
+def test_explore_from_low_waypoint_does_not_rejoin_a_shallow_active_node(
+    monkeypatch, deeper_branch_pending, from_archive,
+) -> None:
     import mc_agent.skills.mining_dfs as mining
 
     world = _MockMineWorld(start_pos=(0.5, 20.0, 44.5), surface_y=64, dimension="the_nether",
@@ -3247,6 +3250,10 @@ def test_explore_from_low_waypoint_does_not_rejoin_a_shallow_active_node(monkeyp
         )
         engine.active_node_id = collar.node_id
         engine._record_corridor((0, 20, 44))
+        if from_archive:
+            engine.target_y = 15
+            engine._archive_current_shaft_to_ledger()
+            engine._clear_active_tree_only()
         walk = engine._walk_waypoints
 
         def walk_at_depth(waypoints, **kwargs):
