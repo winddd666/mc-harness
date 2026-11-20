@@ -581,7 +581,10 @@ def test_cancel_aborts_zombie_retries_and_enforces_post_cancel_cooldown(
         conc_client.close()
     assert out["content"] == "recovered"
     assert attempts == 5
-    assert [e["wait_s"] for e in retry_events if e["type"] == "http_retry"] == [6.0, 10.0, 15.0, 20.0]
+    waits = [e["wait_s"] for e in retry_events if e["type"] == "http_retry"]
+    assert len(waits) == 4
+    for actual, base in zip(waits, [6.0, 10.0, 15.0, 20.0]):
+        assert base <= actual <= base + 3.0
     assert all(e["concurrency_limit"] is True for e in retry_events if e["type"] == "http_retry")
 
     # 3. QwenModel 在一次取消后会进入 post_cancel_cooldown_s，并于下次请求触发 cancel_cooldown_wait

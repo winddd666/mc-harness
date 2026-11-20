@@ -561,34 +561,45 @@ def _make_http_client(spec: QwenSpec, base_url: str) -> httpx.Client:
 
 
 def _retry_delay_s(attempt: int, retry_after_header: str | None = None) -> float:
+    jitter = random.uniform(0.3, 2.0)
     if retry_after_header:
         try:
             parsed = float(retry_after_header.strip())
             if parsed > 0:
-                return min(15.0, parsed)
+                return min(20.0, parsed + jitter)
         except ValueError:
             pass
-    return 2.0 * (attempt + 1)
+    return 2.0 * (attempt + 1) + jitter
 
 
 def _is_concurrency_limit_429(status_code: int, detail: str) -> bool:
     if status_code != 429:
         return False
     low = (detail or "").lower()
-    return "concurrency" in low or "simultaneous" in low
+    markers = (
+        "concurrency",
+        "simultaneous",
+        "rate limit",
+        "rate_limit",
+        "overloaded",
+        "try again later",
+        "server_error",
+    )
+    return any(m in low for m in markers) or not low
 
 
 def _concurrency_retry_delay_s(attempt: int, retry_after_header: str | None = None) -> float:
     schedule = (6.0, 10.0, 15.0, 20.0, 22.0, 25.0, 28.0)
     base = schedule[min(max(0, attempt), len(schedule) - 1)]
+    jitter = random.uniform(0.5, 3.0)
     if retry_after_header:
         try:
             parsed = float(retry_after_header.strip())
             if parsed > 0:
-                return min(30.0, max(base, parsed))
+                return min(35.0, max(base, parsed) + jitter)
         except ValueError:
             pass
-    return base
+    return min(35.0, base + jitter)
 
 
 def _sleep_with_cancel(wait_s: float, cancel_event: threading.Event | None) -> None:
@@ -663,7 +674,7 @@ def _chat_direct(
                     with http_client.stream("POST", resolved.endpoint, headers=headers, json=body) as response:
                         if response.status_code != 200:
                             detail = response.read().decode("utf-8", errors="replace")[:300].strip()
-                            is_conc_429 = _is_concurrency_limit_429(response.status_code, detail)
+                            is_conc_429 = _is_concurrency_limit_429(response.status_code, detail) or response.status_code == 429
                             allowed = concurrency_max_attempts if is_conc_429 else standard_max_attempts
                             if response.status_code in RETRYABLE_HTTP_STATUSES and attempt < allowed - 1:
                                 wait_s = (
@@ -694,7 +705,7 @@ def _chat_direct(
                 response = http_client.post(resolved.endpoint, headers=headers, json=body)
                 if response.status_code != 200:
                     detail = response.text[:300].strip()
-                    is_conc_429 = _is_concurrency_limit_429(response.status_code, detail)
+                    is_conc_429 = _is_concurrency_limit_429(response.status_code, detail) or response.status_code == 429
                     allowed = concurrency_max_attempts if is_conc_429 else standard_max_attempts
                     if response.status_code in RETRYABLE_HTTP_STATUSES and attempt < allowed - 1:
                         wait_s = (

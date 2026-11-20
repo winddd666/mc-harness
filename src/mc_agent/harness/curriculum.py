@@ -1005,6 +1005,41 @@ def _can_attempt_target(adv_id: str, counts: dict[str, int], *, has_iron_or_bett
         return iron_equiv >= 3 or has_iron_or_better
     if adv_id == "minecraft:husbandry/make_a_sign_glow":
         return counts.get("glow_ink_sac", 0) >= 1 or has_iron_or_better
+    if adv_id == "minecraft:nether/ride_strider":
+        return counts.get("saddle", 0) >= 1
+    if adv_id in {"minecraft:nether/obtain_ancient_debris", "minecraft:nether/obtain_crying_obsidian"}:
+        return has_diamond_pick
+    if adv_id == "minecraft:story/follow_ender_eye":
+        return counts.get("ender_eye", 0) >= 1 or (
+            (counts.get("blaze_rod", 0) >= 1 or counts.get("blaze_powder", 0) >= 1)
+            and counts.get("ender_pearl", 0) >= 1
+        )
+    if adv_id == "minecraft:nether/distract_piglin":
+        return counts.get("gold_ingot", 0) >= 1 or counts.get("gold_nugget", 0) >= 9
+    if adv_id == "minecraft:adventure/heart_transplanter":
+        return counts.get("creaking_heart", 0) >= 1 or counts.get("pale_oak_log", 0) >= 2
+    if adv_id == "minecraft:adventure/kill_mob_near_sculk_catalyst":
+        return counts.get("sculk_catalyst", 0) >= 1
+    if adv_id == "minecraft:story/cure_zombie_villager":
+        return counts.get("golden_apple", 0) >= 1 and (
+            counts.get("splash_potion", 0) >= 1 or counts.get("fermented_spider_eye", 0) >= 1
+        )
+    if adv_id == "minecraft:husbandry/plant_seed":
+        return any(
+            counts.get(k, 0) >= 1
+            for k in (
+                "wheat_seeds",
+                "beetroot_seeds",
+                "melon_seeds",
+                "pumpkin_seeds",
+                "carrot",
+                "potato",
+                "wooden_hoe",
+                "stone_hoe",
+                "iron_hoe",
+                "diamond_hoe",
+            )
+        )
     return True
 
 
@@ -1317,7 +1352,7 @@ def select_next_target(
     leash_active = leash is not None
 
     if not leash_active:
-        if not has_stone_or_better and not _is_cooled("bootstrap_stone_age"):
+        if cur_dim == "overworld" and not has_stone_or_better and not _is_cooled("bootstrap_stone_age"):
             pb0, _ = _enrich_target_with_world_memory(
                 CURRICULUM_PLAYBOOKS["bootstrap_stone_age"],
                 world_memory=world_memory,
@@ -1341,7 +1376,7 @@ def select_next_target(
             if not (has_villager_mem and has_lava_mem):
                 unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
                 return _build_island_recon_target(origin_pos, unexp, tier=0), frontier_data
-        if not has_iron_or_better and not _is_cooled("bootstrap_iron_age"):
+        if cur_dim == "overworld" and not has_iron_or_better and not _is_cooled("bootstrap_iron_age"):
             pb1, _ = _enrich_target_with_world_memory(
                 CURRICULUM_PLAYBOOKS["bootstrap_iron_age"],
                 world_memory=world_memory,
@@ -1370,8 +1405,21 @@ def select_next_target(
             recon_target = _build_island_recon_target(origin_pos, unexp, tier=1)
             candidates.append(((1, 0, -65, "island_recon_sweep"), recon_target))
 
+    _SURFACE_ONLY_TARGETS = frozenset({
+        "minecraft:husbandry/plant_seed",
+        "minecraft:husbandry/breed_an_animal",
+        "minecraft:adventure/sleep_in_bed",
+        "minecraft:husbandry/tame_an_animal",
+        "minecraft:adventure/trade",
+    })
+    is_deep_underground = cur_dim == "overworld" and origin_pos is not None and float(origin_pos[1]) < 48.0
+
     for key, pb in CURRICULUM_PLAYBOOKS.items():
         if key.startswith("bootstrap_"):
+            continue
+        if is_deep_underground and key in _SURFACE_ONLY_TARGETS:
+            continue
+        if key == "minecraft:adventure/sleep_in_bed" and is_day_now:
             continue
         if leash_active and pb.budget_class not in {"micro", "short"}:
             continue
@@ -1598,6 +1646,7 @@ class CurriculumSupervisor:
         self.recon_completed: bool = False
         self._last_dry_pos: list[float] | None = None
         self.strikes: dict[str, int] = {}
+        self.cooldown_tiers: dict[str, int] = {}
         self.cooldowns: dict[str, float] = {}
         self.episodes: list[dict[str, Any]] = []
 
@@ -2352,6 +2401,7 @@ class CurriculumSupervisor:
 
             if progress_made:
                 self.strikes.pop(target.key, None)
+                self.cooldown_tiers.pop(target.key, None)
                 # Prevent an unfinished `deep` slice (`shiny_gear`/`mine_diamond`) from monopolizing back-to-back slices when
                 # the bot already accumulated diamonds/iron that can immediately cash in +35~65 pts on fast deterministic targets!
                 if (
@@ -2370,15 +2420,32 @@ class CurriculumSupervisor:
                     "minecraft:adventure/sleep_in_bed",
                     "minecraft:husbandry/breed_an_animal",
                     "minecraft:husbandry/tame_an_animal",
+                    "minecraft:husbandry/plant_seed",
+                    "minecraft:adventure/heart_transplanter",
+                    "minecraft:story/cure_zombie_villager",
+                    "minecraft:nether/ride_strider",
                 })
+                final_ans_text = str(report.get("final_answer") or report.get("answer") or report.get("output") or "")
+                explicit_blocked = any(
+                    m in final_ans_text
+                    for m in ("阻断报告", "不可达", "不可达成", "无此结构", "数量均为 0", "数量均为0", "判定阻断")
+                )
                 eff_strike_limit = (
                     1
-                    if target.key == "minecraft:husbandry/make_a_sign_glow"
+                    if explicit_blocked
+                    or target.key == "minecraft:husbandry/make_a_sign_glow"
                     or (target.key in _LOCAL_RESOURCE_TARGETS and report.get("status") == "answered")
                     else self.strike_limit
                 )
                 if cnt >= eff_strike_limit:
-                    cd_dur = min(self.cooldown_s, 90.0) if target.key.startswith("bootstrap_") else self.cooldown_s
+                    tier = self.cooldown_tiers.get(target.key, 0) + (2 if explicit_blocked else 1)
+                    self.cooldown_tiers[target.key] = tier
+                    if target.key.startswith("bootstrap_"):
+                        cd_dur = min(self.cooldown_s, 90.0)
+                    else:
+                        # BUG-050 exponential backoff: 1x (20m) -> 3x (60m) -> 9x (3h)
+                        mult = 1 if tier <= 1 else (3 if tier == 2 else 9)
+                        cd_dur = self.cooldown_s * mult
                     self.cooldowns[target.key] = time.monotonic() + cd_dur
                     self.strikes[target.key] = 0
 
