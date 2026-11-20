@@ -4021,6 +4021,42 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
         assert actions[0]["result"]["mode"] == ("respawned" if scenario == "close_respawn" else "surfaced")
 
 
+@pytest.mark.parametrize("safe_sidestep", [True, False])
+def test_bug069_retreat_can_sidestep_on_ground_when_long_routes_are_unsafe(safe_sidestep):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    status = {"pos": [0.5, 64.0, 0.5], "alive": True, "ready": True, "on_ground": True}
+    controls = []
+
+    class NarrowBankBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, z = body["pos"]
+                far_edge = 2 if safe_sidestep else 1
+                return {"name": "stone" if x == 0 and y == 63 and 0 <= z <= far_edge else "air"}
+            if action == "look":
+                status["yaw"] = body["yaw"]
+            if action == "control":
+                controls.append(body)
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                status["pos"] = [0.5 + 0.7 * dx, 64.0, 0.5 + 0.7 * dz]
+            return {"ok": True}
+
+    result = CombatEnv(NarrowBankBot()).flee([4.5, 64, 0.5], allow_shaft_seal=False)
+
+    assert result["ok"] is safe_sidestep
+    if safe_sidestep:
+        control, = controls
+        assert result["pos_after"] == pytest.approx([0.5, 64.0, 1.2])
+        assert control["forward"] and not control["sprint"] and not control["jump"]
+        assert control["ms"] < 350
+    else:
+        assert controls == []
+
+
 @pytest.mark.parametrize("room_for_short_exit", [True, False])
 def test_flee_uses_verified_short_exit_when_full_followup_hits_drop(room_for_short_exit):
     from mc_agent.skills.combat_env import CombatEnv
@@ -4099,6 +4135,91 @@ def test_guardian_damage_retreat_checks_terrain(dimension, health):
     assert retreat["action"] == "combat_or_flee"
     assert retreat["result"]["reason"] == "no_safe_retreat"
     assert mutations == []
+
+
+@pytest.mark.parametrize("water_state", ["surfaced", "submerged", "drowning", "failed_unstick"])
+def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypatch, water_state):
+    status = {"pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180,
+              "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True}
+    calls = []
+
+    class WetBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(WetBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def failed_water_macro(_status):
+        calls.append("water_macro")
+        return {"ok": False, "in_water": True}
+
+    def failed_shore(*args, surface_first=False, **kwargs):
+        calls.append("urgent_shore" if surface_first else "shore")
+        return {"ok": False, "in_water": True}
+
+    monkeypatch.setattr(guard, "_escape_water", failed_water_macro)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", failed_shore)
+    if water_state == "failed_unstick":
+        status.update(submerged=False)
+        receipt = {"ok": False, "in_water": True, "error": {"code": "water_escape_failed"}}
+    else:
+        receipt = guard.handle_preemption({"source": "tool_interrupted_hurt"}, interrupted_name="mc_skill_mine_dfs")
+        assert receipt["reflex_mode"] == "water_surface"
+        assert calls == ["water_macro", "shore"]
+        calls.clear()
+        status.update(submerged=water_state != "surfaced", oxygen=0 if water_state == "drowning" else 180)
+
+    guard.stabilize_after_tools([json.dumps(receipt)])
+
+    expected = {"surfaced": [], "submerged": ["shore"], "drowning": ["urgent_shore"], "failed_unstick": ["shore"]}
+    assert calls == expected[water_state]
+
+
+def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_position():
+    status = {
+        "pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180, "yaw": -1.5708,
+        "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True,
+        "nearest_hostile": {"id": 44, "name": "skeleton", "dist": 8},
+    }
+    calls = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield", "count": 1}}
+            if action == "get_entities":
+                return {"entities": [{"id": 44, "name": "skeleton", "pos": [6386.7, 63.0, -6442.3]}]}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "water"}
+            calls.append((action, body))
+            if action == "move_to":
+                status.update(pos=[body["x"], body["y"], body["z"]], in_water=False, submerged=False, on_ground=True)
+            return {"ok": True}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    receipt = json.dumps({"ok": False, "in_water": True, "error": {"code": "water_escape_failed"}})
+
+    note = guard.stabilize_after_tools([receipt])
+
+    surge = next(body for action, body in calls if action == "control")
+    shore_move = next(body for action, body in calls if action == "move_to")
+    assert calls[0] == ("look", {"entity_id": 44})
+    assert calls[1][0] == "posture" and calls[1][1]["shield"] is True
+    assert surge["jump"] is True and surge["forward"] is False
+    assert shore_move["x"] < 6378.7
+    assert status["in_water"] is False and "登岸" in note
 
 
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch):

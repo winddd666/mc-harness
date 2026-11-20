@@ -499,6 +499,26 @@ class GenerationGuard:
         pos = list(nh["pos"]) if isinstance(nh.get("pos"), (list, tuple)) and len(nh["pos"]) >= 3 else None
         return name, dist, eid, pos
 
+    def _find_hostile_position(self, entity_id: int | None, entity_name: str) -> list[float] | None:
+        # Live status identifies the nearest hostile without always including coordinates.
+        try:
+            response = self.bot.call("get_entities", {"radius": 16})
+        except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
+            raise
+        except Exception:
+            return None
+        if not isinstance(response, dict):
+            return None
+        for entity in response.get("entities") or []:
+            if not isinstance(entity, dict):
+                continue
+            name = str(entity.get("name") or "").removeprefix("minecraft:").strip().lower()
+            if (entity_id is not None and entity.get("id") == entity_id) or (entity_id is None and name == entity_name):
+                pos = entity.get("pos")
+                if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                    return list(pos)
+        return None
+
     @staticmethod
     def _parse_inventory_summary(inv: dict[str, Any]) -> tuple[dict[str, int], bool, bool]:
         counts: dict[str, int] = {}
@@ -755,21 +775,8 @@ class GenerationGuard:
             ):
                 return None
 
-        # Live `/status` omits `nearest_hostile.pos`: resolve 3D entity coords via `get_entities` so `has_los` works on all mobs!
         if nh_pos is None:
-            try:
-                ent_resp = self.bot.call("get_entities", {"radius": 16})
-                for th in (ent_resp or {}).get("entities") or []:
-                    if not isinstance(th, dict):
-                        continue
-                    th_nm = str(th.get("name") or "").removeprefix("minecraft:").strip().lower()
-                    if (nh_id is not None and th.get("id") == nh_id) or (nh_id is None and th_nm == nh_name):
-                        tpos = th.get("pos")
-                        if isinstance(tpos, (list, tuple)) and len(tpos) >= 3:
-                            nh_pos = list(tpos)
-                            break
-            except Exception:
-                nh_pos = None
+            nh_pos = self._find_hostile_position(nh_id, nh_name)
 
         # Never fire `pre_hurt_*` through solid bunker walls! Real damage still triggers `guard_poll_hurt` unconditionally.
         if isinstance(pos, (list, tuple)) and len(pos) >= 3 and isinstance(nh_pos, (list, tuple)) and len(nh_pos) >= 3:
@@ -1964,10 +1971,14 @@ class GenerationGuard:
                         st_after = st_pre
                     left_water = (
                         not bool(st_after.get("in_water"))
+                        and not st_after.get("in_lava")
+                        and st_after.get("on_ground") is not False
                         and st_after.get("ready", True)
                         and st_after.get("alive") is not False
                         and not esc_pre_respawned
                     )
+                    self._last_water_escape_at = time.monotonic()
+                    self._last_water_escape_failed = not left_water
                     if left_water:
                         self._water_hurt_streak = 0
                     recovery = "已脱离水域" if left_water else f"上浮后 in_water={bool(st_after.get('in_water'))}"
@@ -2144,7 +2155,27 @@ class GenerationGuard:
 
         no_water_reentry_b = in_water and now_b < self._no_water_until
         ended_wet_in_payload = any('"in_water": true' in str(r or "").lower() for r in (tool_results or []))
-        needs_water_escape = in_water and (
+        handled_water_in_tool = False
+        unstick_still_wet = False
+        if in_water and tool_results:
+            try:
+                last_tool_result = json.loads(tool_results[-1])
+            except (TypeError, ValueError):
+                last_tool_result = None
+            if isinstance(last_tool_result, dict):
+                tool_status = last_tool_result.get("status_after")
+                handled_water_in_tool = (
+                    last_tool_result.get("preempted_by_reflex") is True
+                    and last_tool_result.get("reflex_mode") == "water_surface"
+                    and isinstance(tool_status, dict) and tool_status.get("in_water") is True
+                )
+                tool_error = last_tool_result.get("error")
+                unstick_still_wet = (
+                    isinstance(tool_error, dict) and tool_error.get("code") == "water_escape_failed"
+                    and last_tool_result.get("in_water") is True
+                )
+        retry_water_escape = not handled_water_in_tool or drowning or bool(hurts) or bool(status.get("submerged"))
+        needs_water_escape = in_water and retry_water_escape and (
             not status.get("on_ground")
             or status.get("submerged")
             or ended_wet_in_payload
@@ -2264,7 +2295,10 @@ class GenerationGuard:
                     if any(a.get("action") == "boundary_raise_shield" and a.get("ok") for a in b_actions):
                         notes.append("举盾护体")
 
-                forced_shore_b = self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
+                forced_shore_b = (
+                    self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
+                    or handled_water_in_tool or unstick_still_wet
+                )
                 esc_b_ok = False
                 esc_b_respawned = False
                 if not forced_shore_b:
@@ -2278,6 +2312,8 @@ class GenerationGuard:
                     self._last_water_escape_failed = False
                     notes.append("自动浮水登岸")
                 elif not esc_b_respawned:
+                    if nh_pos is None and nh_name in RANGED_MOBS and nh_dist <= 16.0:
+                        nh_pos = self._find_hostile_position(nh_id, nh_name)
                     shore_b = self._action(
                         "boundary_escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(

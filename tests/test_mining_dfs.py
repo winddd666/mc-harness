@@ -2391,6 +2391,67 @@ class _MiningClock:
         self.now += seconds
 
 
+@pytest.mark.parametrize(("walk_duration", "walk_error", "expected_stop"), [
+    (5, "backtrack_blocked", "surface_reached"),
+    (23, "backtrack_blocked", "climb_progress"),
+    (5, "hurt", "climb_progress"),
+])
+def test_climb_out_continues_after_partial_walk_with_budget(monkeypatch, walk_duration, walk_error, expected_stop) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=43)
+    walked_from = []
+    stair_starts = []
+
+    def walk_to_collar(collar_id, **kwargs):
+        walked_from.append(world.pos[1])
+        if len(walked_from) == 1:
+            world.pos[1] += 3
+            clock.now += walk_duration
+        return False, walk_error
+
+    def stair_step(**kwargs):
+        stair_starts.append(world.pos[1])
+        world.pos[1] += 1
+        clock.now += 1
+        return {"ok": False, "stop_reason": "time_budget", "steps_done": 1}
+
+    with BotSession("tok", bot_username="PartialClimb", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 43, 0), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        monkeypatch.setattr(engine, "_walk_to_collar", walk_to_collar)
+        monkeypatch.setattr(engine.skills, "dig_staircase", stair_step)
+        result = engine.run(action="climb_out", max_duration_s=32)
+
+    assert result["stop_reason"] == expected_stop
+    if expected_stop == "surface_reached":
+        assert walked_from == [20, 23]
+        assert stair_starts == [23, 24]
+        assert result["climb"]["end_y"] == 25
+    else:
+        assert walked_from == [20]
+        assert not stair_starts
+        assert result["climb"]["end_y"] == 23
+
+
+def test_mine_dfs_api_failure_keeps_its_structured_code() -> None:
+    from mc_agent.errors import ApiError
+
+    def handler(request):
+        raise ApiError("not_loaded", "chunk unavailable")
+
+    with BotSession("tok", bot_username="MiningApiFailure", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_mine_dfs(target="iron"))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "not_loaded"
+
+
 def test_climb_out_honors_the_callers_budget_in_nested_staircase(monkeypatch) -> None:
     """A 5s climb must never turn into the old implicit 90s staircase budget."""
     import mc_agent.skills.mining_dfs as mining
@@ -2815,6 +2876,61 @@ def test_descent_resumes_immediately_after_a_dig_timeout_with_progress(monkeypat
     assert second["stop_reason"] == "quota_reached"
     assert second["target_gained"] == 1
     assert len(attempts) == 2 and attempts[1] - attempts[0] < 30
+    assert engine.collar_node_id == collar.node_id
+
+
+@pytest.mark.parametrize("steps_before_preemption", [0, 6])
+def test_descent_resumes_after_guardian_preemption(monkeypatch, steps_before_preemption) -> None:
+    from mc_agent.harness.guardian import ReflexPreempted
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    clock = _MiningClock()
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", clock.sleep)
+    start = (0, -22, 0)
+    world = _MockMineWorld(
+        start_pos=(0.5, -22.0, 0.5), surface_y=64,
+        inventory_items=[{"name": "iron_pickaxe", "count": 1, "slot": 9}],
+    )
+    world.blocks[start] = world.blocks[(0, -21, 0)] = "air"
+    interrupted = False
+
+    def handler(request):
+        nonlocal interrupted
+        if (
+            request.url.path.endswith("/dig") and not interrupted
+            and world.pos[0] == steps_before_preemption + 0.5
+        ):
+            interrupted = True
+            raise ReflexPreempted({"source": "pre_hurt_creeper"})
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="ResumeAfterGuardian", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, 86), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=start, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [collar.anchor, start]),
+            branches=[BranchSpec("stair_down", "east", 32)],
+        )
+        args = dict(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
+        with pytest.raises(ReflexPreempted):
+            engine.run(**args)
+
+        tip = engine.nodes[engine.active_node_id]
+        assert engine.bot is bot
+        assert tip.anchor == (steps_before_preemption, start[1] - steps_before_preemption, 0)
+        assert [(b.status, b.steps) for b in tip.branches] == [("pending", 32 - steps_before_preemption)]
+        assert engine.ledger.saved_shafts[0]["active_node_id"] == tip.node_id
+
+        world.blocks[(tip.anchor[0] + 2, tip.anchor[1] - 2, 0)] = "diamond_ore"
+        resumed = engine.run(**args)
+
+    assert resumed["stop_reason"] == "quota_reached"
+    assert resumed["target_gained"] == 1
     assert engine.collar_node_id == collar.node_id
 
 
