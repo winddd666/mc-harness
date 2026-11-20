@@ -3260,6 +3260,54 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
     assert "lava_step_bridge" in out_b["actions"]
 
 
+@pytest.mark.parametrize("hit_source", ["fireball", "fire_tick_only", "mob_attack"])
+def test_nether_fire_ticks_do_not_replace_ranged_hit_or_start_a_bunker(monkeypatch, hit_source):
+    mob = "zombie" if hit_source == "mob_attack" else "blaze"
+    attacker = {"id": 42, "name": mob, "dist": 5.1}
+    hurt = []
+    if hit_source != "fire_tick_only":
+        hurt.append({"seq": 1, "type": "hurt", "source": hit_source, "source_entity": attacker})
+    hurt.append({"seq": 2, "type": "hurt", "source": "on_fire"})
+    retreat_calls = []
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [-79.3, 64, 624.2], "health": 3.0, "food": 17, "dimension": "the_nether",
+                    "on_fire": True, "on_ground": True, "alive": True, "ready": True, "nearest_hostile": attacker,
+                }
+            if action == "events":
+                since = kwargs["params"]["since"]
+                return {"events": [row for row in hurt if row["seq"] > since]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": []}
+            return {"ok": True}
+
+    class BunkerSkills:
+        def dig_safety_bunker(self, *, urgent):
+            assert urgent
+            return {"ok": True}
+
+    def retreat(status, target, counts, *, ranged=False, prefer_cover=False):
+        retreat_calls.append((target, ranged))
+        return {"ok": True, "mode": "flee"}
+
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=BunkerSkills())
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    incident = guard.poll()
+
+    action, = incident["actions"]
+    if hit_source == "mob_attack":
+        assert action["action"] == "emergency_bunker"
+        assert retreat_calls == []
+    else:
+        assert action["action"] == "combat_or_flee"
+        assert retreat_calls == [(attacker if hit_source == "fireball" else None, True)]
+
+
 @pytest.mark.parametrize("landed", [False, True])
 def test_lava_reflex_requires_landing_even_without_lava_under_the_hitbox(monkeypatch, landed):
     clock = [1000.0]

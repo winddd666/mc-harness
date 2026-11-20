@@ -1305,8 +1305,20 @@ class GenerationGuard:
                 if critical_non_combat:
                     self._last_non_combat_alert_at = now
             elif effective_combat_hurt and not in_water and not in_lava:
-                attacker = (other_hurts[-1].get("source_entity") or other_hurts[-1].get("likely_attacker")) if other_hurts else status.get("nearest_hostile")
-                hurt_src = str(other_hurts[-1].get("source") or "") if other_hurts else ""
+                combat_hurt = next(
+                    (h for h in reversed(other_hurts) if str(h.get("source") or "").strip().lower() not in NON_COMBAT_HURT_SOURCES),
+                    None,
+                )
+                recent_hurt = combat_hurt or (other_hurts[-1] if other_hurts else {})
+                attacker = (
+                    recent_hurt.get("source_entity") or recent_hurt.get("likely_attacker")
+                    if other_hurts else status.get("nearest_hostile")
+                )
+                hurt_src = str(recent_hurt.get("source") or "").strip().lower()
+                ranged_defense = hurt_src in RANGED_HURT_SOURCES or (
+                    nh_name in {"blaze", "ghast"}
+                    and (hurt_src in FIRE_HURT_SOURCES or (not hurt_src and status.get("on_fire")))
+                )
                 hp_val = float(health) if isinstance(health, (int, float)) else 20.0
                 already_blocking = bool(status.get("blocking"))
                 if in_wall_hurt:
@@ -1337,7 +1349,7 @@ class GenerationGuard:
                 elif (
                     has_shield
                     and not already_blocking
-                    and hurt_src not in RANGED_HURT_SOURCES
+                    and not ranged_defense
                     and hp_val >= 8.0
                     and (now - self._last_shield_only_at >= 12.0 or self._shield_only_streak < 1)
                 ):
@@ -1358,7 +1370,7 @@ class GenerationGuard:
                             ),
                         )
                     )
-                elif hurt_src in RANGED_HURT_SOURCES:
+                elif ranged_defense:
                     self._shield_only_streak = 0
                     att_obj = attacker if isinstance(attacker, dict) else (status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None)
                     self._mark_ranged_engagement(now, attacker=att_obj)
