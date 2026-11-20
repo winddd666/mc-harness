@@ -1164,9 +1164,9 @@ class SceneWatchdog(threading.Thread):
         # The API reports ready=false for the whole death/respawn window; do not skip it, otherwise
         # the death itself is never observed and the bot comes back with an empty inventory.
         dead_signal = health <= 0.0 or alive is False
-        if self.fence_repair is not None:
+        if self.fence_repair is not None and ready and not dead_signal:
             try:
-                self.fence_repair(st.get("dimension"))
+                self.fence_repair(st.get("dimension"), st.get("pos"))
             except (KeyboardInterrupt, SystemExit):
                 raise
             except BaseException:
@@ -1260,35 +1260,44 @@ def _reassert_scene_geofence(
     scene: SceneAnchor,
     *,
     dimension: str | None,
+    pos: Any = None,
     supervisor: Any = None,
 ) -> bool:
-    """Rebuild the toolset geofence at the scene anchor if the HUD auto-recenter moved it (BUG-040).
-
-    `harness/agent.py:1234-1250` re-centers the fence on the bot whenever it is >400m from the
-    current center. When the scene teleport had not landed yet, the fence got pinned to the old
-    position and every staircase/tunnel/move_to in the scene was then rejected as off-island.
-    A portal transition belongs to the curriculum's dimension-specific recentering.
-    """
+    """Keep the home fence at the scene and repair stale fences after same-episode portals."""
     from mc_agent.kb import normalize_dimension
 
-    if not dimension or normalize_dimension(dimension) != scene.dim:
+    if not dimension:
         return False
+    dim = normalize_dimension(dimension)
     gf = getattr(toolset, "geofence", None)
     if gf is None:
         return False
     try:
-        drift = math.hypot(float(gf.center_x) - scene.x, float(gf.center_z) - scene.z)
+        if dim == scene.dim:
+            x, z = scene.x, scene.z
+            limit = 50.0
+        elif (
+            scene.dim == "overworld"
+            and dim in {"the_nether", "the_end"}
+            and isinstance(pos, (list, tuple))
+            and len(pos) >= 3
+        ):
+            # Curriculum recenters between episodes. A bot can die and re-enter a portal
+            # within one episode, leaving the home fence thousands of blocks away (r39 GuiTest).
+            x, z = float(pos[0]), float(pos[2])
+            limit = scene.drift_limit
+        else:
+            return False
+        drift = math.hypot(float(gf.center_x) - x, float(gf.center_z) - z)
     except Exception:
         return False
-    if drift <= 50.0:
+    if drift <= limit:
         return False
     try:
-        rebuilt = _scene_geofence_cls(type(gf))(
-            center_x=scene.x,
-            center_z=scene.z,
-            radius=getattr(gf, "radius", scene.radius),
-            margin=getattr(gf, "margin", 8.0),
-        )
+        if hasattr(gf, "contains"):
+            rebuilt = dataclasses.replace(gf, center_x=x, center_z=z)
+        else:
+            rebuilt = _scene_geofence_cls(type(gf))(center_x=x, center_z=z, radius=gf.radius, margin=gf.margin)
     except Exception as exc:
         print(f"[Scene] geofence rebuild failed: {exc}", flush=True)
         return False
@@ -1299,8 +1308,7 @@ def _reassert_scene_geofence(
         except Exception:
             pass
     print(
-        f"[Scene] geofence drift {drift:.0f}m from anchor -> rebuilt at "
-        f"({scene.x:.1f}, {scene.z:.1f})",
+        f"[Scene] geofence drift {drift:.0f}m -> rebuilt in {dim} at ({x:.1f}, {z:.1f})",
         flush=True,
     )
     return True
@@ -1516,7 +1524,7 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
 }
 
 
-def install_scene_focus(stage: str, episodes: int = 2) -> bool:
+def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | None = None) -> bool:
     """Force the first `episodes` curriculum picks to a stage-specific target (SCENE-001).
 
     `CurriculumSupervisor.run()` resolves `select_next_target` from the module namespace at call
@@ -1529,6 +1537,14 @@ def install_scene_focus(stage: str, episodes: int = 2) -> bool:
     from mc_agent.harness import curriculum as cur
 
     target_kwargs = {k: v for k, v in spec.items() if k != "episodes"}
+    if stage == "brewing_alchemy" and scene is not None:
+        x, y, z = math.floor(scene.x), round(scene.y), math.floor(scene.z)
+        target_kwargs["task"] = (
+            f"场景台面中心在 ({scene.x:.1f}, {y}, {scene.z:.1f})。若已走远，先回到台面中心。"
+            f"优先用玻璃瓶点布置好的水源 ({x - 1}, {y - 1}, {z})，备用水源在 ({x - 2}, {y - 1}, {z - 1})。"
+            f"酿造台在 ({x + 2}, {y}, {z})。查询水源时看这两个坐标和 level=0。"
+            + target_kwargs["task"]
+        )
     target = cur.CurriculumTarget(**target_kwargs)
     remaining = int(spec.get("episodes", episodes))
     original = cur.select_next_target
@@ -1894,7 +1910,9 @@ def main() -> int:
                     return
                 wrong_dim = scene.dim == "the_nether" and "nether" not in dim_cur
                 dist = math.hypot(float(p_cur[0]) - sx, float(p_cur[2]) - sz)
-                _reassert_scene_geofence(toolset, scene, dimension=st_cur.get("dimension"), supervisor=sup)
+                _reassert_scene_geofence(
+                    toolset, scene, dimension=st_cur.get("dimension"), pos=p_cur, supervisor=sup,
+                )
                 if wrong_dim or (scene.dim in dim_cur and dist > scene.drift_limit):
                     restock_scene(bot_name, scene, reason="episode_anchor_pullback")
                     print(
@@ -1907,8 +1925,8 @@ def main() -> int:
 
         scene_state: dict[str, Any] = {"sup": None}
 
-        def _repair_fence(dimension: str | None) -> None:
-            _reassert_scene_geofence(toolset, scene, dimension=dimension, supervisor=scene_state["sup"])
+        def _repair_fence(dimension: str | None, pos: Any) -> None:
+            _reassert_scene_geofence(toolset, scene, dimension=dimension, pos=pos, supervisor=scene_state["sup"])
 
         watchdog = SceneWatchdog(
             bot, bot_name, scene, near_container=_near_known_container, fence_repair=_repair_fence
@@ -1918,7 +1936,7 @@ def main() -> int:
         if trader_keeper is not None:
             trader_keeper.start()
             print(f"[Scene] trader keeper started for {bot_name} (15s re-anchor)", flush=True)
-        install_scene_focus(args.stage, args.focus_episodes)
+        install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         try:
             sup = CurriculumSupervisor(
                 bot,
