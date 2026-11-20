@@ -1330,6 +1330,198 @@ retries 846 | 429 49 | 502 0 | tracebacks 0
 
 → **约 6.2 小时 / 402 集 / 0 次 429**：hy4 的 4 路 + rpm=6 配置可以定稿。
 
+## 4bu. 主轨第二波 `overnight_12bot_part2` 终验（12/12，09:28）
+
+### 12 路对照（同配置、同场景、连续两波）
+
+| bot | wave1 | part2 | Δ | over-cap (part2) |
+|---|---|---|---|---|
+| `glm_2_nether_bastion` | 270 | **270** | 0 | — |
+| `glm_1_nether_fortress` | 205 | **240** | **+35** | — |
+| `ds_4_nether_fortress` | 210 | 210 | 0 | — |
+| `nju_guitest_01_nether` | 180 | **200** | +20 | — |
+| `glm_5_midgame` | 185 | 180 | -5 | — |
+| `nju_3_village_trade` | 150 | 150 | 0 | — |
+| `ds_2_cave_combat` | 120 | **150** | +30 | — |
+| `glm_4_brewing_alchemy` | 195 | 145 | **-50** | deepslate 333 + cobble 225 |
+| `ds_3_enchant_anvil` | 150 | 135 | -15 | — |
+| `ds_1_bare` | 55 | **105** | **+50** | — |
+| `glm_3_village_trade` | 155 | 90 | **-65** | — |
+| `nju_movetest_01_bare` | 25 | **70** | **+45** | cobble 273 |
+| **合计** | **1900** | **1945** | **+45** | |
+
+- 总分 1900 → **1945**（+2.4%），集数 582 → 596
+- **退步全在 Qwen**：`glm_3` -65、`glm_4` -50 —— 正是 429 硬失败最多的两路（2 次 / 8 次）加上 `glm_4` 背包超限
+- **进步全在弱项**：`ds_1` +50、`nju_movetest` +45、`glm_1` +35、`ds_2` +30（裸开/低分 bot 提升明显）
+
+### 门禁
+
+| 项 | 值 | 判定 |
+|---|---|---|
+| startup crash / stick craft / thread exc | 0 | PASS |
+| no_support | 5 | PASS（边缘） |
+| mine dur/budget med | 0.91 | PASS |
+| mine zero-slice | 3.0% | PASS |
+| trade / brew | 2 / 4 | PASS |
+| **deaths (incidents)** | **207** | **FAIL** |
+| **cancel cooldown** | **1663.2s** | **FAIL** |
+| **runtime_error** | **58** | **FAIL** |
+| **over-cap bots** | **2** | **FAIL** |
+
+### 关键指标（wave1 → part2）
+
+| 指标 | wave1 | part2 |
+|---|---|---|
+| `mine_dfs` 次数 | 1025 | 1137 |
+| 零进展占比 | 3.6% | **3.0%** |
+| `depth_reset` | 16 | 17 |
+| `staircase` time_budget | 351 | **241** |
+| `steps_done` 中位 | 1 | **2** |
+| `pillar_fallback` | 137 | **140** |
+| `unstick` 中位 / p90 / max | 5.4 / 25.2 / 55.1s | 5.1 / 17.6 / **404.4s** |
+| notable 死亡 | 110 | **153** |
+| 429 硬失败 | 9 | **52** |
+| retry 总数 | 879 | 931 |
+
+- **死亡恶化**：`ds_4` 单路 **53 次**（wave1 41）、`glm_1` 18、`glm_2` 16；死因 `mob 49 / lava 25 / arrow 21 / hot_floor 18`
+- **`staircase:time_budget` 351→241**（-31%），`steps_done` 中位 1→2 → BUG-041 的快速失败在持续生效
+- **`unstick` max 404.4s**：`ds_1` 一次 unstick 被集时限中止，但**实际超预算 104s**
+
+### 新 P1：BUG-047（阻塞调用不受预算约束）
+
+- `ds_1` 一次 `mc_skill_unstick` **404.4s** → 结果 `工具执行中止`，随后 `运行总时限已到（300.0s）`
+- **33 次** `mc_move_to` 耗时 **102~103s** 后返回 `busy`（预检 `/status.busy` 为空但租约仍被占）
+- 根因：`bot.py:34 timeout=45.0` + `call()` 重试一次 ≈ 90s/次；控制类工具沿用默认超时；episode 时限只在调用之间检查
+- 修复：控制类工具传 `timeout_s=min(15, remaining)`；`move_to` 遇 `busy` 先 `/stop` 再试一次，仍 busy 立即返回；`unstick` 总时长上限 30s
+
+### 两波主轨合计
+
+```
+≈95 bot-小时（12 路 × 4h + 12 路 × 3.9h），1178 集，总分 3845
+429 硬失败 61（其中 part2 52）| 502 0 | Traceback 0
+```
+
+## 4bv. 过夜审计总结（01:08 → 10:13，6 个波次全部收官）
+
+### 波次总览
+
+| 波次 | 配置 | 时长 | 集数 | retry | 429 | 502 | Traceback | 总分 |
+|---|---|---|---|---|---|---|---|---|
+| `overnight_12bot` | 12 路 nju/glm/ds | 4h | 582 | 879 | 9 | 0 | 0 | 1900 |
+| `overnight_12bot_part2` | 12 路 nju/glm/ds | 3.9h | 596 | 931 | 52 | 0 | 0 | 1945 |
+| `hy4_audit_r25` | 4 路 hy4, rpm=6 | 20min | 17 | 0 | 0 | 0 | 0 | 335 |
+| `hy4_audit_r26` | 4 路 hy4, rpm=6 | 20min | 92 | 4 | 0 | 1 | 0 | 535 |
+| `hy4_audit_r27` | 4 路 hy4, rpm=6 | 3h | 126 | 0 | 0 | 0 | 0 | 520 |
+| `hy4_audit_r28` | 4 路 hy4, rpm=6 | 2.5h | 167 | 1 | 0 | 0 | 0 | 645 |
+
+**规模**：主轨 ≈95 bot-小时 / 1178 集；hy4 审计轨 ≈6.2h / 402 集。**全程 0 次 Traceback、0 次 502（主轨）**。
+
+### 通道级结论（本次审计最重要的产出）
+
+| 通道 | retry 率 | 429 硬失败 | 退避墙钟占比 | 结论 |
+|---|---|---|---|---|
+| Qwen（`glm_*`，5 路） | **17~25%** | **52** | **18.1%**（`glm_1` 24.4%） | **配额饱和，是唯一的问题通道** |
+| NJU（`nju_*`，3 路） | 1.2~2.1% | 0 | ≤0.5% | 健康（并发 429 走 8 次预算，从不报废） |
+| DeepSeek（`ds_*`，4 路） | 0~0.2% | 0 | 0% | 最健康 |
+| hy4（4 路 + rpm=6） | 0~0.24% | **0** | 0% | **6.2h/402 集零 429，可定稿为默认** |
+
+→ **429 与模型无关，与"并发数 + 通道配额 + 重试策略"有关**。同一时段同一机器：NJU 3 路 1.5%、Qwen 5 路 19%、hy4 4 路 0%。
+
+### 待修 P1 清单（按性价比排序）
+
+| # | 票 | 一句话 | 关键证据 | 预期收益 |
+|---|---|---|---|---|
+| 1 | **BUG-042** | `_is_concurrency_limit_429` 关键词太窄；Qwen `rate_limit_error` 只给 3 次尝试/30s | 天然 A/B：NJU 16 次并发 429 全存活，Qwen 527 次普通 429 死 52 | 直接消除 52 集报废 |
+| 2 | **BUG-042b** | `Retry-After` 无抖动 → 惊群 | 51 个"≥3 bot 2 秒内同重试"簇；259/931 次 `wait=15.0` | 降低碰撞率 |
+| 3 | **BUG-045** | Qwen squad 无按 provider 的 RPM 上限 | 5 路 17~25% retry、18.1% 墙钟 | 回收约 1/5 墙钟 |
+| 4 | **BUG-046** | `max_episodes=80` 与 `duration_s` 独立，快 bot 提前空转 | `glm_5` 80 集只跑 2h53m/3h55m，空转 1h02m | 每波多跑 1 路·小时 |
+| 5 | **BUG-047** | 阻塞工具调用不受预算约束 | unstick 404s（超预算 104s）；33 次 move_to 白等 102s | 每集多出 1~2 次有效请求 |
+| 6 | **BUG-043** | `lost_iron_pickaxe` 中止后不冷却、重复选中 | 5 路（`ds_2`×3、`ds_1`、`hy4_9`、`nju_movetest`） | 每波回收 3~5 集 |
+| 7 | **BUG-044** | MC API ReadTimeout 打死整集 | 6 集（主轨 5 + hy4 1） | 每波回收 2~3 集 |
+| 8 | **BUG-029** | 长程 `plan_garbage_drops` 的 `need=0` | 8/12 超限（`ds_1` cobble 571、`glm_2` netherrack 551） | 修复背包超限门禁 |
+| 9 | **BUG-030** | `depth_reset` 行为未修 | 16/17 次（`ds_1` 6、`nju_3` 5） | 减少重复下潜 |
+| 10 | **BUG-037/041** | 缺"软方块方向优先" | 241~351 次 time_budget，`steps_done` 中位 1~2 | 挖矿效率 |
+| 11 | **BUG-026/040** | 下界堡垒生存 | 死亡 110→153，`ds_4` 53 次、`hy4_6` 17 次；`hot_floor` 18 | 每波多活 30~50 次 |
+
+### 已证伪的判断（避免重复劳动）
+
+- ❌ "hy4 过载是上下文膨胀导致" → 失败集中位 `actor_requests=3`，按分钟统计是通道级饱和
+- ❌ "缩小历史能缓解 429" → 只有降并发 / 加 RPM / 改重试策略有效
+- ❌ "长任务请求频率低所以不 429" → r27/r28 长波同样 0 次，说明是并发而非频率
+- ❌ "`max_tokens` 截断是主要报废源" → 65 次截断 64 次被救回，仅 1 次报废
+- ❌ "`unstick` 有 55s 慢调用" → 55s 是 p-max 正常值；真正的慢调用是 404s 的**被中止调用**（BUG-047）
+
+### 给 Integrator 的落地顺序建议
+
+1. `_is_concurrency_limit_429` 关键词 + 任意 429 用 8 次预算 + 退避加抖动（一个 PR，收益最大）
+2. `max_episodes` 改为按 duration 推导、transient 集不占配额
+3. 控制类工具短超时（15s）+ `move_to` busy 快速失败
+4. `lost_iron_pickaxe` 前置检查 + abort 冷却
+5. MC API 只读请求短退避 + `transient_api_error` 暂停重排
+
+## 4bw. 10:59 深挖：`staircase` 成功率与 `pillar_fallback` 自锁（P2-36）
+
+### `staircase` 全量分布（`overnight_12bot_part2`，1180 次调用）
+
+| stop_reason | 次数 | 占比 |
+|---|---|---|
+| `time_budget` | 241 | 20.4% |
+| `completed` | **203** | **17.2%** |
+| `pillar_fallback` | 140 | 11.9% |
+| `None`（异常返回） | 123 | 10.4% |
+| `dig_cell_avoided` | 101 | 8.6% |
+| `fluid_or_bedrock` | 86 | 7.3% |
+| `dig_failed` | 68 | 5.8% |
+| `cave_or_drop_ahead` | 68 | 5.8% |
+
+→ **成功率仅 17.2%**，与 BUG-037 的判断一致：阶梯下潜仍是最大 churn。
+
+### `pillar_fallback` 是"安全垫高"，但会自锁
+
+- 语义（`library.py:6634-6639`）：目标台阶四周没有可放置面 → `_dig_pillar_up(steps=1)` → `stop_reason=pillar_fallback`，返回 **`ok=True, requires_replan=False`** + 提示"从新高度重试"
+- 模型照做 → 再次 `no_place_face` → 再垫高 1 格 …… 形成**同工具连续失败循环**
+
+| 波次 | pillar 次数 | 连续 ≥3 段 | 累计耗时 | 最长一段 |
+|---|---|---|---|---|
+| `overnight_12bot_part2` | 140 | 14 | **723s** | `nju_guitest_01_nether` **29 连击**（188s） |
+| `hy4_audit_r28` | 73 | 10 | **437s** | `hy4_6_nether_bastion` 10 连击（134s） |
+
+- 已核验：那 29 次**之间没有任何其他工具调用**（窗口内工具序列全为 `mc_skill_staircase`）→ 真·自锁，不是交替重试
+- 单次 pillar 仅 3~4s，但每段包含 N 次 **LLM 往返**，所以 29 连击 ≈ 3 分钟
+- 修复（约 5 行）：连续 ≥2 次返回 `requires_replan=True` 并建议 `unstick`/水平换向；≥3 次给 target 加 120s 冷却
+
+## 4bx. 11:45 深挖：`void_geofence_blocked` 是隐藏的大 churn（新 P1：BUG-048）
+
+### 先排除一个假疑点
+
+`staircase` 的 123 次 `stop_reason=None` **不是 bug**，是三段正常错误路径：
+- `void_geofence_blocked` 66
+- `preempted_by_reflex` 36（`cover_or_flee` 20 / `creeper_evade` 7 / `counter_killed` 3 / `cover_pocket` 3 / `flee` 2 / `shield_rush_ranged` 1）
+- `repeated_identical_failure_blocked` 21
+
+### 真问题：`void_geofence_blocked` 不触发重复失败保护
+
+| 波次 | bot | 被拦次数 | 不同坐标数 | 距离范围 | safe_radius |
+|---|---|---|---|---|---|
+| `overnight_12bot` | `nju_guitest_01_nether` | **154** | **118** | 554.5m ~ **12927.4m** | 212.0m |
+| `overnight_12bot_part2` | `glm_4_brewing_alchemy` | **129** | **110** | 212.2m ~ 254.4m | 212.0m |
+| `part2` 其余 5 路 | — | 17 | — | — | — |
+| `hy4_audit_r28` | `hy4_9_deep_water` | 5 | — | — | — |
+
+**两种形态**：
+
+1. **"差一点"型（`glm_4`）**：目标 212.2~254.4m，只超出 0~42m —— 意图合理（去挖看见的矿），但围栏只拒绝不引导。`glm_4` 本波 **145 分（-50 vs wave1）**，129 次被拦 ≈ 8~12 分钟。
+2. **"离谱坐标"型（`nju_guitest`）**：目标 554m~**12.9km**（最远 12927m），同一坐标重复 14 次 —— 幻觉坐标，工具层未识别"距离明显异常"。
+
+**为什么保护失效**：`repeated_identical_failure_blocked` 按"完全相同的参数"匹配，模型每次换一个差 0.5~5 格的坐标就绕过了（`glm_4` 129 次里 110 个不同坐标）。
+
+**修复**：
+1. `distance ≤ safe_radius × 1.25` → **自动钳制**到边界内继续执行（意图本来是对的）
+2. `distance > safe_radius × 3` → 立即 `requires_replan=True` + "坐标疑似错误，请用 mc_status 的 pos 重新定位"
+3. 每 episode 累计 ≥3 次 → 强制 `requires_replan=True` + target 冷却 120s
+
+**验收**：单 bot 单波 ≤5 次；`glm_4` 类场景分数回到 ≥195。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
