@@ -5873,19 +5873,20 @@ class MiningDFSEngine:
                         continue
                 ok_bt, err_bt = self._walk_waypoints(edge.waypoints, reverse=True, min_hp_ref=min_hp_ref)
                 if not ok_bt:
-                    if descending and (err_bt or "").startswith("backtrack_blocked"):
+                    if (err_bt or "").startswith("backtrack_blocked"):
                         if self._resume_deepest_branch(node, min_hp_ref=min_hp_ref):
                             continue
                     self._archive_current_shaft_to_ledger(mark_exhausted=False)
                     if not descending and auto_relocations_this_slice < 1 and time.monotonic() + 8.0 < deadline:
                         auto_relocations_this_slice += 1
                         cur_now = _floor_pos(self.bot.status()["pos"])
-                        self._clear_active_tree_only()
                         new_site = self._relocate_to_fresh_collar_site(
                             cur_now, geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref
                         )
                         new_dirs = self._probe_collar_dirs(new_site, geofence=geofence)
                         if new_site != cur_now and new_dirs:
+                            # A deadline during relocation must leave the old shaft available.
+                            self._clear_active_tree_only()
                             self._init_collar(new_site, target_y=self.target_y, geofence=geofence, viable_dirs=new_dirs)
                             continue
                     stop_reason = err_bt or "backtrack_failed"

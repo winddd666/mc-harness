@@ -3042,6 +3042,70 @@ def test_blocked_descent_backtrack_resumes_the_deepest_pending_node(monkeypatch)
     assert result["pos_after"][1] <= 26
 
 
+@pytest.mark.parametrize("local_branch_available", [True, False])
+def test_blocked_target_level_backtrack_preserves_the_shaft(monkeypatch, local_branch_available) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, -54.0, 0.5), surface_y=64,
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    for x in (0, 2):
+        world.blocks[(x, -54, 0)] = world.blocks[(x, -53, 0)] = "air"
+    world.blocks[(4, -54, 0)] = "deepslate_diamond_ore"
+    with BotSession("tok", bot_username="BlockedAtTargetDepth", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=(0, 64, -120), parent_id=None, edge_from_parent=None,
+            branches=[mining.BranchSpec("stair_down", "west", 118)],
+        )
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        junction = engine._create_node(
+            kind="spine", anchor=(0, -54, -2), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, (0, -54, -2)]), branches=[],
+        )
+        if local_branch_available:
+            engine._create_node(
+                kind="spine", anchor=(2, -54, 0), parent_id=junction.node_id,
+                edge_from_parent=ShaftEdge("spine_forward", "east", [junction.anchor, (2, -54, 0)]),
+                branches=[mining.BranchSpec("spine_forward", "east", 4)],
+            )
+        spent = engine._create_node(
+            kind="spine", anchor=(0, -54, 0), parent_id=junction.node_id,
+            edge_from_parent=ShaftEdge("branch_leaf", "south", [junction.anchor, (0, -54, 0)]), branches=[],
+        )
+        relocations = []
+
+        def blocked_walk(waypoints, *, reverse=False, **kwargs):
+            assert reverse and waypoints == spent.edge_from_parent.waypoints
+            world.pos = [2.5, -54.0, 0.5]
+            return False, "backtrack_blocked"
+
+        def interrupted_relocation(*args, **kwargs):
+            relocations.append(world.pos)
+            world.pos = [3.5, -54.0, 0.5]
+            engine.bot.status()
+            clock.now = engine._deadline
+            engine.bot.status()
+
+        monkeypatch.setattr(engine, "_walk_waypoints", blocked_walk)
+        monkeypatch.setattr(engine, "_relocate_to_fresh_collar_site", interrupted_relocation)
+        result = engine.run(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
+
+    if local_branch_available:
+        assert result["stop_reason"] == "quota_reached"
+        assert result["target_gained"] == 1
+        assert not relocations
+    else:
+        assert result["stop_reason"] == "time_slice_progress"
+        assert len(relocations) == 1
+    assert result["pos_after"][1] == -54
+    assert engine.collar_node_id == collar.node_id
+    assert spent.node_id in engine.nodes
+
+
 def test_exhausted_transit_node_uses_its_deeper_pending_branch_before_ascending(monkeypatch) -> None:
     from mc_agent.skills.mining_dfs import BranchSpec, DIRECTIONS
 
