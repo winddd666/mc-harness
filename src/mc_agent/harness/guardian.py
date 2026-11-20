@@ -499,6 +499,26 @@ class GenerationGuard:
         pos = list(nh["pos"]) if isinstance(nh.get("pos"), (list, tuple)) and len(nh["pos"]) >= 3 else None
         return name, dist, eid, pos
 
+    def _find_hostile_position(self, entity_id: int | None, entity_name: str) -> list[float] | None:
+        # Live status identifies the nearest hostile without always including coordinates.
+        try:
+            response = self.bot.call("get_entities", {"radius": 16})
+        except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
+            raise
+        except Exception:
+            return None
+        if not isinstance(response, dict):
+            return None
+        for entity in response.get("entities") or []:
+            if not isinstance(entity, dict):
+                continue
+            name = str(entity.get("name") or "").removeprefix("minecraft:").strip().lower()
+            if (entity_id is not None and entity.get("id") == entity_id) or (entity_id is None and name == entity_name):
+                pos = entity.get("pos")
+                if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                    return list(pos)
+        return None
+
     @staticmethod
     def _parse_inventory_summary(inv: dict[str, Any]) -> tuple[dict[str, int], bool, bool]:
         counts: dict[str, int] = {}
@@ -755,21 +775,8 @@ class GenerationGuard:
             ):
                 return None
 
-        # Live `/status` omits `nearest_hostile.pos`: resolve 3D entity coords via `get_entities` so `has_los` works on all mobs!
         if nh_pos is None:
-            try:
-                ent_resp = self.bot.call("get_entities", {"radius": 16})
-                for th in (ent_resp or {}).get("entities") or []:
-                    if not isinstance(th, dict):
-                        continue
-                    th_nm = str(th.get("name") or "").removeprefix("minecraft:").strip().lower()
-                    if (nh_id is not None and th.get("id") == nh_id) or (nh_id is None and th_nm == nh_name):
-                        tpos = th.get("pos")
-                        if isinstance(tpos, (list, tuple)) and len(tpos) >= 3:
-                            nh_pos = list(tpos)
-                            break
-            except Exception:
-                nh_pos = None
+            nh_pos = self._find_hostile_position(nh_id, nh_name)
 
         # Never fire `pre_hurt_*` through solid bunker walls! Real damage still triggers `guard_poll_hurt` unconditionally.
         if isinstance(pos, (list, tuple)) and len(pos) >= 3 and isinstance(nh_pos, (list, tuple)) and len(nh_pos) >= 3:
@@ -2305,6 +2312,8 @@ class GenerationGuard:
                     self._last_water_escape_failed = False
                     notes.append("自动浮水登岸")
                 elif not esc_b_respawned:
+                    if nh_pos is None and nh_name in RANGED_MOBS and nh_dist <= 16.0:
+                        nh_pos = self._find_hostile_position(nh_id, nh_name)
                     shore_b = self._action(
                         "boundary_escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(

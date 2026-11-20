@@ -4181,6 +4181,47 @@ def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypa
     assert calls == expected[water_state]
 
 
+def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_position():
+    status = {
+        "pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180, "yaw": -1.5708,
+        "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True,
+        "nearest_hostile": {"id": 44, "name": "skeleton", "dist": 8},
+    }
+    calls = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield", "count": 1}}
+            if action == "get_entities":
+                return {"entities": [{"id": 44, "name": "skeleton", "pos": [6386.7, 63.0, -6442.3]}]}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "water"}
+            calls.append((action, body))
+            if action == "move_to":
+                status.update(pos=[body["x"], body["y"], body["z"]], in_water=False, submerged=False, on_ground=True)
+            return {"ok": True}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    receipt = json.dumps({"ok": False, "in_water": True, "error": {"code": "water_escape_failed"}})
+
+    note = guard.stabilize_after_tools([receipt])
+
+    surge = next(body for action, body in calls if action == "control")
+    shore_move = next(body for action, body in calls if action == "move_to")
+    assert calls[0] == ("look", {"entity_id": 44})
+    assert calls[1][0] == "posture" and calls[1][1]["shield"] is True
+    assert surge["jump"] is True and surge["forward"] is False
+    assert shore_move["x"] < 6378.7
+    assert status["in_water"] is False and "登岸" in note
+
+
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])

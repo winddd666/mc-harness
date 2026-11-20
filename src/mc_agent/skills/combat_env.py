@@ -1680,6 +1680,7 @@ class CombatEnv:
         by = math.floor(start_y + 0.05)
         actions: list[str] = []
         shore_target: list[float] | None = None
+        has_threat = isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3
 
         def interrupted_water_escape(st: dict[str, Any]) -> dict[str, Any] | None:
             pos = st.get("pos") or pos0
@@ -1713,7 +1714,10 @@ class CombatEnv:
 
         oxy0 = st0.get("oxygen")
         if surface_first or bool(st0.get("submerged")) or (isinstance(oxy0, (int, float)) and oxy0 < 260):
-            swim_forward = not surface_first and swim_step_allowed(pos0, float(st0.get("yaw") or 0.0))
+            swim_forward = (
+                not (surface_first or has_threat or keep_shield)
+                and swim_step_allowed(pos0, float(st0.get("yaw") or 0.0))
+            )
             try:
                 self.bot.call(
                     "control",
@@ -1734,7 +1738,6 @@ class CombatEnv:
                     }
 
         # Look for reachable dry ledges at the local water level, including flooded caves.
-        has_threat = isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3
         shore_target = self._find_walkable_shore_target(
             pos0,
             block_types=SHORE_LAND_BLOCKS,
