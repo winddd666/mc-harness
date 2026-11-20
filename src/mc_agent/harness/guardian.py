@@ -613,7 +613,17 @@ class GenerationGuard:
         ok = result.get("sneaking") is not False
         if ok:
             self._hot_floor_retry_at = float("-inf")
-        return {**result, "ok": ok}
+            return {**result, "ok": True}
+
+        step_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 3.0)
+        step_env = CombatEnv(step_bot, geofence=self.geofence)
+        try:
+            step = step_env.step_off_hot_floor(status)
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            step = {"ok": False, "reason": "time_budget"}
+        self._hot_floor_retry_at = float("-inf") if step.get("ok") else time.monotonic() + self.HOT_FLOOR_RETRY_S
+        return {**result, **step}
 
     def _try_eat_food(self, food_name: str, eat_st: dict[str, Any], *, action_name: str = "eat") -> dict[str, Any] | None:
         """Eat via `use_item`; treat transient `not_ready`/`wrong_server` as deferred retry, not failure."""
@@ -984,7 +994,7 @@ class GenerationGuard:
             if needs_hot_floor_guard:
                 sneak = self._action("hot_floor_sneak", lambda: self._sneak_on_hot_floor(status))
                 actions.append(sneak)
-                if sneak.get("ok"):
+                if sneak.get("ok") and (sneak.get("result") or {}).get("sneaking") is not False:
                     status = {**status, "sneaking": True}
 
             try:
@@ -1471,7 +1481,11 @@ class GenerationGuard:
                 or needs_float
                 or not ready
                 or status.get("alive") is False
-                or any(a.get("action") == "hot_floor_sneak" and not a.get("ok") for a in actions)
+                or any(
+                    a.get("action") == "hot_floor_sneak"
+                    and (not a.get("ok") or (a.get("result") or {}).get("mode") == "stepped_off")
+                    for a in actions
+                )
                 or any(r not in {"needs_food", "hot_floor"} for r in reasons)
             )
         )
@@ -2009,7 +2023,10 @@ class GenerationGuard:
             if needs_hot_floor_guard:
                 act = self._action("boundary_hot_floor_sneak", lambda: self._sneak_on_hot_floor(status))
                 if act.get("ok"):
-                    notes.append("岩浆块受伤，已潜行避伤")
+                    if (act.get("result") or {}).get("mode") == "stepped_off":
+                        notes.append("已移离岩浆块")
+                    else:
+                        notes.append("岩浆块受伤，已潜行避伤")
             if in_lava:
                 esc_l = self._action(
                     "boundary_escape_lava",

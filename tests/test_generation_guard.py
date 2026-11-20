@@ -4108,6 +4108,8 @@ def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, posture_
                 since = kwargs["params"]["since"]
                 hit = {"seq": seq[0], "type": "hurt", "source": "hot_floor"}
                 return {"events": [hit] if since < seq[0] else []}
+            if action == "get_block":
+                return {"name": "magma_block" if body["pos"][1] < 68 else "air"}
             if action == "posture":
                 calls.append(body)
                 if body["sneak"] != saved_sneak:
@@ -4144,6 +4146,48 @@ def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, posture_
         else:
             assert guard.stabilize_after_tools() is None
         assert len(calls) == 2 * len(expected_sneaks)
+
+
+@pytest.mark.parametrize("landing_safe", [True, False])
+def test_hot_floor_guard_verifies_dry_landing_after_crouch_failure(landing_safe):
+    status = {"pos": [0.5, 64, 0.5], "health": 17, "food": 20, "ready": True, "alive": True, "on_ground": True}
+    moves = []
+
+    class MagmaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                since = kwargs["params"]["since"]
+                return {"events": [] if since else [{"seq": 1, "type": "hurt", "source": "hot_floor"}]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "posture":
+                return {"sneaking": False}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if y >= 64:
+                    return {"name": "air"}
+                if (x, z) == (1, 0) and (landing_safe or not moves):
+                    return {"name": "stone"}
+                return {"name": "magma_block" if (x, z) == (0, 0) else "lava"}
+            if action == "move_to":
+                moves.append(body)
+                status["pos"] = [body[k] for k in ("x", "y", "z")]
+                return {"ok": True}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(MagmaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+    step, = incident["actions"]
+    move, = moves
+    assert [move[k] for k in ("x", "y", "z")] == [1.5, 64, 0.5]
+    assert step["ok"] is landing_safe
+    assert incident["requires_replan"] is True
+    if landing_safe:
+        assert step["result"]["mode"] == "stepped_off"
+    else:
+        assert step["result"]["reason"] == "unsafe_landing"
 
 
 

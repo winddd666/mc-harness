@@ -615,7 +615,9 @@ class CombatEnv:
             "candidates": candidates,
         }
 
-    def probe_retreat(self, origin: Sequence[float], yaw: float, dist: float) -> tuple[int, bool] | None:
+    def probe_retreat(
+        self, origin: Sequence[float], yaw: float, dist: float, *, cross_magma: bool = False,
+    ) -> tuple[int, bool] | None:
         """Check support and clearance under the entire hitbox along a short retreat."""
         ox, oy, oz = map(float, origin[:3])
         ux, uz = yaw_to_unit_xz(yaw)
@@ -623,6 +625,9 @@ class CombatEnv:
         walk_y = start_y
         needs_jump = False
         samples = max(1, math.ceil(dist / 0.45))
+        crossing_hazards = (
+            tuple(name for name in HAZARD_BLOCK_TYPES if name != "magma_block") if cross_magma else HAZARD_BLOCK_TYPES
+        )
         for step in range(1, samples + 1):
             travel = dist * step / samples
             nx, nz = ox + ux * travel, oz + uz * travel
@@ -639,17 +644,59 @@ class CombatEnv:
                 walk_y -= 1
             if abs(walk_y - start_y) > 1:
                 return None
+            floor_hazards = crossing_hazards if step < samples else HAZARD_BLOCK_TYPES
             for hx, hz in _hitbox_columns(nx, nz):
                 foot, head, floor = (
                     self._get_block_name(hx, walk_y + dy, hz, strict=True) for dy in (0, 1, -1)
                 )
-                if not _is_passable(foot) or not _is_passable(head) or not floor or floor in HAZARD_BLOCK_TYPES:
+                if not _is_passable(foot) or not _is_passable(head) or not floor or floor in floor_hazards:
                     return None
                 if (hx, hz) != (bx, bz) and _is_passable(floor):
                     floor = self._get_block_name(hx, walk_y - 2, hz, strict=True)
-                if not floor or floor in HAZARD_BLOCK_TYPES or not _is_solid_ground(floor):
+                if not floor or floor in floor_hazards or not _is_solid_ground(floor):
                     return None
         return walk_y, needs_jump
+
+    def step_off_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
+        pos = status.get("pos")
+        if not pos or status.get("on_ground") is not True:
+            return {"ok": False, "reason": "unsafe_landing"}
+        ox, oy, oz = map(float, pos[:3])
+        self.invalidate_block_cache()
+        for steps in (1, 2):
+            for dx, dz in CARDINAL_VECTORS.values():
+                x = math.floor(ox) + 0.5 + steps * dx
+                z = math.floor(oz) + 0.5 + steps * dz
+                yaw, _ = aim_yaw_pitch(pos, [x, oy, z])
+                route = self.probe_retreat(pos, yaw, math.hypot(x - ox, z - oz), cross_magma=True)
+                if route is not None:
+                    y, _ = route
+                    return self._move_to_hot_floor_exit(status, [x, y, z])
+        return {"ok": False, "reason": "no_safe_hot_floor_exit"}
+
+    def _move_to_hot_floor_exit(self, before: dict[str, Any], target: list[float]) -> dict[str, Any]:
+        x, y, z = target
+        try:
+            self.bot.call("move_to", {"x": x, "y": y, "z": z, "range": 0.15, "timeout": 1100, "stop_on": ["death"]})
+        except (ApiError, httpx.HTTPError) as error:
+            if isinstance(error, httpx.HTTPError):
+                self._best_effort_stop()
+        after = self._safe_status({"ready": False})
+        pos_after = after.get("pos")
+        if (
+            not pos_after or after.get("ready") is False or after.get("alive") is False
+            or after.get("on_ground") is not True or after.get("in_lava") or after.get("in_water")
+            or (after.get("last_death") is not None and after["last_death"] != before.get("last_death"))
+            or math.hypot(float(pos_after[0]) - x, float(pos_after[2]) - z) > 0.35
+        ):
+            return {"ok": False, "reason": "unsafe_landing", "pos_after": pos_after}
+        self.invalidate_block_cache()
+        ground_y = math.floor(float(pos_after[1]) + 0.05) - 1
+        floors = [self._get_block_name(bx, ground_y, bz, strict=True) for bx, bz in _hitbox_columns(pos_after[0], pos_after[2])]
+        safe = all(name and name not in HAZARD_BLOCK_TYPES and _is_solid_ground(name) for name in floors)
+        if not safe:
+            return {"ok": False, "reason": "unsafe_landing", "pos_after": pos_after}
+        return {"ok": True, "mode": "stepped_off", "pos_after": pos_after}
 
     def _query_hazards(self, bx: int, by: int, bz: int, radius: int) -> list[dict[str, Any]]:
         now = time.monotonic()
