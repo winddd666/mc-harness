@@ -177,6 +177,11 @@ class _GuardSession:
             else:
                 timeout = min(timeout, remaining)
         kwargs["timeout_s"] = timeout
+        read_limit = timeout.read if isinstance(timeout, httpx.Timeout) else timeout
+        if isinstance(body, dict) and isinstance(body.get("timeout"), (int, float)) and read_limit is not None:
+            max_body_ms = max(200, int(max(0.2, float(read_limit) - 0.5) * 1000))
+            if body["timeout"] >= float(read_limit) * 1000:
+                body = {**body, "timeout": min(int(body["timeout"]), max_body_ms)}
         kwargs["allow_reauth"] = False
         try:
             call = self._call_override if self._call_override is not None else self.bot.call
