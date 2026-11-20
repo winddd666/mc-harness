@@ -1141,7 +1141,7 @@
 - **r45 收官核查**：六个有终版的寻村集另两条仅原始轨迹有完整首趟，共 47 条技能回执。**29** 次 `target_found` 全是孤立普通箱，覆盖 **5** 路，其中 **24** 次 0m。HY4_10 追向 Y46 的箱坐标被围栏钳制，后续未开箱。新语义修正未被 r45 加载。 [追箱航点](../runs/r45_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-083723-524840.events.jsonl#L177)
 - **r46 终版验收**：r45 的确认默认调用（两路仅原始轨迹）为 **29/33** 孤立箱触发，r46 **0/24**。六个实际派发寻村，默认遇箱且继续实移 **5** 次。HY4_7 看到与 r45 HY4_6 完全相同的 Y33 箱，仍推进 **72.66m**；真实堆肥桶和讲台可立即停。 [相同地下箱继续走](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-090127-093178.events.jsonl#L73) · [真实地标命中](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L20)
 
-### BUG-079 | **P1（Day 1 `harvest_logs` 29/29 报失败均 11s/木 + `mine_blocks` 混镐级整拒 + `scout_surface:in_water` 11x）** | Slice C（#4 Codex #2，`skills/library.py`）| 状态: OPEN（`r46` 耗时账本取证）
+### BUG-079 | **P1（Day 1 `harvest_logs` 29/29 报失败均 11s/木 + `mine_blocks` 混镐级整拒 + `scout_surface:in_water` 11x）** | Slice C（#4 Codex #2，`skills/library.py`）| 状态: FIXED（`8ec11f9` 已合入，待 r47 实机验收）
 
 - **一句话**：`r46_day1_5bot` 中 `mc_skill_harvest_logs` **29 次调用 100% 报 `ok=False`**（耗 827s 占 Day 1 总耗时 22.1%，单根原木平均 **11s**，44s 仅砍 4 根）；`mc_skill_mine_blocks` 混入 `iron_ore` 时木镐被整次拒绝；`r46_day2` 中 `scout_surface` 剩余 15 次失败里 **11 次是 `in_water`**。
 - **实测证据（`r46_day1_5bot` / `r46_day2_wild_scout_9bot`）**：
