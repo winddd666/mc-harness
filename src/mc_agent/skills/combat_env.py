@@ -1078,6 +1078,9 @@ class CombatEnv:
 
     def escape_lava(self, *, force_rim_escape: bool = False) -> dict[str, Any]:
         """Deterministically escape lava using water douse (overworld), safe-yaw jump sprint, wall-notch/pillar climb, and live `in_lava` verification."""
+        def _landing_unconfirmed(status: dict[str, Any]) -> bool:
+            return status.get("on_ground") is False and not status.get("in_water")
+
         try:
             st = self.bot.status()
         except (ApiError, httpx.HTTPError):
@@ -1098,12 +1101,14 @@ class CombatEnv:
                     force_rim_escape and self._is_near_or_over_lava(st)
                 )
             if not rim_lava_active:
+                unconfirmed = _landing_unconfirmed(st)
                 return {
-                    "ok": True,
+                    "ok": not unconfirmed,
                     "in_lava": False,
                     "already_dry": True,
                     "pos_after": st.get("pos"),
                     "actions": [],
+                    **({"reason": "lava_landing_unconfirmed"} if unconfirmed else {}),
                 }
 
         actions: list[str] = []
@@ -1120,7 +1125,7 @@ class CombatEnv:
             except (ApiError, httpx.HTTPError):
                 actions.append("place_water_feet_failed")
             st = self._safe_status(st)
-            if not bool(st.get("in_lava")):
+            if not st.get("in_lava") and not _landing_unconfirmed(st):
                 return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
             try:
                 self.bot.call("use_item", {"item": "water_bucket"})
@@ -1128,7 +1133,7 @@ class CombatEnv:
             except (ApiError, httpx.HTTPError):
                 pass
             st = self._safe_status(st)
-            if not bool(st.get("in_lava")):
+            if not st.get("in_lava") and not _landing_unconfirmed(st):
                 return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
 
         # 1. If submerged deep in lava, swim up first so surface bank scan can find solid footing
@@ -1163,7 +1168,10 @@ class CombatEnv:
         def _should_exit_lava(st_now: dict[str, Any]) -> bool:
             if _did_respawn_during_lava(st_now):
                 return True
-            if bool(st_now.get("in_lava")) or self._is_airborne_above_lava(st_now, start_pos=pos0):
+            if (
+                st_now.get("in_lava") or _landing_unconfirmed(st_now)
+                or self._is_airborne_above_lava(st_now, start_pos=pos0)
+            ):
                 return False
             if rim_lava_active:
                 p_chk = st_now.get("pos") or pos0
@@ -1181,13 +1189,15 @@ class CombatEnv:
                 and (not still_in_lava)
                 and self._is_airborne_above_lava(st_now, start_pos=pos0)
             )
+            unconfirmed = not respawned and not still_in_lava and _landing_unconfirmed(st_now)
             return {
-                "ok": (not respawned) and (not still_in_lava) and (not airborne_over_lava),
+                "ok": not (respawned or still_in_lava or unconfirmed or airborne_over_lava),
                 "in_lava": still_in_lava,
                 "pos_after": pos_now,
                 "actions": actions,
                 **({"respawned": True} if respawned else {}),
                 **({"airborne_above_lava": True} if airborne_over_lava else {}),
+                **({"reason": "lava_landing_unconfirmed"} if unconfirmed else {}),
             }
 
         for _ in range(3):

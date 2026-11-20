@@ -3260,6 +3260,48 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
     assert "lava_step_bridge" in out_b["actions"]
 
 
+@pytest.mark.parametrize("landed", [False, True])
+def test_lava_reflex_requires_landing_even_without_lava_under_the_hitbox(monkeypatch, landed):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [-733.7, 64.4, 287.3], "dimension": "the_nether", "health": 20, "food": 20,
+        "in_lava": True, "on_ground": False, "alive": True, "ready": True,
+    }
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if (x, y, z) == (-734, 64, 287):
+                    return {"name": "lava"}
+                return {"name": "netherrack" if y < 64 else "air"}
+            if action == "control" and body.get("forward"):
+                assert body["jump"] is True
+                status.update(in_lava=False, on_ground=landed, pos=[-734.4, 64.0 if landed else 64.8, 286.3])
+                clock[0] += 5.0
+            return {"ok": True}
+
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    escape, = incident["actions"]
+    assert escape["action"] == "escape_lava"
+    assert escape["ok"] is landed
+    assert escape["result"]["in_lava"] is False
+    assert "airborne_above_lava" not in escape["result"]
+    if not landed:
+        assert escape["result"]["reason"] == "lava_landing_unconfirmed"
+
+
 @pytest.mark.parametrize("bridge_edge", [False, True])
 def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(monkeypatch, bridge_edge):
     """Reproduces r20_short ds_ds_4_nether_fortress:
