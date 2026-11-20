@@ -3222,6 +3222,50 @@ def test_blocked_target_level_backtrack_preserves_the_shaft(monkeypatch, local_b
     assert spent.node_id in engine.nodes
 
 
+@pytest.mark.parametrize("deeper_branch_pending", [True, False])
+def test_explore_from_low_waypoint_does_not_rejoin_a_shallow_active_node(monkeypatch, deeper_branch_pending) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 44.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    route = [(0, y, 64 - y) for y in range(64, 16, -1)]
+    for x, y, z in route:
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(1, 16, 47)] = "ancient_debris"
+    with BotSession("tok", bot_username="ExploreFromDeepWayPoint", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=route[0], parent_id=None, edge_from_parent=None,
+            branches=[mining.BranchSpec("stair_down", "east", 49)],
+        )
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=route[-1], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", route),
+            branches=[mining.BranchSpec("stair_down", "east", 2)] if deeper_branch_pending else [],
+        )
+        engine.active_node_id = collar.node_id
+        engine._record_corridor((0, 20, 44))
+        walk = engine._walk_waypoints
+
+        def walk_at_depth(waypoints, **kwargs):
+            assert max(y for _, y, _ in waypoints) <= 20
+            return walk(waypoints, **kwargs)
+
+        monkeypatch.setattr(engine, "_walk_waypoints", walk_at_depth)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=32)
+
+    if deeper_branch_pending:
+        assert result["stop_reason"] == "quota_reached"
+        assert result["target_gained"] == 1
+    else:
+        assert result["stop_reason"] == "needs_surface_climb"
+        assert world.pos == [0.5, 20.0, 44.5]
+        assert not world.dig_log
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_exhausted_transit_node_uses_its_deeper_pending_branch_before_ascending(monkeypatch) -> None:
     from mc_agent.skills.mining_dfs import BranchSpec, DIRECTIONS
 

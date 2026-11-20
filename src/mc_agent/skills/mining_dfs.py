@@ -2165,10 +2165,12 @@ class MiningDFSEngine:
 
     def _resume_deepest_branch(
         self, node: ShaftNode, *, min_hp_ref: list[float], descendants_only: bool = False,
+        max_y: int | None = None,
     ) -> bool:
+        ceiling = node.anchor[1] if max_y is None else min(max_y, node.anchor[1])
         candidates = []
         for candidate in self.nodes.values():
-            if candidate.node_id == node.node_id or candidate.anchor[1] > node.anchor[1]:
+            if candidate.node_id == node.node_id or candidate.anchor[1] > ceiling:
                 continue
             if not any(branch.status == "pending" for branch in candidate.branches):
                 continue
@@ -5629,11 +5631,19 @@ class MiningDFSEngine:
                         return self._collar_failure(anchor_err or "no_viable_collar_direction", solid_pos, geofence)
                     self._init_collar(solid_pos, target_y=self.target_y, geofence=geofence, viable_dirs=viable_dirs)
             elif math.dist(cur_pos, active.anchor) > 3.5:
-                ok_nav, err_nav = self._resume_shaft_tip(active.node_id, min_hp_ref=min_hp_ref)
-                if not ok_nav and active.kind == "switchback" and err_nav not in {"hurt", "not_ready", "not_grounded"}:
-                    ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref)
+                resume_at_depth = (
+                    self.target_y - SCAN_BAND <= cur_pos[1] <= collar.anchor[1] - 20
+                    and active.anchor[1] > max(cur_pos[1], self.target_y) + 8
+                    and cur_pos in self.known_corridor_positions
+                )
+                if resume_at_depth:
+                    ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref, max_y=cur_pos[1])
+                else:
+                    ok_nav, err_nav = self._resume_shaft_tip(active.node_id, min_hp_ref=min_hp_ref)
+                    if not ok_nav and active.kind == "switchback" and err_nav not in {"hurt", "not_ready", "not_grounded"}:
+                        ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref)
                 if not ok_nav:
-                    if (
+                    if resume_at_depth or (
                         self.collar_ceiling_y is not None
                         and cur_pos[1] <= int(self.collar_ceiling_y) - 20
                     ):
@@ -5646,8 +5656,11 @@ class MiningDFSEngine:
                             "strategy": self.strategy,
                             "stop_reason": "needs_surface_climb",
                             "message": (
-                                f"回撤到当前节点失败，且你已在地下 y={cur_pos[1]}"
-                                f"（最高井口 y={self.collar_ceiling_y}）。" + self._surface_climb_hint()
+                                "当前深度附近的待挖节点暂时无法接上。请先在同层调整站位，再继续 explore。"
+                                "如果无法安全继续，可调用 climb_out 沿已记矿道回撤。"
+                                if resume_at_depth
+                                else f"回撤到当前节点失败，且你已在地下 y={cur_pos[1]}"
+                                     f"（最高井口 y={self.collar_ceiling_y}）。" + self._surface_climb_hint()
                             ),
                             "tree": self.snapshot(),
                         }
