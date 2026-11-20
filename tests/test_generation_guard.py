@@ -3890,7 +3890,10 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
 
 
 @pytest.mark.parametrize("landing", ["grounded", "still_airborne", "respawned"])
-def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing):
+@pytest.mark.parametrize("entry", ["poll", "subcortical"])
+def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing, entry):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
@@ -3902,6 +3905,9 @@ def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, l
     moves = []
 
     class KnockbackBot:
+        def status(self):
+            return self.call("status")
+
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 if clock[0] >= 1000.15:
@@ -3918,19 +3924,25 @@ def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, l
                 return {"blocks": []}
             if action == "get_block":
                 return {"name": "stone" if body["pos"][1] < 69 else "air"}
-            if action in {"move_to", "control"}:
+            if action == "move_to" or (action == "control" and body.get("forward")):
                 assert status["on_ground"] is True
                 moves.append(action)
             return {"ok": True}
 
-    guard = GenerationGuard(KnockbackBot(), EventSink(lambda _: None), checkpoint=lambda: None)
-    incident = guard.poll()
-
-    retreat = next(a for a in incident["actions"] if a["action"] == "combat_or_flee")
+    bot = KnockbackBot()
+    if entry == "poll":
+        guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+        incident = guard.poll()
+        retreat = next(a["result"] for a in incident["actions"] if a["action"] == "combat_or_flee")
+    else:
+        outcome = CombatControllerSlot().handle(
+            CombatEnv(bot), {"source": "pre_hurt_ranged", "primary_type": "skeleton", "primary_entity_id": 42},
+        )
+        retreat = next(a for a in outcome["actions"] if a["action"] == "flee")
     assert bool(moves) is (landing == "grounded")
     assert clock[0] <= 1000.45
     if landing == "respawned":
-        assert retreat["result"]["respawned"] is True
+        assert retreat["respawned"] is True
 
 
 @pytest.mark.parametrize(
@@ -4007,6 +4019,40 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
         assert [action for action, _ in calls] == ["posture", "control"]
         assert actions[0]["ok"] is (scenario != "close_respawn")
         assert actions[0]["result"]["mode"] == ("respawned" if scenario == "close_respawn" else "surfaced")
+
+
+@pytest.mark.parametrize("room_for_short_exit", [True, False])
+def test_flee_uses_verified_short_exit_when_full_followup_hits_drop(room_for_short_exit):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {"pos": [0.5, 64, 0.5], "alive": True, "ready": True, "on_ground": True}
+    followups = []
+    floor_edge = 6 if room_for_short_exit else 4
+
+    class RetreatBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, _ = body["pos"]
+                return {"name": "stone" if y == 63 and x <= floor_edge else "air"}
+            if action == "control":
+                status["pos"] = [2.6, 64, 0.5]
+            if action == "move_to":
+                followups.append(body)
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    result = CombatEnv(RetreatBot()).flee([-1.8, 64, 0.5], distance=13.0, allow_shaft_seal=False)
+
+    if room_for_short_exit:
+        move, = followups
+        assert (move["x"], move["y"], move["z"]) == pytest.approx((6.1, 64, 0.5))
+        assert result["ok"] is True and result["moved_dist"] == pytest.approx(5.6)
+    else:
+        assert followups == []
+        assert result["moved_dist"] == pytest.approx(2.1)
 
 
 @pytest.mark.parametrize(

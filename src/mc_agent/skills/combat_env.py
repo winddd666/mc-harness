@@ -1546,6 +1546,9 @@ class CombatEnv:
             return result
         self.invalidate_block_cache()
         route = self.probe_retreat(mid_pos, chosen_yaw, remaining)
+        if route is None and remaining > 3.5:
+            remaining = 3.5
+            route = self.probe_retreat(mid_pos, chosen_yaw, remaining)
         if route is None:
             return result
         goal_y, _ = route
@@ -2396,10 +2399,11 @@ class SubcorticalInstinctController:
                             env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                         except (ApiError, httpx.HTTPError):
                             pass
-                    fl = env.flee(mob_pos, distance=14.0, urgent=True)
+                    fl = env.flee(mob_pos, distance=14.0, urgent=True, wait_for_ground=mob_name in RANGED_MOBS)
                     actions.append({
                         "action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist"),
                         **({"reason": fl["reason"]} if fl.get("reason") else {}),
+                        **({"respawned": True} if fl.get("respawned") else {}),
                     })
                     self._recent_flee_streak += 1
                     self._last_flee_at = now_flee
