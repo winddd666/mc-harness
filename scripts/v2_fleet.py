@@ -448,7 +448,7 @@ class BotRow:
     squad: str
     stage: str
     status: str
-    score: int
+    score: int | None
     episodes_done: int
     elapsed_s: float
     deaths: int
@@ -520,7 +520,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     if not isinstance(cs, dict) or not cs:
         cs = summary
     episodes = cs.get("episodes") or summary.get("episodes") or []
-    score = int(cs.get("final_score") or summary.get("final_score") or cs.get("current_score") or 0)
+    recorded_scores = (cs.get("final_score"), summary.get("final_score"), cs.get("current_score"))
+    score_value = next((value for value in recorded_scores if value not in (None, "")), None)
     elapsed_s = float(cs.get("elapsed_s") or 0.0)
     gained: list[str] = []
     for ep in episodes:
@@ -608,6 +609,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     crash_tail = _read_crash_tail(bd)
     if crash_tail and not summaries:
         status = "crash"
+    score = int(score_value) if score_value is not None and status != "not_ready" else None
 
     slow_calls.sort(reverse=True)
     scene_meta = summary.get("scene") or {}
@@ -652,7 +654,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
             else None
         ),
         baseline_points=baseline_points,
-        earned_points=score - baseline_points,
+        earned_points=score - baseline_points if score is not None else None,
         error=str(cs.get("error") or summary.get("error") or scene_meta.get("error") or ""),
         death_receipts=lifecycle.death_receipts,
         respawns=lifecycle.respawns,
@@ -687,7 +689,8 @@ def aggregate_by_squad(rows: list[BotRow]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for squad, group in sorted(buckets.items()):
         done = [r for r in group if r.status in ("done", "completed")]
-        scores = [r.score for r in done]
+        scores = [r.score for r in done if r.score is not None]
+        earned = [r.earned_points for r in done if r.earned_points is not None]
         errors: Counter[str] = Counter()
         for r in group:
             for key, cnt in r.top_errors:
@@ -703,9 +706,7 @@ def aggregate_by_squad(rows: list[BotRow]) -> list[dict[str, Any]]:
                 "avg_baseline": round(
                     sum(int(r.baseline_points or 0) for r in done) / len(done), 1
                 ) if done else 0.0,
-                "avg_earned": round(
-                    sum(int(r.earned_points or 0) for r in done) / len(done), 1
-                ) if done else 0.0,
+                "avg_earned": round(sum(earned) / len(earned), 1) if earned else 0.0,
                 "total_deaths": sum(r.deaths for r in group),
                 "avg_deaths": round(sum(r.deaths for r in group) / len(group), 2) if group else 0.0,
                 "http_429": sum(r.http_429 for r in group),
@@ -742,9 +743,11 @@ def _write_markdown(
     ]
     for r in sorted(rows, key=lambda x: (x.squad, x.name)):
         g = ", ".join(r.gained_short[:4])
+        score = r.score if r.score is not None else "—"
+        earned = r.earned_points if r.earned_points is not None else "—"
         lines.append(
-            f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.score} | "
-            f"{int(r.baseline_points or 0)} | {int(r.earned_points or 0)} | {r.episodes_done} | "
+            f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {score} | "
+            f"{int(r.baseline_points or 0)} | {earned} | {r.episodes_done} | "
             f"{r.deaths} | {r.death_receipts} | {r.respawns} | {r.connection_changes} | "
             f"{r.mixed_guardian_incidents} | {r.guardian_incidents} | {r.preemptions} | "
             f"{r.http_429} | {r.http_429_retries} | {g} |"
@@ -753,7 +756,7 @@ def _write_markdown(
         [
             "",
             "> `Score` = `final_score`（含 loadout 预授）；`Baseline` = 场景 loadout 预授予的成就分；"
-            "`Earned` = Score - Baseline，跨场景横向比较请看 Earned。",
+            "`Earned` = Score - Baseline，跨场景横向比较请看 Earned。`—` 表示无可用分数。",
             "> `Deaths` 为按 Bot 和源事件 ID 去重的死亡，加上无 ID 的明确死亡回执。"
             "`Connection changes` 仅统计带类型的连接变化，`Mixed guardian` 记录旧的混合告警。",
         ]
@@ -778,9 +781,9 @@ def _write_markdown(
         lines.append("| Bot | Stage | Anchor | 问题 |")
         lines.append("|---|---|---|---|")
         for r in scene_bad:
+            problem = "启动未就绪" if r.status == "not_ready" else "场景入口未通过"
             lines.append(
-                f"| `{r.name}` | {r.scene_stage or r.stage} | {r.scene_anchor} | "
-                "`entry_verified=false`（未进入目标维度/偏离锚点>64m） |"
+                f"| `{r.name}` | {r.scene_stage or r.stage} | {r.scene_anchor} | `{problem}` |"
             )
     else:
         lines.append("*（所有已收官 bot 场景入口正常）*")
@@ -811,11 +814,11 @@ def _write_markdown(
             ticket_no += 1
             lines.extend(
                 [
-                    f"### FLEET-{ticket_no:03d} | P1 | 启动未就绪（冷却） | 状态: OPEN",
+                    f"### FLEET-{ticket_no:03d} | P1 | 启动未就绪 | 状态: OPEN",
                     f"- **影响 bot**：`{r.name}` (stage=`{r.stage}`)",
                     f"- **错误**：`{r.error or 'not_ready'}`",
-                    "- **验收标准**：`ensure_bot_ready` 在冷却预算内等到 ready，或该路以 `status=not_ready` "
-                    "正常收尾（无进程 Traceback），不影响其余 slot。",
+                    "- **验收标准**：恢复后通过场景入口并进入首集。启动失败时产出 `status=not_ready` summary，"
+                    "其余槽位正常运行。",
                     "",
                 ]
             )
@@ -823,13 +826,13 @@ def _write_markdown(
             ticket_no += 1
             lines.extend(
                 [
-                    f"### FLEET-{ticket_no:03d} | P0 | 启动崩溃 | 状态: OPEN",
+                    f"### FLEET-{ticket_no:03d} | P0 | 进程崩溃 | 状态: OPEN",
                     f"- **影响 bot**：`{r.name}` (stage=`{r.stage}`)",
                     "- **证据**：`stdout.log` traceback tail：",
                     "```text",
                     (r.crash_tail or "<no tail>"),
                     "```",
-                    "- **验收标准**：`py_compile` 通过 + 该 stage 单机能进入首个 episode。",
+                    "- **验收标准**：同场景重放触发步骤，进程正常收官并产出 summary。",
                     "",
                 ]
             )
@@ -880,9 +883,11 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
 
     print(f"\n================ FLEET TRIAGE: {wave} ({len(rows)} bots) ================")
     for r in rows:
+        score = r.score if r.score is not None else "—"
+        earned = r.earned_points if r.earned_points is not None else "—"
         print(
-            f"  [{r.squad:3s}] {r.name:30s} {r.status:10s} score={r.score:3d} "
-            f"base={int(r.baseline_points or 0):3d} earned={int(r.earned_points or 0):3d} "
+            f"  [{r.squad:3s}] {r.name:30s} {r.status:10s} score={score:>3} "
+            f"base={int(r.baseline_points or 0):3d} earned={earned:>3} "
             f"eps={r.episodes_done:2d} "
             f"deaths={r.deaths:2d} (idless={r.death_receipts}) respawn/spawn={r.respawns} "
             f"connection_changes={r.connection_changes} guard_mixed={r.mixed_guardian_incidents} "
