@@ -140,19 +140,42 @@ def _wait_settled(bot: Any, *, timeout_s: float = 12.0, settle_delta: float = 0.
     return pos
 
 
-def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -> tuple[float, float, float, str]:
-    """Find a dry land surface spawn >= 2000m from other bots using vanilla `spreadplayers`."""
-    for offset in range(len(CANDIDATE_SITES)):
-        cx, cz = CANDIDATE_SITES[(start_idx + offset) % len(CANDIDATE_SITES)]
+def select_dry_isolated_wild_site(
+    bot: Any, bot_name: str, start_idx: int = 0, *, day1: bool = False,
+) -> tuple[float, float, float, str]:
+    """Find a dry, wooded Overworld landing for the configured slot."""
+    from mc_agent.kb import normalize_dimension
+
+    start_idx %= len(CANDIDATE_SITES)
+    if day1:
+        # Keep retries in this slot's assigned region. Global fallbacks brought two r41 bots
+        # to the same area around an existing portal.
+        x, z = CANDIDATE_SITES[start_idx]
+        offsets = ((0, 0), (160, 0), (-160, 0), (0, 160), (0, -160),
+                   (360, 0), (-360, 0), (0, 360), (0, -360))
+        candidates = [(x + dx, z + dz) for dx, dz in offsets]
+    else:
+        candidates = CANDIDATE_SITES[start_idx:] + CANDIDATE_SITES[:start_idx]
+    for cx, cz in candidates:
         rcon_batch(
             [
-                f"tp {bot_name} {cx} 120 {cz}",
-                f"spreadplayers {cx} {cz} 0 32 false {bot_name}",
+                f"execute in minecraft:overworld run tp {bot_name} {cx} 120 {cz}",
+                f"execute in minecraft:overworld run spreadplayers {cx} {cz} 0 32 false {bot_name}",
             ],
             timeout=45,
         )
         pos = _wait_settled(bot) or [cx, 64, cz]
         st = bot.status()
+        if day1:
+            pos = st.get("pos")
+            if (
+                not st.get("dimension")
+                or normalize_dimension(st["dimension"]) != "overworld"
+                or not isinstance(pos, (list, tuple))
+                or len(pos) < 3
+                or math.hypot(float(pos[0]) - cx, float(pos[2]) - cz) > 48.0
+            ):
+                continue
         biome = str(st.get("biome") or "").lower()
         in_water = bool(st.get("in_water"))
         # Skip pure ocean spawns so we land on a true terrestrial island/continent
@@ -178,7 +201,14 @@ def select_dry_isolated_wild_site(bot: Any, bot_name: str, start_idx: int = 0) -
         )
         if not (fb or {}).get("blocks"):
             continue
+        if day1:
+            portals = bot.call("find_blocks", {"types": ["nether_portal"], "radius": 64, "limit": 1}) or {}
+            if portals.get("blocks") != []:
+                print(f"[Day 1] {bot_name} skipped portal-unsafe landing near ({cx}, {cz})", flush=True)
+                continue
         return float(pos[0]), float(pos[1]), float(pos[2]), biome
+    if day1:
+        raise RuntimeError("Could not find a wooded, portal-free Day 1 landing in the assigned region")
     raise RuntimeError("Could not find a wooded dry wild spawn site across CANDIDATE_SITES")
 
 
@@ -1017,7 +1047,10 @@ def reset_wild_bot(
     )
 
 
-def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inventory: bool = False) -> None:
+def restock_scene(
+    bot_name: str, scene: SceneAnchor, *, reason: str, clear_inventory: bool = False,
+    revoke_nether_entry: bool = False,
+) -> None:
     """Death-return / drift-return: teleport back to the scene anchor, and re-issue loadout on death."""
     ix, iy, iz = math.floor(scene.x), int(round(scene.y)), math.floor(scene.z)
     cmds = [
@@ -1041,8 +1074,8 @@ def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inven
     else:
         cmds.extend(
             [
-                f"tp {bot_name} {scene.x:.1f} {scene.y:.1f} {scene.z:.1f}",
-                f"spawnpoint {bot_name} {ix} {iy} {iz}",
+                f"execute in minecraft:overworld run tp {bot_name} {scene.x:.1f} {scene.y:.1f} {scene.z:.1f}",
+                f"execute in minecraft:overworld run spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
         )
     cmds.extend(prepare_scene_ground(bot_name, scene.stage, scene.x, scene.y, scene.z, dim=scene.dim))
@@ -1055,12 +1088,59 @@ def restock_scene(bot_name: str, scene: SceneAnchor, *, reason: str, clear_inven
         )
     if clear_inventory:
         cmds.extend(stage_loadout_cmds(bot_name, scene.stage, scene.x, scene.y, scene.z))
+    if revoke_nether_entry:
+        cmds.append(f"advancement revoke {bot_name} only minecraft:story/enter_the_nether")
     rcon_batch(cmds, timeout=60)
     print(
         f"[Scene Restock] {bot_name} stage={scene.stage} reason={reason} restock={clear_inventory} "
         f"-> ({scene.x:.1f}, {scene.y:.1f}, {scene.z:.1f})",
         flush=True,
     )
+
+
+class Day1DimensionGuard:
+    """Return accidental portal travelers until the curriculum explicitly sends them to the Nether."""
+
+    def __init__(self, bot: Any, bot_name: str, scene: SceneAnchor) -> None:
+        self.bot = bot
+        self.bot_name = bot_name
+        self.scene = scene
+        self._lock = threading.Lock()
+        self._portal_target = False
+        self._graduated = False
+
+    def note_target(self, key: str) -> None:
+        with self._lock:
+            self._portal_target = key == "minecraft:story/enter_the_nether"
+
+    def keep_home(self, observed_dim: str | None = None) -> bool:
+        from mc_agent.kb import normalize_dimension
+
+        if self._graduated or (observed_dim and normalize_dimension(observed_dim) == "overworld"):
+            return False
+        with self._lock:
+            if self._graduated:
+                return False
+            # Re-read alternate-dimension observations under the lock to avoid racing another
+            # caller's return or authorizing a trip based on a stale watchdog snapshot.
+            reported_dim = self.bot.status().get("dimension")
+            if not reported_dim:
+                raise RuntimeError(f"{self.bot_name} Day 1 dimension unavailable")
+            dim = normalize_dimension(reported_dim)
+            if dim == "overworld":
+                return False
+            if dim == "the_nether" and self._portal_target:
+                self._graduated = True
+                return False
+            restock_scene(
+                self.bot_name, self.scene, reason=f"day1_unplanned_dimension({dim})", revoke_nether_entry=True,
+            )
+            for _ in range(4):
+                time.sleep(0.5)
+                reported_dim = self.bot.status().get("dimension")
+                if reported_dim and normalize_dimension(reported_dim) == "overworld":
+                    return True
+            raise RuntimeError(f"{self.bot_name} Day 1 Overworld return could not be verified")
 
 
 class SceneWatchdog(threading.Thread):
@@ -1736,6 +1816,7 @@ def main() -> int:
     )
     parser.add_argument("--tag", type=str, default="wild")
     parser.add_argument("--keep-time", action="store_true", help="Do not reset world time to morning")
+    parser.add_argument("--day1", action="store_true", help="Require a portal-free bare landing and guard unplanned dimension changes")
     parser.add_argument(
         "--focus-episodes",
         type=int,
@@ -1756,6 +1837,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.max_episodes < 0:
         parser.error("--max-episodes must be zero or positive")
+    if args.day1 and args.stage != "bare":
+        parser.error("--day1 requires --stage bare")
 
     bot_name = args.bot
     if args.print_plan:
@@ -1818,6 +1901,8 @@ def main() -> int:
     ) as bot:
         try:
             st = ensure_bot_ready(bot, timeout_s=45.0)
+            if args.day1:
+                day1_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=True)
         except Exception as exc:  # BUG-039: never kill the process for a cooldown-bound slot
             msg = str(exc) or exc.__class__.__name__
             print(f"[Startup] {bot_name} not ready: {msg}", flush=True)
@@ -1831,7 +1916,9 @@ def main() -> int:
                 error=msg,
             )
             return 0
-        if args.stage in ("village", "village_trade"):
+        if args.day1:
+            sx, sy, sz, biome = day1_site
+        elif args.stage in ("village", "village_trade"):
             sx, sy, sz, biome = select_village_wild_site(
                 bot,
                 bot_name,
@@ -1899,8 +1986,40 @@ def main() -> int:
                 return False
             return False
 
+        scene_state: dict[str, Any] = {"sup": None}
+        day1_guard = Day1DimensionGuard(bot, bot_name, scene) if args.day1 else None
+
+        def _recover_day1(dimension: str | None = None) -> bool:
+            if day1_guard is None or not day1_guard.keep_home(dimension):
+                return False
+            _reassert_scene_geofence(toolset, scene, dimension="overworld", supervisor=scene_state["sup"])
+            return True
+
+        if day1_guard is not None:
+            from mc_agent.harness import curriculum as cur
+
+            select_target = cur.select_next_target
+
+            def _select_day1_target(session: Any, **kwargs: Any):
+                _recover_day1()
+                target, frontier = select_target(session, **kwargs)
+                day1_guard.note_target(target.key)
+                return target, frontier
+
+            cur.select_next_target = _select_day1_target
+
         def _guard_scene_anchor(ev: dict[str, Any]) -> None:
-            if ev.get("type") != "curriculum.episode.started":
+            kind = ev.get("type")
+            if day1_guard is not None and kind in (
+                "curriculum.pre_ensure.started", "curriculum.pre_ensure.completed", "run.started", "run.finished",
+            ):
+                if kind == "curriculum.pre_ensure.started":
+                    day1_guard.note_target(str(ev["target"]))
+                try:
+                    _recover_day1()
+                except Exception as exc:
+                    print(f"[Day 1] {bot_name} dimension check at {kind} pending: {exc}", flush=True)
+            if kind != "curriculum.episode.started":
                 return
             try:
                 st_cur = bot.status()
@@ -1923,10 +2042,9 @@ def main() -> int:
             except Exception:
                 pass
 
-        scene_state: dict[str, Any] = {"sup": None}
-
         def _repair_fence(dimension: str | None, pos: Any) -> None:
-            _reassert_scene_geofence(toolset, scene, dimension=dimension, pos=pos, supervisor=scene_state["sup"])
+            if not _recover_day1(dimension):
+                _reassert_scene_geofence(toolset, scene, dimension=dimension, pos=pos, supervisor=scene_state["sup"])
 
         watchdog = SceneWatchdog(
             bot, bot_name, scene, near_container=_near_known_container, fence_repair=_repair_fence
@@ -1994,6 +2112,7 @@ def main() -> int:
             "scene": {
                 "stage": scene.stage,
                 "dimension": scene.dim,
+                "day1": args.day1,
                 "anchor": {"x": round(scene.x, 1), "y": round(scene.y, 1), "z": round(scene.z, 1)},
                 "radius": scene.radius,
                 "drift_limit": scene.drift_limit,

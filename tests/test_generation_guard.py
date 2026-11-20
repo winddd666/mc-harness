@@ -1710,6 +1710,57 @@ def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush():
     assert any(a["action"] == "shield_rush_attack" and a.get("killed") is True for a in out_s["actions"])
 
 
+@pytest.mark.parametrize(("remaining_hostile", "retreat_works"), [(True, True), (True, False), (False, True)])
+def test_counter_kill_disengages_from_second_hostile_at_critical_health(monkeypatch, remaining_hostile, retreat_works):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    target = {"id": 42, "name": "zombie", "dist": 2.8, "pos": [3.3, 64.0, 0.5]}
+    survivor = {"id": 43, "name": "zombie", "dist": 2.8, "pos": [0.5, 64.0, 3.3]}
+    retreats = []
+    attacks = []
+    looks = []
+
+    class CaveBot:
+        def status(self):
+            nearest = survivor if attacks and remaining_hostile else target
+            return {
+                "pos": [0.5, 64.0, 0.5], "health": 3.5 if attacks else 20.0, "food": 20,
+                "ready": True, "alive": True, "on_ground": True, "blocking": False,
+                "nearest_hostile": {key: nearest[key] for key in ("id", "name", "dist")},
+            }
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                items = [{"name": "stone_sword", "count": 1}]
+                if not retreat_works:
+                    items.append({"name": "shield", "count": 1})
+                return {"items": items}
+            if action == "get_entities":
+                return {"entities": [survivor] if attacks else [target, survivor]}
+            if action == "look":
+                looks.append(body)
+            if action == "attack":
+                attacks.append(body["entity_id"])
+                return {"hits": 1, "killed": True}
+            return {"ok": True}
+
+    def retreat(_env, threat_pos, **kwargs):
+        retreats.append(threat_pos)
+        return {"ok": retreat_works}
+
+    monkeypatch.setattr(CombatEnv, "flee", retreat)
+    outcome = CombatControllerSlot().handle(
+        CombatEnv(CaveBot()), {"source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie"},
+    )
+
+    assert attacks == [42]
+    assert retreats == ([survivor["pos"]] if remaining_hostile else [])
+    assert outcome["mode"] == ("low_hp_disengage" if remaining_hostile else "counter_killed")
+    if not retreat_works:
+        assert outcome["latched_guard"] is True
+        assert looks[-1] == {"entity_id": 43}
+
+
 def test_bug023_deep_water_trident_shield_first_moves_to_dry_shore_and_3hit_cooldown(monkeypatch):
     """Covers BUG-023: trident/drowned in deep water raises shield first, moves to dry shore, and blocks reentry 30s on 3rd hit."""
     from mc_agent.skills.combat_env import CombatEnv
@@ -3838,6 +3889,62 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
+@pytest.mark.parametrize("landing", ["grounded", "still_airborne", "respawned"])
+@pytest.mark.parametrize("entry", ["poll", "subcortical"])
+def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing, entry):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    status = {
+        "pos": [-5191.8, 69.6, -7616.0], "health": 7.7, "food": 20, "ready": True, "alive": True,
+        "on_ground": False, "dimension": "overworld", "last_death": {"t": 10},
+        "nearest_hostile": {"id": 42, "name": "skeleton", "dist": 9.0, "pos": [-5182.5, 70.0, -7616.2]},
+    }
+    moves = []
+
+    class KnockbackBot:
+        def status(self):
+            return self.call("status")
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if clock[0] >= 1000.15:
+                    if landing == "grounded":
+                        status.update(pos=[-5192.2, 69.0, -7616.0], on_ground=True)
+                    elif landing == "respawned":
+                        status.update(pos=[-5184.5, 70.1, -7614.5], health=20, on_ground=True, last_death={"t": 20})
+                return dict(status)
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "source": "arrow"}] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": []}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 69 else "air"}
+            if action == "move_to" or (action == "control" and body.get("forward")):
+                assert status["on_ground"] is True
+                moves.append(action)
+            return {"ok": True}
+
+    bot = KnockbackBot()
+    if entry == "poll":
+        guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+        incident = guard.poll()
+        retreat = next(a["result"] for a in incident["actions"] if a["action"] == "combat_or_flee")
+    else:
+        outcome = CombatControllerSlot().handle(
+            CombatEnv(bot), {"source": "pre_hurt_ranged", "primary_type": "skeleton", "primary_entity_id": 42},
+        )
+        retreat = next(a for a in outcome["actions"] if a["action"] == "flee")
+    assert bool(moves) is (landing == "grounded")
+    assert clock[0] <= 1000.45
+    if landing == "respawned":
+        assert retreat["respawned"] is True
+
+
 @pytest.mark.parametrize(
     "entry, scenario",
     [
@@ -3912,6 +4019,40 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
         assert [action for action, _ in calls] == ["posture", "control"]
         assert actions[0]["ok"] is (scenario != "close_respawn")
         assert actions[0]["result"]["mode"] == ("respawned" if scenario == "close_respawn" else "surfaced")
+
+
+@pytest.mark.parametrize("room_for_short_exit", [True, False])
+def test_flee_uses_verified_short_exit_when_full_followup_hits_drop(room_for_short_exit):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {"pos": [0.5, 64, 0.5], "alive": True, "ready": True, "on_ground": True}
+    followups = []
+    floor_edge = 6 if room_for_short_exit else 4
+
+    class RetreatBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, _ = body["pos"]
+                return {"name": "stone" if y == 63 and x <= floor_edge else "air"}
+            if action == "control":
+                status["pos"] = [2.6, 64, 0.5]
+            if action == "move_to":
+                followups.append(body)
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    result = CombatEnv(RetreatBot()).flee([-1.8, 64, 0.5], distance=13.0, allow_shaft_seal=False)
+
+    if room_for_short_exit:
+        move, = followups
+        assert (move["x"], move["y"], move["z"]) == pytest.approx((6.1, 64, 0.5))
+        assert result["ok"] is True and result["moved_dist"] == pytest.approx(5.6)
+    else:
+        assert followups == []
+        assert result["moved_dist"] == pytest.approx(2.1)
 
 
 @pytest.mark.parametrize(
@@ -4005,6 +4146,89 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert shore["action"] == "boundary_escape_to_shore" and shore["ok"] is True
     assert all(start + timeout <= 1020.0 for _, timeout, start in calls[:-1])
     assert skills.bot is bot
+
+
+@pytest.mark.parametrize("terrain", ["scan", "radial", "open_water"])
+def test_flooded_cave_escape_uses_local_water_level(terrain):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {"pos": [2930.5, 39.2, -10120.5], "in_water": True, "on_ground": False, "alive": True, "ready": True}
+    local_ledge = [2930, 39, -10125]
+    moves = []
+
+    class FloodedCaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "find_blocks":
+                distant_lip = {"name": "grass_block", "pos": [2930, 62, -10121]}
+                ledge = {"name": "stone", "pos": local_ledge}
+                return {"blocks": [distant_lip, ledge] if terrain == "scan" else []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                return {"name": "stone" if terrain != "open_water" and [x, y, z] == local_ledge else "air"}
+            if action == "move_to":
+                goal = [body["x"], body["y"], body["z"]]
+                moves.append(goal)
+                if goal == [2930.5, 40.0, -10124.5]:
+                    status.update(pos=goal, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(FloodedCaveBot()).escape_deep_water_to_shore()
+
+    goal, = moves
+    if terrain == "open_water":
+        assert goal == pytest.approx([2930.5, 40.2, -10132.5])
+        assert result["mode"] == "surface_retreat"
+        assert result["ok"] is False and result["in_water"] is True
+    else:
+        assert goal == [2930.5, 40.0, -10124.5]
+        assert result["ok"] is True and result["in_water"] is False
+
+
+@pytest.mark.parametrize("landing", ["grounded", "airborne", "in_water"])
+def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    moves = []
+    posture = []
+    status = {"pos": [10937.5, 62.5, -11007.3], "in_water": True, "on_ground": False,
+              "alive": True, "ready": True}
+
+    class ShoreBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": [10938, 63, -11008]}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "posture":
+                posture.append(body)
+            if action == "move_to":
+                moves.append(body)
+                if len(moves) == 1:
+                    status.update(pos=[10937.7, 63.3, -11007.3], in_water=False)
+                else:
+                    assert posture[-1] == {"shield": True, "sneak": False, "jump": False}
+                    if landing == "grounded":
+                        status.update(pos=[10938.5, 64.0, -11007.5], on_ground=True)
+                    elif landing == "in_water":
+                        status.update(pos=[10937.7, 63.0, -11007.3], in_water=True)
+            return {"ok": True}
+
+    result = CombatEnv(ShoreBot()).escape_deep_water_to_shore(keep_shield=True)
+
+    assert len(moves) == 2
+    assert moves[1]["range"] < moves[0]["range"]
+    assert moves[1]["timeout"] < moves[0]["timeout"]
+    assert moves[1]["stop_on"] == ["death"]
+    assert tuple(moves[1][axis] for axis in ("x", "y", "z")) == (10938.5, 64.0, -11007.5)
+    assert result["ok"] is (landing == "grounded")
+    assert result["in_water"] is (landing == "in_water")
+    assert posture[-1]["jump"] is (landing == "in_water")
 
 
 def test_unstick_canopy_branch_shares_the_tool_budget(monkeypatch):
