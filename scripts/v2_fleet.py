@@ -91,32 +91,29 @@ class FleetSlot:
 
 
 FLEET: tuple[FleetSlot, ...] = (
-    # --- Squad 1: NJU Competition Benchmark (3 bots, soft-oversubscribed) ---
-    FleetSlot("MoveTest_01", "nju", "nju", None, 9, "bare", 0, str(MAIN_ROOT / ".state-move-test/tokens.json"), duration_s=2700, max_episodes=45),
-    FleetSlot("GuiTest_01", "nju", "nju", None, 9, "nether", 1, str(MAIN_ROOT / ".state-gui-test/tokens.json"), duration_s=1200, max_episodes=20),
-    FleetSlot("NJU_3", "nju", "nju", None, 9, "village_trade", 2, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    # --- Squad 2: GLM-5.3 Mid/Late-Game Strike Team (5 bots) ---
-    FleetSlot("GLM_1", "glm", "opencode", "glm-5.3", 0, "nether_fortress", 3, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
-    FleetSlot("GLM_2", "glm", "opencode", "glm-5.3", 0, "nether_bastion", 4, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
-    FleetSlot("GLM_3", "glm", "opencode", "glm-5.3", 0, "village_trade", 5, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
-    FleetSlot("GLM_4", "glm", "opencode", "glm-5.3", 0, "brewing_alchemy", 6, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=900, max_episodes=15),
-    FleetSlot("GLM_5", "glm", "opencode", "glm-5.3", 0, "midgame", 7, str(MAIN_ROOT / ".state-glm5/tokens.json"), duration_s=2700, max_episodes=45),
-    # --- Squad 3: DeepSeek-v4.1-flash Cross-Validation (4 bots) ---
-    FleetSlot("DS_1", "ds", "opencode", "deepseek-v4.1-flash", 0, "bare", 8, str(FLEET_TOKEN_FILE), duration_s=2700, max_episodes=45),
-    FleetSlot("DS_2", "ds", "opencode", "deepseek-v4.1-flash", 0, "cave_combat", 9, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
-    FleetSlot("DS_3", "ds", "opencode", "deepseek-v4.1-flash", 0, "enchant_anvil", 10, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
-    FleetSlot("DS_4", "ds", "opencode", "deepseek-v4.1-flash", 0, "nether_fortress", 11, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    # --- Squad 4: HY4-flash-free High-Concurrency Broad Sweeper (10 bots) ---
-    FleetSlot("HY_1", "hy4", "opencode", "hy4-flash-free", 0, "bare", 12, str(FLEET_TOKEN_FILE), duration_s=2700, max_episodes=45),
-    FleetSlot("HY_2", "hy4", "opencode", "hy4-flash-free", 0, "iron", 13, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_3", "hy4", "opencode", "hy4-flash-free", 0, "midgame", 14, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_4", "hy4", "opencode", "hy4-flash-free", 0, "cave_combat", 15, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
-    FleetSlot("HY_5", "hy4", "opencode", "hy4-flash-free", 0, "brewing_alchemy", 16, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
-    FleetSlot("HY_6", "hy4", "opencode", "hy4-flash-free", 0, "nether_bastion", 17, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_7", "hy4", "opencode", "hy4-flash-free", 0, "village", 18, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_8", "hy4", "opencode", "hy4-flash-free", 0, "nether", 19, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
-    FleetSlot("HY_9", "hy4", "opencode", "hy4-flash-free", 0, "deep_water", 20, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
-    FleetSlot("HY_10", "hy4", "opencode", "hy4-flash-free", 0, "deep_water", 21, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    # --- Squad 1: NJU Competition Benchmark (5 bots, soft-oversubscribed at rpm=6 <= 30 cap) ---
+    FleetSlot("MoveTest_01", "nju", "nju", None, 6, "bare", 0, str(MAIN_ROOT / ".state-move-test/tokens.json"), duration_s=2700, max_episodes=45),
+    FleetSlot("GuiTest_01", "nju", "nju", None, 6, "nether", 1, str(MAIN_ROOT / ".state-gui-test/tokens.json"), duration_s=1200, max_episodes=20),
+    FleetSlot("NJU_3", "nju", "nju", None, 6, "village_trade", 2, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("DS_1", "nju", "nju", None, 6, "iron", 8, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("DS_2", "nju", "nju", None, 6, "cave_combat", 9, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    # --- Squad 2: GLM-5.3 Mid/Late-Game Strike Team (5 bots, rpm=10 anti-burst) ---
+    FleetSlot("GLM_1", "glm", "opencode", "glm-5.3", 10, "nether_fortress", 3, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
+    FleetSlot("GLM_2", "glm", "opencode", "glm-5.3", 10, "nether_bastion", 4, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
+    FleetSlot("GLM_3", "glm", "opencode", "glm-5.3", 10, "village_trade", 5, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=1200, max_episodes=20),
+    FleetSlot("GLM_4", "glm", "opencode", "glm-5.3", 10, "brewing_alchemy", 6, str(MAIN_ROOT / ".state-beast/tokens.json"), duration_s=900, max_episodes=15),
+    FleetSlot("GLM_5", "glm", "opencode", "glm-5.3", 10, "midgame", 7, str(MAIN_ROOT / ".state-glm5/tokens.json"), duration_s=2700, max_episodes=45),
+    # --- Squad 3: HY4-flash-free Broad Sweeper (10 bots, rpm=6 anti-429, 100% free) ---
+    FleetSlot("HY_1", "hy4", "opencode", "hy4-flash-free", 6, "bare", 12, str(FLEET_TOKEN_FILE), duration_s=2700, max_episodes=45),
+    FleetSlot("HY_2", "hy4", "opencode", "hy4-flash-free", 6, "iron", 13, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_3", "hy4", "opencode", "hy4-flash-free", 6, "midgame", 14, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_4", "hy4", "opencode", "hy4-flash-free", 6, "cave_combat", 15, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("HY_5", "hy4", "opencode", "hy4-flash-free", 6, "brewing_alchemy", 16, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("HY_6", "hy4", "opencode", "hy4-flash-free", 6, "nether_bastion", 17, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_7", "hy4", "opencode", "hy4-flash-free", 6, "village", 18, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_8", "hy4", "opencode", "hy4-flash-free", 6, "nether", 19, str(FLEET_TOKEN_FILE), duration_s=1200, max_episodes=20),
+    FleetSlot("HY_9", "hy4", "opencode", "hy4-flash-free", 6, "deep_water", 20, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
+    FleetSlot("HY_10", "hy4", "opencode", "hy4-flash-free", 6, "enchant_anvil", 21, str(FLEET_TOKEN_FILE), duration_s=900, max_episodes=15),
 )
 
 
@@ -911,7 +908,7 @@ def main() -> int:
     lp.add_argument("--min-slot-duration", type=int, default=None, help="Only launch slots with duration_s >= N (decouples long runs)")
     lp.add_argument("--max-slot-duration", type=int, default=None, help="Only launch slots with duration_s <= N (decouples short/mid runs)")
     lp.add_argument("--max-episodes", type=int, default=20)
-    lp.add_argument("--squads", default="nju,glm,ds,hy4")
+    lp.add_argument("--squads", default="nju,glm,hy4")
     lp.add_argument("--bots", default=None, help="Optional comma-separated bot names filter (e.g. HY_2,HY_5,HY_6,HY_9)")
     lp.add_argument("--rpm-override", type=int, default=None, help="Optional per-bot RPM budget override for selected slots")
     lp.add_argument("--stagger", type=float, default=1.5)

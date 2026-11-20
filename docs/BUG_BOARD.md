@@ -248,8 +248,7 @@
 - **跨模型影响（r15 收官 21 路）**：死亡 **51 次**（`notable` 去重；incident 口径 57），r14 为 28；`model.failed(cancelled)` **141→247**，`cancel_cooldown_wait` **286.3s→454.2s**
 - **D1 过夜主轨（`overnight_12bot`，4h/12 路）**：**110 次 notable 死亡**（incident 144）：`ds_4_nether_fortress` **41**、`ds_3_enchant_anvil` 23、`ds_1_bare` 13；死因 `mob_attack 38 / lava 22 / arrow 15 / hot_floor 13（岩浆块）/ fall 7`。
   → 下界堡垒（ds_4）是重灾区：4h 41 死 ≈ 每 6 分钟 1 次；`hot_floor` 为新暴露原因。
-- **D1 过夜 hy4 审计轨（`hy4_audit_r26`，20 分钟）**：**38 次 notable 死亡**，其中 `hy4_6_nether_bastion` **20 次（每集 1 次）**、`hy4_2_iron` 13 次；`in_lava` incident **45 次**、`fresh_hurt` 89 次。死因：`mob_attack 13 / lava 11 / arrow 4 / fall 3`。
-  → 堡垒场景的岩浆湖是主因：`escape_lava` 45 次介入仅救回约 76%，每集仍死 1 次；建议场景侧封边/桥接 + 堡垒内禁止向岩浆方向挖。
+- **过夜 hy4 审计轨（`hy4_audit_r26`，配置 2 小时）**有 **38 条明确死亡回执**。`hy4_6_nether_bastion` 的 **20 条分布在 11/20 集**，其中 11 条前一条可归因为岩浆伤害。`hy4_2_iron` 有 13 条。旧记录的 45 次 `in_lava` 反射与死亡回执没有一一对应，不能据此计算逃生成功率。 [堡垒课程汇总](../runs/hy4_audit_r26/hy4_hy_6_nether_bastion/curriculum-20261119-094409-012939.json)
 - **D1 r18 收官（22 路）**：死亡 incident **37**（notable 去重 28：`mob_attack 12 / lava 6 / on_fire 4 / arrow 3 / trident 1 / drown 1 / wither 1`），**全部集中在 3 路下界 bot**（`ds_4` 7、`hy4_6` 6、`hy4_8` 4 = 17/28）；r19_short 13 死、冷却 205.6s。→ 当前主因已从"地表箭伤"转为**下界岩浆/着火**。
 - **D1 r16 复核（`d2ac1ab`+`b920f24` 已合入）**：死亡 incident **57→14**、`cancel_cooldown_wait` **454.2s→148.3s**、`cancelled` 247→约 80；门禁 PASS。待 r17 22/22 复核后关闭。
 - **死因分布**：`mob_attack 23 / arrow 13 / fall 5 / player_explosion 3 / lava 3 / trident 1`
@@ -624,8 +623,8 @@
   → 修复关键词必须覆盖：`concurrency` / `simultaneous` / `overloaded` / `rate limit` / `rate_limit` / `try again later` / `server_error`。
 - **D1 hy4 审计轨对照（决定性证据）**：
   - `hy4_audit_r25`（20min）：**0 retries / 0 429 / 0 502**
-  - `hy4_audit_r26`（20min）：0 429、1 502
-  - `hy4_audit_r27`（**3 小时**、4 路、rpm=6、126 集）：**0 retries / 0 429 / 0 502 / 0 Traceback**，`mine_dfs` 零进展 2.2%，deaths 22、cooldown 128s
+  - `hy4_audit_r26`（配置 2 小时）：0 429、1 502
+  - `hy4_audit_r27`（**3 小时**、4 路、rpm=6、收官 **127 集**）：**0 retries / 0 429 / 0 502 / 0 Traceback**，`mine_dfs` 零进展 2.2%，明确死亡回执 22 条，cooldown 约 128s。 [收官报告](../runs/hy4_audit_r27/triage-hy4_audit_r27.md)
   → **结论定稿：hy4 的 429 与模型无关，纯粹是并发数；4 路 + rpm=6 在 3 小时长程下完全稳定。**
 - **D1 06:52 精确定位（`overnight_12bot_part2`，Qwen 429 硬失败率 6×）**：
   - 失败率对照：第一波 `9/1079` = **0.08%**；第二波 `17/3488` = **0.49%**；重试率两波接近（8.0% vs 9.0%）→ **不是总量问题，是突发窗口**。
@@ -659,6 +658,10 @@
 - **建议（运维）**：① 立即按上述修 `_is_concurrency_limit_429` 关键词；② `v2_fleet.py launch` 增加熔断：连续 429 率 >20% 时暂停新波次或降并发/换 provider；③ curriculum 对 `transient_api_error` 的集暂停重排而不是报废
 - **验收标准**：r24 起长任务因 429/502 报废的集数 ≤1；`hy4_1`（或同类长任务）分数 ≥60
 
+- **P2-40** 课程应按**实测 ROI** 动态加权：`shiny_gear`（61 分/100 请求）、`brew_potion`（87.2）、`use_lodestone`（74.9）应优先；`obtain_ancient_debris`（11.6）、`find_fortress`（5.9）应降权。建议在 `curriculum.py` 里用每波实测的 `score_delta / actor_requests` 更新 target 权重（滑动平均），而不是固定分数。
+- **P2-37** `mine_dfs` 的 `bad_target_for_dimension` **80 次**（`diamond` **63**、`iron` 16、`coal` 1）：模型在**下界**要求挖钻石/铁。工具已返回错误但模型反复重试。修复：`bad_target_for_dimension` 时返回该维度可用矿种清单（下界：quartz/ancient_debris/gold/netherite_scrap）。
+- **P2-38** `mc_skill_craft_gear` 的 `missing_ingredients` **652 次**（占 craft 调用 43%，成功仅 380）：`ds_4` 112、`glm_1` 107、`hy4_6` 88、`nju_3` 80；高频物品 `stone_pickaxe` 132、`wooden_pickaxe` 125、`diamond_pickaxe` 90、`oak_sign` 46。返回体已含 `required_materials`/`available_materials`/`missing_materials`，但模型仍重复调用。修复：返回 `suggested_next`（`smelt`/`gather`/`bootstrap_*`），同一 item 连续 2 次失败后加 90s 冷却。另有 `need_crafting_table` 185、`inventory_full` 69、`server_recipe_rejected` 26。
+- **P2-39** `mc_move_to` 的 `stalled`（8s 无位移）**103 次**（move_to 87、dig 13、bind_bed 2、interact 1）：现有 `unstick` 提示有效，但缺少"stall 2 次自动 unstick"的自动兜底。
 - **P2-36** `staircase:pillar_fallback` **自锁**：`no_place_face` → `_dig_pillar_up(1)` → 返回 `ok=True, requires_replan=False` + hint"从新高度重试" → 模型原地再调一次 → 再 `no_place_face`。
   - 实测：`overnight_12bot_part2` 140 次 pillar_fallback，**14 段连续 ≥3 次**，累计 **723s**；最长 `nju_guitest_01_nether` **连续 29 次**（188s，其间无任何其他工具调用）；`glm_2` 18 次（132s）。
   - `hy4_audit_r28`：73 次，**10 段 ≥3 次**，累计 **437s**；`hy4_6` 最长 10 次（134s）。
@@ -715,6 +718,7 @@
   | `glm_1_nether_fortress` | 80/80 | **12433s（3h27m）** | 1667s（28m）空转 | `completed` |
   | 其余 10 路 | 28~56 | 12214~12939s | — | 正常跑到 deadline |
 - **放大因素**：429 报废的集**同样消耗集数配额** —— `glm_1` 80 集中 **16 集**是 429 `runtime_error`（20%），`glm_5` **15/80**（19%）。即 Qwen 通道既浪费墙钟（18% 退避）又浪费集数槽位。
+- **r28 无 429 的对照**：短预算目标让 `hy4_2_iron`、`hy4_5_brewing_alchemy` 分别在 8640s、7911s 达到 `50/50` 集，距 9000s 目标还有 360s、1089s。集数上限在通道无硬失败时依然会提前收尾。 [铁器收官](../runs/hy4_audit_r28/hy4_hy_2_iron/curriculum-20261119-145210-146844.json) · [酿造收官](../runs/hy4_audit_r28/hy4_hy_5_brewing_alchemy/curriculum-20261119-145213-868815.json)
 - **副作用（评测口径）**：快 bot 被截断、慢 bot 跑满 → **跨 bot/跨波次分数不可比**（`glm_5` 名义 4h 实际只跑了 2h53m）。
 - **最小修复**：① 波次按 `max_episodes = ceil(duration_s / 60)` 或直接 `None`（只靠 deadline）；② 429/502 等 `transient` 集**不占用**集数配额（或 `max_episodes` 只统计非 transient 集）。
 - **验收标准**：4h 波次所有 bot 实际墙钟 ≥ 0.95 × `duration_s`；`elapsed_s/duration_s` 比值分布 ≥0.95。
@@ -743,6 +747,7 @@
   | `overnight_12bot_part2` | `glm_4_brewing_alchemy` | **129** | **110** | 212.2m ~ 254.4m | 212.0m |
   | `overnight_12bot_part2` | 其余 5 路 | 17 | — | — | — |
   | `hy4_audit_r28` | `hy4_9_deep_water` | 5 | — | — | — |
+  | `hy4_audit_r27` | `hy4_hy_2_iron` | **126，集中在 EP02–12** | — | — | — |
 - **两种形态**：
   1. **"差一点"型（`glm_4`）**：目标 212.2~254.4m，仅超出 0~42m —— 意图合理（去挖看见的矿），但围栏只拒绝不引导；`glm_4` 本波 **145 分（-50 vs wave1）**，129 次被拦 ≈ 8~12 分钟。
   2. **"离谱坐标"型（`nju_guitest`）**：目标 554m~**12.9km**（最远 12927m），同一坐标重复 14 次 —— 明显是幻觉坐标/未换算的绝对坐标，工具层未做"距离明显异常"识别。
@@ -771,6 +776,23 @@
   1. 硬前置门控：`ride_strider` 需背包有 `saddle`；`obtain_ancient_debris` / `obtain_crying_obsidian` 需有 `diamond_pickaxe`/`netherite_pickaxe`；`follow_ender_eye` 需有 `ender_eye` 或（`blaze_rod`/`blaze_powder` + `ender_pearl`）；`heart_transplanter` / `kill_mob_near_sculk_catalyst` / `cure_zombie_villager` 未在 WorldMemory 观测到对应结构/实体前禁止盲派；
   2. 冷却改为指数退避：第 1 次失败 20m → 第 2 次 60m → 第 3 次 ≥3h（10800s），若模型明确回报环境阻断/无目标则直接跳级至长冷却。
 - **验收标准**：4 小时长测中单个无进展非主线目标重复派发次数 ≤3；后 2 小时不再出现 `0/14`、`0/8`、`0/7` 式空转。
+- **D1 全量 ROI 复核（6 波 1,581 集，逐 target 统计）**：**18 个 target 成功率 0%，合计 494 集（31.2% 集数）/ 8,078 请求 / 0 分**：
+  | target | 集数 | 请求 |
+  |---|---|---|
+  | `husbandry/make_a_sign_glow` | **116** | 2,402 |
+  | `nether/ride_strider` | 57 | 1,581 |
+  | `husbandry/breed_an_animal` | 51 | 665 |
+  | `adventure/heart_transplanter` | 47 | 448 |
+  | `nether/obtain_crying_obsidian` | 34 | 826 |
+  | `island_recon_sweep` | 30 | 229 |
+  | `adventure/kill_mob_near_sculk_catalyst` | 28 | 270 |
+  | `nether/distract_piglin` | 25 | 344 |
+  | `husbandry/tame_an_animal` / `fishy_business` | 18 / 18 | 149 / 233 |
+  | `husbandry/allay_deliver_item_to_player` | 17 | 116 |
+  | `nether/get_wither_skull` | 10 | 409 |
+  | 其余 6 个（sniffer_egg / cure_zombie_villager / ride_a_boat_with_a_goat / trade_at_world_height / silk_touch_nest / find_bastion） | 53 | 406 |
+- **ROI 排名（分/100 请求）**：`brew_potion` **87.2**（78% 成功）、`use_lodestone` **74.9**、`shiny_gear` **61.0**（1,245 分，占全部得分 61%）、`kill_a_mob` 46.2；而 `obtain_ancient_debris` 仅 **11.6**（91 集 / 3,237 请求 / 375 分）、`find_fortress` **5.9**。
+  → **`shiny_gear` + `brew_potion` + `use_lodestone` 三项贡献了绝大部分分数，而 18 个 0% 目标吃掉了 1/3 集数**。
 
 ### BUG-051 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（16 路过夜轨迹全量复盘）
 - **影响**：规划器高度/位置失明——Bot 挖矿留在地下 `y < 45` 时，连续派发 8 轮短预算的地表任务，导致每集全用来爬楼梯、连地表都见不到就超时。
@@ -815,6 +837,87 @@
 - **最小修复**：`pillar_fallback` 连续 ≥2 次返回 `requires_replan=True` 并建议水平换向/`unstick`；≥3 次给当前方向/target 加 120s 冷却（详见 `D1-r11-triage.md` 4bw 节）。
 - **验收标准**：`pillar_fallback` 连续 ≥3 段降至 0；单次 `bootstrap_stone_age` 平均 ≤2 集完成。
 
+### BUG-056 | P0 | Integrator（#1，`harness/guardian.py` + `skills/library.py`）| 状态: OPEN（过夜 6 波全量审计）
+- **一句话**：`guardian._escape_water` → `skills.escape_water()` **没有任何时间预算**，找不到岸时会连续跑 **499~561 秒**，直接吃穿整个 episode 预算（300~600s）。
+- **影响（最严重的一条）**：**19 个 episode 被单个 reflex 动作整集打死**，每集 0 产出：
+  | bot | 波次 | 集 | 每次阻塞 | 占该 bot 总集数 |
+  |---|---|---|---|---|
+  | `nju_movetest_01_bare` | `overnight_12bot` | **EP11–EP20（连续 10 集）** | **499.0~499.3s** | **10/21 = 48%** |
+  | `hy4_hy_9_deep_water` | `hy4_audit_r27` | **EP11–EP19（连续 9 集）** | **560.4~560.6s** | 9/19 = 47% |
+- **逐集复核**：两段共 19 集。`r27` EP13/EP16 各出现两次约 560.6s 的浮水失败，即 19 集里共 21 条≥300s 的这类回执。 [NJU EP11](../runs/overnight_12bot/nju_movetest_01_bare/20261119-104250-680466.events.jsonl#L23) · [HY4 EP13](../runs/hy4_audit_r27/hy4_hy_9_deep_water/20261119-132625-966581.events.jsonl#L42) · [HY4 EP16](../runs/hy4_audit_r27/hy4_hy_9_deep_water/20261119-140421-425711.events.jsonl#L49)
+- **全量统计（6 波）**：`boundary_escape_water` **557 次**，合计 **16,895s = 4.69 小时**；分布：中位 1.4s，但 **>30s 113 次、>60s 35 次、>120s 24 次、>300s 22 次**，max **560.6s**。对照 `boundary_escape_to_shore` 387 次仅 1,395s（均值 3.6s）—— 说明**慢的不是"上岸"，而是"浮水"这条路径**。
+- **源码定位**：
+  - `guardian.py:1872` `self._action("boundary_escape_water", lambda: self._escape_water(status), ...)`
+  - `guardian.py:294 _escape_water()` → 直接 `self._skills().escape_water()`，**不传任何 deadline**
+  - `skills/library.py:4803 escape_water()` 内部是四层嵌套循环（`range(4)` / `range(2,16)` / `range(10)` / `range(2,9)` + `time.sleep(0.25)`），**没有 `deadline` / `max_duration_s` 参数**（对比同文件 `unstick(max_duration_s=45.0)` 已有预算机制）
+- **耗时定位**：日志确认耗时集中在一次 `boundary_escape_water`，源码中有固定次数的探测、破方块和移动回退，缺少贯穿这些步骤的墙钟预算。现有回执没有每次后端请求的耗时，499s/560.6s 的分项还需埋点确认。
+- **最小修复**：
+  1. `escape_water(*, max_duration_s: float = 20.0)`，内部所有循环共享一个 `deadline`，超时返回 `{"ok": False, "partial": True, "in_water": true, "next": "pillar_or_dig_up"}`；
+  2. `_escape_water` 传 `max_duration_s=min(20, remaining_episode_budget)`；
+  3. 连续 2 次"浮水失败"→ 改走**垂直脱困**（`pillar up` / 向上挖 2 格）而不是继续沿岸搜索。
+- **验收标准**：`boundary_escape_water` p99 ≤ 25s、max ≤ 40s；`nju_movetest` / `hy4_9` 的 `req=1 且 timeout` 集数为 **0**。
+
+### BUG-057 | P1 | Integrator（#1，`harness/guardian.py`）| 状态: OPEN（过夜 6 波全量审计）
+- **一句话**：站在**岩浆块（hot_floor）**上持续掉血时，guardian 把 `hot_floor` 归入 `NON_COMBAT_HURT_SOURCES` **压制了 `fresh_hurt`**，只有 HP ≤ 6 才升级，且升级后的 `emergency_bunker` / `flee` 在下界岩浆区**必然失败**（`unsafe_open_side` / `no_safe_retreat`）。
+- **实测（6 波）**：
+  - `hot_floor` 伤害事件 **2,129 次**，涉及 **58 个 episode**
+  - **因 hot_floor 死亡 34 次**：`ds_4_nether_fortress` **25**、`glm_2_nether_bastion` **7**、`hy4_6_nether_bastion` 2
+  - 典型片段（`glm_2` EP1）：`[受伤 health=19 by hot_floor]×10` → HP 20→13.3，同一 tick 内 `emergency_bunker=unsafe_open_side`、`flee=no_safe_retreat`，然后继续掉血
+- **源码定位**：`guardian.py:52-72 NON_COMBAT_HURT_SOURCES` 含 `hot_floor`；`guardian.py:744-755` 用它算出 `non_combat_only_hurt` → `fresh_hurt` 不加；`guardian.py:790` 只有 `critical_non_combat = non_combat_only_hurt and hp_cur <= 6.0` 才触发动作。**全程没有"离开该方块 1~2 格"这个最直接的反射**。
+- **分支复核**：近处有敌人时，`hot_floor` 仍可能成为 `fresh_hurt`。这会走通用对敌反射；两种分支都缺少针对脚下岩浆块的脱离动作。不能把近敌样本也归因于 HP ≤6 的门槛。 [Guardian 受伤分类](../src/mc_agent/harness/guardian.py)
+- **最小修复**：新增 `hot_floor` 专属反射：检测到 `hurt.source == "hot_floor"` → `mc_move_to` 到相邻**非岩浆块**（1~3 格）或 `posture jump` 跳出；给该方块坐标加 60s `block_avoid`；不必等 HP ≤6。
+- **验收标准**：单集 `hot_floor` 伤害 ≤10 次；`hot_floor` 死亡 ≤3 次/波。
+
+### BUG-058 | P1 | Integrator（#1，`harness/mc_tools.py` + 模型提示）| 状态: OPEN（过夜 6 波全量审计）
+- **一句话**：`mc_move_to` 的 `path_not_found` 是**全量最大的错误码**，且模型会在"可达中转点"和"不可达目标"之间反复横跳。
+- **实测（6 波）**：**1,137 次**（其中 `mc_move_to` **1,099**、`mc_dig` 31、`mc_place` 4），分布在 **446 个 episode**（占 1,581 集的 28%）；**50 个 episode ≥5 次**，最多 13 次。按 bot：`hy4_6_nether_bastion` **237**、`glm_1_nether_fortress` **151**、`glm_4_brewing_alchemy` 88、`nju_3` 73、`glm_2` 73。
+- **典型片段（`hy4_6` r28 EP1，45 请求 0 分）**：
+  ```
+  move_to(228,205,range=4) -> ok
+  move_to(232,205,range=4) -> path_not_found   # 目标就在 4 格外
+  move_to(228,205,range=4) -> ok               # 退回中转点
+  move_to(232,205,range=4) -> path_not_found   # 再撞
+  ```
+  目标 `ancient_debris` 在墙内/岩浆后，`find_blocks radius=96` 每次都返回"total 2"，模型知道位置但到不了。
+- **根因**：`path_not_found` 只说明"没路"，**不告诉模型"该怎么改"**（换中间点？挖过去？放弃？）；`repeated_identical_failure_blocked` 只拦完全相同的参数，坐标差 1~4 格就绕过。
+- **最小修复**：① `path_not_found` 连续 2 次且目标距离 <8m → 自动改 `mc_skill_mine_blocks` / `mc_dig` 朝目标掘进；② 同一目标累计 3 次失败 → `requires_replan=True` + 该坐标 120s 冷却；③ 返回 `suggested: {"mode":"dig_toward","target":[x,y,z]}`。
+- **验收标准**：单 episode `path_not_found` ≤3；单波总量 ≤300。
+
+### BUG-059 | P1 | Integrator（#1，`skills/mining_dfs.py`）| 状态: OPEN（过夜 6 波全量审计）
+- **一句话**：`mine_dfs(action="climb_out")` **回不到地表**：单集内连续 `climb_progress` 最多 16 次，深挖后必然在回程超时。
+- **实测（6 波）**：
+  - `climb_progress` **400 次** + `climb_blocked` 40 次，而 `surface_reached` 仅 **102 次**（成功率 ~20%）
+  - **58 个 episode 出现 ≥3 次连续 climb_progress**，累计 **13,113s = 3.6 小时**
+  - 最长：`glm_4` 一段 **10 连击 839s**、`nju_guitest` **16 连击 424s**、`nju_movetest` 8 连击 431s
+- **为什么爬不出来（量化）**：331 个 `climb_progress` 样本 → **每次中位 +5 格 / 29.3s ≈ 7 秒/格**。`nju_guitest` EP37 从 **y=-48** 开始，16 次调用 458s 只到 **y=1**，仍未到地表（collar-16≈48）→ 需要 ~96 格 × 7s ≈ **672s > 600s 集预算**。**数学上不可能完成**。
+- **源码定位**：`mining_dfs.py:3022 _climb_out(deadline, max_attempts=40)`，每次 `staircase(up,1)` 都要 `get_block + dig + place + 位置确认` 3~4 次 HTTP（≈7s/格）。
+- **最小修复**：① `explore` 下潜深度按 episode 剩余预算**上限钳制**（`max_depth = min(target_y, start_y - remaining_s/7*0.6)`）；② `climb_out` 用"垂直垫高"（每格 1 次 place，≈1~2s/格）替代阶梯；③ 集预算剩余 <35% 时**强制回程**（在 `mine_dfs` 内部触发，不等模型）。
+- **验收标准**：`climb_progress`/`surface_reached` ≤ 1:1；`≥3 连击` 的 episode ≤5/波；深挖集不再因回程超时。
+
+### BUG-060 | P2 | Integrator（#1，`harness/mc_tools.py`）| 状态: OPEN（过夜 6 波全量审计）
+- **一句话**：实体类目标（发光鱿鱼/动物）会陷入"实体 id 失效 → 重新扫描 → 再失效"的循环。
+- **实测**：`no_such_entity` **43 次**（`nju_guitest` 12、`glm_5` 10、`glm_3` 8、`glm_4` 5）；`mc_get_entities` 共 3,493 次，其中 **118 次 radius ≥ 4096**（最大 65,536）。典型（`glm_5` EP39 `make_a_sign_glow`）：radius 256→512→…→65,536 连发 9 次，然后 `move_to(entity_id)` 两次 `no_such_entity`，最后摔死，集满 22 请求 0 分。
+- **最小修复**：① `mc_get_entities` 对 `radius>512` 直接拒绝并提示"实体不在渲染距离内，请换目标"；② `move_to(entity_id)` 失败时返回"该实体已消失，请改用坐标或换目标"，并对该类型加 60s 冷却。
+- **验收标准**：`no_such_entity` ≤5/波；`radius≥4096` 的 get_entities 为 0。
+
+### BUG-061 | P1 | Integrator（课程工具授权）+ Slice C（交互回执）| 状态: OPEN（过夜 6 波复核）
+
+- `fishy_business` 共 **0/18 集验证通过**，分布在 4 条轨迹。18 集中 `mc_use_item` 调用为 **0**。`part2/ds_ds_1_bare` EP14 已合成鱼竿，对 `level=0` 水格调用 `mc_interact` 返回 `ok=true, changed=false`，空目标调用还返回 `bad_args`。EP37 在开阔水边复现，四次交互均无抛竿/钓获回执。 [EP14](../runs/overnight_12bot_part2/ds_ds_1_bare/20261119-150646-372249.events.jsonl#L99) · [EP37](../runs/overnight_12bot_part2/ds_ds_1_bare/20261119-171154-936339.events.jsonl#L131)
+- 同一代码指纹离线复现：`_infer_extra_tools_for_advancement("minecraft:husbandry/fishy_business", "持fishing_rod对开阔水域使用，钓上1条鱼。")` 只返回 `mc_interact`，`COMPACT_CORE_TOOLS` 没有 `mc_use_item`。实际抛竿、等待和收竿由后端的 `use_item(fishing_rod)` 执行。 [课程分配](../src/mc_agent/harness/curriculum.py#L792) · [工具集](../src/mc_agent/harness/mc_tools.py#L98) · [后端钓鱼分支](../experiments/20261115-until-1900/backend_patched/src/session.js#L2348)
+- `follow_ender_eye` 也触发同一授权缺口。对实际 KB 文案调用推断器返回 `()`；`r28/hy4_5` EP26 明确报缺投掷入口，EP25/50 又有独立的合成材料缺口。持眼时能否观测飞行方向仍待验证。 [EP26](../runs/hy4_audit_r28/hy4_hy_5_brewing_alchemy/20261119-163706-486842.events.jsonl) · [KB 文案](../src/mc_agent/kb/data_1_21_11.py#L900)
+- 验收时为适用目标公开对应工具并给到准确工具名。对鱼竿走错入口给可执行的改用提示。用持竿、岸边、静水的回归检查真实抛竿回执与目标验证，再用持眼夹具检查投掷和可观测结果。钓鱼轨迹中的缺工作台、积水矿井问题继续关联 BUG-032/052/056。
+
+### BUG-062 | P1 | Slice C（交互）+ Slice D2（酿造水源）| 状态: OPEN（过夜主轨第二波）
+
+- `part2/glm_glm_4_brewing_alchemy` EP01/02 对 `level=1` 或 `level=8` 的水位 **共 13 次**使用玻璃瓶。回执均为 `ok=true, changed=false`，没有 `used/gained`，酿造台瓶槽仍空，随后 `missing_item`。EP03 是独立的 429。第一波同 Bot 的对照回执明确 `used.glass_bottle=1`、`gained.potion=1`，再把 `potion` 放进瓶槽后成功。 [第二波 EP01](../runs/overnight_12bot_part2/glm_glm_4_brewing_alchemy/20261119-133151-986552.events.jsonl#L30) · [第二波 EP02](../runs/overnight_12bot_part2/glm_glm_4_brewing_alchemy/20261119-133259-566434.events.jsonl#L32) · [第一波成功对照](../runs/overnight_12bot/glm_glm_4_brewing_alchemy/20261119-092305-340302.events.jsonl#L35)
+- BUG-008 的库存变化判定只覆盖桶类。玻璃瓶仍会把无效交互报成功，目标没得到换水格提示。回执应确认玻璃瓶消耗与水药瓶入包，或明确提示改找可达水源。场景侧核查出生点给出的水格是否可交互。P2-27 继续跟踪 `mc_skill_brew` 的参数说明。 [交互判定](../src/mc_agent/harness/mc_tools.py#L1353)
+- 验收覆盖无变化且无物品增减、方块不变但确实装水两路。真实酿造开局可在前两集得到水药瓶并将其投进酿造台。
+
+### BUG-063 | P2 | Slice D1 + Integrator（评测口径）| 状态: OPEN（过夜收官复核）
+
+- Fleet 的 `Deaths` 同时为 `guardian.incident/death_or_connection_changed` 和含 `死亡` 的 `mc.notable_events` 各加一。连接变化可以进入前者，真实死亡也可能两处都出现。同一消息里的多条死亡只会在后者加一。`r26/hy4_hy_6_nether_bastion` 榜单为 **51**，JSONL 有 **20 条明确死亡回执**，分布在 11 集。 [计数代码](../scripts/v2_fleet.py#L569) · [收官榜单](../runs/hy4_audit_r26/triage-hy4_audit_r26.md)
+- 验收时区分死亡、重生和连接变化。有事件 ID 时按 Bot 与 ID 去重，缺 ID 时展示回执口径。离线夹具覆盖单次死亡同时出现在两个事件、仅掉线、同一消息两次死亡。
+
 ## P2 Backlog（不抢 P0/P1；KB/脚本类由 #6 随时消化，核心代码类由 #2/#3/#4 在各自 P0/P1 清零后顺延处理）
 
 > 来源：Slice D1 `/home/xzq/projects/mc/.worktrees/s-triage/docs/D1-r11-triage.md`（`r11_22bot` 22 路轨迹）。以下均为策略/提示/非阻塞小优化，不丢弃。
@@ -853,6 +956,84 @@
 - **P2-17（已修复）** 模型参数串位：`mc_move_to {"x":-7828,"y":-2814,"z":-2744}`（y 填成了 z）。越界保护已忽略该 y，但浪费一次 90.9s `path_not_found`。建议在参数校验层对 `|y|>320` 直接 `bad_args` 并提示。 
 
 ---
+
+## 2026-11-20 过夜长短轨逐条复核
+
+覆盖北京时间 01:22–09:27 的 **6 个波次、40 条 Bot 轨迹、1,581 集、667,056 条事件记录**，实际累计 124.8 Bot 小时。以最终 `curriculum-*.json` 为集目录，逐集匹配报告和原始 JSONL 并核对完成回执、失败、抢占、退避与最后一次增分。1,528 集有 `run.finished`，其余 53 集有课程收尾记录（40 次预准备短路、13 次 `paused_for_world_job`，都为零模型请求）。有运行打点的集使用同一 Python 源码指纹 `c395de55e2b26f7d`，与审查时工作树源码一致。 [全量逐集证据索引](overnight-20261120-episode-index.md)
+
+表中分数含场景预授，`最后增分` 取真实 `score_delta > 0` 的最后一集。目标的 `0/N` 用 `objective_verified`，该集仍可能靠其他成就增分。死亡按明确 `[死亡 …]` 回执计。找到候选资源与突破瓶颈分别判断，正常的波次收尾缩短预算另记在索引。
+
+六波合计，发光告示牌 **0/116**、骑炽足兽 **0/57**、种植 **1/78**、睡觉 **2/79**。这些重复派发与单次动作超时分别跟踪在 BUG-050/054/060 和 BUG-047/056。 [逐集验证状态与失败行](overnight-20261120-episode-index.md)
+
+### 主轨第一波 `overnight_12bot`（12 路 / 582 集 / 4 小时）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `ds_ds_1_bare` | 35 / 55 / EP35 | EP06 伐木 179s 超预算。EP19 丢铁镐触发门控，EP25–33 在地下反复遇到工作台与木料缺口，`need_crafting_table` 14 次。重复补石/铁 16+8 集。EP35 有旁路增分，`shiny_gear` 目标仍超时。 | BUG-032/038/043/047/052 |
+| `ds_ds_2_cave_combat` | 58 / 120 / EP21 | 先拿杀怪和钻石，EP04/07/08 因 `lost_iron_pickaxe` 中止。EP22–58 无增分。`shoot_arrow`、`plant_seed`、`heart_transplanter` 各 0/6，返地表阶梯 63 次 `time_budget`，EP44 的 `move_to:busy` 约 102s。 | BUG-037/043/047/050/051/054 |
+| `ds_ds_3_enchant_anvil` | 41 / 150 / EP12 | EP01 先侦察，遭遇水域死亡后没有利用开局经验与附魔台。`enchant_item` 0/7、`lava_bucket` 0/10，EP13–41 没有增分。EP02/28 都有约 102s 的 `move_to:busy`，整路有 23 条死亡回执。 | BUG-026/047/050/053 |
+| `ds_ds_4_nether_fortress` | 43 / 210 / EP13 | `ancient_debris` 0/12、`ride_strider` 0/12、哭泣黑曜石 0/8。EP11/12 是 MC API `ReadTimeout`。明确死亡 41 条，含岩浆 20、岩浆块 10。末集仍在退避、迫降与短程寻路失败之间循环。 | BUG-026/044/047/050/057/058 |
+| `glm_glm_1_nether_fortress` | 34 / 205 / EP03 | 找到堡垒后 31 集无增分。`ancient_debris` 0/11、`ride_strider` 0/7。死亡后反复进入补镐支线，`tunnel:missing_pickaxe` 31 次、合成满包 24 次。模型 429 硬失败 3 集，另有 1 集 MC API 超时。 | BUG-042/044/045/049/050/052 |
+| `glm_glm_2_nether_bastion` | 30 / 270 / EP25 | 残骸目标有 1/11 成功。堡垒 0/10、炽足兽 0/6；狭窄地形下阶梯 `pillar_fallback` 46 次、移动未确认 75 次。EP09 到堡垒的单次移动等了约 152s 后仍无路径。 | BUG-037/045/047/050/055/058 |
+| `glm_glm_3_village_trade` | 61 / 155 / EP58 | EP01/02 交易通过，之后并行卡在地下补装备、找地表资源。`plant_seed` 0/8，高空交易 0/4；EP55 确认地表村民在场，但无已验证的垂直搬运和高空交易链。EP08/60/61 各遇一次约 102–103s 的移动锁等待。 | BUG-047/050/051/052/054 |
+| `glm_glm_4_brewing_alchemy` | 56 / 195 / EP13 | 开局酿造成功，EP08 后继续在地下接到睡觉、繁殖、种植各 6 次且均未验证。末段合成/熔炼分别有 8/10 次 `inventory_full`。EP14–56 不涨分，堡垒线未能接上。 | BUG-029/051/052/053/054/059 |
+| `glm_glm_5_midgame` | 72 / 185 / EP56 | 早段做出磁石与附魔，后续 `lava_bucket` 0/14、发光牌 0/8、移植树脂核心 0/7。找不到资源后目标反复重派；最后两集种植也未验证。EP72 同时遇 429 退避和桶交互垂直距离拒绝。 | BUG-042/045/050/054/060 |
+| `nju_guitest_01_nether` | 75 / 180 / EP06 | 69 集未涨分。EP22 起多工具共 154 次围栏拒绝，转阶梯仍有 55 次垫高回退。附魔 0/9，炽足兽、堡垒、哭泣黑曜石各 0/4。EP66/67 钓鱼走错入口，有竿和静水时仍未见工作回执。 | BUG-048/050/055/059/061 |
+| `nju_movetest_01_bare` | 21 / 25 / EP09 | EP10 开钻石任务，在积水路径和爬升之间耗掉完整长集。EP11–20 **连续 10 集**各被 `boundary_escape_water` 约 499s 占住，最后一集仅余很短收尾预算。补石器 13 集仅 1 次验证。 | BUG-032/038/047/056 |
+| `nju_nju_3_village_trade` | 56 / 150 / EP45 | 交易拿分后，EP11 有钻石但缺可用工作台/木料；合成 `need_crafting_table` 49 次，阶梯到时限 75 次。高空交易 EP54/55 无有效搬运链，末集附魔仍在阶梯与反射抢占之间打转。 | BUG-037/050/051/052/055 |
+
+### 主轨第二波 `overnight_12bot_part2`（12 路 / 596 集 / 14,100 秒）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `ds_ds_1_bare` | 40 / 105 / EP21 | 四集下界合金锄 0/4，接目标时仍缺跨维度、镐或模板前置。钓鱼 0/8，既有岸边错入口，也有入水后缺工作台。EP24 解卡单次 **404.4s**；EP22–40 无增分。 | BUG-032/047/050/056/061 |
+| `ds_ds_2_cave_combat` | 64 / 150 / EP13 | 钻石线推进后，EP14–64 无增分；短目标射箭/种植均 0/8，睡觉 0/6。阶梯 25 次退化为垫高，`move_to` 有 43 次位移未确认；返铁器验证成功主要恢复装备，没有净新增分。 | BUG-037/050/051/054/055/059 |
+| `ds_ds_3_enchant_anvil` | 45 / 135 / EP18 | 先侦察，附魔仍 0/7；睡觉 0/8、钓鱼 0/6，EP15/25/39/40 反复以右键水格代抛竿。EP02/24/36 均卡 `busy` 约 102–103s。EP14/16 的磁石暂停是世界任务等待，EP18 恢复完成。 | BUG-047/050/053/054/061 |
+| `ds_ds_4_nether_fortress` | 57 / 210 / EP21 | 目标骑炽足兽 0/13、残骸 0/12、哭泣黑曜石 0/10、凋灵头 0/7。53 条明确死亡（岩浆 20、岩浆块 10）；EP09 连死后 `not_connected`，另 3 集 MC API 超时。EP22–57 未再涨分。 | BUG-026/044/050/057、P2-34 |
+| `glm_glm_1_nether_fortress` | 80 / 240 / EP04 | EP05 受击死亡，EP06 起下界反复补主世界石/铁，其中 **0/52 + 0/23**。EP18 等事件有 `the_nether` 实证；伐木无目标 89 次、材料缺失 95 次。16 集 429，撞 80 集限早停约 28 分钟。 | BUG-042/045/046/049 |
+| `glm_glm_2_nether_bastion` | 33 / 270 / EP25 | 残骸有 1/14 成功，堡垒 0/11，炽足兽 0/4。阶梯垫高 35 次，岩浆/掉落/岩浆块伤害拖慢移动。EP11/33 移动约 102s 后才报 `busy`，9 集 429。 | BUG-026/045/047/050/055/057/058 |
+| `glm_glm_3_village_trade` | 32 / 90 / EP24 | 开局交易有效。`shiny_gear` 0/7，37 次 `climb_progress` 反复烧在返程；EP21 磁石等世界任务后 EP24 达成。EP29 暂停来自 `preempt_opportunity`，独立于失败。末段钻石任务又因移动和抢占耗尽预算。 | BUG-026/045/050/052/059 |
+| `glm_glm_4_brewing_alchemy` | 45 / 145 / EP40 | EP01/02 瓶子装水假成功，EP03 是 429；没拿到开局酿造。EP20 起围栏拒绝累计 129 次。发光牌 0/11，另 9 集 429；EP40 磁石增分后再次困在台阶和合成。 | BUG-045/048/050/051/062 |
+| `glm_glm_5_midgame` | 80 / 180 / EP09 | EP10–80 无净增分；岩浆桶 0/14、树脂核心 0/14、种植 0/12、悦灵 0/7。15 集 429，EP19/27 的 `move_to:busy` 各约 103s，80 集提前 3745s 收尾。 | BUG-042/045/046/047/050/054 |
+| `nju_guitest_01_nether` | 41 / 200 / EP40 | EP02 进下界，残骸 0/2、附魔 0/11、发光牌 0/7。阶梯垫高 43 次，最长一段 29 次。EP38 等磁石的世界任务后 EP40 成功；EP41 回矿 692s 仍未附魔。 | BUG-044/050/053/055/059 |
+| `nju_movetest_01_bare` | 30 / 70 / EP26 | 补石/铁器花掉 13 集，三次伐木达到约 90s。EP26 桶目标成功，EP27/28 黑曜石目标困于阶梯、窒息或返矿；EP30 装备目标再次超时。 | BUG-026/032/037/038/047/052 |
+| `nju_nju_3_village_trade` | 49 / 150 / EP21 | 早段交易、钻石和磁石有效，EP22–49 死循环恢复原料和工具。补石器 1/17、补铁器 0/8，缺工作台和找不到木头各 55 次。EP24 熔炼单次约 101s，后续爬阶梯积累 83 次 `time_budget`。 | BUG-032/037/047/052/055/059 |
+
+### hy4 短轨 `hy4_audit_r25`（4 路 / 17 集 / 配置 20 分钟）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `hy4_hy_2_iron` | 3 / 20 / 无 | EP01 侦察无增分，EP02/03 钻石装备任务均超时。挖掘虽有 16 个进展切片，中间遇到 `shaft_exhausted` / `no_progress`，波次内没完成材料链。 | BUG-030/037/051 |
+| `hy4_hy_5_brewing_alchemy` | 8 / 75 / EP06 | 开局酿造已拿分，EP06 补铁时挖掘/熔炼耗光时间但有旁路增分；EP07 预准备短路，EP08 钻石线因受击停挖后超时。 | BUG-026/037/043 |
+| `hy4_hy_6_nether_bastion` | 3 / 210 / EP03 | 残骸两集未验证，期间遇到错误矿种与井重置。全程 6 次 `path_not_found`，EP03 寻堡垒时遇到岩浆块伤害和无安全撤退。4 条死亡集中在 2 集。 | BUG-026/030/050/057/058 |
+| `hy4_hy_9_deep_water` | 3 / 30 / EP02 | 侦察后两集钻石任务均卡在切片与回程。EP02 单次挖掘约 85s，有击杀增分；EP03 收尾无伤亡但仍未合成装备。 | BUG-030/037/038/059 |
+
+### hy4 审计 `hy4_audit_r26`（4 路 / 92 集 / 配置 2 小时）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `hy4_hy_2_iron` | 18 / 100 / EP04 | EP02 装备目标成功，EP05–18 停分。发光牌和弩各 0/4。EP15 已有移动失败链，随后 MC API `ReadTimeout`；整路 13 条死亡，另有 10 次移动 `stalled`。 | BUG-026/044/047/050/060 |
+| `hy4_hy_5_brewing_alchemy` | 19 / 105 / EP18 | 酿造后恢复石/铁器 13 集，中间合成满包 7 次、爬升进展切片 21 次。EP18 有钻石成就旁路增分，EP19 未做出目标装备。 | BUG-032/038/052/059 |
+| `hy4_hy_6_nether_bastion` | 20 / 210 / EP10 | 残骸 0/7、堡垒 0/6、炽足兽 0/4。EP03 有连续岩浆逃生失败，整轨 20 条死亡分布在 11 集。EP06 是 502。EP11–20 无增分，寻路无路径 60 次。 | BUG-026/050/055/057/058 |
+| `hy4_hy_9_deep_water` | 35 / 120 / EP09 | 钻石装备在 EP09 验证，之后岩浆桶、发光牌、床和多种稀有目标重派，无净增分。挖掘有 5 个同位置无掉落切片，另 2 条溺水回执。 | BUG-023/030/050/054/056/060 |
+
+### hy4 审计 `hy4_audit_r27`（4 路 / 127 集 / 配置 3 小时）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `hy4_hy_2_iron` | 27 / 100 / EP16 | **EP02–12 共 126 次围栏拒绝**，覆盖阶梯、寻路、隧道、挖矿等，钻石任务 0/4。EP16 才再涨分，之后短地表任务和稀有结构搜索仍无进展。 | BUG-047/048/050/051/054 |
+| `hy4_hy_5_brewing_alchemy` | 31 / 165 / EP14 | 开局酿造成交，补装备与回程反复。EP04/06 移动锁约 102–103s；`craft_gear:inventory_full` 17 次。EP14 后因岩浆桶距离、找不到发光物资和满包附魔支线停分。 | BUG-029/047/050/052/059 |
+| `hy4_hy_6_nether_bastion` | 50 / 195 / EP08 | EP09–50 反复派主世界石/铁器共 **42 集全零**；在下界遭遇缺原木、镐等级和挖不出掉落，找路失败 72 次。另有 1 集输出截断报废。 | BUG-026/049/055/058、P2-33 |
+| `hy4_hy_9_deep_water` | 19 / 60 / EP05 | EP05 磁石成功，EP07 装备门控中止，EP08 起多次补石/铁。EP11–19 **九集**被约 560.5s 的边界浮水占住；整路 13 集超时、无明确死亡回执，瓶颈是动作时限与脱困。 | BUG-032/043/047/056 |
+
+### hy4 审计 `hy4_audit_r28`（4 路 / 167 集 / 配置 2.5 小时）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `hy4_hy_2_iron` | 50 / 135 / EP26 | 前段磁石、矿线有进展，之后多次搜不到目标结构。种植 0/6、树脂核心 0/4，EP50 仍在找催发体；无 429，但 50 集配额提前约 6 分钟用尽。 | BUG-046/050/051/054/060 |
+| `hy4_hy_5_brewing_alchemy` | 50 / 165 / EP13 | EP01/02 装水并酿造成功，EP14–50 无增分。治愈村民 0/4、末影之眼 0/3（EP25/50 缺料，EP26 报缺用眼入口）、钓鱼 EP43/44 再走错接口。无 429 但提前约 18 分钟触集数限。 | BUG-046/050/053/061 |
+| `hy4_hy_6_nether_bastion` | 24 / 210 / EP05 | EP06–24 无增分，残骸与堡垒均 0/8。阶梯垫高 66 次、寻路无路径 80 次；明确死亡 17 条含岩浆 8 条，EP12 两条岩浆死亡，EP23/24 仍失败。 | BUG-026/050/055/057/058 |
+| `hy4_hy_9_deep_water` | 43 / 135 / EP25 | 磁石 EP25 再得分；从 EP26 岩浆桶找路失败开始停分。种植 0/5、树脂核心和催发体各 0/4，另有 5 次围栏拒绝与 3 条溺水回执。 | BUG-023/048/050/054/056 |
 
 ## 场景需求队列（Scene Requests — 由 #1~#5 提单，#6 DeepSeek #2 按单实现）
 
