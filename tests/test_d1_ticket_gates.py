@@ -161,3 +161,35 @@ def test_day1_guards_require_full_scope_and_verify_explicit_portal_crossing(tmp_
     gates = {gate.metric: gate for gate in ticket_gates(tmp_path)}
     assert gates[dispatch].status == "PENDING"
     assert gates[crossing].status == "PENDING"
+
+
+def test_late_staircase_and_shaft_retreat_gates_have_separate_exposure(tmp_path):
+    bot = tmp_path / "hy4_hy_6_iron"
+    bot.mkdir()
+    final = bot / "wild-endurance-final.json"
+    normal = _tool("flee", "mc_skill_flee", 10, 15, {}, {"ok": True, "mode": "flee"})
+    normal += _tool("early", "mc_skill_staircase", 16, 56, {}, {"ok": True})
+    normal += _tool("refused", "mc_skill_staircase", 87, 87.01, {}, {
+        "ok": False, "error": {"code": "episode_deadline_imminent"},
+    })
+    normal.append({"type": "run.finished", "elapsed": 89})
+    rows = [_write_episode(bot, 1, normal)]
+    final.write_text(json.dumps({"curriculum_summary": {"episodes": rows}}))
+
+    gates = {gate.metric: gate for gate in ticket_gates(tmp_path)}
+    assert gates["staircase started in final 10s, max overrun"].status == "PASS"
+    assert gates["actor flee max"].status == "PASS"
+    assert gates["actor retreat_shaft max"].status == "PENDING"
+
+    late = _tool("shaft", "mc_skill_flee", 0, 79.5, {}, {"ok": True, "mode": "retreat_shaft"})
+    late += _tool("staircase", "mc_skill_staircase", 88, 124, {}, {"ok": True})
+    late.append({"type": "run.finished", "elapsed": 124.1})
+    rows.append(_write_episode(bot, 2, late, status="timeout"))
+    final.write_text(json.dumps({"curriculum_summary": {"episodes": rows}}))
+
+    gates = {gate.metric: gate for gate in ticket_gates(tmp_path)}
+    assert gates["staircase started in final 10s, max overrun"].actual == "34.000s (n=2)"
+    assert gates["staircase started in final 10s, max overrun"].status == "FAIL"
+    assert gates["actor flee max"].status == "FAIL"
+    assert gates["actor retreat_shaft max"].actual == "79.500s (n=1)"
+    assert gates["actor retreat_shaft max"].status == "FAIL"

@@ -112,6 +112,7 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
     retries: dict[tuple[str, int], tuple[int, int]] = {}
     climb_streak = 0
     completed = None
+    budget = _number(report.get("budget_timeout_s"))
 
     for line, event in _trace(trace, report):
         kind = event.get("type")
@@ -159,16 +160,26 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
             result = _object(event.get("result"))
             raw_error = result.get("error")
             error = raw_error.get("code") if isinstance(raw_error, dict) else raw_error
+            timing_keys = ["tool"]
+            if tool == "mc_skill_unstick":
+                timing_keys.append("unstick")
+            elif tool == "mc_move_to" and error == "busy":
+                timing_keys.append("move_busy")
+            elif tool == "mc_skill_flee":
+                timing_keys.append("flee")
+                if result.get("mode") == "retreat_shaft":
+                    timing_keys.append("flee_shaft")
             if duration is not None and duration >= 0:
-                metrics.seconds("tool", duration, line)
-                if tool == "mc_skill_unstick" or (tool == "mc_move_to" and error == "busy"):
-                    metrics.seconds("unstick" if tool == "mc_skill_unstick" else "move_busy", duration, line)
+                for key in timing_keys:
+                    metrics.seconds(key, duration, line)
             else:
-                metrics.count("untimed_tool", line)
-                if tool == "mc_skill_unstick":
-                    metrics.count("untimed_unstick", line)
-                if tool == "mc_move_to" and error == "busy":
-                    metrics.count("untimed_move_busy", line)
+                for key in timing_keys:
+                    metrics.count(f"untimed_{key}", line)
+            if tool == "mc_skill_staircase":
+                if duration is None or duration < 0 or budget is None:
+                    metrics.count("untimed_late_staircase_overrun", line)
+                elif start_time >= budget - 10:
+                    metrics.seconds("late_staircase_overrun", elapsed - budget, line)
             if tool == "mc_skill_harvest_logs":
                 metrics.count("harvest_logs", line)
                 if duration is None or duration < 0:
@@ -240,7 +251,6 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
             completed = elapsed
             metrics.first_lines["run_finished"] = line
 
-    budget = _number(report.get("budget_timeout_s"))
     if budget is not None and completed is not None:
         metrics.seconds("episode_overrun", completed - budget, metrics.first_lines["run_finished"])
     elif completed is not None:
@@ -254,6 +264,10 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
                 metrics.count("untimed_move_busy", 0)
             if tool == "mc_skill_harvest_logs":
                 metrics.count("untimed_harvest_logs", 0)
+            if tool == "mc_skill_flee":
+                metrics.count("untimed_flee", 0)
+            if tool == "mc_skill_staircase":
+                metrics.count("untimed_late_staircase_overrun", 0)
     if water_starts:
         metrics.count("untimed_water", 0, len(water_starts))
     metrics.complete_trace = completed is not None or metrics.requests == 0 and bool(report)
@@ -309,6 +323,7 @@ def ticket_gates(wave_dir: Path) -> list[TicketGate]:
             missing_key = {
                 "escape_water": "untimed_water",
                 "episode_overrun": "missing_budget",
+                "flee_shaft": "untimed_flee",
             }.get(key, f"untimed_{key}")
             untimed, missing_ref = total(episodes, missing_key)
             passed = value <= limit
@@ -370,6 +385,9 @@ def ticket_gates(wave_dir: Path) -> list[TicketGate]:
     timed("BUG-047", "unstick", "unstick max", 30)
     timed("BUG-047", "move_busy", "move_to busy max", 20)
     timed("BUG-047", "episode_overrun", "episode elapsed minus budget max", 10)
+    timed("BUG-047", "late_staircase_overrun", "staircase started in final 10s, max overrun", 10)
+    timed("BUG-072", "flee", "actor flee max", 35)
+    timed("BUG-072", "flee_shaft", "actor retreat_shaft max", 35)
     timed("BUG-056", "escape_water", "boundary_escape_water p99", 25, .99)
     timed("BUG-056", "escape_water", "boundary_escape_water max", 40)
     water = [ep for ep in episodes if ep.bot.startswith(("nju_movetest", "hy4_hy_9"))]

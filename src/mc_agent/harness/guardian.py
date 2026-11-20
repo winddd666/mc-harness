@@ -180,6 +180,7 @@ class _GuardSession:
 
 class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
+    WATER_SHORE_MAX_HP = 6.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     UNSTICK_BUDGET_S = 30.0
     FLEE_BUDGET_S = 35.0
@@ -385,6 +386,13 @@ class GenerationGuard:
             timeout_details={"in_water": True},
         )
 
+    def _swimming_at_low_health(self, status: dict[str, Any]) -> bool:
+        health = status.get("health")
+        return (
+            isinstance(health, (int, float)) and health <= self.WATER_SHORE_MAX_HP
+            and (status.get("on_ground") is False or bool(status.get("submerged")))
+        )
+
     def _unstick_in_wall(self, before: dict[str, Any]) -> dict[str, Any]:
         return self._run_recovery_macro(before, lambda skills: skills.unstick(), budget_s=self.IN_WALL_RECOVERY_BUDGET_S)
 
@@ -500,10 +508,12 @@ class GenerationGuard:
         pos = list(nh["pos"]) if isinstance(nh.get("pos"), (list, tuple)) and len(nh["pos"]) >= 3 else None
         return name, dist, eid, pos
 
-    def _find_hostile_position(self, entity_id: int | None, entity_name: str) -> list[float] | None:
+    def _find_hostile_position(
+        self, entity_id: int | None, entity_name: str, *, session: _GuardSession | None = None,
+    ) -> list[float] | None:
         # Live status identifies the nearest hostile without always including coordinates.
         try:
-            response = self.bot.call("get_entities", {"radius": 16})
+            response = (session or self.bot).call("get_entities", {"radius": 16})
         except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
             raise
         except Exception:
@@ -1088,7 +1098,7 @@ class GenerationGuard:
                         inv=inv,
                         attacker=status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None,
                     )
-                if no_water_reentry or drowning:
+                if no_water_reentry or drowning or self._swimming_at_low_health(status):
                     shore_act = self._action(
                         "escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
@@ -1186,7 +1196,10 @@ class GenerationGuard:
                 esc_succeeded = False
                 esc_respawned = False
                 esc_err_code: str | None = None
-                if not transient_err and not forced_water_shore and not no_water_reentry and not drowning:
+                if (
+                    not transient_err and not forced_water_shore and not no_water_reentry and not drowning
+                    and not self._swimming_at_low_health(status)
+                ):
                     if not _already("escape_water"):
                         actions.append(self._action("escape_water", lambda: self._escape_water(status)))
                     esc_act = next((a for a in actions if a.get("action") == "escape_water"), None)
@@ -1635,6 +1648,43 @@ class GenerationGuard:
         fraction = distance / desired_distance
         return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": 1.0}
 
+    def _retreat_after_unsafe_exit(self, deadline: float | None) -> dict[str, Any] | None:
+        now = time.monotonic()
+        if deadline is None or now >= deadline:
+            return None
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=min(now + 4.0, deadline))
+        try:
+            status = bot.status()
+            if (
+                status.get("ready") is False or status.get("alive") is False
+                or status.get("in_water") or status.get("in_lava")
+            ):
+                return None
+            name, distance, entity_id, threat_pos = self._extract_hostile_info(status)
+            ranged = name in RANGED_MOBS
+            if not name or distance > (16.0 if ranged else 6.0):
+                return None
+            if threat_pos is None:
+                threat_pos = self._find_hostile_position(entity_id, name, session=bot)
+            env = CombatEnv(bot, geofence=self.geofence)
+            recovery = self._action(
+                "unsafe_exit_retreat",
+                lambda: env.flee(threat_pos, distance=8.0, allow_shaft_seal=False, wait_for_ground=ranged),
+                raise_on_http_error=False,
+            )
+            result = recovery.get("result")
+            if recovery.get("ok") and isinstance(result, dict):
+                return {**result, "requires_replan": True, "pos_before": status.get("pos")}
+            return None
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return None
+        except RunTimedOut:
+            self._stop_after_recovery_timeout()
+            raise
+        except (ApiError, httpx.HTTPError):
+            return None
+
     @contextmanager
     def _intercept_bot_calls(
         self,
@@ -1941,7 +1991,10 @@ class GenerationGuard:
                     pre_actions: list[dict[str, Any]] = []
                     if hurt_pre_water:
                         self._water_hurt_streak += 1
-                    forced_pre_shore = self._water_hurt_streak >= 3 or now_pre < self._no_water_until
+                    forced_pre_shore = (
+                        self._water_hurt_streak >= 3 or now_pre < self._no_water_until
+                        or self._swimming_at_low_health(st_pre)
+                    )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
                         self.events.emit("guardian.no_water_cooldown", duration_s=30.0, streak=self._water_hurt_streak)
@@ -2116,19 +2169,19 @@ class GenerationGuard:
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _RecoveryBudgetExceeded
                 return result
-        except _UnsafeFleeExit:
-            self.events.emit("guardian.flee_exit_blocked", tool=tool_name)
+        except (_UnsafeFleeExit, _UnsafeUnstickExit):
+            self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
+            recovery = self._retreat_after_unsafe_exit(deadline)
+            if recovery is not None:
+                return json.dumps(recovery, ensure_ascii=False)
+            message = (
+                "撤退方向缺少安全落脚点，请改从有支撑的方向离开。"
+                if is_flee else "脱困出口缺少安全落脚点，请从当前位置寻找另一条路线。"
+            )
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
-                "error": {"code": "unsafe_landing", "message": "撤退方向缺少安全落脚点，请改从有支撑的方向离开。"},
-            }, ensure_ascii=False)
-        except _UnsafeUnstickExit:
-            self.events.emit("guardian.unstick_exit_blocked", tool=tool_name)
-            return json.dumps({
-                "ok": False,
-                "requires_replan": True,
-                "error": {"code": "unsafe_landing", "message": "脱困出口缺少安全落脚点，请从当前位置寻找另一条路线。"},
+                "error": {"code": "unsafe_landing", "message": message},
             }, ensure_ascii=False)
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
@@ -2331,7 +2384,7 @@ class GenerationGuard:
 
                 forced_shore_b = (
                     self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
-                    or handled_water_in_tool or unstick_still_wet
+                    or handled_water_in_tool or unstick_still_wet or self._swimming_at_low_health(status)
                 )
                 esc_b_ok = False
                 esc_b_respawned = False
