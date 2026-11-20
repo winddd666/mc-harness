@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fcntl
 import glob
 import json
 import os
@@ -29,6 +30,7 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
+from typing import TextIO
 
 WT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN_ROOT = pathlib.Path("/home/xzq/projects/mc")
@@ -265,50 +267,48 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _acquire_bot_locks(selected: list[FleetSlot], wave: str) -> list[pathlib.Path]:
-    """Refuse to launch a bot that is still running in another wave (BUG-036 single-token mutex)."""
+def _acquire_bot_locks(selected: list[FleetSlot], wave: str) -> dict[str, TextIO]:
+    """Hold an exclusive lock for each bot's live session (BUG-036 single-token mutex)."""
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    acquired: list[pathlib.Path] = []
-    conflicts: list[tuple[str, str, int]] = []
-    for slot in selected:
-        path = LOCK_DIR / f"{slot.bot.lower()}.json"
-        if path.is_file():
+    acquired: dict[str, TextIO] = {}
+    try:
+        for slot in selected:
+            name = slot.bot.lower()
+            if name in acquired:
+                raise RuntimeError(f"Refusing to launch: {slot.bot} appears twice in wave '{wave}'.")
+            lock = (LOCK_DIR / f"{name}.json").open("a+", encoding="utf-8")
+            acquired[name] = lock
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError(f"Refusing to launch: {slot.bot} already has an active fleet lock.") from None
+
+            lock.seek(0)
+            try:
+                data = json.load(lock)
+            except ValueError:
                 data = {}
-            other_wave = str(data.get("wave") or "?")
-            other_pid = int(data.get("pid") or 0)
-            if other_wave != wave and _pid_alive(other_pid):
-                conflicts.append((slot.bot, other_wave, other_pid))
-                continue
-        path.write_text(
-            json.dumps({"bot": slot.bot, "wave": wave, "pid": os.getpid()}),
-            encoding="utf-8",
-        )
-        acquired.append(path)
-    if conflicts:
-        for p in acquired:
-            try:
-                p.unlink()
-            except OSError:
-                pass
-        detail = "\n".join(
-            f"  - {bot}: already running in wave '{w}' (pid {pid})" for bot, w, pid in conflicts
-        )
-        raise RuntimeError(
-            "Refusing to launch: the same bot is active in another wave. A second `login` would "
-            "revoke the running token (single-token mutex).\n" + detail
-        )
+            # Earlier launchers wrote PID metadata without taking an OS lock.
+            if isinstance(data, dict) and not data.get("flock"):
+                legacy_pid = data.get("pid")
+                if isinstance(legacy_pid, int) and _pid_alive(legacy_pid):
+                    raise RuntimeError(
+                        f"Refusing to launch: {slot.bot} is active in wave '{data.get('wave')}' (pid {legacy_pid})."
+                    )
+            lock.seek(0)
+            lock.truncate()
+            json.dump({"bot": slot.bot, "wave": wave, "pid": os.getpid(), "flock": True}, lock)
+            lock.flush()
+    except BaseException:
+        _release_bot_locks(acquired)
+        raise
     return acquired
 
 
-def _release_bot_locks(paths: list[pathlib.Path]) -> None:
-    for p in paths:
-        try:
-            p.unlink()
-        except OSError:
-            pass
+def _release_bot_locks(locks: dict[str, TextIO]) -> None:
+    for lock in locks.values():
+        # Keep the inode in place. The child can still hold the same open file description.
+        lock.close()
 
 
 def cmd_launch(
@@ -336,8 +336,8 @@ def cmd_launch(
         return 1
     selected = _assign_isolated_sites(selected_raw)
     try:
-        lock_paths = _acquire_bot_locks(selected, wave)
-    except RuntimeError as exc:
+        locks = _acquire_bot_locks(selected, wave)
+    except (OSError, RuntimeError) as exc:
         print(str(exc))
         return 2
     try:
@@ -370,8 +370,14 @@ def cmd_launch(
                 cmd.extend(["--model", slot.model])
             if idx > 0:
                 cmd.append("--keep-time")
-            lf = open(log_path, "wb")
-            proc = subprocess.Popen(cmd, env=env, stdout=lf, stderr=subprocess.STDOUT)
+            with log_path.open("wb") as log_file:
+                proc = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    pass_fds=(locks[slot.bot.lower()].fileno(),),
+                )
             procs.append((slot, proc, log_path))
             print(f"  [{idx+1:2d}/{len(selected):2d}] started {slot.bot:12s} ({slot.squad:3s}/{slot.model or 'nju':19s}) stage={slot.stage:15s} dur={slot_dur:g}s pid={proc.pid}", flush=True)
             if idx + 1 < len(selected):
@@ -386,7 +392,7 @@ def cmd_launch(
             print(f"  [DONE] {slot.bot:12s} ({slot.stage:15s}) rc={rc}", flush=True)
         print(f"[Fleet Complete] wave={wave} total={len(procs)} failed={failed}")
     finally:
-        _release_bot_locks(lock_paths)
+        _release_bot_locks(locks)
     return cmd_triage(wave)
 
 
