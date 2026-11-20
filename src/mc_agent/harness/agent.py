@@ -1007,6 +1007,7 @@ def run_mc_agent(
             wait_for_cooldown=True,
             stop_check=_safe_stop_check,
             on_cooldown_wait=_on_cd_wait,
+            episode_deadline_mono=deadline,
         )
     else:
         toolset.rebind_runtime_hooks(
@@ -1014,6 +1015,7 @@ def run_mc_agent(
             wait_for_cooldown=True,
             stop_check=_safe_stop_check,
             on_cooldown_wait=_on_cd_wait,
+            episode_deadline_mono=deadline,
         )
     if tool_profile == "compact":
         resolved_extras = (
@@ -1649,7 +1651,7 @@ def run_mc_agent(
                 report["input_messages"].append(item)
                 events.emit("input.pending", input_id=item["id"], reason=report["status"])
         if not owns_toolset:
-            toolset.rebind_runtime_hooks(stop_check=None, on_cooldown_wait=None)
+            toolset.rebind_runtime_hooks(stop_check=None, on_cooldown_wait=None, episode_deadline_mono=None)
         phase("finished")
         events.emit(
             "run.finished",

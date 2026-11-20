@@ -147,6 +147,7 @@ class McToolset:
         wait_for_cooldown: bool = False,
         stop_check: Callable[[], bool] | None = None,
         on_cooldown_wait: Callable[[str, float], None] | None = None,
+        episode_deadline_mono: float | None = None,
     ) -> None:
         self.bot = bot
         self._state_lock = threading.Lock()
@@ -154,6 +155,7 @@ class McToolset:
         self._wait_for_cooldown = bool(wait_for_cooldown)
         self._stop_check = stop_check
         self._on_cooldown_wait = on_cooldown_wait
+        self._episode_deadline_mono: float | None = episode_deadline_mono
         self._last_event_seq: int = int(getattr(bot, "_last_event_seq", 0) or 0)
         self._in_water: bool = False
         self._last_block_pos: list[int] | None = None
@@ -180,6 +182,7 @@ class McToolset:
         wait_for_cooldown: bool | None = None,
         stop_check: Callable[[], bool] | None = None,
         on_cooldown_wait: Callable[[str, float], None] | None = None,
+        episode_deadline_mono: float | None = None,
     ) -> None:
         """Rebind per-episode timeout/cooldown callbacks on a persistent shared McToolset."""
         if geofence is not None:
@@ -188,8 +191,26 @@ class McToolset:
             self._wait_for_cooldown = bool(wait_for_cooldown)
         self._stop_check = stop_check
         self._on_cooldown_wait = on_cooldown_wait
+        self._episode_deadline_mono = episode_deadline_mono
         self._geofence_blocked_count = 0
         self._path_not_found_targets.clear()
+
+    def _clamp_tool_budget(
+        self,
+        requested_s: float,
+        *,
+        max_s: float = 55.0,
+        min_s: float = 5.0,
+        reserve_s: float = 4.0,
+    ) -> tuple[float, bool]:
+        """Clamp long-running skill budgets to [min_s, max_s] and remaining episode deadline."""
+        eff = max(float(min_s), min(float(max_s), float(requested_s)))
+        if self._episode_deadline_mono is not None:
+            rem = self._episode_deadline_mono - time.monotonic() - float(reserve_s)
+            if rem <= 2.0:
+                return (0.0, True)
+            eff = min(eff, max(2.0, rem))
+        return (eff, False)
 
     def _record_geofence_block(
         self,
@@ -2395,6 +2416,22 @@ class McToolset:
                 clamped_from = ty_int
                 eff_target_y = -54
 
+        eff_duration_s, deadline_imminent = self._clamp_tool_budget(
+            max_duration_s, max_s=55.0, min_s=20.0, reserve_s=4.0
+        )
+        if deadline_imminent:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "requires_replan": False,
+                    "error": {
+                        "code": "episode_deadline_imminent",
+                        "message": "本集剩余时间不足 6s，已跳过长耗时挖矿以避免超时越界。",
+                    },
+                },
+                ensure_ascii=False,
+            )
+
         def _invoke() -> dict[str, Any]:
             res = self.skills.mine_dfs(
                 target=target,
@@ -2402,7 +2439,7 @@ class McToolset:
                 target_y=eff_target_y,
                 action=action,
                 geofence=self.geofence,
-                max_duration_s=max(20.0, min(90.0, float(max_duration_s))),
+                max_duration_s=eff_duration_s,
             )
             if clamped_from is not None and isinstance(res, dict):
                 res["clamped_shallow_diamond_y_from"] = clamped_from

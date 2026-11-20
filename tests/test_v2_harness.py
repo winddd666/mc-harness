@@ -192,6 +192,41 @@ def test_bug058_path_not_found_suggests_dig_toward_and_escalates_repeats() -> No
         assert third.get("requires_replan") is not True
 
 
+def test_bug047_mine_dfs_clamps_to_55s_and_episode_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.mc_tools.time.monotonic", lambda: now[0])
+    seen_budgets: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": {"ok": True}})
+
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot:
+        ts = McToolset(bot, geofence=VoidGeofence(radius=0.0))
+        monkeypatch.setattr(
+            ts.skills,
+            "mine_dfs",
+            lambda **kwargs: (seen_budgets.append(float(kwargs["max_duration_s"])) or {"ok": True}),
+        )
+        monkeypatch.setattr(ts.skills, "_ensure_free_slots", lambda min_free=3: (True, []))
+
+        # 1) Unbounded episode caps 90s request to 55s.
+        json.loads(ts.mc_skill_mine_dfs(target="ancient_debris", max_duration_s=90.0))
+        assert seen_budgets[-1] == 55.0
+
+        # 2) Tight episode deadline (20s remaining) clamps to 16s (reserve 4s).
+        ts.rebind_runtime_hooks(episode_deadline_mono=1020.0)
+        json.loads(ts.mc_skill_mine_dfs(target="ancient_debris", max_duration_s=90.0))
+        assert seen_budgets[-1] == 16.0
+
+        # 3) Imminent deadline (5s remaining) short-circuits without calling mine_dfs.
+        ts.rebind_runtime_hooks(episode_deadline_mono=1005.0)
+        count_before = len(seen_budgets)
+        out = json.loads(ts.mc_skill_mine_dfs(target="ancient_debris", max_duration_s=90.0))
+        assert out["ok"] is False
+        assert out["error"]["code"] == "episode_deadline_imminent"
+        assert len(seen_budgets) == count_before
+
+
 def test_world_hud_renders_compact_coords_durability_and_gaps() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix("/api/v1")
