@@ -24,10 +24,13 @@ from ..kb import assess_world_target, build_jit_error_hint, lookup_kb, normalize
 from ..skills import MacroSkills, SafetyEmergency, check_and_stabilize, compute_advancement_frontier
 from ..skills.combat_adapter import run_combat_skill
 from ..skills.library import (
+    BED_BLOCK_TYPES,
     BLOCK_MIN_PICKAXE_TIER,
     LOG_TYPES,
     NETHER_STEM_TYPES,
     TABLE_RECIPES,
+    VILLAGE_LANDMARK_BLOCKS,
+    VILLAGE_SURVEY_CLUTTER,
     _StairDeadline,
     _StairSession,
     _best_pickaxe_in_inv,
@@ -44,16 +47,6 @@ from .geofence import VoidGeofence
 from .tool_registry import Parameter, Tool, ToolRegistry
 from .world_memory import WorldMemory, default_memory_path_for_bot
 
-_BED_BLOCK_TYPES: tuple[str, ...] = tuple(
-    f"{color}_bed"
-    for color in (
-        "white", "orange", "magenta", "light_blue", "yellow", "lime",
-        "pink", "gray", "light_gray", "cyan", "purple", "blue",
-        "brown", "green", "red", "black",
-    )
-)
-
-
 class _ScoutNumberParameter(Parameter):
     """Keep a numeric schema and validate number strings in the scout handler."""
 
@@ -64,10 +57,10 @@ class _ScoutNumberParameter(Parameter):
         return {"type": "number", "description": self.description}
 
 
-_BLOCK_COLORS: tuple[str, ...] = tuple(name.removesuffix("_bed") for name in _BED_BLOCK_TYPES)
+_BLOCK_COLORS: tuple[str, ...] = tuple(name.removesuffix("_bed") for name in BED_BLOCK_TYPES)
 _BLOCK_WOODS: tuple[str, ...] = tuple(name.removesuffix("_log") for name in LOG_TYPES)
 _FIND_BLOCK_ALIASES: dict[str, tuple[str, ...]] = {
-    "bed": _BED_BLOCK_TYPES, "beds": _BED_BLOCK_TYPES,
+    "bed": BED_BLOCK_TYPES, "beds": BED_BLOCK_TYPES, "*_bed": BED_BLOCK_TYPES,
     "log": LOG_TYPES, "logs": LOG_TYPES,
     "planks": tuple(f"{wood}_planks" for wood in (*_BLOCK_WOODS, "crimson", "warped", "bamboo")),
     "wool": tuple(f"{color}_wool" for color in _BLOCK_COLORS),
@@ -779,6 +772,49 @@ class McToolset:
         }
     )
 
+    def _reserve_village_landmarks(
+        self, blocks: list[dict[str, Any]], types: list[str], radius: int, limit: int
+    ) -> list[dict[str, Any]]:
+        rows = [row for row in blocks if isinstance(row, dict)]
+        if not any(row.get("name") in VILLAGE_SURVEY_CLUTTER for row in rows):
+            return blocks
+
+        groups: dict[str, list[str]] = {}
+        for name in types:
+            if name in VILLAGE_LANDMARK_BLOCKS:
+                key = "bed" if name.endswith("_bed") else name
+                groups.setdefault(key, []).append(name)
+        if not groups:
+            return blocks
+
+        nearest: dict[str, dict[str, Any]] = {}
+        budget_s, _ = self._clamp_tool_budget(4.0, max_s=4.0, min_s=0.0, reserve_s=1.0)
+        deadline = time.monotonic() + budget_s
+        for key, names in groups.items():
+            existing = next((row for row in rows if row.get("name") in names), None)
+            if existing is not None:
+                nearest[key] = existing
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.15:
+                continue
+            try:
+                found = self.bot.call(
+                    "find_blocks", {"radius": radius, "types": names, "limit": 1},
+                    timeout_s=min(1.0, remaining / 2), allow_reauth=False,
+                )
+            except (ApiError, httpx.HTTPError):
+                continue
+            first = next((
+                row for row in (found.get("blocks") or [])
+                if isinstance(row, dict) and row.get("name") in names
+            ), None)
+            if first is not None:
+                nearest[key] = first
+
+        reserved = list(nearest.values())
+        return (reserved + [row for row in blocks if row not in reserved])[:limit]
+
     def mc_find_blocks(
         self,
         radius: int = 16,
@@ -830,14 +866,22 @@ class McToolset:
                 and isinstance(res_obj.get("total"), int) and isinstance(blocks, list)):
             # total is the backend scan count, not the number of returned rows.
             # Do not rewrite it; expose the truncation explicitly (P2-9).
+            if types and "mature" not in payload and res_obj["total"] > len(blocks):
+                prioritized = self._reserve_village_landmarks(blocks, types, radius, limit)
+                if prioritized != blocks:
+                    blocks = res_obj["blocks"] = prioritized
+                    res_obj["village_landmarks_prioritized"] = True
             returned = len(blocks)
             res_obj["returned"] = returned
             if res_obj["total"] > returned:
                 res_obj["truncated"] = True
-                res_obj["total_note"] = (
-                    "total 为后端在半径内扫描到的匹配总数；blocks 仅返回前 limit 条。"
-                    "请缩小 radius/types 或提高 limit（上限 60），不要把 total 当作可访问方块数。"
-                )
+                if res_obj.get("village_landmarks_prioritized"):
+                    res_obj["total_note"] = "total 为原始匹配总数；blocks 优先保留村庄地标，最多返回 limit 条。"
+                else:
+                    res_obj["total_note"] = (
+                        "total 为后端在半径内扫描到的匹配总数；blocks 仅返回前 limit 条。"
+                        "请缩小 radius/types 或提高 limit（上限 60），不要把 total 当作可访问方块数。"
+                    )
             raw = json.dumps(parsed, ensure_ascii=False)
         if parsed.get("ok") is True and isinstance(blocks, list) and blocks:
             dim_obs, _, _ = self._cached_env(fetch_if_missing=False)

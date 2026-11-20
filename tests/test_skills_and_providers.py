@@ -2546,7 +2546,7 @@ class _SurfaceScoutBackend:
         raise AssertionError(route)
 
 
-@pytest.mark.parametrize("target,segments", [(None, 5), ("bell", 2), ("villager", 2)])
+@pytest.mark.parametrize("target,segments", [(None, 5), ("dirt_path", 5), ("bell", 2), ("villager", 2)])
 def test_surface_scout_continues_and_scans_until_target(target, segments) -> None:
     from mc_agent.harness.geofence import VoidGeofence
     from mc_agent.harness.mc_tools import McToolset
@@ -2563,19 +2563,72 @@ def test_surface_scout_continues_and_scans_until_target(target, segments) -> Non
         assert toolset._last_block_pos == [28 * segments, 64, 0]
 
     assert result["ok"] is True
-    assert result["stop_reason"] == ("target_found" if target else "segment_limit")
+    hit = target in {"bell", "villager"}
+    assert result["stop_reason"] == ("target_found" if hit else "segment_limit")
     assert result["segments_completed"] == len(backend.moves) == segments
     assert result["distance_traveled"] == 28 * segments
     assert result["final_pos"] == [28 * segments + 0.5, 64, 0.5]
     assert sum(route == "get_entities" for route, _, _ in backend.calls) == segments + 1
     assert [row["name"] for row in result["detected_pois"]].count("obsidian") == 1
-    if target:
+    if hit:
         key = "detected_entities" if target == "villager" else "detected_pois"
         match = next(row for row in result[key] if row["name"] == target)
         assert match["pos"] == [62, 64, 1]
         assert match["dist"] == 5.5
         assert match["biome"] == "meadow"
         assert match["observer_biome"] == "plains"
+
+
+@pytest.mark.parametrize("entry", ["find_blocks", "scout_surface"])
+def test_village_scan_retains_beds_and_hay_amid_path_blocks(entry) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    crowded = [
+        {"name": "dirt_path", "pos": [i % 10, 63, i // 10], "dist": 1.0}
+        for i in range(200)
+    ]
+    anchors = [
+        {"name": "hay_block", "pos": [2, 64, 0], "dist": 2.1},
+        {"name": "yellow_bed", "pos": [3, 64, 0], "dist": 3.1},
+    ]
+    block_queries = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "find_blocks":
+            block_queries.append(body["types"])
+            rows = [row for row in [*crowded, *anchors] if row["name"] in body["types"]]
+            result = {"blocks": rows[:body["limit"]], "total": len(rows)}
+        elif route == "status":
+            result = {"pos": [0.5, 64, 0.5], "biome": "plains"}
+        elif route == "get_entities":
+            result = {"entities": []}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, geofence=VoidGeofence())
+        if entry == "find_blocks":
+            out = json.loads(toolset.mc_find_blocks(
+                radius=64, types=["dirt_path", "hay_block", "bed"], limit=20, mature=False,
+            ))["result"]
+            assert out["total"] == 202
+            assert out["returned"] == len(out["blocks"]) == 20
+            assert out["village_landmarks_prioritized"] is True
+            assert ["hay_block"] in block_queries[1:]
+            rows = out["blocks"]
+        else:
+            out = json.loads(toolset.mc_skill_scout_surface())
+            assert out["stop_reason"] == "target_found"
+            assert out["segments_completed"] == 0
+            assert "dirt_path" not in block_queries[0]
+            rows = out["detected_pois"]
+        assert [row["name"] for row in rows[:2]] == ["hay_block", "yellow_bed"]
+        remembered = toolset.world_memory.query_pois(["hay_block", "bed"], origin=[0.5, 64, 0.5], dim="overworld")
+        assert {"hay_block", "yellow_bed"} <= {row["name"] for row in remembered}
 
 
 @pytest.mark.parametrize("valid_targets", [[], ["bell", "villager"]])

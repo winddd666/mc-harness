@@ -38,8 +38,17 @@ NETHER_STEM_TYPES: tuple[str, ...] = (
     "warped_stem",
 )
 
+BED_BLOCK_TYPES: tuple[str, ...] = tuple(
+    f"{color}_bed"
+    for color in (
+        "white", "orange", "magenta", "light_blue", "yellow", "lime",
+        "pink", "gray", "light_gray", "cyan", "purple", "blue",
+        "brown", "green", "red", "black",
+    )
+)
+VILLAGE_LANDMARK_BLOCKS = ("bell", "hay_block", "composter", "lectern", "fletching_table", "chest", *BED_BLOCK_TYPES)
+VILLAGE_SURVEY_CLUTTER = frozenset({"dirt_path", "farmland"})
 SURFACE_SCOUT_DIRECTIONS = ("east", "southeast", "south", "southwest", "west", "northwest", "north", "northeast")
-SURFACE_SCOUT_BLOCKS = ("bell", "hay_block", "dirt_path", "composter", "lectern")
 SURFACE_SCOUT_ENTITIES = ("villager", "iron_golem")
 SURFACE_SCOUT_LANDMARKS = ("lava", "obsidian")
 SURFACE_SCOUT_PATH_ERRORS = frozenset({"path_not_found", "no_path", "timeout", "move_timeout", "stalled"})
@@ -1395,12 +1404,19 @@ class MacroSkills:
             return {**result, "stop_reason": "invalid_direction", "requires_replan": True}
         if not math.isfinite(max_duration_s) or not math.isfinite(step_dist):
             return {**result, "stop_reason": "invalid_budget_or_step", "requires_replan": True}
+        requested = [resolve_item_alias(name) for name in (target_types or (*VILLAGE_LANDMARK_BLOCKS, *SURFACE_SCOUT_ENTITIES))]
         targets = tuple(dict.fromkeys(
-            resolve_item_alias(name) for name in
-            (target_types or (*SURFACE_SCOUT_BLOCKS, *SURFACE_SCOUT_ENTITIES))
+            block for name in requested for block in (BED_BLOCK_TYPES if name in {"bed", "beds", "*_bed"} else (name,))
         ))
         remaining_targets = set(targets)
-        blocks = [name for name in targets if name not in SURFACE_SCOUT_ENTITIES] or list(SURFACE_SCOUT_BLOCKS)
+        blocks = [
+            name for name in targets if name not in SURFACE_SCOUT_ENTITIES and name not in VILLAGE_SURVEY_CLUTTER
+        ]
+        paths = ["dirt_path"]
+        if "farmland" in targets:
+            paths.append("farmland")
+        if not blocks and not any(name in VILLAGE_SURVEY_CLUTTER for name in targets):
+            blocks = list(VILLAGE_LANDMARK_BLOCKS)
         entities = [name for name in targets if name in SURFACE_SCOUT_ENTITIES] or list(SURFACE_SCOUT_ENTITIES)
         step = max(28.0, min(32.0, step_dist))
         session = _SkillBudgetSession(self.bot, min(50.0, max_duration_s))
@@ -1432,9 +1448,10 @@ class MacroSkills:
             for route, key, receipt_key, types in (
                 ("find_blocks", "blocks", "detected_pois", blocks),
                 ("get_entities", "entities", "detected_entities", entities),
+                ("find_blocks", "blocks", "detected_pois", paths),
                 ("find_blocks", "blocks", "detected_pois", landmarks),
             ):
-                if not types:
+                if not types or (types is paths and found):
                     continue
                 query = {"radius": 64, "types": types}
                 if key == "blocks":
