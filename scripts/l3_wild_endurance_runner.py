@@ -55,6 +55,12 @@ LIVE_STATE_DIR = WT_ROOT / ".state-l3-live"
 RUNS_DIR = WT_ROOT / "runs"
 DAY2_VILLAGE_STAGE = "day2_village_near"
 VILLAGE_APPROACH_RANGE = (120.0, 180.0)
+STRONGHOLD_STAGE = "village_to_stronghold_end"
+STRONGHOLD_DISTANCE_RANGE = (120.0, 600.0)
+STRONGHOLD_TRAVEL_RADIUS = 720.0
+FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
+ENTER_END = "minecraft:story/enter_the_end"
+ENTER_NETHER = "minecraft:story/enter_the_nether"
 
 CANDIDATE_SITES: list[tuple[int, int]] = [
     # 24 spaced anchors give each slot its own site and keep bots off shared islands.
@@ -83,6 +89,14 @@ CANDIDATE_SITES: list[tuple[int, int]] = [
     (-5200, 7600),
     (5200, 7600),
 ]
+
+NETHER_SITE_RADIUS = 600.0
+# Centers are 1800m apart, leaving at least 600m between accepted structure locations.
+NETHER_CANDIDATE_SITES = sorted(
+    ((1800 * x, 1800 * z) for x in range(-2, 3) for z in range(-2, 3)),
+    key=lambda site: math.hypot(*site),
+)
+NETHER_STRUCTURES = {"nether_fortress": "minecraft:fortress", "nether_bastion": "minecraft:bastion_remnant"}
 
 
 def rcon_batch(commands: list[str], *, timeout: int = 60) -> list[dict[str, str]]:
@@ -394,6 +408,68 @@ def select_day2_village_site(
     raise RuntimeError("Day 2 could not find a dry, portal-free landing 120–180m from the village")
 
 
+def _dry_overworld_position(status: dict[str, Any]) -> tuple[float, float, float] | None:
+    from mc_agent.kb import normalize_dimension
+
+    dim, pos = status.get("dimension"), status.get("pos")
+    if (
+        not dim
+        or normalize_dimension(dim) != "overworld"
+        or not isinstance(pos, (list, tuple))
+        or len(pos) < 3
+        or status.get("on_ground") is not True
+        or status.get("in_water")
+        or status.get("in_lava")
+    ):
+        return None
+    return float(pos[0]), float(pos[1]), float(pos[2])
+
+
+def select_stronghold_village_site(
+    bot: Any, bot_name: str, start_idx: int,
+) -> tuple[tuple[float, float, float, str], tuple[int, int], tuple[int, int]]:
+    """Find a dry village start and the nearest reachable stronghold for this slot."""
+    dim = "minecraft:overworld"
+    anchor = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
+    nearest = _locate_structure(dim, *anchor, "minecraft:stronghold")
+    probes = [anchor]
+    if nearest is not None:
+        hx, hz = nearest
+        for offset in range(8):
+            bearing = ((start_idx + offset) % 8) * math.tau / 8
+            probes.append((hx + round(320 * math.cos(bearing)), hz + round(320 * math.sin(bearing))))
+    inner, outer = STRONGHOLD_DISTANCE_RANGE
+    seen_villages = set()
+    for probe in probes:
+        village = _locate_structure(dim, *probe, "#minecraft:village")
+        if village is None or village in seen_villages:
+            continue
+        seen_villages.add(village)
+        if min(CANDIDATE_SITES, key=lambda site: math.dist(site, village)) != anchor:
+            continue
+        stronghold = _locate_structure(dim, *village, "minecraft:stronghold")
+        if (
+            stronghold is None
+            or min(CANDIDATE_SITES, key=lambda site: math.dist(site, stronghold)) != anchor
+            or not inner - 32 <= math.dist(village, stronghold) <= outer + 32
+        ):
+            continue
+        for _ in range(2):
+            _, status = _spread_overworld(bot, bot_name, *village, 16)
+            pos = _dry_overworld_position(status)
+            if pos is None:
+                continue
+            xz = pos[0], pos[2]
+            if (
+                math.dist(xz, village) <= 32
+                and inner <= math.dist(xz, stronghold) <= outer
+                and _portal_free_landing(bot)
+                and _locate_structure(dim, math.floor(xz[0]), math.floor(xz[1]), "minecraft:stronghold") == stronghold
+            ):
+                return (*pos, str(status.get("biome") or "")), village, stronghold
+    raise RuntimeError("Could not find a safe village with a stronghold 120–600m away in the assigned region")
+
+
 def select_nether_structure_site(
     bot: Any,
     bot_name: str,
@@ -407,27 +483,17 @@ def select_nether_structure_site(
     silently fell back to the anchor because `#minecraft:fortress` is not a valid structure tag.
     """
     structure_id = structure_tag.lstrip("#")
-    candidates = (structure_id,)
-    search_anchors = [(0, 0), (800, 0), (-800, 0), (0, 800), (0, -800), (800, 800)]
-    nx: int | None = None
-    nz: int | None = None
-    for offset in range(len(search_anchors)):
-        sx, sz = search_anchors[(start_idx + offset) % len(search_anchors)]
-        for cand in candidates:
-            coords = _locate_structure("minecraft:the_nether", sx, sz, cand)
-            if coords is not None:
-                nx, nz = coords
-                break
-        if nx is not None:
+    region = NETHER_CANDIDATE_SITES[start_idx % len(NETHER_CANDIDATE_SITES)]
+    cx, cz = region
+    for dx, dz in ((0, 0), (360, 0), (-360, 0), (0, 360), (0, -360)):
+        coords = _locate_structure("minecraft:the_nether", cx + dx, cz + dz, structure_id)
+        if coords is not None and math.dist(region, coords) <= NETHER_SITE_RADIUS:
+            nx, nz = coords
             break
-    if nx is None:
-        nx, nz = search_anchors[start_idx % len(search_anchors)]
-        print(
-            f"[Scene] locate {structure_id} failed across {len(search_anchors)} anchors; "
-            f"falling back to ({nx}, {nz})",
-            flush=True,
-        )
+    else:
+        raise RuntimeError(f"Could not locate {structure_id} within {NETHER_SITE_RADIUS:g}m of the assigned Nether region")
     ny = 64
+    anchor = (nx + 0.5, float(ny), nz + 0.5)
     prep = prepare_scene_ground(
         bot_name, "nether_fortress", float(nx), float(ny), float(nz), dim="the_nether"
     )
@@ -439,17 +505,14 @@ def select_nether_structure_site(
         ]
     )
     rcon_batch(prep, timeout=45)
-    pos = _wait_settled(bot, timeout_s=8.0) or [float(nx) + 0.5, float(ny), float(nz) + 0.5]
+    pos = _wait_settled(bot, timeout_s=8.0) or anchor
     st = bot.status()
-    if "nether" not in str(st.get("dimension") or "").lower():
-        # `tp` may not have settled yet; never anchor the scene to a stale overworld position.
-        pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
-    elif abs(float(pos[1]) - float(ny)) > 6.0:
-        # The bot fell into the structure during the settle window (r16 HY_6 anchored at y=46.9
-        # inside a bastion and then died to fall/lava on every return). Re-carve the ledge and pin
-        # the anchor to the carved height instead of the fall-through position.
+    if "nether" in str(st.get("dimension") or "").lower() and (
+        abs(float(pos[1]) - ny) > 6.0 or math.hypot(float(pos[0]) - anchor[0], float(pos[2]) - anchor[2]) > 4.0
+    ):
+        # A stale position or a fall through the ledge must not move the slot's anchor.
         print(
-            f"[Scene] nether settle y={pos[1]:.1f} differs from ledge y={ny}; re-carving ledge",
+            f"[Scene] nether settle at {pos} missed assigned ledge {anchor}. Re-carving ledge.",
             flush=True,
         )
         rcon_batch(
@@ -457,8 +520,7 @@ def select_nether_structure_site(
             timeout=30,
         )
         time.sleep(1.0)
-        pos = [float(nx) + 0.5, float(ny), float(nz) + 0.5]
-    return float(pos[0]), float(pos[1]), float(pos[2]), f"nether:{structure_tag.split(':')[-1]}"
+    return (*anchor, f"nether:{structure_id.split(':')[-1]}")
 
 
 def _deep_water_pad_cmds(bot_name: str, ix: int, iz: int, surface_y: int) -> list[str]:
@@ -724,6 +786,26 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                     f"give {bot_name} minecraft:bread 16",
                 ]
             )
+    elif stage == STRONGHOLD_STAGE:
+        cmds.extend(
+            f"advancement grant {bot_name} only minecraft:story/{advancement}"
+            for advancement in ("mine_stone", "upgrade_tools", "smelt_iron", "iron_tools", "mine_diamond", "shiny_gear")
+        )
+        cmds.extend(
+            [
+                f"give {bot_name} minecraft:diamond_pickaxe 1",
+                f"give {bot_name} minecraft:diamond_sword 1",
+                f"item replace entity {bot_name} armor.head with minecraft:iron_helmet",
+                f"item replace entity {bot_name} armor.chest with minecraft:iron_chestplate",
+                f"item replace entity {bot_name} armor.legs with minecraft:iron_leggings",
+                f"item replace entity {bot_name} armor.feet with minecraft:diamond_boots",
+                f"item replace entity {bot_name} weapon.offhand with minecraft:shield",
+                f"give {bot_name} minecraft:cooked_beef 32",
+                f"give {bot_name} minecraft:cobblestone 64",
+                f"give {bot_name} minecraft:torch 48",
+                f"give {bot_name} minecraft:ender_eye 14",
+            ]
+        )
     elif stage == "midgame":
         cmds.extend(
             [
@@ -945,12 +1027,12 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
     return cmds
 
 
-NETHER_STAGES = frozenset({"nether_fortress", "nether_bastion"})
+NETHER_STAGES = frozenset(NETHER_STRUCTURES)
 LOCAL_FIXTURE_STAGES = frozenset({"brewing_alchemy", "cave_combat", "enchant_anvil", "village_trade"})
 
 # Surface slices where a night start is pure mob-farm noise (fleet passes --keep-time to every bot
 # except the first, so without this the village/brewing scenes would open at night).
-SURFACE_DAYTIME_STAGES = frozenset({"village", "village_trade", "brewing_alchemy", DAY2_VILLAGE_STAGE})
+SURFACE_DAYTIME_STAGES = frozenset({"village", "village_trade", "brewing_alchemy", DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE})
 
 
 def scene_dimension(stage: str) -> str:
@@ -1055,10 +1137,11 @@ def build_reset_cmds(
             ]
         )
     else:
+        prefix = "execute in minecraft:overworld run " if stage == STRONGHOLD_STAGE else ""
         cmds.extend(
             [
-                f"tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
-                f"spawnpoint {bot_name} {ix} {iy} {iz}",
+                f"{prefix}tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
+                f"{prefix}spawnpoint {bot_name} {ix} {iy} {iz}",
                 f"advancement revoke {bot_name} everything",
                 f"advancement grant {bot_name} only minecraft:story/root",
                 f"advancement grant {bot_name} only minecraft:adventure/root",
@@ -1110,7 +1193,7 @@ def reset_wild_bot(
 
 def restock_scene(
     bot_name: str, scene: SceneAnchor, *, reason: str, clear_inventory: bool = False,
-    revoke_nether_entry: bool = False,
+    revoke_advancement: str | None = None,
 ) -> None:
     """Death-return / drift-return: teleport back to the scene anchor, and re-issue loadout on death."""
     ix, iy, iz = math.floor(scene.x), int(round(scene.y)), math.floor(scene.z)
@@ -1149,8 +1232,8 @@ def restock_scene(
         )
     if clear_inventory:
         cmds.extend(stage_loadout_cmds(bot_name, scene.stage, scene.x, scene.y, scene.z))
-    if revoke_nether_entry:
-        cmds.append(f"advancement revoke {bot_name} only minecraft:story/enter_the_nether")
+    if revoke_advancement is not None:
+        cmds.append(f"advancement revoke {bot_name} only {revoke_advancement}")
     rcon_batch(cmds, timeout=60)
     print(
         f"[Scene Restock] {bot_name} stage={scene.stage} reason={reason} restock={clear_inventory} "
@@ -1160,29 +1243,37 @@ def restock_scene(
 
 
 class OverworldProgressGuard:
-    """Return accidental portal travelers until the curriculum explicitly sends them to the Nether."""
+    """Return accidental portal travelers while allowing the slice's intended progression."""
 
     def __init__(self, bot: Any, bot_name: str, scene: SceneAnchor) -> None:
         self.bot = bot
         self.bot_name = bot_name
         self.scene = scene
-        self.day = 1 if scene.stage == "bare" else 2
-        self.label = f"Day {self.day}"
+        self.stronghold_run = scene.stage == STRONGHOLD_STAGE
+        self.label = "Stronghold" if self.stronghold_run else ("Day 1" if scene.stage == "bare" else "Day 2")
+        self.portal_dimension = "the_end" if self.stronghold_run else "the_nether"
+        self.portal_advancement = ENTER_END if self.stronghold_run else ENTER_NETHER
         self._lock = threading.Lock()
-        self._portal_target = False
-        self._graduated = False
+        self._target: str | None = None
+        self.portal_entered = False
 
     def note_target(self, key: str) -> None:
         with self._lock:
-            self._portal_target = key == "minecraft:story/enter_the_nether"
+            self._target = key
+
+    def _end_after_stronghold(self) -> bool:
+        if not self.stronghold_run or self._target != FOLLOW_ENDER_EYE:
+            return False
+        resp = self.bot.call("advancements", {"status": "completed", "ids": [FOLLOW_ENDER_EYE]})
+        return any(row.get("id") == FOLLOW_ENDER_EYE for row in resp.get("advancements", []))
 
     def keep_home(self, observed_dim: str | None = None) -> bool:
         from mc_agent.kb import normalize_dimension
 
-        if self._graduated or (observed_dim and normalize_dimension(observed_dim) == "overworld"):
+        if observed_dim and normalize_dimension(observed_dim) == "overworld":
             return False
         with self._lock:
-            if self._graduated:
+            if self.portal_entered and not self.stronghold_run:
                 return False
             # Re-read alternate-dimension observations under the lock to avoid racing another
             # caller's return or authorizing a trip based on a stale watchdog snapshot.
@@ -1192,13 +1283,18 @@ class OverworldProgressGuard:
             dim = normalize_dimension(reported_dim)
             if dim == "overworld":
                 return False
-            if dim == "the_nether" and self._portal_target:
-                self._graduated = True
+            if dim == self.portal_dimension and (
+                self.portal_entered or self._target == self.portal_advancement or self._end_after_stronghold()
+            ):
+                if not self.portal_entered:
+                    print(f"[{self.label}] {self.bot_name} verified progression to {dim}", flush=True)
+                self.portal_entered = True
                 return False
+            revoke = ENTER_END if self.stronghold_run and dim == "the_end" else ENTER_NETHER
             restock_scene(
                 self.bot_name, self.scene,
-                reason=f"day{self.day}_unplanned_dimension({dim})",
-                revoke_nether_entry=True,
+                reason=f"{self.label.lower().replace(' ', '')}_unplanned_dimension({dim})",
+                revoke_advancement=revoke,
             )
             for _ in range(4):
                 time.sleep(0.5)
@@ -1484,7 +1580,7 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
                 inside = max(abs(dx), abs(dz)) < 4.5 and 0.0 <= dy <= 2.0
             else:
                 inside = math.hypot(dx, dz) <= radius and (not local_fixture or abs(dy) <= 1.0)
-            if inside and scene.village_xz is not None:
+            if inside and scene.stage == DAY2_VILLAGE_STAGE and scene.village_xz is not None:
                 vx, vz = scene.village_xz
                 inner, outer = VILLAGE_APPROACH_RANGE
                 distance = math.hypot(float(pos[0]) - vx, float(pos[2]) - vz)
@@ -1492,6 +1588,10 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
                     inner <= distance <= outer
                     and st.get("on_ground") is not False
                     and not (st.get("in_water") or st.get("in_lava"))
+                )
+            if inside and scene.stage == STRONGHOLD_STAGE:
+                inside = (
+                    _dry_overworld_position(st) is not None and math.hypot(dx, dz) <= 6.0 and abs(dy) <= 2.0
                 )
             if not inside:
                 break
@@ -1677,6 +1777,40 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
     },
 }
 
+STRONGHOLD_TOOLS = ("mc_use_item", "mc_skill_scout_surface", "mc_skill_collect_drops", "mc_status", "mc_inventory")
+STRONGHOLD_FOCUS = (
+    {
+        "key": FOLLOW_ENDER_EYE,
+        "title": "60分：从村庄跟随末影之眼进入要塞",
+        "task": (
+            "从村庄出发寻找并进入天然主世界要塞。背包有 14 颗末影之眼。先在开阔处调用 "
+            "mc_use_item(item='ender_eye')。用回执中的 eye_vector=[dx,dz] 判断方向。"
+            "正 X 向东，正 Z 向南，两轴都明显时用对应对角方向。bearing_deg 的 0/90/180/270 分别是南/西/北/东。"
+            "若回执没有 eye_vector 或 projectile 指向其他实体，立即用 mc_get_entities(types=['eye_of_ender'], radius=32)，"
+            "把眼的位置减去你的位置得到方向。"
+            "沿眼指向用 mc_skill_scout_surface(direction=方向, target_types=['end_portal_frame'], "
+            "step_dist=30, max_duration_s=45) 分段推进。用 mc_skill_collect_drops 回收附近落下的眼后再测向，"
+            "尽量为门框保留 12 颗。"
+            "眼向下或转向时，分开扫描 end_portal_frame、stone_bricks 与 mossy_stone_bricks，"
+            "用 mc_skill_staircase(vertical='down', steps=8) 分段下挖，留火把和回程阶梯。"
+            "进入实际要塞结构才触发 follow_ender_eye。"
+        ),
+        "extra_tools": STRONGHOLD_TOOLS,
+    },
+    {
+        "key": ENTER_END,
+        "title": "60分：找到要塞传送门房并进入末地",
+        "task": (
+            "沿之前的地下入口继续调查要塞。用 mc_find_blocks(types=['end_portal_frame'], radius=64) "
+            "找传送门框。按观测到的坐标安全下到同层，先照明并确认岩浆与落脚点。"
+            "对每一个没有眼的门框，在可触及范围内调用 mc_interact(x=框的X, y=框的Y, z=框的Z, item='ender_eye')。"
+            "用 mc_get_block 核对门框的 eye 状态。全部激活后扫描 end_portal，走进传送门并用 mc_status 确认 the_end。"
+            "若死亡回村，拿补给沿记住的路线返回，必要时再用末影之眼与地表斥候重新定位。"
+        ),
+        "extra_tools": (*STRONGHOLD_TOOLS, "mc_interact", "mc_get_block"),
+    },
+)
+
 
 def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | None = None) -> bool:
     """Force the first `episodes` curriculum picks to a stage-specific target (SCENE-001).
@@ -1686,11 +1820,23 @@ def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | N
     budget is exhausted the original selector takes over again.
     """
     spec = SCENE_FOCUS.get(stage)
-    if episodes <= 0 or (not spec and stage != DAY2_VILLAGE_STAGE):
+    if episodes <= 0 or (not spec and stage not in {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE}):
         return False
     from mc_agent.harness import curriculum as cur
 
-    if stage == DAY2_VILLAGE_STAGE:
+    if stage == STRONGHOLD_STAGE:
+        targets = tuple(
+            cur.CurriculumTarget(
+                **step,
+                points=cur.RULES_ADVANCEMENT_POINTS[step["key"]],
+                tier=3,
+                budget_class="expedition",
+                advancement_id=step["key"],
+            )
+            for step in STRONGHOLD_FOCUS
+        )
+        remaining = None
+    elif stage == DAY2_VILLAGE_STAGE:
         origin = (scene.x, scene.y, scene.z) if scene is not None else None
         target = cur._build_day2_village_search_target(origin, ())
         target = dataclasses.replace(
@@ -1701,6 +1847,7 @@ def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | N
                 + target.task
             ),
         )
+        targets = (target,)
         remaining = 1
     else:
         target_kwargs = {k: v for k, v in spec.items() if k != "episodes"}
@@ -1712,22 +1859,27 @@ def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | N
                 f"酿造台在 ({x + 2}, {y}, {z})。查询水源时看这两个坐标和 level=0。"
                 + target_kwargs["task"]
             )
-        target = cur.CurriculumTarget(**target_kwargs)
+        targets = (cur.CurriculumTarget(**target_kwargs),)
         remaining = int(spec.get("episodes", episodes))
     original = cur.select_next_target
 
     def _wrapped(bot: Any, **kwargs: Any):
         nonlocal remaining
-        if remaining > 0:
+        if remaining is None or remaining > 0:
             frontier = cur.compute_advancement_frontier(bot, limit=50)
-            if target.advancement_id not in (frontier.get("completed_ids") or []):
-                remaining -= 1
-                return target, frontier
+            completed = frontier.get("completed_ids") or []
+            for target in targets:
+                if target.advancement_id not in completed:
+                    if remaining is not None:
+                        remaining -= 1
+                    return target, frontier
             remaining = 0
         return original(bot, **kwargs)
 
     cur.select_next_target = _wrapped
-    print(f"[Scene Focus] stage={stage} up to {remaining} opening episode(s) -> {target.key}", flush=True)
+    focus = " -> ".join(target.key for target in targets)
+    limit = "until verified" if remaining is None else f"up to {remaining} opening episode(s)"
+    print(f"[Scene Focus] stage={stage} {limit} -> {focus}", flush=True)
     return True
 
 
@@ -1891,6 +2043,7 @@ def main() -> int:
             "village",
             "village_trade",
             DAY2_VILLAGE_STAGE,
+            STRONGHOLD_STAGE,
             "nether",
             "nether_fortress",
             "nether_bastion",
@@ -1909,7 +2062,7 @@ def main() -> int:
         "--focus-episodes",
         type=int,
         default=2,
-        help="For scene stages, force this many opening episodes onto the stage-specific target (0 disables)",
+        help="Scene opening episode count (0 disables). The stronghold chain continues until both goals are verified.",
     )
     parser.add_argument(
         "--print-plan",
@@ -1920,7 +2073,7 @@ def main() -> int:
         "--plan-pos",
         type=str,
         default=None,
-        help="Anchor x,y,z used by --print-plan (default: first CANDIDATE_SITES entry)",
+        help="Anchor x,y,z used by --print-plan (defaults to the slot's search origin)",
     )
     args = parser.parse_args()
     if args.max_episodes < 0:
@@ -1936,7 +2089,8 @@ def main() -> int:
             except ValueError:
                 raise SystemExit("--plan-pos must be 'x,y,z'")
         else:
-            ax, az = CANDIDATE_SITES[args.site_index % len(CANDIDATE_SITES)]
+            sites = NETHER_CANDIDATE_SITES if args.stage in NETHER_STAGES else CANDIDATE_SITES
+            ax, az = sites[args.site_index % len(sites)]
             px, py, pz = float(ax) + 0.5, 64.0, float(az) + 0.5
         dim = scene_dimension(args.stage)
         plan = {
@@ -1952,6 +2106,20 @@ def main() -> int:
         }
         if args.stage == DAY2_VILLAGE_STAGE:
             plan["site_search"] = {"structure": "#minecraft:village", "distance_xz_m": list(VILLAGE_APPROACH_RANGE)}
+        elif args.stage == STRONGHOLD_STAGE:
+            plan["site_search"] = {
+                "village": "#minecraft:village",
+                "stronghold": "minecraft:stronghold",
+                "stronghold_distance_xz_m": list(STRONGHOLD_DISTANCE_RANGE),
+            }
+            plan["geofence_radius"] = STRONGHOLD_TRAVEL_RADIUS
+            plan["focus"] = [FOLLOW_ENDER_EYE, ENTER_END] if args.focus_episodes > 0 else []
+        elif args.stage in NETHER_STAGES:
+            plan["site_search"] = {
+                "structure": NETHER_STRUCTURES[args.stage],
+                "origin_xz": NETHER_CANDIDATE_SITES[args.site_index % len(NETHER_CANDIDATE_SITES)],
+                "max_distance_xz_m": NETHER_SITE_RADIUS,
+            }
         print(json.dumps(plan, ensure_ascii=False, indent=2))
         return 0
 
@@ -1991,13 +2159,20 @@ def main() -> int:
     ) as bot:
         starting_site = None
         village_xz = None
+        stronghold_xz = None
         try:
             st = ensure_bot_ready(bot, timeout_s=45.0)
             if args.day1:
                 starting_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=True)
             elif args.stage == DAY2_VILLAGE_STAGE:
                 starting_site, village_xz = select_day2_village_site(bot, bot_name, args.site_index)
-        except Exception as exc:  # BUG-039: never kill the process for a cooldown-bound slot
+            elif args.stage == STRONGHOLD_STAGE:
+                starting_site, village_xz, stronghold_xz = select_stronghold_village_site(bot, bot_name, args.site_index)
+            elif args.stage in NETHER_STAGES:
+                starting_site = select_nether_structure_site(
+                    bot, bot_name, NETHER_STRUCTURES[args.stage], start_idx=args.site_index,
+                )
+        except Exception as exc:
             msg = str(exc) or exc.__class__.__name__
             print(f"[Startup] {bot_name} not ready: {msg}", flush=True)
             _write_not_ready_summary(
@@ -2018,10 +2193,6 @@ def main() -> int:
                 bot_name,
                 start_idx=args.site_index,
             )
-        elif args.stage == "nether_fortress":
-            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:fortress", start_idx=args.site_index)
-        elif args.stage == "nether_bastion":
-            sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:bastion_remnant", start_idx=args.site_index)
         elif args.stage == "deep_water":
             sx, sy, sz, biome = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
         else:
@@ -2030,6 +2201,8 @@ def main() -> int:
             sx, sy, sz = math.floor(sx) + 0.5, float(round(sy)), math.floor(sz) + 0.5
         dim = scene_dimension(args.stage)
         scene = SceneAnchor(stage=args.stage, dim=dim, x=sx, y=sy, z=sz, village_xz=village_xz)
+        if args.stage == STRONGHOLD_STAGE:
+            scene = dataclasses.replace(scene, radius=STRONGHOLD_TRAVEL_RADIUS, drift_limit=STRONGHOLD_TRAVEL_RADIUS + 100)
         baseline = compute_stage_baseline(args.stage)
         prep = prepare_scene_ground(bot_name, args.stage, sx, sy, sz, dim=dim)
         if prep:
@@ -2037,8 +2210,8 @@ def main() -> int:
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
         entry_ok = verify_scene_entry(bot, bot_name, scene)
-        if args.stage == DAY2_VILLAGE_STAGE and not entry_ok:
-            msg = "Day 2 village approach landing could not be verified"
+        if not entry_ok and args.stage in (NETHER_STAGES | {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE}):
+            msg = f"Scene {args.stage} landing could not be verified"
             _write_not_ready_summary(
                 out_file,
                 bot_name=bot_name,
@@ -2053,7 +2226,7 @@ def main() -> int:
             _pin_villager_near(bot, bot_name, [sx + 2.0, sy, sz])
 
         geofence = _scene_geofence_cls(VoidGeofence)(
-            center_x=sx, center_z=sz, radius=220.0, margin=8.0
+            center_x=sx, center_z=sz, radius=scene.radius, margin=8.0
         )
         toolset = McToolset(bot, geofence=geofence, wait_for_cooldown=True)
 
@@ -2095,7 +2268,7 @@ def main() -> int:
         scene_state: dict[str, Any] = {"sup": None}
         portal_guard = (
             OverworldProgressGuard(bot, bot_name, scene)
-            if args.day1 or args.stage == DAY2_VILLAGE_STAGE
+            if args.day1 or args.stage in {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE}
             else None
         )
 
@@ -2235,6 +2408,7 @@ def main() -> int:
             },
             "end_status": {
                 "pos": st_end.get("pos"),
+                "dimension": st_end.get("dimension"),
                 "health": st_end.get("health"),
                 "food": st_end.get("food"),
                 "is_day": st_end.get("is_day"),
@@ -2252,6 +2426,10 @@ def main() -> int:
         if village_xz is not None:
             vx, vz = village_xz
             payload["scene"]["village"] = {"x": vx, "z": vz, "spawn_distance_m": round(math.hypot(sx - vx, sz - vz), 2)}
+        if stronghold_xz is not None:
+            hx, hz = stronghold_xz
+            payload["scene"]["stronghold"] = {"x": hx, "z": hz, "spawn_distance_m": round(math.hypot(sx - hx, sz - hz), 2)}
+            payload["scene"]["end_entry_verified"] = portal_guard is not None and portal_guard.portal_entered
         out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         print(
             f"\n[Wild Run Complete] {out_file} | final_score={summary.get('final_score')} "

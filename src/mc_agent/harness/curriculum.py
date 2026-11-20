@@ -777,6 +777,36 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         extra_tools=("mc_posture",),
         advancement_id="minecraft:nether/find_fortress",
     ),
+    "minecraft:nether/obtain_blaze_rod": CurriculumTarget(
+        key="minecraft:nether/obtain_blaze_rod",
+        title="30分：下界要塞击杀烈焰人并拾取烈焰棒（解锁酿造与末影之眼）",
+        points=30,
+        tier=3,
+        budget_class="expedition",
+        task=(
+            "解锁 nether/obtain_blaze_rod(30分)：已在下界要塞附近，请勿穿回主世界！"
+            "1) 调 mc_get_entities(radius=48) 与 mc_find_blocks(radius=48, types=['spawner','nether_bricks']) 定位烈焰人或刷怪笼；"
+            "2) 靠近烈焰人前确认副手有盾并保持掩体，发现 blaze 后立即调 mc_skill_combat(action='attack', entity_id=<blaze_id>) 或 mc_attack 集火击杀（切勿只看不打）；"
+            "3) 击杀后立刻靠近拾取掉落的 blaze_rod（收集 1~2 根即解锁成就，若顺路看到 nether_wart 一并采收）。"
+        ),
+        extra_tools=("mc_skill_combat", "mc_posture"),
+        advancement_id="minecraft:nether/obtain_blaze_rod",
+    ),
+    "minecraft:story/follow_ender_eye": CurriculumTarget(
+        key="minecraft:story/follow_ender_eye",
+        title="60分：掷末影之眼定位并进入主世界要塞（直通末地传送门）",
+        points=60,
+        tier=3,
+        budget_class="expedition",
+        task=(
+            "解锁 story/follow_ender_eye(60分) 并顺势推进至末地传送门："
+            "1) 若包内有 ender_eye，先选定主手调 mc_use_item(item='ender_eye') 掷出末影之眼，并立刻调 mc_get_entities(radius=32) 观察 eye_of_ender 飞行方向；"
+            "2) 沿末影之眼飞行方向调用 mc_skill_scout_surface(direction=<方向>, max_duration_s=45, step_dist=30) 高速推进 150~250 格后再次掷眼复核；"
+            "3) 当末影之眼向下钻地或原地盘旋时，调 mc_skill_staircase(vertical='down', steps=12) 下挖并扫描 stone_bricks / mossy_stone_bricks / end_portal_frame / spawner，进入要塞房间即解锁！"
+        ),
+        extra_tools=("mc_use_item", "mc_skill_scout_surface", "mc_interact", "mc_posture"),
+        advancement_id="minecraft:story/follow_ender_eye",
+    ),
 }
 
 

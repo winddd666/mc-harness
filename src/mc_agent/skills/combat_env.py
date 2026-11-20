@@ -878,6 +878,17 @@ class CombatEnv:
                 return name
         return None
 
+    def dig_cover_pocket(self, skills: Any) -> dict[str, Any]:
+        result = skills.dig_cover_pocket()
+        self.invalidate_block_cache()
+        pocket = result.get("pocket")
+        if not result.get("ok") or not pocket:
+            return result
+        pos = result.get("pos_after")
+        if pos and [math.floor(pos[0]), math.floor(pos[1] + 0.05), math.floor(pos[2])] == pocket[0]:
+            return result
+        return {**result, "ok": False, "requires_replan": True, "reason": "cover_not_entered"}
+
     def build_tactical(
         self,
         mode: str,
@@ -910,8 +921,7 @@ class CombatEnv:
 
         if norm_mode == "cover_pocket":
             if self.skills is not None and hasattr(self.skills, "dig_cover_pocket"):
-                res = self.skills.dig_cover_pocket()
-                self.invalidate_block_cache()
+                res = self.dig_cover_pocket(self.skills)
                 return {
                     "ok": bool(res.get("ok")),
                     "mode": "cover_pocket",
@@ -1068,6 +1078,9 @@ class CombatEnv:
 
     def escape_lava(self, *, force_rim_escape: bool = False) -> dict[str, Any]:
         """Deterministically escape lava using water douse (overworld), safe-yaw jump sprint, wall-notch/pillar climb, and live `in_lava` verification."""
+        def _landing_unconfirmed(status: dict[str, Any]) -> bool:
+            return status.get("on_ground") is False and not status.get("in_water")
+
         try:
             st = self.bot.status()
         except (ApiError, httpx.HTTPError):
@@ -1088,12 +1101,14 @@ class CombatEnv:
                     force_rim_escape and self._is_near_or_over_lava(st)
                 )
             if not rim_lava_active:
+                unconfirmed = _landing_unconfirmed(st)
                 return {
-                    "ok": True,
+                    "ok": not unconfirmed,
                     "in_lava": False,
                     "already_dry": True,
                     "pos_after": st.get("pos"),
                     "actions": [],
+                    **({"reason": "lava_landing_unconfirmed"} if unconfirmed else {}),
                 }
 
         actions: list[str] = []
@@ -1110,7 +1125,7 @@ class CombatEnv:
             except (ApiError, httpx.HTTPError):
                 actions.append("place_water_feet_failed")
             st = self._safe_status(st)
-            if not bool(st.get("in_lava")):
+            if not st.get("in_lava") and not _landing_unconfirmed(st):
                 return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
             try:
                 self.bot.call("use_item", {"item": "water_bucket"})
@@ -1118,7 +1133,7 @@ class CombatEnv:
             except (ApiError, httpx.HTTPError):
                 pass
             st = self._safe_status(st)
-            if not bool(st.get("in_lava")):
+            if not st.get("in_lava") and not _landing_unconfirmed(st):
                 return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
 
         # 1. If submerged deep in lava, swim up first so surface bank scan can find solid footing
@@ -1153,7 +1168,10 @@ class CombatEnv:
         def _should_exit_lava(st_now: dict[str, Any]) -> bool:
             if _did_respawn_during_lava(st_now):
                 return True
-            if bool(st_now.get("in_lava")) or self._is_airborne_above_lava(st_now, start_pos=pos0):
+            if (
+                st_now.get("in_lava") or _landing_unconfirmed(st_now)
+                or self._is_airborne_above_lava(st_now, start_pos=pos0)
+            ):
                 return False
             if rim_lava_active:
                 p_chk = st_now.get("pos") or pos0
@@ -1171,13 +1189,15 @@ class CombatEnv:
                 and (not still_in_lava)
                 and self._is_airborne_above_lava(st_now, start_pos=pos0)
             )
+            unconfirmed = not respawned and not still_in_lava and _landing_unconfirmed(st_now)
             return {
-                "ok": (not respawned) and (not still_in_lava) and (not airborne_over_lava),
+                "ok": not (respawned or still_in_lava or unconfirmed or airborne_over_lava),
                 "in_lava": still_in_lava,
                 "pos_after": pos_now,
                 "actions": actions,
                 **({"respawned": True} if respawned else {}),
                 **({"airborne_above_lava": True} if airborne_over_lava else {}),
+                **({"reason": "lava_landing_unconfirmed"} if unconfirmed else {}),
             }
 
         for _ in range(3):
@@ -1494,16 +1514,25 @@ class CombatEnv:
         wait_for_ground: bool = False,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
-        st0 = self.bot.status()
-        if (
-            wait_for_ground and st0.get("pos") and st0.get("on_ground") is False
-            and st0.get("alive") is not False and st0.get("ready") is not False
-            and not st0.get("in_lava") and not st0.get("in_water")
-        ):
-            # Ranged hurt is often reported during the knockback hop.
-            before = st0
+        def respawned_since(before: dict[str, Any], after: dict[str, Any]) -> bool:
+            start, end = before.get("pos"), after.get("pos")
+            return bool(
+                after.get("alive") is False
+                or (after.get("dimension") and before.get("dimension") and after["dimension"] != before["dimension"])
+                or (after.get("last_death") is not None and after["last_death"] != before.get("last_death"))
+                or (start and end and math.hypot(end[0] - start[0], end[2] - start[2]) > 64.0)
+            )
+
+        def settle_airborne(status: dict[str, Any], life: dict[str, Any]) -> dict[str, Any]:
+            # The initial knockback and the retreat pulse can each end midair.
             deadline = time.monotonic() + 0.45
+            sample = status
             for _ in range(3):
+                if (
+                    sample.get("on_ground") is not False or sample.get("ready") is False
+                    or sample.get("in_water") or sample.get("in_lava") or respawned_since(life, sample)
+                ):
+                    break
                 if deadline - time.monotonic() <= 0.1:
                     break
                 time.sleep(0.1)
@@ -1511,26 +1540,30 @@ class CombatEnv:
                 if remaining <= 0:
                     break
                 try:
-                    landed = self.bot.call("status", method="GET", timeout_s=remaining, allow_reauth=False)
+                    observed = self.bot.call("status", method="GET", timeout_s=remaining, allow_reauth=False)
                 except (ApiError, httpx.HTTPError):
                     break
-                pos = landed.get("pos") or before["pos"]
-                if (
-                    landed.get("alive") is False
-                    or (landed.get("dimension") and before.get("dimension") and landed["dimension"] != before["dimension"])
-                    or (landed.get("last_death") is not None and landed["last_death"] != before.get("last_death"))
-                    or math.hypot(pos[0] - before["pos"][0], pos[2] - before["pos"][2]) > 64.0
-                ):
-                    return {"ok": False, "mode": "respawned", "respawned": True, "moved_dist": 0.0, "pos_after": pos}
-                if landed.get("on_ground") is True and not landed.get("in_water"):
-                    st0 = landed
-                    break
-                if landed.get("ready") is False or landed.get("in_water") or landed.get("in_lava"):
-                    break
+                sample = {**observed, "on_ground": observed.get("on_ground") is True}
+            return sample
+
+        st0 = self.bot.status()
+        entered_water = False
+        if (
+            wait_for_ground and st0.get("pos") and st0.get("on_ground") is False
+            and st0.get("alive") is not False and st0.get("ready") is not False
+        ):
+            before = st0
+            st0 = settle_airborne(before, before)
+            if respawned_since(before, st0):
+                return {
+                    "ok": False, "mode": "respawned", "respawned": True, "moved_dist": 0.0,
+                    "pos_after": st0.get("pos") or before["pos"],
+                }
+            entered_water = bool(st0.get("in_water") and not before.get("in_water"))
         pos0 = st0.get("pos")
         if not pos0 or st0.get("alive") is False or st0.get("ready") is False:
             return {"ok": False, "mode": "flee", "reason": "not_ready", "moved_dist": 0.0, "pos_after": pos0}
-        if st0.get("in_lava") or st0.get("on_ground") is False:
+        if st0.get("in_lava") or entered_water or st0.get("on_ground") is False:
             return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0, "pos_after": pos0}
         if threat_pos is None:
             nh = st0.get("nearest_hostile")
@@ -1592,12 +1625,7 @@ class CombatEnv:
         def retreat_result(st: dict[str, Any]) -> dict[str, Any]:
             pos = st.get("pos") or pos0
             moved = math.hypot(float(pos[0]) - float(pos0[0]), float(pos[2]) - float(pos0[2]))
-            respawned = (
-                st.get("alive") is False
-                or moved > 64.0
-                or (st.get("dimension") and st0.get("dimension") and st["dimension"] != st0["dimension"])
-                or (st.get("last_death") is not None and st["last_death"] != st0.get("last_death"))
-            )
+            respawned = respawned_since(st0, st)
             unsafe = (
                 st.get("ready") is False or st.get("in_lava") or st.get("in_water") or st.get("on_ground") is False
             )
@@ -1611,6 +1639,8 @@ class CombatEnv:
             }
 
         st_mid = self._safe_status({**st0, "ready": False})
+        if wait_for_ground:
+            st_mid = settle_airborne(st_mid, st0)
         result = retreat_result(st_mid)
         if short_step or result.get("respawned") or result.get("reason") == "unsafe_landing":
             return result
@@ -1731,6 +1761,7 @@ class CombatEnv:
         *,
         max_radius: int = 24,
         keep_shield: bool = False,
+        shield_target_id: int | None = None,
         surface_first: bool = False,
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
@@ -1994,6 +2025,12 @@ class CombatEnv:
                     self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": True})
                 except ApiError:
                     pass
+        if keep_shield and isinstance(shield_target_id, int):
+            try:
+                self.bot.call("look", {"entity_id": shield_target_id}, timeout_s=0.9, allow_reauth=False)
+                actions.append("face_water_attacker")
+            except (ApiError, httpx.HTTPError):
+                pass
         landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")
         return {
             "ok": not still_wet and landed,
@@ -2255,7 +2292,7 @@ class SubcorticalInstinctController:
             esc = env.surface_from_water(st)
             actions.append({"action": "water_surface", **esc})
             if not esc.get("respawned") and (not esc.get("ok") or esc.get("in_water")):
-                shore = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield)
+                shore = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield, shield_target_id=mob_id)
                 actions.append({"action": "water_surface_shore", "ok": bool(shore.get("ok"))})
 
         # 1) Creeper emergency: NEVER melee in blast radius — shield & retreat / seal shaft
@@ -2296,8 +2333,7 @@ class SubcorticalInstinctController:
                     except (ApiError, httpx.HTTPError):
                         pass
                 flee_res = env.flee(c_pos, distance=11.5, urgent=True, allow_shaft_seal=False)
-                actions.append({"action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")), "moved": flee_res.get("moved_dist")})
-                st_chk = env._safe_status(st)
+                st_chk = env._safe_status({**st, "ready": False})
                 post_h = self._find_live_hostiles(env, radius=8)
                 close_creeper = next(
                     (
@@ -2317,6 +2353,21 @@ class SubcorticalInstinctController:
                     ):
                         close_creeper = nh_chk
                 creeper_still_close = close_creeper is not None
+                actions.append({
+                    "action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")) and not creeper_still_close,
+                    "moved": flee_res.get("moved_dist"),
+                    **({"creeper_distance": self._entity_dist(st_chk.get("pos"), close_creeper)} if close_creeper else {}),
+                })
+                close_pos = close_creeper.get("pos") if close_creeper else None
+                if (
+                    not has_shield and isinstance(close_pos, (list, tuple)) and len(close_pos) >= 3
+                    and flee_res.get("ok") and not flee_res.get("respawned")
+                    and st_chk.get("ready") is not False and st_chk.get("alive") is not False
+                    and st_chk.get("on_ground") is True and not st_chk.get("in_water") and not st_chk.get("in_lava")
+                    and st_chk.get("last_death") == st.get("last_death") and time.monotonic() < deadline
+                ):
+                    followup = env.flee(close_pos, distance=3.5, urgent=True, allow_shaft_seal=False)
+                    actions.append({"action": "creeper_followup_retreat", **followup})
                 if (
                     (not flee_res.get("ok") or creeper_still_close)
                     and not flee_res.get("respawned")
@@ -2351,7 +2402,7 @@ class SubcorticalInstinctController:
                     if not esc_cur.get("respawned") and (
                         not esc_cur.get("ok") or esc_cur.get("in_water") or st_w.get("in_water")
                     ):
-                        shore_w = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield)
+                        shore_w = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield, shield_target_id=mob_id)
                         actions.append({"action": "water_surface_shore", "ok": bool(shore_w.get("ok"))})
                         st_w = env._safe_status(st_w)
                     nh_w = st_w.get("nearest_hostile")
@@ -2484,6 +2535,8 @@ class SubcorticalInstinctController:
                         covered = True
                         mode = "cover_pocket"
                         actions.append({"action": "cover_pocket", "ok": True})
+                    elif cov.get("reason") == "cover_not_entered":
+                        actions.append({"action": "cover_pocket", "ok": False, "reason": "cover_not_entered"})
                 now_flee = time.monotonic()
                 if now_flee - self._last_flee_at > 25.0:
                     self._recent_flee_streak = 0
@@ -2503,12 +2556,18 @@ class SubcorticalInstinctController:
                     )
                 )
                 if should_bunker:
-                    bunk = env.skills.dig_safety_bunker(urgent=True)
-                    if bunk.get("ok"):
-                        covered = True
-                        mode = "bunker_sealed"
-                        self._recent_flee_streak = 0
-                        actions.append({"action": "emergency_bunker", "ok": True})
+                    try:
+                        bunk = env.skills.dig_safety_bunker(urgent=True)
+                    except ApiError as err:
+                        if err.code != "missing_item":
+                            raise
+                        actions.append({"action": "emergency_bunker", "ok": False, "code": err.code})
+                    else:
+                        if bunk.get("ok"):
+                            covered = True
+                            mode = "bunker_sealed"
+                            self._recent_flee_streak = 0
+                            actions.append({"action": "emergency_bunker", "ok": True})
                 if not covered:
                     if has_shield and mob_id is not None:
                         try:
@@ -2516,7 +2575,10 @@ class SubcorticalInstinctController:
                             env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                         except (ApiError, httpx.HTTPError):
                             pass
-                    fl = env.flee(mob_pos, distance=14.0, urgent=True, wait_for_ground=mob_name in RANGED_MOBS)
+                    fl = env.flee(
+                        mob_pos, distance=14.0, urgent=True,
+                        wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon,
+                    )
                     actions.append({
                         "action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist"),
                         **({"reason": fl["reason"]} if fl.get("reason") else {}),
