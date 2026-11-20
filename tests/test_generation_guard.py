@@ -4007,6 +4007,50 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert skills.bot is bot
 
 
+@pytest.mark.parametrize("landing", ["grounded", "airborne", "in_water"])
+def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    moves = []
+    posture = []
+    status = {"pos": [10937.5, 62.5, -11007.3], "in_water": True, "on_ground": False,
+              "alive": True, "ready": True}
+
+    class ShoreBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": [10938, 63, -11008]}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "posture":
+                posture.append(body)
+            if action == "move_to":
+                moves.append(body)
+                if len(moves) == 1:
+                    status.update(pos=[10937.7, 63.3, -11007.3], in_water=False)
+                else:
+                    assert posture[-1] == {"shield": True, "sneak": False, "jump": False}
+                    if landing == "grounded":
+                        status.update(pos=[10938.5, 64.0, -11007.5], on_ground=True)
+                    elif landing == "in_water":
+                        status.update(pos=[10937.7, 63.0, -11007.3], in_water=True)
+            return {"ok": True}
+
+    result = CombatEnv(ShoreBot()).escape_deep_water_to_shore(keep_shield=True)
+
+    assert len(moves) == 2
+    assert moves[1]["range"] < moves[0]["range"]
+    assert moves[1]["timeout"] < moves[0]["timeout"]
+    assert moves[1]["stop_on"] == ["death"]
+    assert tuple(moves[1][axis] for axis in ("x", "y", "z")) == (10938.5, 64.0, -11007.5)
+    assert result["ok"] is (landing == "grounded")
+    assert result["in_water"] is (landing == "in_water")
+    assert posture[-1]["jump"] is (landing == "in_water")
+
+
 def test_unstick_canopy_branch_shares_the_tool_budget(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])

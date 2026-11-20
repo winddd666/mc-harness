@@ -1620,10 +1620,11 @@ class CombatEnv:
                 "pos_after": st0.get("pos"),
             }
         if not bool(st0.get("in_water")):
+            landed = st0.get("on_ground") is not False
             return {
-                "ok": True,
+                "ok": landed,
                 "in_water": False,
-                "mode": "already_dry",
+                "mode": "already_dry" if landed else "shore_landing_unconfirmed",
                 "pos_after": st0.get("pos"),
             }
 
@@ -1837,13 +1838,44 @@ class CombatEnv:
             )
         except ApiError:
             pass
+        # A jump can clear the water flag before the bot has reached the bank.
+        if (
+            shore_target is not None and not still_wet and st_end.get("on_ground") is False
+            and not st_end.get("in_lava") and math.dist(pos_end[:3], shore_target) <= 2.0
+        ):
+            try:
+                self.bot.call(
+                    "move_to",
+                    {
+                        "x": shore_target[0], "y": shore_target[1], "z": shore_target[2],
+                        "range": 0.25, "timeout": 1600, "stop_on": ["death"],
+                    },
+                    timeout_s=2.5, allow_reauth=False,
+                )
+                actions.append("shore_landing")
+            except (ApiError, httpx.HTTPError) as err:
+                if isinstance(err, httpx.HTTPError):
+                    self._best_effort_stop()
+            st_end = self._safe_status({**st_end, "ready": False})
+            interruption = interrupted_water_escape(st_end)
+            if interruption is not None:
+                return interruption
+            pos_end = st_end.get("pos") or pos_end
+            still_wet = bool(st_end.get("in_water"))
+            if still_wet:
+                try:
+                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": True})
+                except ApiError:
+                    pass
+        landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")
         return {
-            "ok": not still_wet,
+            "ok": not still_wet and landed,
             "in_water": still_wet,
             "mode": "move_to_shore" if shore_target is not None else "surface_retreat",
             "shore_target": shore_target,
             "actions": actions,
             "pos_after": pos_end,
+            **({"reason": "shore_landing_unconfirmed"} if not still_wet and not landed else {}),
         }
 
     def guard_lava_edge(
