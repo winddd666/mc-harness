@@ -346,13 +346,17 @@ class GenerationGuard:
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int], *, ranged: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
-        if "nether" in str(status.get("dimension") or "").lower() or (ranged and isinstance(skills, MacroSkills)):
+        health = status.get("health")
+        # The legacy macro cannot counter below 11 HP and falls through to an unchecked sprint-jump.
+        low_health_on_ground = status.get("on_ground") is True and isinstance(health, (int, float)) and health < 11.0
+        retreat_only = ranged or low_health_on_ground
+        if "nether" in str(status.get("dimension") or "").lower() or (retreat_only and isinstance(skills, MacroSkills)):
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
             if not pos:
                 _, _, _, pos = self._extract_hostile_info(status)
             return self.combat_env.flee(pos)
         return skills.defend_or_flee(
-            attacker=attacker, counts=counts, health=status.get("health"), urgent=True, geofence=self.geofence,
+            attacker=attacker, counts=counts, health=health, urgent=True, geofence=self.geofence,
         )
 
     def _inside_own_shaft(self) -> bool:
