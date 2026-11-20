@@ -4021,6 +4021,42 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
         assert actions[0]["result"]["mode"] == ("respawned" if scenario == "close_respawn" else "surfaced")
 
 
+@pytest.mark.parametrize("safe_sidestep", [True, False])
+def test_bug069_retreat_can_sidestep_on_ground_when_long_routes_are_unsafe(safe_sidestep):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    status = {"pos": [0.5, 64.0, 0.5], "alive": True, "ready": True, "on_ground": True}
+    controls = []
+
+    class NarrowBankBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, z = body["pos"]
+                far_edge = 2 if safe_sidestep else 1
+                return {"name": "stone" if x == 0 and y == 63 and 0 <= z <= far_edge else "air"}
+            if action == "look":
+                status["yaw"] = body["yaw"]
+            if action == "control":
+                controls.append(body)
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                status["pos"] = [0.5 + 0.7 * dx, 64.0, 0.5 + 0.7 * dz]
+            return {"ok": True}
+
+    result = CombatEnv(NarrowBankBot()).flee([4.5, 64, 0.5], allow_shaft_seal=False)
+
+    assert result["ok"] is safe_sidestep
+    if safe_sidestep:
+        control, = controls
+        assert result["pos_after"] == pytest.approx([0.5, 64.0, 1.2])
+        assert control["forward"] and not control["sprint"] and not control["jump"]
+        assert control["ms"] < 350
+    else:
+        assert controls == []
+
+
 @pytest.mark.parametrize("room_for_short_exit", [True, False])
 def test_flee_uses_verified_short_exit_when_full_followup_hits_drop(room_for_short_exit):
     from mc_agent.skills.combat_env import CombatEnv
@@ -4101,7 +4137,7 @@ def test_guardian_damage_retreat_checks_terrain(dimension, health):
     assert mutations == []
 
 
-@pytest.mark.parametrize("water_state", ["surfaced", "submerged", "drowning"])
+@pytest.mark.parametrize("water_state", ["surfaced", "submerged", "drowning", "failed_unstick"])
 def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypatch, water_state):
     status = {"pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180,
               "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True}
@@ -4129,15 +4165,19 @@ def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypa
 
     monkeypatch.setattr(guard, "_escape_water", failed_water_macro)
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", failed_shore)
-    receipt = guard.handle_preemption({"source": "tool_interrupted_hurt"}, interrupted_name="mc_skill_mine_dfs")
-    assert receipt["reflex_mode"] == "water_surface"
-    assert calls == ["water_macro", "shore"]
-    calls.clear()
-    status.update(submerged=water_state != "surfaced", oxygen=0 if water_state == "drowning" else 180)
+    if water_state == "failed_unstick":
+        status.update(submerged=False)
+        receipt = {"ok": False, "in_water": True, "error": {"code": "water_escape_failed"}}
+    else:
+        receipt = guard.handle_preemption({"source": "tool_interrupted_hurt"}, interrupted_name="mc_skill_mine_dfs")
+        assert receipt["reflex_mode"] == "water_surface"
+        assert calls == ["water_macro", "shore"]
+        calls.clear()
+        status.update(submerged=water_state != "surfaced", oxygen=0 if water_state == "drowning" else 180)
 
     guard.stabilize_after_tools([json.dumps(receipt)])
 
-    expected = {"surfaced": [], "submerged": ["shore"], "drowning": ["urgent_shore"]}
+    expected = {"surfaced": [], "submerged": ["shore"], "drowning": ["urgent_shore"], "failed_unstick": ["shore"]}
     assert calls == expected[water_state]
 
 

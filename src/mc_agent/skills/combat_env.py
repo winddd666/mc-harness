@@ -1477,24 +1477,35 @@ class CombatEnv:
             pref_yaw = float(st0.get("yaw") or 0.0) + math.pi
 
         self.invalidate_block_cache()
+        short_step = False
         for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180):
             chosen_yaw = pref_yaw + math.radians(angle)
             route = self.probe_retreat(pos0, chosen_yaw, 3.5)
             if route is not None:
                 break
         else:
-            return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0, "pos_after": pos0}
+            if st0.get("on_ground") is True and not st0.get("in_water"):
+                foot_y = math.floor(float(pos0[1]) + 0.05)
+                for offset in (math.pi / 2, -math.pi / 2):
+                    chosen_yaw = pref_yaw + offset
+                    route = self.probe_retreat(pos0, chosen_yaw, 1.65)
+                    if route == (foot_y, False):
+                        short_step = True
+                        break
+            if not short_step:
+                return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0, "pos_after": pos0}
 
         _, needs_jump = route
+        pulse_ms = 220 if short_step else (450 if urgent else 350)
         try:
             self.bot.call("look", {"yaw": chosen_yaw, "pitch": 0.0})
             self.bot.call(
                 "control",
                 {
                     "forward": True,
-                    "sprint": True,
+                    "sprint": not short_step,
                     "jump": needs_jump or bool(st0.get("in_water")),
-                    "ms": 450 if urgent else 350,
+                    "ms": pulse_ms,
                     "stop_on": ["death"],
                 },
             )
@@ -1515,7 +1526,7 @@ class CombatEnv:
                 st.get("ready") is False or st.get("in_lava") or st.get("in_water") or st.get("on_ground") is False
             )
             return {
-                "ok": not respawned and not unsafe and moved >= 1.5,
+                "ok": not respawned and not unsafe and moved >= (0.35 if short_step else 1.5),
                 "mode": "respawned" if respawned else "flee",
                 "moved_dist": round(moved, 2),
                 "pos_after": pos,
@@ -1525,7 +1536,7 @@ class CombatEnv:
 
         st_mid = self._safe_status({**st0, "ready": False})
         result = retreat_result(st_mid)
-        if result.get("respawned") or result.get("reason") == "unsafe_landing":
+        if short_step or result.get("respawned") or result.get("reason") == "unsafe_landing":
             return result
 
         mid_pos = result["pos_after"]
