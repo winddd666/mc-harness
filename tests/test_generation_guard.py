@@ -3911,7 +3911,7 @@ def test_unstick_water_branch_shares_the_tool_budget(monkeypatch):
             return {"ok": True}
 
     def slow_water_escape(skills):
-        for _ in range(6):
+        for _ in range(9):
             skills.bot.call("move_to", {}, timeout_s=None)
         return {"ok": False, "in_water": True}
 
@@ -3920,7 +3920,9 @@ def test_unstick_water_branch_shares_the_tool_budget(monkeypatch):
     skills = MacroSkills(bot)
     guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
     original_call = bot.call
-    result = json.loads(guard.run_tool_with_reflex("mc_skill_unstick", lambda: json.dumps(skills.unstick())))
+    result = json.loads(
+        guard.run_tool_with_reflex("mc_skill_unstick", lambda: json.dumps(skills.unstick(max_duration_s=60.0)))
+    )
 
     assert result["ok"] is False and result["requires_replan"] is True
     assert result["error"]["code"] == "time_budget"

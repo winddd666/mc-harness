@@ -5206,9 +5206,18 @@ class MacroSkills:
                 def __init__(self) -> None:
                     self.last_status = st
 
-                def call(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+                def call(
+                    self,
+                    path: str,
+                    body: dict[str, Any] | None = None,
+                    *,
+                    timeout_s: float | None = None,
+                    **kwargs: Any,
+                ) -> dict[str, Any]:
                     cap = 15.0 if path == "dig" else 6.0 if path == "move_to" else 3.0
-                    return _call(path, body, cap=cap)
+                    if timeout_s is not None:
+                        cap = min(cap, float(timeout_s))
+                    return _call(path, body, cap=cap, **kwargs)
 
                 def status(self) -> dict[str, Any]:
                     self.last_status = _call("status", method="GET") if isinstance(bot, BotSession) else bot.status()

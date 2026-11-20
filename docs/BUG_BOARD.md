@@ -913,10 +913,11 @@
 - BUG-008 的库存变化判定只覆盖桶类。玻璃瓶仍会把无效交互报成功，目标没得到换水格提示。回执应确认玻璃瓶消耗与水药瓶入包，或明确提示改找可达水源。场景侧核查出生点给出的水格是否可交互。P2-27 继续跟踪 `mc_skill_brew` 的参数说明。 [交互判定](../src/mc_agent/harness/mc_tools.py#L1353)
 - 验收覆盖无变化且无物品增减、方块不变但确实装水两路。真实酿造开局可在前两集得到水药瓶并将其投进酿造台。
 
-### BUG-063 | P2 | Slice D1 + Integrator（评测口径）| 状态: OPEN（过夜收官复核）
+### BUG-063 | P2 | Slice D1 + Integrator（评测口径）| 状态: OPEN（D1 离线通过，待 Integrator 合入）
 
 - Fleet 的 `Deaths` 同时为 `guardian.incident/death_or_connection_changed` 和含 `死亡` 的 `mc.notable_events` 各加一。连接变化可以进入前者，真实死亡也可能两处都出现。同一消息里的多条死亡只会在后者加一。`r26/hy4_hy_6_nether_bastion` 榜单为 **51**，JSONL 有 **20 条明确死亡回执**，分布在 11 集。 [计数代码](../scripts/v2_fleet.py#L569) · [收官榜单](../runs/hy4_audit_r26/triage-hy4_audit_r26.md)
 - 验收时区分死亡、重生和连接变化。有事件 ID 时按 Bot 与 ID 去重，缺 ID 时展示回执口径。离线夹具覆盖单次死亡同时出现在两个事件、仅掉线、同一消息两次死亡。
+- D1 用只读回放复现 `hy4_audit_r26/hy4_hy_6_nether_bastion` 的 **51 = 31 条混合 Guardian 事件 + 20 条含死亡的消息**。新 Fleet 输出为 **20 次明确死亡（全部无源 ID）**、**22 次重生或出生回执**、**0 条显式连接变化**、**31 条混合事件**。旧日志的连接变化总数未知。离线夹具通过双发、掉线、同批两死、`×N` 和跨 Bot 去重。 [EP02 混合事件](../runs/hy4_audit_r26/hy4_hy_6_nether_bastion/20261119-094622-266718.events.jsonl#L1017) · [EP02 死亡与重生回执](../runs/hy4_audit_r26/hy4_hy_6_nether_bastion/20261119-094622-266718.events.jsonl#L1020) · [D1 报告](../../s-triage/docs/D1-r11-triage.md#4ca-bug-063-fleet-死亡口径与-r26-对账)
 
 ## P2 Backlog（不抢 P0/P1；KB/脚本类由 #6 随时消化，核心代码类由 #2/#3/#4 在各自 P0/P1 清零后顺延处理）
 
