@@ -1404,6 +1404,10 @@ class GenerationGuard:
                                 inv=inv,
                                 attacker=attacker if isinstance(attacker, dict) else None,
                             )
+                        if not has_shield and not att_pos_r and isinstance(att_id_r, int):
+                            shooter_pos = self._find_hostile_position(att_id_r, att_name_r)
+                            if shooter_pos is not None:
+                                attacker = {**(att_obj or {}), "pos": shooter_pos}
                         cf = self._action(
                             "combat_or_flee",
                             lambda: self._defend_or_flee(status, attacker, counts, ranged=True),

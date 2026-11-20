@@ -3945,6 +3945,36 @@ def test_ranged_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, l
         assert retreat["respawned"] is True
 
 
+def test_ranged_retreat_without_shield_resolves_the_shooter_from_live_entities(monkeypatch):
+    retreat_targets = []
+    shooter = {"id": 44, "name": "pillager", "pos": [-10936.8, 63.0, -10992.5]}
+
+    class RiverbankBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [-10934.7, 63.2, -10993.8], "health": 16.0, "food": 20, "ready": True, "alive": True,
+                    "on_ground": False, "nearest_hostile": {"id": 44, "name": "pillager", "dist": 2.6},
+                }
+            if action == "events":
+                event = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": {"id": 44, "name": "pillager"}}
+                return {"events": [event] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": [], "offhand": None}
+            if action == "get_entities":
+                return {"entities": [{"id": 47, "name": "pillager", "pos": [-10931.0, 63.0, -10992.5]}, shooter]}
+            return {"ok": True}
+
+    def retreat(threat_pos, **kwargs):
+        retreat_targets.append(threat_pos)
+        return {"ok": True, "mode": "flee"}
+
+    guard = GenerationGuard(RiverbankBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", retreat)
+    assert guard.poll() is not None
+    assert retreat_targets == [shooter["pos"]]
+
+
 @pytest.mark.parametrize(
     "entry, scenario",
     [
