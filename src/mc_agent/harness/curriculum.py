@@ -462,12 +462,12 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         task=(
             "将装备升级至铁器并完成铁煤层发育：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
             "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
-            "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（若包内有生肉可顺手烤熟）；"
+            "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
             "4) 优先调 mc_skill_craft_gear('iron_pickaxe')，铁锭充裕时顺手合出 shield（副手盾）与 1 件铁甲（如 iron_boots/iron_chestplate）完成安全成型即收工。"
         ),
         post_ensure_task=(
             "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=6) 采入；"
-            "若地表无暴露铁矿再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6) -> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
+            "若地表无暴露铁矿再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
         ),
         extra_tools=("mc_skill_container",),
         advancement_id="minecraft:story/iron_tools",
@@ -2447,6 +2447,9 @@ class CurriculumSupervisor:
 
             if target.key == "island_recon_sweep" and report.get("status") not in {"paused", "paused_for_world_job"}:
                 self.recon_completed = True
+            if target.key == "day2_village_search" and report.get("status") not in {"paused", "paused_for_world_job"}:
+                # Cap daytime village search to 1 bounded episode per 30m to prevent sunk-cost 0-score wandering
+                self.cooldowns["day2_village_search"] = time.monotonic() + 1800.0
 
             report["curriculum_episode"] = ep_index
             report["curriculum_target"] = target.key
