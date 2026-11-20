@@ -2881,6 +2881,8 @@ class MiningDFSEngine:
             anc = (int(anc_raw[0]), int(anc_raw[1]), int(anc_raw[2]))
             if anc == skip_collar or (anc in self.exhausted_collars and not allow_retired):
                 continue
+            if allow_retired and anc[1] <= cur_pos[1]:
+                continue
             # Pending stairs still carry their original branch target layer.
             saved_target_y = sh.get("target_y")
             if not allow_retired and saved_target_y is not None and abs(int(saved_target_y) - self.target_y) > SCAN_BAND:
@@ -3183,15 +3185,15 @@ class MiningDFSEngine:
             hp_now = 20.0
         hp_ref = [hp_now]
 
-        # 1) Preferred: walk our own corridor (no digging at all).
+        # 1) Preferred: walk our own corridor to a higher collar.
         walked = False
-        attempted_collar = None
-        if self.collar_node_id is not None and self.collar_node_id in self.nodes:
-            attempted_collar = self.nodes[self.collar_node_id].anchor
+        collar = self.nodes.get(self.collar_node_id)
+        attempted_collar = collar.anchor if collar is not None else None
+        if collar is not None and collar.anchor[1] > start_y:
             previous_y = start_y
             while True:
                 walked, walk_error = self._walk_to_collar(
-                    self.collar_node_id, min_hp_ref=hp_ref, deadline=deadline,
+                    collar.node_id, min_hp_ref=hp_ref, deadline=deadline,
                 )
                 if walked:
                     break
@@ -5313,6 +5315,10 @@ class MiningDFSEngine:
                         stop_reason="climb_progress", next_action="climb_out",
                         message=f"本轮已爬到 y={end_y}，目标 y={target_height}。可从当前站位继续 climb_out。",
                     )
+                    remaining_height = target_height - 2 - end_y
+                    if 20 <= budget < 55 and remaining_height > end_y - start_y:
+                        result["suggested_next"] = {"retry_with": {"max_duration_s": 55}}
+                        result["message"] += "若本集时间允许，可保留其余参数，将 max_duration_s 调到 55 秒。"
             if act == "return_collar" and self.collar_node_id in self.nodes:
                 collar = self.nodes[self.collar_node_id].anchor
                 result["collar_anchor"] = list(collar)

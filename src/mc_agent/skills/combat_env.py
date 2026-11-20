@@ -2143,6 +2143,33 @@ class SubcorticalInstinctController:
         except (ApiError, httpx.HTTPError):
             return False
 
+    def _strike_cornered_hostile(
+        self, env: CombatEnv, target_id: int, counts: dict[str, int], held_name: str | None,
+    ) -> dict[str, Any] | None:
+        status = env._safe_status({"ready": False})
+        health = status.get("health")
+        nearest = status.get("nearest_hostile")
+        if (
+            not isinstance(health, (int, float)) or not 0 < health <= 6.0
+            or status.get("ready") is False or status.get("alive") is False
+            or status.get("on_ground") is not True or status.get("in_water") or status.get("in_lava")
+            or not isinstance(nearest, dict) or nearest.get("id") != target_id
+            or self._entity_dist(status.get("pos"), nearest) > 1.25
+        ):
+            return None
+        weapon = self._equip_best_weapon_and_shield(env, counts, False, held_name)
+        try:
+            result = env.bot.call(
+                "attack", {"entity_id": target_id, "max_hits": 1, "timeout": 300, "interval_ms": 100, "stop_on": ["death"]},
+                timeout_s=0.9, allow_reauth=False,
+            )
+        except ApiError as err:
+            return {"action": "cornered_melee_strike", "ok": False, "code": err.code}
+        return {
+            "action": "cornered_melee_strike", "entity_id": target_id, "weapon": weapon,
+            "ok": bool(result.get("hits")), "killed": bool(result.get("killed")),
+        }
+
     def on_encounter(self, env: CombatEnv, trigger: ThreatTrigger) -> CombatOutcome:
         actions: list[dict[str, Any]] = []
         deadline = time.monotonic() + 7.5
@@ -2520,6 +2547,15 @@ class SubcorticalInstinctController:
                                 env,
                                 int(mob_id) if mob_id is not None else None,
                             )
+                    elif (
+                        not flee_ok and fl.get("reason") in {"no_safe_retreat", "unsafe_landing"}
+                        and not fl.get("respawned") and not has_shield and has_weapon
+                        and mob_name in LONE_COUNTERKILL_MOBS and isinstance(mob_id, int)
+                        and len(nearby_hostiles) == 1 and time.monotonic() < deadline
+                    ):
+                        strike = self._strike_cornered_hostile(env, mob_id, counts, held_name)
+                        if strike is not None:
+                            actions.append(strike)
 
         # 4) Check for a surviving attacker before handing back control or eating.
         st_post = env._safe_status(st)
