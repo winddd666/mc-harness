@@ -17,6 +17,8 @@ else:
 _HOT_FLOOR_HURT = re.compile(r"^\[受伤 [^\]]* by hot_floor\](?:×(\d+))?$")
 _HTTP_FAILURE = re.compile(r"\bHTTP (429|502)\b|failed: \[(429|502)\]", re.I)
 _FOUR_HOUR_WINDOW = (14_100, 14_700)
+_PORTAL_ENTRY = "minecraft:story/enter_the_nether"
+_DAY1_AFFECTED_BOTS = {"hy4_hy_6_bare", "hy4_hy_7_bare"}
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,8 @@ class Episode:
     attempts_429: list[tuple[int, int]] = field(default_factory=list)
     backoff_429: float = 0.0
     complete_trace: bool = False
+    target: str = ""
+    portal_verified: bool = False
 
     def count(self, key: str, line: int, count: int = 1) -> None:
         self.first_lines.setdefault(key, line)
@@ -95,6 +99,11 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
     metrics = Episode(
         f"{bot} EP{row.get('episode')} {trace.name if trace.is_file() else basename}",
         bot, row.get("status", ""), row.get("actor_requests"), row.get("budget_class", ""),
+    )
+    metrics.target = str(row.get("target") or "")
+    metrics.portal_verified = metrics.target == _PORTAL_ENTRY and (
+        _PORTAL_ENTRY in (row.get("gained_advancements") or ())
+        and (row.get("objective_verified") is True or metrics.status == "goal_satisfied")
     )
     life = LifecycleCounter(bot, seen_ids=seen_ids)
     starts: dict[str, tuple[str, float | None]] = {}
@@ -160,6 +169,24 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
                     metrics.count("untimed_unstick", line)
                 if tool == "mc_move_to" and error == "busy":
                     metrics.count("untimed_move_busy", line)
+            if tool == "mc_skill_harvest_logs":
+                metrics.count("harvest_logs", line)
+                if duration is None or duration < 0:
+                    metrics.count("untimed_harvest_logs", line)
+                elif duration >= 60:
+                    metrics.count("slow_harvest_logs", line)
+                    if duration >= 90:
+                        target_gains = result.get("target_gained")
+                        gains = result.get("gained")
+                        if not isinstance(target_gains, dict) and isinstance(gains, dict):
+                            target_gains = {
+                                name: count for name, count in gains.items()
+                                if name.endswith(("_log", "_stem", "_hyphae"))
+                            }
+                        if not isinstance(target_gains, dict):
+                            metrics.count("unknown_harvest_gain", line)
+                        elif not any((_number(count) or 0) > 0 for count in target_gains.values()):
+                            metrics.count("empty_harvest_logs_90s", line)
             if error in ("path_not_found", "no_such_entity"):
                 metrics.count(error, line)
             if tool == "mc_skill_mine_dfs":
@@ -207,6 +234,8 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
             attempt, retry_line = retries.pop((scope, event.get("request")), (0, line))
             if status == "429" or attempt >= 5 and kind == "model.completed":
                 metrics.attempts_429.append((attempt + 1, retry_line))
+        elif kind == "run.started":
+            metrics.first_lines.setdefault("run_started", line)
         elif kind == "run.finished":
             completed = elapsed
             metrics.first_lines["run_finished"] = line
@@ -223,6 +252,8 @@ def _episode(bot_dir: Path, row: dict, seen_ids: set[tuple[str, str]]) -> Episod
                 metrics.count("untimed_unstick", 0)
             if tool == "mc_move_to":
                 metrics.count("untimed_move_busy", 0)
+            if tool == "mc_skill_harvest_logs":
+                metrics.count("untimed_harvest_logs", 0)
     if water_starts:
         metrics.count("untimed_water", 0, len(water_starts))
     metrics.complete_trace = completed is not None or metrics.requests == 0 and bool(report)
@@ -233,13 +264,16 @@ def ticket_gates(wave_dir: Path) -> list[TicketGate]:
     """Evaluate thresholds from BUG_BOARD for the selected wave."""
     episodes: list[Episode] = []
     final: dict[str, dict] = {}
+    final_scenes: dict[str, dict] = {}
     missing: list[str] = []
     seen_ids: set[tuple[str, str]] = set()
     for bot_dir in sorted(path for path in wave_dir.iterdir() if path.is_dir()):
         summaries = sorted(bot_dir.glob("wild-endurance-*.json"))
-        summary = _object(_read(summaries[-1]).get("curriculum_summary")) if summaries else {}
+        report = _read(summaries[-1]) if summaries else {}
+        summary = _object(report.get("curriculum_summary"))
         if summary:
             final[bot_dir.name] = summary
+            final_scenes[bot_dir.name] = _object(report.get("scene"))
         else:
             missing.append(bot_dir.name)
             snapshots = sorted(bot_dir.glob("curriculum-*.json"))
@@ -384,4 +418,52 @@ def ticket_gates(wave_dir: Path) -> list[TicketGate]:
         stale <= 5 if stale or entity_move else None, stale_ref or entity_ref or "no entity move exposure")
     add("BUG-060", "get_entities radius >=4096", str(big), "== 0",
         big == 0 if scans else None, big_ref or scan_ref or "no get_entities calls")
+    bare = {bot for bot, scene in final_scenes.items() if scene.get("stage") == "bare"}
+    guarded = {bot for bot in bare if final_scenes[bot].get("day1") is True}
+    if guarded or "day1" in wave_dir.name.lower():
+        day1_bots = bare | {bot for bot in missing if bot.endswith("_bare")}
+        day1 = [ep for ep in episodes if ep.bot in day1_bots]
+        full_day1 = len(bare) == 15 and bare == {ep.bot for ep in day1}
+        harvest, _ = total(day1, "harvest_logs")
+        untimed, _ = total(day1, "untimed_harvest_logs")
+        unknown_gain, _ = total(day1, "unknown_harvest_gain")
+        harvest_scope = f"{len(bare)}/15 sealed bare slots, {harvest} harvest receipts, {untimed} untimed"
+        for key, caption, missing_gain in (
+            ("slow_harvest_logs", "Day 1 harvest_logs >=60s", 0),
+            ("empty_harvest_logs_90s", "Day 1 harvest_logs >=90s with zero log gain", unknown_gain),
+        ):
+            count, sample = total(day1, key)
+            passed = False if count else True if full_day1 and harvest and not (untimed or missing_gain) else None
+            add("BUG-064", caption, str(count), "== 0", passed,
+                sample or f"{harvest_scope}, {missing_gain} missing gain reports")
+
+        # Dispatch and verified crossing are separate: an incidental advancement
+        # during a bootstrap episode is neither an explicit dispatch nor a legal control.
+        portal_dispatched: set[str] = set()
+        portal_verified: set[str] = set()
+        early_nether = []
+        ambiguous_nether = []
+        for ep in day1:
+            if ep.target == _PORTAL_ENTRY:
+                portal_dispatched.add(ep.bot)
+                if ep.portal_verified:
+                    portal_verified.add(ep.bot)
+            elif ep.target.startswith("minecraft:nether/"):
+                if ep.bot not in portal_dispatched:
+                    early_nether.append(ep)
+                elif ep.bot not in portal_verified:
+                    ambiguous_nether.append(ep)
+        guarded_scope = full_day1 and guarded == bare and _DAY1_AFFECTED_BOTS <= guarded
+        scope_info = f"{len(guarded)}/15 final scene.day1=true, affected HY4_6/7 required"
+        if ambiguous_nether:
+            scope_info += f"; portal crossing unresolved before {ambiguous_nether[0].ref}"
+        add("BUG-066", "Day 1 Nether targets before explicit portal dispatch",
+            str(len(early_nether)), "== 0",
+            False if early_nether else True if guarded_scope and not ambiguous_nether else None,
+            early_nether[0].at(early_nether[0].first_lines.get("run_started", 0)) if early_nether else scope_info)
+        legal_crossings = [ep for ep in day1 if ep.bot in guarded and ep.portal_verified]
+        add("BUG-066", "Day 1 verified explicit portal crossing", str(len(legal_crossings)), ">= 1",
+            True if legal_crossings else None,
+            legal_crossings[0].at(legal_crossings[0].first_lines.get("run_started", 0)) if legal_crossings
+            else "no guarded episode verified enter_the_nether under the explicit portal target")
     return results

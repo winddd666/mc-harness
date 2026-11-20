@@ -101,3 +101,63 @@ def test_skipped_tool_completion_is_excluded_from_timing(tmp_path):
 
     metric = next(gate for gate in ticket_gates(tmp_path) if gate.metric == "tool p99")
     assert (metric.status, metric.actual) == ("PASS", "14.000s (n=1)")
+
+def test_day1_reports_old_failures_and_distinguishes_incidental_portal_entry(tmp_path):
+    wave = tmp_path / "r41_day1_test"
+    bot = wave / "hy4_hy_6_bare"
+    bot.mkdir(parents=True)
+    events = _tool("harvest", "mc_skill_harvest_logs", 1, 92, {}, {
+        "ok": False, "gained": {"oak_sapling": 2},
+    }) + [{"type": "run.finished", "elapsed": 93}]
+    bootstrap = _write_episode(bot, 1, events)
+    bootstrap.update(target="bootstrap_stone_age", gained_advancements=["minecraft:story/enter_the_nether"])
+    nether = _write_episode(bot, 2, [
+        {"type": "run.started"}, {"type": "run.finished", "elapsed": 20},
+    ])
+    nether["target"] = "minecraft:nether/find_fortress"
+    (bot / "wild-endurance-final.json").write_text(json.dumps({
+        "scene": {"stage": "bare"}, "curriculum_summary": {"episodes": [bootstrap, nether]},
+    }))
+
+    gates = {gate.metric: gate for gate in ticket_gates(wave)}
+    assert gates["Day 1 harvest_logs >=60s"].status == "FAIL"
+    assert gates["Day 1 harvest_logs >=90s with zero log gain"].status == "FAIL"
+    assert gates["Day 1 Nether targets before explicit portal dispatch"].status == "FAIL"
+    assert gates["Day 1 Nether targets before explicit portal dispatch"].evidence.endswith("episode-2.events.jsonl:1")
+    assert gates["Day 1 verified explicit portal crossing"].status == "PENDING"
+
+
+def test_day1_guards_require_full_scope_and_verify_explicit_portal_crossing(tmp_path):
+    portal_target = "minecraft:story/enter_the_nether"
+    for index in range(1, 16):
+        bot = tmp_path / f"hy4_hy_{index}_bare"
+        bot.mkdir()
+        first = _write_episode(bot, 1, _tool("harvest", "mc_skill_harvest_logs", 1, 59, {}, {
+            "ok": True, "target_gained": {"oak_log": 4},
+        }) + [{"type": "run.finished", "elapsed": 60}])
+        rows = [first]
+        if index == 6:
+            rows[0].update(target=portal_target, gained_advancements=[portal_target], objective_verified=True)
+            followup = _write_episode(bot, 2, [{"type": "run.finished", "elapsed": 20}])
+            followup["target"] = "minecraft:nether/find_fortress"
+            rows.append(followup)
+        (bot / "wild-endurance-final.json").write_text(json.dumps({
+            "scene": {"stage": "bare", "day1": True}, "curriculum_summary": {"episodes": rows},
+        }))
+
+    gates = {gate.metric: gate for gate in ticket_gates(tmp_path)}
+    assert gates["Day 1 harvest_logs >=60s"].status == "PASS"
+    assert gates["Day 1 harvest_logs >=90s with zero log gain"].status == "PASS"
+    dispatch = "Day 1 Nether targets before explicit portal dispatch"
+    crossing = "Day 1 verified explicit portal crossing"
+    assert gates[dispatch].status == "PASS"
+    assert gates[crossing].status == "PASS"
+
+    report = tmp_path / "hy4_hy_6_bare" / "wild-endurance-final.json"
+    payload = json.loads(report.read_text())
+    payload["curriculum_summary"]["episodes"][0]["objective_verified"] = False
+    report.write_text(json.dumps(payload))
+
+    gates = {gate.metric: gate for gate in ticket_gates(tmp_path)}
+    assert gates[dispatch].status == "PENDING"
+    assert gates[crossing].status == "PENDING"
