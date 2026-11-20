@@ -1545,8 +1545,8 @@ def test_deep_pickaxe_low_with_no_wood_requests_climb_before_harvesting() -> Non
     assert not world.dig_log
 
 
-@pytest.mark.parametrize("available_supply", ["raw_iron", "crafting_table"])
-def test_worn_pickaxe_without_sticks_does_not_auto_return_to_collar(monkeypatch, available_supply) -> None:
+@pytest.mark.parametrize("available_supply", ["raw_iron", "crafting_table", "sticks"])
+def test_worn_pickaxe_resupply_preserves_mining_tip(monkeypatch, available_supply) -> None:
     from mc_agent.skills import mining_dfs as mining
 
     clock = _MiningClock()
@@ -1562,7 +1562,9 @@ def test_worn_pickaxe_without_sticks_does_not_auto_return_to_collar(monkeypatch,
     world.blocks[(0, 16, 0)] = world.blocks[(0, 17, 0)] = "air"
     if available_supply == "raw_iron":
         world._add_item("raw_iron")
-    with BotSession("tok", bot_username="WoodlessResupply", transport=httpx.MockTransport(world.handler)) as bot:
+    if available_supply == "sticks":
+        world._add_item("stick", 4)
+    with BotSession("tok", bot_username="CollarResupply", transport=httpx.MockTransport(world.handler)) as bot:
         engine = MacroSkills(bot).mining_dfs
         collar = engine._create_node(kind="collar", anchor=(0, 64, -48), parent_id=None,
                                      edge_from_parent=None, branches=[])
@@ -1576,22 +1578,41 @@ def test_worn_pickaxe_without_sticks_does_not_auto_return_to_collar(monkeypatch,
         if available_supply == "crafting_table":
             engine.ledger.record_utility("crafting_table", (1, 64, -48))
         return_goals = []
+        navigation_origins = []
 
-        def interrupted_return(goal_node_id, **kwargs):
+        def navigate_back(goal_node_id, **kwargs):
             return_goals.append(goal_node_id)
-            world.pos = [0.5, 53.0, -36.5]
-            engine.bot.status()
-            clock.now = engine._deadline
-            engine.bot.status()
+            navigation_origins.append(engine.active_node_id)
+            if len(return_goals) == 1:
+                world.pos = [0.5, 53.0, -36.5]
+                engine.active_node_id = collar.node_id
+                engine.bot.status()
+                clock.now = engine._deadline
+                engine.bot.status()
+            world.pos = [0.5, 64.0, -47.5]
+            engine.active_node_id = collar.node_id
+            return True, None
 
-        monkeypatch.setattr(engine, "_navigate_to_node", interrupted_return)
+        monkeypatch.setattr(engine, "_navigate_to_node", navigate_back)
         result = engine.run(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
 
-    assert result["stop_reason"] == "pickaxe_low"
-    assert result["next_action"] == "climb_out"
-    assert result["pos_after"][1] <= 16
-    assert not return_goals
-    assert engine.collar_node_id == collar.node_id
+        assert result["stop_reason"] == "pickaxe_low"
+        if available_supply == "sticks":
+            assert result["next_action"] == "return_collar"
+            assert result["pos_after"][1] == 53
+            tip = engine.nodes[navigation_origins[0]]
+            assert tip.anchor[1] <= 16
+            assert engine.active_node_id == tip.node_id
+            assert any(branch.status == "pending" for branch in tip.branches)
+            continued = engine.run(action="return_collar", max_duration_s=32)
+            assert continued["stop_reason"] == "returned_to_collar"
+            assert engine.active_node_id == tip.node_id
+            assert return_goals == [collar.node_id, collar.node_id]
+        else:
+            assert result["next_action"] == "climb_out"
+            assert result["pos_after"][1] <= 16
+            assert not return_goals
+        assert engine.collar_node_id == collar.node_id
 
 
 def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -> None:
