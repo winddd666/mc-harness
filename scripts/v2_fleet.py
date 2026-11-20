@@ -30,6 +30,11 @@ import sys
 import time
 from collections import Counter, defaultdict
 
+if __package__:
+    from .fleet_lifecycle import LifecycleCounter
+else:
+    from fleet_lifecycle import LifecycleCounter
+
 WT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN_ROOT = pathlib.Path("/home/xzq/projects/mc")
 VENV_PY = MAIN_ROOT / ".venv/bin/python"
@@ -454,6 +459,10 @@ class BotRow:
     baseline_points: int | None = None
     earned_points: int | None = None
     error: str = ""
+    death_receipts: int = 0
+    respawns: int = 0
+    connection_changes: int = 0
+    mixed_guardian_incidents: int = 0
 
     @property
     def gained_short(self) -> list[str]:
@@ -514,7 +523,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     tool_fails: Counter[str] = Counter()
     err_codes: Counter[str] = Counter()
     slow_calls: list[tuple[float, str, str]] = []
-    event_deaths = 0
+    lifecycle = LifecycleCounter(name)
     http_429 = 0
     rate_waits = 0
     event_preemptions = 0
@@ -534,6 +543,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 ev = json.loads(ln)
             except Exception:
                 continue
+            lifecycle.observe(ev)
             tp = str(ev.get("type") or "")
             el = float(ev.get("elapsed") or 0.0)
             if tp in ("tool.started", "tool.ready"):
@@ -563,14 +573,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                     event_preemptions += 1
                 if dt >= SLOW_TOOL_THRESHOLD_S:
                     slow_calls.append((dt, name, tname))
-            elif tp == "guardian.incident":
-                reasons = ev.get("reasons") or []
-                if "death_or_connection_changed" in reasons:
-                    event_deaths += 1
             elif tp == "guardian.preempted_tool":
                 event_preemptions += 1
-            elif tp == "mc.notable_events" and "死亡" in str(ev.get("text") or ""):
-                event_deaths += 1
             elif tp == "model.rate_wait":
                 if float(ev.get("wait_s") or 0.0) > 0:
                     rate_waits += 1
@@ -605,7 +609,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         score=score,
         episodes_done=len(episodes),
         elapsed_s=elapsed_s,
-        deaths=event_deaths,
+        deaths=lifecycle.deaths,
         guardian_incidents=guardian_incidents,
         preemptions=max(preemptions, event_preemptions),
         http_429=http_429,
@@ -627,6 +631,10 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         baseline_points=baseline_points,
         earned_points=score - baseline_points,
         error=str(cs.get("error") or summary.get("error") or scene_meta.get("error") or ""),
+        death_receipts=lifecycle.death_receipts,
+        respawns=lifecycle.respawns,
+        connection_changes=lifecycle.connection_changes,
+        mixed_guardian_incidents=lifecycle.mixed_guardian_incidents,
     )
 
 
@@ -705,21 +713,24 @@ def _write_markdown(
         "",
         "## 1. 各路成绩总览（baseline = 场景 loadout 预授分，earned = 实机净增分）",
         "",
-        "| Squad | Bot | Stage | Status | Score | Baseline | Earned | Eps | Deaths | Guard | Preempt | 429 | Gained |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Squad | Bot | Stage | Status | Score | Baseline | Earned | Eps | Deaths | ID-less deaths | Respawn/spawn | Connection changes | Mixed guardian | Guard | Preempt | 429 | Gained |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in sorted(rows, key=lambda x: (x.squad, x.name)):
         g = ", ".join(r.gained_short[:4])
         lines.append(
             f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.score} | "
             f"{int(r.baseline_points or 0)} | {int(r.earned_points or 0)} | {r.episodes_done} | "
-            f"{r.deaths} | {r.guardian_incidents} | {r.preemptions} | {r.http_429} | {g} |"
+            f"{r.deaths} | {r.death_receipts} | {r.respawns} | {r.connection_changes} | "
+            f"{r.mixed_guardian_incidents} | {r.guardian_incidents} | {r.preemptions} | {r.http_429} | {g} |"
         )
     lines.extend(
         [
             "",
             "> `Score` = `final_score`（含 loadout 预授）；`Baseline` = 场景 loadout 预授予的成就分；"
             "`Earned` = Score - Baseline，跨场景横向比较请看 Earned。",
+            "> `Deaths` 为按 Bot 和源事件 ID 去重的死亡，加上无 ID 的明确死亡回执。"
+            "`Connection changes` 仅统计带类型的连接变化，`Mixed guardian` 记录旧的混合告警。",
         ]
     )
     lines.extend(["", "## 2. 模型维度聚合（跨模型对比）", ""])
@@ -848,7 +859,9 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"  [{r.squad:3s}] {r.name:30s} {r.status:10s} score={r.score:3d} "
             f"base={int(r.baseline_points or 0):3d} earned={int(r.earned_points or 0):3d} "
             f"eps={r.episodes_done:2d} "
-            f"deaths={r.deaths:2d} guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
+            f"deaths={r.deaths:2d} (idless={r.death_receipts}) respawn/spawn={r.respawns} "
+            f"connection_changes={r.connection_changes} guard_mixed={r.mixed_guardian_incidents} "
+            f"guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
             f"429={r.http_429:2d} gained=[{','.join(r.gained_short[:4])}]"
             + (" scene=BAD" if r.scene_ok is False else "")
             + (f" wd={r.scene_ticks}skips={r.scene_preempt_skips}" if r.scene_ticks is not None else "")

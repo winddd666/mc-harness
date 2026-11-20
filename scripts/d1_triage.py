@@ -19,6 +19,11 @@ import glob
 import json
 import pathlib
 
+if __package__:
+    from .fleet_lifecycle import LifecycleCounter
+else:
+    from fleet_lifecycle import LifecycleCounter
+
 WT = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated")
 
 
@@ -75,7 +80,7 @@ def main() -> int:
     for bd in bot_dirs:
         name = bd.name
         squad = name.split("_")[0]
-        cur = {"squad": squad, "bot": name, "model": "?", "score": 0, "deaths": 0,
+        cur = {"squad": squad, "bot": name, "model": "?", "score": 0,
                "guard": 0, "c429": 0, "eps": 0, "gained": 0, "status": "running"}
         sums = sorted(bd.glob("wild-endurance-*.json"))
         if sums:
@@ -91,6 +96,7 @@ def main() -> int:
                 pass
 
         starts: dict[str, str] = {}
+        lifecycle = LifecycleCounter(name)
         for evf in sorted(bd.glob("*.events.jsonl")):
             for ln in evf.read_text(errors="ignore").splitlines():
                 if not ln.strip():
@@ -99,6 +105,7 @@ def main() -> int:
                     ev = json.loads(ln)
                 except Exception:
                     continue
+                lifecycle.observe(ev)
                 t = ev.get("type")
                 if t == "run.started":
                     m = str(ev.get("model") or "")
@@ -148,11 +155,10 @@ def main() -> int:
                     key = f"{t}:{ev.get('error')}"
                     retry_cnt[key] += 1
                     retry_bots[key].add(name)
-                elif t == "guardian.incident":
-                    if "death_or_connection_changed" in (ev.get("reasons") or []):
-                        cur["deaths"] += 1
                 if '"429"' in ln or "rate_limit" in ln.lower():
                     cur["c429"] += 1
+        cur["deaths"] = lifecycle.deaths
+        cur["death_receipts"] = lifecycle.death_receipts
         rows.append(cur)
 
     if args.format == "text":
@@ -160,7 +166,8 @@ def main() -> int:
         for r in rows:
             print(f"  [{r['squad']:3s}] {r['bot']:28s} {r['status']:7s} model={r['model']:24s} "
                   f"score={r['score']:3d} eps={r['eps']:2d} gained={r['gained']:2d} "
-                  f"deaths={r['deaths']:2d} guard={r['guard']:3d} 429={r['c429']}")
+                  f"deaths={r['deaths']:2d} (idless={r['death_receipts']}) "
+                  f"guard={r['guard']:3d} 429={r['c429']}")
 
         print("\n--- TOOL FAILURE LEADERBOARD (by bots affected, then count) ---")
         for key, cnt in sorted(err_cnt.items(), key=lambda kv: (-len(err_bots[kv[0]]), -kv[1]))[:args.top]:

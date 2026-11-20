@@ -16,6 +16,11 @@ import json
 import pathlib
 import statistics
 
+if __package__:
+    from .fleet_lifecycle import LifecycleCounter
+else:
+    from fleet_lifecycle import LifecycleCounter
+
 WT = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated")
 
 
@@ -40,6 +45,8 @@ def collect(wave: str) -> dict:
         "no_support": 0,
         "stick_fails": 0,
         "deaths": collections.Counter(),
+        "death_receipts": 0,
+        "death_or_connection_incidents": 0,
         "cancel": 0,
         "cancel_wait": 0.0,
         "mine_dur": [],
@@ -84,6 +91,7 @@ def collect(wave: str) -> dict:
             elif not sums:
                 out["startup_crash"].append(bot)
         starts: dict[str, tuple[str, float, dict]] = {}
+        lifecycle = LifecycleCounter(bot)
         for evf in sorted(sd.glob("*.events.jsonl")):
             for ln in evf.read_text(errors="ignore").splitlines():
                 if not ln.strip():
@@ -92,6 +100,7 @@ def collect(wave: str) -> dict:
                     ev = json.loads(ln)
                 except Exception:
                     continue
+                lifecycle.observe(ev)
                 t = ev.get("type")
                 if t == "tool.started":
                     fn = ev.get("function") or {}
@@ -145,19 +154,16 @@ def collect(wave: str) -> dict:
                         out["trade"] += 1
                     if tool == "mc_skill_brew":
                         out["brew"] += 1
-                elif t == "guardian.incident":
-                    if "death_or_connection_changed" in (ev.get("reasons") or []):
-                        out["deaths"][bot] += 1
-                elif t == "mc.notable_events":
-                    txt = str(ev.get("text") or "")
-                    if "死亡" in txt and "trident" in txt and "deep_water" in bot:
-                        out["dw_trident"] += 1
                 elif t == "model.failed" and ev.get("cancelled"):
                     out["cancel"] += 1
                 elif t == "model.cancel_cooldown_wait":
                     out["cancel_wait"] += float(ev.get("wait_s") or 0)
+        out["deaths"][bot] = lifecycle.deaths
+        out["death_receipts"] += lifecycle.death_receipts
+        out["death_or_connection_incidents"] += lifecycle.mixed_guardian_incidents
         if "deep_water" in bot:
             out["deep_water"] = bot
+            out["dw_trident"] += sum(n for cause, n in lifecycle.death_causes.items() if "trident" in cause)
         if "_iron" in bot:
             out["iron_scores"].append(out["summaries"].get(bot, 0))
     return out
@@ -189,7 +195,7 @@ def main() -> int:
         ("BUG-021 startup crash", len(o["startup_crash"]), "== 0"),
         ("BUG-025 stick craft fails", o["stick_fails"], "== 0"),
         ("BUG-024 no_support", o["no_support"], "<= 5"),
-        ("BUG-026 deaths (incidents)", deaths, "<= 25"),
+        ("BUG-026 death/connection incidents", o["death_or_connection_incidents"], "<= 25"),
         ("BUG-026 cancel cooldown s", round(o["cancel_wait"], 1), "<= 200"),
         ("BUG-018 mine dur/budget med", round(ratio_med, 2), "<= 1.2"),
         ("BUG-018 mine zero-slice %", round(zero_pct, 1), "< 10"),
@@ -223,6 +229,7 @@ def main() -> int:
         failed += 0 if ok else 1
         print(f"  {'PASS' if ok else 'FAIL'}  {name:34s} actual={val!s:>8s}  target {rule}")
     print(f"\n  deep_water bot: {o['deep_water']} score={deep_score}")
+    print(f"  observed deaths: {deaths} (ID-less receipts: {o['death_receipts']})")
     print(f"  iron slots: {o['iron_scores']}")
     print(f"  top failures: {o['errs'].most_common(5)}")
     if o["startup_crash"]:

@@ -15,9 +15,13 @@ from __future__ import annotations
 
 import argparse
 import collections
-import glob
 import json
 import pathlib
+
+if __package__:
+    from .fleet_lifecycle import LifecycleCounter
+else:
+    from fleet_lifecycle import LifecycleCounter
 
 WT = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated/runs")
 
@@ -29,15 +33,11 @@ def L(x):
         return {}
 
 
-def episode_events(report_file: str) -> list[dict]:
+def read_report(report_file: pathlib.Path) -> dict:
     try:
-        r = json.load(open(report_file))
-    except Exception:
-        return []
-    evs = r.get("events")
-    if isinstance(evs, list):
-        return evs
-    return []
+        return json.loads(report_file.read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 def sig(err: str) -> str:
@@ -61,25 +61,26 @@ def sig(err: str) -> str:
     return e[:48]
 
 
-def audit_episode(wave: str, bot: str, ep: dict) -> dict:
-    report = ep.get("report_file") or ""
-    evs = episode_events(report)
-    err = ""
-    try:
-        err = str(json.load(open(report)).get("error") or "")
-    except Exception:
-        pass
-    gate = ""
-    try:
-        gate = str(json.load(open(report)).get("gate_reason") or "")
-    except Exception:
-        pass
+def audit_episode(
+    wave: str, bot: str, ep: dict, seen_ids: set[tuple[str, str]] | None = None
+) -> dict:
+    report_name = pathlib.Path(ep.get("report_file") or "").name
+    report_path = WT / wave / bot / report_name
+    report = read_report(report_path) if report_name else {}
+    err = str(report.get("error") or "")
+    gate = str(report.get("gate_reason") or "")
+    raw_path = report_path.with_suffix(".events.jsonl") if report_name else None
+    evs = report.get("events") or []
+    if raw_path and raw_path.is_file():
+        with raw_path.open(encoding="utf-8") as stream:
+            evs = [event for line in stream if isinstance(event := L(line), dict) and event]
 
     calls: list[tuple[str, str, str]] = []  # (tool, stop_reason, err_code)
     started: dict[str, str] = {}
-    deaths = 0
+    lifecycle = LifecycleCounter(bot, seen_ids if seen_ids is not None else set())
     geofence_blocks = 0
     for e in evs:
+        lifecycle.observe(e)
         t = e.get("type")
         if t == "tool.started":
             fn = e.get("function") or {}
@@ -92,9 +93,6 @@ def audit_episode(wave: str, bot: str, ep: dict) -> dict:
             if code == "void_geofence_blocked":
                 geofence_blocks += 1
             calls.append((nm, str(o.get("stop_reason") or ""), code))
-        elif t == "mc.notable_events":
-            txt = str(e.get("text") or "")
-            deaths += txt.count("死亡")
 
     last = calls[-1] if calls else ("", "", "")
     # longest run of identical (tool, stop_reason, code)
@@ -115,6 +113,8 @@ def audit_episode(wave: str, bot: str, ep: dict) -> dict:
         "requests": ep.get("actor_requests"),
         "delta": ep.get("score_delta"),
         "verified": ep.get("objective_verified"),
+        "succeeded": bool(ep.get("objective_verified") or ep.get("status") == "goal_satisfied"),
+        "event_file": str(raw_path) if raw_path and raw_path.is_file() else "",
         "error_sig": sig(err),
         "gate": gate,
         "last_tool": last[0],
@@ -123,7 +123,11 @@ def audit_episode(wave: str, bot: str, ep: dict) -> dict:
         "tool_calls": len(calls),
         "longest_repeat": longest,
         "geofence_blocks": geofence_blocks,
-        "deaths": deaths,
+        "deaths": lifecycle.deaths,
+        "death_receipts": lifecycle.death_receipts,
+        "respawns": lifecycle.respawns,
+        "connection_changes": lifecycle.connection_changes,
+        "mixed_guardian_incidents": lifecycle.mixed_guardian_incidents,
         "error_raw": err[:160],
     }
 
@@ -135,15 +139,21 @@ def main() -> int:
     args = ap.parse_args()
 
     rows: list[dict] = []
+    final_bots: collections.Counter[str] = collections.Counter()
+    wave_bots: collections.Counter[str] = collections.Counter()
     for wave in args.wave:
-        for cf in sorted(glob.glob(str(WT / wave / "*/curriculum-*.json"))):
-            bot = pathlib.Path(cf).parent.name
-            try:
-                d = json.load(open(cf))
-            except Exception:
-                continue
-            for ep in d.get("episodes") or []:
-                rows.append(audit_episode(wave, bot, ep))
+        seen_ids: set[tuple[str, str]] = set()
+        for bot_dir in sorted(p for p in (WT / wave).glob("*/") if p.is_dir()):
+            wave_bots[wave] += 1
+            final = sorted(bot_dir.glob("wild-endurance-*.json"))
+            if final:
+                summary = read_report(final[-1]).get("curriculum_summary") or {}
+                final_bots[wave] += bool(summary)
+            else:
+                snapshots = sorted(bot_dir.glob("curriculum-*.json"))
+                summary = read_report(snapshots[-1]) if snapshots else {}
+            for ep in summary.get("episodes") or []:
+                rows.append(audit_episode(wave, bot_dir.name, ep, seen_ids))
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
@@ -157,9 +167,11 @@ def main() -> int:
         if not wr:
             continue
         st = collections.Counter(r["status"] for r in wr)
-        print(f"\n===== {wave}  episodes={len(wr)}  {dict(st)}")
+        provisional = " PROVISIONAL" if final_bots[wave] < wave_bots[wave] else ""
+        print(f"\n===== {wave}{provisional}  episodes={len(wr)}  "
+              f"verified={sum(r['succeeded'] for r in wr)}  {dict(st)}")
         sigs = collections.Counter(
-            (r["status"], r["error_sig"], r["gate"]) for r in wr if r["status"] not in ("answered", "goal_satisfied")
+            (r["status"], r["error_sig"], r["gate"]) for r in wr if not r["succeeded"]
         )
         for (s, e, g), n in sigs.most_common(14):
             print(f"  {n:4d}  {s:16s} sig={e:22s} gate={g}")
@@ -172,9 +184,8 @@ def main() -> int:
         for b in bots:
             br = [r for r in wr if r["bot"] == b]
             st = collections.Counter(r["status"] for r in br)
-            bad = sum(n for s, n in st.items() if s not in ("answered", "goal_satisfied"))
             print(
-                f"  {wave[:22]:22s} {b:28s} eps={len(br):3d} bad={bad:3d} "
+                f"  {wave[:22]:22s} {b:28s} eps={len(br):3d} verified={sum(r['succeeded'] for r in br):3d} "
                 f"{dict(st)}"
             )
     return 0

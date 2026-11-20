@@ -13,6 +13,11 @@ import pathlib
 import sys
 from typing import Any
 
+if __package__:
+    from .fleet_lifecycle import LifecycleCounter
+else:
+    from fleet_lifecycle import LifecycleCounter
+
 
 def _extract_error_code(output_text: str) -> str:
     try:
@@ -45,7 +50,7 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
     call_start: dict[str, tuple[float, str]] = {}
     rate_waits: list[float] = []
     http_429 = 0
-    deaths = 0
+    lifecycle = LifecycleCounter(run_dir.name)
     guardian_incidents = 0
     tool_preemptions = 0
     llm_requests = 0
@@ -59,6 +64,7 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
                 r = json.loads(raw)
             except Exception:
                 continue
+            lifecycle.observe(r)
             t = str(r.get("type") or "")
             el = float(r.get("elapsed") or 0.0)
             if t == "model.request":
@@ -90,8 +96,6 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
                     slow_calls.append((dur, tname, ef.name))
             elif t == "guardian.incident":
                 guardian_incidents += 1
-            elif t == "mc.notable_events" and "死亡" in str(r.get("text") or ""):
-                deaths += 1
             if "429" in str(r.get("error") or ""):
                 http_429 += 1
 
@@ -107,7 +111,8 @@ def triage_run_dir(run_dir: pathlib.Path) -> dict[str, Any]:
         "pts_per_10m": round(score / (elapsed_s / 600.0), 1) if elapsed_s > 60 else 0.0,
         "episodes_done": len(eps),
         "llm_requests": llm_requests,
-        "deaths": deaths,
+        "deaths": lifecycle.deaths,
+        "death_receipts": lifecycle.death_receipts,
         "http_429": http_429,
         "rate_waits": len(rate_waits),
         "max_rate_wait_s": round(max(rate_waits, default=0.0), 2),
@@ -137,7 +142,8 @@ def main(argv: list[str]) -> int:
         print(
             f"[{rep['dir']}] status={rep['status']} elapsed={rep['elapsed_s']:.0f}s "
             f"score={rep['score']} ({rep['pts_per_10m']} pts/10m) eps={rep['episodes_done']} "
-            f"llm_reqs={rep['llm_requests']} deaths={rep['deaths']} 429={rep['http_429']} "
+            f"llm_reqs={rep['llm_requests']} deaths={rep['deaths']} "
+            f"(idless={rep['death_receipts']}) 429={rep['http_429']} "
             f"rate_waits={rep['rate_waits']}(max={rep['max_rate_wait_s']}s) "
             f"guardian={rep['guardian_incidents']}/{rep['tool_preemptions']}preempt"
         )
