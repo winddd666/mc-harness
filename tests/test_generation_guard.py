@@ -4490,6 +4490,58 @@ def test_guardian_checks_support_before_unstick_moves(solid_exit):
         assert movements == []
 
 
+@pytest.mark.parametrize("episode_timeout", [False, True])
+def test_bug072_flee_bounds_nested_shaft_moves_and_stops_on_timeout(monkeypatch, episode_timeout):
+    from mc_agent.harness.control import RunTimedOut
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    moves = []
+    calls = []
+    events = []
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            timeout_s = kwargs.get("timeout_s", 30.0)
+            calls.append((action, timeout_s))
+            if action == "move_to":
+                moves.append((clock[0], timeout_s, body["timeout"]))
+                clock[0] += min(7.0, timeout_s)
+                if timeout_s < 7.0:
+                    raise httpx.ReadTimeout("nested shaft move reached the retreat deadline")
+            if action == "stop":
+                clock[0] += timeout_s
+            return {"ok": True}
+
+    def checkpoint():
+        if episode_timeout and clock[0] >= 1014.0:
+            raise RunTimedOut("episode deadline")
+
+    bot = ShaftBot()
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=checkpoint)
+    orig_call = bot.call
+
+    def retreat_recorded_shaft():
+        for y in range(-17, -3):
+            bot.call("move_to", {"x": -2712.5, "y": y, "z": -10275.4, "timeout": 20000})
+        return json.dumps({"ok": True, "mode": "retreat_shaft"})
+
+    if episode_timeout:
+        with pytest.raises(RunTimedOut):
+            guard.run_tool_with_reflex("mc_skill_flee", retreat_recorded_shaft)
+        assert len(moves) == 2
+    else:
+        result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", retreat_recorded_shaft))
+        assert result["ok"] is False and result["error"]["code"] == "time_budget"
+        assert len(moves) == 5
+        assert any(event["type"] == "guardian.recovery_budget_exceeded" and event["budget_s"] == 35.0 for event in events)
+
+    assert all(start + timeout <= 1033.0 and start + server_ms / 1000 <= 1033.0 for start, timeout, server_ms in moves)
+    assert calls[-1] == ("stop", 1.5)
+    assert clock[0] - 1000.0 < 35.0
+    assert bot.call == orig_call
+
+
 @pytest.mark.parametrize("action", ["control", "move_to"])
 @pytest.mark.parametrize("solid_exit", [True, False])
 @pytest.mark.parametrize("dimension", ["the_nether", "overworld"])
