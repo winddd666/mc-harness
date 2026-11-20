@@ -351,6 +351,7 @@
 - **D1 代码复核（通过）**：`4161d8f` 已在 `_ensure_free_slots` 的提前 return **之前**计算 `pre_over_cap`（cobble/deepslate >192、netherrack >128、dirt >64），并改为 `if empty_now >= min_free and not pre_over_cap: return`——与建议一致。r19_short 起用 `owned_end` 与 `dropped` 事件验收。
 - **r43 短波再现**：Day 2 终版 3/9 路超出 192/种上限及 15% 容忍，均为圆石深板岩，HY4_10 **293**、HY4_8 **296**、HY4_9 **332**。 [HY4_10](../runs/r43_day2_village_near_9bot/hy4_hy_10_day2_village_near/wild-endurance-r43_day2_village_near_9bot_hy_10_day2_village_near-20261120-071631.json#L52) · [HY4_8](../runs/r43_day2_village_near_9bot/hy4_hy_8_day2_village_near/wild-endurance-r43_day2_village_near_9bot_hy_8_day2_village_near-20261120-071627.json#L59) · [HY4_9](../runs/r43_day2_village_near_9bot/hy4_hy_9_day2_village_near/wild-endurance-r43_day2_village_near_9bot_hy_9_day2_village_near-20261120-071629.json#L63)
 - **r44 Day 1**：HY4_2 和 HY4_3 终版分别仍有 **242／276** 圆石，两路超过上限与宽限。 [HY4_2](../runs/r44_day1_5bot/hy4_hy_2_bare/wild-endurance-r44_day1_5bot_hy_2_bare-20261120-074020.json#L52) · [HY4_3](../runs/r44_day1_5bot/hy4_hy_3_bare/wild-endurance-r44_day1_5bot_hy_3_bare-20261120-074022.json#L53)
+- **r47 收官**：单项 192 加 15% 容差门禁超标 **Day 1 1/5、Day 2 4/9**。GuiTest 圆石 258；Day 2 HY4_4、HY4_6 圆石 257/420，HY4_9、NJU_3 深板岩圆石 267/344。GuiTest EP05 连续两条回执清理 66 圆石，第二条零挖掘、零收益、同位置，终版仍为 192+66。回收附近掉落是待直接拾取回执验证的分支。 [GuiTest 终版](../runs/r47_day1_5bot/nju_guitest_01_bare/wild-endurance-r47_day1_5bot_guitest_01_bare-20261120-095707.json#L48) · [同位置再次清理](../runs/r47_day1_5bot/nju_guitest_01_bare/20261120-101126-256146.events.jsonl#L360) · [HY4_6 终版](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/wild-endurance-r47_day2_full_day_scout_9bot_hy_6_iron-20261120-095717.json#L62)
 
 ### BUG-030 | P1 | Slice A（#3 Codex #1）| 状态: OPEN（r17/r18 实测；HEAD 仍未改）
 - **影响**：`hy4_hy_2_iron` 100（r15）→ **20**（r17）；两集 `shiny_gear` 共 37 个 actor 请求、~1000s，全部耗在下潜
@@ -758,6 +759,7 @@
 - **r44 Day 1 再现楼梯越界**：GuiTest EP05 在 `budget_timeout_s=310.300`、只剩 **2.753s** 时启动 `steps=50`，已钳为 10 步但实际运行 **36.090s**。集尾 **343.643s**、超 **33.343s**，与 r43 近村为同一外层截止传递缺口。 [楼梯开始](../runs/r44_day1_5bot/nju_guitest_01_bare/20261120-075635-392125.events.jsonl#L450) · [集尾](../runs/r44_day1_5bot/nju_guitest_01_bare/20261120-075635-392125.events.jsonl#L453) · [集预算原件](../runs/r44_day1_5bot/nju_guitest_01_bare/20261120-075635-392125.json)
 - **r44 Day 2**：工具 p99 **51.588s**、脱困 max **28.037s**。HY4_10 EP03 在 540s 集限剩 **8.222s** 时启动矿道撤退，实际 **18.929s**，整集超 **10.713s**。楼梯 `76020c6` 和撤退 `fa4cd15`、`cfde702` 均在 r44 进程启动之后合入。 [撤退起点](../runs/r44_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-074538-967229.events.jsonl#L289) · [集尾](../runs/r44_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-074538-967229.events.jsonl#L292)
 - **r46 终版**：Day 1／2 p99 **51.911／51.554s**，整集最大超额 **3.572／0.229s**，通用门槛通过。末 10s 启动楼梯和移动 `busy` 缺样本，保持待验。 [Day 1 最大值](../runs/r46_day1_5bot/nju_movetest_01_bare/20261120-090001-392391.events.jsonl#L226) · [Day 2 最大值](../runs/r46_day2_wild_scout_9bot/hy4_hy_9_iron/20261120-092014-538120.events.jsonl#L10)
+- **r47 终版**：Day 1/2 工具 p99 **51.435/51.342s**，脱困最大 **7.914/9.884s**，集超预算最大 **0.032/0.145s**。三次在最后 10s 发起楼梯均在预算内返回，最大超额 **−2.510/−5.910s**。移动 `busy` 没有暴露，整票继续 OPEN。 [MoveTest 集尾](../runs/r47_day1_5bot/nju_movetest_01_bare/20261120-101654-485630.events.jsonl#L130) · [HY4_6 集尾](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-100313-044535.events.jsonl#L310)
 
 ### BUG-048 | P1 | Integrator（#1，`harness/geofence.py` + 工具层）| 状态: OPEN（过夜两波实测）
 - **影响**：`void_geofence_blocked` **不触发**"重复失败保护"，因为模型每次换一个略有差异的坐标 → 单 bot 连续被拦 **129~154 次**，每次都是一轮完整 LLM 往返。
@@ -814,6 +816,7 @@
   | 其余 6 个（sniffer_egg / cure_zombie_villager / ride_a_boat_with_a_goat / trade_at_world_height / silk_touch_nest / find_bastion） | 53 | 406 |
 - **ROI 排名（分/100 请求）**：`brew_potion` **87.2**（78% 成功）、`use_lodestone` **74.9**、`shiny_gear` **61.0**（1,245 分，占全部得分 61%）、`kill_a_mob` 46.2；而 `obtain_ancient_debris` 仅 **11.6**（91 集 / 3,237 请求 / 375 分）、`find_fortress` **5.9**。
   → **`shiny_gear` + `brew_potion` + `use_lodestone` 三项贡献了绝大部分分数，而 18 个 0% 目标吃掉了 1/3 集数**。
+- **D1 离线复现（r48 实际版本 `198c32a`）**：缺少其他可派候选时，选择器移除最早到期的冷却再递归。下界有钻镐、已完成 `shiny_gear`、只剩堡垒目标的夹具中，`now=1` 仍会派发冷却截止 1200 或 10800 的 `find_fortress`。显式排除该目标后，现有空闲探索回退正常选中。应在无可用目标时保留未到期冷却，并在阶段有可做任务时继续派发已就绪目标。实机冷却被提前解除须同时核对累计冷却和再次派发两个事件。 [到期判断](../src/mc_agent/harness/curriculum.py#L1343) · [回退移除冷却](../src/mc_agent/harness/curriculum.py#L1638) · [指数写入](../src/mc_agent/harness/curriculum.py#L2538) · [离线夹具](../../s-triage/tests/test_d1_repro.py#L165)
 
 ### BUG-051 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（16 路过夜轨迹全量复盘）
 - **影响**：规划器高度/位置失明——Bot 挖矿留在地下 `y < 45` 时，连续派发 8 轮短预算的地表任务，导致每集全用来爬楼梯、连地表都见不到就超时。
@@ -841,6 +844,7 @@
   1. `enchant_anvil` 切片同 `brewing_alchemy`/`village_trade` 一样加开局专属目标（优先附魔，不先跑 `island_recon_sweep`）；
   2. 规划器判断“能否走下界高分线”看 `cur_dim == "the_nether"` 或已知传送门，而非仅看 `enter_the_nether` 成就位；主世界满钻装后若尚未在下界，主动派建门进下界。
 - **验收标准**：`enchant_anvil` 开局 2 集内完成首次附魔；主世界满钻装 4h 长测能主动进入下界继续推进至 ≥250 分。
+- **r48 开局分支实测**：附魔场景五槽 EP01 全部 `goal_satisfied`，工具核对钻石剑重新入包、实际附魔为锋利 I，等级 30→29。首集均无环岛派发。满钻装主世界主动进下界与 4h ≥250 分仍需同条件实机。 [HY4_1 附魔回执](../runs/r48_enchant_5bot/hy4_hy_1_enchant_anvil/20261120-102002-047133.events.jsonl#L24) · [MoveTest 附魔回执](../runs/r48_enchant_5bot/nju_movetest_01_enchant_anvil/20261120-101957-760568.events.jsonl#L47)
 
 ### BUG-054 | P1 | Integrator（#1）+ Slice C（#4）| 状态: OPEN（16 路过夜轨迹全量复盘）
 - **影响**：`husbandry/plant_seed` 与 `adventure/sleep_in_bed` 看似简单却长期接近 0% 成交，白烧大量集数。
@@ -916,6 +920,7 @@
 - **r43 短波门禁**：Day 1 单集峰值 **2**、全波 **3**，Day 2 **3／5**，均通过本波阈值。仍等同类下界路径压力验收。 [Day 2 峰值 EP03](../runs/r43_day2_village_near_9bot/hy4_hy_9_day2_village_near/20261120-072726-669575.events.jsonl#L47)
 - **r44 Day 2 回潮**：全波 **10**，HY4_5 EP02 单集 **4** 超门槛，三条来自 `mc_skill_scout_surface`，一条来自 `mc_move_to`。重规划需跨斥候和直接坐标移动保留失败上下文。 [首条斥候失败](../runs/r44_day2_wild_scout_9bot/hy4_hy_5_iron/20261120-074143-250000.events.jsonl#L19) · [直接移动失败](../runs/r44_day2_wild_scout_9bot/hy4_hy_5_iron/20261120-074143-250000.events.jsonl#L163)
 - **r46**：Day 1 峰 **4／全波 7**，HY4_3 EP03 中两个近目标先后反复失败，第二个目标经过挖隧道和脱困后仍 `path_not_found`。Day 2 峰 **2／全波 4**。 [第一个近目标](../runs/r46_day1_5bot/hy4_hy_3_bare/20261120-090237-438331.events.jsonl#L78) · [第二个目标末次重试](../runs/r46_day1_5bot/hy4_hy_3_bare/20261120-090237-438331.events.jsonl#L314)
+- **r47**：Day 1 单集峰 **4／全波 13**，Day 2 **3／6**。GuiTest EP03 从 Y55 起点尝试远距离 XZ 航点，脱困拒绝和浅爬后仍重复相同西向目标 `[6310,-6535]`。32m 分段回执提前返回，跳过路径失败历史与定向掘进提示；复验覆盖该分支。单集目标继续未过。 [分段提前返回](../src/mc_agent/harness/mc_tools.py#L1320) · [失败历史](../src/mc_agent/harness/mc_tools.py#L1403) [首次西向失败](../runs/r47_day1_5bot/nju_guitest_01_bare/20261120-100322-253643.events.jsonl#L79) · [重复西向失败](../runs/r47_day1_5bot/nju_guitest_01_bare/20261120-100322-253643.events.jsonl#L139)
 
 ### BUG-059 | P1 | Integrator（#1，`skills/mining_dfs.py`）| 状态: OPEN（过夜 6 波全量审计）
 - **一句话**：`mine_dfs(action="climb_out")` **回不到地表**：单集内连续 `climb_progress` 最多 16 次，深挖后必然在回程超时。
@@ -938,6 +943,7 @@
 - **r45 回程回潮**：有终版的 Day 2 轨迹回程比 **4/2**，DS_1 EP04 先两次探矿失败和一次地下 reset 被拒，随后自 Y−28 开始，三片只达 Y9／目标 Y47，还差 **38 格**。末次在只余约 3s 时被拒，确属回程未完成。其他两个带回程的超时集（HY4_8、NJU_3）均先返回地表再继续。 [DS_1 末次推进](../runs/r45_day2_wild_scout_9bot/nju_ds_1_iron/20261120-085117-337871.events.jsonl#L218) · [到集限](../runs/r45_day2_wild_scout_9bot/nju_ds_1_iron/20261120-085117-337871.events.jsonl#L256)
 - **r46**：Day 2 比 **6/1**，三条深挖候选有两条真实未回地面。HY4_7 EP04 连同参数 `climb_out` 先 Y−9→21，接着 **21→15→−3**、损失 24 格且分别报 `time_slice`，目标 Y61。首次与第一次倒退仍是同一单节点树，次次倒退后才出现 24 个节点。优先定位回程重入为何接受下行路径，给连续调用保留已验证高度和可继续回程的状态。DS_1 EP04 到 Y30／目标48 停滞。HY4_10 EP03 四片推进后已回到目标容差内，再下井时超时。 [首次上升](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L293) · [倒退回执](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L340) · [回程候选](../src/mc_agent/skills/mining_dfs.py#L3167)
 - **候选修复与验收**：集成 `16df57e` 在回程时跳过低于当前站位的现役矿口与低位归档矿口。`50adb01` 在初次推进小于剩余爬升且预算低于 55s 时建议下一片 55s。现役、归档两条防倒退夹具及继续预算夹具均过。D1 新门禁回放 r46 Day 2 为 **2/12** 条 `climb_out` 净降高，第一条失败在 HY4_7 EP04 L314。首次爬到 Y21 的回执和第一次退回 Y15 的回执均保留同一个现役矿口 `(-7877,-9,2666)`，低于重入站位 30 格。旧版入口有该 ID 即尝试走回矿口，现场具备修复所拦条件。新版实机还需出现低位矿口分支，并核对净降、回程比、真实回程超时。 [现役及归档夹具](../tests/test_mining_dfs.py#L2443) · [继续预算夹具](../tests/test_mining_dfs.py#L2548) · [r46 倒退](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L314)
+- **r47 已加载 `16df57e`、`50adb01`**：Day 1/2 净降高 **0/3、0/12**，Day 2 回程比 **6/1→9/2** 仍超门槛。三个深挖超时候选中，一条确为回程未完。HY4_6 EP03 四片共 **114.576s**，Y−2→7→9→10→10，距目标 Y59 仍差 49 格，实际收到 55s 提示后第四片因集尾只执行约 2.5s。EP04 延续自 Y10 出地表容差至 Y57。实机三次重入时同一现役矿口为 Y15，起始 Y16、28、39，分别继续升至 Y28、39、50。HY4_6 和 HY4_10 的 EP04 都在已回地面后另开探矿才超时。 [低位现役矿口与连续爬升](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-101213-237538.events.jsonl#L76) [提示](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-100313-044535.events.jsonl#L263) · [末次回程](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-100313-044535.events.jsonl#L287) · [下一集回地表](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-101213-237538.events.jsonl#L125) · [HY4_10 回地表](../runs/r47_day2_full_day_scout_9bot/hy4_hy_10_iron/20261120-100512-901208.events.jsonl#L98)
 
 ### BUG-060 | P2 | Integrator（#1，`harness/mc_tools.py`）| 状态: FIXED（同场景长波门禁通过）
 - **一句话**：实体类目标（发光鱿鱼/动物）会陷入"实体 id 失效 → 重新扫描 → 再失效"的循环。
@@ -1099,6 +1105,7 @@
 - **验收标准**：离线单测覆盖“200 个 `dirt_path` + 1 个 `hay_block` + 1 个 `yellow_bed` 时，进村扫描必返回 `hay_block` 与 `bed`”；实机进村后绑床/薅干草/开箱转化率显著提升。
 - **r46**：HY4_6 EP02 真正进村，扫出白床与 `(-7796,78,2862)` 的箱，床交互返回成功。随后两次去箱只传 XZ，实际到 Y35.9/Y39.9，接着在 Y40 的三个开箱调用均失败。未见拥挤混扫标志或采干草、取物、交易回执。 [白床和正确箱高](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L100) · [第一处错误楼层](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L165) · [失败回执](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L295)
 - **r47 Day 2 已完成集复核**：`hy4_hy_7_iron` EP02 再扫到同一 `(-7796,78,2862)` 的箱，于白床旁 Y71 起步，随后只传 XZ 和 `range=3`。调用 `ok=true`，落在 `(-7793.5,38,2863.5)`，离箱 40 格垂直距离。`unstick` 原地失败，18 级楼梯回到 Y56，本集无开箱回执。寻村收割提示应要求对已知箱/床用完整坐标接近并核对垂直差，验收用该村箱位置做同锚点对照，确认实际取物。 [箱坐标](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L119) · [床旁站位](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L157) · [XZ 参数](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L199) · [错误楼层](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L200) · [末次爬升](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L261) · [寻村收割提示](../src/mc_agent/harness/curriculum.py#L1318) · [移动工具入参](../src/mc_agent/harness/mc_tools.py#L1184)
+- **r47 第二个同箱复现与床位正例**：HY4_6 EP02 同样甩到 Y37.9、离箱 40.1 格，三片楼梯才回到 Y65。HY4_6 和 HY4_7 均与 `(-7778,72,2879)` 白床交互成功，HY4_7 EP04 实际死亡后重生在 `(-7778.5,72,2878.5)`，距床 0.71 格。Day 2 终版 16 集寻村无取箱、干草、交易回执。 [HY4_6 错层](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-095905-635192.events.jsonl#L157) · [HY4_6 最后爬升](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-095905-635192.events.jsonl#L239) · [HY4_7 床交互](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L178) · [HY4_7 实际重生](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100828-101734.events.jsonl#L296)
 
 ### BUG-076 | P1（`r43`/`r44` 裸装 Day 1 `hy4_hy_1_bare` 连续两波 7–8 死异常回路）| Slice D1（#5 DeepSeek #1 取证）+ Slice B（#2 子 AGY 修复）| 状态: FIXED（r46 实测两次换安全退路，HY4_1 仍有 3 次箭伤，掩体与低血上岸待验）
 
@@ -1143,7 +1150,7 @@
 - **r45 收官核查**：六个有终版的寻村集另两条仅原始轨迹有完整首趟，共 47 条技能回执。**29** 次 `target_found` 全是孤立普通箱，覆盖 **5** 路，其中 **24** 次 0m。HY4_10 追向 Y46 的箱坐标被围栏钳制，后续未开箱。新语义修正未被 r45 加载。 [追箱航点](../runs/r45_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-083723-524840.events.jsonl#L177)
 - **r46 终版验收**：r45 的确认默认调用（两路仅原始轨迹）为 **29/33** 孤立箱触发，r46 **0/24**。六个实际派发寻村，默认遇箱且继续实移 **5** 次。HY4_7 看到与 r45 HY4_6 完全相同的 Y33 箱，仍推进 **72.66m**；真实堆肥桶和讲台可立即停。 [相同地下箱继续走](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-090127-093178.events.jsonl#L73) · [真实地标命中](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L20)
 
-### BUG-079 | **P1（Day 1 `harvest_logs` 29/29 报失败均 11s/木 + `mine_blocks` 混镐级整拒 + `scout_surface:in_water` 11x）** | Slice C（#4 Codex #2，`skills/library.py`）| 状态: VERIFIED（`r47_day1_5bot` PASS：`harvest_logs:time_budget` 15→1、`unreachable_targets` 5→0、`tool_tier_insufficient` 2→0）
+### BUG-079 | **P1（Day 1 `harvest_logs` 29/29 报失败均 11s/木 + `mine_blocks` 混镐级整拒 + `scout_surface:in_water` 11x）** | Slice C（#4 Codex #2，`skills/library.py`）| 状态: OPEN（`8ec11f9` 已合入，r47 采木门槛未通过）
 
 - **一句话**：`r46_day1_5bot` 中 `mc_skill_harvest_logs` **29 次调用 100% 报 `ok=False`**（耗 827s 占 Day 1 总耗时 22.1%，单根原木平均 **11s**，44s 仅砍 4 根）；`mc_skill_mine_blocks` 混入 `iron_ore` 时木镐被整次拒绝；`r46_day2` 中 `scout_surface` 剩余 15 次失败里 **11 次是 `in_water`**。
 - **实测证据（`r46_day1_5bot` / `r46_day2_wild_scout_9bot`）**：
@@ -1155,6 +1162,16 @@
   2. **`mine_blocks` 混合镐级容错**：当 `block_types` 同时包含可挖方块（如 `stone`/`coal_ore`）和当前镐级挖不动的方块（如 `iron_ore`）时，仅剔除不可挖项（在返回体附 `skipped_unmineable`）并继续挖剩余合法目标；仅全部不可挖才返回 `tool_tier_insufficient`；
   3. **`scout_surface:in_water` 绕岸兜底**：遇到 `in_water` 时先尝试 1 次短距回干岸 + `±90°` 偏航再决定是否终止，减少水边早停。
 - **验收标准**：离线单测覆盖“同树干原地连砍 4 根原木不重寻路”、“木镐混传 `stone+iron_ore` 自动跳过 `iron_ore` 挖 `stone`”、“`scout_surface` 遇水先绕干岸”；实机 Day 1 `harvest_logs` 失败率从 100% 降至 `< 20%`，单次 15–20s 稳拿 6+ 根原木。
+- **D1 r47 终版复验**：r46→r47 已配对采木 **29→25**，排除反射后失败 **27/27→12/21（57.1%）**，仍高于 **20%**。技能耗时中位 **44.039→20.583s**，3 次净收至少 6 根，最快 **24.308s**，20s 内 **0/21**。按失败回执计 `time_budget` **15→4**、`unreachable_targets` **6→2**，另有一次 44.046s 收 6 根的超时部分成功。两条 r47 的 `tool_tier_insufficient` 均报告角色无镐，木镐混传暴露仍待新样本。Day 2 斥候有效回执 `in_water` **11/27→9/61**，新增 3 次 `shore_recoveries`，HY4_8 仍有 6 次涉水早停。 [最快六根](../runs/r47_day1_5bot/hy4_hy_1_bare/20261120-095716-917129.events.jsonl#L62) · [超时部分成功](../runs/r47_day1_5bot/hy4_hy_1_bare/20261120-100243-715803.events.jsonl#L71) · [无镐拒绝](../runs/r47_day1_5bot/hy4_hy_2_bare/20261120-101249-037804.events.jsonl#L116) · [上岸续跑](../runs/r47_day2_full_day_scout_9bot/nju_ds_1_iron/20261120-100224-945668.events.jsonl#L164)
+
+### BUG-080 | **P1（下界要塞 `mc_skill_tunnel:unsafe_or_unknown_floor` 29x + 下界高速斥候外推）** | Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: OPEN（`r48_nether_fortress_9bot` 实测）
+
+- **一句话**：`r48_nether_fortress_9bot` 6/9 找到要塞，但导航阶段出现 **29 次 `mc_skill_tunnel:unsafe_or_unknown_floor`**（5 bots）、**33 次 `movement_not_confirmed`**（7 bots）、**28 次 `path_not_found`**（4 bots），且 `mc_skill_scout_surface` 尚未支持 `the_nether` 维度（导致下界仍靠手动短步寻路）。
+- **实测证据**：[r48_nether_fortress 榜单](../runs/r48_nether_fortress_9bot/triage-r48_nether_fortress_9bot.md)（9/9 完成，0 崩溃，0 慢调用，但 90 次导航失败）。
+- **最小修复**：
+  1. `mc_skill_tunnel` 在下界桥面/要塞走廊遇 `unsafe_or_unknown_floor` 时，若包内有 `cobblestone`/`netherrack`/`blackstone` 且脚下 1 格为空气（非岩浆），自动垫 1 格安全方块再继续，或返回明确的 `bridge_gap_ahead` 建议改向，不再盲目重复触发 29 次；
+  2. 将 `mc_skill_scout_surface` 外推支持 `the_nether`（或放宽维度检查）：下界沿安全实心下界岩/地狱砖分段推进（步长 16–20m），自动避开 `lava`/`magma_block`/悬崖，每段优先扫 `nether_bricks`/`spawner`/`nether_wart`/`blaze`/`wither_skeleton`，绝不被 `netherrack` 淹没。
+- **验收标准**：离线单测覆盖“下界 `scout_surface` 避岩浆/岩浆块并命中 `nether_bricks`/`blaze` 早停”和“`tunnel` 空隙提示/垫脚”；实机 `nether_fortress` 导航失败大幅下降、`obtain_blaze_rod` 破零。
 
 ## P2 Backlog（不抢 P0/P1；KB/脚本类由 #6 随时消化，核心代码类由 #2/#3/#4 在各自 P0/P1 清零后顺延处理）
 
