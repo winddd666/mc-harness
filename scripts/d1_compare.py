@@ -20,8 +20,10 @@ import pathlib
 import statistics
 
 if __package__:
+    from .d1_ticket_gates import ticket_gates
     from .fleet_lifecycle import LifecycleCounter
 else:
+    from d1_ticket_gates import ticket_gates
     from fleet_lifecycle import LifecycleCounter
 
 WT = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated")
@@ -120,6 +122,7 @@ def main() -> int:
     ap.add_argument("before")
     ap.add_argument("after")
     ap.add_argument("--keys", nargs="*", default=[])
+    ap.add_argument("--ticket", action="append", default=[], metavar="BUG-NNN")
     args = ap.parse_args()
 
     a = analyze(args.before)
@@ -165,6 +168,19 @@ def main() -> int:
         print("\n-- ticket spot-check --")
         for k in args.keys:
             print(f"  {k:52s} {a['err_cnt'][k]:4d} -> {b['err_cnt'][k]:4d}")
+    if args.ticket:
+        before = {
+            (gate.ticket, gate.metric): gate
+            for gate in ticket_gates(WT / "runs" / args.before) if gate.ticket in args.ticket
+        }
+        print("\n-- assigned ticket metrics --")
+        for gate in ticket_gates(WT / "runs" / args.after):
+            old = before.get((gate.ticket, gate.metric))
+            if old:
+                print(f"  {gate.ticket} {gate.metric}: "
+                      f"{old.actual} [{old.status}] -> {gate.actual} [{gate.status}]  target {gate.threshold}")
+                if gate.evidence:
+                    print(f"    {gate.evidence}")
     return 0
 
 

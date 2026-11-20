@@ -1747,6 +1747,24 @@ retries 846 | 429 49 | 502 0 | tracebacks 0
 /home/xzq/projects/mc/.venv/bin/python scripts/v2_fleet.py triage --wave hy4_audit_r26 --runs-root /home/xzq/projects/mc/.worktrees/v2-integrated/runs --no-markdown
 ```
 
+## 4cb. 九票离线门禁与合入检查
+
+截至集成树 `29893fb`，指定前缀下仍只有已收官的六波基线。队列里有三组待实测的合入变更。BUG-042/045 已有 `c15e9c7` 的 429 尝试预算与抖动，以及 `103eaa9` 的 GLM 每 Bot 10 RPM 配置。BUG-056 已有 `46f882b` 和 `a586958` 的浮水时限路径。BUG-057 已有 `3594833` 的岩浆块受伤时下蹲路径。集成树的 `bug056 or bug057` 离线测试通过 5 项。仍需运行产物确认实际加载的版本、场景覆盖和门禁结果。 [429 代码](../../v2-integrated/src/mc_agent/harness/model.py#L674) · [Fleet 配置](../../v2-integrated/scripts/v2_fleet.py#L101) · [浮水时限](../../v2-integrated/src/mc_agent/harness/guardian.py#L316) · [岩浆块反射](../../v2-integrated/src/mc_agent/harness/guardian.py#L557) · [集成树离线测试](../../v2-integrated/tests/test_generation_guard.py#L3877)
+
+| 工单 | `d1_acceptance.py` 核对项 |
+|---|---|
+| BUG-042 | 12 路约 4h 的硬 429 集 ≤2，持续限流尝试 ≥6，长任务 429/502 报废 ≤1，同类 HY4 长任务分数 ≥60。 |
+| BUG-045 | 原票 `glm_*` 通道重试率和 429 退避墙钟各 ≤5%，整波硬 429 集 ≤3。 |
+| BUG-046 | 约 4h 波次最短 Bot 实际墙钟比例 ≥95%。 |
+| BUG-047 | 工具 p99 ≤60s，`unstick` ≤30s，`move_to:busy` ≤20s，单集超预算 ≤10s。 |
+| BUG-056 | 浮水 p99 ≤25s、max ≤40s，指定 Bot 的单请求超时集为 0。 |
+| BUG-057 | 每集岩浆块伤害 ≤10 次，整波岩浆块死亡 ≤3 次。 |
+| BUG-058 | `path_not_found` 每集 ≤3 次，整波 ≤300 次。 |
+| BUG-059 | `climb_progress/surface_reached` ≤1:1，连击 ≥3 的集数 ≤5，深挖回程超时需逐集核定。 |
+| BUG-060 | `no_such_entity` 每波 ≤5 次，以半径 ≥4096 扫实体为 0 次。 |
+
+终版以 `wild-endurance-*.json` 中的 `curriculum_summary` 为准。无终版、缺少样本或待逐集判定的门禁显示 `PENDING`。计时只在集内配对开始和结束事件。用修复前后的波名运行 `d1_compare.py 前波 后波 --ticket BUG-NNN` 可得到该票各项指标及证据位置。单集示范为 `hy4_audit_r27/hy4_hy_9_deep_water` EP13，JSONL L21 与 L42 两次 `boundary_escape_water` 分别为 560.6412s 与 560.6349s，L46 在 600s 预算下记录实际 1132.1628s。 [门禁实现](../scripts/d1_ticket_gates.py) · [前后对照](../scripts/d1_compare.py) · [离线测试](../tests/test_d1_ticket_gates.py) · [EP13 L21](../../v2-integrated/runs/hy4_audit_r27/hy4_hy_9_deep_water/20261119-132625-966581.events.jsonl#L21) · [EP13 L42](../../v2-integrated/runs/hy4_audit_r27/hy4_hy_9_deep_water/20261119-132625-966581.events.jsonl#L42) · [EP13 L46](../../v2-integrated/runs/hy4_audit_r27/hy4_hy_9_deep_water/20261119-132625-966581.events.jsonl#L46)
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s

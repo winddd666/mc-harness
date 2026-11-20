@@ -4,21 +4,22 @@
 Usage:
   python scripts/d1_acceptance.py --wave r16_22bot
 
-Exit 0 = all gates pass; 1 = at least one FAIL (details printed).
+Exit 0 = no observed failure; 1 = at least one FAIL. PENDING is reported separately.
 Thresholds are copied from docs/BUG_BOARD.md acceptance criteria.
 """
 from __future__ import annotations
 
 import argparse
 import collections
-import glob
 import json
 import pathlib
 import statistics
 
 if __package__:
+    from .d1_ticket_gates import ticket_gates
     from .fleet_lifecycle import LifecycleCounter
 else:
+    from d1_ticket_gates import ticket_gates
     from fleet_lifecycle import LifecycleCounter
 
 WT = pathlib.Path("/home/xzq/projects/mc/.worktrees/v2-integrated")
@@ -173,6 +174,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--wave", required=True)
     args = ap.parse_args()
+    wave_dir = WT / "runs" / args.wave
+    if not wave_dir.is_dir():
+        ap.error(f"wave directory not found: {wave_dir}")
     o = collect(args.wave)
     med = statistics.median(o["mine_dur"]) if o["mine_dur"] else 0.0
     ratios = sorted(d / b for d, b in o["mine_pairs"]) if o["mine_pairs"] else []
@@ -206,7 +210,6 @@ def main() -> int:
         ("SCENE-001 trade calls", o["trade"], ">= 1", has_trade),
         ("SCENE-001 brew calls", o["brew"], ">= 1", has_brew),
     ]
-    width = max(len(g[0]) for g in gates) + 2
     print(f"\n===== D1 ACCEPTANCE {args.wave} ({len(o['summaries'])}/{len(o['bots'])} summaries, {o['tool_calls']} tool calls) =====")
     failed = 0
     for gate in gates:
@@ -236,7 +239,14 @@ def main() -> int:
         print(f"  startup crashes: {o['startup_crash']}")
     if o["thread_errors"]:
         print(f"  dead background threads: {o['thread_errors']}")
-    print(f"\n{'ALL PASS' if failed == 0 else f'{failed} GATE(S) FAILED'}")
+    print("\n===== ASSIGNED D1 TICKETS =====")
+    pending = 0
+    for gate in ticket_gates(wave_dir):
+        failed += gate.status == "FAIL"
+        pending += gate.status == "PENDING"
+        evidence = f"  [{gate.evidence}]" if gate.evidence else ""
+        print(f"  {gate.status:7s} {gate.ticket} {gate.metric}  actual={gate.actual}  target {gate.threshold}{evidence}")
+    print(f"\n{failed} GATE(S) FAILED, {pending} ASSIGNED GATE(S) PENDING")
     return 0 if failed == 0 else 1
 
 
