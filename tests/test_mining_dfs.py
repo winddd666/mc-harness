@@ -1545,6 +1545,55 @@ def test_deep_pickaxe_low_with_no_wood_requests_climb_before_harvesting() -> Non
     assert not world.dig_log
 
 
+@pytest.mark.parametrize("available_supply", ["raw_iron", "crafting_table"])
+def test_worn_pickaxe_without_sticks_does_not_auto_return_to_collar(monkeypatch, available_supply) -> None:
+    from mc_agent.skills import mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(
+        start_pos=(0.5, 16.0, 0.5), surface_y=64, track_durability=True,
+        inventory_items=[
+            {"name": "iron_pickaxe", "count": 1, "slot": 9, "durability": [7, 250]},
+            {"name": "cobblestone", "count": 32, "slot": 10},
+        ],
+    )
+    world.blocks[(0, 16, 0)] = world.blocks[(0, 17, 0)] = "air"
+    if available_supply == "raw_iron":
+        world._add_item("raw_iron")
+    with BotSession("tok", bot_username="WoodlessResupply", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -48), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=(0, 16, 0), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, (0, 16, 0)]),
+            branches=[mining.BranchSpec("stair_down", "east", 70)],
+        )
+        if available_supply == "crafting_table":
+            engine.ledger.record_utility("crafting_table", (1, 64, -48))
+        return_goals = []
+
+        def interrupted_return(goal_node_id, **kwargs):
+            return_goals.append(goal_node_id)
+            world.pos = [0.5, 53.0, -36.5]
+            engine.bot.status()
+            clock.now = engine._deadline
+            engine.bot.status()
+
+        monkeypatch.setattr(engine, "_navigate_to_node", interrupted_return)
+        result = engine.run(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
+
+    assert result["stop_reason"] == "pickaxe_low"
+    assert result["next_action"] == "climb_out"
+    assert result["pos_after"][1] <= 16
+    assert not return_goals
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -> None:
     """Rock digging must auto-craft a stone burner pick instead of stopping at pickaxe_low."""
     world = _MockMineWorld(
@@ -3040,6 +3089,70 @@ def test_blocked_descent_backtrack_resumes_the_deepest_pending_node(monkeypatch)
     assert result["stop_reason"] == "quota_reached"
     assert engine.collar_node_id == collar.node_id
     assert result["pos_after"][1] <= 26
+
+
+@pytest.mark.parametrize("local_branch_available", [True, False])
+def test_blocked_target_level_backtrack_preserves_the_shaft(monkeypatch, local_branch_available) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, -54.0, 0.5), surface_y=64,
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    for x in (0, 2):
+        world.blocks[(x, -54, 0)] = world.blocks[(x, -53, 0)] = "air"
+    world.blocks[(4, -54, 0)] = "deepslate_diamond_ore"
+    with BotSession("tok", bot_username="BlockedAtTargetDepth", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(
+            kind="collar", anchor=(0, 64, -120), parent_id=None, edge_from_parent=None,
+            branches=[mining.BranchSpec("stair_down", "west", 118)],
+        )
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        junction = engine._create_node(
+            kind="spine", anchor=(0, -54, -2), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, (0, -54, -2)]), branches=[],
+        )
+        if local_branch_available:
+            engine._create_node(
+                kind="spine", anchor=(2, -54, 0), parent_id=junction.node_id,
+                edge_from_parent=ShaftEdge("spine_forward", "east", [junction.anchor, (2, -54, 0)]),
+                branches=[mining.BranchSpec("spine_forward", "east", 4)],
+            )
+        spent = engine._create_node(
+            kind="spine", anchor=(0, -54, 0), parent_id=junction.node_id,
+            edge_from_parent=ShaftEdge("branch_leaf", "south", [junction.anchor, (0, -54, 0)]), branches=[],
+        )
+        relocations = []
+
+        def blocked_walk(waypoints, *, reverse=False, **kwargs):
+            assert reverse and waypoints == spent.edge_from_parent.waypoints
+            world.pos = [2.5, -54.0, 0.5]
+            return False, "backtrack_blocked"
+
+        def interrupted_relocation(*args, **kwargs):
+            relocations.append(world.pos)
+            world.pos = [3.5, -54.0, 0.5]
+            engine.bot.status()
+            clock.now = engine._deadline
+            engine.bot.status()
+
+        monkeypatch.setattr(engine, "_walk_waypoints", blocked_walk)
+        monkeypatch.setattr(engine, "_relocate_to_fresh_collar_site", interrupted_relocation)
+        result = engine.run(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
+
+    if local_branch_available:
+        assert result["stop_reason"] == "quota_reached"
+        assert result["target_gained"] == 1
+        assert not relocations
+    else:
+        assert result["stop_reason"] == "time_slice_progress"
+        assert len(relocations) == 1
+    assert result["pos_after"][1] == -54
+    assert engine.collar_node_id == collar.node_id
+    assert spent.node_id in engine.nodes
 
 
 def test_exhausted_transit_node_uses_its_deeper_pending_branch_before_ascending(monkeypatch) -> None:

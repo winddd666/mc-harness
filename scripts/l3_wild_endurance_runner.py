@@ -11,7 +11,7 @@
 
 Scene slices (`--stage`, one unique site per fleet slot):
   bare / iron / midgame / nether / village     overworld checkpoints, `/spawnpoint` death return
-  village_trade                                natural village, emerald/stick trade loadout
+  village_trade                                lit landing pad in a natural village + staged trader
   brewing_alchemy                              cobblestone pad + brewing stand + 2x2 water source
   cave_combat                                  roofed 11x11 arena with one zombie + one skeleton
   nether_fortress / nether_bastion             locate real structure, obsidian ledge + charged
@@ -186,15 +186,8 @@ def select_village_wild_site(
     bot: Any,
     bot_name: str,
     start_idx: int = 0,
-    *,
-    park_near_villager: bool = False,
 ) -> tuple[float, float, float, str]:
-    """Locate a real natural village near a far-away candidate anchor via RCON `locate structure`.
-
-    `park_near_villager` (village_trade): after landing, teleport right next to a real villager so
-    the first `mc_window_view` cannot fail with `no_window` because the target is 12m away or behind
-    a wall (r16 glm_glm_3_village_trade: 11 no_window errors).
-    """
+    """Locate a natural village and use the surface selected by spreadplayers."""
     cx, cz = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
     res = rcon_batch(
         [f"execute positioned {cx} 100 {cz} run locate structure #minecraft:village"],
@@ -214,20 +207,13 @@ def select_village_wild_site(
         pos = _wait_settled(bot) or [vx, 64, vz]
         st = bot.status()
         pos = st.get("pos") or pos
-        if park_near_villager:
-            parked = _park_near_entity(bot, bot_name, ("villager",), pos, radius=64)
-            if parked is None:
-                parked = _park_near_entity(bot, bot_name, ("villager",), pos, radius=128)
-            if parked is not None:
-                pos = parked
-            _pin_villager_near(bot, bot_name, pos)
         biome = str(st.get("biome") or "village").lower()
         return float(pos[0]), float(pos[1]), float(pos[2]), f"village:{biome}"
     return select_dry_isolated_wild_site(bot, bot_name, start_idx=start_idx)
 
 
 def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
-    """Teleport + freeze the nearest villager 1.5 blocks beside the bot (village_trade fixture).
+    """Place a persistent trader at the specified position on the village_trade pad.
 
     r18 glm_glm_3_village_trade kept chasing villagers 27m away (`out_of_reach`) and hit
     `path_not_found` on the village hillside. A NoAI villager at arm's length makes the trade slice
@@ -249,7 +235,7 @@ def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
 
     try:
         # Preferred fixture: SUMMON a persistent, invulnerable, NoAI farmer with a paper->emerald
-        # trade directly on the bot's block. Teleporting an existing villager kept losing it
+        # trade. Teleporting an existing villager kept losing it
         # (r22: entities=[] + 20m chase; r23 NJU: stale id 1330 -> target_not_visible).
         summon = (
             f"summon minecraft:villager {tx:.1f} {ty:.1f} {tz:.1f} "
@@ -276,7 +262,7 @@ def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
         else:
             print(f"[Scene] trader summon not accepted ({reply[:80]!r}); falling back to tp+NoAI", flush=True)
 
-        # Fallback: teleport a loaded villager onto the bot's passable block and freeze it.
+        # Fallback: teleport a loaded villager onto the same prepared block and freeze it.
         pinned = False
         for attempt in (1, 2):
             rcon_batch(
@@ -305,60 +291,6 @@ def _pin_villager_near(bot: Any, bot_name: str, pos: list[float]) -> bool:
     except Exception as exc:
         print(f"[Scene] villager pin failed for {bot_name}: {exc}", flush=True)
         return False
-
-
-def _park_near_entity(
-    bot: Any,
-    bot_name: str,
-    name_fragments: tuple[str, ...],
-    fallback: list[float],
-    *,
-    radius: int = 64,
-) -> list[float] | None:
-    """Teleport the bot 1.5 blocks beside the nearest matching entity (scene setup helper)."""
-    try:
-        res = bot.call("get_entities", {"radius": radius}) or {}
-    except Exception:
-        return None
-    entities = res.get("entities") if isinstance(res, dict) else None
-    if not isinstance(entities, list) or not entities:
-        return None
-    best: dict[str, Any] | None = None
-    best_dist = float("inf")
-    for ent in entities:
-        if not isinstance(ent, dict):
-            continue
-        label = f"{ent.get('name') or ''} {ent.get('type') or ''}".lower()
-        if not any(frag in label for frag in name_fragments):
-            continue
-        pos = ent.get("pos")
-        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
-            continue
-        d = math.hypot(float(pos[0]) - fallback[0], float(pos[2]) - fallback[2])
-        if d < best_dist:
-            best_dist = d
-            best = ent
-    if best is None:
-        return None
-    ex, ey, ez = (float(v) for v in best["pos"][:3])
-    target = [ex + 1.5, ey, ez + 0.5]
-    try:
-        rcon_batch(
-            [
-                f"tp {bot_name} {target[0]:.1f} {target[1]:.1f} {target[2]:.1f}",
-                f"spawnpoint {bot_name} {int(round(target[0]))} {int(round(target[1]))} {int(round(target[2]))}",
-            ],
-            timeout=30,
-        )
-        settled = _wait_settled(bot, timeout_s=6.0) or target
-        print(
-            f"[Scene] parked {bot_name} next to '{best.get('name')}' at "
-            f"({target[0]:.1f}, {target[1]:.1f}, {target[2]:.1f}) in village",
-            flush=True,
-        )
-        return settled
-    except Exception:
-        return None
 
 
 def _locate_coords(reply: str) -> tuple[int, int] | None:
@@ -626,6 +558,14 @@ def prepare_scene_ground(
             ]
         )
         return cmds
+    if stage == "village_trade":
+        # r31 NJU_3 suffocated at a fixed offset from a villager inside a building.
+        return [
+            f"fill {ix - 2} {iy - 1} {iz - 2} {ix + 2} {iy - 1} {iz + 2} minecraft:cobblestone",
+            f"fill {ix - 2} {iy} {iz - 2} {ix + 2} {iy + 2} {iz + 2} minecraft:air",
+            f"setblock {ix - 2} {iy} {iz - 2} minecraft:torch",
+            f"setblock {ix + 2} {iy} {iz + 2} minecraft:torch",
+        ]
     if stage == "cave_combat":
         # Enclosed 11x11x4 cobblestone combat arena with roof (prevents sunburn) and torches at corners.
         cmds.extend(
@@ -1502,7 +1442,7 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "tier": 2,
         "budget_class": "short",
         "task": (
-            "本场景已在村庄内、出生点脚下固定了一名 NoAI 村民，背包备有 emerald 32 / wheat 32 / "
+            "你在村庄的照明台面，旁边有一名 NoAI 交易村民，背包备有 emerald 32 / wheat 32 / "
             "stick 64 / paper 32 / coal 32。先 mc_get_entities(radius=12)（**不要**传 types 过滤，"
             "直接看返回列表里的 villager），若距离 >4m 先 mc_move_to(x=..., z=..., range=1.5) 贴近"
             "（不要隔着 20m 直接开窗，会 out_of_reach），然后 mc_window_view(entity_id=...) 读取报价；"
@@ -1866,8 +1806,9 @@ def main() -> int:
                 bot,
                 bot_name,
                 start_idx=args.site_index,
-                park_near_villager=(args.stage == "village_trade"),
             )
+            if args.stage == "village_trade":
+                sx, sy, sz = math.floor(sx) + 0.5, float(round(sy)), math.floor(sz) + 0.5
         elif args.stage == "nether_fortress":
             sx, sy, sz, biome = select_nether_structure_site(bot, bot_name, "minecraft:fortress", start_idx=args.site_index)
         elif args.stage == "nether_bastion":
@@ -1885,6 +1826,8 @@ def main() -> int:
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
         entry_ok = verify_scene_entry(bot, bot_name, scene)
+        if args.stage == "village_trade":
+            _pin_villager_near(bot, bot_name, [sx + 2.0, sy, sz])
 
         geofence = _scene_geofence_cls(VoidGeofence)(
             center_x=sx, center_z=sz, radius=220.0, margin=8.0

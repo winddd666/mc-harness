@@ -155,6 +155,43 @@ def test_bug048_geofence_clamps_mild_overshoot_and_escalates_repeated_or_implaus
         assert b_reset.get("requires_replan") is not True
 
 
+def test_bug058_path_not_found_suggests_dig_toward_and_escalates_repeats() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"pos": [100.5, 64.0, 200.5], "dimension": "overworld", "ready": True}},
+            )
+        if path == "/move_to":
+            return httpx.Response(
+                200,
+                json={"ok": False, "error": {"code": "path_not_found", "message": "No path"}},
+            )
+        return httpx.Response(200, json={"ok": True, "result": {"ok": True}})
+
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot:
+        ts = McToolset(bot, geofence=VoidGeofence(radius=0.0))
+
+        first = json.loads(ts.mc_move_to(x=105.0, y=64.0, z=200.0, range=1.0))
+        assert first["ok"] is False
+        assert first["suggested"]["mode"] == "dig_toward"
+        assert first["path_not_found_count"] == 1
+        assert first.get("requires_replan") is not True
+
+        # Second failure within 8m escalates to requires_replan=True
+        second = json.loads(ts.mc_move_to(x=106.0, y=64.0, z=201.0, range=1.0))
+        assert second["ok"] is False
+        assert second["path_not_found_count"] == 2
+        assert second["requires_replan"] is True
+
+        # Rebinding episode clears the counter
+        ts.rebind_runtime_hooks()
+        third = json.loads(ts.mc_move_to(x=120.0, y=64.0, z=200.0, range=1.0))
+        assert third["path_not_found_count"] == 1
+        assert third.get("requires_replan") is not True
+
+
 def test_world_hud_renders_compact_coords_durability_and_gaps() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix("/api/v1")

@@ -163,6 +163,7 @@ class McToolset:
         self._entity_observed_mono: float = 0.0
         self._entity_observed_dimension: str = "overworld"
         self._geofence_blocked_count: int = 0
+        self._path_not_found_targets: list[tuple[float, float]] = []
         self.geofence = geofence if geofence is not None else VoidGeofence.from_env()
         self.world_memory = (
             world_memory
@@ -188,6 +189,7 @@ class McToolset:
         self._stop_check = stop_check
         self._on_cooldown_wait = on_cooldown_wait
         self._geofence_blocked_count = 0
+        self._path_not_found_targets.clear()
 
     def _record_geofence_block(
         self,
@@ -1148,10 +1150,41 @@ class McToolset:
                         pass
                 # If moving onto a remembered POI failed with path_not_found, cool down that POI for 300s
                 if err_code in {"path_not_found", "no_path"}:
-                    tx_i, tz_i = math.floor(float(x)), math.floor(float(z))
+                    tx_f, tz_f = float(x), float(z)
+                    tx_i, tz_i = math.floor(tx_f), math.floor(tz_f)
                     for (edim, ex, ey, ez) in list(self.world_memory.pois.keys()):
                         if edim == dim_m and abs(ex - tx_i) <= 1 and abs(ez - tz_i) <= 1 and (y is None or abs(ey - math.floor(float(y))) <= 2):
                             self.world_memory.mark_unreachable((ex, ey, ez), dim=dim_m, reason=err_code, cooldown_s=300.0)
+                    # BUG-058: guide short-range dig_toward and escalate repeated path_not_found to requires_replan
+                    with self._state_lock:
+                        near_hits = 1 + sum(
+                            1 for (px_f, pz_f) in self._path_not_found_targets
+                            if math.hypot(tx_f - px_f, tz_f - pz_f) <= 8.0
+                        )
+                        self._path_not_found_targets.append((tx_f, tz_f))
+                        total_hits = len(self._path_not_found_targets)
+                    parsed["path_not_found_count"] = total_hits
+                    if cur_p is not None and dist_m <= 12.0:
+                        parsed["suggested"] = {
+                            "mode": "dig_toward",
+                            "target": [
+                                round(tx_f, 1),
+                                round(float(y), 1) if y is not None else None,
+                                round(tz_f, 1),
+                            ],
+                            "distance": round(dist_m, 1),
+                        }
+                        parsed["hint"] = (
+                            f"目标距当前位置仅 {round(dist_m, 1)}m 但寻路不通（可能隔墙/悬崖/门框阻挡），"
+                            "请改用 mc_dig / mc_skill_tunnel / mc_skill_staircase 挖通或垫高，不要重复调用 mc_move_to。"
+                        )
+                    if near_hits >= 2 or total_hits >= 3:
+                        parsed["requires_replan"] = True
+                        parsed["hint"] = (
+                            f"本集已 {total_hits} 次遇到 path_not_found（近邻目标重复 {near_hits} 次），"
+                            "该路径不可达。请立即放弃此坐标，改挖通路径（mc_skill_tunnel/mc_dig）或换可达目标。"
+                        )
+                    raw = json.dumps(parsed, ensure_ascii=False)
         if entity_id is not None:
             try:
                 parsed_ent = json.loads(raw)
