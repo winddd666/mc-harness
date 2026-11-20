@@ -1522,6 +1522,150 @@ retries 846 | 429 49 | 502 0 | tracebacks 0
 
 **验收**：单 bot 单波 ≤5 次；`glm_4` 类场景分数回到 ≥195。
 
+## 4by. 逐轨迹卡点全量审计（6 波 / 40 条 bot 轨迹 / 1,581 个 episode）
+
+> 审计口径：`overnight_12bot`（12 路 ×4h）+ `overnight_12bot_part2`（12 路 ×3.9h）+ `hy4_audit_r25/r26/r27/r28`（4 路 ×20min/3h/2.5h）。逐 episode 读 `report_file` 的 `events`，逐 bot 汇总最后工具 / stop_reason / guardian 动作 / 死亡。
+
+### 0. 总体结论：**91.1% 的 episode 得分为 0**
+
+| 状态 | 集数 | 占比 |
+|---|---|---|
+| `answered` | 1,133 | 71.7% |
+| `timeout` | 168 | 10.6% |
+| `goal_satisfied` | 111 | **7.0%** |
+| `limit_reached` | 74 | 4.7% |
+| `runtime_error` | 73 | 4.6% |
+| `paused_for_world_job` | 13 | 0.8% |
+| `aborted` | 7 | 0.4% |
+| `network_error` / `paused` | 2 | 0.1% |
+
+**零分集 1,440 / 1,581 = 91.1%**（分波：92.3% / 91.4% / 70.6% / 88.0% / 90.6% / 89.8%）。
+→ `answered` ≠ 成功：它是"模型自行收尾/判定不可达"，绝大多数同样 0 分。**真正的成交率只有 7.0%。**
+
+### 1. 逐波次逐 bot 卡点表（每个 bot 的 top 卡点）
+
+| 波次 | bot | 集 | 成交 | 主要卡点 |
+|---|---|---|---|---|
+| overnight | `ds_1_bare` | 35 | 26 | mine_slice×3、limit:move_to、limit:find_blocks |
+| overnight | `ds_2_cave_combat` | 58 | 44 | mine_slice×5、**lost_pickaxe×3**、limit:flee×2 |
+| overnight | `ds_3_enchant_anvil` | 41 | 30 | limit:move_to×2、limit:get_entities×2、staircase_budget×2 |
+| overnight | `ds_4_nether_fortress` | 43 | 35 | limit:move_to×3、**MCAPI_timeout×2**、limit:get_entities |
+| overnight | `glm_1_nether_fortress` | 34 | 28 | **429×3**、mine_slice×2、MCAPI_timeout |
+| overnight | `glm_2_nether_bastion` | 30 | 25 | 429×2、limit:dig、limit:mine_dfs |
+| overnight | `glm_3_village_trade` | 61 | 49 | mine_slice×3、**limit:flee×3**、timeout:staircase×2 |
+| overnight | `glm_4_brewing_alchemy` | 56 | 43 | staircase_budget×2、**climb_livelock×2**、429×2 |
+| overnight | `glm_5_midgame` | 72 | 56 | **staircase_budget×4**、timeout:staircase×2、429×2 |
+| overnight | `nju_guitest_01_nether` | 75 | 74 | unstick_loop×1（几乎全成交） |
+| overnight | `nju_movetest_01_bare` | 21 | 8 | **craft_hang×7（实为 escape_water 499s）**、timeout:get_entities×3 |
+| overnight | `nju_3_village_trade` | 56 | 50 | mine_slice×2、timeout:staircase×2 |
+| part2 | `ds_1_bare` | 40 | 28 | mine_slice×3、limit:flee、limit:attack |
+| part2 | `ds_2_cave_combat` | 64 | 59 | timeout:mine_dfs、mine_slice、limit:find_blocks |
+| part2 | `ds_3_enchant_anvil` | 45 | 32 | mine_slice×3、limit:flee×2、climb_livelock×2 |
+| part2 | `ds_4_nether_fortress` | 57 | 46 | **MCAPI_timeout×3**、limit:move_to×2、limit:mine_blocks×2 |
+| part2 | `glm_1_nether_fortress` | 80 | 59 | **429×16**、limit:craft_gear×2 |
+| part2 | `glm_2_nether_bastion` | 33 | 22 | **429×9**、limit:unstick、timeout:move_to |
+| part2 | `glm_3_village_trade` | 32 | 17 | 429×3、mine_slice×2、timeout:staircase×2 |
+| part2 | `glm_4_brewing_alchemy` | 45 | 30 | **429×9**、mine_slice×3、staircase_budget×2 |
+| part2 | `glm_5_midgame` | 80 | 60 | **429×15**、limit:move_to×2 |
+| part2 | `nju_guitest_01_nether` | 41 | 26 | mine_slice×4、staircase_budget×2 |
+| part2 | `nju_movetest_01_bare` | 30 | 20 | **climb_livelock×3**、staircase_budget×3、lost_pickaxe |
+| part2 | `nju_3_village_trade` | 49 | 42 | staircase_budget×3、mine_slice×2 |
+| r25 | `hy4_2_iron` | 3 | 1 | mine_slice×2 |
+| r25 | `hy4_5_brewing_alchemy` | 8 | 6 | timeout:smelt、timeout:mine_dfs |
+| r25 | `hy4_6_nether_bastion` | 3 | 2 | timeout:get_entities |
+| r25 | `hy4_9_deep_water` | 3 | 1 | mine_slice×2 |
+| r26 | `hy4_2_iron` | 18 | 12 | timeout:move_to、limit:smelt、limit:mine_dfs |
+| r26 | `hy4_5_brewing_alchemy` | 19 | 15 | mine_slice×2、climb_livelock、limit:smelt |
+| r26 | `hy4_6_nether_bastion` | 20 | 15 | limit:find_blocks、limit:move_to、runtime_error |
+| r26 | `hy4_9_deep_water` | 35 | 31 | timeout:find_blocks、timeout:staircase、timeout:smelt |
+| r27 | `hy4_2_iron` | 27 | 24 | timeout:move_to、mine_slice、timeout:find_blocks |
+| r27 | `hy4_5_brewing_alchemy` | 31 | 25 | timeout:move_to、unstick_loop、limit:move_to |
+| r27 | `hy4_6_nether_bastion` | 50 | 47 | limit:find_blocks、runtime_error、timeout:find_blocks |
+| r27 | `hy4_9_deep_water` | 19 | **4** | **craft_hang×6（escape_water 560s）**、climb_livelock×2 |
+| r28 | `hy4_2_iron` | 50 | 46 | mine_slice×2、staircase_budget |
+| r28 | `hy4_5_brewing_alchemy` | 50 | 48 | timeout:mine_dfs、limit:get_entities |
+| r28 | `hy4_6_nether_bastion` | 24 | 22 | limit:unstick、timeout:staircase |
+| r28 | `hy4_9_deep_water` | 43 | 36 | timeout:mine_dfs×2、lost_pickaxe、mine_slice |
+
+### 2. 卡点类别（按影响排序）
+
+#### A. `escape_water` 无界阻塞 —— **P0，19 集整集报废（新票 BUG-056）**
+- `nju_movetest_01_bare` **EP11–EP20 连续 10 集**，每集只有 1 次 `craft_gear` 调用，然后 `guardian.action=boundary_escape_water` 跑 **499.0s**，集预算 300s → 整集报废（**占该 bot 48% 集数**）
+- `hy4_hy_9_deep_water`（r27）**EP11–EP19 连续 9 集**，每次 **560.6s**
+- 全量：557 次调用 / **16,895s = 4.69h**；>30s 113、>60s 35、>120s 24、>300s 22
+- 根因：`library.py:4803 escape_water()` 无 deadline（四层嵌套循环），`guardian.py:294` 直接调用不传预算
+
+#### B. `hot_floor`（岩浆块）无反射 —— **P1，2,129 次伤害 / 34 死（新票 BUG-057）**
+- `ds_4` **1,232 次**伤害、25 死；`glm_2` 754 次、7 死；`hy4_6` 101 次、2 死
+- 典型：`[受伤 health=19 by hot_floor]×10` → HP 20→13.3；`emergency_bunker=unsafe_open_side`、`flee=no_safe_retreat` 双双失败后继续掉血
+- 根因：`hot_floor` 在 `NON_COMBAT_HURT_SOURCES` 里**压制了 `fresh_hurt`**，只有 HP≤6 才升级；全程没有"离开该方块"的反射
+
+#### C. `path_not_found` —— **P1，1,137 次 / 446 集（新票 BUG-058）**
+- `mc_move_to` 1,099 次；`hy4_6` **237**、`glm_1` **151**、`glm_4` 88
+- 典型（`hy4_6` r28 EP1，45 请求 0 分）：在可达中转点 (228,205) 与不可达目标 (232,205) 之间**来回横跳**
+- `find_blocks radius=96` 每次都说"有 2 个 ancient_debris"，模型知道位置但到不了，也没有"挖过去"的建议
+
+#### D. `climb_out` 回不到地表 —— **P1，58 集 / 3.6h（新票 BUG-059）**
+- `climb_progress` **400 次** vs `surface_reached` **102 次**（成功率 20%）
+- 331 样本：**+5 格 / 29.3s = 7 秒/格**；`nju_guitest` EP37 从 **y=-48** 爬 16 次（458s）只到 y=1，仍需 ~672s > 600s 预算 → **数学上不可能**
+- 与并行 slice 的 BUG-051（地下 y<45 被派地表任务）叠加，形成"下得去、上不来、还被派地表活"的死循环
+
+#### E. 实体 id 失效循环 —— **P2，43 次 + 118 次超大半径扫描（新票 BUG-060）**
+- `glm_5` EP39 `make_a_sign_glow`：radius 256→512→…→**65,536** 连发 9 次 → `move_to(entity_id)` 两次 `no_such_entity` → 摔死 → 22 请求 0 分
+
+#### F. `void_geofence_blocked` —— **P1，307 次（BUG-048）**
+- `nju_guitest` wave1 **154** 次 / 118 个不同坐标 / 最远 **12.9km**；`glm_4` part2 **129** 次 / 110 个不同坐标（仅超界 0~42m）
+- 重复失败保护按"完全相同参数"匹配 → 每次换个坐标就绕过
+
+#### G. `pillar_fallback` 自锁 —— **P1（BUG-055 / P2-36）**
+- 213 次，其中 **24 段 ≥3 连击**（`nju_guitest` **29 连击** 188s、`glm_2` 18 连击、`hy4_6` 10 连击）
+
+#### H. 规划锁死（并行 slice 已立 BUG-049/050/051）—— **零分集的最大来源**
+- 下界死亡丢镐后仍派主世界 `bootstrap_stone_age/iron_age`：`glm_1` **75/80 集（94%）** 全废
+- 无鞍派 `ride_strider`、无钻镐派 `ancient_debris`、无结构派 `heart_transplanter`：`ds_4` 0/13+0/12+0/10、`glm_5` 0/14+0/8+0/7
+- 地下 y<45 被派地表任务（`sleep_in_bed`/`breed_an_animal`/`plant_seed`）：`glm_4` 连续 17 集
+
+#### I. `staircase:time_budget` —— **P1（BUG-037/041）**
+- 两波 592 次（351+241），`steps_done` 中位 1→2，仍缺"软方块方向优先"
+
+#### J. `depth_reset` —— **P1（BUG-030）**
+- 两波 41 次（16+17），`ds_1` 6、`nju_3` 5；行为修复（导航回最深节点）仍未实现
+
+#### K. 维度错配挖矿 —— **P2-37**
+- `bad_target_for_dimension` **80 次**：`diamond` **63**（下界要钻石）、`iron` 16
+
+#### L. `craft_gear:missing_ingredients` —— **P2-38**
+- **652 次**（占 craft 调用 43%，成功 380）；`stone_pickaxe` 132、`wooden_pickaxe` 125、`diamond_pickaxe` 90
+
+#### M. 死亡 —— **P1（BUG-026/040）**
+- 两波 notable 死亡 **263 次**（110+153）：`mob 87 / lava 47 / arrow 36 / hot_floor 31 / fall 16`；`ds_4` 单路 94 次
+
+### 3. 票号对账（与并行 slice 的 16 路复盘）
+
+| 并行 slice 的票 | 我的对应证据 | 关系 |
+|---|---|---|
+| BUG-049 下界派主世界 bootstrap | `glm_1` 75/80 集全废 | 一致，我方补充 `bad_target_for_dimension` 80 次 |
+| BUG-050 缺前置强派 + 固定 20min 冷却 | `ride_strider`/`ancient_debris` 0/13 等 | 一致 |
+| BUG-051 地下被派地表任务 | 与本方 BUG-059（climb 7s/格）**互为因果** | 需一起修 |
+| BUG-052 缺工作台/满包 | `craft:inventory_full` 69、`need_crafting_table` 185 | 一致 |
+| BUG-055 pillar 自锁 | 本方 P2-36 同源 | 已合并引用 |
+| **BUG-056** escape_water 无界 | 19 集报废 / 4.69h | **本方新增（P0）** |
+| **BUG-057** hot_floor 无反射 | 2,129 次伤害 / 34 死 | **本方新增** |
+| **BUG-058** path_not_found | 1,137 次 / 446 集 | **本方新增** |
+| **BUG-059** climb_out 回不来 | 400 次 progress / 3.6h | **本方新增** |
+| **BUG-060** 实体 id 失效 | 43 次 + 118 次超大扫描 | **本方新增（P2）** |
+
+### 4. 修复优先级（按"每修一项能救回多少零分集"）
+
+1. **BUG-056**（escape_water 预算）→ 直接救回 19 集 + 4.69h
+2. **BUG-049/050**（下界/前置门控）→ 救回 `glm_1` 75 集级别的整段空转
+3. **BUG-042/045**（429 重试预算 + Qwen RPM）→ 救回 61 集 + 18% 墙钟
+4. **BUG-057**（hot_floor 反射）→ 救回 34 死 + 58 集
+5. **BUG-058**（path_not_found 改挖）→ 释放 446 集里的无效往返
+6. **BUG-059 + BUG-051**（climb 加速 + 地下不派地表）→ 解决 58 集回程超时
+7. **BUG-048 / BUG-055**（围栏钳制 + pillar 自锁）→ 各 ~300/213 次
+8. **BUG-030 / BUG-037**（depth_reset + 软方块路由）→ 长期效率
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
