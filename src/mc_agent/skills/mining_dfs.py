@@ -332,6 +332,7 @@ class _BudgetSession:
         self.last_inventory: dict[str, Any] | None = None
         self.timeout_path: str | None = None
         self.timeout_dig_pos: tuple[int, int, int] | None = None
+        self.timeout_dig_read_s = 0.0
         self.dug_count = 0
         self.positions: list[tuple[int, int, int]] = []
         self.session = copy.copy(bot)
@@ -381,6 +382,7 @@ class _BudgetSession:
                 dig_pos = (payload or {}).get("pos")
                 if endpoint == "dig" and isinstance(dig_pos, (list, tuple)) and len(dig_pos) >= 3:
                     self.timeout_dig_pos = _floor_pos(dig_pos)
+                    self.timeout_dig_read_s = read_timeout
                 raise _MiningDeadline from exc
         if endpoint == "dig" and result.get("dug"):
             self.dug_count += 1
@@ -5054,8 +5056,11 @@ class MiningDFSEngine:
         except _MiningDeadline as exc:
             resupply_interrupted = isinstance(exc, _CollarResupplyDeadline)
             moved = len(scoped.positions) >= 2 and scoped.positions[-1] != scoped.positions[0]
-            # A dig interrupted after progress can get a fresh budget on the preserved route.
-            if scoped.timeout_dig_pos is not None and not (moved or scoped.dug_count):
+            # Give productive slices and digs with a subsecond read allowance a fresh budget.
+            if (
+                scoped.timeout_dig_pos is not None and scoped.timeout_dig_read_s >= 1.0
+                and not (moved or scoped.dug_count)
+            ):
                 self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", 30.0)
             # Keep interrupted branches retryable. Preserve the observed return route if
             # the cutoff landed inside an edge before its local waypoints were committed.
