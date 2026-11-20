@@ -130,7 +130,7 @@ class _UnsafeUnstickExit(BaseException):
 
 
 class _UnsafeFleeExit(BaseException):
-    """Unwind an explicit Nether retreat before an unsupported movement."""
+    """Unwind an explicit retreat before an unsupported ground movement."""
 
 
 class _GuardSession:
@@ -1577,14 +1577,14 @@ class GenerationGuard:
         _, needs_jump = route
         return {**body, "sprint": False, "jump": needs_jump, "ms": min(int(body.get("ms") or 350), 350)}
 
-    def _verify_nether_flee_step(self, action: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _verify_flee_step(self, action: str, body: dict[str, Any]) -> dict[str, Any]:
         status = self.bot.status()
-        if "nether" not in str(status.get("dimension") or "").lower():
+        if status.get("in_water") and status.get("alive") is not False and status.get("ready") is not False:
             return body
         pos = status.get("pos")
         if (
             not pos or status.get("ready") is False or status.get("alive") is False
-            or status.get("in_lava") or status.get("on_ground") is not True
+            or status.get("in_lava") or status.get("on_ground") is False
         ):
             raise _UnsafeFleeExit
 
@@ -1741,7 +1741,7 @@ class GenerationGuard:
                     (clean_path == "control" and body.get("forward") and isinstance(body.get("yaw"), (int, float)))
                     or (clean_path == "move_to" and "y" not in body and all(k in body for k in ("x", "z")))
                 ):
-                    body = self._verify_nether_flee_step(clean_path, body)
+                    body = self._verify_flee_step(clean_path, body)
                 return orig_call(path, body, **kwargs)
             if is_readonly_poll:
                 return actor_call(path, body, **kwargs)
