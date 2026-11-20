@@ -898,6 +898,14 @@ def _is_two_step_stair(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool
     return abs(a[1] - b[1]) == 2 and (abs(a[0] - b[0]), abs(a[2] - b[2])) in {(2, 0), (0, 2)}
 
 
+def _stair_midpoint_index(waypoints: list[tuple[int, int, int]], pos: tuple[int, int, int]) -> int | None:
+    return next((
+        index for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1)
+        if abs(a[1] - pos[1]) == 1 and _is_two_step_stair(a, b)
+        and _interpolate_cells(a, b)[1] == pos
+    ), None)
+
+
 def _interpolate_cells(a: tuple[int, int, int], b: tuple[int, int, int]) -> list[tuple[int, int, int]]:
     """Cell-by-cell straight line from a to b (each hop <= 1 block on every axis)."""
     steps = max(abs(b[0] - a[0]), abs(b[1] - a[1]), abs(b[2] - a[2]))
@@ -1444,6 +1452,9 @@ class MiningDFSEngine:
         if bname in PASSABLE_BLOCKS:
             cache[dpos] = bname
             return True, None, False, 0
+        avoidance = self.skills.temporary_avoidance.get(dpos)
+        if avoidance and avoidance.get("reason") == "dig_timeout" and self.skills._is_block_avoided(dpos):
+            return False, "dig_cell_avoided", False, 0
 
         is_tracked = bname in TRACKED_ORES
         expected_ore_drops = _expected_drops_for_blocks([bname]) if is_tracked else frozenset()
@@ -2006,11 +2017,7 @@ class MiningDFSEngine:
                         offset = waypoints.index(cur_pos)
                     elif edge.edge_kind in {"stair_down", "stair_up"}:
                         # Stairs save every second step. A slice can stop on the omitted step.
-                        offset = next((
-                            index for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1)
-                            if abs(a[1] - cur_pos[1]) == 1 and _is_two_step_stair(a, b)
-                            and _interpolate_cells(a, b)[1] == cur_pos
-                        ), None)
+                        offset = _stair_midpoint_index(waypoints, cur_pos)
                         if offset is None:
                             continue
                         waypoints = [*waypoints[:offset], cur_pos, *waypoints[offset:]]
@@ -2030,6 +2037,25 @@ class MiningDFSEngine:
                     self.active_node_id = dest
                     cur_pos = self.nodes[dest].anchor
                     break
+                else:
+                    # Finished side branches keep waypoints without adding a node.
+                    # Follow the recorded branch back to its junction first.
+                    leaf = next((
+                        (node.node_id, branch.completed_waypoints)
+                        for node in self.nodes.values()
+                        for branch in node.branches
+                        if branch.kind == "branch_leaf" and branch.status == "completed"
+                        and branch.completed_waypoints and branch.completed_waypoints[0] == node.anchor
+                        and cur_pos in branch.completed_waypoints
+                    ), None)
+                    if leaf is not None:
+                        dest, waypoints = leaf
+                        route = list(reversed(waypoints[:waypoints.index(cur_pos) + 1]))
+                        ok, err = self._walk_waypoints(route, min_hp_ref=min_hp_ref, deadline=deadline)
+                        if not ok:
+                            return False, err
+                        self.active_node_id = dest
+                        cur_pos = self.nodes[dest].anchor
         anchor_now = self.nodes[self.active_node_id].anchor
         if cur_pos != anchor_now:
             best_near_id: int | None = None
@@ -2102,14 +2128,21 @@ class MiningDFSEngine:
             self.active_node_id = goal_node_id
             raise
 
-    def _resume_deepest_branch(self, node: ShaftNode, *, min_hp_ref: list[float]) -> bool:
-        deepest = min(
-            (candidate for candidate in self.nodes.values()
-             if candidate.node_id != node.node_id and candidate.anchor[1] <= node.anchor[1]
-             and any(branch.status == "pending" for branch in candidate.branches)),
-            key=lambda candidate: candidate.anchor[1],
-            default=None,
-        )
+    def _resume_deepest_branch(
+        self, node: ShaftNode, *, min_hp_ref: list[float], descendants_only: bool = False,
+    ) -> bool:
+        candidates = []
+        for candidate in self.nodes.values():
+            if candidate.node_id == node.node_id or candidate.anchor[1] > node.anchor[1]:
+                continue
+            if not any(branch.status == "pending" for branch in candidate.branches):
+                continue
+            if descendants_only:
+                route = self._find_node_path(node.node_id, candidate.node_id)
+                if not route or any(reverse for _, reverse, _ in route):
+                    continue
+            candidates.append(candidate)
+        deepest = min(candidates, key=lambda candidate: candidate.anchor[1], default=None)
         if deepest is None:
             return False
         reached, _ = self._resume_shaft_tip(deepest.node_id, min_hp_ref=min_hp_ref)
@@ -2769,13 +2802,26 @@ class MiningDFSEngine:
             hd = math.hypot(cur_pos[0] - anc[0], cur_pos[2] - anc[2])
             vertical_near = abs(cur_pos[1] - anc[1]) <= 20
             if allow_retired or not vertical_near or hd > 36.0:
-                points = [tuple(n["anchor"]) for n in sh.get("nodes", []) if n.get("anchor")]
-                points.extend(tuple(wp) for n in sh.get("nodes", [])
-                              for wp in (n.get("edge_from_parent") or {}).get("waypoints", []))
+                nodes = sh.get("nodes", [])
+                edges = [
+                    (edge.get("edge_kind"), [tuple(wp) for wp in edge.get("waypoints", [])])
+                    for n in nodes if (edge := n.get("edge_from_parent"))
+                ]
+                points = [tuple(n["anchor"]) for n in nodes if n.get("anchor")]
+                points.extend(wp for _, waypoints in edges for wp in waypoints)
+                for n in nodes:
+                    for branch in n.get("branches", []):
+                        waypoints = branch.get("completed_waypoints") or []
+                        if (branch.get("kind") == "branch_leaf" and branch.get("status") == "completed"
+                                and waypoints and waypoints[0] == n.get("anchor")):
+                            points.extend(tuple(wp) for wp in waypoints)
                 if allow_retired and points:
                     hd = min(math.dist(cur_pos, pt) for pt in points)
                     vertical_near = hd <= 6.0
-                elif cur_pos in points:
+                elif cur_pos in points or any(
+                    kind in {"stair_down", "stair_up"} and _stair_midpoint_index(waypoints, cur_pos) is not None
+                    for kind, waypoints in edges
+                ):
                     hd = 0.0
                     vertical_near = True
             if hd <= best_d and vertical_near:
@@ -2830,6 +2876,10 @@ class MiningDFSEngine:
         if not allow_retired and not self._tree_has_pending_branches():
             self._clear_active_tree_only()
             return False
+        if allow_retired:
+            # A return trip only needs the route. Leave saved ores for explore
+            # to verify when it restores a mining shaft.
+            return True
 
         for o_pt, meta in list(self.ledger.discovered_ores.items()):
             if o_pt in self.mined_ore_positions or o_pt in self.deferred_ores:
@@ -2853,9 +2903,6 @@ class MiningDFSEngine:
                 nearest_node_id=near_nid,
             )
 
-        if allow_retired:
-            # The caller is climbing: do not detour back to the saved mining tip first.
-            return True
         ok_nav, _ = self._resume_shaft_tip(self.active_node_id, min_hp_ref=min_hp_ref)
         if not ok_nav:
             self._clear_active_tree_only()
@@ -4003,6 +4050,23 @@ class MiningDFSEngine:
                 return True, auto_relocations + 1
         return False, auto_relocations
 
+    def _retry_dry_junction(
+        self,
+        node: ShaftNode,
+        *,
+        geofence: Any,
+        min_hp_ref: list[float],
+    ) -> bool:
+        collar = self.nodes.get(self.collar_node_id)
+        if collar is None or node.anchor[1] > collar.anchor[1] - 6:
+            return False
+        if not any(branch.status == "pending" for branch in node.branches):
+            return False
+        if self._probe_dry_descent(node.anchor, directions=(), geofence=geofence, min_hp_ref=min_hp_ref) is None:
+            return False
+        self.fluid_aborts = 0
+        return True
+
     def _pickaxe_redline_threshold(self, cur_y: int, counts_now: dict[str, int]) -> int:
         if self.collar_node_id in self.nodes:
             collar_y = self.nodes[self.collar_node_id].anchor[1]
@@ -5012,6 +5076,8 @@ class MiningDFSEngine:
             }
             if scoped.timeout_path is not None:
                 result["timeout_path"] = scoped.timeout_path
+            if scoped.timeout_dig_pos is not None:
+                result["dig_target"] = list(scoped.timeout_dig_pos)
             if act == "explore":
                 gained = {}
                 if scoped.first_inventory is not None and scoped.last_inventory is not None:
@@ -5095,7 +5161,7 @@ class MiningDFSEngine:
         if not before or not after or result["goal_met"]:
             return
         start_y, end_y = _floor_pos(before)[1], _floor_pos(after)[1]
-        if start_y > target_y + 8 and end_y > start_y + 8:
+        if end_y > max(start_y, target_y) + 8:
             result["progress_lost"] = True
             result["depth_lost"] = end_y - start_y
             if result.get("stop_reason") == "time_slice_progress":
@@ -5409,13 +5475,17 @@ class MiningDFSEngine:
             ):
                 # Live s01/s03: after a deep reset this path opened a "collar" at y=-54,
                 # so every later reset looked legitimate and the run churned underground.
-                if time.monotonic() + 6.0 >= deadline:
+                # An explore at or above the target layer must not spend its
+                # slice digging away from it when no shaft can be restored.
+                if cur_pos[1] >= self.target_y - SCAN_BAND or time.monotonic() + 6.0 >= deadline:
                     return {
                         "ok": False,
                         "requires_replan": True,
                         "action": act,
                         "strategy": self.strategy,
                         "stop_reason": "needs_surface_climb",
+                        "next_action": "climb_out",
+                        "pos_after": st0.get("pos"),
                         "message": self._surface_climb_hint(),
                         "tree": self.snapshot(),
                     }
@@ -5628,6 +5698,7 @@ class MiningDFSEngine:
                 break
 
         # Priority 2: main DFS loop
+        blocked_branches: set[int] = set()
         idle_streak = 0
         idle_since = time.monotonic()
         last_excavated = len(self.excavated_positions)
@@ -5696,8 +5767,11 @@ class MiningDFSEngine:
                 stop_reason = "quota_reached"
                 break
 
-            next_branch = next((b for b in node.branches if b.status == "pending"), None)
+            next_branch = next((b for b in node.branches if b.status == "pending" and id(b) not in blocked_branches), None)
             if next_branch is None:
+                if any(b.status == "pending" for b in node.branches):
+                    stop_reason = "dig_cell_avoided"
+                    break
                 spine_blocked = any(b.kind == "spine_forward" and b.status == "pruned" for b in node.branches)
                 if node.kind == "spine" and spine_blocked:
                     promo = max(
@@ -5773,6 +5847,12 @@ class MiningDFSEngine:
                         for branch in tuple(node.branches) if branch.status == "pruned"
                     ):
                         continue
+                parent = self.nodes.get(node.parent_id)
+                if parent is not None and parent.anchor[1] > node.anchor[1]:
+                    # Resuming at a cleared transit node should lead back down
+                    # to unfinished work below it before walking up the shaft.
+                    if self._resume_deepest_branch(node, min_hp_ref=min_hp_ref, descendants_only=True):
+                        continue
                 ok_bt, err_bt = self._walk_waypoints(edge.waypoints, reverse=True, min_hp_ref=min_hp_ref)
                 if not ok_bt:
                     if descending and (err_bt or "").startswith("backtrack_blocked"):
@@ -5796,12 +5876,18 @@ class MiningDFSEngine:
                 continue
 
             next_branch.status = "active"
-            if next_branch.kind == "offset_retry":
+            branch_kind = next_branch.kind
+            if branch_kind == "offset_retry":
                 lat_dir = next_branch.sidestep_dir or LEFT_RIGHT_DIRS[next_branch.direction][0]
                 resume_k = next_branch.resume_kind or "stair_down"
-                edge_res = self._dig_level_edge(
-                    direction=lat_dir,
-                    steps=3,
+            if branch_kind in {"stair_down", "stair_up"}:
+                is_up = branch_kind == "stair_up"
+                eff_y = next_branch.branch_target_y if next_branch.branch_target_y is not None else self.target_y
+                stair_fn = self._dig_stair_up_edge if is_up else self._dig_stair_down_edge
+                edge_res = stair_fn(
+                    direction=next_branch.direction,
+                    max_steps=next_branch.steps,
+                    target_y=eff_y,
                     target_blocks=target_blocks,
                     parent_node_id=node.node_id,
                     geofence=geofence,
@@ -5810,13 +5896,35 @@ class MiningDFSEngine:
                     min_target_tier=min_target_tier,
                     quota_met=_quota_met,
                 )
-                steps_done = int(edge_res["steps_done"])
-                er = str(edge_res["stop_reason"])
-                breaches_sealed += int(edge_res["breaches_sealed"])
-                catch_placed += int(edge_res["catch_placed"])
-                deferred_added += int(edge_res["deferred_added"])
-                mined_ores.extend(edge_res["mined_ores"])
+            else:
+                edge_res = self._dig_level_edge(
+                    direction=lat_dir if branch_kind == "offset_retry" else next_branch.direction,
+                    steps=3 if branch_kind == "offset_retry" else next_branch.steps,
+                    target_blocks=target_blocks,
+                    parent_node_id=node.node_id,
+                    geofence=geofence,
+                    deadline=deadline,
+                    min_hp_ref=min_hp_ref,
+                    min_target_tier=min_target_tier,
+                    quota_met=_quota_met,
+                )
+            steps_done = int(edge_res["steps_done"])
+            er = str(edge_res["stop_reason"])
+            breaches_sealed += int(edge_res["breaches_sealed"])
+            catch_placed += int(edge_res["catch_placed"])
+            deferred_added += int(edge_res["deferred_added"])
+            mined_ores.extend(edge_res["mined_ores"])
+            if er == "dig_cell_avoided":
+                if steps_done == 0:
+                    next_branch.status = "pending"
+                    blocked_branches.add(id(next_branch))
+                    idle_streak = 0
+                    idle_since = time.monotonic()
+                    continue
+                # Keep the traversed edge and resume after the cooldown.
+                er = "time_slice"
 
+            if branch_kind == "offset_retry":
                 if er == "quota_reached":
                     next_branch.status = "completed"
                     if steps_done >= 1:
@@ -5877,28 +5985,7 @@ class MiningDFSEngine:
                     if steps_done > 0:
                         self._walk_waypoints(edge_res["waypoints"], reverse=True, min_hp_ref=min_hp_ref)
 
-            elif next_branch.kind in {"stair_down", "stair_up"}:
-                is_up = next_branch.kind == "stair_up"
-                eff_y = next_branch.branch_target_y if next_branch.branch_target_y is not None else self.target_y
-                stair_fn = self._dig_stair_up_edge if is_up else self._dig_stair_down_edge
-                edge_res = stair_fn(
-                    direction=next_branch.direction,
-                    max_steps=next_branch.steps,
-                    target_y=eff_y,
-                    target_blocks=target_blocks,
-                    parent_node_id=node.node_id,
-                    geofence=geofence,
-                    deadline=deadline,
-                    min_hp_ref=min_hp_ref,
-                    min_target_tier=min_target_tier,
-                    quota_met=_quota_met,
-                )
-                steps_done = int(edge_res["steps_done"])
-                er = str(edge_res["stop_reason"])
-                breaches_sealed += int(edge_res["breaches_sealed"])
-                catch_placed += int(edge_res["catch_placed"])
-                deferred_added += int(edge_res["deferred_added"])
-                mined_ores.extend(edge_res["mined_ores"])
+            elif branch_kind in {"stair_down", "stair_up"}:
                 end_anchor = tuple(edge_res["end_anchor"])
                 reached_band = (end_anchor[1] >= eff_y - 1) if is_up else (end_anchor[1] <= eff_y + 2)
 
@@ -5913,6 +6000,8 @@ class MiningDFSEngine:
                     next_branch.prune_reason = er
                     if detoured:
                         self.fluid_aborts = 0
+                        continue
+                    if not steps_done and self._retry_dry_junction(node, geofence=geofence, min_hp_ref=min_hp_ref):
                         continue
                     moved, auto_relocations_this_slice = self._force_relocate_on_fluid(
                         geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref,
@@ -6041,27 +6130,11 @@ class MiningDFSEngine:
 
             else:
                 # "branch_leaf" or "spine_forward"
-                edge_res = self._dig_level_edge(
-                    direction=next_branch.direction,
-                    steps=next_branch.steps,
-                    target_blocks=target_blocks,
-                    parent_node_id=node.node_id,
-                    geofence=geofence,
-                    deadline=deadline,
-                    min_hp_ref=min_hp_ref,
-                    min_target_tier=min_target_tier,
-                    quota_met=_quota_met,
-                )
-                steps_done = int(edge_res["steps_done"])
-                er = str(edge_res["stop_reason"])
-                breaches_sealed += int(edge_res["breaches_sealed"])
-                catch_placed += int(edge_res["catch_placed"])
-                deferred_added += int(edge_res["deferred_added"])
-                mined_ores.extend(edge_res["mined_ores"])
-
                 if self._note_fluid_abort(er):
                     next_branch.status = "pruned"
                     next_branch.prune_reason = er
+                    if not steps_done and self._retry_dry_junction(node, geofence=geofence, min_hp_ref=min_hp_ref):
+                        continue
                     moved, auto_relocations_this_slice = self._force_relocate_on_fluid(
                         geofence=geofence, deadline=deadline, min_hp_ref=min_hp_ref,
                         auto_relocations=auto_relocations_this_slice,
@@ -6215,6 +6288,8 @@ class MiningDFSEngine:
             )
         if stop_reason == "pickaxe_low":
             out_res.update(self._pickaxe_low_recovery(counts_after, st_end.get("pos")))
+        if stop_reason == "dig_cell_avoided":
+            out_res["message"] = "当前可走分支的挖掘格处于超时冷却。请先处理障碍，或改从同层的安全站位进矿。"
         if stop_reason == "no_progress":
             out_res["message"] = (
                 "在原地连续多次既没挖到方块也没推进矿井节点（可能卡在死胡同反复重试），已提前结束本轮而不是空耗时间。"
