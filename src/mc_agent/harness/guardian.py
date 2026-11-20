@@ -966,6 +966,7 @@ class GenerationGuard:
             or needs_hot_floor_guard
             or drowning
             or (effective_combat_hurt and in_water)
+            or (effective_combat_hurt and other_hurts and hp_cur <= 4.0)
             or no_water_reentry
             or (pre_trigger is not None and pre_trigger.get("source") == "pre_hurt_creeper")
             or in_wall_hurt
