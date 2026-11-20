@@ -4963,7 +4963,8 @@ class MiningDFSEngine:
     ) -> bool:
         if self.collar_node_id is None or self.collar_node_id not in self.nodes:
             return False
-        if counts_now.get("crafting_table", 0) >= 1:
+        _, _, sticks = _stone_pickaxe_headroom(counts_now)
+        if sticks < 2 or counts_now.get("crafting_table", 0) >= 1:
             return False
         total_planks = sum(v for k, v in counts_now.items() if k.endswith("_planks"))
         total_logs = sum(v for k, v in counts_now.items() if k.endswith(("_log", "_stem")))

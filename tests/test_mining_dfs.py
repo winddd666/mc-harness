@@ -1545,6 +1545,55 @@ def test_deep_pickaxe_low_with_no_wood_requests_climb_before_harvesting() -> Non
     assert not world.dig_log
 
 
+@pytest.mark.parametrize("available_supply", ["raw_iron", "crafting_table"])
+def test_worn_pickaxe_without_sticks_does_not_auto_return_to_collar(monkeypatch, available_supply) -> None:
+    from mc_agent.skills import mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(
+        start_pos=(0.5, 16.0, 0.5), surface_y=64, track_durability=True,
+        inventory_items=[
+            {"name": "iron_pickaxe", "count": 1, "slot": 9, "durability": [7, 250]},
+            {"name": "cobblestone", "count": 32, "slot": 10},
+        ],
+    )
+    world.blocks[(0, 16, 0)] = world.blocks[(0, 17, 0)] = "air"
+    if available_supply == "raw_iron":
+        world._add_item("raw_iron")
+    with BotSession("tok", bot_username="WoodlessResupply", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -48), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=(0, 16, 0), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, (0, 16, 0)]),
+            branches=[mining.BranchSpec("stair_down", "east", 70)],
+        )
+        if available_supply == "crafting_table":
+            engine.ledger.record_utility("crafting_table", (1, 64, -48))
+        return_goals = []
+
+        def interrupted_return(goal_node_id, **kwargs):
+            return_goals.append(goal_node_id)
+            world.pos = [0.5, 53.0, -36.5]
+            engine.bot.status()
+            clock.now = engine._deadline
+            engine.bot.status()
+
+        monkeypatch.setattr(engine, "_navigate_to_node", interrupted_return)
+        result = engine.run(target="diamond", target_y=-54, goal_count=1, max_duration_s=32)
+
+    assert result["stop_reason"] == "pickaxe_low"
+    assert result["next_action"] == "climb_out"
+    assert result["pos_after"][1] <= 16
+    assert not return_goals
+    assert engine.collar_node_id == collar.node_id
+
+
 def test_engine_recrafts_burner_stone_pickaxe_when_durability_low(monkeypatch) -> None:
     """Rock digging must auto-craft a stone burner pick instead of stopping at pickaxe_low."""
     world = _MockMineWorld(
