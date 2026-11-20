@@ -1263,6 +1263,43 @@ retries 846 | 429 49 | 502 0 | tracebacks 0
 
 39 集、**0 retry / 0 429**、1 aborted、10 集 goal_satisfied。
 
+## 4bs. 09:08 抽检：`max_episodes=80` 硬上限让快 bot 提前空转（新 P1：BUG-046）
+
+### 已收官的两路（`status=completed`，但墙钟未满）
+
+| bot | 集数 | 实际墙钟 | 剩余 | 集状态分布 |
+|---|---|---|---|---|
+| `glm_5_midgame` | **80/80** | **10355s（2h53m）** | **1h02m 空转** | answered 57 / **429 15** / goal 3 / limit 3 / timeout 1 / paused 1 |
+| `glm_1_nether_fortress` | **80/80** | **12433s（3h27m）** | 28m 空转 | answered 58 / **429 16** / limit 5 / goal 1 |
+
+- 波次参数（stdout 实证）：`duration_s=14100.0 max_episodes=80`
+- `max_episodes` 与 `duration_s` **互相独立**：跑得快的 bot 先撞集数上限，剩下的墙钟全部浪费
+- **429 集同样吃配额**：`glm_1` 80 集里 **16 集是 429 报废**（20%），`glm_5` 15/80（19%）
+- 叠加效应：Qwen 通道同时损失 **18% 墙钟（退避）+ 19~20% 集数槽位**
+- **评测口径副作用**：快 bot 被截断、慢 bot 跑满 → 跨 bot 分数不可比（`glm_5` 名义 4h 实际 2h53m）
+
+### 当前战况（12 路，10 路在跑）
+
+| bot | 集 | 分数 |
+|---|---|---|
+| `glm_1_nether_fortress` | 80（已收） | **240** |
+| `glm_2_nether_bastion` | 30 | 270 |
+| `glm_5_midgame` | 80（已收） | 180 |
+| `ds_4_nether_fortress` | 53 | 210 |
+| `nju_guitest_01_nether` | 36 | 185 |
+| `nju_3_village_trade` | 44 | 150 |
+| `ds_2_cave_combat` | 56 | 150 |
+| `glm_4_brewing_alchemy` | 43 | 145 |
+| `ds_3_enchant_anvil` | 43 | 135 |
+| `ds_1_bare` | 34 | 105 |
+| `glm_3_village_trade` | 30 | 90 |
+| `nju_movetest_01_bare` | 28 | 70 |
+
+### hy4 审计轨 `hy4_audit_r28`（2.7h / 2.5h，1/4 收官）
+
+150 集、**0 retry / 0 429 / 0 502**、1 aborted；`hy4_2` 135、`hy4_6` 210、`hy4_9` 135、`hy4_5` 已收。
+注意：r28 集数（150）远高于 r27（126 / 3h），说明短集比例上升，需在收官时核对分数质量。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
