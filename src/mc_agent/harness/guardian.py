@@ -548,6 +548,10 @@ class GenerationGuard:
             return False
         return True
 
+    def _sneak_on_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
+        result = self.bot.call("posture", {"sneak": True, "shield": bool(status.get("blocking")), "jump": False})
+        return {**result, "ok": result.get("sneaking") is not False}
+
     def _try_eat_food(self, food_name: str, eat_st: dict[str, Any], *, action_name: str = "eat") -> dict[str, Any] | None:
         """Eat via `use_item`; treat transient `not_ready`/`wrong_server` as deferred retry, not failure."""
         if eat_st.get("blocking"):
@@ -714,12 +718,18 @@ class GenerationGuard:
         self.previous_ready = ready
         self.previous_health = float(health) if isinstance(health, (int, float)) else None
         hurts = [e for e in fresh if e.get("type") == "hurt"]
+        other_hurts = [e for e in hurts if str(e.get("source") or "").strip().lower() != "hot_floor"]
         deaths = [e for e in fresh if e.get("type") in {"death", "death_loop", "disconnected", "spawn"}]
         in_water = bool(status.get("in_water"))
         raw_in_lava = bool(status.get("in_lava"))
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or (
             hurt_by_lava and not deaths and not disconnected and ready and status.get("alive") is not False
+        )
+        hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
+        needs_hot_floor_guard = (
+            len(other_hurts) < len(hurts) and not in_water and not in_lava
+            and status.get("on_ground") is True and not status.get("sneaking")
         )
         oxygen = status.get("oxygen")
         low_oxygen = isinstance(oxygen, (int, float)) and oxygen < 240
@@ -771,7 +781,7 @@ class GenerationGuard:
             self.retry_after_ready = False
         nh_name0, nh_dist0, _, _ = self._extract_hostile_info(status)
         eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
-        should_eat = (needs_food or pending_ready_eat) and eat_safe_distance
+        should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not needs_hot_floor_guard
         hurt = bool(hurts) or dropped
         non_combat_only_hurt = (
             hurt
@@ -796,7 +806,7 @@ class GenerationGuard:
             if (hurt or deaths or disconnected or not ready or in_water or in_lava)
             else self._detect_pre_hurt_trigger(status)
         )
-        effective_combat_hurt = hurt and not non_combat_only_hurt
+        effective_combat_hurt = hurt and not (non_combat_only_hurt or hot_floor_only)
         ranged_hurt_only = (
             effective_combat_hurt
             and bool(hurts)
@@ -817,12 +827,13 @@ class GenerationGuard:
         critical_override = bool(
             deaths
             or in_lava
+            or needs_hot_floor_guard
             or (effective_combat_hurt and in_water)
             or no_water_reentry
             or (pre_trigger is not None and pre_trigger.get("source") == "pre_hurt_creeper")
             or any(str(h.get("source") or "") in IN_WALL_HURT_SOURCES for h in hurts)
         )
-        critical_non_combat = non_combat_only_hurt and hp_cur <= 6.0 and (now - self._last_non_combat_alert_at >= 10.0)
+        critical_non_combat = non_combat_only_hurt and not hot_floor_only and hp_cur <= 6.0 and (now - self._last_non_combat_alert_at >= 10.0)
         can_try_fire_douse = (
             fire_hurt_only
             and not status.get("busy")
@@ -832,6 +843,7 @@ class GenerationGuard:
 
         if not (
             effective_combat_hurt
+            or needs_hot_floor_guard
             or critical_non_combat
             or can_try_fire_douse
             or deaths
@@ -862,6 +874,8 @@ class GenerationGuard:
             reasons.append("water_float")
         if no_water_reentry:
             reasons.append("water_avoid_cooldown")
+        if needs_hot_floor_guard:
+            reasons.append("hot_floor")
 
         if deaths or disconnected or not ready or status.get("alive") is False:
             self._consecutive_flees = 0
@@ -893,8 +907,14 @@ class GenerationGuard:
 
         self._in_reflex = True
         try:
+            if needs_hot_floor_guard:
+                sneak = self._action("hot_floor_sneak", lambda: self._sneak_on_hot_floor(status))
+                actions.append(sneak)
+                if sneak.get("ok"):
+                    status = {**status, "sneaking": True}
+
             try:
-                inv = self.bot.inventory() if (hurt or should_eat or in_lava or no_water_reentry or pre_trigger is not None) else {}
+                inv = self.bot.inventory() if ((hurt and not hot_floor_only) or should_eat or in_lava or no_water_reentry or pre_trigger is not None) else {}
             except (ApiError, httpx.HTTPError):
                 inv = {}
             counts, has_shield, has_melee_weapon = self._parse_inventory_summary(inv)
@@ -1088,9 +1108,9 @@ class GenerationGuard:
                         actions.append(self._action("douse_fire", lambda: self.combat_env.build_tactical("place_water_feet")))
                 if critical_non_combat:
                     self._last_non_combat_alert_at = now
-            elif hurt and not in_water and not in_lava:
-                attacker = (hurts[-1].get("source_entity") or hurts[-1].get("likely_attacker")) if hurts else status.get("nearest_hostile")
-                hurt_src = str(hurts[-1].get("source") or "") if hurts else ""
+            elif effective_combat_hurt and not in_water and not in_lava:
+                attacker = (other_hurts[-1].get("source_entity") or other_hurts[-1].get("likely_attacker")) if other_hurts else status.get("nearest_hostile")
+                hurt_src = str(other_hurts[-1].get("source") or "") if other_hurts else ""
                 hp_val = float(health) if isinstance(health, (int, float)) else 20.0
                 already_blocking = bool(status.get("blocking"))
                 if hurt_src in IN_WALL_HURT_SOURCES:
@@ -1371,7 +1391,8 @@ class GenerationGuard:
                 or needs_float
                 or not ready
                 or status.get("alive") is False
-                or any(r != "needs_food" for r in reasons)
+                or any(a.get("action") == "hot_floor_sneak" and not a.get("ok") for a in actions)
+                or any(r not in {"needs_food", "hot_floor"} for r in reasons)
             )
         )
         try:
@@ -1785,8 +1806,14 @@ class GenerationGuard:
         raw_in_lava = bool(status.get("in_lava"))
         oxygen = status.get("oxygen")
         hurts = [e for e in fresh if e.get("type") == "hurt"]
+        other_hurts = [e for e in hurts if str(e.get("source") or "").strip().lower() != "hot_floor"]
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or hurt_by_lava
+        hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
+        needs_hot_floor_guard = (
+            len(other_hurts) < len(hurts) and not in_water and not in_lava
+            and status.get("on_ground") is True and not status.get("sneaking")
+        )
         drowning = in_water and (
             (status.get("submerged") and oxygen == 0)
             or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
@@ -1807,8 +1834,8 @@ class GenerationGuard:
             or (isinstance(oxygen, (int, float)) and oxygen < 270)
         )
 
-        boundary_trigger: ThreatTrigger | None = None if (in_water or in_lava) else self._detect_pre_hurt_trigger(status)
-        if boundary_trigger is None and not in_water and not in_lava and hurts and nh_name and nh_dist <= 15.0:
+        boundary_trigger: ThreatTrigger | None = None if (in_water or in_lava or hot_floor_only) else self._detect_pre_hurt_trigger(status)
+        if boundary_trigger is None and not in_water and not in_lava and other_hurts and nh_name and nh_dist <= 15.0:
             boundary_trigger = {
                 "source": "boundary_threat",
                 "primary_entity_id": nh_id,
@@ -1819,7 +1846,7 @@ class GenerationGuard:
 
         hp = float(status.get("health") or 20.0)
         food = int(status.get("food") or 20)
-        needs_post_eat = self._can_auto_eat_safely(status, min_dist=8.0) and (hp <= 13.0 or food <= 13) and food < 20
+        needs_post_eat = not needs_hot_floor_guard and self._can_auto_eat_safely(status, min_dist=8.0) and (hp <= 13.0 or food <= 13) and food < 20
         in_wall_hurt = any(str(h.get("source") or "") in IN_WALL_HURT_SOURCES for h in hurts)
         pos_b = status.get("pos") or [0.0, 64.0, 0.0]
         by_b = float(pos_b[1]) if isinstance(pos_b, (list, tuple)) and len(pos_b) >= 2 else 64.0
@@ -1843,6 +1870,7 @@ class GenerationGuard:
 
         if not (
             in_lava
+            or needs_hot_floor_guard
             or needs_water_escape
             or in_wall_hurt
             or boundary_trigger is not None
@@ -1858,6 +1886,10 @@ class GenerationGuard:
         try:
             still_lava = in_lava
             still_wet = in_water
+            if needs_hot_floor_guard:
+                act = self._action("boundary_hot_floor_sneak", lambda: self._sneak_on_hot_floor(status))
+                if act.get("ok"):
+                    notes.append("岩浆块受伤，已潜行避伤")
             if in_lava:
                 esc_l = self._action(
                     "boundary_escape_lava",
@@ -2036,15 +2068,14 @@ class GenerationGuard:
         self.last_reaction = time.monotonic()
         self.previous_health = status.get("health")
         self.stats["incidents"] += 1
-        note = (
-            "响应不代表整体安全；按最新状态重新规划，勿继续被中断的旧动作链。"
-            if requires_replan
-            else (
-                "处于举盾/掩体/远程交战姿态，未打断当前生成。"
-                if "fresh_hurt" in reasons
-                else "后台已静默进食，未打断当前生成。"
-            )
-        )
+        if requires_replan:
+            note = "响应不代表整体安全；按最新状态重新规划，勿继续被中断的旧动作链。"
+        elif "fresh_hurt" in reasons:
+            note = "处于举盾/掩体/远程交战姿态，未打断当前生成。"
+        elif "hot_floor" in reasons:
+            note = "已潜行避开岩浆块伤害，未打断当前生成。"
+        else:
+            note = "后台已静默进食，未打断当前生成。"
         rem_no_water = self._no_water_until - time.monotonic()
         if requires_replan and rem_no_water > 0.0:
             note += f" 禁止下水冷却中(剩余{int(math.ceil(rem_no_water))}s)，保持干燥陆地避险。"

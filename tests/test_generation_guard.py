@@ -3752,7 +3752,7 @@ def test_r24_nether_damage_retreat_refuses_lava_border():
                 }
             if action == "events":
                 since = kwargs["params"]["since"]
-                return {"events": [{"seq": 1, "type": "hurt", "source": "hot_floor"}] if since < 1 else []}
+                return {"events": [{"seq": 1, "type": "hurt", "source": "mob_attack"}] if since < 1 else []}
             if action == "inventory":
                 return {"items": [], "offhand": {"name": "shield"}}
             if action == "get_block":
@@ -3819,6 +3819,50 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert shore["action"] == "boundary_escape_to_shore" and shore["ok"] is True
     assert all(start + timeout <= 1020.0 for _, timeout, start in calls[:-1])
     assert skills.bot is bot
+
+
+@pytest.mark.parametrize("entry", ["poll", "boundary"])
+def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    seq = [1]
+    calls = []
+    status = {
+        "pos": [724.3, 68, 636.7], "health": 16.5, "food": 17, "ready": True, "alive": True,
+        "on_ground": True, "blocking": True, "sneaking": False, "dimension": "the_nether",
+        "nearest_hostile": {"id": 42, "name": "wither_skeleton", "dist": 2.0},
+    }
+
+    class MagmaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                since = kwargs["params"]["since"]
+                hit = {"seq": seq[0], "type": "hurt", "source": "hot_floor"}
+                return {"events": [hit] if since < seq[0] else []}
+            if action == "posture":
+                calls.append(body)
+                status["sneaking"] = body["sneak"]
+                return {"sneaking": status["sneaking"]}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(MagmaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    if entry == "poll":
+        incident = guard.poll()
+        assert incident["requires_replan"] is False
+        assert incident["reasons"] == ["hot_floor"]
+    else:
+        assert "已潜行避伤" in guard.stabilize_after_tools()
+    assert calls == [{"sneak": True, "shield": True, "jump": False}]
+
+    seq[0] += 1
+    clock[0] += 4.0
+    if entry == "poll":
+        assert guard.poll() is None
+    else:
+        assert guard.stabilize_after_tools() is None
+    assert len(calls) == 1
 
 
 
