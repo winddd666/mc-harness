@@ -1500,7 +1500,7 @@ class CombatEnv:
             and st0.get("alive") is not False and st0.get("ready") is not False
             and not st0.get("in_lava") and not st0.get("in_water")
         ):
-            # Ranged hurt is often reported during the knockback hop.
+            # Damage can be reported during the knockback hop.
             before = st0
             deadline = time.monotonic() + 0.45
             for _ in range(3):
@@ -2296,8 +2296,7 @@ class SubcorticalInstinctController:
                     except (ApiError, httpx.HTTPError):
                         pass
                 flee_res = env.flee(c_pos, distance=11.5, urgent=True, allow_shaft_seal=False)
-                actions.append({"action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")), "moved": flee_res.get("moved_dist")})
-                st_chk = env._safe_status(st)
+                st_chk = env._safe_status({**st, "ready": False})
                 post_h = self._find_live_hostiles(env, radius=8)
                 close_creeper = next(
                     (
@@ -2317,6 +2316,21 @@ class SubcorticalInstinctController:
                     ):
                         close_creeper = nh_chk
                 creeper_still_close = close_creeper is not None
+                actions.append({
+                    "action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")) and not creeper_still_close,
+                    "moved": flee_res.get("moved_dist"),
+                    **({"creeper_distance": self._entity_dist(st_chk.get("pos"), close_creeper)} if close_creeper else {}),
+                })
+                close_pos = close_creeper.get("pos") if close_creeper else None
+                if (
+                    not has_shield and isinstance(close_pos, (list, tuple)) and len(close_pos) >= 3
+                    and flee_res.get("ok") and not flee_res.get("respawned")
+                    and st_chk.get("ready") is not False and st_chk.get("alive") is not False
+                    and st_chk.get("on_ground") is True and not st_chk.get("in_water") and not st_chk.get("in_lava")
+                    and st_chk.get("last_death") == st.get("last_death") and time.monotonic() < deadline
+                ):
+                    followup = env.flee(close_pos, distance=3.5, urgent=True, allow_shaft_seal=False)
+                    actions.append({"action": "creeper_followup_retreat", **followup})
                 if (
                     (not flee_res.get("ok") or creeper_still_close)
                     and not flee_res.get("respawned")
@@ -2503,12 +2517,18 @@ class SubcorticalInstinctController:
                     )
                 )
                 if should_bunker:
-                    bunk = env.skills.dig_safety_bunker(urgent=True)
-                    if bunk.get("ok"):
-                        covered = True
-                        mode = "bunker_sealed"
-                        self._recent_flee_streak = 0
-                        actions.append({"action": "emergency_bunker", "ok": True})
+                    try:
+                        bunk = env.skills.dig_safety_bunker(urgent=True)
+                    except ApiError as err:
+                        if err.code != "missing_item":
+                            raise
+                        actions.append({"action": "emergency_bunker", "ok": False, "code": err.code})
+                    else:
+                        if bunk.get("ok"):
+                            covered = True
+                            mode = "bunker_sealed"
+                            self._recent_flee_streak = 0
+                            actions.append({"action": "emergency_bunker", "ok": True})
                 if not covered:
                     if has_shield and mob_id is not None:
                         try:
