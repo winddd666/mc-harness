@@ -184,7 +184,9 @@ class GenerationGuard:
         self.geofence = geofence
         # Sharing the live MacroSkills instance lets reflexes see the MiningDFS shaft state
         self.skills = skills
-        self.combat_env = CombatEnv(self.bot, skills=self.skills, geofence=self.geofence)
+        self.combat_env = CombatEnv(
+            self.bot, skills=self.skills, geofence=self.geofence, water_escape=self._escape_water,
+        )
         self.combat_slot = CombatControllerSlot(combat_controller)
         self._custom_combat_registered = combat_controller is not None
         self.last_poll = float("-inf")
@@ -1731,10 +1733,15 @@ class GenerationGuard:
                                 st_after = self.bot.status()
                             except (ApiError, httpx.HTTPError):
                                 pass
-                        elif isinstance(st_after, dict) and st_after.get("in_water") and (
-                            st_after.get("submerged")
-                            or (isinstance(st_after.get("oxygen"), (int, float)) and st_after["oxygen"] < 180)
-                            or time.monotonic() < self._no_water_until
+                        elif (
+                            isinstance(st_after, dict)
+                            and st_after.get("in_water")
+                            and (self._custom_combat_registered or outcome.get("mode") not in {"water_surface", "water_surface_abort"})
+                            and (
+                                st_after.get("submerged")
+                                or (isinstance(st_after.get("oxygen"), (int, float)) and st_after["oxygen"] < 180)
+                                or time.monotonic() < self._no_water_until
+                            )
                         ):
                             esc_post = self._action("escape_water", lambda: self._escape_water(st_after), raise_on_http_error=False)
                             esc_post_res = esc_post.get("result") if isinstance(esc_post.get("result"), dict) else {}

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Literal, Protocol, Sequence, TypedDict
+from typing import Any, Callable, Literal, Protocol, Sequence, TypedDict
 
 import httpx
 
@@ -344,16 +344,29 @@ class CombatEnv:
         *,
         skills: Any | None = None,
         geofence: Any | None = None,
+        water_escape: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         block_cache_ttl: float = 3.0,
         hazard_cache_ttl: float = 3.0,
     ) -> None:
         self.bot = bot
         self.skills = skills
         self.geofence = geofence
+        self._water_escape = water_escape
         self.block_cache_ttl = max(0.2, float(block_cache_ttl))
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
+
+    def surface_from_water(self, status: dict[str, Any]) -> dict[str, Any]:
+        if self._water_escape is not None:
+            return self._water_escape(status)
+        if self.skills is not None and hasattr(self.skills, "escape_water"):
+            return self.skills.escape_water()
+        try:
+            self.bot.call("control", {"jump": True, "forward": True, "ms": 950, "stop_on": ["death"]})
+        except ApiError as err:
+            return {"ok": False, "code": err.code}
+        return {"ok": True}
 
     def invalidate_block_cache(self) -> None:
         self._block_cache.clear()
@@ -1982,15 +1995,11 @@ class SubcorticalInstinctController:
         # 0) Underwater drowning emergency: surface immediately instead of burning oxygen in combat!
         if in_water and (submerged or low_oxygen):
             mode = "water_surface"
-            if env.skills is not None and hasattr(env.skills, "escape_water"):
-                esc = env.skills.escape_water()
-                actions.append({"action": "water_surface", "ok": bool(esc.get("ok"))})
-            else:
-                try:
-                    env.bot.call("control", {"jump": True, "forward": True, "ms": 950, "stop_on": ["death"]})
-                    actions.append({"action": "water_surface", "ok": True})
-                except ApiError as err:
-                    actions.append({"action": "water_surface", "ok": False, "code": err.code})
+            esc = env.surface_from_water(st)
+            actions.append({"action": "water_surface", **esc})
+            if not esc.get("respawned") and (not esc.get("ok") or esc.get("in_water")):
+                shore = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield)
+                actions.append({"action": "water_surface_shore", "ok": bool(shore.get("ok"))})
 
         # 1) Creeper emergency: NEVER melee in blast radius — shield & retreat / seal shaft
         elif any_creeper_close or trigger.get("source") == "pre_hurt_creeper":
@@ -2079,19 +2088,12 @@ class SubcorticalInstinctController:
                 if st_cur.get("in_water") and (
                     st_cur.get("submerged") or (isinstance(oxy_cur, (int, float)) and oxy_cur < 150)
                 ):
-                    esc_cur: dict[str, Any] = {}
-                    if env.skills is not None and hasattr(env.skills, "escape_water"):
-                        esc_cur = env.skills.escape_water()
-                        actions.append({"action": "water_surface_abort", "ok": bool(esc_cur.get("ok"))})
-                    else:
-                        try:
-                            env.bot.call("control", {"jump": True, "forward": True, "ms": 950, "stop_on": ["death"]})
-                            esc_cur = {"ok": True}
-                            actions.append({"action": "water_surface_abort", "ok": True})
-                        except ApiError:
-                            esc_cur = {"ok": False}
+                    esc_cur = env.surface_from_water(st_cur)
+                    actions.append({"action": "water_surface_abort", **esc_cur})
                     st_w = env._safe_status(st_cur)
-                    if not (esc_cur.get("ok") and not esc_cur.get("in_water") and not st_w.get("in_water")):
+                    if not esc_cur.get("respawned") and (
+                        not esc_cur.get("ok") or esc_cur.get("in_water") or st_w.get("in_water")
+                    ):
                         shore_w = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield)
                         actions.append({"action": "water_surface_shore", "ok": bool(shore_w.get("ok"))})
                         st_w = env._safe_status(st_w)

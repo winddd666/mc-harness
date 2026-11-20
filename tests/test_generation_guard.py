@@ -3821,6 +3821,66 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert skills.bot is bot
 
 
+@pytest.mark.parametrize("starts_submerged", [True, False])
+def test_bug056_subcortical_water_escape_uses_budget_once(starts_submerged, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    calls = []
+    events = []
+    zombie = {"id": 42, "name": "zombie", "dist": 2.0, "pos": [2.5, 52, 0.5]}
+    status = {
+        "pos": [0.5, 52, 0.5], "health": 17, "food": 20, "alive": True, "ready": True,
+        "in_water": starts_submerged, "submerged": starts_submerged, "on_ground": not starts_submerged,
+        "nearest_hostile": zombie,
+    }
+
+    class CombatWaterBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [zombie]}
+            if action == "attack":
+                calls.append("attack")
+                status.update(in_water=True, submerged=True, on_ground=False)
+                return {"hits": 1, "killed": False}
+            if action == "move_to":
+                calls.append("water_move")
+                assert kwargs["timeout_s"] == pytest.approx(20.0)
+                clock[0] += kwargs["timeout_s"]
+                raise httpx.ReadTimeout("water move reached its deadline")
+            if action == "stop" and kwargs["timeout_s"] == 1.5:
+                calls.append("water_stop")
+            return {"ok": True}
+
+    monkeypatch.setattr(MacroSkills, "escape_water", lambda self: self.bot.call("move_to", {}, timeout_s=60))
+    bot = CombatWaterBot()
+    skills = MacroSkills(bot)
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
+
+    def blocked_shore(*args, **kwargs):
+        calls.append("shore")
+        return {"ok": False, "in_water": True}
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", blocked_shore)
+    trigger = {"source": "tool_interrupted_hurt", "primary_entity_id": 42, "primary_type": "zombie", "distance": 2.0}
+    if starts_submerged:
+        result = guard.combat_slot.handle(guard.combat_env, trigger)
+        assert result["mode"] == "water_surface"
+    else:
+        receipt = guard.handle_preemption(trigger, interrupted_name="mc_skill_mine_dfs")
+        assert receipt["reflex_mode"] == "water_surface_abort"
+        result = next(e["result"] for e in events if e["type"] == "guardian.action.completed")
+    assert result["actions"][-2]["reason"] == "time_budget"
+    assert result["actions"][-1] == {"action": "water_surface_shore", "ok": False}
+    assert calls == (["attack"] if not starts_submerged else []) + ["water_move", "water_stop", "shore"]
+    assert skills.bot is bot
+
+
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
 def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, monkeypatch):
     clock = [1000.0]
