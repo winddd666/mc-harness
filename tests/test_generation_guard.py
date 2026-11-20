@@ -1710,6 +1710,57 @@ def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush():
     assert any(a["action"] == "shield_rush_attack" and a.get("killed") is True for a in out_s["actions"])
 
 
+@pytest.mark.parametrize(("remaining_hostile", "retreat_works"), [(True, True), (True, False), (False, True)])
+def test_counter_kill_disengages_from_second_hostile_at_critical_health(monkeypatch, remaining_hostile, retreat_works):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    target = {"id": 42, "name": "zombie", "dist": 2.8, "pos": [3.3, 64.0, 0.5]}
+    survivor = {"id": 43, "name": "zombie", "dist": 2.8, "pos": [0.5, 64.0, 3.3]}
+    retreats = []
+    attacks = []
+    looks = []
+
+    class CaveBot:
+        def status(self):
+            nearest = survivor if attacks and remaining_hostile else target
+            return {
+                "pos": [0.5, 64.0, 0.5], "health": 3.5 if attacks else 20.0, "food": 20,
+                "ready": True, "alive": True, "on_ground": True, "blocking": False,
+                "nearest_hostile": {key: nearest[key] for key in ("id", "name", "dist")},
+            }
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                items = [{"name": "stone_sword", "count": 1}]
+                if not retreat_works:
+                    items.append({"name": "shield", "count": 1})
+                return {"items": items}
+            if action == "get_entities":
+                return {"entities": [survivor] if attacks else [target, survivor]}
+            if action == "look":
+                looks.append(body)
+            if action == "attack":
+                attacks.append(body["entity_id"])
+                return {"hits": 1, "killed": True}
+            return {"ok": True}
+
+    def retreat(_env, threat_pos, **kwargs):
+        retreats.append(threat_pos)
+        return {"ok": retreat_works}
+
+    monkeypatch.setattr(CombatEnv, "flee", retreat)
+    outcome = CombatControllerSlot().handle(
+        CombatEnv(CaveBot()), {"source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie"},
+    )
+
+    assert attacks == [42]
+    assert retreats == ([survivor["pos"]] if remaining_hostile else [])
+    assert outcome["mode"] == ("low_hp_disengage" if remaining_hostile else "counter_killed")
+    if not retreat_works:
+        assert outcome["latched_guard"] is True
+        assert looks[-1] == {"entity_id": 43}
+
+
 def test_bug023_deep_water_trident_shield_first_moves_to_dry_shore_and_3hit_cooldown(monkeypatch):
     """Covers BUG-023: trident/drowned in deep water raises shield first, moves to dry shore, and blocks reentry 30s on 3rd hit."""
     from mc_agent.skills.combat_env import CombatEnv

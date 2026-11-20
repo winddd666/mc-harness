@@ -2393,8 +2393,32 @@ class SubcorticalInstinctController:
                                 int(mob_id) if mob_id is not None else None,
                             )
 
-        # 4) Post-combat food recovery when safe and ready
+        # 4) Check for a surviving attacker before handing back control or eating.
         st_post = env._safe_status(st)
+        nh_post = st_post.get("nearest_hostile")
+        if (
+            mode == "counter_killed" and float(st_post.get("health") or 20.0) <= 8.0
+            and isinstance(nh_post, dict) and nh_post.get("name") and nh_post.get("id") != mob_id
+            and self._entity_dist(st_post.get("pos"), nh_post) <= 5.0
+            and st_post.get("ready") is not False and st_post.get("alive") is not False
+            and not st_post.get("in_water") and not st_post.get("in_lava")
+        ):
+            survivor_id = nh_post.get("id")
+            survivor_pos = nh_post.get("pos")
+            if survivor_pos is None and survivor_id is not None:
+                survivors = self._find_live_hostiles(env, radius=6)
+                survivor = next((hostile for hostile in survivors if hostile.get("id") == survivor_id), {})
+                survivor_pos = survivor.get("pos")
+            retreat = env.flee(survivor_pos, distance=12.0, urgent=True)
+            actions.append({"action": "low_hp_abort_flee", "ok": bool(retreat.get("ok")), "entity_id": survivor_id})
+            mode = "low_hp_disengage"
+            st_post = env._safe_status(st_post)
+            if (
+                has_shield and not retreat.get("ok") and not retreat.get("respawned")
+                and st_post.get("ready") is not False and st_post.get("alive") is not False
+                and not st_post.get("in_water") and not st_post.get("in_lava")
+            ):
+                latched_guard = self._latch_shield_at_threat(env, survivor_id)
         hp_post = float(st_post.get("health") or 20.0)
         food_post = int(st_post.get("food") or 20)
         nh_post = st_post.get("nearest_hostile")
