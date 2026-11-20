@@ -3104,6 +3104,12 @@ class MacroSkills:
             )
 
         gained: dict[str, int] = {}
+
+        def _merge_confirmed_inventory_gain() -> None:
+            if inv_before is not None:
+                for name, amount in _positive_inv_delta(inv_before, _inventory_counts(self.bot)).items():
+                    gained[name] = max(int(gained.get(name) or 0), int(amount))
+
         dug_count = 0
         protected_hits = 0
         water_skipped = 0
@@ -3126,7 +3132,7 @@ class MacroSkills:
             dig_supports_timeout = False
 
         for _ in range(count * 3):
-            if dug_count >= count:
+            if dug_count >= count or (harvesting_logs and _target_gain_sum(gained) >= count):
                 break
             if time.monotonic() >= mine_deadline:
                 deadline_hit = True
@@ -3214,9 +3220,7 @@ class MacroSkills:
                         exclude_items=auto_dropped_names,
                     )
                     if inv_before is not None:
-                        inv_delta = _positive_inv_delta(inv_before, _inventory_counts(self.bot))
-                        for k, v in inv_delta.items():
-                            gained[k] = max(int(gained.get(k) or 0), int(v))
+                        _merge_confirmed_inventory_gain()
                         if _target_gain_sum(gained) > 0:
                             continue
                     break
@@ -3303,10 +3307,24 @@ class MacroSkills:
                     target_items=expected_drops,
                     exclude_items=auto_dropped_names,
                 )
-            if inv_before is not None:
-                inv_delta = _positive_inv_delta(inv_before, _inventory_counts(self.bot))
-                for k, v in inv_delta.items():
-                    gained[k] = max(int(gained.get(k) or 0), int(v))
+            _merge_confirmed_inventory_gain()
+        if (
+            harvesting_logs and dug_count >= count
+            and 0 < _target_gain_sum(gained) < count
+            and not deadline_hit and inv_before is not None
+            and mine_deadline - time.monotonic() > 2.0
+        ):
+            _merge_confirmed_inventory_gain()
+            if _target_gain_sum(gained) < count and last_drop_scan is None:
+                last_bot_pos = self.bot.status().get("pos")
+                last_drop_scan = self._collect_nearby_items(
+                    bot_y=float(last_bot_pos[1]) if last_bot_pos else bot_y,
+                    radius=8,
+                    max_pickups=2,
+                    target_items=expected_drops,
+                    exclude_items=auto_dropped_names,
+                )
+                _merge_confirmed_inventory_gain()
 
         if dug_count == 0 and water_skipped > 0:
             return {
@@ -3332,9 +3350,10 @@ class MacroSkills:
             for k, v in gained.items()
             if str(k).removeprefix("minecraft:") not in expected_drops and int(v) > 0
         }
+        collected = sum(target_gained.values())
 
         out: dict[str, Any] = {
-            "ok": dug_count >= count and bool(target_gained),
+            "ok": collected >= count if harvesting_logs else dug_count >= count and bool(target_gained),
             "requested_count": count,
             "dug_count": dug_count,
             "gained": gained,
@@ -3367,7 +3386,7 @@ class MacroSkills:
                     f"连续挖掘 {dug_count} 格但目标掉落物均未拾取{inc_note}（可能掉入深坑、被地形卡住或工具等级不匹配），"
                     "已停止继续损耗耐久，请移动到安全平层/斜坡挖掘或用 mc_get_entities 检查地面物品。"
                 )
-        elif dug_count < count:
+        elif not out["ok"]:
             out["error"] = "partial_collection" if dug_count else "no_targets_available"
             if (
                 dug_count == 0
@@ -3378,6 +3397,9 @@ class MacroSkills:
                     f"半径 {radius} 格内未扫描到任何匹配目标方块（{', '.join(block_types)}），"
                     "请先水平移动或使用 mc_skill_staircase 改变海拔后再探测，勿原地仅修改 count 重试。"
                 )
+            elif harvesting_logs and dug_count >= count:
+                out["partial_progress"] = True
+                out["message"] = f"已砍 {dug_count} 格，确认 {collected}/{count} 根原木入包。请按已入包数量决定下一步。"
             else:
                 out["message"] = f"本次只挖掘 {dug_count}/{count} 格；请按 gained 检查实际入包量。临时避让与保护区分别报告，改变站位或等待冷却后可重试临时失败。"
             out["requires_replan"] = True

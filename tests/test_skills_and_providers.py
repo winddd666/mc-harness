@@ -484,6 +484,44 @@ def test_harvest_logs_chops_one_column_and_collects_at_the_end(monkeypatch, time
         assert clock[0] == 6.0
 
 
+@pytest.mark.parametrize("actual_logs", [2, 6])
+def test_harvest_logs_checks_inventory_when_cuts_outnumber_reported_pickups(actual_logs) -> None:
+    cuts = 0
+    pickup_scans = 0
+
+    def handler(request):
+        nonlocal cuts, pickup_scans
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": "spruce_log", "count": min(cuts, actual_logs)}]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"name": "spruce_log", "pos": [cuts + 1, 64, 0], "dist": 1.0}]}
+        elif route == "dig":
+            cuts += 1
+            result = {"dug": "spruce_log", "gained": {"spruce_log": 1} if cuts <= 2 else {}}
+        elif route == "get_entities":
+            pickup_scans += 1
+            result = {"entities": []}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).harvest_logs(target_logs=6)
+
+    assert cuts == 6
+    assert result["target_gained"] == {"spruce_log": actual_logs}
+    assert result["ok"] is (actual_logs == 6)
+    if actual_logs == 2:
+        assert result["error"] == "partial_collection"
+        assert result["partial_progress"] is True
+        assert pickup_scans == 1
+    else:
+        assert pickup_scans == 0
+
+
 def test_mine_blocks_with_wooden_pick_skips_only_unmineable_types() -> None:
     from mc_agent.harness.geofence import VoidGeofence
     from mc_agent.harness.mc_tools import McToolset
