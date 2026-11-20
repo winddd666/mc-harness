@@ -129,6 +129,10 @@ class _UnsafeUnstickExit(BaseException):
     """Unwind an unstick whose final movement has no verified footing."""
 
 
+class _UnsafeFleeExit(BaseException):
+    """Unwind an explicit Nether retreat before an unsupported movement."""
+
+
 class _GuardSession:
     def __init__(
         self,
@@ -1573,6 +1577,44 @@ class GenerationGuard:
         _, needs_jump = route
         return {**body, "sprint": False, "jump": needs_jump, "ms": min(int(body.get("ms") or 350), 350)}
 
+    def _verify_nether_flee_step(self, action: str, body: dict[str, Any]) -> dict[str, Any]:
+        status = self.bot.status()
+        if "nether" not in str(status.get("dimension") or "").lower():
+            return body
+        pos = status.get("pos")
+        if (
+            not pos or status.get("ready") is False or status.get("alive") is False
+            or status.get("in_lava") or status.get("on_ground") is not True
+        ):
+            raise _UnsafeFleeExit
+
+        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.0)
+        probe_env = CombatEnv(probe_bot, geofence=self.geofence)
+
+        def probe(yaw: float, distance: float) -> tuple[int, bool]:
+            try:
+                route = probe_env.probe_retreat(pos, yaw, distance)
+            except _RecoveryBudgetExceeded:
+                route = None
+            if route is None:
+                raise _UnsafeFleeExit
+            return route
+
+        if action == "control":
+            _, needs_jump = probe(float(body["yaw"]), 3.5)
+            return {**body, "jump": needs_jump, "ms": min(int(body.get("ms") or 450), 450)}
+
+        x, _, z = map(float, pos[:3])
+        dx, dz = float(body["x"]) - x, float(body["z"]) - z
+        desired_distance = math.hypot(dx, dz)
+        if desired_distance == 0:
+            return body
+        distance = min(6.0, desired_distance)
+        yaw = math.atan2(-dx, -dz)
+        landing_y, _ = probe(yaw, distance)
+        fraction = distance / desired_distance
+        return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": 1.0}
+
     @contextmanager
     def _intercept_bot_calls(
         self,
@@ -1581,6 +1623,7 @@ class GenerationGuard:
         deadline: float | None = None,
         check_unstick_exit: bool = False,
         watch_hot_floor: bool = False,
+        check_flee_exit: bool = False,
     ):
         """Intercept `interrupted_by=='hurt'` and silent creeper approach inside multi-step macro skills."""
         orig_call = getattr(self.raw_bot, "call", None)
@@ -1692,6 +1735,13 @@ class GenerationGuard:
                 or clean_path in READ_ONLY_POLL_ENDPOINTS
             )
             if not is_actor_thread:
+                return orig_call(path, body, **kwargs)
+            if check_flee_exit:
+                if isinstance(body, dict) and body.get("stop_on") == ["death"] and (
+                    (clean_path == "control" and body.get("forward") and isinstance(body.get("yaw"), (int, float)))
+                    or (clean_path == "move_to" and "y" not in body and all(k in body for k in ("x", "z")))
+                ):
+                    body = self._verify_nether_flee_step(clean_path, body)
                 return orig_call(path, body, **kwargs)
             if is_readonly_poll:
                 return actor_call(path, body, **kwargs)
@@ -2011,21 +2061,31 @@ class GenerationGuard:
             receipt = self._protect_attack_on_hot_floor()
             if receipt is not None:
                 return receipt
-        if tool_name in NON_PREEMPTABLE_TOOLS or self._in_reflex:
+        is_flee = tool_name == "mc_skill_flee"
+        if (tool_name in NON_PREEMPTABLE_TOOLS and not is_flee) or self._in_reflex:
             return invoke_fn()
         is_unstick = tool_name == "mc_skill_unstick"
         # Leave time for the watcher to exit and for the final bounded stop request.
         deadline = time.monotonic() + self.UNSTICK_BUDGET_S - 2.0 if is_unstick else None
         try:
             with self._intercept_bot_calls(
+                enable_creeper_watcher=not is_flee,
                 deadline=deadline,
                 check_unstick_exit=is_unstick,
                 watch_hot_floor=tool_name in {"mc_skill_mine_dfs", "mc_skill_staircase"},
+                check_flee_exit=is_flee,
             ):
                 result = invoke_fn()
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _RecoveryBudgetExceeded
                 return result
+        except _UnsafeFleeExit:
+            self.events.emit("guardian.flee_exit_blocked", tool=tool_name)
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {"code": "unsafe_landing", "message": "撤退方向缺少安全落脚点，请改从有支撑的方向离开。"},
+            }, ensure_ascii=False)
         except _UnsafeUnstickExit:
             self.events.emit("guardian.unstick_exit_blocked", tool=tool_name)
             return json.dumps({

@@ -4081,6 +4081,41 @@ def test_guardian_checks_support_before_unstick_moves(solid_exit):
         assert movements == []
 
 
+@pytest.mark.parametrize("action", ["control", "move_to"])
+@pytest.mark.parametrize("solid_exit", [True, False])
+def test_explicit_nether_flee_checks_support_before_each_motion(action, solid_exit):
+    movements = []
+
+    class NetherBot:
+        def call(self, name, body=None, **kwargs):
+            if name == "status":
+                return {"pos": [0.5, 36, 0.5], "dimension": "the_nether", "ready": True, "alive": True, "on_ground": True}
+            if name == "get_block":
+                x, y, z = body["pos"]
+                if y == 35:
+                    return {"name": "netherrack" if solid_exit or (x, z) == (0, 0) else "lava"}
+                return {"name": "air"}
+            movements.append((name, body))
+            return {"ok": True}
+
+    body = {"x": 22.5, "z": 0.5, "range": 2.0, "stop_on": ["death"]}
+    if action == "control":
+        body = {"forward": True, "sprint": True, "jump": True, "yaw": -1.5708, "ms": 1200, "stop_on": ["death"]}
+    bot = NetherBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(bot.call(action, body))))
+    assert result["ok"] is solid_exit
+    if solid_exit:
+        (_, move), = movements
+        if action == "control":
+            assert move["ms"] == 450 and move["jump"] is False
+        else:
+            assert (move["x"], move["y"], move["z"]) == (6.5, 36, 0.5)
+    else:
+        assert result["error"]["code"] == "unsafe_landing"
+        assert movements == []
+
+
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
 @pytest.mark.parametrize("failure", ["timeout", "death"])
 def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monkeypatch):
