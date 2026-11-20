@@ -1227,6 +1227,42 @@ retries 545 | 429 26 | 502 0 | tracebacks 0
 
 23 集、**0 retry / 0 429**、1 aborted。四波审计轨累计 **0 次 429**。
 
+## 4br. 08:23 抽检：Qwen 通道饱和，18% 墙钟耗在退避（新 P1：BUG-045）
+
+### 主轨 `overnight_12bot_part2`（2h50m / 3.9h）
+
+```
+429 集：answered 298 / goal 26 / limit 27 / timeout 29 / runtime 53 / aborted 1 / paused 4 / network_error 1
+retries 846 | 429 49 | 502 0 | tracebacks 0
+```
+
+- 53 个 runtime_error = **49× Qwen 429** + 3× MC API ReadTimeout + 1× `[not_connected]`
+- 429 已从"10 分钟突发"演变为**持续劣化**：23:46–23:59（14 次）、00:04–00:22（12 次）连续出现
+
+### 关键量化：按通道分组的 retry 率
+
+| bot | 集 | 请求 | retry | retry% | 硬失败 | 退避墙钟占比 |
+|---|---|---|---|---|---|---|
+| `glm_1_nether_fortress` | 63 | 1018 | 213 | **17.3%** | 15 | **24.4%** |
+| `glm_5_midgame` | 79 | 950 | 201 | **17.5%** | 15 | **22.7%** |
+| `glm_2_nether_bastion` | 24 | 702 | 169 | 19.4% | 9 | 18.4% |
+| `glm_4_brewing_alchemy` | 34 | 516 | 135 | 20.7% | 8 | 14.7% |
+| `glm_3_village_trade` | 19 | 313 | 105 | 25.1% | 2 | 10.5% |
+| `nju_*`（3 路） | 81 | 1475 | 22 | **1.2~2.1%** | **0** | ≤0.5% |
+| `ds_*`（4 路） | 139 | 2627 | 1 | **0~0.2%** | **0** | 0% |
+
+- **5 路 Qwen retry 率成比例一致（17~25%）** → 共享 key/通道配额饱和，不是单 bot 行为异常
+- **Qwen 合计 18.1% 墙钟（9251s / 51036s）在 429 退避里睡觉** —— 相当于 5 路里约 1 路全程空转
+- 对照：同期的 hy4 审计轨（另一通道，4 路 + rpm=6）**0 次 429**
+
+### 新 P1：BUG-045（通道级 RPM 缺失）
+
+`v2_fleet.py launch` 对 Qwen squad 没有按 provider 的 RPM 上限（hy4 已有 `rpm=6` 且实测有效）。建议：Qwen 加 `rpm=6`，或并发从 5 降到 3；按 provider 配置而不是全局 default。
+
+### hy4 审计轨 `hy4_audit_r28`
+
+39 集、**0 retry / 0 429**、1 aborted、10 集 goal_satisfied。
+
 ## 5. 附录：工具时间占比（r11，start→finish 差值，已验证口径）
 
 - 全队工具墙钟合计：`mine_dfs` **7338s**、`move_to` 2310s、`staircase` 1606s、`mine_blocks` 1165s，其余 <800s
