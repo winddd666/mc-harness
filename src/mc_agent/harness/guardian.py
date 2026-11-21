@@ -336,7 +336,7 @@ class GenerationGuard:
         self._pre_hurt_suppress_block: tuple[int, int, int] | None = None
         self._pre_hurt_suppress_until: float = float("-inf")
         self._pre_hurt_target_cooldown: dict[str, float] = {}
-        self._last_cornered_creeper: tuple[int, tuple[float, ...], float, float] | None = None
+        self._stationary_warnings: dict[str, tuple[int, tuple[float, ...], float, float, tuple[Any, Any]]] = {}
         self._last_stalled_lava: tuple[tuple[float, ...], tuple[Any, ...], float] | None = None
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
@@ -702,10 +702,8 @@ class GenerationGuard:
         swimming = status.get("on_ground") is False or bool(status.get("submerged"))
         return source == "trident" or (
             isinstance(health, (int, float)) and health > 0
-            and (
-                (source in RANGED_HURT_SOURCES and (swimming or health <= 14.0))
-                or (source in MELEE_HURT_SOURCES and health <= 14.0)
-            )
+            and (source in RANGED_HURT_SOURCES or source in MELEE_HURT_SOURCES)
+            and (swimming or health <= 14.0)
         )
 
     def _unstick_in_wall(self, before: dict[str, Any]) -> dict[str, Any]:
@@ -996,12 +994,12 @@ class GenerationGuard:
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
                     self._last_dig_cover_fail_at = float("-inf")
-                    self._last_cornered_creeper = None
+                    self._stationary_warnings.clear()
                     self._last_stalled_lava = None
                     self._blocked_bunker = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
-                    self._last_cornered_creeper = None
+                    self._stationary_warnings.clear()
                     self._last_stalled_lava = None
                     source = str(event.get("source") or "").strip().lower()
                     if source in RANGED_HURT_SOURCES:
@@ -1990,6 +1988,24 @@ class GenerationGuard:
                 )
                 hurt_src = str(recent_hurt.get("source") or "").strip().lower()
                 indirect_magic = hurt_src == "indirect_magic"
+                if not hurt_src and not recent_hurt.get("source_entity") and any(
+                    str(hit.get("source") or "").strip().lower() in {"magic", "poison", "indirect_magic"}
+                    for hit in other_hurts
+                ):
+                    try:
+                        sighting = self.bot.call("get_entities", {"radius": 12, "types": ["hostile"]}, timeout_s=0.6)
+                    except (ApiError, httpx.HTTPError):
+                        sighting = {}
+                    witch = next((
+                        entity for entity in (sighting.get("entities") or [])
+                        if isinstance(entity, dict) and str(entity.get("name") or "").removeprefix("minecraft:") == "witch"
+                        and entity.get("blocked_by_wall") is False and isinstance(entity.get("id"), int)
+                        and isinstance(entity.get("pos"), (list, tuple)) and len(entity["pos"]) >= 3
+                        and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in entity["pos"][:3])
+                    ), None)
+                    if witch is not None:
+                        attacker = witch
+                        indirect_magic = True
                 ranged_defense = hurt_src in RANGED_HURT_SOURCES or (
                     nh_name in {"blaze", "ghast"}
                     and (hurt_src in FIRE_HURT_SOURCES or (not hurt_src and status.get("on_fire")))
@@ -2494,7 +2510,9 @@ class GenerationGuard:
                         reasons.append("death_or_connection_changed")
                     replan = True
         if pre_trigger is not None and post_events_verified and not any(e.get("type") == "hurt" for e in fresh):
-            if reasons == ["pre_hurt_creeper"] and self._repeat_cornered_creeper(pre_trigger, status, post_status, actions):
+            if reasons in (["pre_hurt_creeper"], ["pre_hurt_melee"]) and self._repeat_stationary_retreat_warning(
+                pre_trigger, status, post_status, actions,
+            ):
                 replan = False
             elif reasons == ["pre_hurt_melee"] and self._resolved_melee_warning(pre_trigger, status, post_status, actions):
                 replan = False
@@ -2608,10 +2626,12 @@ class GenerationGuard:
             and start and end and math.dist(start[:3], end[:3]) <= 0.2
         )
 
-    def _repeat_cornered_creeper(
+    def _repeat_stationary_retreat_warning(
         self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
     ) -> bool:
-        """Keep a generation running after an unchanged, stationary creeper retreat failure."""
+        """Keep a generation running when a repeated threat leaves the retreat state unchanged."""
+        source = trigger["source"]
+        melee_warning = source == "pre_hurt_melee"
         if len(actions) != 1 or actions[0]["action"] != "subcortical_combat":
             return False
         outcome = actions[0].get("result")
@@ -2619,10 +2639,15 @@ class GenerationGuard:
         if not isinstance(combat_actions, list) or len(combat_actions) != 1:
             return False
         retreat = combat_actions[0]
-        if not isinstance(retreat, dict) or retreat.get("action") != "retreat_from_creeper" or retreat.get("reason") != "no_safe_retreat":
+        expected_action = "flee" if melee_warning else "retreat_from_creeper"
+        if (
+            not isinstance(retreat, dict) or retreat.get("action") != expected_action
+            or retreat.get("reason") != "no_safe_retreat"
+            or (melee_warning and (retreat.get("moved") != 0.0 or retreat.get("ok") is not False))
+        ):
             return False
 
-        _, distance, entity_id, _ = self._extract_hostile_info(after)
+        name, distance, entity_id, _ = self._extract_hostile_info(after)
         pos_before, pos_after = before.get("pos"), after.get("pos")
         if (
             entity_id is None or entity_id != trigger.get("primary_entity_id")
@@ -2631,19 +2656,27 @@ class GenerationGuard:
             or after.get("health") != before.get("health") or after.get("blocking") != before.get("blocking")
             or after.get("dimension") != before.get("dimension") or after.get("last_death") != before.get("last_death")
             or not pos_before or not pos_after or math.dist(pos_before[:3], pos_after[:3]) > 0.2
+            or (melee_warning and (
+                name not in PRE_HURT_MELEE_MOBS or before.get("on_ground") is not True or after.get("on_fire")
+                or any(after.get(key) != before.get(key) for key in ("food", "held", "offhand"))
+            ))
         ):
             return False
 
         distance = min(distance, float(trigger.get("distance", distance)))
-        previous = self._last_cornered_creeper
+        previous = self._stationary_warnings.get(source)
         now = time.monotonic()
+        life = (after.get("dimension"), after.get("last_death"))
         if (
             previous is not None and previous[0] == entity_id and now - previous[3] < 45.0
-            and math.dist(pos_after[:3], previous[1]) <= 0.25
+            and previous[4] == life and math.dist(pos_after[:3], previous[1]) <= 0.25
             and distance > 2.3 and distance >= previous[2] - 0.25
         ):
+            if melee_warning:
+                # Refresh the observation while comparing position and distance to the initial warning.
+                self._stationary_warnings[source] = (previous[0], previous[1], previous[2], now, life)
             return True
-        self._last_cornered_creeper = (entity_id, tuple(pos_after[:3]), distance, now)
+        self._stationary_warnings[source] = (entity_id, tuple(pos_after[:3]), distance, now, life)
         return False
 
     # ---- Layer 2: Active Macro-Tool & `pre_ensure` Preemption ----
@@ -3389,10 +3422,13 @@ class GenerationGuard:
                         )
             hot_floor_trigger = trigger.get("primary_type") == "hot_floor"
             hp_pre = st_pre.get("health")
+            dimension = str(st_pre.get("dimension") or "").lower().removeprefix("minecraft:")
             check_hot_floor = hot_floor_trigger or (
-                interrupted_name in HOT_FLOOR_WATCH_TOOLS
+                (
+                    (interrupted_name in HOT_FLOOR_WATCH_TOOLS and "nether" in dimension)
+                    or (interrupted_name == "pre_ensure" and dimension == "overworld")
+                )
                 and trigger.get("source") == "tool_interrupted_hurt"
-                and "nether" in str(st_pre.get("dimension") or "").lower()
                 and isinstance(hp_pre, (int, float)) and 0 < hp_pre <= 4.0
                 and self._needs_hot_floor_stance(st_pre, time.monotonic())
             )
@@ -3506,7 +3542,7 @@ class GenerationGuard:
                     nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
                     drowned_during_tool = nh_pre_name == "drowned" and (
                         (interrupted_name == "mc_attack" and nh_pre_dist <= self.ATTACK_WATER_THREAT_RANGE)
-                        or (interrupted_name == "mc_skill_scout_surface" and nh_pre_dist <= 6.0)
+                        or (interrupted_name in {"mc_move_to", "mc_skill_scout_surface"} and nh_pre_dist <= 6.0)
                     )
                     if hurt_pre_water:
                         self._water_hurt_streak += 1

@@ -1802,6 +1802,60 @@ def test_bug_009_stationary_lava_escape_keeps_retrying_without_duplicate_cancel(
         assert guard.poll()["requires_replan"] is True
 
 
+@pytest.mark.parametrize("followup", ["unchanged", "closer", "hurt", "new_life", "new_target"])
+def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, followup):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    zombie = {"id": 5462415, "name": "zombie", "dist": 2.6, "pos": [40995.5, 61, 10998.5]}
+    status = {
+        "pos": [40994, 63, 10997.3], "dimension": "overworld", "health": 2, "food": 17, "last_death": {"t": 1},
+        "ready": True, "alive": True, "on_ground": True, "blocking": False, "nearest_hostile": zombie,
+    }
+    hits = []
+
+    class LedgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    def combat(_env, _trigger):
+        return {
+            "mode": "cover_or_flee", "handled": True,
+            "actions": [{"action": "flee", "ok": False, "reason": "no_safe_retreat", "moved": 0.0}],
+            "status_after": dict(status),
+        }
+
+    class Combat:
+        def on_encounter(self, env, trigger):
+            return combat(env, trigger)
+
+    guard = GenerationGuard(LedgeBot(), EventSink(lambda _: None), checkpoint=lambda: None, combat_controller=Combat())
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+    assert guard.poll()["requires_replan"] is True
+
+    clock[0] += 15.5
+    if followup == "closer":
+        zombie["dist"] = 2.1
+    elif followup == "hurt":
+        status["health"] = 1.0
+        hits.append({"seq": 1, "type": "hurt", "source": "mob_attack"})
+    elif followup == "new_life":
+        status["last_death"] = {"t": 2}
+    elif followup == "new_target":
+        zombie["id"] += 1
+
+    assert guard.poll()["requires_replan"] is (followup != "unchanged")
+    if followup == "unchanged":
+        for _ in range(3):
+            clock[0] += 15.5
+            assert guard.poll()["requires_replan"] is False
+
+
 @pytest.mark.parametrize("after_kill", ["stable", "hurt", "moved", "shooter", "death", "unverified"])
 def test_bug_009_resolved_melee_warning_keeps_generation_only_when_stable(monkeypatch, after_kill):
     spider = {"id": 4614512, "name": "spider", "dist": 2.7, "pos": [3.2, 64, 0.5]}
@@ -4436,11 +4490,13 @@ def test_retreat_keeps_shield_against_a_nearby_shooter(health, distance_after, a
 
 
 @pytest.mark.parametrize("landing", ["near_melee", "near_shooter", "clear", "respawned"])
-@pytest.mark.parametrize("failed_shaft_seal", [False, True])
-def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, landing, failed_shaft_seal):
+@pytest.mark.parametrize("encounter", ["surface_melee", "shaft_melee", "shaft_ranged"])
+def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, landing, encounter):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
-    mob = "wither_skeleton" if failed_shaft_seal else "husk"
+    failed_shaft_seal = encounter != "surface_melee"
+    shaft_ranged = encounter == "shaft_ranged"
+    mob = "skeleton" if shaft_ranged else "wither_skeleton" if failed_shaft_seal else "husk"
     primary = {"id": 77, "name": mob, "pos": [1.3, 69, 0.5], "dist": 0.8}
     status = {
         "pos": [0.5, 69, 0.5], "health": 20.0 if failed_shaft_seal else 7.0, "food": 17, "ready": True, "alive": True,
@@ -4468,7 +4524,11 @@ def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, land
 
     def short_retreat(*args, **kwargs):
         status.update(pos=[-1.68, 69, 0.5], health=4.84)
-        status["nearest_hostile"] = {"id": 78, "name": mob, "dist": 2.3 if landing != "clear" else 4.0}
+        status["nearest_hostile"] = {
+            "id": 78, "name": "husk" if shaft_ranged else mob, "dist": 2.3 if landing != "clear" else 4.0,
+        }
+        if shaft_ranged:
+            status["blocking"] = False
         if landing == "near_shooter":
             status["nearest_hostile"].update(name="skeleton", dist=3.4)
         if landing == "respawned":
@@ -4481,16 +4541,17 @@ def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, land
         monkeypatch.setattr(env, "arena_snapshot", lambda *args: {"enclosure": "carved_shaft"})
         monkeypatch.setattr(env, "build_tactical", lambda *args, **kwargs: {"ok": False, "reason": "no_safe_seal"})
     outcome = CombatControllerSlot().handle(
-        env, {"source": "pre_hurt_melee", "primary_entity_id": 77, "primary_type": mob},
+        env, {"source": "pre_hurt_ranged" if shaft_ranged else "pre_hurt_melee", "primary_entity_id": 77, "primary_type": mob},
     )
 
     if failed_shaft_seal:
         assert {"action": "seal_shaft", "ok": False} in outcome["actions"]
         assert {"action": "flee", "ok": False} in outcome["actions"]
-    should_latch = landing == "near_melee" or (landing == "near_shooter" and not failed_shaft_seal)
+    should_latch = landing == "near_melee" or (landing == "near_shooter" and encounter != "shaft_melee")
     assert outcome["latched_guard"] is should_latch
     if should_latch and landing == "near_shooter":
-        assert {"action": "guard_ranged_after_melee_retreat", "ok": True, "entity_id": 78} in outcome["actions"]
+        action = "guard_ranged_after_failed_seal" if shaft_ranged else "guard_ranged_after_melee_retreat"
+        assert {"action": action, "ok": True, "entity_id": 78} in outcome["actions"]
     if should_latch:
         assert posture_calls[-2:] == [("look", {"entity_id": 78}), ("posture", {"shield": True, "sneak": False, "jump": False})]
         assert status["blocking"] is True
@@ -5124,6 +5185,41 @@ def test_indirect_magic_uses_checked_retreat_without_digging_a_bunker(monkeypatc
         assert [action["action"] for action in incident["actions"]] == ["combat_or_flee"]
     else:
         assert retreats == [] and incident is None
+
+
+@pytest.mark.parametrize("witch_visible", [False, True])
+def test_magic_damage_with_visible_witch_retreats_from_the_witch(monkeypatch, witch_visible):
+    zombie = {"id": 41, "name": "zombie", "dist": 1.9, "pos": [2.4, 71, 0.5]}
+    witch = {"id": 42, "name": "witch", "dist": 7.5, "pos": [0.5, 71, -7.0], "blocked_by_wall": not witch_visible}
+    status = {
+        "pos": [0.5, 71, 0.5], "dimension": "overworld", "health": 16.7, "food": 17,
+        "ready": True, "alive": True, "on_ground": True, "blocking": True, "nearest_hostile": zombie,
+    }
+    hits = [{"seq": 1, "type": "hurt"}, {"seq": 2, "type": "hurt", "source": "magic"}]
+    retreats = []
+
+    class MagicBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [h for h in hits if h["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                assert kwargs["timeout_s"] == 0.6
+                return {"entities": [zombie, witch]}
+            return {"ok": True}
+
+    guard = GenerationGuard(MagicBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def defend(_status, attacker, _counts, *, ranged=False):
+        retreats.append((attacker, ranged))
+        return {"ok": True, "mode": "flee"}
+
+    monkeypatch.setattr(guard, "_defend_or_flee", defend)
+    assert guard.poll()["requires_replan"]
+    assert retreats == ([(witch, True)] if witch_visible else [(None, False)])
 
 
 @pytest.mark.parametrize("respawned", [False, True])
@@ -8468,13 +8564,15 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
 @pytest.mark.parametrize("scenario", [
     "ordinary", "surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
     "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee", "boundary_arrow", "poll_arrow",
+    "poll_high_health_melee", "tool_high_health_melee",
 ])
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     events = []
     calls = []
-    status = {"pos": [0.5, 52, 0.5], "health": 14 if scenario.endswith("melee") else 20, "oxygen": 240, "in_water": True,
+    health = 14 if scenario.endswith("melee") and "high_health" not in scenario else 20
+    status = {"pos": [0.5, 52, 0.5], "health": health, "oxygen": 240, "in_water": True,
               "submerged": scenario != "surface_partial_move", "on_ground": False, "alive": True, "ready": True}
     if scenario.endswith("arrow"):
         status.update(
@@ -8527,7 +8625,7 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     }
     if scenario.startswith("poll_"):
         assert guard.poll() is not None
-    elif scenario == "tool_melee":
+    elif scenario.startswith("tool_"):
         trigger = {"source": "tool_interrupted_hurt", "hurt_source": "mob_attack", "primary_type": "zombie"}
         report = guard.handle_preemption(trigger, interrupted_name="mc_skill_unstick")
         assert report["status_after"]["in_water"] is False
@@ -8984,10 +9082,13 @@ def test_water_retry_rechecks_nearby_bank_before_swimming_past_it(monkeypatch, b
         assert result["ok"] is True and result["in_water"] is False
 
 
-@pytest.mark.parametrize("bank_state", ["clear", "flooded", "new_life", "observed_after_tool", "observed_during_poll"])
+@pytest.mark.parametrize("bank_state", [
+    "clear", "flooded", "new_life", "observed_after_tool", "observed_during_poll", "higher_bank", "too_high",
+])
 def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, bank_state):
-    bank = [7884.5, 63, 2779.5]
-    wet = [7885.5, 62.8, 2751.5]
+    bank_y = {"higher_bank": 64, "too_high": 65}.get(bank_state, 63)
+    bank = [7884.5, bank_y, 2779.5]
+    wet = [7885.5, 62.7, 2751.5]
     status = {
         "pos": wet, "in_water": True, "on_ground": False, "alive": True, "ready": True,
         "dimension": "overworld", "last_death": {"t": 1},
@@ -9003,7 +9104,7 @@ def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, ba
             if action == "get_block":
                 x, y, z = body["pos"]
                 if (x, z) == (7884, 2779):
-                    if y == 62:
+                    if y == bank_y - 1:
                         return {"name": "stone"}
                     return {"name": "water" if bank_state == "flooded" else "air"}
                 return {"name": "water"}
@@ -9034,7 +9135,7 @@ def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, ba
         status["last_death"] = {"t": 2}
     result = guard.combat_env.escape_deep_water_to_shore()
 
-    safe_bank = bank_state not in {"flooded", "new_life"}
+    safe_bank = bank_state not in {"flooded", "new_life", "too_high"}
     assert ("return_to_dry_bank" in result["actions"]) is safe_bank
     assert (bank in moves) is safe_bank
     assert result["ok"] is safe_bank
@@ -9201,7 +9302,7 @@ def test_water_boundary_avoids_a_shore_path_that_crosses_a_creeper(monkeypatch):
     assert note is not None and "登岸" in note
 
 
-@pytest.mark.parametrize("entry", ["poll", "interrupted_attack"])
+@pytest.mark.parametrize("entry", ["poll", "mc_attack", "mc_move_to"])
 def test_nearby_drowned_sends_water_recovery_directly_to_shore(monkeypatch, entry):
     drowned = {"id": 44, "name": "drowned", "dist": 4.7}
     drowned_pos = [9266.3, 61, -11355]
@@ -9246,8 +9347,9 @@ def test_nearby_drowned_sends_water_recovery_directly_to_shore(monkeypatch, entr
         assert incident["actions"][-1]["action"] == "escape_to_shore"
     else:
         receipt = guard.handle_preemption({
-            "source": "boundary_threat", "primary_entity_id": 44, "primary_type": "drowned",
-        }, interrupted_name="mc_attack")
+            "source": "tool_interrupted_hurt" if entry == "mc_move_to" else "boundary_threat",
+            "primary_entity_id": 44, "primary_type": "drowned",
+        }, interrupted_name=entry)
         assert receipt["reflex_mode"] == "water_surface" and receipt["status_after"]["on_ground"]
     assert actions == ["shield", "shore"]
 
@@ -10123,15 +10225,18 @@ def test_repeated_magma_damage_after_successful_sneak_seeks_safe_ground(monkeypa
 
 
 @pytest.mark.parametrize("floor", ["magma_block", "netherrack"])
-def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch, floor):
+@pytest.mark.parametrize(("dimension", "tool", "shooter"), [
+    ("the_nether", "mc_skill_staircase", "blaze"), ("overworld", "pre_ensure", "skeleton"),
+])
+def test_critical_tool_preemption_checks_floor_before_combat(monkeypatch, floor, dimension, tool, shooter):
     status = {
-        "pos": [2014.3, 76, 1890.2], "health": 0.25, "dimension": "the_nether",
+        "pos": [2014.3, 76, 1890.2], "health": 0.25, "dimension": dimension,
         "ready": True, "alive": True, "on_ground": True, "blocking": True, "sneaking": False,
     }
     postures = []
     combat = []
 
-    class NetherBot:
+    class HazardBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return dict(status)
@@ -10146,7 +10251,7 @@ def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch,
                 return {"sneaking": status["sneaking"]}
             pytest.fail(f"Unexpected action during critical preemption: {action}")
 
-    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard = GenerationGuard(HazardBot(), EventSink(lambda _: None), checkpoint=lambda: None)
 
     def respond(env, trigger):
         combat.append(trigger["primary_type"])
@@ -10154,7 +10259,7 @@ def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch,
 
     monkeypatch.setattr(guard.combat_slot, "handle", respond)
     receipt = guard.handle_preemption(
-        {"source": "tool_interrupted_hurt", "primary_type": "blaze"}, interrupted_name="mc_skill_staircase",
+        {"source": "tool_interrupted_hurt", "primary_type": shooter}, interrupted_name=tool,
     )
 
     if floor == "magma_block":
@@ -10163,7 +10268,7 @@ def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch,
         assert combat == []
     else:
         assert receipt["reflex_mode"] == "cover_or_flee"
-        assert postures == [] and combat == ["blaze"]
+        assert postures == [] and combat == [shooter]
 
 
 @pytest.mark.parametrize("landing_safe", [True, False])
