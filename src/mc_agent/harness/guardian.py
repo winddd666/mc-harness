@@ -49,6 +49,7 @@ LOW_HP_BUNKER_MAX = 10.0
 # Ranged damage: sprinting away in open cave air just makes the firing line longer.
 RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "wither_skull", "skeleton"})
 MELEE_HURT_SOURCES = frozenset({"mob_attack", "player_attack"})
+BLAST_HURT_SOURCES = frozenset({"player_explosion", "entity_explosion", "fireball", "small_fireball", "wither_skull"})
 
 # Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
 LAVA_HURT_SOURCES = frozenset({"lava"})
@@ -1093,6 +1094,17 @@ class GenerationGuard:
         in_lava = raw_in_lava or (
             hurt_by_lava and not deaths and not disconnected and ready and status.get("alive") is not False
         )
+        if (
+            not in_lava and not in_water and not deaths and ready and status.get("alive") is not False
+            and status.get("on_ground") is False and "nether" in str(status.get("dimension") or "").lower()
+            and status.get("pos")
+            and any(str(h.get("source") or "").strip().lower() in BLAST_HURT_SOURCES for h in hurts)
+        ):
+            probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.5)
+            try:
+                in_lava = CombatEnv(probe_bot)._is_airborne_above_lava(status, start_pos=status["pos"])
+            except _RecoveryBudgetExceeded:
+                pass
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava
@@ -1835,14 +1847,15 @@ class GenerationGuard:
                         else:
                             self._consecutive_flees = 0
                     cf_result = (cf or {}).get("result") or {}
-                    face_after_blocked_retreat = (
+                    face_after_melee_retreat = (
                         str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
-                        and already_blocking and cf_result.get("reason") == "no_safe_retreat"
+                        and already_blocking and cf_result.get("mode") == "flee"
+                        and cf_result.get("reason") in {None, "no_safe_retreat", "unsafe_landing"}
                     )
                     follow_unarmed_retreat = (
                         not has_shield and not has_melee_weapon and cf and cf.get("ok") and cf_result.get("mode") == "flee"
                     )
-                    if hurt_src in MELEE_HURT_SOURCES and (face_after_blocked_retreat or follow_unarmed_retreat):
+                    if hurt_src in MELEE_HURT_SOURCES and (face_after_melee_retreat or follow_unarmed_retreat):
                         try:
                             landing = self.bot.call("status", method="GET", timeout_s=0.6)
                         except (ApiError, httpx.HTTPError):
@@ -1858,7 +1871,7 @@ class GenerationGuard:
                             and isinstance(current_hp, (int, float)) and 0 < current_hp <= LOW_HP_BUNKER_MAX
                             and mob in PRE_HURT_MELEE_MOBS and target_id is not None and dist <= 3.5
                         ):
-                            if face_after_blocked_retreat and landing.get("blocking"):
+                            if face_after_melee_retreat and landing.get("blocking"):
                                 actions.append(self._action(
                                     "face_attacker_after_retreat",
                                     lambda: self.bot.call("look", {"entity_id": target_id}, timeout_s=0.9),
