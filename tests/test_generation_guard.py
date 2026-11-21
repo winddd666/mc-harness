@@ -5974,6 +5974,50 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert len(pulses) == len(actions) == 1
 
 
+@pytest.mark.parametrize("creeper_in_status", [False, True])
+def test_creeper_warning_uses_a_creeper_position_when_scan_only_finds_other_mobs(monkeypatch, creeper_in_status):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    parched = {"id": 4621113, "name": "parched", "dist": 11.8, "pos": [12.3, 65, 0.5]}
+    creeper_pos = [-3.2, 65, 0.5]
+    status = {
+        "pos": [0.5, 65, 0.5], "health": 19, "food": 20, "on_ground": True,
+        "ready": True, "alive": True, "nearest_hostile": parched,
+    }
+    if creeper_in_status:
+        status["nearest_hostile"] = {"id": 4623433, "name": "creeper", "dist": 3.7, "pos": [-3.2, 65, 1.5]}
+    expected = status["nearest_hostile"]["pos"] if creeper_in_status else creeper_pos
+    moves = []
+
+    class NightBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [parched]}
+            raise AssertionError(action)
+
+    env = CombatEnv(NightBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open"})
+
+    def flee(threat_pos, **_kwargs):
+        moves.append(threat_pos)
+        status["nearest_hostile"] = parched
+        return {"ok": True, "moved_dist": 3.0}
+
+    monkeypatch.setattr(env, "flee", flee)
+    result = SubcorticalInstinctController().on_encounter(env, {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 4623433,
+        "primary_pos": creeper_pos, "distance": 3.7,
+    })
+
+    assert result["mode"] == "creeper_evade"
+    assert moves == [expected]
+
+
 @pytest.mark.parametrize("lands_in_water", [False, True])
 @pytest.mark.parametrize(
     "mob, trigger, retreat_action",
