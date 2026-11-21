@@ -3738,6 +3738,52 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
             assert calls == [(primary["pos"], True, [secondary["pos"]])]
 
 
+@pytest.mark.parametrize("shooters", ["visible", "timeout", "melee_only"])
+def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, shooters):
+    melee = {"id": 44, "name": "zombie", "dist": 2.0, "pos": [-2, 72, 0]}
+    shooter = {"id": 45, "name": "skeleton", "dist": 8.0, "pos": [8, 72, 0]}
+    status = {
+        "pos": [0, 72, 0], "dimension": "overworld", "health": 8.56, "food": 17,
+        "ready": True, "alive": True, "on_ground": True, "blocking": True,
+        "nearest_hostile": {key: melee[key] for key in ("id", "name", "dist")},
+    }
+    hits = [{"seq": 2, "type": "hurt", "source": "mob_attack"}]
+    if shooters != "melee_only":
+        hits.insert(0, {"seq": 1, "type": "hurt", "source": "arrow"})
+    scans = []
+    retreats = []
+
+    class NightBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [] if kwargs["params"]["since"] else hits}
+            if action == "inventory":
+                return {"items": [{"name": "diamond_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                scans.append(body)
+                assert kwargs["timeout_s"] == 0.6 and kwargs["allow_reauth"] is False
+                if shooters == "timeout":
+                    raise httpx.ReadTimeout("hostile scan timeout")
+                return {"entities": [melee, shooter]}
+            return {"ok": True}
+
+    def retreat(primary_pos, *, wait_for_ground, other_shooters=()):
+        assert wait_for_ground
+        retreats.append((primary_pos, list(other_shooters)))
+        return {"ok": True, "mode": "flee"}
+
+    guard = GenerationGuard(NightBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", retreat)
+    incident = guard.poll()
+
+    assert [action["action"] for action in incident["actions"]] == ["combat_or_flee"]
+    assert scans == ([] if shooters == "melee_only" else [{"radius": 16, "types": ["hostile"]}])
+    expected = (melee["pos"], [shooter["pos"]]) if shooters == "visible" else (None, [])
+    assert retreats == [expected]
+
+
 @pytest.mark.parametrize("landed", [False, True])
 def test_lava_reflex_requires_landing_even_without_lava_under_the_hitbox(monkeypatch, landed):
     clock = [1000.0]

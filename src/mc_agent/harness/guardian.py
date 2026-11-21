@@ -464,29 +464,45 @@ class GenerationGuard:
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
             if not pos:
                 pos = nh_pos
+            now = time.monotonic()
+            recent_melee = now - self._last_melee_hurt_at < 4.0
+            mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
+            burning_blaze = "nether" in dimension and ranged and low_health and status.get("on_fire") and nh_name == "blaze"
+            attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
+            primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
             other_shooters = []
             check_blaze_cover = False
             if (
-                "nether" in dimension and ranged and low_health and status.get("on_fire")
-                and nh_name == "blaze" and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
+                (mixed_hurt or (burning_blaze and primary_id is not None))
+                and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
             ):
-                attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
-                primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
-                if primary_id is not None:
-                    try:
-                        sighting = self.bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
-                    except (ApiError, httpx.HTTPError):
-                        sighting = {}
-                    for shooter_id, shooter_pos in ranged_retreat_positions(
-                        retreat_pos, sighting.get("entities") or [], max_distance=16.0,
-                    ):
-                        if shooter_id == primary_id:
-                            pos = shooter_pos
-                            check_blaze_cover = True
-                        elif shooter_id is not None:
-                            other_shooters.append(shooter_pos)
+                try:
+                    sighting = self.bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
+                except (ApiError, httpx.HTTPError):
+                    sighting = {}
+                entities = sighting.get("entities") or []
+                if mixed_hurt and not pos and primary_id is not None:
+                    for entity in entities:
+                        if not isinstance(entity, dict) or entity.get("id") != primary_id:
+                            continue
+                        live_pos = entity.get("pos")
+                        if (
+                            isinstance(live_pos, (tuple, list)) and len(live_pos) >= 3
+                            and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in live_pos[:3])
+                        ):
+                            pos = live_pos
+                            break
+                for shooter_id, shooter_pos in ranged_retreat_positions(retreat_pos, entities, max_distance=16.0):
+                    if shooter_id is None:
+                        continue
+                    if shooter_id == primary_id:
+                        pos = shooter_pos
+                        check_blaze_cover = burning_blaze
+                    else:
+                        other_shooters.append(shooter_pos)
+                if mixed_hurt and not pos and other_shooters:
+                    pos = other_shooters.pop(0)
             # A wall that blocks projectiles cannot protect us from a melee attacker already in reach.
-            recent_melee = time.monotonic() - self._last_melee_hurt_at < 4.0
             if pos and (prefer_cover or check_blaze_cover) and not recent_melee:
                 cover_budget = 1.25 if check_blaze_cover else 2.25
                 cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + cover_budget)
