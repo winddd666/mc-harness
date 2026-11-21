@@ -378,6 +378,7 @@ class CombatEnv:
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
+        self._stalled_lava_shore: tuple[tuple[float, ...], tuple[float, ...], float] | None = None
 
     def surface_from_water(self, status: dict[str, Any]) -> dict[str, Any]:
         if self._water_escape is not None:
@@ -1161,6 +1162,8 @@ class CombatEnv:
                     force_rim_escape and self._is_near_or_over_lava(st)
                 )
             if not rim_lava_active:
+                if not _landing_unconfirmed(st):
+                    self._stalled_lava_shore = None
                 unconfirmed = _landing_unconfirmed(st)
                 return {
                     "ok": not unconfirmed,
@@ -1244,6 +1247,8 @@ class CombatEnv:
             still_in_lava = bool(st_now.get("in_lava"))
             pos_now = st_now.get("pos") or pos0
             respawned = _did_respawn_during_lava(st_now)
+            if respawned or (not still_in_lava and not _landing_unconfirmed(st_now)):
+                self._stalled_lava_shore = None
             airborne_over_lava = (
                 (not respawned)
                 and (not still_in_lava)
@@ -1375,7 +1380,15 @@ class CombatEnv:
         if lava_shore_target is not None and time.monotonic() + 1.5 < lava_deadline:
             swim_pos = st.get("pos") or pos0
             shore_d = math.hypot(lava_shore_target[0] - float(swim_pos[0]), lava_shore_target[2] - float(swim_pos[2]))
-            if shore_d <= 6.5:
+            stalled = self._stalled_lava_shore
+            repeat_stall = (
+                stalled is not None and stalled[0] == tuple(lava_shore_target)
+                and math.dist(swim_pos[:3], stalled[1]) <= 1.25
+                and time.monotonic() - stalled[2] < 15.0
+            )
+            if repeat_stall:
+                actions.append("lava_shore_path_stalled")
+            elif shore_d <= 6.5:
                 try:
                     self.bot.call(
                         "move_to",
@@ -1394,11 +1407,14 @@ class CombatEnv:
                     actions.append("lava_move_to_shore")
                 except (ApiError, httpx.HTTPError) as err:
                     actions.append("lava_move_to_shore_timeout" if isinstance(err, httpx.HTTPError) else "lava_move_to_shore_err")
-                    self._best_effort_stop()
+                    self._best_effort_stop(timeout_s=0.5)
                 self.invalidate_block_cache()
                 st = self._safe_status(st)
                 if _should_exit_lava(st):
                     return _lava_result(st)
+                end = st.get("pos") or swim_pos
+                if math.dist(end[:3], lava_shore_target) >= math.dist(swim_pos[:3], lava_shore_target) - 0.75:
+                    self._stalled_lava_shore = (tuple(lava_shore_target), tuple(end[:3]), time.monotonic())
 
         # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
         filler = self._pick_filler_block(counts)

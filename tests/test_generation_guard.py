@@ -3539,6 +3539,48 @@ def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monk
     assert ("lava_bridge_probe_incomplete" in result["actions"]) is bridge_probe_slow
 
 
+def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkeypatch):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    shore = [3188.5, 66, -2046.5]
+    status = {
+        "pos": [3186.7, 64.6, -2046.8], "health": 20, "alive": True, "ready": True,
+        "in_lava": True, "on_ground": False, "dimension": "the_nether",
+    }
+    calls = []
+    can_bridge = False
+
+    class LavaBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 4}] if can_bridge else []}
+            if action == "get_block":
+                return {"name": "lava" if body["pos"][1] <= 64 else "air"}
+            if action == "move_to":
+                calls.append(action)
+                # The pathfinder replies successfully before the bot leaves the lava hitbox.
+                status["pos"] = [3186.7, 64.6, -2046.2]
+            if action == "place":
+                calls.append(action)
+                status.update(in_lava=False, on_ground=True, pos=[3186.7, 65, -2046.2])
+            return {"ok": True}
+
+    env = CombatEnv(LavaBot())
+    monkeypatch.setattr(env, "scan_safe_yaws", lambda *args, **kwargs: {})
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *args, **kwargs: shore)
+    first = env.escape_lava()
+    assert not first["ok"] and "lava_move_to_shore" in first["actions"]
+
+    can_bridge = True
+    second = env.escape_lava()
+    assert second["ok"] and "lava_shore_path_stalled" in second["actions"]
+    assert calls == ["move_to", "place"]
+
+
 @pytest.mark.parametrize("lands_after_jump", [False, True])
 def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsupported(monkeypatch, lands_after_jump):
     """Reproduces r20_short hy4_hy_6_nether_bastion: when underfoot place fails no_support/blocked_by_self, place side bridge against bank & step onto it."""
