@@ -51,8 +51,8 @@ BOT = "MapTest_01"
 TOKEN_FILE = MAIN_ROOT / ".state-maptest" / "tokens.json"
 ENV_FILE = MAIN_ROOT / ".env.beast"
 
-LIVE_STATE_DIR = WT_ROOT / ".state-l3-live"
-RUNS_DIR = WT_ROOT / "runs"
+LIVE_STATE_DIR = pathlib.Path(os.environ.get("MC_FLEET_LIVE_STATE_DIR") or (WT_ROOT / ".state-l3-live"))
+RUNS_DIR = pathlib.Path(os.environ.get("MC_FLEET_RUNS_ROOT") or (WT_ROOT / "runs"))
 DAY2_VILLAGE_STAGE = "day2_village_near"
 VILLAGE_APPROACH_RANGE = (120.0, 180.0)
 STRONGHOLD_STAGE = "village_to_stronghold_end"

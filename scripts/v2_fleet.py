@@ -22,14 +22,18 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import errno
 import fcntl
 import glob
+import io
 import json
 import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from collections import Counter, defaultdict
 from typing import TextIO
 
@@ -48,6 +52,7 @@ ENV_FILE = MAIN_ROOT / ".env.beast"
 FLEET_TOKEN_FILE = MAIN_ROOT / ".state-fleet/tokens.json"
 RUNS_ROOT = pathlib.Path(os.environ.get("MC_FLEET_RUNS_ROOT") or (WT_ROOT / "runs"))
 LOCK_DIR = WT_ROOT / ".state-fleet" / "locks"
+SOURCE_DIR = WT_ROOT / ".state-fleet" / "sources"
 SLOW_TOOL_THRESHOLD_S = 60.0
 KNOWN_STAGES: tuple[str, ...] = (
     "village_to_stronghold_end",
@@ -326,6 +331,43 @@ def _release_bot_locks(locks: dict[str, TextIO]) -> None:
         lock.close()
 
 
+def _validate_wave_source(source: pathlib.Path, runner_path: pathlib.Path) -> None:
+    runner = source / runner_path
+    package = source / "src" / "mc_agent"
+    if not runner.is_file() or not (package / "__init__.py").is_file():
+        raise ValueError("source snapshot is missing the fleet runner or mc_agent package")
+    for path in (runner, *sorted(package.rglob("*.py"))):
+        compile(path.read_bytes(), str(path.relative_to(source)), "exec", dont_inherit=True)
+
+
+def _prepare_wave_source() -> tuple[str, pathlib.Path]:
+    """Publish a validated, commit-addressed source tree before starting any bot."""
+    revision = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=WT_ROOT, text=True).strip()
+    runner_path = RUNNER.relative_to(WT_ROOT)
+    source = SOURCE_DIR / revision
+    if not source.is_dir():
+        SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".prepare-", dir=SOURCE_DIR) as tmp:
+            staged = pathlib.Path(tmp) / "source"
+            payload = subprocess.check_output(
+                ["git", "archive", "--format=zip", revision, "src", runner_path.as_posix()], cwd=WT_ROOT,
+            )
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                archive.extractall(staged)
+            _validate_wave_source(staged, runner_path)
+            try:
+                staged.rename(source)
+            except OSError as exc:
+                if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                    raise
+            else:
+                return revision, source
+    # Concurrent launchers can publish the same revision. On-disk validation also
+    # catches a damaged cache before a later launch uses it.
+    _validate_wave_source(source, runner_path)
+    return revision, source
+
+
 def cmd_launch(
     wave: str,
     duration_s: float,
@@ -352,16 +394,21 @@ def cmd_launch(
         return 1
     selected = _assign_isolated_sites(selected_raw)
     try:
+        revision, source = _prepare_wave_source()
         locks = _acquire_bot_locks(selected, wave)
-    except (OSError, RuntimeError) as exc:
-        print(str(exc))
+    except (OSError, RuntimeError, SyntaxError, ValueError, subprocess.CalledProcessError, zipfile.BadZipFile) as exc:
+        print(f"[Fleet Launch] wave={wave}: {exc}", file=sys.stderr)
         return 2
     try:
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(WT_ROOT / "src")
+        env["PYTHONPATH"] = str(source / "src")
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["MC_FLEET_RUNS_ROOT"] = str(RUNS_ROOT.resolve())
+        env["MC_FLEET_LIVE_STATE_DIR"] = str(WT_ROOT / ".state-l3-live")
+        runner = source / RUNNER.relative_to(WT_ROOT)
         procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path]] = []
         dur_label = "per-slot" if use_slot_durations else str(duration_s)
-        print(f"[Fleet Launch] wave={wave} bots={len(selected)} duration_s={dur_label} max_eps={max_episodes or 'deadline'}")
+        print(f"[Fleet Launch] wave={wave} bots={len(selected)} revision={revision} duration_s={dur_label} max_eps={max_episodes or 'deadline'}", flush=True)
         for idx, slot in enumerate(selected):
             slot_dur = slot.duration_s if use_slot_durations else duration_s
             subdir = f"{wave}/{slot.squad}_{slot.bot.lower()}_{slot.stage}"
@@ -370,7 +417,7 @@ def cmd_launch(
             log_path = log_dir / "stdout.log"
             cmd = [
                 str(VENV_PY),
-                str(RUNNER),
+                str(runner),
                 "--bot", slot.bot,
                 "--token-file", slot.token_file,
                 "--provider", slot.provider,
