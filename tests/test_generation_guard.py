@@ -4910,6 +4910,60 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert len(pulses) == len(actions) == 1
 
 
+@pytest.mark.parametrize("lands_in_water", [False, True])
+def test_creeper_retreat_rechecks_landing_after_leaving_water(monkeypatch, lands_in_water):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    creeper = {"id": 66, "name": "creeper", "pos": [0.5, 64.0, 4.5], "dist": 4.0}
+    pos = [0.5, 64.4, 0.5]
+    landing_checked = False
+    calls = []
+
+    class ShoreBot:
+        def status(self):
+            return {
+                "pos": list(pos), "health": 20, "food": 20, "ready": True, "alive": True,
+                "on_ground": landing_checked and not lands_in_water,
+                "in_water": landing_checked and lands_in_water,
+                "nearest_hostile": {**creeper, "dist": math.dist(pos, creeper["pos"])},
+            }
+
+        def call(self, action, body=None, **kwargs):
+            nonlocal landing_checked
+            if action != "control" or (body or {}).get("forward"):
+                calls.append(action)
+            if action == "status":
+                assert 0 < kwargs["timeout_s"] <= 0.45
+                landing_checked = True
+                pos[1] = 64.0
+                return self.status()
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [self.status()["nearest_hostile"]]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 64 else "air"}
+            if action == "control" and body.get("forward"):
+                assert landing_checked and not lands_in_water
+                pos[2] -= 2.3
+            if action == "move_to":
+                pos[:] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    result = CombatControllerSlot().handle(CombatEnv(ShoreBot()), {
+        "source": "pre_hurt_creeper", "primary_entity_id": 66, "primary_type": "creeper",
+    })
+    retreat = next(action for action in result["actions"] if action["action"] == "retreat_from_creeper")
+    assert landing_checked
+    assert retreat["ok"] is not lands_in_water
+    if lands_in_water:
+        assert retreat["reason"] == "unsafe_landing" and result["latched_guard"]
+        assert "control" not in calls and "move_to" not in calls
+    else:
+        assert calls.index("status") < calls.index("control")
+
+
 def test_missing_offhand_pickaxe_for_bunker_still_allows_boundary_retreat():
     pos = [5199.5, 84, 7615.5]
     shooter = {"id": 42, "name": "skeleton", "dist": 8.0, "pos": [5207.5, 84, 7615.5]}

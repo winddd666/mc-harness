@@ -2519,7 +2519,9 @@ class SubcorticalInstinctController:
                         actions.append({"action": "raise_shield_creeper", "ok": True})
                     except (ApiError, httpx.HTTPError):
                         pass
-                flee_res = env.flee(c_pos, distance=11.5, urgent=True, allow_shaft_seal=False)
+                flee_res = env.flee(
+                    c_pos, distance=11.5, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
+                )
                 st_chk = env._safe_status({**st, "ready": False})
                 post_h = self._find_live_hostiles(env, radius=8)
                 close_creeper = next(
@@ -2543,6 +2545,7 @@ class SubcorticalInstinctController:
                 actions.append({
                     "action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")) and not creeper_still_close,
                     "moved": flee_res.get("moved_dist"),
+                    **({"reason": flee_res["reason"]} if flee_res.get("reason") else {}),
                     **({"creeper_distance": self._entity_dist(st_chk.get("pos"), close_creeper)} if close_creeper else {}),
                 })
                 close_pos = close_creeper.get("pos") if close_creeper else None
@@ -2559,7 +2562,10 @@ class SubcorticalInstinctController:
                     (not flee_res.get("ok") or creeper_still_close)
                     and not flee_res.get("respawned")
                     and has_shield
+                    and st_chk.get("ready") is not False
                     and st_chk.get("alive") is not False
+                    and st_chk.get("last_death") == st.get("last_death")
+                    and st_chk.get("dimension") == st.get("dimension")
                 ):
                     cid = (close_creeper or creeper_ent or {}).get("id")
                     latched_guard = self._latch_shield_at_threat(env, int(cid) if cid is not None else None)
