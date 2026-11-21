@@ -2298,6 +2298,32 @@ def test_guardian_defends_current_life_when_spawn_and_hurt_share_a_poll(monkeypa
     assert retreats == ([zombie] if state == "ready" else [])
 
 
+@pytest.mark.parametrize("path, endpoint", [("/api/attack", "attack"), ("/status", "status"), ("/unrecognized", None), (None, None)])
+def test_combat_timeout_records_only_a_known_endpoint(path, endpoint):
+    events = []
+    stops = []
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            assert action == "stop" and kwargs["allow_reauth"] is False
+            stops.append(action)
+            return {"ok": True}
+
+    def stalled_call():
+        if path is None:
+            raise httpx.ReadTimeout("request unavailable")
+        request = httpx.Request("POST", f"https://example.invalid{path}?marker=omitted")
+        raise httpx.ReadTimeout("request stalled", request=request)
+
+    guard = GenerationGuard(RidgeBot(), EventSink(events.append), checkpoint=lambda: None)
+    result = guard._action("subcortical_combat", stalled_call)
+    completed, = [event for event in events if event["type"] == "guardian.action.completed"]
+    assert completed.get("endpoint") == endpoint
+    assert "omitted" not in str(completed)
+    assert result["error"] == {"code": "network_uncertain", "message": "ReadTimeout", "timeout": True}
+    assert stops == ["stop"]
+
+
 def test_bug_011_guardian_http_error_returns_network_uncertain_without_crashing_episode(monkeypatch):
     """BUG-011: httpx.HTTPError (ReadTimeout/ReadError) inside _action or guard.poll() must never raise RuntimeError or terminate episode."""
     clock = [700.0]

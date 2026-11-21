@@ -939,6 +939,7 @@ class GenerationGuard:
     ) -> dict[str, Any]:
         started = time.monotonic()
         self.events.emit("guardian.action.started", action=name)
+        event_details = {}
         try:
             result = operation()
             outcome = {"action": name, "result": result, "ok": result.get("ok", True) if isinstance(result, dict) else True}
@@ -949,6 +950,16 @@ class GenerationGuard:
                 "error": {"code": error.code, "message": error.message, **error.context},
             }
         except httpx.TimeoutException as error:
+            if name in {"subcortical_combat", "boundary_subcortical_combat"}:
+                try:
+                    endpoint = error.request.url.path.rsplit("/", 1)[-1]
+                except RuntimeError:
+                    endpoint = ""
+                if endpoint in {
+                    "attack", "status", "inventory", "get_entities", "get_block", "find_blocks",
+                    "stop", "control", "posture", "look", "equip", "move_to", "dig", "place",
+                }:
+                    event_details["endpoint"] = endpoint
             # Always attempt to cancel a lingering server action (e.g. `attack` / `move_to`) so the bot
             # does not remain stuck in `busy='attack'` after a client-side ReadTimeout.
             try:
@@ -969,7 +980,7 @@ class GenerationGuard:
                 "error": {"code": "network_uncertain", "message": type(error).__name__},
             }
         self.stats["actions"] += 1
-        self.events.emit("guardian.action.completed", duration=time.monotonic() - started, **outcome)
+        self.events.emit("guardian.action.completed", duration=time.monotonic() - started, **outcome, **event_details)
         return outcome
 
     def _drain_events_pages(self, *, observe_combat_hurt: bool = True) -> list[dict[str, Any]]:
