@@ -2454,10 +2454,12 @@ class CombatEnv:
                 avoid_close_threat and has_threat and self._crosses_near_water_threat(pos, x, z, threat_pos)
             )
 
-        def shore_bank_in_reach(pos: Sequence[float], bank: Sequence[float], max_dist: float = 3.5) -> bool:
+        def shore_bank_in_reach(
+            pos: Sequence[float], bank: Sequence[float], *, max_dist: float = 3.5, max_height: float = 1.25,
+        ) -> bool:
             return (
                 math.hypot(bank[0] - pos[0], bank[2] - pos[2]) <= max_dist
-                and abs(bank[1] - pos[1]) <= 1.25
+                and abs(bank[1] - pos[1]) <= max_height
                 and self._point_allowed(bank[0], bank[2], action="water_shore")
                 and not (
                     avoid_close_threat and has_threat
@@ -2580,7 +2582,8 @@ class CombatEnv:
             bank, bank_life, bank_at = self._last_dry_bank
             if (
                 life == bank_life and time.monotonic() - bank_at < 60.0 and bank != excluded_shore
-                and shore_bank_in_reach(search_pos, bank, max_dist=36.0) and self._dry_bank_is_walkable(bank)
+                and shore_bank_in_reach(search_pos, bank, max_dist=36.0, max_height=2.0)
+                and self._dry_bank_is_walkable(bank)
             ):
                 shore_target = list(bank)
                 self._last_dry_bank = None

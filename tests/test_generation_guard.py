@@ -9045,10 +9045,13 @@ def test_water_retry_rechecks_nearby_bank_before_swimming_past_it(monkeypatch, b
         assert result["ok"] is True and result["in_water"] is False
 
 
-@pytest.mark.parametrize("bank_state", ["clear", "flooded", "new_life", "observed_after_tool", "observed_during_poll"])
+@pytest.mark.parametrize("bank_state", [
+    "clear", "flooded", "new_life", "observed_after_tool", "observed_during_poll", "higher_bank", "too_high",
+])
 def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, bank_state):
-    bank = [7884.5, 63, 2779.5]
-    wet = [7885.5, 62.8, 2751.5]
+    bank_y = {"higher_bank": 64, "too_high": 65}.get(bank_state, 63)
+    bank = [7884.5, bank_y, 2779.5]
+    wet = [7885.5, 62.7, 2751.5]
     status = {
         "pos": wet, "in_water": True, "on_ground": False, "alive": True, "ready": True,
         "dimension": "overworld", "last_death": {"t": 1},
@@ -9064,7 +9067,7 @@ def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, ba
             if action == "get_block":
                 x, y, z = body["pos"]
                 if (x, z) == (7884, 2779):
-                    if y == 62:
+                    if y == bank_y - 1:
                         return {"name": "stone"}
                     return {"name": "water" if bank_state == "flooded" else "air"}
                 return {"name": "water"}
@@ -9095,7 +9098,7 @@ def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, ba
         status["last_death"] = {"t": 2}
     result = guard.combat_env.escape_deep_water_to_shore()
 
-    safe_bank = bank_state not in {"flooded", "new_life"}
+    safe_bank = bank_state not in {"flooded", "new_life", "too_high"}
     assert ("return_to_dry_bank" in result["actions"]) is safe_bank
     assert (bank in moves) is safe_bank
     assert result["ok"] is safe_bank
