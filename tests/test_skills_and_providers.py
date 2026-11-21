@@ -1707,13 +1707,14 @@ def test_move_to_busy_retries_only_after_lease_release(release) -> None:
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        tools = McToolset(bot)
+        tools = McToolset(bot, episode_deadline_mono=time.monotonic() + (30 if release else 6.5))
         tools._is_in_water = lambda: False
         result = json.loads(tools.mc_move_to(x=4.5, z=0.5))
     assert result["ok"] is release
     assert calls.count("stop") == 1
     assert calls.count("move_to") == (2 if release else 1)
     if not release:
+        assert calls == ["status", "move_to", "stop"]
         assert result["requires_replan"] is True
         assert result["error"]["code"] == "busy"
         assert "动作锁仍被" in result["error"]["message"]
