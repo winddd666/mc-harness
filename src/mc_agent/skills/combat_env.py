@@ -1610,6 +1610,15 @@ class CombatEnv:
             p_cur = st.get("pos") or pos0
             bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
             place_targets = [[bx, by, bz], [bx, by - 1, bz]]
+
+            def bridge_call(
+                action: str, body: dict[str, Any] | None, *, timeout_s: float, **kwargs: Any,
+            ) -> dict[str, Any]:
+                remaining = bridge_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _TerrainProbeExpired
+                return self.bot.call(action, body, timeout_s=min(timeout_s, remaining), allow_reauth=False, **kwargs)
+
             probe_until = min(bridge_deadline - 0.8, time.monotonic() + 0.6)
             try:
                 if st.get("on_ground") is False and _is_passable(self._get_block_name(bx, by - 1, bz, deadline=probe_until)):
@@ -1634,14 +1643,12 @@ class CombatEnv:
                         break
             except _TerrainProbeExpired:
                 actions.append("lava_bridge_probe_incomplete")
-
-            def bridge_call(
-                action: str, body: dict[str, Any] | None, *, timeout_s: float, **kwargs: Any,
-            ) -> dict[str, Any]:
-                remaining = bridge_deadline - time.monotonic()
-                if remaining <= 0:
-                    raise _TerrainProbeExpired
-                return self.bot.call(action, body, timeout_s=min(timeout_s, remaining), allow_reauth=False, **kwargs)
+                try:
+                    st = bridge_call("status", None, timeout_s=0.25, method="GET")
+                except (_TerrainProbeExpired, ApiError, httpx.HTTPError):
+                    pass
+                if _should_exit_lava(st):
+                    return _lava_result(st)
 
             for place_pos in place_targets:
                 if time.monotonic() >= bridge_deadline:

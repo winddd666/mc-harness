@@ -4054,8 +4054,8 @@ def test_recent_melee_damage_defers_eating(entry, dimension, blocking, monkeypat
     assert actions == [*expected, ("use_item", {"item": "cooked_beef"})]
 
 
-@pytest.mark.parametrize("bridge_probe_slow", [False, True])
-def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monkeypatch, bridge_probe_slow):
+@pytest.mark.parametrize("bridge_probe", ["normal", "timeout", "respawned"])
+def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monkeypatch, bridge_probe):
     from mc_agent.skills.combat_env import CombatEnv
 
     clock = [1000.0]
@@ -4070,15 +4070,20 @@ def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monk
             return dict(status)
 
         def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
             if action == "inventory":
                 return {"items": [{"name": "cobblestone", "count": 4}]}
             if action == "get_block":
                 timeout = kwargs.get("timeout_s", 0.5)
                 if not actions:
                     clock[0] += timeout
-                elif bridge_probe_slow and status["in_lava"]:
+                elif bridge_probe != "normal" and status["in_lava"]:
                     assert kwargs["allow_reauth"] is False and timeout <= 0.35
                     clock[0] += timeout
+                    if bridge_probe == "respawned":
+                        status.update(pos=[-415.5, 64.1, -1887.5], health=20, in_lava=False,
+                                      ready=False, last_death={"t": 2})
                     raise httpx.ReadTimeout("bridge block probe stalled")
                 y = body["pos"][1]
                 return {"name": "lava" if y == 64 else "air"}
@@ -4088,6 +4093,8 @@ def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monk
             if action == "control" and body.get("forward"):
                 actions.append(("swim", clock[0]))
                 clock[0] += body["ms"] / 1000
+            if action in {"control", "place"} and status["ready"] is False:
+                pytest.fail(f"Unexpected {action} after respawn during the bridge probe")
             if action == "place":
                 assert kwargs["allow_reauth"] is False and 0 < kwargs["timeout_s"] <= 0.7
                 actions.append(("bridge", clock[0]))
@@ -4096,10 +4103,16 @@ def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monk
 
     result = CombatEnv(LavaBot()).escape_lava()
 
+    assert ("lava_bridge_probe_incomplete" in result["actions"]) is (bridge_probe != "normal")
+    if bridge_probe == "respawned":
+        assert result["ok"] is False and result["respawned"] is True
+        assert result["pos_after"] == status["pos"]
+        assert [action for action, _ in actions] == ["swim"]
+        return
+
     assert result["ok"] is True and result["in_lava"] is False
     assert [action for action, _ in actions] == ["swim", "bridge"]
     assert actions[-1][1] < 1005.0
-    assert ("lava_bridge_probe_incomplete" in result["actions"]) is bridge_probe_slow
 
 
 @pytest.mark.parametrize("placement_works", [False, True])
