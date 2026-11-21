@@ -3194,6 +3194,44 @@ def test_scout_novelty_cannot_skip_legal_turns_after_path_failure(monkeypatch, n
         assert result["distance_traveled"] == 0
 
 
+def test_surface_scout_skips_recent_failed_routes_near_same_origin(monkeypatch) -> None:
+    from mc_agent.skills import library
+
+    now = 0.0
+    monkeypatch.setattr(library.time, "monotonic", lambda: now)
+    backend = _SurfaceScoutBackend()
+
+    def move(request, body):
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked"},
+        })
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        skills = MacroSkills(bot)
+        assert skills.scout_surface(direction="east", step_dist=30)["stop_reason"] == "path_not_found"
+        assert len(backend.moves) == 3
+
+        now = 139.0
+        backend.pos[1] += 1
+        skills.scout_surface(direction="north", step_dist=30)
+        assert len(backend.moves) == 5
+        assert all(body["x"] <= 0.5 and body["z"] < 0.5 for body in backend.moves[3:])
+
+        result = skills.scout_surface(direction="east", step_dist=30)
+        assert result["stop_reason"] == "scout_route_cooldown"
+        assert result["requires_replan"] is True
+        assert len(backend.moves) == 5
+
+        now = 181.0
+        skills.scout_surface(direction="east", step_dist=30)
+        assert len(backend.moves) == 8
+
+        backend.pos[0] += 3
+        skills.scout_surface(direction="east", step_dist=30)
+        assert len(backend.moves) == 11
+
+
 def test_surface_scout_checks_for_water_before_moving() -> None:
     backend = _SurfaceScoutBackend()
 

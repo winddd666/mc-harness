@@ -1365,6 +1365,7 @@ class MacroSkills:
         self.temporary_avoidance: dict[tuple[int, int, int], dict[str, Any]] = {}
         self.failed_stair_dirs: dict[tuple[int, int, int, str], dict[str, tuple[float, str]]] = {}
         self._pillar_fallbacks: dict[tuple[str, int, int], tuple[int, float]] = {}
+        self._failed_scout_routes: dict[tuple[str, int], tuple[tuple[float, float, float], float, float]] = {}
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
         self._mining_dfs: Any = None
         self.world_memory: Any = None
@@ -1568,6 +1569,15 @@ class MacroSkills:
             elif self._scout_route_has_liquid(session, x, y, z, tx - x, tz - z):
                 return "liquid_ahead"
 
+            route_key = (dimension, heading)
+            previous = self._failed_scout_routes.get(route_key)
+            if previous is not None:
+                previous_pos, previous_step, expires = previous
+                if (
+                    time.monotonic() < expires and math.dist((x, y, z), previous_pos) <= 2.0
+                    and abs(step - previous_step) <= 0.5
+                ):
+                    return "scout_route_cooldown"
             health_before = status.get("health")
             move_error = self._scout_move(
                 session, tx, tz, seconds=10.0, y=landing_y, range_m=0.5 if nether else 1.5,
@@ -1591,6 +1601,8 @@ class MacroSkills:
                 if forward < -0.5:
                     return "remeasure_after_detour"
             if move_error:
+                if move_error in {"path_not_found", "no_path"} and math.dist((x, y, z), (px, py, pz)) < 1.0:
+                    self._failed_scout_routes[route_key] = ((x, y, z), step, time.monotonic() + 180.0)
                 return move_error
             if nether_probe is not None:
                 if status.get("on_ground") is not True or abs(py - landing_y) > 0.75:
@@ -1606,7 +1618,7 @@ class MacroSkills:
             return "target_found" if scan(status) else "segment_completed"
 
         terrain_blocks = {"void_geofence_blocked", "liquid_ahead", "unsafe_nether_route"}
-        detour_reasons = SURFACE_SCOUT_PATH_ERRORS | terrain_blocks
+        detour_reasons = SURFACE_SCOUT_PATH_ERRORS | terrain_blocks | {"scout_route_cooldown"}
         try:
             status = observe()
             origin = result["final_pos"]
@@ -1711,6 +1723,8 @@ class MacroSkills:
         if not result["ok"]:
             result["requires_replan"] = True
             result.setdefault("error", {"code": reason})
+        if reason == "scout_route_cooldown":
+            result["error"]["message"] = "当前位置的候选航线刚刚寻路失败。请先用 mc_skill_unstick 或安全的短距移动换站位，再启动斥候。"
         if reason == "remeasure_after_detour":
             final = result["final_pos"]
             result["pos_before"] = origin
