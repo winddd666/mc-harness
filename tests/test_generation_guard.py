@@ -9565,6 +9565,7 @@ def test_unstick_preserves_a_roof_that_holds_back_fluid(above_roof, in_water, er
 
 @pytest.mark.parametrize(("tool", "terrain"), [
     ("mc_dig", "deep_drop"), ("mc_dig", "shallow_drop"), ("mc_dig", "lava"),
+    ("mc_dig", "airborne_lava"), ("mc_dig", "offset_lava"), ("mc_dig", "airborne_side_dig"),
     ("mc_dig", "side_dig"), ("mc_dig", "edge_support"), ("mc_dig", "edge_dig"),
     ("mc_skill_staircase", "deep_drop"), ("mc_skill_staircase", "shallow_drop"),
     ("mc_skill_staircase", "dripstone"), ("mc_skill_staircase", "side_dig"),
@@ -9572,19 +9573,21 @@ def test_unstick_preserves_a_roof_that_holds_back_fluid(above_roof, in_water, er
 def test_dig_checks_the_landing_before_removing_support(tool, terrain):
     from mc_agent.harness.mc_tools import McToolset
 
-    target = [2015 if terrain in {"side_dig", "edge_dig"} else 2014, 70, 1882]
+    target = [2015 if terrain in {"side_dig", "edge_dig", "airborne_side_dig"} else 2014, 70, 1882]
     x = 2014.8 if terrain in {"edge_support", "edge_dig"} else 2014.5
+    airborne = terrain.startswith("airborne_")
+    feet_y = 71.2 if airborne or terrain == "offset_lava" else 71.0
     digs = []
     probes = []
 
     class ShaftBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                return {"pos": [x, 71.0, 1882.5], "on_ground": True, "ready": True, "alive": True}
+                return {"pos": [x, feet_y, 1882.5], "on_ground": not airborne, "ready": True, "alive": True}
             if action == "get_block":
                 probes.append(body["pos"])
                 y = body["pos"][1]
-                if y == 69 and terrain == "lava":
+                if y == 69 and terrain in {"lava", "airborne_lava", "offset_lava"}:
                     return {"name": "lava"}
                 if y == 69 and terrain == "dripstone":
                     return {"name": "pointed_dripstone"}
@@ -9606,13 +9609,13 @@ def test_dig_checks_the_landing_before_removing_support(tool, terrain):
 
     result = json.loads(guard.run_tool_with_reflex(tool, invoke))
 
-    if terrain in {"deep_drop", "lava", "dripstone", "edge_support"}:
+    if terrain in {"deep_drop", "lava", "airborne_lava", "offset_lava", "dripstone", "edge_support"}:
         assert result["ok"] is False and result["requires_replan"] is True
         assert result["error"]["code"] == "unsafe_landing"
         assert digs == []
     else:
         assert result["ok"] is True and digs == [target]
-    if terrain == "side_dig":
+    if terrain in {"side_dig", "airborne_side_dig"}:
         assert probes == ([target] if tool == "mc_dig" else [])
 
 

@@ -3710,14 +3710,14 @@ class GenerationGuard:
         pos = status.get("pos")
         if (
             not isinstance(pos, (list, tuple)) or len(pos) < 3
-            or status.get("on_ground") is not True or status.get("ready") is False or status.get("alive") is False
+            or status.get("ready") is False or status.get("alive") is False
         ):
             return None
 
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.0)
         env = CombatEnv(probe_bot)
         try:
-            if check_roof:
+            if check_roof and status.get("on_ground") is True:
                 fluid = env.fluid_above_headroom(pos, target)
                 if fluid == "lava" or (fluid == "water" and not status.get("in_water") and not status.get("submerged")):
                     self.events.emit(f"guardian.{fluid}_roof_dig_blocked", target=list(target), pos=pos)
