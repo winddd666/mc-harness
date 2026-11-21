@@ -3915,13 +3915,16 @@ def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(mo
     assert control_calls
 
 
-@pytest.mark.parametrize("recent_nether_fireball", [False, True])
-def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, recent_nether_fireball):
+@pytest.mark.parametrize(
+    "health, shooter_dist, recent_nether_fireball",
+    [(5.3, 6.2, False), (17.6, None, True), (2.53, 18.7, False)],
+)
+def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shooter_dist, recent_nether_fireball):
     clock = [7000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     use_items: list[dict] = []
     posture_calls: list[dict] = []
-    state = {"hp": 17.6 if recent_nether_fireball else 5.3, "food": 19, "inside_shaft": False}
+    state = {"inside_shaft": False}
 
     class _EnclosedSkills:
         class _Eng:
@@ -3940,8 +3943,8 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, recent_nethe
             if action == "status":
                 return {
                     "pos": [0.5, 64.0, 0.5],
-                    "health": state["hp"],
-                    "food": state["food"],
+                    "health": health,
+                    "food": 19,
                     "alive": True,
                     "ready": True,
                     "on_ground": True,
@@ -3950,8 +3953,8 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, recent_nethe
                     "blocking": not recent_nether_fireball,
                     "dimension": "the_nether" if recent_nether_fireball else "overworld",
                     "on_fire": recent_nether_fireball,
-                    "nearest_hostile": None if recent_nether_fireball else {
-                        "id": 612494, "name": "skeleton", "pos": [6.7, 64.0, 0.5], "dist": 6.2,
+                    "nearest_hostile": None if shooter_dist is None else {
+                        "id": 612494, "name": "skeleton", "pos": [0.5 + shooter_dist, 64.0, 0.5], "dist": shooter_dist,
                     },
                 }
             if action == "events":

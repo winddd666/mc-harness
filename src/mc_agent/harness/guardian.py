@@ -743,6 +743,10 @@ class GenerationGuard:
         nh_name, nh_dist, _, _ = self._extract_hostile_info(status)
         if nh_name and nh_dist <= min_dist:
             return False
+        health = status.get("health")
+        if isinstance(health, (int, float)) and health <= 4.0:
+            # In-flight projectiles can still reach a critical-health bot just beyond that range.
+            ranged_min_dist = max(ranged_min_dist, 20.0)
         ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
         now = time.monotonic()
         recent_ranged_hit = now - self._last_ranged_hurt_at < 8.0
