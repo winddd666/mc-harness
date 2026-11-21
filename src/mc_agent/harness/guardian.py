@@ -2228,7 +2228,9 @@ class GenerationGuard:
                     if watch_hp0 is None and isinstance(cur_hp, (int, float)):
                         watch_hp0 = float(cur_hp)
                     nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(st)
+                    in_lava_now = bool(st.get("in_lava"))
                     if watch_attack_emergency:
+                        lava_danger = in_lava_now and st.get("ready") is not False and st.get("alive") is not False
                         water_danger = (
                             st.get("in_water")
                             and st.get("ready") is not False
@@ -2251,14 +2253,17 @@ class GenerationGuard:
                             unarmed = not st.get("blocking") and held_name not in MELEE_WEAPON_ORDER
                             other_melee_attacker = nh_id is not None and attack_target_id is not None and nh_id != attack_target_id
                             melee_danger = losing_close_melee and (unarmed or other_melee_attacker)
-                            stop_attack = (water_danger or melee_danger) and attack_active.is_set() and not stop_evt.is_set()
+                            stop_attack = (
+                                (lava_danger or water_danger or melee_danger)
+                                and attack_active.is_set() and not stop_evt.is_set()
+                            )
                             if stop_attack:
                                 pending_trigger.append({
-                                    "source": "boundary_threat" if water_danger else "tool_interrupted_hurt",
-                                    "primary_entity_id": nh_id,
-                                    "primary_type": nh_name,
-                                    "primary_pos": nh_pos,
-                                    "distance": nh_dist,
+                                    "source": "boundary_threat" if lava_danger or water_danger else "tool_interrupted_hurt",
+                                    "primary_entity_id": None if lava_danger else nh_id,
+                                    "primary_type": "lava" if lava_danger else nh_name,
+                                    "primary_pos": None if lava_danger else nh_pos,
+                                    "distance": 0.0 if lava_danger else nh_dist,
                                 })
                         if stop_attack:
                             try:
@@ -2286,7 +2291,6 @@ class GenerationGuard:
                         and nh_dist <= 4.5
                         and not self._is_pre_hurt_debounced(nh_id, nh_name)
                     )
-                    in_lava_now = bool(st.get("in_lava"))
                     hot_floor_now = False
                     if watch_hot_floor and not (in_lava_now or creeper_close or melee_ambush or hp_dropped):
                         tile = self._hot_floor_block(st)
@@ -2425,7 +2429,10 @@ class GenerationGuard:
                 if self._in_reflex or not pending_trigger:
                     return
                 trigger = pending_trigger[0]
-                terrain_emergency = clean_path == "move_to" and trigger.get("primary_type") in {"lava", "hot_floor"}
+                moving = clean_path == "move_to" or (
+                    watch_hot_floor and clean_path == "control" and isinstance(body, dict) and body.get("forward")
+                )
+                terrain_emergency = moving and trigger.get("primary_type") in {"lava", "hot_floor"}
                 if not caller_ignores_hurt or terrain_emergency:
                     raise ReflexPreempted(trigger) from None
 

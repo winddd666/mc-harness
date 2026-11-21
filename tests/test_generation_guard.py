@@ -7689,7 +7689,7 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
 
 
 @pytest.mark.parametrize("attack_result", ["returned", "interrupted", "read_timeout"])
-@pytest.mark.parametrize("hazard", ["water", "unarmed_melee", "other_melee"])
+@pytest.mark.parametrize("hazard", ["water", "lava", "unarmed_melee", "other_melee"])
 def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result, hazard):
     import threading
 
@@ -7710,8 +7710,8 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
                 return current
             actions.append(action)
             if action == "attack":
-                if hazard == "water":
-                    status.update(in_water=True, on_ground=False, health=6.7)
+                if hazard in {"water", "lava"}:
+                    status.update(in_water=hazard == "water", in_lava=hazard == "lava", on_ground=False, health=6.7)
                 else:
                     assert observed.wait(2.0)
                     weapon = "iron_sword" if hazard == "other_melee" else "wooden_pickaxe"
@@ -7741,7 +7741,14 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         status.update(in_water=False, on_ground=True)
         return {"ok": True, "in_water": False}
 
+    def escape_lava():
+        assert actions[:2] == ["attack", "stop"]
+        actions.append("lava_escape")
+        status.update(in_lava=False, on_ground=True)
+        return {"ok": True, "in_lava": False}
+
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", escape_to_shore)
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape_lava)
     monkeypatch.setattr(guard, "_escape_water", lambda before: {"ok": False, "in_water": True})
 
     def retreat(_env, trigger):
@@ -7763,12 +7770,14 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         assert receipt["preempted_by_reflex"] is True
         assert not receipt["status_after"]["in_water"]
         assert actions.count("attack") == 1
-        assert ("shore" if hazard == "water" else "retreat") in actions
+        assert {"water": "shore", "lava": "lava_escape"}.get(hazard, "retreat") in actions
+        assert not status.get("in_lava")
 
 
 @pytest.mark.parametrize(("tool", "endpoint", "interrupted_error"), [
     ("mc_skill_mine_dfs", "dig", False), ("mc_skill_combat", "move_to", False),
     ("mc_move_to", "move_to", False), ("mc_move_to", "move_to", True),
+    ("mc_skill_combat", "control", False), ("mc_skill_combat", "control", True),
 ])
 def test_magma_interrupts_active_tool_before_the_boundary(tool, endpoint, interrupted_error):
     import threading
@@ -7806,6 +7815,8 @@ def test_magma_interrupts_active_tool_before_the_boundary(tool, endpoint, interr
     bot = MagmaBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
     body = {"stop_on": ["death"]} if tool == "mc_move_to" else {}
+    if endpoint == "control":
+        body = {"forward": True, "stop_on": ["death"]}
     result = json.loads(guard.run_tool_with_reflex(tool, lambda: json.dumps(bot.call(endpoint, body))))
     assert result["reflex_mode"] == "hot_floor"
     assert result["requires_replan"] is True
