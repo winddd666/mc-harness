@@ -3739,6 +3739,8 @@ def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch):
     escape = incident["actions"][0]
     assert escape["action"] == "escape_lava"
     assert escape["result"] == {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
+    budget_event, = [e for e in events if e["type"] == "guardian.lava_budget_exceeded"]
+    assert budget_event["endpoint"] == "dig" and budget_event["budget_s"] == guard.LAVA_ESCAPE_BUDGET_S
     dig, = [(started, timeout) for action, started, timeout in calls if action == "dig"]
     assert sum(dig) == pytest.approx(1000.0 + guard.LAVA_ESCAPE_BUDGET_S)
     assert any(action == "stop" and timeout == 1.5 for action, _, timeout in calls)

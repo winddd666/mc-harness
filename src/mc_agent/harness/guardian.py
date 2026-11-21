@@ -167,11 +167,11 @@ class _GuardSession:
         finally:
             self._deadline.reset(token)
 
-    def _time_remaining(self) -> float:
+    def _time_remaining(self, action: str) -> float:
         deadline = self._deadline.get()
         remaining = float("inf") if deadline is None else deadline - time.monotonic()
         if remaining <= 0:
-            raise _RecoveryBudgetExceeded
+            raise _RecoveryBudgetExceeded(action)
         return remaining
 
     def call(self, action: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
@@ -181,12 +181,12 @@ class _GuardSession:
         if timeout is None:
             timeout = 2.0 if readonly else 8.0
         if self._deadline.get() is not None:
-            remaining = self._time_remaining()
+            remaining = self._time_remaining(action)
             if isinstance(timeout, httpx.Timeout):
                 # BotSession can retry a closed keepalive after a 150ms delay.
                 attempt_budget = (remaining - 0.15) / 2
                 if attempt_budget <= 0:
-                    raise _RecoveryBudgetExceeded
+                    raise _RecoveryBudgetExceeded(action)
                 phase_budget = attempt_budget / 4
                 overhead = {
                     phase: min(seconds, phase_budget) if seconds is not None else phase_budget
@@ -208,10 +208,10 @@ class _GuardSession:
             call = self._call_override if self._call_override is not None else self.bot.call
             result = call(action, body, **kwargs)
         except httpx.TimeoutException:
-            self._time_remaining()
+            self._time_remaining(action)
             raise
         self.checkpoint()
-        self._time_remaining()
+        self._time_remaining(action)
         return result
 
     def status(self) -> dict[str, Any]:
@@ -404,8 +404,13 @@ class GenerationGuard:
         try:
             with self.bot.limit_until(time.monotonic() + self.LAVA_ESCAPE_BUDGET_S):
                 return operation()
-        except _RecoveryBudgetExceeded:
+        except _RecoveryBudgetExceeded as error:
             self._stop_after_recovery_timeout()
+            self.events.emit(
+                "guardian.lava_budget_exceeded",
+                endpoint=error.args[0] if error.args else None,
+                budget_s=self.LAVA_ESCAPE_BUDGET_S,
+            )
             return {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
 
     def _clear_contact_fire(self, pos: list[float] | tuple[float, ...]) -> dict[str, Any]:
