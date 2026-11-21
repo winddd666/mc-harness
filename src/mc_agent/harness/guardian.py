@@ -113,7 +113,7 @@ ACTION_LOCK_ENDPOINTS = frozenset(
 )
 
 READ_ONLY_POLL_ENDPOINTS = frozenset({"status", "inventory", "events"})
-HOT_FLOOR_WATCH_TOOLS = frozenset({"mc_skill_mine_dfs", "mc_skill_staircase", "mc_skill_combat"})
+HOT_FLOOR_WATCH_TOOLS = frozenset({"mc_move_to", "mc_skill_mine_dfs", "mc_skill_staircase", "mc_skill_combat"})
 
 
 class ReflexPreempted(BaseException):
@@ -2359,6 +2359,15 @@ class GenerationGuard:
                     raise ReflexPreempted(pending_trigger[0])
             # Do not preempt explicit stop_on=['death'] emergency swim/trap digs
             caller_ignores_hurt = isinstance(body, dict) and body.get("stop_on") == ["death"]
+
+            def apply_pending_preemption() -> None:
+                if self._in_reflex or not pending_trigger:
+                    return
+                trigger = pending_trigger[0]
+                terrain_emergency = clean_path == "move_to" and trigger.get("primary_type") in {"lava", "hot_floor"}
+                if not caller_ignores_hurt or terrain_emergency:
+                    raise ReflexPreempted(trigger) from None
+
             try:
                 res = actor_call(path, body, **kwargs)
             except _RecoveryBudgetExceeded:
@@ -2366,18 +2375,16 @@ class GenerationGuard:
                     raise ReflexPreempted(pending_trigger[0]) from None
                 raise
             except ApiError as err:
+                apply_pending_preemption()
                 if not self._in_reflex and not caller_ignores_hurt:
-                    if pending_trigger:
-                        raise ReflexPreempted(pending_trigger[0]) from None
                     if err.code == "interrupted" and clean_path in ACTION_LOCK_ENDPOINTS:
                         trigger = interrupted_action_trigger(14.0)
                         if trigger is not None:
                             raise ReflexPreempted(trigger) from None
                 raise
 
+            apply_pending_preemption()
             if not self._in_reflex and not caller_ignores_hurt:
-                if pending_trigger:
-                    raise ReflexPreempted(pending_trigger[0])
                 if isinstance(res, dict) and res.get("interrupted_by") == "hurt" and clean_path in ACTION_LOCK_ENDPOINTS:
                     trigger = interrupted_action_trigger(15.0)
                     if trigger is not None:

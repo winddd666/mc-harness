@@ -7495,8 +7495,11 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         assert ("shore" if hazard == "water" else "retreat") in actions
 
 
-@pytest.mark.parametrize(("tool", "endpoint"), [("mc_skill_mine_dfs", "dig"), ("mc_skill_combat", "move_to")])
-def test_magma_interrupts_long_mining_and_combat_before_the_boundary(tool, endpoint):
+@pytest.mark.parametrize(("tool", "endpoint", "interrupted_error"), [
+    ("mc_skill_mine_dfs", "dig", False), ("mc_skill_combat", "move_to", False),
+    ("mc_move_to", "move_to", False), ("mc_move_to", "move_to", True),
+])
+def test_magma_interrupts_active_tool_before_the_boundary(tool, endpoint, interrupted_error):
     import threading
 
     stopped = threading.Event()
@@ -7517,6 +7520,8 @@ def test_magma_interrupts_long_mining_and_combat_before_the_boundary(tool, endpo
                 return {"name": "magma_block"}
             if action == endpoint:
                 assert stopped.wait(3.0)
+                if interrupted_error:
+                    raise ApiError("interrupted", "stopped because of stop")
                 return {"interrupted_by": "hurt"}
             if action == "stop":
                 actions.append("stop")
@@ -7529,7 +7534,8 @@ def test_magma_interrupts_long_mining_and_combat_before_the_boundary(tool, endpo
 
     bot = MagmaBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
-    result = json.loads(guard.run_tool_with_reflex(tool, lambda: json.dumps(bot.call(endpoint, {}))))
+    body = {"stop_on": ["death"]} if tool == "mc_move_to" else {}
+    result = json.loads(guard.run_tool_with_reflex(tool, lambda: json.dumps(bot.call(endpoint, body))))
     assert result["reflex_mode"] == "hot_floor"
     assert result["requires_replan"] is True
     assert status["sneaking"] is True
