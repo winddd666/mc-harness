@@ -1804,7 +1804,11 @@ STRONGHOLD_FOCUS = (
             "至少离上次投掷点 100 格再复测。若两次有效方向相反，用 mc_move_to 向上一观测点回走一半距离，"
             "缩小搜索范围。只剩 12 颗时优先用已有方向和方块线索定位。"
             "眼向下或转向时，分开扫描 end_portal_frame、stone_bricks 与 mossy_stone_bricks，"
-            "用 mc_skill_staircase(vertical='down', steps=8) 分段下挖，留火把和回程阶梯。"
+            "看到门框或成片要塞砖后，记下回执的 X/Y/Z，结束长距离斥候。"
+            "若只有靠近黑曜石的零散地表砖和箱子，继续核对地下结构。"
+            "用 mc_skill_staircase(vertical='down', steps=8, stop_on_ore=False) 分段下挖，留火把和回程阶梯。"
+            "下到与砖群同层后，沿安全实心地面用 mc_skill_tunnel 分段朝砖群 X/Z 接近。"
+            "遇岩浆或连续挖掘失败，沿既有阶梯撤回干地，从另一侧下挖。"
             "进入实际要塞结构才触发 follow_ender_eye。"
         ),
         "extra_tools": STRONGHOLD_TOOLS,
