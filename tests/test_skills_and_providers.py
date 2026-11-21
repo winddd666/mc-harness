@@ -2125,27 +2125,33 @@ def test_staircase_dig_timeout_names_wooden_pickaxe_as_cause() -> None:
     assert "stone_pickaxe" in result["error"]["message"]
 
 
-def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
+def test_staircase_up_falls_back_to_pillar_when_step_has_no_face(monkeypatch) -> None:
     """BUG-024: a self-dug shaft step cell has no six-face support."""
     pos = [0.5, 30.0, 0.5]
     jumping = [False]
-    placed = [False]
+    jumps_from = [30.0]
+    places = []
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
         body = json.loads(request.content) if request.content else {}
         if path == "status":
-            y = 31.2 if jumping[0] else (31.0 if placed[0] else 30.0)
-            result = {"pos": [0.5, y, 0.5], "on_ground": not jumping[0], "alive": True, "ready": True}
+            y = jumps_from[0] + 1.2 if jumping[0] else pos[1]
+            result = {"pos": [pos[0], y, pos[2]], "on_ground": not jumping[0], "alive": True, "ready": True}
         elif path == "inventory":
             result = {"items": [{"name": "cobblestone", "count": 8}]}
         elif path == "get_block":
             result = {"name": "air"}
         elif path == "posture":
             jumping[0] = bool(body.get("jump"))
+            if jumping[0]:
+                jumps_from[0] = pos[1]
             result = {}
         elif path == "place":
-            placed[0] = True
+            pos[1] += 1
+            places.append(body["pos"])
             result = {"pos": body["pos"]}
         elif path == "find_blocks":
             result = {"blocks": []}
@@ -2154,12 +2160,25 @@ def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+        skills = MacroSkills(bot)
+        result = skills.dig_staircase(direction="north", vertical="up", steps=1)
+        repeated = skills.dig_staircase(direction="east", vertical="up", steps=1)
+        blocked = skills.dig_staircase(direction="north", vertical="up", steps=1)
+        assert len(places) == 2
+        clock[0] = 121.0
+        expired = skills.dig_staircase(direction="north", vertical="up", steps=1)
     assert result["ok"] is True
     assert result["stop_reason"] == "pillar_fallback"
     assert result["fallback"] == "pillar"
     assert result["steps_done"] == 1
     assert result["placed_count"] == 1
+    assert result["requires_replan"] is False
+    assert repeated["ok"] is True and repeated["requires_replan"] is True
+    assert blocked["stop_reason"] == "pillar_fallback_cooldown"
+    assert blocked["steps_done"] == 0
+    assert blocked["requires_replan"] is True
+    assert expired["stop_reason"] == "pillar_fallback"
+    assert expired["requires_replan"] is False
 
 
 def test_staircase_up_retries_transient_place_failed() -> None:
