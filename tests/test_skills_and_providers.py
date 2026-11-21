@@ -2843,6 +2843,7 @@ def test_tracking_ender_eye_stops_before_wide_detour_after_first_hop(tracking) -
         assert len(backend.moves) == 1
         assert result["segments_completed"] == 1
         assert result["distance_traveled"] == 28
+        assert result["pos_before"] == [0.5, 64, 0.5]
         assert result["final_pos"] == [28.5, 64, 0.5]
         assert result["stop_reason"] == "remeasure_after_detour"
         assert result["requires_replan"] is True
@@ -2867,7 +2868,9 @@ def test_tracking_ender_eye_requests_new_vantage_when_blocked_in_place() -> None
     assert result["distance_traveled"] == 0
     assert result["stop_reason"] == "remeasure_after_detour"
     assert result["needs_new_vantage"] is True
+    assert result["pos_before"] == result["final_pos"]
     assert "先换到" in result["error"]["message"]
+    assert "与上一次投点水平相距至少 25 格" in result["error"]["message"]
 
 
 def test_tracking_ender_eye_stops_after_observed_backward_movement() -> None:
