@@ -6516,6 +6516,51 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert len(pulses) == len(actions) == 1
 
 
+def test_creeper_retreat_does_not_report_success_if_the_final_sample_is_dead(monkeypatch):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    creeper = {"id": 66, "name": "creeper", "pos": [4868.3, 22, -7670], "dist": 1.7}
+    status = {
+        "pos": [4870.0, 22, -7670], "health": 12, "food": 20, "on_ground": True,
+        "ready": True, "alive": True, "dimension": "overworld", "last_death": {"t": 10},
+        "nearest_hostile": creeper,
+    }
+    retreat_returned = False
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                if retreat_returned:
+                    status.update(pos=[4858.5, 69.1, -7603.5], health=0, ready=False, alive=False,
+                                  last_death={"t": 20}, nearest_hostile=None)
+                    return {"entities": []}
+                return {"entities": [creeper]}
+            return {"ok": True}
+
+        def status(self):
+            return dict(status)
+
+    env = CombatEnv(CaveBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda *_args: {"enclosure": "open_cave"})
+
+    def retreat(*_args, **_kwargs):
+        nonlocal retreat_returned
+        retreat_returned = True
+        status.update(pos=[4866, 22, -7670], nearest_hostile=None)
+        return {"ok": True, "mode": "flee", "moved_dist": 4.0}
+
+    monkeypatch.setattr(env, "flee", retreat)
+    outcome = CombatControllerSlot().handle(
+        env, {"source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": creeper["id"]},
+    )
+
+    action, = outcome["actions"]
+    assert action == {"action": "retreat_from_creeper", "ok": False, "moved": 4.0, "respawned": True}
+    assert outcome["requires_replan"] and outcome["status_after"]["alive"] is False
+
+
 def test_melee_warning_faces_nearby_creeper_before_raising_shield(monkeypatch):
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
 

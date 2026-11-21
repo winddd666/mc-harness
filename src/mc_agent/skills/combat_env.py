@@ -3246,6 +3246,14 @@ class SubcorticalInstinctController:
         # 4) Check for a surviving attacker before handing back control or eating.
         has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
         st_post = env._safe_status(st)
+        if mode == "creeper_evade" and (
+            st_post.get("alive") is False
+            or st_post.get("last_death") != st.get("last_death")
+            or st_post.get("dimension") != st.get("dimension")
+        ):
+            for action in actions:
+                if action["action"] in {"retreat_from_creeper", "creeper_followup_retreat", "creeper_intruded_flee"}:
+                    action.update(ok=False, respawned=True)
         nh_post = st_post.get("nearest_hostile")
         if (
             mode == "cover_or_flee" and not has_shield and not has_weapon
