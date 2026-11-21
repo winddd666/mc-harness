@@ -2378,18 +2378,28 @@ class CombatEnv:
                 and retry_bank is None
                 and swim_step_allowed(pos0, float(st0.get("yaw") or 0.0))
             )
-            try:
-                self.bot.call(
-                    "control",
-                    {"forward": swim_forward, "jump": True, "sprint": swim_forward, "ms": 750, "stop_on": ["death"]},
-                )
-                actions.append("water_surface_surge")
-            except ApiError:
-                pass
-            search_status = self.bot.status()
-            interruption = interrupted_water_escape(search_status)
-            if interruption is not None:
-                return interruption
+            for _ in range(2):
+                try:
+                    self.bot.call(
+                        "control",
+                        {"forward": swim_forward, "jump": True, "sprint": swim_forward, "ms": 750, "stop_on": ["death"]},
+                    )
+                    actions.append("water_surface_surge")
+                except ApiError:
+                    pass
+                search_status = self.bot.status()
+                interruption = interrupted_water_escape(search_status)
+                if interruption is not None:
+                    return interruption
+                oxygen = search_status.get("oxygen")
+                raised_pos = search_status.get("pos")
+                # Continue a successful ascent while the bot has no air.
+                if not (
+                    surface_first and search_status.get("in_water") and search_status.get("submerged")
+                    and isinstance(oxygen, (int, float)) and oxygen <= 0
+                    and raised_pos and raised_pos[1] - pos0[1] >= 0.5
+                ):
+                    break
             if surface_first and not search_status.get("in_water") and search_status.get("on_ground") is not False:
                 return {
                     "ok": True, "in_water": False, "mode": "surfaced",

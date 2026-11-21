@@ -8486,6 +8486,45 @@ def test_water_macro_restores_raised_shield_on_dry_landing(landing):
         assert "shield_restored" not in water["result"]
 
 
+@pytest.mark.parametrize("rising", [True, False])
+def test_drowning_continues_a_verified_ascent_before_trying_to_path_to_shore(rising):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [-11061.7, 60.2, 10936.7], "in_water": True, "submerged": True,
+        "oxygen": 0, "on_ground": False, "ready": True, "alive": True,
+    }
+    bank = [-11075, 62, 10937]
+    actions = []
+
+    class WetCaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "control" and not body.get("forward"):
+                actions.append("up")
+                if rising and actions == ["up"]:
+                    status["pos"] = [-11061.7, 61.0, 10936.7]
+                elif rising:
+                    status.update(pos=[-11061.7, 63, 10936.7], oxygen=300, submerged=False, in_water=False, on_ground=True)
+            if action == "find_blocks":
+                return {"blocks": [{"name": "stone", "pos": bank}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "move_to":
+                actions.append("move_to")
+                status.update(pos=[body["x"], body["y"], body["z"]], submerged=False, in_water=False, on_ground=True)
+            return {"ok": True}
+
+        def status(self):
+            return dict(status)
+
+    result = CombatEnv(WetCaveBot()).escape_deep_water_to_shore(surface_first=True)
+
+    assert result["ok"] is True and result["in_water"] is False
+    assert actions == (["up", "up"] if rising else ["up", "move_to"])
+
+
 @pytest.mark.parametrize("starts_in_lava, surface_first", [(True, True), (False, True), (False, False)])
 def test_directed_shore_escape_does_not_report_lava_as_dry_land(starts_in_lava, surface_first):
     from mc_agent.skills.combat_env import CombatEnv
