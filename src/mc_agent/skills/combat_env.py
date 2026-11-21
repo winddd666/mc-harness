@@ -1006,15 +1006,16 @@ class CombatEnv:
 
         return {"ok": False, "mode": norm_mode, "placed": 0, "pos_after": pos0, "reason": "unknown_mode"}
 
-    def _best_effort_stop(self, *, stop_control: bool = True) -> None:
+    def _best_effort_stop(self, *, stop_control: bool = True, timeout_s: float | None = None) -> None:
         """Stop residual movement/pathfinder controls after a timeout or preemption."""
+        transport = {"timeout_s": timeout_s, "allow_reauth": False} if timeout_s is not None else {}
         try:
-            self.bot.call("stop", {})
+            self.bot.call("stop", {}, **transport)
         except (ApiError, httpx.HTTPError):
             pass
         if stop_control:
             try:
-                self.bot.call("control", {"wait": False})
+                self.bot.call("control", {"wait": False}, **transport)
             except (ApiError, httpx.HTTPError):
                 pass
 
@@ -1200,6 +1201,12 @@ class CombatEnv:
                 **({"reason": "lava_landing_unconfirmed"} if unconfirmed else {}),
             }
 
+        def jump_in_lava(ms: int, *, advance: bool) -> None:
+            self.bot.call(
+                "control", {"forward": advance, "jump": True, "sprint": advance, "ms": ms, "stop_on": ["death"]},
+                timeout_s=ms / 1000.0 + 0.6, allow_reauth=False,
+            )
+
         for _ in range(3):
             px, py, pz = map(float, pos0[:3])
             head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz))
@@ -1208,12 +1215,12 @@ class CombatEnv:
             try:
                 # The current yaw can still face the attacker that knocked us in.
                 # Preserve the horizontal position until the shore probe picks a heading.
-                self.bot.call("control", {"forward": False, "jump": True, "sprint": False, "ms": 950, "stop_on": ["death"]})
+                jump_in_lava(950, advance=False)
                 actions.append("lava_surface_swim")
             except (ApiError, httpx.HTTPError) as err:
                 if isinstance(err, httpx.HTTPError):
                     actions.append("lava_surface_swim_timeout")
-                    self._best_effort_stop()
+                    self._best_effort_stop(timeout_s=0.5)
             self.invalidate_block_cache()
             st = self._safe_status(st)
             if _should_exit_lava(st):
@@ -1278,16 +1285,13 @@ class CombatEnv:
         def _run_jump_sprint(cyaw: float) -> bool:
             nonlocal st
             try:
-                self.bot.call("look", {"yaw": cyaw, "pitch": 0.0})
-                self.bot.call(
-                    "control",
-                    {"forward": True, "jump": True, "sprint": True, "ms": swim_ms, "stop_on": ["death"]},
-                )
+                self.bot.call("look", {"yaw": cyaw, "pitch": 0.0}, timeout_s=0.6, allow_reauth=False)
+                jump_in_lava(swim_ms, advance=True)
                 actions.append("lava_jump_sprint")
             except (ApiError, httpx.HTTPError) as err:
                 if isinstance(err, httpx.HTTPError):
                     actions.append("lava_jump_sprint_timeout")
-                    self._best_effort_stop()
+                    self._best_effort_stop(timeout_s=0.5)
             self.invalidate_block_cache()
             st = self._safe_status(st)
             return _should_exit_lava(st)

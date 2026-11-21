@@ -2736,8 +2736,14 @@ def test_r18_lava_airborne_swim_timeout_and_creeper_flee_timeout_hardening(monke
                 return {"name": "air"}
             if action == "find_blocks":
                 return {"blocks": []}
+            if action == "stop" or (action == "control" and pl == {"wait": False}):
+                assert kwargs["timeout_s"] <= 0.5
+                assert kwargs["allow_reauth"] is False
             if action == "control":
                 # First swim call simulates transient ReadTimeout; jump-sprint launches mid-air above lava!
+                if pl.get("ms") in {950, 1400}:
+                    assert pl["ms"] / 1000 < kwargs["timeout_s"] <= 2.0
+                    assert kwargs["allow_reauth"] is False
                 if pl.get("ms") == 950 and lava_actions.count("control") == 1:
                     assert pl["jump"] is True
                     assert pl["forward"] is False and pl["sprint"] is False
