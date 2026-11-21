@@ -508,32 +508,39 @@ class GenerationGuard:
                 **result, "ok": False, "reason": "shore_landing_unconfirmed", "pos_after": end,
                 "in_water": bool(after.get("in_water")), "in_lava": bool(after.get("in_lava")),
             }
-        offhand = after.get("offhand")
         if (
-            confirm_shore and before.get("blocking") and after.get("blocking") is False
-            and after.get("on_ground") is True and after.get("ready") is True and after.get("alive") is True
-            and after.get("dimension") == before.get("dimension")
-            and after.get("last_death") == before.get("last_death")
-            and isinstance(offhand, dict)
-            and str(offhand.get("name") or "").removeprefix("minecraft:") == "shield"
+            confirm_shore and before.get("blocking") and after.get("on_ground") is True
+            and self._restore_shield_near_threat(before, after, recovery_bot)
         ):
-            mob, distance, target_id, _ = self._extract_hostile_info(after)
-            if target_id is not None and (
-                (mob in PRE_HURT_MELEE_MOBS and distance <= 3.5) or (mob in RANGED_MOBS and distance <= 12.0)
-            ):
-                try:
-                    recovery_bot.call("look", {"entity_id": target_id}, timeout_s=0.35, allow_reauth=False)
-                    posture = recovery_bot.call(
-                        "posture", {"shield": True, "jump": False, "sneak": bool(after.get("sneaking"))},
-                        timeout_s=0.35, allow_reauth=False,
-                    )
-                    if posture.get("blocking") is True:
-                        result = {**result, "shield_restored": True}
-                except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
-                    pass
+            result = {**result, "shield_restored": True}
         if result.get("mode") == "flee" and after.get("in_lava"):
             return {**result, "ok": False, "reason": "retreat_into_lava", "pos_after": after.get("pos") or end}
         return result
+
+    def _restore_shield_near_threat(
+        self, before: dict[str, Any], after: dict[str, Any], bot: _GuardSession,
+    ) -> bool:
+        offhand = after.get("offhand")
+        mob, distance, target_id, _ = self._extract_hostile_info(after)
+        if not (
+            after.get("blocking") is False and after.get("ready") is True and after.get("alive") is True
+            and not after.get("in_water") and not after.get("in_lava")
+            and after.get("dimension") == before.get("dimension")
+            and after.get("last_death") == before.get("last_death")
+            and isinstance(offhand, dict) and str(offhand.get("name") or "").removeprefix("minecraft:") == "shield"
+            and target_id is not None
+            and ((mob in PRE_HURT_MELEE_MOBS and distance <= 3.5) or (mob in RANGED_MOBS and distance <= 12.0))
+        ):
+            return False
+        try:
+            bot.call("look", {"entity_id": target_id}, timeout_s=0.35, allow_reauth=False)
+            posture = bot.call(
+                "posture", {"shield": True, "jump": False, "sneak": bool(after.get("sneaking"))},
+                timeout_s=0.35, allow_reauth=False,
+            )
+            return posture.get("blocking") is True
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+            return False
 
     def _escape_water(self, before: dict[str, Any], *, budget_s: float | None = None) -> dict[str, Any]:
         return self._run_recovery_macro(
@@ -1106,6 +1113,15 @@ class GenerationGuard:
                 "ok": False,
                 "error": {"code": "network_uncertain", "message": type(error).__name__},
             }
+        result = outcome.get("result")
+        if eat_st.get("blocking") and isinstance(result, dict) and result.get("interrupted_by") == "hurt":
+            recovery_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.2)
+            try:
+                after = recovery_bot.call("status", None, method="GET", timeout_s=0.5, allow_reauth=False)
+                if self._restore_shield_near_threat(eat_st, after, recovery_bot):
+                    outcome["result"] = {**result, "shield_restored": True}
+            except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+                pass
         self.stats["actions"] += 1
         self.events.emit("guardian.action.completed", duration=time.monotonic() - started, **outcome)
         return outcome

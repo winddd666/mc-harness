@@ -5252,6 +5252,50 @@ def test_mixed_nether_damage_keeps_melee_eat_cooldown_regardless_of_event_order(
     assert eats == [{"item": "cooked_beef"}]
 
 
+@pytest.mark.parametrize("after_eat", ["spear_in_reach", "respawned", "clear"])
+def test_interrupted_eat_restores_shield_against_a_confirmed_threat(after_eat):
+    status = {
+        "pos": [2562.3, 76, 9263.5], "dimension": "overworld", "health": 11.67, "food": 17,
+        "ready": True, "alive": True, "on_ground": True, "blocking": True,
+        "offhand": {"name": "shield"}, "last_death": {"t": 1},
+    }
+    actions = []
+
+    class FoodBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 1}], "offhand": status["offhand"]}
+            actions.append((action, body))
+            if action == "posture":
+                status["blocking"] = body["shield"]
+                return {"blocking": status["blocking"]}
+            if action == "use_item":
+                status.update(pos=[2561.3, 75.9, 9261.5], health=4.67, food=20, on_ground=False)
+                if after_eat == "spear_in_reach":
+                    status["nearest_hostile"] = {"id": 78, "name": "husk", "dist": 2.5}
+                if after_eat == "respawned":
+                    status.update(ready=False, last_death={"t": 2})
+                return {"interrupted_by": "hurt"}
+            return {"ok": True}
+
+    guard = GenerationGuard(FoodBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    eat, = incident["actions"]
+    assert incident["requires_replan"] and "fresh_hurt" in incident["reasons"]
+    expected = [("posture", {"shield": False}), ("use_item", {"item": "cooked_beef"})]
+    if after_eat == "spear_in_reach":
+        expected += [("look", {"entity_id": 78}), ("posture", {"shield": True, "jump": False, "sneak": False})]
+        assert eat["result"]["shield_restored"] is True
+    else:
+        assert "shield_restored" not in eat["result"]
+    assert actions == expected
+
+
 @pytest.mark.parametrize(
     "item, shooter_distance, allowed",
     [("cooked_beef", 4.2, False), ("cooked_beef", 23.0, True), ("golden_apple", 4.2, True)],
