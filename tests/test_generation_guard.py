@@ -3362,7 +3362,8 @@ def test_lava_notch_checks_bank_support_and_actual_clearance(bank):
 
 
 @pytest.mark.parametrize("retry", ["tool_changed", "new_bank", "expired"])
-def test_lava_notch_skips_recent_timeout_until_next_viable_attempt(monkeypatch, retry):
+@pytest.mark.parametrize("timeout_kind", ["transport", "server"])
+def test_lava_notch_skips_recent_timeout_until_next_viable_attempt(monkeypatch, retry, timeout_kind):
     from mc_agent.skills.combat_env import CombatEnv
 
     clock = [1000.0]
@@ -3388,6 +3389,8 @@ def test_lava_notch_skips_recent_timeout_until_next_viable_attempt(monkeypatch, 
                 pos = tuple(body["pos"])
                 digs.append(pos)
                 if len(digs) == 1:
+                    if timeout_kind == "server":
+                        raise ApiError("timeout", "could not open the bank")
                     raise httpx.ReadTimeout("could not open the bank")
                 bank.pop(pos)
             if action == "control" and body.get("forward") and len(digs) == 2:
@@ -3396,7 +3399,12 @@ def test_lava_notch_skips_recent_timeout_until_next_viable_attempt(monkeypatch, 
 
     env = CombatEnv(LavaBot())
     monkeypatch.setattr(env, "scan_safe_yaws", lambda *args, **kwargs: {"best_yaw": 0.0})
-    assert "lava_notch_dig_timeout" in env.escape_lava()["actions"]
+    failure = env.escape_lava()
+    assert "lava_notch_dig_timeout" in failure["actions"]
+    assert failure["notch_dig_failures"] == [{
+        "pos": [3566, 65, 1793], "block": "blackstone", "held": None,
+        "error": "timeout" if timeout_kind == "server" else "ReadTimeout",
+    }]
 
     clock[0] += 4.0
     assert "lava_notch_dig_deferred" in env.escape_lava()["actions"]

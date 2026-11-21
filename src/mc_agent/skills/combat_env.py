@@ -1233,6 +1233,7 @@ class CombatEnv:
                 }
 
         actions: list[str] = []
+        notch_dig_failures: list[dict[str, Any]] = []
         lava_deadline = time.monotonic() + 5.0
         try:
             counts, _, held_name = self._inventory_counts_and_shield()
@@ -1319,6 +1320,7 @@ class CombatEnv:
                 "in_lava": still_in_lava,
                 "pos_after": pos_now,
                 "actions": actions,
+                **({"notch_dig_failures": notch_dig_failures} if notch_dig_failures else {}),
                 **({"respawned": True} if respawned else {}),
                 **({"airborne_above_lava": True} if airborne_over_lava else {}),
                 **({"reason": "lava_landing_unconfirmed"} if unconfirmed else {}),
@@ -1686,10 +1688,15 @@ class CombatEnv:
                         timeout_s=dig_budget, allow_reauth=False,
                     )
                 except (ApiError, httpx.HTTPError) as err:
-                    if isinstance(err, httpx.ReadTimeout):
+                    error = err.code if isinstance(err, ApiError) else type(err).__name__
+                    notch_dig_failures.append({
+                        "pos": list(key[1]), "block": key[2], "held": key[3], "error": error,
+                    })
+                    timed_out = isinstance(err, httpx.TimeoutException) or error in {"timeout", "action_timeout"}
+                    if timed_out:
                         self._stalled_lava_notch[key] = time.monotonic() + 15.0
-                    if isinstance(err, httpx.HTTPError):
                         actions.append("lava_notch_dig_timeout")
+                    if timed_out or isinstance(err, httpx.HTTPError):
                         self._best_effort_stop(timeout_s=0.25)
                     break
             if time.monotonic() + 1.25 >= notch_deadline:
