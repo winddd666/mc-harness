@@ -49,6 +49,7 @@ LOW_HP_BUNKER_MAX = 10.0
 # Ranged damage: sprinting away in open cave air just makes the firing line longer.
 RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "wither_skull", "skeleton"})
 MELEE_HURT_SOURCES = frozenset({"mob_attack", "player_attack"})
+BLAST_HURT_SOURCES = frozenset({"player_explosion", "entity_explosion", "fireball", "small_fireball", "wither_skull"})
 
 # Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
 LAVA_HURT_SOURCES = frozenset({"lava"})
@@ -1097,7 +1098,7 @@ class GenerationGuard:
             not in_lava and not in_water and not deaths and ready and status.get("alive") is not False
             and status.get("on_ground") is False and "nether" in str(status.get("dimension") or "").lower()
             and status.get("pos")
-            and any(str(h.get("source") or "").strip().lower() in {"player_explosion", "entity_explosion"} for h in hurts)
+            and any(str(h.get("source") or "").strip().lower() in BLAST_HURT_SOURCES for h in hurts)
         ):
             probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.5)
             try:
