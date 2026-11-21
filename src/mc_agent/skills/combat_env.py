@@ -256,7 +256,7 @@ def _is_passable(name: str) -> bool:
 def _is_los_transparent(name: str) -> bool:
     if _is_passable(name):
         return True
-    if name in {"water", "flowing_water", "glass", "iron_bars", "cobweb"} or name.endswith(("_glass", "_glass_pane")):
+    if name in {"water", "flowing_water", "glass", "iron_bars", "cobweb", "fire", "soul_fire"} or name.endswith(("_glass", "_glass_pane")):
         return True
     return False
 
@@ -1511,7 +1511,9 @@ class CombatEnv:
                 return False
         return True
 
-    def seek_natural_cover(self, threat_pos: Sequence[float]) -> dict[str, Any] | None:
+    def seek_natural_cover(
+        self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (),
+    ) -> dict[str, Any] | None:
         """Find a close, supported position behind existing terrain and verify the landing."""
         before = self.bot.status()
         origin = before.get("pos")
@@ -1522,7 +1524,8 @@ class CombatEnv:
         ):
             return None
         self.invalidate_block_cache()
-        already_covered = self._blocks_shot(origin, threat_pos)
+        shooters = (threat_pos, *other_shooters)
+        already_covered = all(self._blocks_shot(origin, shooter) for shooter in shooters)
         if not already_covered:
             away, _ = aim_yaw_pitch(threat_pos, origin)
             for offset in (90, -90, 45, -45):
@@ -1532,7 +1535,7 @@ class CombatEnv:
                     continue
                 ux, uz = yaw_to_unit_xz(yaw)
                 target = [origin[0] + ux * 2.2, route[0], origin[2] + uz * 2.2]
-                if self._blocks_shot(target, threat_pos):
+                if all(self._blocks_shot(target, shooter) for shooter in shooters):
                     break
             else:
                 return None
@@ -1570,7 +1573,7 @@ class CombatEnv:
             and not after.get("in_water") and not after.get("in_lava")
             and after.get("last_death") == before.get("last_death")
             and after.get("dimension") == before.get("dimension")
-            and self._blocks_shot(final_pos, threat_pos)
+            and all(self._blocks_shot(final_pos, shooter) for shooter in shooters)
         )
         return {
             "ok": confirmed, "mode": "natural_cover", "pos_after": final_pos,

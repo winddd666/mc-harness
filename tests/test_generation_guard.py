@@ -3547,8 +3547,10 @@ def test_nether_fire_ticks_do_not_replace_ranged_hit_or_start_a_bunker(monkeypat
         assert retreat_calls == [(attacker if hit_source == "fireball" else None, True)]
 
 
-@pytest.mark.parametrize("scan_times_out", [False, True])
-def test_burning_nether_retreat_uses_nearby_blaze_positions(monkeypatch, scan_times_out):
+@pytest.mark.parametrize("sighting", ["exposed", "covered", "timeout"])
+def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, sighting):
+    from mc_agent.skills.combat_env import CombatEnv
+
     primary = {"name": "blaze", "id": 44, "dist": 7.8, "pos": [1534.2, 62, 3108.9]}
     secondary = {"name": "blaze", "id": 45, "dist": 14.4, "pos": [1529.5, 58, 3101.3]}
     distant = {"name": "blaze", "id": 46, "dist": 17.9, "pos": [1532, 58.5, 3097.5]}
@@ -3558,6 +3560,7 @@ def test_burning_nether_retreat_uses_nearby_blaze_positions(monkeypatch, scan_ti
         "nearest_hostile": {key: primary[key] for key in ("name", "id", "dist")},
     }
     calls = []
+    cover_checks = []
 
     class FortressBot:
         def call(self, action, body=None, **kwargs):
@@ -3569,7 +3572,7 @@ def test_burning_nether_retreat_uses_nearby_blaze_positions(monkeypatch, scan_ti
                 return {"items": [], "offhand": {"name": "shield"}}
             if action == "get_entities":
                 assert kwargs["timeout_s"] == 0.6 and kwargs["allow_reauth"] is False
-                if scan_times_out:
+                if sighting == "timeout":
                     raise httpx.ReadTimeout("hostile scan timeout")
                 return {"entities": [primary, secondary, distant]}
             return {"ok": True}
@@ -3578,11 +3581,25 @@ def test_burning_nether_retreat_uses_nearby_blaze_positions(monkeypatch, scan_ti
         calls.append((threat_pos, wait_for_ground, other_shooters))
         return {"ok": True, "mode": "flee"}
 
-    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
-    monkeypatch.setattr(guard.combat_env, "flee", flee)
-    guard.poll()
+    def blocks_shot(_env, _pos, shooter_pos):
+        cover_checks.append(shooter_pos)
+        return shooter_pos == primary["pos"] or sighting == "covered"
 
-    assert calls == ([(None, True, ())] if scan_times_out else [(primary["pos"], True, [secondary["pos"]])])
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(CombatEnv, "_blocks_shot", blocks_shot)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    incident = guard.poll()
+
+    if sighting == "timeout":
+        assert cover_checks == [] and calls == [(None, True, ())]
+    else:
+        assert cover_checks == [primary["pos"], secondary["pos"]]
+        if sighting == "covered":
+            assert calls == []
+            retreat = next(a for a in incident["actions"] if a["action"] == "combat_or_flee")
+            assert retreat["result"]["mode"] == "natural_cover"
+        else:
+            assert calls == [(primary["pos"], True, [secondary["pos"]])]
 
 
 @pytest.mark.parametrize("landed", [False, True])
@@ -5998,7 +6015,7 @@ def test_explicit_dig_checks_the_landing_before_removing_support(terrain):
         assert probes == [target]
 
 
-@pytest.mark.parametrize("terrain", ["wall", "unknown", "drifted_during_probe", "missed_landing"])
+@pytest.mark.parametrize("terrain", ["wall", "fire", "unknown", "drifted_during_probe", "missed_landing"])
 def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing(terrain):
     from mc_agent.skills.combat_env import CombatEnv
 
@@ -6031,7 +6048,7 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
                 if y in (64, 65) and 3 <= x <= 5 and 1 <= z <= 2:
                     if terrain == "unknown":
                         raise httpx.ReadTimeout("cover voxel was not read")
-                    return {"name": "stone"}
+                    return {"name": "fire" if terrain == "fire" else "stone"}
                 return {"name": "stone" if y == 63 else "air"}
             if action == "move_to":
                 moves.append(body)
@@ -6047,7 +6064,7 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
     else:
         result = CombatEnv(bot).seek_natural_cover(shooter)
 
-    if terrain in {"unknown", "drifted_during_probe"}:
+    if terrain in {"fire", "unknown", "drifted_during_probe"}:
         assert result is None
         assert moves == []
     else:
