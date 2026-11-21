@@ -1733,7 +1733,7 @@ class CombatEnv:
         return True
 
     def seek_natural_cover(
-        self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (),
+        self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,
     ) -> dict[str, Any] | None:
         """Find a close, supported position behind existing terrain and verify the landing."""
         before = self.bot.status()
@@ -1746,7 +1746,8 @@ class CombatEnv:
             return None
         self.invalidate_block_cache()
         shooters = (threat_pos, *other_shooters)
-        already_covered = all(self._blocks_shot(origin, shooter) for shooter in shooters)
+        # A fresh blast at this location overrides otherwise favorable sight lines.
+        already_covered = allow_stationary and all(self._blocks_shot(origin, shooter) for shooter in shooters)
         if not already_covered:
             away, _ = aim_yaw_pitch(threat_pos, origin)
             for offset in (90, -90, 45, -45):

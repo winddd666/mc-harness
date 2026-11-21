@@ -4245,7 +4245,8 @@ def test_nether_fire_ticks_do_not_replace_ranged_hit_or_start_a_bunker(monkeypat
             assert urgent
             return {"ok": True}
 
-    def retreat(status, target, counts, *, ranged=False, prefer_cover=False):
+    def retreat(status, target, counts, *, ranged=False, prefer_cover=False, allow_stationary_cover=True):
+        assert allow_stationary_cover == (hit_source != "fireball")
         retreat_calls.append((target, ranged))
         return {"ok": True, "mode": "flee"}
 
@@ -4322,8 +4323,9 @@ def test_failed_nether_cover_falls_back_to_checked_retreat_only_in_same_life(mon
                 return {"entities": [blaze]}
             return {"ok": True}
 
-    def fail_cover(_env, pos):
+    def fail_cover(_env, pos, *, other_shooters, allow_stationary):
         assert pos == blaze["pos"]
+        assert not other_shooters and allow_stationary
         return {"ok": False, "mode": "natural_cover", "reason": "cover_unconfirmed", "respawned": respawned}
 
     guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
@@ -4339,7 +4341,7 @@ def test_failed_nether_cover_falls_back_to_checked_retreat_only_in_same_life(mon
     assert retreats == ([] if respawned else [(blaze["pos"], True)])
 
 
-@pytest.mark.parametrize("sighting", ["exposed", "covered", "timeout", "covered_with_melee"])
+@pytest.mark.parametrize("sighting", ["exposed", "covered", "timeout", "covered_with_melee", "fireball_in_cover"])
 @pytest.mark.parametrize("health", [4.2, 16.0])
 def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, sighting, health):
     from mc_agent.skills.combat_env import CombatEnv
@@ -4361,6 +4363,8 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
                 return dict(status)
             if action == "events":
                 hits = [{"seq": 1, "type": "hurt", "source": "on_fire"}]
+                if sighting == "fireball_in_cover":
+                    hits.append({"seq": 2, "type": "hurt", "source": "fireball"})
                 if sighting == "covered_with_melee":
                     hits = [
                         {"seq": 1, "type": "hurt", "source": "mob_attack"},
@@ -4382,16 +4386,18 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
 
     def blocks_shot(_env, _pos, shooter_pos):
         cover_checks.append(shooter_pos)
-        return shooter_pos == primary["pos"] or sighting in {"covered", "covered_with_melee"}
+        return shooter_pos == primary["pos"] or sighting in {"covered", "covered_with_melee", "fireball_in_cover"}
 
     guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(CombatEnv, "_blocks_shot", blocks_shot)
+    if sighting == "fireball_in_cover":
+        monkeypatch.setattr(CombatEnv, "probe_retreat", lambda *_args: None)
     monkeypatch.setattr(guard.combat_env, "flee", flee)
     incident = guard.poll()
 
     if sighting == "timeout":
         assert cover_checks == [] and calls == [(None, True, ())]
-    elif sighting == "covered_with_melee":
+    elif sighting in {"covered_with_melee", "fireball_in_cover"}:
         assert cover_checks == [] and calls == [(primary["pos"], True, [secondary["pos"]])]
     else:
         assert cover_checks == [primary["pos"], secondary["pos"]]

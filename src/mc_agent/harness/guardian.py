@@ -507,7 +507,7 @@ class GenerationGuard:
 
     def _defend_or_flee(
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
-        *, ranged: bool = False, prefer_cover: bool = False,
+        *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True,
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
@@ -582,7 +582,7 @@ class GenerationGuard:
                 cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + cover_budget)
                 try:
                     cover = CombatEnv(cover_bot, geofence=self.geofence).seek_natural_cover(
-                        pos, **({"other_shooters": other_shooters} if other_shooters else {}),
+                        pos, other_shooters=other_shooters, allow_stationary=allow_stationary_cover,
                     )
                 except _RecoveryBudgetExceeded:
                     self._stop_after_recovery_timeout()
@@ -1690,11 +1690,8 @@ class GenerationGuard:
                                 attacker=attacker if isinstance(attacker, dict) else status.get("nearest_hostile"),
                             )
                     att_name_r = str((att_obj or {}).get("name") or nh_name or "").removeprefix("minecraft:").strip().lower()
-                    skip_cover_for_blast = (
-                        hurt_src in {"fireball", "small_fireball", "wither_skull"}
-                        or att_name_r in {"blaze", "ghast"}
-                        or bool(status.get("on_fire"))
-                    )
+                    fresh_blast = hurt_src in {"fireball", "small_fireball", "wither_skull"}
+                    skip_cover_for_blast = fresh_blast or att_name_r in {"blaze", "ghast"} or bool(status.get("on_fire"))
                     def cover_block(pos: Any) -> tuple[int, int, int] | None:
                         if isinstance(pos, (list, tuple)) and len(pos) >= 3:
                             return math.floor(float(pos[0])), math.floor(float(pos[1]) + 0.05), math.floor(float(pos[2]))
@@ -1759,6 +1756,7 @@ class GenerationGuard:
                             "combat_or_flee",
                             lambda: self._defend_or_flee(
                                 status, attacker, counts, ranged=True, prefer_cover=not has_shield and hp_val <= LOW_HP_BUNKER_MAX,
+                                allow_stationary_cover=not fresh_blast,
                             ),
                         )
                         actions.append(cf)
