@@ -1707,13 +1707,14 @@ def test_move_to_busy_retries_only_after_lease_release(release) -> None:
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        tools = McToolset(bot)
+        tools = McToolset(bot, episode_deadline_mono=time.monotonic() + (30 if release else 6.5))
         tools._is_in_water = lambda: False
         result = json.loads(tools.mc_move_to(x=4.5, z=0.5))
     assert result["ok"] is release
     assert calls.count("stop") == 1
     assert calls.count("move_to") == (2 if release else 1)
     if not release:
+        assert calls == ["status", "move_to", "stop"]
         assert result["requires_replan"] is True
         assert result["error"]["code"] == "busy"
         assert "动作锁仍被" in result["error"]["message"]
@@ -2973,6 +2974,60 @@ def test_nether_tunnel_reports_the_actual_floor_blocker(floor, reason) -> None:
     assert "改" in result["hint"]
 
 
+@pytest.mark.parametrize("slow_route", ["imminent", "dig", "cleanup"])
+def test_actor_tunnel_shares_episode_deadline_across_preflight_and_cleanup(monkeypatch, slow_route) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    pos = [0.5, 64, 0.5]
+    calls = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        allowed = (2.1 if route == "stop" else 1.575) - clock[0]
+        timeout = request.extensions["timeout"]["read"]
+        assert 0.0 < timeout <= allowed + 1e-6
+        if route == slow_route or (slow_route == "cleanup" and route == "inventory" and calls.count(route) == 3):
+            clock[0] += timeout
+            raise httpx.ReadTimeout("offline tunnel timeout", request=request)
+        clock[0] += min(0.02, timeout)
+        if route == "get_block":
+            name = "stone" if body["pos"][1] == 63 or (slow_route == "dig" and body["pos"] == [1, 65, 0]) else "air"
+            return _SurfaceScoutBackend.ok({"name": name})
+        if route == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            return _SurfaceScoutBackend.ok({"pos": pos})
+        responses = {
+            "inventory": {"items": [{"name": "stone_pickaxe", "count": 1}]},
+            "status": {"pos": pos, "held": "stone_pickaxe", "on_ground": True, "health": 20},
+            "stop": {"released": True},
+        }
+        return _SurfaceScoutBackend.ok(responses[route])
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence(radius=30))
+        tools._episode_deadline_mono = 6.0 if slow_route == "imminent" else 6.1
+        result = json.loads(tools.mc_skill_tunnel("east", steps=1))
+
+    assert clock[0] <= 2.1 + 1e-6
+    if slow_route == "imminent":
+        assert calls == []
+        assert result["stop_reason"] == "episode_deadline_imminent"
+    elif slow_route == "dig":
+        assert calls[0] == "status"
+        assert calls[-2:] == ["dig", "stop"]
+        assert result["stop_reason"] == "time_slice"
+        assert result["stop_confirmed"] is True
+    else:
+        assert calls[-1] == "inventory" and calls.count("inventory") == 3
+        assert result["ok"] is True and result["steps_done"] == 1
+        assert result["cleanup_deadline_hit"] is True
+
+
 @pytest.mark.parametrize("entry", ["find_blocks", "scout_surface"])
 def test_village_scan_retains_beds_and_hay_amid_path_blocks(entry) -> None:
     from mc_agent.harness.geofence import VoidGeofence
@@ -3138,6 +3193,44 @@ def test_scout_novelty_cannot_skip_legal_turns_after_path_failure(monkeypatch, n
         assert len(backend.moves) == 3
         assert result["stop_reason"] == "path_not_found"
         assert result["distance_traveled"] == 0
+
+
+def test_surface_scout_skips_recent_failed_routes_near_same_origin(monkeypatch) -> None:
+    from mc_agent.skills import library
+
+    now = 0.0
+    monkeypatch.setattr(library.time, "monotonic", lambda: now)
+    backend = _SurfaceScoutBackend()
+
+    def move(request, body):
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked"},
+        })
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        skills = MacroSkills(bot)
+        assert skills.scout_surface(direction="east", step_dist=30)["stop_reason"] == "path_not_found"
+        assert len(backend.moves) == 3
+
+        now = 139.0
+        backend.pos[1] += 1
+        skills.scout_surface(direction="north", step_dist=30)
+        assert len(backend.moves) == 5
+        assert all(body["x"] <= 0.5 and body["z"] < 0.5 for body in backend.moves[3:])
+
+        result = skills.scout_surface(direction="east", step_dist=30)
+        assert result["stop_reason"] == "scout_route_cooldown"
+        assert result["requires_replan"] is True
+        assert len(backend.moves) == 5
+
+        now = 181.0
+        skills.scout_surface(direction="east", step_dist=30)
+        assert len(backend.moves) == 8
+
+        backend.pos[0] += 3
+        skills.scout_surface(direction="east", step_dist=30)
+        assert len(backend.moves) == 11
 
 
 def test_surface_scout_checks_for_water_before_moving() -> None:

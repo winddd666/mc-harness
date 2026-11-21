@@ -1654,9 +1654,13 @@ def select_next_target(
         if key == "minecraft:story/deflect_arrow" and not is_day_now and enriched_pb.tier == 2:
             enriched_pb = dataclasses.replace(enriched_pb, tier=1)
             mem_boosted = True
-        if key == "minecraft:story/enter_the_nether" and counts.get("obsidian", 0) >= 10 and counts.get("flint_and_steel", 0) >= 1:
-            enriched_pb = dataclasses.replace(enriched_pb, tier=1)
-            mem_boosted = True
+        if key == "minecraft:story/enter_the_nether" and cur_dim == "overworld":
+            if counts.get("obsidian", 0) >= 10 and counts.get("flint_and_steel", 0) >= 1:
+                enriched_pb = dataclasses.replace(enriched_pb, tier=0)
+                mem_boosted = True
+            elif counts.get("diamond_pickaxe", 0) >= 1 or counts.get("netherite_pickaxe", 0) >= 1:
+                enriched_pb = dataclasses.replace(enriched_pb, tier=1)
+                mem_boosted = True
         if key in {"minecraft:story/shiny_gear", "minecraft:story/mine_diamond"} and day2_village_pending and is_dusk_or_night:
             # Defer deep Y=-54 diamond diving until after Day 2 daytime village search (stay safe in Y=16 iron layer on Night 1)
             enriched_pb = dataclasses.replace(enriched_pb, tier=3)
