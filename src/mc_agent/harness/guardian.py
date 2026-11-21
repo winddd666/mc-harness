@@ -296,6 +296,7 @@ class GenerationGuard:
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
         self._last_ranged_hurt_at = float("-inf")
+        self._last_trident_hurt_at = float("-inf")
         self._last_melee_hurt_at = float("-inf")
         self._last_lava_contact_at = float("-inf")
         self._last_fire_contact_at = float("-inf")
@@ -684,6 +685,7 @@ class GenerationGuard:
             for event in fresh:
                 if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
                     self._last_ranged_hurt_at = float("-inf")
+                    self._last_trident_hurt_at = float("-inf")
                     self._last_melee_hurt_at = float("-inf")
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
@@ -694,6 +696,8 @@ class GenerationGuard:
                     source = str(event.get("source") or "").strip().lower()
                     if source in RANGED_HURT_SOURCES:
                         self._last_ranged_hurt_at = now
+                        if source == "trident":
+                            self._last_trident_hurt_at = now
                         self._last_melee_hurt_at = float("-inf")
                     elif source in MELEE_HURT_SOURCES:
                         self._last_melee_hurt_at = now
@@ -854,7 +858,11 @@ class GenerationGuard:
         recent_nether_threat = in_nether and (
             recent_melee_hit or (status.get("on_fire") and recent_ranged_hit)
         )
-        if (ranged_in_range or protecting_against_recent_hit or recent_nether_threat) and not self._inside_own_shaft():
+        recent_trident_hit = now - self._last_trident_hurt_at < 8.0
+        if (
+            (ranged_in_range or protecting_against_recent_hit or recent_nether_threat or recent_trident_hit)
+            and not self._inside_own_shaft()
+        ):
             return False
         return True
 

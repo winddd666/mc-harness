@@ -3487,6 +3487,44 @@ def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatc
     assert followups == ([(6.7, [5002, 39, -7591.4])] if nearby else [])
 
 
+def test_recent_trident_hit_defers_food_until_the_projectile_threat_passes(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [9261.3, 64, -11343.7], "health": 10.5, "food": 17,
+        "dimension": "overworld", "on_ground": True, "alive": True, "ready": True, "blocking": False,
+    }
+    hits = [{"seq": 1, "type": "hurt", "source": "trident"}]
+    dishes = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 2}]}
+            if action == "use_item":
+                dishes.append(body["item"])
+            return {"ok": True}
+
+    bot = RiverBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._drain_events_pages()
+
+    def eat():
+        return json.dumps(bot.call("use_item", {"item": "cooked_beef"}))
+
+    result = json.loads(guard.run_tool_with_reflex("mc_use_item", eat))
+    assert result["error"]["code"] == "unsafe_to_eat"
+    assert guard.poll() is None and dishes == []
+
+    clock[0] += 8.1
+    assert guard.poll()["actions"][0]["action"] == "eat"
+    assert dishes == ["cooked_beef"]
+
+
 def test_r19_poll_skips_eat_in_close_melee_range_after_combat_timeout(monkeypatch):
     """Reproduces r19_short hy4_hy_3_midgame: never drop shield to eat when a hostile is <= 5.5m after melee cooldown."""
     clock = [6000.0]
