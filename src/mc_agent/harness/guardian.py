@@ -1691,8 +1691,7 @@ class GenerationGuard:
 
     # ---- Layer 2: Active Macro-Tool & `pre_ensure` Preemption ----
 
-    def _verify_unstick_exit(self, body: dict[str, Any]) -> dict[str, Any]:
-        status = self.bot.status()
+    def _verify_unstick_exit(self, body: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
         if status.get("in_water"):
             return body
         pos = status.get("pos")
@@ -1707,6 +1706,31 @@ class GenerationGuard:
             raise _UnsafeUnstickExit
         _, needs_jump = route
         return {**body, "sprint": False, "jump": needs_jump, "ms": min(int(body.get("ms") or 350), 350)}
+
+    def _restore_unstick_shield_facing(self, before: dict[str, Any], call: Callable[..., dict[str, Any]]) -> None:
+        name, distance, entity_id, _ = self._extract_hostile_info(before)
+        health = before.get("health")
+        if not (
+            before.get("blocking") and not before.get("in_water") and name in RANGED_MOBS
+            and entity_id is not None and distance <= 16.0
+            and isinstance(health, (int, float)) and 0 < health <= LOW_HP_BUNKER_MAX
+        ):
+            return
+        try:
+            after = call("status", None, method="GET", timeout_s=0.6, allow_reauth=False)
+            if (
+                after.get("ready") is False or after.get("alive") is False or not after.get("blocking")
+                or after.get("in_lava") or after.get("in_water")
+                or after.get("last_death") != before.get("last_death")
+                or after.get("dimension") != before.get("dimension")
+            ):
+                return
+            self._action(
+                "face_attacker_after_retreat",
+                lambda: call("look", {"entity_id": entity_id}, timeout_s=0.9, allow_reauth=False),
+            )
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+            pass
 
     def _verify_flee_step(
         self, action: str, body: dict[str, Any], *, deadline: float | None = None,
@@ -1996,11 +2020,13 @@ class GenerationGuard:
                 return actor_call(path, body, **kwargs)
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
+            unstick_before = None
             if (
                 check_unstick_exit and clean_path == "control" and isinstance(body, dict)
                 and body.get("forward") and body.get("stop_on") == [] and isinstance(body.get("yaw"), (int, float))
             ):
-                body = self._verify_unstick_exit(body)
+                unstick_before = self.bot.status()
+                body = self._verify_unstick_exit(body, unstick_before)
                 if pending_trigger and not self._in_reflex:
                     raise ReflexPreempted(pending_trigger[0])
             # Do not preempt explicit stop_on=['death'] emergency swim/trap digs
@@ -2064,6 +2090,8 @@ class GenerationGuard:
                                 "distance": nh_d,
                             }
                         )
+            if unstick_before is not None:
+                self._restore_unstick_shield_facing(unstick_before, actor_call)
             return res
 
         try:

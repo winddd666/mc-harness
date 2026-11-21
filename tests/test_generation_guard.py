@@ -5281,8 +5281,11 @@ def test_unstick_canopy_branch_shares_the_tool_budget(monkeypatch):
 
 
 @pytest.mark.parametrize("solid_exit", [True, False])
-def test_guardian_checks_support_before_unstick_moves(solid_exit):
+@pytest.mark.parametrize("after_step", ["unshielded", "blocking", "respawned"])
+def test_guardian_checks_support_before_unstick_moves(solid_exit, after_step):
     movements = []
+    faces = []
+    death = {"t": 10}
 
     class LedgeBot:
         def status(self):
@@ -5290,7 +5293,11 @@ def test_guardian_checks_support_before_unstick_moves(solid_exit):
 
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                return {"pos": [0.5, 44, 0.5], "ready": True, "alive": True, "on_ground": True}
+                return {
+                    "pos": [0.5, 44, 0.5], "ready": True, "alive": True, "on_ground": True,
+                    "health": 1.8, "blocking": after_step != "unshielded", "last_death": dict(death),
+                    "nearest_hostile": {"id": 44, "name": "pillager", "dist": 10.2},
+                }
             if action == "get_block":
                 x, y, z = body["pos"]
                 if y == 43 and (solid_exit or (x, z) == (0, 0)):
@@ -5298,6 +5305,11 @@ def test_guardian_checks_support_before_unstick_moves(solid_exit):
                 return {"name": "air"}
             if action == "control":
                 movements.append(body)
+                if after_step == "respawned":
+                    death["t"] = 20
+            if action == "look" and "entity_id" in body:
+                assert movements
+                faces.append(body["entity_id"])
             return {"ok": True}
 
     bot = LedgeBot()
@@ -5311,6 +5323,7 @@ def test_guardian_checks_support_before_unstick_moves(solid_exit):
     else:
         assert result["error"]["code"] == "unsafe_landing" and result["requires_replan"] is True
         assert movements == []
+    assert faces == ([44] if solid_exit and after_step == "blocking" else [])
 
 
 @pytest.mark.parametrize("episode_timeout", [False, True])
