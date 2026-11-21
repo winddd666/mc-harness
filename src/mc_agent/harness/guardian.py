@@ -427,10 +427,10 @@ class GenerationGuard:
             )
             return {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
 
-    def _clear_contact_fire(self, pos: list[float] | tuple[float, ...]) -> dict[str, Any]:
+    def _clear_contact_fire(self, pos: list[float] | tuple[float, ...], *, sneaking: bool = False) -> dict[str, Any]:
         try:
             with self.bot.limit_until(time.monotonic() + 1.25):
-                return self.combat_env.extinguish_fire_at_feet(pos)
+                return self.combat_env.extinguish_contact_fire(pos, sneaking=sneaking)
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget"}
@@ -1661,7 +1661,9 @@ class GenerationGuard:
                 fire_cleared = False
                 if can_clear_fire:
                     self._last_fire_clear_at = now
-                    clear = self._action("clear_contact_fire", lambda: self._clear_contact_fire(fire_pos))
+                    clear = self._action(
+                        "clear_contact_fire", lambda: self._clear_contact_fire(fire_pos, sneaking=bool(status.get("sneaking"))),
+                    )
                     actions.append(clear)
                     fire_cleared = clear["ok"]
                 if can_try_fire_douse and not fire_cleared:

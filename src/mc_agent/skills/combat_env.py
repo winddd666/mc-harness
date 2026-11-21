@@ -750,22 +750,24 @@ class CombatEnv:
         ground_y = math.floor(y + 0.05) - 1
         return any(self._get_block_name(bx, ground_y, bz, strict=True) == "magma_block" for bx, bz in _hitbox_columns(x, z))
 
-    def extinguish_fire_at_feet(self, pos: Sequence[float]) -> dict[str, Any]:
-        """Clear a verified flame intersecting the bot's feet without moving or breaking support."""
+    def extinguish_contact_fire(self, pos: Sequence[float], *, sneaking: bool = False) -> dict[str, Any]:
+        """Clear a verified flame intersecting the bot without moving or breaking support."""
         x, y, z = pos[:3]
-        foot_y = math.floor(y + 0.05)
+        height = 1.5 if sneaking else 1.8
+        columns = _hitbox_columns(x, z)
         flames = {"fire", "soul_fire"}
         self.invalidate_block_cache()
-        for bx, bz in _hitbox_columns(x, z):
-            if self._get_block_name(bx, foot_y, bz, strict=True) not in flames:
-                continue
-            target = [bx, foot_y, bz]
-            self.bot.call("dig", {"pos": target, "collect": False, "stop_on": ["death"]},
-                          timeout_s=0.6, allow_reauth=False)
-            self.invalidate_block_cache()
-            after = self._get_block_name(*target, strict=True)
-            return {"ok": bool(after) and after not in flames, "block_pos": target, "block_after": after}
-        return {"ok": False, "reason": "no_fire_at_feet"}
+        for by in range(math.floor(y), math.ceil(y + height)):
+            for bx, bz in columns:
+                if self._get_block_name(bx, by, bz, strict=True) not in flames:
+                    continue
+                target = [bx, by, bz]
+                self.bot.call("dig", {"pos": target, "collect": False, "stop_on": ["death"]},
+                              timeout_s=0.6, allow_reauth=False)
+                self.invalidate_block_cache()
+                after = self._get_block_name(*target, strict=True)
+                return {"ok": bool(after) and after not in flames, "block_pos": target, "block_after": after}
+        return {"ok": False, "reason": "no_contact_fire"}
 
     def douse_in_adjacent_water(self, before: dict[str, Any]) -> dict[str, Any]:
         """Reach adjacent shallow water only across verified, supported terrain."""

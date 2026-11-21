@@ -5193,10 +5193,13 @@ def test_lava_contact_without_damage_preserves_later_melee_reflex(monkeypatch):
 
 
 @pytest.mark.parametrize("recent_reaction", [False, True])
-@pytest.mark.parametrize("foot_block, clears", [("fire", True), ("soul_fire", False), ("netherrack", False)])
-def test_contact_fire_only_digs_a_live_flame_at_the_feet(monkeypatch, foot_block, clears, recent_reaction):
+@pytest.mark.parametrize(
+    "block, block_y, clears",
+    [("fire", 52, True), ("fire", 53, True), ("fire", 54, False), ("soul_fire", 52, False), ("netherrack", 52, False)],
+)
+def test_contact_fire_only_digs_live_flames_inside_the_hitbox(monkeypatch, block, block_y, clears, recent_reaction):
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
-    blocks = {(-419, 52, -1881): foot_block}
+    blocks = {(-419, block_y, -1881): block}
     digs = []
 
     class FireBot:
@@ -5227,7 +5230,8 @@ def test_contact_fire_only_digs_a_live_flame_at_the_feet(monkeypatch, foot_block
     assert incident is not None
     clear, = incident["actions"]
     assert clear["action"] == "clear_contact_fire" and clear["ok"] is clears
-    assert digs == ([] if foot_block == "netherrack" else [[-419, 52, -1881]])
+    expected_digs = [[-419, block_y, -1881]] if block != "netherrack" and block_y < 54 else []
+    assert digs == expected_digs
     assert not incident["requires_replan"]
 
 
