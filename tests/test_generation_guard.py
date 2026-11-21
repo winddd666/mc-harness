@@ -8211,7 +8211,7 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
 
 @pytest.mark.parametrize("scenario", [
     "ordinary", "surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
-    "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee",
+    "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee", "boundary_arrow", "poll_arrow",
 ])
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
     clock = [1000.0]
@@ -8220,6 +8220,11 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     calls = []
     status = {"pos": [0.5, 52, 0.5], "health": 14 if scenario.endswith("melee") else 20, "oxygen": 240, "in_water": True,
               "submerged": scenario != "surface_partial_move", "on_ground": False, "alive": True, "ready": True}
+    if scenario.endswith("arrow"):
+        status.update(
+            health=17.6, submerged=False, blocking=True,
+            nearest_hostile={"id": 42, "name": "pillager", "dist": 9.4, "pos": [9.9, 53, 0.5]},
+        )
 
     class DeepWaterBot:
         def call(self, action, body=None, **kwargs):
@@ -8233,6 +8238,8 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
                     ]}
                 if scenario.endswith("melee") and not kwargs["params"]["since"]:
                     return {"events": [{"seq": 1, "type": "hurt", "source": "mob_attack"}]}
+                if scenario.endswith("arrow") and not kwargs["params"]["since"]:
+                    return {"events": [{"seq": 1, "type": "hurt", "source": "arrow"}]}
                 return {"events": []}
             if action == "inventory":
                 return {"items": []}
