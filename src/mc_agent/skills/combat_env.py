@@ -93,6 +93,7 @@ HAZARD_BLOCK_TYPES: tuple[str, ...] = (
     "sweet_berry_bush",
     "powder_snow",
     "cobweb",
+    "pointed_dripstone",
 )
 
 SURFACE_SHORE_PRIORITY_BLOCKS: tuple[str, ...] = (
@@ -156,6 +157,7 @@ TRAP_BLOCKS: frozenset[str] = frozenset(
         "powder_snow",
         "cobweb",
         "magma_block",
+        "pointed_dripstone",
     }
 )
 
@@ -1431,6 +1433,8 @@ class CombatEnv:
             if repeat_stall:
                 actions.append("lava_shore_path_stalled")
             elif shore_d <= 6.5:
+                # Keep the attempted bank if the recovery deadline interrupts the status recheck.
+                self._stalled_lava_shore = (tuple(lava_shore_target), tuple(swim_pos[:3]), time.monotonic())
                 try:
                     self.bot.call(
                         "move_to",
@@ -1457,6 +1461,8 @@ class CombatEnv:
                 end = st.get("pos") or swim_pos
                 if math.dist(end[:3], lava_shore_target) >= math.dist(swim_pos[:3], lava_shore_target) - 0.75:
                     self._stalled_lava_shore = (tuple(lava_shore_target), tuple(end[:3]), time.monotonic())
+                else:
+                    self._stalled_lava_shore = stalled
 
         # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
         if filler is not None and time.monotonic() < lava_deadline + 0.8:
@@ -1561,6 +1567,7 @@ class CombatEnv:
                 return _lava_result(st)
 
         # 4. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
+        notch_deadline = lava_deadline + 0.8
         for dname, (dx, dz) in CARDINAL_VECTORS.items():
             if time.monotonic() >= lava_deadline:
                 break
@@ -1582,12 +1589,22 @@ class CombatEnv:
                 continue
             for cy, block in zip(clearance, blocks):
                 if not _is_passable(block):
+                    # Reserve time to reach the notch after opening it.
+                    dig_budget = min(1.0, notch_deadline - time.monotonic() - 1.5)
+                    if dig_budget < 0.25:
+                        break
                     try:
-                        self.bot.call("dig", {"pos": [ex, cy, ez], "collect": False, "stop_on": ["death"]})
+                        self.bot.call(
+                            "dig", {"pos": [ex, cy, ez], "collect": False, "stop_on": ["death"]},
+                            timeout_s=dig_budget, allow_reauth=False,
+                        )
                     except (ApiError, httpx.HTTPError) as err:
                         if isinstance(err, httpx.HTTPError):
-                            self._best_effort_stop()
+                            actions.append("lava_notch_dig_timeout")
+                            self._best_effort_stop(timeout_s=0.25)
                         break
+            if time.monotonic() + 1.25 >= notch_deadline:
+                break
             self.invalidate_block_cache()
             floor = self._get_block_name(ex, floor_y, ez, strict=True)
             if (
@@ -1596,15 +1613,16 @@ class CombatEnv:
             ):
                 yaw_out = math.atan2(-(ex + 0.5 - float(p_cur[0])), -(ez + 0.5 - float(p_cur[2])))
                 try:
-                    self.bot.call("look", {"yaw": yaw_out, "pitch": 0.0})
+                    self.bot.call("look", {"yaw": yaw_out, "pitch": 0.0}, timeout_s=0.3, allow_reauth=False)
                     self.bot.call(
                         "control",
                         {"forward": True, "jump": True, "sprint": True, "ms": 1000, "stop_on": ["death"]},
+                        timeout_s=1.3, allow_reauth=False,
                     )
                     actions.append(f"lava_notch_{dname}")
                 except (ApiError, httpx.HTTPError) as err:
                     if isinstance(err, httpx.HTTPError):
-                        self._best_effort_stop()
+                        self._best_effort_stop(timeout_s=0.25)
                 self.invalidate_block_cache()
                 st = self._safe_status(st)
                 if _should_exit_lava(st):
