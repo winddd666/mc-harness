@@ -7923,6 +7923,58 @@ def test_explicit_flee_checks_support_before_each_motion(action, solid_exit, dim
         assert movements == []
 
 
+@pytest.mark.parametrize("cover", ["safe", "exposed", "fresh_hit"])
+def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, cover):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    blaze = {"id": 44, "name": "blaze", "dist": 6.0, "pos": [0.5, 64, 6.5]}
+    second = {"id": 45, "name": "blaze", "dist": 8.0, "pos": [-7.5, 64, 0.5]}
+    status = {
+        "pos": [0.5, 64, 0.5], "dimension": "the_nether", "health": 8.3,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": blaze,
+    }
+    checks = []
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "get_entities":
+                return {"entities": [blaze, second]}
+            raise AssertionError(action)
+
+    def seek_cover(_env, pos, *, other_shooters):
+        checks.append("cover")
+        assert pos == blaze["pos"] and other_shooters == [second["pos"]]
+        if cover == "safe":
+            return {"ok": True, "mode": "natural_cover", "moved_dist": 0.0, "pos_after": status["pos"]}
+        return None
+
+    def flee(_env, pos, **_kwargs):
+        checks.append("flee")
+        assert pos == blaze["pos"]
+        return {"ok": True, "mode": "flee", "moved_dist": 2.2}
+
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    bot = FortressBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._mark_ranged_engagement(987.0, attacker=blaze, in_cover=True)
+    if cover == "fresh_hit":
+        guard._last_ranged_hurt_at = 999.0
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
+    )))
+
+    assert result["requires_replan"]
+    assert result["mode"] == ("natural_cover" if cover == "safe" else "flee")
+    assert checks == {"safe": ["cover"], "exposed": ["cover", "flee"], "fresh_hit": ["flee"]}[cover]
+
+
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
 @pytest.mark.parametrize("failure", ["timeout", "death"])
 def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monkeypatch):

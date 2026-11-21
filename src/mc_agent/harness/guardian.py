@@ -2233,7 +2233,7 @@ class GenerationGuard:
         fraction = distance / desired_distance
         return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": 1.0}
 
-    def _retreat_after_unsafe_exit(self, deadline: float | None) -> dict[str, Any] | None:
+    def _retreat_after_unsafe_exit(self, deadline: float | None, *, allow_cover: bool = False) -> dict[str, Any] | None:
         now = time.monotonic()
         if deadline is None or now >= deadline:
             return None
@@ -2249,6 +2249,15 @@ class GenerationGuard:
             ranged = name in RANGED_MOBS
             if not name or distance > (16.0 if ranged else 6.0):
                 return None
+            if (
+                allow_cover and ranged and "nether" in str(status.get("dimension") or "").lower()
+                and now < self._ranged_cover_active_until
+                and now - max(self._last_ranged_hurt_at, self._last_melee_hurt_at) >= 4.0
+                and status.get("on_ground") is True and status.get("pos")
+            ):
+                cover = self._recheck_cover_after_blocked_flee(status["pos"], entity_id, min(now + 1.25, deadline))
+                if cover and (cover.get("ok") or cover.get("respawned")):
+                    return {**cover, "requires_replan": True, "pos_before": status["pos"]}
             if threat_pos is None:
                 threat_pos = self._find_hostile_position(entity_id, name, session=bot)
             env = CombatEnv(bot, geofence=self.geofence)
@@ -2280,6 +2289,28 @@ class GenerationGuard:
         except RunTimedOut:
             self._stop_after_recovery_timeout()
             raise
+        except (ApiError, httpx.HTTPError):
+            return None
+
+    def _recheck_cover_after_blocked_flee(
+        self, pos: list[float], target_id: int | None, deadline: float,
+    ) -> dict[str, Any] | None:
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        try:
+            entities = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
+            shooters = ranged_retreat_positions(pos, entities.get("entities") or [], max_distance=16.0)
+            target = next((point for entity_id, point in shooters if entity_id == target_id), None)
+            if target_id is None or target is None:
+                return None
+            others = [point for entity_id, point in shooters if entity_id != target_id]
+            cover = self._action(
+                "unsafe_exit_cover",
+                lambda: CombatEnv(bot, geofence=self.geofence).seek_natural_cover(target, other_shooters=others),
+            )
+            return cover.get("result")
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return None
         except (ApiError, httpx.HTTPError):
             return None
 
@@ -3038,7 +3069,7 @@ class GenerationGuard:
             }, ensure_ascii=False)
         except (_UnsafeFleeExit, _UnsafeUnstickExit):
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
-            recovery = self._retreat_after_unsafe_exit(deadline)
+            recovery = self._retreat_after_unsafe_exit(deadline, allow_cover=is_flee)
             if recovery is not None:
                 return json.dumps(recovery, ensure_ascii=False)
             message = (
