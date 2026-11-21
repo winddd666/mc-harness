@@ -763,15 +763,21 @@ class GenerationGuard:
             )
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
+            surface_unarmed_retreat = (
+                dimension == "overworld" and unshielded and best_melee_weapon_in_inv(counts) is None
+            )
+            melee_id = attacker_id if isinstance(attacker_id, int) else None
+            if melee_id is None and surface_unarmed_retreat and nh_name in PRE_HURT_MELEE_MOBS:
+                melee_id = nh_id
             resolve_melee = (
-                "nether" in dimension and low_health and recent_melee and not ranged and not mixed_hurt
-                and isinstance(attacker_id, int)
+                ("nether" in dimension or surface_unarmed_retreat)
+                and low_health and recent_melee and not ranged and not mixed_hurt and melee_id is not None
             )
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
-            if not pos and (not resolve_melee or nh_id == attacker_id):
+            if not pos and (not resolve_melee or nh_id == melee_id):
                 pos = nh_pos
             if not pos and resolve_melee:
-                pos = self._find_hostile_position(attacker_id, "", timeout_s=0.6)
+                pos = self._find_hostile_position(melee_id, "", timeout_s=0.6)
             attacker_name = str(attacker.get("name") or "").removeprefix("minecraft:") if isinstance(attacker, dict) else ""
             shooter_unknown = scan_surface_shooters and attacker_name not in RANGED_MOBS and nh_name not in RANGED_MOBS
             fallback_pos = pos if shooter_unknown else None

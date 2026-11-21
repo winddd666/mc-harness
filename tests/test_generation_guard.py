@@ -5219,34 +5219,41 @@ def test_repeated_melee_hurt_skips_bunker_when_the_same_block_still_blocks_it(mo
     assert retreats == [True, True]
 
 
-@pytest.mark.parametrize("nearest", ["attacker", "other_mob", "scan_timeout"])
-def test_nether_melee_retreat_resolves_the_confirmed_attacker_without_position(monkeypatch, nearest):
-    attacker = {"id": 4580454, "name": "enderman", "dist": 1.1}
+@pytest.mark.parametrize(("dimension", "nearest"), [
+    ("the_nether", "attacker"), ("the_nether", "other_mob"), ("the_nether", "scan_timeout"),
+    ("overworld", "attacker"), ("overworld", "other_mob"), ("overworld", "scan_timeout"),
+    ("overworld", "unknown_attacker"),
+])
+def test_melee_retreat_resolves_the_confirmed_attacker_without_position(monkeypatch, nearest, dimension):
+    attacker = {"id": 4580454, "name": "enderman" if dimension == "the_nether" else "zombie", "dist": 1.1}
     attacker_pos = [3517.2, 60, 1781.9]
     blaze = {"id": 82, "name": "blaze", "dist": 0.9, "pos": [3515.2, 60, 1781.9]}
     status = {
-        "pos": [3516.1, 60, 1781.9], "health": 6.1, "food": 17, "dimension": "the_nether",
-        "ready": True, "alive": True, "on_ground": True, "blocking": True,
-        "nearest_hostile": attacker if nearest == "attacker" else blaze,
+        "pos": [3516.1, 60, 1781.9], "health": 6.1, "food": 17, "dimension": dimension,
+        "ready": True, "alive": True, "on_ground": True, "blocking": dimension == "the_nether",
+        "nearest_hostile": attacker if nearest in {"attacker", "unknown_attacker"} else blaze,
     }
     retreats = []
 
-    class NetherBot:
+    class AmbushBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return dict(status)
             if action == "events":
-                hits = [{"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": attacker}]
+                hit = {"seq": 1, "type": "hurt", "source": "mob_attack"}
+                if nearest != "unknown_attacker":
+                    hit["source_entity"] = attacker
+                hits = [hit]
                 return {"events": [] if kwargs["params"]["since"] else hits}
             if action == "inventory":
-                return {"items": [], "offhand": {"name": "shield"}}
+                return {"items": [], "offhand": {"name": "shield"} if dimension == "the_nether" else None}
             if action == "get_entities":
                 if nearest == "scan_timeout":
                     raise httpx.ReadTimeout("attacker lookup timed out")
                 return {"entities": [blaze, {**attacker, "pos": attacker_pos}]}
             return {"ok": True}
 
-    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard = GenerationGuard(AmbushBot(), EventSink(lambda _: None), checkpoint=lambda: None)
 
     def flee(threat_pos, *, wait_for_ground, use_nearest_hostile=True):
         assert wait_for_ground
