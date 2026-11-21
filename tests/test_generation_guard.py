@@ -7595,7 +7595,8 @@ def test_trident_hit_directs_low_health_swimmer_to_shore_after_shield(monkeypatc
     assert [action["action"] for action in incident["actions"]] == [*actions, "escape_to_shore"]
 
 
-def test_water_melee_retries_shore_after_unconfirmed_landing(monkeypatch):
+@pytest.mark.parametrize("second_source", ["mob_attack", "arrow"])
+def test_water_combat_retries_shore_after_unconfirmed_landing(monkeypatch, second_source):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     status = {
@@ -7637,7 +7638,7 @@ def test_water_melee_retries_shore_after_unconfirmed_landing(monkeypatch):
 
     clock[0] += 4.0
     status.update(health=11.0, nearest_hostile={})
-    hurts.append({"seq": 2, "type": "hurt", "source": "mob_attack", "health": 11.0})
+    hurts.append({"seq": 2, "type": "hurt", "source": second_source, "health": 11.0})
     second = guard.poll()
     assert [action["action"] for action in second["actions"]] == ["escape_to_shore"]
     assert second["actions"][0]["ok"] is True

@@ -1620,7 +1620,7 @@ class GenerationGuard:
                 close_drowned_hit = nh_name == "drowned" and nh_dist <= 6.0 and hurt_src_w in MELEE_HURT_SOURCES
                 swimming = status.get("on_ground") is False or bool(status.get("submerged"))
                 retry_shore_after_hit = (
-                    swimming and recent_failed_water_escape and hurt_src_w in MELEE_HURT_SOURCES
+                    swimming and recent_failed_water_escape
                     and self._short_water_escape_after_hit(status, hurt_src_w)
                 )
                 urgent_trident_shore = swimming and hurt_src_w == "trident" and 0.0 < hp_cur < 10.0
