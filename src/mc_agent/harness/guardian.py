@@ -1597,6 +1597,12 @@ class GenerationGuard:
             and nh_name0 != "creeper"
             and nh_dist0 > 3.5
         )
+        sustained_shield_damage = (
+            ranged_hurt_only and status.get("blocking") and status.get("on_ground") is True
+            and not in_water and not in_lava and not status.get("on_fire") and 4.0 < hp_cur <= 16.0
+            and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+            and len(hurts) >= 2 and all(str(h.get("source") or "").strip().lower() == "arrow" for h in hurts)
+        )
         already_in_ranged_guard = (
             bool(status.get("blocking"))
             or (now < self._ranged_cover_active_until)
@@ -1609,6 +1615,7 @@ class GenerationGuard:
             or in_lava
             or needs_hot_floor_guard
             or drowning
+            or sustained_shield_damage
             or (effective_combat_hurt and in_water)
             or (effective_combat_hurt and other_hurts and hp_cur <= 4.0)
             or no_water_reentry
@@ -2110,6 +2117,7 @@ class GenerationGuard:
                     )
                     already_in_dug_cover = (
                         not skip_cover_for_blast
+                        and not sustained_shield_damage
                         and not same_spot_cover_ineffective
                         and (now < self._ranged_cover_active_until)
                         and hp_val > 10.0
@@ -2120,6 +2128,7 @@ class GenerationGuard:
                     if (
                         status.get("on_ground") is not False
                         and not skip_cover_for_blast
+                        and not sustained_shield_damage
                         and not close_unshielded_shooter
                         and not same_spot_cover_ineffective
                         and not already_in_dug_cover
@@ -2129,7 +2138,8 @@ class GenerationGuard:
                     cover_ok = bool(cover and cover.get("ok")) or already_in_dug_cover
                     cover_changed_life = bool(((cover or {}).get("result") or {}).get("respawned"))
                     if not cover_ok and not cover_changed_life and (
-                        skip_cover_for_blast or not already_blocking or hp_val <= 10.0 or not ranged_hurt_only
+                        sustained_shield_damage or skip_cover_for_blast
+                        or not already_blocking or hp_val <= 10.0 or not ranged_hurt_only
                     ):
                         if (
                             has_shield
@@ -2148,8 +2158,9 @@ class GenerationGuard:
                             not skip_cover_for_blast and status.get("on_ground") is True
                             and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                         )
-                        critical_shielded_cover = (
-                            surface_arrow_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0
+                        shielded_cover = (
+                            sustained_shield_damage
+                            or (surface_arrow_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0)
                         )
                         unshielded_cover = not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX
                         missing_filler_cover = (
@@ -2164,8 +2175,8 @@ class GenerationGuard:
                             "combat_or_flee",
                             lambda: self._defend_or_flee(
                                 status, attacker, counts, ranged=True,
-                                prefer_cover=unshielded_cover or critical_shielded_cover or missing_filler_cover,
-                                allow_stationary_cover=not (fresh_blast or missing_filler_cover),
+                                prefer_cover=unshielded_cover or shielded_cover or missing_filler_cover,
+                                allow_stationary_cover=not (fresh_blast or missing_filler_cover or sustained_shield_damage),
                             ),
                         )
                         actions.append(cf)
@@ -2410,6 +2421,7 @@ class GenerationGuard:
             and not in_water
             and not needs_float
             and not any(a["action"] == "escape_to_shore" for a in actions)
+            and not (sustained_shield_damage and any(a["action"] == "combat_or_flee" and a.get("ok") for a in actions))
             and not status.get("busy")
         )
         replan = (
