@@ -353,6 +353,10 @@ class CombatController(Protocol):
     def on_encounter(self, env: "CombatEnv", trigger: ThreatTrigger) -> CombatOutcome: ...
 
 
+class _TerrainProbeExpired(Exception):
+    """An urgent terrain probe ran out of time or could not verify a block."""
+
+
 class CombatEnv:
     """Two-tier spatial combat environment (`CombatEnv` spec v1)."""
 
@@ -390,21 +394,28 @@ class CombatEnv:
         self._block_cache.clear()
         self._hazard_cache = None
 
-    def _get_block_name(self, x: int, y: int, z: int, *, strict: bool = False) -> str:
+    def _get_block_name(
+        self, x: int, y: int, z: int, *, strict: bool = False, deadline: float | None = None,
+    ) -> str:
         key = (int(x), int(y), int(z))
         now = time.monotonic()
+        if deadline is not None and now >= deadline:
+            raise _TerrainProbeExpired
         cached = self._block_cache.get(key)
         if cached is not None and (now - cached[1]) <= self.block_cache_ttl:
             name = cached[0]
         else:
             try:
-                res = self.bot.call("get_block", {"pos": [key[0], key[1], key[2]]})
+                transport = {"timeout_s": min(0.35, deadline - now), "allow_reauth": False} if deadline is not None else {}
+                res = self.bot.call("get_block", {"pos": [key[0], key[1], key[2]]}, **transport)
                 name = _clean_block_name(res) if res.get("name") or res.get("type") else ""
             except (RunTimedOut, RequestCancelled):
                 raise
             except Exception:
                 name = None
             self._block_cache[key] = (name, now)
+        if deadline is not None and (not name or time.monotonic() >= deadline):
+            raise _TerrainProbeExpired
         if name or strict:
             return name or ""
         return "stone" if name is None else "air"
@@ -487,6 +498,7 @@ class CombatEnv:
         yaw: float,
         *,
         dist: float = 3.0,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """Probe walkability, 1-block step-ups, cliffs, traps, fluids, and geofence along `yaw`."""
         ox, oy, oz = float(origin[0]), float(origin[1]), float(origin[2])
@@ -502,6 +514,7 @@ class CombatEnv:
 
         sample_d = 0.9
         cur_y = base_y
+        probe_kwargs = {"deadline": deadline} if deadline is not None else {}
         while sample_d <= max_r + 1e-6:
             nx = ox + ux * sample_d
             nz = oz + uz * sample_d
@@ -511,8 +524,8 @@ class CombatEnv:
                     break
 
             bx, bz = math.floor(nx), math.floor(nz)
-            foot_b = self._get_block_name(bx, cur_y, bz)
-            head_b = self._get_block_name(bx, cur_y + 1, bz)
+            foot_b = self._get_block_name(bx, cur_y, bz, **probe_kwargs)
+            head_b = self._get_block_name(bx, cur_y + 1, bz, **probe_kwargs)
 
             if foot_b in {"lava", "flowing_lava"} or head_b in {"lava", "flowing_lava"}:
                 hazard = "lava"
@@ -534,8 +547,8 @@ class CombatEnv:
 
             if not _is_passable(foot_b):
                 # Check if this is a clean 1-block step-up (`cur_y + 1` and `cur_y + 2` + overhead at origin clear)
-                step_head2 = self._get_block_name(bx, cur_y + 2, bz)
-                orig_above = self._get_block_name(math.floor(ox), cur_y + 2, math.floor(oz))
+                step_head2 = self._get_block_name(bx, cur_y + 2, bz, **probe_kwargs)
+                orig_above = self._get_block_name(math.floor(ox), cur_y + 2, math.floor(oz), **probe_kwargs)
                 if _is_solid_ground(foot_b) and _is_passable(step_head2) and _is_passable(orig_above):
                     needs_jump = True
                     cur_y += 1
@@ -550,7 +563,7 @@ class CombatEnv:
             drop = 0
             landed_hazard: str | None = None
             for dy_down in range(1, 6):
-                below_b = self._get_block_name(bx, cur_y - dy_down, bz)
+                below_b = self._get_block_name(bx, cur_y - dy_down, bz, **probe_kwargs)
                 if below_b in {"lava", "flowing_lava"}:
                     landed_hazard = "lava"
                     break
@@ -599,12 +612,16 @@ class CombatEnv:
         *,
         dist: float = 3.0,
         angles_deg: Sequence[float] = (0, 35, -35, 70, -70, 110, -110, 150, -150),
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """Fan-probe around `preferred_yaw`, ranking safe directions with minimal angular deviation first."""
         candidates: list[dict[str, Any]] = []
         for deg in angles_deg:
             cand_yaw = float(preferred_yaw) + math.radians(float(deg))
-            ray = self.probe_ray(origin, cand_yaw, dist=dist)
+            try:
+                ray = self.probe_ray(origin, cand_yaw, dist=dist, **({"deadline": deadline} if deadline is not None else {}))
+            except _TerrainProbeExpired:
+                break
             candidates.append(
                 {
                     "yaw": round(cand_yaw, 4),
@@ -1272,11 +1289,13 @@ class CombatEnv:
                 break
 
         # 2. Try scanning safe non-lava exits (including 1-block step-ups, plus wide shore search) and jump-sprinting out
+        terrain_deadline = min(lava_deadline - 2.0, time.monotonic() + 1.5)
         scan = self.scan_safe_yaws(
             pos0,
             float(st.get("yaw") or 0.0),
             dist=2.8,
             angles_deg=(0, 45, -45, 90, -90, 135, -135, 180),
+            deadline=terrain_deadline,
         )
         tried_yaws: list[float] = []
         if scan.get("best_yaw") is not None:
@@ -1291,30 +1310,40 @@ class CombatEnv:
         if not tried_yaws and time.monotonic() < lava_deadline:
             # Wide lava lake: filter shore types by dimension to keep find_blocks fast (<1s).
             shore_blocks = NETHER_SHORE_BLOCKS if "nether" in dim else SHORE_LAND_BLOCKS
-            lava_shore_target = self._find_walkable_shore_target(
-                pos0,
-                block_types=shore_blocks,
-                max_radius=18,
-                min_y=py - 1,
-                max_y=py + 2,
-                max_candidates=6,
-            )
+            try:
+                lava_shore_target = self._find_walkable_shore_target(
+                    pos0,
+                    block_types=shore_blocks,
+                    max_radius=18,
+                    min_y=py - 1,
+                    max_y=py + 2,
+                    max_candidates=6,
+                    deadline=terrain_deadline,
+                )
+            except _TerrainProbeExpired:
+                pass
             if lava_shore_target is not None:
                 tried_yaws = [aim_yaw_pitch(pos0, lava_shore_target)[0]]
             else:
                 base_yaw = float(st.get("yaw") or 0.0)
                 best_shore_yaw: float | None = None
                 for probe_dist in (4.5, 9.0):
-                    if time.monotonic() >= lava_deadline:
+                    if time.monotonic() >= terrain_deadline:
                         break
                     for deg in (0, 90, -90, 180, 45, -45, 135, -135):
+                        if time.monotonic() >= terrain_deadline:
+                            break
                         cand_yaw = base_yaw + math.radians(deg)
                         ux, uz = yaw_to_unit_xz(cand_yaw)
                         px = math.floor(float(pos0[0]) + ux * probe_dist)
                         pz = math.floor(float(pos0[2]) + uz * probe_dist)
                         for y_chk in (py, py + 1):
-                            if _is_solid_ground(self._get_block_name(px, y_chk, pz)) and _is_passable(self._get_block_name(px, y_chk + 1, pz)):
-                                best_shore_yaw = cand_yaw
+                            try:
+                                floor = self._get_block_name(px, y_chk, pz, deadline=terrain_deadline)
+                                if _is_solid_ground(floor) and _is_passable(self._get_block_name(px, y_chk + 1, pz, deadline=terrain_deadline)):
+                                    best_shore_yaw = cand_yaw
+                                    break
+                            except _TerrainProbeExpired:
                                 break
                         if best_shore_yaw is not None:
                             break
@@ -1811,6 +1840,7 @@ class CombatEnv:
         threat_pos: Sequence[float] | None = None,
         max_candidates: int = 10,
         avoid_close_threat: bool = False,
+        deadline: float | None = None,
     ) -> list[float] | None:
         """Query `find_blocks` for nearby solid shoreline with 2-high passable headroom."""
         start_x, start_z = float(pos0[0]), float(pos0[2])
@@ -1820,6 +1850,12 @@ class CombatEnv:
         threat_dist0 = math.hypot(start_x - tx_th, start_z - tz_th) if has_threat else 0.0
 
         def _pick_from_query(q_types: Sequence[str], *, q_limit: int) -> list[float] | None:
+            transport = {}
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                transport = {"timeout_s": remaining, "allow_reauth": False}
             try:
                 found = self.bot.call(
                     "find_blocks",
@@ -1828,6 +1864,7 @@ class CombatEnv:
                         "types": list(q_types),
                         "limit": q_limit,
                     },
+                    **transport,
                 )
             except Exception:
                 found = None
@@ -1854,8 +1891,9 @@ class CombatEnv:
 
             candidates.sort(key=lambda item: item[0])
             for _, cx, cy, cz in candidates[:max(1, int(max_candidates))]:
-                foot_b = self._get_block_name(cx, cy + 1, cz)
-                head_b = self._get_block_name(cx, cy + 2, cz)
+                probe_kwargs = {"deadline": deadline} if deadline is not None else {}
+                foot_b = self._get_block_name(cx, cy + 1, cz, **probe_kwargs)
+                head_b = self._get_block_name(cx, cy + 2, cz, **probe_kwargs)
                 if _is_passable(foot_b) and _is_passable(head_b):
                     return [cx + 0.5, float(cy + 1), cz + 0.5]
             return None
