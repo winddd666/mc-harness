@@ -777,6 +777,36 @@ def test_escape_lava_does_not_trust_in_water_false_and_nether_skips_water_bucket
     assert "use_item" not in nether_calls
 
 
+@pytest.mark.parametrize("life", [{"ready": False, "alive": True}, {"ready": True, "alive": False}])
+def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life):
+    status = {"pos": [10975.5, 70.1, 11349.5], "health": 20, "in_water": False, **life}
+
+    class RespawningBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            pytest.fail(f"Unexpected {action} before the bot can act")
+
+    events = []
+    guard = GenerationGuard(RespawningBot(), EventSink(events.append), checkpoint=lambda: None)
+
+    def stale_combat(*args):
+        pytest.fail("The interrupted tool's threat belongs to an unavailable life")
+
+    monkeypatch.setattr(guard.combat_slot, "handle", stale_combat)
+    receipt = guard.handle_preemption(
+        {"source": "pre_hurt_melee", "primary_type": "drowned", "primary_entity_id": 71},
+        interrupted_name="mc_move_to",
+    )
+
+    assert receipt["requires_replan"] and receipt["preempted_by_reflex"]
+    assert receipt["reflex_mode"] == "life_unavailable"
+    assert receipt["status_after"]["pos"] == status["pos"]
+    assert [event["type"] for event in events] == ["guardian.preempted_tool"]
+
+
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
     """Reproduces glm_glm_3_village / hy4_hy_8_nether: ReadTimeout in subcortical_combat must /stop & not crash run."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController

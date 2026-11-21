@@ -2839,6 +2839,7 @@ class GenerationGuard:
                 st_pre = self.bot.status()
             except (ApiError, httpx.HTTPError):
                 st_pre = {}
+            life_unavailable = st_pre.get("ready") is False or st_pre.get("alive") is False
             lava_threat = trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava"))
             hot_floor_trigger = trigger.get("primary_type") == "hot_floor"
             hp_pre = st_pre.get("health")
@@ -2851,8 +2852,8 @@ class GenerationGuard:
             )
             on_hot_floor = False
             if (
-                check_hot_floor and not lava_threat and st_pre.get("ready") is not False
-                and st_pre.get("alive") is not False and st_pre.get("on_ground") is True
+                check_hot_floor and not lava_threat and not life_unavailable
+                and st_pre.get("on_ground") is True
                 and not st_pre.get("in_water") and st_pre.get("pos")
             ):
                 probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.6)
@@ -2860,8 +2861,12 @@ class GenerationGuard:
                     on_hot_floor = CombatEnv(probe_bot).is_on_hot_floor(st_pre["pos"])
                 except _RecoveryBudgetExceeded:
                     pass
-            if lava_threat:
-                if st_pre.get("in_lava") and st_pre.get("ready") is not False and st_pre.get("alive") is not False:
+            if life_unavailable:
+                st_after = st_pre
+                summary = f"执行 {interrupted_name} 时角色已死亡或尚未就绪，等待角色就绪后重新规划"
+                outcome = {"handled": False, "mode": "life_unavailable", "actions": []}
+            elif lava_threat:
+                if st_pre.get("in_lava"):
                     self._last_lava_contact_at = time.monotonic()
                 act = self._action("escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
                 act_res = act.get("result") if isinstance(act.get("result"), dict) else {}
@@ -3103,7 +3108,8 @@ class GenerationGuard:
                                 pass
                         summary = str(outcome.get("summary") or f"执行 {interrupted_name} 途中遇袭，已完成 0-LLM 本能处置")
             self.last_reaction = time.monotonic()
-            self._mark_pre_hurt_cooldown(trigger, self.last_reaction)
+            if not life_unavailable:
+                self._mark_pre_hurt_cooldown(trigger, self.last_reaction)
             self.previous_health = float(st_after.get("health")) if isinstance(st_after.get("health"), (int, float)) else None
             try:
                 self._drain_events_pages()
