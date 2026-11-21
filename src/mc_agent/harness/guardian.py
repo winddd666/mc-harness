@@ -1176,7 +1176,9 @@ class GenerationGuard:
                         shore_f_res = shore_f.get("result") if isinstance(shore_f, dict) and isinstance(shore_f.get("result"), dict) else {}
                         self._last_water_escape_failed = not bool(shore_f.get("ok") and shore_f_res.get("in_water") is not True)
                     else:
-                        self._last_water_escape_failed = False
+                        self._last_water_escape_failed = bool(
+                            esc_f_err == "network_uncertain" and esc_f["error"].get("timeout") is True
+                        )
                 self._last_water_escape_at = time.monotonic()
 
             if pre_trigger is not None and not in_lava and not in_water:
@@ -2373,6 +2375,7 @@ class GenerationGuard:
                 "ok": False,
                 "requires_replan": True,
                 "error": {"code": "time_budget", "message": message},
+                **({"interrupted_tool": tool_name} if is_unstick else {}),
             }, ensure_ascii=False)
         except RunTimedOut:
             if is_flee:
@@ -2447,8 +2450,11 @@ class GenerationGuard:
                     )
                 tool_error = last_tool_result.get("error")
                 unstick_still_wet = (
-                    isinstance(tool_error, dict) and tool_error.get("code") == "water_escape_failed"
-                    and last_tool_result.get("in_water") is True
+                    isinstance(tool_error, dict) and (
+                        (tool_error.get("code") == "water_escape_failed" and last_tool_result.get("in_water") is True)
+                        or (tool_error.get("code") == "time_budget"
+                            and last_tool_result.get("interrupted_tool") == "mc_skill_unstick")
+                    )
                 )
         retry_water_escape = not handled_water_in_tool or drowning or bool(hurts) or bool(status.get("submerged"))
         needs_water_escape = in_water and retry_water_escape and (

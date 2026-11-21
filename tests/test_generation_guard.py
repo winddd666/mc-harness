@@ -4828,7 +4828,9 @@ def test_guardian_damage_retreat_checks_terrain(dimension, health):
     assert mutations == []
 
 
-@pytest.mark.parametrize("water_state", ["surfaced", "submerged", "drowning", "failed_unstick"])
+@pytest.mark.parametrize(
+    "water_state", ["surfaced", "submerged", "drowning", "failed_unstick", "unstick_timeout", "dry_after_unstick_timeout"],
+)
 def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypatch, water_state):
     status = {"pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180,
               "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True}
@@ -4859,6 +4861,9 @@ def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypa
     if water_state == "failed_unstick":
         status.update(submerged=False)
         receipt = {"ok": False, "in_water": True, "error": {"code": "water_escape_failed"}}
+    elif water_state in {"unstick_timeout", "dry_after_unstick_timeout"}:
+        status.update(in_water=water_state == "unstick_timeout", submerged=False)
+        receipt = {"ok": False, "interrupted_tool": "mc_skill_unstick", "error": {"code": "time_budget"}}
     else:
         receipt = guard.handle_preemption({"source": "tool_interrupted_hurt"}, interrupted_name="mc_skill_mine_dfs")
         assert receipt["reflex_mode"] == "water_surface"
@@ -4868,11 +4873,14 @@ def test_tool_boundary_does_not_repeat_water_macro_after_its_own_reflex(monkeypa
 
     guard.stabilize_after_tools([json.dumps(receipt)])
 
-    expected = {"surfaced": [], "submerged": ["shore"], "drowning": ["urgent_shore"], "failed_unstick": ["shore"]}
+    expected = {
+        "surfaced": [], "submerged": ["shore"], "drowning": ["urgent_shore"], "failed_unstick": ["shore"],
+        "unstick_timeout": ["shore"], "dry_after_unstick_timeout": [],
+    }
     assert calls == expected[water_state]
 
 
-@pytest.mark.parametrize("reentry", ["still_submerged", "observed_dry", "retry_window_expired"])
+@pytest.mark.parametrize("reentry", ["still_submerged", "observed_dry", "retry_window_expired", "poll_timeout"])
 def test_boundary_retries_shore_directly_after_water_macro_times_out(monkeypatch, reentry):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
@@ -4888,6 +4896,8 @@ def test_boundary_retries_shore_directly_after_water_macro_times_out(monkeypatch
                 return dict(status)
             if action == "events":
                 return {"events": []}
+            if action == "inventory":
+                return {"items": []}
             assert action == "stop"
             return {"ok": True}
 
@@ -4902,8 +4912,12 @@ def test_boundary_retries_shore_directly_after_water_macro_times_out(monkeypatch
     guard = GenerationGuard(FloodedCaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(guard, "_escape_water", timed_out_water_macro)
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", missed_shore)
-    guard.stabilize_after_tools()
-    assert attempts == ["water_macro", "shore"]
+    if reentry == "poll_timeout":
+        guard.poll()
+        assert attempts == ["water_macro"]
+    else:
+        guard.stabilize_after_tools()
+        assert attempts == ["water_macro", "shore"]
     attempts.clear()
 
     clock[0] += 31.0 if reentry == "retry_window_expired" else 4.25
@@ -4913,7 +4927,7 @@ def test_boundary_retries_shore_directly_after_water_macro_times_out(monkeypatch
         status.update(in_water=True, submerged=True, on_ground=False)
     guard.stabilize_after_tools()
 
-    expected = ["surface_then_shore"] if reentry == "still_submerged" else ["water_macro", "shore"]
+    expected = ["surface_then_shore"] if reentry in {"still_submerged", "poll_timeout"} else ["water_macro", "shore"]
     assert attempts == expected
 
 
@@ -5259,6 +5273,7 @@ def test_unstick_canopy_branch_shares_the_tool_budget(monkeypatch):
 
     assert result["ok"] is False and result["requires_replan"] is True
     assert result["error"]["code"] == "time_budget"
+    assert result["interrupted_tool"] == "mc_skill_unstick"
     assert calls[-1] == ("stop", 1028.0, 1.5)
     assert all(start + timeout <= 1028.0 for _, start, timeout in calls[:-1])
     assert bot.call == original_call
