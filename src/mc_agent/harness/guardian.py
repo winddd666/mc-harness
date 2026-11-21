@@ -2144,7 +2144,16 @@ class GenerationGuard:
                         and hp_val > 10.0
                         and ranged_hurt_only
                     )
-                    recent_cover_fail = already_blocking and ranged_hurt_only and hp_val > 10.0 and (now - self._last_dig_cover_fail_at < 15.0)
+                    surface_arrow_cover = (
+                        not skip_cover_for_blast and status.get("on_ground") is True
+                        and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                    )
+                    recent_cover_fail = (
+                        already_blocking and ranged_hurt_only and now - self._last_dig_cover_fail_at < 15.0
+                    )
+                    seek_cover_after_failed_dig = (
+                        recent_cover_fail and surface_arrow_cover and hurt_src == "arrow" and 0 < hp_val <= 10.0
+                    )
                     cover: dict[str, Any] | None = None
                     if (
                         status.get("on_ground") is not False
@@ -2153,7 +2162,8 @@ class GenerationGuard:
                         and not close_unshielded_shooter
                         and not same_spot_cover_ineffective
                         and not already_in_dug_cover
-                        and not recent_cover_fail
+                        and not (recent_cover_fail and hp_val > 10.0)
+                        and not seek_cover_after_failed_dig
                     ):
                         cover = try_cover(cur_blk_r)
                     cover_ok = bool(cover and cover.get("ok")) or already_in_dug_cover
@@ -2175,12 +2185,8 @@ class GenerationGuard:
                                 inv=inv,
                                 attacker=attacker if isinstance(attacker, dict) else None,
                             )
-                        surface_arrow_cover = (
-                            not skip_cover_for_blast and status.get("on_ground") is True
-                            and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
-                        )
                         shielded_cover = (
-                            sustained_shield_damage
+                            sustained_shield_damage or seek_cover_after_failed_dig
                             or (surface_arrow_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0)
                         )
                         unshielded_cover = not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX
@@ -2197,7 +2203,9 @@ class GenerationGuard:
                             lambda: self._defend_or_flee(
                                 status, attacker, counts, ranged=True,
                                 prefer_cover=unshielded_cover or shielded_cover or missing_filler_cover,
-                                allow_stationary_cover=not (fresh_blast or missing_filler_cover or sustained_shield_damage),
+                                allow_stationary_cover=not (
+                                    fresh_blast or missing_filler_cover or sustained_shield_damage or seek_cover_after_failed_dig
+                                ),
                             ),
                         )
                         actions.append(cf)

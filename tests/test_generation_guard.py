@@ -5400,15 +5400,18 @@ def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, sho
     assert retreats == [expected]
 
 
-@pytest.mark.parametrize("shielded", [False, True])
+@pytest.mark.parametrize("stance", ["unshielded", "shielded", "failed_cover"])
 @pytest.mark.parametrize("scan", ["visible", "timeout"])
-def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, scan, shielded):
+def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, scan, stance):
     from mc_agent.skills.combat_env import CombatEnv
 
+    shielded = stance != "unshielded"
+    failed_cover = stance == "failed_cover"
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 100.0)
     primary = {"id": 4882325, "name": "pillager", "pos": [-10959.1, 72, -11030.2], "dist": 7.3}
     secondary = {"id": 4883019, "name": "pillager", "pos": [-10965.5, 72, -11050.4], "dist": 13.5}
     status = {
-        "pos": [-10962.4, 72, -11038], "health": 2.39 if shielded else 5.33, "food": 20, "dimension": "overworld",
+        "pos": [-10962.4, 72, -11038], "health": 7.9 if failed_cover else 2.39 if shielded else 5.33, "food": 20, "dimension": "overworld",
         "ready": True, "alive": True, "on_ground": True, "blocking": shielded,
         "nearest_hostile": primary,
     }
@@ -5434,6 +5437,8 @@ def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, sc
             raise AssertionError(action)
 
     def cover(_env, pos, *, other_shooters, allow_stationary):
+        if failed_cover:
+            assert not allow_stationary
         plans.append(("cover", pos, list(other_shooters)))
         return None
 
@@ -5443,12 +5448,15 @@ def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, sc
         return {"ok": True, "mode": "flee"}
 
     guard = GenerationGuard(RoadBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    if failed_cover:
+        guard._last_dig_cover_fail_at = 88.5
+        guard._last_dig_cover_block = (-10961, 72, -11038)
     monkeypatch.setattr(MacroSkills, "dig_cover_pocket", lambda _skills: {"ok": False, "reason": "no_solid_wall"})
     monkeypatch.setattr(guard.combat_env, "probe_retreat", lambda *_args: None)
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
     monkeypatch.setattr(guard.combat_env, "flee", flee)
 
-    expected_actions = ["dig_cover", "combat_or_flee"]
+    expected_actions = ["combat_or_flee"] if failed_cover else ["dig_cover", "combat_or_flee"]
     if shielded:
         expected_actions = ["face_attacker", *expected_actions, "face_attacker_after_retreat"]
     assert [a["action"] for a in guard.poll()["actions"]] == expected_actions
