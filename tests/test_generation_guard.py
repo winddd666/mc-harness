@@ -6861,6 +6861,45 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert skills.bot is bot
 
 
+@pytest.mark.parametrize("health", [9.8, 10.0, 15.5])
+def test_trident_hit_directs_low_health_swimmer_to_shore_after_shield(monkeypatch, health):
+    status = {
+        "pos": [9264.9, 62.3, -11339.2], "health": health, "food": 20, "oxygen": 285,
+        "in_water": True, "on_ground": False, "ready": True, "alive": True, "blocking": False,
+        "nearest_hostile": {"id": 44, "name": "drowned", "dist": 7.0, "pos": [9257.9, 62.3, -11339.2]},
+    }
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "trident"}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "posture":
+                status["blocking"] = body["shield"]
+            return {"ok": True}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def reach_shore(pos, *, keep_shield, shield_target_id):
+        assert pos == [9257.9, 62.3, -11339.2]
+        assert keep_shield and shield_target_id == 44 and status["blocking"]
+        status.update(in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    monkeypatch.setattr(guard, "_escape_water", lambda *_args, **_kwargs: {"ok": False, "in_water": True})
+    incident = guard.poll()
+
+    actions = ["face_attacker", "raise_shield"]
+    if health >= 10:
+        actions.append("escape_water")
+    assert [action["action"] for action in incident["actions"]] == [*actions, "escape_to_shore"]
+
+
 def test_water_melee_retries_shore_after_unconfirmed_landing(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])

@@ -1460,11 +1460,12 @@ class GenerationGuard:
                 att_w_dict = att_w if isinstance(att_w, dict) else None
                 att_pos_w = att_w_dict.get("pos") if att_w_dict else nh_pos
                 close_drowned_hit = nh_name == "drowned" and nh_dist <= 6.0 and hurt_src_w in MELEE_HURT_SOURCES
+                swimming = status.get("on_ground") is False or bool(status.get("submerged"))
                 retry_shore_after_hit = (
-                    recent_failed_water_escape and hurt_src_w in MELEE_HURT_SOURCES
+                    swimming and recent_failed_water_escape and hurt_src_w in MELEE_HURT_SOURCES
                     and self._short_water_escape_after_hit(status, hurt_src_w)
-                    and (status.get("on_ground") is False or bool(status.get("submerged")))
                 )
+                urgent_trident_shore = swimming and hurt_src_w == "trident" and 0.0 < hp_cur < 10.0
                 should_shield_water = (
                     has_shield
                     and not status.get("blocking")
@@ -1496,7 +1497,8 @@ class GenerationGuard:
                 esc_err_code: str | None = None
                 if (
                     not transient_err and not forced_water_shore and not no_water_reentry and not drowning
-                    and not self._swimming_at_low_health(status) and not close_drowned_hit and not retry_shore_after_hit
+                    and not self._swimming_at_low_health(status) and not close_drowned_hit
+                    and not retry_shore_after_hit and not urgent_trident_shore
                 ):
                     if not _already("escape_water"):
                         short_escape = any(self._short_water_escape_after_hit(status, h.get("source")) for h in hurts)
