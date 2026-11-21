@@ -1571,18 +1571,22 @@ def select_next_target(
         and has_iron_or_better
         and day2_village_pending
         and (counts.get("shield", 0) < 1 or "minecraft:story/obtain_armor" not in completed)
-        and not _is_cooled("bootstrap_iron_age")
+        and not _is_cooled("day1_night_iron_prep")
     ):
         pb_n1 = dataclasses.replace(
             CURRICULUM_PLAYBOOKS["bootstrap_iron_age"],
+            key="day1_night_iron_prep",
+            title="Day 1 铁层过夜防装成型：合成盾牌与铁甲，天亮前勿盲目回地表",
             tier=0,
+            pre_ensure=(),
+            advancement_id="minecraft:story/obtain_armor" if "minecraft:story/obtain_armor" not in completed else None,
             task=(
                 "[Day 1 铁层安稳过夜：天黑且尚未经历 Day 2 白天探村，第 1 晚绝不冒险下 Y=-54 挖钻或回地表送死！"
                 "请安心在 Y=16 铁/煤层凑足铁锭与煤炭，合成 shield（副手盾）与 1 件铁甲（iron_chestplate/iron_boots）及备用铁镐，等天亮立刻出井探村！]\n"
                 + CURRICULUM_PLAYBOOKS["bootstrap_iron_age"].task
             ),
         )
-        candidates.append(((0, 0, -85, "bootstrap_iron_age"), pb_n1))
+        candidates.append(((0, 0, -85, "day1_night_iron_prep"), pb_n1))
 
     _SURFACE_ONLY_TARGETS = frozenset({
         "minecraft:husbandry/plant_seed",
