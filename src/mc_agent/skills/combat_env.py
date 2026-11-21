@@ -2052,7 +2052,7 @@ class CombatEnv:
             return {
                 "ok": not respawned and not unsafe and moved >= (0.35 if short_step else 1.5),
                 "mode": "respawned" if respawned else "flee",
-                "moved_dist": round(moved, 2),
+                "moved_dist": 0.0 if respawned else round(moved, 2),
                 "pos_after": pos,
                 **({"respawned": True} if respawned else {}),
                 **({"reason": "unsafe_landing"} if unsafe else {}),
@@ -2252,6 +2252,11 @@ class CombatEnv:
                 "mode": "not_ready",
                 "pos_after": st0.get("pos"),
             }
+        if st0.get("in_lava"):
+            return {
+                "ok": False, "in_water": bool(st0.get("in_water")), "in_lava": True,
+                "mode": "entered_lava", "pos_after": st0.get("pos"),
+            }
         if not bool(st0.get("in_water")):
             landed = st0.get("on_ground") is not False
             return {
@@ -2274,12 +2279,19 @@ class CombatEnv:
                 math.hypot(float(pos[0]) - start_x, float(pos[2]) - start_z) > 64.0
                 or (st.get("last_death") is not None and st["last_death"] != st0.get("last_death"))
             )
-            if not respawned and st.get("alive") is not False and st.get("ready") is not False:
+            if respawned:
+                mode = "respawned"
+            elif st.get("alive") is False or st.get("ready") is False:
+                mode = "not_ready"
+            elif st.get("in_lava"):
+                mode = "entered_lava"
+            else:
                 return None
             return {
                 "ok": False,
                 "in_water": bool(st.get("in_water", True)),
-                "mode": "respawned" if respawned else "not_ready",
+                "mode": mode,
+                **({"in_lava": True} if mode == "entered_lava" else {}),
                 "shore_target": shore_target,
                 "actions": actions,
                 "pos_after": pos,
@@ -3234,6 +3246,14 @@ class SubcorticalInstinctController:
         # 4) Check for a surviving attacker before handing back control or eating.
         has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
         st_post = env._safe_status(st)
+        if mode == "creeper_evade" and (
+            st_post.get("alive") is False
+            or st_post.get("last_death") != st.get("last_death")
+            or st_post.get("dimension") != st.get("dimension")
+        ):
+            for action in actions:
+                if action["action"] in {"retreat_from_creeper", "creeper_followup_retreat", "creeper_intruded_flee"}:
+                    action.update(ok=False, respawned=True)
         nh_post = st_post.get("nearest_hostile")
         if (
             mode == "cover_or_flee" and not has_shield and not has_weapon

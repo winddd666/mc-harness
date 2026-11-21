@@ -6467,10 +6467,21 @@ class MacroSkills:
                 continue
         return {"ok": False, "requires_replan": True, "reason": "no_solid_wall"}
 
-    def dig_level_tunnel(self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> dict[str, Any]:
-        from .tunnel import AIR, dig_level_tunnel
+    def dig_level_tunnel(
+        self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True, *, deadline: float | None = None,
+    ) -> dict[str, Any]:
+        from .tunnel import dig_level_tunnel
 
-        res = dig_level_tunnel(self.bot, direction, steps, stop_on_ore)
+        res = dig_level_tunnel(self.bot, direction, steps, stop_on_ore, deadline=deadline)
+        try:
+            return self._describe_tunnel_result(direction, res)
+        except _SkillDeadline:
+            res["routing_probe_deadline_hit"] = True
+            return res
+
+    def _describe_tunnel_result(self, direction: str, res: dict[str, Any]) -> dict[str, Any]:
+        from .tunnel import AIR
+
         d_key = str(direction).strip().lower()
         stop_reason = str(res.get("stop_reason") or "")
         if stop_reason == "unsafe_or_unknown_floor":
