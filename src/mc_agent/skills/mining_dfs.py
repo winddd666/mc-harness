@@ -5197,6 +5197,21 @@ class MiningDFSEngine:
             if len(verified_route) < len(route):
                 if not verified_route:
                     return True
+                status = scoped.last_status
+                if deadline_failure is not None and status.get("on_ground") and not (
+                    status.get("in_water") or status.get("in_lava")
+                    or status.get("alive") is False or status.get("ready") is False
+                ):
+                    # A pickup or a jump can briefly take the bot off its new stair.
+                    # Only skip those observations if every step to the final stance is known.
+                    dx, dz = DIRECTIONS[branch.direction]
+                    connected = [node.anchor]
+                    for pt in route[1:]:
+                        x, y, z = connected[-1]
+                        if pt == (x + dx, y - 1, z + dz) and pt in self.known_corridor_positions:
+                            connected.append(pt)
+                    if connected[-1] == route[-1] and connected[-1][1] < verified_route[-1][1]:
+                        verified_route = connected
                 route = verified_route
                 steps_taken = node.anchor[1] - route[-1][1]
         elif branch.kind != "stair_up" and any(pt[1] != node.anchor[1] for pt in route):

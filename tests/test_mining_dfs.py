@@ -3298,6 +3298,43 @@ def test_descent_resumes_after_guardian_preemption(monkeypatch, steps_before_pre
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("connected", [True, False])
+def test_interrupted_descent_recovers_a_confirmed_stair_after_a_brief_detour(monkeypatch, connected: bool) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    origin = (0, 69, 0)
+    descent = [(-step, 69 - step, 0) for step in range(14)]
+    world = _MockMineWorld(start_pos=(0.5, 69.0, 0.5), surface_y=99)
+    with BotSession("tok", bot_username="InterruptedStraightStair", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 99, 30), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=origin, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [collar.anchor, origin]),
+            branches=[mining.BranchSpec("stair_down", "west", 53, branch_target_y=16)],
+        )
+
+        def interrupt_after_descent(**kwargs):
+            for pt in [*descent[1:3], (-2, 68, 0), *descent[3:]]:
+                x, y, z = pt
+                world.pos = [x + 0.5, y, z + 0.5]
+                engine.bot.status()
+                if pt in descent and (connected or pt != descent[3]):
+                    engine._record_corridor(pt)
+            raise mining._MiningDeadline
+
+        monkeypatch.setattr(engine, "_dig_stair_down_edge", interrupt_after_descent)
+        result = engine.run(target="iron", target_y=16, goal_count=4)
+
+    assert result["pos_after"][1] == 56
+    tip = engine.nodes[engine.active_node_id]
+    assert tip.edge_from_parent.waypoints == (descent if connected else descent[:3])
+    assert tip.branches[0].steps == (40 if connected else 51)
+
+
 @pytest.mark.parametrize("deadline_expires", [False, True])
 def test_descent_keeps_confirmed_steps_when_the_bot_moves_upward(monkeypatch, deadline_expires) -> None:
     import mc_agent.skills.mining_dfs as mining
