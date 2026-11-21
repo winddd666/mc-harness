@@ -367,6 +367,7 @@ class CombatEnv:
         skills: Any | None = None,
         geofence: Any | None = None,
         water_escape: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        run_lava_escape: Callable[[Callable[[], dict[str, Any]]], dict[str, Any]] | None = None,
         block_cache_ttl: float = 3.0,
         hazard_cache_ttl: float = 3.0,
     ) -> None:
@@ -374,6 +375,7 @@ class CombatEnv:
         self.skills = skills
         self.geofence = geofence
         self._water_escape = water_escape
+        self._run_lava_escape = run_lava_escape
         self.block_cache_ttl = max(0.2, float(block_cache_ttl))
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
@@ -721,6 +723,23 @@ class CombatEnv:
         x, y, z = map(float, pos[:3])
         ground_y = math.floor(y + 0.05) - 1
         return any(self._get_block_name(bx, ground_y, bz, strict=True) == "magma_block" for bx, bz in _hitbox_columns(x, z))
+
+    def extinguish_fire_at_feet(self, pos: Sequence[float]) -> dict[str, Any]:
+        """Clear a verified flame intersecting the bot's feet without moving or breaking support."""
+        x, y, z = pos[:3]
+        foot_y = math.floor(y + 0.05)
+        flames = {"fire", "soul_fire"}
+        self.invalidate_block_cache()
+        for bx, bz in _hitbox_columns(x, z):
+            if self._get_block_name(bx, foot_y, bz, strict=True) not in flames:
+                continue
+            target = [bx, foot_y, bz]
+            self.bot.call("dig", {"pos": target, "collect": False, "stop_on": ["death"]},
+                          timeout_s=0.6, allow_reauth=False)
+            self.invalidate_block_cache()
+            after = self._get_block_name(*target, strict=True)
+            return {"ok": bool(after) and after not in flames, "block_pos": target, "block_after": after}
+        return {"ok": False, "reason": "no_fire_at_feet"}
 
     def step_off_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
         pos = status.get("pos")
@@ -1139,6 +1158,11 @@ class CombatEnv:
 
     def escape_lava(self, *, force_rim_escape: bool = False) -> dict[str, Any]:
         """Deterministically escape lava using water douse (overworld), safe-yaw jump sprint, wall-notch/pillar climb, and live `in_lava` verification."""
+        if self._run_lava_escape is not None:
+            return self._run_lava_escape(lambda: self._escape_lava(force_rim_escape=force_rim_escape))
+        return self._escape_lava(force_rim_escape=force_rim_escape)
+
+    def _escape_lava(self, *, force_rim_escape: bool) -> dict[str, Any]:
         def _landing_unconfirmed(status: dict[str, Any]) -> bool:
             return status.get("on_ground") is False and not status.get("in_water")
 
@@ -1315,6 +1339,11 @@ class CombatEnv:
         if not tried_yaws and time.monotonic() < lava_deadline:
             # Wide lava lake: filter shore types by dimension to keep find_blocks fast (<1s).
             shore_blocks = NETHER_SHORE_BLOCKS if "nether" in dim else SHORE_LAND_BLOCKS
+            stalled = self._stalled_lava_shore
+            excluded_shore = (
+                stalled[0] if stalled is not None and math.dist(pos0[:3], stalled[1]) <= 1.25
+                and time.monotonic() - stalled[2] < 15.0 else None
+            )
             try:
                 lava_shore_target = self._find_walkable_shore_target(
                     pos0,
@@ -1324,12 +1353,15 @@ class CombatEnv:
                     max_y=py + 2,
                     max_candidates=6,
                     deadline=terrain_deadline,
+                    excluded_shore=excluded_shore,
                 )
             except _TerrainProbeExpired:
                 pass
             if lava_shore_target is not None:
                 tried_yaws = [aim_yaw_pitch(pos0, lava_shore_target)[0]]
             else:
+                if excluded_shore is not None:
+                    actions.append("lava_shore_path_stalled")
                 base_yaw = float(st.get("yaw") or 0.0)
                 best_shore_yaw: float | None = None
                 for probe_dist in (4.5, 9.0):
@@ -1873,6 +1905,7 @@ class CombatEnv:
         max_candidates: int = 10,
         avoid_close_threat: bool = False,
         deadline: float | None = None,
+        excluded_shore: Sequence[float] | None = None,
     ) -> list[float] | None:
         """Query `find_blocks` for nearby solid shoreline with 2-high passable headroom."""
         start_x, start_z = float(pos0[0]), float(pos0[2])
@@ -1910,6 +1943,8 @@ class CombatEnv:
                     continue
                 cx, cy, cz = int(rpos[0]), int(rpos[1]), int(rpos[2])
                 if cy < min_y or (max_y is not None and cy > max_y):
+                    continue
+                if excluded_shore is not None and (cx + 0.5, float(cy + 1), cz + 0.5) == tuple(excluded_shore):
                     continue
                 if not _is_solid_ground(_clean_block_name(row.get("name"))):
                     continue

@@ -1608,6 +1608,7 @@ class MacroSkills:
         detour_reasons = SURFACE_SCOUT_PATH_ERRORS | terrain_blocks
         try:
             status = observe()
+            origin = result["final_pos"]
             dimension = normalize_dimension(status.get("dimension"))
             nether = dimension == "the_nether"
             nether_probe = None
@@ -1708,7 +1709,12 @@ class MacroSkills:
             result["requires_replan"] = True
             result.setdefault("error", {"code": reason})
         if reason == "remeasure_after_detour":
-            result["error"]["message"] = "追眼路线受阻或发生绕行。请在当前安全位置重新掷眼，再按新回执的方向继续。"
+            final = result["final_pos"]
+            if math.hypot(final[0] - origin[0], final[2] - origin[2]) < 1.0:
+                result["needs_new_vantage"] = True
+                result["error"]["message"] = "原测向点附近未能推进。请先换到可达的开阔干地并确认已离开原处，再重新掷眼。"
+            else:
+                result["error"]["message"] = "追眼路线受阻或发生绕行。请在当前安全位置重新掷眼，再按新回执的方向继续。"
         biome = str(result["biome"] or "").lower()
         if any(part in biome for part in ("ocean", "dark_forest", "jungle")):
             result["biome_hint"] = "当前群系不利于寻村，请改走朝向平原、草原或其他开阔干地的方向。"
@@ -3060,7 +3066,7 @@ class MacroSkills:
         return out
 
     def _gather_with_budget(
-        self, max_duration_s: float, gather: Callable[[MacroSkills], dict[str, Any]]
+        self, max_duration_s: float, gather: Callable[[MacroSkills], dict[str, Any]], *, cleanup_inventory: bool = False,
     ) -> dict[str, Any]:
         session = _SkillBudgetSession(self.bot, min(45.0, float(max_duration_s)))
         session.progress = {"dug_count": 0, "gained": {}}
@@ -3081,6 +3087,17 @@ class MacroSkills:
                 "stop_reason": "time_budget",
                 "message": "本轮采集已到时间预算。请按 gained 核对入包产物，再换近处可达目标或减少数量。",
             }
+        if cleanup_inventory and result.get("stop_reason") != "time_budget":
+            try:
+                _, cleaned = scoped._ensure_free_slots(min_free=3)
+            except _SkillDeadline:
+                session.stop_pending()
+                result["cleanup_deadline_hit"] = True
+            except (ApiError, httpx.HTTPError):
+                pass
+            else:
+                if cleaned:
+                    result["inventory_cleaned"] = cleaned
         return result
 
     def _reachable_log_column(
@@ -3895,14 +3912,19 @@ class MacroSkills:
         *,
         max_duration_s: float = 45.0,
         skip_unmineable: bool = False,
+        cleanup_inventory: bool = False,
     ) -> dict[str, Any]:
         """Validate pickaxe tier and gather blocks within a shared skill budget."""
         return self._gather_with_budget(
-            max_duration_s, lambda skills: skills._mine_blocks(block_types, count, radius, skip_unmineable=skip_unmineable)
+            max_duration_s,
+            lambda skills: skills._mine_blocks(
+                block_types, count, radius, skip_unmineable=skip_unmineable, defer_cleanup=cleanup_inventory,
+            ),
+            cleanup_inventory=cleanup_inventory,
         )
 
     def _mine_blocks(
-        self, block_types: list[str], count: int, radius: int, *, skip_unmineable: bool
+        self, block_types: list[str], count: int, radius: int, *, skip_unmineable: bool, defer_cleanup: bool = False,
     ) -> dict[str, Any]:
         if not block_types:
             return {"ok": False, "error": "bad_args", "message": "block_types 不能为空。"}
@@ -4132,14 +4154,13 @@ class MacroSkills:
             out_mine["auto_dropped"] = auto_dropped
         # BUG-029: a long mining slice can leave hundreds of low-value blocks
         # even when several slots are still empty; enforce retention caps here.
-        try:
-            _, cleaned = self._ensure_free_slots(min_free=3)
-        except Exception:
-            cleaned = []
-        if cleaned:
-            out_mine["inventory_cleaned"] = [
-                {"item": d.get("item"), "count": d.get("count")} for d in cleaned
-            ]
+        if not defer_cleanup:
+            try:
+                _, cleaned = self._ensure_free_slots(min_free=3)
+            except Exception:
+                cleaned = []
+            if cleaned:
+                out_mine["inventory_cleaned"] = cleaned
         return out_mine
 
     def _recall_and_mine_memory_poi(

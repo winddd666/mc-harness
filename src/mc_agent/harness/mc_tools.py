@@ -2683,11 +2683,22 @@ class McToolset:
     def mc_skill_mine_blocks(self, block_types: list[str], count: int = 3, radius: int = 32) -> str:
         count = max(1, min(32, int(count)))
         radius = max(4, min(64, int(radius)))
-        return self._run_skill(
-            lambda: self._cleanup_inventory_after(
-                self.skills.mine_blocks(block_types=block_types, count=count, radius=radius, skip_unmineable=True)
+
+        def mine() -> dict[str, Any]:
+            budget_s, deadline_imminent = self._clamp_tool_budget(45.0, max_s=45.0)
+            if deadline_imminent:
+                return {
+                    "ok": False,
+                    "stop_reason": "episode_deadline_imminent",
+                    "requires_replan": True,
+                    "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过采矿。"},
+                }
+            return self.skills.mine_blocks(
+                block_types=block_types, count=count, radius=radius, max_duration_s=budget_s,
+                skip_unmineable=True, cleanup_inventory=True,
             )
-        )
+
+        return self._run_skill(mine)
 
     def mc_skill_smelt(self, input_item: str, count: int = 1, fuel_item: str | None = None) -> str:
         count = max(1, min(64, int(count)))
