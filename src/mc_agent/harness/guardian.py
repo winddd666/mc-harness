@@ -243,6 +243,7 @@ class GenerationGuard:
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     COMBAT_RECOVERY_BUDGET_S = 8.0
+    RANGED_COVER_BUDGET_S = 3.5
     UNSTICK_BUDGET_S = 30.0
     FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
@@ -1945,7 +1946,11 @@ class GenerationGuard:
                         return None
 
                     def checked_cover() -> dict[str, Any]:
-                        result = self.combat_env.dig_cover_pocket(self._skills())
+                        result = self._run_recovery_macro(
+                            status, self.combat_env.dig_cover_pocket, budget_s=self.RANGED_COVER_BUDGET_S,
+                        )
+                        if result.get("ok") or result.get("respawned"):
+                            return result
                         try:
                             after = self.bot.call("status", method="GET", timeout_s=0.6, allow_reauth=False)
                         except (ApiError, httpx.HTTPError):

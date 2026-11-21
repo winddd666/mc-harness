@@ -747,6 +747,55 @@ def test_arrow_cover_does_not_retreat_using_a_previous_lifes_attacker(monkeypatc
     assert incident["requires_replan"] is True
 
 
+@pytest.mark.parametrize("died_while_digging", [False, True])
+def test_arrow_cover_deadline_stops_pending_dig_before_retreat(monkeypatch, died_while_digging):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [7821.6, 66.0, 2774.5], "health": 17.2, "food": 20, "on_ground": True,
+        "alive": True, "ready": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    calls = []
+
+    class ShotBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hits = [{"seq": 1, "type": "hurt", "source": "arrow"}]
+                return {"events": [e for e in hits if e["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 2}]}
+            calls.append((action, kwargs.get("timeout_s")))
+            if action == "dig":
+                clock[0] += min(kwargs.get("timeout_s", 8.0), 6.94)
+                if died_while_digging:
+                    status.update(pos=[7790.5, 66.1, 2771.5], health=20, last_death={"t": 2})
+                raise httpx.ReadTimeout("cover dig stalled")
+            assert action == "stop"
+            return {"ok": True}
+
+    def dig_cover(scoped):
+        scoped.bot.call("dig", {"pos": [7822, 66, 2774]}, timeout_s=8.0)
+
+    def retreat(*_args, **_kwargs):
+        assert calls[-1] == ("stop", 1.5)
+        calls.append(("retreat", None))
+        return {"ok": True, "mode": "flee"}
+
+    monkeypatch.setattr(MacroSkills, "dig_cover_pocket", dig_cover)
+    bot = ShotBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(bot))
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    incident = guard.poll()
+
+    cover, *other_actions = incident["actions"]
+    assert cover["result"]["reason"] == "time_budget"
+    assert cover["result"].get("respawned", False) is died_while_digging
+    assert [a["action"] for a in other_actions] == ([] if died_while_digging else ["combat_or_flee"])
+    assert calls[:2] == [("dig", 3.5), ("stop", 1.5)]
+
+
 def test_escape_lava_does_not_trust_in_water_false_and_nether_skips_water_bucket(monkeypatch):
     """Reproduces hy4_hy_7_village: escape_water() lied ok=True in lava, looping 11 ticks to death."""
     from mc_agent.skills.safety import SafetyEmergency, check_and_stabilize
@@ -6733,6 +6782,60 @@ def test_creeper_retreat_does_not_report_success_if_the_final_sample_is_dead(mon
     assert outcome["requires_replan"] and outcome["status_after"]["alive"] is False
 
 
+@pytest.mark.parametrize("shield_in_offhand", [True, False])
+def test_creeper_retreat_raises_shield_once_before_terrain_probe(monkeypatch, shield_in_offhand):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    creeper = {"id": 55, "name": "creeper", "pos": [4.3, 64.0, 0.5], "dist": 3.8}
+    status = {
+        "pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "ready": True, "alive": True,
+        "on_ground": True, "nearest_hostile": creeper,
+    }
+    calls = []
+
+    class CreekBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **_kwargs):
+            calls.append((action, body))
+            if action == "inventory":
+                return {
+                    "items": [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}],
+                    "offhand": {"name": "shield"} if shield_in_offhand else None,
+                    "held": {"name": "iron_pickaxe"},
+                }
+            if action == "get_entities":
+                return {"entities": [status["nearest_hostile"]] if status["nearest_hostile"] else []}
+            return {"ok": True}
+
+    env = CombatEnv(CreekBot())
+
+    def probe(_pos):
+        calls.append(("probe", None))
+        return {"enclosure": "open"}
+
+    def retreat(_pos, **_kwargs):
+        status.update(pos=[-6.5, 64.0, 0.5], nearest_hostile=None)
+        return {"ok": True, "moved_dist": 7.0}
+
+    monkeypatch.setattr(env, "arena_snapshot", probe)
+    monkeypatch.setattr(env, "flee", retreat)
+    result = SubcorticalInstinctController().on_encounter(env, {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": creeper["id"],
+        "primary_pos": creeper["pos"], "distance": 3.8,
+    })
+
+    shield_equip = [] if shield_in_offhand else [("equip", {"item": "shield", "slot": "off-hand"})]
+    assert [(action, body) for action, body in calls if action in {"equip", "look", "posture", "probe"}] == [
+        *shield_equip,
+        ("look", {"entity_id": creeper["id"]}),
+        ("posture", {"shield": True, "sneak": False, "jump": False}),
+        ("probe", None),
+    ]
+    assert result["mode"] == "creeper_evade"
+
+
 def test_melee_warning_faces_nearby_creeper_before_raising_shield(monkeypatch):
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
 
@@ -8144,13 +8247,14 @@ def test_water_macro_restores_raised_shield_on_dry_landing(landing):
         assert "shield_restored" not in water["result"]
 
 
-@pytest.mark.parametrize("starts_in_lava", [True, False])
-def test_directed_shore_escape_does_not_report_lava_as_dry_land(starts_in_lava):
+@pytest.mark.parametrize("starts_in_lava, surface_first", [(True, True), (False, True), (False, False)])
+def test_directed_shore_escape_does_not_report_lava_as_dry_land(starts_in_lava, surface_first):
     from mc_agent.skills.combat_env import CombatEnv
 
     status = {
         "pos": [-6139.7, 43.2, -6089.7], "in_water": not starts_in_lava, "in_lava": starts_in_lava,
         "on_ground": starts_in_lava, "ready": True, "alive": True, "dimension": "overworld",
+        "submerged": not starts_in_lava,
     }
     commands = []
 
@@ -8164,7 +8268,7 @@ def test_directed_shore_escape_does_not_report_lava_as_dry_land(starts_in_lava):
                 status.update(in_water=False, in_lava=True, on_ground=True)
             return {"ok": True}
 
-    result = CombatEnv(FloodedCaveBot()).escape_deep_water_to_shore(surface_first=True)
+    result = CombatEnv(FloodedCaveBot()).escape_deep_water_to_shore(surface_first=surface_first)
 
     assert result["ok"] is False and result["in_lava"] is True
     assert result["mode"] == "entered_lava"
@@ -8208,6 +8312,40 @@ def test_flooded_cave_escape_uses_local_water_level(terrain):
     else:
         assert goal == [2930.5, 40.0, -10124.5]
         assert result["ok"] is True and result["in_water"] is False
+
+
+def test_directed_water_escape_searches_the_bank_at_the_post_surge_water_level():
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [11208.5, 59.2, -11028.5], "in_water": True, "submerged": True,
+        "on_ground": False, "alive": True, "ready": True,
+    }
+    bank = [11206, 62, -11048]
+    moves = []
+
+    class ShoreBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "control" and body.get("ms") == 750:
+                status.update(pos=[11206.5, 62.2, -11040.5], submerged=False)
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": bank}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "move_to":
+                goal = [body["x"], body["y"], body["z"]]
+                moves.append(goal)
+                if goal == [11206.5, 63.0, -11047.5]:
+                    status.update(pos=goal, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(ShoreBot()).escape_deep_water_to_shore()
+
+    assert moves == [[11206.5, 63.0, -11047.5]]
+    assert result["ok"] is True and result["in_water"] is False
 
 
 @pytest.mark.parametrize("under_attack", [False, True])
