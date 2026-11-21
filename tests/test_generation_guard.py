@@ -783,6 +783,7 @@ def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_c
 
     # 1) Bounded attack timeout on SubcorticalInstinctController
     seen_attack_payloads: list[dict] = []
+    attack_times_out = False
 
     class _AttackBot:
         def status(self):
@@ -798,6 +799,8 @@ def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_c
                 return {"entities": [{"id": 5, "name": "zombie", "pos": [1.5, 64.0, 0.5], "dist": 1.8}]}
             if action == "attack":
                 seen_attack_payloads.append(dict(body or {}))
+                if attack_times_out:
+                    raise ApiError("timeout", "timed out waiting for server attack")
                 return {"hits": 2, "killed": True}
             return {"ok": True}
 
@@ -805,6 +808,13 @@ def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_c
     out = ctrl.on_encounter(CombatEnv(_AttackBot()), {"source": "pre_hurt_melee", "primary_entity_id": 5, "primary_type": "zombie"})
     assert out["mode"] == "counter_killed"
     assert seen_attack_payloads and 1000 <= seen_attack_payloads[0]["timeout"] <= 3000
+
+    attack_times_out = True
+    env = CombatEnv(_AttackBot())
+    monkeypatch.setattr(env, "flee", lambda *_args, **_kwargs: {"ok": True, "mode": "flee"})
+    out = ctrl.on_encounter(env, {"source": "pre_hurt_melee", "primary_entity_id": 5, "primary_type": "zombie"})
+    assert out["mode"] == "cover_or_flee"
+    assert {"action": "attack_timeout_flee", "ok": True} in out["actions"]
 
     # 2) ReadTimeout during run_tool_with_reflex preemption emits /stop, posture {}, and returns replan receipt
     stop_calls: list[str] = []
