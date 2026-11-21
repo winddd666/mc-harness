@@ -1974,6 +1974,8 @@ class CombatEnv:
 
         # 3. Move to shore target (plus shoreline lip jump) or swim up and away from threat.
         if shore_target is not None:
+            shore_dist = math.hypot(shore_target[0] - start_x, shore_target[2] - start_z)
+            contested_short_crossing = (has_threat or shield_target_id is not None) and shore_dist <= 5.0
             try:
                 syaw, _ = aim_yaw_pitch(pos0, shore_target)
                 self.bot.call("look", {"yaw": syaw, "pitch": -10.0})
@@ -1987,15 +1989,16 @@ class CombatEnv:
                         "y": shore_target[1],
                         "z": shore_target[2],
                         "range": 0.6,
-                        "timeout": 4200,
+                        "timeout": 1800 if contested_short_crossing else 4200,
                         "stop_on": ["death"],
                     },
+                    **({"timeout_s": 2.4, "allow_reauth": False} if contested_short_crossing else {}),
                 )
                 actions.append("move_to_shore")
             except (ApiError, httpx.HTTPError) as err:
                 actions.append("move_to_shore_failed")
                 if isinstance(err, httpx.HTTPError):
-                    self._best_effort_stop()
+                    self._best_effort_stop(timeout_s=0.5 if contested_short_crossing else None)
 
             st_mid = self._safe_status(st0)
             interruption = interrupted_water_escape(st_mid)

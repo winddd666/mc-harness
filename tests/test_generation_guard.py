@@ -5581,6 +5581,46 @@ def test_flooded_cave_escape_uses_local_water_level(terrain):
         assert result["ok"] is True and result["in_water"] is False
 
 
+@pytest.mark.parametrize("under_attack", [False, True])
+def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attack):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {"pos": [10989.2, 62.7, -10987.8], "in_water": True, "on_ground": False,
+              "alive": True, "ready": True}
+    ledge = [10992, 62, -10985]
+    motions = []
+
+    class ShoreBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": ledge}]}
+            if action == "get_block":
+                return {"name": "grass_block" if body["pos"] == ledge else "air"}
+            if action == "move_to":
+                motions.append("move_to")
+                assert body["timeout"] == (1800 if under_attack else 4200)
+                if under_attack:
+                    assert kwargs["timeout_s"] == 2.4 and kwargs["allow_reauth"] is False
+                raise httpx.ReadTimeout("shore pathfinder did not settle")
+            if action == "stop" or (action == "control" and body == {"wait": False}):
+                if under_attack:
+                    assert kwargs["timeout_s"] == 0.5 and kwargs["allow_reauth"] is False
+            if action == "control" and body.get("forward"):
+                motions.append("jump")
+                assert body["jump"] is True
+                status.update(pos=[10992.5, 63.0, -10984.5], in_water=False, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(ShoreBot()).escape_deep_water_to_shore(shield_target_id=44 if under_attack else None)
+
+    assert motions == ["move_to", "jump"]
+    assert result["ok"] is True and result["in_water"] is False
+    assert result["actions"] == ["move_to_shore_failed", "shore_lip_jump"]
+
+
 @pytest.mark.parametrize("landing", ["grounded", "airborne", "in_water"])
 def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
     from mc_agent.skills.combat_env import CombatEnv
