@@ -615,6 +615,30 @@ class CombatEnv:
             "candidates": candidates,
         }
 
+    def can_remove_footing(self, pos: Sequence[float], target: Sequence[int]) -> bool:
+        """Allow ordinary digs and check the landing for a dig through the current floor."""
+        x, y, z = pos[:3]
+        tx, ty, tz = target[:3]
+        columns = _hitbox_columns(x, z)
+        if ty != math.floor(y - 0.01) or (tx, tz) not in columns:
+            return True
+
+        for hx, hz in columns:
+            if (hx, hz) != (tx, tz):
+                floor = self._get_block_name(hx, ty, hz, strict=True)
+                if floor and floor not in HAZARD_BLOCK_TYPES and _is_solid_ground(floor):
+                    return True
+
+        for depth in range(1, 4):
+            floor = self._get_block_name(tx, ty - depth, tz, strict=True)
+            if not floor or floor in HAZARD_BLOCK_TYPES:
+                return False
+            if _is_solid_ground(floor):
+                return True
+            if not _is_passable(floor):
+                return False
+        return False
+
     def probe_retreat(
         self, origin: Sequence[float], yaw: float, dist: float, *, cross_magma: bool = False,
     ) -> tuple[int, bool] | None:

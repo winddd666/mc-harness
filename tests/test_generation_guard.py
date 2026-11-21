@@ -5719,6 +5719,46 @@ def test_bug072_real_flee_entry_accepts_the_mining_sessions_httpx_timeout(monkey
     assert final.connect <= 0.5 and final.write <= 0.5 and final.pool <= 0.5
 
 
+@pytest.mark.parametrize("terrain", ["deep_drop", "shallow_drop", "lava", "side_dig"])
+def test_explicit_dig_checks_the_landing_before_removing_support(terrain):
+    from mc_agent.harness.mc_tools import McToolset
+
+    target = [2015 if terrain == "side_dig" else 2014, 70, 1882]
+    digs = []
+    probes = []
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [2014.5, 71.0, 1882.5], "on_ground": True, "ready": True, "alive": True}
+            if action == "get_block":
+                probes.append(body["pos"])
+                y = body["pos"][1]
+                if y == 69 and terrain == "lava":
+                    return {"name": "lava"}
+                if y == 68 and terrain == "shallow_drop":
+                    return {"name": "netherrack"}
+                return {"name": "netherrack" if y >= 70 else "air"}
+            if action == "dig":
+                digs.append(body["pos"])
+            return {"ok": True}
+
+    bot = ShaftBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    toolset = McToolset(bot)
+
+    result = json.loads(guard.run_tool_with_reflex("mc_dig", lambda: toolset.mc_dig(*target)))
+
+    if terrain in {"deep_drop", "lava"}:
+        assert result["ok"] is False and result["requires_replan"] is True
+        assert result["error"]["code"] == "unsafe_landing"
+        assert digs == []
+    else:
+        assert result["ok"] is True and digs == [target]
+    if terrain == "side_dig":
+        assert probes == [target]
+
+
 @pytest.mark.parametrize("terrain", ["wall", "unknown", "drifted_during_probe", "missed_landing"])
 def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing(terrain):
     from mc_agent.skills.combat_env import CombatEnv

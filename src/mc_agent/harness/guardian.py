@@ -133,6 +133,10 @@ class _UnsafeFleeExit(BaseException):
     """Unwind an explicit retreat before an unsupported ground movement."""
 
 
+class _UnsafeSupportDig(BaseException):
+    """Unwind an explicit dig that would remove footing above an unsafe drop."""
+
+
 class _GuardSession:
     def __init__(
         self,
@@ -1876,6 +1880,7 @@ class GenerationGuard:
         watch_hot_floor: bool = False,
         check_flee_exit: bool = False,
         watch_attack_water: bool = False,
+        check_support_dig: bool = False,
     ):
         """Intercept threats during actor macros, or watch only water danger during an attack."""
         orig_call = getattr(self.raw_bot, "call", None)
@@ -2059,6 +2064,12 @@ class GenerationGuard:
                 return actor_call(path, body, **kwargs)
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
+            if check_support_dig and clean_path == "dig" and isinstance(body, dict):
+                unsafe_dig = self._is_support_dig_unsafe(body.get("pos"))
+                if pending_trigger:
+                    raise ReflexPreempted(pending_trigger[0])
+                if unsafe_dig:
+                    raise _UnsafeSupportDig
             unstick_before = None
             if (
                 check_unstick_exit and clean_path == "control" and isinstance(body, dict)
@@ -2399,6 +2410,29 @@ class GenerationGuard:
         finally:
             self._in_reflex = False
 
+    def _is_support_dig_unsafe(self, target: Any) -> bool:
+        if not isinstance(target, (list, tuple)) or len(target) != 3 or not all(isinstance(v, int) for v in target):
+            return False
+        try:
+            status = self.bot.call("status", method="GET", timeout_s=0.6)
+        except (ApiError, httpx.HTTPError):
+            return False
+        pos = status.get("pos")
+        if (
+            not isinstance(pos, (list, tuple)) or len(pos) < 3
+            or status.get("on_ground") is not True or status.get("ready") is False or status.get("alive") is False
+        ):
+            return False
+
+        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.0)
+        try:
+            if CombatEnv(probe_bot).can_remove_footing(pos, target):
+                return False
+        except _RecoveryBudgetExceeded:
+            pass
+        self.events.emit("guardian.support_dig_blocked", target=list(target), pos=pos)
+        return True
+
     def run_tool_with_reflex(self, tool_name: str, invoke_fn: Callable[[], str]) -> str:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
         is_attack = tool_name == "mc_attack"
@@ -2425,11 +2459,18 @@ class GenerationGuard:
                 watch_hot_floor=tool_name in {"mc_skill_mine_dfs", "mc_skill_staircase"},
                 check_flee_exit=is_flee,
                 watch_attack_water=is_attack,
+                check_support_dig=tool_name == "mc_dig",
             ):
                 result = invoke_fn()
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _RecoveryBudgetExceeded
                 return result
+        except _UnsafeSupportDig:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {"code": "unsafe_landing", "message": "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。"},
+            }, ensure_ascii=False)
         except (_UnsafeFleeExit, _UnsafeUnstickExit):
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
             recovery = self._retreat_after_unsafe_exit(deadline)
