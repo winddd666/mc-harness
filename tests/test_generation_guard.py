@@ -1244,6 +1244,51 @@ def test_bug_009_stationary_failed_creeper_retreat_only_cancels_again_on_change(
     assert len(attempts) == 3
 
 
+@pytest.mark.parametrize("change", ["stationary", "drifted", "hurt", "landed"])
+def test_bug_009_stationary_lava_escape_keeps_retrying_without_duplicate_cancel(monkeypatch, change):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [3567.0, 64.6, 1790.3], "health": 20, "food": 20, "dimension": "the_nether",
+        "in_lava": True, "on_ground": False, "ready": True, "alive": True, "last_death": {"t": 10},
+    }
+    hurts = []
+    escapes = []
+
+    class NetherBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [event for event in hurts if event["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def escape(**_kwargs):
+        escapes.append(True)
+        if len(escapes) == 2 and change == "drifted":
+            status["pos"] = [3568, 64.6, 1790.3]
+        if len(escapes) == 2 and change == "hurt":
+            status["health"] = 18
+            hurts.append({"seq": 1, "type": "hurt", "source": "lava"})
+        if len(escapes) == 2 and change == "landed":
+            status.update(in_lava=False, on_ground=True)
+        return {"ok": not status["in_lava"], "in_lava": status["in_lava"], "pos_after": status["pos"]}
+
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+    assert guard.poll()["requires_replan"] is True
+    clock[0] += 2.1
+    result = guard.poll()
+    assert result["requires_replan"] is (change != "stationary")
+    assert len(escapes) == 2
+    if change == "stationary":
+        clock[0] += 8.0
+        assert guard.poll()["requires_replan"] is True
+
+
 @pytest.mark.parametrize("after_kill", ["stable", "hurt", "moved", "shooter", "death", "unverified"])
 def test_bug_009_resolved_melee_warning_keeps_generation_only_when_stable(monkeypatch, after_kill):
     spider = {"id": 4614512, "name": "spider", "dist": 2.7, "pos": [3.2, 64, 0.5]}

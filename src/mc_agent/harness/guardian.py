@@ -302,6 +302,7 @@ class GenerationGuard:
         self._pre_hurt_suppress_until: float = float("-inf")
         self._pre_hurt_target_cooldown: dict[str, float] = {}
         self._last_cornered_creeper: tuple[int, tuple[float, ...], float, float] | None = None
+        self._last_stalled_lava: tuple[tuple[float, ...], tuple[Any, ...], float] | None = None
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
         self._last_ranged_hurt_at = float("-inf")
@@ -754,10 +755,12 @@ class GenerationGuard:
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
                     self._last_cornered_creeper = None
+                    self._last_stalled_lava = None
                     self._blocked_bunker = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     self._last_cornered_creeper = None
+                    self._last_stalled_lava = None
                     source = str(event.get("source") or "").strip().lower()
                     if source in RANGED_HURT_SOURCES:
                         self._last_ranged_hurt_at = now
@@ -1206,6 +1209,8 @@ class GenerationGuard:
                 in_lava = CombatEnv(probe_bot)._is_airborne_above_lava(status, start_pos=status["pos"])
             except _RecoveryBudgetExceeded:
                 pass
+        if not in_lava and status.get("on_ground") is True:
+            self._last_stalled_lava = None
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava
@@ -2123,7 +2128,42 @@ class GenerationGuard:
                 replan = False
             elif reasons == ["pre_hurt_melee"] and self._resolved_melee_warning(pre_trigger, status, post_status, actions):
                 replan = False
+        if reasons == ["in_lava"] and post_events_verified and not fresh:
+            if self._repeat_stalled_lava_escape(status, post_status, actions):
+                replan = False
+        else:
+            self._last_stalled_lava = None
         return self._incident(post_status, reasons, actions, fresh, requires_replan=replan)
+
+    def _repeat_stalled_lava_escape(
+        self, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
+    ) -> bool:
+        attempt = actions[0] if len(actions) == 1 else {}
+        result = attempt.get("result") or {}
+        start, end = before.get("pos"), after.get("pos")
+        health = after.get("health")
+        keys = ("dimension", "last_death", "health", "on_fire")
+        state = tuple(after.get(key) for key in keys)
+
+        def same_rim(a: tuple[float, ...] | list[float], b: tuple[float, ...] | list[float]) -> bool:
+            return abs(a[1] - b[1]) <= 0.9 and math.hypot(a[0] - b[0], a[2] - b[2]) <= 0.35
+
+        if (
+            attempt.get("action") != "escape_lava" or attempt.get("ok") or result.get("respawned")
+            or result.get("reason") not in {None, "lava_landing_unconfirmed"}
+            or not (after.get("in_lava") or (after.get("on_ground") is False and result.get("airborne_above_lava")))
+            or after.get("ready") is not True or after.get("alive") is not True or after.get("busy")
+            or not isinstance(health, (int, float)) or health < 16.0 or state != tuple(before.get(key) for key in keys)
+            or not start or not end or not same_rim(start, end)
+        ):
+            self._last_stalled_lava = None
+            return False
+        previous = self._last_stalled_lava
+        now = time.monotonic()
+        if previous and previous[1] == state and now - previous[2] < 10.0 and same_rim(previous[0], end):
+            return True
+        self._last_stalled_lava = (tuple(end[:3]), state, now)
+        return False
 
     def _resolved_melee_warning(
         self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
@@ -3588,6 +3628,8 @@ class GenerationGuard:
             note = "已复查苦力怕威胁，继续当前生成。"
         elif "pre_hurt_melee" in reasons:
             note = "近战威胁已清除，复查无新险情，继续当前生成。"
+        elif "in_lava" in reasons:
+            note = "仍在原处尝试脱离岩浆，未观察到新伤害，继续当前生成。"
         elif "hot_floor" in reasons:
             note = "已潜行避开岩浆块伤害，未打断当前生成。"
         else:
