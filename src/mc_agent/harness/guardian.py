@@ -3523,7 +3523,7 @@ class GenerationGuard:
                     nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
                     drowned_during_tool = nh_pre_name == "drowned" and (
                         (interrupted_name == "mc_attack" and nh_pre_dist <= self.ATTACK_WATER_THREAT_RANGE)
-                        or (interrupted_name == "mc_skill_scout_surface" and nh_pre_dist <= 6.0)
+                        or (interrupted_name in {"mc_move_to", "mc_skill_scout_surface"} and nh_pre_dist <= 6.0)
                     )
                     if hurt_pre_water:
                         self._water_hurt_streak += 1

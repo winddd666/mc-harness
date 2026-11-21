@@ -9262,7 +9262,7 @@ def test_water_boundary_avoids_a_shore_path_that_crosses_a_creeper(monkeypatch):
     assert note is not None and "登岸" in note
 
 
-@pytest.mark.parametrize("entry", ["poll", "interrupted_attack"])
+@pytest.mark.parametrize("entry", ["poll", "mc_attack", "mc_move_to"])
 def test_nearby_drowned_sends_water_recovery_directly_to_shore(monkeypatch, entry):
     drowned = {"id": 44, "name": "drowned", "dist": 4.7}
     drowned_pos = [9266.3, 61, -11355]
@@ -9307,8 +9307,9 @@ def test_nearby_drowned_sends_water_recovery_directly_to_shore(monkeypatch, entr
         assert incident["actions"][-1]["action"] == "escape_to_shore"
     else:
         receipt = guard.handle_preemption({
-            "source": "boundary_threat", "primary_entity_id": 44, "primary_type": "drowned",
-        }, interrupted_name="mc_attack")
+            "source": "tool_interrupted_hurt" if entry == "mc_move_to" else "boundary_threat",
+            "primary_entity_id": 44, "primary_type": "drowned",
+        }, interrupted_name=entry)
         assert receipt["reflex_mode"] == "water_surface" and receipt["status_after"]["on_ground"]
     assert actions == ["shield", "shore"]
 
