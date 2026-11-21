@@ -1829,6 +1829,7 @@ class CombatEnv:
         allow_shaft_seal: bool = True,
         wait_for_ground: bool = False,
         other_shooters: Sequence[Sequence[float]] = (),
+        use_nearest_hostile: bool = True,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
         def respawned_since(before: dict[str, Any], after: dict[str, Any]) -> bool:
@@ -1882,7 +1883,7 @@ class CombatEnv:
             return {"ok": False, "mode": "flee", "reason": "not_ready", "moved_dist": 0.0, "pos_after": pos0}
         if st0.get("in_lava") or entered_water or st0.get("on_ground") is False:
             return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0, "pos_after": pos0}
-        if threat_pos is None:
+        if threat_pos is None and use_nearest_hostile:
             nh = st0.get("nearest_hostile")
             if isinstance(nh, dict) and isinstance(nh.get("pos"), list):
                 threat_pos = nh["pos"]

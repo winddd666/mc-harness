@@ -4531,6 +4531,46 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
             assert calls == [(primary["pos"], True, [secondary["pos"]])]
 
 
+@pytest.mark.parametrize("nearest", ["attacker", "other_mob", "scan_timeout"])
+def test_nether_melee_retreat_resolves_the_confirmed_attacker_without_position(monkeypatch, nearest):
+    attacker = {"id": 4580454, "name": "enderman", "dist": 1.1}
+    attacker_pos = [3517.2, 60, 1781.9]
+    blaze = {"id": 82, "name": "blaze", "dist": 0.9, "pos": [3515.2, 60, 1781.9]}
+    status = {
+        "pos": [3516.1, 60, 1781.9], "health": 6.1, "food": 17, "dimension": "the_nether",
+        "ready": True, "alive": True, "on_ground": True, "blocking": True,
+        "nearest_hostile": attacker if nearest == "attacker" else blaze,
+    }
+    retreats = []
+
+    class NetherBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hits = [{"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": attacker}]
+                return {"events": [] if kwargs["params"]["since"] else hits}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                if nearest == "scan_timeout":
+                    raise httpx.ReadTimeout("attacker lookup timed out")
+                return {"entities": [blaze, {**attacker, "pos": attacker_pos}]}
+            return {"ok": True}
+
+    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def flee(threat_pos, *, wait_for_ground, use_nearest_hostile=True):
+        assert wait_for_ground
+        assert use_nearest_hostile is (nearest != "scan_timeout")
+        retreats.append(threat_pos)
+        return {"ok": True, "mode": "flee"}
+
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    guard.poll()
+    assert retreats == [None if nearest == "scan_timeout" else attacker_pos]
+
+
 @pytest.mark.parametrize("shooters", ["visible", "timeout", "melee_only"])
 def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, shooters):
     melee = {"id": 44, "name": "zombie", "dist": 2.0, "pos": [-2, 72, 0]}

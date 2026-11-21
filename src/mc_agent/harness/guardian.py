@@ -540,15 +540,21 @@ class GenerationGuard:
         )
         if "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
             nh_name, _, nh_id, nh_pos = self._extract_hostile_info(status)
-            pos = attacker.get("pos") if isinstance(attacker, dict) else None
-            if not pos:
-                pos = nh_pos
             now = time.monotonic()
             recent_melee = now - self._last_melee_hurt_at < 4.0
             mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
             burning_blaze = "nether" in dimension and ranged and status.get("on_fire") and nh_name == "blaze"
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
+            resolve_melee = (
+                "nether" in dimension and low_health and recent_melee and not ranged and not mixed_hurt
+                and isinstance(attacker_id, int)
+            )
+            pos = attacker.get("pos") if isinstance(attacker, dict) else None
+            if not pos and (not resolve_melee or nh_id == attacker_id):
+                pos = nh_pos
+            if not pos and resolve_melee:
+                pos = self._find_hostile_position(attacker_id, "", timeout_s=0.6)
             other_shooters = []
             check_blaze_cover = False
             if (
@@ -597,6 +603,7 @@ class GenerationGuard:
             return self.combat_env.flee(
                 pos, wait_for_ground=True,
                 **({"other_shooters": other_shooters} if other_shooters else {}),
+                **({"use_nearest_hostile": False} if resolve_melee and pos is None else {}),
             )
         result = self._run_recovery_macro(
             status,
