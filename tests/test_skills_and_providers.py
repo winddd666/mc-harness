@@ -2716,6 +2716,37 @@ def test_surface_scout_continues_and_scans_until_target(target, segments) -> Non
         assert match["observer_biome"] == "plains"
 
 
+@pytest.mark.parametrize("vector,direction", [
+    ([1, 0], "east"), ([1, 1], "southeast"), ([-0.1, 0.8], "south"),
+    ([-0.6, 0.5], "southwest"), ([-1, 0], "west"), ([-1, -1], "northwest"),
+    ([0, -1], "north"), ([0.6, -0.5], "northeast"),
+    ([0, 0], None), (None, None), ([True, 1], None),
+])
+def test_ender_eye_reports_scout_direction_from_observed_vector(vector, direction) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    throw = {"thrown": True, "projectile": "eye_of_ender", "bearing_deg": 6}
+    if vector is not None:
+        throw["eye_vector"] = vector
+
+    def handle(request):
+        assert request.url.path.endswith("/use_item")
+        assert json.loads(request.content) == {"item": "minecraft:ender_eye"}
+        return httpx.Response(200, json={"ok": True, "result": throw})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        receipt = json.loads(McToolset(bot).mc_use_item("minecraft:ender_eye"))
+
+    assert receipt["ok"] is True
+    result = receipt["result"]
+    assert result["scout_direction"] == direction
+    assert all(result[key] == value for key, value in throw.items())
+    if direction is None:
+        assert "重新测向" in result["scout_hint"]
+    else:
+        assert f"mc_skill_scout_surface(direction='{direction}')" in result["scout_hint"]
+
+
 @pytest.mark.parametrize("hazard,target", [("lava", "nether_bricks"), ("magma_block", "blaze"), ("cave_air", "nether_bricks")])
 def test_nether_scout_detours_unsafe_floor_and_stops_at_fortress_evidence(hazard, target) -> None:
     from mc_agent.harness.geofence import VoidGeofence

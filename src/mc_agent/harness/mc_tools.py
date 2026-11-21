@@ -28,6 +28,7 @@ from ..skills.library import (
     BLOCK_MIN_PICKAXE_TIER,
     LOG_TYPES,
     NETHER_STEM_TYPES,
+    SURFACE_SCOUT_DIRECTIONS,
     TABLE_RECIPES,
     VILLAGE_LANDMARK_BLOCKS,
     VILLAGE_SURVEY_CLUTTER,
@@ -1887,7 +1888,31 @@ class McToolset:
             payload["target"] = {"pos": [x, y, z]}
         if ms is not None:
             payload["ms"] = max(50, min(10000, int(ms)))
-        return self._call_json("use_item", payload)
+        raw = self._call_json("use_item", payload)
+        if resolve_item_alias(item) != "ender_eye":
+            return raw
+
+        receipt = json.loads(raw)
+        result = receipt.get("result")
+        if receipt.get("ok") is not True or not isinstance(result, dict) or result.get("thrown") is not True:
+            return raw
+
+        vector = result.get("eye_vector")
+        direction = None
+        if isinstance(vector, list) and len(vector) == 2 and all(
+            type(value) in (int, float) and -math.inf < value < math.inf for value in vector
+        ):
+            dx, dz = vector
+            scale = max(abs(dx), abs(dz))
+            if scale:
+                sector = math.floor((math.atan2(dz / scale, dx / scale) + math.pi / 8) / (math.pi / 4))
+                direction = SURFACE_SCOUT_DIRECTIONS[sector % len(SURFACE_SCOUT_DIRECTIONS)]
+        result["scout_direction"] = direction
+        result["scout_hint"] = (
+            f"可直接调用 mc_skill_scout_surface(direction='{direction}')。位移后请重新测向，绕障改向后尤其需要复测。"
+            if direction else "本次掷眼没有获得有效的水平向量。请在开阔处重新测向后再决定方向。"
+        )
+        return json.dumps(receipt, ensure_ascii=False)
 
     def mc_attack(
         self,
