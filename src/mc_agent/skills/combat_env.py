@@ -2128,6 +2128,26 @@ class CombatEnv:
                 actions.append("face_water_attacker")
             except (ApiError, httpx.HTTPError):
                 pass
+        if (
+            shore_target is not None and not still_wet and st_end.get("on_ground") is False
+            and not st_end.get("in_lava") and math.dist(pos_end[:3], shore_target) <= 0.6
+        ):
+            # The landing move can finish inside its goal radius one physics tick before contact.
+            time.sleep(0.1)
+            try:
+                st_end = self.bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
+            except (ApiError, httpx.HTTPError):
+                pass
+            interruption = interrupted_water_escape(st_end)
+            if interruption is not None:
+                return interruption
+            pos_end = st_end.get("pos") or pos_end
+            still_wet = bool(st_end.get("in_water"))
+            if still_wet:
+                try:
+                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": True})
+                except ApiError:
+                    pass
         landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")
         return {
             "ok": not still_wet and landed,
