@@ -2244,7 +2244,7 @@ class CombatEnv:
         pos = status.get("pos")
         if (
             pos and status.get("on_ground") is True and status.get("ready") is True and status.get("alive") is True
-            and not status.get("in_water") and not status.get("in_lava")
+            and not status.get("in_water") and not status.get("submerged") and not status.get("in_lava")
         ):
             x, y, z = map(math.floor, pos[:3])
             self._last_dry_bank = (
