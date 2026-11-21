@@ -11092,3 +11092,49 @@ def test_staircase_preempts_for_fresh_suffocation_without_a_nearby_mob(monkeypat
         assert continued == []
         assert result["reflex_mode"] == ("life_unavailable" if cause == "respawned" else "unstick_in_wall")
         assert unstuck == ([] if cause == "respawned" else [{"t": 1}])
+
+
+@pytest.mark.parametrize("mode", ["cover", "bunker"])
+def test_subcortical_recovery_macros_share_the_combat_transport_deadline(monkeypatch, mode):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {"pos": [0.5, 74, 0.5], "dimension": "overworld", "ready": True, "alive": True, "on_ground": True}
+    calls = []
+    events = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "dig":
+                calls.append(kwargs["timeout_s"])
+                clock[0] += kwargs["timeout_s"]
+                return {"ok": True}
+            return {"ok": True}
+
+    class SurvivalRecovery:
+        def on_encounter(self, env, _trigger):
+            if mode == "cover":
+                env.build_tactical("cover_pocket")
+            else:
+                env.skills.dig_safety_bunker(urgent=True)
+            return {"handled": True, "mode": "covered", "actions": [], "status_after": dict(status)}
+
+    def recovery(skills, **_kwargs):
+        return skills.bot.call("dig", {"pos": [0, 75, 0]}, timeout_s=30.0)
+
+    monkeypatch.setattr(MacroSkills, "dig_cover_pocket", recovery)
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", recovery)
+    raw_bot = CaveBot()
+    skills = MacroSkills(raw_bot)
+    guard = GenerationGuard(raw_bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
+    guard.combat_slot.register(SurvivalRecovery())
+
+    outcome = guard._run_subcortical_combat({"source": "pre_hurt_melee"})
+
+    assert outcome["reason"] == "time_budget"
+    budget_event, = [event for event in events if event["type"] == "guardian.combat_budget_exceeded"]
+    assert budget_event["endpoint"] == "dig"
+    assert calls == [7.5]
+    assert clock[0] <= 1009.0
+    assert guard.combat_env.skills is skills and skills.bot is raw_bot

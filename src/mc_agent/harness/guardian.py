@@ -464,8 +464,14 @@ class GenerationGuard:
             return {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
 
     def _run_subcortical_combat(self, trigger: ThreatTrigger) -> dict[str, Any]:
+        skills = self.combat_env.skills
         try:
             with self.bot.limit_until(time.monotonic() + SUBCORTICAL_COMBAT_BUDGET_S):
+                if isinstance(skills, MacroSkills):
+                    # Keep shared terrain records while binding the macro's calls to this deadline.
+                    scoped_skills = copy(skills)
+                    scoped_skills.bot = self.bot
+                    self.combat_env.skills = scoped_skills
                 return self.combat_slot.handle(self.combat_env, trigger)
         except _RecoveryBudgetExceeded as error:
             # The combat deadline can interrupt the slot's own exit cleanup.
@@ -505,6 +511,8 @@ class GenerationGuard:
                 "reason": "time_budget", "requires_replan": True,
                 "summary": "战斗反射达到时限，已尝试停止挂起动作",
             }
+        finally:
+            self.combat_env.skills = skills
 
     def _clear_contact_fire(self, pos: list[float] | tuple[float, ...], *, sneaking: bool = False) -> dict[str, Any]:
         try:
