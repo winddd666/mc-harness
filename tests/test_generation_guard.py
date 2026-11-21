@@ -10190,15 +10190,18 @@ def test_repeated_magma_damage_after_successful_sneak_seeks_safe_ground(monkeypa
 
 
 @pytest.mark.parametrize("floor", ["magma_block", "netherrack"])
-def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch, floor):
+@pytest.mark.parametrize(("dimension", "tool", "shooter"), [
+    ("the_nether", "mc_skill_staircase", "blaze"), ("overworld", "pre_ensure", "skeleton"),
+])
+def test_critical_tool_preemption_checks_floor_before_combat(monkeypatch, floor, dimension, tool, shooter):
     status = {
-        "pos": [2014.3, 76, 1890.2], "health": 0.25, "dimension": "the_nether",
+        "pos": [2014.3, 76, 1890.2], "health": 0.25, "dimension": dimension,
         "ready": True, "alive": True, "on_ground": True, "blocking": True, "sneaking": False,
     }
     postures = []
     combat = []
 
-    class NetherBot:
+    class HazardBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return dict(status)
@@ -10213,7 +10216,7 @@ def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch,
                 return {"sneaking": status["sneaking"]}
             pytest.fail(f"Unexpected action during critical preemption: {action}")
 
-    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard = GenerationGuard(HazardBot(), EventSink(lambda _: None), checkpoint=lambda: None)
 
     def respond(env, trigger):
         combat.append(trigger["primary_type"])
@@ -10221,7 +10224,7 @@ def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch,
 
     monkeypatch.setattr(guard.combat_slot, "handle", respond)
     receipt = guard.handle_preemption(
-        {"source": "tool_interrupted_hurt", "primary_type": "blaze"}, interrupted_name="mc_skill_staircase",
+        {"source": "tool_interrupted_hurt", "primary_type": shooter}, interrupted_name=tool,
     )
 
     if floor == "magma_block":
@@ -10230,7 +10233,7 @@ def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch,
         assert combat == []
     else:
         assert receipt["reflex_mode"] == "cover_or_flee"
-        assert postures == [] and combat == ["blaze"]
+        assert postures == [] and combat == [shooter]
 
 
 @pytest.mark.parametrize("landing_safe", [True, False])

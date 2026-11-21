@@ -3404,10 +3404,13 @@ class GenerationGuard:
                         )
             hot_floor_trigger = trigger.get("primary_type") == "hot_floor"
             hp_pre = st_pre.get("health")
+            dimension = str(st_pre.get("dimension") or "").lower().removeprefix("minecraft:")
             check_hot_floor = hot_floor_trigger or (
-                interrupted_name in HOT_FLOOR_WATCH_TOOLS
+                (
+                    (interrupted_name in HOT_FLOOR_WATCH_TOOLS and "nether" in dimension)
+                    or (interrupted_name == "pre_ensure" and dimension == "overworld")
+                )
                 and trigger.get("source") == "tool_interrupted_hurt"
-                and "nether" in str(st_pre.get("dimension") or "").lower()
                 and isinstance(hp_pre, (int, float)) and 0 < hp_pre <= 4.0
                 and self._needs_hot_floor_stance(st_pre, time.monotonic())
             )
