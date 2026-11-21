@@ -1042,6 +1042,44 @@ def test_death_during_combat_does_not_suppress_the_next_threat_at_spawn(monkeypa
     assert "pre_hurt_ranged" in second["reasons"]
 
 
+@pytest.mark.parametrize("combat_duration", [4.0, 6.0])
+def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch, combat_duration):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    zombie = {"id": 42, "name": "zombie", "pos": [2.0, 11, 0.5], "dist": 1.5}
+    status = {
+        "pos": [0.5, 11, 0.5], "health": 14.2, "food": 17, "on_ground": True,
+        "alive": True, "ready": True, "dimension": "overworld", "nearest_hostile": zombie,
+    }
+    meals = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "cooked_beef", "count": 3}]}
+            if action == "get_entities":
+                return {"entities": [zombie]}
+            if action == "attack":
+                clock[0] += combat_duration
+                status["nearest_hostile"] = None
+                return {"hits": 2, "killed": True}
+            if action == "use_item":
+                meals.append(body["item"])
+                clock[0] += 2.0
+                status["food"] = 20
+            return {"ok": True}
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    outcome = guard._run_subcortical_combat({
+        "source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie",
+    })
+
+    assert outcome["mode"] == "counter_killed"
+    assert meals == (["cooked_beef"] if combat_duration == 4.0 else [])
+
+
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
     """Reproduces glm_glm_3_village / hy4_hy_8_nether: ReadTimeout in subcortical_combat must /stop & not crash run."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController

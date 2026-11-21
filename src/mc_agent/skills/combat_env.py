@@ -3431,8 +3431,11 @@ class SubcorticalInstinctController:
             latched_guard = self._latch_shield_at_threat(env, survivor_id)
             action = "guard_surviving_shooter" if surviving_shooter else "guard_surviving_melee"
             actions.append({"action": action, "ok": latched_guard, "entity_id": survivor_id})
+        # Eating takes about two seconds. Leave room to confirm status and release controls.
+        food_start_deadline = deadline - 2.5
         if (
             not latched_guard
+            and time.monotonic() < food_start_deadline
             and st_post.get("ready", True)
             and st_post.get("alive") is not False
             and st_post.get("on_ground") is not False
@@ -3445,7 +3448,7 @@ class SubcorticalInstinctController:
         ):
             counts_now, _, _ = env._inventory_counts_and_shield()
             best_food = next((f for f in SAFE_FOOD_PRIORITY if counts_now.get(f, 0) > 0), None)
-            if best_food:
+            if best_food and time.monotonic() < food_start_deadline:
                 try:
                     env.bot.call("use_item", {"item": best_food})
                     actions.append({"action": "post_combat_eat", "item": best_food, "ok": True})
