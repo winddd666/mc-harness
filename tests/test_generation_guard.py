@@ -565,7 +565,8 @@ def test_harness_accepts_completion_when_goal_item_is_present():
     assert requests["n"] == 1
 
 
-def test_arrow_hit_digs_cover_pocket_instead_of_sprinting_away(monkeypatch):
+@pytest.mark.parametrize("health, distance", [(16.0, 9.0), (5.0, 9.0), (5.0, 1.6)])
+def test_arrow_hit_digs_cover_pocket_instead_of_sprinting_away(monkeypatch, health, distance):
     """Live s03: 6 arrows (20 -> 0 hp) while sprint-fleeing in a straight line down a cave."""
 
     class _ArrowSkills:
@@ -588,11 +589,11 @@ def test_arrow_hit_digs_cover_pocket_instead_of_sprinting_away(monkeypatch):
 
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                return {"pos": [0.5, 23.0, 0.5], "health": 16.0, "food": 20.0, "alive": True,
+                return {"pos": [0.5, 23.0, 0.5], "health": health, "food": 20.0, "alive": True,
                         "ready": True, "in_water": False, "on_ground": True,
-                        "nearest_hostile": {"name": "skeleton", "dist": 9.0}}
+                        "nearest_hostile": {"name": "pillager" if distance <= 3.5 else "skeleton", "dist": distance}}
             if action == "events":
-                return {"events": [{"seq": 1, "type": "hurt", "health": 16.0, "source": "arrow"}],
+                return {"events": [{"seq": 1, "type": "hurt", "health": health, "source": "arrow"}],
                         "last_seq": 1}
             if action == "inventory":
                 return {"items": [{"name": "cobblestone", "count": 40}], "offhand": {}}
@@ -604,8 +605,9 @@ def test_arrow_hit_digs_cover_pocket_instead_of_sprinting_away(monkeypatch):
     incident = guard.poll()
 
     assert incident is not None
-    assert [a["action"] for a in incident["actions"]] == ["dig_cover"]
-    assert incident["actions"][0]["ok"] is True
+    expected = "combat_or_flee" if health <= 10.0 and distance <= 3.5 else "dig_cover"
+    action, = incident["actions"]
+    assert action["action"] == expected and action["ok"] is True
 
 
 def test_arrow_hit_falls_back_to_flee_when_no_wall_for_cover():

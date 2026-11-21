@@ -1834,6 +1834,9 @@ class GenerationGuard:
                     att_name_r = str((att_obj or {}).get("name") or nh_name or "").removeprefix("minecraft:").strip().lower()
                     fresh_blast = hurt_src in {"fireball", "small_fireball", "wither_skull"}
                     skip_cover_for_blast = fresh_blast or att_name_r in {"blaze", "ghast"} or bool(status.get("on_fire"))
+                    close_unshielded_shooter = (
+                        not has_shield and hp_val <= LOW_HP_BUNKER_MAX and nh_name in RANGED_MOBS and nh_dist <= 3.5
+                    )
                     def cover_block(pos: Any) -> tuple[int, int, int] | None:
                         if isinstance(pos, (list, tuple)) and len(pos) >= 3:
                             return math.floor(float(pos[0])), math.floor(float(pos[1]) + 0.05), math.floor(float(pos[2]))
@@ -1868,6 +1871,7 @@ class GenerationGuard:
                     if (
                         status.get("on_ground") is not False
                         and not skip_cover_for_blast
+                        and not close_unshielded_shooter
                         and not same_spot_cover_ineffective
                         and not already_in_dug_cover
                         and not recent_cover_fail
@@ -1897,7 +1901,8 @@ class GenerationGuard:
                         cf = self._action(
                             "combat_or_flee",
                             lambda: self._defend_or_flee(
-                                status, attacker, counts, ranged=True, prefer_cover=not has_shield and hp_val <= LOW_HP_BUNKER_MAX,
+                                status, attacker, counts, ranged=True,
+                                prefer_cover=not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX,
                                 allow_stationary_cover=not fresh_blast,
                             ),
                         )
