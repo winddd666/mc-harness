@@ -2909,6 +2909,38 @@ class GenerationGuard:
             if isinstance(result, dict) and result.get("respawned"):
                 return {**result, "requires_replan": True, "pos_before": status.get("pos")}
             if recovery.get("ok") and isinstance(result, dict):
+                cover_deadline = min(now + 4.0, deadline)
+                if (
+                    allow_cover and ranged and dimension == "overworld" and not status.get("blocking")
+                    and isinstance(health, (int, float)) and 0 < health <= 10.0
+                    and time.monotonic() + 1.5 < cover_deadline
+                ):
+                    try:
+                        after = bot.call("status", method="GET", timeout_s=0.3, allow_reauth=False)
+                    except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+                        after = {}
+                    if after.get("alive") is False or any(
+                        after.get(key) is not None and after[key] != status.get(key)
+                        for key in ("last_death", "dimension")
+                    ):
+                        return {
+                            "ok": False, "mode": "respawned", "respawned": True, "requires_replan": True,
+                            "moved_dist": 0.0, "pos_before": status.get("pos"), "pos_after": after.get("pos"),
+                        }
+                    shooter, shooter_dist, shooter_id, _ = self._extract_hostile_info(after)
+                    hp = after.get("health")
+                    if (
+                        shooter in RANGED_MOBS and shooter_id is not None and shooter_dist <= 8.0
+                        and isinstance(hp, (int, float)) and 0 < hp <= 6.0 and after.get("pos")
+                        and after.get("ready") is True and after.get("alive") is not False and after.get("on_ground") is True
+                        and not any(after.get(key) for key in ("blocking", "in_water", "in_lava", "on_fire"))
+                        and all(after.get(key) == status.get(key) for key in ("last_death", "dimension"))
+                    ):
+                        cover, _, _ = self._cover_and_shooters_after_blocked_flee(
+                            after["pos"], shooter_id, min(cover_deadline, time.monotonic() + 2.25), allow_stationary=False,
+                        )
+                        if cover and (cover.get("ok") or cover.get("respawned")):
+                            return {**cover, "requires_replan": True, "pos_before": status.get("pos")}
                 if (
                     ranged and entity_id is not None and status.get("blocking")
                     and isinstance(health, (int, float)) and health <= LOW_HP_BUNKER_MAX

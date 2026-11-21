@@ -10439,6 +10439,55 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
     }[cover]
 
 
+@pytest.mark.parametrize("landing", ["covered", "exposed", "new_life", "shooter_gone", "healthy"])
+def test_blocked_flee_checks_cover_after_a_critical_unshielded_landing(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    shooter = {"id": 44, "name": "skeleton", "dist": 5.5, "pos": [0.5, 77, 6.0]}
+    origin = [0.5, 77, 0.5]
+    landing_pos = [0.5, 77, -2.0]
+    status = {"pos": origin, "dimension": "overworld", "health": 8.5, "on_ground": True,
+              "ready": True, "alive": True, "last_death": {"t": 1}, "nearest_hostile": shooter}
+    checks = []
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "get_entities":
+                return {"entities": [shooter]}
+            pytest.fail(f"Unexpected action during retreat: {action}")
+
+    def flee(_env, target, **_kwargs):
+        assert target == shooter["pos"]
+        checks.append("flee")
+        status.update(pos=landing_pos, health=8.5 if landing == "healthy" else 4.5,
+                      nearest_hostile=None if landing == "shooter_gone" else {**shooter, "dist": 8.0},
+                      last_death={"t": 2 if landing == "new_life" else 1})
+        return {"ok": True, "mode": "flee", "moved_dist": 2.5, "pos_after": landing_pos}
+
+    def cover(_env, target, *, other_shooters, allow_stationary):
+        assert target == shooter["pos"] and not other_shooters and not allow_stationary
+        checks.append("cover")
+        if landing == "covered":
+            return {"ok": True, "mode": "natural_cover", "pos_after": [-1.7, 77, -2.0]}
+        return None
+
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
+    bot = RidgeBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
+    )))
+
+    assert checks == (["flee", "cover"] if landing in {"covered", "exposed"} else ["flee"])
+    assert result["mode"] == {"covered": "natural_cover", "new_life": "respawned"}.get(landing, "flee")
+    assert result["ok"] is (landing != "new_life") and result["requires_replan"]
+
+
 @pytest.mark.parametrize("pressure", ["arrow", "stale_arrow", "melee_and_arrow", "exposed"])
 def test_unsafe_overworld_flee_checks_cover_when_critical_arrows_bypass_shield(monkeypatch, pressure):
     from mc_agent.skills.combat_env import CombatEnv
