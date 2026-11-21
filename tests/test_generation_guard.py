@@ -11187,3 +11187,50 @@ def test_repeated_arrow_hits_through_a_shield_prompt_cover_before_critical_healt
 
     assert cover_checks == ([(far["pos"], [near["pos"]], False)] if hits == 2 else [])
     assert incident["requires_replan"] is cover_found
+
+
+@pytest.mark.parametrize("landing", ["grounded", "water", "respawned", "still_airborne"])
+def test_shore_recovery_confirms_landing_when_the_generic_escape_already_left_water(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    bank = [0.5, 63, 0.5]
+    status = {
+        "pos": [0.5, 63.5, 0.5], "dimension": "overworld", "ready": True, "alive": True,
+        "in_water": False, "on_ground": False, "last_death": {"t": 1},
+    }
+    moves = []
+
+    class ShoreBot:
+        def status(self):
+            if clock[0] >= 1000.15 and not moves:
+                if landing == "grounded":
+                    status.update(pos=bank, on_ground=True)
+                elif landing == "water":
+                    status.update(pos=[0.5, 62, -1.0], in_water=True)
+                elif landing == "respawned":
+                    status.update(pos=[1.5, 65, 0.5], last_death={"t": 2}, on_ground=True)
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "move_to":
+                moves.append([body[key] for key in ("x", "y", "z")])
+                status.update(pos=bank, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    env = CombatEnv(ShoreBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_args, **_kwargs: bank)
+
+    outcome = env.escape_deep_water_to_shore()
+
+    assert 1000.15 <= clock[0] <= 1000.31
+    assert outcome["ok"] is (landing in {"grounded", "water"})
+    assert moves == ([bank] if landing == "water" else [])
+    if landing == "respawned":
+        assert outcome["mode"] == "respawned"
+    elif landing == "still_airborne":
+        assert outcome["mode"] == "shore_landing_unconfirmed"
