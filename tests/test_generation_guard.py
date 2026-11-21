@@ -4328,7 +4328,7 @@ def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch
             if action == "get_entities":
                 return {"entities": []}
             if action == "inventory":
-                return {"items": []}
+                return {"items": [{"name": "stone_sword", "count": 1}]}
             moves.append((action, kwargs["timeout_s"]))
             if action == "control":
                 if outcome == "time_budget":
@@ -4372,6 +4372,42 @@ def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch
     elif outcome == "time_budget":
         assert retreat["result"] == {"ok": False, "reason": "time_budget", "partial": True}
         assert moves[1:] == [("stop", 1.5)]
+
+
+def test_unarmed_melee_reflex_checks_footing_before_retreat(monkeypatch):
+    status = {
+        "pos": [0.5, 64.0, 0.5], "health": 14.0, "food": 20, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True,
+        "nearest_hostile": {"id": 42, "name": "zombie", "dist": 2.0, "pos": [0.5, 64.0, 2.5]},
+    }
+
+    class LavaRimBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack"}
+                return {"events": [hurt] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": [{"name": "stone_pickaxe", "count": 1}]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                name = "air" if y >= 64 else "stone" if (x, z) == (0, 0) else "lava"
+                return {"name": name}
+            if action == "find_blocks":
+                return {"blocks": []}
+            pytest.fail(f"Unexpected {action} on an unverified retreat route")
+
+    def unchecked_retreat(*args, **kwargs):
+        pytest.fail("The unarmed bot must check retreat footing before moving")
+
+    monkeypatch.setattr(MacroSkills, "_flee_hostiles", unchecked_retreat)
+    guard = GenerationGuard(LavaRimBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    retreat, = guard.poll()["actions"]
+
+    assert retreat["action"] == "combat_or_flee"
+    assert retreat["ok"] is False
+    assert retreat["result"]["reason"] == "no_safe_retreat"
 
 
 @pytest.mark.parametrize("after_first", ["close", "clear", "respawned"])

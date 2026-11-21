@@ -35,7 +35,7 @@ from ..skills.combat_env import (
     ThreatTrigger,
     aim_yaw_pitch,
 )
-from ..skills.library import MacroSkills
+from ..skills.library import MacroSkills, best_melee_weapon_in_inv
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
 
 # Hurt sources that mean "my body is embedded in a block", not "something is attacking me".
@@ -428,10 +428,14 @@ class GenerationGuard:
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
+        dimension = str(status.get("dimension") or "").lower().removeprefix("minecraft:")
         # The legacy macro cannot counter below 11 HP and falls through to an unchecked sprint-jump.
         low_health = isinstance(health, (int, float)) and health < 11.0
-        retreat_only = ranged or low_health
-        if "nether" in str(status.get("dimension") or "").lower() or (retreat_only and isinstance(skills, MacroSkills)):
+        retreat_only = ranged or low_health or (
+            dimension == "overworld" and isinstance(skills, MacroSkills)
+            and best_melee_weapon_in_inv(counts) is None and not self._inside_own_shaft()
+        )
+        if "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
             if not pos:
                 _, _, _, pos = self._extract_hostile_info(status)
