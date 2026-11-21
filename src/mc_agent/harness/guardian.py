@@ -1264,7 +1264,7 @@ class GenerationGuard:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget"}
 
-    def _protect_attack_on_hot_floor(self) -> str | None:
+    def _protect_action_on_hot_floor(self, *, is_attack: bool) -> str | None:
         if self._last_hot_floor_block is None:
             return None
         try:
@@ -1277,14 +1277,22 @@ class GenerationGuard:
             or self._hot_floor_block(status) != self._last_hot_floor_block
         ):
             return None
+        health = status.get("health")
+        if not is_attack and not (isinstance(health, (int, float)) and 0 < health <= 4.0):
+            return None
         self.combat_env.invalidate_block_cache()
         if not self.combat_env.is_on_hot_floor(status["pos"]):
             return None
-        step = self._action("hot_floor_exit_before_attack", lambda: self._step_off_hot_floor(status))
+        action = "hot_floor_exit_before_attack" if is_attack else "hot_floor_exit_before_move"
+        message = (
+            "脚下是岩浆块，请确认安全落脚后重新选择攻击目标。"
+            if is_attack else "脚下是岩浆块，请从有支撑的安全落脚点继续移动。"
+        )
+        step = self._action(action, lambda: self._step_off_hot_floor(status))
         return json.dumps({
             "ok": False,
             "requires_replan": True,
-            "error": {"code": "hot_floor", "message": "脚下是岩浆块，请确认安全落脚后重新选择攻击目标。"},
+            "error": {"code": "hot_floor", "message": message},
             "recovery": step,
         }, ensure_ascii=False)
 
@@ -3797,8 +3805,8 @@ class GenerationGuard:
     def run_tool_with_reflex(self, tool_name: str, invoke_fn: Callable[[], str]) -> str:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
         is_attack = tool_name == "mc_attack"
-        if is_attack and not self._in_reflex:
-            receipt = self._protect_attack_on_hot_floor()
+        if (is_attack or tool_name == "mc_move_to") and not self._in_reflex:
+            receipt = self._protect_action_on_hot_floor(is_attack=is_attack)
             if receipt is not None:
                 return receipt
         is_flee = tool_name == "mc_skill_flee"

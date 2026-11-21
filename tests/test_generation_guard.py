@@ -10271,6 +10271,44 @@ def test_critical_tool_preemption_checks_floor_before_combat(monkeypatch, floor,
         assert postures == [] and combat == [shooter]
 
 
+@pytest.mark.parametrize("floor", ["magma_block", "stone"])
+def test_critical_move_rechecks_recent_hot_floor_before_dispatch(monkeypatch, floor):
+    status = {
+        "pos": [6174.3, 66, 56.3], "health": 1.3, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "sneaking": True,
+    }
+    actions = []
+
+    class PlateauBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": floor}
+            if action == "move_to":
+                actions.append("move")
+                return {"ok": True}
+            pytest.fail(f"Unexpected action {action}")
+
+    bot = PlateauBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_hot_floor_block = guard._hot_floor_block(status)
+
+    def step_off(_status):
+        actions.append("checked_exit")
+        return {"ok": False, "reason": "no_safe_hot_floor_exit"}
+
+    monkeypatch.setattr(guard, "_step_off_hot_floor", step_off)
+    receipt = json.loads(guard.run_tool_with_reflex(
+        "mc_move_to", lambda: json.dumps(bot.call("move_to", {"x": 6170, "y": 66, "z": 50, "stop_on": ["death"]})),
+    ))
+    if floor == "magma_block":
+        assert actions == ["checked_exit"]
+        assert receipt["error"]["code"] == "hot_floor" and receipt["requires_replan"]
+    else:
+        assert actions == ["move"] and receipt["ok"]
+
+
 @pytest.mark.parametrize("landing_safe", [True, False])
 def test_hot_floor_guard_verifies_dry_landing_after_crouch_failure(landing_safe):
     status = {"pos": [0.5, 64, 0.5], "health": 17, "food": 20, "ready": True, "alive": True, "on_ground": True}
