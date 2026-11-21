@@ -2435,8 +2435,10 @@ class GenerationGuard:
                 moving = clean_path == "move_to" or (
                     watch_hot_floor and clean_path == "control" and isinstance(body, dict) and body.get("forward")
                 )
-                terrain_emergency = moving and trigger.get("primary_type") in {"lava", "hot_floor"}
-                if not caller_ignores_hurt or terrain_emergency:
+                movement_emergency = moving and (
+                    trigger.get("primary_type") in {"lava", "hot_floor"} or trigger.get("source") == "pre_hurt_creeper"
+                )
+                if not caller_ignores_hurt or movement_emergency:
                     raise ReflexPreempted(trigger) from None
 
             try:

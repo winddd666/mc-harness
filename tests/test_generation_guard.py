@@ -7952,6 +7952,50 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         assert not status.get("in_lava")
 
 
+@pytest.mark.parametrize("interrupted_error", [False, True])
+def test_close_creeper_preempts_movement_that_ignores_ordinary_hurt(monkeypatch, interrupted_error):
+    import threading
+
+    stopped = threading.Event()
+    creeper = {"id": 44, "name": "creeper", "dist": 4.0, "pos": [0.5, 64, 4.5]}
+    status = {
+        "pos": [0.5, 64, 0.5], "health": 20, "alive": True, "ready": True, "on_ground": True,
+        "nearest_hostile": creeper,
+    }
+    calls = []
+
+    class MovingBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "move_to":
+                calls.append("move_to")
+                assert body["stop_on"] == ["death"]
+                assert stopped.wait(2.0)
+                if interrupted_error:
+                    raise ApiError("interrupted", "movement stopped")
+            if action == "stop":
+                calls.append("stop")
+                stopped.set()
+            return {"ok": True}
+
+    bot = MovingBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def handle(_env, trigger):
+        assert trigger["source"] == "pre_hurt_creeper" and trigger["primary_entity_id"] == 44
+        calls.append("creeper_evade")
+        return {"handled": True, "mode": "creeper_evade", "status_after": dict(status)}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", handle)
+    result = json.loads(guard.run_tool_with_reflex(
+        "mc_move_to", lambda: json.dumps(bot.call("move_to", {"x": 10, "z": 10, "stop_on": ["death"]})),
+    ))
+
+    assert result["preempted_by_reflex"] and result["reflex_mode"] == "creeper_evade"
+    assert calls == ["move_to", "stop", "creeper_evade"]
+
+
 @pytest.mark.parametrize(("tool", "endpoint", "interrupted_error"), [
     ("mc_skill_mine_dfs", "dig", False), ("mc_skill_combat", "move_to", False),
     ("mc_move_to", "move_to", False), ("mc_move_to", "move_to", True),
