@@ -2733,23 +2733,28 @@ class GenerationGuard:
                 and isinstance(health, (int, float)) and 0 < health <= 4.0
                 and now - self._last_ranged_hurt_at < 8.0 and now - self._last_melee_hurt_at >= 4.0
             )
+            other_shooters = []
             if (
                 allow_cover and ranged and status.get("on_ground") is True and status.get("pos")
                 and (recent_nether_cover or critical_overworld_arrows)
             ):
                 cover_budget = 2.25 if critical_overworld_arrows else 1.25
-                cover = self._recheck_cover_after_blocked_flee(
+                cover, live_target, other_shooters = self._cover_and_shooters_after_blocked_flee(
                     status["pos"], entity_id, min(now + cover_budget, deadline),
                     allow_stationary=not (critical_overworld_arrows or self._low_health_burning_after_ranged_hit(status, now)),
                 )
                 if cover and (cover.get("ok") or cover.get("respawned")):
                     return {**cover, "requires_replan": True, "pos_before": status["pos"]}
+                threat_pos = live_target or threat_pos
             if threat_pos is None:
                 threat_pos = self._find_hostile_position(entity_id, name, session=bot)
             env = CombatEnv(bot, geofence=self.geofence)
             recovery = self._action(
                 "unsafe_exit_retreat",
-                lambda: env.flee(threat_pos, distance=8.0, allow_shaft_seal=False, wait_for_ground=ranged),
+                lambda: env.flee(
+                    threat_pos, distance=8.0, allow_shaft_seal=False, wait_for_ground=ranged,
+                    **({"other_shooters": other_shooters} if other_shooters else {}),
+                ),
                 raise_on_http_error=False,
             )
             result = recovery.get("result")
@@ -2777,29 +2782,31 @@ class GenerationGuard:
         except (ApiError, httpx.HTTPError):
             return None
 
-    def _recheck_cover_after_blocked_flee(
+    def _cover_and_shooters_after_blocked_flee(
         self, pos: list[float], target_id: int | None, deadline: float, *, allow_stationary: bool,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, Sequence[float] | None, list[Sequence[float]]]:
         bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        target = None
+        others = []
         try:
             entities = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
             shooters = ranged_retreat_positions(pos, entities.get("entities") or [], max_distance=16.0)
-            target = next((point for entity_id, point in shooters if entity_id == target_id), None)
-            if target_id is None or target is None:
-                return None
+            target = next((point for entity_id, point in shooters if target_id is not None and entity_id == target_id), None)
             others = [point for entity_id, point in shooters if entity_id != target_id]
+            if target is None:
+                return None, target, others
             cover = self._action(
                 "unsafe_exit_cover",
                 lambda: CombatEnv(bot, geofence=self.geofence).seek_natural_cover(
                     target, other_shooters=others, allow_stationary=allow_stationary,
                 ),
             )
-            return cover.get("result")
+            return cover.get("result"), target, others
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
-            return None
         except (ApiError, httpx.HTTPError):
-            return None
+            pass
+        return None, target, others
 
     def _verify_combat_step(self, body: dict[str, Any]) -> dict[str, Any]:
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.6)

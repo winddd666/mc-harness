@@ -9715,8 +9715,9 @@ def test_unsafe_overworld_flee_checks_cover_when_critical_arrows_bypass_shield(m
             return None
         return {"ok": True, "mode": "natural_cover", "moved_dist": 2.2, "pos_after": [2.7, 73, 0.5]}
 
-    def flee(_env, pos, **_kwargs):
+    def flee(_env, pos, **kwargs):
         checks.append("flee")
+        assert kwargs.get("other_shooters", []) == ([pillager["pos"]] if pressure == "exposed" else [])
         return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
 
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
