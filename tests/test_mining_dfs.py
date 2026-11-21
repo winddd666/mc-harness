@@ -3965,6 +3965,45 @@ def test_explore_rejoins_a_recorded_stair_far_from_its_collar(monkeypatch) -> No
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("lower_open", [True, False])
+def test_rejoin_prefers_a_nearby_route_below_the_current_height(monkeypatch, lower_open: bool) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=65)
+    with BotSession("tok", bot_username="PreferLowerJoin", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 65, -30), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        high = engine._create_node(
+            kind="switchback", anchor=(0, 29, 5), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, (0, 29, 5)]), branches=[],
+        )
+        low = engine._create_node(
+            kind="spine", anchor=(1, 16, 14), parent_id=high.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [high.anchor, (1, 16, 14)]), branches=[],
+        )
+        tip = engine._create_node(
+            kind="spine", anchor=(4, 16, 17), parent_id=low.node_id,
+            edge_from_parent=ShaftEdge("branch_leaf", "east", [low.anchor, (4, 16, 17)]), branches=[],
+        )
+        attempted = []
+
+        def move(cell, **kwargs):
+            attempted.append(cell)
+            return cell != low.anchor or lower_open
+
+        def walk(waypoints, **kwargs):
+            x, y, z = waypoints[-1]
+            world.pos = [x + 0.5, y, z + 0.5]
+            return True, None
+
+        monkeypatch.setattr(engine, "_move_exact", move)
+        monkeypatch.setattr(engine, "_walk_waypoints", walk)
+        result = engine._resume_shaft_tip(tip.node_id, min_hp_ref=[20.0])
+
+    assert result == (True, None) and engine.active_node_id == tip.node_id
+    assert attempted == ([low.anchor] if lower_open else [low.anchor, high.anchor])
+
+
 def test_blocked_spine_rejoin_tries_another_pending_node_at_depth(monkeypatch) -> None:
     from mc_agent.skills.mining_dfs import BranchSpec
 

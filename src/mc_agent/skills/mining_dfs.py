@@ -2037,6 +2037,25 @@ class MiningDFSEngine:
                 return True
         return False
 
+    def _nearby_node_without_ascent(
+        self, pos: tuple[int, int, int], goal_id: int,
+    ) -> ShaftNode | None:
+        candidates = sorted(self.nodes.values(), key=lambda node: math.dist(pos, node.anchor))
+        for candidate in candidates:
+            if math.dist(pos, candidate.anchor) > NODE_REJOIN_DISTANCE:
+                break
+            if candidate.anchor[1] > pos[1]:
+                continue
+            if candidate.node_id == goal_id:
+                return candidate
+            route = self._find_node_path(candidate.node_id, goal_id)
+            if route and all(
+                points and self.nodes[dest_id].anchor[1] <= pos[1] and all(pt[1] <= pos[1] for pt in points)
+                for points, _, dest_id in route
+            ):
+                return candidate
+        return None
+
     def _navigate_to_node(
         self,
         goal_node_id: int,
@@ -2132,7 +2151,15 @@ class MiningDFSEngine:
                 if d < best_near_d:
                     best_near_d = d
                     best_near_id = nid
-            if best_near_id is not None and best_near_d <= NODE_REJOIN_DISTANCE and (
+            lower_join = None
+            if (
+                best_near_id is not None
+                and self.nodes[best_near_id].anchor[1] > cur_pos[1] >= self.nodes[goal_node_id].anchor[1]
+            ):
+                lower_join = self._nearby_node_without_ascent(cur_pos, goal_node_id)
+            if lower_join is not None and self._move_exact(lower_join.anchor):
+                self.active_node_id = lower_join.node_id
+            elif best_near_id is not None and best_near_d <= NODE_REJOIN_DISTANCE and (
                 best_near_id == self.collar_node_id or best_near_d <= math.dist(cur_pos, anchor_now)
             ):
                 anchor = self.nodes[best_near_id].anchor
