@@ -936,7 +936,8 @@ def test_interrupted_tool_reports_combat_api_failure_and_rechecks_life(monkeypat
     assert (guard._ranged_combat_stance_until == float("-inf")) is respawned
 
 
-def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypatch):
+@pytest.mark.parametrize("slow_cleanup", [False, True])
+def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypatch, slow_cleanup):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     zombie = {"id": 42, "name": "zombie", "pos": [2.5, 64.0, 0.5], "dist": 2.0}
@@ -958,6 +959,15 @@ def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypa
             if action == "attack":
                 clock[0] += min(12.0, kwargs["timeout_s"])
                 raise httpx.ReadTimeout("combat request stalled")
+            if slow_cleanup and clock[0] >= 1007.5 and action in {"stop", "control", "posture"}:
+                timeout = kwargs["timeout_s"]
+                if isinstance(timeout, httpx.Timeout):
+                    # One closed keepalive can use another attempt after a 150 ms delay.
+                    duration = 2 * sum(timeout.as_dict().values()) + 0.15
+                else:
+                    duration = 4 * timeout
+                clock[0] += duration
+                raise httpx.ReadTimeout("cleanup request stalled")
             return {"ok": True}
 
     class StalledAttack:
@@ -965,7 +975,8 @@ def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypa
             assert trigger["source"] == "pre_hurt_melee"
             env.bot.call("attack", {"entity_id": 42}, timeout_s=20.0)
 
-    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    emitted = []
+    guard = GenerationGuard(CaveBot(), EventSink(emitted.append), checkpoint=lambda: None)
     guard.combat_slot.register(StalledAttack())
     monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
     incident = guard.poll()
@@ -975,7 +986,14 @@ def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypa
     assert combat["result"]["reason"] == "time_budget"
     assert incident["requires_replan"] is True
     assert ("attack", 7.5) in calls
-    assert [a for a, _ in calls[-3:]] == ["stop", "control", "posture"]
+    budget_event, = [event for event in emitted if event["type"] == "guardian.combat_budget_exceeded"]
+    assert budget_event["endpoint"] == "attack"
+    assert budget_event["cleanup_s"] <= 1.5
+    if slow_cleanup:
+        assert calls[calls.index(("attack", 7.5)) + 1][0] == "stop"
+        assert clock[0] <= 1009.000001
+    else:
+        assert [a for a, _ in calls[-3:]] == ["stop", "control", "posture"]
 
 
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
