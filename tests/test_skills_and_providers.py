@@ -2791,6 +2791,45 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
     assert operations[-1] == {"op": "take", "from": "output", "count": 2}
 
 
+def test_skill_smelt_stops_pending_furnace_view_after_timeout(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    calls = []
+
+    def handler(request):
+        nonlocal now
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        if route == "view":
+            if calls.count(route) == 1:
+                now += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("furnace view action still pending", request=request)
+            return httpx.Response(200, json={
+                "ok": False, "error": {"code": "busy", "message": "running window_view"},
+            })
+        responses = {
+            "inventory": {"items": [{"name": "raw_iron", "count": 6}, {"name": "coal", "count": 1}]},
+            "find_blocks": {"blocks": [{"name": "furnace", "pos": [1, 64, 0], "dist": 1}]},
+            "status": {"pos": [0.5, 64, 0.5], "health": 20, "food": 20},
+            "act": {},
+            "stop": {"released": False},
+        }
+        return httpx.Response(200, json={"ok": True, "result": responses[route]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_smelt("raw_iron", count=6, fuel_item="coal"))
+
+    assert now == pytest.approx(48.0)
+    assert calls.count("act") == 1
+    assert calls.count("view") == 1
+    assert calls[-2:] == ["view", "stop"]
+    assert result["error"] == "partial_smelt"
+    assert result["fuel"] == {"item": "coal", "count": 1}
+    assert result["collected"] == []
+
+
 class _SurfaceScoutBackend:
     def __init__(self) -> None:
         self.pos = [0.5, 64, 0.5]

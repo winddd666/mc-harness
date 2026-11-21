@@ -1288,7 +1288,8 @@ class _SkillDeadline(Exception):
 class _SkillBudgetSession:
     """Bound one skill invocation without rebinding the shared bot."""
 
-    _READS = frozenset({"status", "inventory", "get_block", "find_blocks", "get_entities", "window/view"})
+    # window/view opens a GUI under the server's action lease.
+    _READS = frozenset({"status", "inventory", "get_block", "find_blocks", "get_entities"})
 
     def __init__(self, bot: BotSession, max_duration_s: float) -> None:
         self.bot = bot
