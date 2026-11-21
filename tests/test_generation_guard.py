@@ -10534,3 +10534,64 @@ def test_magma_interrupts_active_tool_before_the_boundary(tool, endpoint, interr
 
 
 
+
+
+@pytest.mark.parametrize("pocket, covered", [
+    ("no_filler_block", True),
+    ("no_filler_block", False),
+    ("cover_not_entered", False),
+])
+def test_arrow_poll_without_filler_checks_natural_cover_before_repeating_flee(monkeypatch, pocket, covered):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    shooter = {"id": 41, "name": "skeleton", "dist": 2.0}
+    live_shooter = {**shooter, "pos": [0.5, 69, 2.5]}
+    status = {
+        "pos": [0.5, 69, 0.5], "dimension": "overworld", "health": 16.0, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
+    }
+    checks = []
+
+    class StairBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": shooter}
+                return {"events": [] if kwargs["params"]["since"] else [hurt], "last_seq": 1}
+            if action == "inventory":
+                return {"items": [{"name": "stone_pickaxe", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [live_shooter]}
+            raise AssertionError(action)
+
+    def dig_cover(_env, _skills):
+        checks.append("dig")
+        return {"ok": False, "reason": pocket}
+
+    def seek_cover(_env, pos, *, other_shooters, allow_stationary):
+        checks.append("natural_cover")
+        assert pos == live_shooter["pos"]
+        assert other_shooters == []
+        assert allow_stationary is False
+        if covered:
+            return {"ok": True, "mode": "natural_cover", "pos_after": [2.7, 69, 0.5]}
+        return None
+
+    def flee(_env, _pos, **_kwargs):
+        checks.append("flee")
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "dig_cover_pocket", dig_cover)
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    guard = GenerationGuard(StairBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    expected = ["dig"]
+    if pocket == "no_filler_block":
+        expected.append("natural_cover")
+    if not covered:
+        expected.append("flee")
+    assert checks == expected
+    assert incident["actions"][-1]["result"]["mode"] == ("natural_cover" if covered else "flee")
