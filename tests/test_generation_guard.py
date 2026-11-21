@@ -5067,6 +5067,62 @@ def test_critical_health_water_recovery_heads_to_shore_before_slow_float(monkeyp
     assert not status["in_water"]
 
 
+@pytest.mark.parametrize("recent_engagement", [True, False])
+def test_poll_enters_water_near_recent_shooter_before_next_hurt(monkeypatch, recent_engagement):
+    status = {
+        "pos": [0.5, 62.2, 0.5], "health": 17.64, "food": 20, "oxygen": 180,
+        "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True,
+        "nearest_hostile": {"id": 44, "name": "pillager", "dist": 4.3},
+    }
+    shooter_pos = [4.8, 62.2, 0.5]
+    calls = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield", "count": 1}}
+            if action == "get_entities":
+                return {"entities": [{"id": 44, "name": "pillager", "pos": shooter_pos}]}
+            calls.append((action, body))
+            return {"ok": True}
+
+    def leave_water():
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    def float_to_surface(_status):
+        calls.append(("float", None))
+        return leave_water()
+
+    def reach_shore(attacker_pos, *, keep_shield, shield_target_id):
+        calls.append(("shore", (attacker_pos, keep_shield, shield_target_id)))
+        return leave_water()
+
+    now = 1000.0
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: now)
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    elapsed = 3.2 if recent_engagement else guard.RANGED_COMBAT_STANCE_S + 1
+    guard._mark_ranged_engagement(now - elapsed, attacker=status["nearest_hostile"])
+    monkeypatch.setattr(guard, "_escape_water", float_to_surface)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+
+    guard.poll()
+
+    if recent_engagement:
+        assert calls == [
+            ("look", {"entity_id": 44}),
+            ("posture", {"shield": True, "jump": True, "sneak": False}),
+            ("shore", (shooter_pos, True, 44)),
+        ]
+    else:
+        assert calls == [("float", None)]
+    assert not status["in_water"]
+
+
 def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_position():
     status = {
         "pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180, "yaw": -1.5708,

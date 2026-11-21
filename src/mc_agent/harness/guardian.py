@@ -975,6 +975,10 @@ class GenerationGuard:
         ):
             self.retry_after_ready = False
         nh_name0, nh_dist0, _, _ = self._extract_hostile_info(status)
+        exposed_in_water = (
+            needs_float and now < self._ranged_combat_stance_until
+            and (nh_name0 in RANGED_MOBS or nh_name0 == "ghast") and nh_dist0 <= 16.0
+        )
         eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
         should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not (hot_floor_only or needs_hot_floor_guard)
         hurt = bool(hurts) or dropped
@@ -1111,7 +1115,11 @@ class GenerationGuard:
                     status = {**status, "sneaking": True}
 
             try:
-                inv = self.bot.inventory() if ((hurt and not hot_floor_only) or should_eat or in_lava or no_water_reentry or pre_trigger is not None) else {}
+                needs_inventory = (
+                    (hurt and not hot_floor_only) or should_eat or in_lava or no_water_reentry
+                    or exposed_in_water or pre_trigger is not None
+                )
+                inv = self.bot.inventory() if needs_inventory else {}
             except (ApiError, httpx.HTTPError):
                 inv = {}
             counts, has_shield, has_melee_weapon = self._parse_inventory_summary(inv)
@@ -1139,14 +1147,16 @@ class GenerationGuard:
             nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
 
             if (needs_float or no_water_reentry) and not in_lava and not hurt:
-                if no_water_reentry and nh_name and has_shield:
+                if (no_water_reentry or exposed_in_water) and nh_name and has_shield:
                     self._equip_and_raise_shield_for_water(
                         status,
                         actions,
                         inv=inv,
                         attacker=status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None,
                     )
-                if no_water_reentry or drowning or self._swimming_at_low_health(status):
+                if no_water_reentry or exposed_in_water or drowning or self._swimming_at_low_health(status):
+                    if exposed_in_water and nh_pos is None:
+                        nh_pos = self._find_hostile_position(nh_id, nh_name)
                     shore_act = self._action(
                         "escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
