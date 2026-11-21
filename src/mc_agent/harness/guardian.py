@@ -208,6 +208,7 @@ class _GuardSession:
 
 class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
+    SURFACE_WATER_ESCAPE_BUDGET_S = 4.0
     TRIDENT_WATER_ESCAPE_BUDGET_S = 4.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
@@ -2658,6 +2659,7 @@ class GenerationGuard:
         ended_wet_in_payload = any('"in_water": true' in str(r or "").lower() for r in (tool_results or []))
         handled_water_in_tool = False
         unstick_still_wet = False
+        tool_stopped_in_water = False
         waiting_for_shore_landing = False
         if tool_results:
             try:
@@ -2680,6 +2682,10 @@ class GenerationGuard:
                         and isinstance(shore_hostile, dict) and shore_hostile.get("id") == nh_id
                     )
                 tool_error = last_tool_result.get("error")
+                tool_stopped_in_water = (
+                    last_tool_result.get("stop_reason") == "in_water"
+                    and isinstance(tool_error, dict) and tool_error.get("code") == "in_water"
+                )
                 unstick_still_wet = (
                     isinstance(tool_error, dict) and (
                         (tool_error.get("code") == "water_escape_failed" and last_tool_result.get("in_water") is True)
@@ -2834,7 +2840,12 @@ class GenerationGuard:
                 esc_b_ok = False
                 esc_b_respawned = False
                 if not forced_shore_b:
-                    esc = self._action("boundary_escape_water", lambda: self._escape_water(status), raise_on_http_error=False)
+                    escape_budget = self.SURFACE_WATER_ESCAPE_BUDGET_S if tool_stopped_in_water else None
+                    esc = self._action(
+                        "boundary_escape_water",
+                        lambda: self._escape_water(status, **({"budget_s": escape_budget} if escape_budget else {})),
+                        raise_on_http_error=False,
+                    )
                     esc_b_res = esc.get("result") if isinstance(esc.get("result"), dict) else {}
                     esc_b_ok = bool(esc.get("ok") and esc_b_res.get("in_water") is not True)
                     esc_b_respawned = bool(esc_b_res.get("respawned"))

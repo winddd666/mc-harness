@@ -5812,7 +5812,8 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
     assert status["in_water"] is False and "登岸" in note
 
 
-def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch):
+@pytest.mark.parametrize("surface_tool_stopped", [False, True])
+def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, surface_tool_stopped):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     events = []
@@ -5848,14 +5849,20 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
         return {"ok": True, "in_water": False}
 
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
-    assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools()
+    receipt = {
+        "ok": False, "stop_reason": "in_water", "pos_after": status["pos"],
+        "error": {"code": "in_water"},
+    }
+    tool_results = [json.dumps(receipt)] if surface_tool_stopped else None
+    assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools(tool_results)
     completed = [e for e in events if e["type"] == "guardian.action.completed"]
     shallow, shore = completed
     assert shallow["action"] == "boundary_escape_water"
-    assert shallow["duration"] == pytest.approx(20.0)
+    budget_s = 4.0 if surface_tool_stopped else 20.0
+    assert shallow["duration"] == pytest.approx(budget_s)
     assert shallow["result"] == {"ok": False, "reason": "time_budget", "partial": True, "in_water": True}
     assert shore["action"] == "boundary_escape_to_shore" and shore["ok"] is True
-    assert all(start + timeout <= 1020.0 for _, timeout, start in calls[:-1])
+    assert all(start + timeout <= 1000.0 + budget_s for _, timeout, start in calls[:-1])
     assert skills.bot is bot
 
 
