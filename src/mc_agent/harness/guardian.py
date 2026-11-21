@@ -1093,6 +1093,17 @@ class GenerationGuard:
         in_lava = raw_in_lava or (
             hurt_by_lava and not deaths and not disconnected and ready and status.get("alive") is not False
         )
+        if (
+            not in_lava and not in_water and not deaths and ready and status.get("alive") is not False
+            and status.get("on_ground") is False and "nether" in str(status.get("dimension") or "").lower()
+            and status.get("pos")
+            and any(str(h.get("source") or "").strip().lower() in {"player_explosion", "entity_explosion"} for h in hurts)
+        ):
+            probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.5)
+            try:
+                in_lava = CombatEnv(probe_bot)._is_airborne_above_lava(status, start_pos=status["pos"])
+            except _RecoveryBudgetExceeded:
+                pass
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava

@@ -6351,9 +6351,10 @@ def test_ranged_knockback_into_water_goes_to_shore_in_same_poll(monkeypatch, res
 
 
 @pytest.mark.parametrize("terrain", ["exposed_lava", "solid_cover", "already_landed"])
-def test_low_health_nether_knockback_checks_for_lava_before_waiting_to_retreat(monkeypatch, terrain):
+@pytest.mark.parametrize(("source", "health"), [("mob_attack", 2.86), ("player_explosion", 15.87)])
+def test_nether_knockback_checks_for_lava_before_waiting_to_retreat(monkeypatch, terrain, source, health):
     status = {
-        "pos": [-1873.7, 36.6, -3688.7], "health": 2.86, "food": 20,
+        "pos": [-1873.7, 36.6, -3688.7], "health": health, "food": 20,
         "in_lava": False, "on_ground": False, "alive": True, "ready": True, "blocking": True,
         "dimension": "the_nether", "nearest_hostile": {"id": 44, "name": "wither_skeleton", "dist": 3.0},
     }
@@ -6364,7 +6365,7 @@ def test_low_health_nether_knockback_checks_for_lava_before_waiting_to_retreat(m
             if action == "status":
                 return dict(status)
             if action == "events":
-                return {"events": [] if kwargs["params"]["since"] else [{"seq": 1, "type": "hurt", "source": "mob_attack"}]}
+                return {"events": [] if kwargs["params"]["since"] else [{"seq": 1, "type": "hurt", "source": source}]}
             if action == "inventory":
                 return {"items": [], "offhand": {"name": "shield"}}
             if action == "get_block":
@@ -6375,7 +6376,8 @@ def test_low_health_nether_knockback_checks_for_lava_before_waiting_to_retreat(m
                 return {"name": "lava" if y == 34 else "air"}
             return {"ok": True}
 
-    def escape_lava():
+    def escape_lava(*, force_rim_escape=False):
+        assert not force_rim_escape
         moves.append("escape_lava")
         status.update(on_ground=True)
         return {"ok": True, "in_lava": False, "already_dry": terrain == "already_landed"}
@@ -6391,7 +6393,10 @@ def test_low_health_nether_knockback_checks_for_lava_before_waiting_to_retreat(m
 
     incident = guard.poll()
 
-    if terrain == "exposed_lava":
+    if source == "player_explosion" and terrain != "solid_cover":
+        assert moves == ["escape_lava"]
+        assert incident["actions"][0]["action"] == "escape_lava"
+    elif terrain == "exposed_lava":
         assert moves == ["escape_lava"]
         assert incident["actions"][0]["result"]["mode"] == "lava_escape"
     else:
