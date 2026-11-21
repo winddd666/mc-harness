@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Unified 22-Bot Fleet Orchestrator & Cross-Model P0/P1 Bug Aggregator for v2-integrated.
+"""Fleet Orchestrator & Cross-Model P0/P1 Bug Aggregator for v2-integrated.
 
 Squads:
   - nju  (3): NJU Qwen3.6-35B competition model (soft-oversubscribed 3-way on 2-concurrency gateway, rpm=9)
   - glm  (5): OpenCode GLM-5.3 (complex mid/late-game: fortress, bastion, village, enchant, midgame)
   - ds   (4): OpenCode DeepSeek-v4.1-flash (cost-controlled cross-validation)
   - hy4 (10): OpenCode HY4-flash-free (free high-concurrency broad terrain & edge-case sweep)
+  - lc   (4): OpenCode LongCat-2.5-free (village and midgame coverage)
 
 Usage:
   python scripts/v2_fleet.py provision
-  python scripts/v2_fleet.py launch --wave r11 --duration 1200 [--squads nju,glm,ds,hy4]
+  python scripts/v2_fleet.py launch --wave r11 --duration 1200 [--squads nju,glm,ds,hy4,lc]
   python scripts/v2_fleet.py triage --wave r11 [--markdown [PATH]] [--no-markdown]
 
 `triage` parses each bot's `wild-endurance-*.json` + `*.events.jsonl` and auto-exports
@@ -684,6 +685,7 @@ SQUAD_LABELS: dict[str, str] = {
     "glm": "GLM-5.3",
     "ds": "DeepSeek-v4.1-flash",
     "hy4": "HY4-flash-free",
+    "lc": "LongCat-2.5-free",
 }
 
 
