@@ -5724,6 +5724,44 @@ def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attac
     assert result["actions"] == ["move_to_shore_failed", "shore_lip_jump"]
 
 
+def test_water_boundary_avoids_a_shore_path_that_crosses_a_creeper(monkeypatch):
+    status = {
+        "pos": [0.5, 62.2, 0.5], "health": 20, "food": 20, "oxygen": 320,
+        "in_water": True, "on_ground": False, "alive": True, "ready": True,
+        "nearest_hostile": {"id": 44, "name": "creeper", "dist": 5.0},
+    }
+    moves = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [{"id": 44, "name": "creeper", "pos": [5.5, 62.2, 0.5]}]}
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": [11, 62, 0]},
+                                   {"name": "grass_block", "pos": [-13, 62, 0]}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "move_to":
+                goal = [body["x"], body["y"], body["z"]]
+                moves.append(goal)
+                status.update(pos=goal, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_escape_water", lambda _status: pytest.fail("nearby creeper needs a threat-aware shore"))
+
+    note = guard.stabilize_after_tools()
+
+    assert moves == [[-12.5, 63.0, 0.5]]
+    assert note is not None and "登岸" in note
+
+
 @pytest.mark.parametrize("landing", ["grounded", "airborne", "in_water", "settled", "respawned"])
 def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
     from mc_agent.skills.combat_env import CombatEnv

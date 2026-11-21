@@ -2759,6 +2759,8 @@ class GenerationGuard:
                         self.events.emit("guardian.no_water_cooldown", duration_s=30.0, streak=self._water_hurt_streak)
                 has_shield_b = False
                 shield_target_b = nh_id
+                shore_threat_name = nh_name
+                shore_threat_pos = nh_pos
                 if hurts or nh_name or no_water_reentry_b:
                     try:
                         inv_b = self.bot.inventory()
@@ -2774,6 +2776,9 @@ class GenerationGuard:
                     ) or (status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None)
                     if isinstance(att_b, dict) and isinstance(att_b.get("id"), int):
                         shield_target_b = att_b["id"]
+                        shore_threat_name = str(att_b.get("name") or (nh_name if shield_target_b == nh_id else ""))
+                        shore_threat_name = shore_threat_name.removeprefix("minecraft:").lower()
+                        shore_threat_pos = att_b.get("pos") or (nh_pos if shield_target_b == nh_id else None)
                     has_shield_b, _ = self._equip_and_raise_shield_for_water(
                         status,
                         b_actions,
@@ -2796,6 +2801,7 @@ class GenerationGuard:
                     self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
                     or handled_water_in_tool or unstick_still_wet or self._swimming_at_low_health(status)
                     or continuing_water_escape
+                    or (shore_threat_name == "creeper" and nh_dist <= 6.0)
                 )
                 esc_b_ok = False
                 esc_b_respawned = False
@@ -2810,13 +2816,14 @@ class GenerationGuard:
                     self._last_water_escape_failed = False
                     notes.append("自动浮水登岸")
                 elif not esc_b_respawned:
-                    if nh_pos is None and nh_name in RANGED_MOBS and nh_dist <= 16.0:
-                        nh_pos = self._find_hostile_position(nh_id, nh_name)
+                    if shore_threat_pos is None and nh_dist <= 16.0 and (shield_target_b is not None or shore_threat_name):
+                        shore_threat_pos = self._find_hostile_position(shield_target_b, shore_threat_name)
                     shore_b = self._action(
                         "boundary_escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
-                            nh_pos, keep_shield=has_shield_b, shield_target_id=shield_target_b,
+                            shore_threat_pos, keep_shield=has_shield_b, shield_target_id=shield_target_b,
                             **({"surface_first": True} if surface_first else {}),
+                            **({"avoid_close_threat": True} if shore_threat_name == "creeper" else {}),
                         ),
                         raise_on_http_error=False,
                     )

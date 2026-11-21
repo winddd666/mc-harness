@@ -1789,6 +1789,17 @@ class CombatEnv:
             return True
         return self.geofence.check_point(float(x), float(z), action=action) is None
 
+    @staticmethod
+    def _crosses_near_water_threat(pos: Sequence[float], x: float, z: float, threat: Sequence[float]) -> bool:
+        dx, dz = x - pos[0], z - pos[2]
+        length_sq = dx * dx + dz * dz
+        if length_sq == 0:
+            return False
+        tx, ty, tz = threat[0] - pos[0], threat[1] - pos[1], threat[2] - pos[2]
+        fraction = max(0.0, min(1.0, (tx * dx + tz * dz) / length_sq))
+        closest = math.hypot(tx - fraction * dx, ty, tz - fraction * dz)
+        return closest < min(4.5, math.hypot(tx, ty, tz)) - 1e-6
+
     def _find_walkable_shore_target(
         self,
         pos0: Sequence[float],
@@ -1799,6 +1810,7 @@ class CombatEnv:
         max_y: int | None = None,
         threat_pos: Sequence[float] | None = None,
         max_candidates: int = 10,
+        avoid_close_threat: bool = False,
     ) -> list[float] | None:
         """Query `find_blocks` for nearby solid shoreline with 2-high passable headroom."""
         start_x, start_z = float(pos0[0]), float(pos0[2])
@@ -1834,6 +1846,8 @@ class CombatEnv:
                     continue
                 if not self._point_allowed(cx + 0.5, cz + 0.5, action="lava_shore"):
                     continue
+                if avoid_close_threat and has_threat and self._crosses_near_water_threat(pos0, cx + 0.5, cz + 0.5, threat_pos):
+                    continue
                 hdist = math.hypot(cx + 0.5 - start_x, cz + 0.5 - start_z)
                 away_penalty = 1.5 if (has_threat and math.hypot(cx + 0.5 - tx_th, cz + 0.5 - tz_th) < threat_dist0) else 0.0
                 candidates.append((hdist + away_penalty, cx, cy, cz))
@@ -1860,6 +1874,7 @@ class CombatEnv:
         keep_shield: bool = False,
         shield_target_id: int | None = None,
         surface_first: bool = False,
+        avoid_close_threat: bool = False,
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
         st0 = self.bot.status()
@@ -1903,9 +1918,12 @@ class CombatEnv:
                 "pos_after": pos,
             }
 
-        def swim_step_allowed(pos: Sequence[float], yaw: float) -> bool:
+        def swim_step_allowed(pos: Sequence[float], yaw: float, distance: float = 5.0) -> bool:
             ux, uz = yaw_to_unit_xz(yaw)
-            return self._point_allowed(float(pos[0]) + 5.0 * ux, float(pos[2]) + 5.0 * uz, action="water_retreat")
+            x, z = float(pos[0]) + distance * ux, float(pos[2]) + distance * uz
+            return self._point_allowed(x, z, action="water_retreat") and not (
+                avoid_close_threat and has_threat and self._crosses_near_water_threat(pos, x, z, threat_pos)
+            )
 
         # Hold buoyancy + shield while locating shoreline or breaking surface.
         try:
@@ -1949,6 +1967,7 @@ class CombatEnv:
             min_y=by - 1,
             max_y=by + 2,
             threat_pos=threat_pos,
+            avoid_close_threat=avoid_close_threat,
         )
 
         # 2. Radial fallback if find_blocks yielded no dry surface spot.
@@ -1966,6 +1985,8 @@ class CombatEnv:
                     px = math.floor(start_x + ux * dist)
                     pz = math.floor(start_z + uz * dist)
                     if not self._point_allowed(px + 0.5, pz + 0.5, action="water_shore"):
+                        continue
+                    if avoid_close_threat and has_threat and self._crosses_near_water_threat(pos0, px + 0.5, pz + 0.5, threat_pos):
                         continue
                     g_name = self._get_block_name(px, y_probe, pz, strict=True)
                     if g_name and g_name not in HAZARD_BLOCK_TYPES and _is_solid_ground(g_name):
@@ -2046,7 +2067,7 @@ class CombatEnv:
             elif st_mid.get("in_water"):
                 ux, uz = yaw_to_unit_xz(away_yaw)
                 px, py, pz = map(float, swim_pos[:3])
-                step_dist = 12.0 if self._point_allowed(px + ux * 12.0, pz + uz * 12.0, action="water_retreat") else 5.0
+                step_dist = 12.0 if swim_step_allowed(swim_pos, away_yaw, 12.0) else 5.0
                 try:
                     self.bot.call("look", {"yaw": away_yaw, "pitch": -15.0})
                 except (ApiError, httpx.HTTPError):
