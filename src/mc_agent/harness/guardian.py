@@ -930,6 +930,11 @@ class GenerationGuard:
             now = time.monotonic()
             for event in fresh:
                 if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
+                    self._pre_hurt_suppress_block = None
+                    self._pre_hurt_suppress_until = float("-inf")
+                    self._pre_hurt_target_cooldown.clear()
+                    self._ranged_combat_stance_until = float("-inf")
+                    self._ranged_cover_active_until = float("-inf")
                     self._last_ranged_hurt_at = float("-inf")
                     self._last_trident_hurt_at = float("-inf")
                     self._last_melee_hurt_at = float("-inf")

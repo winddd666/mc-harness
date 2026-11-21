@@ -996,6 +996,90 @@ def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypa
         assert [a for a, _ in calls[-3:]] == ["stop", "control", "posture"]
 
 
+@pytest.mark.parametrize("same_shooter", [False, True])
+def test_death_during_combat_does_not_suppress_the_next_threat_at_spawn(monkeypatch, same_shooter):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    prior_threat = {
+        "id": 43 if same_shooter else 42, "name": "skeleton" if same_shooter else "spider",
+        "pos": [2.0, 64.0, 0.5], "dist": 1.5,
+    }
+    skeleton = {"id": 43, "name": "skeleton", "pos": [20.5, 64.0, 4.5], "dist": 4.0}
+    status = {
+        "pos": [0.5, 64.0, 0.5], "health": 8, "food": 20, "on_ground": True,
+        "alive": True, "ready": True, "dimension": "overworld", "nearest_hostile": prior_threat,
+    }
+    lifecycle = []
+    encounters = []
+
+    class RespawnBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [ev for ev in lifecycle if ev["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    class RespawnDuringCombat:
+        def on_encounter(self, _env, trigger):
+            encounters.append(trigger["primary_entity_id"])
+            if len(encounters) == 1:
+                status.update(pos=[20.5, 64.0, 0.5], health=20, last_death={"t": 1}, nearest_hostile=skeleton)
+                lifecycle.extend([{"seq": 1, "type": "death"}, {"seq": 2, "type": "spawn"}])
+            return {"handled": True, "mode": "cover_or_flee", "status_after": dict(status), "requires_replan": True}
+
+    guard = GenerationGuard(RespawnBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.combat_slot.register(RespawnDuringCombat())
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+    first = guard.poll()
+    assert "death_or_connection_changed" in first["reasons"]
+    clock[0] += 3.1
+    second = guard.poll()
+
+    assert encounters == [prior_threat["id"], skeleton["id"]]
+    assert "pre_hurt_ranged" in second["reasons"]
+
+
+@pytest.mark.parametrize("combat_duration", [4.0, 6.0])
+def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch, combat_duration):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    zombie = {"id": 42, "name": "zombie", "pos": [2.0, 11, 0.5], "dist": 1.5}
+    status = {
+        "pos": [0.5, 11, 0.5], "health": 14.2, "food": 17, "on_ground": True,
+        "alive": True, "ready": True, "dimension": "overworld", "nearest_hostile": zombie,
+    }
+    meals = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "cooked_beef", "count": 3}]}
+            if action == "get_entities":
+                return {"entities": [zombie]}
+            if action == "attack":
+                clock[0] += combat_duration
+                status["nearest_hostile"] = None
+                return {"hits": 2, "killed": True}
+            if action == "use_item":
+                meals.append(body["item"])
+                clock[0] += 2.0
+                status["food"] = 20
+            return {"ok": True}
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    outcome = guard._run_subcortical_combat({
+        "source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie",
+    })
+
+    assert outcome["mode"] == "counter_killed"
+    assert meals == (["cooked_beef"] if combat_duration == 4.0 else [])
+
+
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
     """Reproduces glm_glm_3_village / hy4_hy_8_nether: ReadTimeout in subcortical_combat must /stop & not crash run."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
@@ -8400,6 +8484,45 @@ def test_water_macro_restores_raised_shield_on_dry_landing(landing):
     else:
         assert commands == []
         assert "shield_restored" not in water["result"]
+
+
+@pytest.mark.parametrize("rising", [True, False])
+def test_drowning_continues_a_verified_ascent_before_trying_to_path_to_shore(rising):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [-11061.7, 60.2, 10936.7], "in_water": True, "submerged": True,
+        "oxygen": 0, "on_ground": False, "ready": True, "alive": True,
+    }
+    bank = [-11075, 62, 10937]
+    actions = []
+
+    class WetCaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "control" and not body.get("forward"):
+                actions.append("up")
+                if rising and actions == ["up"]:
+                    status["pos"] = [-11061.7, 61.0, 10936.7]
+                elif rising:
+                    status.update(pos=[-11061.7, 63, 10936.7], oxygen=300, submerged=False, in_water=False, on_ground=True)
+            if action == "find_blocks":
+                return {"blocks": [{"name": "stone", "pos": bank}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "move_to":
+                actions.append("move_to")
+                status.update(pos=[body["x"], body["y"], body["z"]], submerged=False, in_water=False, on_ground=True)
+            return {"ok": True}
+
+        def status(self):
+            return dict(status)
+
+    result = CombatEnv(WetCaveBot()).escape_deep_water_to_shore(surface_first=True)
+
+    assert result["ok"] is True and result["in_water"] is False
+    assert actions == (["up", "up"] if rising else ["up", "move_to"])
 
 
 @pytest.mark.parametrize("starts_in_lava, surface_first", [(True, True), (False, True), (False, False)])

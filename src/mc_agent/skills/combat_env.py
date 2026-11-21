@@ -2378,18 +2378,28 @@ class CombatEnv:
                 and retry_bank is None
                 and swim_step_allowed(pos0, float(st0.get("yaw") or 0.0))
             )
-            try:
-                self.bot.call(
-                    "control",
-                    {"forward": swim_forward, "jump": True, "sprint": swim_forward, "ms": 750, "stop_on": ["death"]},
-                )
-                actions.append("water_surface_surge")
-            except ApiError:
-                pass
-            search_status = self.bot.status()
-            interruption = interrupted_water_escape(search_status)
-            if interruption is not None:
-                return interruption
+            for _ in range(2):
+                try:
+                    self.bot.call(
+                        "control",
+                        {"forward": swim_forward, "jump": True, "sprint": swim_forward, "ms": 750, "stop_on": ["death"]},
+                    )
+                    actions.append("water_surface_surge")
+                except ApiError:
+                    pass
+                search_status = self.bot.status()
+                interruption = interrupted_water_escape(search_status)
+                if interruption is not None:
+                    return interruption
+                oxygen = search_status.get("oxygen")
+                raised_pos = search_status.get("pos")
+                # Continue a successful ascent while the bot has no air.
+                if not (
+                    surface_first and search_status.get("in_water") and search_status.get("submerged")
+                    and isinstance(oxygen, (int, float)) and oxygen <= 0
+                    and raised_pos and raised_pos[1] - pos0[1] >= 0.5
+                ):
+                    break
             if surface_first and not search_status.get("in_water") and search_status.get("on_ground") is not False:
                 return {
                     "ok": True, "in_water": False, "mode": "surfaced",
@@ -3431,8 +3441,11 @@ class SubcorticalInstinctController:
             latched_guard = self._latch_shield_at_threat(env, survivor_id)
             action = "guard_surviving_shooter" if surviving_shooter else "guard_surviving_melee"
             actions.append({"action": action, "ok": latched_guard, "entity_id": survivor_id})
+        # Eating takes about two seconds. Leave room to confirm status and release controls.
+        food_start_deadline = deadline - 2.5
         if (
             not latched_guard
+            and time.monotonic() < food_start_deadline
             and st_post.get("ready", True)
             and st_post.get("alive") is not False
             and st_post.get("on_ground") is not False
@@ -3445,7 +3458,7 @@ class SubcorticalInstinctController:
         ):
             counts_now, _, _ = env._inventory_counts_and_shield()
             best_food = next((f for f in SAFE_FOOD_PRIORITY if counts_now.get(f, 0) > 0), None)
-            if best_food:
+            if best_food and time.monotonic() < food_start_deadline:
                 try:
                     env.bot.call("use_item", {"item": best_food})
                     actions.append({"action": "post_combat_eat", "item": best_food, "ok": True})
