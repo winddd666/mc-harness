@@ -5754,6 +5754,64 @@ def test_post_lava_burning_does_not_treat_a_nearby_drowned_as_the_attacker(monke
         assert incident is None
 
 
+@pytest.mark.parametrize("hit", ["unattributed", "unattributed_later_page", "identified", "melee", "no_fire_context"])
+def test_post_lava_fire_ticks_keep_adjacent_water_available_at_low_health(monkeypatch, hit):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    zombie = {"id": 42, "name": "zombie", "dist": 9.0}
+    status = {"pos": [6356.7, 22, 6515.3], "health": 14.0, "food": 20, "ready": True, "alive": True,
+              "on_ground": True, "on_fire": True, "dimension": "overworld", "nearest_hostile": zombie}
+    events = [{"seq": 1, "type": "hurt", "source": "lava"}]
+    attempts = []
+    defenses = []
+
+    class RimBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [row for row in events if row["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    def douse(snapshot):
+        attempts.append(snapshot["health"])
+        status.update(in_water=True, on_fire=False)
+        return {"ok": True, "in_water": True}
+
+    def defend(_status, attacker, _counts, **_kwargs):
+        defenses.append(attacker)
+        return {"ok": False, "mode": "flee"}
+
+    guard = GenerationGuard(RimBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._drain_events_pages()
+    monkeypatch.setattr(guard.combat_env, "douse_in_adjacent_water", douse)
+    monkeypatch.setattr(guard, "_defend_or_flee", defend)
+
+    events.extend([{"seq": 2, "type": "hurt", "source": "on_fire"}, {"seq": 3, "type": "hurt"}])
+    assert guard.poll() is None
+    assert attempts == [] and defenses == []
+
+    clock[0] += 4.0
+    status.update(health=8.0, on_fire=hit != "no_fire_context")
+    if hit != "unattributed_later_page":
+        events.append({"seq": 4, "type": "hurt", "source": "on_fire"})
+    last = {"seq": 5, "type": "hurt"}
+    if hit == "identified":
+        last["source_entity"] = zombie
+    elif hit == "melee":
+        last.update(source="mob_attack", source_entity=zombie)
+    events.append(last)
+
+    incident = guard.poll()
+    if hit in {"unattributed", "unattributed_later_page"}:
+        assert attempts == [8.0] and defenses == []
+        assert [step["action"] for step in incident["actions"]] == ["douse_in_water"]
+    else:
+        assert attempts == [] and len(defenses) == 1
+
+
 @pytest.mark.parametrize("landed", [False, True])
 def test_lava_reflex_requires_landing_even_without_lava_under_the_hitbox(monkeypatch, landed):
     clock = [1000.0]

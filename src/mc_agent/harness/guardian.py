@@ -346,6 +346,7 @@ class GenerationGuard:
         self._nether_melee_eat_defer_until = float("-inf")
         self._last_lava_contact_at = float("-inf")
         self._last_fire_contact_at = float("-inf")
+        self._last_burn_hurt_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
         self._blocked_bunker: tuple[tuple[Any, ...], list[int], str] | None = None
         self._last_dig_cover_block: tuple[int, int, int] | None = None
@@ -993,6 +994,7 @@ class GenerationGuard:
                     self._nether_melee_eat_defer_until = float("-inf")
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
+                    self._last_burn_hurt_at = float("-inf")
                     self._last_dig_cover_fail_at = float("-inf")
                     self._stationary_warnings.clear()
                     self._last_stalled_lava = None
@@ -1012,8 +1014,10 @@ class GenerationGuard:
                         self._nether_melee_eat_defer_until = now + self.MELEE_EAT_DEFER_S
                     elif source in LAVA_HURT_SOURCES:
                         self._last_lava_contact_at = now
-                    elif source == "in_fire":
-                        self._last_fire_contact_at = now
+                    elif source in FIRE_HURT_SOURCES:
+                        self._last_burn_hurt_at = now
+                        if source == "in_fire":
+                            self._last_fire_contact_at = now
         return fresh
 
     @staticmethod
@@ -1581,9 +1585,21 @@ class GenerationGuard:
         should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not (hot_floor_only or needs_hot_floor_guard)
         hurt = bool(hurts) or dropped
         contact_fire = any(str(h.get("source") or "").strip().lower() == "in_fire" for h in hurts)
+        recent_lava = now - self._last_lava_contact_at < 15.0
+        fire_hurt = any(str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts)
+        continuing_burn = recent_lava and status.get("on_fire") and (
+            fire_hurt or (nh_dist0 > 8.0 and now - self._last_burn_hurt_at < 5.0)
+        )
         environmental_burning = (
-            bool(hurts) and (contact_fire or now - self._last_lava_contact_at < 15.0)
-            and all(str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts)
+            bool(hurts) and ((fire_hurt and (contact_fire or recent_lava)) or continuing_burn)
+            and all(
+                str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES
+                or (
+                    continuing_burn and not str(h.get("source") or "").strip()
+                    and not (h.get("source_entity") or h.get("likely_attacker"))
+                )
+                for h in hurts
+            )
         )
         non_combat_only_hurt = (
             hurt
@@ -1602,9 +1618,7 @@ class GenerationGuard:
                 )
             )
         )
-        fire_hurt_only = non_combat_only_hurt and any(
-            str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts
-        )
+        fire_hurt_only = non_combat_only_hurt and (fire_hurt or environmental_burning)
         hp_cur = float(health) if isinstance(health, (int, float)) else 20.0
 
         pre_trigger = (
@@ -1981,9 +1995,14 @@ class GenerationGuard:
                     actions.append(clear)
                     fire_cleared = clear["ok"]
                 if can_try_fire_douse and not fire_cleared:
-                    self._last_fire_douse_at = now
                     if counts.get("water_bucket", 0) > 0:
+                        self._last_fire_douse_at = now
                         actions.append(self._action("douse_fire", lambda: self.combat_env.build_tactical("place_water_feet")))
+                    elif recent_lava:
+                        douse = self._douse_after_lava(status, after=status)
+                        if douse is not None:
+                            self._last_fire_douse_at = now
+                            actions.append(douse)
                 if critical_non_combat:
                     self._last_non_combat_alert_at = now
             elif effective_combat_hurt and not in_water and not in_lava:
