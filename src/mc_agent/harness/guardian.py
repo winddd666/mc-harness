@@ -3525,7 +3525,7 @@ class GenerationGuard:
                         pre_actions.append(esc_act)
                         esc_pre_res = esc_act.get("result") if isinstance(esc_act, dict) and isinstance(esc_act.get("result"), dict) else {}
                         esc_pre_ok = bool(esc_act.get("ok") and esc_pre_res.get("in_water") is not True)
-                        esc_pre_respawned = bool(esc_pre_res.get("respawned"))
+                        esc_pre_respawned = bool(esc_pre_res.get("respawned")) or esc_pre_res.get("mode") == "respawned"
                         esc_pre_handled_lava = esc_pre_res.get("mode") == "lava_escape"
                     if not esc_pre_ok and not esc_pre_respawned and not esc_pre_handled_lava:
                         shore_threat_pos = trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None)
@@ -3543,26 +3543,33 @@ class GenerationGuard:
                         )
                         pre_actions.append(shore_pre)
                         shore_result = shore_pre.get("result") or {}
-                        esc_pre_respawned = shore_result.get("mode") == "respawned"
+                        esc_pre_respawned = bool(shore_result.get("respawned")) or shore_result.get("mode") == "respawned"
                     try:
                         st_after = self.bot.status()
                     except (ApiError, httpx.HTTPError):
                         st_after = st_pre
-                    left_water = (
-                        not bool(st_after.get("in_water"))
-                        and not st_after.get("in_lava")
-                        and st_after.get("on_ground") is not False
-                        and st_after.get("ready", True)
-                        and st_after.get("alive") is not False
-                        and not esc_pre_respawned
-                    )
-                    self._last_water_escape_at = time.monotonic()
-                    self._last_water_escape_failed = not left_water
-                    if left_water:
+                    life_unavailable = esc_pre_respawned or life_changed(st_after)
+                    if life_unavailable:
+                        self._last_water_escape_at = float("-inf")
+                        self._last_water_escape_failed = False
                         self._water_hurt_streak = 0
-                    recovery = "已脱离水域" if left_water else f"上浮后 in_water={bool(st_after.get('in_water'))}"
-                    summary = f"执行 {interrupted_name} 途中水下遇险，{recovery}，当前 HP={st_after.get('health')}"
-                    outcome = {"handled": True, "mode": "water_surface", "summary": summary, "actions": pre_actions, "status_after": st_after}
+                        summary = f"执行 {interrupted_name} 时脱水期间角色状态已变化，请按最新状态重新规划"
+                        outcome = {"handled": False, "mode": "life_unavailable", "actions": pre_actions}
+                    else:
+                        left_water = (
+                            not st_after.get("in_water") and not st_after.get("in_lava")
+                            and st_after.get("on_ground") is not False
+                        )
+                        self._last_water_escape_at = time.monotonic()
+                        self._last_water_escape_failed = not left_water
+                        if left_water:
+                            self._water_hurt_streak = 0
+                        recovery = "已脱离水域" if left_water else f"上浮后 in_water={bool(st_after.get('in_water'))}"
+                        summary = f"执行 {interrupted_name} 途中水下遇险，{recovery}，当前 HP={st_after.get('health')}"
+                        outcome = {
+                            "handled": True, "mode": "water_surface", "summary": summary,
+                            "actions": pre_actions, "status_after": st_after,
+                        }
                 else:
                     act = self._action(
                         "subcortical_combat",

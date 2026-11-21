@@ -941,6 +941,44 @@ def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life
     assert [event["type"] for event in events] == ["guardian.preempted_tool"]
 
 
+@pytest.mark.parametrize("recovery", ["shore_receipt", "status_changed"])
+def test_water_tool_preemption_reports_life_unavailable_after_respawn(monkeypatch, recovery):
+    status = {
+        "pos": [40995.8, 62.1, 10997.6], "dimension": "overworld", "health": 2, "food": 17,
+        "ready": True, "alive": True, "in_water": True, "submerged": True, "last_death": {"t": 1},
+    }
+    events = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            raise AssertionError(action)
+
+    def shore(*_args, **_kwargs):
+        if recovery == "status_changed":
+            status.update(health=20, in_water=False, on_ground=True, last_death={"t": 2})
+            return {"ok": False, "in_water": False}
+        return {"ok": False, "mode": "respawned", "in_water": False}
+
+    guard = GenerationGuard(RiverBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    receipt = guard.handle_preemption(
+        {"source": "tool_interrupted_hurt", "primary_type": "zombie", "primary_entity_id": 5462415},
+        interrupted_name="mc_attack",
+    )
+
+    assert receipt["reflex_mode"] == "life_unavailable"
+    assert receipt["requires_replan"]
+    assert guard._last_water_escape_failed is False
+    assert guard._water_hurt_streak == 0
+    assert [e["action"] for e in events if e["type"] == "guardian.action.completed"] == ["escape_to_shore"]
+
+
 @pytest.mark.parametrize("source, identified, expected", [
     ("mob_attack", True, "cover_or_flee"),
     ("mob_attack", False, "cover_or_flee"),
