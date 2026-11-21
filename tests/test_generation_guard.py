@@ -10234,6 +10234,43 @@ def test_explicit_flee_checks_support_before_each_motion(action, solid_exit, dim
         assert movements == []
 
 
+def test_blocked_flee_preserves_a_respawn_reported_by_the_checked_retreat(monkeypatch):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    shooter = {"id": 44, "name": "skeleton", "dist": 6.0, "pos": [0.5, 69, 6.5]}
+    origin = [0.5, 69, 0.5]
+    spawn = [-79.5, 63.1, 75.5]
+    status = {"pos": origin, "dimension": "overworld", "health": 0.8, "blocking": True,
+              "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter}
+    attempts = []
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": "air"}
+            pytest.fail(f"Unexpected action during blocked flee: {action}")
+
+    def flee(_env, target, **_kwargs):
+        assert target == shooter["pos"]
+        attempts.append(target)
+        return {"ok": False, "mode": "respawned", "respawned": True, "pos_after": spawn,
+                "moved_dist": 0.0, "reason": "unsafe_landing"}
+
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    bot = RidgeBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    outcome = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
+    )))
+
+    assert attempts == [shooter["pos"]]
+    assert outcome["ok"] is False and outcome["requires_replan"] is True
+    assert outcome["mode"] == "respawned" and outcome["respawned"] is True
+    assert outcome["pos_before"] == origin and outcome["pos_after"] == spawn
+
+
 @pytest.mark.parametrize(
     "cover", ["safe", "exposed", "fresh_hit", "burning_after_hit", "burning_old_hit"],
 )

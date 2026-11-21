@@ -2899,6 +2899,8 @@ class GenerationGuard:
                 raise_on_http_error=False,
             )
             result = recovery.get("result")
+            if isinstance(result, dict) and result.get("respawned"):
+                return {**result, "requires_replan": True, "pos_before": status.get("pos")}
             if recovery.get("ok") and isinstance(result, dict):
                 if (
                     ranged and entity_id is not None and status.get("blocking")
