@@ -391,6 +391,7 @@ class CombatEnv:
         self._stalled_lava_swim: tuple[tuple[float, ...], float, str, float] | None = None
         self._stalled_water_shore: tuple[tuple[float, ...], tuple[float, ...], tuple[Any, Any], float] | None = None
         self._nearby_water_bank: tuple[tuple[float, ...], tuple[Any, Any], float] | None = None
+        self._last_dry_bank: tuple[tuple[float, ...], tuple[Any, Any], float] | None = None
         self._stalled_lava_notch: dict[tuple[str, tuple[int, int, int], str, str | None], float] = {}
 
     def surface_from_water(self, status: dict[str, Any]) -> dict[str, Any]:
@@ -2235,6 +2236,34 @@ class CombatEnv:
                 return surf_hit
         return _pick_from_query(block_types, q_limit=120)
 
+    def remember_dry_bank(self, status: dict[str, Any]) -> None:
+        pos = status.get("pos")
+        if (
+            pos and status.get("on_ground") is True and status.get("ready") is True and status.get("alive") is True
+            and not status.get("in_water") and not status.get("in_lava")
+        ):
+            x, y, z = map(math.floor, pos[:3])
+            self._last_dry_bank = (
+                (x + 0.5, float(y), z + 0.5),
+                (status.get("dimension"), status.get("last_death")),
+                time.monotonic(),
+            )
+
+    def _dry_bank_is_walkable(self, bank: Sequence[float]) -> bool:
+        self.invalidate_block_cache()
+        bx, by, bz = map(math.floor, bank)
+        deadline = time.monotonic() + 0.6
+        try:
+            floor, feet, head = (
+                self._get_block_name(bx, by + dy, bz, strict=True, deadline=deadline) for dy in (-1, 0, 1)
+            )
+        except _TerrainProbeExpired:
+            return False
+        return (
+            floor not in HAZARD_BLOCK_TYPES and _is_solid_ground(floor)
+            and _is_passable(feet) and _is_passable(head)
+        )
+
     def escape_deep_water_to_shore(
         self,
         threat_pos: Sequence[float] | None = None,
@@ -2308,9 +2337,9 @@ class CombatEnv:
                 avoid_close_threat and has_threat and self._crosses_near_water_threat(pos, x, z, threat_pos)
             )
 
-        def nearby_bank_allowed(pos: Sequence[float], bank: Sequence[float]) -> bool:
+        def shore_bank_in_reach(pos: Sequence[float], bank: Sequence[float], max_dist: float = 3.5) -> bool:
             return (
-                math.hypot(bank[0] - pos[0], bank[2] - pos[2]) <= 3.5
+                math.hypot(bank[0] - pos[0], bank[2] - pos[2]) <= max_dist
                 and abs(bank[1] - pos[1]) <= 1.25
                 and self._point_allowed(bank[0], bank[2], action="water_shore")
                 and not (
@@ -2323,22 +2352,11 @@ class CombatEnv:
         retry_bank = None
         if previous_bank is not None:
             bank, bank_life, bank_at = previous_bank
-            if life == bank_life and time.monotonic() - bank_at < 12.0 and nearby_bank_allowed(pos0, bank):
-                self.invalidate_block_cache()
-                bx, by, bz = map(math.floor, bank)
-                deadline = time.monotonic() + 0.6
-                try:
-                    floor, feet, head = (
-                        self._get_block_name(bx, by + dy, bz, strict=True, deadline=deadline) for dy in (-1, 0, 1)
-                    )
-                except _TerrainProbeExpired:
-                    pass
-                else:
-                    if (
-                        floor not in HAZARD_BLOCK_TYPES and _is_solid_ground(floor)
-                        and _is_passable(feet) and _is_passable(head)
-                    ):
-                        retry_bank = list(bank)
+            if (
+                life == bank_life and time.monotonic() - bank_at < 12.0
+                and shore_bank_in_reach(pos0, bank) and self._dry_bank_is_walkable(bank)
+            ):
+                retry_bank = list(bank)
 
         # Hold buoyancy + shield while locating shoreline or breaking surface.
         try:
@@ -2384,7 +2402,7 @@ class CombatEnv:
             if life == stalled_life and time.monotonic() - stalled_at < 15.0 and math.dist(search_pos[:3], stalled_pos) <= 2.5:
                 excluded_shore = stalled_shore
                 actions.append("shore_lip_stalled")
-        retrying_bank = retry_bank is not None and nearby_bank_allowed(search_pos, retry_bank)
+        retrying_bank = retry_bank is not None and shore_bank_in_reach(search_pos, retry_bank)
         if retrying_bank:
             shore_target = retry_bank
             actions.append("shore_bank_retry")
@@ -2428,6 +2446,16 @@ class CombatEnv:
                             break
                 if shore_target is not None:
                     break
+
+        if shore_target is None and self._last_dry_bank is not None:
+            bank, bank_life, bank_at = self._last_dry_bank
+            if (
+                life == bank_life and time.monotonic() - bank_at < 60.0 and bank != excluded_shore
+                and shore_bank_in_reach(search_pos, bank, max_dist=36.0) and self._dry_bank_is_walkable(bank)
+            ):
+                shore_target = list(bank)
+                self._last_dry_bank = None
+                actions.append("return_to_dry_bank")
 
         # 3. Move to shore target (plus shoreline lip jump) or swim up and away from threat.
         if shore_target is not None:
@@ -2608,6 +2636,7 @@ class CombatEnv:
         landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")
         if not still_wet and landed:
             self._stalled_water_shore = None
+            self.remember_dry_bank(st_end)
         elif (
             still_wet and shore_target is not None and "shore_lip_jump" in actions
             and (has_threat or shield_target_id is not None) and life == (st_end.get("dimension"), st_end.get("last_death"))
@@ -2618,7 +2647,7 @@ class CombatEnv:
         if (
             still_wet and not retrying_bank and shore_target is not None and "shore_lip_jump" in actions
             and life == (st_end.get("dimension"), st_end.get("last_death"))
-            and nearby_bank_allowed(pos_end, shore_target)
+            and shore_bank_in_reach(pos_end, shore_target)
         ):
             self._nearby_water_bank = (tuple(shore_target), life, time.monotonic())
         return {

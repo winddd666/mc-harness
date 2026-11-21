@@ -591,6 +591,8 @@ class GenerationGuard:
                 **result, "ok": False, "reason": "shore_landing_unconfirmed", "pos_after": end,
                 "in_water": bool(after.get("in_water")), "in_lava": bool(after.get("in_lava")),
             }
+        if confirm_shore:
+            self.combat_env.remember_dry_bank(after)
         if (
             confirm_shore and before.get("blocking") and after.get("on_ground") is True
             and self._restore_shield_near_threat(before, after, recovery_bot)

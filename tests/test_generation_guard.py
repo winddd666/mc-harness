@@ -8492,6 +8492,54 @@ def test_water_retry_rechecks_nearby_bank_before_swimming_past_it(monkeypatch, b
         assert result["ok"] is True and result["in_water"] is False
 
 
+@pytest.mark.parametrize("bank_state", ["clear", "flooded", "new_life"])
+def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, bank_state):
+    bank = [7884.5, 63, 2779.5]
+    wet = [7885.5, 62.8, 2751.5]
+    status = {
+        "pos": wet, "in_water": True, "on_ground": False, "alive": True, "ready": True,
+        "dimension": "overworld", "last_death": {"t": 1},
+    }
+    moves = []
+
+    class WaterBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if (x, z) == (7884, 2779):
+                    if y == 62:
+                        return {"name": "stone"}
+                    return {"name": "water" if bank_state == "flooded" else "air"}
+                return {"name": "water"}
+            if action == "move_to":
+                target = [body["x"], body["y"], body["z"]]
+                moves.append(target)
+                if target == bank:
+                    status.update(pos=bank, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    def generic_escape(_skills):
+        status.update(pos=bank, in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False, "pos_after": bank}
+
+    guard = GenerationGuard(WaterBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(MacroSkills, "escape_water", generic_escape)
+    assert guard._escape_water(dict(status))["ok"] is True
+
+    status.update(pos=wet, in_water=True, on_ground=False)
+    if bank_state == "new_life":
+        status["last_death"] = {"t": 2}
+    result = guard.combat_env.escape_deep_water_to_shore()
+
+    assert ("return_to_dry_bank" in result["actions"]) is (bank_state == "clear")
+    assert (bank in moves) is (bank_state == "clear")
+    assert result["ok"] is (bank_state == "clear")
+
+
 @pytest.mark.parametrize("under_attack", [False, True])
 def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attack):
     from mc_agent.skills.combat_env import CombatEnv
