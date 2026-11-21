@@ -5333,12 +5333,14 @@ def test_retreat_rechecks_airborne_landing(monkeypatch, lands_in_water, mob, tri
         assert calls.index("status") < calls.index("control")
 
 
-def test_poll_nether_retreat_waits_for_landing_at_high_health(monkeypatch):
+@pytest.mark.parametrize("short_bank", [False, True])
+def test_poll_nether_retreat_checks_footing_at_high_health(monkeypatch, short_bank):
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
     status = {
-        "pos": [-407.7, 59.8, -1887.3], "health": 14.83, "food": 20, "dimension": "the_nether",
-        "on_ground": False, "alive": True, "ready": True,
-        "nearest_hostile": {"id": 77, "name": "wither_skeleton", "pos": [-407.7, 59, -1883.3], "dist": 4},
+        "pos": [-407.5, 59.0 if short_bank else 59.8, -1887.3],
+        "health": 14.83, "food": 20, "dimension": "the_nether",
+        "on_ground": short_bank, "alive": True, "ready": True,
+        "nearest_hostile": {"id": 77, "name": "wither_skeleton", "pos": [-407.5, 59, -1883.3], "dist": 4},
     }
     landings = []
     movements = []
@@ -5348,26 +5350,32 @@ def test_poll_nether_retreat_waits_for_landing_at_high_health(monkeypatch):
             if action == "status":
                 if kwargs["timeout_s"] <= 0.45:
                     landings.append(action)
-                    status.update(on_ground=True, pos=[-407.7, 59.0, -1887.3])
+                    status.update(on_ground=True, pos=[-407.5, 59.0, -1887.3])
                 return dict(status)
             if action == "events":
                 return {"events": [] if kwargs["params"]["since"] else [{"seq": 1, "type": "hurt", "source": "mob_attack"}]}
             if action == "inventory":
                 return {"items": []}
             if action == "get_block":
-                return {"name": "netherrack" if body["pos"][1] < 59 else "air"}
+                x, y, z = body["pos"]
+                if short_bank and (x != -408 or not -1890 <= z <= -1888):
+                    return {"name": "lava" if y == 58 else "air"}
+                return {"name": "netherrack" if y < 59 else "air"}
             if action == "control" and body.get("forward"):
-                assert landings and status["on_ground"]
-                movements.append(action)
-                status["pos"] = [-407.7, 59.0, -1889.6]
+                assert status["on_ground"]
+                movements.append(body)
+                status["pos"] = [-407.5, 59.0, -1888.0 if short_bank else -1889.6]
             if action == "move_to":
+                assert not short_bank
                 status["pos"] = [body["x"], body["y"], body["z"]]
             return {"ok": True}
 
     guard = GenerationGuard(LedgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     incident = guard.poll()
 
-    assert landings == ["status"] and movements == ["control"]
+    assert landings == ([] if short_bank else ["status"])
+    control, = movements
+    assert control["sprint"] is not short_bank and not control["jump"]
     retreat, = incident["actions"]
     assert retreat["action"] == "combat_or_flee" and retreat["ok"]
 
