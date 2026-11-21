@@ -10166,6 +10166,8 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
                 if threading.current_thread() is not actor_thread:
                     observed.set()
                 return current
+            if action == "get_entities":
+                return {"entities": []}
             actions.append(action)
             if action == "attack":
                 if in_water or hazard == "lava":
@@ -10746,3 +10748,41 @@ def test_combat_status_keeps_retry_and_http_phases_inside_remaining_budget(monke
     assert event["endpoint"] == "status"
     assert len(status_attempts) == 2
     assert clock[0] <= 1007.500001
+
+
+@pytest.mark.parametrize("sighting", ["nearest", "scan", "unconfirmed"])
+def test_melee_attack_blocks_a_confirmed_creeper_before_starting(sighting):
+    target_id = 5325659
+    creeper = {"id": target_id, "name": "creeper", "dist": 5.4}
+    attacks = []
+
+    class ScoutBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 67, 0.5], "health": 19, "ready": True,
+                    "alive": True, "on_ground": True, "dimension": "overworld",
+                    "nearest_hostile": creeper if sighting == "nearest" else {"id": 91, "name": "zombie", "dist": 4.0},
+                }
+            if action == "get_entities":
+                return {"entities": [creeper] if sighting == "scan" else [{**creeper, "id": target_id + 1}]}
+            if action == "attack":
+                attacks.append(body)
+                raise httpx.ReadTimeout("attack reply timed out")
+            raise AssertionError(action)
+
+    bot = ScoutBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def attack():
+        return json.dumps(bot.call("attack", {"entity_id": target_id, "max_hits": 3}))
+
+    if sighting == "unconfirmed":
+        with pytest.raises(httpx.ReadTimeout, match="attack reply timed out"):
+            guard.run_tool_with_reflex("mc_attack", attack)
+        assert len(attacks) == 1
+    else:
+        result = json.loads(guard.run_tool_with_reflex("mc_attack", attack))
+        assert result["requires_replan"]
+        assert result["error"]["code"] == "unsafe_creeper_attack"
+        assert attacks == []
