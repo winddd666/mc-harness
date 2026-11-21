@@ -4436,11 +4436,13 @@ def test_retreat_keeps_shield_against_a_nearby_shooter(health, distance_after, a
 
 
 @pytest.mark.parametrize("landing", ["near_melee", "near_shooter", "clear", "respawned"])
-@pytest.mark.parametrize("failed_shaft_seal", [False, True])
-def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, landing, failed_shaft_seal):
+@pytest.mark.parametrize("encounter", ["surface_melee", "shaft_melee", "shaft_ranged"])
+def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, landing, encounter):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
-    mob = "wither_skeleton" if failed_shaft_seal else "husk"
+    failed_shaft_seal = encounter != "surface_melee"
+    shaft_ranged = encounter == "shaft_ranged"
+    mob = "skeleton" if shaft_ranged else "wither_skeleton" if failed_shaft_seal else "husk"
     primary = {"id": 77, "name": mob, "pos": [1.3, 69, 0.5], "dist": 0.8}
     status = {
         "pos": [0.5, 69, 0.5], "health": 20.0 if failed_shaft_seal else 7.0, "food": 17, "ready": True, "alive": True,
@@ -4468,7 +4470,11 @@ def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, land
 
     def short_retreat(*args, **kwargs):
         status.update(pos=[-1.68, 69, 0.5], health=4.84)
-        status["nearest_hostile"] = {"id": 78, "name": mob, "dist": 2.3 if landing != "clear" else 4.0}
+        status["nearest_hostile"] = {
+            "id": 78, "name": "husk" if shaft_ranged else mob, "dist": 2.3 if landing != "clear" else 4.0,
+        }
+        if shaft_ranged:
+            status["blocking"] = False
         if landing == "near_shooter":
             status["nearest_hostile"].update(name="skeleton", dist=3.4)
         if landing == "respawned":
@@ -4481,16 +4487,17 @@ def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, land
         monkeypatch.setattr(env, "arena_snapshot", lambda *args: {"enclosure": "carved_shaft"})
         monkeypatch.setattr(env, "build_tactical", lambda *args, **kwargs: {"ok": False, "reason": "no_safe_seal"})
     outcome = CombatControllerSlot().handle(
-        env, {"source": "pre_hurt_melee", "primary_entity_id": 77, "primary_type": mob},
+        env, {"source": "pre_hurt_ranged" if shaft_ranged else "pre_hurt_melee", "primary_entity_id": 77, "primary_type": mob},
     )
 
     if failed_shaft_seal:
         assert {"action": "seal_shaft", "ok": False} in outcome["actions"]
         assert {"action": "flee", "ok": False} in outcome["actions"]
-    should_latch = landing == "near_melee" or (landing == "near_shooter" and not failed_shaft_seal)
+    should_latch = landing == "near_melee" or (landing == "near_shooter" and encounter != "shaft_melee")
     assert outcome["latched_guard"] is should_latch
     if should_latch and landing == "near_shooter":
-        assert {"action": "guard_ranged_after_melee_retreat", "ok": True, "entity_id": 78} in outcome["actions"]
+        action = "guard_ranged_after_failed_seal" if shaft_ranged else "guard_ranged_after_melee_retreat"
+        assert {"action": action, "ok": True, "entity_id": 78} in outcome["actions"]
     if should_latch:
         assert posture_calls[-2:] == [("look", {"entity_id": 78}), ("posture", {"shield": True, "sneak": False, "jump": False})]
         assert status["blocking"] is True

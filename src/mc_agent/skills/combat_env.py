@@ -3369,17 +3369,26 @@ class SubcorticalInstinctController:
                     if has_shield and not fl.get("respawned"):
                         landing = env._safe_status({"ready": False})
                         nearest = landing.get("nearest_hostile")
+                        nearest = nearest if isinstance(nearest, dict) else {}
+                        name = _clean_block_name(nearest.get("name"))
+                        distance = self._entity_dist(landing.get("pos"), nearest)
+                        close_melee = name in PRE_HURT_MELEE_MOBS and distance <= 3.5
+                        health = landing.get("health")
+                        exposed_to_shooter = (
+                            not fl.get("ok") and landing.get("blocking") is False
+                            and mob_name in RANGED_MOBS and name in RANGED_MOBS and distance <= 8.0
+                            and isinstance(health, (int, float)) and 0 < health <= 10.0
+                        )
                         if (
-                            isinstance(nearest, dict) and isinstance(nearest.get("id"), int)
-                            and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
-                            and self._entity_dist(landing.get("pos"), nearest) <= 3.5
+                            (close_melee or exposed_to_shooter) and isinstance(nearest.get("id"), int)
                             and landing.get("ready") is not False and landing.get("alive") is not False
                             and not landing.get("in_water") and not landing.get("in_lava")
                             and landing.get("last_death") == st.get("last_death")
                             and landing.get("dimension") == st.get("dimension")
                         ):
                             latched_guard = self._latch_shield_at_threat(env, nearest["id"])
-                            actions.append({"action": "guard_melee_after_retreat", "ok": latched_guard, "entity_id": nearest["id"]})
+                            action = "guard_melee_after_retreat" if close_melee else "guard_ranged_after_failed_seal"
+                            actions.append({"action": action, "ok": latched_guard, "entity_id": nearest["id"]})
             elif (
                 mob_name in RANGED_MOBS
                 and mob_name != "blaze"
