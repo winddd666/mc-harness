@@ -1988,6 +1988,24 @@ class GenerationGuard:
                 )
                 hurt_src = str(recent_hurt.get("source") or "").strip().lower()
                 indirect_magic = hurt_src == "indirect_magic"
+                if not hurt_src and not recent_hurt.get("source_entity") and any(
+                    str(hit.get("source") or "").strip().lower() in {"magic", "poison", "indirect_magic"}
+                    for hit in other_hurts
+                ):
+                    try:
+                        sighting = self.bot.call("get_entities", {"radius": 12, "types": ["hostile"]}, timeout_s=0.6)
+                    except (ApiError, httpx.HTTPError):
+                        sighting = {}
+                    witch = next((
+                        entity for entity in (sighting.get("entities") or [])
+                        if isinstance(entity, dict) and str(entity.get("name") or "").removeprefix("minecraft:") == "witch"
+                        and entity.get("blocked_by_wall") is False and isinstance(entity.get("id"), int)
+                        and isinstance(entity.get("pos"), (list, tuple)) and len(entity["pos"]) >= 3
+                        and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in entity["pos"][:3])
+                    ), None)
+                    if witch is not None:
+                        attacker = witch
+                        indirect_magic = True
                 ranged_defense = hurt_src in RANGED_HURT_SOURCES or (
                     nh_name in {"blaze", "ghast"}
                     and (hurt_src in FIRE_HURT_SOURCES or (not hurt_src and status.get("on_fire")))

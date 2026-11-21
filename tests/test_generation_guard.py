@@ -5187,6 +5187,41 @@ def test_indirect_magic_uses_checked_retreat_without_digging_a_bunker(monkeypatc
         assert retreats == [] and incident is None
 
 
+@pytest.mark.parametrize("witch_visible", [False, True])
+def test_magic_damage_with_visible_witch_retreats_from_the_witch(monkeypatch, witch_visible):
+    zombie = {"id": 41, "name": "zombie", "dist": 1.9, "pos": [2.4, 71, 0.5]}
+    witch = {"id": 42, "name": "witch", "dist": 7.5, "pos": [0.5, 71, -7.0], "blocked_by_wall": not witch_visible}
+    status = {
+        "pos": [0.5, 71, 0.5], "dimension": "overworld", "health": 16.7, "food": 17,
+        "ready": True, "alive": True, "on_ground": True, "blocking": True, "nearest_hostile": zombie,
+    }
+    hits = [{"seq": 1, "type": "hurt"}, {"seq": 2, "type": "hurt", "source": "magic"}]
+    retreats = []
+
+    class MagicBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [h for h in hits if h["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                assert kwargs["timeout_s"] == 0.6
+                return {"entities": [zombie, witch]}
+            return {"ok": True}
+
+    guard = GenerationGuard(MagicBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def defend(_status, attacker, _counts, *, ranged=False):
+        retreats.append((attacker, ranged))
+        return {"ok": True, "mode": "flee"}
+
+    monkeypatch.setattr(guard, "_defend_or_flee", defend)
+    assert guard.poll()["requires_replan"]
+    assert retreats == ([(witch, True)] if witch_visible else [(None, False)])
+
+
 @pytest.mark.parametrize("respawned", [False, True])
 def test_failed_nether_cover_falls_back_to_checked_retreat_only_in_same_life(monkeypatch, respawned):
     from mc_agent.skills.combat_env import CombatEnv
