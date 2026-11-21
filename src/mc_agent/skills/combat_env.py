@@ -378,6 +378,7 @@ class CombatEnv:
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
+        self._stalled_lava_shore: tuple[tuple[float, ...], tuple[float, ...], float] | None = None
 
     def surface_from_water(self, status: dict[str, Any]) -> dict[str, Any]:
         if self._water_escape is not None:
@@ -1161,6 +1162,8 @@ class CombatEnv:
                     force_rim_escape and self._is_near_or_over_lava(st)
                 )
             if not rim_lava_active:
+                if not _landing_unconfirmed(st):
+                    self._stalled_lava_shore = None
                 unconfirmed = _landing_unconfirmed(st)
                 return {
                     "ok": not unconfirmed,
@@ -1244,6 +1247,8 @@ class CombatEnv:
             still_in_lava = bool(st_now.get("in_lava"))
             pos_now = st_now.get("pos") or pos0
             respawned = _did_respawn_during_lava(st_now)
+            if respawned or (not still_in_lava and not _landing_unconfirmed(st_now)):
+                self._stalled_lava_shore = None
             airborne_over_lava = (
                 (not respawned)
                 and (not still_in_lava)
@@ -1375,7 +1380,15 @@ class CombatEnv:
         if lava_shore_target is not None and time.monotonic() + 1.5 < lava_deadline:
             swim_pos = st.get("pos") or pos0
             shore_d = math.hypot(lava_shore_target[0] - float(swim_pos[0]), lava_shore_target[2] - float(swim_pos[2]))
-            if shore_d <= 6.5:
+            stalled = self._stalled_lava_shore
+            repeat_stall = (
+                stalled is not None and stalled[0] == tuple(lava_shore_target)
+                and math.dist(swim_pos[:3], stalled[1]) <= 1.25
+                and time.monotonic() - stalled[2] < 15.0
+            )
+            if repeat_stall:
+                actions.append("lava_shore_path_stalled")
+            elif shore_d <= 6.5:
                 try:
                     self.bot.call(
                         "move_to",
@@ -1394,11 +1407,14 @@ class CombatEnv:
                     actions.append("lava_move_to_shore")
                 except (ApiError, httpx.HTTPError) as err:
                     actions.append("lava_move_to_shore_timeout" if isinstance(err, httpx.HTTPError) else "lava_move_to_shore_err")
-                    self._best_effort_stop()
+                    self._best_effort_stop(timeout_s=0.5)
                 self.invalidate_block_cache()
                 st = self._safe_status(st)
                 if _should_exit_lava(st):
                     return _lava_result(st)
+                end = st.get("pos") or swim_pos
+                if math.dist(end[:3], lava_shore_target) >= math.dist(swim_pos[:3], lava_shore_target) - 0.75:
+                    self._stalled_lava_shore = (tuple(lava_shore_target), tuple(end[:3]), time.monotonic())
 
         # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
         filler = self._pick_filler_block(counts)
@@ -2208,9 +2224,11 @@ class CombatEnv:
                 pass
         if (
             shore_target is not None and not still_wet and st_end.get("on_ground") is False
-            and not st_end.get("in_lava") and math.dist(pos_end[:3], shore_target) <= 0.6
+            and not st_end.get("in_lava")
+            and math.hypot(pos_end[0] - shore_target[0], pos_end[2] - shore_target[2]) <= 0.6
+            and -0.6 <= pos_end[1] - shore_target[1] <= 1.25
         ):
-            # The landing move can finish inside its goal radius one physics tick before contact.
+            # A shore hop can end above the bank before the feet reach it.
             time.sleep(0.1)
             try:
                 st_end = self.bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
@@ -2688,6 +2706,20 @@ class SubcorticalInstinctController:
                 if not seal.get("ok"):
                     fl = env.flee(mob_pos, distance=12.0, urgent=True, allow_shaft_seal=False)
                     actions.append({"action": "flee", "ok": bool(fl.get("ok"))})
+                    if has_shield and not fl.get("respawned"):
+                        landing = env._safe_status({"ready": False})
+                        nearest = landing.get("nearest_hostile")
+                        if (
+                            isinstance(nearest, dict) and isinstance(nearest.get("id"), int)
+                            and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
+                            and self._entity_dist(landing.get("pos"), nearest) <= 3.5
+                            and landing.get("ready") is not False and landing.get("alive") is not False
+                            and not landing.get("in_water") and not landing.get("in_lava")
+                            and landing.get("last_death") == st.get("last_death")
+                            and landing.get("dimension") == st.get("dimension")
+                        ):
+                            latched_guard = self._latch_shield_at_threat(env, nearest["id"])
+                            actions.append({"action": "guard_melee_after_retreat", "ok": latched_guard, "entity_id": nearest["id"]})
             elif (
                 mob_name in RANGED_MOBS
                 and mob_name != "blaze"
@@ -2791,9 +2823,10 @@ class SubcorticalInstinctController:
                                 pos, [hostile for hostile in hostiles if hostile is not primary], max_distance=12.0,
                             )
                         ]
+                    hurt_midair = st.get("on_ground") is False and trigger.get("source") == "tool_interrupted_hurt"
                     fl = env.flee(
                         mob_pos, distance=14.0, urgent=True,
-                        wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon,
+                        wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon or hurt_midair,
                         **({"other_shooters": other_shooters} if other_shooters else {}),
                     )
                     actions.append({
@@ -2814,8 +2847,15 @@ class SubcorticalInstinctController:
                         nearest_dist = nearest.get("dist")
                         low_health_after = isinstance(st_fl.get("health"), (int, float)) and st_fl["health"] <= 10.0
                         ranged_still_exposed = (
-                            check_ranged_guard and low_health_after and nearest_id == mob_id and mob_id is not None
-                            and isinstance(nearest_dist, (int, float)) and nearest_dist <= 12.0
+                            check_ranged_guard and isinstance(nearest_id, int)
+                            and isinstance(nearest_dist, (int, float))
+                            and (
+                                (low_health_after and nearest_id == mob_id and nearest_dist <= 12.0)
+                                or (
+                                    st_fl.get("blocking") and nearest_dist <= 3.5
+                                    and _clean_block_name(nearest.get("name")) in RANGED_MOBS
+                                )
+                            )
                         )
                         melee_still_close = (
                             check_melee_guard and low_health_after and st_fl.get("blocking")
@@ -2831,7 +2871,7 @@ class SubcorticalInstinctController:
                             and st_fl.get("last_death") == st.get("last_death")
                             and st_fl.get("dimension") == st.get("dimension")
                         ):
-                            guard_target = nearest_id if melee_still_close else mob_id
+                            guard_target = nearest_id if ranged_still_exposed or melee_still_close else mob_id
                             latched_guard = self._latch_shield_at_threat(
                                 env,
                                 int(guard_target) if guard_target is not None else None,

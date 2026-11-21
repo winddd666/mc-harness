@@ -139,6 +139,10 @@ class _UnsafeSupportDig(BaseException):
     """Unwind an explicit dig that would remove footing above an unsafe drop."""
 
 
+class _UnsafeFoodUse(BaseException):
+    """Unwind ordinary food use while the bot is exposed to a hazard."""
+
+
 class _GuardSession:
     def __init__(
         self,
@@ -277,6 +281,7 @@ class GenerationGuard:
         self._ranged_cover_active_until: float = float("-inf")
         self._last_ranged_hurt_at = float("-inf")
         self._last_melee_hurt_at = float("-inf")
+        self._last_lava_hurt_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
@@ -633,6 +638,7 @@ class GenerationGuard:
                 if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
                     self._last_ranged_hurt_at = float("-inf")
                     self._last_melee_hurt_at = float("-inf")
+                    self._last_lava_hurt_at = float("-inf")
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     source = str(event.get("source") or "").strip().lower()
@@ -641,6 +647,8 @@ class GenerationGuard:
                         self._last_melee_hurt_at = float("-inf")
                     elif source in MELEE_HURT_SOURCES:
                         self._last_melee_hurt_at = now
+                    elif source in LAVA_HURT_SOURCES:
+                        self._last_lava_hurt_at = now
         return fresh
 
     @staticmethod
@@ -1106,18 +1114,26 @@ class GenerationGuard:
         eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
         should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not (hot_floor_only or needs_hot_floor_guard)
         hurt = bool(hurts) or dropped
+        burning_after_lava = (
+            bool(hurts) and now - self._last_lava_hurt_at < 15.0
+            and all(str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts)
+        )
         non_combat_only_hurt = (
             hurt
             and bool(hurts)
             and not in_lava
             and not in_water
             and not deaths
-            and all(
-                str(h.get("source") or "").strip().lower() in NON_COMBAT_HURT_SOURCES
-                and not (h.get("source_entity") or h.get("likely_attacker"))
-                for h in hurts
+            and (
+                burning_after_lava or (
+                    (not nh_name0 or nh_dist0 > 8.0)
+                    and all(
+                        str(h.get("source") or "").strip().lower() in NON_COMBAT_HURT_SOURCES
+                        and not (h.get("source_entity") or h.get("likely_attacker"))
+                        for h in hurts
+                    )
+                )
             )
-            and (not nh_name0 or nh_dist0 > 8.0)
         )
         fire_hurt_only = non_combat_only_hurt and any(
             str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts
@@ -2003,6 +2019,7 @@ class GenerationGuard:
         check_flee_exit: bool = False,
         watch_attack_water: bool = False,
         check_support_dig: bool = False,
+        check_food_use: bool = False,
     ):
         """Intercept threats during actor macros, or watch only water danger during an attack."""
         orig_call = getattr(self.raw_bot, "call", None)
@@ -2019,6 +2036,26 @@ class GenerationGuard:
         attack_state_lock = threading.Lock()
         actor_thread_id = threading.get_ident()
         pending_trigger: list[ThreatTrigger] = []
+
+        def interrupted_action_trigger(max_enemy_distance: float) -> ThreatTrigger | None:
+            try:
+                status = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
+            except (ApiError, httpx.HTTPError):
+                return None
+            if not isinstance(status, dict):
+                return None
+            if status.get("in_lava"):
+                return {
+                    "source": "boundary_threat", "primary_entity_id": None, "primary_type": "lava",
+                    "primary_pos": None, "distance": 0.0,
+                }
+            name, dist, entity_id, pos = self._extract_hostile_info(status)
+            if name and dist <= max_enemy_distance:
+                return {
+                    "source": "tool_interrupted_hurt", "primary_entity_id": entity_id, "primary_type": name,
+                    "primary_pos": pos, "distance": dist,
+                }
+            return None
 
         def _watcher() -> None:
             # Delay 0.30s before first poll so fast (<5ms) offline mock calls never incur background HTTP reads
@@ -2186,6 +2223,19 @@ class GenerationGuard:
                 return actor_call(path, body, **kwargs)
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
+            if (
+                check_food_use and clean_path == "use_item" and isinstance(body, dict) and not body.get("target")
+                and str(body.get("item") or "").removeprefix("minecraft:") in SAFE_FOOD_PRIORITY
+            ):
+                try:
+                    state = actor_call("status", method="GET", timeout_s=0.6, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    state = {}
+                if (
+                    state and state.get("ready") is not False and state.get("alive") is not False
+                    and not self._can_auto_eat_safely(state)
+                ):
+                    raise _UnsafeFoodUse
             if check_support_dig and clean_path == "dig" and isinstance(body, dict):
                 unsafe_dig = self._is_support_dig_unsafe(body.get("pos"))
                 if pending_trigger:
@@ -2214,54 +2264,18 @@ class GenerationGuard:
                     if pending_trigger:
                         raise ReflexPreempted(pending_trigger[0]) from None
                     if err.code == "interrupted" and clean_path in ACTION_LOCK_ENDPOINTS:
-                        st_err = {}
-                        try:
-                            st_err = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
-                        except Exception:
-                            pass
-                        if isinstance(st_err, dict) and bool(st_err.get("in_lava")):
-                            raise ReflexPreempted(
-                                {
-                                    "source": "boundary_threat",
-                                    "primary_entity_id": None,
-                                    "primary_type": "lava",
-                                    "primary_pos": None,
-                                    "distance": 0.0,
-                                }
-                            ) from None
-                        nh_n, nh_d, nh_i, nh_p = self._extract_hostile_info(st_err)
-                        if nh_n and nh_d <= 14.0:
-                            raise ReflexPreempted(
-                                {
-                                    "source": "tool_interrupted_hurt",
-                                    "primary_entity_id": nh_i,
-                                    "primary_type": nh_n,
-                                    "primary_pos": nh_p,
-                                    "distance": nh_d,
-                                }
-                            ) from None
+                        trigger = interrupted_action_trigger(14.0)
+                        if trigger is not None:
+                            raise ReflexPreempted(trigger) from None
                 raise
 
             if not self._in_reflex and not caller_ignores_hurt:
                 if pending_trigger:
                     raise ReflexPreempted(pending_trigger[0])
                 if isinstance(res, dict) and res.get("interrupted_by") == "hurt" and clean_path in ACTION_LOCK_ENDPOINTS:
-                    st_int = {}
-                    try:
-                        st_int = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
-                    except Exception:
-                        pass
-                    nh_n, nh_d, nh_i, nh_p = self._extract_hostile_info(st_int)
-                    if nh_n and nh_d <= 15.0:
-                        raise ReflexPreempted(
-                            {
-                                "source": "tool_interrupted_hurt",
-                                "primary_entity_id": nh_i,
-                                "primary_type": nh_n,
-                                "primary_pos": nh_p,
-                                "distance": nh_d,
-                            }
-                        )
+                    trigger = interrupted_action_trigger(15.0)
+                    if trigger is not None:
+                        raise ReflexPreempted(trigger)
             if unstick_before is not None:
                 self._restore_unstick_shield_facing(unstick_before, actor_call)
             return res
@@ -2589,11 +2603,18 @@ class GenerationGuard:
                 check_flee_exit=is_flee,
                 watch_attack_water=is_attack,
                 check_support_dig=tool_name == "mc_dig",
+                check_food_use=tool_name == "mc_use_item",
             ):
                 result = invoke_fn()
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _RecoveryBudgetExceeded
                 return result
+        except _UnsafeFoodUse:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {"code": "unsafe_to_eat", "message": "当前位置有环境危险或敌人威胁，请先到安全位置再进食。"},
+            }, ensure_ascii=False)
         except _UnsafeSupportDig:
             return json.dumps({
                 "ok": False,
