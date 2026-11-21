@@ -10712,3 +10712,37 @@ def test_creeper_retreat_avoids_a_second_creeper_on_the_escape_heading(monkeypat
     assert outcome["mode"] == "creeper_evade"
     assert path
     assert all(math.dist(p, second["pos"]) >= min(distance, 6.0) - 1e-6 for p in path), path
+
+
+def test_combat_status_keeps_retry_and_http_phases_inside_remaining_budget(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.bot.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    status_attempts = []
+    events = []
+
+    def respond(request):
+        if request.url.path.endswith("/status") and clock[0] >= 1006.6 and len(status_attempts) < 2:
+            timeout = request.extensions["timeout"]
+            status_attempts.append(timeout)
+            clock[0] += sum(timeout.values())
+            if len(status_attempts) == 1:
+                raise httpx.RemoteProtocolError("closed connection")
+            raise httpx.ReadTimeout("slow retry")
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    class LateStatus:
+        def on_encounter(self, env, _trigger):
+            clock[0] += 6.6
+            env.bot.status()
+
+    with BotSession("cached", transport=httpx.MockTransport(respond)) as bot:
+        guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None)
+        guard.combat_slot.register(LateStatus())
+        outcome = guard._run_subcortical_combat({"source": "pre_hurt_melee"})
+
+    assert outcome["reason"] == "time_budget"
+    event, = [event for event in events if event["type"] == "guardian.combat_budget_exceeded"]
+    assert event["endpoint"] == "status"
+    assert len(status_attempts) == 2
+    assert clock[0] <= 1007.500001

@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 import httpx
 
+from ..bot import BotSession
 from ..errors import ApiError
 from .control import RequestCancelled, RunTimedOut
 from ..skills.combat_env import (
@@ -210,6 +211,8 @@ class _GuardSession:
             timeout = 2.0 if readonly else 8.0
         if self._deadline.get() is not None:
             remaining = self._time_remaining(action)
+            if action == "status" and isinstance(self.bot, BotSession) and not isinstance(timeout, httpx.Timeout):
+                timeout = httpx.Timeout(timeout, connect=min(timeout, 0.25), write=min(timeout, 0.1), pool=min(timeout, 0.1))
             if isinstance(timeout, httpx.Timeout):
                 # BotSession can retry a closed keepalive after a 150ms delay.
                 attempt_budget = (remaining - 0.15) / 2
