@@ -6749,18 +6749,19 @@ def test_bug072_real_flee_entry_accepts_the_mining_sessions_httpx_timeout(monkey
     assert final.connect <= 0.5 and final.write <= 0.5 and final.pool <= 0.5
 
 
-@pytest.mark.parametrize("terrain", ["deep_drop", "shallow_drop", "lava", "side_dig"])
+@pytest.mark.parametrize("terrain", ["deep_drop", "shallow_drop", "lava", "side_dig", "edge_support", "edge_dig"])
 def test_explicit_dig_checks_the_landing_before_removing_support(terrain):
     from mc_agent.harness.mc_tools import McToolset
 
-    target = [2015 if terrain == "side_dig" else 2014, 70, 1882]
+    target = [2015 if terrain in {"side_dig", "edge_dig"} else 2014, 70, 1882]
+    x = 2014.8 if terrain in {"edge_support", "edge_dig"} else 2014.5
     digs = []
     probes = []
 
     class ShaftBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                return {"pos": [2014.5, 71.0, 1882.5], "on_ground": True, "ready": True, "alive": True}
+                return {"pos": [x, 71.0, 1882.5], "on_ground": True, "ready": True, "alive": True}
             if action == "get_block":
                 probes.append(body["pos"])
                 y = body["pos"][1]
@@ -6779,7 +6780,7 @@ def test_explicit_dig_checks_the_landing_before_removing_support(terrain):
 
     result = json.loads(guard.run_tool_with_reflex("mc_dig", lambda: toolset.mc_dig(*target)))
 
-    if terrain in {"deep_drop", "lava"}:
+    if terrain in {"deep_drop", "lava", "edge_support"}:
         assert result["ok"] is False and result["requires_replan"] is True
         assert result["error"]["code"] == "unsafe_landing"
         assert digs == []
