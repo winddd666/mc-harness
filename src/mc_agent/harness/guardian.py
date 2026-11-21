@@ -2957,6 +2957,31 @@ class GenerationGuard:
                                 and oxygen <= self.MINING_WATER_ESCAPE_OXYGEN)
                         )
                     )
+                    if (
+                        creeper_close and nh_dist > 2.3 and isinstance(nh_id, int)
+                        and st.get("on_ground") is True and not st.get("in_water")
+                        and not in_lava_now and not hp_dropped
+                    ):
+                        try:
+                            sighting = orig_call(
+                                "get_entities", {"radius": 6, "types": ["hostile"]},
+                                timeout_s=0.3, allow_reauth=False,
+                            )
+                        except (ApiError, httpx.HTTPError):
+                            sighting = {}
+                        entities = (sighting.get("entities") or []) if isinstance(sighting, dict) else []
+                        nearby_creepers = [
+                            entity for entity in entities
+                            if isinstance(entity, dict) and (
+                                entity.get("id") == nh_id
+                                or str(entity.get("name") or "").removeprefix("minecraft:") == "creeper"
+                            )
+                        ]
+                        if (
+                            any(entity.get("id") == nh_id for entity in nearby_creepers)
+                            and all(entity.get("blocked_by_wall") is True for entity in nearby_creepers)
+                        ):
+                            creeper_close = False
                     hot_floor_now = False
                     if watch_hot_floor and not (in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped):
                         tile = self._hot_floor_block(st)

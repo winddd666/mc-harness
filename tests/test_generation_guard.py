@@ -10235,6 +10235,56 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         assert not status.get("in_lava")
 
 
+@pytest.mark.parametrize("visibility", ["occluded", "exposed", "another_exposed", "unknown"])
+def test_mining_watcher_waits_only_for_a_confirmed_occluded_creeper(monkeypatch, visibility):
+    import threading
+
+    inspected = threading.Event()
+    stopped = threading.Event()
+    creeper = {"id": 42, "name": "creeper", "dist": 4.1, "pos": [0.5, 58, 4.6]}
+    status = {
+        "pos": [0.5, 58, 0.5], "health": 20, "on_ground": True,
+        "ready": True, "alive": True, "blocking": True, "nearest_hostile": creeper,
+    }
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_entities":
+                inspected.set()
+                if visibility == "unknown":
+                    raise httpx.ReadTimeout("entity visibility unavailable")
+                entities = [{**creeper, "blocked_by_wall": visibility != "exposed"}]
+                if visibility == "another_exposed":
+                    entities.append({**creeper, "id": 43, "dist": 4.4, "blocked_by_wall": False})
+                return {"entities": entities}
+            if action == "dig":
+                assert inspected.wait(1.5)
+                if visibility != "occluded":
+                    assert stopped.wait(1.5)
+                return {"ok": True}
+            if action == "stop":
+                stopped.set()
+            if action == "events":
+                return {"events": []}
+            return {"ok": True}
+
+    bot = ShaftBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_slot, "handle", lambda *_: {
+        "mode": "creeper_evade", "handled": True, "status_after": status,
+    })
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(
+        bot.call("dig", {"pos": [1, 58, 0]}),
+    )))
+
+    if visibility == "occluded":
+        assert result == {"ok": True} and not stopped.is_set()
+    else:
+        assert result["reflex_mode"] == "creeper_evade" and stopped.is_set()
+
+
 def test_mining_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch):
     import threading
 
