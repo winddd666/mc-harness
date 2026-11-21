@@ -6521,6 +6521,55 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert skills.bot is bot
 
 
+def test_water_melee_retries_shore_after_unconfirmed_landing(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [0.5, 62.5, 0.5], "health": 17.8, "food": 20, "oxygen": 285,
+        "in_water": True, "on_ground": False, "alive": True, "ready": True,
+        "nearest_hostile": {"id": 44, "name": "drowned", "pos": [3.3, 62.5, 0.5], "dist": 2.8},
+    }
+    hurts = [{"seq": 1, "type": "hurt", "source": "mob_attack", "health": 17.8}]
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                since = kwargs["params"]["since"]
+                return {"events": [hurt for hurt in hurts if hurt["seq"] > since], "last_seq": hurts[-1]["seq"]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    shore_attempts = []
+
+    def reach_shore(attacker_pos, **kwargs):
+        shore_attempts.append(attacker_pos)
+        if len(shore_attempts) == 1:
+            return {"ok": False, "in_water": False, "reason": "shore_landing_unconfirmed"}
+        status.update(in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    def escape_water(*args, **kwargs):
+        pytest.fail("a failed shore landing should be followed by another directed escape")
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    monkeypatch.setattr(guard, "_escape_water", escape_water)
+    first = guard.poll()
+    assert [action["action"] for action in first["actions"]] == ["escape_to_shore"]
+    assert first["actions"][0]["result"]["reason"] == "shore_landing_unconfirmed"
+
+    clock[0] += 4.0
+    status.update(health=11.0, nearest_hostile={})
+    hurts.append({"seq": 2, "type": "hurt", "source": "mob_attack", "health": 11.0})
+    second = guard.poll()
+    assert [action["action"] for action in second["actions"]] == ["escape_to_shore"]
+    assert second["actions"][0]["ok"] is True
+    assert shore_attempts == [[3.3, 62.5, 0.5], None]
+
+
 @pytest.mark.parametrize("landing", ["grounded", "airborne", "wet_again"])
 def test_water_macro_checks_that_a_dry_jump_reaches_ground(monkeypatch, landing):
     monkeypatch.setattr("mc_agent.harness.guardian.time.sleep", lambda _: None)
