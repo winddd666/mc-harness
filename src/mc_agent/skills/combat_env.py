@@ -3225,7 +3225,13 @@ class SubcorticalInstinctController:
                     **({"use_nearest_hostile": False} if not c_pos else {}),
                 )
                 st_chk = env._safe_status({**st, "ready": False})
-                post_h = self._find_live_hostiles(env, radius=8)
+                changed_life = (
+                    bool(flee_res.get("respawned")) or st_chk.get("alive") is False
+                    or st_chk.get("last_death") != st.get("last_death")
+                    or st_chk.get("dimension") != st.get("dimension")
+                )
+                can_continue = not changed_life and st_chk.get("ready") is not False and bool(st_chk.get("pos"))
+                post_h = self._find_live_hostiles(env, radius=8) if can_continue else []
                 close_creeper = next(
                     (
                         e
@@ -3235,7 +3241,7 @@ class SubcorticalInstinctController:
                     ),
                     None,
                 )
-                if close_creeper is None:
+                if close_creeper is None and can_continue:
                     nh_chk = st_chk.get("nearest_hostile")
                     if (
                         isinstance(nh_chk, dict)
@@ -3245,18 +3251,16 @@ class SubcorticalInstinctController:
                         close_creeper = nh_chk
                 creeper_still_close = close_creeper is not None
                 actions.append({
-                    "action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")) and not creeper_still_close,
+                    "action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")) and can_continue and not creeper_still_close,
                     "moved": flee_res.get("moved_dist"),
                     **({"reason": flee_res["reason"]} if flee_res.get("reason") else {}),
                     **({"creeper_distance": self._entity_dist(st_chk.get("pos"), close_creeper)} if close_creeper else {}),
+                    **({"respawned": True} if changed_life else {}),
                 })
                 close_pos = close_creeper.get("pos") if close_creeper else None
                 if (
                     st_chk.get("in_water") and not st_chk.get("in_lava")
-                    and not flee_res.get("respawned")
-                    and st_chk.get("ready") is not False and st_chk.get("alive") is not False
-                    and st_chk.get("last_death") == st.get("last_death")
-                    and st_chk.get("dimension") == st.get("dimension")
+                    and can_continue
                     and time.monotonic() < deadline
                 ):
                     shore = env.escape_deep_water_to_shore(
@@ -3274,10 +3278,9 @@ class SubcorticalInstinctController:
                     )
                 elif (
                     not has_shield and isinstance(close_pos, (list, tuple)) and len(close_pos) >= 3
-                    and flee_res.get("ok") and not flee_res.get("respawned")
-                    and st_chk.get("ready") is not False and st_chk.get("alive") is not False
+                    and flee_res.get("ok") and can_continue
                     and st_chk.get("on_ground") is True and not st_chk.get("in_water") and not st_chk.get("in_lava")
-                    and st_chk.get("last_death") == st.get("last_death") and time.monotonic() < deadline
+                    and time.monotonic() < deadline
                 ):
                     other_close_creepers = self._other_creeper_positions(post_h, close_creeper.get("id"))
                     followup = env.flee(
@@ -3287,13 +3290,9 @@ class SubcorticalInstinctController:
                     actions.append({"action": "creeper_followup_retreat", **followup})
                 if (
                     (not flee_res.get("ok") or creeper_still_close)
-                    and not flee_res.get("respawned")
+                    and can_continue
                     and has_shield
-                    and st_chk.get("ready") is not False
-                    and st_chk.get("alive") is not False
                     and not st_chk.get("in_water")
-                    and st_chk.get("last_death") == st.get("last_death")
-                    and st_chk.get("dimension") == st.get("dimension")
                 ):
                     cid = (close_creeper or creeper_ent or {}).get("id")
                     latched_guard = self._latch_shield_at_threat(env, int(cid) if cid is not None else None)

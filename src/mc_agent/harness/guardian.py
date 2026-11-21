@@ -698,6 +698,14 @@ class GenerationGuard:
         )
 
     @staticmethod
+    def _unattributed_fall_only(hurts: list[dict[str, Any]]) -> bool:
+        return bool(hurts) and all(
+            str(hit.get("source") or "").strip().lower() == "fall"
+            and not (hit.get("source_entity") or hit.get("likely_attacker"))
+            for hit in hurts
+        )
+
+    @staticmethod
     def _short_water_escape_after_hit(status: dict[str, Any], source: Any) -> bool:
         source = str(source or "").strip().lower()
         health = status.get("health")
@@ -846,14 +854,21 @@ class GenerationGuard:
                     return cover
             if cover_only:
                 return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
-            critical_arrow_knockback = (
-                dimension == "overworld" and ranged and prefer_cover and unshielded
-                and isinstance(health, (int, float)) and 0 < health <= 4.0
+            critical_knockback = (
+                dimension == "overworld" and unshielded
                 and status.get("on_ground") is False and not status.get("on_fire")
+                and isinstance(health, (int, float)) and 0 < health <= 6.0
+                and (
+                    (ranged and prefer_cover)
+                    or (
+                        not ranged and recent_melee and health <= 4.0
+                        and nh_name in PRE_HURT_MELEE_MOBS and nh_distance <= 3.5
+                    )
+                )
             )
             return self.combat_env.flee(
                 pos, wait_for_ground=True,
-                **({"initial_landing_checks": 5} if critical_arrow_knockback else {}),
+                **({"initial_landing_checks": 5} if critical_knockback else {}),
                 **({"other_shooters": other_shooters} if other_shooters else {}),
                 **({"other_melee": other_melee} if other_melee else {}),
                 **({"use_nearest_hostile": False} if resolve_melee and pos is None else {}),
@@ -1587,6 +1602,7 @@ class GenerationGuard:
         eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
         should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not (hot_floor_only or needs_hot_floor_guard)
         hurt = bool(hurts) or dropped
+        fall_only = self._unattributed_fall_only(hurts)
         contact_fire = any(str(h.get("source") or "").strip().lower() == "in_fire" for h in hurts)
         recent_lava = now - self._last_lava_contact_at < 15.0
         fire_hurt = any(str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts)
@@ -1611,7 +1627,7 @@ class GenerationGuard:
             and not in_water
             and not life_transition_pending
             and (
-                environmental_burning or (
+                environmental_burning or fall_only or (
                     (not nh_name0 or nh_dist0 > 8.0)
                     and all(
                         str(h.get("source") or "").strip().lower() in NON_COMBAT_HURT_SOURCES
@@ -1626,7 +1642,10 @@ class GenerationGuard:
 
         pre_trigger = (
             None
-            if (hurt or deaths or disconnected or not ready or in_water or in_lava)
+            if (
+                (hurt and not (fall_only and status.get("on_ground") is True))
+                or deaths or disconnected or not ready or in_water or in_lava
+            )
             else self._detect_pre_hurt_trigger(status)
         )
         effective_combat_hurt = hurt and not (non_combat_only_hurt or hot_floor_only)
@@ -2902,6 +2921,38 @@ class GenerationGuard:
             if isinstance(result, dict) and result.get("respawned"):
                 return {**result, "requires_replan": True, "pos_before": status.get("pos")}
             if recovery.get("ok") and isinstance(result, dict):
+                cover_deadline = min(now + 4.0, deadline)
+                if (
+                    allow_cover and ranged and dimension == "overworld" and not status.get("blocking")
+                    and isinstance(health, (int, float)) and 0 < health <= 10.0
+                    and time.monotonic() + 1.5 < cover_deadline
+                ):
+                    try:
+                        after = bot.call("status", method="GET", timeout_s=0.3, allow_reauth=False)
+                    except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+                        after = {}
+                    if after.get("alive") is False or any(
+                        after.get(key) is not None and after[key] != status.get(key)
+                        for key in ("last_death", "dimension")
+                    ):
+                        return {
+                            "ok": False, "mode": "respawned", "respawned": True, "requires_replan": True,
+                            "moved_dist": 0.0, "pos_before": status.get("pos"), "pos_after": after.get("pos"),
+                        }
+                    shooter, shooter_dist, shooter_id, _ = self._extract_hostile_info(after)
+                    hp = after.get("health")
+                    if (
+                        shooter in RANGED_MOBS and shooter_id is not None and shooter_dist <= 8.0
+                        and isinstance(hp, (int, float)) and 0 < hp <= 6.0 and after.get("pos")
+                        and after.get("ready") is True and after.get("alive") is not False and after.get("on_ground") is True
+                        and not any(after.get(key) for key in ("blocking", "in_water", "in_lava", "on_fire"))
+                        and all(after.get(key) == status.get(key) for key in ("last_death", "dimension"))
+                    ):
+                        cover, _, _ = self._cover_and_shooters_after_blocked_flee(
+                            after["pos"], shooter_id, min(cover_deadline, time.monotonic() + 2.25), allow_stationary=False,
+                        )
+                        if cover and (cover.get("ok") or cover.get("respawned")):
+                            return {**cover, "requires_replan": True, "pos_before": status.get("pos")}
                 if (
                     ranged and entity_id is not None and status.get("blocking")
                     and isinstance(health, (int, float)) and health <= LOW_HP_BUNKER_MAX
@@ -3842,6 +3893,10 @@ class GenerationGuard:
                     for k in ("pos", "health", "food", "in_water", "on_ground", "is_day", "nearest_hostile")
                 },
             }
+            if outcome.get("mode") == "network_timeout":
+                receipt["status_after"].update({
+                    key: st_after.get(key) for key in ("dimension", "last_death")
+                })
             self.events.emit("guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary)
             return receipt
         finally:
@@ -4014,6 +4069,7 @@ class GenerationGuard:
             self._last_lava_contact_at = now_b
         oxygen = status.get("oxygen")
         hurts = [e for e in fresh if e.get("type") == "hurt"]
+        fall_only = self._unattributed_fall_only(hurts)
         other_hurts = [e for e in hurts if str(e.get("source") or "").strip().lower() != "hot_floor"]
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or hurt_by_lava
@@ -4039,6 +4095,7 @@ class GenerationGuard:
         unstick_still_wet = False
         tool_returned_in_water = False
         waiting_for_shore_landing = False
+        same_threat_after_timeout = False
         if tool_results:
             try:
                 last_tool_result = json.loads(tool_results[-1])
@@ -4047,6 +4104,29 @@ class GenerationGuard:
             if isinstance(last_tool_result, dict):
                 tool_returned_in_water = in_water
                 tool_status = last_tool_result.get("status_after")
+                if (
+                    last_tool_result.get("preempted_by_reflex") is True
+                    and last_tool_result.get("reflex_mode") == "network_timeout"
+                    and isinstance(tool_status, dict) and not fresh
+                ):
+                    previous_name, previous_dist, previous_id, _ = self._extract_hostile_info(tool_status)
+                    pos, previous_pos = status.get("pos"), tool_status.get("pos")
+                    health = status.get("health")
+                    same_threat_after_timeout = (
+                        nh_name in PRE_HURT_MELEE_MOBS and nh_name == previous_name
+                        and nh_id is not None and nh_id == previous_id and nh_dist >= max(1.5, previous_dist - 0.25)
+                        and isinstance(health, (int, float)) and health > LOW_HP_BUNKER_MAX
+                        and health == tool_status.get("health")
+                        and status.get("on_ground") is True and tool_status.get("on_ground") is True
+                        and all(key in tool_status and tool_status[key] == status.get(key) for key in ("dimension", "last_death"))
+                        and not status.get("on_fire")
+                        and all(
+                            isinstance(point, (list, tuple)) and len(point) >= 3
+                            and all(isinstance(coord, (int, float)) for coord in point[:3])
+                            for point in (pos, previous_pos)
+                        )
+                        and math.dist(pos[:3], previous_pos[:3]) <= 0.2
+                    )
                 water_reflex = (
                     last_tool_result.get("preempted_by_reflex") is True
                     and last_tool_result.get("reflex_mode") == "water_surface"
@@ -4079,9 +4159,12 @@ class GenerationGuard:
         )
 
         boundary_trigger: ThreatTrigger | None = None
-        if not (in_water or in_lava or hot_floor_only or waiting_for_shore_landing):
+        if not (
+            in_water or in_lava or hot_floor_only or waiting_for_shore_landing or same_threat_after_timeout
+            or (fall_only and status.get("on_ground") is False)
+        ):
             boundary_trigger = self._detect_pre_hurt_trigger(status)
-        if boundary_trigger is None and not in_water and not in_lava and other_hurts and nh_name and nh_dist <= 15.0:
+        if boundary_trigger is None and not in_water and not in_lava and not fall_only and other_hurts and nh_name and nh_dist <= 15.0:
             boundary_trigger = {
                 "source": "boundary_threat",
                 "primary_entity_id": nh_id,
