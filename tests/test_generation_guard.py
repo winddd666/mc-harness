@@ -5964,6 +5964,8 @@ def test_bug026_flee_probes_player_width_and_rechecks_each_landing(scenario):
     elif scenario == "close_respawn":
         assert not result["ok"]
         assert result["respawned"] is True
+        assert result["moved_dist"] == 0.0
+        assert result["pos_after"] == status["pos"]
         assert [action for action, _ in calls] == ["look", "control"]
     else:
         assert not result["ok"]

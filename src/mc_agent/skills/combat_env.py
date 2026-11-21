@@ -2052,7 +2052,7 @@ class CombatEnv:
             return {
                 "ok": not respawned and not unsafe and moved >= (0.35 if short_step else 1.5),
                 "mode": "respawned" if respawned else "flee",
-                "moved_dist": round(moved, 2),
+                "moved_dist": 0.0 if respawned else round(moved, 2),
                 "pos_after": pos,
                 **({"respawned": True} if respawned else {}),
                 **({"reason": "unsafe_landing"} if unsafe else {}),
