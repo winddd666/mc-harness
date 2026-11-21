@@ -811,6 +811,22 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         extra_tools=("mc_use_item", "mc_skill_scout_surface", "mc_interact", "mc_posture"),
         advancement_id="minecraft:story/follow_ender_eye",
     ),
+    "minecraft:story/enter_the_end": CurriculumTarget(
+        key="minecraft:story/enter_the_end",
+        title="60分：定位要塞传送门房、补齐末影之眼并跳入末地传送门",
+        points=60,
+        tier=2,
+        budget_class="expedition",
+        task=(
+            "解锁 story/enter_the_end(60分)（已进入主世界要塞，请全力直冲传送门房！）："
+            "1) 先调 mc_find_blocks(types=['end_portal_frame', 'end_portal'], radius=64, limit=20) 锁定传送门框架坐标及其 properties.eye 状态；若 64m 未扫到，沿要塞石砖走廊推进 25m 后再扫；"
+            "2) 拿到 end_portal_frame 坐标后，先调 mc_move_to 靠近；若遇门/墙阻断或高度差，优先用 mc_skill_staircase 调齐至与框架同海拔(±2格)并朝目标方向用 mc_dig/mc_skill_tunnel 打通直达传送门房（注意避开框架下方与楼梯口岩浆池！）；"
+            "3) 站在框架外侧安全石砖上，对所有 properties.eye 为 false/False 的 end_portal_frame 逐一调用 mc_interact(x=..., y=..., z=..., item='ender_eye') 补齐末影之眼；"
+            "4) 一旦 12 颗眼补齐并生成 end_portal，调 mc_find_blocks(types=['end_portal'], radius=16) 拿到中心坐标，直接 mc_move_to 步入 end_portal 即进入末地解锁 60 分！"
+        ),
+        extra_tools=("mc_interact", "mc_use_item", "mc_skill_tunnel", "mc_skill_staircase", "mc_posture"),
+        advancement_id="minecraft:story/enter_the_end",
+    ),
 }
 
 
