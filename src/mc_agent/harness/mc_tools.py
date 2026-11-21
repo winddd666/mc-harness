@@ -2512,12 +2512,12 @@ class McToolset:
     def mc_skill_stabilize(self) -> str:
         return self._run_skill(lambda: check_and_stabilize(self.bot))
 
-    def _cleanup_inventory_after(self, res: Any) -> Any:
+    def _cleanup_inventory_after(self, res: Any, *, skills: MacroSkills | None = None) -> Any:
         """BUG-029: enforce retention caps after every mining-style skill."""
         if not isinstance(res, dict):
             return res
         try:
-            _, cleaned = self.skills._ensure_free_slots(min_free=3)
+            _, cleaned = (skills if skills is not None else self.skills)._ensure_free_slots(min_free=3)
         except Exception:
             cleaned = []
         if cleaned:
@@ -2698,7 +2698,7 @@ class McToolset:
             return None
         try:
             st = (status or self.bot.status)()
-        except _StairDeadline:
+        except (_StairDeadline, _SkillDeadline):
             raise
         except Exception:
             return None
@@ -2854,14 +2854,46 @@ class McToolset:
     def mc_skill_tunnel(self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> str:
         direction = str(direction).strip().lower()
         steps = max(1, min(8, int(steps)))
-        blocked = self._check_direction_geofence(direction, steps, "mc_skill_tunnel")
-        if blocked is not None:
-            return blocked
-        return self._run_skill(
-            lambda: self._cleanup_inventory_after(
-                self.skills.dig_level_tunnel(direction, steps, stop_on_ore)
-            )
-        )
+
+        def tunnel() -> dict[str, Any]:
+            budget_s, deadline_imminent = self._clamp_tool_budget(35.0, max_s=35.0)
+            if deadline_imminent:
+                return {
+                    "ok": False, "requires_replan": True, "steps_done": 0,
+                    "stop_reason": "episode_deadline_imminent",
+                    "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过隧道施工。"},
+                }
+            session = None
+            skills = self.skills
+            if self._episode_deadline_mono is not None:
+                session = _SkillBudgetSession(self.bot, budget_s)
+                skills = copy(self.skills)
+                skills.bot = session
+            try:
+                blocked = self._check_direction_geofence(direction, steps, "mc_skill_tunnel", status=skills.bot.status)
+                if blocked is not None:
+                    return json.loads(blocked)
+                result = (
+                    skills.dig_level_tunnel(direction, steps, stop_on_ore, deadline=session.deadline)
+                    if session is not None else skills.dig_level_tunnel(direction, steps, stop_on_ore)
+                )
+            except (_SkillDeadline, httpx.TimeoutException):
+                if session is None:
+                    raise
+                return {
+                    "ok": False, "requires_replan": True, "stop_reason": "time_slice",
+                    "stop_confirmed": session.stop_pending(),
+                    "error": {"code": "time_slice", "message": "隧道预算已用尽。请先核对位置和背包，再重新规划。"},
+                }
+            if session is None or (not session.timed_out and result.get("stop_reason") != "time_slice"):
+                self._cleanup_inventory_after(result, skills=skills)
+                if session is not None and session.timed_out:
+                    result["cleanup_deadline_hit"] = True
+            if session is not None and session.timed_out:
+                session.stop_pending()
+            return result
+
+        return self._run_skill(tunnel)
 
     def mc_skill_mine_dfs(
         self,

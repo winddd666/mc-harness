@@ -2973,6 +2973,60 @@ def test_nether_tunnel_reports_the_actual_floor_blocker(floor, reason) -> None:
     assert "改" in result["hint"]
 
 
+@pytest.mark.parametrize("slow_route", ["imminent", "dig", "cleanup"])
+def test_actor_tunnel_shares_episode_deadline_across_preflight_and_cleanup(monkeypatch, slow_route) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    pos = [0.5, 64, 0.5]
+    calls = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        allowed = (2.1 if route == "stop" else 1.575) - clock[0]
+        timeout = request.extensions["timeout"]["read"]
+        assert 0.0 < timeout <= allowed + 1e-6
+        if route == slow_route or (slow_route == "cleanup" and route == "inventory" and calls.count(route) == 3):
+            clock[0] += timeout
+            raise httpx.ReadTimeout("offline tunnel timeout", request=request)
+        clock[0] += min(0.02, timeout)
+        if route == "get_block":
+            name = "stone" if body["pos"][1] == 63 or (slow_route == "dig" and body["pos"] == [1, 65, 0]) else "air"
+            return _SurfaceScoutBackend.ok({"name": name})
+        if route == "move_to":
+            pos[:] = [body["x"], body["y"], body["z"]]
+            return _SurfaceScoutBackend.ok({"pos": pos})
+        responses = {
+            "inventory": {"items": [{"name": "stone_pickaxe", "count": 1}]},
+            "status": {"pos": pos, "held": "stone_pickaxe", "on_ground": True, "health": 20},
+            "stop": {"released": True},
+        }
+        return _SurfaceScoutBackend.ok(responses[route])
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence(radius=30))
+        tools._episode_deadline_mono = 6.0 if slow_route == "imminent" else 6.1
+        result = json.loads(tools.mc_skill_tunnel("east", steps=1))
+
+    assert clock[0] <= 2.1 + 1e-6
+    if slow_route == "imminent":
+        assert calls == []
+        assert result["stop_reason"] == "episode_deadline_imminent"
+    elif slow_route == "dig":
+        assert calls[0] == "status"
+        assert calls[-2:] == ["dig", "stop"]
+        assert result["stop_reason"] == "time_slice"
+        assert result["stop_confirmed"] is True
+    else:
+        assert calls[-1] == "inventory" and calls.count("inventory") == 3
+        assert result["ok"] is True and result["steps_done"] == 1
+        assert result["cleanup_deadline_hit"] is True
+
+
 @pytest.mark.parametrize("entry", ["find_blocks", "scout_surface"])
 def test_village_scan_retains_beds_and_hay_amid_path_blocks(entry) -> None:
     from mc_agent.harness.geofence import VoidGeofence
