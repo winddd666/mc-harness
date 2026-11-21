@@ -1481,11 +1481,13 @@ class CombatEnv:
             except _TerrainProbeExpired:
                 actions.append("lava_bridge_probe_incomplete")
 
-            def bridge_call(action: str, body: dict[str, Any], *, timeout_s: float) -> dict[str, Any]:
+            def bridge_call(
+                action: str, body: dict[str, Any] | None, *, timeout_s: float, **kwargs: Any,
+            ) -> dict[str, Any]:
                 remaining = bridge_deadline - time.monotonic()
                 if remaining <= 0:
                     raise _TerrainProbeExpired
-                return self.bot.call(action, body, timeout_s=min(timeout_s, remaining), allow_reauth=False)
+                return self.bot.call(action, body, timeout_s=min(timeout_s, remaining), allow_reauth=False, **kwargs)
 
             for place_pos in place_targets:
                 if time.monotonic() >= bridge_deadline:
@@ -1496,7 +1498,8 @@ class CombatEnv:
                     bridge_call("place", {"item": filler, "pos": place_pos}, timeout_s=0.7)
                     actions.append(f"lava_place_{filler}")
                     self.invalidate_block_cache()
-                    if place_pos[0] != bx or place_pos[2] != bz:
+                    side_step = place_pos[0] != bx or place_pos[2] != bz
+                    if side_step:
                         try:
                             byaw, _ = aim_yaw_pitch(p_cur, [place_pos[0] + 0.5, place_pos[1] + 1.0, place_pos[2] + 0.5])
                             bridge_call("look", {"yaw": byaw, "pitch": 0.0}, timeout_s=0.35)
@@ -1523,6 +1526,16 @@ class CombatEnv:
                             except (ApiError, httpx.HTTPError):
                                 pass
                     if _should_exit_lava(st):
+                        if side_step and st.get("on_ground") is True and not _did_respawn_during_lava(st):
+                            # Sprint momentum can carry the bot off a one-block landing.
+                            try:
+                                bridge_call("posture", {"sneak": True, "jump": False, "shield": bool(st.get("blocking"))}, timeout_s=0.35)
+                                actions.append("lava_bridge_sneak")
+                                st = bridge_call("status", None, timeout_s=0.35, method="GET")
+                            except (_TerrainProbeExpired, ApiError, httpx.HTTPError):
+                                return {**_lava_result(st), "ok": False, "reason": "lava_bridge_landing_unconfirmed"}
+                            if not _did_respawn_during_lava(st) and st.get("on_ground") is not True:
+                                return {**_lava_result(st), "ok": False, "reason": "lava_landing_unconfirmed"}
                         return _lava_result(st)
                 except _TerrainProbeExpired:
                     break
