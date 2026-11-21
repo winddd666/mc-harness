@@ -2328,16 +2328,15 @@ class CombatEnv:
                 actions.append("water_surface_surge")
             except ApiError:
                 pass
-            if surface_first:
-                st_surface = self.bot.status()
-                interruption = interrupted_water_escape(st_surface)
-                if interruption is not None:
-                    return interruption
-                if not st_surface.get("in_water") and st_surface.get("on_ground") is not False:
-                    return {
-                        "ok": True, "in_water": False, "mode": "surfaced",
-                        "actions": actions, "pos_after": st_surface.get("pos"),
-                    }
+            st_surface = self.bot.status()
+            interruption = interrupted_water_escape(st_surface)
+            if interruption is not None:
+                return interruption
+            if surface_first and not st_surface.get("in_water") and st_surface.get("on_ground") is not False:
+                return {
+                    "ok": True, "in_water": False, "mode": "surfaced",
+                    "actions": actions, "pos_after": st_surface.get("pos"),
+                }
 
         # Look for reachable dry ledges at the local water level, including flooded caves.
         life = (st0.get("dimension"), st0.get("last_death"))
