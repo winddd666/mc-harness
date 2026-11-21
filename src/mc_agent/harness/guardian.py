@@ -522,7 +522,7 @@ class GenerationGuard:
             now = time.monotonic()
             recent_melee = now - self._last_melee_hurt_at < 4.0
             mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
-            burning_blaze = "nether" in dimension and ranged and low_health and status.get("on_fire") and nh_name == "blaze"
+            burning_blaze = "nether" in dimension and ranged and status.get("on_fire") and nh_name == "blaze"
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
             other_shooters = []

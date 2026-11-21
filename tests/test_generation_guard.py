@@ -3840,14 +3840,15 @@ def test_indirect_magic_uses_checked_retreat_without_digging_a_bunker(monkeypatc
 
 
 @pytest.mark.parametrize("sighting", ["exposed", "covered", "timeout", "covered_with_melee"])
-def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, sighting):
+@pytest.mark.parametrize("health", [4.2, 16.0])
+def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, sighting, health):
     from mc_agent.skills.combat_env import CombatEnv
 
     primary = {"name": "blaze", "id": 44, "dist": 7.8, "pos": [1534.2, 62, 3108.9]}
     secondary = {"name": "blaze", "id": 45, "dist": 14.4, "pos": [1529.5, 58, 3101.3]}
     distant = {"name": "blaze", "id": 46, "dist": 17.9, "pos": [1532, 58.5, 3097.5]}
     status = {
-        "pos": [1532.6, 58, 3115.4], "dimension": "the_nether", "health": 4.2, "food": 17,
+        "pos": [1532.6, 58, 3115.4], "dimension": "the_nether", "health": health, "food": 17,
         "ready": True, "alive": True, "on_ground": True, "on_fire": True, "blocking": True,
         "nearest_hostile": {key: primary[key] for key in ("name", "id", "dist")},
     }
