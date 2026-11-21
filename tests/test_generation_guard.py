@@ -936,7 +936,8 @@ def test_interrupted_tool_reports_combat_api_failure_and_rechecks_life(monkeypat
     assert (guard._ranged_combat_stance_until == float("-inf")) is respawned
 
 
-def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypatch):
+@pytest.mark.parametrize("slow_cleanup", [False, True])
+def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypatch, slow_cleanup):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     zombie = {"id": 42, "name": "zombie", "pos": [2.5, 64.0, 0.5], "dist": 2.0}
@@ -958,6 +959,15 @@ def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypa
             if action == "attack":
                 clock[0] += min(12.0, kwargs["timeout_s"])
                 raise httpx.ReadTimeout("combat request stalled")
+            if slow_cleanup and clock[0] >= 1007.5 and action in {"stop", "control", "posture"}:
+                timeout = kwargs["timeout_s"]
+                if isinstance(timeout, httpx.Timeout):
+                    # One closed keepalive can use another attempt after a 150 ms delay.
+                    duration = 2 * sum(timeout.as_dict().values()) + 0.15
+                else:
+                    duration = 4 * timeout
+                clock[0] += duration
+                raise httpx.ReadTimeout("cleanup request stalled")
             return {"ok": True}
 
     class StalledAttack:
@@ -965,7 +975,8 @@ def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypa
             assert trigger["source"] == "pre_hurt_melee"
             env.bot.call("attack", {"entity_id": 42}, timeout_s=20.0)
 
-    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    emitted = []
+    guard = GenerationGuard(CaveBot(), EventSink(emitted.append), checkpoint=lambda: None)
     guard.combat_slot.register(StalledAttack())
     monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
     incident = guard.poll()
@@ -975,7 +986,14 @@ def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypa
     assert combat["result"]["reason"] == "time_budget"
     assert incident["requires_replan"] is True
     assert ("attack", 7.5) in calls
-    assert [a for a, _ in calls[-3:]] == ["stop", "control", "posture"]
+    budget_event, = [event for event in emitted if event["type"] == "guardian.combat_budget_exceeded"]
+    assert budget_event["endpoint"] == "attack"
+    assert budget_event["cleanup_s"] <= 1.5
+    if slow_cleanup:
+        assert calls[calls.index(("attack", 7.5)) + 1][0] == "stop"
+        assert clock[0] <= 1009.000001
+    else:
+        assert [a for a, _ in calls[-3:]] == ["stop", "control", "posture"]
 
 
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
@@ -9381,6 +9399,61 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
         "burning_after_hit": ["cover", "flee"],
         "burning_old_hit": ["cover"],
     }[cover]
+
+
+@pytest.mark.parametrize("pressure", ["arrow", "stale_arrow", "melee_and_arrow", "exposed"])
+def test_unsafe_overworld_flee_checks_cover_when_critical_arrows_bypass_shield(monkeypatch, pressure):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
+    skeleton = {"id": 44, "name": "skeleton", "dist": 2.0, "pos": [0.5, 73, 2.5]}
+    pillager = {"id": 45, "name": "pillager", "dist": 7.8, "pos": [-7.3, 73, 0.5]}
+    status = {
+        "pos": [0.5, 73, 0.5], "dimension": "overworld", "health": 2.6, "blocking": True,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": skeleton,
+    }
+    checks = []
+
+    class CliffBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "get_entities":
+                return {"entities": [skeleton, pillager]}
+            raise AssertionError(action)
+
+    def seek_cover(_env, pos, *, other_shooters, allow_stationary):
+        checks.append("cover")
+        assert pos == skeleton["pos"] and other_shooters == [pillager["pos"]]
+        assert allow_stationary is False
+        if pressure == "exposed":
+            return None
+        return {"ok": True, "mode": "natural_cover", "moved_dist": 2.2, "pos_after": [2.7, 73, 0.5]}
+
+    def flee(_env, pos, **_kwargs):
+        checks.append("flee")
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    bot = CliffBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_ranged_hurt_at = 991.0 if pressure == "stale_arrow" else 999.0
+    if pressure == "melee_and_arrow":
+        guard._last_melee_hurt_at = 999.0
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
+    )))
+
+    assert result["requires_replan"]
+    if pressure == "arrow":
+        assert result["mode"] == "natural_cover"
+        assert checks == ["cover"]
+    else:
+        assert result["error"]["code"] == "unsafe_landing"
+        assert checks == (["cover", "flee"] if pressure == "exposed" else ["flee"])
 
 
 @pytest.mark.parametrize("entry", ["poll", "boundary"])

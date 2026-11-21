@@ -456,20 +456,39 @@ class GenerationGuard:
         try:
             with self.bot.limit_until(time.monotonic() + SUBCORTICAL_COMBAT_BUDGET_S):
                 return self.combat_slot.handle(self.combat_env, trigger)
-        except _RecoveryBudgetExceeded:
-            # The expired scope can interrupt the combat slot's own exit cleanup.
+        except _RecoveryBudgetExceeded as error:
+            # The combat deadline can interrupt the slot's own exit cleanup.
+            while isinstance(error.__context__, _RecoveryBudgetExceeded):
+                error = error.__context__
+            cleanup_started = time.monotonic()
+            timeout = httpx.Timeout(0.35, connect=0.1, write=0.1, pool=0.1)
+            status = {}
             try:
-                status = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
-            except (ApiError, httpx.HTTPError):
-                status = {}
-            posture = {}
-            if status.get("in_water") or status.get("in_lava"):
-                posture = {"jump": True, "shield": bool(status.get("blocking"))}
-            for action, body in (("stop", {}), ("control", {"wait": False}), ("posture", posture)):
-                try:
-                    self.bot.call(action, body, timeout_s=0.35, allow_reauth=False)
-                except (ApiError, httpx.HTTPError):
-                    pass
+                with self.bot.limit_until(cleanup_started + 1.5):
+                    for action, body in (("stop", {}), ("control", {"wait": False})):
+                        try:
+                            self.bot.call(action, body, timeout_s=timeout)
+                        except (ApiError, httpx.HTTPError):
+                            pass
+                    try:
+                        status = self.bot.call("status", method="GET", timeout_s=timeout)
+                    except (ApiError, httpx.HTTPError):
+                        pass
+                    posture = {}
+                    if status.get("in_water") or status.get("in_lava"):
+                        posture = {"jump": True, "shield": bool(status.get("blocking"))}
+                    try:
+                        self.bot.call("posture", posture, timeout_s=timeout)
+                    except (ApiError, httpx.HTTPError):
+                        pass
+            except _RecoveryBudgetExceeded:
+                pass
+            self.events.emit(
+                "guardian.combat_budget_exceeded",
+                endpoint=error.args[0] if error.args else None,
+                budget_s=SUBCORTICAL_COMBAT_BUDGET_S,
+                cleanup_s=round(time.monotonic() - cleanup_started, 3),
+            )
             return {
                 "ok": False, "handled": False, "mode": "combat_timeout",
                 "reason": "time_budget", "requires_replan": True,
@@ -2641,15 +2660,25 @@ class GenerationGuard:
             if not name or distance > (16.0 if ranged else 6.0):
                 return None
             health = status.get("health")
-            if (
-                allow_cover and ranged and "nether" in str(status.get("dimension") or "").lower()
+            dimension = str(status.get("dimension") or "").lower().removeprefix("minecraft:")
+            recent_nether_cover = (
+                "nether" in dimension
                 and now < self._ranged_cover_active_until
                 and now - max(self._last_ranged_hurt_at, self._last_melee_hurt_at) >= 4.0
-                and status.get("on_ground") is True and status.get("pos")
+            )
+            critical_overworld_arrows = (
+                dimension == "overworld" and status.get("blocking")
+                and isinstance(health, (int, float)) and 0 < health <= 4.0
+                and now - self._last_ranged_hurt_at < 8.0 and now - self._last_melee_hurt_at >= 4.0
+            )
+            if (
+                allow_cover and ranged and status.get("on_ground") is True and status.get("pos")
+                and (recent_nether_cover or critical_overworld_arrows)
             ):
+                cover_budget = 2.25 if critical_overworld_arrows else 1.25
                 cover = self._recheck_cover_after_blocked_flee(
-                    status["pos"], entity_id, min(now + 1.25, deadline),
-                    allow_stationary=not self._low_health_burning_after_ranged_hit(status, now),
+                    status["pos"], entity_id, min(now + cover_budget, deadline),
+                    allow_stationary=not (critical_overworld_arrows or self._low_health_burning_after_ranged_hit(status, now)),
                 )
                 if cover and (cover.get("ok") or cover.get("respawned")):
                     return {**cover, "requires_replan": True, "pos_before": status["pos"]}
