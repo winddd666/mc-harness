@@ -124,6 +124,11 @@ FLEET: tuple[FleetSlot, ...] = (
     FleetSlot("HY_8", "hy4", "opencode", "hy4-flash-free", 6, "nether", 19, str(FLEET_TOKEN_FILE), duration_s=1200),
     FleetSlot("HY_9", "hy4", "opencode", "hy4-flash-free", 6, "deep_water", 20, str(FLEET_TOKEN_FILE), duration_s=900),
     FleetSlot("HY_10", "hy4", "opencode", "hy4-flash-free", 6, "enchant_anvil", 21, str(FLEET_TOKEN_FILE), duration_s=900),
+    # --- Squad 4: LongCat-2.5-free Auxiliary Sweeper (4 bots, rpm=6 anti-429, 100% free) ---
+    FleetSlot("LC_1", "lc", "opencode", "longcat-2.5-free", 6, "day2_village_near", 10, str(FLEET_TOKEN_FILE), duration_s=1800),
+    FleetSlot("LC_2", "lc", "opencode", "longcat-2.5-free", 6, "day2_village_near", 11, str(FLEET_TOKEN_FILE), duration_s=1800),
+    FleetSlot("LC_3", "lc", "opencode", "longcat-2.5-free", 6, "midgame", 22, str(FLEET_TOKEN_FILE), duration_s=1800),
+    FleetSlot("LC_4", "lc", "opencode", "longcat-2.5-free", 6, "midgame", 23, str(FLEET_TOKEN_FILE), duration_s=1800),
 )
 
 
