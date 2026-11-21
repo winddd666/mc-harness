@@ -3703,7 +3703,8 @@ def test_critical_lava_escape_attempts_bridge_before_swimming_in_an_unverified_d
         assert actions[-1] == "swim"
 
 
-def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch):
+@pytest.mark.parametrize("transport_overruns", [False, True])
+def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch, transport_overruns):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     status = {
@@ -3728,7 +3729,10 @@ def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch):
             if action == "control" and body.get("forward"):
                 clock[0] += body["ms"] / 1000
             if action == "dig":
-                clock[0] += timeout + 0.000001
+                if transport_overruns:
+                    clock[0] = 1000.0 + guard.LAVA_ESCAPE_BUDGET_S + 0.000001
+                else:
+                    clock[0] += timeout + 0.000001
                 raise httpx.ReadTimeout("notch dig exceeded its transport budget")
             return {"ok": True}
 
@@ -3738,12 +3742,18 @@ def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch):
 
     escape = incident["actions"][0]
     assert escape["action"] == "escape_lava"
-    assert escape["result"] == {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
-    budget_event, = [e for e in events if e["type"] == "guardian.lava_budget_exceeded"]
-    assert budget_event["endpoint"] == "dig" and budget_event["budget_s"] == guard.LAVA_ESCAPE_BUDGET_S
-    dig, = [(started, timeout) for action, started, timeout in calls if action == "dig"]
-    assert sum(dig) == pytest.approx(1000.0 + guard.LAVA_ESCAPE_BUDGET_S)
-    assert any(action == "stop" and timeout == 1.5 for action, _, timeout in calls)
+    digs = [(started, timeout) for action, started, timeout in calls if action == "dig"]
+    assert digs and all(0 < timeout <= 1.0 and started + timeout <= 1004.3 for started, timeout in digs)
+    if transport_overruns:
+        assert escape["result"] == {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
+        budget_event, = [e for e in events if e["type"] == "guardian.lava_budget_exceeded"]
+        assert budget_event["endpoint"] == "dig" and budget_event["budget_s"] == guard.LAVA_ESCAPE_BUDGET_S
+        assert any(action == "stop" and timeout == 1.5 for action, _, timeout in calls)
+    else:
+        assert escape["result"]["ok"] is False
+        assert "lava_notch_dig_timeout" in escape["result"]["actions"]
+        assert clock[0] < 1000.0 + guard.LAVA_ESCAPE_BUDGET_S
+        assert any(action == "stop" and timeout == 0.25 for action, _, timeout in calls)
     guard.bot.status()
     assert calls[-1][2] == 2.0
 
