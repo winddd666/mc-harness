@@ -1584,7 +1584,10 @@ def select_next_target(
             enriched_pb = dataclasses.replace(enriched_pb, tier=1)
             mem_boosted = True
         if cur_dim == "the_nether":
-            if key.startswith("minecraft:nether/"):
+            if key in {"minecraft:nether/find_fortress", "minecraft:nether/obtain_blaze_rod"}:
+                enriched_pb = dataclasses.replace(enriched_pb, tier=0)
+                mem_boosted = True
+            elif key.startswith("minecraft:nether/"):
                 enriched_pb = dataclasses.replace(enriched_pb, tier=1)
                 mem_boosted = True
             else:
