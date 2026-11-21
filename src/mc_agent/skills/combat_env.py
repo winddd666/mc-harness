@@ -2340,6 +2340,7 @@ class CombatEnv:
         shield_target_id: int | None = None,
         surface_first: bool = False,
         avoid_close_threat: bool = False,
+        sneak_on_magma: bool = False,
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
         st0 = self.bot.status()
@@ -2481,7 +2482,7 @@ class CombatEnv:
         try:
             self.bot.call(
                 "posture",
-                {"shield": bool(keep_shield), "sneak": False, "jump": True},
+                {"shield": bool(keep_shield), "sneak": sneak_on_magma, "jump": True},
             )
         except ApiError:
             pass
@@ -2516,6 +2517,11 @@ class CombatEnv:
                 ):
                     break
             if surface_first and not search_status.get("in_water") and search_status.get("on_ground") is not False:
+                if sneak_on_magma:
+                    try:
+                        self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": False})
+                    except (ApiError, httpx.HTTPError):
+                        pass
                 return {
                     "ok": True, "in_water": False, "mode": "surfaced",
                     "actions": actions, "pos_after": search_status.get("pos"),
@@ -2729,7 +2735,7 @@ class CombatEnv:
         try:
             self.bot.call(
                 "posture",
-                {"shield": bool(keep_shield), "sneak": False, "jump": still_wet},
+                {"shield": bool(keep_shield), "sneak": sneak_on_magma and still_wet, "jump": still_wet},
             )
         except ApiError:
             pass
@@ -2759,7 +2765,7 @@ class CombatEnv:
             still_wet = bool(st_end.get("in_water"))
             if still_wet:
                 try:
-                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": True})
+                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": sneak_on_magma, "jump": True})
                 except ApiError:
                     pass
         if keep_shield and isinstance(shield_target_id, int):
@@ -2778,7 +2784,7 @@ class CombatEnv:
             still_wet = bool(st_end.get("in_water"))
             if still_wet:
                 try:
-                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": True})
+                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": sneak_on_magma, "jump": True})
                 except ApiError:
                     pass
         landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")

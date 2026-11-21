@@ -1506,6 +1506,7 @@ class GenerationGuard:
         if not in_lava and status.get("on_ground") is True:
             self._last_stalled_lava = None
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
+        underwater_hot_floor = in_water and len(other_hurts) < len(hurts)
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava
             and self._needs_hot_floor_stance(status, now)
@@ -1901,7 +1902,7 @@ class GenerationGuard:
                 if (
                     not transient_err and not forced_water_shore and not no_water_reentry and not drowning
                     and not self._swimming_at_low_health(status) and not close_drowned_hit
-                    and not retry_shore_after_hit and not urgent_trident_shore
+                    and not retry_shore_after_hit and not urgent_trident_shore and not underwater_hot_floor
                 ):
                     if not _already("escape_water"):
                         short_escape = any(self._short_water_escape_after_hit(status, h.get("source")) for h in hurts)
@@ -1933,6 +1934,7 @@ class GenerationGuard:
                             att_pos_w, keep_shield=has_shield,
                             shield_target_id=att_w_dict.get("id") if att_w_dict else nh_id,
                             **({"surface_first": True} if drowning else {}),
+                            **({"sneak_on_magma": True} if underwater_hot_floor else {}),
                         ),
                     )
                     actions.append(shore_act)
@@ -3945,6 +3947,7 @@ class GenerationGuard:
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or hurt_by_lava
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
+        underwater_hot_floor = in_water and len(other_hurts) < len(hurts)
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava
             and self._needs_hot_floor_stance(status, now_b)
@@ -4140,7 +4143,7 @@ class GenerationGuard:
                 forced_shore_b = (
                     self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
                     or handled_water_in_tool or unstick_still_wet or self._swimming_at_low_health(status)
-                    or continuing_water_escape
+                    or continuing_water_escape or underwater_hot_floor
                     or (shore_threat_name == "creeper" and nh_dist <= 6.0)
                 )
                 esc_b_ok = False
@@ -4179,6 +4182,7 @@ class GenerationGuard:
                             shore_threat_pos, keep_shield=has_shield_b, shield_target_id=shield_target_b,
                             **({"surface_first": True} if surface_first else {}),
                             **({"avoid_close_threat": True} if shore_threat_name == "creeper" else {}),
+                            **({"sneak_on_magma": True} if underwater_hot_floor else {}),
                         ),
                         raise_on_http_error=False,
                     )

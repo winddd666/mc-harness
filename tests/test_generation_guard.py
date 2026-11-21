@@ -8682,6 +8682,46 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert skills.bot is bot
 
 
+@pytest.mark.parametrize("entry", ["poll", "boundary"])
+@pytest.mark.parametrize("landed", [False, True])
+def test_underwater_hot_floor_keeps_sneak_until_dry(monkeypatch, entry, landed):
+    status = {
+        "pos": [6111.5, 37.2, -108.5], "health": 19, "food": 20, "oxygen": 260,
+        "in_water": True, "submerged": True, "on_ground": False, "ready": True, "alive": True,
+    }
+    bank = [6113.5, 38, -108.5]
+    posture = []
+
+    class BubbleBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hit = {"seq": 1, "type": "hurt", "source": "hot_floor"}
+                return {"events": [hit] if not kwargs["params"]["since"] else []}
+            if action == "inventory":
+                return {"items": []}
+            if action == "posture":
+                posture.append(body)
+            if action == "move_to" and landed:
+                status.update(pos=bank, in_water=False, submerged=False, on_ground=True)
+            if action == "get_block":
+                return {"name": "water"}
+            return {"ok": True}
+
+    guard = GenerationGuard(BubbleBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_escape_water", lambda *_args, **_kwargs: pytest.fail("no digging in a magma column"))
+    monkeypatch.setattr(guard.combat_env, "_find_walkable_shore_target", lambda *_args, **_kwargs: bank if landed else None)
+
+    if entry == "poll":
+        guard.poll()
+    else:
+        guard.stabilize_after_tools()
+    assert posture[0] == {"shield": False, "sneak": True, "jump": True}
+    assert posture[-1] == {"shield": False, "sneak": not landed, "jump": not landed}
+    assert status["in_water"] is not landed
+
+
 @pytest.mark.parametrize("lava_escape_succeeds", [True, False])
 def test_boundary_switches_water_macro_to_lava_escape_on_contact(monkeypatch, lava_escape_succeeds):
     status = {
