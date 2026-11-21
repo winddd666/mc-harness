@@ -139,6 +139,10 @@ class _UnsafeSupportDig(BaseException):
     """Unwind an explicit dig that would remove footing above an unsafe drop."""
 
 
+class _UnsafeFoodUse(BaseException):
+    """Unwind ordinary food use while the bot is exposed to a hazard."""
+
+
 class _GuardSession:
     def __init__(
         self,
@@ -2015,6 +2019,7 @@ class GenerationGuard:
         check_flee_exit: bool = False,
         watch_attack_water: bool = False,
         check_support_dig: bool = False,
+        check_food_use: bool = False,
     ):
         """Intercept threats during actor macros, or watch only water danger during an attack."""
         orig_call = getattr(self.raw_bot, "call", None)
@@ -2198,6 +2203,19 @@ class GenerationGuard:
                 return actor_call(path, body, **kwargs)
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
+            if (
+                check_food_use and clean_path == "use_item" and isinstance(body, dict) and not body.get("target")
+                and str(body.get("item") or "").removeprefix("minecraft:") in SAFE_FOOD_PRIORITY
+            ):
+                try:
+                    state = actor_call("status", method="GET", timeout_s=0.6, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    state = {}
+                if (
+                    state and state.get("ready") is not False and state.get("alive") is not False
+                    and not self._can_auto_eat_safely(state)
+                ):
+                    raise _UnsafeFoodUse
             if check_support_dig and clean_path == "dig" and isinstance(body, dict):
                 unsafe_dig = self._is_support_dig_unsafe(body.get("pos"))
                 if pending_trigger:
@@ -2601,11 +2619,18 @@ class GenerationGuard:
                 check_flee_exit=is_flee,
                 watch_attack_water=is_attack,
                 check_support_dig=tool_name == "mc_dig",
+                check_food_use=tool_name == "mc_use_item",
             ):
                 result = invoke_fn()
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _RecoveryBudgetExceeded
                 return result
+        except _UnsafeFoodUse:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {"code": "unsafe_to_eat", "message": "当前位置有环境危险或敌人威胁，请先到安全位置再进食。"},
+            }, ensure_ascii=False)
         except _UnsafeSupportDig:
             return json.dumps({
                 "ok": False,

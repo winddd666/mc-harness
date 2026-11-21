@@ -4090,6 +4090,41 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shoo
     assert use_items == [{"item": "cooked_beef"}]
 
 
+@pytest.mark.parametrize(
+    "item, shooter_distance, allowed",
+    [("cooked_beef", 4.2, False), ("cooked_beef", 23.0, True), ("golden_apple", 4.2, True)],
+)
+def test_explicit_food_use_reuses_eating_safety_check(item, shooter_distance, allowed):
+    from mc_agent.harness.mc_tools import McToolset
+
+    uses = []
+
+    class FoodBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                assert kwargs["timeout_s"] == 0.6 and kwargs["allow_reauth"] is False
+                return {
+                    "pos": [9097.3, 96, -11178.8], "health": 9.56, "food": 17, "blocking": True,
+                    "on_ground": True, "ready": True, "alive": True,
+                    "nearest_hostile": {"id": 44, "name": "skeleton", "dist": shooter_distance},
+                }
+            if action == "use_item":
+                uses.append(body)
+            return {"ok": True}
+
+    bot = FoodBot()
+    toolset = McToolset(bot)
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    receipt = json.loads(guard.run_tool_with_reflex("mc_use_item", lambda: toolset.mc_use_item(item, ms=1200)))
+
+    assert receipt["ok"] is allowed
+    if allowed:
+        assert uses == [{"item": item, "ms": 1200}]
+    else:
+        assert receipt["requires_replan"] and receipt["error"]["code"] == "unsafe_to_eat"
+        assert uses == []
+
+
 def test_r21_preempted_lava_death_reports_respawned_not_escaped():
     """Reproduces r21_short hy4_hy_8_nether: lava preemption ending in death/respawn must NOT claim '已中断原工具并脱困'."""
     dead_lava_state = {"calls": 0}
