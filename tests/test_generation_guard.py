@@ -2121,8 +2121,10 @@ def test_r15_nether_bastion_wide_lava_steers_via_find_blocks_onto_elevated_ledge
                     ]
                 }
             if action == "move_to":
-                st["pos"] = [pl["x"], pl["y"], pl["z"]]
-                st["in_lava"] = False
+                # A pathfinder can return successfully from the liquid at the edge of its tolerance.
+                st["pos"] = [pl["x"] - pl["range"], pl["y"], pl["z"]]
+                st["in_lava"] = st["pos"][0] - 0.3 < 229
+                assert kwargs["timeout_s"] == 2.0 and kwargs["allow_reauth"] is False
                 return {"ok": True}
             return {"ok": True}
 

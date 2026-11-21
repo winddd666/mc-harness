@@ -1298,7 +1298,8 @@ class CombatEnv:
 
         # 2b. Short pathfinder step onto close shore (`<=6.5m`) guarded against pathfinder ReadTimeout stalls.
         if lava_shore_target is not None and time.monotonic() + 1.5 < lava_deadline:
-            shore_d = math.hypot(lava_shore_target[0] - float(pos0[0]), lava_shore_target[2] - float(pos0[2]))
+            swim_pos = st.get("pos") or pos0
+            shore_d = math.hypot(lava_shore_target[0] - float(swim_pos[0]), lava_shore_target[2] - float(swim_pos[2]))
             if shore_d <= 6.5:
                 try:
                     self.bot.call(
@@ -1307,10 +1308,13 @@ class CombatEnv:
                             "x": lava_shore_target[0],
                             "y": lava_shore_target[1],
                             "z": lava_shore_target[2],
-                            "range": 1.2,
+                            # Keep the entire hitbox on the confirmed bank tile.
+                            "range": 0.15,
                             "timeout": 1200,
                             "stop_on": ["death"],
                         },
+                        timeout_s=2.0,
+                        allow_reauth=False,
                     )
                     actions.append("lava_move_to_shore")
                 except (ApiError, httpx.HTTPError) as err:
