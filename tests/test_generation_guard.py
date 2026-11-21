@@ -1319,6 +1319,47 @@ def test_bug_009_stationary_failed_creeper_retreat_only_cancels_again_on_change(
     assert len(attempts) == 3
 
 
+@pytest.mark.parametrize("change", ["stationary", "hurt", "moved", "shooter_closed_in"])
+def test_bug_009_failed_distant_ranged_retreat_keeps_generation_if_unchanged(monkeypatch, change):
+    shooter = {"id": 4920712, "name": "skeleton", "dist": 11.2, "pos": [5267.6, 23, -7421.5]}
+    status = {
+        "pos": [5256.4, 23, -7421.5], "health": 20, "food": 20, "dimension": "overworld",
+        "on_ground": True, "alive": True, "ready": True, "blocking": False, "nearest_hostile": shooter,
+        "held": {"name": "stone_pickaxe", "slot": 41},
+    }
+    hurt = []
+
+    class ShotBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {**status, "nearest_hostile": dict(shooter)}
+            if action == "events":
+                return {"events": [e for e in hurt if e["seq"] > kwargs["params"]["since"]]}
+            assert action == "inventory"
+            return {"items": [], "offhand": None}
+
+    guard = GenerationGuard(ShotBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def blocked_retreat(_env, trigger):
+        assert trigger["source"] == "pre_hurt_ranged"
+        if change == "hurt":
+            hurt.append({"seq": 1, "type": "hurt", "source": "arrow"})
+        elif change == "moved":
+            status["pos"] = [5254.4, 23, -7421.5]
+        elif change == "shooter_closed_in":
+            shooter["dist"] = 5.0
+        return {"handled": True, "mode": "cover_or_flee", "actions": [
+            {"action": "flee", "ok": False, "moved": 0.0, "reason": "no_safe_retreat"},
+        ]}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", blocked_retreat)
+    incident = guard.poll()
+
+    assert incident["reasons"] == ["pre_hurt_ranged"]
+    assert incident["requires_replan"] is (change != "stationary")
+
+
 @pytest.mark.parametrize("change", ["stationary", "drifted", "hurt", "landed"])
 def test_bug_009_stationary_lava_escape_keeps_retrying_without_duplicate_cancel(monkeypatch, change):
     clock = [1000.0]

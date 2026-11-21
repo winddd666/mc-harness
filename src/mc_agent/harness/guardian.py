@@ -2284,6 +2284,8 @@ class GenerationGuard:
                 replan = False
             elif reasons == ["pre_hurt_melee"] and self._resolved_melee_warning(pre_trigger, status, post_status, actions):
                 replan = False
+            elif reasons == ["pre_hurt_ranged"] and self._unchanged_ranged_warning(pre_trigger, status, post_status, actions):
+                replan = False
         if reasons == ["in_lava"] and post_events_verified and not fresh:
             if self._repeat_stalled_lava_escape(status, post_status, actions):
                 replan = False
@@ -2355,6 +2357,40 @@ class GenerationGuard:
             and isinstance(held_before, dict) and isinstance(held_after, dict)
             and (held_after.get("name"), held_after.get("slot")) == (held_before.get("name"), held_before.get("slot"))
             and pos_before and pos_after and math.dist(pos_before[:3], pos_after[:3]) <= 0.2
+        )
+
+    def _unchanged_ranged_warning(
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
+    ) -> bool:
+        if len(actions) != 1 or actions[0].get("action") != "subcortical_combat":
+            return False
+        outcome = actions[0].get("result") or {}
+        steps = outcome.get("actions")
+        if outcome.get("mode") != "cover_or_flee" or not isinstance(steps, list) or len(steps) != 1:
+            return False
+        retreat = steps[0]
+        if (
+            retreat.get("action") != "flee" or retreat.get("ok") is not False
+            or retreat.get("reason") != "no_safe_retreat" or retreat.get("moved") != 0.0
+        ):
+            return False
+        mob, distance, entity_id, _ = self._extract_hostile_info(after)
+        start, end = before.get("pos"), after.get("pos")
+        health = after.get("health")
+        return bool(
+            str(after.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+            and mob in {"skeleton", "stray", "bogged", "pillager"} and entity_id is not None
+            and entity_id == trigger.get("primary_entity_id")
+            and min(distance, trigger["distance"]) >= 10.0
+            and after.get("ready") is True and after.get("alive") is True
+            and before.get("on_ground") is True and after.get("on_ground") is True
+            and not before.get("busy") and not after.get("busy")
+            and not any(after.get(key) for key in ("in_water", "in_lava", "on_fire"))
+            and isinstance(health, (int, float)) and health >= 16.0
+            and all(after.get(key) == before.get(key) for key in (
+                "last_death", "dimension", "health", "food", "held", "offhand", "blocking",
+            ))
+            and start and end and math.dist(start[:3], end[:3]) <= 0.2
         )
 
     def _repeat_cornered_creeper(
