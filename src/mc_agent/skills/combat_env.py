@@ -2108,10 +2108,18 @@ class CombatEnv:
         exposed_lava: list[list[int]] = []
         for dx, dz in CARDINAL_VECTORS.values():
             nx, nz = bx + dx, bz + dz
-            for check_y in (by - 1, by):
-                if self._get_block_name(nx, check_y, nz) in {"lava", "flowing_lava"}:
-                    exposed_lava.append([nx, check_y, nz])
-                    break
+            below_feet = self._get_block_name(nx, by - 1, nz, strict=True)
+            if _is_lava_block(below_feet):
+                exposed_lava.append([nx, by - 1, nz])
+                continue
+            at_feet = self._get_block_name(nx, by, nz, strict=True)
+            if _is_lava_block(at_feet):
+                exposed_lava.append([nx, by, nz])
+            elif (
+                _is_passable(at_feet) and _is_passable(below_feet)
+                and _is_lava_block(self._get_block_name(nx, by - 2, nz, strict=True))
+            ):
+                exposed_lava.append([nx, by - 2, nz])
 
         if not exposed_lava:
             return {"ok": True, "near_lava": False, "sneak": bool(st0.get("sneaking")), "sealed": 0}

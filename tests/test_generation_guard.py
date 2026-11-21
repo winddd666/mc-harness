@@ -2548,6 +2548,44 @@ def test_bug028_real_void_geofence_across_escape_lava_water_and_lava_edge():
     assert placed_edge == [[235, 39, 235]]
 
 
+@pytest.mark.parametrize("covered", [False, True])
+def test_tool_boundary_guards_an_exposed_two_block_drop_into_lava(covered):
+    calls = []
+    lava = [-1869, 34, -3689]
+
+    class NetherBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [-1868.5, 36, -3687.1], "dimension": "the_nether", "health": 12.76,
+                        "food": 20, "on_ground": True, "alive": True, "ready": True, "blocking": True}
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [{"name": "basalt", "count": 4}]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if body["pos"] == lava:
+                    return {"name": "lava"}
+                if x == lava[0] and z == lava[2] and y == 35 and not covered:
+                    return {"name": "air"}
+                return {"name": "netherrack" if y < 36 else "air"}
+            calls.append((action, body))
+            return {"ok": True}
+
+    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    note = guard.stabilize_after_tools()
+
+    if covered:
+        assert calls == [] and note is None
+    else:
+        assert calls == [
+            ("posture", {"sneak": True, "shield": True, "jump": False}),
+            ("place", {"item": "basalt", "pos": lava}),
+        ]
+        assert note is not None and "岩浆边潜行封边" in note
+
+
 def test_water_retreat_turns_inward_at_geofence():
     import math
 
