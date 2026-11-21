@@ -1773,6 +1773,7 @@ class GenerationGuard:
                             self._consecutive_flees = 0
                 else:
                     self._shield_only_streak = 0
+                    cf = None
                     raw_dist = (attacker or status.get("nearest_hostile") or {}).get("dist", 99.0)
                     try:
                         eff_dist = float(raw_dist)
@@ -1819,6 +1820,30 @@ class GenerationGuard:
                             self._consecutive_flees += 1
                         else:
                             self._consecutive_flees = 0
+                    if (
+                        str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                        and already_blocking and hurt_src in MELEE_HURT_SOURCES and cf
+                        and (cf.get("result") or {}).get("reason") == "no_safe_retreat"
+                    ):
+                        try:
+                            landing = self.bot.call("status", method="GET", timeout_s=0.6)
+                        except (ApiError, httpx.HTTPError):
+                            landing = {}
+                        mob, dist, target_id, _ = self._extract_hostile_info(landing)
+                        current_hp = landing.get("health")
+                        if (
+                            landing.get("blocking") and landing.get("on_ground") is True
+                            and landing.get("ready") is not False and landing.get("alive") is not False
+                            and not landing.get("in_lava") and not landing.get("in_water")
+                            and landing.get("last_death") == status.get("last_death")
+                            and landing.get("dimension") == status.get("dimension")
+                            and isinstance(current_hp, (int, float)) and 0 < current_hp <= LOW_HP_BUNKER_MAX
+                            and mob in PRE_HURT_MELEE_MOBS and target_id is not None and dist <= 3.5
+                        ):
+                            actions.append(self._action(
+                                "face_attacker_after_retreat",
+                                lambda: self.bot.call("look", {"entity_id": target_id}, timeout_s=0.9),
+                            ))
 
             if should_eat and (
                 not effective_combat_hurt

@@ -3247,6 +3247,44 @@ def test_r19_lava_pit_places_netherrack_filler_before_second_sprint(monkeypatch)
     assert out_p["actions"].count("lava_jump_sprint") == 1
 
 
+@pytest.mark.parametrize("landing", ["cornered", "clear", "respawned"])
+def test_poll_refaces_a_close_melee_attacker_with_shield_after_failed_retreat(monkeypatch, landing):
+    attacker = {"id": 77, "name": "wither_skeleton", "dist": 3.1, "pos": [3602.5, 64, 1817.6]}
+    status = {"pos": [3599.4, 64, 1817.6], "dimension": "the_nether", "health": 14.4,
+              "ready": True, "alive": True, "on_ground": True, "blocking": True, "food": 17,
+              "last_death": {"t": 1}, "nearest_hostile": attacker}
+    looks = []
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": attacker}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "look":
+                looks.append(body)
+            assert action != "posture"
+            return {"ok": True}
+
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def blocked_retreat(_threat_pos, *, wait_for_ground):
+        status.update(health=9.56, nearest_hostile={"id": 78, "name": "wither_skeleton", "dist": 5 if landing == "clear" else 2.2})
+        if landing == "respawned":
+            status["last_death"] = {"t": 2}
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat"}
+
+    monkeypatch.setattr(guard.combat_env, "flee", blocked_retreat)
+    incident = guard.poll()
+
+    actions = [a["action"] for a in incident["actions"]]
+    assert actions == (["combat_or_flee", "face_attacker_after_retreat"] if landing == "cornered" else ["combat_or_flee"])
+    assert looks == ([{"entity_id": 78}] if landing == "cornered" else [])
+
+
 def test_r19_poll_skips_eat_in_close_melee_range_after_combat_timeout(monkeypatch):
     """Reproduces r19_short hy4_hy_3_midgame: never drop shield to eat when a hostile is <= 5.5m after melee cooldown."""
     clock = [6000.0]
