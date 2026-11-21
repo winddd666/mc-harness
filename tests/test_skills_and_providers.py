@@ -1829,6 +1829,38 @@ def test_move_to_far_coordinates_reports_one_waypoint_and_remaining_distance(tim
         assert response["requires_replan"] is True
 
 
+def test_move_to_counts_waypoint_and_direct_no_path_in_one_episode() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    moves = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={
+                "ok": True, "result": {"pos": [0, 64, 0], "dimension": "overworld"},
+            })
+        assert path == "move_to"
+        moves.append(json.loads(request.content)["x"])
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked", "pos": [0, 64, 0]},
+        })
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=time.monotonic() + 60)
+        direct = json.loads(toolset.mc_move_to(x=35, z=0))
+        waypoint = json.loads(toolset.mc_move_to(x=40, z=0))
+        later = json.loads(toolset.mc_move_to(x=0, z=25))
+
+    assert moves == [35, 32, 0]
+    assert [out["path_not_found_count"] for out in (direct, waypoint, later)] == [1, 2, 3]
+    assert waypoint["requires_replan"] is True
+    assert waypoint["result"]["waypoint_xz"] == [32, 0]
+    assert waypoint["result"]["target_xz"] == [40, 0]
+    assert "近邻目标重复 2 次" in waypoint["result"]["hint"]
+    assert later["requires_replan"] is True
+
+
 def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
     """r12 P2-16: busy move_to blocked ~101s before returning."""
     from mc_agent.harness.mc_tools import McToolset

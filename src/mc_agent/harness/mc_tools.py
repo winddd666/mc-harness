@@ -1418,13 +1418,7 @@ class McToolset:
                         if edim == dim_m and abs(ex - tx_i) <= 1 and abs(ez - tz_i) <= 1 and (y is None or abs(ey - math.floor(float(y))) <= 2):
                             self.world_memory.mark_unreachable((ex, ey, ez), dim=dim_m, reason=err_code, cooldown_s=300.0)
                     # BUG-058: guide short-range dig_toward and escalate repeated path_not_found to requires_replan
-                    with self._state_lock:
-                        near_hits = 1 + sum(
-                            1 for (px_f, pz_f) in self._path_not_found_targets
-                            if math.hypot(tx_f - px_f, tz_f - pz_f) <= 8.0
-                        )
-                        self._path_not_found_targets.append((tx_f, tz_f))
-                        total_hits = len(self._path_not_found_targets)
+                    total_hits, near_hits = self._record_move_path_failure(tx_f, tz_f)
                     parsed["path_not_found_count"] = total_hits
                     if cur_p is not None and dist_m <= 12.0:
                         parsed["suggested"] = {
@@ -1482,6 +1476,15 @@ class McToolset:
                 pass
         return out_raw
 
+    def _record_move_path_failure(self, x: float, z: float) -> tuple[int, int]:
+        with self._state_lock:
+            near_hits = 1 + sum(
+                math.hypot(x - previous_x, z - previous_z) <= 8.0
+                for previous_x, previous_z in self._path_not_found_targets
+            )
+            self._path_not_found_targets.append((x, z))
+            return len(self._path_not_found_targets), near_hits
+
     def _move_waypoint_receipt(
         self, raw: str, waypoint: list[float], target: list[float], geofence_info: dict[str, Any] | None
     ) -> str:
@@ -1501,6 +1504,14 @@ class McToolset:
         remaining = None
         if isinstance(pos, (list, tuple)) and len(pos) >= 3:
             remaining = round(math.hypot(target[0] - float(pos[0]), target[1] - float(pos[2])), 1)
+        hint = "本次执行途中航点。请根据当前位置和剩余距离继续分段移动或换方向。"
+        if receipt.get("ok") is False and error.get("code") in {"path_not_found", "no_path"}:
+            total_hits, near_hits = self._record_move_path_failure(*target)
+            receipt["path_not_found_count"] = total_hits
+            hint = (
+                f"途中航点无可达路径，本集已遇到 {total_hits} 次无路（近邻目标重复 {near_hits} 次）。"
+                "请根据当前位置选择其他方向的可达落脚点，再接近最终目标。"
+            )
         receipt["result"] = {
             **result,
             "partial_move": True,
@@ -1508,7 +1519,7 @@ class McToolset:
             "target_xz": target,
             "pos": pos,
             "remaining_dist": remaining,
-            "hint": "本次执行途中航点。请根据当前位置和剩余距离继续分段移动或换方向。",
+            "hint": hint,
         }
         if geofence_info:
             receipt.update(geofence_info)
