@@ -7624,7 +7624,7 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert len(pulses) == len(actions) == 1
 
 
-@pytest.mark.parametrize("landing", ["water", "lava", "respawn"])
+@pytest.mark.parametrize("landing", ["water", "lava", "respawn", "retreat_respawn", "new_dimension", "not_ready"])
 def test_creeper_retreat_hands_off_to_water_escape_in_the_same_life(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
@@ -7635,6 +7635,7 @@ def test_creeper_retreat_hands_off_to_water_escape_in_the_same_life(monkeypatch,
         "nearest_hostile": creeper,
     }
     shore_calls = []
+    scans = []
 
     class BankBot:
         def status(self):
@@ -7644,6 +7645,7 @@ def test_creeper_retreat_hands_off_to_water_escape_in_the_same_life(monkeypatch,
             if action == "inventory":
                 return {"items": [], "offhand": {"name": "shield"}}
             if action == "get_entities":
+                scans.append(body["radius"])
                 return {"entities": [creeper]}
             if action == "get_block":
                 return {"name": "air"}
@@ -7653,7 +7655,12 @@ def test_creeper_retreat_hands_off_to_water_escape_in_the_same_life(monkeypatch,
         status.update(pos=[0.5, 61.3, 0.5], in_water=True, in_lava=landing == "lava")
         if landing == "respawn":
             status["last_death"] = {"t": 2}
-        return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0}
+        elif landing == "new_dimension":
+            status["dimension"] = "the_nether"
+        elif landing == "not_ready":
+            status["ready"] = False
+        return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0,
+                "respawned": landing == "retreat_respawn"}
 
     def reach_shore(threat_pos, **kwargs):
         shore_calls.append((threat_pos, kwargs))
@@ -7668,6 +7675,9 @@ def test_creeper_retreat_hands_off_to_water_escape_in_the_same_life(monkeypatch,
     )
 
     assert result["mode"] == "creeper_evade"
+    assert scans == ([16, 8] if landing in {"water", "lava"} else [16])
+    retreat = next(step for step in result["actions"] if step["action"] == "retreat_from_creeper")
+    assert bool(retreat.get("respawned")) is (landing in {"respawn", "retreat_respawn", "new_dimension"})
     if landing == "water":
         assert shore_calls == [(creeper["pos"], {"keep_shield": True, "shield_target_id": 42, "avoid_close_threat": True})]
         assert result["status_after"]["in_water"] is False
