@@ -10166,6 +10166,8 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
                 if threading.current_thread() is not actor_thread:
                     observed.set()
                 return current
+            if action == "get_entities":
+                return {"entities": []}
             actions.append(action)
             if action == "attack":
                 if in_water or hazard == "lava":
@@ -10656,3 +10658,183 @@ def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(m
         assert outcome["latched_guard"] is True and status["blocking"] is True
     else:
         assert attacks == []
+
+
+@pytest.mark.parametrize("distance, short_only", [(3.0, False), (7.0, False), (3.0, True)])
+def test_creeper_retreat_avoids_a_second_creeper_on_the_escape_heading(monkeypatch, distance, short_only):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    origin = [0.5, 66, 0.5]
+    primary = {"id": 11, "name": "creeper", "dist": 2.6, "pos": [-2.1, 66, 0.5]}
+    second = {"id": 12, "name": "creeper", "dist": distance, "pos": [0.5 + distance, 66, 0.5]}
+    status = {
+        "pos": origin, "health": 3.85, "ready": True, "alive": True, "on_ground": True,
+        "dimension": "overworld", "nearest_hostile": primary,
+    }
+    path = []
+
+    class RespawnBot:
+        yaw = 0.0
+
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [{**mob, "dist": math.dist(status["pos"], mob["pos"])} for mob in (primary, second)]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 66 else "air"}
+            if action == "look" and "yaw" in body:
+                self.yaw = body["yaw"]
+            if action == "control" and body.get("forward"):
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                travel = 1.65 if short_only else 3.0
+                x, y, z = status["pos"]
+                status["pos"] = [x + travel * dx, y, z + travel * dz]
+                path.append(status["pos"])
+            if action == "move_to":
+                status["pos"] = [body["x"], body["y"], body["z"]]
+                path.append(status["pos"])
+            return {"ok": True}
+
+    if short_only:
+        def probe(_env, _pos, yaw, travel):
+            dx, dz = yaw_to_unit_xz(yaw)
+            if travel <= 1.65 and (dx > 0.95 or (dx < -0.3 and dz > 0.8)):
+                return 66, False
+            return None
+
+        monkeypatch.setattr(CombatEnv, "probe_retreat", probe)
+    outcome = CombatControllerSlot().handle(CombatEnv(RespawnBot()), {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 11, "primary_pos": primary["pos"],
+    })
+
+    assert outcome["mode"] == "creeper_evade"
+    assert path
+    assert all(math.dist(p, second["pos"]) >= min(distance, 6.0) - 1e-6 for p in path), path
+
+
+def test_combat_status_keeps_retry_and_http_phases_inside_remaining_budget(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.bot.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    status_attempts = []
+    events = []
+
+    def respond(request):
+        if request.url.path.endswith("/status") and clock[0] >= 1006.6 and len(status_attempts) < 2:
+            timeout = request.extensions["timeout"]
+            status_attempts.append(timeout)
+            clock[0] += sum(timeout.values())
+            if len(status_attempts) == 1:
+                raise httpx.RemoteProtocolError("closed connection")
+            raise httpx.ReadTimeout("slow retry")
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    class LateStatus:
+        def on_encounter(self, env, _trigger):
+            clock[0] += 6.6
+            env.bot.status()
+
+    with BotSession("cached", transport=httpx.MockTransport(respond)) as bot:
+        guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None)
+        guard.combat_slot.register(LateStatus())
+        outcome = guard._run_subcortical_combat({"source": "pre_hurt_melee"})
+
+    assert outcome["reason"] == "time_budget"
+    event, = [event for event in events if event["type"] == "guardian.combat_budget_exceeded"]
+    assert event["endpoint"] == "status"
+    assert len(status_attempts) == 2
+    assert clock[0] <= 1007.500001
+
+
+@pytest.mark.parametrize("sighting", ["nearest", "scan", "unconfirmed"])
+def test_melee_attack_blocks_a_confirmed_creeper_before_starting(sighting):
+    target_id = 5325659
+    creeper = {"id": target_id, "name": "creeper", "dist": 5.4}
+    attacks = []
+
+    class ScoutBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 67, 0.5], "health": 19, "ready": True,
+                    "alive": True, "on_ground": True, "dimension": "overworld",
+                    "nearest_hostile": creeper if sighting == "nearest" else {"id": 91, "name": "zombie", "dist": 4.0},
+                }
+            if action == "get_entities":
+                return {"entities": [creeper] if sighting == "scan" else [{**creeper, "id": target_id + 1}]}
+            if action == "attack":
+                attacks.append(body)
+                raise httpx.ReadTimeout("attack reply timed out")
+            raise AssertionError(action)
+
+    bot = ScoutBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def attack():
+        return json.dumps(bot.call("attack", {"entity_id": target_id, "max_hits": 3}))
+
+    if sighting == "unconfirmed":
+        with pytest.raises(httpx.ReadTimeout, match="attack reply timed out"):
+            guard.run_tool_with_reflex("mc_attack", attack)
+        assert len(attacks) == 1
+    else:
+        result = json.loads(guard.run_tool_with_reflex("mc_attack", attack))
+        assert result["requires_replan"]
+        assert result["error"]["code"] == "unsafe_creeper_attack"
+        assert attacks == []
+
+
+@pytest.mark.parametrize("landing", ["dry", "water", "respawned"])
+def test_retreat_waits_for_ground_after_pathfinder_leg(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    status = {
+        "pos": [0.5, 66, 0.5], "dimension": "overworld", "on_ground": True,
+        "ready": True, "alive": True, "last_death": {"t": 1},
+    }
+    steps = []
+
+    class KnockbackBot:
+        yaw = 0.0
+
+        def status(self):
+            if steps == ["pulse", "pathfinder"] and clock[0] >= 1000.15:
+                status["on_ground"] = True
+                if landing == "water":
+                    status["in_water"] = True
+                if landing == "respawned":
+                    status.update(pos=[2.5, 68, 2.5], last_death={"t": 2})
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 66 else "air"}
+            if action == "look":
+                self.yaw = body["yaw"]
+            if action == "control":
+                steps.append("pulse")
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                status["pos"] = [0.5 + 2 * dx, 66, 0.5 + 2 * dz]
+            if action == "move_to":
+                steps.append("pathfinder")
+                status.update(pos=[body["x"], body["y"] + 0.2, body["z"]], on_ground=False)
+            return {"ok": True}
+
+    outcome = CombatEnv(KnockbackBot()).flee([-2.5, 66, 0.5], wait_for_ground=True, allow_shaft_seal=False)
+
+    assert steps == ["pulse", "pathfinder"]
+    assert 1000.15 <= clock[0] <= 1000.35
+    assert outcome["ok"] is (landing == "dry")
+    if landing == "water":
+        assert outcome["reason"] == "unsafe_landing"
+    if landing == "respawned":
+        assert outcome["respawned"] is True and outcome["moved_dist"] == 0.0

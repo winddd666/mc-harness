@@ -1915,7 +1915,9 @@ class CombatEnv:
         initial_landing_checks: int = 3,
         other_shooters: Sequence[Sequence[float]] = (),
         other_melee: Sequence[Sequence[float]] = (),
+        other_creepers: Sequence[Sequence[float]] = (),
         avoid_blast: bool = False,
+        keep_blast_clearance: bool = False,
         use_nearest_hostile: bool = True,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
@@ -1994,7 +1996,29 @@ class CombatEnv:
         short_step = False
         disengage_range = min(float(distance), 8.5)
         yaws = [pref_yaw + math.radians(angle) for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180)]
-        if (other_shooters or other_melee) and threat_pos is not None and len(threat_pos) >= 3:
+        blast_offsets = [
+            tuple(float(threat[axis]) - float(pos0[axis]) for axis in range(3))
+            for threat in (threat_pos, *other_creepers)
+        ] if other_creepers and threat_pos is not None and len(threat_pos) >= 3 else []
+
+        def blast_clearance(yaw: float, travel: float) -> tuple[float, float]:
+            ux, uz = yaw_to_unit_xz(yaw)
+            loss = 0.0
+            endpoint = math.inf
+            step = min(travel, 3.0)
+            for dx, dy, dz in blast_offsets:
+                nearest_step = max(0.0, min(travel, dx * ux + dz * uz))
+                nearest = math.hypot(dx - ux * nearest_step, dy, dz - uz * nearest_step)
+                loss = max(loss, min(6.0, math.hypot(dx, dy, dz)) - nearest)
+                endpoint = min(endpoint, math.hypot(dx - ux * step, dy, dz - uz * step))
+            return -loss, endpoint
+
+        blast_route_length = min(float(distance), 9.5)
+        if blast_offsets:
+            yaws.extend((pref_yaw + math.pi / 2, pref_yaw - math.pi / 2))
+            # The optional second leg can add six blocks in the same direction.
+            yaws.sort(key=lambda yaw: blast_clearance(yaw, blast_route_length), reverse=True)
+        elif (other_shooters or other_melee) and threat_pos is not None and len(threat_pos) >= 3:
             # A follow-up move keeps the selected heading. Account for both legs before probing terrain.
             yaws.extend((pref_yaw + math.pi / 2, pref_yaw - math.pi / 2))
             threat_offsets = [
@@ -2022,6 +2046,8 @@ class CombatEnv:
 
             yaws.sort(key=threat_clearance, reverse=True)
         for chosen_yaw in yaws:
+            if keep_blast_clearance and blast_clearance(chosen_yaw, blast_route_length)[0] < -1e-6:
+                continue
             route = self.probe_retreat(pos0, chosen_yaw, 3.5)
             if route is not None:
                 break
@@ -2029,9 +2055,13 @@ class CombatEnv:
             if st0.get("on_ground") is True and not st0.get("in_water"):
                 foot_y = math.floor(float(pos0[1]) + 0.05)
                 short_yaws = [pref_yaw + math.pi / 2, pref_yaw - math.pi / 2]
-                if wait_for_ground:
+                if blast_offsets:
+                    short_yaws = sorted(yaws, key=lambda yaw: blast_clearance(yaw, 1.65), reverse=True)
+                elif wait_for_ground:
                     short_yaws.extend(yaws[:3])
                 for chosen_yaw in short_yaws:
+                    if keep_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
+                        continue
                     route = self.probe_retreat(pos0, chosen_yaw, 1.65)
                     if route == (foot_y, False):
                         short_step = True
@@ -2119,7 +2149,10 @@ class CombatEnv:
         except (ApiError, httpx.HTTPError) as err:
             if isinstance(err, httpx.HTTPError):
                 self._best_effort_stop()
-        return retreat_result(self._safe_status({**st_mid, "ready": False}))
+        st_final = self._safe_status({**st_mid, "ready": False})
+        if wait_for_ground:
+            st_final = settle_airborne(st_final, st0)
+        return retreat_result(st_final)
 
     def step_away_from_melee(self, status: dict[str, Any], threat_pos: Sequence[float], *, deadline: float) -> bool:
         """Take one short, supported step away from a still-close attacker."""
@@ -2826,6 +2859,20 @@ class SubcorticalInstinctController:
         except Exception:
             return []
 
+    @staticmethod
+    def _other_creeper_positions(hostiles: Sequence[dict[str, Any]], target_id: int | None) -> list[Sequence[float]]:
+        positions = []
+        for hostile in hostiles:
+            point = hostile.get("pos")
+            if (
+                hostile.get("id") != target_id and _clean_block_name(hostile.get("name")) == "creeper"
+                and not hostile.get("blocked_by_wall")
+                and isinstance(point, (list, tuple)) and len(point) >= 3
+                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in point[:3])
+            ):
+                positions.append(point)
+        return positions
+
     def _equip_best_weapon_and_shield(
         self,
         env: CombatEnv,
@@ -3045,12 +3092,14 @@ class SubcorticalInstinctController:
                     if post_creepers:
                         sealed_ok = False
             if not sealed_ok:
+                other_creepers = self._other_creeper_positions(hostiles, mob_id)
                 rank_melee_clearance = bool(other_melee) and not any(
                     hostile is not primary and _clean_block_name(hostile.get("name")) == "creeper"
                     for hostile in nearby_hostiles
                 )
                 flee_res = env.flee(
                     c_pos, distance=11.5, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
+                    **({"other_creepers": other_creepers} if other_creepers and c_pos else {}),
                     **({"other_melee": other_melee, "avoid_blast": True} if rank_melee_clearance else {}),
                     **({"initial_landing_checks": 5} if not has_shield and st.get("on_ground") is False else {}),
                     **({"use_nearest_hostile": False} if not c_pos else {}),
@@ -3110,7 +3159,11 @@ class SubcorticalInstinctController:
                     and st_chk.get("on_ground") is True and not st_chk.get("in_water") and not st_chk.get("in_lava")
                     and st_chk.get("last_death") == st.get("last_death") and time.monotonic() < deadline
                 ):
-                    followup = env.flee(close_pos, distance=3.5, urgent=True, allow_shaft_seal=False)
+                    other_close_creepers = self._other_creeper_positions(post_h, close_creeper.get("id"))
+                    followup = env.flee(
+                        close_pos, distance=3.5, urgent=True, allow_shaft_seal=False,
+                        **({"other_creepers": other_close_creepers, "keep_blast_clearance": True} if other_close_creepers else {}),
+                    )
                     actions.append({"action": "creeper_followup_retreat", **followup})
                 if (
                     (not flee_res.get("ok") or creeper_still_close)

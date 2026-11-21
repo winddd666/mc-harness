@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 import httpx
 
+from ..bot import BotSession
 from ..errors import ApiError
 from .control import RequestCancelled, RunTimedOut
 from ..skills.combat_env import (
@@ -148,6 +149,10 @@ class _UnsafeCombatStep(BaseException):
     """Unwind a chase before an unsupported ground movement."""
 
 
+class _UnsafeCreeperAttack(BaseException):
+    """Prevent an explicit melee chase toward a confirmed creeper."""
+
+
 class _UnsafeDig(BaseException):
     """Unwind a dig that would expose the bot to an unsafe drop or overhead fluid."""
 
@@ -210,6 +215,8 @@ class _GuardSession:
             timeout = 2.0 if readonly else 8.0
         if self._deadline.get() is not None:
             remaining = self._time_remaining(action)
+            if action == "status" and isinstance(self.bot, BotSession) and not isinstance(timeout, httpx.Timeout):
+                timeout = httpx.Timeout(timeout, connect=min(timeout, 0.25), write=min(timeout, 0.1), pool=min(timeout, 0.1))
             if isinstance(timeout, httpx.Timeout):
                 # BotSession can retry a closed keepalive after a 150ms delay.
                 attempt_budget = (remaining - 0.15) / 2
@@ -2786,14 +2793,26 @@ class GenerationGuard:
         bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline, call_override=call)
         try:
             status = bot.status()
+            if status.get("ready") is False or status.get("alive") is False:
+                return
+            name, distance, nearest_id, target = self._extract_hostile_info(status)
+            if nearest_id == entity_id and name == "creeper":
+                raise _UnsafeCreeperAttack(entity_id)
+            if nearest_id != entity_id or not name:
+                sighting = bot.call("get_entities", {"radius": 64, "types": ["creeper"]}, timeout_s=0.3)
+                if any(
+                    isinstance(entity, dict) and entity.get("id") == entity_id
+                    and str(entity.get("name") or "").removeprefix("minecraft:") == "creeper"
+                    for entity in sighting.get("entities") or []
+                ):
+                    raise _UnsafeCreeperAttack(entity_id)
             pos = status.get("pos")
             if (
                 "nether" not in str(status.get("dimension") or "").lower()
                 or status.get("on_ground") is not True or not pos
-                or status.get("ready") is False or status.get("alive") is False or status.get("in_lava")
+                or status.get("in_lava")
             ):
                 return
-            name, distance, nearest_id, target = self._extract_hostile_info(status)
             if nearest_id != entity_id or name not in {"blaze", "ghast"} or distance > 3.5:
                 return
             if target is None:
@@ -3599,6 +3618,17 @@ class GenerationGuard:
                 "ok": False,
                 "requires_replan": True,
                 "error": {"code": "unsafe_to_eat", "message": "当前位置有环境危险或敌人威胁，请先到安全位置再进食。"},
+            }, ensure_ascii=False)
+        except _UnsafeCreeperAttack as error:
+            entity_id = error.args[0]
+            self.events.emit("guardian.creeper_attack_blocked", entity_id=entity_id)
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {
+                    "code": "unsafe_creeper_attack", "entity_id": entity_id,
+                    "message": "目标是苦力怕。请拉开距离后远程攻击，或改走安全路线。",
+                },
             }, ensure_ascii=False)
         except _UnsafeDig as error:
             code = error.args[0]
