@@ -1100,13 +1100,20 @@ class CombatEnv:
                 except ApiError:
                     continue
             self.invalidate_block_cache()
+            ok = placed > 0
+            reason = None if ok else "place_failed"
+            if norm_mode == "full_seal" and ok:
+                verified = [self._get_block_name(*cell, strict=True) for cell in cells]
+                ok = all(block and _is_solid_ground(block) for block in verified)
+                if not ok:
+                    reason = "seal_unconfirmed"
             return {
-                "ok": placed > 0,
+                "ok": ok,
                 "mode": norm_mode,
                 "direction": chosen_dir,
                 "placed": placed,
                 "pos_after": self.bot.status().get("pos"),
-                "reason": None if placed > 0 else "place_failed",
+                "reason": reason,
             }
 
         return {"ok": False, "mode": norm_mode, "placed": 0, "pos_after": pos0, "reason": "unknown_mode"}

@@ -7640,6 +7640,44 @@ def test_dig_checks_the_landing_before_removing_support(tool, terrain):
         assert probes == ([target] if tool == "mc_dig" else [])
 
 
+@pytest.mark.parametrize("placement", ["complete", "existing_wall", "partial", "receipt_only"])
+def test_flee_only_confirms_a_shaft_seal_after_both_cells_are_solid(monkeypatch, placement):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    blocks = {(1, 95, 0): "stone"} if placement == "existing_wall" else {}
+    attempts = []
+    status = {"pos": [0.5, 95, 0.5], "alive": True, "ready": True, "on_ground": True}
+
+    class ShaftBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 8}]}
+            if action == "get_block":
+                return {"name": blocks.get(tuple(body["pos"]), "air")}
+            if action == "place":
+                cell = tuple(body["pos"])
+                attempts.append(cell)
+                if placement == "partial" and cell[1] == 96:
+                    raise ApiError("blocked_by_entity", "placement failed")
+                if placement != "receipt_only":
+                    blocks[cell] = "cobblestone"
+                return {"ok": True}
+            pytest.fail(f"unexpected action {action}")
+
+    env = CombatEnv(ShaftBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "carved_shaft"})
+    monkeypatch.setattr(env, "probe_retreat", lambda *_a: None)
+    result = env.flee([3.0, 95, 0.5])
+
+    complete = placement in {"complete", "existing_wall"}
+    assert result["ok"] is complete
+    assert result["mode"] == ("sealed" if complete else "flee")
+    assert attempts[-1] == (1, 96, 0)
+
+
 @pytest.mark.parametrize("terrain", ["wall", "fire", "unknown", "drifted_during_probe", "missed_landing", "respawned"])
 def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing(terrain):
     from mc_agent.skills.combat_env import CombatEnv
