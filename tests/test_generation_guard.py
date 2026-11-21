@@ -4670,6 +4670,52 @@ def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, sho
     assert retreats == [expected]
 
 
+@pytest.mark.parametrize("water_floor", ["stone", "lava", "air"])
+@pytest.mark.parametrize("entry", ["poll", "boundary"])
+def test_critical_post_lava_burning_can_douse_in_verified_adjacent_water(monkeypatch, water_floor, entry):
+    status = {
+        "pos": [0.5, 63.6, 0.5], "health": 5, "food": 20, "dimension": "overworld",
+        "ready": True, "alive": True, "in_lava": True, "on_ground": False, "on_fire": True,
+    }
+    targets = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 2}]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                blocks = {(0, 63, 0): "stone", (1, 63, 0): "water", (1, 62, 0): water_floor}
+                return {"name": blocks.get((x, y, z), "air")}
+            if action == "move_to":
+                targets.append([body[k] for k in ("x", "y", "z")])
+                status.update(pos=targets[-1], in_water=True, on_fire=False)
+                return {"ok": True}
+            raise AssertionError(action)
+
+    events = []
+    guard = GenerationGuard(CaveBot(), EventSink(events.append), checkpoint=lambda: None)
+
+    def escape(**_kwargs):
+        status.update(pos=[0.5, 64, 0.5], health=2.6, in_lava=False, on_ground=True)
+        return {"ok": True, "in_lava": False, "pos_after": status["pos"]}
+
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+    if entry == "poll":
+        guard.poll()
+    else:
+        guard.stabilize_after_tools()
+    escape_event, douse = (event for event in events if event["type"] == "guardian.action.completed")
+    assert escape_event["action"] == ("escape_lava" if entry == "poll" else "boundary_escape_lava")
+    assert douse["action"] == "douse_in_water"
+    assert douse["ok"] is (water_floor == "stone")
+    assert targets == ([[1.5, 63, 0.5]] if water_floor == "stone" else [])
+
+
 @pytest.mark.parametrize("next_event", ["burn_only", "burn_with_bucket", "melee"])
 def test_post_lava_burning_does_not_treat_a_nearby_drowned_as_the_attacker(monkeypatch, next_event):
     drowned = {"id": 44, "name": "drowned", "dist": 3.3}

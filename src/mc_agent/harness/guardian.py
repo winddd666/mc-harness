@@ -432,6 +432,26 @@ class GenerationGuard:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget"}
 
+    def _douse_after_lava(self, before: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            after = self.bot.call("status", method="GET", timeout_s=0.5)
+        except (ApiError, httpx.HTTPError):
+            return None
+        health = after.get("health")
+        _, hostile_dist, _, _ = self._extract_hostile_info(after)
+        if (
+            after.get("ready") is True and after.get("alive") is not False and after.get("pos")
+            and after.get("on_ground") is True and after.get("on_fire") and not after.get("in_water") and not after.get("in_lava")
+            and isinstance(health, (int, float)) and 0 < health <= 4.0 and hostile_dist > 8.0
+            and after.get("last_death") == before.get("last_death") and after.get("dimension") == before.get("dimension")
+        ):
+            try:
+                with self.bot.limit_until(time.monotonic() + 1.5):
+                    return self._action("douse_in_water", lambda: self.combat_env.douse_in_adjacent_water(after))
+            except _RecoveryBudgetExceeded:
+                self._stop_after_recovery_timeout()
+        return None
+
     def _run_recovery_macro(
         self,
         before: dict[str, Any],
@@ -1423,12 +1443,14 @@ class GenerationGuard:
             if in_lava:
                 if counts.get("water_bucket", 0) > 0 and "nether" not in str(status.get("dimension") or "").lower():
                     actions.append(self._action("douse_lava", lambda: self.combat_env.build_tactical("place_water_feet")))
-                actions.append(
-                    self._action(
-                        "escape_lava",
-                        lambda: self.combat_env.escape_lava(force_rim_escape=hurt_by_lava and not raw_in_lava),
-                    )
+                escape = self._action(
+                    "escape_lava", lambda: self.combat_env.escape_lava(force_rim_escape=hurt_by_lava and not raw_in_lava),
                 )
+                actions.append(escape)
+                if escape.get("ok") and not counts.get("water_bucket") and "nether" not in str(status.get("dimension") or "").lower():
+                    douse = self._douse_after_lava(status)
+                    if douse is not None:
+                        actions.append(douse)
 
             def _already(name: str) -> bool:
                 return any(a.get("action") == name for a in actions)
@@ -3334,6 +3356,11 @@ class GenerationGuard:
                 )
                 still_lava = not bool(esc_l.get("ok"))
                 notes.append("脱离岩浆" if not still_lava else "尝试脱离岩浆")
+                if not still_lava and "nether" not in dim_b:
+                    douse = self._douse_after_lava(status)
+                    if douse and douse.get("ok"):
+                        still_wet = True
+                        notes.append("进入浅水灭火")
             elif needs_lava_edge_guard and not in_wall_hurt:
                 edge_act = self._action(
                     "boundary_guard_lava_edge",

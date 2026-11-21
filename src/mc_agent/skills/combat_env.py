@@ -767,6 +767,62 @@ class CombatEnv:
             return {"ok": bool(after) and after not in flames, "block_pos": target, "block_after": after}
         return {"ok": False, "reason": "no_fire_at_feet"}
 
+    def douse_in_adjacent_water(self, before: dict[str, Any]) -> dict[str, Any]:
+        """Reach adjacent shallow water only across verified, supported terrain."""
+        ox, oy, oz = before["pos"][:3]
+        bx, by, bz = math.floor(ox), math.floor(oy + 0.05), math.floor(oz)
+        self.invalidate_block_cache()
+
+        def safe_floor(x: int, y: int, z: int) -> bool:
+            block = self._get_block_name(x, y, z, strict=True)
+            return bool(block) and block not in HAZARD_BLOCK_TYPES and _is_solid_ground(block)
+
+        for dx, dz in CARDINAL_VECTORS.values():
+            wx, wz = bx + dx, bz + dz
+            water_y = next((y for y in (by, by - 1) if self._get_block_name(wx, y, wz, strict=True) == "water"), None)
+            if water_y is None or not safe_floor(wx, water_y - 1, wz):
+                continue
+            if not all(_is_passable(self._get_block_name(wx, y, wz, strict=True)) for y in range(water_y + 1, by + 2)):
+                continue
+            x, z = wx + 0.5, wz + 0.5
+            steps = max(1, math.ceil(math.hypot(x - ox, z - oz) / 0.3))
+            path = [(ox + (x - ox) * i / steps, oz + (z - oz) * i / steps) for i in range(steps + 1)]
+            if not all(self._point_allowed(px, pz, action="fire_douse") for px, pz in path):
+                continue
+            columns = {(cx, cz) for px, pz in path for cx, cz in _hitbox_columns(px, pz)}
+            columns.discard((wx, wz))
+            if not all(
+                safe_floor(cx, by - 1, cz)
+                and all(_is_passable(self._get_block_name(cx, y, cz, strict=True)) for y in (by, by + 1))
+                for cx, cz in columns
+            ):
+                continue
+            current = self._safe_status()
+            current_pos = current.get("pos")
+            if (
+                not current_pos or math.dist(current_pos[:3], before["pos"][:3]) > 0.2
+                or current.get("ready") is not True or current.get("alive") is False
+                or current.get("on_ground") is not True or current.get("in_lava") or not current.get("on_fire")
+                or current.get("dimension") != before.get("dimension") or current.get("last_death") != before.get("last_death")
+            ):
+                return {"ok": False, "reason": "position_or_hazard_changed"}
+            try:
+                self.bot.call(
+                    "move_to", {"x": x, "y": water_y, "z": z, "range": 0.2, "timeout": 650, "stop_on": ["death"]},
+                    timeout_s=0.95, allow_reauth=False,
+                )
+            except (ApiError, httpx.HTTPError) as error:
+                if isinstance(error, httpx.HTTPError):
+                    self._best_effort_stop(timeout_s=0.25)
+            after = self._safe_status()
+            ok = bool(
+                after.get("ready") is True and after.get("alive") is not False
+                and after.get("in_water") and not after.get("in_lava") and after.get("on_fire") is False
+                and after.get("last_death") == before.get("last_death") and after.get("dimension") == before.get("dimension")
+            )
+            return {"ok": ok, "pos_after": after.get("pos"), **({"reason": "douse_unconfirmed"} if not ok else {})}
+        return {"ok": False, "reason": "no_safe_shallow_water"}
+
     def step_off_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
         pos = status.get("pos")
         if not pos or status.get("on_ground") is not True:
