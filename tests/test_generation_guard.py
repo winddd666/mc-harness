@@ -6819,6 +6819,49 @@ def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attac
     assert result["actions"] == ["move_to_shore_failed", "shore_lip_jump"]
 
 
+@pytest.mark.parametrize("same_life", [True, False])
+def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(monkeypatch, same_life):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [11299.7, 62.2, 11021.3], "dimension": "overworld", "last_death": {"t": 1},
+        "health": 9.0, "in_water": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    high_bank = [11300, 64, 11021]
+    low_bank = [11298, 62, 11023]
+    targets = []
+
+    class RiverBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": point} for point in (high_bank, low_bank)]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "move_to":
+                target = [body["x"], body["y"], body["z"]]
+                targets.append(target)
+                if target[1] == 63:
+                    status.update(pos=target, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    env = CombatEnv(RiverBot())
+    first = env.escape_deep_water_to_shore(shield_target_id=44)
+    assert first["in_water"] is True and first["shore_target"] == [11300.5, 65.0, 11021.5]
+    clock[0] += 4.0
+    if not same_life:
+        status["last_death"] = {"t": 2}
+    second = env.escape_deep_water_to_shore(shield_target_id=44)
+
+    expected_bank = [11298.5, 63.0, 11023.5] if same_life else first["shore_target"]
+    assert second["ok"] is same_life
+    assert targets == [first["shore_target"], expected_bank]
+
+
 def test_water_boundary_avoids_a_shore_path_that_crosses_a_creeper(monkeypatch):
     status = {
         "pos": [0.5, 62.2, 0.5], "health": 20, "food": 20, "oxygen": 320,

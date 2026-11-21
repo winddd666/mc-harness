@@ -383,6 +383,7 @@ class CombatEnv:
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
         self._stalled_lava_shore: tuple[tuple[float, ...], tuple[float, ...], float] | None = None
+        self._stalled_water_shore: tuple[tuple[float, ...], tuple[float, ...], tuple[Any, Any], float] | None = None
         self._stalled_lava_notch: dict[tuple[str, tuple[int, int, int], str, str | None], float] = {}
 
     def surface_from_water(self, status: dict[str, Any]) -> dict[str, Any]:
@@ -2168,6 +2169,13 @@ class CombatEnv:
                     }
 
         # Look for reachable dry ledges at the local water level, including flooded caves.
+        life = (st0.get("dimension"), st0.get("last_death"))
+        excluded_shore = None
+        if self._stalled_water_shore is not None:
+            stalled_shore, stalled_pos, stalled_life, stalled_at = self._stalled_water_shore
+            if life == stalled_life and time.monotonic() - stalled_at < 15.0 and math.dist(pos0[:3], stalled_pos) <= 2.5:
+                excluded_shore = stalled_shore
+                actions.append("shore_lip_stalled")
         shore_target = self._find_walkable_shore_target(
             pos0,
             block_types=SHORE_LAND_BLOCKS,
@@ -2176,6 +2184,7 @@ class CombatEnv:
             max_y=by + 2,
             threat_pos=threat_pos,
             avoid_close_threat=avoid_close_threat,
+            excluded_shore=excluded_shore,
         )
 
         # 2. Radial fallback if find_blocks yielded no dry surface spot.
@@ -2192,7 +2201,8 @@ class CombatEnv:
                 for dist in (4, 8, 14):
                     px = math.floor(start_x + ux * dist)
                     pz = math.floor(start_z + uz * dist)
-                    if not self._point_allowed(px + 0.5, pz + 0.5, action="water_shore"):
+                    candidate = (px + 0.5, float(y_probe + 1), pz + 0.5)
+                    if candidate == excluded_shore or not self._point_allowed(px + 0.5, pz + 0.5, action="water_shore"):
                         continue
                     if avoid_close_threat and has_threat and self._crosses_near_water_threat(pos0, px + 0.5, pz + 0.5, threat_pos):
                         continue
@@ -2201,7 +2211,7 @@ class CombatEnv:
                         foot_p = self._get_block_name(px, y_probe + 1, pz, strict=True)
                         head_p = self._get_block_name(px, y_probe + 2, pz, strict=True)
                         if _is_passable(foot_p) and _is_passable(head_p):
-                            shore_target = [px + 0.5, float(y_probe + 1), pz + 0.5]
+                            shore_target = list(candidate)
                             break
                 if shore_target is not None:
                     break
@@ -2383,6 +2393,15 @@ class CombatEnv:
                 except ApiError:
                     pass
         landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")
+        if not still_wet and landed:
+            self._stalled_water_shore = None
+        elif (
+            still_wet and shore_target is not None and "shore_lip_jump" in actions
+            and (has_threat or shield_target_id is not None) and life == (st_end.get("dimension"), st_end.get("last_death"))
+            and shore_target[1] - pos_end[1] >= 1.75
+            and math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
+        ):
+            self._stalled_water_shore = (tuple(shore_target), tuple(pos_end[:3]), life, time.monotonic())
         return {
             "ok": not still_wet and landed,
             "in_water": still_wet,
