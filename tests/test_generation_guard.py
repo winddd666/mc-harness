@@ -7560,7 +7560,7 @@ def test_water_melee_retries_shore_after_unconfirmed_landing(monkeypatch):
     assert shore_attempts == [[3.3, 62.5, 0.5], None]
 
 
-@pytest.mark.parametrize("landing", ["grounded", "airborne", "wet_again"])
+@pytest.mark.parametrize("landing", ["grounded", "grounded_on_second_sample", "airborne", "wet_again"])
 def test_water_macro_checks_that_a_dry_jump_reaches_ground(monkeypatch, landing):
     monkeypatch.setattr("mc_agent.harness.guardian.time.sleep", lambda _: None)
     status = {
@@ -7575,7 +7575,8 @@ def test_water_macro_checks_that_a_dry_jump_reaches_ground(monkeypatch, landing)
             if action == "status":
                 if kwargs.get("timeout_s") == 0.25:
                     rechecks.append(action)
-                    status.update(on_ground=landing == "grounded", in_water=landing == "wet_again")
+                    grounded = landing == "grounded" or (landing == "grounded_on_second_sample" and len(rechecks) == 2)
+                    status.update(on_ground=grounded, in_water=landing == "wet_again")
                 return dict(status)
             if action == "events":
                 return {"events": []}
@@ -7596,11 +7597,11 @@ def test_water_macro_checks_that_a_dry_jump_reaches_ground(monkeypatch, landing)
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
     incident = guard.poll()
 
-    assert rechecks == ["status"]
     water = incident["actions"][0]
     assert water["action"] == "escape_water"
-    assert water["ok"] is (landing == "grounded")
-    if landing == "grounded":
+    assert water["ok"] is landing.startswith("grounded")
+    assert rechecks == ["status"] * (2 if landing in {"grounded_on_second_sample", "airborne"} else 1)
+    if landing.startswith("grounded"):
         assert shore_calls == []
     else:
         assert water["result"]["reason"] == "shore_landing_unconfirmed"

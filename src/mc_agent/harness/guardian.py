@@ -476,16 +476,20 @@ class GenerationGuard:
             if not result.get("ok") and (result.get("mode") != "flee" or result.get("respawned")):
                 return result
             after = recovery_bot.status()
-            if (
-                confirm_shore and after.get("on_ground") is False and not after.get("in_water")
-                and not after.get("in_lava") and after.get("alive") is not False and after.get("ready") is not False
-                and deadline - time.monotonic() >= 0.35
-            ):
-                time.sleep(0.1)
-                try:
-                    after = recovery_bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
-                except (ApiError, httpx.HTTPError):
-                    pass
+            if confirm_shore:
+                for _ in range(2):
+                    if (
+                        after.get("on_ground") is not False or after.get("in_water") or after.get("in_lava")
+                        or after.get("alive") is False or after.get("ready") is False
+                        or after.get("last_death") != before.get("last_death")
+                        or deadline - time.monotonic() < 0.35
+                    ):
+                        break
+                    time.sleep(0.1)
+                    try:
+                        after = recovery_bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
+                    except (ApiError, httpx.HTTPError):
+                        break
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget", "partial": True, **(timeout_details or {})}
