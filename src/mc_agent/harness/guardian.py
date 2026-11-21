@@ -2064,13 +2064,48 @@ class GenerationGuard:
                     if "death_or_connection_changed" not in reasons:
                         reasons.append("death_or_connection_changed")
                     replan = True
-        if (
-            reasons == ["pre_hurt_creeper"] and pre_trigger is not None and post_events_verified
-            and not any(e.get("type") == "hurt" for e in fresh)
-            and self._repeat_cornered_creeper(pre_trigger, status, post_status, actions)
-        ):
-            replan = False
+        if pre_trigger is not None and post_events_verified and not any(e.get("type") == "hurt" for e in fresh):
+            if reasons == ["pre_hurt_creeper"] and self._repeat_cornered_creeper(pre_trigger, status, post_status, actions):
+                replan = False
+            elif reasons == ["pre_hurt_melee"] and self._resolved_melee_warning(pre_trigger, status, post_status, actions):
+                replan = False
         return self._incident(post_status, reasons, actions, fresh, requires_replan=replan)
+
+    def _resolved_melee_warning(
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
+    ) -> bool:
+        if len(actions) != 1 or actions[0]["action"] != "subcortical_combat" or not actions[0].get("ok"):
+            return False
+        outcome = actions[0].get("result")
+        if not isinstance(outcome, dict) or outcome.get("mode") != "counter_killed":
+            return False
+        hits = outcome.get("actions")
+        target = trigger.get("primary_entity_id")
+        if (
+            target is None or not isinstance(hits, list) or not hits
+            or not all(
+                isinstance(a, dict) and a.get("action") == "melee_attack" and a.get("ok") and a.get("entity_id") == target
+                for a in hits
+            )
+            or hits[-1].get("killed") is not True
+        ):
+            return False
+        _, distance, remaining, _ = self._extract_hostile_info(after)
+        health = after.get("health")
+        pos_before, pos_after = before.get("pos"), after.get("pos")
+        held_before, held_after = before.get("held"), after.get("held")
+        return bool(
+            "nearest_hostile" in after and remaining != target and distance > 16.0
+            and after.get("ready") is True and after.get("alive") is True
+            and before.get("on_ground") is True and after.get("on_ground") is True
+            and not before.get("busy") and not after.get("busy")
+            and not any(after.get(key) for key in ("in_water", "in_lava", "on_fire"))
+            and isinstance(health, (int, float)) and health > LOW_HP_BUNKER_MAX and health == before.get("health")
+            and all(after.get(key) == before.get(key) for key in ("dimension", "last_death", "food", "blocking"))
+            and isinstance(held_before, dict) and isinstance(held_after, dict)
+            and (held_after.get("name"), held_after.get("slot")) == (held_before.get("name"), held_before.get("slot"))
+            and pos_before and pos_after and math.dist(pos_before[:3], pos_after[:3]) <= 0.2
+        )
 
     def _repeat_cornered_creeper(
         self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
@@ -3419,6 +3454,8 @@ class GenerationGuard:
             note = "处于举盾/掩体/远程交战姿态，未打断当前生成。"
         elif "pre_hurt_creeper" in reasons:
             note = "已复查苦力怕威胁，继续当前生成。"
+        elif "pre_hurt_melee" in reasons:
+            note = "近战威胁已清除，复查无新险情，继续当前生成。"
         elif "hot_floor" in reasons:
             note = "已潜行避开岩浆块伤害，未打断当前生成。"
         else:

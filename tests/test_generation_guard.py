@@ -1244,6 +1244,55 @@ def test_bug_009_stationary_failed_creeper_retreat_only_cancels_again_on_change(
     assert len(attempts) == 3
 
 
+@pytest.mark.parametrize("after_kill", ["stable", "hurt", "moved", "shooter", "death", "unverified"])
+def test_bug_009_resolved_melee_warning_keeps_generation_only_when_stable(monkeypatch, after_kill):
+    spider = {"id": 4614512, "name": "spider", "dist": 2.7, "pos": [3.2, 64, 0.5]}
+    status = {
+        "pos": [0.5, 64, 0.5], "health": 20, "food": 20, "dimension": "overworld",
+        "on_ground": True, "alive": True, "ready": True, "blocking": False, "nearest_hostile": spider,
+        "held": {"name": "diamond_sword", "slot": 37, "durability_used": 5},
+    }
+    events = []
+    attempts = []
+
+    class NightBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                if after_kill == "unverified" and attempts:
+                    raise httpx.ReadTimeout("post-combat event read failed")
+                return {"events": [event for event in events if event["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [status["held"]]}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(NightBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_detect_pre_hurt_trigger", lambda _: {
+        "source": "pre_hurt_melee", "primary_type": "spider", "primary_entity_id": spider["id"], "distance": 2.7,
+    })
+
+    def kill(_env, trigger):
+        attempts.append(trigger["primary_entity_id"])
+        status.update(nearest_hostile=None, held={**status["held"], "durability_used": 6})
+        if after_kill == "hurt":
+            events.append({"seq": 1, "type": "hurt", "source": "arrow"})
+        elif after_kill == "moved":
+            status["pos"] = [1.5, 64, 0.5]
+        elif after_kill == "shooter":
+            status["nearest_hostile"] = {"id": 14, "name": "skeleton", "dist": 9}
+        elif after_kill == "death":
+            events.append({"seq": 1, "type": "death"})
+        return {"handled": True, "mode": "counter_killed", "actions": [
+            {"action": "melee_attack", "entity_id": spider["id"], "ok": True, "killed": True},
+        ]}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", kill)
+    incident = guard.poll()
+    assert attempts == [spider["id"]]
+    assert incident["requires_replan"] is (after_kill != "stable")
+
+
 def test_bug_009_pre_hurt_same_target_debounce_cancels_once(monkeypatch):
     """BUG-009: Consecutive pre_hurt_* triggers from the same target within 3s must cancel only once."""
     clock = [500.0]
