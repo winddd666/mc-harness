@@ -3164,6 +3164,14 @@ class GenerationGuard:
                 st_pre = self.bot.status()
             except (ApiError, httpx.HTTPError):
                 st_pre = {}
+
+            def life_changed(after: dict[str, Any]) -> bool:
+                return bool(
+                    after.get("ready") is False or after.get("alive") is False
+                    or (after.get("last_death") is not None and after["last_death"] != st_pre.get("last_death"))
+                    or (after.get("dimension") and st_pre.get("dimension") and after["dimension"] != st_pre["dimension"])
+                )
+
             life_unavailable = st_pre.get("ready") is False or st_pre.get("alive") is False
             lava_threat = trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava"))
             hot_floor_trigger = trigger.get("primary_type") == "hot_floor"
@@ -3381,12 +3389,7 @@ class GenerationGuard:
                             st_after = self.bot.call("status", method="GET", timeout_s=0.6, allow_reauth=False)
                         except (ApiError, httpx.HTTPError):
                             st_after = {}
-                        life_unavailable = bool(
-                            st_after.get("ready") is False or st_after.get("alive") is False
-                            or (st_after.get("last_death") is not None and st_after["last_death"] != st_pre.get("last_death"))
-                            or (st_after.get("dimension") and st_pre.get("dimension")
-                                and st_after["dimension"] != st_pre["dimension"])
-                        )
+                        life_unavailable = life_changed(st_after)
                         error_code = act["error"].get("code")
                         summary = f"执行 {interrupted_name} 途中遇袭，战斗反射受阻（{error_code}）"
                         if life_unavailable:
@@ -3401,6 +3404,7 @@ class GenerationGuard:
                             st_after = outcome.get("status_after") or self.bot.status()
                         except (ApiError, httpx.HTTPError):
                             st_after = st_pre
+                        life_unavailable = isinstance(st_after, dict) and life_changed(st_after)
                         post_name, post_dist, post_id, post_pos = self._extract_hostile_info(st_after if isinstance(st_after, dict) else {})
                         close_drowned_after_reflex = (
                             trigger.get("source") == "tool_interrupted_hurt"
@@ -3409,7 +3413,7 @@ class GenerationGuard:
                             and st_after.get("last_death") == st_pre.get("last_death")
                             and st_after.get("dimension") == st_pre.get("dimension")
                         )
-                        if isinstance(st_after, dict) and st_after.get("in_lava"):
+                        if not life_unavailable and isinstance(st_after, dict) and st_after.get("in_lava"):
                             self._action("escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
                             try:
                                 st_after = self.bot.status()
@@ -3417,6 +3421,7 @@ class GenerationGuard:
                                 pass
                         elif (
                             isinstance(st_after, dict)
+                            and not life_unavailable
                             and st_after.get("in_water")
                             and (self._custom_combat_registered or outcome.get("mode") not in {"water_surface", "water_surface_abort"})
                             and (
@@ -3455,7 +3460,12 @@ class GenerationGuard:
                                 st_after = self.bot.status()
                             except (ApiError, httpx.HTTPError):
                                 pass
-                        summary = str(outcome.get("summary") or f"执行 {interrupted_name} 途中遇袭，已完成 0-LLM 本能处置")
+                        life_unavailable = life_unavailable or (isinstance(st_after, dict) and life_changed(st_after))
+                        if life_unavailable:
+                            outcome = {**outcome, "handled": False, "mode": "life_unavailable"}
+                            summary = f"执行 {interrupted_name} 途中遇袭，战斗反射期间角色状态已变化，请按最新状态重新规划"
+                        else:
+                            summary = str(outcome.get("summary") or f"执行 {interrupted_name} 途中遇袭，已完成 0-LLM 本能处置")
             self.last_reaction = time.monotonic()
             if not life_unavailable:
                 self._mark_pre_hurt_cooldown(trigger, self.last_reaction)

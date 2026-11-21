@@ -936,6 +936,40 @@ def test_interrupted_tool_reports_combat_api_failure_and_rechecks_life(monkeypat
     assert (guard._ranged_combat_stance_until == float("-inf")) is respawned
 
 
+@pytest.mark.parametrize("ready_after_respawn", [False, True])
+def test_interrupted_tool_reports_respawn_returned_by_combat(monkeypatch, ready_after_respawn):
+    before = {
+        "pos": [0.5, 56.0, 0.5], "health": 20, "on_ground": True, "ready": True,
+        "alive": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    after = {
+        **before, "pos": [66.5, 87.1, 26.5], "health": 20 if ready_after_respawn else 0,
+        "on_ground": False, "ready": ready_after_respawn, "alive": ready_after_respawn,
+        "last_death": {"t": 2}, "in_lava": True,
+    }
+
+    class ScoutBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(before)
+            if action == "events":
+                return {"events": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(ScoutBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_slot, "handle", lambda *_: {
+        "handled": True, "mode": "creeper_evade", "summary": "creeper reflex", "status_after": after,
+    })
+    monkeypatch.setattr(guard.combat_env, "escape_lava", lambda: pytest.fail("old reflex must end at respawn"))
+    trigger = {"source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 42}
+    receipt = guard.handle_preemption(trigger, interrupted_name="mc_skill_scout_surface")
+
+    assert receipt["requires_replan"]
+    assert receipt["reflex_mode"] == "life_unavailable"
+    assert receipt["status_after"]["pos"] == after["pos"]
+    assert not guard._is_pre_hurt_debounced(42, "creeper")
+
+
 @pytest.mark.parametrize("slow_cleanup", [False, True])
 def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypatch, slow_cleanup):
     clock = [1000.0]
