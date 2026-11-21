@@ -93,6 +93,7 @@ HAZARD_BLOCK_TYPES: tuple[str, ...] = (
     "sweet_berry_bush",
     "powder_snow",
     "cobweb",
+    "pointed_dripstone",
 )
 
 SURFACE_SHORE_PRIORITY_BLOCKS: tuple[str, ...] = (
@@ -156,6 +157,7 @@ TRAP_BLOCKS: frozenset[str] = frozenset(
         "powder_snow",
         "cobweb",
         "magma_block",
+        "pointed_dripstone",
     }
 )
 
@@ -1431,6 +1433,8 @@ class CombatEnv:
             if repeat_stall:
                 actions.append("lava_shore_path_stalled")
             elif shore_d <= 6.5:
+                # Keep the attempted bank if the recovery deadline interrupts the status recheck.
+                self._stalled_lava_shore = (tuple(lava_shore_target), tuple(swim_pos[:3]), time.monotonic())
                 try:
                     self.bot.call(
                         "move_to",
@@ -1457,6 +1461,8 @@ class CombatEnv:
                 end = st.get("pos") or swim_pos
                 if math.dist(end[:3], lava_shore_target) >= math.dist(swim_pos[:3], lava_shore_target) - 0.75:
                     self._stalled_lava_shore = (tuple(lava_shore_target), tuple(end[:3]), time.monotonic())
+                else:
+                    self._stalled_lava_shore = stalled
 
         # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
         if filler is not None and time.monotonic() < lava_deadline + 0.8:
