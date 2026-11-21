@@ -996,6 +996,52 @@ def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypa
         assert [a for a, _ in calls[-3:]] == ["stop", "control", "posture"]
 
 
+@pytest.mark.parametrize("same_shooter", [False, True])
+def test_death_during_combat_does_not_suppress_the_next_threat_at_spawn(monkeypatch, same_shooter):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    prior_threat = {
+        "id": 43 if same_shooter else 42, "name": "skeleton" if same_shooter else "spider",
+        "pos": [2.0, 64.0, 0.5], "dist": 1.5,
+    }
+    skeleton = {"id": 43, "name": "skeleton", "pos": [20.5, 64.0, 4.5], "dist": 4.0}
+    status = {
+        "pos": [0.5, 64.0, 0.5], "health": 8, "food": 20, "on_ground": True,
+        "alive": True, "ready": True, "dimension": "overworld", "nearest_hostile": prior_threat,
+    }
+    lifecycle = []
+    encounters = []
+
+    class RespawnBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [ev for ev in lifecycle if ev["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    class RespawnDuringCombat:
+        def on_encounter(self, _env, trigger):
+            encounters.append(trigger["primary_entity_id"])
+            if len(encounters) == 1:
+                status.update(pos=[20.5, 64.0, 0.5], health=20, last_death={"t": 1}, nearest_hostile=skeleton)
+                lifecycle.extend([{"seq": 1, "type": "death"}, {"seq": 2, "type": "spawn"}])
+            return {"handled": True, "mode": "cover_or_flee", "status_after": dict(status), "requires_replan": True}
+
+    guard = GenerationGuard(RespawnBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.combat_slot.register(RespawnDuringCombat())
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+    first = guard.poll()
+    assert "death_or_connection_changed" in first["reasons"]
+    clock[0] += 3.1
+    second = guard.poll()
+
+    assert encounters == [prior_threat["id"], skeleton["id"]]
+    assert "pre_hurt_ranged" in second["reasons"]
+
+
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
     """Reproduces glm_glm_3_village / hy4_hy_8_nether: ReadTimeout in subcortical_combat must /stop & not crash run."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
