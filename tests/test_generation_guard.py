@@ -12272,6 +12272,55 @@ def test_subcortical_recovery_macros_share_the_combat_transport_deadline(monkeyp
     assert guard.combat_env.skills is skills and skills.bot is raw_bot
 
 
+@pytest.mark.parametrize("melee", ["far", "near", "unknown_distance", "scan_failed"])
+def test_critical_arrow_reaction_checks_live_melee_clearance_before_cover(monkeypatch, melee):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
+    skeleton = {"id": 42, "name": "skeleton", "dist": 4.5, "pos": [5, 106, 0.5]}
+    zombie = {"id": 43, "name": "zombie"}
+    if melee != "unknown_distance":
+        zombie["dist"] = 8.0 if melee == "far" else 4.8
+    status = {"pos": [0.5, 106, 0.5], "dimension": "overworld", "health": 4.048, "food": 17,
+              "ready": True, "alive": True, "on_ground": True, "blocking": True, "nearest_hostile": skeleton}
+    moves = []
+
+    class HillBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": skeleton}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                if melee == "scan_failed":
+                    raise httpx.ReadTimeout("hostile scan unavailable")
+                assert kwargs["timeout_s"] == 0.6
+                return {"entities": [skeleton, zombie]}
+            return {"ok": True}
+
+    def cover(_env, shooter, *, other_shooters, allow_stationary):
+        assert not other_shooters and shooter == skeleton["pos"] and not allow_stationary
+        moves.append("natural_cover")
+        return {"ok": True, "mode": "natural_cover"}
+
+    def flee(_pos, **_kwargs):
+        moves.append("flee")
+        return {"ok": True, "mode": "flee", "moved_dist": 0.95}
+
+    guard = GenerationGuard(HillBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_melee_hurt_at = 999.0
+    guard._last_dig_cover_at = 990.0
+    guard._last_dig_cover_block = (0, 106, 0)
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    assert guard.poll()["requires_replan"]
+
+    assert moves == (["natural_cover"] if melee == "far" else ["flee"])
+
+
 @pytest.mark.parametrize("hits, cover_found", [(1, False), (2, True), (2, False)])
 def test_repeated_arrow_hits_through_a_shield_prompt_cover_before_critical_health(monkeypatch, hits, cover_found):
     import time
