@@ -2575,6 +2575,17 @@ class GenerationGuard:
             return False
         hits = outcome.get("actions")
         target = trigger.get("primary_entity_id")
+        if isinstance(hits, list) and hits and isinstance(hits[0], dict) and hits[0].get("action") == "raise_shield_entry":
+            # The slot releases temporary posture before poll samples the final state.
+            shield_before, shield_after = before.get("offhand"), after.get("offhand")
+            if (
+                hits[0].get("ok") is not True or outcome.get("latched_guard")
+                or not isinstance(shield_before, dict) or not isinstance(shield_after, dict)
+                or (shield_before.get("name"), shield_before.get("slot"))
+                != (shield_after.get("name"), shield_after.get("slot"))
+            ):
+                return False
+            hits = hits[1:]
         if (
             target is None or not isinstance(hits, list) or not hits
             or not all(

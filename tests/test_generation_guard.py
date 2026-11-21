@@ -1885,7 +1885,10 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
             assert guard.poll()["requires_replan"] is False
 
 
-@pytest.mark.parametrize("after_kill", ["stable", "hurt", "moved", "shooter", "death", "unverified"])
+@pytest.mark.parametrize("after_kill", [
+    "stable", "hurt", "moved", "shooter", "death", "unverified",
+    "shield_released", "shield_changed", "shield_latched", "shield_still_blocking",
+])
 def test_bug_009_resolved_melee_warning_keeps_generation_only_when_stable(monkeypatch, after_kill):
     spider = {"id": 4614512, "name": "spider", "dist": 2.7, "pos": [3.2, 64, 0.5]}
     status = {
@@ -1895,6 +1898,9 @@ def test_bug_009_resolved_melee_warning_keeps_generation_only_when_stable(monkey
     }
     events = []
     attempts = []
+    raised_shield = after_kill.startswith("shield_")
+    if raised_shield:
+        status["offhand"] = {"name": "shield", "slot": 45, "durability_used": 7}
 
     class NightBot:
         def call(self, action, body=None, **kwargs):
@@ -1924,14 +1930,24 @@ def test_bug_009_resolved_melee_warning_keeps_generation_only_when_stable(monkey
             status["nearest_hostile"] = {"id": 14, "name": "skeleton", "dist": 9}
         elif after_kill == "death":
             events.append({"seq": 1, "type": "death"})
-        return {"handled": True, "mode": "counter_killed", "actions": [
-            {"action": "melee_attack", "entity_id": spider["id"], "ok": True, "killed": True},
-        ]}
+        steps = []
+        if raised_shield:
+            steps.append({"action": "raise_shield_entry", "ok": True})
+            status["offhand"] = {**status["offhand"], "durability_used": 8}
+            if after_kill == "shield_changed":
+                status["offhand"] = None
+            elif after_kill == "shield_still_blocking":
+                status["blocking"] = True
+        steps.append({"action": "melee_attack", "entity_id": spider["id"], "ok": True, "killed": True})
+        return {
+            "handled": True, "mode": "counter_killed", "actions": steps,
+            "latched_guard": after_kill == "shield_latched",
+        }
 
     monkeypatch.setattr(guard.combat_slot, "handle", kill)
     incident = guard.poll()
     assert attempts == [spider["id"]]
-    assert incident["requires_replan"] is (after_kill != "stable")
+    assert incident["requires_replan"] is (after_kill not in {"stable", "shield_released"})
 
 
 def test_bug_009_pre_hurt_same_target_debounce_cancels_once(monkeypatch):
