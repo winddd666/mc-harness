@@ -485,7 +485,9 @@ class GenerationGuard:
                             check_blaze_cover = True
                         elif shooter_id is not None:
                             other_shooters.append(shooter_pos)
-            if pos and (prefer_cover or check_blaze_cover):
+            # A wall that blocks projectiles cannot protect us from a melee attacker already in reach.
+            recent_melee = time.monotonic() - self._last_melee_hurt_at < 4.0
+            if pos and (prefer_cover or check_blaze_cover) and not recent_melee:
                 cover_budget = 1.25 if check_blaze_cover else 2.25
                 cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + cover_budget)
                 try:

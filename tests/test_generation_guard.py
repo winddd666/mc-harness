@@ -3672,7 +3672,7 @@ def test_indirect_magic_uses_checked_retreat_without_digging_a_bunker(monkeypatc
         assert retreats == [] and incident is None
 
 
-@pytest.mark.parametrize("sighting", ["exposed", "covered", "timeout"])
+@pytest.mark.parametrize("sighting", ["exposed", "covered", "timeout", "covered_with_melee"])
 def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, sighting):
     from mc_agent.skills.combat_env import CombatEnv
 
@@ -3692,7 +3692,13 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
             if action == "status":
                 return dict(status)
             if action == "events":
-                return {"events": [] if kwargs["params"]["since"] else [{"seq": 1, "type": "hurt", "source": "on_fire"}]}
+                hits = [{"seq": 1, "type": "hurt", "source": "on_fire"}]
+                if sighting == "covered_with_melee":
+                    hits = [
+                        {"seq": 1, "type": "hurt", "source": "mob_attack"},
+                        {"seq": 2, "type": "hurt", "source": ""},
+                    ]
+                return {"events": [] if kwargs["params"]["since"] else hits}
             if action == "inventory":
                 return {"items": [], "offhand": {"name": "shield"}}
             if action == "get_entities":
@@ -3708,7 +3714,7 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
 
     def blocks_shot(_env, _pos, shooter_pos):
         cover_checks.append(shooter_pos)
-        return shooter_pos == primary["pos"] or sighting == "covered"
+        return shooter_pos == primary["pos"] or sighting in {"covered", "covered_with_melee"}
 
     guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(CombatEnv, "_blocks_shot", blocks_shot)
@@ -3717,6 +3723,8 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
 
     if sighting == "timeout":
         assert cover_checks == [] and calls == [(None, True, ())]
+    elif sighting == "covered_with_melee":
+        assert cover_checks == [] and calls == [(primary["pos"], True, [secondary["pos"]])]
     else:
         assert cover_checks == [primary["pos"], secondary["pos"]]
         if sighting == "covered":
