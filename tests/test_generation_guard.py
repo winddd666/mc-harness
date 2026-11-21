@@ -783,7 +783,7 @@ def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_c
 
     # 1) Bounded attack timeout on SubcorticalInstinctController
     seen_attack_payloads: list[dict] = []
-    attack_times_out = False
+    attack_result = "killed"
 
     class _AttackBot:
         def status(self):
@@ -799,8 +799,10 @@ def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_c
                 return {"entities": [{"id": 5, "name": "zombie", "pos": [1.5, 64.0, 0.5], "dist": 1.8}]}
             if action == "attack":
                 seen_attack_payloads.append(dict(body or {}))
-                if attack_times_out:
+                if attack_result == "server_timeout":
                     raise ApiError("timeout", "timed out waiting for server attack")
+                if attack_result == "zero_hits":
+                    return {"hits": 0, "killed": False}
                 return {"hits": 2, "killed": True}
             return {"ok": True}
 
@@ -809,12 +811,15 @@ def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_c
     assert out["mode"] == "counter_killed"
     assert seen_attack_payloads and 1000 <= seen_attack_payloads[0]["timeout"] <= 3000
 
-    attack_times_out = True
-    env = CombatEnv(_AttackBot())
-    monkeypatch.setattr(env, "flee", lambda *_args, **_kwargs: {"ok": True, "mode": "flee"})
-    out = ctrl.on_encounter(env, {"source": "pre_hurt_melee", "primary_entity_id": 5, "primary_type": "zombie"})
-    assert out["mode"] == "cover_or_flee"
-    assert {"action": "attack_timeout_flee", "ok": True} in out["actions"]
+    for attack_result, fallback in [("server_timeout", "attack_timeout_flee"), ("zero_hits", "unreachable_flee")]:
+        env = CombatEnv(_AttackBot())
+        monkeypatch.setattr(env, "flee", lambda *_args, **_kwargs: {"ok": True, "mode": "flee"})
+        out = SubcorticalInstinctController().on_encounter(
+            env, {"source": "pre_hurt_melee", "primary_entity_id": 5, "primary_type": "zombie"},
+        )
+        assert out["mode"] == "cover_or_flee"
+        assert {"action": fallback, "ok": True} in out["actions"]
+        assert out["status_after"]["alive"] and out["status_after"]["ready"]
 
     # 2) ReadTimeout during run_tool_with_reflex preemption emits /stop, posture {}, and returns replan receipt
     stop_calls: list[str] = []
