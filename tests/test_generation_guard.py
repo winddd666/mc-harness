@@ -1867,6 +1867,54 @@ def test_counter_kill_disengages_from_second_hostile_at_critical_health(monkeypa
         assert looks[-1] == {"entity_id": 43}
 
 
+@pytest.mark.parametrize("shooter_dist", [8.6, 13.0])
+def test_counter_kill_keeps_raised_shield_facing_a_nearby_surviving_shooter(shooter_dist):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    melee = {"id": 42, "name": "zombie", "dist": 3.5, "pos": [4.0, 72.0, 0.5]}
+    shooter = {"id": 43, "name": "skeleton", "dist": shooter_dist, "pos": [0.5, 72.0, 0.5 + shooter_dist]}
+    calls = []
+    killed = False
+    blocking = True
+
+    class ShieldBot:
+        def status(self):
+            nearest = shooter if killed else melee
+            return {
+                "pos": [0.5, 72.0, 0.5], "health": 13.32 if killed else 16.68, "food": 17,
+                "alive": True, "ready": True, "on_ground": True, "blocking": blocking,
+                "nearest_hostile": {key: nearest[key] for key in ("id", "name", "dist")},
+            }
+
+        def call(self, action, body=None, **kwargs):
+            nonlocal killed, blocking
+            if action == "inventory":
+                return {"items": [{"name": "diamond_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [shooter] if killed else [melee, shooter]}
+            if action in {"attack", "look", "posture"}:
+                calls.append((action, body))
+            if action == "attack":
+                killed = True
+                return {"hits": 1, "killed": True}
+            if action == "posture":
+                blocking = body.get("shield", False)
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(
+        CombatEnv(ShieldBot()), {"source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie"},
+    )
+
+    assert outcome["mode"] == "counter_killed"
+    assert [body["entity_id"] for action, body in calls if action == "attack"] == [42]
+    if shooter_dist == 8.6:
+        assert calls[-2:] == [("look", {"entity_id": 43}), ("posture", {"shield": True, "sneak": False, "jump": False})]
+        assert outcome["latched_guard"] is True and blocking
+    else:
+        assert calls[-1] == ("posture", {})
+        assert outcome["latched_guard"] is False and not blocking
+
+
 def test_bug023_deep_water_trident_shield_first_moves_to_dry_shore_and_3hit_cooldown(monkeypatch):
     """Covers BUG-023: trident/drowned in deep water raises shield first, moves to dry shore, and blocks reentry 30s on 3rd hit."""
     from mc_agent.skills.combat_env import CombatEnv

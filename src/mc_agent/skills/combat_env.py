@@ -2694,6 +2694,16 @@ class SubcorticalInstinctController:
         nh_post_name = _clean_block_name(nh_post.get("name")) if isinstance(nh_post, dict) and nh_post.get("name") else ""
         nh_post_d = float(nh_post.get("dist", 99.0)) if nh_post_name else 99.0
         if (
+            mode == "counter_killed" and has_shield and st_post.get("blocking")
+            and nh_post_name in RANGED_MOBS and nh_post_d <= 12.0
+            and isinstance(nh_post.get("id"), int) and nh_post["id"] != mob_id
+            and st_post.get("ready") is not False and st_post.get("alive") is not False
+            and not st_post.get("in_water") and not st_post.get("in_lava")
+        ):
+            survivor_id = nh_post["id"]
+            latched_guard = self._latch_shield_at_threat(env, survivor_id)
+            actions.append({"action": "guard_surviving_shooter", "ok": latched_guard, "entity_id": survivor_id})
+        if (
             not latched_guard
             and st_post.get("ready", True)
             and st_post.get("alive") is not False
