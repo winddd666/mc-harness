@@ -454,22 +454,22 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
     ),
     "bootstrap_iron_age": CurriculumTarget(
         key="bootstrap_iron_age",
-        title="Day 1 铁煤层发育：封口下矿凑 8 铁+8 煤，合出铁镐+盾牌+铁甲",
+        title="Day 1 极速铁镐成型：凑 4~5 铁+煤直出 iron_pickaxe 立刻毕业",
         points=10,
         tier=0,
         budget_class="medium",
         # D3 根治：仅客观保底石镐（若包/近箱已有铁料则由督导器动态直出铁镐，绝不在 pre_ensure 盲挖地下矿井）
         pre_ensure=(("stone_pickaxe", 1),),
         task=(
-            "将装备升级至铁器并完成铁煤层发育：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
+            "极速将装备升级至铁镐（拿到 iron_pickaxe 立刻毕业，切勿贪多恋战）：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
             "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 4 根原木，先顺手砍 4~6 根原木（或备好 2 把 stone_pickaxe）再下井，严防地下断镐无木软锁；"
-            "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
-            "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
-            "4) 优先调 mc_skill_craft_gear('iron_pickaxe')，铁锭充裕时顺手合出 shield（副手盾）与 1 件铁甲（如 iron_boots/iron_chestplate）完成安全成型即收工。"
+            "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=4) 凑齐 4~5 块 raw_iron 与至少 4 块 coal/charcoal 即可停止挖铁；"
+            "3) 调 mc_skill_smelt('raw_iron', count=4) 熔炼铁锭（严禁浪费时间烧 raw_copper）；"
+            "4) 立刻调 mc_skill_craft_gear('iron_pickaxe')（若有第 4 块多余铁锭可顺手合 shield），iron_pickaxe 入包即刻收工！"
         ),
         post_ensure_task=(
-            "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=6) 采入；"
-            "若地表无暴露铁矿且包内备用原木/木板不足 4 根原木，先顺手补 4~6 根原木（防地下断镐无木被困），再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
+            "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=4) 采入；"
+            "若地表无暴露铁矿且包内备用原木/木板不足 4 根原木，先顺手补 4~6 根原木（防地下断镐无木被困），再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=4) 下井凑 4 块粗铁即停；随后调 mc_skill_smelt('raw_iron', count=4)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')，铁镐入包立即收工！"
         ),
         extra_tools=("mc_skill_container",),
         advancement_id="minecraft:story/iron_tools",
