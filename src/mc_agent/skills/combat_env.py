@@ -2791,9 +2791,10 @@ class SubcorticalInstinctController:
                                 pos, [hostile for hostile in hostiles if hostile is not primary], max_distance=12.0,
                             )
                         ]
+                    hurt_midair = st.get("on_ground") is False and trigger.get("source") == "tool_interrupted_hurt"
                     fl = env.flee(
                         mob_pos, distance=14.0, urgent=True,
-                        wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon,
+                        wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon or hurt_midair,
                         **({"other_shooters": other_shooters} if other_shooters else {}),
                     )
                     actions.append({
