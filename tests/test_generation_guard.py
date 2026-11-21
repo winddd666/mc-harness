@@ -5367,11 +5367,12 @@ def test_bug072_flee_bounds_nested_shaft_moves_and_stops_on_timeout(monkeypatch,
 
 @pytest.mark.parametrize("tool", ["mc_skill_flee", "mc_skill_unstick"])
 @pytest.mark.parametrize("safe_exit", [True, False])
-def test_bug076_unsafe_actor_exit_checks_another_route_when_a_hostile_is_close(tool, safe_exit):
+@pytest.mark.parametrize("blocking", [False, True])
+def test_bug076_unsafe_actor_exit_checks_another_route_when_a_hostile_is_close(tool, safe_exit, blocking):
     from mc_agent.skills.combat_env import yaw_to_unit_xz
 
     status = {
-        "pos": [0.5, 64, 0.5], "alive": True, "ready": True, "on_ground": True, "health": 5.0,
+        "pos": [0.5, 64, 0.5], "alive": True, "ready": True, "on_ground": True, "health": 5.0, "blocking": blocking,
         "nearest_hostile": {"id": 7, "name": "pillager", "dist": 2.0, "pos": [2.5, 64, 0.5]},
     }
     motions = []
@@ -5386,7 +5387,11 @@ def test_bug076_unsafe_actor_exit_checks_another_route_when_a_hostile_is_close(t
                 supported = x <= 0 if safe_exit else (x == 0 and z == 0)
                 return {"name": "stone" if y == 63 and supported else "air"}
             if action == "look":
-                yaw[0] = body["yaw"]
+                if "entity_id" in body:
+                    assert body["entity_id"] == 7
+                    motions.append("face_attacker")
+                else:
+                    yaw[0] = body["yaw"]
             if action == "control":
                 motions.append(action)
                 dx, dz = yaw_to_unit_xz(yaw[0])
@@ -5407,6 +5412,7 @@ def test_bug076_unsafe_actor_exit_checks_another_route_when_a_hostile_is_close(t
     assert result["ok"] is safe_exit
     if safe_exit:
         assert motions[0] == "control"
+        assert (motions[-1] == "face_attacker") is blocking
         assert status["pos"][0] < 0
     else:
         assert result["error"]["code"] == "unsafe_landing"

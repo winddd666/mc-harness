@@ -1779,6 +1779,19 @@ class GenerationGuard:
             )
             result = recovery.get("result")
             if recovery.get("ok") and isinstance(result, dict):
+                health = status.get("health")
+                if (
+                    ranged and entity_id is not None and status.get("blocking")
+                    and isinstance(health, (int, float)) and health <= LOW_HP_BUNKER_MAX
+                ):
+                    try:
+                        self._action(
+                            "face_attacker_after_retreat",
+                            lambda: bot.call("look", {"entity_id": entity_id}, timeout_s=0.9),
+                        )
+                    except _RecoveryBudgetExceeded:
+                        # The confirmed retreat remains valid if its remaining time cannot fit a look.
+                        pass
                 return {**result, "requires_replan": True, "pos_before": status.get("pos")}
             return None
         except _RecoveryBudgetExceeded:
