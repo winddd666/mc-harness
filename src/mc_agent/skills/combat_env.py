@@ -2781,9 +2781,12 @@ class CombatEnv:
                 actions.append("face_water_attacker")
             except (ApiError, httpx.HTTPError):
                 pass
-        # A shore hop can end above the bank before the feet reach it.
-        if shore_target is not None and not still_wet:
-            st_end = settle_landing(st_end, bank=shore_target)
+        # A timed-out crossing can also find dry footing before the selected bank.
+        if observed_end_pos and not still_wet:
+            landing_bank = shore_target
+            if landing_bank is not None and math.dist(pos_end[:3], landing_bank) > 2.0:
+                landing_bank = None
+            st_end = settle_landing(st_end, bank=landing_bank)
             interruption = interrupted_water_escape(st_end)
             if interruption is not None:
                 return interruption

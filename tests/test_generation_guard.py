@@ -11608,13 +11608,15 @@ def test_grounded_retreat_can_step_down_one_verified_block_in_a_tunnel(terrain):
 
 
 @pytest.mark.parametrize("landing", ["grounded", "water", "respawned", "airborne"])
-def test_directed_shore_rechecks_an_airborne_bot_over_the_bank(monkeypatch, landing):
+@pytest.mark.parametrize("early_exit", [False, True])
+def test_directed_shore_rechecks_an_airborne_bot_over_the_bank(monkeypatch, landing, early_exit):
     from mc_agent.skills.combat_env import CombatEnv
 
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
-    bank = [0.5, 63.0, 4.5]
+    bank = [0.5, 63.0, 14.5] if early_exit else [0.5, 63.0, 4.5]
+    actual_landing = [0.5, 63.0, 4.5]
     status = {
         "pos": [0.5, 62.2, 0.5], "dimension": "overworld", "last_death": {"t": 1},
         "in_water": True, "on_ground": False, "alive": True, "ready": True,
@@ -11626,7 +11628,7 @@ def test_directed_shore_rechecks_an_airborne_bot_over_the_bank(monkeypatch, land
         def status(self):
             if clock[0] >= 1000.15:
                 if landing == "grounded":
-                    status.update(in_water=False, on_ground=True, pos=bank)
+                    status.update(in_water=False, on_ground=True, pos=actual_landing)
                 elif landing == "water":
                     status.update(in_water=True, on_ground=False)
                 elif landing == "respawned":
@@ -11639,6 +11641,8 @@ def test_directed_shore_rechecks_an_airborne_bot_over_the_bank(monkeypatch, land
             if action == "move_to":
                 moves.append(body)
                 status.update(pos=[0.5, 63.5, 4.5], in_water=False, on_ground=False)
+                if early_exit:
+                    raise ApiError("timeout", "movement ended before reaching the requested bank")
             if action == "posture":
                 jump.append(body.get("jump"))
             return {"ok": True}
@@ -11647,7 +11651,7 @@ def test_directed_shore_rechecks_an_airborne_bot_over_the_bank(monkeypatch, land
     monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_args, **_kwargs: bank)
     outcome = env.escape_deep_water_to_shore()
 
-    assert len(moves) == 2
+    assert len(moves) == (1 if early_exit else 2)
     assert 1000.15 <= clock[0] <= 1000.31
     assert outcome["ok"] is (landing == "grounded")
     if landing == "water":
