@@ -442,8 +442,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("stone_pickaxe", 1),),
         task=(
             "确保完成 Day 1 早晨石器与据点箱基建：0) 若包内已有 cobblestone>=3 且有木棍/木板或工作台，直接就地调 mc_skill_craft_gear('stone_pickaxe')，切勿在地下砍树；"
+            "0.5) 若身处地下(Y<55)且无可用镐且无原木/木板/木棍，严禁在地下反复扫树，立即调 mc_skill_unstick 或沿矿道向上返回地表；"
             "1) 若在水中先调 mc_skill_unstick 上岸；"
-            "2) 在地表先调 mc_skill_harvest_logs(target_logs=6) 速砍 1~2 棵树（严禁徒手硬砍 16 根，凑足 4~6 根原木立刻合工作台+wooden_pickaxe，挖 11 块圆石直出 stone_pickaxe + stone_axe + furnace；有了石斧再按需补 6~8 根原木速度快 4 倍；若 32m 内无树/出生点被砍秃，立即调 mc_skill_scout_surface(direction='auto', target_types=['oak_log','birch_log','spruce_log','dark_oak_log','acacia_log','jungle_log'], max_duration_s=40) 跑出 100m 找树林，严禁在无树原地空手挖石头！）；"
+            "2) 在地表先调 mc_skill_harvest_logs(target_logs=6) 速砍 1~2 棵树（严禁徒手硬砍 16 根，凑足 4~6 根原木立刻合工作台+wooden_pickaxe，挖 11 块圆石直出 stone_pickaxe + stone_axe + furnace；有了石斧再按需补 6~8 根原木速度快 4 倍；若 32m 内无树/出生点被砍秃/遇 dig_unconfirmed 保护区，立即调 mc_skill_scout_surface(direction='auto', target_types=['end_portal_frame'], max_duration_s=40) 强行跑出 100m+ 到新林区再砍树，或若已知远处树干坐标直接 mc_move_to 走过去，严禁在原地反复扫树或空手挖石头！）；"
             "3) 合工作台、wooden_pickaxe（挖 11+ 圆石后立刻升级 stone_pickaxe + stone_axe/stone_sword + furnace）；"
             "4) 挖掘至少 11 块圆石合出 stone_pickaxe、stone_axe（跳劈可高伤收猪/牛/羊且砍树极快）与 furnace；"
             "5) 若在出生安全地表且木板充足，顺手合 1 个 chest 并放置为据点箱，把多余原木（随身留 6~8 块）存箱留底，防死亡爆装返贫。"
@@ -461,13 +462,14 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("stone_pickaxe", 1),),
         task=(
             "将装备升级至铁器并完成铁煤层发育：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
+            "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 4 根原木，先顺手砍 4~6 根原木（或备好 2 把 stone_pickaxe）再下井，严防地下断镐无木软锁；"
             "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
             "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
             "4) 优先调 mc_skill_craft_gear('iron_pickaxe')，铁锭充裕时顺手合出 shield（副手盾）与 1 件铁甲（如 iron_boots/iron_chestplate）完成安全成型即收工。"
         ),
         post_ensure_task=(
             "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=6) 采入；"
-            "若地表无暴露铁矿再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
+            "若地表无暴露铁矿且包内备用原木/木板不足 4 根原木，先顺手补 4~6 根原木（防地下断镐无木被困），再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
         ),
         extra_tools=("mc_skill_container",),
         advancement_id="minecraft:story/iron_tools",
