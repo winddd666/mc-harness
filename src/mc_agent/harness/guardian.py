@@ -257,6 +257,7 @@ class GenerationGuard:
         self._last_torch_place_at = float("-inf")
         self._hot_floor_retry_at = float("-inf")
         self._last_hot_floor_block: tuple[str, int, int, int] | None = None
+        self._last_hot_floor_health: float | None = None
         self.previous_health: float | None = None
         self.previous_ready: bool | None = None
         self.cursor = int(getattr(bot, "_last_event_seq", 0) or 0)
@@ -588,6 +589,7 @@ class GenerationGuard:
                 if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
                     self._last_ranged_hurt_at = float("-inf")
                     self._last_melee_hurt_at = float("-inf")
+                    self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     source = str(event.get("source") or "").strip().lower()
                     if source in RANGED_HURT_SOURCES:
@@ -750,13 +752,26 @@ class GenerationGuard:
         return str(status.get("dimension") or ""), math.floor(x), math.floor(y + 0.05), math.floor(z)
 
     def _needs_hot_floor_stance(self, status: dict[str, Any], now: float) -> bool:
-        return status.get("on_ground") is True and not status.get("sneaking") and (
+        return status.get("on_ground") is True and (
+            not status.get("sneaking") or self._hot_floor_damage_continued(status)
+        ) and (
             now >= self._hot_floor_retry_at or self._hot_floor_block(status) != self._last_hot_floor_block
         )
 
+    def _hot_floor_damage_continued(self, status: dict[str, Any]) -> bool:
+        health = status.get("health")
+        return (
+            self._last_hot_floor_block is not None and self._hot_floor_block(status) == self._last_hot_floor_block
+            and self._last_hot_floor_health is not None and isinstance(health, (int, float))
+            and health < self._last_hot_floor_health
+        )
+
     def _sneak_on_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
+        must_leave_tile = self._hot_floor_damage_continued(status)
         self._hot_floor_retry_at = time.monotonic() + self.HOT_FLOOR_RETRY_S
         self._last_hot_floor_block = self._hot_floor_block(status)
+        health = status.get("health")
+        self._last_hot_floor_health = float(health) if isinstance(health, (int, float)) else None
         posture = {"sneak": True, "shield": bool(status.get("blocking")), "jump": False}
         result = self.bot.call("posture", posture, timeout_s=1.0)
         if result.get("sneaking") is False:
@@ -764,7 +779,7 @@ class GenerationGuard:
             self.bot.call("posture", {**posture, "sneak": False}, timeout_s=1.0)
             result = self.bot.call("posture", posture, timeout_s=1.0)
         ok = result.get("sneaking") is not False
-        if ok:
+        if ok and not must_leave_tile:
             self._hot_floor_retry_at = float("-inf")
             return {**result, "ok": True}
 

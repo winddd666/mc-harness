@@ -6209,6 +6209,59 @@ def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, posture_
         assert len(calls) == 2 * len(expected_sneaks)
 
 
+@pytest.mark.parametrize("safe_bank", [True, False])
+def test_repeated_magma_damage_after_successful_sneak_seeks_safe_ground(monkeypatch, safe_bank):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    hurt = {"seq": 1, "type": "hurt", "source": "hot_floor"}
+    status = {"pos": [0.5, 64.0, 0.5], "health": 19.54, "food": 20, "ready": True,
+              "alive": True, "on_ground": True, "blocking": True, "sneaking": False, "dimension": "the_nether"}
+    calls = []
+
+    class MagmaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [dict(hurt)] if kwargs["params"]["since"] < hurt["seq"] else []}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if y < 64:
+                    return {"name": "netherrack" if safe_bank and (x, z) != (0, 0) else "magma_block"}
+                return {"name": "air"}
+            calls.append((action, body))
+            if action == "posture":
+                status["sneaking"] = body["sneak"]
+                return {"sneaking": status["sneaking"]}
+            if action == "move_to":
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    guard = GenerationGuard(MagmaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    initial = guard.poll()
+    assert initial["requires_replan"] is False
+    assert calls == [("posture", {"sneak": True, "shield": True, "jump": False})]
+    clock[0] += 4.0
+    hurt["seq"] += 1
+    status["health"] = 19.08
+
+    repeat = guard.poll()
+
+    assert repeat["requires_replan"] is True
+    action, = repeat["actions"]
+    assert action["ok"] is safe_bank
+    if safe_bank:
+        assert action["result"]["mode"] == "stepped_off"
+        assert calls[-1][0] == "move_to"
+        assert status["pos"] != [0.5, 64.0, 0.5]
+    else:
+        assert action["result"]["reason"] == "no_safe_hot_floor_exit"
+        assert all(action == "posture" for action, _ in calls)
+
+
 @pytest.mark.parametrize("floor", ["magma_block", "netherrack"])
 def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch, floor):
     status = {
