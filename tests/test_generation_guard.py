@@ -4166,6 +4166,48 @@ def test_lava_escape_changes_unverified_swim_heading_after_stalling(monkeypatch,
     assert swim_headings == pytest.approx([0.0, (-1 if west_blocked else 1) * math.pi / 2])
 
 
+@pytest.mark.parametrize("lands_after_jump", [False, True])
+def test_lava_shore_hop_checks_landing_before_requesting_pathfinder(monkeypatch, lands_after_jump):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    bank = [3568.5, 65, 1794.5]
+    status = {
+        "pos": [3567.3, 64.5, 1794.7], "health": 7, "dimension": "the_nether",
+        "in_lava": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    calls = []
+
+    class LavaBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "control" and body.get("forward"):
+                status.update(in_lava=False, pos=[3568.4, 65.3, 1794.5])
+            if action == "status":
+                calls.append("verify_landing")
+                if lands_after_jump:
+                    status.update(on_ground=True, pos=bank)
+                return self.status()
+            if action == "move_to":
+                calls.append(action)
+            return {"ok": True}
+
+    env = CombatEnv(LavaBot())
+    monkeypatch.setattr(env, "scan_safe_yaws", lambda *args, **kwargs: {})
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *args, **kwargs: bank)
+    result = env.escape_lava()
+    assert result["ok"] is lands_after_jump
+    assert calls == (["verify_landing"] if lands_after_jump else ["verify_landing", "move_to"])
+    if not lands_after_jump:
+        assert result["reason"] == "lava_landing_unconfirmed"
+
+
 @pytest.mark.parametrize("fallback", ["bridge", "alternate_bank", "third_bank"])
 @pytest.mark.parametrize("status_timeout", [False, True])
 def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkeypatch, fallback, status_timeout):

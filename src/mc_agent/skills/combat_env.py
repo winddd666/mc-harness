@@ -1544,6 +1544,22 @@ class CombatEnv:
         if tried_yaws and not defer_blind_swim and time.monotonic() < lava_deadline:
             if _run_jump_sprint(tried_yaws[0]):
                 return _lava_result(st)
+            landing = st.get("pos")
+            if (
+                lava_shore_target is not None and landing and not st.get("in_lava") and st.get("on_ground") is False
+                and math.hypot(landing[0] - lava_shore_target[0], landing[2] - lava_shore_target[2]) <= 0.35
+                and -0.05 <= landing[1] - lava_shore_target[1] <= 0.9
+                and lava_deadline - time.monotonic() >= 0.35
+            ):
+                # The swim pulse can end above the bank just before the next physics tick lands.
+                time.sleep(0.1)
+                try:
+                    st = self.bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
+                    actions.append("lava_shore_landing_checked")
+                except (ApiError, httpx.HTTPError):
+                    pass
+                if _should_exit_lava(st):
+                    return _lava_result(st)
 
         # 2b. Short pathfinder step onto close shore (`<=6.5m`) guarded against pathfinder ReadTimeout stalls.
         if lava_shore_target is not None and time.monotonic() + 1.5 < lava_deadline:
