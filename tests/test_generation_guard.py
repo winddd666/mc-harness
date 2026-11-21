@@ -8136,7 +8136,7 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
 
 
 @pytest.mark.parametrize("attack_result", ["returned", "interrupted", "read_timeout"])
-@pytest.mark.parametrize("hazard", ["water", "lava", "unarmed_melee", "unarmed_above_critical", "other_melee"])
+@pytest.mark.parametrize("hazard", ["water", "ranged_water", "lava", "unarmed_melee", "unarmed_above_critical", "other_melee"])
 def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result, hazard):
     import threading
 
@@ -8145,9 +8145,12 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
     actions = []
     attack_target = 44 if hazard == "other_melee" else 27
     above_critical = hazard == "unarmed_above_critical"
+    in_water = hazard in {"water", "ranged_water"}
+    drowned_distance = 8.5 if hazard == "ranged_water" else 2.0
+    hostile_pos = [0.5 + drowned_distance, 62, 0.5]
     status = {
         "pos": [0.5, 63, 0.5], "health": 18 if above_critical else 12, "ready": True, "alive": True, "on_ground": True,
-        "nearest_hostile": {"id": 27, "name": "drowned" if hazard == "water" else "zombie", "dist": 2.0, "pos": [2.5, 62, 0.5]},
+        "nearest_hostile": {"id": 27, "name": "drowned" if in_water else "zombie", "dist": drowned_distance, "pos": hostile_pos},
     }
 
     class AttackBot:
@@ -8158,8 +8161,9 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
                 return current
             actions.append(action)
             if action == "attack":
-                if hazard in {"water", "lava"}:
-                    status.update(in_water=hazard == "water", in_lava=hazard == "lava", on_ground=False, health=6.7)
+                if in_water or hazard == "lava":
+                    health = 9.98 if hazard == "ranged_water" else 6.7
+                    status.update(in_water=in_water, in_lava=hazard == "lava", on_ground=False, health=health)
                 else:
                     assert observed.wait(2.0)
                     weapon = "iron_sword" if hazard == "other_melee" else "wooden_pickaxe"
@@ -8183,7 +8187,7 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
 
     def escape_to_shore(threat_pos, **kwargs):
-        assert threat_pos == [2.5, 62, 0.5]
+        assert threat_pos == hostile_pos
         assert actions[:2] == ["attack", "stop"]
         actions.append("shore")
         status.update(in_water=False, on_ground=True)
@@ -8197,7 +8201,9 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
 
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", escape_to_shore)
     monkeypatch.setattr(guard.combat_env, "escape_lava", escape_lava)
-    monkeypatch.setattr(guard, "_escape_water", lambda before: {"ok": False, "in_water": True})
+    monkeypatch.setattr(
+        guard, "_escape_water", lambda *_args, **_kwargs: pytest.fail("drowned attack should hand off directly to shore"),
+    )
 
     def retreat(_env, trigger):
         assert trigger["source"] == "tool_interrupted_hurt" and trigger["primary_entity_id"] == 27
@@ -8218,7 +8224,7 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         assert receipt["preempted_by_reflex"] is True
         assert not receipt["status_after"]["in_water"]
         assert actions.count("attack") == 1
-        assert {"water": "shore", "lava": "lava_escape"}.get(hazard, "retreat") in actions
+        assert {"water": "shore", "ranged_water": "shore", "lava": "lava_escape"}.get(hazard, "retreat") in actions
         assert not status.get("in_lava")
 
 

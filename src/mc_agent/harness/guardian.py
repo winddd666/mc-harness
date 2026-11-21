@@ -228,6 +228,7 @@ class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
     SURFACE_WATER_ESCAPE_BUDGET_S = 4.0
     COMBAT_WATER_ESCAPE_BUDGET_S = 4.0
+    ATTACK_WATER_THREAT_RANGE = 16.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -2305,7 +2306,7 @@ class GenerationGuard:
                             and st.get("ready") is not False
                             and st.get("alive") is not False
                             and (st.get("submerged") or (
-                                nh_dist <= 16.0
+                                nh_dist <= self.ATTACK_WATER_THREAT_RANGE
                                 and (nh_name == "drowned" or self._swimming_at_low_health(st))
                             ))
                         )
@@ -2659,15 +2660,15 @@ class GenerationGuard:
                 if underwater_danger:
                     pre_actions: list[dict[str, Any]] = []
                     nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
-                    moving_near_drowned = (
-                        interrupted_name in {"mc_attack", "mc_skill_scout_surface"}
-                        and nh_pre_name == "drowned" and nh_pre_dist <= 6.0
+                    drowned_during_tool = nh_pre_name == "drowned" and (
+                        (interrupted_name == "mc_attack" and nh_pre_dist <= self.ATTACK_WATER_THREAT_RANGE)
+                        or (interrupted_name == "mc_skill_scout_surface" and nh_pre_dist <= 6.0)
                     )
                     if hurt_pre_water:
                         self._water_hurt_streak += 1
                     forced_pre_shore = (
                         self._water_hurt_streak >= 3 or now_pre < self._no_water_until
-                        or self._swimming_at_low_health(st_pre) or moving_near_drowned
+                        or self._swimming_at_low_health(st_pre) or drowned_during_tool
                     )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
@@ -2709,7 +2710,7 @@ class GenerationGuard:
                         esc_pre_respawned = bool(esc_pre_res.get("respawned"))
                     if not esc_pre_ok and not esc_pre_respawned:
                         shore_threat_pos = trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None)
-                        if moving_near_drowned and shore_threat_pos is None and att_pre:
+                        if drowned_during_tool and shore_threat_pos is None and att_pre:
                             shore_threat_pos = self._find_hostile_position(att_pre.get("id"), nh_pre_name, timeout_s=0.6)
                         shore_pre = self._action(
                             "escape_to_shore",
