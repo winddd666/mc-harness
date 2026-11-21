@@ -3834,7 +3834,7 @@ def test_retreat_keeps_shield_against_a_nearby_shooter(health, distance_after, a
         assert posture_calls[-1] == ("posture", {})
 
 
-@pytest.mark.parametrize("landing", ["near_melee", "clear", "respawned"])
+@pytest.mark.parametrize("landing", ["near_melee", "near_shooter", "clear", "respawned"])
 @pytest.mark.parametrize("failed_shaft_seal", [False, True])
 def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, landing, failed_shaft_seal):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
@@ -3868,6 +3868,8 @@ def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, land
     def short_retreat(*args, **kwargs):
         status.update(pos=[-1.68, 69, 0.5], health=4.84)
         status["nearest_hostile"] = {"id": 78, "name": mob, "dist": 2.3 if landing != "clear" else 4.0}
+        if landing == "near_shooter":
+            status["nearest_hostile"].update(name="skeleton", dist=3.4)
         if landing == "respawned":
             status["last_death"] = {"t": 2}
         return {"ok": not failed_shaft_seal, "mode": "flee", "moved_dist": 2.18}
@@ -3884,8 +3886,11 @@ def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, land
     if failed_shaft_seal:
         assert {"action": "seal_shaft", "ok": False} in outcome["actions"]
         assert {"action": "flee", "ok": False} in outcome["actions"]
-    assert outcome["latched_guard"] is (landing == "near_melee")
-    if landing == "near_melee":
+    should_latch = landing == "near_melee" or (landing == "near_shooter" and not failed_shaft_seal)
+    assert outcome["latched_guard"] is should_latch
+    if should_latch and landing == "near_shooter":
+        assert {"action": "guard_ranged_after_melee_retreat", "ok": True, "entity_id": 78} in outcome["actions"]
+    if should_latch:
         assert posture_calls[-2:] == [("look", {"entity_id": 78}), ("posture", {"shield": True, "sneak": False, "jump": False})]
         assert status["blocking"] is True
     else:
