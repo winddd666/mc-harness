@@ -3484,7 +3484,8 @@ def test_recent_melee_damage_defers_eating_with_shield_up(entry, monkeypatch):
     assert actions == [("posture", {"shield": False}), ("use_item", {"item": "cooked_beef"})]
 
 
-def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monkeypatch):
+@pytest.mark.parametrize("bridge_probe_slow", [False, True])
+def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monkeypatch, bridge_probe_slow):
     from mc_agent.skills.combat_env import CombatEnv
 
     clock = [1000.0]
@@ -3505,6 +3506,10 @@ def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monk
                 timeout = kwargs.get("timeout_s", 0.5)
                 if not actions:
                     clock[0] += timeout
+                elif bridge_probe_slow and status["in_lava"]:
+                    assert kwargs["allow_reauth"] is False and timeout <= 0.35
+                    clock[0] += timeout
+                    raise httpx.ReadTimeout("bridge block probe stalled")
                 y = body["pos"][1]
                 return {"name": "lava" if y == 64 else "air"}
             if action == "find_blocks":
@@ -3514,6 +3519,7 @@ def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monk
                 actions.append(("swim", clock[0]))
                 clock[0] += body["ms"] / 1000
             if action == "place":
+                assert kwargs["allow_reauth"] is False and 0 < kwargs["timeout_s"] <= 0.7
                 actions.append(("bridge", clock[0]))
                 status.update(in_lava=False, on_ground=True, pos=[3183.5, 65.0, -2045.3])
             return {"ok": True}
@@ -3523,6 +3529,7 @@ def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monk
     assert result["ok"] is True and result["in_lava"] is False
     assert [action for action, _ in actions] == ["swim", "bridge"]
     assert actions[-1][1] < 1005.0
+    assert ("lava_bridge_probe_incomplete" in result["actions"]) is bridge_probe_slow
 
 
 @pytest.mark.parametrize("lands_after_jump", [False, True])
