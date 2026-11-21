@@ -2874,24 +2874,32 @@ class GenerationGuard:
                 ):
                     raise _UnsafeCreeperAttack(entity_id)
             pos = status.get("pos")
-            if (
-                "nether" not in str(status.get("dimension") or "").lower()
-                or status.get("on_ground") is not True or not pos
-                or status.get("in_lava")
-            ):
+            if nearest_id != entity_id or not pos or status.get("on_ground") is not True or status.get("in_lava"):
                 return
-            if nearest_id != entity_id or name not in {"blaze", "ghast"} or distance > 3.5:
+            dimension = str(status.get("dimension") or "").lower().removeprefix("minecraft:")
+            health = status.get("health")
+            critical_shore_chase = (
+                dimension == "overworld" and name in RANGED_MOBS and 3.5 < distance <= 13.5
+                and isinstance(health, (int, float)) and 0 < health <= 4.0 and not status.get("in_water")
+                and time.monotonic() - self._last_water_escape_at < self.WATER_ESCAPE_RETRY_WINDOW_S
+            )
+            nearby_nether_shooter = "nether" in dimension and name in {"blaze", "ghast"} and distance <= 3.5
+            if not (critical_shore_chase or nearby_nether_shooter):
                 return
             if target is None:
                 target = self._find_hostile_position(entity_id, name, session=bot, timeout_s=0.3)
             if target is None:
                 return
             travel = math.hypot(target[0] - pos[0], target[2] - pos[2])
-            if not 0.35 <= travel <= 3.5:
-                return
             yaw, _ = aim_yaw_pitch(pos, target)
-            if CombatEnv(bot, geofence=self.geofence).probe_retreat(pos, yaw, travel, deadline=deadline) is None:
-                raise _UnsafeCombatStep
+            env = CombatEnv(bot, geofence=self.geofence)
+            if critical_shore_chase and travel > 3.5:
+                route = env.probe_ray(pos, yaw, dist=min(travel, 8.5), deadline=deadline)
+                if route["hazard"] == "water":
+                    raise _UnsafeCombatStep("water")
+            elif nearby_nether_shooter and 0.35 <= travel <= 3.5:
+                if env.probe_retreat(pos, yaw, travel, deadline=deadline) is None:
+                    raise _UnsafeCombatStep
         except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
             return
 
@@ -3807,14 +3815,19 @@ class GenerationGuard:
                 "requires_replan": True,
                 "error": {"code": code, "message": message},
             }, ensure_ascii=False)
-        except _UnsafeCombatStep:
+        except _UnsafeCombatStep as error:
             if not is_attack:
                 self._stop_after_recovery_timeout()
-            self.events.emit("guardian.combat_step_blocked", tool=tool_name)
+            hazard = error.args[0] if error.args else None
+            self.events.emit("guardian.combat_step_blocked", tool=tool_name, **({"hazard": hazard} if hazard else {}))
+            message = (
+                "追击方向有水，请沿干地撤离或从掩体后远程攻击。"
+                if hazard == "water" else "追击方向缺少安全落脚点，请在有支撑的位置接战。"
+            )
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
-                "error": {"code": "unsafe_landing", "message": "追击方向缺少安全落脚点，请在有支撑的位置接战。"},
+                "error": {"code": "unsafe_landing", "message": message},
             }, ensure_ascii=False)
         except (_UnsafeFleeExit, _UnsafeUnstickExit):
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)

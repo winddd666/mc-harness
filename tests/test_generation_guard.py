@@ -10244,6 +10244,45 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
         assert attacks == [True] and moves == []
 
 
+@pytest.mark.parametrize(("terrain", "elapsed"), [("water", 21.0), ("stone", 21.0), ("water", 31.0)])
+def test_critical_ranged_chase_checks_for_water_after_landing(monkeypatch, terrain, elapsed):
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 100.0)
+    pillager = {"id": 5475818, "name": "pillager", "dist": 6.9, "pos": [-10924.6, 62.5, -10944.3]}
+    status = {
+        "pos": [-10921.5, 63, -10950.4], "health": 3.3, "ready": True, "alive": True,
+        "on_ground": True, "dimension": "overworld", "nearest_hostile": pillager,
+    }
+    attacks = []
+
+    class ShoreBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                y = body["pos"][1]
+                return {"name": terrain if y == 62 else "air"}
+            if action == "attack":
+                attacks.append(body["entity_id"])
+                raise httpx.ReadTimeout("attack response timed out")
+            raise AssertionError(action)
+
+    bot = ShoreBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_water_escape_at = 100.0 - elapsed
+
+    def attack():
+        return json.dumps(bot.call("attack", {"entity_id": pillager["id"], "timeout": 6000}))
+
+    if terrain == "water" and elapsed < guard.WATER_ESCAPE_RETRY_WINDOW_S:
+        receipt = json.loads(guard.run_tool_with_reflex("mc_attack", attack))
+        assert receipt["error"]["code"] == "unsafe_landing" and receipt["requires_replan"]
+        assert attacks == []
+    else:
+        with pytest.raises(httpx.ReadTimeout, match="attack response timed out"):
+            guard.run_tool_with_reflex("mc_attack", attack)
+        assert attacks == [pillager["id"]]
+
+
 @pytest.mark.parametrize("terrain", ["solid", "drop", "lava", "unknown"])
 def test_nether_attack_checks_footing_toward_nearby_blaze(terrain):
     calls = []
