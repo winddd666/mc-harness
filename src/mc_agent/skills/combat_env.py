@@ -2073,6 +2073,8 @@ class CombatEnv:
                     short_yaws = sorted(yaws, key=lambda yaw: blast_clearance(yaw, 1.65), reverse=True)
                 elif wait_for_ground:
                     short_yaws.extend(yaws[:3])
+                    if threat_pos is not None and not (other_shooters or other_melee):
+                        short_yaws.extend(pref_yaw + math.radians(angle) for angle in (70, -70))
                 for chosen_yaw in short_yaws:
                     if require_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
                         continue
@@ -2638,7 +2640,12 @@ class CombatEnv:
                 lip_height = float(shore_target[1]) - float(mid_pos[1])
                 lip_distance = math.hypot(shore_target[0] - mid_pos[0], shore_target[2] - mid_pos[2])
                 lip_ms = 1150 if lip_height > 0.05 else 850
-                if 0.6 < lip_distance <= 1.8 and 0.0 <= lip_height <= 1.25:
+                shallow_lip = 0.6 < lip_distance <= 1.8 and 0.0 <= lip_height <= 1.25
+                # A failed short hop can leave the bot pressed against the same low bank.
+                sustained_climb = (
+                    shallow_lip and retrying_bank and not (has_threat or shield_target_id is not None or sneak_on_magma)
+                )
+                if shallow_lip and not sustained_climb:
                     # A full swim pulse can carry the bot across a shallow one-block bank.
                     lip_ms = 450
                 try:
@@ -2646,7 +2653,7 @@ class CombatEnv:
                     self.bot.call("look", {"yaw": syaw_m, "pitch": -10.0})
                     self.bot.call(
                         "control",
-                        {"forward": True, "jump": True, "sprint": True, "ms": lip_ms, "stop_on": ["death"]},
+                        {"forward": True, "jump": True, "sprint": not sustained_climb, "ms": lip_ms, "stop_on": ["death"]},
                     )
                     actions.append("shore_lip_jump")
                 except (ApiError, httpx.HTTPError) as err:
@@ -2774,9 +2781,12 @@ class CombatEnv:
                 actions.append("face_water_attacker")
             except (ApiError, httpx.HTTPError):
                 pass
-        # A shore hop can end above the bank before the feet reach it.
-        if shore_target is not None and not still_wet:
-            st_end = settle_landing(st_end, bank=shore_target)
+        # A timed-out crossing can also find dry footing before the selected bank.
+        if observed_end_pos and not still_wet:
+            landing_bank = shore_target
+            if landing_bank is not None and math.dist(pos_end[:3], landing_bank) > 2.0:
+                landing_bank = None
+            st_end = settle_landing(st_end, bank=landing_bank)
             interruption = interrupted_water_escape(st_end)
             if interruption is not None:
                 return interruption
@@ -3349,8 +3359,16 @@ class SubcorticalInstinctController:
                 eff_id = int(target_ent["id"]) if isinstance(target_ent, dict) and target_ent.get("id") is not None else mob_id
                 if eff_id is None:
                     break
+                # Keep part of the slot budget for the reply, final status and control release.
+                remaining = deadline - time.monotonic()
+                if remaining < 1.5:
+                    break
+                attack_ms = min(2600, int((remaining - 0.9) * 1000))
                 try:
-                    atk = env.bot.call("attack", {"entity_id": eff_id, "timeout": 2600, "stop_on": ["death"]})
+                    atk = env.bot.call(
+                        "attack", {"entity_id": eff_id, "timeout": attack_ms, "stop_on": ["death"]},
+                        timeout_s=attack_ms / 1000 + 0.35, allow_reauth=False,
+                    )
                     hits = atk.get("hits")
                     actions.append({"action": "melee_attack", "weapon": weapon, "entity_id": eff_id, "ok": True, "killed": bool(atk.get("killed"))})
                     if atk.get("killed"):
@@ -3439,9 +3457,14 @@ class SubcorticalInstinctController:
                     else:
                         env.bot.call("posture", {"shield": False, "sneak": False, "jump": False})
                         for _ in range(3):
-                            if time.monotonic() >= deadline:
+                            remaining = deadline - time.monotonic()
+                            if remaining < 1.5:
                                 break
-                            atk_r = env.bot.call("attack", {"entity_id": int(mob_id), "timeout": 2400, "stop_on": ["death"]})
+                            attack_ms = min(2400, int((remaining - 0.9) * 1000))
+                            atk_r = env.bot.call(
+                                "attack", {"entity_id": int(mob_id), "timeout": attack_ms, "stop_on": ["death"]},
+                                timeout_s=attack_ms / 1000 + 0.35, allow_reauth=False,
+                            )
                             hits_r = atk_r.get("hits")
                             killed_r = bool(atk_r.get("killed"))
                             actions.append({"action": "shield_rush_attack", "ok": True, "killed": killed_r})
