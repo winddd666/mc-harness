@@ -243,6 +243,7 @@ class GenerationGuard:
     FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
     MELEE_EAT_DEFER_S = 10.0
+    RANGED_EAT_DEFER_S = 8.0
     NETHER_BURN_RANGED_WINDOW_S = 12.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
@@ -291,6 +292,7 @@ class GenerationGuard:
         self.previous_health: float | None = None
         self.previous_ready: bool | None = None
         self.cursor = int(getattr(bot, "_last_event_seq", 0) or 0)
+        self._eat_history_checked = self.cursor <= 0
         self.failures = 0
         self.disconnected = False
         self.retry_after_ready = False
@@ -954,6 +956,32 @@ class GenerationGuard:
             cur + cd,
         )
 
+    def _recover_recent_ranged_hit_for_eating(self) -> None:
+        self._eat_history_checked = True
+        # The actor can consume a final hurt event before the next episode's guard is created.
+        cursor = self.cursor
+        try:
+            page = self.bot.call(
+                "events", method="GET", params={"since": max(0, cursor - 32), "limit": 32},
+                timeout_s=0.5, allow_reauth=False,
+            )
+        except (ApiError, httpx.HTTPError):
+            return
+        now_wall, now = time.time(), time.monotonic()
+        for event in reversed(page.get("events") or []):
+            if int(event.get("seq", 0)) > cursor:
+                continue
+            if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
+                break
+            if event.get("type") != "hurt" or str(event.get("source") or "").strip().lower() not in RANGED_HURT_SOURCES:
+                continue
+            timestamp_ms = event.get("t")
+            if isinstance(timestamp_ms, (int, float)):
+                age = now_wall - timestamp_ms / 1000.0
+                if 0 <= age < self.RANGED_EAT_DEFER_S:
+                    self._last_ranged_hurt_at = max(self._last_ranged_hurt_at, now - age)
+                    break
+
     def _can_auto_eat_safely(
         self,
         status: dict[str, Any],
@@ -975,7 +1003,9 @@ class GenerationGuard:
             # In-flight projectiles can still reach a critical-health bot just beyond that range.
             ranged_min_dist = max(ranged_min_dist, 20.0)
         ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
-        recent_ranged_hit = now - self._last_ranged_hurt_at < 8.0
+        if not self._eat_history_checked and status.get("blocking") and status.get("ready") is True:
+            self._recover_recent_ranged_hit_for_eating()
+        recent_ranged_hit = now - self._last_ranged_hurt_at < self.RANGED_EAT_DEFER_S
         recent_melee_hit = now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
         in_nether = str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
         protecting_against_recent_hit = status.get("blocking") and (recent_ranged_hit or recent_melee_hit)

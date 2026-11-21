@@ -5217,6 +5217,53 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shoo
     assert use_items == [{"item": "cooked_beef"}]
 
 
+@pytest.mark.parametrize("history", ["fresh_arrow", "old_arrow", "respawned"])
+def test_episode_start_keeps_eating_guard_for_recent_consumed_arrow(monkeypatch, history):
+    clock = [1000.0]
+    wall_now = 1_795_200_000.0
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.harness.guardian.time.time", lambda: wall_now + clock[0] - 1000.0)
+    arrow = {"seq": 19, "type": "hurt", "source": "arrow",
+             "t": (wall_now - (8.1 if history == "old_arrow" else 0.7)) * 1000}
+    events = [arrow]
+    if history == "respawned":
+        events.append({"seq": 20, "type": "spawn", "t": (wall_now - 0.1) * 1000})
+    status = {
+        "pos": [-5057.2, 71, -7715.6], "health": 13.3, "food": 16, "dimension": "overworld",
+        "blocking": True, "on_ground": True, "ready": True, "alive": True,
+    }
+    commands = []
+    cursors = []
+
+    class EpisodeBot:
+        _last_event_seq = 20
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                since = kwargs["params"]["since"]
+                cursors.append(since)
+                return {"events": [event for event in events if event["seq"] > since], "last_seq": 20}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 1}]}
+            commands.append((action, body))
+            return {"ok": True}
+
+    guard = GenerationGuard(EpisodeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    if history == "fresh_arrow":
+        assert incident is None and commands == []
+        clock[0] += 7.4
+        incident = guard.poll()
+
+    assert incident["reasons"] == ["needs_food"] and incident["event_seqs"] == []
+    assert not incident["requires_replan"]
+    assert commands == [("posture", {"shield": False}), ("use_item", {"item": "cooked_beef"})]
+    assert cursors.count(0) == 1
+
+
 @pytest.mark.parametrize("position", ["failed_cover", "moved", "window_elapsed"])
 def test_recent_arrow_defers_eating_at_failed_cover_site(monkeypatch, position):
     clock = [1000.0]
