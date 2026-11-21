@@ -376,6 +376,7 @@ class CombatEnv:
         geofence: Any | None = None,
         water_escape: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         run_lava_escape: Callable[[Callable[[], dict[str, Any]]], dict[str, Any]] | None = None,
+        post_combat_food: bool = True,
         block_cache_ttl: float = 3.0,
         hazard_cache_ttl: float = 3.0,
     ) -> None:
@@ -384,6 +385,7 @@ class CombatEnv:
         self.geofence = geofence
         self._water_escape = water_escape
         self._run_lava_escape = run_lava_escape
+        self.post_combat_food = post_combat_food
         self.block_cache_ttl = max(0.2, float(block_cache_ttl))
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
@@ -2354,18 +2356,8 @@ class CombatEnv:
                 "ok": False, "in_water": bool(st0.get("in_water")), "in_lava": True,
                 "mode": "entered_lava", "pos_after": st0.get("pos"),
             }
-        if not bool(st0.get("in_water")):
-            landed = st0.get("on_ground") is not False
-            return {
-                "ok": landed,
-                "in_water": False,
-                "mode": "already_dry" if landed else "shore_landing_unconfirmed",
-                "pos_after": st0.get("pos"),
-            }
-
         pos0 = st0.get("pos") or [0.0, 64.0, 0.0]
         start_x, start_z = float(pos0[0]), float(pos0[2])
-        search_status = st0
         actions: list[str] = []
         shore_target: list[float] | None = None
         has_threat = isinstance(threat_pos, (list, tuple)) and len(threat_pos) >= 3
@@ -2375,6 +2367,7 @@ class CombatEnv:
             respawned = (
                 math.hypot(float(pos[0]) - start_x, float(pos[2]) - start_z) > 64.0
                 or (st.get("last_death") is not None and st["last_death"] != st0.get("last_death"))
+                or (st.get("dimension") and st0.get("dimension") and st["dimension"] != st0["dimension"])
             )
             if respawned:
                 mode = "respawned"
@@ -2393,6 +2386,55 @@ class CombatEnv:
                 "actions": actions,
                 "pos_after": pos,
             }
+
+        def settle_landing(st: dict[str, Any], bank: Sequence[float] | None = None) -> dict[str, Any]:
+            deadline = time.monotonic() + 0.45
+            for _ in range(3):
+                pos = st.get("pos")
+                if (
+                    st.get("in_water") or st.get("on_ground") is not False or not pos
+                    or deadline - time.monotonic() <= 0.1
+                    or (bank is not None and (
+                        math.hypot(pos[0] - bank[0], pos[2] - bank[2]) > 0.6 or not -0.6 <= pos[1] - bank[1] <= 1.25
+                    ))
+                ):
+                    break
+                time.sleep(0.1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    sample = self.bot.call("status", method="GET", timeout_s=min(0.25, remaining), allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    break
+                if not isinstance(sample, dict):
+                    break
+                if interrupted_water_escape(sample) is not None:
+                    return sample
+                if not sample.get("pos"):
+                    break
+                st = sample
+            return st
+
+        if not st0.get("in_water"):
+            refreshed = settle_landing(st0)
+            interruption = interrupted_water_escape(refreshed)
+            if interruption is not None:
+                return interruption
+            if not refreshed.get("in_water"):
+                landed = refreshed.get("on_ground") is not False
+                if landed:
+                    self.remember_dry_bank(refreshed)
+                return {
+                    "ok": landed,
+                    "in_water": False,
+                    "mode": "already_dry" if landed else "shore_landing_unconfirmed",
+                    "pos_after": refreshed.get("pos"),
+                }
+            st0 = refreshed
+            pos0 = st0["pos"]
+            start_x, start_z = float(pos0[0]), float(pos0[2])
+        search_status = st0
 
         def swim_step_allowed(
             pos: Sequence[float], yaw: float, distance: float = 5.0,
@@ -2723,23 +2765,8 @@ class CombatEnv:
             except (ApiError, httpx.HTTPError):
                 pass
         # A shore hop can end above the bank before the feet reach it.
-        landing_deadline = time.monotonic() + 0.45
-        for _ in range(3):
-            if not (
-                shore_target is not None and not still_wet and st_end.get("on_ground") is False
-                and math.hypot(pos_end[0] - shore_target[0], pos_end[2] - shore_target[2]) <= 0.6
-                and -0.6 <= pos_end[1] - shore_target[1] <= 1.25
-                and landing_deadline - time.monotonic() > 0.1
-            ):
-                break
-            time.sleep(0.1)
-            remaining = landing_deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                st_end = self.bot.call("status", method="GET", timeout_s=min(0.25, remaining), allow_reauth=False)
-            except (ApiError, httpx.HTTPError):
-                break
+        if shore_target is not None and not still_wet:
+            st_end = settle_landing(st_end, bank=shore_target)
             interruption = interrupted_water_escape(st_end)
             if interruption is not None:
                 return interruption
@@ -3611,7 +3638,8 @@ class SubcorticalInstinctController:
         # Eating takes about two seconds. Leave room to confirm status and release controls.
         food_start_deadline = deadline - 2.5
         if (
-            not latched_guard
+            env.post_combat_food
+            and not latched_guard
             and time.monotonic() < food_start_deadline
             and st_post.get("ready", True)
             and st_post.get("alive") is not False

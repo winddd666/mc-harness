@@ -303,7 +303,7 @@ class GenerationGuard:
         self.skills = skills
         self.combat_env = CombatEnv(
             self.bot, skills=self.skills, geofence=self.geofence, water_escape=self._escape_water_for_combat,
-            run_lava_escape=self._run_lava_escape,
+            run_lava_escape=self._run_lava_escape, post_combat_food=False,
         )
         self.combat_slot = CombatControllerSlot(combat_controller)
         self._custom_combat_registered = combat_controller is not None
@@ -1597,6 +1597,12 @@ class GenerationGuard:
             and nh_name0 != "creeper"
             and nh_dist0 > 3.5
         )
+        sustained_shield_damage = (
+            ranged_hurt_only and status.get("blocking") and status.get("on_ground") is True
+            and not in_water and not in_lava and not status.get("on_fire") and 4.0 < hp_cur <= 16.0
+            and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+            and len(hurts) >= 2 and all(str(h.get("source") or "").strip().lower() == "arrow" for h in hurts)
+        )
         already_in_ranged_guard = (
             bool(status.get("blocking"))
             or (now < self._ranged_cover_active_until)
@@ -1609,6 +1615,7 @@ class GenerationGuard:
             or in_lava
             or needs_hot_floor_guard
             or drowning
+            or sustained_shield_damage
             or (effective_combat_hurt and in_water)
             or (effective_combat_hurt and other_hurts and hp_cur <= 4.0)
             or no_water_reentry
@@ -2110,6 +2117,7 @@ class GenerationGuard:
                     )
                     already_in_dug_cover = (
                         not skip_cover_for_blast
+                        and not sustained_shield_damage
                         and not same_spot_cover_ineffective
                         and (now < self._ranged_cover_active_until)
                         and hp_val > 10.0
@@ -2120,6 +2128,7 @@ class GenerationGuard:
                     if (
                         status.get("on_ground") is not False
                         and not skip_cover_for_blast
+                        and not sustained_shield_damage
                         and not close_unshielded_shooter
                         and not same_spot_cover_ineffective
                         and not already_in_dug_cover
@@ -2129,7 +2138,8 @@ class GenerationGuard:
                     cover_ok = bool(cover and cover.get("ok")) or already_in_dug_cover
                     cover_changed_life = bool(((cover or {}).get("result") or {}).get("respawned"))
                     if not cover_ok and not cover_changed_life and (
-                        skip_cover_for_blast or not already_blocking or hp_val <= 10.0 or not ranged_hurt_only
+                        sustained_shield_damage or skip_cover_for_blast
+                        or not already_blocking or hp_val <= 10.0 or not ranged_hurt_only
                     ):
                         if (
                             has_shield
@@ -2148,8 +2158,9 @@ class GenerationGuard:
                             not skip_cover_for_blast and status.get("on_ground") is True
                             and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                         )
-                        critical_shielded_cover = (
-                            surface_arrow_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0
+                        shielded_cover = (
+                            sustained_shield_damage
+                            or (surface_arrow_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0)
                         )
                         unshielded_cover = not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX
                         missing_filler_cover = (
@@ -2164,8 +2175,8 @@ class GenerationGuard:
                             "combat_or_flee",
                             lambda: self._defend_or_flee(
                                 status, attacker, counts, ranged=True,
-                                prefer_cover=unshielded_cover or critical_shielded_cover or missing_filler_cover,
-                                allow_stationary_cover=not (fresh_blast or missing_filler_cover),
+                                prefer_cover=unshielded_cover or shielded_cover or missing_filler_cover,
+                                allow_stationary_cover=not (fresh_blast or missing_filler_cover or sustained_shield_damage),
                             ),
                         )
                         actions.append(cf)
@@ -2410,6 +2421,7 @@ class GenerationGuard:
             and not in_water
             and not needs_float
             and not any(a["action"] == "escape_to_shore" for a in actions)
+            and not (sustained_shield_damage and any(a["action"] == "combat_or_flee" and a.get("ok") for a in actions))
             and not status.get("busy")
         )
         replan = (
@@ -2721,23 +2733,28 @@ class GenerationGuard:
                 and isinstance(health, (int, float)) and 0 < health <= 4.0
                 and now - self._last_ranged_hurt_at < 8.0 and now - self._last_melee_hurt_at >= 4.0
             )
+            other_shooters = []
             if (
                 allow_cover and ranged and status.get("on_ground") is True and status.get("pos")
                 and (recent_nether_cover or critical_overworld_arrows)
             ):
                 cover_budget = 2.25 if critical_overworld_arrows else 1.25
-                cover = self._recheck_cover_after_blocked_flee(
+                cover, live_target, other_shooters = self._cover_and_shooters_after_blocked_flee(
                     status["pos"], entity_id, min(now + cover_budget, deadline),
                     allow_stationary=not (critical_overworld_arrows or self._low_health_burning_after_ranged_hit(status, now)),
                 )
                 if cover and (cover.get("ok") or cover.get("respawned")):
                     return {**cover, "requires_replan": True, "pos_before": status["pos"]}
+                threat_pos = live_target or threat_pos
             if threat_pos is None:
                 threat_pos = self._find_hostile_position(entity_id, name, session=bot)
             env = CombatEnv(bot, geofence=self.geofence)
             recovery = self._action(
                 "unsafe_exit_retreat",
-                lambda: env.flee(threat_pos, distance=8.0, allow_shaft_seal=False, wait_for_ground=ranged),
+                lambda: env.flee(
+                    threat_pos, distance=8.0, allow_shaft_seal=False, wait_for_ground=ranged,
+                    **({"other_shooters": other_shooters} if other_shooters else {}),
+                ),
                 raise_on_http_error=False,
             )
             result = recovery.get("result")
@@ -2765,29 +2782,31 @@ class GenerationGuard:
         except (ApiError, httpx.HTTPError):
             return None
 
-    def _recheck_cover_after_blocked_flee(
+    def _cover_and_shooters_after_blocked_flee(
         self, pos: list[float], target_id: int | None, deadline: float, *, allow_stationary: bool,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, Sequence[float] | None, list[Sequence[float]]]:
         bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        target = None
+        others = []
         try:
             entities = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
             shooters = ranged_retreat_positions(pos, entities.get("entities") or [], max_distance=16.0)
-            target = next((point for entity_id, point in shooters if entity_id == target_id), None)
-            if target_id is None or target is None:
-                return None
+            target = next((point for entity_id, point in shooters if target_id is not None and entity_id == target_id), None)
             others = [point for entity_id, point in shooters if entity_id != target_id]
+            if target is None:
+                return None, target, others
             cover = self._action(
                 "unsafe_exit_cover",
                 lambda: CombatEnv(bot, geofence=self.geofence).seek_natural_cover(
                     target, other_shooters=others, allow_stationary=allow_stationary,
                 ),
             )
-            return cover.get("result")
+            return cover.get("result"), target, others
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
-            return None
         except (ApiError, httpx.HTTPError):
-            return None
+            pass
+        return None, target, others
 
     def _verify_combat_step(self, body: dict[str, Any]) -> dict[str, Any]:
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.6)
