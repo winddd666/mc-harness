@@ -1687,8 +1687,10 @@ class CombatEnv:
         else:
             if st0.get("on_ground") is True and not st0.get("in_water"):
                 foot_y = math.floor(float(pos0[1]) + 0.05)
-                for offset in (math.pi / 2, -math.pi / 2):
-                    chosen_yaw = pref_yaw + offset
+                short_yaws = [pref_yaw + math.pi / 2, pref_yaw - math.pi / 2]
+                if wait_for_ground:
+                    short_yaws.extend(yaws[:3])
+                for chosen_yaw in short_yaws:
                     route = self.probe_retreat(pos0, chosen_yaw, 1.65)
                     if route == (foot_y, False):
                         short_step = True

@@ -4946,8 +4946,9 @@ def test_guardian_drowning_surfaces_first_and_checks_respawn(entry, scenario, mo
         assert actions[0]["result"]["mode"] == ("respawned" if scenario == "close_respawn" else "surfaced")
 
 
-@pytest.mark.parametrize("safe_sidestep", [True, False])
-def test_bug069_retreat_can_sidestep_on_ground_when_long_routes_are_unsafe(safe_sidestep):
+@pytest.mark.parametrize("safe_step", [True, False])
+@pytest.mark.parametrize("direction", ["side", "away"])
+def test_bug069_retreat_can_take_a_verified_short_step_when_long_routes_are_unsafe(safe_step, direction):
     from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
 
     status = {"pos": [0.5, 64.0, 0.5], "alive": True, "ready": True, "on_ground": True}
@@ -4960,8 +4961,9 @@ def test_bug069_retreat_can_sidestep_on_ground_when_long_routes_are_unsafe(safe_
         def call(self, action, body=None, **kwargs):
             if action == "get_block":
                 x, y, z = body["pos"]
-                far_edge = 2 if safe_sidestep else 1
-                return {"name": "stone" if x == 0 and y == 63 and 0 <= z <= far_edge else "air"}
+                far_edge = 2 if safe_step else 1
+                on_bank = x == 0 and 0 <= z <= far_edge if direction == "side" else z == 0 and -far_edge <= x <= 0
+                return {"name": "stone" if y == 63 and on_bank else "air"}
             if action == "look":
                 status["yaw"] = body["yaw"]
             if action == "control":
@@ -4970,12 +4972,15 @@ def test_bug069_retreat_can_sidestep_on_ground_when_long_routes_are_unsafe(safe_
                 status["pos"] = [0.5 + 0.7 * dx, 64.0, 0.5 + 0.7 * dz]
             return {"ok": True}
 
-    result = CombatEnv(NarrowBankBot()).flee([4.5, 64, 0.5], allow_shaft_seal=False)
+    result = CombatEnv(NarrowBankBot()).flee(
+        [4.5, 64, 0.5], allow_shaft_seal=False, wait_for_ground=direction == "away",
+    )
 
-    assert result["ok"] is safe_sidestep
-    if safe_sidestep:
+    assert result["ok"] is safe_step
+    if safe_step:
         control, = controls
-        assert result["pos_after"] == pytest.approx([0.5, 64.0, 1.2])
+        expected = [0.5, 64.0, 1.2] if direction == "side" else [-0.2, 64.0, 0.5]
+        assert result["pos_after"] == pytest.approx(expected)
         assert control["forward"] and not control["sprint"] and not control["jump"]
         assert control["ms"] < 350
     else:
