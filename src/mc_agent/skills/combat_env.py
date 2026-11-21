@@ -2978,6 +2978,9 @@ class SubcorticalInstinctController:
     def on_encounter(self, env: CombatEnv, trigger: ThreatTrigger) -> CombatOutcome:
         actions: list[dict[str, Any]] = []
         deadline = time.monotonic() + SUBCORTICAL_COMBAT_BUDGET_S
+        active_deadline = getattr(env.bot, "active_deadline", None)
+        if isinstance(active_deadline, (int, float)):
+            deadline = min(deadline, active_deadline)
         st = env.bot.status()
         if bool(st.get("in_lava")):
             esc_lava = env.escape_lava()

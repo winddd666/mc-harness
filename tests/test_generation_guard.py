@@ -1076,8 +1076,8 @@ def test_death_during_combat_does_not_suppress_the_next_threat_at_spawn(monkeypa
     assert "pre_hurt_ranged" in second["reasons"]
 
 
-@pytest.mark.parametrize("combat_duration", [4.0, 6.0])
-def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch, combat_duration):
+@pytest.mark.parametrize("combat_duration, entry_time", [(4.0, 0.0), (6.0, 0.0), (4.3, 1.5)])
+def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch, combat_duration, entry_time):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     zombie = {"id": 42, "name": "zombie", "pos": [2.0, 11, 0.5], "dist": 1.5}
@@ -1089,6 +1089,8 @@ def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch
 
     class CaveBot:
         def call(self, action, body=None, **kwargs):
+            if action == "stop" and clock[0] == 1000.0:
+                clock[0] += entry_time
             if action == "status":
                 return dict(status)
             if action == "inventory":

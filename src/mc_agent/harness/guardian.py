@@ -175,6 +175,10 @@ class _GuardSession:
         self._deadline = ContextVar("guard_deadline", default=deadline)
         self._call_override = call_override
 
+    @property
+    def active_deadline(self) -> float | None:
+        return self._deadline.get()
+
     @contextmanager
     def limit_until(self, deadline: float):
         previous = self._deadline.get()
