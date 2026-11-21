@@ -1100,13 +1100,20 @@ class CombatEnv:
                 except ApiError:
                     continue
             self.invalidate_block_cache()
+            ok = placed > 0
+            reason = None if ok else "place_failed"
+            if norm_mode == "full_seal" and ok:
+                verified = [self._get_block_name(*cell, strict=True) for cell in cells]
+                ok = all(block and _is_solid_ground(block) for block in verified)
+                if not ok:
+                    reason = "seal_unconfirmed"
             return {
-                "ok": placed > 0,
+                "ok": ok,
                 "mode": norm_mode,
                 "direction": chosen_dir,
                 "placed": placed,
                 "pos_after": self.bot.status().get("pos"),
-                "reason": None if placed > 0 else "place_failed",
+                "reason": reason,
             }
 
         return {"ok": False, "mode": norm_mode, "placed": 0, "pos_after": pos0, "reason": "unknown_mode"}
@@ -1726,7 +1733,7 @@ class CombatEnv:
         return True
 
     def seek_natural_cover(
-        self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (),
+        self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,
     ) -> dict[str, Any] | None:
         """Find a close, supported position behind existing terrain and verify the landing."""
         before = self.bot.status()
@@ -1739,7 +1746,8 @@ class CombatEnv:
             return None
         self.invalidate_block_cache()
         shooters = (threat_pos, *other_shooters)
-        already_covered = all(self._blocks_shot(origin, shooter) for shooter in shooters)
+        # A fresh blast at this location overrides otherwise favorable sight lines.
+        already_covered = allow_stationary and all(self._blocks_shot(origin, shooter) for shooter in shooters)
         if not already_covered:
             away, _ = aim_yaw_pitch(threat_pos, origin)
             for offset in (90, -90, 45, -45):
@@ -1781,17 +1789,20 @@ class CombatEnv:
         after = self._safe_status({"ready": False})
         final_pos = after.get("pos")
         self.invalidate_block_cache()
+        respawned = after.get("alive") is False or bool(
+            final_pos and (after.get("last_death") != before.get("last_death")
+                           or after.get("dimension") != before.get("dimension"))
+        )
         confirmed = bool(
             final_pos and math.dist(final_pos[:3], target) <= 0.6 and after.get("on_ground") is True
-            and after.get("ready") is not False and after.get("alive") is not False
+            and after.get("ready") is not False and not respawned
             and not after.get("in_water") and not after.get("in_lava")
-            and after.get("last_death") == before.get("last_death")
-            and after.get("dimension") == before.get("dimension")
             and all(self._blocks_shot(final_pos, shooter) for shooter in shooters)
         )
         return {
             "ok": confirmed, "mode": "natural_cover", "pos_after": final_pos,
             **({"reason": "cover_unconfirmed"} if not confirmed else {}),
+            **({"respawned": True} if respawned else {}),
         }
 
     def flee(
