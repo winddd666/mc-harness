@@ -4531,6 +4531,58 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
             assert calls == [(primary["pos"], True, [secondary["pos"]])]
 
 
+def test_repeated_melee_hurt_skips_bunker_when_the_same_water_block_still_blocks_it(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    water = [-11016, 93, 10931]
+    obstacle = "water"
+    hits = []
+    bunkers = []
+    retreats = []
+    status = {
+        "pos": [-11014.3, 94, 10931.7], "health": 3.9, "dimension": "overworld", "food": 17,
+        "ready": True, "alive": True, "on_ground": True, "blocking": False,
+        "nearest_hostile": {"id": 42, "name": "spider", "dist": 1.5},
+    }
+
+    class NightBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [event for event in hits if event["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                assert body["pos"] == water
+                return {"name": obstacle}
+            raise AssertionError(action)
+
+    class BunkerSkills:
+        def dig_safety_bunker(self, *, urgent):
+            assert urgent
+            bunkers.append(obstacle)
+            if obstacle == "water":
+                return {"ok": False, "reason": "unsafe_open_side", "block_pos": water, "block": obstacle}
+            return {"ok": True}
+
+    guard = GenerationGuard(NightBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=BunkerSkills())
+
+    def retreat(*_args):
+        retreats.append(True)
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat"}
+
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    for seq, block in enumerate(("water", "water", "stone"), 1):
+        obstacle = block
+        hits.append({"seq": seq, "type": "hurt", "source": "mob_attack"})
+        clock[0] += 0.6
+        assert guard.poll()["requires_replan"]
+
+    assert bunkers == ["water", "stone"]
+    assert retreats == [True, True]
+
+
 @pytest.mark.parametrize("nearest", ["attacker", "other_mob", "scan_timeout"])
 def test_nether_melee_retreat_resolves_the_confirmed_attacker_without_position(monkeypatch, nearest):
     attacker = {"id": 4580454, "name": "enderman", "dist": 1.1}

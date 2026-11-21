@@ -308,6 +308,7 @@ class GenerationGuard:
         self._last_lava_contact_at = float("-inf")
         self._last_fire_contact_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
+        self._blocked_bunker: tuple[tuple[Any, ...], list[int], str] | None = None
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
         self.stats = {
@@ -617,6 +618,33 @@ class GenerationGuard:
             return {**result, "lava_recovery": recovery}
         return result
 
+    def _try_emergency_bunker(self, status: dict[str, Any]) -> dict[str, Any] | None:
+        pos = status.get("pos")
+        tile = tuple(math.floor(coord) for coord in pos[:3]) if pos else None
+        site = (status.get("dimension"), status.get("last_death"), tile)
+        if self._blocked_bunker is not None and self._blocked_bunker[0] == site:
+            _, block_pos, obstacle = self._blocked_bunker
+            try:
+                live = self.bot.call("get_block", {"pos": block_pos}, timeout_s=0.35)
+            except (ApiError, httpx.HTTPError):
+                return None
+            name = str(live.get("name") or live.get("block") or "").removeprefix("minecraft:")
+            if name == obstacle:
+                return None
+
+        self._blocked_bunker = None
+        action = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
+        result = action.get("result") or {}
+        block_pos, obstacle = result.get("block_pos"), result.get("block")
+        if (
+            result.get("reason") == "unsafe_open_side" and tile
+            and isinstance(block_pos, list) and len(block_pos) == 3 and all(isinstance(coord, int) for coord in block_pos)
+            and isinstance(obstacle, str) and 1 <= tile[1] - block_pos[1] <= 3
+            and abs(tile[0] - block_pos[0]) + abs(tile[2] - block_pos[2]) == 1
+        ):
+            self._blocked_bunker = (site, block_pos, obstacle)
+        return action
+
     def _inside_own_shaft(self) -> bool:
         """Only bunker-in-place when we are inside our own carved tunnel (never in open cave air)."""
         eng = getattr(self.skills, "mining_dfs", None) if self.skills is not None else None
@@ -704,6 +732,7 @@ class GenerationGuard:
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
                     self._last_cornered_creeper = None
+                    self._blocked_bunker = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     self._last_cornered_creeper = None
@@ -1877,24 +1906,16 @@ class GenerationGuard:
                             or (not has_melee_weapon and status.get("is_day") is False and self._consecutive_flees >= 1 and hp_val <= 14.0)
                         )
                     )
-                    if not indirect_magic and ((melee_or_airborne and can_surface_night_bunker) or not melee_or_airborne):
-                        bunker = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
+                    bunker = None
+                    if not indirect_magic and (can_surface_night_bunker or not melee_or_airborne):
+                        bunker = self._try_emergency_bunker(status)
+                    if bunker is not None:
                         actions.append(bunker)
-                        if bunker["ok"]:
-                            self._consecutive_flees = 0
-                            bunker_result = bunker.get("result") or {}
-                            if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
-                                self._last_melee_hurt_at = float("-inf")
-                        else:
-                            cf = self._action(
-                                "combat_or_flee",
-                                lambda: self._defend_or_flee(status, attacker, counts),
-                            )
-                            actions.append(cf)
-                            if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":
-                                self._consecutive_flees += 1
-                            else:
-                                self._consecutive_flees = 0
+                    if bunker and bunker["ok"]:
+                        self._consecutive_flees = 0
+                        bunker_result = bunker.get("result") or {}
+                        if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
+                            self._last_melee_hurt_at = float("-inf")
                     else:
                         cf = self._action(
                             "combat_or_flee",
