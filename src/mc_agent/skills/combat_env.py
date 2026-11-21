@@ -2149,7 +2149,10 @@ class CombatEnv:
         except (ApiError, httpx.HTTPError) as err:
             if isinstance(err, httpx.HTTPError):
                 self._best_effort_stop()
-        return retreat_result(self._safe_status({**st_mid, "ready": False}))
+        st_final = self._safe_status({**st_mid, "ready": False})
+        if wait_for_ground:
+            st_final = settle_airborne(st_final, st0)
+        return retreat_result(st_final)
 
     def step_away_from_melee(self, status: dict[str, Any], threat_pos: Sequence[float], *, deadline: float) -> bool:
         """Take one short, supported step away from a still-close attacker."""

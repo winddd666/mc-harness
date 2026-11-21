@@ -10786,3 +10786,55 @@ def test_melee_attack_blocks_a_confirmed_creeper_before_starting(sighting):
         assert result["requires_replan"]
         assert result["error"]["code"] == "unsafe_creeper_attack"
         assert attacks == []
+
+
+@pytest.mark.parametrize("landing", ["dry", "water", "respawned"])
+def test_retreat_waits_for_ground_after_pathfinder_leg(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    status = {
+        "pos": [0.5, 66, 0.5], "dimension": "overworld", "on_ground": True,
+        "ready": True, "alive": True, "last_death": {"t": 1},
+    }
+    steps = []
+
+    class KnockbackBot:
+        yaw = 0.0
+
+        def status(self):
+            if steps == ["pulse", "pathfinder"] and clock[0] >= 1000.15:
+                status["on_ground"] = True
+                if landing == "water":
+                    status["in_water"] = True
+                if landing == "respawned":
+                    status.update(pos=[2.5, 68, 2.5], last_death={"t": 2})
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 66 else "air"}
+            if action == "look":
+                self.yaw = body["yaw"]
+            if action == "control":
+                steps.append("pulse")
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                status["pos"] = [0.5 + 2 * dx, 66, 0.5 + 2 * dz]
+            if action == "move_to":
+                steps.append("pathfinder")
+                status.update(pos=[body["x"], body["y"] + 0.2, body["z"]], on_ground=False)
+            return {"ok": True}
+
+    outcome = CombatEnv(KnockbackBot()).flee([-2.5, 66, 0.5], wait_for_ground=True, allow_shaft_seal=False)
+
+    assert steps == ["pulse", "pathfinder"]
+    assert 1000.15 <= clock[0] <= 1000.35
+    assert outcome["ok"] is (landing == "dry")
+    if landing == "water":
+        assert outcome["reason"] == "unsafe_landing"
+    if landing == "respawned":
+        assert outcome["respawned"] is True and outcome["moved_dist"] == 0.0
