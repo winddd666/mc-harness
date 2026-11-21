@@ -901,6 +901,48 @@ def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life
     assert [event["type"] for event in events] == ["guardian.preempted_tool"]
 
 
+def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    zombie = {"id": 42, "name": "zombie", "pos": [2.5, 64.0, 0.5], "dist": 2.0}
+    status = {
+        "pos": [0.5, 64.0, 0.5], "health": 14, "food": 20, "on_ground": True,
+        "alive": True, "ready": True, "nearest_hostile": zombie,
+    }
+    calls = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            calls.append((action, kwargs.get("timeout_s")))
+            if action == "attack":
+                clock[0] += min(12.0, kwargs["timeout_s"])
+                raise httpx.ReadTimeout("combat request stalled")
+            return {"ok": True}
+
+    class StalledAttack:
+        def on_encounter(self, env, trigger):
+            assert trigger["source"] == "pre_hurt_melee"
+            env.bot.call("attack", {"entity_id": 42}, timeout_s=20.0)
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.combat_slot.register(StalledAttack())
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+    incident = guard.poll()
+
+    combat, = incident["actions"]
+    assert combat["ok"] is False
+    assert combat["result"]["reason"] == "time_budget"
+    assert incident["requires_replan"] is True
+    assert ("attack", 7.5) in calls
+    assert [a for a, _ in calls[-3:]] == ["stop", "control", "posture"]
+
+
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
     """Reproduces glm_glm_3_village / hy4_hy_8_nether: ReadTimeout in subcortical_combat must /stop & not crash run."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
@@ -8346,6 +8388,60 @@ def test_directed_water_escape_searches_the_bank_at_the_post_surge_water_level()
 
     assert moves == [[11206.5, 63.0, -11047.5]]
     assert result["ok"] is True and result["in_water"] is False
+
+
+@pytest.mark.parametrize("bank_flooded", [False, True])
+def test_water_retry_rechecks_nearby_bank_before_swimming_past_it(monkeypatch, bank_flooded):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    bank = [7938.5, 63.0, 2777.5]
+    status = {
+        "pos": [7923.2, 62.8, 2778.8], "in_water": True, "submerged": False,
+        "on_ground": False, "alive": True, "ready": True, "dimension": "overworld",
+    }
+    attempts = []
+    retry = False
+    surges = []
+
+    class ShoreBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if (x, z) == (7938, 2777):
+                    return {"name": "stone" if y == 62 else "water" if y == 63 and bank_flooded else "air"}
+                return {"name": "water"}
+            if action == "move_to":
+                goal = [body["x"], body["y"], body["z"]]
+                attempts.append(goal)
+                if not retry:
+                    raise ApiError("path_not_found", "shore movement stalled")
+                if goal == bank:
+                    status.update(pos=goal, in_water=False, on_ground=True)
+            if action == "control" and not retry and body.get("ms") == 1150:
+                status.update(pos=[7936.0, 62.6, 2777.5])
+            if action == "control" and retry and body.get("ms") == 750:
+                surges.append(body["forward"])
+            return {"ok": True}
+
+    env = CombatEnv(ShoreBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_a, **_kw: None if retry else bank)
+
+    assert env.escape_deep_water_to_shore()["in_water"] is True
+    retry = True
+    status.update(submerged=True)
+    result = env.escape_deep_water_to_shore()
+
+    assert surges == [bank_flooded]
+    assert ("shore_bank_retry" in result["actions"]) is not bank_flooded
+    if bank_flooded:
+        assert attempts.count(bank) == 1
+        assert result["in_water"] is True
+    else:
+        assert attempts == [bank, bank]
+        assert result["ok"] is True and result["in_water"] is False
 
 
 @pytest.mark.parametrize("under_attack", [False, True])

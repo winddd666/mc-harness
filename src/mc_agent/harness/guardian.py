@@ -30,6 +30,7 @@ from ..skills.combat_env import (
     MELEE_WEAPON_ORDER,
     PRE_HURT_MELEE_MOBS,
     RANGED_MOBS,
+    SUBCORTICAL_COMBAT_BUDGET_S,
     CombatController,
     CombatControllerSlot,
     CombatEnv,
@@ -178,6 +179,22 @@ class _GuardSession:
         finally:
             self._deadline.reset(token)
 
+    @contextmanager
+    def pause_deadline(self, action: str):
+        """Exclude time spent in a separately budgeted recovery."""
+        deadline = self._deadline.get()
+        if deadline is None:
+            yield
+            return
+        self._time_remaining(action)
+        started = time.monotonic()
+        token = self._deadline.set(None)
+        try:
+            yield
+        finally:
+            self._deadline.reset(token)
+            self._deadline.set(deadline + time.monotonic() - started)
+
     def _time_remaining(self, action: str) -> float:
         deadline = self._deadline.get()
         remaining = float("inf") if deadline is None else deadline - time.monotonic()
@@ -274,7 +291,7 @@ class GenerationGuard:
         # Sharing the live MacroSkills instance lets reflexes see the MiningDFS shaft state
         self.skills = skills
         self.combat_env = CombatEnv(
-            self.bot, skills=self.skills, geofence=self.geofence, water_escape=self._escape_water,
+            self.bot, skills=self.skills, geofence=self.geofence, water_escape=self._escape_water_for_combat,
             run_lava_escape=self._run_lava_escape,
         )
         self.combat_slot = CombatControllerSlot(combat_controller)
@@ -435,6 +452,30 @@ class GenerationGuard:
             )
             return {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
 
+    def _run_subcortical_combat(self, trigger: ThreatTrigger) -> dict[str, Any]:
+        try:
+            with self.bot.limit_until(time.monotonic() + SUBCORTICAL_COMBAT_BUDGET_S):
+                return self.combat_slot.handle(self.combat_env, trigger)
+        except _RecoveryBudgetExceeded:
+            # The expired scope can interrupt the combat slot's own exit cleanup.
+            try:
+                status = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+            except (ApiError, httpx.HTTPError):
+                status = {}
+            posture = {}
+            if status.get("in_water") or status.get("in_lava"):
+                posture = {"jump": True, "shield": bool(status.get("blocking"))}
+            for action, body in (("stop", {}), ("control", {"wait": False}), ("posture", posture)):
+                try:
+                    self.bot.call(action, body, timeout_s=0.35, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
+            return {
+                "ok": False, "handled": False, "mode": "combat_timeout",
+                "reason": "time_budget", "requires_replan": True,
+                "summary": "战斗反射达到时限，已尝试停止挂起动作",
+            }
+
     def _clear_contact_fire(self, pos: list[float] | tuple[float, ...], *, sneaking: bool = False) -> dict[str, Any]:
         try:
             with self.bot.limit_until(time.monotonic() + 1.25):
@@ -574,6 +615,10 @@ class GenerationGuard:
             return posture.get("blocking") is True
         except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
             return False
+
+    def _escape_water_for_combat(self, before: dict[str, Any]) -> dict[str, Any]:
+        with self.bot.pause_deadline("escape_water"):
+            return self._escape_water(before)
 
     def _escape_water(self, before: dict[str, Any], *, budget_s: float | None = None) -> dict[str, Any]:
         try:
@@ -1666,7 +1711,7 @@ class GenerationGuard:
                 self._mark_pre_hurt_cooldown(pre_trigger, now)
                 sc_out = self._action(
                     "subcortical_combat",
-                    lambda: self.combat_slot.handle(self.combat_env, pre_trigger),
+                    lambda: self._run_subcortical_combat(pre_trigger),
                 )
                 self._mark_pre_hurt_cooldown(pre_trigger, time.monotonic())
                 actions.append(sc_out)
@@ -1863,7 +1908,7 @@ class GenerationGuard:
                     actions.append(
                         self._action(
                             "subcortical_combat",
-                            lambda: self.combat_slot.handle(self.combat_env, trig),
+                            lambda: self._run_subcortical_combat(trig),
                         )
                     )
                     if hurt_src in RANGED_HURT_SOURCES or att_type in RANGED_MOBS:
@@ -3248,7 +3293,7 @@ class GenerationGuard:
                 else:
                     act = self._action(
                         "subcortical_combat",
-                        lambda: self.combat_slot.handle(self.combat_env, trigger),
+                        lambda: self._run_subcortical_combat(trigger),
                         raise_on_http_error=False,
                     )
                     if act.get("ok") is False and isinstance(act.get("error"), dict) and act["error"].get("code") in {"network_timeout", "network_error", "network_uncertain"}:
@@ -3783,7 +3828,7 @@ class GenerationGuard:
                 self._mark_pre_hurt_cooldown(boundary_trigger, time.monotonic())
                 act = self._action(
                     "boundary_subcortical_combat",
-                    lambda: self.combat_slot.handle(self.combat_env, boundary_trigger),
+                    lambda: self._run_subcortical_combat(boundary_trigger),
                     raise_on_http_error=False,
                 )
                 self._mark_pre_hurt_cooldown(boundary_trigger, time.monotonic())
