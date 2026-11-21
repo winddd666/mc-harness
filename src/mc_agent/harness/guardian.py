@@ -208,6 +208,7 @@ class _GuardSession:
 
 class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
+    TRIDENT_WATER_ESCAPE_BUDGET_S = 4.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -413,9 +414,10 @@ class GenerationGuard:
             return {**result, "ok": False, "reason": "retreat_into_lava", "pos_after": after.get("pos") or end}
         return result
 
-    def _escape_water(self, before: dict[str, Any]) -> dict[str, Any]:
+    def _escape_water(self, before: dict[str, Any], *, budget_s: float | None = None) -> dict[str, Any]:
         return self._run_recovery_macro(
-            before, lambda skills: skills.escape_water(), budget_s=self.WATER_ESCAPE_BUDGET_S,
+            before, lambda skills: skills.escape_water(),
+            budget_s=self.WATER_ESCAPE_BUDGET_S if budget_s is None else budget_s,
             timeout_details={"in_water": True},
         )
 
@@ -2356,7 +2358,14 @@ class GenerationGuard:
                     esc_pre_ok = False
                     esc_pre_respawned = False
                     if not forced_pre_shore and not drowning_pre:
-                        esc_act = self._action("escape_water", lambda: self._escape_water(st_pre), raise_on_http_error=False)
+                        trident_exposure = trigger.get("hurt_source") == "trident" or (
+                            trigger.get("source") == "tool_interrupted_hurt"
+                            and (trigger.get("primary_type") == "drowned" or self._extract_hostile_info(st_pre)[0] == "drowned")
+                        )
+                        budget = {"budget_s": self.TRIDENT_WATER_ESCAPE_BUDGET_S} if trident_exposure else {}
+                        esc_act = self._action(
+                            "escape_water", lambda: self._escape_water(st_pre, **budget), raise_on_http_error=False,
+                        )
                         pre_actions.append(esc_act)
                         esc_pre_res = esc_act.get("result") if isinstance(esc_act, dict) and isinstance(esc_act.get("result"), dict) else {}
                         esc_pre_ok = bool(esc_act.get("ok") and esc_pre_res.get("in_water") is not True)

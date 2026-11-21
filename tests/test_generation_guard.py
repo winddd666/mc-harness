@@ -5208,6 +5208,52 @@ def test_water_attack_preemption_waits_for_shore_landing_before_retrying_combat(
     assert combat == ([] if after_shore == "still_airborne" else [status["nearest_hostile"]["id"]])
 
 
+def test_drowned_tool_preemption_bounds_float_before_shore_fallback(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [9067.9, 62.7, -11364.9], "health": 14.8, "oxygen": 200, "food": 19,
+        "in_water": True, "submerged": True, "on_ground": False, "alive": True, "ready": True,
+        "nearest_hostile": {"id": 44, "name": "drowned", "dist": 12.3},
+    }
+    calls = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": []}
+            if action == "events":
+                return {"events": []}
+            if action == "move_to":
+                calls.append((action, kwargs["timeout_s"]))
+                clock[0] += kwargs["timeout_s"]
+                raise httpx.ReadTimeout("float pathfinder exceeded its budget")
+            calls.append((action, clock[0]))
+            return {"ok": True}
+
+    def slow_float(skills):
+        return skills.bot.call("move_to", {"x": 9070.5, "y": 63, "z": -11351.5}, timeout_s=8.5)
+
+    def reach_shore(*args, **kwargs):
+        calls.append(("shore", clock[0]))
+        status.update(in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(MacroSkills, "escape_water", slow_float)
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+
+    receipt = guard.handle_preemption(
+        {"source": "tool_interrupted_hurt", "primary_type": "drowned", "primary_entity_id": 44},
+        interrupted_name="mc_skill_scout_surface",
+    )
+
+    assert calls == [("move_to", 4.0), ("stop", 1004.0), ("shore", 1004.0)]
+    assert receipt["reflex_mode"] == "water_surface" and receipt["status_after"]["in_water"] is False
+
+
 @pytest.mark.parametrize("respawned", [False, True])
 def test_trident_preemption_restores_shield_facing_after_shore_attempt(respawned):
     status = {
