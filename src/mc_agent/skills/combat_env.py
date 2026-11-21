@@ -686,7 +686,7 @@ class CombatEnv:
         """Allow ordinary digs and check the landing for a dig through the current floor."""
         x, y, z = pos[:3]
         tx, ty, tz = target[:3]
-        if ty != math.floor(y - 0.01) or (tx, tz) not in _hitbox_columns(x, z):
+        if ty != math.floor(y + 0.05) - 1 or (tx, tz) not in _hitbox_columns(x, z):
             return True
 
         # A sliver of support at the edge of the hitbox can disappear with a small displacement.

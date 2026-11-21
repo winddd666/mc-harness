@@ -941,6 +941,44 @@ def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life
     assert [event["type"] for event in events] == ["guardian.preempted_tool"]
 
 
+@pytest.mark.parametrize("recovery", ["shore_receipt", "status_changed"])
+def test_water_tool_preemption_reports_life_unavailable_after_respawn(monkeypatch, recovery):
+    status = {
+        "pos": [40995.8, 62.1, 10997.6], "dimension": "overworld", "health": 2, "food": 17,
+        "ready": True, "alive": True, "in_water": True, "submerged": True, "last_death": {"t": 1},
+    }
+    events = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            raise AssertionError(action)
+
+    def shore(*_args, **_kwargs):
+        if recovery == "status_changed":
+            status.update(health=20, in_water=False, on_ground=True, last_death={"t": 2})
+            return {"ok": False, "in_water": False}
+        return {"ok": False, "mode": "respawned", "in_water": False}
+
+    guard = GenerationGuard(RiverBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    receipt = guard.handle_preemption(
+        {"source": "tool_interrupted_hurt", "primary_type": "zombie", "primary_entity_id": 5462415},
+        interrupted_name="mc_attack",
+    )
+
+    assert receipt["reflex_mode"] == "life_unavailable"
+    assert receipt["requires_replan"]
+    assert guard._last_water_escape_failed is False
+    assert guard._water_hurt_streak == 0
+    assert [e["action"] for e in events if e["type"] == "guardian.action.completed"] == ["escape_to_shore"]
+
+
 @pytest.mark.parametrize("source, identified, expected", [
     ("mob_attack", True, "cover_or_flee"),
     ("mob_attack", False, "cover_or_flee"),
@@ -5419,11 +5457,11 @@ def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, sc
 
 
 @pytest.mark.parametrize("water_floor", ["stone", "lava", "air"])
-@pytest.mark.parametrize("entry", ["poll", "boundary"])
+@pytest.mark.parametrize("entry", ["poll", "boundary", "tool"])
 def test_critical_post_lava_burning_can_douse_in_verified_adjacent_water(monkeypatch, water_floor, entry):
     status = {
         "pos": [0.5, 63.6, 0.5], "health": 5, "food": 20, "dimension": "overworld",
-        "ready": True, "alive": True, "in_lava": True, "on_ground": False, "on_fire": True,
+        "ready": True, "alive": True, "in_water": False, "in_lava": True, "on_ground": False, "on_fire": True,
     }
     targets = []
 
@@ -5449,16 +5487,21 @@ def test_critical_post_lava_burning_can_douse_in_verified_adjacent_water(monkeyp
     guard = GenerationGuard(CaveBot(), EventSink(events.append), checkpoint=lambda: None)
 
     def escape(**_kwargs):
-        status.update(pos=[0.5, 64, 0.5], health=2.6, in_lava=False, on_ground=True)
+        status.update(pos=[0.5, 64, 0.5], health=9.8, in_lava=False, on_ground=True)
         return {"ok": True, "in_lava": False, "pos_after": status["pos"]}
 
     monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
     if entry == "poll":
         guard.poll()
-    else:
+    elif entry == "boundary":
         guard.stabilize_after_tools()
+    else:
+        receipt = guard.handle_preemption(
+            {"source": "boundary_threat", "primary_type": "lava"}, interrupted_name="mc_skill_mine_dfs",
+        )
+        assert receipt["status_after"]["in_water"] is (water_floor == "stone")
     escape_event, douse = (event for event in events if event["type"] == "guardian.action.completed")
-    assert escape_event["action"] == ("escape_lava" if entry == "poll" else "boundary_escape_lava")
+    assert escape_event["action"] == ("boundary_escape_lava" if entry == "boundary" else "escape_lava")
     assert douse["action"] == "douse_in_water"
     assert douse["ok"] is (water_floor == "stone")
     assert targets == ([[1.5, 63, 0.5]] if water_floor == "stone" else [])
@@ -9527,6 +9570,7 @@ def test_unstick_preserves_a_roof_that_holds_back_fluid(above_roof, in_water, er
 
 @pytest.mark.parametrize(("tool", "terrain"), [
     ("mc_dig", "deep_drop"), ("mc_dig", "shallow_drop"), ("mc_dig", "lava"),
+    ("mc_dig", "airborne_lava"), ("mc_dig", "offset_lava"), ("mc_dig", "airborne_side_dig"),
     ("mc_dig", "side_dig"), ("mc_dig", "edge_support"), ("mc_dig", "edge_dig"),
     ("mc_skill_staircase", "deep_drop"), ("mc_skill_staircase", "shallow_drop"),
     ("mc_skill_staircase", "dripstone"), ("mc_skill_staircase", "side_dig"),
@@ -9534,19 +9578,21 @@ def test_unstick_preserves_a_roof_that_holds_back_fluid(above_roof, in_water, er
 def test_dig_checks_the_landing_before_removing_support(tool, terrain):
     from mc_agent.harness.mc_tools import McToolset
 
-    target = [2015 if terrain in {"side_dig", "edge_dig"} else 2014, 70, 1882]
+    target = [2015 if terrain in {"side_dig", "edge_dig", "airborne_side_dig"} else 2014, 70, 1882]
     x = 2014.8 if terrain in {"edge_support", "edge_dig"} else 2014.5
+    airborne = terrain.startswith("airborne_")
+    feet_y = 71.2 if airborne or terrain == "offset_lava" else 71.0
     digs = []
     probes = []
 
     class ShaftBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                return {"pos": [x, 71.0, 1882.5], "on_ground": True, "ready": True, "alive": True}
+                return {"pos": [x, feet_y, 1882.5], "on_ground": not airborne, "ready": True, "alive": True}
             if action == "get_block":
                 probes.append(body["pos"])
                 y = body["pos"][1]
-                if y == 69 and terrain == "lava":
+                if y == 69 and terrain in {"lava", "airborne_lava", "offset_lava"}:
                     return {"name": "lava"}
                 if y == 69 and terrain == "dripstone":
                     return {"name": "pointed_dripstone"}
@@ -9568,13 +9614,13 @@ def test_dig_checks_the_landing_before_removing_support(tool, terrain):
 
     result = json.loads(guard.run_tool_with_reflex(tool, invoke))
 
-    if terrain in {"deep_drop", "lava", "dripstone", "edge_support"}:
+    if terrain in {"deep_drop", "lava", "airborne_lava", "offset_lava", "dripstone", "edge_support"}:
         assert result["ok"] is False and result["requires_replan"] is True
         assert result["error"]["code"] == "unsafe_landing"
         assert digs == []
     else:
         assert result["ok"] is True and digs == [target]
-    if terrain == "side_dig":
+    if terrain in {"side_dig", "airborne_side_dig"}:
         assert probes == ([target] if tool == "mc_dig" else [])
 
 

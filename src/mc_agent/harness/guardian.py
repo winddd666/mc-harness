@@ -522,17 +522,21 @@ class GenerationGuard:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget"}
 
-    def _douse_after_lava(self, before: dict[str, Any]) -> dict[str, Any] | None:
-        try:
-            after = self.bot.call("status", method="GET", timeout_s=0.5)
-        except (ApiError, httpx.HTTPError):
-            return None
+    def _douse_after_lava(
+        self, before: dict[str, Any], *, after: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if after is None:
+            try:
+                after = self.bot.call("status", method="GET", timeout_s=0.5)
+            except (ApiError, httpx.HTTPError):
+                return None
         health = after.get("health")
         _, hostile_dist, _, _ = self._extract_hostile_info(after)
         if (
             after.get("ready") is True and after.get("alive") is not False and after.get("pos")
             and after.get("on_ground") is True and after.get("on_fire") and not after.get("in_water") and not after.get("in_lava")
-            and isinstance(health, (int, float)) and 0 < health <= 4.0 and hostile_dist > 8.0
+            and "nether" not in str(after.get("dimension") or "").lower()
+            and isinstance(health, (int, float)) and 0 < health <= 10.0 and hostile_dist > 8.0
             and after.get("last_death") == before.get("last_death") and after.get("dimension") == before.get("dimension")
         ):
             try:
@@ -3420,6 +3424,14 @@ class GenerationGuard:
                     )
                 )
                 esc_ok = bool(act.get("ok") and not act_res.get("in_lava") and not lava_died)
+                lava_actions = [act]
+                if esc_ok:
+                    douse = self._douse_after_lava(st_pre, after=st_after)
+                    if douse is not None:
+                        lava_actions.append(douse)
+                        st_after = self.combat_env._safe_status(st_after)
+                        lava_died = life_changed(st_after)
+                        esc_ok = not lava_died
                 if lava_died:
                     summary = f"执行 {interrupted_name} 途中滑入岩浆，抢占逃生期间已死亡并重生（装备已掉落，先重整背包再继续）"
                 elif esc_ok:
@@ -3433,7 +3445,7 @@ class GenerationGuard:
                     "handled": esc_ok,
                     "mode": "lava_escape",
                     "summary": summary,
-                    "actions": [act],
+                    "actions": lava_actions,
                     "status_after": st_after,
                     **({"respawned": True} if lava_died else {}),
                 }
@@ -3525,7 +3537,7 @@ class GenerationGuard:
                         pre_actions.append(esc_act)
                         esc_pre_res = esc_act.get("result") if isinstance(esc_act, dict) and isinstance(esc_act.get("result"), dict) else {}
                         esc_pre_ok = bool(esc_act.get("ok") and esc_pre_res.get("in_water") is not True)
-                        esc_pre_respawned = bool(esc_pre_res.get("respawned"))
+                        esc_pre_respawned = bool(esc_pre_res.get("respawned")) or esc_pre_res.get("mode") == "respawned"
                         esc_pre_handled_lava = esc_pre_res.get("mode") == "lava_escape"
                     if not esc_pre_ok and not esc_pre_respawned and not esc_pre_handled_lava:
                         shore_threat_pos = trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None)
@@ -3543,26 +3555,33 @@ class GenerationGuard:
                         )
                         pre_actions.append(shore_pre)
                         shore_result = shore_pre.get("result") or {}
-                        esc_pre_respawned = shore_result.get("mode") == "respawned"
+                        esc_pre_respawned = bool(shore_result.get("respawned")) or shore_result.get("mode") == "respawned"
                     try:
                         st_after = self.bot.status()
                     except (ApiError, httpx.HTTPError):
                         st_after = st_pre
-                    left_water = (
-                        not bool(st_after.get("in_water"))
-                        and not st_after.get("in_lava")
-                        and st_after.get("on_ground") is not False
-                        and st_after.get("ready", True)
-                        and st_after.get("alive") is not False
-                        and not esc_pre_respawned
-                    )
-                    self._last_water_escape_at = time.monotonic()
-                    self._last_water_escape_failed = not left_water
-                    if left_water:
+                    life_unavailable = esc_pre_respawned or life_changed(st_after)
+                    if life_unavailable:
+                        self._last_water_escape_at = float("-inf")
+                        self._last_water_escape_failed = False
                         self._water_hurt_streak = 0
-                    recovery = "已脱离水域" if left_water else f"上浮后 in_water={bool(st_after.get('in_water'))}"
-                    summary = f"执行 {interrupted_name} 途中水下遇险，{recovery}，当前 HP={st_after.get('health')}"
-                    outcome = {"handled": True, "mode": "water_surface", "summary": summary, "actions": pre_actions, "status_after": st_after}
+                        summary = f"执行 {interrupted_name} 时脱水期间角色状态已变化，请按最新状态重新规划"
+                        outcome = {"handled": False, "mode": "life_unavailable", "actions": pre_actions}
+                    else:
+                        left_water = (
+                            not st_after.get("in_water") and not st_after.get("in_lava")
+                            and st_after.get("on_ground") is not False
+                        )
+                        self._last_water_escape_at = time.monotonic()
+                        self._last_water_escape_failed = not left_water
+                        if left_water:
+                            self._water_hurt_streak = 0
+                        recovery = "已脱离水域" if left_water else f"上浮后 in_water={bool(st_after.get('in_water'))}"
+                        summary = f"执行 {interrupted_name} 途中水下遇险，{recovery}，当前 HP={st_after.get('health')}"
+                        outcome = {
+                            "handled": True, "mode": "water_surface", "summary": summary,
+                            "actions": pre_actions, "status_after": st_after,
+                        }
                 else:
                     act = self._action(
                         "subcortical_combat",
@@ -3703,14 +3722,14 @@ class GenerationGuard:
         pos = status.get("pos")
         if (
             not isinstance(pos, (list, tuple)) or len(pos) < 3
-            or status.get("on_ground") is not True or status.get("ready") is False or status.get("alive") is False
+            or status.get("ready") is False or status.get("alive") is False
         ):
             return None
 
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.0)
         env = CombatEnv(probe_bot)
         try:
-            if check_roof:
+            if check_roof and status.get("on_ground") is True:
                 fluid = env.fluid_above_headroom(pos, target)
                 if fluid == "lava" or (fluid == "water" and not status.get("in_water") and not status.get("submerged")):
                     self.events.emit(f"guardian.{fluid}_roof_dig_blocked", target=list(target), pos=pos)
