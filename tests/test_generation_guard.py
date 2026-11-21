@@ -941,6 +941,55 @@ def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life
     assert [event["type"] for event in events] == ["guardian.preempted_tool"]
 
 
+@pytest.mark.parametrize("source, identified, expected", [
+    ("mob_attack", True, "cover_or_flee"),
+    ("mob_attack", False, "cover_or_flee"),
+    ("entity_explosion", False, "creeper_evade"),
+])
+def test_tool_hurt_does_not_treat_distant_creeper_as_melee_attacker(monkeypatch, source, identified, expected):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    creeper = {"id": 42, "name": "creeper", "dist": 11.9, "pos": [12.4, 64, 0.5]}
+    zombie = {"id": 77, "name": "zombie", "dist": 2.0, "pos": [0.5, 64, -1.5]}
+    status = {
+        "pos": [0.5, 64, 0.5], "dimension": "overworld", "health": 19, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": creeper,
+    }
+    retreat_targets = []
+
+    class InterruptedBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": source}
+                if identified:
+                    hurt["source_entity"] = zombie
+                return {"events": [hurt] if kwargs["params"]["since"] < 1 else [], "last_seq": 1}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [creeper, zombie] if identified else [creeper]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 64 else "air"}
+            return {"ok": True}
+
+    def retreat(_env, threat_pos=None, **kwargs):
+        retreat_targets.append((threat_pos, kwargs.get("use_nearest_hostile", True)))
+        return {"ok": True, "mode": "flee", "moved_dist": 3.0, "pos_after": status["pos"]}
+
+    monkeypatch.setattr(CombatEnv, "flee", retreat)
+    guard = GenerationGuard(InterruptedBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    receipt = guard.handle_preemption(
+        {"source": "tool_interrupted_hurt", "primary_type": "creeper", "primary_entity_id": 42, "distance": 11.9},
+        interrupted_name="mc_dig",
+    )
+
+    assert receipt["reflex_mode"] == expected
+    expected_target = creeper["pos"] if source == "entity_explosion" else zombie["pos"] if identified else None
+    assert retreat_targets == [(expected_target, expected_target is not None)]
+
+
 @pytest.mark.parametrize("respawned", [False, True])
 def test_interrupted_tool_reports_combat_api_failure_and_rechecks_life(monkeypatch, respawned):
     status = {

@@ -2931,33 +2931,15 @@ class GenerationGuard:
                 or status.get("in_water") or status.get("in_lava") or not status.get("pos")
             ):
                 return None
-            since = self.cursor
-            try:
-                page = call(
-                    "events", method="GET", params={"since": since, "limit": 100}, timeout_s=0.4, allow_reauth=False,
-                )
-            except (ApiError, httpx.HTTPError):
+            event = self._fresh_tool_hurt_event(call)
+            source = str((event or {}).get("source") or "").strip().lower()
+            if source not in IN_WALL_HURT_SOURCES:
                 return None
-            if not isinstance(page, dict):
-                return None
-            for event in reversed(page.get("events") or []):
-                if not isinstance(event, dict) or not isinstance(event.get("seq"), int) or event["seq"] <= since:
-                    continue
-                if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
-                    return None
-                if event.get("type") != "hurt":
-                    continue
-                source = str(event.get("source") or "").strip().lower()
-                timestamp = event.get("t")
-                stale = isinstance(timestamp, (int, float)) and time.time() - timestamp / 1000 > 3.0
-                if source not in IN_WALL_HURT_SOURCES or stale:
-                    return None
-                return {
-                    "source": "tool_interrupted_hurt", "primary_type": "in_wall", "primary_pos": status["pos"],
-                    "primary_entity_id": None, "distance": 0.0, "hurt_source": source,
-                    "observed_life": (status.get("dimension"), status.get("last_death")),
-                }
-            return None
+            return {
+                "source": "tool_interrupted_hurt", "primary_type": "in_wall", "primary_pos": status["pos"],
+                "primary_entity_id": None, "distance": 0.0, "hurt_source": source,
+                "observed_life": (status.get("dimension"), status.get("last_death")),
+            }
 
         def interrupted_action_trigger(max_enemy_distance: float, *, wall_only: bool) -> ThreatTrigger | None:
             try:
@@ -3324,6 +3306,29 @@ class GenerationGuard:
                 wait_for_stop = pending_trigger and (watch_attack_emergency or pending_trigger[0].get("primary_type") == "in_wall")
                 watcher_thread.join(timeout=1.55 if wait_for_stop else 0.05)
 
+    def _fresh_tool_hurt_event(self, call: Callable[..., dict[str, Any]]) -> dict[str, Any] | None:
+        since = self.cursor
+        try:
+            page = call(
+                "events", method="GET", params={"since": since, "limit": 100}, timeout_s=0.4, allow_reauth=False,
+            )
+        except (ApiError, httpx.HTTPError):
+            return None
+        if not isinstance(page, dict):
+            return None
+        for event in reversed(page.get("events") or []):
+            if not isinstance(event, dict) or not isinstance(event.get("seq"), int) or event["seq"] <= since:
+                continue
+            if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
+                return None
+            if event.get("type") != "hurt":
+                continue
+            timestamp = event.get("t")
+            if isinstance(timestamp, (int, float)) and time.time() - timestamp / 1000 > 3.0:
+                return None
+            return event
+        return None
+
     def handle_preemption(self, trigger: ThreatTrigger, *, interrupted_name: str) -> dict[str, Any]:
         """Execute full 0-LLM subcortical combat/evasion takeover on the main thread (no tool auto-replay)."""
         self._in_reflex = True
@@ -3346,6 +3351,22 @@ class GenerationGuard:
                 observed_life is not None and observed_life != (st_pre.get("dimension"), st_pre.get("last_death"))
             )
             lava_threat = trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava"))
+            distance = trigger.get("distance")
+            if (
+                not life_unavailable and not lava_threat and not st_pre.get("in_water")
+                and trigger.get("source") == "tool_interrupted_hurt" and trigger.get("primary_type") == "creeper"
+                and isinstance(distance, (int, float)) and distance > 8.5
+            ):
+                hurt = self._fresh_tool_hurt_event(self.bot.call) or {}
+                hurt_source = str(hurt.get("source") or "").strip().lower()
+                if hurt_source in MELEE_HURT_SOURCES:
+                    trigger = {**trigger, "hurt_source": hurt_source}
+                    attacker = hurt.get("source_entity") or hurt.get("likely_attacker")
+                    if isinstance(attacker, dict) and isinstance(attacker.get("id"), int) and attacker.get("name"):
+                        trigger.update(
+                            primary_entity_id=attacker["id"], primary_type=attacker["name"],
+                            primary_pos=attacker.get("pos"), distance=attacker.get("dist"),
+                        )
             hot_floor_trigger = trigger.get("primary_type") == "hot_floor"
             hp_pre = st_pre.get("health")
             check_hot_floor = hot_floor_trigger or (

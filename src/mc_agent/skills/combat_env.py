@@ -3040,12 +3040,29 @@ class SubcorticalInstinctController:
         primary: dict[str, Any] | None = None
         trig_id = trigger.get("primary_entity_id")
         creeper_warning = trigger.get("source") == "pre_hurt_creeper"
+        confirmed_melee_hurt = (
+            trigger.get("source") == "tool_interrupted_hurt"
+            and trigger.get("hurt_source") in {"mob_attack", "player_attack", "spear"}
+        )
+
+        def eligible_attacker(entity: dict[str, Any]) -> bool:
+            return not (
+                confirmed_melee_hurt and _clean_block_name(entity.get("name")) == "creeper"
+                and self._entity_dist(pos, entity) > 8.5
+            )
+
+        attackers = [entity for entity in hostiles if eligible_attacker(entity)]
+        trigger_attacker = {
+            "id": trig_id, "name": trigger.get("primary_type"), "pos": trigger.get("primary_pos"),
+            "dist": trigger.get("distance"),
+        }
+        trigger_is_eligible = eligible_attacker(trigger_attacker)
         nearby_creeper = next((
             e for e in hostiles
             if _clean_block_name(e.get("name")) == "creeper" and self._entity_dist(pos, e) <= 5.5
         ), None)
         if trig_id is not None:
-            primary = next((e for e in hostiles if e.get("id") == trig_id), None)
+            primary = next((e for e in attackers if e.get("id") == trig_id), None)
         if creeper_warning and (primary is None or _clean_block_name(primary.get("name")) != "creeper"):
             # Keep the blast direction if the triggering creeper drops out of the scan.
             primary = nearby_creeper
@@ -3060,16 +3077,19 @@ class SubcorticalInstinctController:
                 }
         elif not creeper_warning and nearby_creeper is not None:
             primary = nearby_creeper
-        if primary is None and hostiles:
-            primary = hostiles[0]
-        if primary is None and nh and nh.get("name"):
+        if primary is None and confirmed_melee_hurt and trigger_is_eligible and trig_id is not None:
+            primary = trigger_attacker
+        if primary is None and attackers:
+            primary = attackers[0]
+        if primary is None and nh and nh.get("name") and eligible_attacker(nh):
             primary = nh
 
-        mob_name = _clean_block_name((primary or {}).get("name") or trigger.get("primary_type") or "")
-        mob_id = (primary or {}).get("id") if isinstance(primary, dict) else trig_id
+        fallback_attacker = trigger_attacker if trigger_is_eligible else {}
+        mob_name = _clean_block_name((primary or {}).get("name") or fallback_attacker.get("name") or "")
+        mob_id = primary.get("id") if primary is not None else fallback_attacker.get("id")
         mob_pos = (primary or {}).get("pos")
         if not mob_pos and (mob_name != "creeper" or mob_id == trig_id):
-            mob_pos = trigger.get("primary_pos")
+            mob_pos = fallback_attacker.get("pos")
         try:
             mob_dist = float((primary or {}).get("dist") or trigger.get("distance") or 99.0)
         except (TypeError, ValueError):
@@ -3466,6 +3486,7 @@ class SubcorticalInstinctController:
                     fl = env.flee(
                         mob_pos, distance=14.0, urgent=True,
                         wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon or hurt_midair,
+                        **({"use_nearest_hostile": False} if not trigger_is_eligible else {}),
                         **({"other_shooters": other_shooters} if other_shooters else {}),
                         **({"other_melee": other_melee} if other_melee else {}),
                     )
