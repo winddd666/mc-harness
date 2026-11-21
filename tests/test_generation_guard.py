@@ -9245,7 +9245,7 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
 
 
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
-@pytest.mark.parametrize("failure", ["timeout", "death"])
+@pytest.mark.parametrize("failure", ["timeout", "death", "failed_respawn"])
 def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
@@ -9267,6 +9267,9 @@ def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monk
                 if failure == "timeout":
                     clock[0] += kwargs["timeout_s"]
                     raise httpx.ReadTimeout("wall dig reached its deadline")
+                if failure == "failed_respawn":
+                    status.update(pos=[-152.5, 71, -382.5], health=20, last_death={"t": 2})
+                    return {"ok": False, "error": {"code": "unsafe_landing"}, "pos_after": status["pos"]}
                 status.update(health=0, ready=False, alive=False)
             return {"ok": True}
 

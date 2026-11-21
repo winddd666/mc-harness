@@ -512,6 +512,7 @@ class GenerationGuard:
         budget_s: float,
         timeout_details: dict[str, Any] | None = None,
         confirm_shore: bool = False,
+        confirm_failed_life: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
         deadline = time.monotonic() + budget_s
@@ -537,9 +538,17 @@ class GenerationGuard:
             skills.bot = recovery_bot
         try:
             result = run(skills)
-            if not result.get("ok") and (result.get("mode") != "flee" or result.get("respawned")):
+            if not result.get("ok") and (
+                result.get("respawned") or (result.get("mode") != "flee" and not confirm_failed_life)
+            ):
                 return result
-            after = recovery_bot.status()
+            if confirm_failed_life and not result.get("ok"):
+                try:
+                    after = recovery_bot.call("status", method="GET", timeout_s=0.6, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    return result
+            else:
+                after = recovery_bot.status()
             if confirm_shore:
                 for _ in range(2):
                     if (
@@ -652,7 +661,10 @@ class GenerationGuard:
         )
 
     def _unstick_in_wall(self, before: dict[str, Any]) -> dict[str, Any]:
-        return self._run_recovery_macro(before, lambda skills: skills.unstick(), budget_s=self.IN_WALL_RECOVERY_BUDGET_S)
+        return self._run_recovery_macro(
+            before, lambda skills: skills.unstick(),
+            budget_s=self.IN_WALL_RECOVERY_BUDGET_S, confirm_failed_life=True,
+        )
 
     def _low_health_burning_after_ranged_hit(self, status: dict[str, Any], now: float) -> bool:
         health = status.get("health")
