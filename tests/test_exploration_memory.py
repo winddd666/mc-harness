@@ -42,7 +42,8 @@ def test_exploration_memory_two_tier_persistence_and_quadrant_summary(tmp_path: 
     assert summary["recommended_directions"][0] not in {"east", "north"}
     assert "southwest" in summary["recommended_directions"] or "south" in summary["recommended_directions"]
     assert len(summary["brief"]) <= 160
-    assert "[探索罗盘(village)]" in summary["brief"]
+    assert "[周边探索(village,以当前位置为原点)]" in summary["brief"]
+    assert "%" not in summary["brief"]
 
 
 def test_direction_novelty_deprioritizes_water_and_void_without_hard_ban(tmp_path: pathlib.Path) -> None:

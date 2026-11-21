@@ -1428,19 +1428,18 @@ class WorldMemory:
         intent: str = "village",
         half_size: int = 1024,
     ) -> dict[str, Any]:
-        """Aggregate Layer-6 64x64 cells into 4 quadrants + intent-based recommendations (~50-70 tokens)."""
+        """Aggregate Layer-6 64x64 cells relative to current `pos` (egocentric radar + push depth)."""
         norm_dim = normalize_dimension(dim)
-        origin = self.spawn_points.get(norm_dim) or [int(pos[0]), int(pos[1]), int(pos[2])]
-        ox, oz = int(origin[0]), int(origin[2])
-        orx = ox >> EXPLORATION_CELL_SHIFT
-        orz = oz >> EXPLORATION_CELL_SHIFT
+        px, pz = float(pos[0]), float(pos[2])
+        rx0 = math.floor(px) >> EXPLORATION_CELL_SHIFT
+        rz0 = math.floor(pz) >> EXPLORATION_CELL_SHIFT
         quad_total_cells = max(1, (max(64, int(half_size)) >> EXPLORATION_CELL_SHIFT) ** 2)
 
         quads: dict[str, dict[str, Any]] = {
-            "NE": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "biomes": {}},
-            "NW": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "biomes": {}},
-            "SE": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "biomes": {}},
-            "SW": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "biomes": {}},
+            "NE": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "max_dist_m": 0, "biomes": {}},
+            "NW": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "max_dist_m": 0, "biomes": {}},
+            "SE": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "max_dist_m": 0, "biomes": {}},
+            "SW": {"cells": 0, "land": 0, "water": 0, "void": 0, "village_eligible": 0, "max_dist_m": 0, "biomes": {}},
         }
         blocked_edges: list[str] = []
         total_cells = 0
@@ -1449,9 +1448,16 @@ class WorldMemory:
             if cdim != norm_dim:
                 continue
             total_cells += 1
-            qname = ("N" if rz < orz else "S") + ("E" if rx >= orx else "W")
+            if rx == rx0 and rz == rz0:
+                continue
+            qname = ("N" if rz < rz0 else "S") + ("E" if rx >= rx0 else "W")
             q = quads[qname]
             q["cells"] += 1
+            cx_m = (rx + 0.5) * (1 << EXPLORATION_CELL_SHIFT)
+            cz_m = (rz + 0.5) * (1 << EXPLORATION_CELL_SHIFT)
+            d_m = int(round(math.hypot(cx_m - px, cz_m - pz) / 10.0) * 10)
+            if d_m > q["max_dist_m"]:
+                q["max_dist_m"] = d_m
             t = cell.get("terrain", "land")
             if t == "void_edge":
                 q["void"] += 1
@@ -1466,8 +1472,6 @@ class WorldMemory:
                 q["biomes"][b] = q["biomes"].get(b, 0) + 1
 
         # Identify blocked immediate directions around current pos
-        rx0 = math.floor(float(pos[0])) >> EXPLORATION_CELL_SHIFT
-        rz0 = math.floor(float(pos[2])) >> EXPLORATION_CELL_SHIFT
         for name, dx, dz in EXPLORATION_DIRS_8:
             c1 = self.exploration_cells.get((norm_dim, rx0 + dx, rz0 + dz))
             if c1 is not None and c1.get("terrain") in {"water", "void_edge"}:
@@ -1477,28 +1481,44 @@ class WorldMemory:
         ranked_dirs = self.unexplored_directions_8(pos, dim=norm_dim, intent=intent)
         recommended = ranked_dirs[:3]
 
+        quad_cn = {"NE": "东北", "NW": "西北", "SE": "东南", "SW": "西南"}
         quad_parts: list[str] = []
+        unexplored_quads: list[str] = []
         quad_stats: dict[str, dict[str, Any]] = {}
         for qname in ("NE", "NW", "SE", "SW"):
             q = quads[qname]
             pct = min(100, round(q["cells"] * 100.0 / quad_total_cells))
             top_b = max(q["biomes"].items(), key=lambda kv: kv[1])[0] if q["biomes"] else ""
-            tag = f"{top_b}" if top_b else ("水" if q["water"] > q["land"] else ("未探" if q["cells"] == 0 else "陆"))
             quad_stats[qname] = {
                 "cells": q["cells"],
                 "coverage_pct": pct,
+                "max_dist_m": q["max_dist_m"],
                 "land": q["land"],
                 "water": q["water"],
                 "void": q["void"],
                 "village_eligible": q["village_eligible"],
                 "top_biome": top_b,
             }
-            quad_parts.append(f"{qname}:{pct}%({tag})")
+            if q["cells"] == 0:
+                unexplored_quads.append(quad_cn[qname])
+                continue
+            tags: list[str] = []
+            if q["void"] > 0:
+                tags.append("碰边")
+            elif q["water"] > 0 and q["water"] >= q["land"]:
+                tags.append("见水")
+            if top_b:
+                tags.append(top_b)
+            elif not tags:
+                tags.append("见水" if q["water"] > 0 else "陆")
+            quad_parts.append(f"{quad_cn[qname]}:已探{q['max_dist_m']}m({'/'.join(tags)})")
 
+        if unexplored_quads:
+            quad_parts.append(f"{'/'.join(unexplored_quads)}:未探")
         blocked_str = f" | 已阻={','.join(blocked_edges[:3])}" if blocked_edges else ""
         brief = (
-            f"[探索罗盘({intent})] 已探{total_cells}格 "
-            f"{' '.join(quad_parts)} | 推荐方向={'/' .join(recommended)}{blocked_str}"
+            f"[周边探索({intent},以当前位置为原点)] "
+            f"{' '.join(quad_parts)} | 推荐方向={'/'.join(recommended)}{blocked_str}"
         )
         return {
             "dim": norm_dim,
