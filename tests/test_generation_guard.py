@@ -4260,6 +4260,38 @@ def test_explicit_food_use_reuses_eating_safety_check(item, shooter_distance, al
         assert uses == []
 
 
+def test_boundary_does_not_eat_while_still_taking_contact_fire_damage(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    uses = []
+    status = {
+        "pos": [-393.2, 55, -1890.5], "health": 10.08, "food": 19, "dimension": "the_nether",
+        "on_ground": True, "on_fire": True, "alive": True, "ready": True,
+    }
+
+    class FireBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [] if kwargs["params"]["since"] else [
+                    {"seq": 1, "type": "hurt", "source": "in_fire"},
+                ]}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 1}]}
+            if action == "use_item":
+                uses.append(body)
+                status["food"] = 20
+            return {"ok": True}
+
+    guard = GenerationGuard(FireBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    assert guard.stabilize_after_tools() is None
+    assert uses == []
+    clock[0] += 2.0
+    assert "进食" in guard.stabilize_after_tools()
+    assert uses == [{"item": "cooked_beef"}]
+
+
 def test_r21_preempted_lava_death_reports_respawned_not_escaped():
     """Reproduces r21_short hy4_hy_8_nether: lava preemption ending in death/respawn must NOT claim '已中断原工具并脱困'."""
     dead_lava_state = {"calls": 0}

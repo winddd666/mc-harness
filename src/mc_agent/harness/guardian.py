@@ -295,6 +295,7 @@ class GenerationGuard:
         self._last_ranged_hurt_at = float("-inf")
         self._last_melee_hurt_at = float("-inf")
         self._last_lava_hurt_at = float("-inf")
+        self._last_fire_contact_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
@@ -660,6 +661,7 @@ class GenerationGuard:
                     self._last_ranged_hurt_at = float("-inf")
                     self._last_melee_hurt_at = float("-inf")
                     self._last_lava_hurt_at = float("-inf")
+                    self._last_fire_contact_at = float("-inf")
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     source = str(event.get("source") or "").strip().lower()
@@ -670,6 +672,8 @@ class GenerationGuard:
                         self._last_melee_hurt_at = now
                     elif source in LAVA_HURT_SOURCES:
                         self._last_lava_hurt_at = now
+                    elif source == "in_fire":
+                        self._last_fire_contact_at = now
         return fresh
 
     @staticmethod
@@ -804,6 +808,9 @@ class GenerationGuard:
         """Return False when mid-air, in fluid, or exposed within melee or ranged threat range."""
         if status.get("in_lava") or status.get("in_water") or status.get("on_ground") is False:
             return False
+        now = time.monotonic()
+        if status.get("on_fire") and now - self._last_fire_contact_at < 1.25:
+            return False
         nh_name, nh_dist, _, _ = self._extract_hostile_info(status)
         if nh_name and nh_dist <= min_dist:
             return False
@@ -812,7 +819,6 @@ class GenerationGuard:
             # In-flight projectiles can still reach a critical-health bot just beyond that range.
             ranged_min_dist = max(ranged_min_dist, 20.0)
         ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
-        now = time.monotonic()
         recent_ranged_hit = now - self._last_ranged_hurt_at < 8.0
         protecting_against_recent_hit = status.get("blocking") and (
             recent_ranged_hit or now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
