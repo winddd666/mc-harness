@@ -281,6 +281,8 @@ RECRAFT_PICK_DURABILITY = 100
 MAX_IDLE_ITERATIONS = 4
 # Also bail when a whole stretch of wall clock passes with zero progress (slow APIs).
 MAX_IDLE_SECONDS = 20.0
+# Keep a stalled first dig cooling through a second failed turn and dispatch between calls.
+FIRST_DIG_TIMEOUT_COOLDOWN_S = 45.0
 # Three consecutive fluid/hazard aborts on one shaft means an aquifer/cave field: relocate.
 FLUID_ABORT_LIMIT = 3
 # Three consecutive "ok but nothing happened" calls mean the shaft is a dead end.
@@ -906,6 +908,10 @@ def _is_two_step_stair(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool
     return abs(a[1] - b[1]) == 2 and (abs(a[0] - b[0]), abs(a[2] - b[2])) in {(2, 0), (0, 2)}
 
 
+def _is_two_block_vertical_gap(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool:
+    return a[0] == b[0] and a[2] == b[2] and abs(a[1] - b[1]) == 2
+
+
 def _descent_start_beside_anchor(
     start: tuple[int, int, int], anchor: tuple[int, int, int], direction: str,
 ) -> bool:
@@ -933,7 +939,7 @@ def _omitted_waypoint_index(
 ) -> int | None:
     for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1):
         if edge_kind in {"stair_down", "stair_up"}:
-            if abs(a[1] - pos[1]) != 1 or not _is_two_step_stair(a, b):
+            if abs(a[1] - pos[1]) != 1 or not (_is_two_step_stair(a, b) or _is_two_block_vertical_gap(a, b)):
                 continue
         elif edge_kind in {"spine_forward", "branch_leaf", "offset_sidestep"}:
             # Level excavation saves every third step. Only expand short,
@@ -1934,12 +1940,14 @@ class MiningDFSEngine:
             hops = _interpolate_cells(cur, wp)
             if len(hops) > 1:
                 # A straight stair can omit the middle step from its waypoint list.
-                recorded_stair = index > 0 and cur == ordered[index - 1] and _is_two_step_stair(cur, wp)
+                recorded_segment = index > 0 and cur == ordered[index - 1]
+                recorded_stair = recorded_segment and _is_two_step_stair(cur, wp)
+                recorded_drop = recorded_segment and _is_two_block_vertical_gap(cur, wp)
                 stepped_all = True
                 for previous, hop in zip(hops, hops[1:]):
                     if deadline is not None and time.monotonic() >= deadline:
                         return False, "walk_time_slice"
-                    if hop == wp and previous == (hop[0], hop[1] - 1, hop[2]):
+                    if (hop == wp or recorded_drop) and previous == (hop[0], hop[1] - 1, hop[2]):
                         if self._pillar_to_recorded_step(hop, deadline=deadline):
                             continue
                     if not self._step_to(hop, from_cell=previous, repair_support=(hop == wp or recorded_stair)):
@@ -2037,6 +2045,25 @@ class MiningDFSEngine:
                 return True
         return False
 
+    def _nearby_node_without_ascent(
+        self, pos: tuple[int, int, int], goal_id: int,
+    ) -> ShaftNode | None:
+        candidates = sorted(self.nodes.values(), key=lambda node: math.dist(pos, node.anchor))
+        for candidate in candidates:
+            if math.dist(pos, candidate.anchor) > NODE_REJOIN_DISTANCE:
+                break
+            if candidate.anchor[1] > pos[1]:
+                continue
+            if candidate.node_id == goal_id:
+                return candidate
+            route = self._find_node_path(candidate.node_id, goal_id)
+            if route and all(
+                points and self.nodes[dest_id].anchor[1] <= pos[1] and all(pt[1] <= pos[1] for pt in points)
+                for points, _, dest_id in route
+            ):
+                return candidate
+        return None
+
     def _navigate_to_node(
         self,
         goal_node_id: int,
@@ -2132,7 +2159,15 @@ class MiningDFSEngine:
                 if d < best_near_d:
                     best_near_d = d
                     best_near_id = nid
-            if best_near_id is not None and best_near_d <= NODE_REJOIN_DISTANCE and (
+            lower_join = None
+            if (
+                best_near_id is not None
+                and self.nodes[best_near_id].anchor[1] > cur_pos[1] >= self.nodes[goal_node_id].anchor[1]
+            ):
+                lower_join = self._nearby_node_without_ascent(cur_pos, goal_node_id)
+            if lower_join is not None and self._move_exact(lower_join.anchor):
+                self.active_node_id = lower_join.node_id
+            elif best_near_id is not None and best_near_d <= NODE_REJOIN_DISTANCE and (
                 best_near_id == self.collar_node_id or best_near_d <= math.dist(cur_pos, anchor_now)
             ):
                 anchor = self.nodes[best_near_id].anchor
@@ -2214,14 +2249,17 @@ class MiningDFSEngine:
 
     def _resume_deepest_branch(
         self, node: ShaftNode, *, min_hp_ref: list[float], descendants_only: bool = False,
-        max_y: int | None = None,
+        max_y: int | None = None, blocked_branches: set[int] | None = None,
     ) -> bool:
         ceiling = node.anchor[1] if max_y is None else min(max_y, node.anchor[1])
         candidates = []
         for candidate in self.nodes.values():
             if candidate.node_id == node.node_id or candidate.anchor[1] > ceiling:
                 continue
-            if not any(branch.status == "pending" for branch in candidate.branches):
+            if not any(
+                branch.status == "pending" and (blocked_branches is None or id(branch) not in blocked_branches)
+                for branch in candidate.branches
+            ):
                 continue
             if descendants_only:
                 route = self._find_node_path(node.node_id, candidate.node_id)
@@ -5197,8 +5235,25 @@ class MiningDFSEngine:
             if len(verified_route) < len(route):
                 if not verified_route:
                     return True
+                status = scoped.last_status
+                if deadline_failure is not None and status.get("on_ground") and not (
+                    status.get("in_water") or status.get("in_lava")
+                    or status.get("alive") is False or status.get("ready") is False
+                ):
+                    # A pickup or a jump can briefly take the bot off its new stair.
+                    # Only skip those observations if every step to the final stance is known.
+                    dx, dz = DIRECTIONS[branch.direction]
+                    connected = [node.anchor]
+                    for pt in route[1:]:
+                        x, y, z = connected[-1]
+                        if pt == (x + dx, y - 1, z + dz) and pt in self.known_corridor_positions:
+                            connected.append(pt)
+                    if connected[-1] == route[-1] and connected[-1][1] < verified_route[-1][1]:
+                        verified_route = connected
                 route = verified_route
                 steps_taken = node.anchor[1] - route[-1][1]
+        elif branch.kind != "stair_up" and any(pt[1] != node.anchor[1] for pt in route):
+            return True
         if steps_taken <= 0 or route[-1] == node.anchor:
             return True
         if deadline_failure is None:
@@ -5220,6 +5275,15 @@ class MiningDFSEngine:
     def _record_partial_branch(
         self, node: ShaftNode, branch: BranchSpec, route: list[tuple[int, int, int]], steps_taken: int,
     ) -> None:
+        if branch.kind == "offset_retry":
+            direction = branch.sidestep_dir or LEFT_RIGHT_DIRS[branch.direction][0]
+            dx, dz = DIRECTIONS[direction]
+            x, y, z = node.anchor
+            if 2 <= steps_taken <= OFFSET_RETRY_STEPS and all(
+                pt == (x + step * dx, y, z + step * dz) for step, pt in enumerate(route)
+            ):
+                self._record_offset_branch(node, branch, route, direction)
+            return
         branch.status = "completed"
         self._create_node(
             kind="switchback" if branch.kind.startswith("stair") else "spine",
@@ -5228,6 +5292,21 @@ class MiningDFSEngine:
             branches=[dataclasses.replace(
                 branch, status="pending", completed_waypoints=[],
                 steps=max(1, branch.steps - steps_taken),
+            )],
+        )
+
+    def _record_offset_branch(
+        self, node: ShaftNode, branch: BranchSpec, route: list[tuple[int, int, int]], direction: str,
+    ) -> ShaftNode:
+        resume_kind = branch.resume_kind or "stair_down"
+        branch.status = "completed"
+        return self._create_node(
+            kind="spine" if resume_kind == "spine_forward" else "switchback",
+            anchor=route[-1], parent_id=node.node_id,
+            edge_from_parent=ShaftEdge("offset_sidestep", direction, list(route)),
+            branches=[BranchSpec(
+                kind=resume_kind, direction=branch.direction, steps=branch.steps,
+                offset_tried=True, branch_target_y=branch.branch_target_y,
             )],
         )
 
@@ -5273,7 +5352,7 @@ class MiningDFSEngine:
                 scoped.timeout_dig_pos is not None and scoped.timeout_dig_read_s >= 1.0
                 and not scoped.dug_count
             ):
-                self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", 30.0)
+                self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", FIRST_DIG_TIMEOUT_COOLDOWN_S)
             self._preserve_interrupted_branch(scoped, deadline_failure=exc)
             self._archive_current_shaft_to_ledger(mark_exhausted=False)
             result: dict[str, Any] = {
@@ -5311,7 +5390,19 @@ class MiningDFSEngine:
                         message="镐耐久不足，回井口补给途中达到时间上限。请继续 action='return_collar'，补好镐后再 explore。",
                     )
                 else:
-                    if moved or scoped.dug_count or gained:
+                    made_progress = bool(moved or scoped.dug_count or gained)
+                    if (
+                        scoped.timeout_dig_pos is not None and scoped.timeout_dig_read_s >= 1.0
+                        and not (scoped.dug_count or gained)
+                        and len(self.nodes) == 1 and self.collar_node_id in self.nodes
+                        and scoped.first_pos and result["pos_after"]
+                        and _floor_pos(scoped.first_pos) == _floor_pos(result["pos_after"])
+                    ):
+                        # A timed-out first dig bypasses the normal end-of-slice idle check.
+                        self.idle_calls += 1
+                    elif made_progress:
+                        self.idle_calls = 0
+                    if made_progress:
                         result.update(
                             ok=True,
                             requires_replan=False,
@@ -5829,7 +5920,10 @@ class MiningDFSEngine:
                     ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref, max_y=cur_pos[1])
                 else:
                     ok_nav, err_nav = self._resume_shaft_tip(active.node_id, min_hp_ref=min_hp_ref)
-                    if not ok_nav and active.kind == "switchback" and err_nav not in {"hurt", "not_ready", "not_grounded"}:
+                    if (
+                        not ok_nav and active.kind in {"switchback", "spine"}
+                        and err_nav not in {"hurt", "not_ready", "not_grounded"}
+                    ):
                         ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref)
                 if not ok_nav:
                     if resume_at_depth:
@@ -6046,9 +6140,19 @@ class MiningDFSEngine:
                 stop_reason = "quota_reached"
                 break
 
+            edge = node.edge_from_parent
+            if (
+                node.kind == "spine" and edge is not None and not self.radar_enabled
+                and node.anchor[1] - self.target_y > SPINE_DESCEND_MIN_DELTA
+                and not any(b.kind == "stair_down" and b.branch_target_y == self.target_y for b in node.branches)
+            ):
+                # An existing spine can still have the branch plan from its old target layer.
+                plan = self._spine_branches(edge.direction, node.anchor, geofence)
+                if plan and plan[0].kind == "stair_down":
+                    node.branches.insert(0, plan[0])
+
             next_branch = next((b for b in node.branches if b.status == "pending" and id(b) not in blocked_branches), None)
             if next_branch is None:
-                edge = node.edge_from_parent
                 descending = (
                     edge is not None and node.kind == "switchback" and node.anchor[1] > self.target_y + SCAN_BAND
                 )
@@ -6064,6 +6168,10 @@ class MiningDFSEngine:
                         node.branches.extend(alternatives)
                         continue
                 if any(b.status == "pending" for b in node.branches):
+                    if node.kind == "spine" and self._resume_deepest_branch(
+                        node, min_hp_ref=min_hp_ref, blocked_branches=blocked_branches,
+                    ):
+                        continue
                     stop_reason = "dig_cell_avoided"
                     break
                 spine_blocked = any(b.kind == "spine_forward" and b.status == "pruned" for b in node.branches)
@@ -6161,13 +6269,20 @@ class MiningDFSEngine:
                 continue
 
             branch_kind = next_branch.kind
+            is_level = branch_kind not in {"stair_down", "stair_up"}
             if branch_kind == "offset_retry":
                 lat_dir = next_branch.sidestep_dir or LEFT_RIGHT_DIRS[next_branch.direction][0]
                 if self._offset_cuts_incoming_stair(node, lat_dir):
                     next_branch.status = "pruned"
                     next_branch.prune_reason = "stair_support"
                     continue
-                resume_k = next_branch.resume_kind or "stair_down"
+            if is_level:
+                stance = _floor_pos(self.bot.status()["pos"])
+                if stance[1] != node.anchor[1] or (branch_kind == "offset_retry" and stance != node.anchor):
+                    reached, reason = self._resume_shaft_tip(node.node_id, min_hp_ref=min_hp_ref)
+                    if not reached:
+                        stop_reason = reason or "movement_not_confirmed"
+                        break
             next_branch.status = "active"
             if branch_kind in {"stair_down", "stair_up"}:
                 is_up = branch_kind == "stair_up"
@@ -6203,6 +6318,11 @@ class MiningDFSEngine:
             catch_placed += int(edge_res["catch_placed"])
             deferred_added += int(edge_res["deferred_added"])
             mined_ores.extend(edge_res["mined_ores"])
+            if is_level and any(pt[1] != node.anchor[1] for pt in edge_res["waypoints"]):
+                # A sidestep or level corridor cannot connect nodes on different floors.
+                next_branch.status = "pending"
+                stop_reason = er if er in {"hurt", "not_ready", "pickaxe_low"} else "movement_not_confirmed"
+                break
             if er == "dig_cell_avoided":
                 if steps_done == 0:
                     next_branch.status = "pending"
@@ -6217,22 +6337,7 @@ class MiningDFSEngine:
                 if er == "quota_reached":
                     next_branch.status = "completed"
                     if steps_done >= 1:
-                        end_anchor_o = tuple(edge_res["end_anchor"])
-                        self._create_node(
-                            kind="spine" if resume_k == "spine_forward" else "switchback",
-                            anchor=end_anchor_o,
-                            parent_id=node.node_id,
-                            edge_from_parent=ShaftEdge("offset_sidestep", lat_dir, edge_res["waypoints"]),
-                            branches=[
-                                BranchSpec(
-                                    kind=resume_k,
-                                    direction=next_branch.direction,
-                                    steps=next_branch.steps,
-                                    offset_tried=True,
-                                    branch_target_y=next_branch.branch_target_y,
-                                )
-                            ],
-                        )
+                        self._record_offset_branch(node, next_branch, edge_res["waypoints"], lat_dir)
                     stop_reason = "quota_reached"
                     break
                 if er in {"hurt", "not_ready", "pickaxe_low"}:
@@ -6245,25 +6350,7 @@ class MiningDFSEngine:
                     stop_reason = "time_slice_progress"
                     break
                 if steps_done >= 2:
-                    next_branch.status = "completed"
-                    end_anchor = tuple(edge_res["end_anchor"])
-                    retry_branches = [
-                        BranchSpec(
-                            kind=resume_k,
-                            direction=next_branch.direction,
-                            steps=next_branch.steps,
-                            offset_tried=True,
-                            branch_target_y=next_branch.branch_target_y,
-                        )
-                    ]
-                    child_kind = "spine" if resume_k == "spine_forward" else "switchback"
-                    sh_node = self._create_node(
-                        kind=child_kind,
-                        anchor=end_anchor,
-                        parent_id=node.node_id,
-                        edge_from_parent=ShaftEdge("offset_sidestep", lat_dir, edge_res["waypoints"]),
-                        branches=retry_branches,
-                    )
+                    sh_node = self._record_offset_branch(node, next_branch, edge_res["waypoints"], lat_dir)
                     self._maybe_place_torch_at_node(sh_node)
                     if er == "time_slice":
                         stop_reason = "time_slice_progress"
