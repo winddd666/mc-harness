@@ -3288,6 +3288,49 @@ def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypat
     assert looks == ([{"entity_id": 78}] if should_face else [])
 
 
+@pytest.mark.parametrize("distance", [2.2, 5.0])
+def test_poll_raises_main_hand_shield_when_cornered_by_nether_melee(monkeypatch, distance):
+    attacker = {"id": 77, "name": "wither_skeleton", "dist": distance, "pos": [-417.8 + distance, 53, -1880.3]}
+    status = {
+        "pos": [-417.8, 53, -1880.3], "dimension": "the_nether", "health": 2.48,
+        "ready": True, "alive": True, "on_ground": True, "blocking": False, "food": 20,
+        "nearest_hostile": attacker,
+    }
+    shield = {"name": "shield", "count": 1}
+    commands = []
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": attacker}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [shield, {"name": "iron_sword", "count": 1}], "held": shield, "offhand": None}
+            commands.append((action, body))
+            return {"ok": True}
+
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", lambda *args, **kwargs: {
+        "ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0,
+    })
+
+    incident = guard.poll()
+
+    actions = ["combat_or_flee"]
+    if distance <= 3.5:
+        actions += ["equip_shield", "face_attacker", "raise_shield"]
+        assert commands == [
+            ("equip", {"item": "shield", "slot": "off-hand"}),
+            ("look", {"entity_id": 77}),
+            ("posture", {"shield": True, "jump": False, "sneak": False}),
+        ]
+    else:
+        assert commands == []
+    assert [action["action"] for action in incident["actions"]] == actions
+
+
 @pytest.mark.parametrize("nearby", [False, True])
 def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatch, nearby):
     attacker = {"id": 77, "name": "spider", "dist": 3.1, "pos": [5003.5, 39, -7590.8]}

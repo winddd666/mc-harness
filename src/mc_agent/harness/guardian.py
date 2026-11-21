@@ -1855,15 +1855,24 @@ class GenerationGuard:
                         else:
                             self._consecutive_flees = 0
                     cf_result = (cf or {}).get("result") or {}
-                    face_after_melee_retreat = (
+                    nether_melee_retreat = (
                         str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
-                        and already_blocking and cf_result.get("mode") == "flee"
+                        and cf_result.get("mode") == "flee"
+                    )
+                    face_after_melee_retreat = (
+                        nether_melee_retreat and already_blocking
                         and cf_result.get("reason") in {None, "no_safe_retreat", "unsafe_landing"}
+                    )
+                    shield_when_cornered = (
+                        nether_melee_retreat and has_shield and not already_blocking
+                        and cf_result.get("reason") == "no_safe_retreat"
                     )
                     follow_unarmed_retreat = (
                         not has_shield and not has_melee_weapon and cf and cf.get("ok") and cf_result.get("mode") == "flee"
                     )
-                    if hurt_src in MELEE_HURT_SOURCES and (face_after_melee_retreat or follow_unarmed_retreat):
+                    if hurt_src in MELEE_HURT_SOURCES and (
+                        face_after_melee_retreat or shield_when_cornered or follow_unarmed_retreat
+                    ):
                         try:
                             landing = self.bot.call("status", method="GET", timeout_s=0.6)
                         except (ApiError, httpx.HTTPError):
@@ -1884,6 +1893,10 @@ class GenerationGuard:
                                     "face_attacker_after_retreat",
                                     lambda: self.bot.call("look", {"entity_id": target_id}, timeout_s=0.9),
                                 ))
+                            elif shield_when_cornered:
+                                self._equip_and_raise_shield_for_water(
+                                    landing, actions, inv=inv, attacker={"id": target_id},
+                                )
                             elif follow_unarmed_retreat and landing.get("pos"):
                                 if target_pos is None:
                                     target_pos = self._find_hostile_position(target_id, mob, timeout_s=0.6)
