@@ -4496,8 +4496,10 @@ def test_explicit_food_use_reuses_eating_safety_check(item, shooter_distance, al
         assert uses == []
 
 
+@pytest.mark.parametrize("recent_reaction", [False, True])
 @pytest.mark.parametrize("foot_block, clears", [("fire", True), ("soul_fire", False), ("netherrack", False)])
-def test_contact_fire_only_digs_a_live_flame_at_the_feet(foot_block, clears):
+def test_contact_fire_only_digs_a_live_flame_at_the_feet(monkeypatch, foot_block, clears, recent_reaction):
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
     blocks = {(-419, 52, -1881): foot_block}
     digs = []
 
@@ -4523,7 +4525,10 @@ def test_contact_fire_only_digs_a_live_flame_at_the_feet(foot_block, clears):
             return {"ok": True}
 
     guard = GenerationGuard(FireBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    if recent_reaction:
+        guard.last_reaction = 999.0
     incident = guard.poll()
+    assert incident is not None
     clear, = incident["actions"]
     assert clear["action"] == "clear_contact_fire" and clear["ok"] is clears
     assert digs == ([] if foot_block == "netherrack" else [[-419, 52, -1881]])

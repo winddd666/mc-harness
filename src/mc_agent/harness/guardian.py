@@ -1267,7 +1267,7 @@ class GenerationGuard:
             self._consecutive_flees = 0
             self._shield_only_streak = 0
             return None
-        if now - self.last_reaction < 3.0 and not (critical_override or pending_ready_eat):
+        if now - self.last_reaction < 3.0 and not (critical_override or pending_ready_eat or can_clear_fire):
             return None
 
         actions: list[dict[str, Any]] = []
