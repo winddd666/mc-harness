@@ -2704,6 +2704,20 @@ class SubcorticalInstinctController:
                 if not seal.get("ok"):
                     fl = env.flee(mob_pos, distance=12.0, urgent=True, allow_shaft_seal=False)
                     actions.append({"action": "flee", "ok": bool(fl.get("ok"))})
+                    if has_shield and not fl.get("respawned"):
+                        landing = env._safe_status({"ready": False})
+                        nearest = landing.get("nearest_hostile")
+                        if (
+                            isinstance(nearest, dict) and isinstance(nearest.get("id"), int)
+                            and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
+                            and self._entity_dist(landing.get("pos"), nearest) <= 3.5
+                            and landing.get("ready") is not False and landing.get("alive") is not False
+                            and not landing.get("in_water") and not landing.get("in_lava")
+                            and landing.get("last_death") == st.get("last_death")
+                            and landing.get("dimension") == st.get("dimension")
+                        ):
+                            latched_guard = self._latch_shield_at_threat(env, nearest["id"])
+                            actions.append({"action": "guard_melee_after_retreat", "ok": latched_guard, "entity_id": nearest["id"]})
             elif (
                 mob_name in RANGED_MOBS
                 and mob_name != "blaze"
