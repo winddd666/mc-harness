@@ -2697,14 +2697,15 @@ class SubcorticalInstinctController:
         primary: dict[str, Any] | None = None
         trig_id = trigger.get("primary_entity_id")
         creeper_warning = trigger.get("source") == "pre_hurt_creeper"
+        nearby_creeper = next((
+            e for e in hostiles
+            if _clean_block_name(e.get("name")) == "creeper" and self._entity_dist(pos, e) <= 5.5
+        ), None)
         if trig_id is not None:
             primary = next((e for e in hostiles if e.get("id") == trig_id), None)
         if creeper_warning and (primary is None or _clean_block_name(primary.get("name")) != "creeper"):
             # Keep the blast direction if the triggering creeper drops out of the scan.
-            primary = next((
-                e for e in hostiles
-                if _clean_block_name(e.get("name")) == "creeper" and self._entity_dist(pos, e) <= 5.5
-            ), None)
+            primary = nearby_creeper
             if (
                 primary is None and nh and _clean_block_name(nh.get("name")) == "creeper"
                 and (nh.get("id") == trig_id or self._entity_dist(pos, nh) <= 5.5)
@@ -2714,6 +2715,8 @@ class SubcorticalInstinctController:
                 primary = {
                     "id": trig_id, "name": "creeper", "pos": trigger.get("primary_pos"), "dist": trigger.get("distance"),
                 }
+        elif not creeper_warning and nearby_creeper is not None:
+            primary = nearby_creeper
         if primary is None and hostiles:
             primary = hostiles[0]
         if primary is None and nh and nh.get("name"):
@@ -2721,16 +2724,15 @@ class SubcorticalInstinctController:
 
         mob_name = _clean_block_name((primary or {}).get("name") or trigger.get("primary_type") or "")
         mob_id = (primary or {}).get("id") if isinstance(primary, dict) else trig_id
-        mob_pos = (primary or {}).get("pos") or trigger.get("primary_pos")
+        mob_pos = (primary or {}).get("pos")
+        if not mob_pos and (mob_name != "creeper" or mob_id == trig_id):
+            mob_pos = trigger.get("primary_pos")
         try:
             mob_dist = float((primary or {}).get("dist") or trigger.get("distance") or 99.0)
         except (TypeError, ValueError):
             mob_dist = 99.0
 
-        any_creeper_close = mob_name == "creeper" or any(
-            _clean_block_name(e.get("name")) == "creeper" and float(e.get("dist", 99.0)) <= 5.5
-            for e in hostiles
-        )
+        any_creeper_close = mob_name == "creeper"
         # Count close-range engaged hostiles (<=8.5m) for swarm/solo gates so mobs outside enclosed
         # walls (`10..16m`) never trick a sword+shield bot into pure circle-fleeing inside a room.
         nearby_hostiles = [e for e in hostiles if float(e.get("dist", 99.0)) <= 8.5]
@@ -2772,11 +2774,8 @@ class SubcorticalInstinctController:
         elif any_creeper_close or creeper_warning:
             mode = "creeper_evade"
             self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
-            creeper_ent = primary if creeper_warning else next(
-                (e for e in hostiles if _clean_block_name(e.get("name")) == "creeper"),
-                primary,
-            )
-            c_pos = (creeper_ent or {}).get("pos") or mob_pos
+            creeper_ent = primary
+            c_pos = mob_pos
             snap = env.arena_snapshot(pos)
             sealed_ok = False
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
@@ -2807,6 +2806,7 @@ class SubcorticalInstinctController:
                         pass
                 flee_res = env.flee(
                     c_pos, distance=11.5, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
+                    **({"use_nearest_hostile": False} if not c_pos else {}),
                 )
                 st_chk = env._safe_status({**st, "ready": False})
                 post_h = self._find_live_hostiles(env, radius=8)

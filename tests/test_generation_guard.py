@@ -6096,6 +6096,49 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert len(pulses) == len(actions) == 1
 
 
+def test_melee_warning_faces_nearby_creeper_before_raising_shield(monkeypatch):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    zombie = {"id": 11, "name": "zombie", "pos": [1.9, 64, 0.5], "dist": 1.4}
+    creeper = {"id": 12, "name": "creeper", "pos": [-2.8, 64, 0.5], "dist": 3.3}
+    status = {
+        "pos": [0.5, 64, 0.5], "health": 16, "food": 20, "ready": True, "alive": True,
+        "on_ground": True, "blocking": False, "nearest_hostile": zombie,
+    }
+    hostiles = [zombie, creeper]
+    faced = []
+
+    class CaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": hostiles}
+            if action == "look":
+                faced.append(body["entity_id"])
+            return {"ok": True}
+
+    env = CombatEnv(CaveBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open"})
+
+    def flee(pos, **_kwargs):
+        assert pos == creeper["pos"]
+        hostiles.clear()
+        return {"ok": True, "moved_dist": 6.0}
+
+    monkeypatch.setattr(env, "flee", flee)
+    result = SubcorticalInstinctController().on_encounter(env, {
+        "source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": zombie["id"],
+        "primary_pos": zombie["pos"], "distance": 1.4,
+    })
+
+    assert result["mode"] == "creeper_evade"
+    assert faced and set(faced) == {creeper["id"]}
+
+
 @pytest.mark.parametrize("creeper_in_status", [False, True])
 def test_creeper_warning_uses_a_creeper_position_when_scan_only_finds_other_mobs(monkeypatch, creeper_in_status):
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
