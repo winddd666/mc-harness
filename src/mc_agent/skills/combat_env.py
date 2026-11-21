@@ -1497,7 +1497,8 @@ class CombatEnv:
                     stalled_pos, stalled_yaw, stalled_dim, stalled_at = stalled_swim
                     if (
                         stalled_dim == dim0 and time.monotonic() - stalled_at < 15.0
-                        and math.dist(pos0[:3], stalled_pos) <= 1.25
+                        and abs(pos0[1] - stalled_pos[1]) <= 2.0
+                        and math.hypot(pos0[0] - stalled_pos[0], pos0[2] - stalled_pos[2]) <= 1.25
                         and abs(math.remainder(base_yaw - stalled_yaw, math.tau)) <= math.radians(15)
                     ):
                         tried_yaws = []

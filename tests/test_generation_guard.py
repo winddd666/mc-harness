@@ -4122,7 +4122,8 @@ def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch, transpo
 
 
 @pytest.mark.parametrize("west_blocked", [False, True])
-def test_lava_escape_changes_unverified_swim_heading_after_stalling(monkeypatch, west_blocked):
+@pytest.mark.parametrize("height_change", [0, 1.6])
+def test_lava_escape_changes_unverified_swim_heading_after_stalling(monkeypatch, west_blocked, height_change):
     from mc_agent.skills.combat_env import CombatEnv
 
     clock = [1000.0]
@@ -4141,7 +4142,7 @@ def test_lava_escape_changes_unverified_swim_heading_after_stalling(monkeypatch,
             if action == "inventory":
                 return {"items": []}
             if action == "get_block":
-                return {"name": "lava" if body["pos"][1] <= 67 else "air"}
+                return {"name": "lava" if body["pos"][1] <= math.floor(status["pos"][1]) else "air"}
             if action == "find_blocks":
                 return {"blocks": []}
             if action == "look":
@@ -4157,6 +4158,7 @@ def test_lava_escape_changes_unverified_swim_heading_after_stalling(monkeypatch,
     if west_blocked:
         monkeypatch.setattr(env, "_point_allowed", lambda x, _z, **_kwargs: x >= 3184.7)
     assert env.escape_lava()["in_lava"] is True
+    status["pos"] = [3184.7, 67.2 + height_change, -2048.3]
     clock[0] += 3.0
     escaped = env.escape_lava()
 
