@@ -1191,6 +1191,54 @@ def test_bug077_prime_ages_deaths_and_retains_recent_live_deaths(monkeypatch):
     assert bot.recent_deaths_in_window() == [1010.0, 1019.0]
 
 
+@pytest.mark.parametrize("new_risk", ["closer", "different_target", "new_hurt"])
+def test_bug_009_stationary_failed_creeper_retreat_only_cancels_again_on_change(monkeypatch, new_risk):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    creeper = {"id": 4547388, "name": "creeper", "dist": 2.9, "pos": [2975.5, 53, -10040.3]}
+    status = {
+        "pos": [2975.5, 53, -10037.4], "health": 20, "food": 20, "dimension": "overworld",
+        "on_ground": True, "alive": True, "ready": True, "blocking": False, "nearest_hostile": creeper,
+    }
+    hits = []
+    attempts = []
+
+    class CreeperBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(CreeperBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def cornered(_env, trigger):
+        attempts.append(trigger["primary_entity_id"])
+        if len(attempts) == 3 and new_risk == "new_hurt":
+            hits.append({"type": "hurt", "seq": 1, "source": "arrow"})
+        return {"handled": True, "mode": "creeper_evade", "actions": [
+            {"action": "retreat_from_creeper", "ok": False, "moved": 0.0, "reason": "no_safe_retreat"},
+        ]}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", cornered)
+    assert guard.poll()["requires_replan"] is True
+
+    clock[0] += 15.0
+    second = guard.poll()
+    assert second["reasons"] == ["pre_hurt_creeper"] and second["requires_replan"] is False
+
+    clock[0] += 6.0 if new_risk == "closer" else 15.5
+    if new_risk == "closer":
+        creeper["dist"] = 2.25
+    elif new_risk == "different_target":
+        creeper["id"] += 1
+    assert guard.poll()["requires_replan"] is True
+    assert len(attempts) == 3
+
+
 def test_bug_009_pre_hurt_same_target_debounce_cancels_once(monkeypatch):
     """BUG-009: Consecutive pre_hurt_* triggers from the same target within 3s must cancel only once."""
     clock = [500.0]

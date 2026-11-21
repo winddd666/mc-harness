@@ -292,6 +292,7 @@ class GenerationGuard:
         self._pre_hurt_suppress_block: tuple[int, int, int] | None = None
         self._pre_hurt_suppress_until: float = float("-inf")
         self._pre_hurt_target_cooldown: dict[str, float] = {}
+        self._last_cornered_creeper: tuple[int, tuple[float, ...], float, float] | None = None
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
         self._last_ranged_hurt_at = float("-inf")
@@ -686,8 +687,10 @@ class GenerationGuard:
                     self._last_melee_hurt_at = float("-inf")
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
+                    self._last_cornered_creeper = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
+                    self._last_cornered_creeper = None
                     source = str(event.get("source") or "").strip().lower()
                     if source in RANGED_HURT_SOURCES:
                         self._last_ranged_hurt_at = now
@@ -2009,9 +2012,11 @@ class GenerationGuard:
             if "death_or_connection_changed" not in reasons:
                 reasons.append("death_or_connection_changed")
             replan = True
+        post_events_verified = False
         if actions:
             try:
                 post_fresh = self._drain_events_pages()
+                post_events_verified = True
             except (ApiError, httpx.HTTPError):
                 post_fresh = []
             if post_fresh:
@@ -2020,7 +2025,51 @@ class GenerationGuard:
                     if "death_or_connection_changed" not in reasons:
                         reasons.append("death_or_connection_changed")
                     replan = True
+        if (
+            reasons == ["pre_hurt_creeper"] and pre_trigger is not None and post_events_verified
+            and not any(e.get("type") == "hurt" for e in fresh)
+            and self._repeat_cornered_creeper(pre_trigger, status, post_status, actions)
+        ):
+            replan = False
         return self._incident(post_status, reasons, actions, fresh, requires_replan=replan)
+
+    def _repeat_cornered_creeper(
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
+    ) -> bool:
+        """Keep a generation running after an unchanged, stationary creeper retreat failure."""
+        if len(actions) != 1 or actions[0]["action"] != "subcortical_combat":
+            return False
+        outcome = actions[0].get("result")
+        combat_actions = outcome.get("actions") if isinstance(outcome, dict) else None
+        if not isinstance(combat_actions, list) or len(combat_actions) != 1:
+            return False
+        retreat = combat_actions[0]
+        if not isinstance(retreat, dict) or retreat.get("action") != "retreat_from_creeper" or retreat.get("reason") != "no_safe_retreat":
+            return False
+
+        _, distance, entity_id, _ = self._extract_hostile_info(after)
+        pos_before, pos_after = before.get("pos"), after.get("pos")
+        if (
+            entity_id is None or entity_id != trigger.get("primary_entity_id")
+            or after.get("ready") is not True or after.get("alive") is not True or after.get("on_ground") is not True
+            or before.get("busy") or after.get("busy") or after.get("in_water") or after.get("in_lava")
+            or after.get("health") != before.get("health") or after.get("blocking") != before.get("blocking")
+            or after.get("dimension") != before.get("dimension") or after.get("last_death") != before.get("last_death")
+            or not pos_before or not pos_after or math.dist(pos_before[:3], pos_after[:3]) > 0.2
+        ):
+            return False
+
+        distance = min(distance, float(trigger.get("distance", distance)))
+        previous = self._last_cornered_creeper
+        now = time.monotonic()
+        if (
+            previous is not None and previous[0] == entity_id and now - previous[3] < 45.0
+            and math.dist(pos_after[:3], previous[1]) <= 0.25
+            and distance > 2.3 and distance >= previous[2] - 0.25
+        ):
+            return True
+        self._last_cornered_creeper = (entity_id, tuple(pos_after[:3]), distance, now)
+        return False
 
     # ---- Layer 2: Active Macro-Tool & `pre_ensure` Preemption ----
 
@@ -3254,6 +3303,8 @@ class GenerationGuard:
             note = "响应不代表整体安全；按最新状态重新规划，勿继续被中断的旧动作链。"
         elif "fresh_hurt" in reasons:
             note = "处于举盾/掩体/远程交战姿态，未打断当前生成。"
+        elif "pre_hurt_creeper" in reasons:
+            note = "已复查苦力怕威胁，继续当前生成。"
         elif "hot_floor" in reasons:
             note = "已潜行避开岩浆块伤害，未打断当前生成。"
         else:
