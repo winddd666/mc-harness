@@ -3585,6 +3585,45 @@ def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monk
     assert ("lava_bridge_probe_incomplete" in result["actions"]) is bridge_probe_slow
 
 
+@pytest.mark.parametrize("placement_works", [False, True])
+def test_critical_lava_escape_attempts_bridge_before_swimming_in_an_unverified_direction(monkeypatch, placement_works):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    status = {"pos": [3183.5, 66.2, -2048.5], "dimension": "the_nether", "health": 8,
+              "in_lava": True, "on_ground": False, "alive": True, "ready": True}
+    actions = []
+
+    class LavaBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 4}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "place":
+                actions.append("bridge")
+                if not placement_works:
+                    raise ApiError("no_support", "no adjacent support")
+                status.update(in_lava=False, on_ground=True, pos=[3183.5, 67, -2048.5])
+            if action == "control" and body.get("forward"):
+                actions.append("swim")
+            return {"ok": True}
+
+    result = CombatEnv(LavaBot()).escape_lava()
+
+    assert actions[0] == "bridge"
+    assert result["ok"] is placement_works
+    if placement_works:
+        assert actions == ["bridge"]
+    else:
+        assert actions[-1] == "swim"
+
+
 def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])

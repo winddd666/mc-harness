@@ -1336,6 +1336,8 @@ class CombatEnv:
 
         py = math.floor(float(pos0[1]) + 0.05)
         lava_shore_target: list[float] | None = None
+        filler = self._pick_filler_block(counts)
+        defer_blind_swim = False
         if not tried_yaws and time.monotonic() < lava_deadline:
             # Wide lava lake: filter shore types by dimension to keep find_blocks fast (<1s).
             shore_blocks = NETHER_SHORE_BLOCKS if "nether" in dim else SHORE_LAND_BLOCKS
@@ -1387,6 +1389,12 @@ class CombatEnv:
                     if best_shore_yaw is not None:
                         break
                 tried_yaws = [best_shore_yaw] if best_shore_yaw is not None else [base_yaw]
+                health_after_ascent = st.get("health")
+                # At critical health, reserve time for usable blocks before following an unverified yaw.
+                defer_blind_swim = (
+                    best_shore_yaw is None and filler is not None
+                    and isinstance(health_after_ascent, (int, float)) and health_after_ascent < 10.0
+                )
 
         swim_ms = 1400 if (lava_shore_target is not None or len(tried_yaws) == 1) else 950
 
@@ -1404,7 +1412,7 @@ class CombatEnv:
             st = self._safe_status(st)
             return _should_exit_lava(st)
 
-        if tried_yaws and time.monotonic() < lava_deadline:
+        if tried_yaws and not defer_blind_swim and time.monotonic() < lava_deadline:
             if _run_jump_sprint(tried_yaws[0]):
                 return _lava_result(st)
 
@@ -1449,7 +1457,6 @@ class CombatEnv:
                     self._stalled_lava_shore = (tuple(lava_shore_target), tuple(end[:3]), time.monotonic())
 
         # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
-        filler = self._pick_filler_block(counts)
         if filler is not None and time.monotonic() < lava_deadline + 0.8:
             bridge_deadline = lava_deadline + 0.8
             checked_bridge_landing = False
@@ -1544,6 +1551,9 @@ class CombatEnv:
                         self._best_effort_stop(timeout_s=0.5)
                     continue
 
+        if defer_blind_swim and st.get("in_lava") and time.monotonic() < lava_deadline:
+            if _run_jump_sprint(tried_yaws[0]):
+                return _lava_result(st)
         if len(tried_yaws) > 1 and time.monotonic() < lava_deadline:
             if _run_jump_sprint(tried_yaws[1]):
                 return _lava_result(st)
