@@ -2634,6 +2634,14 @@ class GenerationGuard:
                             st_after = outcome.get("status_after") or self.bot.status()
                         except (ApiError, httpx.HTTPError):
                             st_after = st_pre
+                        post_name, post_dist, post_id, post_pos = self._extract_hostile_info(st_after if isinstance(st_after, dict) else {})
+                        close_drowned_after_reflex = (
+                            trigger.get("source") == "tool_interrupted_hurt"
+                            and post_name == "drowned" and post_dist <= 6.0
+                            and st_after.get("ready") is not False and st_after.get("alive") is not False
+                            and st_after.get("last_death") == st_pre.get("last_death")
+                            and st_after.get("dimension") == st_pre.get("dimension")
+                        )
                         if isinstance(st_after, dict) and st_after.get("in_lava"):
                             self._action("escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
                             try:
@@ -2645,19 +2653,34 @@ class GenerationGuard:
                             and st_after.get("in_water")
                             and (self._custom_combat_registered or outcome.get("mode") not in {"water_surface", "water_surface_abort"})
                             and (
-                                st_after.get("submerged")
+                                close_drowned_after_reflex or st_after.get("submerged")
                                 or (isinstance(st_after.get("oxygen"), (int, float)) and st_after["oxygen"] < 180)
                                 or time.monotonic() < self._no_water_until
                             )
                         ):
-                            esc_post = self._action("escape_water", lambda: self._escape_water(st_after), raise_on_http_error=False)
-                            esc_post_res = esc_post.get("result") if isinstance(esc_post.get("result"), dict) else {}
-                            if not esc_post_res.get("respawned") and not (esc_post.get("ok") and esc_post_res.get("in_water") is not True):
+                            if close_drowned_after_reflex:
+                                if post_pos is None:
+                                    post_pos = self._find_hostile_position(post_id, post_name, timeout_s=0.6)
+                                offhand = st_after.get("offhand")
+                                keep_shield = bool(st_after.get("blocking")) or (
+                                    isinstance(offhand, dict) and str(offhand.get("name") or "").removeprefix("minecraft:") == "shield"
+                                )
                                 self._action(
                                     "escape_to_shore",
-                                    lambda: self.combat_env.escape_deep_water_to_shore(trigger.get("primary_pos")),
+                                    lambda: self.combat_env.escape_deep_water_to_shore(
+                                        post_pos, keep_shield=keep_shield, shield_target_id=post_id, avoid_close_threat=True,
+                                    ),
                                     raise_on_http_error=False,
                                 )
+                            else:
+                                esc_post = self._action("escape_water", lambda: self._escape_water(st_after), raise_on_http_error=False)
+                                esc_post_res = esc_post.get("result") if isinstance(esc_post.get("result"), dict) else {}
+                                if not esc_post_res.get("respawned") and not (esc_post.get("ok") and esc_post_res.get("in_water") is not True):
+                                    self._action(
+                                        "escape_to_shore",
+                                        lambda: self.combat_env.escape_deep_water_to_shore(trigger.get("primary_pos")),
+                                        raise_on_http_error=False,
+                                    )
                             try:
                                 st_after = self.bot.status()
                             except (ApiError, httpx.HTTPError):

@@ -6094,6 +6094,48 @@ def test_drowned_tool_preemption_bounds_float_before_shore_fallback(monkeypatch)
     assert receipt["reflex_mode"] == "water_surface" and receipt["status_after"]["in_water"] is False
 
 
+@pytest.mark.parametrize("has_shield", [False, True])
+def test_tool_reflex_landing_in_water_near_drowned_heads_straight_to_shore(monkeypatch, has_shield):
+    status = {"pos": [10935.7, 62.4, 11345.7], "health": 6.17, "oxygen": 230,
+              "ready": True, "alive": True, "on_ground": False, "in_water": False,
+              "last_death": {"t": 1}, "dimension": "overworld",
+              "nearest_hostile": {"id": 44, "name": "drowned", "dist": 3.0}}
+    threat_pos = [10932.7, 62.4, 11345.7]
+    actions = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "get_entities":
+                assert kwargs["timeout_s"] == 0.6
+                return {"entities": [{**status["nearest_hostile"], "pos": threat_pos}]}
+            return {"ok": True}
+
+    def combat(_env, trigger):
+        status.update(in_water=True, offhand={"name": "shield"} if has_shield else None)
+        return {"ok": False, "mode": "cover_or_flee", "status_after": dict(status)}
+
+    def land(pos, *, keep_shield, shield_target_id, avoid_close_threat):
+        actions.append((pos, keep_shield, shield_target_id, avoid_close_threat))
+        status.update(in_water=False, on_ground=True, pos=[10939.5, 63, 11345.5])
+        return {"ok": True, "in_water": False}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_slot, "handle", combat)
+    monkeypatch.setattr(guard, "_escape_water", lambda *_: pytest.fail("close drowned requires immediate shore escape"))
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", land)
+    trigger = {"source": "tool_interrupted_hurt", "primary_type": "drowned", "primary_entity_id": 44}
+
+    result = guard.handle_preemption(trigger, interrupted_name="mc_skill_unstick")
+
+    assert actions == [(threat_pos, has_shield, 44, True)]
+    assert result["status_after"]["in_water"] is False
+    assert result["status_after"]["on_ground"] is True
+
+
 @pytest.mark.parametrize("respawned", [False, True])
 def test_trident_preemption_restores_shield_facing_after_shore_attempt(respawned):
     status = {
