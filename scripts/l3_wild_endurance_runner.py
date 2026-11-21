@@ -1807,8 +1807,9 @@ STRONGHOLD_FOCUS = (
         "key": FOLLOW_ENDER_EYE,
         "title": "60分：从村庄跟随末影之眼进入要塞",
         "task": (
-            "从村庄出发寻找并进入天然主世界要塞。背包有 14 颗末影之眼。先在开阔处调用 "
-            "mc_use_item(item='ender_eye')。确认 projectile 是 eye_of_ender 后，把回执的 scout_direction 原样传给斥候工具。"
+            "从村庄出发寻找并进入天然主世界要塞。每集先用 mc_inventory 核对剩余末影之眼，优先沿已有估算坐标或要塞方块线索推进。"
+            "需要测向且库存多于 12 颗时，才在开阔处调用 mc_use_item(item='ender_eye')。"
+            "确认 projectile 是 eye_of_ender 后，把回执的 scout_direction 原样传给斥候工具。"
             "回执缺少有效方向或 projectile 不符时，立即用 mc_get_entities(types=['eye_of_ender'], radius=32)，"
             "把眼的位置减去你的位置。正 X 向东、负 X 向西、正 Z 向南、负 Z 向北。"
             "[0,0] 表示方向未测出。等眼飞开再查一次，仍无方向且眼多于 12 颗时才补投一次。"
@@ -1820,7 +1821,7 @@ STRONGHOLD_FOCUS = (
             "有估算坐标就沿可达路线接近，眼多于 12 颗时才考虑复测。"
             "确认附近有掉落的眼后，再用 mc_skill_collect_drops 回收。"
             "没有第二观测点建议时，至少离上次投掷点 100 格再复测。若两次有效方向相反，用 mc_move_to 向上一观测点回走一半距离，"
-            "缩小搜索范围。只剩 12 颗时优先用已有方向和方块线索定位。"
+            "缩小搜索范围。库存 12 颗及以下时，留给门框，沿已有方向和方块线索定位。"
             "eye_went_down 为 true、到达估算坐标附近或出现方向反转时，分开扫描 end_portal_frame、stone_bricks 与 mossy_stone_bricks。"
             "看到门框或成片要塞砖后，记下回执的 X/Y/Z，结束长距离斥候。"
             "若只有靠近黑曜石的零散地表砖和箱子，继续核对地下结构。"
