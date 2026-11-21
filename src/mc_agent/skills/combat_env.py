@@ -658,6 +658,17 @@ class CombatEnv:
             "candidates": candidates,
         }
 
+    def lava_above_headroom(self, pos: Sequence[float], target: Sequence[int]) -> bool:
+        """Check whether removing a block above the bot would expose its column to lava."""
+        x, y, z = pos[:3]
+        tx, ty, tz = target[:3]
+        feet_y = math.floor(y + 0.05)
+        return (
+            ty in {feet_y + 1, feet_y + 2}
+            and (tx, tz) in _hitbox_columns(x, z)
+            and _is_lava_block(self._get_block_name(tx, ty + 1, tz, strict=True))
+        )
+
     def can_remove_footing(self, pos: Sequence[float], target: Sequence[int]) -> bool:
         """Allow ordinary digs and check the landing for a dig through the current floor."""
         x, y, z = pos[:3]

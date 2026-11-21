@@ -7330,6 +7330,35 @@ def test_bug072_real_flee_entry_accepts_the_mining_sessions_httpx_timeout(monkey
     assert final.connect <= 0.5 and final.write <= 0.5 and final.pool <= 0.5
 
 
+@pytest.mark.parametrize("above_roof", ["lava", "flowing_lava", "air"])
+def test_unstick_preserves_a_roof_that_holds_back_lava(above_roof):
+    target = [-421, 26, -1914]
+    digs = []
+
+    class PocketBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [-420.5, 24, -1913.5], "on_ground": True, "ready": True, "alive": True}
+            if action == "get_block":
+                assert body["pos"] == [-421, 27, -1914]
+                return {"name": above_roof}
+            if action == "dig":
+                digs.append(body["pos"])
+            return {"ok": True}
+
+    bot = PocketBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    result = json.loads(guard.run_tool_with_reflex(
+        "mc_skill_unstick", lambda: json.dumps(bot.call("dig", {"pos": target, "stop_on": ["death"]})),
+    ))
+
+    if above_roof == "air":
+        assert result["ok"] is True and digs == [target]
+    else:
+        assert result["error"]["code"] == "unsafe_lava_roof" and result["requires_replan"] is True
+        assert digs == []
+
+
 @pytest.mark.parametrize(("tool", "terrain"), [
     ("mc_dig", "deep_drop"), ("mc_dig", "shallow_drop"), ("mc_dig", "lava"),
     ("mc_dig", "side_dig"), ("mc_dig", "edge_support"), ("mc_dig", "edge_dig"),

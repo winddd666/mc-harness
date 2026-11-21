@@ -137,8 +137,8 @@ class _UnsafeFleeExit(BaseException):
     """Unwind an explicit retreat before an unsupported ground movement."""
 
 
-class _UnsafeSupportDig(BaseException):
-    """Unwind an explicit dig that would remove footing above an unsafe drop."""
+class _UnsafeDig(BaseException):
+    """Unwind a dig that would expose the bot to an unsafe drop or overhead lava."""
 
 
 class _UnsafeFoodUse(BaseException):
@@ -2410,12 +2410,12 @@ class GenerationGuard:
                     and not self._can_auto_eat_safely(state)
                 ):
                     raise _UnsafeFoodUse
-            if check_support_dig and clean_path == "dig" and isinstance(body, dict):
-                unsafe_dig = self._is_support_dig_unsafe(body.get("pos"))
+            if (check_support_dig or check_unstick_exit) and clean_path == "dig" and isinstance(body, dict):
+                dig_hazard = self._dig_hazard(body.get("pos"), check_support=check_support_dig, check_roof=check_unstick_exit)
                 if pending_trigger:
                     raise ReflexPreempted(pending_trigger[0])
-                if unsafe_dig:
-                    raise _UnsafeSupportDig
+                if dig_hazard:
+                    raise _UnsafeDig(dig_hazard)
             unstick_before = None
             if (
                 check_unstick_exit and clean_path == "control" and isinstance(body, dict)
@@ -2767,28 +2767,33 @@ class GenerationGuard:
         finally:
             self._in_reflex = False
 
-    def _is_support_dig_unsafe(self, target: Any) -> bool:
+    def _dig_hazard(self, target: Any, *, check_support: bool, check_roof: bool) -> str | None:
         if not isinstance(target, (list, tuple)) or len(target) != 3 or not all(isinstance(v, int) for v in target):
-            return False
+            return None
         try:
             status = self.bot.call("status", method="GET", timeout_s=0.6)
         except (ApiError, httpx.HTTPError):
-            return False
+            return None
         pos = status.get("pos")
         if (
             not isinstance(pos, (list, tuple)) or len(pos) < 3
             or status.get("on_ground") is not True or status.get("ready") is False or status.get("alive") is False
         ):
-            return False
+            return None
 
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.0)
+        env = CombatEnv(probe_bot)
         try:
-            if CombatEnv(probe_bot).can_remove_footing(pos, target):
-                return False
+            if check_roof and env.lava_above_headroom(pos, target):
+                self.events.emit("guardian.lava_roof_dig_blocked", target=list(target), pos=pos)
+                return "unsafe_lava_roof"
+            if not check_support or env.can_remove_footing(pos, target):
+                return None
         except _RecoveryBudgetExceeded:
-            pass
+            if not check_support:
+                return None
         self.events.emit("guardian.support_dig_blocked", target=list(target), pos=pos)
-        return True
+        return "unsafe_landing"
 
     def run_tool_with_reflex(self, tool_name: str, invoke_fn: Callable[[], str]) -> str:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
@@ -2829,11 +2834,16 @@ class GenerationGuard:
                 "requires_replan": True,
                 "error": {"code": "unsafe_to_eat", "message": "当前位置有环境危险或敌人威胁，请先到安全位置再进食。"},
             }, ensure_ascii=False)
-        except _UnsafeSupportDig:
+        except _UnsafeDig as error:
+            code = error.args[0]
+            message = (
+                "头顶待挖方块上方有岩浆，请从侧面寻找脱困路线。"
+                if code == "unsafe_lava_roof" else "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。"
+            )
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
-                "error": {"code": "unsafe_landing", "message": "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。"},
+                "error": {"code": code, "message": message},
             }, ensure_ascii=False)
         except (_UnsafeFleeExit, _UnsafeUnstickExit):
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
