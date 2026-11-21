@@ -435,6 +435,21 @@ class GenerationGuard:
         dimension = str(status.get("dimension") or "").lower().removeprefix("minecraft:")
         # The legacy macro cannot counter below 11 HP and falls through to an unchecked sprint-jump.
         low_health = isinstance(health, (int, float)) and health < 11.0
+        retreat_pos = status.get("pos")
+        if (
+            "nether" in dimension and low_health and status.get("on_ground") is False
+            and not status.get("in_water") and isinstance(retreat_pos, (list, tuple)) and len(retreat_pos) >= 3
+        ):
+            probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.5)
+            try:
+                over_lava = CombatEnv(probe_bot)._is_airborne_above_lava(status, start_pos=retreat_pos)
+            except _RecoveryBudgetExceeded:
+                over_lava = False
+            if over_lava:
+                recovery = self._action("escape_lava", self.combat_env.escape_lava)
+                result = recovery.get("result") or {}
+                if not result.get("already_dry") or result.get("respawned"):
+                    return {**result, "ok": bool(recovery.get("ok")), "mode": "lava_escape"}
         retreat_only = ranged or low_health or (
             dimension == "overworld" and isinstance(skills, MacroSkills)
             and best_melee_weapon_in_inv(counts) is None and not self._inside_own_shaft()

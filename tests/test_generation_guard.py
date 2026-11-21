@@ -5320,6 +5320,55 @@ def test_ranged_knockback_into_water_goes_to_shore_in_same_poll(monkeypatch, res
         assert incident["status"]["in_water"] is False
 
 
+@pytest.mark.parametrize("terrain", ["exposed_lava", "solid_cover", "already_landed"])
+def test_low_health_nether_knockback_checks_for_lava_before_waiting_to_retreat(monkeypatch, terrain):
+    status = {
+        "pos": [-1873.7, 36.6, -3688.7], "health": 2.86, "food": 20,
+        "in_lava": False, "on_ground": False, "alive": True, "ready": True, "blocking": True,
+        "dimension": "the_nether", "nearest_hostile": {"id": 44, "name": "wither_skeleton", "dist": 3.0},
+    }
+    moves = []
+
+    class NetherBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [] if kwargs["params"]["since"] else [{"seq": 1, "type": "hurt", "source": "mob_attack"}]}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_block":
+                assert kwargs["timeout_s"] <= 0.5 and kwargs["allow_reauth"] is False
+                y = body["pos"][1]
+                if y == 35 and terrain == "solid_cover":
+                    return {"name": "netherrack"}
+                return {"name": "lava" if y == 34 else "air"}
+            return {"ok": True}
+
+    def escape_lava():
+        moves.append("escape_lava")
+        status.update(on_ground=True)
+        return {"ok": True, "in_lava": False, "already_dry": terrain == "already_landed"}
+
+    def flee(_pos, *, wait_for_ground):
+        moves.append("flee")
+        assert wait_for_ground is True
+        return {"ok": True, "mode": "flee"}
+
+    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape_lava)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+
+    incident = guard.poll()
+
+    if terrain == "exposed_lava":
+        assert moves == ["escape_lava"]
+        assert incident["actions"][0]["result"]["mode"] == "lava_escape"
+    else:
+        assert moves == (["flee"] if terrain == "solid_cover" else ["escape_lava", "flee"])
+        assert incident["actions"][0]["result"]["mode"] == "flee"
+
+
 def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_position():
     status = {
         "pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180, "yaw": -1.5708,
