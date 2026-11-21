@@ -3163,16 +3163,22 @@ class SubcorticalInstinctController:
                         wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon or hurt_midair,
                         **({"other_shooters": other_shooters} if other_shooters else {}),
                     )
-                    actions.append({
-                        "action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist"),
-                        **({"reason": fl["reason"]} if fl.get("reason") else {}),
-                        **({"respawned": True} if fl.get("respawned") else {}),
-                    })
-                    self._recent_flee_streak += 1
-                    self._last_flee_at = now_flee
                     flee_ok = bool(fl.get("ok"))
+                    sealed = flee_ok and fl.get("mode") == "sealed" and not fl.get("respawned")
+                    if sealed:
+                        mode = "sealed_shaft"
+                        actions.append({"action": "seal_shaft", "ok": True})
+                        self._recent_flee_streak = 0
+                    else:
+                        actions.append({
+                            "action": "flee", "ok": flee_ok, "moved": fl.get("moved_dist"),
+                            **({"reason": fl["reason"]} if fl.get("reason") else {}),
+                            **({"respawned": True} if fl.get("respawned") else {}),
+                        })
+                        self._recent_flee_streak += 1
+                        self._last_flee_at = now_flee
                     check_ranged_guard = flee_ok and fl.get("mode") == "flee" and mob_name in RANGED_MOBS
-                    check_melee_guard = flee_ok and fl.get("mode") == "flee" and mob_name in PRE_HURT_MELEE_MOBS
+                    check_melee_guard = flee_ok and (sealed or fl.get("mode") == "flee") and mob_name in PRE_HURT_MELEE_MOBS
                     if (not flee_ok or check_ranged_guard or check_melee_guard) and not fl.get("respawned") and has_shield:
                         st_fl = env._safe_status({"ready": False})
                         nearest_raw = st_fl.get("nearest_hostile")
@@ -3193,7 +3199,7 @@ class SubcorticalInstinctController:
                             )
                         )
                         melee_still_close = (
-                            check_melee_guard and low_health_after and st_fl.get("blocking")
+                            check_melee_guard and (low_health_after or sealed) and st_fl.get("blocking")
                             and isinstance(nearest_id, int) and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
                             and isinstance(nearest_dist, (int, float)) and nearest_dist <= 3.5
                         )

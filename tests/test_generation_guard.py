@@ -3972,6 +3972,49 @@ def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, land
         assert posture_calls[-1] == ("posture", {})
 
 
+@pytest.mark.parametrize("hostile_still_close", [True, False])
+def test_seal_during_melee_retreat_reports_cover_and_keeps_shield_if_needed(monkeypatch, hostile_still_close):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    hostile = {"id": 77, "name": "wither_skeleton", "dist": 3.2, "pos": [3532.5, 70, 1796.7]}
+    status = {
+        "pos": [3532.5, 70, 1793.5], "health": 20, "food": 17, "ready": True, "alive": True,
+        "on_ground": True, "blocking": False, "dimension": "the_nether", "nearest_hostile": hostile,
+    }
+
+    class FortressBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [hostile]}
+            if action == "posture":
+                status["blocking"] = body.get("shield", False)
+            return {"ok": True}
+
+    env = CombatEnv(FortressBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda *_args: {"enclosure": "open_cave"})
+
+    def seal_while_retreating(*_args, **_kwargs):
+        if not hostile_still_close:
+            status["nearest_hostile"] = None
+        return {"ok": True, "mode": "sealed", "moved_dist": 0.0, "pos_after": status["pos"]}
+
+    monkeypatch.setattr(env, "flee", seal_while_retreating)
+    outcome = CombatControllerSlot().handle(
+        env, {"source": "pre_hurt_melee", "primary_entity_id": hostile["id"], "primary_type": hostile["name"]},
+    )
+
+    assert outcome["mode"] == "sealed_shaft"
+    assert {"action": "seal_shaft", "ok": True} in outcome["actions"]
+    assert not any(action["action"] == "flee" for action in outcome["actions"])
+    assert outcome["latched_guard"] is hostile_still_close
+    assert status["blocking"] is hostile_still_close
+
+
 @pytest.mark.parametrize("second_shooter", [False, True])
 def test_unshielded_boundary_retreat_accounts_for_a_second_shooter(second_shooter):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
