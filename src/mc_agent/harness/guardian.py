@@ -2478,7 +2478,7 @@ class GenerationGuard:
             return False
         mob, distance, entity_id, _ = self._extract_hostile_info(after)
         start, end = before.get("pos"), after.get("pos")
-        health = after.get("health")
+        previous_health, health = before.get("health"), after.get("health")
         return bool(
             str(after.get("dimension") or "").removeprefix("minecraft:") == "overworld"
             and mob in {"skeleton", "stray", "bogged", "pillager"} and entity_id is not None
@@ -2488,9 +2488,10 @@ class GenerationGuard:
             and before.get("on_ground") is True and after.get("on_ground") is True
             and not before.get("busy") and not after.get("busy")
             and not any(after.get(key) for key in ("in_water", "in_lava", "on_fire"))
-            and isinstance(health, (int, float)) and health >= 16.0
+            and isinstance(previous_health, (int, float)) and isinstance(health, (int, float))
+            and health >= previous_health >= 16.0
             and all(after.get(key) == before.get(key) for key in (
-                "last_death", "dimension", "health", "food", "held", "offhand", "blocking",
+                "last_death", "dimension", "food", "held", "offhand", "blocking",
             ))
             and start and end and math.dist(start[:3], end[:3]) <= 0.2
         )
