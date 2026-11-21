@@ -3316,8 +3316,11 @@ def test_r19_poll_skips_eat_in_close_melee_range_after_combat_timeout(monkeypatc
     assert latch_calls[-1] == ("posture", {"shield": True, "sneak": False, "jump": False})
 
 
-@pytest.mark.parametrize("distance_after, keep_shield", [(11.6, True), (16.0, False)])
-def test_low_health_retreat_keeps_shield_against_a_nearby_shooter(distance_after, keep_shield):
+@pytest.mark.parametrize(
+    "health, distance_after, alternate_shooter, keep_shield",
+    [(7.0, 11.6, False, True), (7.0, 16.0, False, False), (13.28, 1.9, True, True), (13.28, 4.0, True, False)],
+)
+def test_retreat_keeps_shield_against_a_nearby_shooter(health, distance_after, alternate_shooter, keep_shield):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
     pos = [0.5, 64.0, 0.5]
@@ -3326,8 +3329,8 @@ def test_low_health_retreat_keeps_shield_against_a_nearby_shooter(distance_after
 
     class RetreatBot:
         def status(self):
-            return {"pos": list(pos), "health": 7, "food": 20, "alive": True, "ready": True,
-                    "on_ground": True, "nearest_hostile": dict(shooter)}
+            return {"pos": list(pos), "health": health, "food": 20, "alive": True, "ready": True,
+                    "on_ground": True, "blocking": True, "nearest_hostile": dict(shooter)}
 
         def call(self, action, body=None, **kwargs):
             if action == "inventory":
@@ -3339,6 +3342,8 @@ def test_low_health_retreat_keeps_shield_against_a_nearby_shooter(distance_after
             if action == "control" and body.get("forward"):
                 pos[0] -= 2.5
                 shooter["dist"] = distance_after
+                if alternate_shooter:
+                    shooter.update(id=88, name="blaze")
             if action in {"posture", "look"}:
                 posture_calls.append((action, body))
             return {"ok": True}
@@ -3350,7 +3355,8 @@ def test_low_health_retreat_keeps_shield_against_a_nearby_shooter(distance_after
     assert outcome["latched_guard"] is keep_shield
     if keep_shield:
         assert posture_calls[-2:] == [
-            ("look", {"entity_id": 77}), ("posture", {"shield": True, "sneak": False, "jump": False}),
+            ("look", {"entity_id": 88 if alternate_shooter else 77}),
+            ("posture", {"shield": True, "sneak": False, "jump": False}),
         ]
     else:
         assert posture_calls[-1] == ("posture", {})

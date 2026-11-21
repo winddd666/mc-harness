@@ -2815,8 +2815,15 @@ class SubcorticalInstinctController:
                         nearest_dist = nearest.get("dist")
                         low_health_after = isinstance(st_fl.get("health"), (int, float)) and st_fl["health"] <= 10.0
                         ranged_still_exposed = (
-                            check_ranged_guard and low_health_after and nearest_id == mob_id and mob_id is not None
-                            and isinstance(nearest_dist, (int, float)) and nearest_dist <= 12.0
+                            check_ranged_guard and isinstance(nearest_id, int)
+                            and isinstance(nearest_dist, (int, float))
+                            and (
+                                (low_health_after and nearest_id == mob_id and nearest_dist <= 12.0)
+                                or (
+                                    st_fl.get("blocking") and nearest_dist <= 3.5
+                                    and _clean_block_name(nearest.get("name")) in RANGED_MOBS
+                                )
+                            )
                         )
                         melee_still_close = (
                             check_melee_guard and low_health_after and st_fl.get("blocking")
@@ -2832,7 +2839,7 @@ class SubcorticalInstinctController:
                             and st_fl.get("last_death") == st.get("last_death")
                             and st_fl.get("dimension") == st.get("dimension")
                         ):
-                            guard_target = nearest_id if melee_still_close else mob_id
+                            guard_target = nearest_id if ranged_still_exposed or melee_still_close else mob_id
                             latched_guard = self._latch_shield_at_threat(
                                 env,
                                 int(guard_target) if guard_target is not None else None,
