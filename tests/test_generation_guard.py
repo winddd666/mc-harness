@@ -6369,6 +6369,57 @@ def test_water_boundary_avoids_a_shore_path_that_crosses_a_creeper(monkeypatch):
     assert note is not None and "登岸" in note
 
 
+@pytest.mark.parametrize("entry", ["poll", "interrupted_attack"])
+def test_nearby_drowned_sends_water_recovery_directly_to_shore(monkeypatch, entry):
+    drowned = {"id": 44, "name": "drowned", "dist": 4.7}
+    drowned_pos = [9266.3, 61, -11355]
+    status = {
+        "pos": [9265.5, 62, -11350.5], "health": 14.1, "food": 20, "oxygen": 220,
+        "in_water": True, "submerged": True, "on_ground": False, "blocking": False,
+        "ready": True, "alive": True, "nearest_hostile": drowned,
+    }
+    actions = []
+
+    class ShoreBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [] if kwargs["params"]["since"] else [
+                    {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": drowned},
+                ]}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                assert kwargs["timeout_s"] == 0.6 and kwargs["allow_reauth"] is False
+                return {"entities": [{**drowned, "pos": drowned_pos}]}
+            if action == "posture":
+                assert body["shield"] and body["jump"]
+                actions.append("shield")
+                status["blocking"] = True
+            return {"ok": True}
+
+    def reach_shore(threat_pos, *, keep_shield, shield_target_id):
+        assert threat_pos == drowned_pos and keep_shield and shield_target_id == 44
+        assert status["blocking"]
+        actions.append("shore")
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    guard = GenerationGuard(ShoreBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_escape_water", lambda *args, **kwargs: pytest.fail("generic escape delays shore recovery"))
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    if entry == "poll":
+        incident = guard.poll()
+        assert incident["actions"][-1]["action"] == "escape_to_shore"
+    else:
+        receipt = guard.handle_preemption({
+            "source": "boundary_threat", "primary_entity_id": 44, "primary_type": "drowned",
+        }, interrupted_name="mc_attack")
+        assert receipt["reflex_mode"] == "water_surface" and receipt["status_after"]["on_ground"]
+    assert actions == ["shield", "shore"]
+
+
 @pytest.mark.parametrize("landing", ["grounded", "airborne", "in_water", "settled", "settled_above", "respawned"])
 def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
     from mc_agent.skills.combat_env import CombatEnv

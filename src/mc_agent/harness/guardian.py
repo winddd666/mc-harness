@@ -700,11 +700,11 @@ class GenerationGuard:
         return name, dist, eid, pos
 
     def _find_hostile_position(
-        self, entity_id: int | None, entity_name: str, *, session: _GuardSession | None = None,
+        self, entity_id: int | None, entity_name: str, *, session: _GuardSession | None = None, timeout_s: float | None = None,
     ) -> list[float] | None:
         # Live status identifies the nearest hostile without always including coordinates.
         try:
-            response = (session or self.bot).call("get_entities", {"radius": 16})
+            response = (session or self.bot).call("get_entities", {"radius": 16}, timeout_s=timeout_s)
         except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
             raise
         except Exception:
@@ -1414,6 +1414,7 @@ class GenerationGuard:
                 ) or status.get("nearest_hostile")
                 att_w_dict = att_w if isinstance(att_w, dict) else None
                 att_pos_w = att_w_dict.get("pos") if att_w_dict else nh_pos
+                close_drowned_hit = nh_name == "drowned" and nh_dist <= 6.0 and hurt_src_w in MELEE_HURT_SOURCES
                 should_shield_water = (
                     has_shield
                     and not status.get("blocking")
@@ -1445,7 +1446,7 @@ class GenerationGuard:
                 esc_err_code: str | None = None
                 if (
                     not transient_err and not forced_water_shore and not no_water_reentry and not drowning
-                    and not self._swimming_at_low_health(status)
+                    and not self._swimming_at_low_health(status) and not close_drowned_hit
                 ):
                     if not _already("escape_water"):
                         actions.append(self._action("escape_water", lambda: self._escape_water(status)))
@@ -1466,6 +1467,8 @@ class GenerationGuard:
                     and not esc_respawned
                     and esc_err_code not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}
                 ):
+                    if close_drowned_hit and att_pos_w is None:
+                        att_pos_w = self._find_hostile_position(nh_id, nh_name, timeout_s=0.6)
                     shore_act = self._action(
                         "escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
@@ -2444,11 +2447,13 @@ class GenerationGuard:
                 )
                 if underwater_danger:
                     pre_actions: list[dict[str, Any]] = []
+                    nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
+                    attack_near_drowned = interrupted_name == "mc_attack" and nh_pre_name == "drowned" and nh_pre_dist <= 6.0
                     if hurt_pre_water:
                         self._water_hurt_streak += 1
                     forced_pre_shore = (
                         self._water_hurt_streak >= 3 or now_pre < self._no_water_until
-                        or self._swimming_at_low_health(st_pre)
+                        or self._swimming_at_low_health(st_pre) or attack_near_drowned
                     )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
@@ -2489,10 +2494,13 @@ class GenerationGuard:
                         esc_pre_ok = bool(esc_act.get("ok") and esc_pre_res.get("in_water") is not True)
                         esc_pre_respawned = bool(esc_pre_res.get("respawned"))
                     if not esc_pre_ok and not esc_pre_respawned:
+                        shore_threat_pos = trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None)
+                        if attack_near_drowned and shore_threat_pos is None and att_pre:
+                            shore_threat_pos = self._find_hostile_position(att_pre.get("id"), nh_pre_name, timeout_s=0.6)
                         shore_pre = self._action(
                             "escape_to_shore",
                             lambda: self.combat_env.escape_deep_water_to_shore(
-                                trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None),
+                                shore_threat_pos,
                                 keep_shield=has_shield_pre,
                                 shield_target_id=att_pre.get("id") if isinstance(att_pre, dict) else None,
                                 **({"surface_first": True} if drowning_pre else {}),
