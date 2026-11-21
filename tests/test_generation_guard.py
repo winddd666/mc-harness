@@ -7608,6 +7608,52 @@ def test_water_macro_checks_that_a_dry_jump_reaches_ground(monkeypatch, landing)
         assert len(shore_calls) == 1
 
 
+@pytest.mark.parametrize("landing", ["threat_close", "threat_clear", "respawned"])
+def test_water_macro_restores_raised_shield_on_dry_landing(landing):
+    zombie = {"name": "zombie", "id": 4748724, "dist": 1.5}
+    status = {
+        "pos": [-11071.4, 50, 10869.4], "health": 16, "food": 20, "oxygen": 140,
+        "in_water": True, "on_ground": True, "ready": True, "alive": True, "blocking": True,
+        "dimension": "overworld", "last_death": {"t": 1}, "offhand": {"name": "shield"},
+        "nearest_hostile": zombie,
+    }
+    commands = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [], "offhand": status["offhand"]}
+            commands.append((action, body))
+            return {"blocking": True}
+
+    class EscapeMacro:
+        def escape_water(self):
+            status.update(pos=[-11071.7, 50, 10869.7], in_water=False, blocking=False, health=6)
+            if landing == "respawned":
+                status.update(last_death={"t": 2}, ready=False)
+            if landing == "threat_clear":
+                status["nearest_hostile"] = None
+            return {"ok": True, "in_water": False, "pos_after": status["pos"]}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=EscapeMacro())
+    water, = guard.poll()["actions"]
+
+    assert water["ok"] is (landing != "respawned")
+    if landing == "threat_close":
+        assert commands == [
+            ("look", {"entity_id": zombie["id"]}),
+            ("posture", {"shield": True, "jump": False, "sneak": False}),
+        ]
+        assert water["result"]["shield_restored"] is True
+    else:
+        assert commands == []
+        assert "shield_restored" not in water["result"]
+
+
 @pytest.mark.parametrize("terrain", ["scan", "radial", "open_water"])
 def test_flooded_cave_escape_uses_local_water_level(terrain):
     from mc_agent.skills.combat_env import CombatEnv

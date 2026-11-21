@@ -503,6 +503,29 @@ class GenerationGuard:
                 **result, "ok": False, "reason": "shore_landing_unconfirmed", "pos_after": end,
                 "in_water": bool(after.get("in_water")), "in_lava": bool(after.get("in_lava")),
             }
+        offhand = after.get("offhand")
+        if (
+            confirm_shore and before.get("blocking") and after.get("blocking") is False
+            and after.get("on_ground") is True and after.get("ready") is True and after.get("alive") is True
+            and after.get("dimension") == before.get("dimension")
+            and after.get("last_death") == before.get("last_death")
+            and isinstance(offhand, dict)
+            and str(offhand.get("name") or "").removeprefix("minecraft:") == "shield"
+        ):
+            mob, distance, target_id, _ = self._extract_hostile_info(after)
+            if target_id is not None and (
+                (mob in PRE_HURT_MELEE_MOBS and distance <= 3.5) or (mob in RANGED_MOBS and distance <= 12.0)
+            ):
+                try:
+                    recovery_bot.call("look", {"entity_id": target_id}, timeout_s=0.35, allow_reauth=False)
+                    posture = recovery_bot.call(
+                        "posture", {"shield": True, "jump": False, "sneak": bool(after.get("sneaking"))},
+                        timeout_s=0.35, allow_reauth=False,
+                    )
+                    if posture.get("blocking") is True:
+                        result = {**result, "shield_restored": True}
+                except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+                    pass
         if result.get("mode") == "flee" and after.get("in_lava"):
             return {**result, "ok": False, "reason": "retreat_into_lava", "pos_after": after.get("pos") or end}
         return result
