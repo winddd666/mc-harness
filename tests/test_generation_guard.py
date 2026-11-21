@@ -6402,11 +6402,14 @@ def test_ranged_knockback_into_water_goes_to_shore_in_same_poll(monkeypatch, res
 
 
 @pytest.mark.parametrize("terrain", ["exposed_lava", "solid_cover", "already_landed"])
-@pytest.mark.parametrize(("source", "health"), [("mob_attack", 2.86), ("player_explosion", 15.87), ("fireball", 17.3)])
+@pytest.mark.parametrize(("source", "health"), [
+    ("mob_attack", 2.86), ("mob_attack", 14.0), ("player_explosion", 15.87), ("fireball", 17.3),
+])
 def test_nether_knockback_checks_for_lava_before_waiting_to_retreat(monkeypatch, terrain, source, health):
+    melee_above_retreat_threshold = source == "mob_attack" and health >= 11.0
     status = {
         "pos": [-1873.7, 36.6, -3688.7], "health": health, "food": 20,
-        "in_lava": False, "on_ground": False, "alive": True, "ready": True, "blocking": True,
+        "in_lava": False, "on_ground": False, "alive": True, "ready": True, "blocking": not melee_above_retreat_threshold,
         "dimension": "the_nether", "nearest_hostile": {"id": 44, "name": "wither_skeleton", "dist": 3.0},
     }
     moves = []
@@ -6444,9 +6447,12 @@ def test_nether_knockback_checks_for_lava_before_waiting_to_retreat(monkeypatch,
 
     incident = guard.poll()
 
-    if source != "mob_attack" and terrain != "solid_cover":
+    if health >= 11.0 and terrain != "solid_cover":
         assert moves == ["escape_lava"]
         assert incident["actions"][0]["action"] == "escape_lava"
+    elif melee_above_retreat_threshold:
+        assert moves == []
+        assert [action["action"] for action in incident["actions"]] == ["raise_shield"]
     elif terrain == "exposed_lava":
         assert moves == ["escape_lava"]
         assert incident["actions"][0]["result"]["mode"] == "lava_escape"

@@ -1098,7 +1098,11 @@ class GenerationGuard:
             not in_lava and not in_water and not deaths and ready and status.get("alive") is not False
             and status.get("on_ground") is False and "nether" in str(status.get("dimension") or "").lower()
             and status.get("pos")
-            and any(str(h.get("source") or "").strip().lower() in BLAST_HURT_SOURCES for h in hurts)
+            and any(
+                source in BLAST_HURT_SOURCES
+                or (source in MELEE_HURT_SOURCES and isinstance(health, (int, float)) and health >= 11.0)
+                for source in (str(h.get("source") or "").strip().lower() for h in hurts)
+            )
         ):
             probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.5)
             try:
