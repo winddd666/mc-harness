@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Callable, Literal, Protocol, Sequence, TypedDict
+from typing import Any, Callable, Collection, Literal, Protocol, Sequence, TypedDict
 
 import httpx
 
@@ -387,7 +387,7 @@ class CombatEnv:
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
-        self._stalled_lava_shore: tuple[tuple[float, ...], tuple[float, ...], float] | None = None
+        self._stalled_lava_shores: dict[tuple[float, ...], tuple[tuple[float, ...], float]] = {}
         self._stalled_lava_swim: tuple[tuple[float, ...], float, str, float] | None = None
         self._stalled_water_shore: tuple[tuple[float, ...], tuple[float, ...], tuple[Any, Any], float] | None = None
         self._stalled_lava_notch: dict[tuple[str, tuple[int, int, int], str, str | None], float] = {}
@@ -1220,7 +1220,7 @@ class CombatEnv:
                 )
             if not rim_lava_active:
                 if not _landing_unconfirmed(st):
-                    self._stalled_lava_shore = None
+                    self._stalled_lava_shores.clear()
                     self._stalled_lava_swim = None
                 unconfirmed = _landing_unconfirmed(st)
                 return {
@@ -1307,7 +1307,7 @@ class CombatEnv:
             pos_now = st_now.get("pos") or pos0
             respawned = _did_respawn_during_lava(st_now)
             if respawned or (not still_in_lava and not _landing_unconfirmed(st_now)):
-                self._stalled_lava_shore = None
+                self._stalled_lava_shores.clear()
                 self._stalled_lava_swim = None
             airborne_over_lava = (
                 (not respawned)
@@ -1376,14 +1376,22 @@ class CombatEnv:
         filler = self._pick_filler_block(counts)
         blind_swim = False
         defer_blind_swim = False
+        now = time.monotonic()
+        self._stalled_lava_shores = {
+            bank: (rim, at) for bank, (rim, at) in self._stalled_lava_shores.items() if now - at < 15.0
+        }
+
+        def stalled_shores_near(pos: Sequence[float]) -> set[tuple[float, ...]]:
+            return {
+                bank for bank, (rim, at) in self._stalled_lava_shores.items()
+                if time.monotonic() - at < 15.0 and abs(pos[1] - rim[1]) <= 2.0
+                and math.hypot(pos[0] - rim[0], pos[2] - rim[2]) <= 1.25
+            }
+
         if not tried_yaws and time.monotonic() < lava_deadline:
             # Wide lava lake: filter shore types by dimension to keep find_blocks fast (<1s).
             shore_blocks = NETHER_SHORE_BLOCKS if "nether" in dim else SHORE_LAND_BLOCKS
-            stalled = self._stalled_lava_shore
-            excluded_shore = (
-                stalled[0] if stalled is not None and math.dist(pos0[:3], stalled[1]) <= 1.25
-                and time.monotonic() - stalled[2] < 15.0 else None
-            )
+            excluded_shores = stalled_shores_near(pos0)
             try:
                 lava_shore_target = self._find_walkable_shore_target(
                     pos0,
@@ -1393,14 +1401,14 @@ class CombatEnv:
                     max_y=py + 2,
                     max_candidates=6,
                     deadline=terrain_deadline,
-                    excluded_shore=excluded_shore,
+                    excluded_shores=excluded_shores,
                 )
             except _TerrainProbeExpired:
                 pass
             if lava_shore_target is not None:
                 tried_yaws = [aim_yaw_pitch(pos0, lava_shore_target)[0]]
             else:
-                if excluded_shore is not None:
+                if excluded_shores:
                     actions.append("lava_shore_path_stalled")
                 base_yaw = float(st.get("yaw") or 0.0)
                 best_shore_yaw: float | None = None
@@ -1484,17 +1492,12 @@ class CombatEnv:
         if lava_shore_target is not None and time.monotonic() + 1.5 < lava_deadline:
             swim_pos = st.get("pos") or pos0
             shore_d = math.hypot(lava_shore_target[0] - float(swim_pos[0]), lava_shore_target[2] - float(swim_pos[2]))
-            stalled = self._stalled_lava_shore
-            repeat_stall = (
-                stalled is not None and stalled[0] == tuple(lava_shore_target)
-                and math.dist(swim_pos[:3], stalled[1]) <= 1.25
-                and time.monotonic() - stalled[2] < 15.0
-            )
-            if repeat_stall:
+            bank = tuple(lava_shore_target)
+            if bank in stalled_shores_near(swim_pos):
                 actions.append("lava_shore_path_stalled")
             elif shore_d <= 6.5:
                 # Keep the attempted bank if the recovery deadline interrupts the status recheck.
-                self._stalled_lava_shore = (tuple(lava_shore_target), tuple(swim_pos[:3]), time.monotonic())
+                self._stalled_lava_shores[bank] = (tuple(swim_pos[:3]), time.monotonic())
                 try:
                     self.bot.call(
                         "move_to",
@@ -1519,10 +1522,11 @@ class CombatEnv:
                 if _should_exit_lava(st):
                     return _lava_result(st)
                 end = st.get("pos") or swim_pos
-                if math.dist(end[:3], lava_shore_target) >= math.dist(swim_pos[:3], lava_shore_target) - 0.75:
-                    self._stalled_lava_shore = (tuple(lava_shore_target), tuple(end[:3]), time.monotonic())
+                remaining = math.hypot(bank[0] - end[0], bank[2] - end[2])
+                if remaining >= shore_d - 0.75:
+                    self._stalled_lava_shores[bank] = (tuple(end[:3]), time.monotonic())
                 else:
-                    self._stalled_lava_shore = stalled
+                    self._stalled_lava_shores.pop(bank, None)
 
         # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
         if filler is not None and time.monotonic() < lava_deadline + 0.8:
@@ -2080,7 +2084,7 @@ class CombatEnv:
         max_candidates: int = 10,
         avoid_close_threat: bool = False,
         deadline: float | None = None,
-        excluded_shore: Sequence[float] | None = None,
+        excluded_shores: Collection[tuple[float, ...]] = (),
     ) -> list[float] | None:
         """Query `find_blocks` for nearby solid shoreline with 2-high passable headroom."""
         start_x, start_z = float(pos0[0]), float(pos0[2])
@@ -2119,7 +2123,7 @@ class CombatEnv:
                 cx, cy, cz = int(rpos[0]), int(rpos[1]), int(rpos[2])
                 if cy < min_y or (max_y is not None and cy > max_y):
                     continue
-                if excluded_shore is not None and (cx + 0.5, float(cy + 1), cz + 0.5) == tuple(excluded_shore):
+                if (cx + 0.5, float(cy + 1), cz + 0.5) in excluded_shores:
                     continue
                 if not _is_solid_ground(_clean_block_name(row.get("name"))):
                     continue
@@ -2255,7 +2259,7 @@ class CombatEnv:
             max_y=by + 2,
             threat_pos=threat_pos,
             avoid_close_threat=avoid_close_threat,
-            excluded_shore=excluded_shore,
+            excluded_shores=(excluded_shore,) if excluded_shore is not None else (),
         )
 
         # 2. Radial fallback if find_blocks yielded no dry surface spot.

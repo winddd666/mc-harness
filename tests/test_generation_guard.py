@@ -4159,7 +4159,7 @@ def test_lava_escape_changes_unverified_swim_heading_after_stalling(monkeypatch,
     assert swim_headings == pytest.approx([0.0, (-1 if west_blocked else 1) * math.pi / 2])
 
 
-@pytest.mark.parametrize("fallback", ["bridge", "alternate_bank"])
+@pytest.mark.parametrize("fallback", ["bridge", "alternate_bank", "third_bank"])
 @pytest.mark.parametrize("status_timeout", [False, True])
 def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkeypatch, fallback, status_timeout):
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
@@ -4195,6 +4195,7 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
                 return {"blocks": [
                     {"name": "netherrack", "pos": [3188, 65, -2047]},
                     {"name": "basalt", "pos": [3183, 64, -2047]},
+                    *([{"name": "netherrack", "pos": [3186, 66, -2051]}] if fallback == "third_bank" else []),
                 ]}
             if action == "look":
                 headings.append(body["yaw"])
@@ -4208,8 +4209,11 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
                     status["pos"] = [3186.7, 64.6, -2046.2]
                     clock[0] += 1.8
                     check_first_path = True
+                elif fallback == "third_bank" and body["x"] == 3183.5:
+                    # A vertical rise without movement across the pool does not make a shore path viable.
+                    status["pos"] = [3186.7, 65.8, -2046.2]
                 else:
-                    assert fallback == "alternate_bank" and body["x"] == 3183.5
+                    assert body["x"] == (3186.5 if fallback == "third_bank" else 3183.5)
                     status.update(in_lava=False, on_ground=True, pos=[body["x"], body["y"], body["z"]])
             if action == "place":
                 calls.append(action)
@@ -4235,6 +4239,11 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
 
     can_bridge = fallback == "bridge"
     second = env.escape_lava()
+    if fallback == "third_bank":
+        assert not second["ok"]
+        assert env.escape_lava()["ok"]
+        assert calls == ["move_to"] * 3
+        return
     assert second["ok"]
     if fallback == "bridge":
         assert "lava_shore_path_stalled" in second["actions"]
