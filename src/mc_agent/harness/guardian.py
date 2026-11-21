@@ -138,6 +138,10 @@ class _UnsafeFleeExit(BaseException):
     """Unwind an explicit retreat before an unsupported ground movement."""
 
 
+class _UnsafeCombatStep(BaseException):
+    """Unwind a chase before an unsupported ground movement."""
+
+
 class _UnsafeDig(BaseException):
     """Unwind a dig that would expose the bot to an unsafe drop or overhead fluid."""
 
@@ -2244,6 +2248,30 @@ class GenerationGuard:
         except (ApiError, httpx.HTTPError):
             return None
 
+    def _verify_combat_step(self, body: dict[str, Any]) -> dict[str, Any]:
+        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.6)
+        try:
+            status = probe_bot.status()
+            if "nether" not in str(status.get("dimension") or "").lower():
+                return body
+            if status.get("in_lava"):
+                self._stop_after_recovery_timeout()
+                raise ReflexPreempted({"source": "boundary_threat", "primary_type": "lava"})
+            pos, yaw = status.get("pos"), body.get("yaw", status.get("yaw"))
+            if (
+                not pos or not isinstance(yaw, (int, float)) or not math.isfinite(yaw)
+                or status.get("ready") is False or status.get("alive") is False or status.get("on_ground") is not True
+            ):
+                raise _UnsafeCombatStep
+            # Cover a preceding movement pulse still in flight as well as the next pulse.
+            distance = 3.0 if body.get("sprint") else 2.25
+            route = CombatEnv(probe_bot, geofence=self.geofence).probe_retreat(pos, yaw, distance)
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+            raise _UnsafeCombatStep from None
+        if route is None:
+            raise _UnsafeCombatStep
+        return {**body, "ms": min(body["ms"], 250)}
+
     @contextmanager
     def _intercept_bot_calls(
         self,
@@ -2255,6 +2283,7 @@ class GenerationGuard:
         watch_scout_water: bool = False,
         check_flee_exit: bool = False,
         watch_attack_emergency: bool = False,
+        check_combat_step: bool = False,
         check_support_dig: bool = False,
         check_food_use: bool = False,
     ):
@@ -2490,6 +2519,20 @@ class GenerationGuard:
                 return actor_call(path, body, **kwargs)
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
+            if (
+                check_combat_step and clean_path == "control" and isinstance(body, dict)
+                and body.get("forward") and body.get("wait") is False
+                and not any(body.get(key) for key in ("back", "left", "right", "jump"))
+                and isinstance(body.get("ms"), int) and body["ms"] > 0
+            ):
+                try:
+                    body = self._verify_combat_step(body)
+                except _UnsafeCombatStep:
+                    if pending_trigger:
+                        raise ReflexPreempted(pending_trigger[0]) from None
+                    raise
+                if pending_trigger:
+                    raise ReflexPreempted(pending_trigger[0])
             if (
                 check_food_use and clean_path == "use_item" and isinstance(body, dict) and not body.get("target")
                 and str(body.get("item") or "").removeprefix("minecraft:") in SAFE_FOOD_PRIORITY
@@ -2924,6 +2967,7 @@ class GenerationGuard:
                 watch_scout_water=tool_name == "mc_skill_scout_surface",
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
+                check_combat_step=tool_name == "mc_skill_combat",
                 check_support_dig=tool_name in {"mc_dig", "mc_skill_staircase"},
                 check_food_use=tool_name == "mc_use_item",
             ):
@@ -2948,6 +2992,14 @@ class GenerationGuard:
                 "ok": False,
                 "requires_replan": True,
                 "error": {"code": code, "message": message},
+            }, ensure_ascii=False)
+        except _UnsafeCombatStep:
+            self._stop_after_recovery_timeout()
+            self.events.emit("guardian.combat_step_blocked", tool=tool_name)
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {"code": "unsafe_landing", "message": "追击方向缺少安全落脚点，请在有支撑的位置接战。"},
             }, ensure_ascii=False)
         except (_UnsafeFleeExit, _UnsafeUnstickExit):
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)

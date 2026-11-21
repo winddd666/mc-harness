@@ -8374,6 +8374,41 @@ def test_close_creeper_preempts_movement_that_ignores_ordinary_hurt(monkeypatch,
     assert calls == ["move_to", "stop", "creeper_evade"]
 
 
+@pytest.mark.parametrize("terrain", ["netherrack", "drop", "lava"])
+def test_nether_combat_checks_footing_before_issuing_a_chase_pulse(terrain):
+    moves = []
+    status = {
+        "pos": [0.5, 64, 0.5], "yaw": 0.0, "health": 20, "on_ground": True,
+        "ready": True, "alive": True, "dimension": "the_nether",
+    }
+
+    class CombatBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                _, y, z = body["pos"]
+                if y == 63:
+                    return {"name": "netherrack" if terrain == "netherrack" or z >= 0 else "lava" if terrain == "lava" else "air"}
+                return {"name": "air"}
+            if action in {"control", "stop"}:
+                moves.append(action)
+                return {"ok": True}
+            raise AssertionError(action)
+
+    bot = CombatBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_combat", lambda: json.dumps(
+        bot.call("control", {"forward": True, "sprint": True, "ms": 250, "wait": False, "stop_on": []}),
+    )))
+
+    if terrain == "netherrack":
+        assert moves == ["control"] and result["ok"]
+    else:
+        assert moves == ["stop"]
+        assert result["requires_replan"] and result["error"]["code"] == "unsafe_landing"
+
+
 @pytest.mark.parametrize(("tool", "endpoint", "interrupted_error"), [
     ("mc_skill_mine_dfs", "dig", False), ("mc_skill_combat", "move_to", False),
     ("mc_move_to", "move_to", False), ("mc_move_to", "move_to", True),
