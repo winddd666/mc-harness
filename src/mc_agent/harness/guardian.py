@@ -539,9 +539,20 @@ class GenerationGuard:
             rows = [e for e in page.get("events", []) if int(e.get("seq", 0)) > self.cursor]
             rec_fn = getattr(self.bot.bot, "record_death_event", None)
             if callable(rec_fn):
+                now_wall = time.time()
+                now_mono = time.monotonic()
                 for ev in rows:
-                    if str(ev.get("type") or "").lower() == "death":
-                        rec_fn(ev.get("seq") if ev.get("seq") is not None else ev.get("t"))
+                    if str(ev.get("type") or "").lower() != "death":
+                        continue
+                    timestamp_ms = ev.get("t")
+                    death_key = ev.get("seq") if ev.get("seq") is not None else timestamp_ms
+                    if isinstance(timestamp_ms, (int, float)) and 0 < timestamp_ms <= (now_wall + 5.0) * 1000:
+                        age = max(0.0, now_wall - timestamp_ms / 1000.0)
+                        if age <= 60.0:
+                            rec_fn(death_key, mono_ts=now_mono - age)
+                    elif observe_combat_hurt:
+                        # Only live events may fall back to arrival time when the timestamp is absent.
+                        rec_fn(death_key)
             fresh.extend(rows)
             self.cursor = max([self.cursor, int(page.get("last_seq", 0))] + [int(e.get("seq", 0)) for e in rows])
             if not page.get("has_more") or not rows:

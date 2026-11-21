@@ -1098,6 +1098,53 @@ def test_night_surface_bunker_after_failed_flee_boundary_eat_and_no_dead_eat(mon
     assert [a["action"] for a in inc_shield["actions"]] == ["dig_cover"]
 
 
+def test_bug077_prime_ages_deaths_and_retains_recent_live_deaths(monkeypatch):
+    now_s = 1_795_200_000
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.time", lambda: now_s + clock[0] - 1000.0)
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    events = [
+        {"type": "death", "seq": 1, "t": (now_s - 2400) * 1000},
+        {"type": "death", "seq": 2},
+        {"type": "death", "seq": 3, "t": (now_s - 42) * 1000},
+    ]
+
+    class ReplayBot:
+        _last_event_seq = 0
+        record_death_event = BotSession.record_death_event
+        recent_deaths_in_window = BotSession.recent_deaths_in_window
+
+        def __init__(self):
+            self._seen_death_keys = set()
+            self._death_mono_times = []
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"health": 20, "ready": True, "alive": True}
+            if action == "inventory":
+                return {}
+            if action == "events":
+                return {"events": [e for e in events if e["seq"] > kwargs["params"]["since"]], "last_seq": events[-1]["seq"]}
+            raise AssertionError(action)
+
+    bot = ReplayBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    guard.prime()
+
+    assert guard.cursor == bot._last_event_seq == 3
+    assert bot.recent_deaths_in_window() == [958.0]
+
+    clock[0] = 1019.0
+    recent = {"type": "death", "seq": 4, "t": (now_s + 10) * 1000}
+    events.extend([recent, recent.copy(), {"type": "death", "seq": 5}])
+    guard._drain_events_pages()
+    guard._drain_events_pages()
+
+    assert guard.cursor == 5
+    assert bot.recent_deaths_in_window() == [1010.0, 1019.0]
+
+
 def test_bug_009_pre_hurt_same_target_debounce_cancels_once(monkeypatch):
     """BUG-009: Consecutive pre_hurt_* triggers from the same target within 3s must cancel only once."""
     clock = [500.0]
