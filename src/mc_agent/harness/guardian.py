@@ -308,6 +308,7 @@ class GenerationGuard:
         self._last_ranged_hurt_at = float("-inf")
         self._last_trident_hurt_at = float("-inf")
         self._last_melee_hurt_at = float("-inf")
+        self._nether_melee_eat_defer_until = float("-inf")
         self._last_lava_contact_at = float("-inf")
         self._last_fire_contact_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
@@ -798,6 +799,7 @@ class GenerationGuard:
                     self._last_ranged_hurt_at = float("-inf")
                     self._last_trident_hurt_at = float("-inf")
                     self._last_melee_hurt_at = float("-inf")
+                    self._nether_melee_eat_defer_until = float("-inf")
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
                     self._last_cornered_creeper = None
@@ -815,6 +817,7 @@ class GenerationGuard:
                         self._last_melee_hurt_at = float("-inf")
                     elif source in MELEE_HURT_SOURCES:
                         self._last_melee_hurt_at = now
+                        self._nether_melee_eat_defer_until = now + self.MELEE_EAT_DEFER_S
                     elif source in LAVA_HURT_SOURCES:
                         self._last_lava_contact_at = now
                     elif source == "in_fire":
@@ -970,7 +973,8 @@ class GenerationGuard:
         protecting_against_recent_hit = status.get("blocking") and (recent_ranged_hit or recent_melee_hit)
         # A Nether shooter can keep firing while missing from the nearest-hostile snapshot.
         recent_nether_threat = in_nether and (
-            recent_melee_hit or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_RANGED_WINDOW_S)
+            now < self._nether_melee_eat_defer_until
+            or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_RANGED_WINDOW_S)
         )
         recent_trident_hit = now - self._last_trident_hurt_at < 8.0
         if (
@@ -1994,6 +1998,7 @@ class GenerationGuard:
                         bunker_result = bunker.get("result") or {}
                         if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
                             self._last_melee_hurt_at = float("-inf")
+                            self._nether_melee_eat_defer_until = float("-inf")
                     else:
                         cf = self._action(
                             "combat_or_flee",

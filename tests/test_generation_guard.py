@@ -5212,6 +5212,41 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shoo
     assert use_items == [{"item": "cooked_beef"}]
 
 
+@pytest.mark.parametrize("sources", [("mob_attack", "fireball"), ("fireball", "mob_attack")])
+def test_mixed_nether_damage_keeps_melee_eat_cooldown_regardless_of_event_order(monkeypatch, sources):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [-406.3, 58, -1903.3], "dimension": "the_nether", "health": 17, "food": 19,
+        "ready": True, "alive": True, "on_ground": True, "blocking": True, "on_fire": False,
+    }
+    eats = []
+    hits = [{"seq": seq, "type": "hurt", "source": source} for seq, source in enumerate(sources, 1)]
+
+    class FoodBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 1}]}
+            if action == "use_item":
+                eats.append(body)
+            return {"ok": True}
+
+    guard = GenerationGuard(FoodBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._drain_events_pages()
+    clock[0] += 9.0
+
+    assert guard.poll() is None
+    assert eats == []
+    clock[0] += 1.1
+    eat, = guard.poll()["actions"]
+    assert eat["action"] == "eat" and eat["ok"]
+    assert eats == [{"item": "cooked_beef"}]
+
+
 @pytest.mark.parametrize(
     "item, shooter_distance, allowed",
     [("cooked_beef", 4.2, False), ("cooked_beef", 23.0, True), ("golden_apple", 4.2, True)],
