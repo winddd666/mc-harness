@@ -6471,6 +6471,43 @@ def test_guardian_bounds_melee_macro_and_rejects_retreat_after_death(monkeypatch
         assert moves[1:] == [("stop", 1.5)]
 
 
+@pytest.mark.parametrize("landed_behind_seal", [True, False])
+def test_guardian_rechecks_landing_after_legacy_shaft_seal(monkeypatch, landed_behind_seal):
+    before = {
+        "pos": [3103.7, 99.0, -10039.7], "health": 14.0, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True,
+    }
+    seal_position = [3102.4, 100.0, -10039.3]
+    after = {
+        **before, "health": 10.833,
+        "pos": [3102.3, 100.0, -10039.1] if landed_behind_seal else [3103.4, 99.0, -10039.3],
+    }
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            assert action == "status"
+            return dict(after)
+
+    def seal_shaft(_skills, **_kwargs):
+        return {
+            "ok": True, "mode": "seal_shaft", "pos_after": seal_position,
+            "placed_positions": [[3101, 100, -10040], [3101, 101, -10040]],
+            "requires_replan": True,
+        }
+
+    monkeypatch.setattr(MacroSkills, "defend_or_flee", seal_shaft)
+    bot = ShaftBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(bot))
+
+    result = guard._defend_or_flee(before, None, {"stone_sword": 1})
+
+    assert result["ok"] is landed_behind_seal
+    assert result["pos_after"] == after["pos"]
+    assert result["requires_replan"] is True
+    if not landed_behind_seal:
+        assert result["reason"] == "shaft_seal_landing_unconfirmed"
+
+
 def test_unarmed_melee_reflex_checks_footing_before_retreat(monkeypatch):
     status = {
         "pos": [0.5, 64.0, 0.5], "health": 14.0, "food": 20, "dimension": "overworld",

@@ -505,6 +505,17 @@ class GenerationGuard:
             return {**result, "ok": False, "respawned": True}
         if after.get("ready") is False:
             return {**result, "ok": False, "reason": "not_ready"}
+        if result.get("mode") == "seal_shaft":
+            seal_pos = result.get("pos_after")
+            live_pos = after.get("pos")
+            result = {**result, "pos_after": live_pos}
+            # Placement can finish while knockback is moving the bot off the sealed step.
+            if (
+                after.get("on_ground") is not True or after.get("in_water") or after.get("in_lava")
+                or not live_pos or not seal_pos
+                or tuple(map(math.floor, live_pos[:3])) != tuple(map(math.floor, seal_pos[:3]))
+            ):
+                return {**result, "ok": False, "reason": "shaft_seal_landing_unconfirmed"}
         if confirm_shore and (after.get("on_ground") is False or after.get("in_water") or after.get("in_lava")):
             return {
                 **result, "ok": False, "reason": "shore_landing_unconfirmed", "pos_after": end,
