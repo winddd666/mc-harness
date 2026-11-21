@@ -1350,7 +1350,9 @@ class McToolset:
                         f"动作锁仍被 {err_obj.get('action') or '其他动作'} 占用，move_to 未执行；"
                         "请先脱困或等待 1~2 秒后重试，不要连续提交同一路径。"
                     )
-                    raw = json.dumps(parsed, ensure_ascii=False)
+                    if geofence_clamped_info is not None:
+                        parsed.update(geofence_clamped_info)
+                    return json.dumps(parsed, ensure_ascii=False)
                 st_mv: dict[str, Any] | None = None
                 try:
                     st_mv = self.bot.status()
