@@ -2660,15 +2660,25 @@ class GenerationGuard:
             if not name or distance > (16.0 if ranged else 6.0):
                 return None
             health = status.get("health")
-            if (
-                allow_cover and ranged and "nether" in str(status.get("dimension") or "").lower()
+            dimension = str(status.get("dimension") or "").lower().removeprefix("minecraft:")
+            recent_nether_cover = (
+                "nether" in dimension
                 and now < self._ranged_cover_active_until
                 and now - max(self._last_ranged_hurt_at, self._last_melee_hurt_at) >= 4.0
-                and status.get("on_ground") is True and status.get("pos")
+            )
+            critical_overworld_arrows = (
+                dimension == "overworld" and status.get("blocking")
+                and isinstance(health, (int, float)) and 0 < health <= 4.0
+                and now - self._last_ranged_hurt_at < 8.0 and now - self._last_melee_hurt_at >= 4.0
+            )
+            if (
+                allow_cover and ranged and status.get("on_ground") is True and status.get("pos")
+                and (recent_nether_cover or critical_overworld_arrows)
             ):
+                cover_budget = 2.25 if critical_overworld_arrows else 1.25
                 cover = self._recheck_cover_after_blocked_flee(
-                    status["pos"], entity_id, min(now + 1.25, deadline),
-                    allow_stationary=not self._low_health_burning_after_ranged_hit(status, now),
+                    status["pos"], entity_id, min(now + cover_budget, deadline),
+                    allow_stationary=not (critical_overworld_arrows or self._low_health_burning_after_ranged_hit(status, now)),
                 )
                 if cover and (cover.get("ok") or cover.get("respawned")):
                     return {**cover, "requires_replan": True, "pos_before": status["pos"]}

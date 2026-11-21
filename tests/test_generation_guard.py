@@ -9401,6 +9401,61 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
     }[cover]
 
 
+@pytest.mark.parametrize("pressure", ["arrow", "stale_arrow", "melee_and_arrow", "exposed"])
+def test_unsafe_overworld_flee_checks_cover_when_critical_arrows_bypass_shield(monkeypatch, pressure):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
+    skeleton = {"id": 44, "name": "skeleton", "dist": 2.0, "pos": [0.5, 73, 2.5]}
+    pillager = {"id": 45, "name": "pillager", "dist": 7.8, "pos": [-7.3, 73, 0.5]}
+    status = {
+        "pos": [0.5, 73, 0.5], "dimension": "overworld", "health": 2.6, "blocking": True,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": skeleton,
+    }
+    checks = []
+
+    class CliffBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "get_entities":
+                return {"entities": [skeleton, pillager]}
+            raise AssertionError(action)
+
+    def seek_cover(_env, pos, *, other_shooters, allow_stationary):
+        checks.append("cover")
+        assert pos == skeleton["pos"] and other_shooters == [pillager["pos"]]
+        assert allow_stationary is False
+        if pressure == "exposed":
+            return None
+        return {"ok": True, "mode": "natural_cover", "moved_dist": 2.2, "pos_after": [2.7, 73, 0.5]}
+
+    def flee(_env, pos, **_kwargs):
+        checks.append("flee")
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    bot = CliffBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_ranged_hurt_at = 991.0 if pressure == "stale_arrow" else 999.0
+    if pressure == "melee_and_arrow":
+        guard._last_melee_hurt_at = 999.0
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
+    )))
+
+    assert result["requires_replan"]
+    if pressure == "arrow":
+        assert result["mode"] == "natural_cover"
+        assert checks == ["cover"]
+    else:
+        assert result["error"]["code"] == "unsafe_landing"
+        assert checks == (["cover", "flee"] if pressure == "exposed" else ["flee"])
+
+
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
 @pytest.mark.parametrize("failure", ["timeout", "death", "failed_respawn"])
 def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monkeypatch):
