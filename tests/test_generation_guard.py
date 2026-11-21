@@ -3194,6 +3194,58 @@ def test_lava_notch_checks_bank_support_and_actual_clearance(bank):
     assert not any(a.startswith("lava_notch_") for a in escaped["actions"] if a != "lava_notch_north")
 
 
+@pytest.mark.parametrize("retry", ["tool_changed", "new_bank", "expired"])
+def test_lava_notch_skips_recent_timeout_until_next_viable_attempt(monkeypatch, retry):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [3566.3, 64.4, 1794.7], "dimension": "the_nether", "health": 20,
+        "in_lava": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    bank = {(3566, 64, 1793): "blackstone", (3566, 65, 1793): "blackstone"}
+    digs = []
+    held = None
+
+    class LavaBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "obsidian", "count": 1}], "held": held}
+            if action == "get_block":
+                return {"name": bank.get(tuple(body["pos"]), "air")}
+            if action == "dig":
+                pos = tuple(body["pos"])
+                digs.append(pos)
+                if len(digs) == 1:
+                    raise httpx.ReadTimeout("could not open the bank")
+                bank.pop(pos)
+            if action == "control" and body.get("forward") and len(digs) == 2:
+                status.update(in_lava=False, on_ground=True, pos=[digs[-1][0] + 0.5, 65, 1793.5])
+            return {"ok": True}
+
+    env = CombatEnv(LavaBot())
+    monkeypatch.setattr(env, "scan_safe_yaws", lambda *args, **kwargs: {"best_yaw": 0.0})
+    assert "lava_notch_dig_timeout" in env.escape_lava()["actions"]
+
+    clock[0] += 4.0
+    assert "lava_notch_dig_deferred" in env.escape_lava()["actions"]
+    assert digs == [(3566, 65, 1793)]
+
+    if retry == "tool_changed":
+        held = {"name": "iron_pickaxe"}
+    elif retry == "new_bank":
+        bank.update({(3567, 64, 1793): "blackstone", (3567, 65, 1793): "blackstone"})
+        status["pos"] = [3567.3, 64.4, 1794.7]
+    else:
+        clock[0] += 15.0
+    assert env.escape_lava()["ok"] is True
+    assert digs[-1] == (3567 if retry == "new_bank" else 3566, 65, 1793)
+
+
 def test_r19_lava_pit_places_netherrack_filler_before_second_sprint(monkeypatch):
     """Reproduces r19_short hy4_hy_8_nether: boxed Nether pit must try netherrack bridge right after first sprint instead of starving."""
     from mc_agent.skills.combat_env import CombatEnv

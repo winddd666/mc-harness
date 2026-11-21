@@ -383,6 +383,7 @@ class CombatEnv:
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
         self._stalled_lava_shore: tuple[tuple[float, ...], tuple[float, ...], float] | None = None
+        self._stalled_lava_notch: dict[tuple[str, tuple[int, int, int], str, str | None], float] = {}
 
     def surface_from_water(self, status: dict[str, Any]) -> dict[str, Any]:
         if self._water_escape is not None:
@@ -1205,9 +1206,9 @@ class CombatEnv:
         actions: list[str] = []
         lava_deadline = time.monotonic() + 5.0
         try:
-            counts, _, _ = self._inventory_counts_and_shield()
+            counts, _, held_name = self._inventory_counts_and_shield()
         except (ApiError, httpx.HTTPError):
-            counts = {}
+            counts, held_name = {}, None
         dim = str(st.get("dimension") or "").lower()
         if counts.get("water_bucket", 0) > 0 and "nether" not in dim:
             try:
@@ -1583,6 +1584,8 @@ class CombatEnv:
 
         # 4. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
         notch_deadline = lava_deadline + 0.8
+        now = time.monotonic()
+        self._stalled_lava_notch = {key: until for key, until in self._stalled_lava_notch.items() if now < until}
         for dname, (dx, dz) in CARDINAL_VECTORS.items():
             if time.monotonic() >= lava_deadline:
                 break
@@ -1602,22 +1605,32 @@ class CombatEnv:
             blocks = [self._get_block_name(ex, cy, ez, strict=True) for cy in clearance]
             if any(not block or block in HAZARD_BLOCK_TYPES or block == "bedrock" for block in blocks):
                 continue
-            for cy, block in zip(clearance, blocks):
-                if not _is_passable(block):
-                    # Reserve time to reach the notch after opening it.
-                    dig_budget = min(1.0, notch_deadline - time.monotonic() - 1.5)
-                    if dig_budget < 0.25:
-                        break
-                    try:
-                        self.bot.call(
-                            "dig", {"pos": [ex, cy, ez], "collect": False, "stop_on": ["death"]},
-                            timeout_s=dig_budget, allow_reauth=False,
-                        )
-                    except (ApiError, httpx.HTTPError) as err:
-                        if isinstance(err, httpx.HTTPError):
-                            actions.append("lava_notch_dig_timeout")
-                            self._best_effort_stop(timeout_s=0.25)
-                        break
+            dig_keys = [
+                (dim0, (ex, cy, ez), block, held_name)
+                for cy, block in zip(clearance, blocks)
+                if not _is_passable(block)
+            ]
+            now = time.monotonic()
+            if any(self._stalled_lava_notch.get(key, now) > now for key in dig_keys):
+                actions.append("lava_notch_dig_deferred")
+                continue
+            for key in dig_keys:
+                # Reserve time to reach the notch after opening it.
+                dig_budget = min(1.0, notch_deadline - time.monotonic() - 1.5)
+                if dig_budget < 0.25:
+                    break
+                try:
+                    self.bot.call(
+                        "dig", {"pos": list(key[1]), "collect": False, "stop_on": ["death"]},
+                        timeout_s=dig_budget, allow_reauth=False,
+                    )
+                except (ApiError, httpx.HTTPError) as err:
+                    if isinstance(err, httpx.ReadTimeout):
+                        self._stalled_lava_notch[key] = time.monotonic() + 15.0
+                    if isinstance(err, httpx.HTTPError):
+                        actions.append("lava_notch_dig_timeout")
+                        self._best_effort_stop(timeout_s=0.25)
+                    break
             if time.monotonic() + 1.25 >= notch_deadline:
                 break
             self.invalidate_block_cache()
