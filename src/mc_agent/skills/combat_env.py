@@ -2804,7 +2804,7 @@ class CombatEnv:
         elif still_wet and observed_end_pos and shore_target is not None and life == (st_end.get("dimension"), st_end.get("last_death")):
             tried_lip = "shore_lip_jump" in actions
             stalled_below_lip = (
-                tried_lip and (has_threat or shield_target_id is not None) and shore_target[1] - pos_end[1] >= 1.75
+                tried_lip and shore_target[1] - pos_end[1] >= 1.75
                 and math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
             )
             no_approach = (tried_lip or shore_path_unreachable) and (
@@ -3572,6 +3572,27 @@ class SubcorticalInstinctController:
                         })
                         self._recent_flee_streak += 1
                         self._last_flee_at = now_flee
+                    if (
+                        not flee_ok and fl.get("reason") == "no_safe_retreat" and not fl.get("respawned")
+                        and not has_shield and hp <= 4.0 and mob_name in RANGED_MOBS
+                        and trigger.get("hurt_source") == "arrow"
+                        and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                        and isinstance(mob_pos, (list, tuple)) and len(mob_pos) >= 3
+                        and time.monotonic() + 2.0 < deadline
+                        and not any(
+                            _clean_block_name(hostile.get("name")) in PRE_HURT_MELEE_MOBS
+                            and self._entity_dist(pos, hostile) <= 3.5
+                            for hostile in nearby_hostiles
+                        )
+                    ):
+                        natural_cover = env.seek_natural_cover(
+                            mob_pos, other_shooters=other_shooters, allow_stationary=False,
+                        )
+                        if natural_cover is not None:
+                            actions.append({"action": "natural_cover", **natural_cover})
+                            if natural_cover.get("ok"):
+                                mode = "natural_cover"
+                                self._recent_flee_streak = 0
                     check_ranged_guard = flee_ok and fl.get("mode") == "flee" and mob_name in RANGED_MOBS
                     check_melee_guard = flee_ok and (sealed or fl.get("mode") == "flee") and mob_name in PRE_HURT_MELEE_MOBS
                     if (not flee_ok or check_ranged_guard or check_melee_guard) and not fl.get("respawned") and has_shield:

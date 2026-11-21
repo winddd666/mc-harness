@@ -9577,17 +9577,18 @@ def test_failed_pathfinder_uses_a_short_hop_to_reach_a_nearby_shallow_bank(monke
 
 
 @pytest.mark.parametrize("same_life", [True, False])
-def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(monkeypatch, same_life):
+@pytest.mark.parametrize("under_attack", [False, True])
+def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(monkeypatch, same_life, under_attack):
     from mc_agent.skills.combat_env import CombatEnv
 
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     status = {
-        "pos": [11299.7, 62.2, 11021.3], "dimension": "overworld", "last_death": {"t": 1},
+        "pos": [11298.2, 62.2, 11021.3], "dimension": "overworld", "last_death": {"t": 1},
         "health": 9.0, "in_water": True, "on_ground": False, "alive": True, "ready": True,
     }
     high_bank = [11300, 64, 11021]
-    low_bank = [11298, 62, 11023]
+    low_bank = [11296, 62, 11023]
     targets = []
 
     class RiverBot:
@@ -9604,17 +9605,20 @@ def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(m
                 targets.append(target)
                 if target[1] == 63:
                     status.update(pos=target, in_water=False, on_ground=True)
+                else:
+                    status["pos"] = [11300.5, 62.9, 11021.8]
             return {"ok": True}
 
     env = CombatEnv(RiverBot())
-    first = env.escape_deep_water_to_shore(shield_target_id=44)
+    shield_target = 44 if under_attack else None
+    first = env.escape_deep_water_to_shore(shield_target_id=shield_target)
     assert first["in_water"] is True and first["shore_target"] == [11300.5, 65.0, 11021.5]
     clock[0] += 4.0
     if not same_life:
         status["last_death"] = {"t": 2}
-    second = env.escape_deep_water_to_shore(shield_target_id=44)
+    second = env.escape_deep_water_to_shore(shield_target_id=shield_target)
 
-    expected_bank = [11298.5, 63.0, 11023.5] if same_life else first["shore_target"]
+    expected_bank = [11296.5, 63.0, 11023.5] if same_life else first["shore_target"]
     assert second["ok"] is same_life
     assert targets == [first["shore_target"], expected_bank]
 
@@ -11353,6 +11357,59 @@ def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(m
         assert outcome["latched_guard"] is True and status["blocking"] is True
     else:
         assert attacks == []
+
+
+@pytest.mark.parametrize("fallback", ["covered", "exposed", "respawned", "near_melee", "little_time"])
+def test_interrupted_arrow_tool_checks_natural_cover_after_no_safe_retreat(monkeypatch, fallback):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    shooter = {"id": 41, "name": "skeleton", "dist": 4.3, "pos": [4.8, 71, 0.5]}
+    second_shooter = {"id": 42, "name": "skeleton", "dist": 7.0, "pos": [0.5, 71, 7.5]}
+    hostiles = [shooter, second_shooter]
+    if fallback == "near_melee":
+        hostiles.append({"id": 43, "name": "spider", "dist": 2.0, "pos": [2.5, 71, 0.5]})
+    status = {"pos": [0.5, 71, 0.5], "health": 3.33, "food": 17, "alive": True, "ready": True,
+              "dimension": "overworld", "on_ground": True, "nearest_hostile": shooter}
+    checks = []
+
+    class RidgeBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": hostiles}
+            return {"ok": True}
+
+    def flee(pos, **kwargs):
+        assert pos == shooter["pos"] and kwargs["wait_for_ground"]
+        checks.append("flee")
+        if fallback == "little_time":
+            clock[0] += 6.0
+        return {"ok": False, "moved_dist": 0.0, "reason": "no_safe_retreat", "respawned": fallback == "respawned"}
+
+    def seek_cover(pos, *, other_shooters, allow_stationary):
+        assert pos == shooter["pos"] and other_shooters == [second_shooter["pos"]] and not allow_stationary
+        checks.append("cover")
+        if fallback == "covered":
+            status.update(pos=[0.5, 71, -1.7])
+            return {"ok": True, "mode": "natural_cover", "pos_after": status["pos"]}
+        return None
+
+    env = CombatEnv(RidgeBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", flee)
+    monkeypatch.setattr(env, "seek_natural_cover", seek_cover)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "tool_interrupted_hurt", "hurt_source": "arrow", "primary_entity_id": 41, "primary_type": "skeleton",
+    })
+
+    assert checks == (["flee", "cover"] if fallback in {"covered", "exposed"} else ["flee"])
+    assert outcome["mode"] == ("natural_cover" if fallback == "covered" else "cover_or_flee")
 
 
 @pytest.mark.parametrize("unbroken_ledge", [True, False])
