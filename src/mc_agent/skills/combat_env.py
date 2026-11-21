@@ -2499,7 +2499,12 @@ class CombatEnv:
                 and st_mid.get("ready", True)
             ):
                 mid_pos = st_mid.get("pos") or pos0
-                lip_ms = 1150 if float(mid_pos[1]) < float(shore_target[1]) - 0.05 else 850
+                lip_height = float(shore_target[1]) - float(mid_pos[1])
+                lip_distance = math.hypot(shore_target[0] - mid_pos[0], shore_target[2] - mid_pos[2])
+                lip_ms = 1150 if lip_height > 0.05 else 850
+                if 0.6 < lip_distance <= 1.8 and 0.0 <= lip_height <= 1.25:
+                    # A full swim pulse can carry the bot across a shallow one-block bank.
+                    lip_ms = 450
                 try:
                     syaw_m, _ = aim_yaw_pitch(mid_pos, shore_target)
                     self.bot.call("look", {"yaw": syaw_m, "pitch": -10.0})

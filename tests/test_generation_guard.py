@@ -8627,6 +8627,46 @@ def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attac
     assert result["actions"] == ["move_to_shore_failed", "shore_lip_jump"]
 
 
+def test_failed_pathfinder_uses_a_short_hop_to_reach_a_nearby_shallow_bank(monkeypatch):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    bank = [7948.5, 63.0, 2771.5]
+    status = {
+        "pos": [7949.8, 62.0, 2771.5], "in_water": True, "on_ground": False,
+        "alive": True, "ready": True, "dimension": "overworld",
+    }
+
+    class ShoreBot:
+        yaw = 0.0
+
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "look":
+                self.yaw = body["yaw"]
+            if action == "move_to":
+                raise ApiError("path_not_found", "pathfinder cannot climb the lip")
+            if action == "control" and body.get("forward"):
+                assert body["jump"] is True
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                x, _, z = status["pos"]
+                distance = 3.0 * body["ms"] / 1000
+                x += dx * distance
+                z += dz * distance
+                landed = int(x) == int(bank[0]) and int(z) == int(bank[2])
+                status.update(pos=[x, 63.0 if landed else 62.0, z], in_water=not landed, on_ground=landed)
+            return {"ok": True}
+
+    env = CombatEnv(ShoreBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_a, **_kw: bank)
+
+    result = env.escape_deep_water_to_shore()
+
+    assert result["ok"] is True
+    assert result["actions"] == ["move_to_shore_failed", "shore_lip_jump"]
+
+
 @pytest.mark.parametrize("same_life", [True, False])
 def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(monkeypatch, same_life):
     from mc_agent.skills.combat_env import CombatEnv
