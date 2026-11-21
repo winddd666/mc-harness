@@ -6979,7 +6979,7 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
-@pytest.mark.parametrize("landing", ["landed", "late_landing", "airborne", "respawned", "no_filler", "no_cover"])
+@pytest.mark.parametrize("landing", ["landed", "late_landing", "airborne", "respawned", "no_filler", "no_wall", "no_cover"])
 def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monkeypatch, landing):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
@@ -6994,7 +6994,7 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
     }
     cover_calls = []
     natural_checks = []
-    fallback = landing in {"no_filler", "no_cover"}
+    fallback = landing in {"no_filler", "no_wall", "no_cover"}
 
     class CaveBot:
         def call(self, action, body=None, **kwargs):
@@ -7026,14 +7026,14 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
         assert status["last_death"] == {"t": 1}
         cover_calls.append(status["pos"])
         if fallback:
-            return {"ok": False, "reason": "no_filler_block"}
+            return {"ok": False, "reason": "no_filler_block" if landing == "no_filler" else "no_solid_wall"}
         return {"ok": True, "mode": "cover_pocket"}
 
     def natural_cover(_env, pos, *, other_shooters, allow_stationary):
         assert status["on_ground"] and not allow_stationary
         assert not other_shooters and pos == [-7911.3, 44, 2790.6]
         natural_checks.append(pos)
-        if landing == "no_filler":
+        if landing != "no_cover":
             return {"ok": True, "mode": "natural_cover", "pos_after": [-7920.5, 44, 2790.6]}
         return None
 
@@ -7045,7 +7045,7 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
     assert len(natural_checks) == int(fallback)
     if fallback:
         assert [a["action"] for a in incident["actions"]] == ["combat_or_flee", "dig_cover", "natural_cover"]
-        assert incident["actions"][-1]["ok"] is (landing == "no_filler")
+        assert incident["actions"][-1]["ok"] is (landing != "no_cover")
 
 
 @pytest.mark.parametrize("respawned", [False, True])
@@ -10234,6 +10234,43 @@ def test_explicit_flee_checks_support_before_each_motion(action, solid_exit, dim
         assert movements == []
 
 
+def test_blocked_flee_preserves_a_respawn_reported_by_the_checked_retreat(monkeypatch):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    shooter = {"id": 44, "name": "skeleton", "dist": 6.0, "pos": [0.5, 69, 6.5]}
+    origin = [0.5, 69, 0.5]
+    spawn = [-79.5, 63.1, 75.5]
+    status = {"pos": origin, "dimension": "overworld", "health": 0.8, "blocking": True,
+              "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter}
+    attempts = []
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": "air"}
+            pytest.fail(f"Unexpected action during blocked flee: {action}")
+
+    def flee(_env, target, **_kwargs):
+        assert target == shooter["pos"]
+        attempts.append(target)
+        return {"ok": False, "mode": "respawned", "respawned": True, "pos_after": spawn,
+                "moved_dist": 0.0, "reason": "unsafe_landing"}
+
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    bot = RidgeBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    outcome = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
+    )))
+
+    assert attempts == [shooter["pos"]]
+    assert outcome["ok"] is False and outcome["requires_replan"] is True
+    assert outcome["mode"] == "respawned" and outcome["respawned"] is True
+    assert outcome["pos_before"] == origin and outcome["pos_after"] == spawn
+
+
 @pytest.mark.parametrize(
     "cover", ["safe", "exposed", "fresh_hit", "burning_after_hit", "burning_old_hit"],
 )
@@ -11240,9 +11277,11 @@ def test_magma_interrupts_active_tool_before_the_boundary(tool, endpoint, interr
 @pytest.mark.parametrize("pocket, covered", [
     ("no_filler_block", True),
     ("no_filler_block", False),
+    ("no_solid_wall", True),
+    ("no_solid_wall", False),
     ("cover_not_entered", False),
 ])
-def test_arrow_poll_without_filler_checks_natural_cover_before_repeating_flee(monkeypatch, pocket, covered):
+def test_arrow_poll_without_a_diggable_pocket_checks_natural_cover_before_flee(monkeypatch, pocket, covered):
     from mc_agent.skills.combat_env import CombatEnv
 
     shooter = {"id": 41, "name": "skeleton", "dist": 2.0}
@@ -11290,7 +11329,7 @@ def test_arrow_poll_without_filler_checks_natural_cover_before_repeating_flee(mo
     incident = guard.poll()
 
     expected = ["dig"]
-    if pocket == "no_filler_block":
+    if pocket in {"no_filler_block", "no_solid_wall"}:
         expected.append("natural_cover")
     if not covered:
         expected.append("flee")

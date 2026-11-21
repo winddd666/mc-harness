@@ -58,6 +58,7 @@ BLAST_HURT_SOURCES = frozenset({"player_explosion", "entity_explosion", "firebal
 # Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
 LAVA_HURT_SOURCES = frozenset({"lava"})
 FIRE_HURT_SOURCES = frozenset({"on_fire", "in_fire", "fire"})
+NO_DIG_COVER_REASONS = frozenset({"no_filler_block", "no_solid_wall"})
 NON_COMBAT_HURT_SOURCES = frozenset(
     {
         "on_fire",
@@ -2237,11 +2238,11 @@ class GenerationGuard:
                             or (surface_arrow_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0)
                         )
                         unshielded_cover = not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX
-                        missing_filler_cover = (
+                        pocket_unavailable = (
                             surface_arrow_cover and not has_shield and (ranged_hurt_only or nh_name in RANGED_MOBS)
-                            and ((cover or {}).get("result") or {}).get("reason") == "no_filler_block"
+                            and ((cover or {}).get("result") or {}).get("reason") in NO_DIG_COVER_REASONS
                         )
-                        if not missing_filler_cover and not has_shield and not att_pos_r and isinstance(att_id_r, int):
+                        if not pocket_unavailable and not has_shield and not att_pos_r and isinstance(att_id_r, int):
                             shooter_pos = self._find_hostile_position(att_id_r, att_name_r)
                             if shooter_pos is not None:
                                 attacker = {**(att_obj or {}), "pos": shooter_pos}
@@ -2249,9 +2250,9 @@ class GenerationGuard:
                             "combat_or_flee",
                             lambda: self._defend_or_flee(
                                 status, attacker, counts, ranged=True,
-                                prefer_cover=unshielded_cover or shielded_cover or missing_filler_cover,
+                                prefer_cover=unshielded_cover or shielded_cover or pocket_unavailable,
                                 allow_stationary_cover=not (
-                                    fresh_blast or missing_filler_cover or sustained_shield_damage or seek_cover_after_failed_dig
+                                    fresh_blast or pocket_unavailable or sustained_shield_damage or seek_cover_after_failed_dig
                                 ),
                             ),
                         )
@@ -2310,7 +2311,7 @@ class GenerationGuard:
                                 ):
                                     landing_cover = try_cover(landing_block).get("result") or {}
                                     if (
-                                        hurt_src == "arrow" and landing_cover.get("reason") == "no_filler_block"
+                                        hurt_src == "arrow" and landing_cover.get("reason") in NO_DIG_COVER_REASONS
                                         and not landing_cover.get("respawned")
                                     ):
                                         natural_cover = self._action(
@@ -2898,6 +2899,8 @@ class GenerationGuard:
                 raise_on_http_error=False,
             )
             result = recovery.get("result")
+            if isinstance(result, dict) and result.get("respawned"):
+                return {**result, "requires_replan": True, "pos_before": status.get("pos")}
             if recovery.get("ok") and isinstance(result, dict):
                 if (
                     ranged and entity_id is not None and status.get("blocking")
