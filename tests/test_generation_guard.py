@@ -7022,15 +7022,18 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
-@pytest.mark.parametrize("landing", ["landed", "late_landing", "airborne", "respawned", "no_filler", "no_wall", "no_cover"])
+@pytest.mark.parametrize("landing", [
+    "landed", "late_landing", "five_hp_late_landing", "airborne", "respawned", "no_filler", "no_wall", "no_cover",
+])
 def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monkeypatch, landing):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
-    late_landing = landing == "late_landing"
+    late_landing = landing in {"late_landing", "five_hp_late_landing"}
     landing_at = 1000.45 if late_landing else 1000.15
     status = {
-        "pos": [-7918.3, 44.6, 2790.6], "health": 2.2 if late_landing else 7.3, "food": 20,
+        "pos": [-7918.3, 44.6, 2790.6], "health": {"late_landing": 2.2, "five_hp_late_landing": 5.0}.get(landing, 7.3),
+        "food": 20,
         "dimension": "overworld",
         "ready": True, "alive": True, "on_ground": False, "last_death": {"t": 1},
         "nearest_hostile": {"name": "skeleton", "dist": 7.0},

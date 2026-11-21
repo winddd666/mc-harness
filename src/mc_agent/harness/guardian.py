@@ -848,7 +848,7 @@ class GenerationGuard:
                 return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
             critical_arrow_knockback = (
                 dimension == "overworld" and ranged and prefer_cover and unshielded
-                and isinstance(health, (int, float)) and 0 < health <= 4.0
+                and isinstance(health, (int, float)) and 0 < health <= 6.0
                 and status.get("on_ground") is False and not status.get("on_fire")
             )
             return self.combat_env.flee(
