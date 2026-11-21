@@ -4224,7 +4224,7 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
         assert headings[0] < 0 < headings[1]
 
 
-@pytest.mark.parametrize("landing", ["grounded", "after_jump", "after_two_checks", "loses_footing"])
+@pytest.mark.parametrize("landing", ["grounded", "after_jump", "after_two_checks", "after_two_edge_checks", "loses_footing"])
 def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsupported(monkeypatch, landing):
     """Reproduces r20_short hy4_hy_6_nether_bastion: when underfoot place fails no_support/blocked_by_self, place side bridge against bank & step onto it."""
     from mc_agent.errors import ApiError
@@ -4258,7 +4258,7 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
                 elif "timeout_s" in kwargs and not bridge_state["in_lava"] and not bridge_state["on_ground"]:
                     assert kwargs["allow_reauth"] is False
                     landing_reads.append(kwargs["timeout_s"])
-                    if landing != "after_two_checks" or len(landing_reads) == 2:
+                    if landing not in {"after_two_checks", "after_two_edge_checks"} or len(landing_reads) == 2:
                         bridge_state.update(on_ground=True, pos=[250.5, 29.0, 208.5])
                 return self.status()
             if action == "inventory":
@@ -4282,10 +4282,11 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
                 bridge_state["placed"].add(p)
                 return {"ok": True}
             if action == "control" and pl.get("forward") and bridge_state["placed"]:
-                after_jump = landing in {"after_jump", "after_two_checks"}
+                after_jump = landing in {"after_jump", "after_two_checks", "after_two_edge_checks"}
                 bridge_state.update(
                     in_lava=False, on_ground=not after_jump,
-                    pos=[250.5, 29.3 if after_jump else 29.0, 208.5],
+                    pos=[250.2 if landing == "after_two_edge_checks" else 250.5,
+                         29.3 if after_jump else 29.0, 208.5],
                 )
             if action == "posture":
                 assert bridge_state["on_ground"] and 0 < kwargs["timeout_s"] <= 0.35
@@ -4302,7 +4303,7 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
         assert out_b["reason"] == "lava_landing_unconfirmed"
     else:
         assert out_b["pos_after"] == [250.5, 29.0, 208.5]
-    assert len(landing_reads) == {"after_jump": 1, "after_two_checks": 2}.get(landing, 0)
+    assert len(landing_reads) == {"after_jump": 1, "after_two_checks": 2, "after_two_edge_checks": 2}.get(landing, 0)
     assert all(0 < timeout <= 0.25 for timeout in landing_reads)
 
 
@@ -5972,6 +5973,50 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert pulses[1] == pytest.approx([-1.8, 64.0, -1.8])
     else:
         assert len(pulses) == len(actions) == 1
+
+
+@pytest.mark.parametrize("creeper_in_status", [False, True])
+def test_creeper_warning_uses_a_creeper_position_when_scan_only_finds_other_mobs(monkeypatch, creeper_in_status):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    parched = {"id": 4621113, "name": "parched", "dist": 11.8, "pos": [12.3, 65, 0.5]}
+    creeper_pos = [-3.2, 65, 0.5]
+    status = {
+        "pos": [0.5, 65, 0.5], "health": 19, "food": 20, "on_ground": True,
+        "ready": True, "alive": True, "nearest_hostile": parched,
+    }
+    if creeper_in_status:
+        status["nearest_hostile"] = {"id": 4623433, "name": "creeper", "dist": 3.7, "pos": [-3.2, 65, 1.5]}
+    expected = status["nearest_hostile"]["pos"] if creeper_in_status else creeper_pos
+    moves = []
+
+    class NightBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [parched]}
+            raise AssertionError(action)
+
+    env = CombatEnv(NightBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open"})
+
+    def flee(threat_pos, **_kwargs):
+        moves.append(threat_pos)
+        status["nearest_hostile"] = parched
+        return {"ok": True, "moved_dist": 3.0}
+
+    monkeypatch.setattr(env, "flee", flee)
+    result = SubcorticalInstinctController().on_encounter(env, {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 4623433,
+        "primary_pos": creeper_pos, "distance": 3.7,
+    })
+
+    assert result["mode"] == "creeper_evade"
+    assert moves == [expected]
 
 
 @pytest.mark.parametrize("lands_in_water", [False, True])
@@ -7879,6 +7924,58 @@ def test_explicit_flee_checks_support_before_each_motion(action, solid_exit, dim
         assert movements == []
 
 
+@pytest.mark.parametrize("cover", ["safe", "exposed", "fresh_hit"])
+def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, cover):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    blaze = {"id": 44, "name": "blaze", "dist": 6.0, "pos": [0.5, 64, 6.5]}
+    second = {"id": 45, "name": "blaze", "dist": 8.0, "pos": [-7.5, 64, 0.5]}
+    status = {
+        "pos": [0.5, 64, 0.5], "dimension": "the_nether", "health": 8.3,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": blaze,
+    }
+    checks = []
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "get_entities":
+                return {"entities": [blaze, second]}
+            raise AssertionError(action)
+
+    def seek_cover(_env, pos, *, other_shooters):
+        checks.append("cover")
+        assert pos == blaze["pos"] and other_shooters == [second["pos"]]
+        if cover == "safe":
+            return {"ok": True, "mode": "natural_cover", "moved_dist": 0.0, "pos_after": status["pos"]}
+        return None
+
+    def flee(_env, pos, **_kwargs):
+        checks.append("flee")
+        assert pos == blaze["pos"]
+        return {"ok": True, "mode": "flee", "moved_dist": 2.2}
+
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    bot = FortressBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._mark_ranged_engagement(987.0, attacker=blaze, in_cover=True)
+    if cover == "fresh_hit":
+        guard._last_ranged_hurt_at = 999.0
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
+    )))
+
+    assert result["requires_replan"]
+    assert result["mode"] == ("natural_cover" if cover == "safe" else "flee")
+    assert checks == {"safe": ["cover"], "exposed": ["cover", "flee"], "fresh_hit": ["flee"]}[cover]
+
+
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
 @pytest.mark.parametrize("failure", ["timeout", "death"])
 def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monkeypatch):
@@ -8233,11 +8330,54 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
         assert attacks == [True] and moves == []
 
 
+@pytest.mark.parametrize("terrain", ["solid", "drop", "lava", "unknown"])
+def test_nether_attack_checks_footing_toward_nearby_blaze(terrain):
+    calls = []
+    blaze = {"id": 4645315, "name": "blaze", "dist": 1.3, "pos": [1.8, 65, 0.5]}
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 65, 0.5], "health": 17.64, "ready": True, "alive": True,
+                    "on_ground": True, "dimension": "the_nether", "nearest_hostile": blaze,
+                }
+            if action == "get_block":
+                x, y, _ = body["pos"]
+                if y == 64:
+                    if x == 0 or terrain == "solid":
+                        return {"name": "netherrack"}
+                    if terrain == "unknown":
+                        raise httpx.ReadTimeout("unverified footing")
+                    return {"name": "lava" if terrain == "lava" else "air"}
+                return {"name": "air"}
+            if action == "attack":
+                calls.append(action)
+                raise httpx.ReadTimeout("attack response timed out")
+            raise AssertionError(action)
+
+    bot = FortressBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def attack():
+        return json.dumps(bot.call("attack", {"entity_id": blaze["id"], "timeout": 5000}))
+
+    if terrain in {"solid", "unknown"}:
+        with pytest.raises(httpx.ReadTimeout, match="attack response timed out"):
+            guard.run_tool_with_reflex("mc_attack", attack)
+        assert calls == ["attack"]
+    else:
+        result = json.loads(guard.run_tool_with_reflex("mc_attack", attack))
+        assert calls == []
+        assert result["requires_replan"] and result["error"]["code"] == "unsafe_landing"
+
+
 @pytest.mark.parametrize("attack_result", ["returned", "interrupted", "read_timeout"])
 @pytest.mark.parametrize("hazard", ["water", "ranged_water", "lava", "unarmed_melee", "unarmed_above_critical", "other_melee"])
 def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result, hazard):
     import threading
 
+    actor_thread = threading.current_thread()
     stopped = threading.Event()
     observed = threading.Event()
     actions = []
@@ -8255,7 +8395,8 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 current = dict(status)
-                observed.set()
+                if threading.current_thread() is not actor_thread:
+                    observed.set()
                 return current
             actions.append(action)
             if action == "attack":

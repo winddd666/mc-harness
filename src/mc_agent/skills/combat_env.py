@@ -1594,13 +1594,13 @@ class CombatEnv:
                         landing_deadline = min(bridge_deadline, time.monotonic() + 0.35)
                         for sample in range(2):
                             if sample:
-                                # Wait again only while the hitbox is over the side bridge.
+                                # The bot can land with its center over the bridge and its hitbox straddling the edge.
                                 p_landing = st.get("pos")
                                 if (
                                     not side_step or st.get("in_lava") or not _landing_unconfirmed(st)
                                     or _did_respawn_during_lava(st) or not p_landing
                                     or p_landing[1] < place_pos[1] + 0.95
-                                    or _hitbox_columns(p_landing[0], p_landing[2]) != [(place_pos[0], place_pos[2])]
+                                    or (math.floor(p_landing[0]), math.floor(p_landing[2])) != (place_pos[0], place_pos[2])
                                 ):
                                     break
                             if landing_deadline - time.monotonic() <= 0.1:
@@ -2680,8 +2680,24 @@ class SubcorticalInstinctController:
         nh = st.get("nearest_hostile") if isinstance(st.get("nearest_hostile"), dict) else None
         primary: dict[str, Any] | None = None
         trig_id = trigger.get("primary_entity_id")
+        creeper_warning = trigger.get("source") == "pre_hurt_creeper"
         if trig_id is not None:
             primary = next((e for e in hostiles if e.get("id") == trig_id), None)
+        if creeper_warning and (primary is None or _clean_block_name(primary.get("name")) != "creeper"):
+            # Keep the blast direction if the triggering creeper drops out of the scan.
+            primary = next((
+                e for e in hostiles
+                if _clean_block_name(e.get("name")) == "creeper" and self._entity_dist(pos, e) <= 5.5
+            ), None)
+            if (
+                primary is None and nh and _clean_block_name(nh.get("name")) == "creeper"
+                and (nh.get("id") == trig_id or self._entity_dist(pos, nh) <= 5.5)
+            ):
+                primary = nh
+            if primary is None:
+                primary = {
+                    "id": trig_id, "name": "creeper", "pos": trigger.get("primary_pos"), "dist": trigger.get("distance"),
+                }
         if primary is None and hostiles:
             primary = hostiles[0]
         if primary is None and nh and nh.get("name"):
@@ -2737,10 +2753,10 @@ class SubcorticalInstinctController:
                 actions.append({"action": "water_surface_shore", "ok": bool(shore.get("ok"))})
 
         # 1) Creeper emergency: NEVER melee in blast radius — shield & retreat / seal shaft
-        elif any_creeper_close or trigger.get("source") == "pre_hurt_creeper":
+        elif any_creeper_close or creeper_warning:
             mode = "creeper_evade"
             self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
-            creeper_ent = next(
+            creeper_ent = primary if creeper_warning else next(
                 (e for e in hostiles if _clean_block_name(e.get("name")) == "creeper"),
                 primary,
             )

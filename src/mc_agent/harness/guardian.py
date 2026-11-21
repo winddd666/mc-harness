@@ -34,6 +34,7 @@ from ..skills.combat_env import (
     CombatControllerSlot,
     CombatEnv,
     ThreatTrigger,
+    _TerrainProbeExpired,
     aim_yaw_pitch,
     ranged_retreat_positions,
     retreat_made_progress,
@@ -2233,7 +2234,7 @@ class GenerationGuard:
         fraction = distance / desired_distance
         return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": 1.0}
 
-    def _retreat_after_unsafe_exit(self, deadline: float | None) -> dict[str, Any] | None:
+    def _retreat_after_unsafe_exit(self, deadline: float | None, *, allow_cover: bool = False) -> dict[str, Any] | None:
         now = time.monotonic()
         if deadline is None or now >= deadline:
             return None
@@ -2249,6 +2250,15 @@ class GenerationGuard:
             ranged = name in RANGED_MOBS
             if not name or distance > (16.0 if ranged else 6.0):
                 return None
+            if (
+                allow_cover and ranged and "nether" in str(status.get("dimension") or "").lower()
+                and now < self._ranged_cover_active_until
+                and now - max(self._last_ranged_hurt_at, self._last_melee_hurt_at) >= 4.0
+                and status.get("on_ground") is True and status.get("pos")
+            ):
+                cover = self._recheck_cover_after_blocked_flee(status["pos"], entity_id, min(now + 1.25, deadline))
+                if cover and (cover.get("ok") or cover.get("respawned")):
+                    return {**cover, "requires_replan": True, "pos_before": status["pos"]}
             if threat_pos is None:
                 threat_pos = self._find_hostile_position(entity_id, name, session=bot)
             env = CombatEnv(bot, geofence=self.geofence)
@@ -2283,6 +2293,28 @@ class GenerationGuard:
         except (ApiError, httpx.HTTPError):
             return None
 
+    def _recheck_cover_after_blocked_flee(
+        self, pos: list[float], target_id: int | None, deadline: float,
+    ) -> dict[str, Any] | None:
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        try:
+            entities = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
+            shooters = ranged_retreat_positions(pos, entities.get("entities") or [], max_distance=16.0)
+            target = next((point for entity_id, point in shooters if entity_id == target_id), None)
+            if target_id is None or target is None:
+                return None
+            others = [point for entity_id, point in shooters if entity_id != target_id]
+            cover = self._action(
+                "unsafe_exit_cover",
+                lambda: CombatEnv(bot, geofence=self.geofence).seek_natural_cover(target, other_shooters=others),
+            )
+            return cover.get("result")
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return None
+        except (ApiError, httpx.HTTPError):
+            return None
+
     def _verify_combat_step(self, body: dict[str, Any]) -> dict[str, Any]:
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.6)
         try:
@@ -2306,6 +2338,36 @@ class GenerationGuard:
         if route is None:
             raise _UnsafeCombatStep
         return {**body, "ms": min(body["ms"], 250)}
+
+    def _verify_attack_approach(self, entity_id: Any, call: Callable[..., dict[str, Any]]) -> None:
+        if not isinstance(entity_id, int):
+            return
+        deadline = time.monotonic() + 0.8
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline, call_override=call)
+        try:
+            status = bot.status()
+            pos = status.get("pos")
+            if (
+                "nether" not in str(status.get("dimension") or "").lower()
+                or status.get("on_ground") is not True or not pos
+                or status.get("ready") is False or status.get("alive") is False or status.get("in_lava")
+            ):
+                return
+            name, distance, nearest_id, target = self._extract_hostile_info(status)
+            if nearest_id != entity_id or name not in {"blaze", "ghast"} or distance > 3.5:
+                return
+            if target is None:
+                target = self._find_hostile_position(entity_id, name, session=bot, timeout_s=0.3)
+            if target is None:
+                return
+            travel = math.hypot(target[0] - pos[0], target[2] - pos[2])
+            if not 0.35 <= travel <= 3.5:
+                return
+            yaw, _ = aim_yaw_pitch(pos, target)
+            if CombatEnv(bot, geofence=self.geofence).probe_retreat(pos, yaw, travel, deadline=deadline) is None:
+                raise _UnsafeCombatStep
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
+            return
 
     @contextmanager
     def _intercept_bot_calls(
@@ -2518,6 +2580,7 @@ class GenerationGuard:
                 if clean_path != "attack":
                     return actor_call(path, body, **kwargs)
                 entity_id = body.get("entity_id") if isinstance(body, dict) else None
+                self._verify_attack_approach(entity_id, orig_call)
                 with attack_state_lock:
                     attack_target_id = entity_id if isinstance(entity_id, int) else None
                     attack_active.set()
@@ -3029,7 +3092,8 @@ class GenerationGuard:
                 "error": {"code": code, "message": message},
             }, ensure_ascii=False)
         except _UnsafeCombatStep:
-            self._stop_after_recovery_timeout()
+            if not is_attack:
+                self._stop_after_recovery_timeout()
             self.events.emit("guardian.combat_step_blocked", tool=tool_name)
             return json.dumps({
                 "ok": False,
@@ -3038,7 +3102,7 @@ class GenerationGuard:
             }, ensure_ascii=False)
         except (_UnsafeFleeExit, _UnsafeUnstickExit):
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
-            recovery = self._retreat_after_unsafe_exit(deadline)
+            recovery = self._retreat_after_unsafe_exit(deadline, allow_cover=is_flee)
             if recovery is not None:
                 return json.dumps(recovery, ensure_ascii=False)
             message = (
