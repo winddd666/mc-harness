@@ -208,6 +208,7 @@ class _GuardSession:
 
 class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
+    TRIDENT_WATER_ESCAPE_BUDGET_S = 4.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -413,9 +414,10 @@ class GenerationGuard:
             return {**result, "ok": False, "reason": "retreat_into_lava", "pos_after": after.get("pos") or end}
         return result
 
-    def _escape_water(self, before: dict[str, Any]) -> dict[str, Any]:
+    def _escape_water(self, before: dict[str, Any], *, budget_s: float | None = None) -> dict[str, Any]:
         return self._run_recovery_macro(
-            before, lambda skills: skills.escape_water(), budget_s=self.WATER_ESCAPE_BUDGET_S,
+            before, lambda skills: skills.escape_water(),
+            budget_s=self.WATER_ESCAPE_BUDGET_S if budget_s is None else budget_s,
             timeout_details={"in_water": True},
         )
 
@@ -463,6 +465,7 @@ class GenerationGuard:
             if not pos:
                 pos = nh_pos
             other_shooters = []
+            check_blaze_cover = False
             if (
                 "nether" in dimension and ranged and low_health and status.get("on_fire")
                 and nh_name == "blaze" and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
@@ -479,12 +482,16 @@ class GenerationGuard:
                     ):
                         if shooter_id == primary_id:
                             pos = shooter_pos
+                            check_blaze_cover = True
                         elif shooter_id is not None:
                             other_shooters.append(shooter_pos)
-            if prefer_cover and pos:
-                cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.25)
+            if pos and (prefer_cover or check_blaze_cover):
+                cover_budget = 1.25 if check_blaze_cover else 2.25
+                cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + cover_budget)
                 try:
-                    cover = CombatEnv(cover_bot, geofence=self.geofence).seek_natural_cover(pos)
+                    cover = CombatEnv(cover_bot, geofence=self.geofence).seek_natural_cover(
+                        pos, **({"other_shooters": other_shooters} if other_shooters else {}),
+                    )
                 except _RecoveryBudgetExceeded:
                     self._stop_after_recovery_timeout()
                     cover = None
@@ -1412,6 +1419,7 @@ class GenerationGuard:
                     if other_hurts else status.get("nearest_hostile")
                 )
                 hurt_src = str(recent_hurt.get("source") or "").strip().lower()
+                indirect_magic = hurt_src == "indirect_magic"
                 ranged_defense = hurt_src in RANGED_HURT_SOURCES or (
                     nh_name in {"blaze", "ghast"}
                     and (hurt_src in FIRE_HURT_SOURCES or (not hurt_src and status.get("on_fire")))
@@ -1447,6 +1455,7 @@ class GenerationGuard:
                     has_shield
                     and not already_blocking
                     and not ranged_defense
+                    and not indirect_magic
                     and hp_val >= 8.0
                     and (now - self._last_shield_only_at >= 12.0 or self._shield_only_streak < 1)
                 ):
@@ -1665,7 +1674,7 @@ class GenerationGuard:
                             or (not has_melee_weapon and status.get("is_day") is False and self._consecutive_flees >= 1 and hp_val <= 14.0)
                         )
                     )
-                    if (melee_or_airborne and can_surface_night_bunker) or not melee_or_airborne:
+                    if not indirect_magic and ((melee_or_airborne and can_surface_night_bunker) or not melee_or_airborne):
                         bunker = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
                         actions.append(bunker)
                         if bunker["ok"]:
@@ -1686,7 +1695,7 @@ class GenerationGuard:
                     else:
                         cf = self._action(
                             "combat_or_flee",
-                            lambda: self._defend_or_flee(status, attacker, counts),
+                            lambda: self._defend_or_flee(status, attacker, counts, **({"ranged": True} if indirect_magic else {})),
                         )
                         actions.append(cf)
                         if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":
@@ -2356,7 +2365,14 @@ class GenerationGuard:
                     esc_pre_ok = False
                     esc_pre_respawned = False
                     if not forced_pre_shore and not drowning_pre:
-                        esc_act = self._action("escape_water", lambda: self._escape_water(st_pre), raise_on_http_error=False)
+                        trident_exposure = trigger.get("hurt_source") == "trident" or (
+                            trigger.get("source") == "tool_interrupted_hurt"
+                            and (trigger.get("primary_type") == "drowned" or self._extract_hostile_info(st_pre)[0] == "drowned")
+                        )
+                        budget = {"budget_s": self.TRIDENT_WATER_ESCAPE_BUDGET_S} if trident_exposure else {}
+                        esc_act = self._action(
+                            "escape_water", lambda: self._escape_water(st_pre, **budget), raise_on_http_error=False,
+                        )
                         pre_actions.append(esc_act)
                         esc_pre_res = esc_act.get("result") if isinstance(esc_act, dict) and isinstance(esc_act.get("result"), dict) else {}
                         esc_pre_ok = bool(esc_act.get("ok") and esc_pre_res.get("in_water") is not True)
@@ -2743,6 +2759,8 @@ class GenerationGuard:
                         self.events.emit("guardian.no_water_cooldown", duration_s=30.0, streak=self._water_hurt_streak)
                 has_shield_b = False
                 shield_target_b = nh_id
+                shore_threat_name = nh_name
+                shore_threat_pos = nh_pos
                 if hurts or nh_name or no_water_reentry_b:
                     try:
                         inv_b = self.bot.inventory()
@@ -2758,6 +2776,9 @@ class GenerationGuard:
                     ) or (status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None)
                     if isinstance(att_b, dict) and isinstance(att_b.get("id"), int):
                         shield_target_b = att_b["id"]
+                        shore_threat_name = str(att_b.get("name") or (nh_name if shield_target_b == nh_id else ""))
+                        shore_threat_name = shore_threat_name.removeprefix("minecraft:").lower()
+                        shore_threat_pos = att_b.get("pos") or (nh_pos if shield_target_b == nh_id else None)
                     has_shield_b, _ = self._equip_and_raise_shield_for_water(
                         status,
                         b_actions,
@@ -2780,6 +2801,7 @@ class GenerationGuard:
                     self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
                     or handled_water_in_tool or unstick_still_wet or self._swimming_at_low_health(status)
                     or continuing_water_escape
+                    or (shore_threat_name == "creeper" and nh_dist <= 6.0)
                 )
                 esc_b_ok = False
                 esc_b_respawned = False
@@ -2794,13 +2816,14 @@ class GenerationGuard:
                     self._last_water_escape_failed = False
                     notes.append("自动浮水登岸")
                 elif not esc_b_respawned:
-                    if nh_pos is None and nh_name in RANGED_MOBS and nh_dist <= 16.0:
-                        nh_pos = self._find_hostile_position(nh_id, nh_name)
+                    if shore_threat_pos is None and nh_dist <= 16.0 and (shield_target_b is not None or shore_threat_name):
+                        shore_threat_pos = self._find_hostile_position(shield_target_b, shore_threat_name)
                     shore_b = self._action(
                         "boundary_escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
-                            nh_pos, keep_shield=has_shield_b, shield_target_id=shield_target_b,
+                            shore_threat_pos, keep_shield=has_shield_b, shield_target_id=shield_target_b,
                             **({"surface_first": True} if surface_first else {}),
+                            **({"avoid_close_threat": True} if shore_threat_name == "creeper" else {}),
                         ),
                         raise_on_http_error=False,
                     )

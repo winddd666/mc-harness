@@ -770,7 +770,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         key="minecraft:nether/find_fortress",
         title="30分：在下界探索并定位下界要塞",
         points=30,
-        tier=3,
+        tier=2,
         budget_class="expedition",
         task=(
             "解锁 nether/find_fortress(30分)：当前已身处下界，请勿穿回主世界传送门！"
@@ -784,7 +784,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         key="minecraft:nether/obtain_blaze_rod",
         title="30分：下界要塞击杀烈焰人并拾取烈焰棒（解锁酿造与末影之眼）",
         points=30,
-        tier=3,
+        tier=2,
         budget_class="expedition",
         task=(
             "解锁 nether/obtain_blaze_rod(30分)：已在下界要塞附近，请勿穿回主世界！"
@@ -802,10 +802,11 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         tier=3,
         budget_class="expedition",
         task=(
-            "解锁 story/follow_ender_eye(60分) 并顺势推进至末地传送门："
-            "1) 若包内有 ender_eye，先选定主手调 mc_use_item(item='ender_eye') 掷出末影之眼（返回体含 eye_vector 方向；严禁掷眼后原地反复调 mc_skill_collect_drops 浪费时间）；"
-            "2) 沿 eye_vector 方向调用 mc_skill_scout_surface(direction=<方向>, max_duration_s=45, step_dist=30) 高速推进 150m 后再次掷眼复核；若 eye_vector 方向发生反转（说明已越过要塞），立刻把移动步长折半（mc_move_to 退回 30~50m）精确定位；"
-            "3) 当末影之眼向下钻地或小范围来回反转时，调 mc_skill_staircase(vertical='down', steps=12) 下挖并扫描 stone_bricks / mossy_stone_bricks / end_portal_frame / spawner，进入要塞房间即解锁！"
+            "解锁 story/follow_ender_eye(60分) 并顺势推进至末地传送门（使用【2眼三角定位】，严禁调用 mc_skill_collect_drops 捡眼！）："
+            "1) 选定主手调 mc_use_item(item='ender_eye') 掷出第 1 颗末影之眼，读取返回体中的 suggested_second_throw_direction 与 suggested_second_throw_xz；"
+            "2) 沿垂直方向 suggested_second_throw_direction 移动 60~80 格（mc_move_to 或 mc_skill_scout_surface）后掷出第 2 颗末影之眼，系统会自动返回精确的 triangulated_stronghold_xz（要塞估算坐标）与 triangulated_direction；"
+            "3) 拿到 triangulated_stronghold_xz 后，严禁中途再反复掷眼！直接沿 triangulated_direction 用 mc_skill_scout_surface(direction=<triangulated_direction>, target_types=['end_portal_frame'], max_duration_s=45, step_dist=32) 或 mc_move_to 直线奔赴该坐标上方（距目标 <=30m 时最多掷 1 颗确认）；"
+            "4) 抵达要塞坐标上方或返回 eye_went_down=true（钻地）时，立即连续调用 mc_skill_staircase(vertical='down', steps=16) 下挖至 Y=10~-10，每挖一段调 mc_find_blocks(types=['stone_bricks','mossy_stone_bricks','cracked_stone_bricks','iron_bars','end_portal_frame'], radius=24) 探测，扫到要塞砖墙/传送门框架后直接挖通进入房间即解锁 60 分！"
         ),
         extra_tools=("mc_use_item", "mc_skill_scout_surface", "mc_interact", "mc_posture"),
         advancement_id="minecraft:story/follow_ender_eye",
