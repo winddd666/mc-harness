@@ -4917,6 +4917,44 @@ def test_boundary_retries_shore_directly_after_water_macro_times_out(monkeypatch
     assert attempts == expected
 
 
+@pytest.mark.parametrize("after_shore", ["still_airborne", "landed", "fresh_hurt", "new_drowned"])
+def test_water_attack_preemption_waits_for_shore_landing_before_retrying_combat(monkeypatch, after_shore):
+    attacker = {"id": 44, "name": "drowned", "dist": 3.1}
+    status = {
+        "pos": [9056.5, 63, -11385.4], "health": 20, "food": 20, "ready": True, "alive": True,
+        "on_ground": after_shore == "landed", "in_water": False,
+        "nearest_hostile": {**attacker, "id": 45} if after_shore == "new_drowned" else attacker,
+    }
+    combat = []
+
+    class BankBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "trident"}
+                return {"events": [hurt] if after_shore == "fresh_hurt" and kwargs["params"]["since"] < 1 else []}
+            pytest.fail(f"Unexpected action on the bank: {action}")
+
+    guard = GenerationGuard(BankBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_detect_pre_hurt_trigger", lambda st: {
+        "source": "pre_hurt_melee", "primary_type": "drowned", "primary_entity_id": st["nearest_hostile"]["id"],
+    })
+
+    def react(env, trigger):
+        combat.append(trigger["primary_entity_id"])
+        return {"handled": True, "mode": "cover_or_flee", "status_after": dict(status)}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", react)
+    receipt = json.dumps({
+        "preempted_by_reflex": True, "reflex_mode": "water_surface",
+        "status_after": {"in_water": False, "on_ground": False, "nearest_hostile": attacker},
+    })
+    guard.stabilize_after_tools([receipt])
+
+    assert combat == ([] if after_shore == "still_airborne" else [status["nearest_hostile"]["id"]])
+
+
 @pytest.mark.parametrize("respawned", [False, True])
 def test_trident_preemption_restores_shield_facing_after_shore_attempt(respawned):
     status = {

@@ -2424,18 +2424,27 @@ class GenerationGuard:
         ended_wet_in_payload = any('"in_water": true' in str(r or "").lower() for r in (tool_results or []))
         handled_water_in_tool = False
         unstick_still_wet = False
-        if in_water and tool_results:
+        waiting_for_shore_landing = False
+        if tool_results:
             try:
                 last_tool_result = json.loads(tool_results[-1])
             except (TypeError, ValueError):
                 last_tool_result = None
             if isinstance(last_tool_result, dict):
                 tool_status = last_tool_result.get("status_after")
-                handled_water_in_tool = (
+                water_reflex = (
                     last_tool_result.get("preempted_by_reflex") is True
                     and last_tool_result.get("reflex_mode") == "water_surface"
-                    and isinstance(tool_status, dict) and tool_status.get("in_water") is True
                 )
+                if water_reflex and isinstance(tool_status, dict):
+                    handled_water_in_tool = tool_status.get("in_water") is True
+                    shore_hostile = tool_status.get("nearest_hostile")
+                    waiting_for_shore_landing = (
+                        not in_water and status.get("on_ground") is False and tool_status.get("on_ground") is False
+                        and tool_status.get("in_water") is False and not other_hurts
+                        and nh_name == "drowned" and nh_id is not None
+                        and isinstance(shore_hostile, dict) and shore_hostile.get("id") == nh_id
+                    )
                 tool_error = last_tool_result.get("error")
                 unstick_still_wet = (
                     isinstance(tool_error, dict) and tool_error.get("code") == "water_escape_failed"
@@ -2451,7 +2460,9 @@ class GenerationGuard:
             or (isinstance(oxygen, (int, float)) and oxygen < 270)
         )
 
-        boundary_trigger: ThreatTrigger | None = None if (in_water or in_lava or hot_floor_only) else self._detect_pre_hurt_trigger(status)
+        boundary_trigger: ThreatTrigger | None = None
+        if not (in_water or in_lava or hot_floor_only or waiting_for_shore_landing):
+            boundary_trigger = self._detect_pre_hurt_trigger(status)
         if boundary_trigger is None and not in_water and not in_lava and other_hurts and nh_name and nh_dist <= 15.0:
             boundary_trigger = {
                 "source": "boundary_threat",
