@@ -850,6 +850,41 @@ def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_c
     assert "posture" in stop_calls
 
 
+@pytest.mark.parametrize("api_error", [False, True])
+def test_hurt_interrupted_move_enters_lava_reflex_with_distant_hostile(monkeypatch, api_error):
+    moves = []
+    status = {
+        "pos": [-395.9, 53, -1889.5], "health": 10.3, "food": 20, "dimension": "the_nether",
+        "in_lava": True, "alive": True, "ready": True, "on_ground": False,
+        "nearest_hostile": {"id": 44, "name": "blaze", "dist": 16.7},
+    }
+
+    class LedgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "move_to":
+                moves.append(body)
+                if api_error:
+                    raise ApiError("interrupted", "stopped because of hurt")
+                return {"interrupted_by": "hurt"}
+            return {"ok": True}
+
+    def escape():
+        status.update(in_lava=False, on_ground=True)
+        return {"ok": True, "in_lava": False}
+
+    bot = LedgeBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+    move = {"entity_id": 44, "range": 3}
+    receipt = json.loads(guard.run_tool_with_reflex("mc_move_to", lambda: json.dumps(bot.call("move_to", move))))
+
+    assert moves == [move]
+    assert receipt["preempted_by_reflex"] and receipt["reflex_mode"] == "lava_escape"
+    assert status["in_lava"] is False
+
+
 def test_underwater_drowned_preemption_surfaces_and_ignores_swim_pre_hurt(monkeypatch):
     """Reproduces hy4_hy_10_enchant_anvil & hy4_hy_3_iron: underwater reflex surfaces first; swimming skips empty pre_hurt."""
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, SubcorticalInstinctController

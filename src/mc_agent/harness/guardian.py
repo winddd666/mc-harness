@@ -2037,6 +2037,26 @@ class GenerationGuard:
         actor_thread_id = threading.get_ident()
         pending_trigger: list[ThreatTrigger] = []
 
+        def interrupted_action_trigger(max_enemy_distance: float) -> ThreatTrigger | None:
+            try:
+                status = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
+            except (ApiError, httpx.HTTPError):
+                return None
+            if not isinstance(status, dict):
+                return None
+            if status.get("in_lava"):
+                return {
+                    "source": "boundary_threat", "primary_entity_id": None, "primary_type": "lava",
+                    "primary_pos": None, "distance": 0.0,
+                }
+            name, dist, entity_id, pos = self._extract_hostile_info(status)
+            if name and dist <= max_enemy_distance:
+                return {
+                    "source": "tool_interrupted_hurt", "primary_entity_id": entity_id, "primary_type": name,
+                    "primary_pos": pos, "distance": dist,
+                }
+            return None
+
         def _watcher() -> None:
             # Delay 0.30s before first poll so fast (<5ms) offline mock calls never incur background HTTP reads
             if stop_evt.wait(0.30):
@@ -2244,54 +2264,18 @@ class GenerationGuard:
                     if pending_trigger:
                         raise ReflexPreempted(pending_trigger[0]) from None
                     if err.code == "interrupted" and clean_path in ACTION_LOCK_ENDPOINTS:
-                        st_err = {}
-                        try:
-                            st_err = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
-                        except Exception:
-                            pass
-                        if isinstance(st_err, dict) and bool(st_err.get("in_lava")):
-                            raise ReflexPreempted(
-                                {
-                                    "source": "boundary_threat",
-                                    "primary_entity_id": None,
-                                    "primary_type": "lava",
-                                    "primary_pos": None,
-                                    "distance": 0.0,
-                                }
-                            ) from None
-                        nh_n, nh_d, nh_i, nh_p = self._extract_hostile_info(st_err)
-                        if nh_n and nh_d <= 14.0:
-                            raise ReflexPreempted(
-                                {
-                                    "source": "tool_interrupted_hurt",
-                                    "primary_entity_id": nh_i,
-                                    "primary_type": nh_n,
-                                    "primary_pos": nh_p,
-                                    "distance": nh_d,
-                                }
-                            ) from None
+                        trigger = interrupted_action_trigger(14.0)
+                        if trigger is not None:
+                            raise ReflexPreempted(trigger) from None
                 raise
 
             if not self._in_reflex and not caller_ignores_hurt:
                 if pending_trigger:
                     raise ReflexPreempted(pending_trigger[0])
                 if isinstance(res, dict) and res.get("interrupted_by") == "hurt" and clean_path in ACTION_LOCK_ENDPOINTS:
-                    st_int = {}
-                    try:
-                        st_int = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
-                    except Exception:
-                        pass
-                    nh_n, nh_d, nh_i, nh_p = self._extract_hostile_info(st_int)
-                    if nh_n and nh_d <= 15.0:
-                        raise ReflexPreempted(
-                            {
-                                "source": "tool_interrupted_hurt",
-                                "primary_entity_id": nh_i,
-                                "primary_type": nh_n,
-                                "primary_pos": nh_p,
-                                "distance": nh_d,
-                            }
-                        )
+                    trigger = interrupted_action_trigger(15.0)
+                    if trigger is not None:
+                        raise ReflexPreempted(trigger)
             if unstick_before is not None:
                 self._restore_unstick_shield_facing(unstick_before, actor_call)
             return res
