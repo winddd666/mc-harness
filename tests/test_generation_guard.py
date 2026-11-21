@@ -1885,6 +1885,56 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
             assert guard.poll()["requires_replan"] is False
 
 
+@pytest.mark.parametrize("landing", ["magma", "stone", "respawned", "death_event"])
+def test_hot_floor_damage_during_combat_preserves_the_shield_and_crouches(monkeypatch, landing):
+    spider = {"id": 42, "name": "spider", "dist": 1.4}
+    status = {"pos": [-2900.6, 70, -10098.9], "health": 4.0, "food": 17, "ready": True, "alive": True,
+              "on_ground": True, "blocking": True, "nearest_hostile": spider, "dimension": "overworld"}
+    events = []
+    posture = []
+
+    class MagmaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [row for row in events if row["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                assert 0 < kwargs["timeout_s"] <= 0.5
+                return {"name": "stone" if landing == "stone" else "magma_block"}
+            if action == "posture":
+                posture.append(body)
+                status["sneaking"] = body["sneak"]
+                return {"sneaking": status["sneaking"]}
+            pytest.fail(f"Unexpected call after combat: {action}")
+
+    guard = GenerationGuard(MagmaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_detect_pre_hurt_trigger", lambda _: {
+        "source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "spider", "distance": 1.4,
+    })
+
+    def retreat(_env, _trigger):
+        events.append({"seq": 1, "type": "hurt", "source": "hot_floor"})
+        status["health"] = 3.33
+        if landing == "respawned":
+            status["last_death"] = {"t": 321}
+        elif landing == "death_event":
+            events.append({"seq": 2, "type": "death"})
+        return {"handled": True, "mode": "cover_or_flee", "actions": [
+            {"action": "raise_shield_entry", "ok": True},
+            {"action": "flee", "ok": False, "reason": "unsafe_landing", "moved": 0.0},
+        ]}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", retreat)
+    incident = guard.poll()
+
+    assert posture == ([{"sneak": True, "shield": True, "jump": False}] if landing == "magma" else [])
+    assert ("hot_floor" in incident["reasons"]) is (landing == "magma")
+    assert incident["requires_replan"]
+
+
 @pytest.mark.parametrize("after_kill", [
     "stable", "hurt", "moved", "shooter", "death", "unverified",
     "shield_released", "shield_changed", "shield_latched", "shield_still_blocking",

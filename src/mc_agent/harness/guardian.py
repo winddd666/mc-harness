@@ -2538,6 +2538,28 @@ class GenerationGuard:
                     if "death_or_connection_changed" not in reasons:
                         reasons.append("death_or_connection_changed")
                     replan = True
+                elif (
+                    any(e.get("type") == "hurt" and e.get("source") == "hot_floor" for e in post_fresh)
+                    and post_status.get("ready") is True and post_status.get("alive") is not False
+                    and not (post_status.get("in_water") or post_status.get("in_lava") or post_status.get("busy"))
+                    and post_status.get("last_death") == status.get("last_death")
+                    and post_status.get("dimension") == status.get("dimension")
+                    and self._hot_floor_block(post_status) is not None
+                    and self._needs_hot_floor_stance(post_status, time.monotonic())
+                ):
+                    # Combat can leave the bot on magma after the initial event scan.
+                    try:
+                        with self.bot.limit_until(time.monotonic() + 0.5):
+                            self.combat_env.invalidate_block_cache()
+                            on_magma = self.combat_env.is_on_hot_floor(post_status["pos"])
+                    except _RecoveryBudgetExceeded:
+                        on_magma = False
+                    if on_magma:
+                        actions.append(self._action("hot_floor_sneak", lambda: self._sneak_on_hot_floor(post_status)))
+                        if "hot_floor" not in reasons:
+                            reasons.append("hot_floor")
+                        replan = True
+                        post_status = self.combat_env._safe_status(post_status)
         if pre_trigger is not None and post_events_verified and not any(e.get("type") == "hurt" for e in fresh):
             if reasons in (["pre_hurt_creeper"], ["pre_hurt_melee"]) and self._repeat_stationary_retreat_warning(
                 pre_trigger, status, post_status, actions,
