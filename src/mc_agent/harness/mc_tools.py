@@ -188,6 +188,7 @@ class McToolset:
         self.skills = MacroSkills(bot, geofence=self.geofence)
         self.skills.world_memory = self.world_memory
         self._ender_eye_throws: list[tuple[float, float, float, float]] = []
+        self._triangulated_stronghold_xz: list[int] | None = None
 
     def rebind_runtime_hooks(
         self,
@@ -1979,6 +1980,7 @@ class McToolset:
                 "mc_skill_staircase(vertical='down', steps=16) 下挖至 Y=10~-10 寻找 stone_bricks / end_portal_frame！"
             )
         elif triangulated_xz is not None and triangulated_dist is not None:
+            self._triangulated_stronghold_xz = list(triangulated_xz)
             result["triangulated_stronghold_xz"] = triangulated_xz
             result["triangulated_distance"] = triangulated_dist
             result["triangulated_direction"] = triangulated_dir
