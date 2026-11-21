@@ -3474,8 +3474,19 @@ class SubcorticalInstinctController:
                 now_flee = time.monotonic()
                 if now_flee - self._last_flee_at > 25.0:
                     self._recent_flee_streak = 0
+                # A vertical bunker takes several digs while a surface attacker can close in.
+                exposed_to_lethal_melee = (
+                    snap["enclosure"] == "surface"
+                    and hp <= 4.0
+                    and not has_shield
+                    and mob_name in PRE_HURT_MELEE_MOBS
+                    and mob_dist <= 3.5
+                    and not (primary or {}).get("blocked_by_wall")
+                    and (trigger.get("source") == "pre_hurt_melee" or confirmed_melee_hurt)
+                )
                 should_bunker = (
                     not covered
+                    and not exposed_to_lethal_melee
                     and env.skills is not None
                     and hasattr(env.skills, "dig_safety_bunker")
                     and not any_creeper_close

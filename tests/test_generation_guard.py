@@ -7082,6 +7082,56 @@ def test_unarmed_retreat_confirms_landing_after_short_pulse(monkeypatch, landing
     assert bool(retreat.get("respawned")) is (landing == "respawned")
 
 
+@pytest.mark.parametrize(("health", "distance", "blocked", "retreat_first"), [
+    (1.33, 2.8, False, True),
+    (1.33, 2.8, True, False),
+    (1.33, 4.0, False, False),
+    (6.0, 2.8, False, False),
+])
+def test_surface_bunker_yields_to_retreat_when_lethal_melee_is_exposed(monkeypatch, health, distance, blocked, retreat_first):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    threat = {"id": 42, "name": "zombie", "dist": distance, "pos": [0.5 + distance, 76, 0.5],
+              "blocked_by_wall": blocked}
+    status = {"pos": [0.5, 76, 0.5], "health": health, "food": 17, "ready": True, "alive": True,
+              "on_ground": True, "nearest_hostile": threat, "dimension": "overworld"}
+    attempts = []
+
+    class SurfaceBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "dirt", "count": 6}]}
+            if action == "get_entities":
+                return {"entities": [threat]}
+            return {"ok": True}
+
+    class BunkerSkills:
+        def dig_safety_bunker(self, *, urgent):
+            assert urgent
+            attempts.append("bunker")
+            return {"ok": True}
+
+    def checked_flee(threat_pos, *, distance, urgent, wait_for_ground):
+        assert threat_pos == threat["pos"] and distance == 14.0
+        assert urgent and wait_for_ground
+        attempts.append("retreat")
+        status.update(pos=[-4.0, 76, 0.5], nearest_hostile=None)
+        return {"ok": True, "mode": "flee", "moved_dist": 4.5}
+
+    env = CombatEnv(SurfaceBot(), skills=BunkerSkills())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", checked_flee)
+    result = CombatControllerSlot().handle(
+        env, {"source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie", "distance": distance},
+    )
+
+    assert attempts == (["retreat"] if retreat_first else ["bunker"])
+    assert result["mode"] == ("cover_or_flee" if retreat_first else "bunker_sealed")
+
+
 @pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("terrain", ["safe", "drop", "target_gone"])
 def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monkeypatch, terrain, complete):
