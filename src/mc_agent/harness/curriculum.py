@@ -1540,7 +1540,6 @@ def select_next_target(
     if (
         not leash_active
         and enable_island_recon
-        and recon_done
         and has_iron_or_better
         and not is_dusk_or_night
         and world_memory is not None
