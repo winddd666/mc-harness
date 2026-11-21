@@ -7818,6 +7818,56 @@ def test_creeper_retreat_does_not_report_success_if_the_final_sample_is_dead(mon
     assert outcome["requires_replan"] and outcome["status_after"]["alive"] is False
 
 
+@pytest.mark.parametrize("after", ["close_melee", "far_melee", "healthy", "new_life", "still_wet"])
+def test_low_health_creeper_retreat_keeps_shield_facing_surviving_melee(monkeypatch, after):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    creeper = {"id": 42, "name": "creeper", "dist": 2.8, "pos": [0.5, 68, 3.3]}
+    zombie = {"id": 43, "name": "zombie", "dist": 5.6 if after == "far_melee" else 5.4}
+    status = {"pos": [0.5, 68, 0.5], "health": 16.4, "food": 20, "ready": True, "alive": True,
+              "on_ground": True, "blocking": False, "dimension": "overworld", "last_death": {"t": 1},
+              "nearest_hostile": creeper}
+    looks = []
+    posture = []
+
+    class RidgeBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [status["nearest_hostile"]]}
+            if action == "look":
+                looks.append(body["entity_id"])
+            if action == "posture":
+                posture.append(body)
+                status["blocking"] = bool(body.get("shield"))
+            return {"ok": True}
+
+    def retreat(*_a, **_kw):
+        status.update(pos=[0.5, 68, -6.9], health=12.0 if after == "healthy" else 5.73, nearest_hostile=zombie,
+                      last_death={"t": 2 if after == "new_life" else 1}, in_water=after == "still_wet")
+        return {"ok": True, "mode": "flee", "moved_dist": 7.4}
+
+    env = CombatEnv(RidgeBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", retreat)
+    if after == "still_wet":
+        monkeypatch.setattr(env, "escape_deep_water_to_shore", lambda *_a, **_kw: {"ok": False, "in_water": True})
+    result = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 42,
+    })
+
+    assert result["latched_guard"] is (after == "close_melee" or after == "still_wet")
+    assert looks == ([42, 43] if after == "close_melee" else [42])
+    assert status["blocking"] is (after == "close_melee" or after == "still_wet")
+    if after == "close_melee":
+        assert posture[-1] == {"shield": True, "sneak": False, "jump": False}
+        assert result["actions"][-1]["action"] == "guard_melee_after_creeper_retreat"
+
+
 @pytest.mark.parametrize("shield_in_offhand", [True, False])
 def test_creeper_retreat_raises_shield_once_before_terrain_probe(monkeypatch, shield_in_offhand):
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
