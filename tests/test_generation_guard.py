@@ -10235,6 +10235,56 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         assert not status.get("in_lava")
 
 
+@pytest.mark.parametrize("visibility", ["occluded", "exposed", "another_exposed", "unknown"])
+def test_mining_watcher_waits_only_for_a_confirmed_occluded_creeper(monkeypatch, visibility):
+    import threading
+
+    inspected = threading.Event()
+    stopped = threading.Event()
+    creeper = {"id": 42, "name": "creeper", "dist": 4.1, "pos": [0.5, 58, 4.6]}
+    status = {
+        "pos": [0.5, 58, 0.5], "health": 20, "on_ground": True,
+        "ready": True, "alive": True, "blocking": True, "nearest_hostile": creeper,
+    }
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_entities":
+                inspected.set()
+                if visibility == "unknown":
+                    raise httpx.ReadTimeout("entity visibility unavailable")
+                entities = [{**creeper, "blocked_by_wall": visibility != "exposed"}]
+                if visibility == "another_exposed":
+                    entities.append({**creeper, "id": 43, "dist": 4.4, "blocked_by_wall": False})
+                return {"entities": entities}
+            if action == "dig":
+                assert inspected.wait(1.5)
+                if visibility != "occluded":
+                    assert stopped.wait(1.5)
+                return {"ok": True}
+            if action == "stop":
+                stopped.set()
+            if action == "events":
+                return {"events": []}
+            return {"ok": True}
+
+    bot = ShaftBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_slot, "handle", lambda *_: {
+        "mode": "creeper_evade", "handled": True, "status_after": status,
+    })
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(
+        bot.call("dig", {"pos": [1, 58, 0]}),
+    )))
+
+    if visibility == "occluded":
+        assert result == {"ok": True} and not stopped.is_set()
+    else:
+        assert result["reflex_mode"] == "creeper_evade" and stopped.is_set()
+
+
 def test_mining_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch):
     import threading
 
@@ -10484,3 +10534,125 @@ def test_magma_interrupts_active_tool_before_the_boundary(tool, endpoint, interr
 
 
 
+
+
+@pytest.mark.parametrize("pocket, covered", [
+    ("no_filler_block", True),
+    ("no_filler_block", False),
+    ("cover_not_entered", False),
+])
+def test_arrow_poll_without_filler_checks_natural_cover_before_repeating_flee(monkeypatch, pocket, covered):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    shooter = {"id": 41, "name": "skeleton", "dist": 2.0}
+    live_shooter = {**shooter, "pos": [0.5, 69, 2.5]}
+    status = {
+        "pos": [0.5, 69, 0.5], "dimension": "overworld", "health": 16.0, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
+    }
+    checks = []
+
+    class StairBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": shooter}
+                return {"events": [] if kwargs["params"]["since"] else [hurt], "last_seq": 1}
+            if action == "inventory":
+                return {"items": [{"name": "stone_pickaxe", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [live_shooter]}
+            raise AssertionError(action)
+
+    def dig_cover(_env, _skills):
+        checks.append("dig")
+        return {"ok": False, "reason": pocket}
+
+    def seek_cover(_env, pos, *, other_shooters, allow_stationary):
+        checks.append("natural_cover")
+        assert pos == live_shooter["pos"]
+        assert other_shooters == []
+        assert allow_stationary is False
+        if covered:
+            return {"ok": True, "mode": "natural_cover", "pos_after": [2.7, 69, 0.5]}
+        return None
+
+    def flee(_env, _pos, **_kwargs):
+        checks.append("flee")
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "dig_cover_pocket", dig_cover)
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    guard = GenerationGuard(StairBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    expected = ["dig"]
+    if pocket == "no_filler_block":
+        expected.append("natural_cover")
+    if not covered:
+        expected.append("flee")
+    assert checks == expected
+    assert incident["actions"][-1]["result"]["mode"] == ("natural_cover" if covered else "flee")
+
+
+@pytest.mark.parametrize("scenario", ["cornered", "second_hostile", "out_of_reach", "respawned", "blocked_by_wall"])
+def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(monkeypatch, scenario):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    distance = 1.5 if scenario == "out_of_reach" else 0.6
+    zombie = {
+        "id": 11, "name": "zombie_villager", "dist": distance, "pos": [0.5 + distance, 29, 0.5],
+        "blocked_by_wall": scenario == "blocked_by_wall",
+    }
+    status = {
+        "pos": [0.5, 29, 0.5], "dimension": "overworld", "health": 4.7, "food": 20,
+        "alive": True, "ready": True, "on_ground": True, "blocking": False,
+        "nearest_hostile": zombie, "last_death": {"t": 1},
+    }
+    calls = []
+
+    class TunnelBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                sword = {"name": "iron_sword", "count": 1}
+                return {"items": [sword], "held": sword, "offhand": {"name": "shield", "count": 1}}
+            if action == "get_entities":
+                mobs = [zombie]
+                if scenario == "second_hostile":
+                    mobs.append({"id": 12, "name": "husk", "dist": 2.0, "pos": [0.5, 29, 2.5]})
+                return {"entities": mobs}
+            if action == "get_block":
+                return {"name": "air"}
+            if action in {"attack", "posture"}:
+                calls.append((action, body))
+            if action == "attack":
+                assert status["blocking"] is True
+                status["blocking"] = False
+                return {"hits": 1}
+            if action == "posture":
+                status["blocking"] = bool(body.get("shield"))
+            return {"ok": True}
+
+    def flee(_env, _pos, **_kwargs):
+        if scenario == "respawned":
+            status.update(health=20, last_death={"t": 2})
+        return {"ok": False, "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    outcome = CombatControllerSlot().handle(CombatEnv(TunnelBot()), {
+        "source": "pre_hurt_melee", "primary_type": "zombie_villager", "primary_entity_id": 11,
+    })
+
+    attacks = [body for action, body in calls if action == "attack"]
+    if scenario == "cornered":
+        attack, = attacks
+        assert attack["entity_id"] == 11 and attack["max_hits"] == 1
+        assert outcome["actions"][-1]["action"] == "cornered_melee_strike"
+        assert outcome["latched_guard"] is True and status["blocking"] is True
+    else:
+        assert attacks == []

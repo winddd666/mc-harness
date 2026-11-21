@@ -739,8 +739,8 @@ class GenerationGuard:
                 and (not isinstance(offhand, dict) or str(offhand.get("name") or "").removeprefix("minecraft:") != "shield")
             )
             scan_surface_shooters = (
-                dimension == "overworld" and ranged and low_health and status.get("on_ground") is True
-                and (unshielded or prefer_cover)
+                dimension == "overworld" and ranged and status.get("on_ground") is True
+                and (prefer_cover or (low_health and unshielded))
             )
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
@@ -2110,22 +2110,28 @@ class GenerationGuard:
                                 inv=inv,
                                 attacker=attacker if isinstance(attacker, dict) else None,
                             )
-                        if not has_shield and not att_pos_r and isinstance(att_id_r, int):
+                        surface_arrow_cover = (
+                            not skip_cover_for_blast and status.get("on_ground") is True
+                            and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                        )
+                        critical_shielded_cover = (
+                            surface_arrow_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0
+                        )
+                        unshielded_cover = not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX
+                        missing_filler_cover = (
+                            surface_arrow_cover and not has_shield and (ranged_hurt_only or nh_name in RANGED_MOBS)
+                            and ((cover or {}).get("result") or {}).get("reason") == "no_filler_block"
+                        )
+                        if not missing_filler_cover and not has_shield and not att_pos_r and isinstance(att_id_r, int):
                             shooter_pos = self._find_hostile_position(att_id_r, att_name_r)
                             if shooter_pos is not None:
                                 attacker = {**(att_obj or {}), "pos": shooter_pos}
-                        critical_shielded_cover = (
-                            already_blocking and ranged_hurt_only and not skip_cover_for_blast and 0 < hp_val <= 4.0
-                            and status.get("on_ground") is True
-                            and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
-                        )
-                        unshielded_cover = not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX
                         cf = self._action(
                             "combat_or_flee",
                             lambda: self._defend_or_flee(
                                 status, attacker, counts, ranged=True,
-                                prefer_cover=unshielded_cover or critical_shielded_cover,
-                                allow_stationary_cover=not fresh_blast,
+                                prefer_cover=unshielded_cover or critical_shielded_cover or missing_filler_cover,
+                                allow_stationary_cover=not (fresh_blast or missing_filler_cover),
                             ),
                         )
                         actions.append(cf)
@@ -2957,6 +2963,31 @@ class GenerationGuard:
                                 and oxygen <= self.MINING_WATER_ESCAPE_OXYGEN)
                         )
                     )
+                    if (
+                        creeper_close and nh_dist > 2.3 and isinstance(nh_id, int)
+                        and st.get("on_ground") is True and not st.get("in_water")
+                        and not in_lava_now and not hp_dropped
+                    ):
+                        try:
+                            sighting = orig_call(
+                                "get_entities", {"radius": 6, "types": ["hostile"]},
+                                timeout_s=0.3, allow_reauth=False,
+                            )
+                        except (ApiError, httpx.HTTPError):
+                            sighting = {}
+                        entities = (sighting.get("entities") or []) if isinstance(sighting, dict) else []
+                        nearby_creepers = [
+                            entity for entity in entities
+                            if isinstance(entity, dict) and (
+                                entity.get("id") == nh_id
+                                or str(entity.get("name") or "").removeprefix("minecraft:") == "creeper"
+                            )
+                        ]
+                        if (
+                            any(entity.get("id") == nh_id for entity in nearby_creepers)
+                            and all(entity.get("blocked_by_wall") is True for entity in nearby_creepers)
+                        ):
+                            creeper_close = False
                     hot_floor_now = False
                     if watch_hot_floor and not (in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped):
                         tile = self._hot_floor_block(st)
