@@ -1208,9 +1208,11 @@ class McToolset:
         ignore_hurt: bool = False,
     ) -> str:
         range = max(0.2, min(16.0, float(range)))
+        budgeted = self._episode_deadline_mono is not None
         payload: dict[str, Any] = {"range": range}
         geofence_clamped_info: dict[str, Any] | None = None
         if x is not None and z is not None:
+            entity_id = None
             orig_x, orig_z = float(x), float(z)
             clamped = self.geofence.clamped_move_target(orig_x, orig_z)
             if clamped is not None:
@@ -1304,8 +1306,7 @@ class McToolset:
         waypoint = None
         # Budgeted episodes return after one hop so the actor can reassess terrain.
         if (
-            self._episode_deadline_mono is not None
-            and entity_id is None and x is not None and z is not None
+            budgeted and x is not None and z is not None
             and isinstance(origin_pos, (list, tuple)) and len(origin_pos) >= 3
             and all(isinstance(origin_pos[i], (int, float)) and math.isfinite(origin_pos[i]) for i in (0, 2))
         ):
@@ -1354,11 +1355,12 @@ class McToolset:
                         parsed.update(geofence_clamped_info)
                     return json.dumps(parsed, ensure_ascii=False)
                 st_mv: dict[str, Any] | None = None
-                try:
-                    st_mv = self.bot.status()
-                    self._update_status_cache(st_mv)
-                except Exception:
-                    pass
+                if not (budgeted and err_code == "move_timeout"):
+                    try:
+                        st_mv = self.bot.call("status", method="GET", timeout_s=1.0) if budgeted else self.bot.status()
+                        self._update_status_cache(st_mv)
+                    except Exception:
+                        pass
                 if err_code == "movement_not_confirmed":
                     pos_now = st_mv.get("pos") if isinstance(st_mv, dict) else None
                     err_msg = str(err_obj.get("message") or "")
@@ -1394,9 +1396,9 @@ class McToolset:
                             },
                             ensure_ascii=False,
                         )
-                dim_m, cur_p, _ = self._cached_env(fetch_if_missing=True)
+                dim_m, cur_p, _ = self._cached_env(fetch_if_missing=not budgeted)
                 dist_m = math.hypot(float(x) - cur_p[0], float(z) - cur_p[2]) if cur_p is not None else 0.0
-                if dist_m > 36.0 and err_code in {"path_not_found", "no_path", "timeout", "action_timeout", "stalled"}:
+                if not budgeted and dist_m > 36.0 and err_code in {"path_not_found", "no_path", "timeout", "action_timeout", "stalled"}:
                     try:
                         seg_res = self.skills.navigate_segmented(
                             float(x),

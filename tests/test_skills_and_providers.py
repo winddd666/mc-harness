@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 
 import httpx
@@ -1827,6 +1828,58 @@ def test_move_to_far_coordinates_reports_one_waypoint_and_remaining_distance(tim
     if timed_out:
         assert response["error"]["code"] == "move_timeout"
         assert response["requires_replan"] is True
+
+
+@pytest.mark.parametrize("preflight_has_position", [True, False])
+def test_budgeted_coordinate_move_with_entity_placeholder_never_enters_multihop(monkeypatch, preflight_has_position) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    origin = [3031.3, 64, -10005.5]
+    target = [2978, -10076]
+    calls = []
+    moves = []
+
+    def handler(request):
+        nonlocal now
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        timeout = request.extensions["timeout"]["read"]
+        if route == "status" and len(calls) == 1:
+            status = {"dimension": "overworld"}
+            if preflight_has_position:
+                status["pos"] = origin
+            return httpx.Response(200, json={"ok": True, "result": status})
+        if route == "status":
+            assert timeout <= 1.0
+            now += timeout
+            raise httpx.ReadTimeout("offline slow status after failed move", request=request)
+        assert route == "move_to"
+        assert timeout <= 25.0
+        moves.append(json.loads(request.content))
+        now += timeout
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked", "pos": origin},
+        })
+
+    def unexpected_fallback(*args, **kwargs):
+        raise AssertionError("episode move must not start legacy multi-hop recovery")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=44.1327)
+        monkeypatch.setattr(toolset.skills, "navigate_segmented", unexpected_fallback)
+        result = json.loads(toolset.mc_move_to(x=target[0], y=0, z=target[1], range=4, entity_id=0))
+
+    assert len(moves) == 1
+    assert "entity_id" not in moves[0] and "y" not in moves[0]
+    assert now <= 26.0
+    assert result["error"]["code"] == "path_not_found"
+    if preflight_has_position:
+        assert math.hypot(moves[0]["x"] - origin[0], moves[0]["z"] - origin[2]) == pytest.approx(32)
+        assert result["result"]["target_xz"] == target
+    else:
+        assert [moves[0]["x"], moves[0]["z"]] == target
 
 
 def test_move_to_counts_waypoint_and_direct_no_path_in_one_episode() -> None:
