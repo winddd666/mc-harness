@@ -11355,6 +11355,59 @@ def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(m
         assert attacks == []
 
 
+@pytest.mark.parametrize("fallback", ["covered", "exposed", "respawned", "near_melee", "little_time"])
+def test_interrupted_arrow_tool_checks_natural_cover_after_no_safe_retreat(monkeypatch, fallback):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    shooter = {"id": 41, "name": "skeleton", "dist": 4.3, "pos": [4.8, 71, 0.5]}
+    second_shooter = {"id": 42, "name": "skeleton", "dist": 7.0, "pos": [0.5, 71, 7.5]}
+    hostiles = [shooter, second_shooter]
+    if fallback == "near_melee":
+        hostiles.append({"id": 43, "name": "spider", "dist": 2.0, "pos": [2.5, 71, 0.5]})
+    status = {"pos": [0.5, 71, 0.5], "health": 3.33, "food": 17, "alive": True, "ready": True,
+              "dimension": "overworld", "on_ground": True, "nearest_hostile": shooter}
+    checks = []
+
+    class RidgeBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": hostiles}
+            return {"ok": True}
+
+    def flee(pos, **kwargs):
+        assert pos == shooter["pos"] and kwargs["wait_for_ground"]
+        checks.append("flee")
+        if fallback == "little_time":
+            clock[0] += 6.0
+        return {"ok": False, "moved_dist": 0.0, "reason": "no_safe_retreat", "respawned": fallback == "respawned"}
+
+    def seek_cover(pos, *, other_shooters, allow_stationary):
+        assert pos == shooter["pos"] and other_shooters == [second_shooter["pos"]] and not allow_stationary
+        checks.append("cover")
+        if fallback == "covered":
+            status.update(pos=[0.5, 71, -1.7])
+            return {"ok": True, "mode": "natural_cover", "pos_after": status["pos"]}
+        return None
+
+    env = CombatEnv(RidgeBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", flee)
+    monkeypatch.setattr(env, "seek_natural_cover", seek_cover)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "tool_interrupted_hurt", "hurt_source": "arrow", "primary_entity_id": 41, "primary_type": "skeleton",
+    })
+
+    assert checks == (["flee", "cover"] if fallback in {"covered", "exposed"} else ["flee"])
+    assert outcome["mode"] == ("natural_cover" if fallback == "covered" else "cover_or_flee")
+
+
 @pytest.mark.parametrize("unbroken_ledge", [True, False])
 def test_short_retreat_checks_diagonal_supported_ledge(unbroken_ledge):
     from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
