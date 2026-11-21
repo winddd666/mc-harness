@@ -750,22 +750,80 @@ class CombatEnv:
         ground_y = math.floor(y + 0.05) - 1
         return any(self._get_block_name(bx, ground_y, bz, strict=True) == "magma_block" for bx, bz in _hitbox_columns(x, z))
 
-    def extinguish_fire_at_feet(self, pos: Sequence[float]) -> dict[str, Any]:
-        """Clear a verified flame intersecting the bot's feet without moving or breaking support."""
+    def extinguish_contact_fire(self, pos: Sequence[float], *, sneaking: bool = False) -> dict[str, Any]:
+        """Clear a verified flame intersecting the bot without moving or breaking support."""
         x, y, z = pos[:3]
-        foot_y = math.floor(y + 0.05)
+        height = 1.5 if sneaking else 1.8
+        columns = _hitbox_columns(x, z)
         flames = {"fire", "soul_fire"}
         self.invalidate_block_cache()
-        for bx, bz in _hitbox_columns(x, z):
-            if self._get_block_name(bx, foot_y, bz, strict=True) not in flames:
+        for by in range(math.floor(y), math.ceil(y + height)):
+            for bx, bz in columns:
+                if self._get_block_name(bx, by, bz, strict=True) not in flames:
+                    continue
+                target = [bx, by, bz]
+                self.bot.call("dig", {"pos": target, "collect": False, "stop_on": ["death"]},
+                              timeout_s=0.6, allow_reauth=False)
+                self.invalidate_block_cache()
+                after = self._get_block_name(*target, strict=True)
+                return {"ok": bool(after) and after not in flames, "block_pos": target, "block_after": after}
+        return {"ok": False, "reason": "no_contact_fire"}
+
+    def douse_in_adjacent_water(self, before: dict[str, Any]) -> dict[str, Any]:
+        """Reach adjacent shallow water only across verified, supported terrain."""
+        ox, oy, oz = before["pos"][:3]
+        bx, by, bz = math.floor(ox), math.floor(oy + 0.05), math.floor(oz)
+        self.invalidate_block_cache()
+
+        def safe_floor(x: int, y: int, z: int) -> bool:
+            block = self._get_block_name(x, y, z, strict=True)
+            return bool(block) and block not in HAZARD_BLOCK_TYPES and _is_solid_ground(block)
+
+        for dx, dz in CARDINAL_VECTORS.values():
+            wx, wz = bx + dx, bz + dz
+            water_y = next((y for y in (by, by - 1) if self._get_block_name(wx, y, wz, strict=True) == "water"), None)
+            if water_y is None or not safe_floor(wx, water_y - 1, wz):
                 continue
-            target = [bx, foot_y, bz]
-            self.bot.call("dig", {"pos": target, "collect": False, "stop_on": ["death"]},
-                          timeout_s=0.6, allow_reauth=False)
-            self.invalidate_block_cache()
-            after = self._get_block_name(*target, strict=True)
-            return {"ok": bool(after) and after not in flames, "block_pos": target, "block_after": after}
-        return {"ok": False, "reason": "no_fire_at_feet"}
+            if not all(_is_passable(self._get_block_name(wx, y, wz, strict=True)) for y in range(water_y + 1, by + 2)):
+                continue
+            x, z = wx + 0.5, wz + 0.5
+            steps = max(1, math.ceil(math.hypot(x - ox, z - oz) / 0.3))
+            path = [(ox + (x - ox) * i / steps, oz + (z - oz) * i / steps) for i in range(steps + 1)]
+            if not all(self._point_allowed(px, pz, action="fire_douse") for px, pz in path):
+                continue
+            columns = {(cx, cz) for px, pz in path for cx, cz in _hitbox_columns(px, pz)}
+            columns.discard((wx, wz))
+            if not all(
+                safe_floor(cx, by - 1, cz)
+                and all(_is_passable(self._get_block_name(cx, y, cz, strict=True)) for y in (by, by + 1))
+                for cx, cz in columns
+            ):
+                continue
+            current = self._safe_status()
+            current_pos = current.get("pos")
+            if (
+                not current_pos or math.dist(current_pos[:3], before["pos"][:3]) > 0.2
+                or current.get("ready") is not True or current.get("alive") is False
+                or current.get("on_ground") is not True or current.get("in_lava") or not current.get("on_fire")
+                or current.get("dimension") != before.get("dimension") or current.get("last_death") != before.get("last_death")
+            ):
+                return {"ok": False, "reason": "position_or_hazard_changed"}
+            try:
+                self.bot.call(
+                    "move_to", {"x": x, "y": water_y, "z": z, "range": 0.2, "timeout": 650, "stop_on": ["death"]},
+                    timeout_s=0.95, allow_reauth=False,
+                )
+            except (ApiError, httpx.HTTPError) as error:
+                if isinstance(error, httpx.HTTPError):
+                    self._best_effort_stop(timeout_s=0.25)
+            after = self._safe_status()
+            ok = bool(
+                after.get("ready") is True and after.get("alive") is not False
+                and after.get("in_water") and not after.get("in_lava") and after.get("on_fire") is False
+                and after.get("last_death") == before.get("last_death") and after.get("dimension") == before.get("dimension")
+            )
+            return {"ok": ok, "pos_after": after.get("pos"), **({"reason": "douse_unconfirmed"} if not ok else {})}
+        return {"ok": False, "reason": "no_safe_shallow_water"}
 
     def step_off_hot_floor(self, status: dict[str, Any]) -> dict[str, Any]:
         pos = status.get("pos")
@@ -1441,7 +1499,8 @@ class CombatEnv:
                     stalled_pos, stalled_yaw, stalled_dim, stalled_at = stalled_swim
                     if (
                         stalled_dim == dim0 and time.monotonic() - stalled_at < 15.0
-                        and math.dist(pos0[:3], stalled_pos) <= 1.25
+                        and abs(pos0[1] - stalled_pos[1]) <= 2.0
+                        and math.hypot(pos0[0] - stalled_pos[0], pos0[2] - stalled_pos[2]) <= 1.25
                         and abs(math.remainder(base_yaw - stalled_yaw, math.tau)) <= math.radians(15)
                     ):
                         tried_yaws = []
@@ -1487,6 +1546,22 @@ class CombatEnv:
         if tried_yaws and not defer_blind_swim and time.monotonic() < lava_deadline:
             if _run_jump_sprint(tried_yaws[0]):
                 return _lava_result(st)
+            landing = st.get("pos")
+            if (
+                lava_shore_target is not None and landing and not st.get("in_lava") and st.get("on_ground") is False
+                and math.hypot(landing[0] - lava_shore_target[0], landing[2] - lava_shore_target[2]) <= 0.35
+                and -0.05 <= landing[1] - lava_shore_target[1] <= 0.9
+                and lava_deadline - time.monotonic() >= 0.35
+            ):
+                # The swim pulse can end above the bank just before the next physics tick lands.
+                time.sleep(0.1)
+                try:
+                    st = self.bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
+                    actions.append("lava_shore_landing_checked")
+                except (ApiError, httpx.HTTPError):
+                    pass
+                if _should_exit_lava(st):
+                    return _lava_result(st)
 
         # 2b. Short pathfinder step onto close shore (`<=6.5m`) guarded against pathfinder ReadTimeout stalls.
         if lava_shore_target is not None and time.monotonic() + 1.5 < lava_deadline:
@@ -3099,12 +3174,13 @@ class SubcorticalInstinctController:
                         nearest_dist = nearest.get("dist")
                         low_health_after = isinstance(st_fl.get("health"), (int, float)) and st_fl["health"] <= 10.0
                         ranged_still_exposed = (
-                            check_ranged_guard and isinstance(nearest_id, int)
+                            isinstance(nearest_id, int)
                             and isinstance(nearest_dist, (int, float))
                             and (
-                                (low_health_after and nearest_id == mob_id and nearest_dist <= 12.0)
+                                (check_ranged_guard and low_health_after and nearest_id == mob_id and nearest_dist <= 12.0)
                                 or (
-                                    st_fl.get("blocking") and nearest_dist <= 3.5
+                                    (check_ranged_guard or (check_melee_guard and low_health_after))
+                                    and st_fl.get("blocking") and nearest_dist <= 3.5
                                     and _clean_block_name(nearest.get("name")) in RANGED_MOBS
                                 )
                             )
@@ -3130,6 +3206,8 @@ class SubcorticalInstinctController:
                             )
                             if melee_still_close:
                                 actions.append({"action": "guard_melee_after_retreat", "ok": latched_guard, "entity_id": guard_target})
+                            elif check_melee_guard and ranged_still_exposed:
+                                actions.append({"action": "guard_ranged_after_melee_retreat", "ok": latched_guard, "entity_id": guard_target})
                     elif (
                         not flee_ok and fl.get("reason") in {"no_safe_retreat", "unsafe_landing"}
                         and not fl.get("respawned") and not has_shield and has_weapon
