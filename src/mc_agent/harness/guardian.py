@@ -2026,6 +2026,10 @@ class GenerationGuard:
                         already_blocking and (nether_melee_retreat or mixed_surface_retreat)
                         and cf_result.get("reason") in {None, "no_safe_retreat", "unsafe_landing"}
                     )
+                    check_critical_surface_landing = (
+                        dimension == "overworld" and melee_retreat and already_blocking
+                        and cf_result.get("ok") and hp_val > 4.0
+                    )
                     shield_when_cornered = (
                         nether_melee_retreat and has_shield and not already_blocking
                         and cf_result.get("reason") == "no_safe_retreat"
@@ -2038,7 +2042,10 @@ class GenerationGuard:
                     melee_after_retreat = hurt_src in MELEE_HURT_SOURCES or (
                         nether_melee_retreat and not hurt_src and now - self._last_melee_hurt_at < 4.0
                     )
-                    if melee_after_retreat and (face_after_melee_retreat or shield_when_cornered or follow_unarmed_retreat):
+                    if melee_after_retreat and (
+                        face_after_melee_retreat or check_critical_surface_landing
+                        or shield_when_cornered or follow_unarmed_retreat
+                    ):
                         try:
                             landing = self.bot.call("status", method="GET", timeout_s=0.6)
                         except (ApiError, httpx.HTTPError):
@@ -2054,7 +2061,9 @@ class GenerationGuard:
                             and isinstance(current_hp, (int, float)) and 0 < current_hp <= LOW_HP_BUNKER_MAX
                             and mob in PRE_HURT_MELEE_MOBS and target_id is not None and dist <= 3.5
                         ):
-                            if face_after_melee_retreat and landing.get("blocking"):
+                            if landing.get("blocking") and (
+                                face_after_melee_retreat or (check_critical_surface_landing and current_hp <= 4.0)
+                            ):
                                 actions.append(self._action(
                                     "face_attacker_after_retreat",
                                     lambda: self.bot.call("look", {"entity_id": target_id}, timeout_s=0.9),

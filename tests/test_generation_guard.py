@@ -3597,12 +3597,15 @@ def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypat
     assert looks == ([{"entity_id": 78}] if should_face else [])
 
 
-@pytest.mark.parametrize("recent_arrow", [False, True])
-def test_poll_refaces_melee_after_mixed_surface_damage_and_retreat(monkeypatch, recent_arrow):
+@pytest.mark.parametrize(
+    "recent_arrow, hp_before, hp_after, should_face",
+    [(False, 3.34, 2.55, False), (True, 3.34, 2.55, True), (False, 8.7, 1.63, True), (False, 8.7, 6.2, False)],
+)
+def test_poll_refaces_melee_after_surface_retreat(monkeypatch, recent_arrow, hp_before, hp_after, should_face):
     front = {"id": 44, "name": "zombie", "dist": 2.5, "pos": [9250.0, 64, -11469.5]}
     flank = {"id": 55, "name": "zombie", "dist": 1.9, "pos": [9249.8, 64, -11469.6]}
     status = {
-        "pos": [9252.5, 64, -11469.5], "health": 3.34, "food": 17, "dimension": "overworld",
+        "pos": [9252.5, 64, -11469.5], "health": hp_before, "food": 17, "dimension": "overworld",
         "ready": True, "alive": True, "on_ground": True, "blocking": True, "nearest_hostile": front,
     }
     looks = []
@@ -3627,15 +3630,15 @@ def test_poll_refaces_melee_after_mixed_surface_damage_and_retreat(monkeypatch, 
     guard = GenerationGuard(SurfaceBot(), EventSink(lambda _: None), checkpoint=lambda: None)
 
     def retreat(*args, **kwargs):
-        status.update(pos=[9250.1, 64, -11467.9], health=2.55, nearest_hostile=flank)
+        status.update(pos=[9250.1, 64, -11467.9], health=hp_after, nearest_hostile=flank)
         return {"ok": True, "mode": "flee", "moved_dist": 2.26}
 
     monkeypatch.setattr(guard, "_defend_or_flee", retreat)
     incident = guard.poll()
 
-    expected = ["combat_or_flee", "face_attacker_after_retreat"] if recent_arrow else ["combat_or_flee"]
+    expected = ["combat_or_flee", "face_attacker_after_retreat"] if should_face else ["combat_or_flee"]
     assert [action["action"] for action in incident["actions"]] == expected
-    assert looks == ([{"entity_id": 55}] if recent_arrow else [])
+    assert looks == ([{"entity_id": 55}] if should_face else [])
 
 
 @pytest.mark.parametrize("distance", [2.2, 5.0])
