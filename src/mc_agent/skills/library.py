@@ -1364,6 +1364,7 @@ class MacroSkills:
         self.protected_positions: set[tuple[int, int, int]] = set()
         self.temporary_avoidance: dict[tuple[int, int, int], dict[str, Any]] = {}
         self.failed_stair_dirs: dict[tuple[int, int, int, str], dict[str, tuple[float, str]]] = {}
+        self._pillar_fallbacks: dict[tuple[str, int, int], tuple[int, float]] = {}
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
         self._mining_dfs: Any = None
         self.world_memory: Any = None
@@ -1608,6 +1609,7 @@ class MacroSkills:
         detour_reasons = SURFACE_SCOUT_PATH_ERRORS | terrain_blocks
         try:
             status = observe()
+            origin = result["final_pos"]
             dimension = normalize_dimension(status.get("dimension"))
             nether = dimension == "the_nether"
             nether_probe = None
@@ -1708,7 +1710,12 @@ class MacroSkills:
             result["requires_replan"] = True
             result.setdefault("error", {"code": reason})
         if reason == "remeasure_after_detour":
-            result["error"]["message"] = "追眼路线受阻或发生绕行。请在当前安全位置重新掷眼，再按新回执的方向继续。"
+            final = result["final_pos"]
+            if math.hypot(final[0] - origin[0], final[2] - origin[2]) < 1.0:
+                result["needs_new_vantage"] = True
+                result["error"]["message"] = "原测向点附近未能推进。请先换到可达的开阔干地并确认已离开原处，再重新掷眼。"
+            else:
+                result["error"]["message"] = "追眼路线受阻或发生绕行。请在当前安全位置重新掷眼，再按新回执的方向继续。"
         biome = str(result["biome"] or "").lower()
         if any(part in biome for part in ("ocean", "dark_forest", "jungle")):
             result["biome_hint"] = "当前群系不利于寻村，请改走朝向平原、草原或其他开阔干地的方向。"
@@ -3060,7 +3067,7 @@ class MacroSkills:
         return out
 
     def _gather_with_budget(
-        self, max_duration_s: float, gather: Callable[[MacroSkills], dict[str, Any]]
+        self, max_duration_s: float, gather: Callable[[MacroSkills], dict[str, Any]], *, cleanup_inventory: bool = False,
     ) -> dict[str, Any]:
         session = _SkillBudgetSession(self.bot, min(45.0, float(max_duration_s)))
         session.progress = {"dug_count": 0, "gained": {}}
@@ -3081,6 +3088,17 @@ class MacroSkills:
                 "stop_reason": "time_budget",
                 "message": "本轮采集已到时间预算。请按 gained 核对入包产物，再换近处可达目标或减少数量。",
             }
+        if cleanup_inventory and result.get("stop_reason") != "time_budget":
+            try:
+                _, cleaned = scoped._ensure_free_slots(min_free=3)
+            except _SkillDeadline:
+                session.stop_pending()
+                result["cleanup_deadline_hit"] = True
+            except (ApiError, httpx.HTTPError):
+                pass
+            else:
+                if cleaned:
+                    result["inventory_cleaned"] = cleaned
         return result
 
     def _reachable_log_column(
@@ -3895,14 +3913,19 @@ class MacroSkills:
         *,
         max_duration_s: float = 45.0,
         skip_unmineable: bool = False,
+        cleanup_inventory: bool = False,
     ) -> dict[str, Any]:
         """Validate pickaxe tier and gather blocks within a shared skill budget."""
         return self._gather_with_budget(
-            max_duration_s, lambda skills: skills._mine_blocks(block_types, count, radius, skip_unmineable=skip_unmineable)
+            max_duration_s,
+            lambda skills: skills._mine_blocks(
+                block_types, count, radius, skip_unmineable=skip_unmineable, defer_cleanup=cleanup_inventory,
+            ),
+            cleanup_inventory=cleanup_inventory,
         )
 
     def _mine_blocks(
-        self, block_types: list[str], count: int, radius: int, *, skip_unmineable: bool
+        self, block_types: list[str], count: int, radius: int, *, skip_unmineable: bool, defer_cleanup: bool = False,
     ) -> dict[str, Any]:
         if not block_types:
             return {"ok": False, "error": "bad_args", "message": "block_types 不能为空。"}
@@ -4132,14 +4155,13 @@ class MacroSkills:
             out_mine["auto_dropped"] = auto_dropped
         # BUG-029: a long mining slice can leave hundreds of low-value blocks
         # even when several slots are still empty; enforce retention caps here.
-        try:
-            _, cleaned = self._ensure_free_slots(min_free=3)
-        except Exception:
-            cleaned = []
-        if cleaned:
-            out_mine["inventory_cleaned"] = [
-                {"item": d.get("item"), "count": d.get("count")} for d in cleaned
-            ]
+        if not defer_cleanup:
+            try:
+                _, cleaned = self._ensure_free_slots(min_free=3)
+            except Exception:
+                cleaned = []
+            if cleaned:
+                out_mine["inventory_cleaned"] = cleaned
         return out_mine
 
     def _recall_and_mine_memory_poi(
@@ -7223,6 +7245,7 @@ class MacroSkills:
             }
 
         stair_deadline = self.bot.deadline
+        fallback_count = 0
         for step_idx in range(steps if stop_reason == "completed" else 0):
             # BUG-037: the first step often needs walk+dig+confirm and was
             # timing out at per_step_timeout with zero progress. Give step 0
@@ -7480,12 +7503,28 @@ class MacroSkills:
                         not _is_non_solid_support(_block_name(cell)) for cell in face_cells
                     )
                     if not has_place_face:
+                        column = (normalize_dimension(st.get("dimension")), bx, bz)
+                        now = time.monotonic()
+                        for key, (_, expiry) in list(self._pillar_fallbacks.items()):
+                            if expiry <= now:
+                                del self._pillar_fallbacks[key]
+                        fallback_count, expiry = self._pillar_fallbacks.get(column, (0, 0.0))
+                        if fallback_count >= 2:
+                            stop_reason = "pillar_fallback_cooldown"
+                            last_error = {
+                                "code": stop_reason,
+                                "pos": [bx, by, bz],
+                                "retry_after_s": math.ceil(expiry - now),
+                            }
+                            break
                         recovery = self._dig_pillar_up(steps=1, stop_on_ore=False)
                         if recovery.get("ok"):
                             steps_done += int(recovery.get("steps_done") or 0)
                             dug_count += int(recovery.get("dug_count") or 0)
                             placed_count += int(recovery.get("placed_count") or 0)
                             stop_reason = "pillar_fallback"
+                            fallback_count += 1
+                            self._pillar_fallbacks[column] = (fallback_count, time.monotonic() + 120.0)
                         else:
                             last_error = recovery.get("last_error") or {
                                 "code": "no_place_face", "pos": [nx, by, nz],
@@ -7597,10 +7636,13 @@ class MacroSkills:
             out_stair["last_error"] = last_error
         if stop_reason == "pillar_fallback":
             out_stair["fallback"] = "pillar"
-            out_stair["hint"] = (
-                "目标台阶四周没有可放置面（no_support），已原地安全垫高一格。"
-                "请从新高度重新调用 mc_skill_staircase；若仍无支撑，继续 vertical='pillar'。"
-            )
+            if fallback_count >= 2:
+                out_stair["requires_replan"] = True
+                out_stair["hint"] = "同一站位已两次自动垫高。请用 mc_move_to 或 mc_skill_unstick 换到有支撑的站位，再规划阶梯。"
+            else:
+                out_stair["hint"] = "目标台阶没有可放置面，已垫高一格。请从新高度检查有支撑的横向路线。"
+        if stop_reason == "pillar_fallback_cooldown":
+            out_stair["hint"] = "该柱的自动垫高仍在冷却。请用 mc_move_to 或 mc_skill_unstick 换到有支撑的站位。"
         if stop_reason == "dig_cell_avoided":
             out_stair["hint"] = (
                 "该格刚发生 dig 超时（同一格已临时避开 30s），本次未再挖掘。"

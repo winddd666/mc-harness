@@ -454,14 +454,14 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
     ),
     "bootstrap_iron_age": CurriculumTarget(
         key="bootstrap_iron_age",
-        title="Day 1 铁煤层发育：封口下矿凑 8 铁+8 煤，合出铁镐+盾牌+铁甲",
+        title="Day 1 铁层过夜发育：封口下矿凑 6~8 铁+煤，合出铁镐+盾牌+铁甲",
         points=10,
         tier=0,
         budget_class="medium",
         # D3 根治：仅客观保底石镐（若包/近箱已有铁料则由督导器动态直出铁镐，绝不在 pre_ensure 盲挖地下矿井）
         pre_ensure=(("stone_pickaxe", 1),),
         task=(
-            "将装备升级至铁器并完成铁煤层发育：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
+            "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
             "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 4 根原木，先顺手砍 4~6 根原木（或备好 2 把 stone_pickaxe）再下井，严防地下断镐无木软锁；"
             "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
             "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
@@ -810,6 +810,22 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         ),
         extra_tools=("mc_use_item", "mc_skill_scout_surface", "mc_interact", "mc_posture"),
         advancement_id="minecraft:story/follow_ender_eye",
+    ),
+    "minecraft:story/enter_the_end": CurriculumTarget(
+        key="minecraft:story/enter_the_end",
+        title="60分：定位要塞传送门房、补齐末影之眼并跳入末地传送门",
+        points=60,
+        tier=2,
+        budget_class="expedition",
+        task=(
+            "解锁 story/enter_the_end(60分)（已进入主世界要塞，请全力直冲传送门房！）："
+            "1) 先调 mc_find_blocks(types=['end_portal_frame', 'end_portal'], radius=64, limit=20) 锁定传送门框架坐标及其 properties.eye 状态；若 64m 未扫到，沿要塞石砖走廊推进 25m 后再扫；"
+            "2) 拿到 end_portal_frame 坐标后，先调 mc_move_to 靠近；若遇门/墙阻断或高度差，优先用 mc_skill_staircase 调齐至与框架同海拔(±2格)并朝目标方向用 mc_dig/mc_skill_tunnel 打通直达传送门房（注意避开框架下方与楼梯口岩浆池！）；"
+            "3) 站在框架外侧安全石砖上，对所有 properties.eye 为 false/False 的 end_portal_frame 逐一调用 mc_interact(x=..., y=..., z=..., item='ender_eye') 补齐末影之眼；"
+            "4) 一旦 12 颗眼补齐并生成 end_portal，调 mc_find_blocks(types=['end_portal'], radius=16) 拿到中心坐标，直接 mc_move_to 步入 end_portal 即进入末地解锁 60 分！"
+        ),
+        extra_tools=("mc_interact", "mc_use_item", "mc_skill_tunnel", "mc_skill_staircase", "mc_posture"),
+        advancement_id="minecraft:story/enter_the_end",
     ),
 }
 
@@ -1509,6 +1525,18 @@ def select_next_target(
             recon_target = _build_island_recon_target(origin_pos, unexp, tier=1)
             candidates.append(((1, 0, -65, "island_recon_sweep"), recon_target))
 
+    has_village_known = False
+    if world_memory is not None and cur_dim == "overworld":
+        has_village_known = bool(world_memory.habitats.get(("overworld", "villager"))) or any(
+            e.dim == "overworld" and e.name in {"bell", "hay_block", "lectern", "dirt_path", "composter", "fletching_table"}
+            for e in world_memory.pois.values()
+        )
+    day2_village_pending = (
+        enable_island_recon
+        and not has_village_known
+        and not _is_cooled("day2_village_search")
+    )
+
     if (
         not leash_active
         and enable_island_recon
@@ -1517,18 +1545,48 @@ def select_next_target(
         and not is_dusk_or_night
         and world_memory is not None
         and cur_dim == "overworld"
-        and (origin_pos is None or float(origin_pos[1]) >= 48.0)
+        and not has_village_known
         and not _is_cooled("day2_village_search")
     ):
-        has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
-        has_village_poi = any(
-            e.dim == "overworld" and e.name in {"bell", "hay_block", "lectern", "dirt_path", "composter", "fletching_table"}
-            for e in world_memory.pois.values()
+        unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
+        v_target = _build_day2_village_search_target(origin_pos, unexp, biome=cur_biome)
+        if origin_pos is not None and float(origin_pos[1]) < 52.0:
+            v_target = dataclasses.replace(
+                v_target,
+                task=(
+                    f"[Day 2 天已亮，必须立刻上地表探村！当前位于地下 y={int(origin_pos[1])}，"
+                    "请先调 mc_skill_mine_dfs(action='climb_out') 或 mc_skill_staircase(vertical='up', steps=12) 回到地表 y>=60，"
+                    "出井后立刻执行高速斥候探村！]\n"
+                    + v_target.task
+                ),
+            )
+        candidates.append(((0, 0, -90, "day2_village_search"), v_target))
+
+    # Day 1 night iron-layer shelter: before Day 2 daytime village search has run, stay at Y=16 iron layer
+    # to finish shield/iron armor instead of diving to Y=-54 for diamonds on Night 1!
+    if (
+        not leash_active
+        and cur_dim == "overworld"
+        and is_dusk_or_night
+        and has_iron_or_better
+        and day2_village_pending
+        and (counts.get("shield", 0) < 1 or "minecraft:story/obtain_armor" not in completed)
+        and not _is_cooled("day1_night_iron_prep")
+    ):
+        pb_n1 = dataclasses.replace(
+            CURRICULUM_PLAYBOOKS["bootstrap_iron_age"],
+            key="day1_night_iron_prep",
+            title="Day 1 铁层过夜防装成型：合成盾牌与铁甲，天亮前勿盲目回地表",
+            tier=0,
+            pre_ensure=(),
+            advancement_id="minecraft:story/obtain_armor" if "minecraft:story/obtain_armor" not in completed else None,
+            task=(
+                "[Day 1 铁层安稳过夜：天黑且尚未经历 Day 2 白天探村，第 1 晚绝不冒险下 Y=-54 挖钻或回地表送死！"
+                "请安心在 Y=16 铁/煤层凑足铁锭与煤炭，合成 shield（副手盾）与 1 件铁甲（iron_chestplate/iron_boots）及备用铁镐，等天亮立刻出井探村！]\n"
+                + CURRICULUM_PLAYBOOKS["bootstrap_iron_age"].task
+            ),
         )
-        if not has_villager_mem and not has_village_poi:
-            unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
-            v_target = _build_day2_village_search_target(origin_pos, unexp, biome=cur_biome)
-            candidates.append(((1, 0, -70, "day2_village_search"), v_target))
+        candidates.append(((0, 0, -85, "day1_night_iron_prep"), pb_n1))
 
     _SURFACE_ONLY_TARGETS = frozenset({
         "minecraft:husbandry/plant_seed",
@@ -1583,6 +1641,10 @@ def select_next_target(
         if key == "minecraft:story/enter_the_nether" and counts.get("obsidian", 0) >= 10 and counts.get("flint_and_steel", 0) >= 1:
             enriched_pb = dataclasses.replace(enriched_pb, tier=1)
             mem_boosted = True
+        if key in {"minecraft:story/shiny_gear", "minecraft:story/mine_diamond"} and day2_village_pending and is_dusk_or_night:
+            # Defer deep Y=-54 diamond diving until after Day 2 daytime village search (stay safe in Y=16 iron layer on Night 1)
+            enriched_pb = dataclasses.replace(enriched_pb, tier=3)
+            mem_boosted = False
         if cur_dim == "the_nether":
             if key in {"minecraft:nether/find_fortress", "minecraft:nether/obtain_blaze_rod"}:
                 enriched_pb = dataclasses.replace(enriched_pb, tier=0)

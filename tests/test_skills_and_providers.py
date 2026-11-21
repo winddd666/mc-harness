@@ -560,6 +560,57 @@ def test_mine_blocks_with_wooden_pick_skips_only_unmineable_types() -> None:
     assert digs == [[1, 64, 0]]
 
 
+@pytest.mark.parametrize("slow_route", [None, "dig", "cleanup"])
+def test_actor_mine_blocks_shares_episode_budget_with_cleanup(monkeypatch, slow_route) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        timeout = request.extensions["timeout"]["read"]
+        is_cleanup = route == "inventory" and "dig" in calls
+        calls.append(route)
+        assert 0.0 < timeout <= (9.0 if route == "stop" else 8.0) - clock[0]
+        if route == slow_route or (slow_route == "cleanup" and is_cleanup):
+            assert timeout == pytest.approx(8.0 - clock[0])
+            clock[0] += timeout
+            raise httpx.ReadTimeout("offline slow mining request", request=request)
+        clock[0] += min(0.5, timeout)
+        responses = {
+            "inventory": {"items": [{"name": "wooden_pickaxe", "count": 1, "slot": 0}]},
+            "status": {"pos": [0.5, 64, 0.5]},
+            "equip": {},
+            "find_blocks": {"blocks": [{"name": "coal_ore", "pos": [1, 64, 0], "dist": 1}]},
+            "dig": {"gained": {"coal": 1}},
+            "stop": {"released": True},
+        }
+        return httpx.Response(200, json={"ok": True, "result": responses[route]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence())
+        remaining = 0.904 if slow_route is None else 13.0
+        tools._episode_deadline_mono = remaining
+        result = json.loads(tools.mc_skill_mine_blocks(["coal_ore"], count=1))
+
+    assert clock[0] <= remaining
+    if slow_route is None:
+        assert calls == []
+        assert result["stop_reason"] == "episode_deadline_imminent"
+    elif slow_route == "dig":
+        assert calls[-2:] == ["dig", "stop"]
+        assert result["ok"] is False
+        assert result["stop_reason"] == "time_budget"
+    else:
+        assert calls[-1] == "inventory"
+        assert result["ok"] is True
+        assert result["target_gained"] == {"coal": 1}
+        assert result["cleanup_deadline_hit"] is True
+
+
 def test_mine_blocks_single_dig_cannot_outlive_slice_deadline(monkeypatch) -> None:
     """r12: one un-timed obsidian dig let mine_blocks run ~300s."""
     import mc_agent.skills.library as library
@@ -2074,27 +2125,33 @@ def test_staircase_dig_timeout_names_wooden_pickaxe_as_cause() -> None:
     assert "stone_pickaxe" in result["error"]["message"]
 
 
-def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
+def test_staircase_up_falls_back_to_pillar_when_step_has_no_face(monkeypatch) -> None:
     """BUG-024: a self-dug shaft step cell has no six-face support."""
     pos = [0.5, 30.0, 0.5]
     jumping = [False]
-    placed = [False]
+    jumps_from = [30.0]
+    places = []
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
         body = json.loads(request.content) if request.content else {}
         if path == "status":
-            y = 31.2 if jumping[0] else (31.0 if placed[0] else 30.0)
-            result = {"pos": [0.5, y, 0.5], "on_ground": not jumping[0], "alive": True, "ready": True}
+            y = jumps_from[0] + 1.2 if jumping[0] else pos[1]
+            result = {"pos": [pos[0], y, pos[2]], "on_ground": not jumping[0], "alive": True, "ready": True}
         elif path == "inventory":
             result = {"items": [{"name": "cobblestone", "count": 8}]}
         elif path == "get_block":
             result = {"name": "air"}
         elif path == "posture":
             jumping[0] = bool(body.get("jump"))
+            if jumping[0]:
+                jumps_from[0] = pos[1]
             result = {}
         elif path == "place":
-            placed[0] = True
+            pos[1] += 1
+            places.append(body["pos"])
             result = {"pos": body["pos"]}
         elif path == "find_blocks":
             result = {"blocks": []}
@@ -2103,12 +2160,25 @@ def test_staircase_up_falls_back_to_pillar_when_step_has_no_face() -> None:
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).dig_staircase(direction="north", vertical="up", steps=1)
+        skills = MacroSkills(bot)
+        result = skills.dig_staircase(direction="north", vertical="up", steps=1)
+        repeated = skills.dig_staircase(direction="east", vertical="up", steps=1)
+        blocked = skills.dig_staircase(direction="north", vertical="up", steps=1)
+        assert len(places) == 2
+        clock[0] = 121.0
+        expired = skills.dig_staircase(direction="north", vertical="up", steps=1)
     assert result["ok"] is True
     assert result["stop_reason"] == "pillar_fallback"
     assert result["fallback"] == "pillar"
     assert result["steps_done"] == 1
     assert result["placed_count"] == 1
+    assert result["requires_replan"] is False
+    assert repeated["ok"] is True and repeated["requires_replan"] is True
+    assert blocked["stop_reason"] == "pillar_fallback_cooldown"
+    assert blocked["steps_done"] == 0
+    assert blocked["requires_replan"] is True
+    assert expired["stop_reason"] == "pillar_fallback"
+    assert expired["requires_replan"] is False
 
 
 def test_staircase_up_retries_transient_place_failed() -> None:
@@ -2776,9 +2846,28 @@ def test_tracking_ender_eye_stops_before_wide_detour_after_first_hop(tracking) -
         assert result["final_pos"] == [28.5, 64, 0.5]
         assert result["stop_reason"] == "remeasure_after_detour"
         assert result["requires_replan"] is True
+        assert "needs_new_vantage" not in result
     else:
         assert len(backend.moves) == 5
         assert result["direction"] == "north"
+
+
+def test_tracking_ender_eye_requests_new_vantage_when_blocked_in_place() -> None:
+    backend = _SurfaceScoutBackend()
+
+    def handle(request):
+        if request.url.path.endswith("/get_block"):
+            return backend.ok({"name": "water"})
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="southeast", track_ender_eye=True)
+
+    assert backend.moves == []
+    assert result["distance_traveled"] == 0
+    assert result["stop_reason"] == "remeasure_after_detour"
+    assert result["needs_new_vantage"] is True
+    assert "先换到" in result["error"]["message"]
 
 
 def test_tracking_ender_eye_stops_after_observed_backward_movement() -> None:
