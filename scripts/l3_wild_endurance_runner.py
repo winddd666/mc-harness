@@ -2364,8 +2364,18 @@ def main() -> int:
         if trader_keeper is not None:
             trader_keeper.start()
             print(f"[Scene] trader keeper started for {bot_name} (15s re-anchor)", flush=True)
+
+        class StrongholdSupervisor(CurriculumSupervisor):
+            def _detect_surface_preempt_opportunity(self, *, current_key: str, **kwargs: Any) -> str | None:
+                if current_key in (FOLLOW_ENDER_EYE, ENTER_END):
+                    return None
+                return super()._detect_surface_preempt_opportunity(current_key=current_key, **kwargs)
+
+        supervisor_class = (
+            StrongholdSupervisor if args.stage == STRONGHOLD_STAGE and args.focus_episodes > 0 else CurriculumSupervisor
+        )
         try:
-            sup = CurriculumSupervisor(
+            sup = supervisor_class(
                 bot,
                 chat_fn=qwen.chat,
                 model_name=f"{qwen.model}@{qwen.base_url}",
