@@ -50,7 +50,7 @@ LOW_HP_BUNKER_MAX = 10.0
 
 # Ranged damage: sprinting away in open cave air just makes the firing line longer.
 RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "wither_skull", "skeleton"})
-MELEE_HURT_SOURCES = frozenset({"mob_attack", "player_attack"})
+MELEE_HURT_SOURCES = frozenset({"mob_attack", "player_attack", "spear"})
 BLAST_HURT_SOURCES = frozenset({"player_explosion", "entity_explosion", "fireball", "small_fireball", "wither_skull"})
 
 # Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
@@ -1895,7 +1895,8 @@ class GenerationGuard:
                         eff_dist = 99.0
                     melee_or_airborne = (
                         (status.get("on_ground") is not True)
-                        or (hurt_src in {"mob_attack", "player_explosion", "entity_explosion"})
+                        or hurt_src in MELEE_HURT_SOURCES
+                        or hurt_src in {"player_explosion", "entity_explosion"}
                         or (eff_dist <= 4.5)
                     )
                     can_surface_night_bunker = (

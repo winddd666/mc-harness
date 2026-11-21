@@ -4624,7 +4624,8 @@ def test_nether_melee_retreat_resolves_the_confirmed_attacker_without_position(m
 
 
 @pytest.mark.parametrize("shooters", ["visible", "timeout", "melee_only"])
-def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, shooters):
+@pytest.mark.parametrize("melee_source", ["mob_attack", "spear"])
+def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, shooters, melee_source):
     melee = {"id": 44, "name": "zombie", "dist": 2.0, "pos": [-2, 72, 0]}
     shooter = {"id": 45, "name": "skeleton", "dist": 8.0, "pos": [8, 72, 0]}
     status = {
@@ -4632,7 +4633,7 @@ def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, sho
         "ready": True, "alive": True, "on_ground": True, "blocking": True,
         "nearest_hostile": {key: melee[key] for key in ("id", "name", "dist")},
     }
-    hits = [{"seq": 2, "type": "hurt", "source": "mob_attack"}]
+    hits = [{"seq": 2, "type": "hurt", "source": melee_source}]
     if shooters != "melee_only":
         hits.insert(0, {"seq": 1, "type": "hurt", "source": "arrow"})
     scans = []
