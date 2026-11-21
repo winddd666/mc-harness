@@ -1419,6 +1419,7 @@ class GenerationGuard:
                     if other_hurts else status.get("nearest_hostile")
                 )
                 hurt_src = str(recent_hurt.get("source") or "").strip().lower()
+                indirect_magic = hurt_src == "indirect_magic"
                 ranged_defense = hurt_src in RANGED_HURT_SOURCES or (
                     nh_name in {"blaze", "ghast"}
                     and (hurt_src in FIRE_HURT_SOURCES or (not hurt_src and status.get("on_fire")))
@@ -1454,6 +1455,7 @@ class GenerationGuard:
                     has_shield
                     and not already_blocking
                     and not ranged_defense
+                    and not indirect_magic
                     and hp_val >= 8.0
                     and (now - self._last_shield_only_at >= 12.0 or self._shield_only_streak < 1)
                 ):
@@ -1672,7 +1674,7 @@ class GenerationGuard:
                             or (not has_melee_weapon and status.get("is_day") is False and self._consecutive_flees >= 1 and hp_val <= 14.0)
                         )
                     )
-                    if (melee_or_airborne and can_surface_night_bunker) or not melee_or_airborne:
+                    if not indirect_magic and ((melee_or_airborne and can_surface_night_bunker) or not melee_or_airborne):
                         bunker = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
                         actions.append(bunker)
                         if bunker["ok"]:
@@ -1693,7 +1695,7 @@ class GenerationGuard:
                     else:
                         cf = self._action(
                             "combat_or_flee",
-                            lambda: self._defend_or_flee(status, attacker, counts),
+                            lambda: self._defend_or_flee(status, attacker, counts, **({"ranged": True} if indirect_magic else {})),
                         )
                         actions.append(cf)
                         if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":

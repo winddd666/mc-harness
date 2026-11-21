@@ -3547,6 +3547,41 @@ def test_nether_fire_ticks_do_not_replace_ranged_hit_or_start_a_bunker(monkeypat
         assert retreat_calls == [(attacker if hit_source == "fireball" else None, True)]
 
 
+@pytest.mark.parametrize("incoming_magic", [False, True])
+def test_indirect_magic_uses_checked_retreat_without_digging_a_bunker(monkeypatch, incoming_magic):
+    hits = [{"seq": 1, "type": "hurt", "source": "magic"}]
+    if incoming_magic:
+        hits.extend([{"seq": 2, "type": "hurt", "source": "indirect_magic"}, {"seq": 3, "type": "hurt", "source": "magic"}])
+    retreats = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [-10333.4, 15.0, -9057.6], "dimension": "overworld", "health": 13.5,
+                        "food": 20, "ready": True, "alive": True, "on_ground": True}
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            pytest.fail(f"Unexpected action during magic damage recovery: {action}")
+
+    def checked_flee(threat_pos, *, wait_for_ground):
+        retreats.append(threat_pos)
+        assert wait_for_ground is True
+        return {"ok": True, "mode": "flee"}
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", checked_flee)
+
+    incident = guard.poll()
+
+    if incoming_magic:
+        assert retreats == [None]
+        assert [action["action"] for action in incident["actions"]] == ["combat_or_flee"]
+    else:
+        assert retreats == [] and incident is None
+
+
 @pytest.mark.parametrize("sighting", ["exposed", "covered", "timeout"])
 def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, sighting):
     from mc_agent.skills.combat_env import CombatEnv
