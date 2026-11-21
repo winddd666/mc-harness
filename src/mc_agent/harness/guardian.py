@@ -36,6 +36,7 @@ from ..skills.combat_env import (
     ThreatTrigger,
     aim_yaw_pitch,
     ranged_retreat_positions,
+    retreat_made_progress,
 )
 from ..skills.library import MacroSkills, best_melee_weapon_in_inv
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
@@ -1890,7 +1891,9 @@ class GenerationGuard:
                         and cf_result.get("reason") == "no_safe_retreat"
                     )
                     follow_unarmed_retreat = (
-                        not has_shield and not has_melee_weapon and cf and cf.get("ok") and cf_result.get("mode") == "flee"
+                        not has_shield and not has_melee_weapon and cf and melee_retreat
+                        and not cf_result.get("respawned")
+                        and retreat_made_progress(bool(cf.get("ok")), cf_result.get("moved_dist"), cf_result.get("reason"))
                     )
                     melee_after_retreat = hurt_src in MELEE_HURT_SOURCES or (
                         nether_melee_retreat and not hurt_src and now - self._last_melee_hurt_at < 4.0

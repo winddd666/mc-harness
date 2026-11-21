@@ -3487,8 +3487,9 @@ def test_poll_raises_main_hand_shield_when_cornered_by_nether_melee(monkeypatch,
     assert [action["action"] for action in incident["actions"]] == actions
 
 
+@pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("nearby", [False, True])
-def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatch, nearby):
+def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatch, nearby, complete):
     attacker = {"id": 77, "name": "spider", "dist": 3.1, "pos": [5003.5, 39, -7590.8]}
     status = {"pos": [5000.4, 39, -7591.1], "dimension": "overworld", "health": 15.5, "food": 20,
               "ready": True, "alive": True, "on_ground": True, "nearest_hostile": attacker}
@@ -3512,7 +3513,7 @@ def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatc
         status.update(pos=[5004.3, 39, -7591.4], health=6.7, nearest_hostile={
             "id": 77, "name": "spider", "dist": 2.3 if nearby else 5.0,
         })
-        return {"ok": True, "mode": "flee", "moved_dist": 5.94}
+        return {"ok": complete, "mode": "flee", "moved_dist": 5.94 if complete else 1.39}
 
     def step(landing, target, *, deadline):
         followups.append((landing["health"], target))
@@ -5613,8 +5614,9 @@ def test_unarmed_retreat_confirms_landing_after_short_pulse(monkeypatch, landing
     assert bool(retreat.get("respawned")) is (landing == "respawned")
 
 
+@pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("terrain", ["safe", "drop", "target_gone"])
-def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monkeypatch, terrain):
+def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monkeypatch, terrain, complete):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
 
     threat = {"id": 42, "name": "zombie", "dist": 1.2, "pos": [1.7, 69, 0.5]}
@@ -5650,7 +5652,7 @@ def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monk
 
     def initial_retreat(_threat_pos, **kwargs):
         status.update(pos=[-1.7, 69, 0.5], health=8.3, nearest_hostile={"id": 42, "name": "zombie", "dist": 2.6})
-        return {"ok": True, "mode": "flee", "moved_dist": 2.2}
+        return {"ok": complete, "mode": "flee", "moved_dist": 2.2 if complete else 1.39}
 
     env = CombatEnv(RetreatBot())
     monkeypatch.setattr(env, "flee", initial_retreat)
