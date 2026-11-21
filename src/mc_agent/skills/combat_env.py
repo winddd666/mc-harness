@@ -276,6 +276,24 @@ def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
     )
 
 
+def ranged_retreat_positions(
+    origin: Sequence[float], entities: Sequence[dict[str, Any]], *, max_distance: float,
+) -> list[tuple[int | None, Sequence[float]]]:
+    positions = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        pos = entity.get("pos")
+        if (
+            _clean_block_name(entity.get("name")) in RANGED_MOBS
+            and isinstance(pos, (list, tuple)) and len(pos) >= 3
+            and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
+            and math.dist(origin[:3], pos[:3]) <= max_distance
+        ):
+            positions.append((entity.get("id"), pos))
+    return positions
+
+
 def _is_solid_ground(name: str) -> bool:
     if _is_passable(name):
         return False
@@ -614,6 +632,30 @@ class CombatEnv:
             "cornered": True,
             "candidates": candidates,
         }
+
+    def can_remove_footing(self, pos: Sequence[float], target: Sequence[int]) -> bool:
+        """Allow ordinary digs and check the landing for a dig through the current floor."""
+        x, y, z = pos[:3]
+        tx, ty, tz = target[:3]
+        columns = _hitbox_columns(x, z)
+        if ty != math.floor(y - 0.01) or (tx, tz) not in columns:
+            return True
+
+        for hx, hz in columns:
+            if (hx, hz) != (tx, tz):
+                floor = self._get_block_name(hx, ty, hz, strict=True)
+                if floor and floor not in HAZARD_BLOCK_TYPES and _is_solid_ground(floor):
+                    return True
+
+        for depth in range(1, 4):
+            floor = self._get_block_name(tx, ty - depth, tz, strict=True)
+            if not floor or floor in HAZARD_BLOCK_TYPES:
+                return False
+            if _is_solid_ground(floor):
+                return True
+            if not _is_passable(floor):
+                return False
+        return False
 
     def probe_retreat(
         self, origin: Sequence[float], yaw: float, dist: float, *, cross_magma: bool = False,
@@ -1006,15 +1048,16 @@ class CombatEnv:
 
         return {"ok": False, "mode": norm_mode, "placed": 0, "pos_after": pos0, "reason": "unknown_mode"}
 
-    def _best_effort_stop(self, *, stop_control: bool = True) -> None:
+    def _best_effort_stop(self, *, stop_control: bool = True, timeout_s: float | None = None) -> None:
         """Stop residual movement/pathfinder controls after a timeout or preemption."""
+        transport = {"timeout_s": timeout_s, "allow_reauth": False} if timeout_s is not None else {}
         try:
-            self.bot.call("stop", {})
+            self.bot.call("stop", {}, **transport)
         except (ApiError, httpx.HTTPError):
             pass
         if stop_control:
             try:
-                self.bot.call("control", {"wait": False})
+                self.bot.call("control", {"wait": False}, **transport)
             except (ApiError, httpx.HTTPError):
                 pass
 
@@ -1200,6 +1243,12 @@ class CombatEnv:
                 **({"reason": "lava_landing_unconfirmed"} if unconfirmed else {}),
             }
 
+        def jump_in_lava(ms: int, *, advance: bool) -> None:
+            self.bot.call(
+                "control", {"forward": advance, "jump": True, "sprint": advance, "ms": ms, "stop_on": ["death"]},
+                timeout_s=ms / 1000.0 + 0.6, allow_reauth=False,
+            )
+
         for _ in range(3):
             px, py, pz = map(float, pos0[:3])
             head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz))
@@ -1208,12 +1257,12 @@ class CombatEnv:
             try:
                 # The current yaw can still face the attacker that knocked us in.
                 # Preserve the horizontal position until the shore probe picks a heading.
-                self.bot.call("control", {"forward": False, "jump": True, "sprint": False, "ms": 950, "stop_on": ["death"]})
+                jump_in_lava(950, advance=False)
                 actions.append("lava_surface_swim")
             except (ApiError, httpx.HTTPError) as err:
                 if isinstance(err, httpx.HTTPError):
                     actions.append("lava_surface_swim_timeout")
-                    self._best_effort_stop()
+                    self._best_effort_stop(timeout_s=0.5)
             self.invalidate_block_cache()
             st = self._safe_status(st)
             if _should_exit_lava(st):
@@ -1278,16 +1327,13 @@ class CombatEnv:
         def _run_jump_sprint(cyaw: float) -> bool:
             nonlocal st
             try:
-                self.bot.call("look", {"yaw": cyaw, "pitch": 0.0})
-                self.bot.call(
-                    "control",
-                    {"forward": True, "jump": True, "sprint": True, "ms": swim_ms, "stop_on": ["death"]},
-                )
+                self.bot.call("look", {"yaw": cyaw, "pitch": 0.0}, timeout_s=0.6, allow_reauth=False)
+                jump_in_lava(swim_ms, advance=True)
                 actions.append("lava_jump_sprint")
             except (ApiError, httpx.HTTPError) as err:
                 if isinstance(err, httpx.HTTPError):
                     actions.append("lava_jump_sprint_timeout")
-                    self._best_effort_stop()
+                    self._best_effort_stop(timeout_s=0.5)
             self.invalidate_block_cache()
             st = self._safe_status(st)
             return _should_exit_lava(st)
@@ -1298,7 +1344,8 @@ class CombatEnv:
 
         # 2b. Short pathfinder step onto close shore (`<=6.5m`) guarded against pathfinder ReadTimeout stalls.
         if lava_shore_target is not None and time.monotonic() + 1.5 < lava_deadline:
-            shore_d = math.hypot(lava_shore_target[0] - float(pos0[0]), lava_shore_target[2] - float(pos0[2]))
+            swim_pos = st.get("pos") or pos0
+            shore_d = math.hypot(lava_shore_target[0] - float(swim_pos[0]), lava_shore_target[2] - float(swim_pos[2]))
             if shore_d <= 6.5:
                 try:
                     self.bot.call(
@@ -1307,10 +1354,13 @@ class CombatEnv:
                             "x": lava_shore_target[0],
                             "y": lava_shore_target[1],
                             "z": lava_shore_target[2],
-                            "range": 1.2,
+                            # Keep the entire hitbox on the confirmed bank tile.
+                            "range": 0.15,
                             "timeout": 1200,
                             "stop_on": ["death"],
                         },
+                        timeout_s=2.0,
+                        allow_reauth=False,
                     )
                     actions.append("lava_move_to_shore")
                 except (ApiError, httpx.HTTPError) as err:
@@ -1324,6 +1374,8 @@ class CombatEnv:
         # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
         filler = self._pick_filler_block(counts)
         if filler is not None and time.monotonic() < lava_deadline + 0.8:
+            bridge_deadline = lava_deadline + 0.8
+            checked_bridge_landing = False
             p_cur = st.get("pos") or pos0
             bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
             place_targets = [[bx, by, bz], [bx, by - 1, bz]]
@@ -1348,7 +1400,7 @@ class CombatEnv:
                 if len(place_targets) >= 5:
                     break
             for place_pos in place_targets:
-                if time.monotonic() >= lava_deadline + 0.8:
+                if time.monotonic() >= bridge_deadline:
                     break
                 try:
                     self.bot.call("control", {"jump": True, "ms": 220, "wait": False})
@@ -1366,6 +1418,19 @@ class CombatEnv:
                             if isinstance(err_step, httpx.HTTPError):
                                 self._best_effort_stop()
                     st = self._safe_status(st)
+                    if (
+                        not checked_bridge_landing and not st.get("in_lava") and _landing_unconfirmed(st)
+                        and not _did_respawn_during_lava(st) and bridge_deadline - time.monotonic() >= 0.2
+                    ):
+                        # Allow a jump that cleared the lava to settle before trying another placement.
+                        checked_bridge_landing = True
+                        time.sleep(0.1)
+                        remaining = bridge_deadline - time.monotonic()
+                        if remaining > 0:
+                            try:
+                                st = self.bot.call("status", method="GET", timeout_s=min(0.25, remaining), allow_reauth=False)
+                            except (ApiError, httpx.HTTPError):
+                                pass
                     if _should_exit_lava(st):
                         return _lava_result(st)
                 except (ApiError, httpx.HTTPError) as err:
@@ -1378,31 +1443,39 @@ class CombatEnv:
                 return _lava_result(st)
 
         # 4. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
-        p_cur = st.get("pos") or pos0
-        bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
         for dname, (dx, dz) in CARDINAL_VECTORS.items():
             if time.monotonic() >= lava_deadline:
                 break
+            p_cur = st.get("pos") or pos0
+            bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
             ex, ez = bx + dx, bz + dz
             if not self._point_allowed(ex + 0.5, ez + 0.5, action="escape_lava"):
                 continue
-            b_foot = self._get_block_name(ex, by, ez)
-            b_head = self._get_block_name(ex, by + 1, ez)
-            b_top = self._get_block_name(ex, by + 2, ez)
-            if b_foot in {"lava", "flowing_lava", "bedrock"} or b_head in {"lava", "flowing_lava", "bedrock"}:
+            foot = self._get_block_name(ex, by, ez, strict=True)
+            if not foot or foot in HAZARD_BLOCK_TYPES:
                 continue
-            dug_any = False
-            for cy in (by + 1, by + 2):
-                bn = self._get_block_name(ex, cy, ez)
-                if not _is_passable(bn) and bn not in {"lava", "flowing_lava", "water", "flowing_water", "bedrock"}:
+            floor_y = by if _is_solid_ground(foot) else by - 1
+            floor = self._get_block_name(ex, floor_y, ez, strict=True)
+            if not floor or not _is_solid_ground(floor) or floor in HAZARD_BLOCK_TYPES:
+                continue
+            clearance = (floor_y + 1, floor_y + 2)
+            blocks = [self._get_block_name(ex, cy, ez, strict=True) for cy in clearance]
+            if any(not block or block in HAZARD_BLOCK_TYPES or block == "bedrock" for block in blocks):
+                continue
+            for cy, block in zip(clearance, blocks):
+                if not _is_passable(block):
                     try:
                         self.bot.call("dig", {"pos": [ex, cy, ez], "collect": False, "stop_on": ["death"]})
-                        dug_any = True
                     except (ApiError, httpx.HTTPError) as err:
                         if isinstance(err, httpx.HTTPError):
                             self._best_effort_stop()
                         break
-            if dug_any or (_is_passable(b_head) and _is_passable(b_top)):
+            self.invalidate_block_cache()
+            floor = self._get_block_name(ex, floor_y, ez, strict=True)
+            if (
+                floor and _is_solid_ground(floor) and floor not in HAZARD_BLOCK_TYPES
+                and all(_is_passable(self._get_block_name(ex, cy, ez, strict=True)) for cy in clearance)
+            ):
                 yaw_out = math.atan2(-(ex + 0.5 - float(p_cur[0])), -(ez + 0.5 - float(p_cur[2])))
                 try:
                     self.bot.call("look", {"yaw": yaw_out, "pitch": 0.0})
@@ -1512,6 +1585,7 @@ class CombatEnv:
         urgent: bool = True,
         allow_shaft_seal: bool = True,
         wait_for_ground: bool = False,
+        other_shooters: Sequence[Sequence[float]] = (),
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
         def respawned_since(before: dict[str, Any], after: dict[str, Any]) -> bool:
@@ -1587,16 +1661,36 @@ class CombatEnv:
 
         self.invalidate_block_cache()
         short_step = False
-        for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180):
-            chosen_yaw = pref_yaw + math.radians(angle)
+        disengage_range = min(float(distance), 8.5)
+        yaws = [pref_yaw + math.radians(angle) for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180)]
+        if other_shooters and threat_pos is not None and len(threat_pos) >= 3:
+            # A follow-up move keeps the selected heading. Account for both legs before probing terrain.
+            yaws.extend((pref_yaw + math.pi / 2, pref_yaw - math.pi / 2))
+            shooter_offsets = [
+                tuple(float(shooter[axis]) - float(pos0[axis]) for axis in range(3))
+                for shooter in (threat_pos, *other_shooters)
+            ]
+
+            def shooter_clearance(yaw: float) -> float:
+                ux, uz = yaw_to_unit_xz(yaw)
+                nearest = math.inf
+                for dx, dy, dz in shooter_offsets:
+                    along_route = max(0.0, min(disengage_range, dx * ux + dz * uz))
+                    nearest = min(nearest, math.hypot(dx - ux * along_route, dy, dz - uz * along_route))
+                return nearest
+
+            yaws.sort(key=shooter_clearance, reverse=True)
+        for chosen_yaw in yaws:
             route = self.probe_retreat(pos0, chosen_yaw, 3.5)
             if route is not None:
                 break
         else:
             if st0.get("on_ground") is True and not st0.get("in_water"):
                 foot_y = math.floor(float(pos0[1]) + 0.05)
-                for offset in (math.pi / 2, -math.pi / 2):
-                    chosen_yaw = pref_yaw + offset
+                short_yaws = [pref_yaw + math.pi / 2, pref_yaw - math.pi / 2]
+                if wait_for_ground:
+                    short_yaws.extend(yaws[:3])
+                for chosen_yaw in short_yaws:
                     route = self.probe_retreat(pos0, chosen_yaw, 1.65)
                     if route == (foot_y, False):
                         short_step = True
@@ -1653,7 +1747,7 @@ class CombatEnv:
         ux, uz = yaw_to_unit_xz(chosen_yaw)
         if (
             threat_pos is not None
-            and threat_dist_mid >= min(float(distance), 8.5)
+            and threat_dist_mid >= disengage_range
             and result["ok"]
         ):
             return result
@@ -1882,6 +1976,8 @@ class CombatEnv:
 
         # 3. Move to shore target (plus shoreline lip jump) or swim up and away from threat.
         if shore_target is not None:
+            shore_dist = math.hypot(shore_target[0] - start_x, shore_target[2] - start_z)
+            contested_short_crossing = (has_threat or shield_target_id is not None) and shore_dist <= 5.0
             try:
                 syaw, _ = aim_yaw_pitch(pos0, shore_target)
                 self.bot.call("look", {"yaw": syaw, "pitch": -10.0})
@@ -1895,15 +1991,16 @@ class CombatEnv:
                         "y": shore_target[1],
                         "z": shore_target[2],
                         "range": 0.6,
-                        "timeout": 4200,
+                        "timeout": 1800 if contested_short_crossing else 4200,
                         "stop_on": ["death"],
                     },
+                    **({"timeout_s": 2.4, "allow_reauth": False} if contested_short_crossing else {}),
                 )
                 actions.append("move_to_shore")
             except (ApiError, httpx.HTTPError) as err:
                 actions.append("move_to_shore_failed")
                 if isinstance(err, httpx.HTTPError):
-                    self._best_effort_stop()
+                    self._best_effort_stop(timeout_s=0.5 if contested_short_crossing else None)
 
             st_mid = self._safe_status(st0)
             interruption = interrupted_water_escape(st_mid)
@@ -2058,10 +2155,18 @@ class CombatEnv:
         exposed_lava: list[list[int]] = []
         for dx, dz in CARDINAL_VECTORS.values():
             nx, nz = bx + dx, bz + dz
-            for check_y in (by - 1, by):
-                if self._get_block_name(nx, check_y, nz) in {"lava", "flowing_lava"}:
-                    exposed_lava.append([nx, check_y, nz])
-                    break
+            below_feet = self._get_block_name(nx, by - 1, nz, strict=True)
+            if _is_lava_block(below_feet):
+                exposed_lava.append([nx, by - 1, nz])
+                continue
+            at_feet = self._get_block_name(nx, by, nz, strict=True)
+            if _is_lava_block(at_feet):
+                exposed_lava.append([nx, by, nz])
+            elif (
+                _is_passable(at_feet) and _is_passable(below_feet)
+                and _is_lava_block(self._get_block_name(nx, by - 2, nz, strict=True))
+            ):
+                exposed_lava.append([nx, by - 2, nz])
 
         if not exposed_lava:
             return {"ok": True, "near_lava": False, "sneak": bool(st0.get("sneaking")), "sealed": 0}
@@ -2575,9 +2680,17 @@ class SubcorticalInstinctController:
                             env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                         except (ApiError, httpx.HTTPError):
                             pass
+                    other_shooters = []
+                    if mob_name in RANGED_MOBS and not has_shield:
+                        other_shooters = [
+                            shooter_pos for _, shooter_pos in ranged_retreat_positions(
+                                pos, [hostile for hostile in hostiles if hostile is not primary], max_distance=12.0,
+                            )
+                        ]
                     fl = env.flee(
                         mob_pos, distance=14.0, urgent=True,
                         wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon,
+                        **({"other_shooters": other_shooters} if other_shooters else {}),
                     )
                     actions.append({
                         "action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist"),
@@ -2650,6 +2763,16 @@ class SubcorticalInstinctController:
         nh_post = st_post.get("nearest_hostile")
         nh_post_name = _clean_block_name(nh_post.get("name")) if isinstance(nh_post, dict) and nh_post.get("name") else ""
         nh_post_d = float(nh_post.get("dist", 99.0)) if nh_post_name else 99.0
+        if (
+            mode == "counter_killed" and has_shield and st_post.get("blocking")
+            and nh_post_name in RANGED_MOBS and nh_post_d <= 12.0
+            and isinstance(nh_post.get("id"), int) and nh_post["id"] != mob_id
+            and st_post.get("ready") is not False and st_post.get("alive") is not False
+            and not st_post.get("in_water") and not st_post.get("in_lava")
+        ):
+            survivor_id = nh_post["id"]
+            latched_guard = self._latch_shield_at_threat(env, survivor_id)
+            actions.append({"action": "guard_surviving_shooter", "ok": latched_guard, "entity_id": survivor_id})
         if (
             not latched_guard
             and st_post.get("ready", True)
