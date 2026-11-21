@@ -7203,24 +7203,32 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
 
 
 @pytest.mark.parametrize("attack_result", ["returned", "interrupted", "read_timeout"])
-def test_attack_in_water_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result):
+@pytest.mark.parametrize("hazard", ["water", "unarmed_melee"])
+def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result, hazard):
     import threading
 
     stopped = threading.Event()
+    observed = threading.Event()
     actions = []
     status = {
         "pos": [0.5, 63, 0.5], "health": 12, "ready": True, "alive": True, "on_ground": True,
-        "nearest_hostile": {"id": 27, "name": "drowned", "dist": 2.0, "pos": [2.5, 62, 0.5]},
+        "nearest_hostile": {"id": 27, "name": "drowned" if hazard == "water" else "zombie", "dist": 2.0, "pos": [2.5, 62, 0.5]},
     }
 
     class AttackBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                return dict(status)
+                current = dict(status)
+                observed.set()
+                return current
             actions.append(action)
             if action == "attack":
-                status.update(in_water=True, on_ground=False, health=6.7)
-                assert stopped.wait(2.0), "attack remained active after entering water under threat"
+                if hazard == "water":
+                    status.update(in_water=True, on_ground=False, health=6.7)
+                else:
+                    assert observed.wait(2.0)
+                    status.update(health=6.7, held={"name": "wooden_pickaxe"})
+                assert stopped.wait(2.0), "attack remained active after the survival hazard"
                 if attack_result == "read_timeout":
                     raise httpx.ReadTimeout("attack timed out")
                 if attack_result == "interrupted":
@@ -7248,6 +7256,13 @@ def test_attack_in_water_requests_stop_and_preserves_read_timeout(monkeypatch, a
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", escape_to_shore)
     monkeypatch.setattr(guard, "_escape_water", lambda before: {"ok": False, "in_water": True})
 
+    def retreat(_env, trigger):
+        assert trigger["source"] == "tool_interrupted_hurt" and trigger["primary_entity_id"] == 27
+        actions.append("retreat")
+        return {"handled": True, "mode": "cover_or_flee", "actions": [], "status_after": dict(status)}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", retreat)
+
     def attack():
         return json.dumps(bot.call("attack", {"entity_id": 27, "timeout": 6000}))
 
@@ -7258,9 +7273,9 @@ def test_attack_in_water_requests_stop_and_preserves_read_timeout(monkeypatch, a
     else:
         receipt = json.loads(guard.run_tool_with_reflex("mc_attack", attack))
         assert receipt["preempted_by_reflex"] is True
-        assert receipt["status_after"]["in_water"] is False
+        assert not receipt["status_after"]["in_water"]
         assert actions.count("attack") == 1
-        assert "shore" in actions
+        assert ("shore" if hazard == "water" else "retreat") in actions
 
 
 @pytest.mark.parametrize(("tool", "endpoint"), [("mc_skill_mine_dfs", "dig"), ("mc_skill_combat", "move_to")])

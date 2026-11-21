@@ -2070,11 +2070,11 @@ class GenerationGuard:
         check_unstick_exit: bool = False,
         watch_hot_floor: bool = False,
         check_flee_exit: bool = False,
-        watch_attack_water: bool = False,
+        watch_attack_emergency: bool = False,
         check_support_dig: bool = False,
         check_food_use: bool = False,
     ):
-        """Intercept threats during actor macros, or watch only water danger during an attack."""
+        """Intercept threats during actor macros, or watch immediate survival hazards during an attack."""
         orig_call = getattr(self.raw_bot, "call", None)
         if not callable(orig_call) or self._in_reflex:
             yield
@@ -2118,7 +2118,7 @@ class GenerationGuard:
             previous_tile = checked_hot_floor = None
             while not stop_evt.is_set():
                 try:
-                    if watch_attack_water and not attack_active.is_set():
+                    if watch_attack_emergency and not attack_active.is_set():
                         if stop_evt.wait(0.30):
                             return
                         continue
@@ -2131,7 +2131,7 @@ class GenerationGuard:
                     if watch_hp0 is None and isinstance(cur_hp, (int, float)):
                         watch_hp0 = float(cur_hp)
                     nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(st)
-                    if watch_attack_water:
+                    if watch_attack_emergency:
                         water_danger = (
                             st.get("in_water")
                             and st.get("ready") is not False
@@ -2141,11 +2141,20 @@ class GenerationGuard:
                                 and (nh_name == "drowned" or self._swimming_at_low_health(st))
                             ))
                         )
+                        held = st.get("held")
+                        held_name = str(held.get("name") or "").removeprefix("minecraft:") if isinstance(held, dict) else ""
+                        losing_unarmed_fight = (
+                            not st.get("in_water") and not st.get("blocking") and held_name not in MELEE_WEAPON_ORDER
+                            and st.get("ready") is not False and st.get("alive") is not False
+                            and isinstance(cur_hp, (int, float)) and 0 < cur_hp <= 10
+                            and watch_hp0 is not None and watch_hp0 - cur_hp >= 4.0
+                            and nh_name in PRE_HURT_MELEE_MOBS and nh_dist <= 4.0
+                        )
                         with attack_state_lock:
-                            stop_attack = water_danger and attack_active.is_set() and not stop_evt.is_set()
+                            stop_attack = (water_danger or losing_unarmed_fight) and attack_active.is_set() and not stop_evt.is_set()
                             if stop_attack:
                                 pending_trigger.append({
-                                    "source": "boundary_threat",
+                                    "source": "boundary_threat" if water_danger else "tool_interrupted_hurt",
                                     "primary_entity_id": nh_id,
                                     "primary_type": nh_name,
                                     "primary_pos": nh_pos,
@@ -2227,7 +2236,7 @@ class GenerationGuard:
                     return
 
         watcher_thread: threading.Thread | None = None
-        if enable_creeper_watcher or watch_attack_water:
+        if enable_creeper_watcher or watch_attack_emergency:
             watcher_thread = threading.Thread(target=_watcher, name="mc-creeper-watch", daemon=True)
             watcher_thread.start()
 
@@ -2240,7 +2249,7 @@ class GenerationGuard:
             )
             if not is_actor_thread:
                 return orig_call(path, body, **kwargs)
-            if watch_attack_water:
+            if watch_attack_emergency:
                 if clean_path != "attack":
                     return actor_call(path, body, **kwargs)
                 attack_active.set()
@@ -2341,7 +2350,7 @@ class GenerationGuard:
             self.raw_bot.call = orig_call
             if watcher_thread is not None:
                 # Finish a dispatched /stop before issuing a shore recovery mutation.
-                watcher_thread.join(timeout=1.55 if watch_attack_water and pending_trigger else 0.05)
+                watcher_thread.join(timeout=1.55 if watch_attack_emergency and pending_trigger else 0.05)
 
     def handle_preemption(self, trigger: ThreatTrigger, *, interrupted_name: str) -> dict[str, Any]:
         """Execute full 0-LLM subcortical combat/evasion takeover on the main thread (no tool auto-replay)."""
@@ -2659,7 +2668,7 @@ class GenerationGuard:
                 check_unstick_exit=is_unstick,
                 watch_hot_floor=tool_name in HOT_FLOOR_WATCH_TOOLS,
                 check_flee_exit=is_flee,
-                watch_attack_water=is_attack,
+                watch_attack_emergency=is_attack,
                 check_support_dig=tool_name == "mc_dig",
                 check_food_use=tool_name == "mc_use_item",
             ):
