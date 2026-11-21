@@ -1441,6 +1441,8 @@ class MacroSkills:
         def scan(status: dict[str, Any]) -> bool:
             nonlocal found_target
             dim = normalize_dimension(status.get("dimension"))
+            if dim == "overworld" and hasattr(memory, "mark_village_scanned"):
+                memory.mark_village_scanned(status["pos"], dim=dim)
             for route, key, receipt_key, types in (
                 ("find_blocks", "blocks", "detected_pois", blocks),
                 ("get_entities", "entities", "detected_entities", entities),
@@ -1607,6 +1609,20 @@ class MacroSkills:
 
         terrain_blocks = {"void_geofence_blocked", "liquid_ahead", "unsafe_nether_route"}
         detour_reasons = SURFACE_SCOUT_PATH_ERRORS | terrain_blocks
+        blocked_dirs: list[str] = []
+
+        def record_blocked(heading_idx: int, why: str) -> None:
+            dname = SURFACE_SCOUT_DIRECTIONS[heading_idx]
+            if dname not in blocked_dirs:
+                blocked_dirs.append(dname)
+            if (
+                not nether
+                and why in {"liquid_ahead", "void_geofence_blocked"}
+                and status.get("pos") is not None
+                and hasattr(memory, "record_exploration_edge")
+            ):
+                memory.record_exploration_edge(status["pos"], dname, why, dim=dimension)
+
         try:
             status = observe()
             origin = result["final_pos"]
@@ -1653,7 +1669,10 @@ class MacroSkills:
                 reason = "target_found"
             else:
                 if direction == "auto":
-                    unexplored = memory.unexplored_directions(status["pos"], dim=dimension)
+                    if hasattr(memory, "unexplored_directions_8"):
+                        unexplored = memory.unexplored_directions_8(status["pos"], dim=dimension)
+                    else:
+                        unexplored = memory.unexplored_directions(status["pos"], dim=dimension)
                     preferences = list(dict.fromkeys((*unexplored, *SURFACE_SCOUT_DIRECTIONS)))
                     direction = next((
                         name for name in preferences
@@ -1670,8 +1689,27 @@ class MacroSkills:
                         break
                     heading = SURFACE_SCOUT_DIRECTIONS.index(direction)
                     reason = advance(heading)
+                    if reason in detour_reasons:
+                        record_blocked(heading, reason)
                     explore_wider = reason in terrain_blocks
-                    offsets = (-2, 2, -3, 3, -1, 1, 4) if explore_wider else (-1, 1, -2, 2, -3, 3, 4)
+                    base_offsets = (-2, 2, -3, 3, -1, 1, 4) if explore_wider else (-1, 1, -2, 2, -3, 3, 4)
+                    if not nether and not track_ender_eye and status.get("pos") is not None and hasattr(memory, "score_direction_novelty"):
+                        offsets = tuple(
+                            sorted(
+                                base_offsets,
+                                key=lambda off: (
+                                    1 if off == 4 else 0,
+                                    memory.score_direction_novelty(
+                                        status["pos"],
+                                        SURFACE_SCOUT_DIRECTIONS[(heading + off) % len(SURFACE_SCOUT_DIRECTIONS)],
+                                        dim=dimension,
+                                    ),
+                                    base_offsets.index(off),
+                                ),
+                            )
+                        )
+                    else:
+                        offsets = base_offsets
                     for offset in offsets:
                         if reason not in detour_reasons:
                             break
@@ -1681,6 +1719,8 @@ class MacroSkills:
                         if eye_headings is not None and candidate not in eye_headings:
                             continue
                         reason = advance(candidate)
+                        if reason in detour_reasons:
+                            record_blocked(candidate, reason)
                         explore_wider |= reason in terrain_blocks
                     if track_ender_eye and reason in detour_reasons:
                         reason = "remeasure_after_detour"
@@ -1706,6 +1746,19 @@ class MacroSkills:
             pos_after=result["final_pos"],
             direction=direction,
         )
+        if blocked_dirs:
+            result["blocked_directions"] = blocked_dirs[:4]
+        if (
+            result["final_pos"] is not None
+            and not result.get("ok")
+            and normalize_dimension(locals().get("dimension", "overworld")) == "overworld"
+            and hasattr(memory, "unexplored_directions_8")
+        ):
+            rec_dirs = memory.unexplored_directions_8(
+                result["final_pos"], dim="overworld", exclude=set(blocked_dirs),
+            )
+            if rec_dirs:
+                result["unexplored_directions"] = rec_dirs[:3]
         if not result["ok"]:
             result["requires_replan"] = True
             result.setdefault("error", {"code": reason})
@@ -1760,7 +1813,7 @@ class MacroSkills:
                 if exc.code == "not_loaded":
                     continue
                 raise
-            if block.get("name") in {"water", "flowing_water", "bubble_column", "lava"}:
+            if block.get("name") in {"water", "flowing_water", "bubble_column", "lava", "flowing_lava"}:
                 return True
         return False
 
