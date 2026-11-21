@@ -7974,8 +7974,8 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
 
 
 @pytest.mark.parametrize("scenario", [
-    "ordinary", "surface_tool", "flooded_staircase", "submerged_move", "boundary_trident", "poll_trident",
-    "boundary_melee", "poll_melee", "tool_melee",
+    "ordinary", "surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
+    "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee",
 ])
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
     clock = [1000.0]
@@ -7983,7 +7983,7 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     events = []
     calls = []
     status = {"pos": [0.5, 52, 0.5], "health": 14 if scenario.endswith("melee") else 20, "oxygen": 240, "in_water": True,
-              "submerged": True, "on_ground": False, "alive": True, "ready": True}
+              "submerged": scenario != "surface_partial_move", "on_ground": False, "alive": True, "ready": True}
 
     class DeepWaterBot:
         def call(self, action, body=None, **kwargs):
@@ -8038,9 +8038,11 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
                 "ok": False, "stop_reason": "dig_failed",
                 "last_error": {"code": "unsafe_refilled_cell", "pos": [0, 53, 0], "block": "water"},
             }
-        if scenario == "submerged_move":
-            receipt = {"ok": True, "result": {"pos": status["pos"]}}
-        tool_results = [json.dumps(receipt)] if scenario in {"surface_tool", "flooded_staircase", "submerged_move"} else None
+        if scenario in {"submerged_move", "surface_partial_move"}:
+            receipt = {"ok": True, "result": {"pos": status["pos"], "partial_move": scenario == "surface_partial_move"}}
+        tool_results = [json.dumps(receipt)] if scenario in {
+            "surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
+        } else None
         assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools(tool_results)
     completed = [e for e in events if e["type"] == "guardian.action.completed"]
     shallow, shore = completed

@@ -3571,8 +3571,7 @@ class GenerationGuard:
         ended_wet_in_payload = any('"in_water": true' in str(r or "").lower() for r in (tool_results or []))
         handled_water_in_tool = False
         unstick_still_wet = False
-        tool_stopped_in_water = False
-        tool_returned_submerged = False
+        tool_returned_in_water = False
         waiting_for_shore_landing = False
         if tool_results:
             try:
@@ -3580,7 +3579,7 @@ class GenerationGuard:
             except (TypeError, ValueError):
                 last_tool_result = None
             if isinstance(last_tool_result, dict):
-                tool_returned_submerged = status.get("submerged") is True
+                tool_returned_in_water = in_water
                 tool_status = last_tool_result.get("status_after")
                 water_reflex = (
                     last_tool_result.get("preempted_by_reflex") is True
@@ -3596,19 +3595,6 @@ class GenerationGuard:
                         and isinstance(shore_hostile, dict) and shore_hostile.get("id") == nh_id
                     )
                 tool_error = last_tool_result.get("error")
-                last_dig_error = last_tool_result.get("last_error")
-                tool_stopped_in_water = (
-                    (
-                        last_tool_result.get("stop_reason") == "in_water"
-                        and isinstance(tool_error, dict) and tool_error.get("code") == "in_water"
-                    )
-                    or (
-                        last_tool_result.get("stop_reason") == "dig_failed"
-                        and isinstance(last_dig_error, dict)
-                        and last_dig_error.get("code") == "unsafe_refilled_cell"
-                        and last_dig_error.get("block") in ("water", "flowing_water")
-                    )
-                )
                 unstick_still_wet = (
                     isinstance(tool_error, dict) and (
                         (tool_error.get("code") == "water_escape_failed" and last_tool_result.get("in_water") is True)
@@ -3773,7 +3759,7 @@ class GenerationGuard:
                     budget = {}
                     if short_escape:
                         budget["budget_s"] = self.COMBAT_WATER_ESCAPE_BUDGET_S
-                    elif tool_stopped_in_water or tool_returned_submerged:
+                    elif tool_returned_in_water:
                         budget["budget_s"] = self.SURFACE_WATER_ESCAPE_BUDGET_S
                     esc = self._action(
                         "boundary_escape_water",
