@@ -3131,6 +3131,8 @@ def test_timeout_after_walking_to_a_nether_switchback_cools_its_first_dig(monkey
         )
         args = dict(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=55)
         first = engine.run(**args)
+        # In r64 another timed-out turn and actor dispatch took just over 30 seconds.
+        clock.sleep(31.25)
         second = engine.run(**args)
 
     assert first["stop_reason"] == "time_slice_progress"
@@ -3185,7 +3187,7 @@ def test_descent_cooldown_requires_time_to_dig(monkeypatch, first_slice_budget) 
             assert resumed["stop_reason"] == "dig_cell_avoided"
             assert len(attempts) == 1
             assert all(branch.status == "pending" for branch in collar.branches)
-            clock.now += 31
+            clock.sleep(mining.FIRST_DIG_TIMEOUT_COOLDOWN_S + 1)
             resumed = engine.run(**args)
         else:
             assert attempts[0] < 1.0

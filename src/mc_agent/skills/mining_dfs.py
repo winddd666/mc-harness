@@ -281,6 +281,8 @@ RECRAFT_PICK_DURABILITY = 100
 MAX_IDLE_ITERATIONS = 4
 # Also bail when a whole stretch of wall clock passes with zero progress (slow APIs).
 MAX_IDLE_SECONDS = 20.0
+# Keep a stalled first dig cooling through a second failed turn and dispatch between calls.
+FIRST_DIG_TIMEOUT_COOLDOWN_S = 45.0
 # Three consecutive fluid/hazard aborts on one shaft means an aquifer/cave field: relocate.
 FLUID_ABORT_LIMIT = 3
 # Three consecutive "ok but nothing happened" calls mean the shaft is a dead end.
@@ -5344,7 +5346,7 @@ class MiningDFSEngine:
                 scoped.timeout_dig_pos is not None and scoped.timeout_dig_read_s >= 1.0
                 and not scoped.dug_count
             ):
-                self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", 30.0)
+                self.skills._avoid_temporarily(scoped.timeout_dig_pos, "dig_timeout", FIRST_DIG_TIMEOUT_COOLDOWN_S)
             self._preserve_interrupted_branch(scoped, deadline_failure=exc)
             self._archive_current_shaft_to_ledger(mark_exhausted=False)
             result: dict[str, Any] = {
