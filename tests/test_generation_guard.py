@@ -10857,6 +10857,33 @@ def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(m
         assert attacks == []
 
 
+@pytest.mark.parametrize("short_only", [False, True])
+def test_creeper_retreat_does_not_take_the_only_route_toward_the_blast(monkeypatch, short_only):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {"pos": [0.5, 66, 0.5], "on_ground": True, "alive": True, "ready": True, "dimension": "overworld"}
+
+    class RidgeBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            pytest.fail(f"Retreat dispatched {action} toward the creeper")
+
+    def probe(_pos, yaw, travel, **_kwargs):
+        # The ridge opens only toward the creeper at +X.
+        return (66, False) if math.sin(yaw) < -0.8 and (not short_only or travel <= 1.65) else None
+
+    env = CombatEnv(RidgeBot())
+    monkeypatch.setattr(env, "probe_retreat", probe)
+    result = env.flee(
+        [5.7, 66, 0.5], distance=11.5, allow_shaft_seal=False, wait_for_ground=True,
+        other_melee=[[-1.0, 66, 0.5]], avoid_blast=True,
+    )
+
+    assert result["reason"] == "no_safe_retreat" and result["moved_dist"] == 0.0
+
+
 @pytest.mark.parametrize("distance, short_only", [(3.0, False), (7.0, False), (3.0, True)])
 def test_creeper_retreat_avoids_a_second_creeper_on_the_escape_heading(monkeypatch, distance, short_only):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
