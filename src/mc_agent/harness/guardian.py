@@ -1502,6 +1502,9 @@ class GenerationGuard:
             or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
         )
         no_water_active = now < self._no_water_until
+        recent_water_escape_failed = (
+            self._last_water_escape_failed and now - self._last_water_escape_at < self.WATER_ESCAPE_RETRY_WINDOW_S
+        )
         water_retry_gap = 8.0 if self._last_water_escape_failed else 1.5
         no_water_reentry = (
             in_water
@@ -1758,7 +1761,12 @@ class GenerationGuard:
                         inv=inv,
                         attacker=status.get("nearest_hostile") if isinstance(status.get("nearest_hostile"), dict) else None,
                     )
-                if no_water_reentry or exposed_in_water or drowning or self._swimming_at_low_health(status):
+                submerged = bool(status.get("submerged"))
+                continuing_water_escape = recent_water_escape_failed and (submerged or status.get("on_ground") is False)
+                if (
+                    no_water_reentry or exposed_in_water or drowning or self._swimming_at_low_health(status)
+                    or continuing_water_escape
+                ):
                     if exposed_in_water and nh_pos is None:
                         nh_pos = self._find_hostile_position(nh_id, nh_name)
                     shore_act = self._action(
@@ -1767,7 +1775,7 @@ class GenerationGuard:
                             nh_pos,
                             keep_shield=has_shield or bool(status.get("blocking")),
                             shield_target_id=nh_id,
-                            **({"surface_first": True} if drowning else {}),
+                            **({"surface_first": True} if drowning or (continuing_water_escape and submerged) else {}),
                         ),
                     )
                     actions.append(shore_act)
@@ -1827,9 +1835,6 @@ class GenerationGuard:
                             self._pre_hurt_suppress_block = blk_sc
                             self._pre_hurt_suppress_until = now + 15.0
             elif hurt and in_water:
-                recent_failed_water_escape = (
-                    self._last_water_escape_failed and now - self._last_water_escape_at < self.WATER_ESCAPE_RETRY_WINDOW_S
-                )
                 self._last_water_escape_at = now
                 self._water_hurt_streak += 1
                 hurt_src_w = str(hurts[-1].get("source") or "").strip().lower() if hurts else ""
@@ -1843,7 +1848,7 @@ class GenerationGuard:
                 close_drowned_hit = nh_name == "drowned" and nh_dist <= 6.0 and hurt_src_w in MELEE_HURT_SOURCES
                 swimming = status.get("on_ground") is False or bool(status.get("submerged"))
                 retry_shore_after_hit = (
-                    swimming and recent_failed_water_escape
+                    swimming and recent_water_escape_failed
                     and self._short_water_escape_after_hit(status, hurt_src_w)
                 )
                 urgent_trident_shore = swimming and hurt_src_w == "trident" and 0.0 < hp_cur < 10.0

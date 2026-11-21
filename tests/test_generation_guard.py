@@ -367,6 +367,46 @@ def test_water_reflex_escapes_to_dry_land_instead_of_floating_in_place(monkeypat
     assert escaped == ["escape_water"]
 
 
+@pytest.mark.parametrize("elapsed", [4.0, 31.0])
+def test_water_float_continues_shore_recovery_after_recent_failure(monkeypatch, elapsed):
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 100.0)
+    status = {
+        "pos": [7982.5, 59.9, 2869.5], "health": 20, "food": 20, "oxygen": 120,
+        "alive": True, "ready": True, "in_water": True, "submerged": True, "on_ground": False,
+    }
+    attempts = []
+
+    class WetBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(WetBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_water_escape_at = 100.0 - elapsed
+    guard._last_water_escape_failed = True
+
+    def recover(method, **kwargs):
+        attempts.append((method, kwargs.get("surface_first", False)))
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard, "_escape_water", lambda *_: recover("generic"))
+    monkeypatch.setattr(
+        guard.combat_env, "escape_deep_water_to_shore", lambda *_, **kwargs: recover("shore", **kwargs),
+    )
+
+    incident = guard.poll()
+
+    assert "water_float" in incident["reasons"]
+    assert attempts == ([("shore", True)] if elapsed == 4.0 else [("generic", False)])
+    assert guard._last_water_escape_failed is False
+
+
 def test_hurt_while_standing_in_shallow_water_still_escapes(monkeypatch):
     """Live: in_water + hurt produced actions=[] (melee branch needs dry land, needs_float false)."""
     clock = [100.0]
