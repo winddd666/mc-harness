@@ -679,6 +679,7 @@ class CombatEnv:
 
     def probe_retreat(
         self, origin: Sequence[float], yaw: float, dist: float, *, cross_magma: bool = False,
+        deadline: float | None = None,
     ) -> tuple[int, bool] | None:
         """Check support and clearance under the entire hitbox along a short retreat."""
         ox, oy, oz = map(float, origin[:3])
@@ -690,31 +691,32 @@ class CombatEnv:
         crossing_hazards = (
             tuple(name for name in HAZARD_BLOCK_TYPES if name != "magma_block") if cross_magma else HAZARD_BLOCK_TYPES
         )
+        probe_kwargs = {"deadline": deadline} if deadline is not None else {}
         for step in range(1, samples + 1):
             travel = dist * step / samples
             nx, nz = ox + ux * travel, oz + uz * travel
             if not self._point_allowed(nx, nz, action="flee"):
                 return None
             bx, bz = math.floor(nx), math.floor(nz)
-            foot = self._get_block_name(bx, walk_y, bz, strict=True)
+            foot = self._get_block_name(bx, walk_y, bz, strict=True, **probe_kwargs)
             if not foot or foot in HAZARD_BLOCK_TYPES:
                 return None
             if _is_solid_ground(foot):
                 walk_y += 1
                 needs_jump = True
-            elif _is_passable(self._get_block_name(bx, walk_y - 1, bz, strict=True)):
+            elif _is_passable(self._get_block_name(bx, walk_y - 1, bz, strict=True, **probe_kwargs)):
                 walk_y -= 1
             if abs(walk_y - start_y) > 1:
                 return None
             floor_hazards = crossing_hazards if step < samples else HAZARD_BLOCK_TYPES
             for hx, hz in _hitbox_columns(nx, nz):
                 foot, head, floor = (
-                    self._get_block_name(hx, walk_y + dy, hz, strict=True) for dy in (0, 1, -1)
+                    self._get_block_name(hx, walk_y + dy, hz, strict=True, **probe_kwargs) for dy in (0, 1, -1)
                 )
                 if not _is_passable(foot) or not _is_passable(head) or not floor or floor in floor_hazards:
                     return None
                 if (hx, hz) != (bx, bz) and _is_passable(floor):
-                    floor = self._get_block_name(hx, walk_y - 2, hz, strict=True)
+                    floor = self._get_block_name(hx, walk_y - 2, hz, strict=True, **probe_kwargs)
                 if not floor or floor in floor_hazards or not _is_solid_ground(floor):
                     return None
         return walk_y, needs_jump
@@ -1899,6 +1901,38 @@ class CombatEnv:
                 self._best_effort_stop()
         return retreat_result(self._safe_status({**st_mid, "ready": False}))
 
+    def step_away_from_melee(self, status: dict[str, Any], threat_pos: Sequence[float], *, deadline: float) -> bool:
+        """Take one short, supported step away from a still-close attacker."""
+        origin = status["pos"]
+        away, _ = aim_yaw_pitch(threat_pos, origin)
+        foot_y = math.floor(float(origin[1]) + 0.05)
+        self.invalidate_block_cache()
+        try:
+            for offset in (0, 45, -45):
+                yaw = away + math.radians(offset)
+                if self.probe_retreat(origin, yaw, 1.65, deadline=deadline - 0.65) == (foot_y, False):
+                    break
+            else:
+                return False
+            current = self.bot.call("status", method="GET", timeout_s=0.2, allow_reauth=False)
+            pos = current.get("pos")
+            if (
+                not pos or math.dist(pos[:3], origin[:3]) > 0.2
+                or current.get("on_ground") is not True or current.get("in_water") or current.get("in_lava")
+                or current.get("ready") is False or current.get("alive") is False
+                or current.get("last_death") != status.get("last_death") or current.get("dimension") != status.get("dimension")
+                or time.monotonic() + 0.45 >= deadline
+            ):
+                return False
+            self.bot.call("look", {"yaw": yaw, "pitch": 0.0}, timeout_s=0.15, allow_reauth=False)
+            result = self.bot.call(
+                "control", {"forward": True, "ms": 220, "stop_on": ["death"]},
+                timeout_s=0.3, allow_reauth=False,
+            )
+        except (ApiError, httpx.HTTPError, _TerrainProbeExpired):
+            return False
+        return bool(result.get("ok", True))
+
     def _point_allowed(self, x: float, z: float, *, action: str = "combat_env") -> bool:
         """Return True unless an enabled VoidGeofence rejects `(x, z)` via `check_point`."""
         if self.geofence is None or not hasattr(self.geofence, "check_point"):
@@ -2409,9 +2443,12 @@ class SubcorticalInstinctController:
         except (TypeError, ValueError):
             return 99.0
 
-    def _find_live_hostiles(self, env: CombatEnv, radius: int = 16) -> list[dict[str, Any]]:
+    def _find_live_hostiles(
+        self, env: CombatEnv, radius: int = 16, *, timeout_s: float | None = None,
+    ) -> list[dict[str, Any]]:
         try:
-            res = env.bot.call("get_entities", {"radius": radius, "types": ["hostile"]})
+            transport = {"timeout_s": timeout_s, "allow_reauth": False} if timeout_s is not None else {}
+            res = env.bot.call("get_entities", {"radius": radius, "types": ["hostile"]}, **transport)
             rows = [e for e in (res or {}).get("entities") or [] if isinstance(e, dict)]
             rows.sort(key=lambda e: float(e.get("dist", 999.0)))
             return rows
@@ -2949,6 +2986,32 @@ class SubcorticalInstinctController:
         # 4) Check for a surviving attacker before handing back control or eating.
         st_post = env._safe_status(st)
         nh_post = st_post.get("nearest_hostile")
+        if (
+            mode == "cover_or_flee" and not has_shield and not has_weapon
+            and any(a["action"] == "flee" and a["ok"] for a in actions)
+            and isinstance(st_post.get("health"), (int, float)) and 0.0 < st_post["health"] <= 10.0
+            and isinstance(nh_post, dict) and _clean_block_name(nh_post.get("name")) in PRE_HURT_MELEE_MOBS
+            and isinstance(nh_post.get("id"), int) and self._entity_dist(st_post.get("pos"), nh_post) <= 3.5
+            and st_post.get("on_ground") is True and st_post.get("ready") is not False and st_post.get("alive") is not False
+            and not st_post.get("in_water") and not st_post.get("in_lava")
+            and st_post.get("last_death") == st.get("last_death") and st_post.get("dimension") == st.get("dimension")
+            and time.monotonic() + 1.5 < deadline
+        ):
+            target_id = nh_post["id"]
+            live_hostiles = self._find_live_hostiles(env, radius=5, timeout_s=0.6)
+            target = next((entity for entity in live_hostiles if entity.get("id") == target_id), {})
+            target_pos = target.get("pos")
+            if (
+                st_post.get("pos")
+                and time.monotonic() + 0.8 < deadline
+                and isinstance(target_pos, (list, tuple)) and len(target_pos) >= 3
+                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
+                and self._entity_dist(st_post.get("pos"), target) <= 3.5
+            ):
+                stepped = env.step_away_from_melee(st_post, target_pos, deadline=min(deadline, time.monotonic() + 1.5))
+                actions.append({"action": "followup_melee_retreat", "ok": stepped, "entity_id": target_id})
+                st_post = env._safe_status(st_post)
+                nh_post = st_post.get("nearest_hostile")
         if (
             mode == "counter_killed" and float(st_post.get("health") or 20.0) <= 8.0
             and isinstance(nh_post, dict) and nh_post.get("name") and nh_post.get("id") != mob_id

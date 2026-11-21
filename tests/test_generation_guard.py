@@ -5161,6 +5161,56 @@ def test_unarmed_retreat_confirms_landing_after_short_pulse(monkeypatch, landing
     assert bool(retreat.get("respawned")) is (landing == "respawned")
 
 
+@pytest.mark.parametrize("terrain", ["safe", "drop", "target_gone"])
+def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monkeypatch, terrain):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    threat = {"id": 42, "name": "zombie", "dist": 1.2, "pos": [1.7, 69, 0.5]}
+    status = {"pos": [0.5, 69, 0.5], "health": 14, "food": 20, "ready": True, "alive": True,
+              "on_ground": True, "nearest_hostile": threat, "last_death": {"t": 1}}
+    pulses = []
+
+    class RetreatBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                if body["radius"] == 5:
+                    assert kwargs["timeout_s"] == 0.6 and kwargs["allow_reauth"] is False
+                    nearby = {**threat, "pos": [0.9, 69, 0.5], "dist": 2.6}
+                    return {"entities": [] if terrain == "target_gone" else [nearby]}
+                return {"entities": [threat]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] == 68 and terrain != "drop" else "air"}
+            if action == "look":
+                status["yaw"] = body["yaw"]
+            if action == "control" and body.get("forward"):
+                pulses.append(body)
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                assert dx < 0 and dz == pytest.approx(0)
+                status["pos"] = [-1.7 + 0.7 * dx, 69, 0.5 + 0.7 * dz]
+            return {"ok": True}
+
+    def initial_retreat(_threat_pos, **kwargs):
+        status.update(pos=[-1.7, 69, 0.5], health=8.3, nearest_hostile={"id": 42, "name": "zombie", "dist": 2.6})
+        return {"ok": True, "mode": "flee", "moved_dist": 2.2}
+
+    env = CombatEnv(RetreatBot())
+    monkeypatch.setattr(env, "flee", initial_retreat)
+    outcome = CombatControllerSlot().handle(env, {"source": "pre_hurt_melee", "primary_entity_id": 42})
+
+    followups = [a for a in outcome["actions"] if a["action"] == "followup_melee_retreat"]
+    assert followups == ([] if terrain == "target_gone" else [
+        {"action": "followup_melee_retreat", "ok": terrain == "safe", "entity_id": 42},
+    ])
+    assert pulses == ([{"forward": True, "ms": 220, "stop_on": ["death"]}] if terrain == "safe" else [])
+
+
 @pytest.mark.parametrize(
     "outcome", ["same_life", "respawned_nearby", "time_budget", "retreat_into_lava", "failed_retreat_into_lava"],
 )
