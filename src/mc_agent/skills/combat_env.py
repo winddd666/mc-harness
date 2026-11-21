@@ -2009,10 +2009,11 @@ class CombatEnv:
         short_step = False
         disengage_range = min(float(distance), 8.5)
         yaws = [pref_yaw + math.radians(angle) for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180)]
+        require_blast_clearance = keep_blast_clearance or avoid_blast
         blast_offsets = [
             tuple(float(threat[axis]) - float(pos0[axis]) for axis in range(3))
             for threat in (threat_pos, *other_creepers)
-        ] if other_creepers and threat_pos is not None and len(threat_pos) >= 3 else []
+        ] if (other_creepers or require_blast_clearance) and threat_pos is not None and len(threat_pos) >= 3 else []
 
         def blast_clearance(yaw: float, travel: float) -> tuple[float, float]:
             ux, uz = yaw_to_unit_xz(yaw)
@@ -2027,7 +2028,7 @@ class CombatEnv:
             return -loss, endpoint
 
         blast_route_length = min(float(distance), 9.5)
-        if blast_offsets:
+        if other_creepers and blast_offsets:
             yaws.extend((pref_yaw + math.pi / 2, pref_yaw - math.pi / 2))
             # The optional second leg can add six blocks in the same direction.
             yaws.sort(key=lambda yaw: blast_clearance(yaw, blast_route_length), reverse=True)
@@ -2059,7 +2060,7 @@ class CombatEnv:
 
             yaws.sort(key=threat_clearance, reverse=True)
         for chosen_yaw in yaws:
-            if keep_blast_clearance and blast_clearance(chosen_yaw, blast_route_length)[0] < -1e-6:
+            if require_blast_clearance and blast_clearance(chosen_yaw, blast_route_length)[0] < -1e-6:
                 continue
             route = self.probe_retreat(pos0, chosen_yaw, 3.5)
             if route is not None:
@@ -2073,7 +2074,7 @@ class CombatEnv:
                 elif wait_for_ground:
                     short_yaws.extend(yaws[:3])
                 for chosen_yaw in short_yaws:
-                    if keep_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
+                    if require_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
                         continue
                     route = self.probe_retreat(pos0, chosen_yaw, 1.65)
                     if route == (foot_y, False):
@@ -2081,7 +2082,7 @@ class CombatEnv:
                         break
                 if not short_step and wait_for_ground and str(st0.get("dimension") or "").removeprefix("minecraft:") == "overworld":
                     for chosen_yaw in short_yaws:
-                        if keep_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
+                        if require_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
                             continue
                         route = self.probe_retreat(pos0, chosen_yaw, 1.65, allow_step_down=True)
                         if route == (foot_y - 1, False):

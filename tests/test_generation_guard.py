@@ -5400,15 +5400,18 @@ def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, sho
     assert retreats == [expected]
 
 
-@pytest.mark.parametrize("shielded", [False, True])
+@pytest.mark.parametrize("stance", ["unshielded", "shielded", "failed_cover"])
 @pytest.mark.parametrize("scan", ["visible", "timeout"])
-def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, scan, shielded):
+def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, scan, stance):
     from mc_agent.skills.combat_env import CombatEnv
 
+    shielded = stance != "unshielded"
+    failed_cover = stance == "failed_cover"
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 100.0)
     primary = {"id": 4882325, "name": "pillager", "pos": [-10959.1, 72, -11030.2], "dist": 7.3}
     secondary = {"id": 4883019, "name": "pillager", "pos": [-10965.5, 72, -11050.4], "dist": 13.5}
     status = {
-        "pos": [-10962.4, 72, -11038], "health": 2.39 if shielded else 5.33, "food": 20, "dimension": "overworld",
+        "pos": [-10962.4, 72, -11038], "health": 7.9 if failed_cover else 2.39 if shielded else 5.33, "food": 20, "dimension": "overworld",
         "ready": True, "alive": True, "on_ground": True, "blocking": shielded,
         "nearest_hostile": primary,
     }
@@ -5434,6 +5437,8 @@ def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, sc
             raise AssertionError(action)
 
     def cover(_env, pos, *, other_shooters, allow_stationary):
+        if failed_cover:
+            assert not allow_stationary
         plans.append(("cover", pos, list(other_shooters)))
         return None
 
@@ -5443,12 +5448,15 @@ def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, sc
         return {"ok": True, "mode": "flee"}
 
     guard = GenerationGuard(RoadBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    if failed_cover:
+        guard._last_dig_cover_fail_at = 88.5
+        guard._last_dig_cover_block = (-10961, 72, -11038)
     monkeypatch.setattr(MacroSkills, "dig_cover_pocket", lambda _skills: {"ok": False, "reason": "no_solid_wall"})
     monkeypatch.setattr(guard.combat_env, "probe_retreat", lambda *_args: None)
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
     monkeypatch.setattr(guard.combat_env, "flee", flee)
 
-    expected_actions = ["dig_cover", "combat_or_flee"]
+    expected_actions = ["combat_or_flee"] if failed_cover else ["dig_cover", "combat_or_flee"]
     if shielded:
         expected_actions = ["face_attacker", *expected_actions, "face_attacker_after_retreat"]
     assert [a["action"] for a in guard.poll()["actions"]] == expected_actions
@@ -10244,6 +10252,45 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
         assert attacks == [True] and moves == []
 
 
+@pytest.mark.parametrize(("terrain", "elapsed"), [("water", 21.0), ("stone", 21.0), ("water", 31.0)])
+def test_critical_ranged_chase_checks_for_water_after_landing(monkeypatch, terrain, elapsed):
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 100.0)
+    pillager = {"id": 5475818, "name": "pillager", "dist": 6.9, "pos": [-10924.6, 62.5, -10944.3]}
+    status = {
+        "pos": [-10921.5, 63, -10950.4], "health": 3.3, "ready": True, "alive": True,
+        "on_ground": True, "dimension": "overworld", "nearest_hostile": pillager,
+    }
+    attacks = []
+
+    class ShoreBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                y = body["pos"][1]
+                return {"name": terrain if y == 62 else "air"}
+            if action == "attack":
+                attacks.append(body["entity_id"])
+                raise httpx.ReadTimeout("attack response timed out")
+            raise AssertionError(action)
+
+    bot = ShoreBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_water_escape_at = 100.0 - elapsed
+
+    def attack():
+        return json.dumps(bot.call("attack", {"entity_id": pillager["id"], "timeout": 6000}))
+
+    if terrain == "water" and elapsed < guard.WATER_ESCAPE_RETRY_WINDOW_S:
+        receipt = json.loads(guard.run_tool_with_reflex("mc_attack", attack))
+        assert receipt["error"]["code"] == "unsafe_landing" and receipt["requires_replan"]
+        assert attacks == []
+    else:
+        with pytest.raises(httpx.ReadTimeout, match="attack response timed out"):
+            guard.run_tool_with_reflex("mc_attack", attack)
+        assert attacks == [pillager["id"]]
+
+
 @pytest.mark.parametrize("terrain", ["solid", "drop", "lava", "unknown"])
 def test_nether_attack_checks_footing_toward_nearby_blaze(terrain):
     calls = []
@@ -10808,6 +10855,33 @@ def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(m
         assert outcome["latched_guard"] is True and status["blocking"] is True
     else:
         assert attacks == []
+
+
+@pytest.mark.parametrize("short_only", [False, True])
+def test_creeper_retreat_does_not_take_the_only_route_toward_the_blast(monkeypatch, short_only):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {"pos": [0.5, 66, 0.5], "on_ground": True, "alive": True, "ready": True, "dimension": "overworld"}
+
+    class RidgeBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            pytest.fail(f"Retreat dispatched {action} toward the creeper")
+
+    def probe(_pos, yaw, travel, **_kwargs):
+        # The ridge opens only toward the creeper at +X.
+        return (66, False) if math.sin(yaw) < -0.8 and (not short_only or travel <= 1.65) else None
+
+    env = CombatEnv(RidgeBot())
+    monkeypatch.setattr(env, "probe_retreat", probe)
+    result = env.flee(
+        [5.7, 66, 0.5], distance=11.5, allow_shaft_seal=False, wait_for_ground=True,
+        other_melee=[[-1.0, 66, 0.5]], avoid_blast=True,
+    )
+
+    assert result["reason"] == "no_safe_retreat" and result["moved_dist"] == 0.0
 
 
 @pytest.mark.parametrize("distance, short_only", [(3.0, False), (7.0, False), (3.0, True)])
