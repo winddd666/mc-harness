@@ -382,7 +382,10 @@ def test_harvest_logs_prefers_low_trunk_over_closer_canopy() -> None:
     assert result["target_gained"] == {"oak_log": 1}
 
 
-def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch) -> None:
+@pytest.mark.parametrize("actor", [False, True])
+def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch, actor) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
     clock = [0.0]
     monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
     attempts = []
@@ -414,7 +417,15 @@ def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch)
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).harvest_logs(target_logs=4, max_duration_s=8.0)
+        if actor:
+            tools = McToolset(bot, episode_deadline_mono=5.8975)
+            skipped = json.loads(tools.mc_skill_harvest_logs(target_logs=6, radius=24))
+            assert skipped["stop_reason"] == "episode_deadline_imminent"
+            assert calls == []
+            tools = McToolset(bot, episode_deadline_mono=12.0)
+            result = json.loads(tools.mc_skill_harvest_logs(target_logs=4))
+        else:
+            result = MacroSkills(bot).harvest_logs(target_logs=4, max_duration_s=8.0)
 
     assert result["ok"] is False
     assert result["stop_reason"] == "time_budget"
@@ -423,6 +434,60 @@ def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch)
     assert attempts[1] <= 4.0
     assert calls[-1] == "stop"
     assert clock[0] <= 8.0
+
+
+@pytest.mark.parametrize("cleanup_times_out", [False, True])
+def test_actor_harvest_cleanup_respects_the_same_budget(monkeypatch, cleanup_times_out) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    cobblestone_stacks = 0
+    calls = []
+
+    def handler(request):
+        nonlocal now, cobblestone_stacks
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        if route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [
+                {"name": "cobblestone", "count": 64, "slot": slot}
+                for slot in range(9, 9 + cobblestone_stacks)
+            ]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": [1, 64, 0], "name": "oak_log", "dist": 1.0}]}
+        elif route == "dig":
+            now += 5.0
+            cobblestone_stacks = 4
+            result = {"dug": "oak_log", "gained": {"oak_log": 1}}
+        elif route == "drop":
+            timeout = request.extensions["timeout"]["read"]
+            assert 0 < timeout <= 2.0
+            assert json.loads(request.content) == {"item": "cobblestone", "count": 64}
+            if cleanup_times_out:
+                now += timeout
+                raise httpx.ReadTimeout("slow cleanup", request=request)
+            cobblestone_stacks -= 1
+            result = {"count": 64}
+        elif route == "stop":
+            result = {"released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot, episode_deadline_mono=12.0)
+        result = json.loads(tools.mc_skill_harvest_logs(target_logs=1))
+
+    assert result["ok"] is True
+    assert result["target_gained"] == {"oak_log": 1}
+    if cleanup_times_out:
+        assert result["cleanup_deadline_hit"] is True
+        assert calls[-2:] == ["drop", "stop"]
+    else:
+        assert result["inventory_cleaned"] == [{"item": "cobblestone", "count": 64}]
 
 
 @pytest.mark.parametrize("timeout_after_column", [False, True])

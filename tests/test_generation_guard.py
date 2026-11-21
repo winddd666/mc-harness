@@ -6517,6 +6517,53 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
         assert retreat["respawned"] is True
 
 
+def test_melee_swarm_retreat_avoids_another_attacker_on_the_route():
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    primary = {"id": 42, "name": "zombie", "dist": 0.8, "pos": [-0.3, 74, 0.5]}
+    secondary = {"id": 43, "name": "zombie", "dist": 3.0, "pos": [3.5, 74, 0.5]}
+    spider = {"id": 44, "name": "spider", "dist": 4.0, "pos": [0.5, 74, -3.5]}
+    status = {
+        "pos": [0.5, 74, 0.5], "health": 20, "ready": True, "alive": True,
+        "on_ground": True, "is_day": True, "dimension": "overworld",
+        "nearest_hostile": primary, "blocking": True, "last_death": {"t": 1},
+    }
+    forward = []
+
+    class SwarmBot:
+        yaw = 0.0
+
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [primary, secondary, spider]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 74 else "air"}
+            if action == "look" and "yaw" in body:
+                self.yaw = body["yaw"]
+            if action == "control" and body.get("forward"):
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                x, y, z = status["pos"]
+                status["pos"] = [x + 3.0 * dx, y, z + 3.0 * dz]
+                forward.append(status["pos"])
+            if action == "move_to":
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(
+        CombatEnv(SwarmBot()), {"source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie"}
+    )
+    assert outcome["mode"] == "cover_or_flee"
+    assert len(forward) == 1
+    assert forward[0][2] > 2.0
+
+
 @pytest.mark.parametrize("landing", ["grounded", "still_airborne", "water", "respawned"])
 def test_unarmed_retreat_confirms_landing_after_short_pulse(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
@@ -8580,6 +8627,46 @@ def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attac
     assert result["actions"] == ["move_to_shore_failed", "shore_lip_jump"]
 
 
+def test_failed_pathfinder_uses_a_short_hop_to_reach_a_nearby_shallow_bank(monkeypatch):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    bank = [7948.5, 63.0, 2771.5]
+    status = {
+        "pos": [7949.8, 62.0, 2771.5], "in_water": True, "on_ground": False,
+        "alive": True, "ready": True, "dimension": "overworld",
+    }
+
+    class ShoreBot:
+        yaw = 0.0
+
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "look":
+                self.yaw = body["yaw"]
+            if action == "move_to":
+                raise ApiError("path_not_found", "pathfinder cannot climb the lip")
+            if action == "control" and body.get("forward"):
+                assert body["jump"] is True
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                x, _, z = status["pos"]
+                distance = 3.0 * body["ms"] / 1000
+                x += dx * distance
+                z += dz * distance
+                landed = int(x) == int(bank[0]) and int(z) == int(bank[2])
+                status.update(pos=[x, 63.0 if landed else 62.0, z], in_water=not landed, on_ground=landed)
+            return {"ok": True}
+
+    env = CombatEnv(ShoreBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_a, **_kw: bank)
+
+    result = env.escape_deep_water_to_shore()
+
+    assert result["ok"] is True
+    assert result["actions"] == ["move_to_shore_failed", "shore_lip_jump"]
+
+
 @pytest.mark.parametrize("same_life", [True, False])
 def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(monkeypatch, same_life):
     from mc_agent.skills.combat_env import CombatEnv
@@ -9696,7 +9783,9 @@ def test_nether_attack_checks_footing_toward_nearby_blaze(terrain):
 
 
 @pytest.mark.parametrize("attack_result", ["returned", "interrupted", "read_timeout"])
-@pytest.mark.parametrize("hazard", ["water", "ranged_water", "lava", "unarmed_melee", "unarmed_above_critical", "other_melee"])
+@pytest.mark.parametrize("hazard", [
+    "water", "ranged_water", "lava", "unarmed_melee", "unarmed_above_critical", "other_melee", "other_ranged",
+])
 def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result, hazard):
     import threading
 
@@ -9704,14 +9793,16 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
     stopped = threading.Event()
     observed = threading.Event()
     actions = []
-    attack_target = 44 if hazard == "other_melee" else 27
+    armed = hazard in {"other_melee", "other_ranged"}
+    attack_target = 44 if armed else 27
     above_critical = hazard == "unarmed_above_critical"
     in_water = hazard in {"water", "ranged_water"}
     drowned_distance = 8.5 if hazard == "ranged_water" else 2.0
     hostile_pos = [0.5 + drowned_distance, 62, 0.5]
+    hostile_name = {"other_ranged": "pillager", "water": "drowned", "ranged_water": "drowned"}.get(hazard, "zombie")
     status = {
         "pos": [0.5, 63, 0.5], "health": 18 if above_critical else 12, "ready": True, "alive": True, "on_ground": True,
-        "nearest_hostile": {"id": 27, "name": "drowned" if in_water else "zombie", "dist": drowned_distance, "pos": hostile_pos},
+        "nearest_hostile": {"id": 27, "name": hostile_name, "dist": drowned_distance, "pos": hostile_pos},
     }
 
     class AttackBot:
@@ -9728,7 +9819,7 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
                     status.update(in_water=in_water, in_lava=hazard == "lava", on_ground=False, health=health)
                 else:
                     assert observed.wait(2.0)
-                    weapon = "iron_sword" if hazard == "other_melee" else "wooden_pickaxe"
+                    weapon = "iron_sword" if armed else "wooden_pickaxe"
                     status.update(health=12 if above_critical else 6.7, held={"name": weapon})
                 assert stopped.wait(2.0), "attack remained active after the survival hazard"
                 if attack_result == "read_timeout":

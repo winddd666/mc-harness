@@ -3560,10 +3560,14 @@ class MacroSkills:
         return out
 
     def harvest_logs(
-        self, target_logs: int = 4, radius: int = 32, *, max_duration_s: float = 45.0
+        self, target_logs: int = 4, radius: int = 32, *, max_duration_s: float = 45.0,
+        cleanup_inventory: bool = False,
     ) -> dict[str, Any]:
         """Gather logs or nether stems within a shared skill budget."""
-        result = self._gather_with_budget(max_duration_s, lambda skills: skills._harvest_logs(target_logs, radius))
+        result = self._gather_with_budget(
+            max_duration_s, lambda skills: skills._harvest_logs(target_logs, radius),
+            cleanup_inventory=cleanup_inventory,
+        )
         if result.get("stop_reason") == "time_budget":
             logs = {
                 name: amount for name, amount in (result.get("gained") or {}).items()
