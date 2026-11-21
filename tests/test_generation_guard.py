@@ -3792,6 +3792,53 @@ def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, sho
     assert retreats == [expected]
 
 
+@pytest.mark.parametrize("next_event", ["burn_only", "burn_with_bucket", "melee"])
+def test_post_lava_burning_does_not_treat_a_nearby_drowned_as_the_attacker(monkeypatch, next_event):
+    drowned = {"id": 44, "name": "drowned", "dist": 3.3}
+    hits = [{"seq": 1, "type": "hurt", "source": "lava"}]
+    defenses = []
+    douses = []
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [9150.3, 67, -11277.3], "health": 8.24, "food": 17,
+                    "ready": True, "alive": True, "on_ground": True, "dimension": "overworld",
+                    "blocking": True, "on_fire": True, "nearest_hostile": drowned,
+                }
+            if action == "events":
+                return {"events": [h for h in hits if h["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                items = [{"name": "diamond_sword", "count": 1}]
+                if next_event == "burn_with_bucket":
+                    items.append({"name": "water_bucket", "count": 1})
+                return {"items": items, "offhand": {"name": "shield"}}
+            return {"ok": True}
+
+    def retreat(_status, attacker, _counts):
+        defenses.append(attacker)
+        return {"ok": True, "mode": "flee"}
+
+    def douse(mode):
+        douses.append(mode)
+        return {"ok": True}
+
+    guard = GenerationGuard(RidgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._drain_events_pages()
+    hits.append({"seq": 2, "type": "hurt", "source": "on_fire", "likely_attacker": drowned})
+    if next_event == "melee":
+        hits.append({"seq": 3, "type": "hurt", "source": "mob_attack", "source_entity": drowned})
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    monkeypatch.setattr(guard.combat_env, "build_tactical", douse)
+    incident = guard.poll()
+
+    assert defenses == ([drowned] if next_event == "melee" else [])
+    assert douses == (["place_water_feet"] if next_event == "burn_with_bucket" else [])
+    if next_event == "burn_only":
+        assert incident is None
+
+
 @pytest.mark.parametrize("landed", [False, True])
 def test_lava_reflex_requires_landing_even_without_lava_under_the_hitbox(monkeypatch, landed):
     clock = [1000.0]

@@ -277,6 +277,7 @@ class GenerationGuard:
         self._ranged_cover_active_until: float = float("-inf")
         self._last_ranged_hurt_at = float("-inf")
         self._last_melee_hurt_at = float("-inf")
+        self._last_lava_hurt_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
@@ -633,6 +634,7 @@ class GenerationGuard:
                 if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
                     self._last_ranged_hurt_at = float("-inf")
                     self._last_melee_hurt_at = float("-inf")
+                    self._last_lava_hurt_at = float("-inf")
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     source = str(event.get("source") or "").strip().lower()
@@ -641,6 +643,8 @@ class GenerationGuard:
                         self._last_melee_hurt_at = float("-inf")
                     elif source in MELEE_HURT_SOURCES:
                         self._last_melee_hurt_at = now
+                    elif source in LAVA_HURT_SOURCES:
+                        self._last_lava_hurt_at = now
         return fresh
 
     @staticmethod
@@ -1106,18 +1110,26 @@ class GenerationGuard:
         eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
         should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not (hot_floor_only or needs_hot_floor_guard)
         hurt = bool(hurts) or dropped
+        burning_after_lava = (
+            bool(hurts) and now - self._last_lava_hurt_at < 15.0
+            and all(str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts)
+        )
         non_combat_only_hurt = (
             hurt
             and bool(hurts)
             and not in_lava
             and not in_water
             and not deaths
-            and all(
-                str(h.get("source") or "").strip().lower() in NON_COMBAT_HURT_SOURCES
-                and not (h.get("source_entity") or h.get("likely_attacker"))
-                for h in hurts
+            and (
+                burning_after_lava or (
+                    (not nh_name0 or nh_dist0 > 8.0)
+                    and all(
+                        str(h.get("source") or "").strip().lower() in NON_COMBAT_HURT_SOURCES
+                        and not (h.get("source_entity") or h.get("likely_attacker"))
+                        for h in hurts
+                    )
+                )
             )
-            and (not nh_name0 or nh_dist0 > 8.0)
         )
         fire_hurt_only = non_combat_only_hurt and any(
             str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts
