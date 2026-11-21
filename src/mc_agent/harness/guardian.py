@@ -505,6 +505,17 @@ class GenerationGuard:
             return {**result, "ok": False, "respawned": True}
         if after.get("ready") is False:
             return {**result, "ok": False, "reason": "not_ready"}
+        if result.get("mode") == "seal_shaft":
+            seal_pos = result.get("pos_after")
+            live_pos = after.get("pos")
+            result = {**result, "pos_after": live_pos}
+            # Placement can finish while knockback is moving the bot off the sealed step.
+            if (
+                after.get("on_ground") is not True or after.get("in_water") or after.get("in_lava")
+                or not live_pos or not seal_pos
+                or tuple(map(math.floor, live_pos[:3])) != tuple(map(math.floor, seal_pos[:3]))
+            ):
+                return {**result, "ok": False, "reason": "shaft_seal_landing_unconfirmed"}
         if confirm_shore and (after.get("on_ground") is False or after.get("in_water") or after.get("in_lava")):
             return {
                 **result, "ok": False, "reason": "shore_landing_unconfirmed", "pos_after": end,
@@ -613,6 +624,12 @@ class GenerationGuard:
             recent_melee = now - self._last_melee_hurt_at < 4.0
             mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
             burning_blaze = "nether" in dimension and ranged and status.get("on_fire") and nh_name == "blaze"
+            offhand = status.get("offhand")
+            unshielded_surface_ranged = (
+                dimension == "overworld" and ranged and low_health and status.get("on_ground") is True
+                and not status.get("blocking") and not counts.get("shield")
+                and (not isinstance(offhand, dict) or str(offhand.get("name") or "").removeprefix("minecraft:") != "shield")
+            )
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
             resolve_melee = (
@@ -627,7 +644,7 @@ class GenerationGuard:
             other_shooters = []
             check_blaze_cover = False
             if (
-                (mixed_hurt or (burning_blaze and primary_id is not None))
+                (mixed_hurt or unshielded_surface_ranged or (burning_blaze and primary_id is not None))
                 and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
             ):
                 try:
@@ -654,7 +671,7 @@ class GenerationGuard:
                         check_blaze_cover = burning_blaze
                     else:
                         other_shooters.append(shooter_pos)
-                if mixed_hurt and not pos and other_shooters:
+                if (mixed_hurt or unshielded_surface_ranged) and not pos and other_shooters:
                     pos = other_shooters.pop(0)
             # A wall that blocks projectiles cannot protect us from a melee attacker already in reach.
             if pos and (prefer_cover or check_blaze_cover) and not recent_melee:

@@ -1910,6 +1910,7 @@ class CombatEnv:
         urgent: bool = True,
         allow_shaft_seal: bool = True,
         wait_for_ground: bool = False,
+        initial_landing_checks: int = 3,
         other_shooters: Sequence[Sequence[float]] = (),
         use_nearest_hostile: bool = True,
     ) -> dict[str, Any]:
@@ -1923,11 +1924,11 @@ class CombatEnv:
                 or (start and end and math.hypot(end[0] - start[0], end[2] - start[2]) > 64.0)
             )
 
-        def settle_airborne(status: dict[str, Any], life: dict[str, Any]) -> dict[str, Any]:
-            # The initial knockback and the retreat pulse can each end midair.
-            deadline = time.monotonic() + 0.45
+        def settle_airborne(status: dict[str, Any], life: dict[str, Any], checks: int = 3) -> dict[str, Any]:
+            # Each sample allows one physics interval, with a shared allowance for status reads.
+            deadline = time.monotonic() + (checks * 100 + 150) / 1000
             sample = status
-            for _ in range(3):
+            for _ in range(checks):
                 if (
                     sample.get("on_ground") is not False or sample.get("ready") is False
                     or sample.get("in_water") or sample.get("in_lava") or respawned_since(life, sample)
@@ -1953,7 +1954,7 @@ class CombatEnv:
             and st0.get("alive") is not False and st0.get("ready") is not False
         ):
             before = st0
-            st0 = settle_airborne(before, before)
+            st0 = settle_airborne(before, before, checks=initial_landing_checks)
             if respawned_since(before, st0):
                 return {
                     "ok": False, "mode": "respawned", "respawned": True, "moved_dist": 0.0,
@@ -2900,6 +2901,7 @@ class SubcorticalInstinctController:
                         pass
                 flee_res = env.flee(
                     c_pos, distance=11.5, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
+                    **({"initial_landing_checks": 5} if not has_shield and st.get("on_ground") is False else {}),
                     **({"use_nearest_hostile": False} if not c_pos else {}),
                 )
                 st_chk = env._safe_status({**st, "ready": False})
