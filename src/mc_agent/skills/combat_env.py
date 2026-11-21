@@ -3002,6 +3002,7 @@ class SubcorticalInstinctController:
                             actions.append(strike)
 
         # 4) Check for a surviving attacker before handing back control or eating.
+        has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
         st_post = env._safe_status(st)
         nh_post = st_post.get("nearest_hostile")
         if (
