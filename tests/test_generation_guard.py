@@ -6517,6 +6517,53 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
         assert retreat["respawned"] is True
 
 
+def test_melee_swarm_retreat_avoids_another_attacker_on_the_route():
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    primary = {"id": 42, "name": "zombie", "dist": 0.8, "pos": [-0.3, 74, 0.5]}
+    secondary = {"id": 43, "name": "zombie", "dist": 3.0, "pos": [3.5, 74, 0.5]}
+    spider = {"id": 44, "name": "spider", "dist": 4.0, "pos": [0.5, 74, -3.5]}
+    status = {
+        "pos": [0.5, 74, 0.5], "health": 20, "ready": True, "alive": True,
+        "on_ground": True, "is_day": True, "dimension": "overworld",
+        "nearest_hostile": primary, "blocking": True, "last_death": {"t": 1},
+    }
+    forward = []
+
+    class SwarmBot:
+        yaw = 0.0
+
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [primary, secondary, spider]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 74 else "air"}
+            if action == "look" and "yaw" in body:
+                self.yaw = body["yaw"]
+            if action == "control" and body.get("forward"):
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                x, y, z = status["pos"]
+                status["pos"] = [x + 3.0 * dx, y, z + 3.0 * dz]
+                forward.append(status["pos"])
+            if action == "move_to":
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(
+        CombatEnv(SwarmBot()), {"source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie"}
+    )
+    assert outcome["mode"] == "cover_or_flee"
+    assert len(forward) == 1
+    assert forward[0][2] > 2.0
+
+
 @pytest.mark.parametrize("landing", ["grounded", "still_airborne", "water", "respawned"])
 def test_unarmed_retreat_confirms_landing_after_short_pulse(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv

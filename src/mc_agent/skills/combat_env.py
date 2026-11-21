@@ -1914,6 +1914,7 @@ class CombatEnv:
         wait_for_ground: bool = False,
         initial_landing_checks: int = 3,
         other_shooters: Sequence[Sequence[float]] = (),
+        other_melee: Sequence[Sequence[float]] = (),
         use_nearest_hostile: bool = True,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
@@ -1992,23 +1993,26 @@ class CombatEnv:
         short_step = False
         disengage_range = min(float(distance), 8.5)
         yaws = [pref_yaw + math.radians(angle) for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180)]
-        if other_shooters and threat_pos is not None and len(threat_pos) >= 3:
+        if (other_shooters or other_melee) and threat_pos is not None and len(threat_pos) >= 3:
             # A follow-up move keeps the selected heading. Account for both legs before probing terrain.
             yaws.extend((pref_yaw + math.pi / 2, pref_yaw - math.pi / 2))
-            shooter_offsets = [
-                tuple(float(shooter[axis]) - float(pos0[axis]) for axis in range(3))
-                for shooter in (threat_pos, *other_shooters)
+            threat_offsets = [
+                tuple(float(threat[axis]) - float(pos0[axis]) for axis in range(3))
+                for threat in (threat_pos, *other_shooters, *other_melee)
             ]
 
-            def shooter_clearance(yaw: float) -> float:
+            def threat_clearance(yaw: float) -> float:
                 ux, uz = yaw_to_unit_xz(yaw)
                 nearest = math.inf
-                for dx, dy, dz in shooter_offsets:
-                    along_route = max(0.0, min(disengage_range, dx * ux + dz * uz))
+                for index, (dx, dy, dz) in enumerate(threat_offsets):
+                    # The primary melee attacker is already in reach. Compare clearance
+                    # after the initial step while checking the entire route for other mobs.
+                    start = min(1.65, disengage_range) if other_melee and index == 0 else 0.0
+                    along_route = max(start, min(disengage_range, dx * ux + dz * uz))
                     nearest = min(nearest, math.hypot(dx - ux * along_route, dy, dz - uz * along_route))
                 return nearest
 
-            yaws.sort(key=shooter_clearance, reverse=True)
+            yaws.sort(key=threat_clearance, reverse=True)
         for chosen_yaw in yaws:
             route = self.probe_retreat(pos0, chosen_yaw, 3.5)
             if route is not None:
@@ -3251,11 +3255,23 @@ class SubcorticalInstinctController:
                                 pos, [hostile for hostile in hostiles if hostile is not primary], max_distance=12.0,
                             )
                         ]
+                    other_melee = []
+                    if mob_name in PRE_HURT_MELEE_MOBS:
+                        for hostile in nearby_hostiles:
+                            hostile_pos = hostile.get("pos")
+                            if (
+                                hostile is not primary and hostile.get("id") != mob_id
+                                and _clean_block_name(hostile.get("name")) in PRE_HURT_MELEE_MOBS
+                                and isinstance(hostile_pos, (list, tuple)) and len(hostile_pos) >= 3
+                                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in hostile_pos[:3])
+                            ):
+                                other_melee.append(hostile_pos)
                     hurt_midair = st.get("on_ground") is False and trigger.get("source") == "tool_interrupted_hurt"
                     fl = env.flee(
                         mob_pos, distance=14.0, urgent=True,
                         wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon or hurt_midair,
                         **({"other_shooters": other_shooters} if other_shooters else {}),
+                        **({"other_melee": other_melee} if other_melee else {}),
                     )
                     flee_ok = bool(fl.get("ok"))
                     sealed = flee_ok and fl.get("mode") == "sealed" and not fl.get("respawned")
