@@ -34,8 +34,10 @@ from ..skills.combat_env import (
     CombatControllerSlot,
     CombatEnv,
     ThreatTrigger,
+    _TerrainProbeExpired,
     aim_yaw_pitch,
     ranged_retreat_positions,
+    retreat_made_progress,
 )
 from ..skills.library import MacroSkills, best_melee_weapon_in_inv
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
@@ -48,7 +50,7 @@ LOW_HP_BUNKER_MAX = 10.0
 
 # Ranged damage: sprinting away in open cave air just makes the firing line longer.
 RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "wither_skull", "skeleton"})
-MELEE_HURT_SOURCES = frozenset({"mob_attack", "player_attack"})
+MELEE_HURT_SOURCES = frozenset({"mob_attack", "player_attack", "spear"})
 BLAST_HURT_SOURCES = frozenset({"player_explosion", "entity_explosion", "fireball", "small_fireball", "wither_skull"})
 
 # Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
@@ -137,8 +139,12 @@ class _UnsafeFleeExit(BaseException):
     """Unwind an explicit retreat before an unsupported ground movement."""
 
 
+class _UnsafeCombatStep(BaseException):
+    """Unwind a chase before an unsupported ground movement."""
+
+
 class _UnsafeDig(BaseException):
-    """Unwind a dig that would expose the bot to an unsafe drop or overhead lava."""
+    """Unwind a dig that would expose the bot to an unsafe drop or overhead fluid."""
 
 
 class _UnsafeFoodUse(BaseException):
@@ -227,6 +233,8 @@ class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
     SURFACE_WATER_ESCAPE_BUDGET_S = 4.0
     COMBAT_WATER_ESCAPE_BUDGET_S = 4.0
+    ATTACK_WATER_THREAT_RANGE = 16.0
+    MINING_WATER_ESCAPE_OXYGEN = 140.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -235,6 +243,7 @@ class GenerationGuard:
     FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
     MELEE_EAT_DEFER_S = 10.0
+    NETHER_BURN_EAT_DEFER_S = 12.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
@@ -293,6 +302,7 @@ class GenerationGuard:
         self._pre_hurt_suppress_until: float = float("-inf")
         self._pre_hurt_target_cooldown: dict[str, float] = {}
         self._last_cornered_creeper: tuple[int, tuple[float, ...], float, float] | None = None
+        self._last_stalled_lava: tuple[tuple[float, ...], tuple[Any, ...], float] | None = None
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
         self._last_ranged_hurt_at = float("-inf")
@@ -301,6 +311,7 @@ class GenerationGuard:
         self._last_lava_contact_at = float("-inf")
         self._last_fire_contact_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
+        self._blocked_bunker: tuple[tuple[Any, ...], list[int], str] | None = None
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
         self.stats = {
@@ -416,13 +427,33 @@ class GenerationGuard:
             )
             return {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
 
-    def _clear_contact_fire(self, pos: list[float] | tuple[float, ...]) -> dict[str, Any]:
+    def _clear_contact_fire(self, pos: list[float] | tuple[float, ...], *, sneaking: bool = False) -> dict[str, Any]:
         try:
             with self.bot.limit_until(time.monotonic() + 1.25):
-                return self.combat_env.extinguish_fire_at_feet(pos)
+                return self.combat_env.extinguish_contact_fire(pos, sneaking=sneaking)
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget"}
+
+    def _douse_after_lava(self, before: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            after = self.bot.call("status", method="GET", timeout_s=0.5)
+        except (ApiError, httpx.HTTPError):
+            return None
+        health = after.get("health")
+        _, hostile_dist, _, _ = self._extract_hostile_info(after)
+        if (
+            after.get("ready") is True and after.get("alive") is not False and after.get("pos")
+            and after.get("on_ground") is True and after.get("on_fire") and not after.get("in_water") and not after.get("in_lava")
+            and isinstance(health, (int, float)) and 0 < health <= 4.0 and hostile_dist > 8.0
+            and after.get("last_death") == before.get("last_death") and after.get("dimension") == before.get("dimension")
+        ):
+            try:
+                with self.bot.limit_until(time.monotonic() + 1.5):
+                    return self._action("douse_in_water", lambda: self.combat_env.douse_in_adjacent_water(after))
+            except _RecoveryBudgetExceeded:
+                self._stop_after_recovery_timeout()
+        return None
 
     def _run_recovery_macro(
         self,
@@ -505,7 +536,7 @@ class GenerationGuard:
 
     def _defend_or_flee(
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
-        *, ranged: bool = False, prefer_cover: bool = False,
+        *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True,
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
@@ -533,15 +564,21 @@ class GenerationGuard:
         )
         if "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
             nh_name, _, nh_id, nh_pos = self._extract_hostile_info(status)
-            pos = attacker.get("pos") if isinstance(attacker, dict) else None
-            if not pos:
-                pos = nh_pos
             now = time.monotonic()
             recent_melee = now - self._last_melee_hurt_at < 4.0
             mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
             burning_blaze = "nether" in dimension and ranged and status.get("on_fire") and nh_name == "blaze"
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
+            resolve_melee = (
+                "nether" in dimension and low_health and recent_melee and not ranged and not mixed_hurt
+                and isinstance(attacker_id, int)
+            )
+            pos = attacker.get("pos") if isinstance(attacker, dict) else None
+            if not pos and (not resolve_melee or nh_id == attacker_id):
+                pos = nh_pos
+            if not pos and resolve_melee:
+                pos = self._find_hostile_position(attacker_id, "", timeout_s=0.6)
             other_shooters = []
             check_blaze_cover = False
             if (
@@ -580,16 +617,17 @@ class GenerationGuard:
                 cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + cover_budget)
                 try:
                     cover = CombatEnv(cover_bot, geofence=self.geofence).seek_natural_cover(
-                        pos, **({"other_shooters": other_shooters} if other_shooters else {}),
+                        pos, other_shooters=other_shooters, allow_stationary=allow_stationary_cover,
                     )
                 except _RecoveryBudgetExceeded:
                     self._stop_after_recovery_timeout()
                     cover = None
-                if cover is not None:
+                if cover is not None and (cover.get("ok") or cover.get("respawned")):
                     return cover
             return self.combat_env.flee(
                 pos, wait_for_ground=True,
                 **({"other_shooters": other_shooters} if other_shooters else {}),
+                **({"use_nearest_hostile": False} if resolve_melee and pos is None else {}),
             )
         result = self._run_recovery_macro(
             status,
@@ -602,6 +640,33 @@ class GenerationGuard:
             recovery = self._action("escape_lava", self.combat_env.escape_lava)
             return {**result, "lava_recovery": recovery}
         return result
+
+    def _try_emergency_bunker(self, status: dict[str, Any]) -> dict[str, Any] | None:
+        pos = status.get("pos")
+        tile = tuple(math.floor(coord) for coord in pos[:3]) if pos else None
+        site = (status.get("dimension"), status.get("last_death"), tile)
+        if self._blocked_bunker is not None and self._blocked_bunker[0] == site:
+            _, block_pos, obstacle = self._blocked_bunker
+            try:
+                live = self.bot.call("get_block", {"pos": block_pos}, timeout_s=0.35)
+            except (ApiError, httpx.HTTPError):
+                return None
+            name = str(live.get("name") or live.get("block") or "").removeprefix("minecraft:")
+            if name == obstacle:
+                return None
+
+        self._blocked_bunker = None
+        action = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
+        result = action.get("result") or {}
+        block_pos, obstacle = result.get("block_pos"), result.get("block")
+        if (
+            result.get("reason") == "unsafe_open_side" and tile
+            and isinstance(block_pos, list) and len(block_pos) == 3 and all(isinstance(coord, int) for coord in block_pos)
+            and isinstance(obstacle, str) and 1 <= tile[1] - block_pos[1] <= 3
+            and abs(tile[0] - block_pos[0]) + abs(tile[2] - block_pos[2]) == 1
+        ):
+            self._blocked_bunker = (site, block_pos, obstacle)
+        return action
 
     def _inside_own_shaft(self) -> bool:
         """Only bunker-in-place when we are inside our own carved tunnel (never in open cave air)."""
@@ -690,9 +755,12 @@ class GenerationGuard:
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
                     self._last_cornered_creeper = None
+                    self._last_stalled_lava = None
+                    self._blocked_bunker = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     self._last_cornered_creeper = None
+                    self._last_stalled_lava = None
                     source = str(event.get("source") or "").strip().lower()
                     if source in RANGED_HURT_SOURCES:
                         self._last_ranged_hurt_at = now
@@ -856,7 +924,7 @@ class GenerationGuard:
         protecting_against_recent_hit = status.get("blocking") and (recent_ranged_hit or recent_melee_hit)
         # A Nether shooter can keep firing while missing from the nearest-hostile snapshot.
         recent_nether_threat = in_nether and (
-            recent_melee_hit or (status.get("on_fire") and recent_ranged_hit)
+            recent_melee_hit or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_EAT_DEFER_S)
         )
         recent_trident_hit = now - self._last_trident_hurt_at < 8.0
         if (
@@ -1089,26 +1157,45 @@ class GenerationGuard:
                 self.disconnected = True
             return None
 
+        hurts = [e for e in fresh if e.get("type") == "hurt"]
+        deaths = [e for e in fresh if e.get("type") in {"death", "death_loop", "disconnected", "spawn"}]
+        life_transition_pending = bool(deaths)
+        if deaths and hurts and deaths[-1]["type"] == "spawn":
+            # The server can deliver the last death and the new life's first hits together.
+            spawn_seq = int(deaths[-1]["seq"])
+            post_spawn_hurts = [e for e in hurts if int(e["seq"]) > spawn_seq]
+            if post_spawn_hurts and status.get("ready") and status.get("alive") is not False:
+                try:
+                    current = self.bot.status()
+                except (ApiError, httpx.HTTPError):
+                    current = {}
+                if (
+                    current.get("ready") and current.get("alive") is not False
+                    and current.get("last_death") == status.get("last_death")
+                    and current.get("dimension") == status.get("dimension")
+                ):
+                    status = current
+                    hurts = post_spawn_hurts
+                    life_transition_pending = False
+
         health = status.get("health")
         dropped = isinstance(health, (int, float)) and self.previous_health is not None and health < self.previous_health - 0.2
         ready = bool(status.get("ready", status.get("alive", True)))
         disconnected = self.previous_ready is True and not ready
         self.previous_ready = ready
         self.previous_health = float(health) if isinstance(health, (int, float)) else None
-        hurts = [e for e in fresh if e.get("type") == "hurt"]
         other_hurts = [e for e in hurts if str(e.get("source") or "").strip().lower() != "hot_floor"]
         in_wall_hurt = any(str(h.get("source") or "") in IN_WALL_HURT_SOURCES for h in hurts)
-        deaths = [e for e in fresh if e.get("type") in {"death", "death_loop", "disconnected", "spawn"}]
         in_water = bool(status.get("in_water"))
         raw_in_lava = bool(status.get("in_lava"))
-        if raw_in_lava and ready and status.get("alive") is not False and not deaths:
+        if raw_in_lava and ready and status.get("alive") is not False and not life_transition_pending:
             self._last_lava_contact_at = now
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or (
-            hurt_by_lava and not deaths and not disconnected and ready and status.get("alive") is not False
+            hurt_by_lava and not life_transition_pending and not disconnected and ready and status.get("alive") is not False
         )
         if (
-            not in_lava and not in_water and not deaths and ready and status.get("alive") is not False
+            not in_lava and not in_water and not life_transition_pending and ready and status.get("alive") is not False
             and status.get("on_ground") is False and "nether" in str(status.get("dimension") or "").lower()
             and status.get("pos")
             and any(
@@ -1122,6 +1209,8 @@ class GenerationGuard:
                 in_lava = CombatEnv(probe_bot)._is_airborne_above_lava(status, start_pos=status["pos"])
             except _RecoveryBudgetExceeded:
                 pass
+        if not in_lava and status.get("on_ground") is True:
+            self._last_stalled_lava = None
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava
@@ -1202,7 +1291,7 @@ class GenerationGuard:
             and bool(hurts)
             and not in_lava
             and not in_water
-            and not deaths
+            and not life_transition_pending
             and (
                 environmental_burning or (
                     (not nh_name0 or nh_dist0 > 8.0)
@@ -1307,6 +1396,7 @@ class GenerationGuard:
         if deaths or disconnected or not ready or status.get("alive") is False:
             self._consecutive_flees = 0
             self._water_hurt_streak = 0
+        if life_transition_pending or disconnected or not ready or status.get("alive") is False:
             if needs_food and not self.retry_after_ready:
                 self.retry_after_ready = True
                 self.events.emit("guardian.eat_deferred", reason="deaths_or_not_ready", retry_after_ready=True)
@@ -1360,12 +1450,14 @@ class GenerationGuard:
             if in_lava:
                 if counts.get("water_bucket", 0) > 0 and "nether" not in str(status.get("dimension") or "").lower():
                     actions.append(self._action("douse_lava", lambda: self.combat_env.build_tactical("place_water_feet")))
-                actions.append(
-                    self._action(
-                        "escape_lava",
-                        lambda: self.combat_env.escape_lava(force_rim_escape=hurt_by_lava and not raw_in_lava),
-                    )
+                escape = self._action(
+                    "escape_lava", lambda: self.combat_env.escape_lava(force_rim_escape=hurt_by_lava and not raw_in_lava),
                 )
+                actions.append(escape)
+                if escape.get("ok") and not counts.get("water_bucket") and "nether" not in str(status.get("dimension") or "").lower():
+                    douse = self._douse_after_lava(status)
+                    if douse is not None:
+                        actions.append(douse)
 
             def _already(name: str) -> bool:
                 return any(a.get("action") == name for a in actions)
@@ -1569,7 +1661,9 @@ class GenerationGuard:
                 fire_cleared = False
                 if can_clear_fire:
                     self._last_fire_clear_at = now
-                    clear = self._action("clear_contact_fire", lambda: self._clear_contact_fire(fire_pos))
+                    clear = self._action(
+                        "clear_contact_fire", lambda: self._clear_contact_fire(fire_pos, sneaking=bool(status.get("sneaking"))),
+                    )
                     actions.append(clear)
                     fire_cleared = clear["ok"]
                 if can_try_fire_douse and not fire_cleared:
@@ -1688,11 +1782,8 @@ class GenerationGuard:
                                 attacker=attacker if isinstance(attacker, dict) else status.get("nearest_hostile"),
                             )
                     att_name_r = str((att_obj or {}).get("name") or nh_name or "").removeprefix("minecraft:").strip().lower()
-                    skip_cover_for_blast = (
-                        hurt_src in {"fireball", "small_fireball", "wither_skull"}
-                        or att_name_r in {"blaze", "ghast"}
-                        or bool(status.get("on_fire"))
-                    )
+                    fresh_blast = hurt_src in {"fireball", "small_fireball", "wither_skull"}
+                    skip_cover_for_blast = fresh_blast or att_name_r in {"blaze", "ghast"} or bool(status.get("on_fire"))
                     def cover_block(pos: Any) -> tuple[int, int, int] | None:
                         if isinstance(pos, (list, tuple)) and len(pos) >= 3:
                             return math.floor(float(pos[0])), math.floor(float(pos[1]) + 0.05), math.floor(float(pos[2]))
@@ -1757,6 +1848,7 @@ class GenerationGuard:
                             "combat_or_flee",
                             lambda: self._defend_or_flee(
                                 status, attacker, counts, ranged=True, prefer_cover=not has_shield and hp_val <= LOW_HP_BUNKER_MAX,
+                                allow_stationary_cover=not fresh_blast,
                             ),
                         )
                         actions.append(cf)
@@ -1834,7 +1926,8 @@ class GenerationGuard:
                         eff_dist = 99.0
                     melee_or_airborne = (
                         (status.get("on_ground") is not True)
-                        or (hurt_src in {"mob_attack", "player_explosion", "entity_explosion"})
+                        or hurt_src in MELEE_HURT_SOURCES
+                        or hurt_src in {"player_explosion", "entity_explosion"}
                         or (eff_dist <= 4.5)
                     )
                     can_surface_night_bunker = (
@@ -1845,24 +1938,16 @@ class GenerationGuard:
                             or (not has_melee_weapon and status.get("is_day") is False and self._consecutive_flees >= 1 and hp_val <= 14.0)
                         )
                     )
-                    if not indirect_magic and ((melee_or_airborne and can_surface_night_bunker) or not melee_or_airborne):
-                        bunker = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
+                    bunker = None
+                    if not indirect_magic and (can_surface_night_bunker or not melee_or_airborne):
+                        bunker = self._try_emergency_bunker(status)
+                    if bunker is not None:
                         actions.append(bunker)
-                        if bunker["ok"]:
-                            self._consecutive_flees = 0
-                            bunker_result = bunker.get("result") or {}
-                            if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
-                                self._last_melee_hurt_at = float("-inf")
-                        else:
-                            cf = self._action(
-                                "combat_or_flee",
-                                lambda: self._defend_or_flee(status, attacker, counts),
-                            )
-                            actions.append(cf)
-                            if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":
-                                self._consecutive_flees += 1
-                            else:
-                                self._consecutive_flees = 0
+                    if bunker and bunker["ok"]:
+                        self._consecutive_flees = 0
+                        bunker_result = bunker.get("result") or {}
+                        if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
+                            self._last_melee_hurt_at = float("-inf")
                     else:
                         cf = self._action(
                             "combat_or_flee",
@@ -1890,7 +1975,9 @@ class GenerationGuard:
                         and cf_result.get("reason") == "no_safe_retreat"
                     )
                     follow_unarmed_retreat = (
-                        not has_shield and not has_melee_weapon and cf and cf.get("ok") and cf_result.get("mode") == "flee"
+                        not has_shield and not has_melee_weapon and cf and melee_retreat
+                        and not cf_result.get("respawned")
+                        and retreat_made_progress(bool(cf.get("ok")), cf_result.get("moved_dist"), cf_result.get("reason"))
                     )
                     melee_after_retreat = hurt_src in MELEE_HURT_SOURCES or (
                         nether_melee_retreat and not hurt_src and now - self._last_melee_hurt_at < 4.0
@@ -2038,13 +2125,83 @@ class GenerationGuard:
                     if "death_or_connection_changed" not in reasons:
                         reasons.append("death_or_connection_changed")
                     replan = True
-        if (
-            reasons == ["pre_hurt_creeper"] and pre_trigger is not None and post_events_verified
-            and not any(e.get("type") == "hurt" for e in fresh)
-            and self._repeat_cornered_creeper(pre_trigger, status, post_status, actions)
-        ):
-            replan = False
+        if pre_trigger is not None and post_events_verified and not any(e.get("type") == "hurt" for e in fresh):
+            if reasons == ["pre_hurt_creeper"] and self._repeat_cornered_creeper(pre_trigger, status, post_status, actions):
+                replan = False
+            elif reasons == ["pre_hurt_melee"] and self._resolved_melee_warning(pre_trigger, status, post_status, actions):
+                replan = False
+        if reasons == ["in_lava"] and post_events_verified and not fresh:
+            if self._repeat_stalled_lava_escape(status, post_status, actions):
+                replan = False
+        else:
+            self._last_stalled_lava = None
         return self._incident(post_status, reasons, actions, fresh, requires_replan=replan)
+
+    def _repeat_stalled_lava_escape(
+        self, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
+    ) -> bool:
+        attempt = actions[0] if len(actions) == 1 else {}
+        result = attempt.get("result") or {}
+        start, end = before.get("pos"), after.get("pos")
+        health = after.get("health")
+        keys = ("dimension", "last_death", "health", "on_fire")
+        state = tuple(after.get(key) for key in keys)
+
+        def same_rim(a: tuple[float, ...] | list[float], b: tuple[float, ...] | list[float]) -> bool:
+            return abs(a[1] - b[1]) <= 0.9 and math.hypot(a[0] - b[0], a[2] - b[2]) <= 0.35
+
+        if (
+            attempt.get("action") != "escape_lava" or attempt.get("ok") or result.get("respawned")
+            or result.get("reason") not in {None, "lava_landing_unconfirmed"}
+            or not (after.get("in_lava") or (after.get("on_ground") is False and result.get("airborne_above_lava")))
+            or after.get("ready") is not True or after.get("alive") is not True or after.get("busy")
+            or not isinstance(health, (int, float)) or health < 16.0 or state != tuple(before.get(key) for key in keys)
+            or not start or not end or not same_rim(start, end)
+        ):
+            self._last_stalled_lava = None
+            return False
+        previous = self._last_stalled_lava
+        now = time.monotonic()
+        if previous and previous[1] == state and now - previous[2] < 10.0 and same_rim(previous[0], end):
+            return True
+        self._last_stalled_lava = (tuple(end[:3]), state, now)
+        return False
+
+    def _resolved_melee_warning(
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
+    ) -> bool:
+        if len(actions) != 1 or actions[0]["action"] != "subcortical_combat" or not actions[0].get("ok"):
+            return False
+        outcome = actions[0].get("result")
+        if not isinstance(outcome, dict) or outcome.get("mode") != "counter_killed":
+            return False
+        hits = outcome.get("actions")
+        target = trigger.get("primary_entity_id")
+        if (
+            target is None or not isinstance(hits, list) or not hits
+            or not all(
+                isinstance(a, dict) and a.get("action") == "melee_attack" and a.get("ok") and a.get("entity_id") == target
+                for a in hits
+            )
+            or hits[-1].get("killed") is not True
+        ):
+            return False
+        _, distance, remaining, _ = self._extract_hostile_info(after)
+        health = after.get("health")
+        pos_before, pos_after = before.get("pos"), after.get("pos")
+        held_before, held_after = before.get("held"), after.get("held")
+        return bool(
+            "nearest_hostile" in after and remaining != target and distance > 16.0
+            and after.get("ready") is True and after.get("alive") is True
+            and before.get("on_ground") is True and after.get("on_ground") is True
+            and not before.get("busy") and not after.get("busy")
+            and not any(after.get(key) for key in ("in_water", "in_lava", "on_fire"))
+            and isinstance(health, (int, float)) and health > LOW_HP_BUNKER_MAX and health == before.get("health")
+            and all(after.get(key) == before.get(key) for key in ("dimension", "last_death", "food", "blocking"))
+            and isinstance(held_before, dict) and isinstance(held_after, dict)
+            and (held_after.get("name"), held_after.get("slot")) == (held_before.get("name"), held_before.get("slot"))
+            and pos_before and pos_after and math.dist(pos_before[:3], pos_after[:3]) <= 0.2
+        )
 
     def _repeat_cornered_creeper(
         self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
@@ -2172,7 +2329,7 @@ class GenerationGuard:
         fraction = distance / desired_distance
         return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": 1.0}
 
-    def _retreat_after_unsafe_exit(self, deadline: float | None) -> dict[str, Any] | None:
+    def _retreat_after_unsafe_exit(self, deadline: float | None, *, allow_cover: bool = False) -> dict[str, Any] | None:
         now = time.monotonic()
         if deadline is None or now >= deadline:
             return None
@@ -2188,6 +2345,15 @@ class GenerationGuard:
             ranged = name in RANGED_MOBS
             if not name or distance > (16.0 if ranged else 6.0):
                 return None
+            if (
+                allow_cover and ranged and "nether" in str(status.get("dimension") or "").lower()
+                and now < self._ranged_cover_active_until
+                and now - max(self._last_ranged_hurt_at, self._last_melee_hurt_at) >= 4.0
+                and status.get("on_ground") is True and status.get("pos")
+            ):
+                cover = self._recheck_cover_after_blocked_flee(status["pos"], entity_id, min(now + 1.25, deadline))
+                if cover and (cover.get("ok") or cover.get("respawned")):
+                    return {**cover, "requires_replan": True, "pos_before": status["pos"]}
             if threat_pos is None:
                 threat_pos = self._find_hostile_position(entity_id, name, session=bot)
             env = CombatEnv(bot, geofence=self.geofence)
@@ -2222,6 +2388,82 @@ class GenerationGuard:
         except (ApiError, httpx.HTTPError):
             return None
 
+    def _recheck_cover_after_blocked_flee(
+        self, pos: list[float], target_id: int | None, deadline: float,
+    ) -> dict[str, Any] | None:
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        try:
+            entities = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
+            shooters = ranged_retreat_positions(pos, entities.get("entities") or [], max_distance=16.0)
+            target = next((point for entity_id, point in shooters if entity_id == target_id), None)
+            if target_id is None or target is None:
+                return None
+            others = [point for entity_id, point in shooters if entity_id != target_id]
+            cover = self._action(
+                "unsafe_exit_cover",
+                lambda: CombatEnv(bot, geofence=self.geofence).seek_natural_cover(target, other_shooters=others),
+            )
+            return cover.get("result")
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return None
+        except (ApiError, httpx.HTTPError):
+            return None
+
+    def _verify_combat_step(self, body: dict[str, Any]) -> dict[str, Any]:
+        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.6)
+        try:
+            status = probe_bot.status()
+            if "nether" not in str(status.get("dimension") or "").lower():
+                return body
+            if status.get("in_lava"):
+                self._stop_after_recovery_timeout()
+                raise ReflexPreempted({"source": "boundary_threat", "primary_type": "lava"})
+            pos, yaw = status.get("pos"), body.get("yaw", status.get("yaw"))
+            if (
+                not pos or not isinstance(yaw, (int, float)) or not math.isfinite(yaw)
+                or status.get("ready") is False or status.get("alive") is False or status.get("on_ground") is not True
+            ):
+                raise _UnsafeCombatStep
+            # Cover a preceding movement pulse still in flight as well as the next pulse.
+            distance = 3.0 if body.get("sprint") else 2.25
+            route = CombatEnv(probe_bot, geofence=self.geofence).probe_retreat(pos, yaw, distance)
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+            raise _UnsafeCombatStep from None
+        if route is None:
+            raise _UnsafeCombatStep
+        return {**body, "ms": min(body["ms"], 250)}
+
+    def _verify_attack_approach(self, entity_id: Any, call: Callable[..., dict[str, Any]]) -> None:
+        if not isinstance(entity_id, int):
+            return
+        deadline = time.monotonic() + 0.8
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline, call_override=call)
+        try:
+            status = bot.status()
+            pos = status.get("pos")
+            if (
+                "nether" not in str(status.get("dimension") or "").lower()
+                or status.get("on_ground") is not True or not pos
+                or status.get("ready") is False or status.get("alive") is False or status.get("in_lava")
+            ):
+                return
+            name, distance, nearest_id, target = self._extract_hostile_info(status)
+            if nearest_id != entity_id or name not in {"blaze", "ghast"} or distance > 3.5:
+                return
+            if target is None:
+                target = self._find_hostile_position(entity_id, name, session=bot, timeout_s=0.3)
+            if target is None:
+                return
+            travel = math.hypot(target[0] - pos[0], target[2] - pos[2])
+            if not 0.35 <= travel <= 3.5:
+                return
+            yaw, _ = aim_yaw_pitch(pos, target)
+            if CombatEnv(bot, geofence=self.geofence).probe_retreat(pos, yaw, travel, deadline=deadline) is None:
+                raise _UnsafeCombatStep
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
+            return
+
     @contextmanager
     def _intercept_bot_calls(
         self,
@@ -2230,8 +2472,11 @@ class GenerationGuard:
         deadline: float | None = None,
         check_unstick_exit: bool = False,
         watch_hot_floor: bool = False,
+        watch_scout_water: bool = False,
+        watch_mining_water: bool = False,
         check_flee_exit: bool = False,
         watch_attack_emergency: bool = False,
+        check_combat_step: bool = False,
         check_support_dig: bool = False,
         check_food_use: bool = False,
     ):
@@ -2301,21 +2546,22 @@ class GenerationGuard:
                             and st.get("ready") is not False
                             and st.get("alive") is not False
                             and (st.get("submerged") or (
-                                nh_dist <= 16.0
+                                nh_dist <= self.ATTACK_WATER_THREAT_RANGE
                                 and (nh_name == "drowned" or self._swimming_at_low_health(st))
                             ))
                         )
                         held = st.get("held")
                         held_name = str(held.get("name") or "").removeprefix("minecraft:") if isinstance(held, dict) else ""
+                        unarmed = not st.get("blocking") and held_name not in MELEE_WEAPON_ORDER
+                        retreat_hp = 14.0 if unarmed else 10.0
                         losing_close_melee = (
                             not st.get("in_water")
                             and st.get("ready") is not False and st.get("alive") is not False
-                            and isinstance(cur_hp, (int, float)) and 0 < cur_hp <= 10
+                            and isinstance(cur_hp, (int, float)) and 0 < cur_hp <= retreat_hp
                             and watch_hp0 is not None and watch_hp0 - cur_hp >= 4.0
                             and nh_name in PRE_HURT_MELEE_MOBS and nh_dist <= 4.0
                         )
                         with attack_state_lock:
-                            unarmed = not st.get("blocking") and held_name not in MELEE_WEAPON_ORDER
                             other_melee_attacker = nh_id is not None and attack_target_id is not None and nh_id != attack_target_id
                             melee_danger = losing_close_melee and (unarmed or other_melee_attacker)
                             stop_attack = (
@@ -2356,8 +2602,18 @@ class GenerationGuard:
                         and nh_dist <= 4.5
                         and not self._is_pre_hurt_debounced(nh_id, nh_name)
                     )
+                    oxygen = st.get("oxygen")
+                    threatened_swimmer = (
+                        st.get("in_water") and st.get("ready") is not False and st.get("alive") is not False
+                        and (
+                            (watch_scout_water and nh_name == "drowned" and nh_dist <= 6.0
+                             and (st.get("on_ground") is False or st.get("submerged")))
+                            or (watch_mining_water and isinstance(oxygen, (int, float))
+                                and oxygen <= self.MINING_WATER_ESCAPE_OXYGEN)
+                        )
+                    )
                     hot_floor_now = False
-                    if watch_hot_floor and not (in_lava_now or creeper_close or melee_ambush or hp_dropped):
+                    if watch_hot_floor and not (in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped):
                         tile = self._hot_floor_block(st)
                         if (
                             tile is not None and tile == previous_tile and tile != checked_hot_floor
@@ -2374,9 +2630,11 @@ class GenerationGuard:
                             except (ApiError, httpx.HTTPError):
                                 pass
                         previous_tile = tile
-                    if in_lava_now or creeper_close or melee_ambush or hp_dropped or hot_floor_now:
+                    if in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped or hot_floor_now:
                         if in_lava_now:
                             src_w, eid_w, tp_w, pos_w, dist_w = "boundary_threat", None, "lava", None, 0.0
+                        elif threatened_swimmer:
+                            src_w, eid_w, tp_w, pos_w, dist_w = "tool_water_threat", nh_id, nh_name, nh_pos, nh_dist
                         elif creeper_close:
                             src_w, eid_w, tp_w, pos_w, dist_w = "pre_hurt_creeper", nh_id, "creeper", nh_pos, nh_dist
                         elif hp_dropped:
@@ -2423,6 +2681,7 @@ class GenerationGuard:
                 if clean_path != "attack":
                     return actor_call(path, body, **kwargs)
                 entity_id = body.get("entity_id") if isinstance(body, dict) else None
+                self._verify_attack_approach(entity_id, orig_call)
                 with attack_state_lock:
                     attack_target_id = entity_id if isinstance(entity_id, int) else None
                     attack_active.set()
@@ -2460,6 +2719,20 @@ class GenerationGuard:
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
             if (
+                check_combat_step and clean_path == "control" and isinstance(body, dict)
+                and body.get("forward") and body.get("wait") is False
+                and not any(body.get(key) for key in ("back", "left", "right", "jump"))
+                and isinstance(body.get("ms"), int) and body["ms"] > 0
+            ):
+                try:
+                    body = self._verify_combat_step(body)
+                except _UnsafeCombatStep:
+                    if pending_trigger:
+                        raise ReflexPreempted(pending_trigger[0]) from None
+                    raise
+                if pending_trigger:
+                    raise ReflexPreempted(pending_trigger[0])
+            if (
                 check_food_use and clean_path == "use_item" and isinstance(body, dict) and not body.get("target")
                 and str(body.get("item") or "").removeprefix("minecraft:") in SAFE_FOOD_PRIORITY
             ):
@@ -2495,12 +2768,15 @@ class GenerationGuard:
                     return
                 trigger = pending_trigger[0]
                 moving = clean_path == "move_to" or (
-                    watch_hot_floor and clean_path == "control" and isinstance(body, dict) and body.get("forward")
+                    (watch_hot_floor or watch_scout_water)
+                    and clean_path == "control" and isinstance(body, dict) and body.get("forward")
                 )
                 movement_emergency = moving and (
-                    trigger.get("primary_type") in {"lava", "hot_floor"} or trigger.get("source") == "pre_hurt_creeper"
+                    trigger.get("primary_type") in {"lava", "hot_floor"}
+                    or trigger.get("source") in {"pre_hurt_creeper", "tool_water_threat"}
                 )
-                if not caller_ignores_hurt or movement_emergency:
+                mining_oxygen = watch_mining_water and trigger.get("source") == "tool_water_threat"
+                if not caller_ignores_hurt or movement_emergency or mining_oxygen:
                     raise ReflexPreempted(trigger) from None
 
             try:
@@ -2633,6 +2909,7 @@ class GenerationGuard:
                 drowning_pre = (
                     (isinstance(oxy_pre, (int, float)) and oxy_pre <= 0) or trigger.get("hurt_source") == "drown"
                 )
+                mining_oxygen_pre = interrupted_name == "mc_skill_mine_dfs" and trigger.get("source") == "tool_water_threat"
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
                     or (isinstance(oxy_pre, (int, float)) and oxy_pre < 180)
@@ -2645,12 +2922,16 @@ class GenerationGuard:
                 if underwater_danger:
                     pre_actions: list[dict[str, Any]] = []
                     nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
-                    attack_near_drowned = interrupted_name == "mc_attack" and nh_pre_name == "drowned" and nh_pre_dist <= 6.0
+                    drowned_during_tool = nh_pre_name == "drowned" and (
+                        (interrupted_name == "mc_attack" and nh_pre_dist <= self.ATTACK_WATER_THREAT_RANGE)
+                        or (interrupted_name == "mc_skill_scout_surface" and nh_pre_dist <= 6.0)
+                    )
                     if hurt_pre_water:
                         self._water_hurt_streak += 1
                     forced_pre_shore = (
                         self._water_hurt_streak >= 3 or now_pre < self._no_water_until
-                        or self._swimming_at_low_health(st_pre) or attack_near_drowned
+                        or self._swimming_at_low_health(st_pre) or drowned_during_tool
+                        or mining_oxygen_pre
                     )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
@@ -2692,7 +2973,7 @@ class GenerationGuard:
                         esc_pre_respawned = bool(esc_pre_res.get("respawned"))
                     if not esc_pre_ok and not esc_pre_respawned:
                         shore_threat_pos = trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None)
-                        if attack_near_drowned and shore_threat_pos is None and att_pre:
+                        if drowned_during_tool and shore_threat_pos is None and att_pre:
                             shore_threat_pos = self._find_hostile_position(att_pre.get("id"), nh_pre_name, timeout_s=0.6)
                         shore_pre = self._action(
                             "escape_to_shore",
@@ -2700,7 +2981,7 @@ class GenerationGuard:
                                 shore_threat_pos,
                                 keep_shield=has_shield_pre,
                                 shield_target_id=att_pre.get("id") if isinstance(att_pre, dict) else None,
-                                **({"surface_first": True} if drowning_pre else {}),
+                                **({"surface_first": True} if drowning_pre or mining_oxygen_pre else {}),
                             ),
                             raise_on_http_error=False,
                         )
@@ -2848,9 +3129,11 @@ class GenerationGuard:
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.0)
         env = CombatEnv(probe_bot)
         try:
-            if check_roof and env.lava_above_headroom(pos, target):
-                self.events.emit("guardian.lava_roof_dig_blocked", target=list(target), pos=pos)
-                return "unsafe_lava_roof"
+            if check_roof:
+                fluid = env.fluid_above_headroom(pos, target)
+                if fluid == "lava" or (fluid == "water" and not status.get("in_water") and not status.get("submerged")):
+                    self.events.emit(f"guardian.{fluid}_roof_dig_blocked", target=list(target), pos=pos)
+                    return f"unsafe_{fluid}_roof"
             if not check_support or env.can_remove_footing(pos, target):
                 return None
         except _RecoveryBudgetExceeded:
@@ -2883,8 +3166,11 @@ class GenerationGuard:
                 deadline=deadline,
                 check_unstick_exit=is_unstick,
                 watch_hot_floor=tool_name in HOT_FLOOR_WATCH_TOOLS,
+                watch_scout_water=tool_name == "mc_skill_scout_surface",
+                watch_mining_water=tool_name == "mc_skill_mine_dfs",
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
+                check_combat_step=tool_name == "mc_skill_combat",
                 check_support_dig=tool_name in {"mc_dig", "mc_skill_staircase"},
                 check_food_use=tool_name == "mc_use_item",
             ):
@@ -2900,18 +3186,28 @@ class GenerationGuard:
             }, ensure_ascii=False)
         except _UnsafeDig as error:
             code = error.args[0]
-            message = (
-                "头顶待挖方块上方有岩浆，请从侧面寻找脱困路线。"
-                if code == "unsafe_lava_roof" else "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。"
-            )
+            message = {
+                "unsafe_lava_roof": "头顶待挖方块上方有岩浆，请从侧面寻找脱困路线。",
+                "unsafe_water_roof": "头顶待挖方块上方有水，请从侧面寻找脱困路线。",
+                "unsafe_landing": "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。",
+            }[code]
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
                 "error": {"code": code, "message": message},
             }, ensure_ascii=False)
+        except _UnsafeCombatStep:
+            if not is_attack:
+                self._stop_after_recovery_timeout()
+            self.events.emit("guardian.combat_step_blocked", tool=tool_name)
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {"code": "unsafe_landing", "message": "追击方向缺少安全落脚点，请在有支撑的位置接战。"},
+            }, ensure_ascii=False)
         except (_UnsafeFleeExit, _UnsafeUnstickExit):
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
-            recovery = self._retreat_after_unsafe_exit(deadline)
+            recovery = self._retreat_after_unsafe_exit(deadline, allow_cover=is_flee)
             if recovery is not None:
                 return json.dumps(recovery, ensure_ascii=False)
             message = (
@@ -3011,9 +3307,18 @@ class GenerationGuard:
                         and isinstance(shore_hostile, dict) and shore_hostile.get("id") == nh_id
                     )
                 tool_error = last_tool_result.get("error")
+                last_dig_error = last_tool_result.get("last_error")
                 tool_stopped_in_water = (
-                    last_tool_result.get("stop_reason") == "in_water"
-                    and isinstance(tool_error, dict) and tool_error.get("code") == "in_water"
+                    (
+                        last_tool_result.get("stop_reason") == "in_water"
+                        and isinstance(tool_error, dict) and tool_error.get("code") == "in_water"
+                    )
+                    or (
+                        last_tool_result.get("stop_reason") == "dig_failed"
+                        and isinstance(last_dig_error, dict)
+                        and last_dig_error.get("code") == "unsafe_refilled_cell"
+                        and last_dig_error.get("block") in ("water", "flowing_water")
+                    )
                 )
                 unstick_still_wet = (
                     isinstance(tool_error, dict) and (
@@ -3105,6 +3410,11 @@ class GenerationGuard:
                 )
                 still_lava = not bool(esc_l.get("ok"))
                 notes.append("脱离岩浆" if not still_lava else "尝试脱离岩浆")
+                if not still_lava and "nether" not in dim_b:
+                    douse = self._douse_after_lava(status)
+                    if douse and douse.get("ok"):
+                        still_wet = True
+                        notes.append("进入浅水灭火")
             elif needs_lava_edge_guard and not in_wall_hurt:
                 edge_act = self._action(
                     "boundary_guard_lava_edge",
@@ -3318,6 +3628,10 @@ class GenerationGuard:
             note = "处于举盾/掩体/远程交战姿态，未打断当前生成。"
         elif "pre_hurt_creeper" in reasons:
             note = "已复查苦力怕威胁，继续当前生成。"
+        elif "pre_hurt_melee" in reasons:
+            note = "近战威胁已清除，复查无新险情，继续当前生成。"
+        elif "in_lava" in reasons:
+            note = "仍在原处尝试脱离岩浆，未观察到新伤害，继续当前生成。"
         elif "hot_floor" in reasons:
             note = "已潜行避开岩浆块伤害，未打断当前生成。"
         else:
