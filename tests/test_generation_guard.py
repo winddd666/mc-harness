@@ -901,6 +901,41 @@ def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life
     assert [event["type"] for event in events] == ["guardian.preempted_tool"]
 
 
+@pytest.mark.parametrize("respawned", [False, True])
+def test_interrupted_tool_reports_combat_api_failure_and_rechecks_life(monkeypatch, respawned):
+    status = {
+        "pos": [-10972.3, 72, -11002.3], "health": 2.8, "food": 17, "ready": True,
+        "alive": True, "dimension": "overworld", "on_ground": False, "last_death": {"t": 1},
+    }
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            pytest.fail(f"unexpected action {action}")
+
+    def fail_combat(_env, _trigger):
+        if respawned:
+            status.update(pos=[-10971.5, 79.1, -11001.5], health=20, last_death={"t": 2})
+        raise ApiError("not_loaded", "chunk not loaded")
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_slot, "handle", fail_combat)
+    receipt = guard.handle_preemption({
+        "source": "tool_interrupted_hurt", "primary_type": "pillager",
+        "primary_entity_id": 5014994, "hurt_source": "arrow",
+    }, interrupted_name="mc_skill_unstick")
+
+    assert receipt["requires_replan"] is True
+    assert receipt["reflex_mode"] == ("life_unavailable" if respawned else "combat_failed")
+    assert "not_loaded" in receipt["message"]
+    assert "已完成" not in receipt["message"]
+    assert receipt["status_after"]["pos"] == status["pos"]
+    assert (guard._ranged_combat_stance_until == float("-inf")) is respawned
+
+
 def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])

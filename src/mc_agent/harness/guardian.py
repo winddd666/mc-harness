@@ -3320,6 +3320,25 @@ class GenerationGuard:
                             st_after = st_pre
                         summary = f"执行 {interrupted_name} 途中遇袭，小脑接管超时已安全止步（{act['error'].get('message')}）"
                         outcome = {"handled": False, "mode": "network_timeout", "summary": summary, "actions": [act], "status_after": st_after}
+                    elif isinstance(act.get("error"), dict):
+                        try:
+                            st_after = self.bot.call("status", method="GET", timeout_s=0.6, allow_reauth=False)
+                        except (ApiError, httpx.HTTPError):
+                            st_after = {}
+                        life_unavailable = bool(
+                            st_after.get("ready") is False or st_after.get("alive") is False
+                            or (st_after.get("last_death") is not None and st_after["last_death"] != st_pre.get("last_death"))
+                            or (st_after.get("dimension") and st_pre.get("dimension")
+                                and st_after["dimension"] != st_pre["dimension"])
+                        )
+                        error_code = act["error"].get("code")
+                        summary = f"执行 {interrupted_name} 途中遇袭，战斗反射受阻（{error_code}）"
+                        if life_unavailable:
+                            summary += "，角色状态已变化"
+                        outcome = {
+                            "handled": False, "mode": "life_unavailable" if life_unavailable else "combat_failed",
+                            "actions": [act], "status_after": st_after,
+                        }
                     else:
                         outcome = act.get("result") if isinstance(act.get("result"), dict) else {"handled": True, "actions": [act]}
                         try:
