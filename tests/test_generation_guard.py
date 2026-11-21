@@ -9577,17 +9577,18 @@ def test_failed_pathfinder_uses_a_short_hop_to_reach_a_nearby_shallow_bank(monke
 
 
 @pytest.mark.parametrize("same_life", [True, False])
-def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(monkeypatch, same_life):
+@pytest.mark.parametrize("under_attack", [False, True])
+def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(monkeypatch, same_life, under_attack):
     from mc_agent.skills.combat_env import CombatEnv
 
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     status = {
-        "pos": [11299.7, 62.2, 11021.3], "dimension": "overworld", "last_death": {"t": 1},
+        "pos": [11298.2, 62.2, 11021.3], "dimension": "overworld", "last_death": {"t": 1},
         "health": 9.0, "in_water": True, "on_ground": False, "alive": True, "ready": True,
     }
     high_bank = [11300, 64, 11021]
-    low_bank = [11298, 62, 11023]
+    low_bank = [11296, 62, 11023]
     targets = []
 
     class RiverBot:
@@ -9604,17 +9605,20 @@ def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(m
                 targets.append(target)
                 if target[1] == 63:
                     status.update(pos=target, in_water=False, on_ground=True)
+                else:
+                    status["pos"] = [11300.5, 62.9, 11021.8]
             return {"ok": True}
 
     env = CombatEnv(RiverBot())
-    first = env.escape_deep_water_to_shore(shield_target_id=44)
+    shield_target = 44 if under_attack else None
+    first = env.escape_deep_water_to_shore(shield_target_id=shield_target)
     assert first["in_water"] is True and first["shore_target"] == [11300.5, 65.0, 11021.5]
     clock[0] += 4.0
     if not same_life:
         status["last_death"] = {"t": 2}
-    second = env.escape_deep_water_to_shore(shield_target_id=44)
+    second = env.escape_deep_water_to_shore(shield_target_id=shield_target)
 
-    expected_bank = [11298.5, 63.0, 11023.5] if same_life else first["shore_target"]
+    expected_bank = [11296.5, 63.0, 11023.5] if same_life else first["shore_target"]
     assert second["ok"] is same_life
     assert targets == [first["shore_target"], expected_bank]
 

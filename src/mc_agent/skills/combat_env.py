@@ -2804,7 +2804,7 @@ class CombatEnv:
         elif still_wet and observed_end_pos and shore_target is not None and life == (st_end.get("dimension"), st_end.get("last_death")):
             tried_lip = "shore_lip_jump" in actions
             stalled_below_lip = (
-                tried_lip and (has_threat or shield_target_id is not None) and shore_target[1] - pos_end[1] >= 1.75
+                tried_lip and shore_target[1] - pos_end[1] >= 1.75
                 and math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
             )
             no_approach = (tried_lip or shore_path_unreachable) and (
