@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Callable, Literal, Protocol, Sequence, TypedDict
+from typing import Any, Callable, Collection, Literal, Protocol, Sequence, TypedDict
 
 import httpx
 
@@ -387,7 +387,7 @@ class CombatEnv:
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
-        self._stalled_lava_shore: tuple[tuple[float, ...], tuple[float, ...], float] | None = None
+        self._stalled_lava_shores: dict[tuple[float, ...], tuple[tuple[float, ...], float]] = {}
         self._stalled_lava_swim: tuple[tuple[float, ...], float, str, float] | None = None
         self._stalled_water_shore: tuple[tuple[float, ...], tuple[float, ...], tuple[Any, Any], float] | None = None
         self._stalled_lava_notch: dict[tuple[str, tuple[int, int, int], str, str | None], float] = {}
@@ -1220,7 +1220,7 @@ class CombatEnv:
                 )
             if not rim_lava_active:
                 if not _landing_unconfirmed(st):
-                    self._stalled_lava_shore = None
+                    self._stalled_lava_shores.clear()
                     self._stalled_lava_swim = None
                 unconfirmed = _landing_unconfirmed(st)
                 return {
@@ -1233,6 +1233,7 @@ class CombatEnv:
                 }
 
         actions: list[str] = []
+        notch_dig_failures: list[dict[str, Any]] = []
         lava_deadline = time.monotonic() + 5.0
         try:
             counts, _, held_name = self._inventory_counts_and_shield()
@@ -1306,7 +1307,7 @@ class CombatEnv:
             pos_now = st_now.get("pos") or pos0
             respawned = _did_respawn_during_lava(st_now)
             if respawned or (not still_in_lava and not _landing_unconfirmed(st_now)):
-                self._stalled_lava_shore = None
+                self._stalled_lava_shores.clear()
                 self._stalled_lava_swim = None
             airborne_over_lava = (
                 (not respawned)
@@ -1319,6 +1320,7 @@ class CombatEnv:
                 "in_lava": still_in_lava,
                 "pos_after": pos_now,
                 "actions": actions,
+                **({"notch_dig_failures": notch_dig_failures} if notch_dig_failures else {}),
                 **({"respawned": True} if respawned else {}),
                 **({"airborne_above_lava": True} if airborne_over_lava else {}),
                 **({"reason": "lava_landing_unconfirmed"} if unconfirmed else {}),
@@ -1374,14 +1376,22 @@ class CombatEnv:
         filler = self._pick_filler_block(counts)
         blind_swim = False
         defer_blind_swim = False
+        now = time.monotonic()
+        self._stalled_lava_shores = {
+            bank: (rim, at) for bank, (rim, at) in self._stalled_lava_shores.items() if now - at < 15.0
+        }
+
+        def stalled_shores_near(pos: Sequence[float]) -> set[tuple[float, ...]]:
+            return {
+                bank for bank, (rim, at) in self._stalled_lava_shores.items()
+                if time.monotonic() - at < 15.0 and abs(pos[1] - rim[1]) <= 2.0
+                and math.hypot(pos[0] - rim[0], pos[2] - rim[2]) <= 1.25
+            }
+
         if not tried_yaws and time.monotonic() < lava_deadline:
             # Wide lava lake: filter shore types by dimension to keep find_blocks fast (<1s).
             shore_blocks = NETHER_SHORE_BLOCKS if "nether" in dim else SHORE_LAND_BLOCKS
-            stalled = self._stalled_lava_shore
-            excluded_shore = (
-                stalled[0] if stalled is not None and math.dist(pos0[:3], stalled[1]) <= 1.25
-                and time.monotonic() - stalled[2] < 15.0 else None
-            )
+            excluded_shores = stalled_shores_near(pos0)
             try:
                 lava_shore_target = self._find_walkable_shore_target(
                     pos0,
@@ -1391,14 +1401,14 @@ class CombatEnv:
                     max_y=py + 2,
                     max_candidates=6,
                     deadline=terrain_deadline,
-                    excluded_shore=excluded_shore,
+                    excluded_shores=excluded_shores,
                 )
             except _TerrainProbeExpired:
                 pass
             if lava_shore_target is not None:
                 tried_yaws = [aim_yaw_pitch(pos0, lava_shore_target)[0]]
             else:
-                if excluded_shore is not None:
+                if excluded_shores:
                     actions.append("lava_shore_path_stalled")
                 base_yaw = float(st.get("yaw") or 0.0)
                 best_shore_yaw: float | None = None
@@ -1482,17 +1492,12 @@ class CombatEnv:
         if lava_shore_target is not None and time.monotonic() + 1.5 < lava_deadline:
             swim_pos = st.get("pos") or pos0
             shore_d = math.hypot(lava_shore_target[0] - float(swim_pos[0]), lava_shore_target[2] - float(swim_pos[2]))
-            stalled = self._stalled_lava_shore
-            repeat_stall = (
-                stalled is not None and stalled[0] == tuple(lava_shore_target)
-                and math.dist(swim_pos[:3], stalled[1]) <= 1.25
-                and time.monotonic() - stalled[2] < 15.0
-            )
-            if repeat_stall:
+            bank = tuple(lava_shore_target)
+            if bank in stalled_shores_near(swim_pos):
                 actions.append("lava_shore_path_stalled")
             elif shore_d <= 6.5:
                 # Keep the attempted bank if the recovery deadline interrupts the status recheck.
-                self._stalled_lava_shore = (tuple(lava_shore_target), tuple(swim_pos[:3]), time.monotonic())
+                self._stalled_lava_shores[bank] = (tuple(swim_pos[:3]), time.monotonic())
                 try:
                     self.bot.call(
                         "move_to",
@@ -1517,10 +1522,11 @@ class CombatEnv:
                 if _should_exit_lava(st):
                     return _lava_result(st)
                 end = st.get("pos") or swim_pos
-                if math.dist(end[:3], lava_shore_target) >= math.dist(swim_pos[:3], lava_shore_target) - 0.75:
-                    self._stalled_lava_shore = (tuple(lava_shore_target), tuple(end[:3]), time.monotonic())
+                remaining = math.hypot(bank[0] - end[0], bank[2] - end[2])
+                if remaining >= shore_d - 0.75:
+                    self._stalled_lava_shores[bank] = (tuple(end[:3]), time.monotonic())
                 else:
-                    self._stalled_lava_shore = stalled
+                    self._stalled_lava_shores.pop(bank, None)
 
         # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
         if filler is not None and time.monotonic() < lava_deadline + 0.8:
@@ -1662,6 +1668,10 @@ class CombatEnv:
             blocks = [self._get_block_name(ex, cy, ez, strict=True) for cy in clearance]
             if any(not block or block in HAZARD_BLOCK_TYPES or block == "bedrock" for block in blocks):
                 continue
+            if any(block in {"obsidian", "crying_obsidian"} for block in blocks):
+                # Neither block can clear within the one-second emergency dig budget.
+                actions.append("lava_notch_hard_block")
+                continue
             dig_keys = [
                 (dim0, (ex, cy, ez), block, held_name)
                 for cy, block in zip(clearance, blocks)
@@ -1682,10 +1692,15 @@ class CombatEnv:
                         timeout_s=dig_budget, allow_reauth=False,
                     )
                 except (ApiError, httpx.HTTPError) as err:
-                    if isinstance(err, httpx.ReadTimeout):
+                    error = err.code if isinstance(err, ApiError) else type(err).__name__
+                    notch_dig_failures.append({
+                        "pos": list(key[1]), "block": key[2], "held": key[3], "error": error,
+                    })
+                    timed_out = isinstance(err, httpx.TimeoutException) or error in {"timeout", "action_timeout"}
+                    if timed_out:
                         self._stalled_lava_notch[key] = time.monotonic() + 15.0
-                    if isinstance(err, httpx.HTTPError):
                         actions.append("lava_notch_dig_timeout")
+                    if timed_out or isinstance(err, httpx.HTTPError):
                         self._best_effort_stop(timeout_s=0.25)
                     break
             if time.monotonic() + 1.25 >= notch_deadline:
@@ -1814,6 +1829,7 @@ class CombatEnv:
         allow_shaft_seal: bool = True,
         wait_for_ground: bool = False,
         other_shooters: Sequence[Sequence[float]] = (),
+        use_nearest_hostile: bool = True,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
         def respawned_since(before: dict[str, Any], after: dict[str, Any]) -> bool:
@@ -1867,7 +1883,7 @@ class CombatEnv:
             return {"ok": False, "mode": "flee", "reason": "not_ready", "moved_dist": 0.0, "pos_after": pos0}
         if st0.get("in_lava") or entered_water or st0.get("on_ground") is False:
             return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0, "pos_after": pos0}
-        if threat_pos is None:
+        if threat_pos is None and use_nearest_hostile:
             nh = st0.get("nearest_hostile")
             if isinstance(nh, dict) and isinstance(nh.get("pos"), list):
                 threat_pos = nh["pos"]
@@ -2069,7 +2085,7 @@ class CombatEnv:
         max_candidates: int = 10,
         avoid_close_threat: bool = False,
         deadline: float | None = None,
-        excluded_shore: Sequence[float] | None = None,
+        excluded_shores: Collection[tuple[float, ...]] = (),
     ) -> list[float] | None:
         """Query `find_blocks` for nearby solid shoreline with 2-high passable headroom."""
         start_x, start_z = float(pos0[0]), float(pos0[2])
@@ -2108,7 +2124,7 @@ class CombatEnv:
                 cx, cy, cz = int(rpos[0]), int(rpos[1]), int(rpos[2])
                 if cy < min_y or (max_y is not None and cy > max_y):
                     continue
-                if excluded_shore is not None and (cx + 0.5, float(cy + 1), cz + 0.5) == tuple(excluded_shore):
+                if (cx + 0.5, float(cy + 1), cz + 0.5) in excluded_shores:
                     continue
                 if not _is_solid_ground(_clean_block_name(row.get("name"))):
                     continue
@@ -2244,7 +2260,7 @@ class CombatEnv:
             max_y=by + 2,
             threat_pos=threat_pos,
             avoid_close_threat=avoid_close_threat,
-            excluded_shore=excluded_shore,
+            excluded_shores=(excluded_shore,) if excluded_shore is not None else (),
         )
 
         # 2. Radial fallback if find_blocks yielded no dry surface spot.
@@ -2681,14 +2697,15 @@ class SubcorticalInstinctController:
         primary: dict[str, Any] | None = None
         trig_id = trigger.get("primary_entity_id")
         creeper_warning = trigger.get("source") == "pre_hurt_creeper"
+        nearby_creeper = next((
+            e for e in hostiles
+            if _clean_block_name(e.get("name")) == "creeper" and self._entity_dist(pos, e) <= 5.5
+        ), None)
         if trig_id is not None:
             primary = next((e for e in hostiles if e.get("id") == trig_id), None)
         if creeper_warning and (primary is None or _clean_block_name(primary.get("name")) != "creeper"):
             # Keep the blast direction if the triggering creeper drops out of the scan.
-            primary = next((
-                e for e in hostiles
-                if _clean_block_name(e.get("name")) == "creeper" and self._entity_dist(pos, e) <= 5.5
-            ), None)
+            primary = nearby_creeper
             if (
                 primary is None and nh and _clean_block_name(nh.get("name")) == "creeper"
                 and (nh.get("id") == trig_id or self._entity_dist(pos, nh) <= 5.5)
@@ -2698,6 +2715,8 @@ class SubcorticalInstinctController:
                 primary = {
                     "id": trig_id, "name": "creeper", "pos": trigger.get("primary_pos"), "dist": trigger.get("distance"),
                 }
+        elif not creeper_warning and nearby_creeper is not None:
+            primary = nearby_creeper
         if primary is None and hostiles:
             primary = hostiles[0]
         if primary is None and nh and nh.get("name"):
@@ -2705,16 +2724,15 @@ class SubcorticalInstinctController:
 
         mob_name = _clean_block_name((primary or {}).get("name") or trigger.get("primary_type") or "")
         mob_id = (primary or {}).get("id") if isinstance(primary, dict) else trig_id
-        mob_pos = (primary or {}).get("pos") or trigger.get("primary_pos")
+        mob_pos = (primary or {}).get("pos")
+        if not mob_pos and (mob_name != "creeper" or mob_id == trig_id):
+            mob_pos = trigger.get("primary_pos")
         try:
             mob_dist = float((primary or {}).get("dist") or trigger.get("distance") or 99.0)
         except (TypeError, ValueError):
             mob_dist = 99.0
 
-        any_creeper_close = mob_name == "creeper" or any(
-            _clean_block_name(e.get("name")) == "creeper" and float(e.get("dist", 99.0)) <= 5.5
-            for e in hostiles
-        )
+        any_creeper_close = mob_name == "creeper"
         # Count close-range engaged hostiles (<=8.5m) for swarm/solo gates so mobs outside enclosed
         # walls (`10..16m`) never trick a sword+shield bot into pure circle-fleeing inside a room.
         nearby_hostiles = [e for e in hostiles if float(e.get("dist", 99.0)) <= 8.5]
@@ -2756,11 +2774,8 @@ class SubcorticalInstinctController:
         elif any_creeper_close or creeper_warning:
             mode = "creeper_evade"
             self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
-            creeper_ent = primary if creeper_warning else next(
-                (e for e in hostiles if _clean_block_name(e.get("name")) == "creeper"),
-                primary,
-            )
-            c_pos = (creeper_ent or {}).get("pos") or mob_pos
+            creeper_ent = primary
+            c_pos = mob_pos
             snap = env.arena_snapshot(pos)
             sealed_ok = False
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
@@ -2791,6 +2806,7 @@ class SubcorticalInstinctController:
                         pass
                 flee_res = env.flee(
                     c_pos, distance=11.5, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
+                    **({"use_nearest_hostile": False} if not c_pos else {}),
                 )
                 st_chk = env._safe_status({**st, "ready": False})
                 post_h = self._find_live_hostiles(env, radius=8)

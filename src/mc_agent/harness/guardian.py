@@ -50,7 +50,7 @@ LOW_HP_BUNKER_MAX = 10.0
 
 # Ranged damage: sprinting away in open cave air just makes the firing line longer.
 RANGED_HURT_SOURCES = frozenset({"arrow", "projectile", "trident", "fireball", "small_fireball", "wither_skull", "skeleton"})
-MELEE_HURT_SOURCES = frozenset({"mob_attack", "player_attack"})
+MELEE_HURT_SOURCES = frozenset({"mob_attack", "player_attack", "spear"})
 BLAST_HURT_SOURCES = frozenset({"player_explosion", "entity_explosion", "fireball", "small_fireball", "wither_skull"})
 
 # Environmental / tick damage sources that a shield cannot block and must not trigger fake combat reflexes.
@@ -308,6 +308,7 @@ class GenerationGuard:
         self._last_lava_contact_at = float("-inf")
         self._last_fire_contact_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
+        self._blocked_bunker: tuple[tuple[Any, ...], list[int], str] | None = None
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
         self.stats = {
@@ -540,15 +541,21 @@ class GenerationGuard:
         )
         if "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
             nh_name, _, nh_id, nh_pos = self._extract_hostile_info(status)
-            pos = attacker.get("pos") if isinstance(attacker, dict) else None
-            if not pos:
-                pos = nh_pos
             now = time.monotonic()
             recent_melee = now - self._last_melee_hurt_at < 4.0
             mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
             burning_blaze = "nether" in dimension and ranged and status.get("on_fire") and nh_name == "blaze"
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
+            resolve_melee = (
+                "nether" in dimension and low_health and recent_melee and not ranged and not mixed_hurt
+                and isinstance(attacker_id, int)
+            )
+            pos = attacker.get("pos") if isinstance(attacker, dict) else None
+            if not pos and (not resolve_melee or nh_id == attacker_id):
+                pos = nh_pos
+            if not pos and resolve_melee:
+                pos = self._find_hostile_position(attacker_id, "", timeout_s=0.6)
             other_shooters = []
             check_blaze_cover = False
             if (
@@ -597,6 +604,7 @@ class GenerationGuard:
             return self.combat_env.flee(
                 pos, wait_for_ground=True,
                 **({"other_shooters": other_shooters} if other_shooters else {}),
+                **({"use_nearest_hostile": False} if resolve_melee and pos is None else {}),
             )
         result = self._run_recovery_macro(
             status,
@@ -609,6 +617,33 @@ class GenerationGuard:
             recovery = self._action("escape_lava", self.combat_env.escape_lava)
             return {**result, "lava_recovery": recovery}
         return result
+
+    def _try_emergency_bunker(self, status: dict[str, Any]) -> dict[str, Any] | None:
+        pos = status.get("pos")
+        tile = tuple(math.floor(coord) for coord in pos[:3]) if pos else None
+        site = (status.get("dimension"), status.get("last_death"), tile)
+        if self._blocked_bunker is not None and self._blocked_bunker[0] == site:
+            _, block_pos, obstacle = self._blocked_bunker
+            try:
+                live = self.bot.call("get_block", {"pos": block_pos}, timeout_s=0.35)
+            except (ApiError, httpx.HTTPError):
+                return None
+            name = str(live.get("name") or live.get("block") or "").removeprefix("minecraft:")
+            if name == obstacle:
+                return None
+
+        self._blocked_bunker = None
+        action = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
+        result = action.get("result") or {}
+        block_pos, obstacle = result.get("block_pos"), result.get("block")
+        if (
+            result.get("reason") == "unsafe_open_side" and tile
+            and isinstance(block_pos, list) and len(block_pos) == 3 and all(isinstance(coord, int) for coord in block_pos)
+            and isinstance(obstacle, str) and 1 <= tile[1] - block_pos[1] <= 3
+            and abs(tile[0] - block_pos[0]) + abs(tile[2] - block_pos[2]) == 1
+        ):
+            self._blocked_bunker = (site, block_pos, obstacle)
+        return action
 
     def _inside_own_shaft(self) -> bool:
         """Only bunker-in-place when we are inside our own carved tunnel (never in open cave air)."""
@@ -697,6 +732,7 @@ class GenerationGuard:
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
                     self._last_cornered_creeper = None
+                    self._blocked_bunker = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     self._last_cornered_creeper = None
@@ -1859,7 +1895,8 @@ class GenerationGuard:
                         eff_dist = 99.0
                     melee_or_airborne = (
                         (status.get("on_ground") is not True)
-                        or (hurt_src in {"mob_attack", "player_explosion", "entity_explosion"})
+                        or hurt_src in MELEE_HURT_SOURCES
+                        or hurt_src in {"player_explosion", "entity_explosion"}
                         or (eff_dist <= 4.5)
                     )
                     can_surface_night_bunker = (
@@ -1870,24 +1907,16 @@ class GenerationGuard:
                             or (not has_melee_weapon and status.get("is_day") is False and self._consecutive_flees >= 1 and hp_val <= 14.0)
                         )
                     )
-                    if not indirect_magic and ((melee_or_airborne and can_surface_night_bunker) or not melee_or_airborne):
-                        bunker = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
+                    bunker = None
+                    if not indirect_magic and (can_surface_night_bunker or not melee_or_airborne):
+                        bunker = self._try_emergency_bunker(status)
+                    if bunker is not None:
                         actions.append(bunker)
-                        if bunker["ok"]:
-                            self._consecutive_flees = 0
-                            bunker_result = bunker.get("result") or {}
-                            if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
-                                self._last_melee_hurt_at = float("-inf")
-                        else:
-                            cf = self._action(
-                                "combat_or_flee",
-                                lambda: self._defend_or_flee(status, attacker, counts),
-                            )
-                            actions.append(cf)
-                            if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":
-                                self._consecutive_flees += 1
-                            else:
-                                self._consecutive_flees = 0
+                    if bunker and bunker["ok"]:
+                        self._consecutive_flees = 0
+                        bunker_result = bunker.get("result") or {}
+                        if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
+                            self._last_melee_hurt_at = float("-inf")
                     else:
                         cf = self._action(
                             "combat_or_flee",
