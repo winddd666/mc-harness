@@ -1802,6 +1802,60 @@ def test_bug_009_stationary_lava_escape_keeps_retrying_without_duplicate_cancel(
         assert guard.poll()["requires_replan"] is True
 
 
+@pytest.mark.parametrize("followup", ["unchanged", "closer", "hurt", "new_life", "new_target"])
+def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, followup):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    zombie = {"id": 5462415, "name": "zombie", "dist": 2.6, "pos": [40995.5, 61, 10998.5]}
+    status = {
+        "pos": [40994, 63, 10997.3], "dimension": "overworld", "health": 2, "food": 17, "last_death": {"t": 1},
+        "ready": True, "alive": True, "on_ground": True, "blocking": False, "nearest_hostile": zombie,
+    }
+    hits = []
+
+    class LedgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    def combat(_env, _trigger):
+        return {
+            "mode": "cover_or_flee", "handled": True,
+            "actions": [{"action": "flee", "ok": False, "reason": "no_safe_retreat", "moved": 0.0}],
+            "status_after": dict(status),
+        }
+
+    class Combat:
+        def on_encounter(self, env, trigger):
+            return combat(env, trigger)
+
+    guard = GenerationGuard(LedgeBot(), EventSink(lambda _: None), checkpoint=lambda: None, combat_controller=Combat())
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+    assert guard.poll()["requires_replan"] is True
+
+    clock[0] += 15.5
+    if followup == "closer":
+        zombie["dist"] = 2.1
+    elif followup == "hurt":
+        status["health"] = 1.0
+        hits.append({"seq": 1, "type": "hurt", "source": "mob_attack"})
+    elif followup == "new_life":
+        status["last_death"] = {"t": 2}
+    elif followup == "new_target":
+        zombie["id"] += 1
+
+    assert guard.poll()["requires_replan"] is (followup != "unchanged")
+    if followup == "unchanged":
+        for _ in range(3):
+            clock[0] += 15.5
+            assert guard.poll()["requires_replan"] is False
+
+
 @pytest.mark.parametrize("after_kill", ["stable", "hurt", "moved", "shooter", "death", "unverified"])
 def test_bug_009_resolved_melee_warning_keeps_generation_only_when_stable(monkeypatch, after_kill):
     spider = {"id": 4614512, "name": "spider", "dist": 2.7, "pos": [3.2, 64, 0.5]}
