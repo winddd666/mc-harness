@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from copy import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import math
 import re
@@ -149,6 +149,16 @@ _PASSABLE_SIGHT_BLOCKS: set[str] = {
 }
 
 
+@dataclass(frozen=True)
+class _FailedMoveWaypoint:
+    dimension: str
+    origin: tuple[float, ...]
+    x: float
+    z: float
+    range_m: float
+    expires_at: float
+
+
 class McToolset:
     def __init__(
         self,
@@ -179,6 +189,7 @@ class McToolset:
         self._status_hostile_id: int | None = None
         self._geofence_blocked_count: int = 0
         self._path_not_found_targets: list[tuple[float, float]] = []
+        self._last_failed_waypoint: _FailedMoveWaypoint | None = None
         self._empty_max_scans: dict[tuple[str, tuple[str, ...]], tuple[int, tuple[float, float] | None]] = {}
         self.geofence = geofence if geofence is not None else VoidGeofence.from_env()
         self.world_memory = (
@@ -209,6 +220,7 @@ class McToolset:
         self._episode_deadline_mono = episode_deadline_mono
         self._geofence_blocked_count = 0
         self._path_not_found_targets.clear()
+        self._last_failed_waypoint = None
         self._empty_max_scans.clear()
 
     def _annotate_scan_ceiling(
@@ -1318,6 +1330,25 @@ class McToolset:
                 payload["x"], payload["z"] = waypoint
                 payload.pop("y", None)
 
+        failed = self._last_failed_waypoint
+        if (
+            budgeted and waypoint is None and failed is not None and x is not None and z is not None
+            and "y" not in payload and isinstance(origin_pos, (list, tuple))
+            and tuple(origin_pos[:3]) == failed.origin and self._last_dimension == failed.dimension
+            and time.monotonic() < failed.expires_at
+            and math.hypot(float(x) - failed.x, float(z) - failed.z) + range <= failed.range_m
+            and math.floor(float(x)) == math.floor(failed.x) and math.floor(float(z)) == math.floor(failed.z)
+        ):
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {
+                    "code": "move_route_cooldown",
+                    "message": "当前站位刚尝试过这个航点，缩小范围仍在同一失败目标内。请先换方向或换站位。",
+                },
+                **(geofence_clamped_info or {}),
+            }, ensure_ascii=False)
+
         raw = self._call_json("move_to", payload, timeout_s=eff_move_timeout)
         try:
             first = json.loads(raw)
@@ -1334,7 +1365,10 @@ class McToolset:
         except (ValueError, ApiError, httpx.HTTPError):
             pass
         if waypoint is not None:
-            return self._move_waypoint_receipt(raw, waypoint, [float(x), float(z)], geofence_clamped_info)
+            return self._move_waypoint_receipt(
+                raw, waypoint, [float(x), float(z)], geofence_clamped_info,
+                origin=tuple(origin_pos[:3]), range_m=range,
+            )
         if x is not None and z is not None:
             try:
                 parsed = json.loads(raw)
@@ -1488,8 +1522,11 @@ class McToolset:
             return len(self._path_not_found_targets), near_hits
 
     def _move_waypoint_receipt(
-        self, raw: str, waypoint: list[float], target: list[float], geofence_info: dict[str, Any] | None
+        self, raw: str, waypoint: list[float], target: list[float], geofence_info: dict[str, Any] | None,
+        *, origin: tuple[float, ...], range_m: float,
     ) -> str:
+        dimension = self._last_dimension
+        self._last_failed_waypoint = None
         receipt = json.loads(raw)
         result = receipt.get("result") or {}
         error = receipt.get("error") or {}
@@ -1508,6 +1545,10 @@ class McToolset:
             remaining = round(math.hypot(target[0] - float(pos[0]), target[1] - float(pos[2])), 1)
         hint = "本次执行途中航点。请根据当前位置和剩余距离继续分段移动或换方向。"
         if receipt.get("ok") is False and error.get("code") in {"path_not_found", "no_path"}:
+            if isinstance(pos, (list, tuple)) and tuple(pos[:3]) == origin and self._last_dimension == dimension:
+                self._last_failed_waypoint = _FailedMoveWaypoint(
+                    dimension, origin, waypoint[0], waypoint[1], range_m, time.monotonic() + 5.0,
+                )
             total_hits, near_hits = self._record_move_path_failure(*target)
             receipt["path_not_found_count"] = total_hits
             hint = (

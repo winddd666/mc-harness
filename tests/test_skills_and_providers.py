@@ -1914,6 +1914,50 @@ def test_move_to_counts_waypoint_and_direct_no_path_in_one_episode() -> None:
     assert later["requires_replan"] is True
 
 
+def test_move_to_skips_a_retried_waypoint_within_the_failed_range(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    pos = [-5156.5, 58, -7644.3]
+    moves = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "status":
+            return httpx.Response(200, json={
+                "ok": True, "result": {"pos": pos, "dimension": "the_nether"},
+            })
+        assert route == "move_to"
+        moves.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked", "pos": pos},
+        })
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=60)
+        toolset.mc_move_to(x=-5168, z=-7578, range=3)
+        now = 3.54
+        waypoint = json.loads(toolset.mc_move_to(x=-5168, z=-7578, range=5))
+        assert len(moves) == 2 and waypoint["path_not_found_count"] == 2
+
+        now = 6.38
+        retry = json.loads(toolset.mc_move_to(x=-5162, z=-7613, range=4))
+        assert len(moves) == 2
+        assert retry["error"]["code"] == "move_route_cooldown"
+        assert retry["requires_replan"] is True
+
+        wider = json.loads(toolset.mc_move_to(x=-5162, z=-7613, range=6))
+        assert wider["path_not_found_count"] == 3
+        pos[0] += 1.0
+        toolset.mc_move_to(x=-5162, z=-7613, range=4)
+        assert len(moves) == 4
+        pos[0] -= 1.0
+        now = 9.0
+        toolset.mc_move_to(x=-5162, z=-7613, range=4)
+        assert len(moves) == 5
+
+
 def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
     """r12 P2-16: busy move_to blocked ~101s before returning."""
     from mc_agent.harness.mc_tools import McToolset
