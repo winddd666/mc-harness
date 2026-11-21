@@ -10656,3 +10656,59 @@ def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(m
         assert outcome["latched_guard"] is True and status["blocking"] is True
     else:
         assert attacks == []
+
+
+@pytest.mark.parametrize("distance, short_only", [(3.0, False), (7.0, False), (3.0, True)])
+def test_creeper_retreat_avoids_a_second_creeper_on_the_escape_heading(monkeypatch, distance, short_only):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    origin = [0.5, 66, 0.5]
+    primary = {"id": 11, "name": "creeper", "dist": 2.6, "pos": [-2.1, 66, 0.5]}
+    second = {"id": 12, "name": "creeper", "dist": distance, "pos": [0.5 + distance, 66, 0.5]}
+    status = {
+        "pos": origin, "health": 3.85, "ready": True, "alive": True, "on_ground": True,
+        "dimension": "overworld", "nearest_hostile": primary,
+    }
+    path = []
+
+    class RespawnBot:
+        yaw = 0.0
+
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [{**mob, "dist": math.dist(status["pos"], mob["pos"])} for mob in (primary, second)]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 66 else "air"}
+            if action == "look" and "yaw" in body:
+                self.yaw = body["yaw"]
+            if action == "control" and body.get("forward"):
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                travel = 1.65 if short_only else 3.0
+                x, y, z = status["pos"]
+                status["pos"] = [x + travel * dx, y, z + travel * dz]
+                path.append(status["pos"])
+            if action == "move_to":
+                status["pos"] = [body["x"], body["y"], body["z"]]
+                path.append(status["pos"])
+            return {"ok": True}
+
+    if short_only:
+        def probe(_env, _pos, yaw, travel):
+            dx, dz = yaw_to_unit_xz(yaw)
+            if travel <= 1.65 and (dx > 0.95 or (dx < -0.3 and dz > 0.8)):
+                return 66, False
+            return None
+
+        monkeypatch.setattr(CombatEnv, "probe_retreat", probe)
+    outcome = CombatControllerSlot().handle(CombatEnv(RespawnBot()), {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 11, "primary_pos": primary["pos"],
+    })
+
+    assert outcome["mode"] == "creeper_evade"
+    assert path
+    assert all(math.dist(p, second["pos"]) >= min(distance, 6.0) - 1e-6 for p in path), path
