@@ -8685,6 +8685,51 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         assert not status.get("in_lava")
 
 
+def test_mining_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch):
+    import threading
+
+    stopped = threading.Event()
+    status = {
+        "pos": [41012.5, 22, 11034.4], "health": 20, "oxygen": 285,
+        "ready": True, "alive": True, "on_ground": True, "in_water": False,
+    }
+    calls = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "dig":
+                calls.append(action)
+                status.update(in_water=True, submerged=True, on_ground=False, oxygen=110)
+                stopped.wait(1.5)
+            if action == "stop":
+                calls.append(action)
+                stopped.set()
+            if action == "inventory":
+                return {"items": []}
+            if action == "events":
+                return {"events": []}
+            return {"ok": True}
+
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def shore(_pos, *, surface_first, **_kwargs):
+        assert surface_first and status["health"] == 20
+        calls.append("surface")
+        status.update(in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(
+        bot.call("dig", {"pos": [41012, 21, 11034]}),
+    )))
+    assert result["reflex_mode"] == "water_surface"
+    assert calls == ["dig", "stop", "surface"]
+    assert guard._water_hurt_streak == 0
+
+
 @pytest.mark.parametrize("distance", [4.0, 8.0])
 def test_surface_scout_hands_off_water_near_drowned_before_damage(monkeypatch, distance):
     import threading

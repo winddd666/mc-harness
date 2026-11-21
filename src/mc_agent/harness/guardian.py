@@ -234,6 +234,7 @@ class GenerationGuard:
     SURFACE_WATER_ESCAPE_BUDGET_S = 4.0
     COMBAT_WATER_ESCAPE_BUDGET_S = 4.0
     ATTACK_WATER_THREAT_RANGE = 16.0
+    MINING_WATER_ESCAPE_OXYGEN = 140.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -2429,6 +2430,7 @@ class GenerationGuard:
         check_unstick_exit: bool = False,
         watch_hot_floor: bool = False,
         watch_scout_water: bool = False,
+        watch_mining_water: bool = False,
         check_flee_exit: bool = False,
         watch_attack_emergency: bool = False,
         check_combat_step: bool = False,
@@ -2557,10 +2559,15 @@ class GenerationGuard:
                         and nh_dist <= 4.5
                         and not self._is_pre_hurt_debounced(nh_id, nh_name)
                     )
+                    oxygen = st.get("oxygen")
                     threatened_swimmer = (
-                        watch_scout_water and st.get("in_water") and nh_name == "drowned" and nh_dist <= 6.0
-                        and (st.get("on_ground") is False or st.get("submerged"))
-                        and st.get("ready") is not False and st.get("alive") is not False
+                        st.get("in_water") and st.get("ready") is not False and st.get("alive") is not False
+                        and (
+                            (watch_scout_water and nh_name == "drowned" and nh_dist <= 6.0
+                             and (st.get("on_ground") is False or st.get("submerged")))
+                            or (watch_mining_water and isinstance(oxygen, (int, float))
+                                and oxygen <= self.MINING_WATER_ESCAPE_OXYGEN)
+                        )
                     )
                     hot_floor_now = False
                     if watch_hot_floor and not (in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped):
@@ -2725,7 +2732,8 @@ class GenerationGuard:
                     trigger.get("primary_type") in {"lava", "hot_floor"}
                     or trigger.get("source") in {"pre_hurt_creeper", "tool_water_threat"}
                 )
-                if not caller_ignores_hurt or movement_emergency:
+                mining_oxygen = watch_mining_water and trigger.get("source") == "tool_water_threat"
+                if not caller_ignores_hurt or movement_emergency or mining_oxygen:
                     raise ReflexPreempted(trigger) from None
 
             try:
@@ -2858,6 +2866,7 @@ class GenerationGuard:
                 drowning_pre = (
                     (isinstance(oxy_pre, (int, float)) and oxy_pre <= 0) or trigger.get("hurt_source") == "drown"
                 )
+                mining_oxygen_pre = interrupted_name == "mc_skill_mine_dfs" and trigger.get("source") == "tool_water_threat"
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
                     or (isinstance(oxy_pre, (int, float)) and oxy_pre < 180)
@@ -2879,6 +2888,7 @@ class GenerationGuard:
                     forced_pre_shore = (
                         self._water_hurt_streak >= 3 or now_pre < self._no_water_until
                         or self._swimming_at_low_health(st_pre) or drowned_during_tool
+                        or mining_oxygen_pre
                     )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
@@ -2928,7 +2938,7 @@ class GenerationGuard:
                                 shore_threat_pos,
                                 keep_shield=has_shield_pre,
                                 shield_target_id=att_pre.get("id") if isinstance(att_pre, dict) else None,
-                                **({"surface_first": True} if drowning_pre else {}),
+                                **({"surface_first": True} if drowning_pre or mining_oxygen_pre else {}),
                             ),
                             raise_on_http_error=False,
                         )
@@ -3114,6 +3124,7 @@ class GenerationGuard:
                 check_unstick_exit=is_unstick,
                 watch_hot_floor=tool_name in HOT_FLOOR_WATCH_TOOLS,
                 watch_scout_water=tool_name == "mc_skill_scout_surface",
+                watch_mining_water=tool_name == "mc_skill_mine_dfs",
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
                 check_combat_step=tool_name == "mc_skill_combat",
