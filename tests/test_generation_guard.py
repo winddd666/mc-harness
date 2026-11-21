@@ -1076,8 +1076,8 @@ def test_death_during_combat_does_not_suppress_the_next_threat_at_spawn(monkeypa
     assert "pre_hurt_ranged" in second["reasons"]
 
 
-@pytest.mark.parametrize("combat_duration, entry_time", [(4.0, 0.0), (6.0, 0.0), (4.3, 1.5)])
-def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch, combat_duration, entry_time):
+@pytest.mark.parametrize("combat_duration", [1.0, 4.0])
+def test_guard_eats_at_the_next_safe_poll_after_combat(monkeypatch, combat_duration):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     zombie = {"id": 42, "name": "zombie", "pos": [2.0, 11, 0.5], "dist": 1.5}
@@ -1089,10 +1089,10 @@ def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch
 
     class CaveBot:
         def call(self, action, body=None, **kwargs):
-            if action == "stop" and clock[0] == 1000.0:
-                clock[0] += entry_time
             if action == "status":
                 return dict(status)
+            if action == "events":
+                return {"events": []}
             if action == "inventory":
                 return {"items": [{"name": "iron_sword", "count": 1}, {"name": "cooked_beef", "count": 3}]}
             if action == "get_entities":
@@ -1103,7 +1103,7 @@ def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch
                 return {"hits": 2, "killed": True}
             if action == "use_item":
                 meals.append(body["item"])
-                clock[0] += 2.0
+                clock[0] += 4.0
                 status["food"] = 20
             return {"ok": True}
 
@@ -1113,7 +1113,9 @@ def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch
     })
 
     assert outcome["mode"] == "counter_killed"
-    assert meals == (["cooked_beef"] if combat_duration == 4.0 else [])
+    assert meals == []
+    guard.poll()
+    assert meals == ["cooked_beef"]
 
 
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):

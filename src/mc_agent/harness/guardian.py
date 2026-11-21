@@ -303,7 +303,7 @@ class GenerationGuard:
         self.skills = skills
         self.combat_env = CombatEnv(
             self.bot, skills=self.skills, geofence=self.geofence, water_escape=self._escape_water_for_combat,
-            run_lava_escape=self._run_lava_escape,
+            run_lava_escape=self._run_lava_escape, post_combat_food=False,
         )
         self.combat_slot = CombatControllerSlot(combat_controller)
         self._custom_combat_registered = combat_controller is not None

@@ -376,6 +376,7 @@ class CombatEnv:
         geofence: Any | None = None,
         water_escape: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         run_lava_escape: Callable[[Callable[[], dict[str, Any]]], dict[str, Any]] | None = None,
+        post_combat_food: bool = True,
         block_cache_ttl: float = 3.0,
         hazard_cache_ttl: float = 3.0,
     ) -> None:
@@ -384,6 +385,7 @@ class CombatEnv:
         self.geofence = geofence
         self._water_escape = water_escape
         self._run_lava_escape = run_lava_escape
+        self.post_combat_food = post_combat_food
         self.block_cache_ttl = max(0.2, float(block_cache_ttl))
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
@@ -3636,7 +3638,8 @@ class SubcorticalInstinctController:
         # Eating takes about two seconds. Leave room to confirm status and release controls.
         food_start_deadline = deadline - 2.5
         if (
-            not latched_guard
+            env.post_combat_food
+            and not latched_guard
             and time.monotonic() < food_start_deadline
             and st_post.get("ready", True)
             and st_post.get("alive") is not False
