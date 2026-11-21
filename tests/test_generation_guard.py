@@ -367,6 +367,46 @@ def test_water_reflex_escapes_to_dry_land_instead_of_floating_in_place(monkeypat
     assert escaped == ["escape_water"]
 
 
+@pytest.mark.parametrize("elapsed", [4.0, 31.0])
+def test_water_float_continues_shore_recovery_after_recent_failure(monkeypatch, elapsed):
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 100.0)
+    status = {
+        "pos": [7982.5, 59.9, 2869.5], "health": 20, "food": 20, "oxygen": 120,
+        "alive": True, "ready": True, "in_water": True, "submerged": True, "on_ground": False,
+    }
+    attempts = []
+
+    class WetBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(WetBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_water_escape_at = 100.0 - elapsed
+    guard._last_water_escape_failed = True
+
+    def recover(method, **kwargs):
+        attempts.append((method, kwargs.get("surface_first", False)))
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard, "_escape_water", lambda *_: recover("generic"))
+    monkeypatch.setattr(
+        guard.combat_env, "escape_deep_water_to_shore", lambda *_, **kwargs: recover("shore", **kwargs),
+    )
+
+    incident = guard.poll()
+
+    assert "water_float" in incident["reasons"]
+    assert attempts == ([("shore", True)] if elapsed == 4.0 else [("generic", False)])
+    assert guard._last_water_escape_failed is False
+
+
 def test_hurt_while_standing_in_shallow_water_still_escapes(monkeypatch):
     """Live: in_water + hurt produced actions=[] (melee branch needs dry land, needs_float false)."""
     clock = [100.0]
@@ -899,6 +939,55 @@ def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life
     assert receipt["reflex_mode"] == "life_unavailable"
     assert receipt["status_after"]["pos"] == status["pos"]
     assert [event["type"] for event in events] == ["guardian.preempted_tool"]
+
+
+@pytest.mark.parametrize("source, identified, expected", [
+    ("mob_attack", True, "cover_or_flee"),
+    ("mob_attack", False, "cover_or_flee"),
+    ("entity_explosion", False, "creeper_evade"),
+])
+def test_tool_hurt_does_not_treat_distant_creeper_as_melee_attacker(monkeypatch, source, identified, expected):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    creeper = {"id": 42, "name": "creeper", "dist": 11.9, "pos": [12.4, 64, 0.5]}
+    zombie = {"id": 77, "name": "zombie", "dist": 2.0, "pos": [0.5, 64, -1.5]}
+    status = {
+        "pos": [0.5, 64, 0.5], "dimension": "overworld", "health": 19, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": creeper,
+    }
+    retreat_targets = []
+
+    class InterruptedBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": source}
+                if identified:
+                    hurt["source_entity"] = zombie
+                return {"events": [hurt] if kwargs["params"]["since"] < 1 else [], "last_seq": 1}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [creeper, zombie] if identified else [creeper]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 64 else "air"}
+            return {"ok": True}
+
+    def retreat(_env, threat_pos=None, **kwargs):
+        retreat_targets.append((threat_pos, kwargs.get("use_nearest_hostile", True)))
+        return {"ok": True, "mode": "flee", "moved_dist": 3.0, "pos_after": status["pos"]}
+
+    monkeypatch.setattr(CombatEnv, "flee", retreat)
+    guard = GenerationGuard(InterruptedBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    receipt = guard.handle_preemption(
+        {"source": "tool_interrupted_hurt", "primary_type": "creeper", "primary_entity_id": 42, "distance": 11.9},
+        interrupted_name="mc_dig",
+    )
+
+    assert receipt["reflex_mode"] == expected
+    expected_target = creeper["pos"] if source == "entity_explosion" else zombie["pos"] if identified else None
+    assert retreat_targets == [(expected_target, expected_target is not None)]
 
 
 @pytest.mark.parametrize("respawned", [False, True])
@@ -5179,34 +5268,41 @@ def test_repeated_melee_hurt_skips_bunker_when_the_same_block_still_blocks_it(mo
     assert retreats == [True, True]
 
 
-@pytest.mark.parametrize("nearest", ["attacker", "other_mob", "scan_timeout"])
-def test_nether_melee_retreat_resolves_the_confirmed_attacker_without_position(monkeypatch, nearest):
-    attacker = {"id": 4580454, "name": "enderman", "dist": 1.1}
+@pytest.mark.parametrize(("dimension", "nearest"), [
+    ("the_nether", "attacker"), ("the_nether", "other_mob"), ("the_nether", "scan_timeout"),
+    ("overworld", "attacker"), ("overworld", "other_mob"), ("overworld", "scan_timeout"),
+    ("overworld", "unknown_attacker"),
+])
+def test_melee_retreat_resolves_the_confirmed_attacker_without_position(monkeypatch, nearest, dimension):
+    attacker = {"id": 4580454, "name": "enderman" if dimension == "the_nether" else "zombie", "dist": 1.1}
     attacker_pos = [3517.2, 60, 1781.9]
     blaze = {"id": 82, "name": "blaze", "dist": 0.9, "pos": [3515.2, 60, 1781.9]}
     status = {
-        "pos": [3516.1, 60, 1781.9], "health": 6.1, "food": 17, "dimension": "the_nether",
-        "ready": True, "alive": True, "on_ground": True, "blocking": True,
-        "nearest_hostile": attacker if nearest == "attacker" else blaze,
+        "pos": [3516.1, 60, 1781.9], "health": 6.1, "food": 17, "dimension": dimension,
+        "ready": True, "alive": True, "on_ground": True, "blocking": dimension == "the_nether",
+        "nearest_hostile": attacker if nearest in {"attacker", "unknown_attacker"} else blaze,
     }
     retreats = []
 
-    class NetherBot:
+    class AmbushBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return dict(status)
             if action == "events":
-                hits = [{"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": attacker}]
+                hit = {"seq": 1, "type": "hurt", "source": "mob_attack"}
+                if nearest != "unknown_attacker":
+                    hit["source_entity"] = attacker
+                hits = [hit]
                 return {"events": [] if kwargs["params"]["since"] else hits}
             if action == "inventory":
-                return {"items": [], "offhand": {"name": "shield"}}
+                return {"items": [], "offhand": {"name": "shield"} if dimension == "the_nether" else None}
             if action == "get_entities":
                 if nearest == "scan_timeout":
                     raise httpx.ReadTimeout("attacker lookup timed out")
                 return {"entities": [blaze, {**attacker, "pos": attacker_pos}]}
             return {"ok": True}
 
-    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard = GenerationGuard(AmbushBot(), EventSink(lambda _: None), checkpoint=lambda: None)
 
     def flee(threat_pos, *, wait_for_ground, use_nearest_hostile=True):
         assert wait_for_ground
@@ -6532,13 +6628,16 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
-@pytest.mark.parametrize("landing", ["landed", "airborne", "respawned"])
+@pytest.mark.parametrize("landing", ["landed", "late_landing", "airborne", "respawned"])
 def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monkeypatch, landing):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    late_landing = landing == "late_landing"
+    landing_at = 1000.45 if late_landing else 1000.15
     status = {
-        "pos": [-7918.3, 44.6, 2790.6], "health": 7.3, "food": 20,
+        "pos": [-7918.3, 44.6, 2790.6], "health": 2.2 if late_landing else 7.3, "food": 20,
+        "dimension": "overworld",
         "ready": True, "alive": True, "on_ground": False, "last_death": {"t": 1},
         "nearest_hostile": {"name": "skeleton", "dist": 7.0},
     }
@@ -6547,7 +6646,7 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
     class CaveBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                if clock[0] >= 1000.15 and landing != "airborne":
+                if clock[0] >= landing_at and landing != "airborne":
                     status.update(pos=[-7918.3, 44, 2790.6], on_ground=True)
                 return dict(status)
             if action == "events":
@@ -6561,7 +6660,7 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
 
     guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
 
-    def no_route(*args):
+    def no_route(*args, **kwargs):
         assert status["on_ground"] is True
         if landing == "respawned":
             status["last_death"] = {"t": 2}
@@ -6576,7 +6675,7 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
     monkeypatch.setattr(guard.combat_env, "probe_retreat", no_route)
     monkeypatch.setattr(guard.combat_env, "dig_cover_pocket", dig_cover)
     guard.poll()
-    assert cover_calls == ([[-7918.3, 44, 2790.6]] if landing == "landed" else [])
+    assert cover_calls == ([[-7918.3, 44, 2790.6]] if landing in {"landed", "late_landing"} else [])
 
 
 @pytest.mark.parametrize("respawned", [False, True])
