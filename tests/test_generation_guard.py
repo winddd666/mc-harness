@@ -5622,6 +5622,50 @@ def test_bug057_hot_floor_crouches_early_without_dropping_shield(entry, posture_
         assert len(calls) == 2 * len(expected_sneaks)
 
 
+@pytest.mark.parametrize("floor", ["magma_block", "netherrack"])
+def test_critical_nether_tool_preemption_checks_floor_before_combat(monkeypatch, floor):
+    status = {
+        "pos": [2014.3, 76, 1890.2], "health": 0.25, "dimension": "the_nether",
+        "ready": True, "alive": True, "on_ground": True, "blocking": True, "sneaking": False,
+    }
+    postures = []
+    combat = []
+
+    class NetherBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "get_block":
+                assert body["pos"][1] == 75 and kwargs["timeout_s"] <= 0.6
+                return {"name": floor}
+            if action == "posture":
+                postures.append(body)
+                status["sneaking"] = body["sneak"]
+                return {"sneaking": status["sneaking"]}
+            pytest.fail(f"Unexpected action during critical preemption: {action}")
+
+    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def respond(env, trigger):
+        combat.append(trigger["primary_type"])
+        return {"handled": True, "status_after": dict(status), "mode": "cover_or_flee"}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", respond)
+    receipt = guard.handle_preemption(
+        {"source": "tool_interrupted_hurt", "primary_type": "blaze"}, interrupted_name="mc_skill_staircase",
+    )
+
+    if floor == "magma_block":
+        assert receipt["reflex_mode"] == "hot_floor"
+        assert postures == [{"sneak": True, "shield": True, "jump": False}]
+        assert combat == []
+    else:
+        assert receipt["reflex_mode"] == "cover_or_flee"
+        assert postures == [] and combat == ["blaze"]
+
+
 @pytest.mark.parametrize("landing_safe", [True, False])
 def test_hot_floor_guard_verifies_dry_landing_after_crouch_failure(landing_safe):
     status = {"pos": [0.5, 64, 0.5], "health": 17, "food": 20, "ready": True, "alive": True, "on_ground": True}

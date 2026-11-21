@@ -2070,7 +2070,28 @@ class GenerationGuard:
                 st_pre = self.bot.status()
             except (ApiError, httpx.HTTPError):
                 st_pre = {}
-            if trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava")):
+            lava_threat = trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava"))
+            hot_floor_trigger = trigger.get("primary_type") == "hot_floor"
+            hp_pre = st_pre.get("health")
+            check_hot_floor = hot_floor_trigger or (
+                interrupted_name in {"mc_skill_mine_dfs", "mc_skill_staircase"}
+                and trigger.get("source") == "tool_interrupted_hurt"
+                and "nether" in str(st_pre.get("dimension") or "").lower()
+                and isinstance(hp_pre, (int, float)) and 0 < hp_pre <= 4.0
+                and self._needs_hot_floor_stance(st_pre, time.monotonic())
+            )
+            on_hot_floor = False
+            if (
+                check_hot_floor and not lava_threat and st_pre.get("ready") is not False
+                and st_pre.get("alive") is not False and st_pre.get("on_ground") is True
+                and not st_pre.get("in_water") and st_pre.get("pos")
+            ):
+                probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.6)
+                try:
+                    on_hot_floor = CombatEnv(probe_bot).is_on_hot_floor(st_pre["pos"])
+                except _RecoveryBudgetExceeded:
+                    pass
+            if lava_threat:
                 act = self._action("escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
                 act_res = act.get("result") if isinstance(act.get("result"), dict) else {}
                 try:
@@ -2114,20 +2135,16 @@ class GenerationGuard:
                     "status_after": st_after,
                     **({"respawned": True} if lava_died else {}),
                 }
-            elif trigger.get("primary_type") == "hot_floor":
+            elif hot_floor_trigger or on_hot_floor:
                 actions = []
                 st_after = st_pre
-                if st_pre.get("ready") is not False and st_pre.get("alive") is not False and (
-                    st_pre.get("on_ground") is True and not st_pre.get("in_water") and st_pre.get("pos")
-                ):
-                    self.combat_env.invalidate_block_cache()
-                    if self.combat_env.is_on_hot_floor(st_pre["pos"]):
-                        actions.append(self._action("hot_floor_sneak", lambda: self._sneak_on_hot_floor(st_pre)))
-                        self._hot_floor_retry_at = time.monotonic() + self.HOT_FLOOR_RETRY_S
-                        try:
-                            st_after = self.bot.status()
-                        except (ApiError, httpx.HTTPError):
-                            pass
+                if on_hot_floor:
+                    actions.append(self._action("hot_floor_sneak", lambda: self._sneak_on_hot_floor(st_pre)))
+                    self._hot_floor_retry_at = time.monotonic() + self.HOT_FLOOR_RETRY_S
+                    try:
+                        st_after = self.bot.status()
+                    except (ApiError, httpx.HTTPError):
+                        pass
                 summary = f"执行 {interrupted_name} 途中踩到岩浆块，已中断当前动作，当前 HP={st_after.get('health')}"
                 outcome = {"handled": bool(actions and actions[0].get("ok")), "mode": "hot_floor", "actions": actions}
             else:
