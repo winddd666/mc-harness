@@ -10967,3 +10967,54 @@ def test_grounded_retreat_can_step_down_one_verified_block_in_a_tunnel(terrain):
     else:
         assert moves == []
         assert outcome["reason"] == "no_safe_retreat"
+
+
+@pytest.mark.parametrize("landing", ["grounded", "water", "respawned", "airborne"])
+def test_directed_shore_rechecks_an_airborne_bot_over_the_bank(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    bank = [0.5, 63.0, 4.5]
+    status = {
+        "pos": [0.5, 62.2, 0.5], "dimension": "overworld", "last_death": {"t": 1},
+        "in_water": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    moves = []
+    jump = []
+
+    class BankBot:
+        def status(self):
+            if clock[0] >= 1000.15:
+                if landing == "grounded":
+                    status.update(in_water=False, on_ground=True, pos=bank)
+                elif landing == "water":
+                    status.update(in_water=True, on_ground=False)
+                elif landing == "respawned":
+                    status.update(pos=[2.5, 70, 2.5], last_death={"t": 2})
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "move_to":
+                moves.append(body)
+                status.update(pos=[0.5, 63.5, 4.5], in_water=False, on_ground=False)
+            if action == "posture":
+                jump.append(body.get("jump"))
+            return {"ok": True}
+
+    env = CombatEnv(BankBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_args, **_kwargs: bank)
+    outcome = env.escape_deep_water_to_shore()
+
+    assert len(moves) == 2
+    assert 1000.15 <= clock[0] <= 1000.31
+    assert outcome["ok"] is (landing == "grounded")
+    if landing == "water":
+        assert outcome["in_water"] is True and jump[-1] is True
+    elif landing == "respawned":
+        assert outcome["mode"] == "respawned"
+    elif landing == "airborne":
+        assert outcome["reason"] == "shore_landing_unconfirmed"
