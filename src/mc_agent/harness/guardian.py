@@ -745,10 +745,16 @@ class GenerationGuard:
             return False
         ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
         now = time.monotonic()
+        recent_ranged_hit = now - self._last_ranged_hurt_at < 8.0
         protecting_against_recent_hit = status.get("blocking") and (
-            now - self._last_ranged_hurt_at < 8.0 or now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
+            recent_ranged_hit or now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
         )
-        if (ranged_in_range or protecting_against_recent_hit) and not self._inside_own_shaft():
+        # A Nether shooter can keep firing while missing from the nearest-hostile snapshot.
+        burning_after_ranged_hit = (
+            status.get("on_fire") and recent_ranged_hit
+            and str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+        )
+        if (ranged_in_range or protecting_against_recent_hit or burning_after_ranged_hit) and not self._inside_own_shaft():
             return False
         return True
 

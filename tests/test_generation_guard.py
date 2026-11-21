@@ -3912,13 +3912,13 @@ def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(mo
     assert control_calls
 
 
-def test_r20_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch):
-    """Reproduces r20_short ds_ds_3_enchant_anvil: never drop shield to eat in open ranged-mob fire (6..16m)."""
+@pytest.mark.parametrize("recent_nether_fireball", [False, True])
+def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, recent_nether_fireball):
     clock = [7000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     use_items: list[dict] = []
     posture_calls: list[dict] = []
-    state = {"hp": 5.3, "food": 19, "blocking": True, "dist": 6.2, "inside_shaft": False}
+    state = {"hp": 17.6 if recent_nether_fireball else 5.3, "food": 19, "inside_shaft": False}
 
     class _EnclosedSkills:
         class _Eng:
@@ -3944,10 +3944,16 @@ def test_r20_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch):
                     "on_ground": True,
                     "in_water": False,
                     "in_lava": False,
-                    "blocking": state["blocking"],
-                    "nearest_hostile": {"id": 612494, "name": "skeleton", "pos": [0.5 + state["dist"], 64.0, 0.5], "dist": state["dist"]},
+                    "blocking": not recent_nether_fireball,
+                    "dimension": "the_nether" if recent_nether_fireball else "overworld",
+                    "on_fire": recent_nether_fireball,
+                    "nearest_hostile": None if recent_nether_fireball else {
+                        "id": 612494, "name": "skeleton", "pos": [6.7, 64.0, 0.5], "dist": 6.2,
+                    },
                 }
             if action == "events":
+                if recent_nether_fireball and not kwargs["params"]["since"]:
+                    return {"events": [{"seq": 1, "type": "hurt", "source": "fireball"}], "last_seq": 1}
                 return {"events": [], "last_seq": 0}
             if action == "inventory":
                 return {"items": [{"name": "cooked_beef", "count": 10}, {"name": "shield", "count": 1}]}
@@ -3958,7 +3964,11 @@ def test_r20_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch):
             return {"ok": True}
 
     guard = GenerationGuard(_SkeletonRangeBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_EnclosedSkills())
-    guard._mark_ranged_engagement(clock[0], attacker={"id": 612494, "name": "skeleton"})
+    if recent_nether_fireball:
+        guard._drain_events_pages()
+        clock[0] += 5.0
+    else:
+        guard._mark_ranged_engagement(clock[0], attacker={"id": 612494, "name": "skeleton"})
     assert guard.poll() is None
     assert guard.stabilize_after_tools(["ok"]) is None
     assert posture_calls == []
