@@ -6395,7 +6395,8 @@ def test_attack_in_water_requests_stop_and_preserves_read_timeout(monkeypatch, a
         assert "shore" in actions
 
 
-def test_mining_on_magma_is_interrupted_before_the_boundary():
+@pytest.mark.parametrize(("tool", "endpoint"), [("mc_skill_mine_dfs", "dig"), ("mc_skill_combat", "move_to")])
+def test_magma_interrupts_long_mining_and_combat_before_the_boundary(tool, endpoint):
     import threading
 
     stopped = threading.Event()
@@ -6405,7 +6406,7 @@ def test_mining_on_magma_is_interrupted_before_the_boundary():
     }
     actions = []
 
-    class MiningBot:
+    class MagmaBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return dict(status)
@@ -6414,7 +6415,7 @@ def test_mining_on_magma_is_interrupted_before_the_boundary():
             if action == "get_block":
                 assert body["pos"] == [0, 37, 0]
                 return {"name": "magma_block"}
-            if action == "dig":
+            if action == endpoint:
                 assert stopped.wait(3.0)
                 return {"interrupted_by": "hurt"}
             if action == "stop":
@@ -6426,9 +6427,9 @@ def test_mining_on_magma_is_interrupted_before_the_boundary():
                 return {"sneaking": status["sneaking"]}
             return {"ok": True}
 
-    bot = MiningBot()
+    bot = MagmaBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
-    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(bot.call("dig", {}))))
+    result = json.loads(guard.run_tool_with_reflex(tool, lambda: json.dumps(bot.call(endpoint, {}))))
     assert result["reflex_mode"] == "hot_floor"
     assert result["requires_replan"] is True
     assert status["sneaking"] is True

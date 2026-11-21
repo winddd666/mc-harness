@@ -112,6 +112,7 @@ ACTION_LOCK_ENDPOINTS = frozenset(
 )
 
 READ_ONLY_POLL_ENDPOINTS = frozenset({"status", "inventory", "events"})
+HOT_FLOOR_WATCH_TOOLS = frozenset({"mc_skill_mine_dfs", "mc_skill_staircase", "mc_skill_combat"})
 
 
 class ReflexPreempted(BaseException):
@@ -2217,7 +2218,7 @@ class GenerationGuard:
             hot_floor_trigger = trigger.get("primary_type") == "hot_floor"
             hp_pre = st_pre.get("health")
             check_hot_floor = hot_floor_trigger or (
-                interrupted_name in {"mc_skill_mine_dfs", "mc_skill_staircase"}
+                interrupted_name in HOT_FLOOR_WATCH_TOOLS
                 and trigger.get("source") == "tool_interrupted_hurt"
                 and "nether" in str(st_pre.get("dimension") or "").lower()
                 and isinstance(hp_pre, (int, float)) and 0 < hp_pre <= 4.0
@@ -2506,7 +2507,7 @@ class GenerationGuard:
                 enable_creeper_watcher=not (is_flee or is_attack),
                 deadline=deadline,
                 check_unstick_exit=is_unstick,
-                watch_hot_floor=tool_name in {"mc_skill_mine_dfs", "mc_skill_staircase"},
+                watch_hot_floor=tool_name in HOT_FLOOR_WATCH_TOOLS,
                 check_flee_exit=is_flee,
                 watch_attack_water=is_attack,
                 check_support_dig=tool_name == "mc_dig",
