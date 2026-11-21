@@ -770,7 +770,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         key="minecraft:nether/find_fortress",
         title="30分：在下界探索并定位下界要塞",
         points=30,
-        tier=3,
+        tier=2,
         budget_class="expedition",
         task=(
             "解锁 nether/find_fortress(30分)：当前已身处下界，请勿穿回主世界传送门！"
@@ -784,7 +784,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         key="minecraft:nether/obtain_blaze_rod",
         title="30分：下界要塞击杀烈焰人并拾取烈焰棒（解锁酿造与末影之眼）",
         points=30,
-        tier=3,
+        tier=2,
         budget_class="expedition",
         task=(
             "解锁 nether/obtain_blaze_rod(30分)：已在下界要塞附近，请勿穿回主世界！"
