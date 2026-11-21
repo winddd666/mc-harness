@@ -723,7 +723,7 @@ class GenerationGuard:
 
     def _defend_or_flee(
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
-        *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True,
+        *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True, cover_only: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
@@ -749,7 +749,7 @@ class GenerationGuard:
             dimension == "overworld" and isinstance(skills, MacroSkills)
             and best_melee_weapon_in_inv(counts) is None and not self._inside_own_shaft()
         )
-        if "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
+        if cover_only or "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
             nh_name, nh_distance, nh_id, nh_pos = self._extract_hostile_info(status)
             now = time.monotonic()
             recent_melee = now - self._last_melee_hurt_at < 4.0
@@ -843,6 +843,8 @@ class GenerationGuard:
                     cover = None
                 if cover is not None and (cover.get("ok") or cover.get("respawned")):
                     return cover
+            if cover_only:
+                return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
             critical_arrow_knockback = (
                 dimension == "overworld" and ranged and prefer_cover and unshielded
                 and isinstance(health, (int, float)) and 0 < health <= 4.0
@@ -2306,7 +2308,21 @@ class GenerationGuard:
                                         landing_block != self._last_dig_cover_block or now - self._last_dig_cover_at >= 20.0
                                     )
                                 ):
-                                    try_cover(landing_block)
+                                    landing_cover = try_cover(landing_block).get("result") or {}
+                                    if (
+                                        hurt_src == "arrow" and landing_cover.get("reason") == "no_filler_block"
+                                        and not landing_cover.get("respawned")
+                                    ):
+                                        natural_cover = self._action(
+                                            "natural_cover",
+                                            lambda: self._defend_or_flee(
+                                                landing, attacker, counts, ranged=True, prefer_cover=True,
+                                                allow_stationary_cover=False, cover_only=True,
+                                            ),
+                                        )
+                                        actions.append(natural_cover)
+                                        if natural_cover.get("ok"):
+                                            self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                             if (
                                 cf.get("ok") and has_shield and isinstance(att_id_r, int)
                                 and hp_val <= LOW_HP_BUNKER_MAX

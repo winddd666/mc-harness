@@ -6979,7 +6979,7 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
-@pytest.mark.parametrize("landing", ["landed", "late_landing", "airborne", "respawned"])
+@pytest.mark.parametrize("landing", ["landed", "late_landing", "airborne", "respawned", "no_filler", "no_cover"])
 def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monkeypatch, landing):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
@@ -6993,6 +6993,8 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
         "nearest_hostile": {"name": "skeleton", "dist": 7.0},
     }
     cover_calls = []
+    natural_checks = []
+    fallback = landing in {"no_filler", "no_cover"}
 
     class CaveBot:
         def call(self, action, body=None, **kwargs):
@@ -7007,6 +7009,8 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
                 return {"items": [{"name": "stone_pickaxe", "count": 1}, {"name": "cobblestone", "count": 43}]}
             if action == "get_block":
                 return {"name": "air"}
+            if action == "get_entities" and fallback:
+                return {"entities": [{"id": 42, "name": "skeleton", "dist": 7.0, "pos": [-7911.3, 44, 2790.6]}]}
             raise AssertionError(action)
 
     guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
@@ -7021,12 +7025,27 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
         assert status["on_ground"] is True
         assert status["last_death"] == {"t": 1}
         cover_calls.append(status["pos"])
+        if fallback:
+            return {"ok": False, "reason": "no_filler_block"}
         return {"ok": True, "mode": "cover_pocket"}
+
+    def natural_cover(_env, pos, *, other_shooters, allow_stationary):
+        assert status["on_ground"] and not allow_stationary
+        assert not other_shooters and pos == [-7911.3, 44, 2790.6]
+        natural_checks.append(pos)
+        if landing == "no_filler":
+            return {"ok": True, "mode": "natural_cover", "pos_after": [-7920.5, 44, 2790.6]}
+        return None
 
     monkeypatch.setattr(guard.combat_env, "probe_retreat", no_route)
     monkeypatch.setattr(guard.combat_env, "dig_cover_pocket", dig_cover)
-    guard.poll()
-    assert cover_calls == ([[-7918.3, 44, 2790.6]] if landing in {"landed", "late_landing"} else [])
+    monkeypatch.setattr("mc_agent.skills.combat_env.CombatEnv.seek_natural_cover", natural_cover)
+    incident = guard.poll()
+    assert cover_calls == ([[-7918.3, 44, 2790.6]] if landing not in {"airborne", "respawned"} else [])
+    assert len(natural_checks) == int(fallback)
+    if fallback:
+        assert [a["action"] for a in incident["actions"]] == ["combat_or_flee", "dig_cover", "natural_cover"]
+        assert incident["actions"][-1]["ok"] is (landing == "no_filler")
 
 
 @pytest.mark.parametrize("respawned", [False, True])
