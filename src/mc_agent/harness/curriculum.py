@@ -1345,6 +1345,7 @@ def _build_day2_village_search_target(
     unexp: Sequence[str],
     *,
     biome: str = "",
+    exploration_brief: str = "",
 ) -> CurriculumTarget:
     dirs = list(unexp[:3]) if unexp else ["east", "north", "south"]
     dir_hint = "/".join(dirs)
@@ -1354,6 +1355,7 @@ def _build_day2_village_search_target(
         f"（单次零LLM往返连跑 5 段 150m 并自动 64m 扫村/扫村民/避水避围栏；未命中时顺次换未探索方向 {dir_hint} 或 'auto' 再跑 1~2 次，不要手写循环调 mc_move_to+mc_find_blocks）。"
     )
     biome_note = f"当前群系={biome}；" if biome else ""
+    brief_prefix = f"{exploration_brief}\n" if exploration_brief else ""
     return CurriculumTarget(
         key="day2_village_search",
         title="Day 2 白天食物补给与系统寻村：高速斥候 + 进村占房绑床/干草块/箱子",
@@ -1361,7 +1363,8 @@ def _build_day2_village_search_target(
         tier=1,
         budget_class="short",
         task=(
-            "执行 Day 2 白天食物补给与高速系统寻村（入夜或本集结束自动止损，绝不死磕）："
+            brief_prefix
+            + "执行 Day 2 白天食物补给与高速系统寻村（入夜或本集结束自动止损，绝不死磕）："
             f"{biome_note}MC 村庄仅生成在 plains/savanna/desert/taiga/snowy_plains，若进入海洋/深森林/丛林/沼泽立刻换方向。"
             + hop_clause
             + "1) 若包内食物不足 6 块且途中 24m 内有猪/牛/羊，顺手用斧收 2~3 只；"
@@ -1547,8 +1550,22 @@ def select_next_target(
         and not has_village_known
         and not _is_cooled("day2_village_search")
     ):
-        unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
-        v_target = _build_day2_village_search_target(origin_pos, unexp, biome=cur_biome)
+        expl_summary = (
+            world_memory.summarize_exploration(origin_pos or [0.0, 64.0, 0.0], dim="overworld", intent="village")
+            if hasattr(world_memory, "summarize_exploration")
+            else None
+        )
+        unexp = (
+            expl_summary["recommended_directions"]
+            if expl_summary and expl_summary.get("recommended_directions")
+            else world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
+        )
+        v_target = _build_day2_village_search_target(
+            origin_pos,
+            unexp,
+            biome=cur_biome,
+            exploration_brief=str(expl_summary.get("brief") or "") if expl_summary else "",
+        )
         if origin_pos is not None and float(origin_pos[1]) < 52.0:
             v_target = dataclasses.replace(
                 v_target,
