@@ -702,10 +702,8 @@ class GenerationGuard:
         swimming = status.get("on_ground") is False or bool(status.get("submerged"))
         return source == "trident" or (
             isinstance(health, (int, float)) and health > 0
-            and (
-                (source in RANGED_HURT_SOURCES and (swimming or health <= 14.0))
-                or (source in MELEE_HURT_SOURCES and health <= 14.0)
-            )
+            and (source in RANGED_HURT_SOURCES or source in MELEE_HURT_SOURCES)
+            and (swimming or health <= 14.0)
         )
 
     def _unstick_in_wall(self, before: dict[str, Any]) -> dict[str, Any]:

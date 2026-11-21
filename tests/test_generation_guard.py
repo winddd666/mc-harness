@@ -8529,13 +8529,15 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
 @pytest.mark.parametrize("scenario", [
     "ordinary", "surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
     "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee", "boundary_arrow", "poll_arrow",
+    "poll_high_health_melee", "tool_high_health_melee",
 ])
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     events = []
     calls = []
-    status = {"pos": [0.5, 52, 0.5], "health": 14 if scenario.endswith("melee") else 20, "oxygen": 240, "in_water": True,
+    health = 14 if scenario.endswith("melee") and "high_health" not in scenario else 20
+    status = {"pos": [0.5, 52, 0.5], "health": health, "oxygen": 240, "in_water": True,
               "submerged": scenario != "surface_partial_move", "on_ground": False, "alive": True, "ready": True}
     if scenario.endswith("arrow"):
         status.update(
@@ -8588,7 +8590,7 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     }
     if scenario.startswith("poll_"):
         assert guard.poll() is not None
-    elif scenario == "tool_melee":
+    elif scenario.startswith("tool_"):
         trigger = {"source": "tool_interrupted_hurt", "hurt_source": "mob_attack", "primary_type": "zombie"}
         report = guard.handle_preemption(trigger, interrupted_name="mc_skill_unstick")
         assert report["status_after"]["in_water"] is False
