@@ -802,11 +802,11 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         tier=3,
         budget_class="expedition",
         task=(
-            "解锁 story/follow_ender_eye(60分) 并顺势推进至末地传送门（严禁调用 mc_skill_collect_drops 捡眼！）："
-            "1) 选定主手调 mc_use_item(item='ender_eye') 掷出 1 颗末影之眼，直接读取返回体中的 scout_heading（及 eye_vector）；"
-            "2) 沿 scout_heading 调 mc_skill_scout_surface(direction=<scout_heading>, target_types=['end_portal_frame'], max_duration_s=45, step_dist=32) 推进；"
-            "【省眼铁律】必须累计水平前进 >= 100m 后才允许掷下一颗眼！若 scout_surface 因 in_water/地形只走了 <60m，严禁原地重掷，先调 mc_skill_unstick 上岸或偏转 45 度方向继续跑够 100m 再掷第二颗；"
-            "3) 一旦 scout_heading 发生反向（说明已越过要塞）或 landed_at 的 Y 低于当前脚下 Y（末影之眼钻地），立即停止掷眼：若刚跨过则退回中点 30~50m，然后**立刻连续调用 mc_skill_staircase(vertical='down', steps=16) 下挖至 Y=10~-10**（要塞常在地下深处），每下挖一段调 mc_find_blocks(types=['stone_bricks','mossy_stone_bricks','cracked_stone_bricks','iron_bars','end_portal_frame'], radius=24) 探测，扫到砖墙或传送门框架后直接挖通进入房间即解锁 60 分！"
+            "解锁 story/follow_ender_eye(60分) 并顺势推进至末地传送门（使用【2眼三角定位】，严禁调用 mc_skill_collect_drops 捡眼！）："
+            "1) 选定主手调 mc_use_item(item='ender_eye') 掷出第 1 颗末影之眼，读取返回体中的 suggested_second_throw_direction 与 suggested_second_throw_xz；"
+            "2) 沿垂直方向 suggested_second_throw_direction 移动 60~80 格（mc_move_to 或 mc_skill_scout_surface）后掷出第 2 颗末影之眼，系统会自动返回精确的 triangulated_stronghold_xz（要塞估算坐标）与 triangulated_direction；"
+            "3) 拿到 triangulated_stronghold_xz 后，严禁中途再反复掷眼！直接沿 triangulated_direction 用 mc_skill_scout_surface(direction=<triangulated_direction>, target_types=['end_portal_frame'], max_duration_s=45, step_dist=32) 或 mc_move_to 直线奔赴该坐标上方（距目标 <=30m 时最多掷 1 颗确认）；"
+            "4) 抵达要塞坐标上方或返回 eye_went_down=true（钻地）时，立即连续调用 mc_skill_staircase(vertical='down', steps=16) 下挖至 Y=10~-10，每挖一段调 mc_find_blocks(types=['stone_bricks','mossy_stone_bricks','cracked_stone_bricks','iron_bars','end_portal_frame'], radius=24) 探测，扫到要塞砖墙/传送门框架后直接挖通进入房间即解锁 60 分！"
         ),
         extra_tools=("mc_use_item", "mc_skill_scout_surface", "mc_interact", "mc_posture"),
         advancement_id="minecraft:story/follow_ender_eye",

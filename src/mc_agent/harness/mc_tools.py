@@ -187,6 +187,7 @@ class McToolset:
         )
         self.skills = MacroSkills(bot, geofence=self.geofence)
         self.skills.world_memory = self.world_memory
+        self._ender_eye_throws: list[tuple[float, float, float, float]] = []
 
     def rebind_runtime_hooks(
         self,
@@ -1899,19 +1900,108 @@ class McToolset:
 
         vector = result.get("eye_vector")
         direction = None
+        ux = uz = 0.0
+        has_valid_vec = False
         if isinstance(vector, list) and len(vector) == 2 and all(
             type(value) in (int, float) and -math.inf < value < math.inf for value in vector
         ):
-            dx, dz = vector
-            scale = max(abs(dx), abs(dz))
-            if scale:
-                sector = math.floor((math.atan2(dz / scale, dx / scale) + math.pi / 8) / (math.pi / 4))
+            dx, dz = float(vector[0]), float(vector[1])
+            norm = math.hypot(dx, dz)
+            if norm > 1e-6:
+                ux, uz = dx / norm, dz / norm
+                has_valid_vec = True
+                sector = math.floor((math.atan2(uz, ux) + math.pi / 8) / (math.pi / 4))
                 direction = SURFACE_SCOUT_DIRECTIONS[sector % len(SURFACE_SCOUT_DIRECTIONS)]
         result["scout_direction"] = direction
-        result["scout_hint"] = (
-            f"可直接调用 mc_skill_scout_surface(direction='{direction}')。位移后请重新测向，绕障改向后尤其需要复测。"
-            if direction else "本次掷眼没有获得有效的水平向量。请在开阔处重新测向后再决定方向。"
+
+        # 0-LLM two-eye stronghold triangulation
+        origin_x = origin_y = origin_z = None
+        try:
+            st = self.bot.status()
+            pos = st.get("pos") if isinstance(st, dict) else None
+            if isinstance(pos, list) and len(pos) >= 3:
+                origin_x, origin_y, origin_z = float(pos[0]), float(pos[1]), float(pos[2])
+        except Exception:
+            pass
+        landed = result.get("landed_at")
+        if origin_x is None and isinstance(landed, list) and len(landed) >= 3:
+            origin_x, origin_y, origin_z = float(landed[0]), float(landed[1]), float(landed[2])
+
+        eye_went_down = (
+            origin_y is not None
+            and isinstance(landed, list)
+            and len(landed) >= 2
+            and float(landed[1]) <= origin_y - 2.0
         )
+        if eye_went_down:
+            result["eye_went_down"] = True
+
+        triangulated_xz: list[int] | None = None
+        triangulated_dist: float | None = None
+        triangulated_dir: str | None = None
+        if has_valid_vec and origin_x is not None and origin_z is not None:
+            throws = getattr(self, "_ender_eye_throws", None)
+            if not isinstance(throws, list):
+                throws = []
+                self._ender_eye_throws = throws
+            # Solve best intersection against prior throws with sufficient baseline (>=25m) and non-collinear angle
+            best_det = 0.0
+            for px, pz, pvx, pvz in throws:
+                baseline = math.hypot(origin_x - px, origin_z - pz)
+                if baseline < 25.0:
+                    continue
+                det = pvz * ux - pvx * uz
+                if abs(det) < 0.06 or abs(det) <= best_det:
+                    continue
+                t1 = ((origin_z - pz) * ux - (origin_x - px) * uz) / det
+                t2 = ((origin_z - pz) * pvx - (origin_x - px) * pvz) / det
+                if t1 <= 0.0 or t2 <= 0.0:
+                    continue
+                tx = origin_x + t2 * ux
+                tz = origin_z + t2 * uz
+                dist = math.hypot(tx - origin_x, tz - origin_z)
+                if dist > 3000.0:
+                    continue
+                best_det = abs(det)
+                triangulated_xz = [round(tx), round(tz)]
+                triangulated_dist = round(dist, 1)
+                t_sec = math.floor((math.atan2(tz - origin_z, tx - origin_x) + math.pi / 8) / (math.pi / 4))
+                triangulated_dir = SURFACE_SCOUT_DIRECTIONS[t_sec % len(SURFACE_SCOUT_DIRECTIONS)]
+            # Keep bounded history of recent throws
+            if not throws or math.hypot(origin_x - throws[-1][0], origin_z - throws[-1][1]) >= 8.0:
+                throws.append((origin_x, origin_z, ux, uz))
+                if len(throws) > 12:
+                    del throws[:-12]
+
+        if eye_went_down:
+            result["scout_hint"] = (
+                "末影之眼已向下钻地！要塞就在脚下附近，立即停止掷眼并连续调用 "
+                "mc_skill_staircase(vertical='down', steps=16) 下挖至 Y=10~-10 寻找 stone_bricks / end_portal_frame！"
+            )
+        elif triangulated_xz is not None and triangulated_dist is not None:
+            result["triangulated_stronghold_xz"] = triangulated_xz
+            result["triangulated_distance"] = triangulated_dist
+            result["triangulated_direction"] = triangulated_dir
+            result["scout_hint"] = (
+                f"【两眼三角定位成功！】要塞估算坐标为 {triangulated_xz}（距当前约 {triangulated_dist}m，方向 '{triangulated_dir}'）。"
+                f"请直接朝 '{triangulated_dir}' 前往该坐标上方（无需中途再掷眼！），抵达后垂直阶梯下挖至 Y=10~-10 寻找 stone_bricks / end_portal_frame！"
+            )
+        elif direction and origin_x is not None and origin_z is not None:
+            perp_x, perp_z = -uz, ux
+            p_sec = math.floor((math.atan2(perp_z, perp_x) + math.pi / 8) / (math.pi / 4))
+            perp_dir = SURFACE_SCOUT_DIRECTIONS[p_sec % len(SURFACE_SCOUT_DIRECTIONS)]
+            suggested_xz = [round(origin_x + perp_x * 75.0), round(origin_z + perp_z * 75.0)]
+            result["suggested_second_throw_direction"] = perp_dir
+            result["suggested_second_throw_xz"] = suggested_xz
+            result["scout_hint"] = (
+                f"已记录第 1 颗末影之眼射线（主方向 '{direction}'）。推荐先沿垂直方向 '{perp_dir}' 侧移 60~80 格（约 {suggested_xz}）"
+                f"再掷第 2 颗眼，系统将自动三角定位算出要塞精确坐标；也可直接调用 mc_skill_scout_surface(direction='{direction}')。"
+            )
+        else:
+            result["scout_hint"] = (
+                f"可直接调用 mc_skill_scout_surface(direction='{direction}')。位移后请重新测向，绕障改向后尤其需要复测。"
+                if direction else "本次掷眼没有获得有效的水平向量。请在开阔处重新测向后再决定方向。"
+            )
         return json.dumps(receipt, ensure_ascii=False)
 
     def mc_attack(

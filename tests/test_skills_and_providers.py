@@ -4443,3 +4443,54 @@ def test_staircase_timeout_preserves_confirmed_partial_excavation() -> None:
     assert result["steps_done"] == 0
     assert result["pos_before"] == [0.5, 30, 0.5]
     assert result["pos_after"] == [0.5, 30, 0.5]
+
+
+def test_ender_eye_two_throw_triangulation_and_dive_detection() -> None:
+    """Two orthogonal ender_eye throws should triangulate the exact stronghold (X, Z)."""
+    from mc_agent.harness.mc_tools import McToolset
+
+    state = {"pos": [0.0, 70.0, 0.0], "vec": [1.0, 0.0], "landed": [12.0, 75.0, 0.0]}
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": state["pos"], "dimension": "overworld"}})
+        if path == "use_item":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "used": {"name": "ender_eye", "count": 1},
+                        "thrown": True,
+                        "eye_vector": state["vec"],
+                        "landed_at": state["landed"],
+                    },
+                },
+            )
+        raise AssertionError(path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        ts = McToolset(bot)
+        # Throw 1 at (0, 0) pointing east (+X) toward stronghold at (300, 0)
+        r1 = json.loads(ts.mc_use_item("ender_eye"))["result"]
+        assert r1["scout_direction"] == "east"
+        assert r1["suggested_second_throw_direction"] == "south"
+        assert "triangulated_stronghold_xz" not in r1
+
+        # Throw 2 at (0, 100) pointing toward (300, 0): vector = (300, -100)
+        state["pos"] = [0.0, 70.0, 100.0]
+        state["vec"] = [0.9486833, -0.3162278]
+        state["landed"] = [11.4, 74.0, 96.2]
+        r2 = json.loads(ts.mc_use_item("ender_eye"))["result"]
+        assert r2["triangulated_stronghold_xz"] == [300, 0]
+        assert abs(r2["triangulated_distance"] - 316.2) < 1.0
+        assert "三角定位成功" in r2["scout_hint"]
+
+        # Throw 3 directly over stronghold -> dives underground
+        state["pos"] = [300.0, 70.0, 0.0]
+        state["vec"] = [0.1, 0.0]
+        state["landed"] = [300.5, 65.0, 0.0]
+        r3 = json.loads(ts.mc_use_item("ender_eye"))["result"]
+        assert r3["eye_went_down"] is True
+        assert "mc_skill_staircase" in r3["scout_hint"]
