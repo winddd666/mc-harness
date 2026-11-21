@@ -4872,6 +4872,55 @@ def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, sho
     assert retreats == [expected]
 
 
+@pytest.mark.parametrize("scan", ["visible", "timeout"])
+def test_unshielded_surface_ranged_retreat_accounts_for_nearby_shooters(monkeypatch, scan):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    primary = {"id": 4882325, "name": "pillager", "pos": [-10959.1, 72, -11030.2], "dist": 7.3}
+    secondary = {"id": 4883019, "name": "pillager", "pos": [-10965.5, 72, -11050.4], "dist": 13.5}
+    status = {
+        "pos": [-10962.4, 72, -11038], "health": 5.33, "food": 20, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "blocking": False,
+        "nearest_hostile": primary,
+    }
+    plans = []
+
+    class RoadBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hit = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": primary}
+                return {"events": [] if kwargs["params"]["since"] else [hit]}
+            if action == "inventory":
+                return {"items": [], "offhand": None}
+            if action == "get_entities":
+                assert kwargs["timeout_s"] == 0.6 and kwargs["allow_reauth"] is False
+                if scan == "timeout":
+                    raise httpx.ReadTimeout("shooter scan expired")
+                return {"entities": [primary, secondary]}
+            raise AssertionError(action)
+
+    def cover(_env, pos, *, other_shooters, allow_stationary):
+        plans.append(("cover", pos, list(other_shooters)))
+        return None
+
+    def flee(pos, *, wait_for_ground, other_shooters=()):
+        assert wait_for_ground
+        plans.append(("flee", pos, list(other_shooters)))
+        return {"ok": True, "mode": "flee"}
+
+    guard = GenerationGuard(RoadBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(MacroSkills, "dig_cover_pocket", lambda _skills: {"ok": False, "reason": "no_solid_wall"})
+    monkeypatch.setattr(guard.combat_env, "probe_retreat", lambda *_args: None)
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+
+    assert [a["action"] for a in guard.poll()["actions"]] == ["dig_cover", "combat_or_flee"]
+    extra = [secondary["pos"]] if scan == "visible" else []
+    assert plans == [("cover", primary["pos"], extra), ("flee", primary["pos"], extra)]
+
+
 @pytest.mark.parametrize("water_floor", ["stone", "lava", "air"])
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
 def test_critical_post_lava_burning_can_douse_in_verified_adjacent_water(monkeypatch, water_floor, entry):
