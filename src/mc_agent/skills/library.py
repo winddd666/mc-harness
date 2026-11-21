@@ -1694,10 +1694,12 @@ class MacroSkills:
                     explore_wider = reason in terrain_blocks
                     base_offsets = (-2, 2, -3, 3, -1, 1, 4) if explore_wider else (-1, 1, -2, 2, -3, 3, 4)
                     if not nether and not track_ender_eye and status.get("pos") is not None and hasattr(memory, "score_direction_novelty"):
+                        # Keep eligible 45° detours ahead of wider turns until a terrain block permits wider turns (BUG-071).
                         offsets = tuple(
                             sorted(
                                 base_offsets,
                                 key=lambda off: (
+                                    1 if (not explore_wider and abs(off) > 1) else 0,
                                     1 if off == 4 else 0,
                                     memory.score_direction_novelty(
                                         status["pos"],
@@ -1709,7 +1711,7 @@ class MacroSkills:
                             )
                         )
                     else:
-                        offsets = base_offsets
+                        offsets = tuple(sorted(base_offsets, key=lambda off: not explore_wider and abs(off) > 1))
                     for offset in offsets:
                         if reason not in detour_reasons:
                             break

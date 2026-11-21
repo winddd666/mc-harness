@@ -951,6 +951,93 @@ def test_descent_offset_preserves_the_stair_back_to_the_collar(monkeypatch, alre
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_offset_route_with_a_changed_height_is_not_recorded_as_level(monkeypatch, interrupted: bool) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec, _MiningDeadline
+
+    anchor = (0, 54, 0)
+    world = _MockMineWorld(start_pos=(0.5, 54.0, 0.5), surface_y=72, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    world.blocks[anchor] = world.blocks[(0, 55, 0)] = "air"
+
+    with BotSession("tok", bot_username="OffsetHeightChange", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 72, -18), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        branch = BranchSpec("offset_retry", "north", 39, sidestep_dir="east", resume_kind="stair_down")
+        junction = engine._create_node(
+            kind="switchback", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, anchor]), branches=[branch],
+        )
+
+        def displaced_offset(**kwargs):
+            world.pos = [3.5, 53.0, 0.5]
+            if interrupted:
+                engine.bot.status()
+                raise _MiningDeadline
+            return {"steps_done": 3, "end_anchor": (3, 53, 0), "stop_reason": "time_slice",
+                    "waypoints": [anchor, (3, 53, 0)], "breaches_sealed": 0, "catch_placed": 0,
+                    "deferred_added": 0, "mined_ores": []}
+
+        monkeypatch.setattr(engine, "_dig_level_edge", displaced_offset)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1)
+
+    assert result["stop_reason"] == ("time_slice_progress" if interrupted else "movement_not_confirmed")
+    assert result["pos_after"][1] == 53
+    assert engine.active_node_id == junction.node_id
+    assert len(engine.nodes) == 2
+    assert branch.status == "pending"
+
+
+@pytest.mark.parametrize("steps", [1, 2])
+def test_interrupted_sidestep_only_promotes_a_confirmed_offset(monkeypatch, steps: int) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec, _MiningDeadline
+
+    anchor = (0, 54, 0)
+    world = _MockMineWorld(start_pos=(0.5, 54.0, 0.5), surface_y=72, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    for x in range(3):
+        for y in (54, 55):
+            world.blocks[(x, y, 0)] = "air"
+
+    with BotSession("tok", bot_username="InterruptedOffset", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 72, -18), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        branch = BranchSpec("offset_retry", "north", 39, sidestep_dir="east", resume_kind="stair_down",
+                            offset_tried=True, branch_target_y=15)
+        junction = engine._create_node(
+            kind="switchback", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, anchor]), branches=[branch],
+        )
+        starts = []
+
+        def cut_offset(**kwargs):
+            starts.append(tuple(math.floor(v) for v in world.pos))
+            for step in range(1, steps + 1):
+                world.pos[0] = step + 0.5
+                engine.bot.status()
+            raise _MiningDeadline
+
+        monkeypatch.setattr(engine, "_dig_level_edge", cut_offset)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1)
+        assert result["stop_reason"] == "time_slice_progress"
+        if steps == 1:
+            assert branch.status == "pending" and engine.active_node_id == junction.node_id
+            engine.run(target="ancient_debris", target_y=15, goal_count=1)
+            assert starts == [anchor, anchor]
+        else:
+            assert branch.status == "completed"
+            tip = engine.nodes[engine.active_node_id]
+            assert tip.kind == "switchback" and tip.parent_id == junction.node_id
+            assert tip.edge_from_parent == ShaftEdge("offset_sidestep", "east", [anchor, (1, 54, 0), (2, 54, 0)])
+            assert tip.branches == [BranchSpec("stair_down", "north", 39, offset_tried=True, branch_target_y=15)]
+
+
 def test_mining_dfs_64_block_radar_steers_spine_toward_distant_diamond() -> None:
     """P1-5 fix: 64-block radar detects exposed diamond ore 18 blocks east in cave wall and steers Spine east."""
     world = _MockMineWorld(
@@ -1451,6 +1538,42 @@ def test_fishbone_spine_descends_when_target_deepened() -> None:
             # tiny depth differences are ignored to avoid needless vertical churn
             eng.target_y = 16 - SPINE_DESCEND_MIN_DELTA
             assert "stair_down" not in [b.kind for b in eng._spine_branches("north", anchor, geofence=None)]
+
+
+def test_explore_deepens_an_existing_iron_spine_before_more_level_digging(monkeypatch) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    anchor = (0, 16, 0)
+    world = _MockMineWorld(start_pos=(0.5, 16.0, 0.5), surface_y=60,
+                           inventory_items=[{"name": "iron_pickaxe", "count": 1, "slot": 9}])
+    world.blocks[anchor] = world.blocks[(0, 17, 0)] = "air"
+    world.blocks[(-3, 13, 0)] = "diamond_ore"
+
+    with BotSession("tok", bot_username="RetargetIronSpine", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(44, 60, 0), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine.target_y = 16
+        side_branch = BranchSpec("branch_leaf", "south", 8)
+        spine = engine._create_node(
+            kind="spine", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "west", [collar.anchor, anchor]),
+            branches=[side_branch, BranchSpec("spine_forward", "west", 4)],
+        )
+
+        def wrong_layer(*args, **kwargs):
+            pytest.fail("continued digging the old iron layer before attempting descent")
+
+        monkeypatch.setattr(engine, "_dig_level_edge", wrong_layer)
+        result = engine.run(target="diamond", target_y=-54, goal_count=1, strategy="fishbone_scan")
+
+    assert result["stop_reason"] == "quota_reached"
+    assert result["pos_after"][1] < anchor[1]
+    assert engine.nodes[collar.node_id] is collar
+    assert side_branch.status == "pending"
+    assert any(node.parent_id == spine.node_id and node.anchor[1] < 16 for node in engine.nodes.values())
 
 
 def test_fishbone_spine_climbs_when_target_raised() -> None:
@@ -2323,21 +2446,29 @@ def test_return_repairs_missing_support_under_an_open_recorded_stair(monkeypatch
     assert not world.dig_log
 
 
-def test_return_jump_places_one_block_to_reach_recorded_vertical_waypoint(monkeypatch) -> None:
-    world = _MockMineWorld(start_pos=(0.5, 19.0, 0.5), surface_y=40)
-    lower, upper = (0, 19, 0), (0, 20, 0)
-    for y in (19, 20, 21):
+@pytest.mark.parametrize("height, start_offset", [(1, 0), (2, 0), (2, 1)])
+def test_return_jump_rejoins_a_recorded_vertical_gap(monkeypatch, height, start_offset) -> None:
+    world = _MockMineWorld(start_pos=(0.5, float(19 + start_offset), 0.5), surface_y=40)
+    lower, upper = (0, 19, 0), (0, 19 + height, 0)
+    for y in range(19 + start_offset, upper[1] + 2):
         world.blocks[(0, y, 0)] = "air"
     monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
 
     jumping = False
+    jump_base = 0
 
     def handler(request):
-        nonlocal jumping
+        nonlocal jumping, jump_base
         path = request.url.path.rsplit("/", 1)[-1]
         if path == "posture":
-            jumping = bool(json.loads(request.content)["jump"])
-            world.pos[1] = 20.1 if jumping else (20.0 if world.block_at(lower) == "cobblestone" else 19.0)
+            wants_jump = bool(json.loads(request.content)["jump"])
+            if wants_jump and not jumping:
+                jump_base = math.floor(world.pos[1])
+                world.pos[1] = jump_base + 1.1
+            elif jumping and not wants_jump:
+                placed = world.block_at((0, jump_base, 0)) == "cobblestone"
+                world.pos[1] = float(jump_base + placed)
+            jumping = wants_jump
             return httpx.Response(200, json={"ok": True, "result": {}})
         if path == "place":
             assert jumping
@@ -2350,11 +2481,18 @@ def test_return_jump_places_one_block_to_reach_recorded_vertical_waypoint(monkey
 
     with BotSession("tok", bot_username="VerticalReturn", transport=httpx.MockTransport(handler)) as bot:
         engine = MacroSkills(bot).mining_dfs
-        result = engine._walk_waypoints([lower, upper], min_hp_ref=[20.0])
+        collar = engine._create_node(kind="collar", anchor=upper, parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        tip = engine._create_node(
+            kind="switchback", anchor=lower, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [upper, lower]), branches=[],
+        )
+        result = engine.run(action="return_collar")
 
-    assert result == (True, None)
-    assert world.pos == [0.5, 20.0, 0.5]
-    assert world.place_log == [(lower, "cobblestone")]
+    assert result["ok"] is True
+    assert world.pos == [0.5, float(upper[1]), 0.5]
+    assert world.place_log == [((0, y, 0), "cobblestone") for y in range(19 + start_offset, upper[1])]
+    assert engine.active_node_id == tip.node_id
     assert not world.dig_log
     assert not jumping
 
@@ -2884,6 +3022,89 @@ def test_first_dig_timeout_does_not_block_the_next_safe_descent(monkeypatch) -> 
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("other_branch_cooling", [False, True])
+def test_cooling_leaf_resumes_a_pending_branch_at_the_same_depth(monkeypatch, other_branch_cooling: bool) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    world = _MockMineWorld(start_pos=(0.5, 15.0, 3.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    route = [(0, 15, z) for z in range(4)]
+    for x, y, z in route:
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(2, 15, 0)] = "ancient_debris"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+
+    with BotSession("tok", bot_username="CoolingLeafAtDepth", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        engine = skills.mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -49), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        junction = engine._create_node(
+            kind="spine", anchor=route[0], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, route[0]]),
+            branches=[BranchSpec("spine_forward", "east", 4)],
+        )
+        cooling = BranchSpec("branch_leaf", "south", 5)
+        engine._create_node(
+            kind="spine", anchor=route[-1], parent_id=junction.node_id,
+            edge_from_parent=ShaftEdge("branch_leaf", "south", route), branches=[cooling],
+        )
+        stalled = (0, 16, 4)
+        skills._avoid_temporarily(stalled, "dig_timeout", 30.0)
+        if other_branch_cooling:
+            skills._avoid_temporarily((1, 16, 0), "dig_timeout", 30.0)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1)
+
+    assert result["stop_reason"] == ("dig_cell_avoided" if other_branch_cooling else "quota_reached")
+    if other_branch_cooling:
+        assert engine.active_node_id == junction.node_id and not world.dig_log
+    assert result["pos_after"][1] == 15
+    assert engine.nodes[collar.node_id] is collar and cooling.status == "pending"
+    assert all(pos != stalled for pos, _, _ in world.dig_log)
+
+
+def test_repeated_first_dig_timeouts_relocate_an_idle_nether_collar(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 64.0, 0.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    old_site, new_site = (0, 64, 0), (18, 64, 0)
+    world.blocks[(18, 64, -1)] = "ancient_debris"
+    attempts = []
+
+    def handler(request):
+        if request.url.path.endswith("/dig") and world.pos[0] < 10:
+            attempts.append(tuple(json.loads(request.content)["pos"]))
+            clock.now += request.extensions["timeout"]["read"]
+            raise httpx.ReadTimeout("first dig stalled at the collar", request=request)
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="IdleNetherCollar", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        engine._init_collar(old_site, target_y=15, geofence=None, viable_dirs=["north", "east", "south", "west"])
+
+        def relocate(pos, **kwargs):
+            assert pos == old_site
+            world.pos = [18.5, 64.0, 0.5]
+            return new_site
+
+        monkeypatch.setattr(engine, "_relocate_to_fresh_collar_site", relocate)
+        args = dict(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=55)
+        for _ in range(mining.IDLE_CALLS_BEFORE_RELOCATE):
+            result = engine.run(**args)
+            assert result["timeout_path"] == "dig" and result["dug_count"] == 0
+        result = engine.run(**args)
+
+    assert len(set(attempts)) == len(attempts) == mining.IDLE_CALLS_BEFORE_RELOCATE
+    assert engine.nodes[engine.collar_node_id].anchor == new_site
+    assert result["stop_reason"] == "quota_reached"
+
+
 @pytest.mark.parametrize("dry_turn", [True, False])
 def test_timeout_after_walking_to_a_nether_switchback_cools_its_first_dig(monkeypatch, dry_turn: bool) -> None:
     import mc_agent.skills.mining_dfs as mining
@@ -2925,6 +3146,8 @@ def test_timeout_after_walking_to_a_nether_switchback_cools_its_first_dig(monkey
         )
         args = dict(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=55)
         first = engine.run(**args)
+        # In r64 another timed-out turn and actor dispatch took just over 30 seconds.
+        clock.sleep(31.25)
         second = engine.run(**args)
 
     assert first["stop_reason"] == "time_slice_progress"
@@ -2979,7 +3202,7 @@ def test_descent_cooldown_requires_time_to_dig(monkeypatch, first_slice_budget) 
             assert resumed["stop_reason"] == "dig_cell_avoided"
             assert len(attempts) == 1
             assert all(branch.status == "pending" for branch in collar.branches)
-            clock.now += 31
+            clock.sleep(mining.FIRST_DIG_TIMEOUT_COOLDOWN_S + 1)
             resumed = engine.run(**args)
         else:
             assert attempts[0] < 1.0
@@ -3133,6 +3356,43 @@ def test_descent_resumes_after_guardian_preemption(monkeypatch, steps_before_pre
     assert resumed["stop_reason"] == "quota_reached"
     assert resumed["target_gained"] == 1
     assert engine.collar_node_id == collar.node_id
+
+
+@pytest.mark.parametrize("connected", [True, False])
+def test_interrupted_descent_recovers_a_confirmed_stair_after_a_brief_detour(monkeypatch, connected: bool) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    origin = (0, 69, 0)
+    descent = [(-step, 69 - step, 0) for step in range(14)]
+    world = _MockMineWorld(start_pos=(0.5, 69.0, 0.5), surface_y=99)
+    with BotSession("tok", bot_username="InterruptedStraightStair", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 99, 30), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine._create_node(
+            kind="switchback", anchor=origin, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [collar.anchor, origin]),
+            branches=[mining.BranchSpec("stair_down", "west", 53, branch_target_y=16)],
+        )
+
+        def interrupt_after_descent(**kwargs):
+            for pt in [*descent[1:3], (-2, 68, 0), *descent[3:]]:
+                x, y, z = pt
+                world.pos = [x + 0.5, y, z + 0.5]
+                engine.bot.status()
+                if pt in descent and (connected or pt != descent[3]):
+                    engine._record_corridor(pt)
+            raise mining._MiningDeadline
+
+        monkeypatch.setattr(engine, "_dig_stair_down_edge", interrupt_after_descent)
+        result = engine.run(target="iron", target_y=16, goal_count=4)
+
+    assert result["pos_after"][1] == 56
+    tip = engine.nodes[engine.active_node_id]
+    assert tip.edge_from_parent.waypoints == (descent if connected else descent[:3])
+    assert tip.branches[0].steps == (40 if connected else 51)
 
 
 @pytest.mark.parametrize("deadline_expires", [False, True])
@@ -3720,6 +3980,95 @@ def test_explore_rejoins_a_recorded_stair_far_from_its_collar(monkeypatch) -> No
     assert result["target_gained"] == 1
     assert result["pos_after"][1] <= 4
     assert engine.collar_node_id == collar.node_id
+
+
+@pytest.mark.parametrize("lower_open", [True, False])
+def test_rejoin_prefers_a_nearby_route_below_the_current_height(monkeypatch, lower_open: bool) -> None:
+    world = _MockMineWorld(start_pos=(0.5, 20.0, 0.5), surface_y=65)
+    with BotSession("tok", bot_username="PreferLowerJoin", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 65, -30), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        high = engine._create_node(
+            kind="switchback", anchor=(0, 29, 5), parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, (0, 29, 5)]), branches=[],
+        )
+        low = engine._create_node(
+            kind="spine", anchor=(1, 16, 14), parent_id=high.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [high.anchor, (1, 16, 14)]), branches=[],
+        )
+        tip = engine._create_node(
+            kind="spine", anchor=(4, 16, 17), parent_id=low.node_id,
+            edge_from_parent=ShaftEdge("branch_leaf", "east", [low.anchor, (4, 16, 17)]), branches=[],
+        )
+        attempted = []
+
+        def move(cell, **kwargs):
+            attempted.append(cell)
+            return cell != low.anchor or lower_open
+
+        def walk(waypoints, **kwargs):
+            x, y, z = waypoints[-1]
+            world.pos = [x + 0.5, y, z + 0.5]
+            return True, None
+
+        monkeypatch.setattr(engine, "_move_exact", move)
+        monkeypatch.setattr(engine, "_walk_waypoints", walk)
+        result = engine._resume_shaft_tip(tip.node_id, min_hp_ref=[20.0])
+
+    assert result == (True, None) and engine.active_node_id == tip.node_id
+    assert attempted == ([low.anchor] if lower_open else [low.anchor, high.anchor])
+
+
+def test_blocked_spine_rejoin_tries_another_pending_node_at_depth(monkeypatch) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    junction_pos, pending_pos, spent_pos = (0, 16, 0), (6, 15, 0), (12, 15, 0)
+    world = _MockMineWorld(start_pos=(0.5, 16.0, 0.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    for x, y, z in (junction_pos, pending_pos):
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(8, 15, 0)] = "ancient_debris"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+
+    with BotSession("tok", bot_username="BlockedSpineRejoin", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -48), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        junction = engine._create_node(
+            kind="spine", anchor=junction_pos, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, junction_pos]), branches=[],
+        )
+        pending = engine._create_node(
+            kind="spine", anchor=pending_pos, parent_id=junction.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", [junction_pos, pending_pos]),
+            branches=[BranchSpec("spine_forward", "east", 4)],
+        )
+        spent = engine._create_node(
+            kind="spine", anchor=spent_pos, parent_id=pending.node_id,
+            edge_from_parent=ShaftEdge("branch_leaf", "east", [pending_pos, spent_pos]), branches=[],
+        )
+        attempted = []
+
+        def rejoin(node_id, **kwargs):
+            attempted.append(node_id)
+            if node_id == spent.node_id:
+                engine.active_node_id = junction.node_id
+                return False, "backtrack_blocked"
+            assert node_id == pending.node_id
+            world.pos = [6.5, 15.0, 0.5]
+            engine.active_node_id = pending.node_id
+            return True, None
+
+        monkeypatch.setattr(engine, "_resume_shaft_tip", rejoin)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1)
+
+    assert attempted == [spent.node_id, pending.node_id]
+    assert result["stop_reason"] == "quota_reached"
+    assert engine.nodes[collar.node_id] is collar
 
 
 @pytest.mark.parametrize("rejoinable", [True, False])
