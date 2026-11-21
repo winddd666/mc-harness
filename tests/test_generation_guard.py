@@ -10838,3 +10838,45 @@ def test_retreat_waits_for_ground_after_pathfinder_leg(monkeypatch, landing):
         assert outcome["reason"] == "unsafe_landing"
     if landing == "respawned":
         assert outcome["respawned"] is True and outcome["moved_dist"] == 0.0
+
+
+@pytest.mark.parametrize("shooter_visible", [True, False])
+def test_arrow_retreat_uses_the_live_shooter_when_nearest_hostile_is_a_creeper(monkeypatch, shooter_visible):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    creeper = {"id": 77, "name": "creeper", "dist": 4.2, "pos": [4.7, 30, 0.5]}
+    skeleton = {"id": 88, "name": "skeleton", "dist": 8.0, "pos": [0.5, 30, -7.5]}
+    status = {
+        "pos": [0.5, 30, 0.5], "dimension": "overworld", "health": 4.7, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": creeper,
+    }
+    retreat_targets = []
+
+    class GullyBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                events = [{"seq": 1, "type": "hurt", "source": "arrow"}]
+                return {"events": [] if kwargs["params"]["since"] else events, "last_seq": 1}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [creeper, skeleton] if shooter_visible else [creeper]}
+            return {"ok": True}
+
+    def flee(_env, threat_pos, **kwargs):
+        retreat_targets.append((threat_pos, kwargs.get("other_melee", [])))
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "dig_cover_pocket", lambda *_: {"ok": False, "reason": "no_solid_wall"})
+    def seek_cover(*_args, **_kwargs):
+        pytest.fail("nearby creeper makes stationary cover unsafe")
+
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    guard = GenerationGuard(GullyBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    assert guard.poll() is not None
+
+    expected = (skeleton["pos"], [creeper["pos"]]) if shooter_visible else (creeper["pos"], [])
+    assert retreat_targets == [expected]

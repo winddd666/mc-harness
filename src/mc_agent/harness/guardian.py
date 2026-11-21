@@ -735,7 +735,7 @@ class GenerationGuard:
             and best_melee_weapon_in_inv(counts) is None and not self._inside_own_shaft()
         )
         if "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
-            nh_name, _, nh_id, nh_pos = self._extract_hostile_info(status)
+            nh_name, nh_distance, nh_id, nh_pos = self._extract_hostile_info(status)
             now = time.monotonic()
             recent_melee = now - self._last_melee_hurt_at < 4.0
             mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
@@ -760,6 +760,11 @@ class GenerationGuard:
                 pos = nh_pos
             if not pos and resolve_melee:
                 pos = self._find_hostile_position(attacker_id, "", timeout_s=0.6)
+            attacker_name = str(attacker.get("name") or "").removeprefix("minecraft:") if isinstance(attacker, dict) else ""
+            shooter_unknown = scan_surface_shooters and attacker_name not in RANGED_MOBS and nh_name not in RANGED_MOBS
+            fallback_pos = pos if shooter_unknown else None
+            if shooter_unknown:
+                pos = None
             other_shooters = []
             check_blaze_cover = False
             if (
@@ -792,8 +797,17 @@ class GenerationGuard:
                         other_shooters.append(shooter_pos)
                 if (mixed_hurt or scan_surface_shooters) and not pos and other_shooters:
                     pos = other_shooters.pop(0)
+            close_contact = scan_surface_shooters and (
+                (nh_name == "creeper" and nh_distance <= 5.5)
+                or (nh_name in PRE_HURT_MELEE_MOBS and nh_distance <= 3.5)
+            )
+            pos = pos or fallback_pos
+            other_melee = [nh_pos] if (
+                close_contact and pos and nh_pos and pos != nh_pos
+                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in nh_pos[:3])
+            ) else []
             # A wall that blocks projectiles cannot protect us from a melee attacker already in reach.
-            if pos and (prefer_cover or check_blaze_cover) and not recent_melee:
+            if pos and (prefer_cover or check_blaze_cover) and not (recent_melee or close_contact):
                 cover_budget = 1.25 if check_blaze_cover else 2.25
                 allow_stationary = allow_stationary_cover and not (
                     "nether" in dimension and self._low_health_burning_after_ranged_hit(status, now)
@@ -811,6 +825,7 @@ class GenerationGuard:
             return self.combat_env.flee(
                 pos, wait_for_ground=True,
                 **({"other_shooters": other_shooters} if other_shooters else {}),
+                **({"other_melee": other_melee} if other_melee else {}),
                 **({"use_nearest_hostile": False} if resolve_melee and pos is None else {}),
             )
         result = self._run_recovery_macro(
