@@ -8390,6 +8390,60 @@ def test_directed_water_escape_searches_the_bank_at_the_post_surge_water_level()
     assert result["ok"] is True and result["in_water"] is False
 
 
+@pytest.mark.parametrize("bank_flooded", [False, True])
+def test_water_retry_rechecks_nearby_bank_before_swimming_past_it(monkeypatch, bank_flooded):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    bank = [7938.5, 63.0, 2777.5]
+    status = {
+        "pos": [7923.2, 62.8, 2778.8], "in_water": True, "submerged": False,
+        "on_ground": False, "alive": True, "ready": True, "dimension": "overworld",
+    }
+    attempts = []
+    retry = False
+    surges = []
+
+    class ShoreBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if (x, z) == (7938, 2777):
+                    return {"name": "stone" if y == 62 else "water" if y == 63 and bank_flooded else "air"}
+                return {"name": "water"}
+            if action == "move_to":
+                goal = [body["x"], body["y"], body["z"]]
+                attempts.append(goal)
+                if not retry:
+                    raise ApiError("path_not_found", "shore movement stalled")
+                if goal == bank:
+                    status.update(pos=goal, in_water=False, on_ground=True)
+            if action == "control" and not retry and body.get("ms") == 1150:
+                status.update(pos=[7936.0, 62.6, 2777.5])
+            if action == "control" and retry and body.get("ms") == 750:
+                surges.append(body["forward"])
+            return {"ok": True}
+
+    env = CombatEnv(ShoreBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_a, **_kw: None if retry else bank)
+
+    assert env.escape_deep_water_to_shore()["in_water"] is True
+    retry = True
+    status.update(submerged=True)
+    result = env.escape_deep_water_to_shore()
+
+    assert surges == [bank_flooded]
+    assert ("shore_bank_retry" in result["actions"]) is not bank_flooded
+    if bank_flooded:
+        assert attempts.count(bank) == 1
+        assert result["in_water"] is True
+    else:
+        assert attempts == [bank, bank]
+        assert result["ok"] is True and result["in_water"] is False
+
+
 @pytest.mark.parametrize("under_attack", [False, True])
 def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attack):
     from mc_agent.skills.combat_env import CombatEnv

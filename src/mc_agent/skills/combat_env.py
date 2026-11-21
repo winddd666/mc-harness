@@ -390,6 +390,7 @@ class CombatEnv:
         self._stalled_lava_shores: dict[tuple[float, ...], tuple[tuple[float, ...], float]] = {}
         self._stalled_lava_swim: tuple[tuple[float, ...], float, str, float] | None = None
         self._stalled_water_shore: tuple[tuple[float, ...], tuple[float, ...], tuple[Any, Any], float] | None = None
+        self._nearby_water_bank: tuple[tuple[float, ...], tuple[Any, Any], float] | None = None
         self._stalled_lava_notch: dict[tuple[str, tuple[int, int, int], str, str | None], float] = {}
 
     def surface_from_water(self, status: dict[str, Any]) -> dict[str, Any]:
@@ -2246,6 +2247,8 @@ class CombatEnv:
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
         st0 = self.bot.status()
+        previous_bank = self._nearby_water_bank
+        self._nearby_water_bank = None
         if st0.get("alive") is False or st0.get("ready") is False:
             return {
                 "ok": False,
@@ -2305,6 +2308,38 @@ class CombatEnv:
                 avoid_close_threat and has_threat and self._crosses_near_water_threat(pos, x, z, threat_pos)
             )
 
+        def nearby_bank_allowed(pos: Sequence[float], bank: Sequence[float]) -> bool:
+            return (
+                math.hypot(bank[0] - pos[0], bank[2] - pos[2]) <= 3.5
+                and abs(bank[1] - pos[1]) <= 1.25
+                and self._point_allowed(bank[0], bank[2], action="water_shore")
+                and not (
+                    avoid_close_threat and has_threat
+                    and self._crosses_near_water_threat(pos, bank[0], bank[2], threat_pos)
+                )
+            )
+
+        life = (st0.get("dimension"), st0.get("last_death"))
+        retry_bank = None
+        if previous_bank is not None:
+            bank, bank_life, bank_at = previous_bank
+            if life == bank_life and time.monotonic() - bank_at < 12.0 and nearby_bank_allowed(pos0, bank):
+                self.invalidate_block_cache()
+                bx, by, bz = map(math.floor, bank)
+                deadline = time.monotonic() + 0.6
+                try:
+                    floor, feet, head = (
+                        self._get_block_name(bx, by + dy, bz, strict=True, deadline=deadline) for dy in (-1, 0, 1)
+                    )
+                except _TerrainProbeExpired:
+                    pass
+                else:
+                    if (
+                        floor not in HAZARD_BLOCK_TYPES and _is_solid_ground(floor)
+                        and _is_passable(feet) and _is_passable(head)
+                    ):
+                        retry_bank = list(bank)
+
         # Hold buoyancy + shield while locating shoreline or breaking surface.
         try:
             self.bot.call(
@@ -2318,6 +2353,7 @@ class CombatEnv:
         if surface_first or bool(st0.get("submerged")) or (isinstance(oxy0, (int, float)) and oxy0 < 260):
             swim_forward = (
                 not (surface_first or has_threat or keep_shield)
+                and retry_bank is None
                 and swim_step_allowed(pos0, float(st0.get("yaw") or 0.0))
             )
             try:
@@ -2342,23 +2378,27 @@ class CombatEnv:
         search_pos = search_status.get("pos") or pos0
         shore_x, shore_y, shore_z = map(float, search_pos[:3])
         by = math.floor(shore_y + 0.05)
-        life = (st0.get("dimension"), st0.get("last_death"))
         excluded_shore = None
         if self._stalled_water_shore is not None:
             stalled_shore, stalled_pos, stalled_life, stalled_at = self._stalled_water_shore
             if life == stalled_life and time.monotonic() - stalled_at < 15.0 and math.dist(search_pos[:3], stalled_pos) <= 2.5:
                 excluded_shore = stalled_shore
                 actions.append("shore_lip_stalled")
-        shore_target = self._find_walkable_shore_target(
-            search_pos,
-            block_types=SHORE_LAND_BLOCKS,
-            max_radius=max_radius,
-            min_y=by - 1,
-            max_y=by + 2,
-            threat_pos=threat_pos,
-            avoid_close_threat=avoid_close_threat,
-            excluded_shores=(excluded_shore,) if excluded_shore is not None else (),
-        )
+        retrying_bank = retry_bank is not None and nearby_bank_allowed(search_pos, retry_bank)
+        if retrying_bank:
+            shore_target = retry_bank
+            actions.append("shore_bank_retry")
+        else:
+            shore_target = self._find_walkable_shore_target(
+                search_pos,
+                block_types=SHORE_LAND_BLOCKS,
+                max_radius=max_radius,
+                min_y=by - 1,
+                max_y=by + 2,
+                threat_pos=threat_pos,
+                avoid_close_threat=avoid_close_threat,
+                excluded_shores=(excluded_shore,) if excluded_shore is not None else (),
+            )
 
         # 2. Radial fallback if find_blocks yielded no dry surface spot.
         if shore_target is None:
@@ -2575,6 +2615,12 @@ class CombatEnv:
             and math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
         ):
             self._stalled_water_shore = (tuple(shore_target), tuple(pos_end[:3]), life, time.monotonic())
+        if (
+            still_wet and not retrying_bank and shore_target is not None and "shore_lip_jump" in actions
+            and life == (st_end.get("dimension"), st_end.get("last_death"))
+            and nearby_bank_allowed(pos_end, shore_target)
+        ):
+            self._nearby_water_bank = (tuple(shore_target), life, time.monotonic())
         return {
             "ok": not still_wet and landed,
             "in_water": still_wet,
