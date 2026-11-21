@@ -7692,6 +7692,33 @@ def test_water_macro_restores_raised_shield_on_dry_landing(landing):
         assert "shield_restored" not in water["result"]
 
 
+@pytest.mark.parametrize("starts_in_lava", [True, False])
+def test_directed_shore_escape_does_not_report_lava_as_dry_land(starts_in_lava):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [-6139.7, 43.2, -6089.7], "in_water": not starts_in_lava, "in_lava": starts_in_lava,
+        "on_ground": starts_in_lava, "ready": True, "alive": True, "dimension": "overworld",
+    }
+    commands = []
+
+    class FloodedCaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            commands.append(action)
+            if action == "control":
+                status.update(in_water=False, in_lava=True, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(FloodedCaveBot()).escape_deep_water_to_shore(surface_first=True)
+
+    assert result["ok"] is False and result["in_lava"] is True
+    assert result["mode"] == "entered_lava"
+    assert commands == ([] if starts_in_lava else ["posture", "control"])
+
+
 @pytest.mark.parametrize("terrain", ["scan", "radial", "open_water"])
 def test_flooded_cave_escape_uses_local_water_level(terrain):
     from mc_agent.skills.combat_env import CombatEnv

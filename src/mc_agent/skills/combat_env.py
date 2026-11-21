@@ -2252,6 +2252,11 @@ class CombatEnv:
                 "mode": "not_ready",
                 "pos_after": st0.get("pos"),
             }
+        if st0.get("in_lava"):
+            return {
+                "ok": False, "in_water": bool(st0.get("in_water")), "in_lava": True,
+                "mode": "entered_lava", "pos_after": st0.get("pos"),
+            }
         if not bool(st0.get("in_water")):
             landed = st0.get("on_ground") is not False
             return {
@@ -2274,12 +2279,19 @@ class CombatEnv:
                 math.hypot(float(pos[0]) - start_x, float(pos[2]) - start_z) > 64.0
                 or (st.get("last_death") is not None and st["last_death"] != st0.get("last_death"))
             )
-            if not respawned and st.get("alive") is not False and st.get("ready") is not False:
+            if respawned:
+                mode = "respawned"
+            elif st.get("alive") is False or st.get("ready") is False:
+                mode = "not_ready"
+            elif st.get("in_lava"):
+                mode = "entered_lava"
+            else:
                 return None
             return {
                 "ok": False,
                 "in_water": bool(st.get("in_water", True)),
-                "mode": "respawned" if respawned else "not_ready",
+                "mode": mode,
+                **({"in_lava": True} if mode == "entered_lava" else {}),
                 "shore_target": shore_target,
                 "actions": actions,
                 "pos_after": pos,
