@@ -225,7 +225,7 @@ class GenerationGuard:
     LAVA_ESCAPE_BUDGET_S = 6.5
     WATER_ESCAPE_BUDGET_S = 20.0
     SURFACE_WATER_ESCAPE_BUDGET_S = 4.0
-    TRIDENT_WATER_ESCAPE_BUDGET_S = 4.0
+    COMBAT_WATER_ESCAPE_BUDGET_S = 4.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -483,6 +483,15 @@ class GenerationGuard:
             and (status.get("on_ground") is False or bool(status.get("submerged")))
         )
 
+    @staticmethod
+    def _short_water_escape_after_hit(status: dict[str, Any], source: Any) -> bool:
+        source = str(source or "").strip().lower()
+        health = status.get("health")
+        return source == "trident" or (
+            isinstance(health, (int, float)) and 0 < health <= 14.0
+            and (source in MELEE_HURT_SOURCES or source in RANGED_HURT_SOURCES)
+        )
+
     def _unstick_in_wall(self, before: dict[str, Any]) -> dict[str, Any]:
         return self._run_recovery_macro(before, lambda skills: skills.unstick(), budget_s=self.IN_WALL_RECOVERY_BUDGET_S)
 
@@ -522,7 +531,7 @@ class GenerationGuard:
             now = time.monotonic()
             recent_melee = now - self._last_melee_hurt_at < 4.0
             mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
-            burning_blaze = "nether" in dimension and ranged and low_health and status.get("on_fire") and nh_name == "blaze"
+            burning_blaze = "nether" in dimension and ranged and status.get("on_fire") and nh_name == "blaze"
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
             other_shooters = []
@@ -571,7 +580,7 @@ class GenerationGuard:
                 if cover is not None:
                     return cover
             return self.combat_env.flee(
-                pos, wait_for_ground=retreat_only or status.get("on_ground") is False,
+                pos, wait_for_ground=True,
                 **({"other_shooters": other_shooters} if other_shooters else {}),
             )
         result = self._run_recovery_macro(
@@ -829,15 +838,14 @@ class GenerationGuard:
             ranged_min_dist = max(ranged_min_dist, 20.0)
         ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
         recent_ranged_hit = now - self._last_ranged_hurt_at < 8.0
-        protecting_against_recent_hit = status.get("blocking") and (
-            recent_ranged_hit or now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
-        )
+        recent_melee_hit = now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
+        in_nether = str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+        protecting_against_recent_hit = status.get("blocking") and (recent_ranged_hit or recent_melee_hit)
         # A Nether shooter can keep firing while missing from the nearest-hostile snapshot.
-        burning_after_ranged_hit = (
-            status.get("on_fire") and recent_ranged_hit
-            and str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+        recent_nether_threat = in_nether and (
+            recent_melee_hit or (status.get("on_fire") and recent_ranged_hit)
         )
-        if (ranged_in_range or protecting_against_recent_hit or burning_after_ranged_hit) and not self._inside_own_shaft():
+        if (ranged_in_range or protecting_against_recent_hit or recent_nether_threat) and not self._inside_own_shaft():
             return False
         return True
 
@@ -1449,8 +1457,8 @@ class GenerationGuard:
                     and not self._swimming_at_low_health(status) and not close_drowned_hit
                 ):
                     if not _already("escape_water"):
-                        trident_hit = any(str(h.get("source") or "").strip().lower() == "trident" for h in hurts)
-                        budget = {"budget_s": self.TRIDENT_WATER_ESCAPE_BUDGET_S} if trident_hit else {}
+                        short_escape = any(self._short_water_escape_after_hit(status, h.get("source")) for h in hurts)
+                        budget = {"budget_s": self.COMBAT_WATER_ESCAPE_BUDGET_S} if short_escape else {}
                         actions.append(self._action("escape_water", lambda: self._escape_water(status, **budget)))
                     esc_act = next((a for a in actions if a.get("action") == "escape_water"), None)
                     esc_res = esc_act.get("result") if isinstance(esc_act, dict) and isinstance(esc_act.get("result"), dict) else {}
@@ -1774,6 +1782,7 @@ class GenerationGuard:
                             self._consecutive_flees = 0
                 else:
                     self._shield_only_streak = 0
+                    cf = None
                     raw_dist = (attacker or status.get("nearest_hostile") or {}).get("dist", 99.0)
                     try:
                         eff_dist = float(raw_dist)
@@ -1820,6 +1829,30 @@ class GenerationGuard:
                             self._consecutive_flees += 1
                         else:
                             self._consecutive_flees = 0
+                    if (
+                        str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                        and already_blocking and hurt_src in MELEE_HURT_SOURCES and cf
+                        and (cf.get("result") or {}).get("reason") == "no_safe_retreat"
+                    ):
+                        try:
+                            landing = self.bot.call("status", method="GET", timeout_s=0.6)
+                        except (ApiError, httpx.HTTPError):
+                            landing = {}
+                        mob, dist, target_id, _ = self._extract_hostile_info(landing)
+                        current_hp = landing.get("health")
+                        if (
+                            landing.get("blocking") and landing.get("on_ground") is True
+                            and landing.get("ready") is not False and landing.get("alive") is not False
+                            and not landing.get("in_lava") and not landing.get("in_water")
+                            and landing.get("last_death") == status.get("last_death")
+                            and landing.get("dimension") == status.get("dimension")
+                            and isinstance(current_hp, (int, float)) and 0 < current_hp <= LOW_HP_BUNKER_MAX
+                            and mob in PRE_HURT_MELEE_MOBS and target_id is not None and dist <= 3.5
+                        ):
+                            actions.append(self._action(
+                                "face_attacker_after_retreat",
+                                lambda: self.bot.call("look", {"entity_id": target_id}, timeout_s=0.9),
+                            ))
 
             if should_eat and (
                 not effective_combat_hurt
@@ -2492,11 +2525,11 @@ class GenerationGuard:
                     esc_pre_ok = False
                     esc_pre_respawned = False
                     if not forced_pre_shore and not drowning_pre:
-                        trident_exposure = trigger.get("hurt_source") == "trident" or (
+                        short_escape = self._short_water_escape_after_hit(st_pre, trigger.get("hurt_source")) or (
                             trigger.get("source") == "tool_interrupted_hurt"
                             and (trigger.get("primary_type") == "drowned" or self._extract_hostile_info(st_pre)[0] == "drowned")
                         )
-                        budget = {"budget_s": self.TRIDENT_WATER_ESCAPE_BUDGET_S} if trident_exposure else {}
+                        budget = {"budget_s": self.COMBAT_WATER_ESCAPE_BUDGET_S} if short_escape else {}
                         esc_act = self._action(
                             "escape_water", lambda: self._escape_water(st_pre, **budget), raise_on_http_error=False,
                         )
@@ -2948,10 +2981,10 @@ class GenerationGuard:
                 esc_b_ok = False
                 esc_b_respawned = False
                 if not forced_shore_b:
-                    trident_hit = any(str(h.get("source") or "").strip().lower() == "trident" for h in hurts)
+                    short_escape = any(self._short_water_escape_after_hit(status, h.get("source")) for h in hurts)
                     budget = {}
-                    if trident_hit:
-                        budget["budget_s"] = self.TRIDENT_WATER_ESCAPE_BUDGET_S
+                    if short_escape:
+                        budget["budget_s"] = self.COMBAT_WATER_ESCAPE_BUDGET_S
                     elif tool_stopped_in_water:
                         budget["budget_s"] = self.SURFACE_WATER_ESCAPE_BUDGET_S
                     esc = self._action(

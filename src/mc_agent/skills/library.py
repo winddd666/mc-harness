@@ -1364,6 +1364,7 @@ class MacroSkills:
         self.protected_positions: set[tuple[int, int, int]] = set()
         self.temporary_avoidance: dict[tuple[int, int, int], dict[str, Any]] = {}
         self.failed_stair_dirs: dict[tuple[int, int, int, str], dict[str, tuple[float, str]]] = {}
+        self._pillar_fallbacks: dict[tuple[str, int, int], tuple[int, float]] = {}
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
         self._mining_dfs: Any = None
         self.world_memory: Any = None
@@ -7244,6 +7245,7 @@ class MacroSkills:
             }
 
         stair_deadline = self.bot.deadline
+        fallback_count = 0
         for step_idx in range(steps if stop_reason == "completed" else 0):
             # BUG-037: the first step often needs walk+dig+confirm and was
             # timing out at per_step_timeout with zero progress. Give step 0
@@ -7501,12 +7503,28 @@ class MacroSkills:
                         not _is_non_solid_support(_block_name(cell)) for cell in face_cells
                     )
                     if not has_place_face:
+                        column = (normalize_dimension(st.get("dimension")), bx, bz)
+                        now = time.monotonic()
+                        for key, (_, expiry) in list(self._pillar_fallbacks.items()):
+                            if expiry <= now:
+                                del self._pillar_fallbacks[key]
+                        fallback_count, expiry = self._pillar_fallbacks.get(column, (0, 0.0))
+                        if fallback_count >= 2:
+                            stop_reason = "pillar_fallback_cooldown"
+                            last_error = {
+                                "code": stop_reason,
+                                "pos": [bx, by, bz],
+                                "retry_after_s": math.ceil(expiry - now),
+                            }
+                            break
                         recovery = self._dig_pillar_up(steps=1, stop_on_ore=False)
                         if recovery.get("ok"):
                             steps_done += int(recovery.get("steps_done") or 0)
                             dug_count += int(recovery.get("dug_count") or 0)
                             placed_count += int(recovery.get("placed_count") or 0)
                             stop_reason = "pillar_fallback"
+                            fallback_count += 1
+                            self._pillar_fallbacks[column] = (fallback_count, time.monotonic() + 120.0)
                         else:
                             last_error = recovery.get("last_error") or {
                                 "code": "no_place_face", "pos": [nx, by, nz],
@@ -7618,10 +7636,13 @@ class MacroSkills:
             out_stair["last_error"] = last_error
         if stop_reason == "pillar_fallback":
             out_stair["fallback"] = "pillar"
-            out_stair["hint"] = (
-                "目标台阶四周没有可放置面（no_support），已原地安全垫高一格。"
-                "请从新高度重新调用 mc_skill_staircase；若仍无支撑，继续 vertical='pillar'。"
-            )
+            if fallback_count >= 2:
+                out_stair["requires_replan"] = True
+                out_stair["hint"] = "同一站位已两次自动垫高。请用 mc_move_to 或 mc_skill_unstick 换到有支撑的站位，再规划阶梯。"
+            else:
+                out_stair["hint"] = "目标台阶没有可放置面，已垫高一格。请从新高度检查有支撑的横向路线。"
+        if stop_reason == "pillar_fallback_cooldown":
+            out_stair["hint"] = "该柱的自动垫高仍在冷却。请用 mc_move_to 或 mc_skill_unstick 换到有支撑的站位。"
         if stop_reason == "dig_cell_avoided":
             out_stair["hint"] = (
                 "该格刚发生 dig 超时（同一格已临时避开 30s），本次未再挖掘。"
