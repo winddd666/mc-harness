@@ -3706,10 +3706,11 @@ def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch):
 
 
 @pytest.mark.parametrize("fallback", ["bridge", "alternate_bank"])
-def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkeypatch, fallback):
-    from mc_agent.skills.combat_env import CombatEnv
-
+@pytest.mark.parametrize("status_timeout", [False, True])
+def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkeypatch, fallback, status_timeout):
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     shore = [3188.5, 66, -2046.5]
     status = {
         "pos": [3186.7, 64.6, -2046.8], "health": 20, "alive": True, "ready": True,
@@ -3718,12 +3719,20 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
     calls = []
     can_bridge = False
     headings = []
+    check_first_path = False
 
     class LavaBot:
         def status(self):
             return dict(status)
 
         def call(self, action, body=None, **kwargs):
+            nonlocal check_first_path
+            if action == "status":
+                if check_first_path and status_timeout:
+                    check_first_path = False
+                    clock[0] += kwargs["timeout_s"]
+                    raise httpx.ReadTimeout("shore verification exceeded the recovery deadline")
+                return self.status()
             if action == "inventory":
                 return {"items": [{"name": "cobblestone", "count": 4}] if can_bridge else []}
             if action == "get_block":
@@ -3735,11 +3744,16 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
                 ]}
             if action == "look":
                 headings.append(body["yaw"])
+                clock[0] += 0.6
+            if action == "control" and body.get("forward"):
+                clock[0] += body["ms"] / 1000
             if action == "move_to":
                 calls.append(action)
                 if body["x"] == shore[0]:
                     # The pathfinder replies successfully before the bot leaves the lava hitbox.
                     status["pos"] = [3186.7, 64.6, -2046.2]
+                    clock[0] += 1.8
+                    check_first_path = True
                 else:
                     assert fallback == "alternate_bank" and body["x"] == 3183.5
                     status.update(in_lava=False, on_ground=True, pos=[body["x"], body["y"], body["z"]])
@@ -3748,12 +3762,22 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
                 status.update(in_lava=False, on_ground=True, pos=[3186.7, 65, -2046.2])
             return {"ok": True}
 
-    env = CombatEnv(LavaBot())
-    monkeypatch.setattr(env, "scan_safe_yaws", lambda *args, **kwargs: {})
+    guard = GenerationGuard(LavaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    env = guard.combat_env
+
+    def scan(*args, **kwargs):
+        clock[0] += 1.3
+        return {}
+
+    monkeypatch.setattr(env, "scan_safe_yaws", scan)
     if fallback == "bridge":
         monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *args, **kwargs: shore)
     first = env.escape_lava()
-    assert not first["ok"] and "lava_move_to_shore" in first["actions"]
+    assert not first["ok"]
+    if status_timeout:
+        assert first["reason"] == "time_budget"
+    else:
+        assert "lava_move_to_shore" in first["actions"]
 
     can_bridge = fallback == "bridge"
     second = env.escape_lava()
