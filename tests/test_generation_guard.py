@@ -901,6 +901,41 @@ def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life
     assert [event["type"] for event in events] == ["guardian.preempted_tool"]
 
 
+@pytest.mark.parametrize("respawned", [False, True])
+def test_interrupted_tool_reports_combat_api_failure_and_rechecks_life(monkeypatch, respawned):
+    status = {
+        "pos": [-10972.3, 72, -11002.3], "health": 2.8, "food": 17, "ready": True,
+        "alive": True, "dimension": "overworld", "on_ground": False, "last_death": {"t": 1},
+    }
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            pytest.fail(f"unexpected action {action}")
+
+    def fail_combat(_env, _trigger):
+        if respawned:
+            status.update(pos=[-10971.5, 79.1, -11001.5], health=20, last_death={"t": 2})
+        raise ApiError("not_loaded", "chunk not loaded")
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_slot, "handle", fail_combat)
+    receipt = guard.handle_preemption({
+        "source": "tool_interrupted_hurt", "primary_type": "pillager",
+        "primary_entity_id": 5014994, "hurt_source": "arrow",
+    }, interrupted_name="mc_skill_unstick")
+
+    assert receipt["requires_replan"] is True
+    assert receipt["reflex_mode"] == ("life_unavailable" if respawned else "combat_failed")
+    assert "not_loaded" in receipt["message"]
+    assert "已完成" not in receipt["message"]
+    assert receipt["status_after"]["pos"] == status["pos"]
+    assert (guard._ranged_combat_stance_until == float("-inf")) is respawned
+
+
 def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
@@ -5047,15 +5082,16 @@ def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, sho
     assert retreats == [expected]
 
 
+@pytest.mark.parametrize("shielded", [False, True])
 @pytest.mark.parametrize("scan", ["visible", "timeout"])
-def test_unshielded_surface_ranged_retreat_accounts_for_nearby_shooters(monkeypatch, scan):
+def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, scan, shielded):
     from mc_agent.skills.combat_env import CombatEnv
 
     primary = {"id": 4882325, "name": "pillager", "pos": [-10959.1, 72, -11030.2], "dist": 7.3}
     secondary = {"id": 4883019, "name": "pillager", "pos": [-10965.5, 72, -11050.4], "dist": 13.5}
     status = {
-        "pos": [-10962.4, 72, -11038], "health": 5.33, "food": 20, "dimension": "overworld",
-        "ready": True, "alive": True, "on_ground": True, "blocking": False,
+        "pos": [-10962.4, 72, -11038], "health": 2.39 if shielded else 5.33, "food": 20, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "blocking": shielded,
         "nearest_hostile": primary,
     }
     plans = []
@@ -5068,7 +5104,10 @@ def test_unshielded_surface_ranged_retreat_accounts_for_nearby_shooters(monkeypa
                 hit = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": primary}
                 return {"events": [] if kwargs["params"]["since"] else [hit]}
             if action == "inventory":
-                return {"items": [], "offhand": None}
+                return {"items": [], "offhand": {"name": "shield"} if shielded else None}
+            if action == "look":
+                assert shielded
+                return {"ok": True}
             if action == "get_entities":
                 assert kwargs["timeout_s"] == 0.6 and kwargs["allow_reauth"] is False
                 if scan == "timeout":
@@ -5091,7 +5130,10 @@ def test_unshielded_surface_ranged_retreat_accounts_for_nearby_shooters(monkeypa
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
     monkeypatch.setattr(guard.combat_env, "flee", flee)
 
-    assert [a["action"] for a in guard.poll()["actions"]] == ["dig_cover", "combat_or_flee"]
+    expected_actions = ["dig_cover", "combat_or_flee"]
+    if shielded:
+        expected_actions = ["face_attacker", *expected_actions, "face_attacker_after_retreat"]
+    assert [a["action"] for a in guard.poll()["actions"]] == expected_actions
     extra = [secondary["pos"]] if scan == "visible" else []
     assert plans == [("cover", primary["pos"], extra), ("flee", primary["pos"], extra)]
 
@@ -7974,8 +8016,8 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
 
 
 @pytest.mark.parametrize("scenario", [
-    "ordinary", "surface_tool", "flooded_staircase", "submerged_move", "boundary_trident", "poll_trident",
-    "boundary_melee", "poll_melee", "tool_melee",
+    "ordinary", "surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
+    "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee",
 ])
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
     clock = [1000.0]
@@ -7983,7 +8025,7 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     events = []
     calls = []
     status = {"pos": [0.5, 52, 0.5], "health": 14 if scenario.endswith("melee") else 20, "oxygen": 240, "in_water": True,
-              "submerged": True, "on_ground": False, "alive": True, "ready": True}
+              "submerged": scenario != "surface_partial_move", "on_ground": False, "alive": True, "ready": True}
 
     class DeepWaterBot:
         def call(self, action, body=None, **kwargs):
@@ -8038,9 +8080,11 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
                 "ok": False, "stop_reason": "dig_failed",
                 "last_error": {"code": "unsafe_refilled_cell", "pos": [0, 53, 0], "block": "water"},
             }
-        if scenario == "submerged_move":
-            receipt = {"ok": True, "result": {"pos": status["pos"]}}
-        tool_results = [json.dumps(receipt)] if scenario in {"surface_tool", "flooded_staircase", "submerged_move"} else None
+        if scenario in {"submerged_move", "surface_partial_move"}:
+            receipt = {"ok": True, "result": {"pos": status["pos"], "partial_move": scenario == "surface_partial_move"}}
+        tool_results = [json.dumps(receipt)] if scenario in {
+            "surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
+        } else None
         assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools(tool_results)
     completed = [e for e in events if e["type"] == "guardian.action.completed"]
     shallow, shore = completed
@@ -9201,7 +9245,7 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
 
 
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
-@pytest.mark.parametrize("failure", ["timeout", "death"])
+@pytest.mark.parametrize("failure", ["timeout", "death", "failed_respawn"])
 def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
@@ -9223,6 +9267,9 @@ def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monk
                 if failure == "timeout":
                     clock[0] += kwargs["timeout_s"]
                     raise httpx.ReadTimeout("wall dig reached its deadline")
+                if failure == "failed_respawn":
+                    status.update(pos=[-152.5, 71, -382.5], health=20, last_death={"t": 2})
+                    return {"ok": False, "error": {"code": "unsafe_landing"}, "pos_after": status["pos"]}
                 status.update(health=0, ready=False, alive=False)
             return {"ok": True}
 
