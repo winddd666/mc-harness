@@ -3356,8 +3356,16 @@ class SubcorticalInstinctController:
                 eff_id = int(target_ent["id"]) if isinstance(target_ent, dict) and target_ent.get("id") is not None else mob_id
                 if eff_id is None:
                     break
+                # Keep part of the slot budget for the reply, final status and control release.
+                remaining = deadline - time.monotonic()
+                if remaining < 1.5:
+                    break
+                attack_ms = min(2600, int((remaining - 0.9) * 1000))
                 try:
-                    atk = env.bot.call("attack", {"entity_id": eff_id, "timeout": 2600, "stop_on": ["death"]})
+                    atk = env.bot.call(
+                        "attack", {"entity_id": eff_id, "timeout": attack_ms, "stop_on": ["death"]},
+                        timeout_s=attack_ms / 1000 + 0.35, allow_reauth=False,
+                    )
                     hits = atk.get("hits")
                     actions.append({"action": "melee_attack", "weapon": weapon, "entity_id": eff_id, "ok": True, "killed": bool(atk.get("killed"))})
                     if atk.get("killed"):
@@ -3446,9 +3454,14 @@ class SubcorticalInstinctController:
                     else:
                         env.bot.call("posture", {"shield": False, "sneak": False, "jump": False})
                         for _ in range(3):
-                            if time.monotonic() >= deadline:
+                            remaining = deadline - time.monotonic()
+                            if remaining < 1.5:
                                 break
-                            atk_r = env.bot.call("attack", {"entity_id": int(mob_id), "timeout": 2400, "stop_on": ["death"]})
+                            attack_ms = min(2400, int((remaining - 0.9) * 1000))
+                            atk_r = env.bot.call(
+                                "attack", {"entity_id": int(mob_id), "timeout": attack_ms, "stop_on": ["death"]},
+                                timeout_s=attack_ms / 1000 + 0.35, allow_reauth=False,
+                            )
                             hits_r = atk_r.get("hits")
                             killed_r = bool(atk_r.get("killed"))
                             actions.append({"action": "shield_rush_attack", "ok": True, "killed": killed_r})

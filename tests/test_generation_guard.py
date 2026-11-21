@@ -2662,6 +2662,57 @@ def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush():
     assert any(a["action"] == "shield_rush_attack" and a.get("killed") is True for a in out_s["actions"])
 
 
+@pytest.mark.parametrize("ranged", [False, True])
+@pytest.mark.parametrize("slow_status", [False, True])
+def test_combat_attacks_reserve_time_for_final_status_and_release(monkeypatch, ranged, slow_status):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    mob = "skeleton" if ranged else "zombie"
+    threat = {"id": 42, "name": mob, "pos": [2.5, 64, 0.5], "dist": 2.0}
+    attacks = []
+    reads = []
+    commands = []
+
+    class ArenaBot:
+        def status(self):
+            if slow_status and len(attacks) == 2 and not reads:
+                reads.append(clock[0])
+                clock[0] += 0.9
+            return {"pos": [0.5, 64, 0.5], "health": 20, "food": 20, "on_ground": True,
+                    "ready": True, "alive": True, "nearest_hostile": threat}
+
+        def call(self, action, body=None, **kwargs):
+            commands.append((action, body))
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [threat]}
+            if action == "attack":
+                ms = body["timeout"]
+                assert kwargs["timeout_s"] == pytest.approx(ms / 1000 + 0.35)
+                assert kwargs["allow_reauth"] is False
+                attacks.append(ms)
+                clock[0] += 2.7 if len(attacks) <= 2 else ms / 1000
+                return {"hits": 1, "killed": len(attacks) == 3}
+            return {"ok": True}
+
+    env = CombatEnv(ArenaBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "chase_to_range", lambda *_a, **_kw: {"ok": True})
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_ranged" if ranged else "pre_hurt_melee", "primary_type": mob,
+        "primary_entity_id": 42, "distance": 2.0,
+    })
+
+    assert attacks[:2] == [2400 if ranged else 2600] * 2
+    assert attacks[2:] == ([] if slow_status else [pytest.approx(1200, abs=1)])
+    assert clock[0] < 1007.0
+    assert commands[-1] == ("posture", {})
+    assert outcome["status_after"]["health"] == 20
+
+
 @pytest.mark.parametrize("scenario", ["cornered", "escaped", "second_hostile", "out_of_reach"])
 def test_cornered_unshielded_bot_strikes_once_only_against_a_close_lone_melee_mob(monkeypatch, scenario):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
