@@ -1777,6 +1777,32 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
     },
 }
 
+def _with_eye_scout_direction(raw: str, directions: tuple[str, ...]) -> str:
+    """Translate a confirmed eye's world-space vector to the scout's heading."""
+    try:
+        receipt = json.loads(raw)
+    except ValueError:
+        return raw
+    if not isinstance(receipt, dict) or receipt.get("ok") is not True:
+        return raw
+    result = receipt.get("result")
+    if not isinstance(result, dict) or result.get("projectile") != "eye_of_ender":
+        return raw
+    vector = result.get("eye_vector")
+    if not isinstance(vector, list) or len(vector) != 2:
+        return raw
+    try:
+        dx, dz = map(float, vector)
+    except (TypeError, ValueError, OverflowError):
+        return raw
+    if not (math.isfinite(dx) and math.isfinite(dz) and (dx or dz)):
+        return raw
+    sectors = len(directions)
+    sector = math.floor(math.atan2(dz, dx) * sectors / math.tau + 0.5) % sectors
+    result["scout_direction"] = directions[sector]
+    return json.dumps(receipt, ensure_ascii=False)
+
+
 STRONGHOLD_TOOLS = ("mc_use_item", "mc_skill_scout_surface", "mc_skill_collect_drops", "mc_status", "mc_inventory")
 STRONGHOLD_FOCUS = (
     {
@@ -1784,13 +1810,13 @@ STRONGHOLD_FOCUS = (
         "title": "60分：从村庄跟随末影之眼进入要塞",
         "task": (
             "从村庄出发寻找并进入天然主世界要塞。背包有 14 颗末影之眼。先在开阔处调用 "
-            "mc_use_item(item='ender_eye')。用回执中的 eye_vector=[dx,dz] 判断方向。"
-            "正 X 向东，正 Z 向南，两轴都明显时用对应对角方向。bearing_deg 的 0/90/180/270 分别是南/西/北/东。"
+            "mc_use_item(item='ender_eye')。把回执的 scout_direction 原样传给斥候工具。"
+            "若只能读 eye_vector=[dx,dz]，正 X 向东、负 X 向西、正 Z 向南、负 Z 向北。"
             "若回执没有 eye_vector 或 projectile 指向其他实体，立即用 mc_get_entities(types=['eye_of_ender'], radius=32)，"
             "把眼的位置减去你的位置得到方向。"
             "沿眼指向用 mc_skill_scout_surface(direction=方向, target_types=['end_portal_frame'], "
-            "step_dist=30, max_duration_s=45) 分段推进。用 mc_skill_collect_drops 回收附近落下的眼后再测向，"
-            "尽量为门框保留 12 颗。"
+            "step_dist=30, max_duration_s=45) 分段推进。用 mc_skill_collect_drops 回收附近落下的眼。"
+            "沿同一方向继续走，至少离上次投掷点 100 格再复测。只剩 12 颗时优先用现有方向和方块线索定位。"
             "眼向下或转向时，分开扫描 end_portal_frame、stone_bricks 与 mossy_stone_bricks，"
             "用 mc_skill_staircase(vertical='down', steps=8) 分段下挖，留火把和回程阶梯。"
             "进入实际要塞结构才触发 follow_ender_eye。"
@@ -2141,6 +2167,7 @@ def main() -> int:
     from mc_agent.harness.mc_tools import McToolset
     from mc_agent.harness.model import QwenModel, QwenSpec
     from mc_agent.skills import total_owned_counts
+    from mc_agent.skills.library import SURFACE_SCOUT_DIRECTIONS
 
     assert pathlib.Path(mc_agent.__file__).resolve().is_relative_to(WT_ROOT / "src")
 
@@ -2228,7 +2255,15 @@ def main() -> int:
         geofence = _scene_geofence_cls(VoidGeofence)(
             center_x=sx, center_z=sz, radius=scene.radius, margin=8.0
         )
-        toolset = McToolset(bot, geofence=geofence, wait_for_cooldown=True)
+        class StrongholdToolset(McToolset):
+            def mc_use_item(self, item: str, *args: Any, **kwargs: Any) -> str:
+                raw = super().mc_use_item(item, *args, **kwargs)
+                if item.removeprefix("minecraft:") == "ender_eye":
+                    return _with_eye_scout_direction(raw, SURFACE_SCOUT_DIRECTIONS)
+                return raw
+
+        toolset_class = StrongholdToolset if args.stage == STRONGHOLD_STAGE else McToolset
+        toolset = toolset_class(bot, geofence=geofence, wait_for_cooldown=True)
 
         print(
             f"[Wild Run Start] bot={bot_name} stage={args.stage} provider={args.provider or 'default'} "
