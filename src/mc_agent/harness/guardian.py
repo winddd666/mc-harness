@@ -669,14 +669,22 @@ class GenerationGuard:
         self._blocked_bunker = None
         action = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
         result = action.get("result") or {}
-        block_pos, obstacle = result.get("block_pos"), result.get("block")
+        reason = result.get("reason")
+        if reason == "unsafe_floor":
+            block_pos, obstacle = result.get("floor_pos"), result.get("floor_block")
+        else:
+            block_pos, obstacle = result.get("block_pos"), result.get("block")
         if (
-            result.get("reason") == "unsafe_open_side" and tile
+            tile and isinstance(obstacle, str)
             and isinstance(block_pos, list) and len(block_pos) == 3 and all(isinstance(coord, int) for coord in block_pos)
-            and isinstance(obstacle, str) and 1 <= tile[1] - block_pos[1] <= 3
-            and abs(tile[0] - block_pos[0]) + abs(tile[2] - block_pos[2]) == 1
         ):
-            self._blocked_bunker = (site, block_pos, obstacle)
+            unsafe_floor = reason == "unsafe_floor" and block_pos == [tile[0], tile[1] - 4, tile[2]]
+            unsafe_side = (
+                reason == "unsafe_open_side" and 1 <= tile[1] - block_pos[1] <= 3
+                and abs(tile[0] - block_pos[0]) + abs(tile[2] - block_pos[2]) == 1
+            )
+            if unsafe_floor or unsafe_side:
+                self._blocked_bunker = (site, block_pos, obstacle)
         return action
 
     def _inside_own_shaft(self) -> bool:

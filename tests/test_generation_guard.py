@@ -4677,16 +4677,24 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
             assert calls == [(primary["pos"], True, [secondary["pos"]])]
 
 
-def test_repeated_melee_hurt_skips_bunker_when_the_same_water_block_still_blocks_it(monkeypatch):
+@pytest.mark.parametrize("reason", ["unsafe_open_side", "unsafe_floor"])
+def test_repeated_melee_hurt_skips_bunker_when_the_same_block_still_blocks_it(monkeypatch, reason):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
-    water = [-11016, 93, 10931]
-    obstacle = "water"
+    if reason == "unsafe_floor":
+        unsafe_pos, unsafe_name = [-2273, 64, 3938], "air"
+        pos = [-2272.5, 68, 3938.8]
+        details = {"floor_pos": unsafe_pos, "floor_block": unsafe_name}
+    else:
+        unsafe_pos, unsafe_name = [-11016, 93, 10931], "water"
+        pos = [-11014.3, 94, 10931.7]
+        details = {"block_pos": unsafe_pos, "block": unsafe_name}
+    obstacle = unsafe_name
     hits = []
     bunkers = []
     retreats = []
     status = {
-        "pos": [-11014.3, 94, 10931.7], "health": 3.9, "dimension": "overworld", "food": 17,
+        "pos": pos, "health": 3.9, "dimension": "overworld", "food": 17,
         "ready": True, "alive": True, "on_ground": True, "blocking": False,
         "nearest_hostile": {"id": 42, "name": "spider", "dist": 1.5},
     }
@@ -4700,7 +4708,7 @@ def test_repeated_melee_hurt_skips_bunker_when_the_same_water_block_still_blocks
             if action == "inventory":
                 return {"items": []}
             if action == "get_block":
-                assert body["pos"] == water
+                assert body["pos"] == unsafe_pos
                 return {"name": obstacle}
             raise AssertionError(action)
 
@@ -4708,8 +4716,8 @@ def test_repeated_melee_hurt_skips_bunker_when_the_same_water_block_still_blocks
         def dig_safety_bunker(self, *, urgent):
             assert urgent
             bunkers.append(obstacle)
-            if obstacle == "water":
-                return {"ok": False, "reason": "unsafe_open_side", "block_pos": water, "block": obstacle}
+            if obstacle == unsafe_name:
+                return {"ok": False, "reason": reason, **details}
             return {"ok": True}
 
     guard = GenerationGuard(NightBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=BunkerSkills())
@@ -4719,13 +4727,13 @@ def test_repeated_melee_hurt_skips_bunker_when_the_same_water_block_still_blocks
         return {"ok": False, "mode": "flee", "reason": "no_safe_retreat"}
 
     monkeypatch.setattr(guard, "_defend_or_flee", retreat)
-    for seq, block in enumerate(("water", "water", "stone"), 1):
+    for seq, block in enumerate((unsafe_name, unsafe_name, "stone"), 1):
         obstacle = block
         hits.append({"seq": seq, "type": "hurt", "source": "mob_attack"})
         clock[0] += 0.6
         assert guard.poll()["requires_replan"]
 
-    assert bunkers == ["water", "stone"]
+    assert bunkers == [unsafe_name, "stone"]
     assert retreats == [True, True]
 
 
