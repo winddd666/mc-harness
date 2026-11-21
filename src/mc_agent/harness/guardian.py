@@ -1483,6 +1483,7 @@ class GenerationGuard:
             and ready
             and status.get("alive") is not False
         ):
+            self.combat_env.remember_dry_bank(status)
             self._water_hurt_streak = 0
             self._last_water_escape_failed = False
         food = status.get("food")
@@ -3624,6 +3625,7 @@ class GenerationGuard:
 
         if not status.get("ready", True) or status.get("alive") is False or status.get("busy"):
             return None
+        self.combat_env.remember_dry_bank(status)
 
         now_b = time.monotonic()
         in_water = bool(status.get("in_water"))

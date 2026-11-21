@@ -8680,7 +8680,7 @@ def test_water_retry_rechecks_nearby_bank_before_swimming_past_it(monkeypatch, b
         assert result["ok"] is True and result["in_water"] is False
 
 
-@pytest.mark.parametrize("bank_state", ["clear", "flooded", "new_life"])
+@pytest.mark.parametrize("bank_state", ["clear", "flooded", "new_life", "observed_after_tool", "observed_during_poll"])
 def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, bank_state):
     bank = [7884.5, 63, 2779.5]
     wet = [7885.5, 62.8, 2751.5]
@@ -8716,16 +8716,24 @@ def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, ba
 
     guard = GenerationGuard(WaterBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(MacroSkills, "escape_water", generic_escape)
-    assert guard._escape_water(dict(status))["ok"] is True
+    if bank_state in {"observed_after_tool", "observed_during_poll"}:
+        status.update(pos=bank, in_water=False, on_ground=True)
+        if bank_state == "observed_after_tool":
+            guard.stabilize_after_tools()
+        else:
+            guard.poll()
+    else:
+        assert guard._escape_water(dict(status))["ok"] is True
 
     status.update(pos=wet, in_water=True, on_ground=False)
     if bank_state == "new_life":
         status["last_death"] = {"t": 2}
     result = guard.combat_env.escape_deep_water_to_shore()
 
-    assert ("return_to_dry_bank" in result["actions"]) is (bank_state == "clear")
-    assert (bank in moves) is (bank_state == "clear")
-    assert result["ok"] is (bank_state == "clear")
+    safe_bank = bank_state not in {"flooded", "new_life"}
+    assert ("return_to_dry_bank" in result["actions"]) is safe_bank
+    assert (bank in moves) is safe_bank
+    assert result["ok"] is safe_bank
 
 
 @pytest.mark.parametrize("under_attack", [False, True])
