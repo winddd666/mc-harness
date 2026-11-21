@@ -3502,7 +3502,8 @@ def test_unshielded_boundary_retreat_accounts_for_a_second_shooter(second_shoote
 
 
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
-def test_recent_melee_damage_defers_eating_with_shield_up(entry, monkeypatch):
+@pytest.mark.parametrize(("dimension", "blocking"), [("overworld", True), ("minecraft:the_nether", False)])
+def test_recent_melee_damage_defers_eating(entry, dimension, blocking, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     actions = []
@@ -3512,7 +3513,7 @@ def test_recent_melee_damage_defers_eating_with_shield_up(entry, monkeypatch):
             if action == "status":
                 return {
                     "pos": [814.2, 78, -850.7], "health": 12, "food": 13, "on_ground": True,
-                    "blocking": True, "ready": True, "alive": True,
+                    "blocking": blocking, "dimension": dimension, "ready": True, "alive": True,
                     "nearest_hostile": {"name": "enderman", "dist": 17.7},
                 }
             if action == "events":
@@ -3532,7 +3533,8 @@ def test_recent_melee_damage_defers_eating_with_shield_up(entry, monkeypatch):
 
     clock[0] += 2.5
     assert check() is not None
-    assert actions == [("posture", {"shield": False}), ("use_item", {"item": "cooked_beef"})]
+    expected = [("posture", {"shield": False})] if blocking else []
+    assert actions == [*expected, ("use_item", {"item": "cooked_beef"})]
 
 
 @pytest.mark.parametrize("bridge_probe_slow", [False, True])
