@@ -13,6 +13,7 @@ Covers all four previously vulnerable windows without competing for the server a
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import copy
 import json
 import math
@@ -154,11 +155,21 @@ class _GuardSession:
     ) -> None:
         self.bot = bot
         self.checkpoint = checkpoint
-        self.deadline = deadline
+        self._deadline = ContextVar("guard_deadline", default=deadline)
         self._call_override = call_override
 
+    @contextmanager
+    def limit_until(self, deadline: float):
+        previous = self._deadline.get()
+        token = self._deadline.set(deadline if previous is None else min(previous, deadline))
+        try:
+            yield
+        finally:
+            self._deadline.reset(token)
+
     def _time_remaining(self) -> float:
-        remaining = float("inf") if self.deadline is None else self.deadline - time.monotonic()
+        deadline = self._deadline.get()
+        remaining = float("inf") if deadline is None else deadline - time.monotonic()
         if remaining <= 0:
             raise _RecoveryBudgetExceeded
         return remaining
@@ -169,7 +180,7 @@ class _GuardSession:
         timeout = kwargs.get("timeout_s")
         if timeout is None:
             timeout = 2.0 if readonly else 8.0
-        if self.deadline is not None:
+        if self._deadline.get() is not None:
             remaining = self._time_remaining()
             if isinstance(timeout, httpx.Timeout):
                 # BotSession can retry a closed keepalive after a 150ms delay.
@@ -211,6 +222,7 @@ class _GuardSession:
 
 
 class GenerationGuard:
+    LAVA_ESCAPE_BUDGET_S = 6.5
     WATER_ESCAPE_BUDGET_S = 20.0
     SURFACE_WATER_ESCAPE_BUDGET_S = 4.0
     TRIDENT_WATER_ESCAPE_BUDGET_S = 4.0
@@ -247,6 +259,7 @@ class GenerationGuard:
         self.skills = skills
         self.combat_env = CombatEnv(
             self.bot, skills=self.skills, geofence=self.geofence, water_escape=self._escape_water,
+            run_lava_escape=self._run_lava_escape,
         )
         self.combat_slot = CombatControllerSlot(combat_controller)
         self._custom_combat_registered = combat_controller is not None
@@ -384,6 +397,14 @@ class GenerationGuard:
             self.raw_bot.call("stop", {}, timeout_s=1.5, allow_reauth=False)
         except (ApiError, httpx.HTTPError):
             pass
+
+    def _run_lava_escape(self, operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        try:
+            with self.bot.limit_until(time.monotonic() + self.LAVA_ESCAPE_BUDGET_S):
+                return operation()
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
 
     def _run_recovery_macro(
         self,

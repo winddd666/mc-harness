@@ -367,6 +367,7 @@ class CombatEnv:
         skills: Any | None = None,
         geofence: Any | None = None,
         water_escape: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        run_lava_escape: Callable[[Callable[[], dict[str, Any]]], dict[str, Any]] | None = None,
         block_cache_ttl: float = 3.0,
         hazard_cache_ttl: float = 3.0,
     ) -> None:
@@ -374,6 +375,7 @@ class CombatEnv:
         self.skills = skills
         self.geofence = geofence
         self._water_escape = water_escape
+        self._run_lava_escape = run_lava_escape
         self.block_cache_ttl = max(0.2, float(block_cache_ttl))
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
@@ -1139,6 +1141,11 @@ class CombatEnv:
 
     def escape_lava(self, *, force_rim_escape: bool = False) -> dict[str, Any]:
         """Deterministically escape lava using water douse (overworld), safe-yaw jump sprint, wall-notch/pillar climb, and live `in_lava` verification."""
+        if self._run_lava_escape is not None:
+            return self._run_lava_escape(lambda: self._escape_lava(force_rim_escape=force_rim_escape))
+        return self._escape_lava(force_rim_escape=force_rim_escape)
+
+    def _escape_lava(self, *, force_rim_escape: bool) -> dict[str, Any]:
         def _landing_unconfirmed(status: dict[str, Any]) -> bool:
             return status.get("on_ground") is False and not status.get("in_water")
 

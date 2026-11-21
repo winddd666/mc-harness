@@ -3583,6 +3583,49 @@ def test_lava_terrain_probe_reserves_time_for_a_bridge_when_swimming_stalls(monk
     assert ("lava_bridge_probe_incomplete" in result["actions"]) is bridge_probe_slow
 
 
+def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [3186.7, 64.6, -2046.8], "health": 13, "food": 20, "alive": True, "ready": True,
+        "in_lava": True, "on_ground": False, "dimension": "the_nether",
+    }
+    calls = []
+    events = []
+
+    class LavaBot:
+        def call(self, action, body=None, **kwargs):
+            timeout = kwargs.get("timeout_s")
+            calls.append((action, clock[0], timeout))
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": []}
+            if action == "events":
+                return {"events": []}
+            if action == "get_block":
+                return {"name": "netherrack"}
+            if action == "control" and body.get("forward"):
+                clock[0] += body["ms"] / 1000
+            if action == "dig":
+                clock[0] += timeout + 0.000001
+                raise httpx.ReadTimeout("notch dig exceeded its transport budget")
+            return {"ok": True}
+
+    guard = GenerationGuard(LavaBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "scan_safe_yaws", lambda *args, **kwargs: {"best_yaw": 0.0})
+    incident = guard.poll()
+
+    escape = incident["actions"][0]
+    assert escape["action"] == "escape_lava"
+    assert escape["result"] == {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
+    dig, = [(started, timeout) for action, started, timeout in calls if action == "dig"]
+    assert sum(dig) == pytest.approx(1000.0 + guard.LAVA_ESCAPE_BUDGET_S)
+    assert any(action == "stop" and timeout == 1.5 for action, _, timeout in calls)
+    guard.bot.status()
+    assert calls[-1][2] == 2.0
+
+
 def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkeypatch):
     from mc_agent.skills.combat_env import CombatEnv
 
