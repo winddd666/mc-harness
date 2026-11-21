@@ -6046,9 +6046,19 @@ class MiningDFSEngine:
                 stop_reason = "quota_reached"
                 break
 
+            edge = node.edge_from_parent
+            if (
+                node.kind == "spine" and edge is not None and not self.radar_enabled
+                and node.anchor[1] - self.target_y > SPINE_DESCEND_MIN_DELTA
+                and not any(b.kind == "stair_down" and b.branch_target_y == self.target_y for b in node.branches)
+            ):
+                # An existing spine can still have the branch plan from its old target layer.
+                plan = self._spine_branches(edge.direction, node.anchor, geofence)
+                if plan and plan[0].kind == "stair_down":
+                    node.branches.insert(0, plan[0])
+
             next_branch = next((b for b in node.branches if b.status == "pending" and id(b) not in blocked_branches), None)
             if next_branch is None:
-                edge = node.edge_from_parent
                 descending = (
                     edge is not None and node.kind == "switchback" and node.anchor[1] > self.target_y + SCAN_BAND
                 )

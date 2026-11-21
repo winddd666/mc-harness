@@ -1453,6 +1453,42 @@ def test_fishbone_spine_descends_when_target_deepened() -> None:
             assert "stair_down" not in [b.kind for b in eng._spine_branches("north", anchor, geofence=None)]
 
 
+def test_explore_deepens_an_existing_iron_spine_before_more_level_digging(monkeypatch) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    anchor = (0, 16, 0)
+    world = _MockMineWorld(start_pos=(0.5, 16.0, 0.5), surface_y=60,
+                           inventory_items=[{"name": "iron_pickaxe", "count": 1, "slot": 9}])
+    world.blocks[anchor] = world.blocks[(0, 17, 0)] = "air"
+    world.blocks[(-3, 13, 0)] = "diamond_ore"
+
+    with BotSession("tok", bot_username="RetargetIronSpine", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(44, 60, 0), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        engine.target_y = 16
+        side_branch = BranchSpec("branch_leaf", "south", 8)
+        spine = engine._create_node(
+            kind="spine", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "west", [collar.anchor, anchor]),
+            branches=[side_branch, BranchSpec("spine_forward", "west", 4)],
+        )
+
+        def wrong_layer(*args, **kwargs):
+            pytest.fail("continued digging the old iron layer before attempting descent")
+
+        monkeypatch.setattr(engine, "_dig_level_edge", wrong_layer)
+        result = engine.run(target="diamond", target_y=-54, goal_count=1, strategy="fishbone_scan")
+
+    assert result["stop_reason"] == "quota_reached"
+    assert result["pos_after"][1] < anchor[1]
+    assert engine.nodes[collar.node_id] is collar
+    assert side_branch.status == "pending"
+    assert any(node.parent_id == spine.node_id and node.anchor[1] < 16 for node in engine.nodes.values())
+
+
 def test_fishbone_spine_climbs_when_target_raised() -> None:
     """Symmetric gap: a shaft that overshot below target_y must be able to stair_up back to it."""
     world = _MockMineWorld(start_pos=(0.5, 80.0, 0.5), surface_y=80)
