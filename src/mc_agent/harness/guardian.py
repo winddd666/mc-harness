@@ -3011,9 +3011,18 @@ class GenerationGuard:
                         and isinstance(shore_hostile, dict) and shore_hostile.get("id") == nh_id
                     )
                 tool_error = last_tool_result.get("error")
+                last_dig_error = last_tool_result.get("last_error")
                 tool_stopped_in_water = (
-                    last_tool_result.get("stop_reason") == "in_water"
-                    and isinstance(tool_error, dict) and tool_error.get("code") == "in_water"
+                    (
+                        last_tool_result.get("stop_reason") == "in_water"
+                        and isinstance(tool_error, dict) and tool_error.get("code") == "in_water"
+                    )
+                    or (
+                        last_tool_result.get("stop_reason") == "dig_failed"
+                        and isinstance(last_dig_error, dict)
+                        and last_dig_error.get("code") == "unsafe_refilled_cell"
+                        and last_dig_error.get("block") in ("water", "flowing_water")
+                    )
                 )
                 unstick_still_wet = (
                     isinstance(tool_error, dict) and (

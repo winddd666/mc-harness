@@ -6789,7 +6789,8 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
 
 
 @pytest.mark.parametrize("scenario", [
-    "ordinary", "surface_tool", "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee",
+    "ordinary", "surface_tool", "flooded_staircase", "boundary_trident", "poll_trident",
+    "boundary_melee", "poll_melee", "tool_melee",
 ])
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
     clock = [1000.0]
@@ -6847,7 +6848,12 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
         report = guard.handle_preemption(trigger, interrupted_name="mc_skill_unstick")
         assert report["status_after"]["in_water"] is False
     else:
-        tool_results = [json.dumps(receipt)] if scenario == "surface_tool" else None
+        if scenario == "flooded_staircase":
+            receipt = {
+                "ok": False, "stop_reason": "dig_failed",
+                "last_error": {"code": "unsafe_refilled_cell", "pos": [0, 53, 0], "block": "water"},
+            }
+        tool_results = [json.dumps(receipt)] if scenario in {"surface_tool", "flooded_staircase"} else None
         assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools(tool_results)
     completed = [e for e in events if e["type"] == "guardian.action.completed"]
     shallow, shore = completed
