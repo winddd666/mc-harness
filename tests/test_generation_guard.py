@@ -6321,13 +6321,15 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
     assert status["in_water"] is False and "登岸" in note
 
 
-@pytest.mark.parametrize("scenario", ["ordinary", "surface_tool", "boundary_trident", "poll_trident"])
+@pytest.mark.parametrize("scenario", [
+    "ordinary", "surface_tool", "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee",
+])
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     events = []
     calls = []
-    status = {"pos": [0.5, 52, 0.5], "health": 20, "oxygen": 240, "in_water": True,
+    status = {"pos": [0.5, 52, 0.5], "health": 14 if scenario.endswith("melee") else 20, "oxygen": 240, "in_water": True,
               "submerged": True, "on_ground": False, "alive": True, "ready": True}
 
     class DeepWaterBot:
@@ -6340,6 +6342,8 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
                         {"seq": 1, "type": "hurt", "source": "trident"},
                         {"seq": 2, "type": "hurt", "source": "mob_attack"},
                     ]}
+                if scenario.endswith("melee") and not kwargs["params"]["since"]:
+                    return {"events": [{"seq": 1, "type": "hurt", "source": "mob_attack"}]}
                 return {"events": []}
             if action == "inventory":
                 return {"items": []}
@@ -6369,14 +6373,18 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
         "ok": False, "stop_reason": "in_water", "pos_after": status["pos"],
         "error": {"code": "in_water"},
     }
-    if scenario == "poll_trident":
+    if scenario.startswith("poll_"):
         assert guard.poll() is not None
+    elif scenario == "tool_melee":
+        trigger = {"source": "tool_interrupted_hurt", "hurt_source": "mob_attack", "primary_type": "zombie"}
+        report = guard.handle_preemption(trigger, interrupted_name="mc_skill_unstick")
+        assert report["status_after"]["in_water"] is False
     else:
         tool_results = [json.dumps(receipt)] if scenario == "surface_tool" else None
         assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools(tool_results)
     completed = [e for e in events if e["type"] == "guardian.action.completed"]
     shallow, shore = completed
-    prefix = "" if scenario == "poll_trident" else "boundary_"
+    prefix = "" if scenario.startswith(("poll_", "tool_")) else "boundary_"
     assert shallow["action"] == f"{prefix}escape_water"
     budget_s = 20.0 if scenario == "ordinary" else 4.0
     assert shallow["duration"] == pytest.approx(budget_s)
