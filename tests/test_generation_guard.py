@@ -2472,6 +2472,48 @@ def test_nether_deep_lava_preemption_prioritizes_escape_over_nearby_mob(monkeypa
     assert state["in_lava"] is False
 
 
+@pytest.mark.parametrize("entry", ["poll", "tool_boundary"])
+@pytest.mark.parametrize("scenario", ["plain_fall", "near_melee", "mixed_hurt", "attributed_fall"])
+def test_unattributed_fall_uses_independent_threat_detection(monkeypatch, entry, scenario):
+    distance = 2.5 if scenario == "near_melee" else 4.0
+    zombie = {"id": 42, "name": "zombie", "dist": distance, "pos": [0.5, 72, 0.5 + distance]}
+    status = {"pos": [0.5, 72, 0.5], "health": 16, "food": 20, "on_ground": True, "ready": True,
+              "alive": True, "dimension": "overworld", "nearest_hostile": zombie}
+    events = [{"seq": 1, "type": "hurt", "source": "fall"}]
+    if scenario == "mixed_hurt":
+        events.append({"seq": 2, "type": "hurt", "source": "mob_attack", "source_entity": zombie})
+    elif scenario == "attributed_fall":
+        events[0]["source_entity"] = zombie
+    reactions = []
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [row for row in events if row["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            pytest.fail(f"Unexpected action after falling: {action}")
+
+    def react(source):
+        reactions.append(source)
+        return {"ok": True, "handled": True, "mode": "flee"}
+
+    guard = GenerationGuard(RidgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+    monkeypatch.setattr(guard, "_run_subcortical_combat", lambda trigger: react(trigger["source"]))
+    monkeypatch.setattr(guard, "_defend_or_flee", lambda *_a, **_kw: react("fresh_hurt"))
+    response = guard.poll() if entry == "poll" else guard.stabilize_after_tools()
+
+    if scenario == "plain_fall":
+        assert reactions == [] and response is None
+    elif scenario == "near_melee":
+        assert reactions == ["pre_hurt_melee"]
+    else:
+        assert reactions == (["fresh_hurt"] if entry == "poll" else ["boundary_threat"])
+
+
 def test_non_combat_fire_fall_hurt_skips_shield_spam_and_water_trident_equips_shield(monkeypatch):
     """Covers r12 ds_ds_3_village on_fire/fall shield-spam & hy4_hy_9_deep_water trident offhand shield block."""
     clock = [800.0]

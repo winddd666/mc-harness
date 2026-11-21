@@ -698,6 +698,14 @@ class GenerationGuard:
         )
 
     @staticmethod
+    def _unattributed_fall_only(hurts: list[dict[str, Any]]) -> bool:
+        return bool(hurts) and all(
+            str(hit.get("source") or "").strip().lower() == "fall"
+            and not (hit.get("source_entity") or hit.get("likely_attacker"))
+            for hit in hurts
+        )
+
+    @staticmethod
     def _short_water_escape_after_hit(status: dict[str, Any], source: Any) -> bool:
         source = str(source or "").strip().lower()
         health = status.get("health")
@@ -1594,6 +1602,7 @@ class GenerationGuard:
         eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
         should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not (hot_floor_only or needs_hot_floor_guard)
         hurt = bool(hurts) or dropped
+        fall_only = self._unattributed_fall_only(hurts)
         contact_fire = any(str(h.get("source") or "").strip().lower() == "in_fire" for h in hurts)
         recent_lava = now - self._last_lava_contact_at < 15.0
         fire_hurt = any(str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts)
@@ -1618,7 +1627,7 @@ class GenerationGuard:
             and not in_water
             and not life_transition_pending
             and (
-                environmental_burning or (
+                environmental_burning or fall_only or (
                     (not nh_name0 or nh_dist0 > 8.0)
                     and all(
                         str(h.get("source") or "").strip().lower() in NON_COMBAT_HURT_SOURCES
@@ -1633,7 +1642,10 @@ class GenerationGuard:
 
         pre_trigger = (
             None
-            if (hurt or deaths or disconnected or not ready or in_water or in_lava)
+            if (
+                (hurt and not (fall_only and status.get("on_ground") is True))
+                or deaths or disconnected or not ready or in_water or in_lava
+            )
             else self._detect_pre_hurt_trigger(status)
         )
         effective_combat_hurt = hurt and not (non_combat_only_hurt or hot_floor_only)
@@ -4057,6 +4069,7 @@ class GenerationGuard:
             self._last_lava_contact_at = now_b
         oxygen = status.get("oxygen")
         hurts = [e for e in fresh if e.get("type") == "hurt"]
+        fall_only = self._unattributed_fall_only(hurts)
         other_hurts = [e for e in hurts if str(e.get("source") or "").strip().lower() != "hot_floor"]
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or hurt_by_lava
@@ -4146,9 +4159,12 @@ class GenerationGuard:
         )
 
         boundary_trigger: ThreatTrigger | None = None
-        if not (in_water or in_lava or hot_floor_only or waiting_for_shore_landing or same_threat_after_timeout):
+        if not (
+            in_water or in_lava or hot_floor_only or waiting_for_shore_landing or same_threat_after_timeout
+            or (fall_only and status.get("on_ground") is False)
+        ):
             boundary_trigger = self._detect_pre_hurt_trigger(status)
-        if boundary_trigger is None and not in_water and not in_lava and other_hurts and nh_name and nh_dist <= 15.0:
+        if boundary_trigger is None and not in_water and not in_lava and not fall_only and other_hurts and nh_name and nh_dist <= 15.0:
             boundary_trigger = {
                 "source": "boundary_threat",
                 "primary_entity_id": nh_id,
