@@ -704,6 +704,49 @@ def test_sealed_cover_receipt_outside_pocket_does_not_stop_retreat(monkeypatch, 
     assert move == pytest.approx([6392.5, 22, -6633.6])
 
 
+@pytest.mark.parametrize("ready_after_respawn", [False, True])
+def test_arrow_cover_does_not_retreat_using_a_previous_lifes_attacker(monkeypatch, ready_after_respawn):
+    status = {
+        "pos": [-6232.5, 29.1, -6416.8], "health": 9.5, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "dimension": "overworld",
+        "last_death": {"t": 1},
+    }
+
+    class ShotBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                events = [{"seq": 1, "type": "hurt", "source": "arrow"}]
+                return {"events": [event for event in events if event["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [], "offhand": None}
+            pytest.fail(f"unexpected action {action}")
+
+    bot = ShotBot()
+    skills = MacroSkills(bot)
+
+    def die_during_cover():
+        status.update(
+            pos=[-6240.5, 72.1, -6412.5], health=20, ready=ready_after_respawn,
+            last_death={"t": 2},
+        )
+        return {"ok": False, "mode": "cover_pocket", "pos_after": status["pos"], "sealed": [False, False]}
+
+    def stale_retreat(*_args, **_kwargs):
+        pytest.fail("Must stop combat recovery for the previous life")
+
+    monkeypatch.setattr(skills, "dig_cover_pocket", die_during_cover)
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=skills)
+    monkeypatch.setattr(guard, "_defend_or_flee", stale_retreat)
+    incident = guard.poll()
+
+    cover, = incident["actions"]
+    assert cover["action"] == "dig_cover"
+    assert cover["ok"] is False and cover["result"]["respawned"] is True
+    assert incident["requires_replan"] is True
+
+
 def test_escape_lava_does_not_trust_in_water_false_and_nether_skips_water_bucket(monkeypatch):
     """Reproduces hy4_hy_7_village: escape_water() lied ok=True in lava, looping 11 ticks to death."""
     from mc_agent.skills.safety import SafetyEmergency, check_and_stabilize
@@ -1274,6 +1317,47 @@ def test_bug_009_stationary_failed_creeper_retreat_only_cancels_again_on_change(
         creeper["id"] += 1
     assert guard.poll()["requires_replan"] is True
     assert len(attempts) == 3
+
+
+@pytest.mark.parametrize("change", ["stationary", "hurt", "moved", "shooter_closed_in"])
+def test_bug_009_failed_distant_ranged_retreat_keeps_generation_if_unchanged(monkeypatch, change):
+    shooter = {"id": 4920712, "name": "skeleton", "dist": 11.2, "pos": [5267.6, 23, -7421.5]}
+    status = {
+        "pos": [5256.4, 23, -7421.5], "health": 20, "food": 20, "dimension": "overworld",
+        "on_ground": True, "alive": True, "ready": True, "blocking": False, "nearest_hostile": shooter,
+        "held": {"name": "stone_pickaxe", "slot": 41},
+    }
+    hurt = []
+
+    class ShotBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {**status, "nearest_hostile": dict(shooter)}
+            if action == "events":
+                return {"events": [e for e in hurt if e["seq"] > kwargs["params"]["since"]]}
+            assert action == "inventory"
+            return {"items": [], "offhand": None}
+
+    guard = GenerationGuard(ShotBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def blocked_retreat(_env, trigger):
+        assert trigger["source"] == "pre_hurt_ranged"
+        if change == "hurt":
+            hurt.append({"seq": 1, "type": "hurt", "source": "arrow"})
+        elif change == "moved":
+            status["pos"] = [5254.4, 23, -7421.5]
+        elif change == "shooter_closed_in":
+            shooter["dist"] = 5.0
+        return {"handled": True, "mode": "cover_or_flee", "actions": [
+            {"action": "flee", "ok": False, "moved": 0.0, "reason": "no_safe_retreat"},
+        ]}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", blocked_retreat)
+    incident = guard.poll()
+
+    assert incident["reasons"] == ["pre_hurt_ranged"]
+    assert incident["requires_replan"] is (change != "stationary")
 
 
 @pytest.mark.parametrize("change", ["stationary", "drifted", "hurt", "landed"])
@@ -7745,7 +7829,7 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
 
 
 @pytest.mark.parametrize("scenario", [
-    "ordinary", "surface_tool", "flooded_staircase", "boundary_trident", "poll_trident",
+    "ordinary", "surface_tool", "flooded_staircase", "submerged_move", "boundary_trident", "poll_trident",
     "boundary_melee", "poll_melee", "tool_melee",
 ])
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
@@ -7809,7 +7893,9 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
                 "ok": False, "stop_reason": "dig_failed",
                 "last_error": {"code": "unsafe_refilled_cell", "pos": [0, 53, 0], "block": "water"},
             }
-        tool_results = [json.dumps(receipt)] if scenario in {"surface_tool", "flooded_staircase"} else None
+        if scenario == "submerged_move":
+            receipt = {"ok": True, "result": {"pos": status["pos"]}}
+        tool_results = [json.dumps(receipt)] if scenario in {"surface_tool", "flooded_staircase", "submerged_move"} else None
         assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools(tool_results)
     completed = [e for e in events if e["type"] == "guardian.action.completed"]
     shallow, shore = completed
@@ -7821,6 +7907,57 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert shore["action"] == f"{prefix}escape_to_shore" and shore["ok"] is True
     assert all(start + timeout <= 1000.0 + budget_s for _, timeout, start in calls[:-1])
     assert skills.bot is bot
+
+
+@pytest.mark.parametrize("lava_escape_succeeds", [True, False])
+def test_boundary_switches_water_macro_to_lava_escape_on_contact(monkeypatch, lava_escape_succeeds):
+    status = {
+        "pos": [10834.4, 32.1, -11103.5], "health": 20, "food": 20, "oxygen": 240,
+        "in_water": True, "in_lava": False, "submerged": True, "on_ground": False,
+        "ready": True, "alive": True, "last_death": {"t": 1},
+    }
+    recovery = []
+    events = []
+
+    class FluidBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "stop":
+                return {"ok": True}
+            pytest.fail(f"unexpected action {action}")
+
+    def legacy_escape(scoped):
+        assert scoped.bot.status()["in_water"] is True
+        status.update(in_water=False, in_lava=True, pos=[10832.6, 35.8, -11103.5], health=10)
+        scoped.bot.status()
+        pytest.fail("The water macro must unwind as soon as it sees lava")
+
+    def lava_escape():
+        recovery.append("lava")
+        if lava_escape_succeeds:
+            status.update(in_lava=False, on_ground=True)
+        return {"ok": lava_escape_succeeds, "in_lava": status["in_lava"], "pos_after": status["pos"]}
+
+    def stale_shore(*_args, **_kwargs):
+        pytest.fail("A failed lava escape must not return to the water escape path")
+
+    monkeypatch.setattr(MacroSkills, "escape_water", legacy_escape)
+    bot = FluidBot()
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=MacroSkills(bot))
+    monkeypatch.setattr(guard.combat_env, "escape_lava", lava_escape)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", stale_shore)
+
+    receipt = {"ok": True, "result": {"pos": status["pos"]}}
+    guard.stabilize_after_tools([json.dumps(receipt)])
+
+    assert recovery == ["lava"]
+    water, = [e for e in events if e["type"] == "guardian.action.completed" and e["action"] == "boundary_escape_water"]
+    assert water["result"]["mode"] == "lava_escape"
+    assert water["ok"] is lava_escape_succeeds
+    assert status["in_lava"] is not lava_escape_succeeds
 
 
 @pytest.mark.parametrize("health", [9.8, 10.0, 15.5])
