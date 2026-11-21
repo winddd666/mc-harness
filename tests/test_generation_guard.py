@@ -3341,13 +3341,15 @@ def test_recent_melee_damage_defers_eating_with_shield_up(entry, monkeypatch):
     assert actions == [("posture", {"shield": False}), ("use_item", {"item": "cooked_beef"})]
 
 
-def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsupported(monkeypatch):
+@pytest.mark.parametrize("lands_after_jump", [False, True])
+def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsupported(monkeypatch, lands_after_jump):
     """Reproduces r20_short hy4_hy_6_nether_bastion: when underfoot place fails no_support/blocked_by_self, place side bridge against bank & step onto it."""
     from mc_agent.errors import ApiError
     from mc_agent.skills.combat_env import CombatEnv
 
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
-    bridge_state = {"in_lava": True, "pos": [249.5, 28.1, 208.5], "placed": set()}
+    bridge_state = {"in_lava": True, "on_ground": False, "pos": [249.5, 28.1, 208.5], "placed": set()}
+    landing_reads = []
 
     class _DeepBankLavaBot:
         def status(self):
@@ -3357,7 +3359,7 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
                 "alive": True,
                 "ready": True,
                 "in_lava": bridge_state["in_lava"],
-                "on_ground": not bridge_state["in_lava"],
+                "on_ground": bridge_state["on_ground"],
                 "yaw": 0.0,
                 "dimension": "minecraft:the_nether",
             }
@@ -3365,6 +3367,10 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
         def call(self, action, body=None, **kwargs):
             pl = dict(body or {})
             if action == "status":
+                if "timeout_s" in kwargs and not bridge_state["in_lava"] and not bridge_state["on_ground"]:
+                    assert kwargs["allow_reauth"] is False
+                    landing_reads.append(kwargs["timeout_s"])
+                    bridge_state.update(on_ground=True, pos=[250.5, 29.0, 208.5])
                 return self.status()
             if action == "inventory":
                 return {"items": [{"name": "cobblestone", "count": 60}]}
@@ -3387,14 +3393,19 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
                 bridge_state["placed"].add(p)
                 return {"ok": True}
             if action == "control" and pl.get("forward") and bridge_state["placed"]:
-                bridge_state["in_lava"] = False
-                bridge_state["pos"] = [250.5, 29.0, 208.5]
+                bridge_state.update(
+                    in_lava=False, on_ground=not lands_after_jump,
+                    pos=[250.5, 29.3 if lands_after_jump else 29.0, 208.5],
+                )
             return {"ok": True}
 
     out_b = CombatEnv(_DeepBankLavaBot()).escape_lava()
     assert out_b["ok"] is True and out_b["in_lava"] is False
     assert "lava_place_cobblestone" in out_b["actions"]
     assert "lava_step_bridge" in out_b["actions"]
+    assert out_b["pos_after"] == [250.5, 29.0, 208.5]
+    assert len(landing_reads) == int(lands_after_jump)
+    assert all(0 < timeout <= 0.25 for timeout in landing_reads)
 
 
 @pytest.mark.parametrize("hit_source", ["fireball", "fire_tick_only", "mob_attack"])

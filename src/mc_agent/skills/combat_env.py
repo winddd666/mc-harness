@@ -1328,6 +1328,8 @@ class CombatEnv:
         # 3. Boxed-in pit or deep lava: try bridging beneath feet or against adjacent solid bank/floor
         filler = self._pick_filler_block(counts)
         if filler is not None and time.monotonic() < lava_deadline + 0.8:
+            bridge_deadline = lava_deadline + 0.8
+            checked_bridge_landing = False
             p_cur = st.get("pos") or pos0
             bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
             place_targets = [[bx, by, bz], [bx, by - 1, bz]]
@@ -1352,7 +1354,7 @@ class CombatEnv:
                 if len(place_targets) >= 5:
                     break
             for place_pos in place_targets:
-                if time.monotonic() >= lava_deadline + 0.8:
+                if time.monotonic() >= bridge_deadline:
                     break
                 try:
                     self.bot.call("control", {"jump": True, "ms": 220, "wait": False})
@@ -1370,6 +1372,19 @@ class CombatEnv:
                             if isinstance(err_step, httpx.HTTPError):
                                 self._best_effort_stop()
                     st = self._safe_status(st)
+                    if (
+                        not checked_bridge_landing and not st.get("in_lava") and _landing_unconfirmed(st)
+                        and not _did_respawn_during_lava(st) and bridge_deadline - time.monotonic() >= 0.2
+                    ):
+                        # Allow a jump that cleared the lava to settle before trying another placement.
+                        checked_bridge_landing = True
+                        time.sleep(0.1)
+                        remaining = bridge_deadline - time.monotonic()
+                        if remaining > 0:
+                            try:
+                                st = self.bot.call("status", method="GET", timeout_s=min(0.25, remaining), allow_reauth=False)
+                            except (ApiError, httpx.HTTPError):
+                                pass
                     if _should_exit_lava(st):
                         return _lava_result(st)
                 except (ApiError, httpx.HTTPError) as err:
