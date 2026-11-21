@@ -34,6 +34,7 @@ from ..skills.combat_env import (
     CombatControllerSlot,
     CombatEnv,
     ThreatTrigger,
+    _TerrainProbeExpired,
     aim_yaw_pitch,
     ranged_retreat_positions,
     retreat_made_progress,
@@ -2338,6 +2339,36 @@ class GenerationGuard:
             raise _UnsafeCombatStep
         return {**body, "ms": min(body["ms"], 250)}
 
+    def _verify_attack_approach(self, entity_id: Any, call: Callable[..., dict[str, Any]]) -> None:
+        if not isinstance(entity_id, int):
+            return
+        deadline = time.monotonic() + 0.8
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline, call_override=call)
+        try:
+            status = bot.status()
+            pos = status.get("pos")
+            if (
+                "nether" not in str(status.get("dimension") or "").lower()
+                or status.get("on_ground") is not True or not pos
+                or status.get("ready") is False or status.get("alive") is False or status.get("in_lava")
+            ):
+                return
+            name, distance, nearest_id, target = self._extract_hostile_info(status)
+            if nearest_id != entity_id or name not in {"blaze", "ghast"} or distance > 3.5:
+                return
+            if target is None:
+                target = self._find_hostile_position(entity_id, name, session=bot, timeout_s=0.3)
+            if target is None:
+                return
+            travel = math.hypot(target[0] - pos[0], target[2] - pos[2])
+            if not 0.35 <= travel <= 3.5:
+                return
+            yaw, _ = aim_yaw_pitch(pos, target)
+            if CombatEnv(bot, geofence=self.geofence).probe_retreat(pos, yaw, travel, deadline=deadline) is None:
+                raise _UnsafeCombatStep
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
+            return
+
     @contextmanager
     def _intercept_bot_calls(
         self,
@@ -2549,6 +2580,7 @@ class GenerationGuard:
                 if clean_path != "attack":
                     return actor_call(path, body, **kwargs)
                 entity_id = body.get("entity_id") if isinstance(body, dict) else None
+                self._verify_attack_approach(entity_id, orig_call)
                 with attack_state_lock:
                     attack_target_id = entity_id if isinstance(entity_id, int) else None
                     attack_active.set()
@@ -3060,7 +3092,8 @@ class GenerationGuard:
                 "error": {"code": code, "message": message},
             }, ensure_ascii=False)
         except _UnsafeCombatStep:
-            self._stop_after_recovery_timeout()
+            if not is_attack:
+                self._stop_after_recovery_timeout()
             self.events.emit("guardian.combat_step_blocked", tool=tool_name)
             return json.dumps({
                 "ok": False,

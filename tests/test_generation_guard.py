@@ -8330,11 +8330,54 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
         assert attacks == [True] and moves == []
 
 
+@pytest.mark.parametrize("terrain", ["solid", "drop", "lava", "unknown"])
+def test_nether_attack_checks_footing_toward_nearby_blaze(terrain):
+    calls = []
+    blaze = {"id": 4645315, "name": "blaze", "dist": 1.3, "pos": [1.8, 65, 0.5]}
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 65, 0.5], "health": 17.64, "ready": True, "alive": True,
+                    "on_ground": True, "dimension": "the_nether", "nearest_hostile": blaze,
+                }
+            if action == "get_block":
+                x, y, _ = body["pos"]
+                if y == 64:
+                    if x == 0 or terrain == "solid":
+                        return {"name": "netherrack"}
+                    if terrain == "unknown":
+                        raise httpx.ReadTimeout("unverified footing")
+                    return {"name": "lava" if terrain == "lava" else "air"}
+                return {"name": "air"}
+            if action == "attack":
+                calls.append(action)
+                raise httpx.ReadTimeout("attack response timed out")
+            raise AssertionError(action)
+
+    bot = FortressBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def attack():
+        return json.dumps(bot.call("attack", {"entity_id": blaze["id"], "timeout": 5000}))
+
+    if terrain in {"solid", "unknown"}:
+        with pytest.raises(httpx.ReadTimeout, match="attack response timed out"):
+            guard.run_tool_with_reflex("mc_attack", attack)
+        assert calls == ["attack"]
+    else:
+        result = json.loads(guard.run_tool_with_reflex("mc_attack", attack))
+        assert calls == []
+        assert result["requires_replan"] and result["error"]["code"] == "unsafe_landing"
+
+
 @pytest.mark.parametrize("attack_result", ["returned", "interrupted", "read_timeout"])
 @pytest.mark.parametrize("hazard", ["water", "ranged_water", "lava", "unarmed_melee", "unarmed_above_critical", "other_melee"])
 def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result, hazard):
     import threading
 
+    actor_thread = threading.current_thread()
     stopped = threading.Event()
     observed = threading.Event()
     actions = []
@@ -8352,7 +8395,8 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 current = dict(status)
-                observed.set()
+                if threading.current_thread() is not actor_thread:
+                    observed.set()
                 return current
             actions.append(action)
             if action == "attack":
