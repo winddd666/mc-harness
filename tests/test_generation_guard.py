@@ -8053,7 +8053,7 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
 
 
 @pytest.mark.parametrize("attack_result", ["returned", "interrupted", "read_timeout"])
-@pytest.mark.parametrize("hazard", ["water", "lava", "unarmed_melee", "other_melee"])
+@pytest.mark.parametrize("hazard", ["water", "lava", "unarmed_melee", "unarmed_above_critical", "other_melee"])
 def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result, hazard):
     import threading
 
@@ -8061,8 +8061,9 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
     observed = threading.Event()
     actions = []
     attack_target = 44 if hazard == "other_melee" else 27
+    above_critical = hazard == "unarmed_above_critical"
     status = {
-        "pos": [0.5, 63, 0.5], "health": 12, "ready": True, "alive": True, "on_ground": True,
+        "pos": [0.5, 63, 0.5], "health": 18 if above_critical else 12, "ready": True, "alive": True, "on_ground": True,
         "nearest_hostile": {"id": 27, "name": "drowned" if hazard == "water" else "zombie", "dist": 2.0, "pos": [2.5, 62, 0.5]},
     }
 
@@ -8079,7 +8080,7 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
                 else:
                     assert observed.wait(2.0)
                     weapon = "iron_sword" if hazard == "other_melee" else "wooden_pickaxe"
-                    status.update(health=6.7, held={"name": weapon})
+                    status.update(health=12 if above_critical else 6.7, held={"name": weapon})
                 assert stopped.wait(2.0), "attack remained active after the survival hazard"
                 if attack_result == "read_timeout":
                     raise httpx.ReadTimeout("attack timed out")
