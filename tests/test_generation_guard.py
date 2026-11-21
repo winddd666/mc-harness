@@ -4224,7 +4224,7 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
         assert headings[0] < 0 < headings[1]
 
 
-@pytest.mark.parametrize("landing", ["grounded", "after_jump", "after_two_checks", "loses_footing"])
+@pytest.mark.parametrize("landing", ["grounded", "after_jump", "after_two_checks", "after_two_edge_checks", "loses_footing"])
 def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsupported(monkeypatch, landing):
     """Reproduces r20_short hy4_hy_6_nether_bastion: when underfoot place fails no_support/blocked_by_self, place side bridge against bank & step onto it."""
     from mc_agent.errors import ApiError
@@ -4258,7 +4258,7 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
                 elif "timeout_s" in kwargs and not bridge_state["in_lava"] and not bridge_state["on_ground"]:
                     assert kwargs["allow_reauth"] is False
                     landing_reads.append(kwargs["timeout_s"])
-                    if landing != "after_two_checks" or len(landing_reads) == 2:
+                    if landing not in {"after_two_checks", "after_two_edge_checks"} or len(landing_reads) == 2:
                         bridge_state.update(on_ground=True, pos=[250.5, 29.0, 208.5])
                 return self.status()
             if action == "inventory":
@@ -4282,10 +4282,11 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
                 bridge_state["placed"].add(p)
                 return {"ok": True}
             if action == "control" and pl.get("forward") and bridge_state["placed"]:
-                after_jump = landing in {"after_jump", "after_two_checks"}
+                after_jump = landing in {"after_jump", "after_two_checks", "after_two_edge_checks"}
                 bridge_state.update(
                     in_lava=False, on_ground=not after_jump,
-                    pos=[250.5, 29.3 if after_jump else 29.0, 208.5],
+                    pos=[250.2 if landing == "after_two_edge_checks" else 250.5,
+                         29.3 if after_jump else 29.0, 208.5],
                 )
             if action == "posture":
                 assert bridge_state["on_ground"] and 0 < kwargs["timeout_s"] <= 0.35
@@ -4302,7 +4303,7 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
         assert out_b["reason"] == "lava_landing_unconfirmed"
     else:
         assert out_b["pos_after"] == [250.5, 29.0, 208.5]
-    assert len(landing_reads) == {"after_jump": 1, "after_two_checks": 2}.get(landing, 0)
+    assert len(landing_reads) == {"after_jump": 1, "after_two_checks": 2, "after_two_edge_checks": 2}.get(landing, 0)
     assert all(0 < timeout <= 0.25 for timeout in landing_reads)
 
 

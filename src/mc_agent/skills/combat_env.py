@@ -1594,13 +1594,13 @@ class CombatEnv:
                         landing_deadline = min(bridge_deadline, time.monotonic() + 0.35)
                         for sample in range(2):
                             if sample:
-                                # Wait again only while the hitbox is over the side bridge.
+                                # The bot can land with its center over the bridge and its hitbox straddling the edge.
                                 p_landing = st.get("pos")
                                 if (
                                     not side_step or st.get("in_lava") or not _landing_unconfirmed(st)
                                     or _did_respawn_during_lava(st) or not p_landing
                                     or p_landing[1] < place_pos[1] + 0.95
-                                    or _hitbox_columns(p_landing[0], p_landing[2]) != [(place_pos[0], place_pos[2])]
+                                    or (math.floor(p_landing[0]), math.floor(p_landing[2])) != (place_pos[0], place_pos[2])
                                 ):
                                     break
                             if landing_deadline - time.monotonic() <= 0.1:
