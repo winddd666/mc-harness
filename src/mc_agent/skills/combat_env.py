@@ -383,6 +383,8 @@ class CombatEnv:
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
         self._stalled_lava_shore: tuple[tuple[float, ...], tuple[float, ...], float] | None = None
+        self._stalled_water_shore: tuple[tuple[float, ...], tuple[float, ...], tuple[Any, Any], float] | None = None
+        self._stalled_lava_notch: dict[tuple[str, tuple[int, int, int], str, str | None], float] = {}
 
     def surface_from_water(self, status: dict[str, Any]) -> dict[str, Any]:
         if self._water_escape is not None:
@@ -1205,9 +1207,9 @@ class CombatEnv:
         actions: list[str] = []
         lava_deadline = time.monotonic() + 5.0
         try:
-            counts, _, _ = self._inventory_counts_and_shield()
+            counts, _, held_name = self._inventory_counts_and_shield()
         except (ApiError, httpx.HTTPError):
-            counts = {}
+            counts, held_name = {}, None
         dim = str(st.get("dimension") or "").lower()
         if counts.get("water_bucket", 0) > 0 and "nether" not in dim:
             try:
@@ -1533,13 +1535,28 @@ class CombatEnv:
                     ):
                         # Allow a jump that cleared the lava to settle before trying another placement.
                         checked_bridge_landing = True
-                        time.sleep(0.1)
-                        remaining = bridge_deadline - time.monotonic()
-                        if remaining > 0:
+                        landing_deadline = min(bridge_deadline, time.monotonic() + 0.35)
+                        for sample in range(2):
+                            if sample:
+                                # Wait again only while the hitbox is over the side bridge.
+                                p_landing = st.get("pos")
+                                if (
+                                    not side_step or st.get("in_lava") or not _landing_unconfirmed(st)
+                                    or _did_respawn_during_lava(st) or not p_landing
+                                    or p_landing[1] < place_pos[1] + 0.95
+                                    or _hitbox_columns(p_landing[0], p_landing[2]) != [(place_pos[0], place_pos[2])]
+                                ):
+                                    break
+                            if landing_deadline - time.monotonic() <= 0.1:
+                                break
+                            time.sleep(0.1)
+                            remaining = landing_deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
                             try:
                                 st = self.bot.call("status", method="GET", timeout_s=min(0.25, remaining), allow_reauth=False)
                             except (ApiError, httpx.HTTPError):
-                                pass
+                                break
                     if _should_exit_lava(st):
                         if side_step and st.get("on_ground") is True and not _did_respawn_during_lava(st):
                             # Sprint momentum can carry the bot off a one-block landing.
@@ -1568,6 +1585,8 @@ class CombatEnv:
 
         # 4. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
         notch_deadline = lava_deadline + 0.8
+        now = time.monotonic()
+        self._stalled_lava_notch = {key: until for key, until in self._stalled_lava_notch.items() if now < until}
         for dname, (dx, dz) in CARDINAL_VECTORS.items():
             if time.monotonic() >= lava_deadline:
                 break
@@ -1587,22 +1606,32 @@ class CombatEnv:
             blocks = [self._get_block_name(ex, cy, ez, strict=True) for cy in clearance]
             if any(not block or block in HAZARD_BLOCK_TYPES or block == "bedrock" for block in blocks):
                 continue
-            for cy, block in zip(clearance, blocks):
-                if not _is_passable(block):
-                    # Reserve time to reach the notch after opening it.
-                    dig_budget = min(1.0, notch_deadline - time.monotonic() - 1.5)
-                    if dig_budget < 0.25:
-                        break
-                    try:
-                        self.bot.call(
-                            "dig", {"pos": [ex, cy, ez], "collect": False, "stop_on": ["death"]},
-                            timeout_s=dig_budget, allow_reauth=False,
-                        )
-                    except (ApiError, httpx.HTTPError) as err:
-                        if isinstance(err, httpx.HTTPError):
-                            actions.append("lava_notch_dig_timeout")
-                            self._best_effort_stop(timeout_s=0.25)
-                        break
+            dig_keys = [
+                (dim0, (ex, cy, ez), block, held_name)
+                for cy, block in zip(clearance, blocks)
+                if not _is_passable(block)
+            ]
+            now = time.monotonic()
+            if any(self._stalled_lava_notch.get(key, now) > now for key in dig_keys):
+                actions.append("lava_notch_dig_deferred")
+                continue
+            for key in dig_keys:
+                # Reserve time to reach the notch after opening it.
+                dig_budget = min(1.0, notch_deadline - time.monotonic() - 1.5)
+                if dig_budget < 0.25:
+                    break
+                try:
+                    self.bot.call(
+                        "dig", {"pos": list(key[1]), "collect": False, "stop_on": ["death"]},
+                        timeout_s=dig_budget, allow_reauth=False,
+                    )
+                except (ApiError, httpx.HTTPError) as err:
+                    if isinstance(err, httpx.ReadTimeout):
+                        self._stalled_lava_notch[key] = time.monotonic() + 15.0
+                    if isinstance(err, httpx.HTTPError):
+                        actions.append("lava_notch_dig_timeout")
+                        self._best_effort_stop(timeout_s=0.25)
+                    break
             if time.monotonic() + 1.25 >= notch_deadline:
                 break
             self.invalidate_block_cache()
@@ -2140,6 +2169,13 @@ class CombatEnv:
                     }
 
         # Look for reachable dry ledges at the local water level, including flooded caves.
+        life = (st0.get("dimension"), st0.get("last_death"))
+        excluded_shore = None
+        if self._stalled_water_shore is not None:
+            stalled_shore, stalled_pos, stalled_life, stalled_at = self._stalled_water_shore
+            if life == stalled_life and time.monotonic() - stalled_at < 15.0 and math.dist(pos0[:3], stalled_pos) <= 2.5:
+                excluded_shore = stalled_shore
+                actions.append("shore_lip_stalled")
         shore_target = self._find_walkable_shore_target(
             pos0,
             block_types=SHORE_LAND_BLOCKS,
@@ -2148,6 +2184,7 @@ class CombatEnv:
             max_y=by + 2,
             threat_pos=threat_pos,
             avoid_close_threat=avoid_close_threat,
+            excluded_shore=excluded_shore,
         )
 
         # 2. Radial fallback if find_blocks yielded no dry surface spot.
@@ -2164,7 +2201,8 @@ class CombatEnv:
                 for dist in (4, 8, 14):
                     px = math.floor(start_x + ux * dist)
                     pz = math.floor(start_z + uz * dist)
-                    if not self._point_allowed(px + 0.5, pz + 0.5, action="water_shore"):
+                    candidate = (px + 0.5, float(y_probe + 1), pz + 0.5)
+                    if candidate == excluded_shore or not self._point_allowed(px + 0.5, pz + 0.5, action="water_shore"):
                         continue
                     if avoid_close_threat and has_threat and self._crosses_near_water_threat(pos0, px + 0.5, pz + 0.5, threat_pos):
                         continue
@@ -2173,7 +2211,7 @@ class CombatEnv:
                         foot_p = self._get_block_name(px, y_probe + 1, pz, strict=True)
                         head_p = self._get_block_name(px, y_probe + 2, pz, strict=True)
                         if _is_passable(foot_p) and _is_passable(head_p):
-                            shore_target = [px + 0.5, float(y_probe + 1), pz + 0.5]
+                            shore_target = list(candidate)
                             break
                 if shore_target is not None:
                     break
@@ -2355,6 +2393,15 @@ class CombatEnv:
                 except ApiError:
                     pass
         landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")
+        if not still_wet and landed:
+            self._stalled_water_shore = None
+        elif (
+            still_wet and shore_target is not None and "shore_lip_jump" in actions
+            and (has_threat or shield_target_id is not None) and life == (st_end.get("dimension"), st_end.get("last_death"))
+            and shore_target[1] - pos_end[1] >= 1.75
+            and math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
+        ):
+            self._stalled_water_shore = (tuple(shore_target), tuple(pos_end[:3]), life, time.monotonic())
         return {
             "ok": not still_wet and landed,
             "in_water": still_wet,
