@@ -10880,3 +10880,48 @@ def test_arrow_retreat_uses_the_live_shooter_when_nearest_hostile_is_a_creeper(m
 
     expected = (skeleton["pos"], [creeper["pos"]]) if shooter_visible else (creeper["pos"], [])
     assert retreat_targets == [expected]
+
+
+@pytest.mark.parametrize("followup", ["stalled", "progress", "new_life"])
+def test_water_escape_reselects_a_shore_after_a_stalled_path(followup, monkeypatch):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    blocked_bank = [0.5, 64, -4.5]
+    alternative_bank = [3.5, 63, 0.5]
+    status = {
+        "pos": [0.5, 62.8, 0.5], "dimension": "overworld", "last_death": {"t": 1},
+        "in_water": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    attempts = []
+
+    class CreekBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "move_to":
+                bank = [body[key] for key in ("x", "y", "z")]
+                attempts.append(bank)
+                if len(attempts) == 1:
+                    raise ApiError("path_not_found", "bank is unreachable")
+                status.update(pos=bank, in_water=False, on_ground=True)
+            if action == "control" and body.get("forward") and len(attempts) == 1:
+                if followup == "progress":
+                    status["pos"] = [0.5, 63.2, -2.0]
+                else:
+                    raise ApiError("blocked", "cannot clear the lip")
+            return {"ok": True}
+
+    env = CombatEnv(CreekBot())
+
+    def choose_shore(_pos, *, excluded_shores, **_kwargs):
+        return alternative_bank if tuple(blocked_bank) in excluded_shores else blocked_bank
+
+    monkeypatch.setattr(env, "_find_walkable_shore_target", choose_shore)
+    monkeypatch.setattr(env, "_dry_bank_is_walkable", lambda _pos: True)
+    assert env.escape_deep_water_to_shore()["in_water"] is True
+    if followup == "new_life":
+        status["last_death"] = {"t": 2}
+    assert env.escape_deep_water_to_shore()["ok"] is True
+
+    assert attempts == [blocked_bank, alternative_bank if followup == "stalled" else blocked_bank]

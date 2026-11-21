@@ -2467,7 +2467,9 @@ class CombatEnv:
             if life == stalled_life and time.monotonic() - stalled_at < 15.0 and math.dist(search_pos[:3], stalled_pos) <= 2.5:
                 excluded_shore = stalled_shore
                 actions.append("shore_lip_stalled")
-        retrying_bank = retry_bank is not None and shore_bank_in_reach(search_pos, retry_bank)
+        retrying_bank = (
+            retry_bank is not None and tuple(retry_bank) != excluded_shore and shore_bank_in_reach(search_pos, retry_bank)
+        )
         if retrying_bank:
             shore_target = retry_bank
             actions.append("shore_bank_retry")
@@ -2523,6 +2525,7 @@ class CombatEnv:
                 actions.append("return_to_dry_bank")
 
         # 3. Move to shore target (plus shoreline lip jump) or swim up and away from threat.
+        shore_path_unreachable = False
         if shore_target is not None:
             shore_dist = math.hypot(shore_target[0] - shore_x, shore_target[2] - shore_z)
             contested_short_crossing = (has_threat or shield_target_id is not None) and shore_dist <= 5.0
@@ -2547,6 +2550,7 @@ class CombatEnv:
                 actions.append("move_to_shore")
             except (ApiError, httpx.HTTPError) as err:
                 actions.append("move_to_shore_failed")
+                shore_path_unreachable = isinstance(err, ApiError) and err.code in {"path_not_found", "no_path"}
                 if isinstance(err, httpx.HTTPError):
                     self._best_effort_stop(timeout_s=0.5 if contested_short_crossing else None)
 
@@ -2648,7 +2652,9 @@ class CombatEnv:
                         if isinstance(err, httpx.HTTPError):
                             self._best_effort_stop()
 
-        st_end = self._safe_status(st0)
+        st_end = self._safe_status()
+        observed_end_pos = bool(st_end.get("pos"))
+        st_end = st_end or st0
         interruption = interrupted_water_escape(st_end)
         if interruption is not None:
             return interruption
@@ -2723,13 +2729,17 @@ class CombatEnv:
         if not still_wet and landed:
             self._stalled_water_shore = None
             self.remember_dry_bank(st_end)
-        elif (
-            still_wet and shore_target is not None and "shore_lip_jump" in actions
-            and (has_threat or shield_target_id is not None) and life == (st_end.get("dimension"), st_end.get("last_death"))
-            and shore_target[1] - pos_end[1] >= 1.75
-            and math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
-        ):
-            self._stalled_water_shore = (tuple(shore_target), tuple(pos_end[:3]), life, time.monotonic())
+        elif still_wet and observed_end_pos and shore_target is not None and life == (st_end.get("dimension"), st_end.get("last_death")):
+            tried_lip = "shore_lip_jump" in actions
+            stalled_below_lip = (
+                tried_lip and (has_threat or shield_target_id is not None) and shore_target[1] - pos_end[1] >= 1.75
+                and math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
+            )
+            no_approach = (tried_lip or shore_path_unreachable) and (
+                math.dist(search_pos[:3], shore_target) - math.dist(pos_end[:3], shore_target) < 0.5
+            )
+            if stalled_below_lip or no_approach:
+                self._stalled_water_shore = (tuple(shore_target), tuple(pos_end[:3]), life, time.monotonic())
         if (
             still_wet and not retrying_bank and shore_target is not None and "shore_lip_jump" in actions
             and life == (st_end.get("dimension"), st_end.get("last_death"))
