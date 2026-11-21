@@ -387,7 +387,7 @@ class GenerationGuard:
             skills.bot = recovery_bot
         try:
             result = run(skills)
-            if not result.get("ok"):
+            if not result.get("ok") and (result.get("mode") != "flee" or result.get("respawned")):
                 return result
             after = recovery_bot.status()
         except _RecoveryBudgetExceeded:
