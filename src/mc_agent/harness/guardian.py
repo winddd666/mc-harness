@@ -834,8 +834,14 @@ class GenerationGuard:
                     cover = None
                 if cover is not None and (cover.get("ok") or cover.get("respawned")):
                     return cover
+            critical_arrow_knockback = (
+                dimension == "overworld" and ranged and prefer_cover and unshielded
+                and isinstance(health, (int, float)) and 0 < health <= 4.0
+                and status.get("on_ground") is False and not status.get("on_fire")
+            )
             return self.combat_env.flee(
                 pos, wait_for_ground=True,
+                **({"initial_landing_checks": 5} if critical_arrow_knockback else {}),
                 **({"other_shooters": other_shooters} if other_shooters else {}),
                 **({"other_melee": other_melee} if other_melee else {}),
                 **({"use_nearest_hostile": False} if resolve_melee and pos is None else {}),

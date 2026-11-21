@@ -6532,13 +6532,16 @@ def test_r24_airborne_arrow_hit_faces_shooter_without_jumping_or_blind_flee(bloc
     assert retreat["result"]["reason"] == "unsafe_landing"
 
 
-@pytest.mark.parametrize("landing", ["landed", "airborne", "respawned"])
+@pytest.mark.parametrize("landing", ["landed", "late_landing", "airborne", "respawned"])
 def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monkeypatch, landing):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    late_landing = landing == "late_landing"
+    landing_at = 1000.45 if late_landing else 1000.15
     status = {
-        "pos": [-7918.3, 44.6, 2790.6], "health": 7.3, "food": 20,
+        "pos": [-7918.3, 44.6, 2790.6], "health": 2.2 if late_landing else 7.3, "food": 20,
+        "dimension": "overworld",
         "ready": True, "alive": True, "on_ground": False, "last_death": {"t": 1},
         "nearest_hostile": {"name": "skeleton", "dist": 7.0},
     }
@@ -6547,7 +6550,7 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
     class CaveBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                if clock[0] >= 1000.15 and landing != "airborne":
+                if clock[0] >= landing_at and landing != "airborne":
                     status.update(pos=[-7918.3, 44, 2790.6], on_ground=True)
                 return dict(status)
             if action == "events":
@@ -6561,7 +6564,7 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
 
     guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
 
-    def no_route(*args):
+    def no_route(*args, **kwargs):
         assert status["on_ground"] is True
         if landing == "respawned":
             status["last_death"] = {"t": 2}
@@ -6576,7 +6579,7 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
     monkeypatch.setattr(guard.combat_env, "probe_retreat", no_route)
     monkeypatch.setattr(guard.combat_env, "dig_cover_pocket", dig_cover)
     guard.poll()
-    assert cover_calls == ([[-7918.3, 44, 2790.6]] if landing == "landed" else [])
+    assert cover_calls == ([[-7918.3, 44, 2790.6]] if landing in {"landed", "late_landing"} else [])
 
 
 @pytest.mark.parametrize("respawned", [False, True])
