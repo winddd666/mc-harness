@@ -278,6 +278,11 @@ def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
     )
 
 
+def retreat_made_progress(ok: bool, moved: Any, reason: Any) -> bool:
+    """Recognize a partial retreat with movement and no reported landing hazard."""
+    return ok or (reason is None and isinstance(moved, (int, float)) and math.isfinite(moved) and moved >= 0.35)
+
+
 def ranged_retreat_positions(
     origin: Sequence[float], entities: Sequence[dict[str, Any]], *, max_distance: float,
 ) -> list[tuple[int | None, Sequence[float]]]:
@@ -658,16 +663,19 @@ class CombatEnv:
             "candidates": candidates,
         }
 
-    def lava_above_headroom(self, pos: Sequence[float], target: Sequence[int]) -> bool:
-        """Check whether removing a block above the bot would expose its column to lava."""
+    def fluid_above_headroom(self, pos: Sequence[float], target: Sequence[int]) -> str | None:
+        """Identify water or lava held back by a block above the bot."""
         x, y, z = pos[:3]
         tx, ty, tz = target[:3]
         feet_y = math.floor(y + 0.05)
-        return (
-            ty in {feet_y + 1, feet_y + 2}
-            and (tx, tz) in _hitbox_columns(x, z)
-            and _is_lava_block(self._get_block_name(tx, ty + 1, tz, strict=True))
-        )
+        if ty not in {feet_y + 1, feet_y + 2} or (tx, tz) not in _hitbox_columns(x, z):
+            return None
+        block = self._get_block_name(tx, ty + 1, tz, strict=True)
+        if _is_lava_block(block):
+            return "lava"
+        if block in {"water", "flowing_water"}:
+            return "water"
+        return None
 
     def can_remove_footing(self, pos: Sequence[float], target: Sequence[int]) -> bool:
         """Allow ordinary digs and check the landing for a dig through the current floor."""
@@ -3095,7 +3103,11 @@ class SubcorticalInstinctController:
         nh_post = st_post.get("nearest_hostile")
         if (
             mode == "cover_or_flee" and not has_shield and not has_weapon
-            and any(a["action"] == "flee" and a["ok"] for a in actions)
+            and any(
+                a["action"] == "flee" and not a.get("respawned")
+                and retreat_made_progress(a["ok"], a.get("moved"), a.get("reason"))
+                for a in actions
+            )
             and isinstance(st_post.get("health"), (int, float)) and 0.0 < st_post["health"] <= 10.0
             and isinstance(nh_post, dict) and _clean_block_name(nh_post.get("name")) in PRE_HURT_MELEE_MOBS
             and isinstance(nh_post.get("id"), int) and self._entity_dist(st_post.get("pos"), nh_post) <= 3.5

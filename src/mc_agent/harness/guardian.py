@@ -36,6 +36,7 @@ from ..skills.combat_env import (
     ThreatTrigger,
     aim_yaw_pitch,
     ranged_retreat_positions,
+    retreat_made_progress,
 )
 from ..skills.library import MacroSkills, best_melee_weapon_in_inv
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
@@ -138,7 +139,7 @@ class _UnsafeFleeExit(BaseException):
 
 
 class _UnsafeDig(BaseException):
-    """Unwind a dig that would expose the bot to an unsafe drop or overhead lava."""
+    """Unwind a dig that would expose the bot to an unsafe drop or overhead fluid."""
 
 
 class _UnsafeFoodUse(BaseException):
@@ -1890,7 +1891,9 @@ class GenerationGuard:
                         and cf_result.get("reason") == "no_safe_retreat"
                     )
                     follow_unarmed_retreat = (
-                        not has_shield and not has_melee_weapon and cf and cf.get("ok") and cf_result.get("mode") == "flee"
+                        not has_shield and not has_melee_weapon and cf and melee_retreat
+                        and not cf_result.get("respawned")
+                        and retreat_made_progress(bool(cf.get("ok")), cf_result.get("moved_dist"), cf_result.get("reason"))
                     )
                     melee_after_retreat = hurt_src in MELEE_HURT_SOURCES or (
                         nether_melee_retreat and not hurt_src and now - self._last_melee_hurt_at < 4.0
@@ -2230,6 +2233,7 @@ class GenerationGuard:
         deadline: float | None = None,
         check_unstick_exit: bool = False,
         watch_hot_floor: bool = False,
+        watch_scout_water: bool = False,
         check_flee_exit: bool = False,
         watch_attack_emergency: bool = False,
         check_support_dig: bool = False,
@@ -2356,8 +2360,13 @@ class GenerationGuard:
                         and nh_dist <= 4.5
                         and not self._is_pre_hurt_debounced(nh_id, nh_name)
                     )
+                    threatened_swimmer = (
+                        watch_scout_water and st.get("in_water") and nh_name == "drowned" and nh_dist <= 6.0
+                        and (st.get("on_ground") is False or st.get("submerged"))
+                        and st.get("ready") is not False and st.get("alive") is not False
+                    )
                     hot_floor_now = False
-                    if watch_hot_floor and not (in_lava_now or creeper_close or melee_ambush or hp_dropped):
+                    if watch_hot_floor and not (in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped):
                         tile = self._hot_floor_block(st)
                         if (
                             tile is not None and tile == previous_tile and tile != checked_hot_floor
@@ -2374,9 +2383,11 @@ class GenerationGuard:
                             except (ApiError, httpx.HTTPError):
                                 pass
                         previous_tile = tile
-                    if in_lava_now or creeper_close or melee_ambush or hp_dropped or hot_floor_now:
+                    if in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped or hot_floor_now:
                         if in_lava_now:
                             src_w, eid_w, tp_w, pos_w, dist_w = "boundary_threat", None, "lava", None, 0.0
+                        elif threatened_swimmer:
+                            src_w, eid_w, tp_w, pos_w, dist_w = "tool_water_threat", nh_id, nh_name, nh_pos, nh_dist
                         elif creeper_close:
                             src_w, eid_w, tp_w, pos_w, dist_w = "pre_hurt_creeper", nh_id, "creeper", nh_pos, nh_dist
                         elif hp_dropped:
@@ -2495,10 +2506,12 @@ class GenerationGuard:
                     return
                 trigger = pending_trigger[0]
                 moving = clean_path == "move_to" or (
-                    watch_hot_floor and clean_path == "control" and isinstance(body, dict) and body.get("forward")
+                    (watch_hot_floor or watch_scout_water)
+                    and clean_path == "control" and isinstance(body, dict) and body.get("forward")
                 )
                 movement_emergency = moving and (
-                    trigger.get("primary_type") in {"lava", "hot_floor"} or trigger.get("source") == "pre_hurt_creeper"
+                    trigger.get("primary_type") in {"lava", "hot_floor"}
+                    or trigger.get("source") in {"pre_hurt_creeper", "tool_water_threat"}
                 )
                 if not caller_ignores_hurt or movement_emergency:
                     raise ReflexPreempted(trigger) from None
@@ -2645,12 +2658,15 @@ class GenerationGuard:
                 if underwater_danger:
                     pre_actions: list[dict[str, Any]] = []
                     nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
-                    attack_near_drowned = interrupted_name == "mc_attack" and nh_pre_name == "drowned" and nh_pre_dist <= 6.0
+                    moving_near_drowned = (
+                        interrupted_name in {"mc_attack", "mc_skill_scout_surface"}
+                        and nh_pre_name == "drowned" and nh_pre_dist <= 6.0
+                    )
                     if hurt_pre_water:
                         self._water_hurt_streak += 1
                     forced_pre_shore = (
                         self._water_hurt_streak >= 3 or now_pre < self._no_water_until
-                        or self._swimming_at_low_health(st_pre) or attack_near_drowned
+                        or self._swimming_at_low_health(st_pre) or moving_near_drowned
                     )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
@@ -2692,7 +2708,7 @@ class GenerationGuard:
                         esc_pre_respawned = bool(esc_pre_res.get("respawned"))
                     if not esc_pre_ok and not esc_pre_respawned:
                         shore_threat_pos = trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None)
-                        if attack_near_drowned and shore_threat_pos is None and att_pre:
+                        if moving_near_drowned and shore_threat_pos is None and att_pre:
                             shore_threat_pos = self._find_hostile_position(att_pre.get("id"), nh_pre_name, timeout_s=0.6)
                         shore_pre = self._action(
                             "escape_to_shore",
@@ -2848,9 +2864,11 @@ class GenerationGuard:
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.0)
         env = CombatEnv(probe_bot)
         try:
-            if check_roof and env.lava_above_headroom(pos, target):
-                self.events.emit("guardian.lava_roof_dig_blocked", target=list(target), pos=pos)
-                return "unsafe_lava_roof"
+            if check_roof:
+                fluid = env.fluid_above_headroom(pos, target)
+                if fluid == "lava" or (fluid == "water" and not status.get("in_water") and not status.get("submerged")):
+                    self.events.emit(f"guardian.{fluid}_roof_dig_blocked", target=list(target), pos=pos)
+                    return f"unsafe_{fluid}_roof"
             if not check_support or env.can_remove_footing(pos, target):
                 return None
         except _RecoveryBudgetExceeded:
@@ -2883,6 +2901,7 @@ class GenerationGuard:
                 deadline=deadline,
                 check_unstick_exit=is_unstick,
                 watch_hot_floor=tool_name in HOT_FLOOR_WATCH_TOOLS,
+                watch_scout_water=tool_name == "mc_skill_scout_surface",
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
                 check_support_dig=tool_name in {"mc_dig", "mc_skill_staircase"},
@@ -2900,10 +2919,11 @@ class GenerationGuard:
             }, ensure_ascii=False)
         except _UnsafeDig as error:
             code = error.args[0]
-            message = (
-                "头顶待挖方块上方有岩浆，请从侧面寻找脱困路线。"
-                if code == "unsafe_lava_roof" else "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。"
-            )
+            message = {
+                "unsafe_lava_roof": "头顶待挖方块上方有岩浆，请从侧面寻找脱困路线。",
+                "unsafe_water_roof": "头顶待挖方块上方有水，请从侧面寻找脱困路线。",
+                "unsafe_landing": "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。",
+            }[code]
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
@@ -3011,9 +3031,18 @@ class GenerationGuard:
                         and isinstance(shore_hostile, dict) and shore_hostile.get("id") == nh_id
                     )
                 tool_error = last_tool_result.get("error")
+                last_dig_error = last_tool_result.get("last_error")
                 tool_stopped_in_water = (
-                    last_tool_result.get("stop_reason") == "in_water"
-                    and isinstance(tool_error, dict) and tool_error.get("code") == "in_water"
+                    (
+                        last_tool_result.get("stop_reason") == "in_water"
+                        and isinstance(tool_error, dict) and tool_error.get("code") == "in_water"
+                    )
+                    or (
+                        last_tool_result.get("stop_reason") == "dig_failed"
+                        and isinstance(last_dig_error, dict)
+                        and last_dig_error.get("code") == "unsafe_refilled_cell"
+                        and last_dig_error.get("block") in ("water", "flowing_water")
+                    )
                 )
                 unstick_still_wet = (
                     isinstance(tool_error, dict) and (
