@@ -443,12 +443,12 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         task=(
             "确保完成 Day 1 早晨石器与据点箱基建：0) 若包内已有 cobblestone>=3 且有木棍/木板或工作台，直接就地调 mc_skill_craft_gear('stone_pickaxe')，切勿在地下砍树；"
             "1) 若在水中先调 mc_skill_unstick 上岸；"
-            "2) 在地表先调 mc_skill_harvest_logs(target_logs=6) 速砍 1~2 棵树（严禁徒手硬砍 16 根，凑足 4~6 根原木立刻合工作台+wooden_pickaxe，挖 11 块圆石直出 stone_pickaxe + stone_axe + furnace；有了石斧再按需补 6~8 根原木速度快 4 倍）；"
+            "2) 在地表先调 mc_skill_harvest_logs(target_logs=6) 速砍 1~2 棵树（严禁徒手硬砍 16 根，凑足 4~6 根原木立刻合工作台+wooden_pickaxe，挖 11 块圆石直出 stone_pickaxe + stone_axe + furnace；有了石斧再按需补 6~8 根原木速度快 4 倍；若 32m 内无树/出生点被砍秃，立即调 mc_skill_scout_surface(direction='auto', target_types=['oak_log','birch_log','spruce_log','dark_oak_log','acacia_log','jungle_log'], max_duration_s=40) 跑出 100m 找树林，严禁在无树原地空手挖石头！）；"
             "3) 合工作台、wooden_pickaxe（挖 11+ 圆石后立刻升级 stone_pickaxe + stone_axe/stone_sword + furnace）；"
             "4) 挖掘至少 11 块圆石合出 stone_pickaxe、stone_axe（跳劈可高伤收猪/牛/羊且砍树极快）与 furnace；"
             "5) 若在出生安全地表且木板充足，顺手合 1 个 chest 并放置为据点箱，把多余原木（随身留 6~8 块）存箱留底，防死亡爆装返贫。"
         ),
-        extra_tools=("mc_skill_container",),
+        extra_tools=("mc_skill_container", "mc_skill_scout_surface"),
         advancement_id="minecraft:story/upgrade_tools",
     ),
     "bootstrap_iron_age": CurriculumTarget(
@@ -771,10 +771,11 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         tier=3,
         budget_class="expedition",
         task=(
-            "解锁 nether/find_fortress(30分)：当前已身处下界，请勿穿回主世界传送门！沿安全实心下界岩地形分段探索，"
-            "扫描 nether_bricks / nether_brick_fence / blaze / wither_skeleton，进入下界要塞区域即可解锁。"
+            "解锁 nether/find_fortress(30分)：当前已身处下界，请勿穿回主世界传送门！"
+            "优先调用 mc_skill_scout_surface(direction='auto', target_types=['nether_bricks','nether_brick_fence','spawner','nether_wart','blaze'], max_duration_s=45) "
+            "沿安全实心下界岩地形高速推进并自动避开岩浆/岩浆块/悬崖；命中地狱砖或烈焰人后立即切入要塞区域即可解锁。"
         ),
-        extra_tools=("mc_posture",),
+        extra_tools=("mc_posture", "mc_skill_scout_surface"),
         advancement_id="minecraft:nether/find_fortress",
     ),
     "minecraft:nether/obtain_blaze_rod": CurriculumTarget(
@@ -800,9 +801,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         budget_class="expedition",
         task=(
             "解锁 story/follow_ender_eye(60分) 并顺势推进至末地传送门："
-            "1) 若包内有 ender_eye，先选定主手调 mc_use_item(item='ender_eye') 掷出末影之眼，并立刻调 mc_get_entities(radius=32) 观察 eye_of_ender 飞行方向；"
-            "2) 沿末影之眼飞行方向调用 mc_skill_scout_surface(direction=<方向>, max_duration_s=45, step_dist=30) 高速推进 150~250 格后再次掷眼复核；"
-            "3) 当末影之眼向下钻地或原地盘旋时，调 mc_skill_staircase(vertical='down', steps=12) 下挖并扫描 stone_bricks / mossy_stone_bricks / end_portal_frame / spawner，进入要塞房间即解锁！"
+            "1) 若包内有 ender_eye，先选定主手调 mc_use_item(item='ender_eye') 掷出末影之眼（返回体含 eye_vector 方向；严禁掷眼后原地反复调 mc_skill_collect_drops 浪费时间）；"
+            "2) 沿 eye_vector 方向调用 mc_skill_scout_surface(direction=<方向>, max_duration_s=45, step_dist=30) 高速推进 150m 后再次掷眼复核；若 eye_vector 方向发生反转（说明已越过要塞），立刻把移动步长折半（mc_move_to 退回 30~50m）精确定位；"
+            "3) 当末影之眼向下钻地或小范围来回反转时，调 mc_skill_staircase(vertical='down', steps=12) 下挖并扫描 stone_bricks / mossy_stone_bricks / end_portal_frame / spawner，进入要塞房间即解锁！"
         ),
         extra_tools=("mc_use_item", "mc_skill_scout_surface", "mc_interact", "mc_posture"),
         advancement_id="minecraft:story/follow_ender_eye",
