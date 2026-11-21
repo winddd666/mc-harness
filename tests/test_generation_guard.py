@@ -3285,6 +3285,47 @@ def test_poll_refaces_a_close_melee_attacker_with_shield_after_failed_retreat(mo
     assert looks == ([{"entity_id": 78}] if landing == "cornered" else [])
 
 
+@pytest.mark.parametrize("nearby", [False, True])
+def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatch, nearby):
+    attacker = {"id": 77, "name": "spider", "dist": 3.1, "pos": [5003.5, 39, -7590.8]}
+    status = {"pos": [5000.4, 39, -7591.1], "dimension": "overworld", "health": 15.5, "food": 20,
+              "ready": True, "alive": True, "on_ground": True, "nearest_hostile": attacker}
+    followups = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": attacker}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [{"name": "stone_pickaxe", "count": 1}]}
+            if action == "get_entities":
+                assert kwargs["timeout_s"] == 0.6
+                return {"entities": [{**attacker, "pos": [5002, 39, -7591.4]}]}
+            return {"ok": True}
+
+    def flee(*args, **kwargs):
+        status.update(pos=[5004.3, 39, -7591.4], health=6.7, nearest_hostile={
+            "id": 77, "name": "spider", "dist": 2.3 if nearby else 5.0,
+        })
+        return {"ok": True, "mode": "flee", "moved_dist": 5.94}
+
+    def step(landing, target, *, deadline):
+        followups.append((landing["health"], target))
+        return True
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    monkeypatch.setattr(guard.combat_env, "step_away_from_melee", step)
+    incident = guard.poll()
+
+    actions = [a["action"] for a in incident["actions"]]
+    assert actions == (["combat_or_flee", "followup_melee_retreat"] if nearby else ["combat_or_flee"])
+    assert followups == ([(6.7, [5002, 39, -7591.4])] if nearby else [])
+
+
 def test_r19_poll_skips_eat_in_close_melee_range_after_combat_timeout(monkeypatch):
     """Reproduces r19_short hy4_hy_3_midgame: never drop shield to eat when a hostile is <= 5.5m after melee cooldown."""
     clock = [6000.0]

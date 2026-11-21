@@ -1829,19 +1829,23 @@ class GenerationGuard:
                             self._consecutive_flees += 1
                         else:
                             self._consecutive_flees = 0
-                    if (
+                    cf_result = (cf or {}).get("result") or {}
+                    face_after_blocked_retreat = (
                         str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
-                        and already_blocking and hurt_src in MELEE_HURT_SOURCES and cf
-                        and (cf.get("result") or {}).get("reason") == "no_safe_retreat"
-                    ):
+                        and already_blocking and cf_result.get("reason") == "no_safe_retreat"
+                    )
+                    follow_unarmed_retreat = (
+                        not has_shield and not has_melee_weapon and cf and cf.get("ok") and cf_result.get("mode") == "flee"
+                    )
+                    if hurt_src in MELEE_HURT_SOURCES and (face_after_blocked_retreat or follow_unarmed_retreat):
                         try:
                             landing = self.bot.call("status", method="GET", timeout_s=0.6)
                         except (ApiError, httpx.HTTPError):
                             landing = {}
-                        mob, dist, target_id, _ = self._extract_hostile_info(landing)
+                        mob, dist, target_id, target_pos = self._extract_hostile_info(landing)
                         current_hp = landing.get("health")
                         if (
-                            landing.get("blocking") and landing.get("on_ground") is True
+                            landing.get("on_ground") is True
                             and landing.get("ready") is not False and landing.get("alive") is not False
                             and not landing.get("in_lava") and not landing.get("in_water")
                             and landing.get("last_death") == status.get("last_death")
@@ -1849,10 +1853,24 @@ class GenerationGuard:
                             and isinstance(current_hp, (int, float)) and 0 < current_hp <= LOW_HP_BUNKER_MAX
                             and mob in PRE_HURT_MELEE_MOBS and target_id is not None and dist <= 3.5
                         ):
-                            actions.append(self._action(
-                                "face_attacker_after_retreat",
-                                lambda: self.bot.call("look", {"entity_id": target_id}, timeout_s=0.9),
-                            ))
+                            if face_after_blocked_retreat and landing.get("blocking"):
+                                actions.append(self._action(
+                                    "face_attacker_after_retreat",
+                                    lambda: self.bot.call("look", {"entity_id": target_id}, timeout_s=0.9),
+                                ))
+                            elif follow_unarmed_retreat and landing.get("pos"):
+                                if target_pos is None:
+                                    target_pos = self._find_hostile_position(target_id, mob, timeout_s=0.6)
+                                if (
+                                    target_pos and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
+                                    and math.dist(landing["pos"][:3], target_pos[:3]) <= 3.5
+                                ):
+                                    actions.append(self._action(
+                                        "followup_melee_retreat",
+                                        lambda: {"ok": self.combat_env.step_away_from_melee(
+                                            landing, target_pos, deadline=time.monotonic() + 1.5,
+                                        )},
+                                    ))
 
             if should_eat and (
                 not effective_combat_hurt
