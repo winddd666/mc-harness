@@ -908,6 +908,10 @@ def _is_two_step_stair(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool
     return abs(a[1] - b[1]) == 2 and (abs(a[0] - b[0]), abs(a[2] - b[2])) in {(2, 0), (0, 2)}
 
 
+def _is_two_block_vertical_gap(a: tuple[int, int, int], b: tuple[int, int, int]) -> bool:
+    return a[0] == b[0] and a[2] == b[2] and abs(a[1] - b[1]) == 2
+
+
 def _descent_start_beside_anchor(
     start: tuple[int, int, int], anchor: tuple[int, int, int], direction: str,
 ) -> bool:
@@ -935,7 +939,7 @@ def _omitted_waypoint_index(
 ) -> int | None:
     for index, (a, b) in enumerate(zip(waypoints, waypoints[1:]), 1):
         if edge_kind in {"stair_down", "stair_up"}:
-            if abs(a[1] - pos[1]) != 1 or not _is_two_step_stair(a, b):
+            if abs(a[1] - pos[1]) != 1 or not (_is_two_step_stair(a, b) or _is_two_block_vertical_gap(a, b)):
                 continue
         elif edge_kind in {"spine_forward", "branch_leaf", "offset_sidestep"}:
             # Level excavation saves every third step. Only expand short,
@@ -1936,12 +1940,14 @@ class MiningDFSEngine:
             hops = _interpolate_cells(cur, wp)
             if len(hops) > 1:
                 # A straight stair can omit the middle step from its waypoint list.
-                recorded_stair = index > 0 and cur == ordered[index - 1] and _is_two_step_stair(cur, wp)
+                recorded_segment = index > 0 and cur == ordered[index - 1]
+                recorded_stair = recorded_segment and _is_two_step_stair(cur, wp)
+                recorded_drop = recorded_segment and _is_two_block_vertical_gap(cur, wp)
                 stepped_all = True
                 for previous, hop in zip(hops, hops[1:]):
                     if deadline is not None and time.monotonic() >= deadline:
                         return False, "walk_time_slice"
-                    if hop == wp and previous == (hop[0], hop[1] - 1, hop[2]):
+                    if (hop == wp or recorded_drop) and previous == (hop[0], hop[1] - 1, hop[2]):
                         if self._pillar_to_recorded_step(hop, deadline=deadline):
                             continue
                     if not self._step_to(hop, from_cell=previous, repair_support=(hop == wp or recorded_stair)):

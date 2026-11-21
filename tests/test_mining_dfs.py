@@ -2446,21 +2446,29 @@ def test_return_repairs_missing_support_under_an_open_recorded_stair(monkeypatch
     assert not world.dig_log
 
 
-def test_return_jump_places_one_block_to_reach_recorded_vertical_waypoint(monkeypatch) -> None:
-    world = _MockMineWorld(start_pos=(0.5, 19.0, 0.5), surface_y=40)
-    lower, upper = (0, 19, 0), (0, 20, 0)
-    for y in (19, 20, 21):
+@pytest.mark.parametrize("height, start_offset", [(1, 0), (2, 0), (2, 1)])
+def test_return_jump_rejoins_a_recorded_vertical_gap(monkeypatch, height, start_offset) -> None:
+    world = _MockMineWorld(start_pos=(0.5, float(19 + start_offset), 0.5), surface_y=40)
+    lower, upper = (0, 19, 0), (0, 19 + height, 0)
+    for y in range(19 + start_offset, upper[1] + 2):
         world.blocks[(0, y, 0)] = "air"
     monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
 
     jumping = False
+    jump_base = 0
 
     def handler(request):
-        nonlocal jumping
+        nonlocal jumping, jump_base
         path = request.url.path.rsplit("/", 1)[-1]
         if path == "posture":
-            jumping = bool(json.loads(request.content)["jump"])
-            world.pos[1] = 20.1 if jumping else (20.0 if world.block_at(lower) == "cobblestone" else 19.0)
+            wants_jump = bool(json.loads(request.content)["jump"])
+            if wants_jump and not jumping:
+                jump_base = math.floor(world.pos[1])
+                world.pos[1] = jump_base + 1.1
+            elif jumping and not wants_jump:
+                placed = world.block_at((0, jump_base, 0)) == "cobblestone"
+                world.pos[1] = float(jump_base + placed)
+            jumping = wants_jump
             return httpx.Response(200, json={"ok": True, "result": {}})
         if path == "place":
             assert jumping
@@ -2473,11 +2481,18 @@ def test_return_jump_places_one_block_to_reach_recorded_vertical_waypoint(monkey
 
     with BotSession("tok", bot_username="VerticalReturn", transport=httpx.MockTransport(handler)) as bot:
         engine = MacroSkills(bot).mining_dfs
-        result = engine._walk_waypoints([lower, upper], min_hp_ref=[20.0])
+        collar = engine._create_node(kind="collar", anchor=upper, parent_id=None, edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        tip = engine._create_node(
+            kind="switchback", anchor=lower, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "north", [upper, lower]), branches=[],
+        )
+        result = engine.run(action="return_collar")
 
-    assert result == (True, None)
-    assert world.pos == [0.5, 20.0, 0.5]
-    assert world.place_log == [(lower, "cobblestone")]
+    assert result["ok"] is True
+    assert world.pos == [0.5, float(upper[1]), 0.5]
+    assert world.place_log == [((0, y, 0), "cobblestone") for y in range(19 + start_offset, upper[1])]
+    assert engine.active_node_id == tip.node_id
     assert not world.dig_log
     assert not jumping
 
