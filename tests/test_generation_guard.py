@@ -704,6 +704,49 @@ def test_sealed_cover_receipt_outside_pocket_does_not_stop_retreat(monkeypatch, 
     assert move == pytest.approx([6392.5, 22, -6633.6])
 
 
+@pytest.mark.parametrize("ready_after_respawn", [False, True])
+def test_arrow_cover_does_not_retreat_using_a_previous_lifes_attacker(monkeypatch, ready_after_respawn):
+    status = {
+        "pos": [-6232.5, 29.1, -6416.8], "health": 9.5, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "dimension": "overworld",
+        "last_death": {"t": 1},
+    }
+
+    class ShotBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                events = [{"seq": 1, "type": "hurt", "source": "arrow"}]
+                return {"events": [event for event in events if event["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [], "offhand": None}
+            pytest.fail(f"unexpected action {action}")
+
+    bot = ShotBot()
+    skills = MacroSkills(bot)
+
+    def die_during_cover():
+        status.update(
+            pos=[-6240.5, 72.1, -6412.5], health=20, ready=ready_after_respawn,
+            last_death={"t": 2},
+        )
+        return {"ok": False, "mode": "cover_pocket", "pos_after": status["pos"], "sealed": [False, False]}
+
+    def stale_retreat(*_args, **_kwargs):
+        pytest.fail("Must stop combat recovery for the previous life")
+
+    monkeypatch.setattr(skills, "dig_cover_pocket", die_during_cover)
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=skills)
+    monkeypatch.setattr(guard, "_defend_or_flee", stale_retreat)
+    incident = guard.poll()
+
+    cover, = incident["actions"]
+    assert cover["action"] == "dig_cover"
+    assert cover["ok"] is False and cover["result"]["respawned"] is True
+    assert incident["requires_replan"] is True
+
+
 def test_escape_lava_does_not_trust_in_water_false_and_nether_skips_water_bucket(monkeypatch):
     """Reproduces hy4_hy_7_village: escape_water() lied ok=True in lava, looping 11 ticks to death."""
     from mc_agent.skills.safety import SafetyEmergency, check_and_stabilize

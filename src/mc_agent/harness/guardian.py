@@ -1913,9 +1913,25 @@ class GenerationGuard:
                             return math.floor(float(pos[0])), math.floor(float(pos[1]) + 0.05), math.floor(float(pos[2]))
                         return None
 
+                    def checked_cover() -> dict[str, Any]:
+                        result = self.combat_env.dig_cover_pocket(self._skills())
+                        try:
+                            after = self.bot.call("status", method="GET", timeout_s=0.6, allow_reauth=False)
+                        except (ApiError, httpx.HTTPError):
+                            return result
+                        if after.get("alive") is False or (
+                            after.get("last_death") is not None and after["last_death"] != status.get("last_death")
+                        ):
+                            return {**result, "ok": False, "respawned": True, "requires_replan": True}
+                        return result
+
                     def try_cover(block: tuple[int, int, int] | None) -> dict[str, Any]:
-                        result = self._action("dig_cover", lambda: self.combat_env.dig_cover_pocket(self._skills()))
+                        result = self._action("dig_cover", checked_cover)
                         actions.append(result)
+                        if (result.get("result") or {}).get("respawned"):
+                            if "death_or_connection_changed" not in reasons:
+                                reasons.append("death_or_connection_changed")
+                            return result
                         self._last_dig_cover_block = block
                         self._last_dig_cover_at = time.monotonic()
                         if result.get("ok"):
@@ -1950,7 +1966,8 @@ class GenerationGuard:
                     ):
                         cover = try_cover(cur_blk_r)
                     cover_ok = bool(cover and cover.get("ok")) or already_in_dug_cover
-                    if not cover_ok and (
+                    cover_changed_life = bool(((cover or {}).get("result") or {}).get("respawned"))
+                    if not cover_ok and not cover_changed_life and (
                         skip_cover_for_blast or not already_blocking or hp_val <= 10.0 or not ranged_hurt_only
                     ):
                         if (
