@@ -2531,9 +2531,17 @@ class McToolset:
     def mc_skill_harvest_logs(self, target_logs: int = 4, radius: int = 32) -> str:
         target_logs = max(1, min(32, int(target_logs)))
         radius = max(4, min(64, int(radius)))
+        budget_s, deadline_imminent = self._clamp_tool_budget(45.0, max_s=45.0)
+        if deadline_imminent:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "stop_reason": "episode_deadline_imminent",
+                "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过采木。"},
+            }, ensure_ascii=False)
         return self._run_skill(
-            lambda: self._cleanup_inventory_after(
-                self.skills.harvest_logs(target_logs=target_logs, radius=radius)
+            lambda: self.skills.harvest_logs(
+                target_logs=target_logs, radius=radius, max_duration_s=budget_s, cleanup_inventory=True,
             )
         )
 
