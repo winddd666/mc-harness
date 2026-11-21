@@ -1264,7 +1264,7 @@ class GenerationGuard:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget"}
 
-    def _protect_attack_on_hot_floor(self) -> str | None:
+    def _protect_action_on_hot_floor(self, *, is_attack: bool) -> str | None:
         if self._last_hot_floor_block is None:
             return None
         try:
@@ -1277,14 +1277,22 @@ class GenerationGuard:
             or self._hot_floor_block(status) != self._last_hot_floor_block
         ):
             return None
+        health = status.get("health")
+        if not is_attack and not (isinstance(health, (int, float)) and 0 < health <= 4.0):
+            return None
         self.combat_env.invalidate_block_cache()
         if not self.combat_env.is_on_hot_floor(status["pos"]):
             return None
-        step = self._action("hot_floor_exit_before_attack", lambda: self._step_off_hot_floor(status))
+        action = "hot_floor_exit_before_attack" if is_attack else "hot_floor_exit_before_move"
+        message = (
+            "脚下是岩浆块，请确认安全落脚后重新选择攻击目标。"
+            if is_attack else "脚下是岩浆块，请从有支撑的安全落脚点继续移动。"
+        )
+        step = self._action(action, lambda: self._step_off_hot_floor(status))
         return json.dumps({
             "ok": False,
             "requires_replan": True,
-            "error": {"code": "hot_floor", "message": "脚下是岩浆块，请确认安全落脚后重新选择攻击目标。"},
+            "error": {"code": "hot_floor", "message": message},
             "recovery": step,
         }, ensure_ascii=False)
 
@@ -1498,6 +1506,7 @@ class GenerationGuard:
         if not in_lava and status.get("on_ground") is True:
             self._last_stalled_lava = None
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
+        underwater_hot_floor = in_water and len(other_hurts) < len(hurts)
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava
             and self._needs_hot_floor_stance(status, now)
@@ -1893,7 +1902,7 @@ class GenerationGuard:
                 if (
                     not transient_err and not forced_water_shore and not no_water_reentry and not drowning
                     and not self._swimming_at_low_health(status) and not close_drowned_hit
-                    and not retry_shore_after_hit and not urgent_trident_shore
+                    and not retry_shore_after_hit and not urgent_trident_shore and not underwater_hot_floor
                 ):
                     if not _already("escape_water"):
                         short_escape = any(self._short_water_escape_after_hit(status, h.get("source")) for h in hurts)
@@ -1925,6 +1934,7 @@ class GenerationGuard:
                             att_pos_w, keep_shield=has_shield,
                             shield_target_id=att_w_dict.get("id") if att_w_dict else nh_id,
                             **({"surface_first": True} if drowning else {}),
+                            **({"sneak_on_magma": True} if underwater_hot_floor else {}),
                         ),
                     )
                     actions.append(shore_act)
@@ -3675,7 +3685,9 @@ class GenerationGuard:
                             st_after = outcome.get("status_after") or self.bot.status()
                         except (ApiError, httpx.HTTPError):
                             st_after = st_pre
-                        life_unavailable = isinstance(st_after, dict) and life_changed(st_after)
+                        life_unavailable = outcome.get("mode") == "life_unavailable" or (
+                            isinstance(st_after, dict) and life_changed(st_after)
+                        )
                         post_name, post_dist, post_id, post_pos = self._extract_hostile_info(st_after if isinstance(st_after, dict) else {})
                         close_drowned_after_reflex = (
                             trigger.get("source") == "tool_interrupted_hurt"
@@ -3797,8 +3809,8 @@ class GenerationGuard:
     def run_tool_with_reflex(self, tool_name: str, invoke_fn: Callable[[], str]) -> str:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
         is_attack = tool_name == "mc_attack"
-        if is_attack and not self._in_reflex:
-            receipt = self._protect_attack_on_hot_floor()
+        if (is_attack or tool_name == "mc_move_to") and not self._in_reflex:
+            receipt = self._protect_action_on_hot_floor(is_attack=is_attack)
             if receipt is not None:
                 return receipt
         is_flee = tool_name == "mc_skill_flee"
@@ -3935,6 +3947,7 @@ class GenerationGuard:
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or hurt_by_lava
         hot_floor_only = bool(hurts) and not other_hurts and not in_water and not in_lava
+        underwater_hot_floor = in_water and len(other_hurts) < len(hurts)
         needs_hot_floor_guard = (
             len(other_hurts) < len(hurts) and not in_water and not in_lava
             and self._needs_hot_floor_stance(status, now_b)
@@ -4130,7 +4143,7 @@ class GenerationGuard:
                 forced_shore_b = (
                     self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
                     or handled_water_in_tool or unstick_still_wet or self._swimming_at_low_health(status)
-                    or continuing_water_escape
+                    or continuing_water_escape or underwater_hot_floor
                     or (shore_threat_name == "creeper" and nh_dist <= 6.0)
                 )
                 esc_b_ok = False
@@ -4169,6 +4182,7 @@ class GenerationGuard:
                             shore_threat_pos, keep_shield=has_shield_b, shield_target_id=shield_target_b,
                             **({"surface_first": True} if surface_first else {}),
                             **({"avoid_close_threat": True} if shore_threat_name == "creeper" else {}),
+                            **({"sneak_on_magma": True} if underwater_hot_floor else {}),
                         ),
                         raise_on_http_error=False,
                     )

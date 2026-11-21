@@ -2340,6 +2340,7 @@ class CombatEnv:
         shield_target_id: int | None = None,
         surface_first: bool = False,
         avoid_close_threat: bool = False,
+        sneak_on_magma: bool = False,
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
         st0 = self.bot.status()
@@ -2481,7 +2482,7 @@ class CombatEnv:
         try:
             self.bot.call(
                 "posture",
-                {"shield": bool(keep_shield), "sneak": False, "jump": True},
+                {"shield": bool(keep_shield), "sneak": sneak_on_magma, "jump": True},
             )
         except ApiError:
             pass
@@ -2516,6 +2517,11 @@ class CombatEnv:
                 ):
                     break
             if surface_first and not search_status.get("in_water") and search_status.get("on_ground") is not False:
+                if sneak_on_magma:
+                    try:
+                        self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": False})
+                    except (ApiError, httpx.HTTPError):
+                        pass
                 return {
                     "ok": True, "in_water": False, "mode": "surfaced",
                     "actions": actions, "pos_after": search_status.get("pos"),
@@ -2729,7 +2735,7 @@ class CombatEnv:
         try:
             self.bot.call(
                 "posture",
-                {"shield": bool(keep_shield), "sneak": False, "jump": still_wet},
+                {"shield": bool(keep_shield), "sneak": sneak_on_magma and still_wet, "jump": still_wet},
             )
         except ApiError:
             pass
@@ -2759,7 +2765,7 @@ class CombatEnv:
             still_wet = bool(st_end.get("in_water"))
             if still_wet:
                 try:
-                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": True})
+                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": sneak_on_magma, "jump": True})
                 except ApiError:
                     pass
         if keep_shield and isinstance(shield_target_id, int):
@@ -2778,7 +2784,7 @@ class CombatEnv:
             still_wet = bool(st_end.get("in_water"))
             if still_wet:
                 try:
-                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": False, "jump": True})
+                    self.bot.call("posture", {"shield": bool(keep_shield), "sneak": sneak_on_magma, "jump": True})
                 except ApiError:
                     pass
         landed = st_end.get("on_ground") is not False and not st_end.get("in_lava")
@@ -3014,6 +3020,22 @@ class SubcorticalInstinctController:
         if isinstance(active_deadline, (int, float)):
             deadline = min(deadline, active_deadline)
         st = env.bot.status()
+        pos = st.get("pos")
+        health = st.get("health")
+        if (
+            st.get("ready") is False or st.get("alive") is False
+            or not isinstance(pos, (list, tuple)) or len(pos) < 3
+            or (isinstance(health, (int, float)) and health <= 0)
+        ):
+            return {
+                "handled": False,
+                "mode": "life_unavailable",
+                "summary": "角色已死亡或状态尚未就绪，等待刷新后重新规划",
+                "actions": [],
+                "status_after": st,
+                "requires_replan": True,
+                "latched_guard": False,
+            }
         if bool(st.get("in_lava")):
             esc_lava = env.escape_lava()
             st_lava_after = env.bot.status()
@@ -3026,8 +3048,7 @@ class SubcorticalInstinctController:
                 "requires_replan": True,
                 "latched_guard": False,
             }
-        pos = st.get("pos") or [0.0, 64.0, 0.0]
-        hp = float(st.get("health") or 20.0)
+        hp = float(health or 20.0)
         try:
             inv0 = env.bot.call("inventory", method="GET")
         except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
@@ -3453,8 +3474,19 @@ class SubcorticalInstinctController:
                 now_flee = time.monotonic()
                 if now_flee - self._last_flee_at > 25.0:
                     self._recent_flee_streak = 0
+                # A vertical bunker takes several digs while a surface attacker can close in.
+                exposed_to_lethal_melee = (
+                    snap["enclosure"] == "surface"
+                    and hp <= 4.0
+                    and not has_shield
+                    and mob_name in PRE_HURT_MELEE_MOBS
+                    and mob_dist <= 3.5
+                    and not (primary or {}).get("blocked_by_wall")
+                    and (trigger.get("source") == "pre_hurt_melee" or confirmed_melee_hurt)
+                )
                 should_bunker = (
                     not covered
+                    and not exposed_to_lethal_melee
                     and env.skills is not None
                     and hasattr(env.skills, "dig_safety_bunker")
                     and not any_creeper_close
@@ -3746,7 +3778,7 @@ class CombatControllerSlot:
             return outcome
         finally:
             # 2. Exit rule: NEVER leave shield/sneak/jump stuck at 30% speed unless explicitly latched
-            if not outcome.get("latched_guard", False):
+            if outcome.get("mode") != "life_unavailable" and not outcome.get("latched_guard", False):
                 st_end = outcome.get("status_after") if isinstance(outcome, dict) else None
                 wet_submerged = isinstance(st_end, dict) and bool(st_end.get("in_water")) and (
                     bool(st_end.get("submerged"))
