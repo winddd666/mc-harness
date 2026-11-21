@@ -435,11 +435,13 @@ def select_stronghold_village_site(
     probes = [anchor]
     if nearest is not None:
         hx, hz = nearest
-        for offset in range(8):
-            bearing = ((start_idx + offset) % 8) * math.tau / 8
-            probes.append((hx + round(320 * math.cos(bearing)), hz + round(320 * math.sin(bearing))))
+        for radius in (320, 520):
+            for offset in range(8):
+                bearing = ((start_idx + offset) % 8) * math.tau / 8
+                probes.append((hx + round(radius * math.cos(bearing)), hz + round(radius * math.sin(bearing))))
     inner, outer = STRONGHOLD_DISTANCE_RANGE
     seen_villages = set()
+    nearby_pairs = 0
     for probe in probes:
         village = _locate_structure(dim, *probe, "#minecraft:village")
         if village is None or village in seen_villages:
@@ -454,6 +456,7 @@ def select_stronghold_village_site(
             or not inner - 32 <= math.dist(village, stronghold) <= outer + 32
         ):
             continue
+        nearby_pairs += 1
         for _ in range(2):
             _, status = _spread_overworld(bot, bot_name, *village, 16)
             pos = _dry_overworld_position(status)
@@ -467,7 +470,10 @@ def select_stronghold_village_site(
                 and _locate_structure(dim, math.floor(xz[0]), math.floor(xz[1]), "minecraft:stronghold") == stronghold
             ):
                 return (*pos, str(status.get("biome") or "")), village, stronghold
-    raise RuntimeError("Could not find a safe village with a stronghold 120–600m away in the assigned region")
+    raise RuntimeError(
+        "Could not find a safe village with a stronghold 120–600m away in the assigned region "
+        f"({len(seen_villages)} distinct villages located, {nearby_pairs} pairs sent to landing checks)"
+    )
 
 
 def select_nether_structure_site(
