@@ -10838,3 +10838,132 @@ def test_retreat_waits_for_ground_after_pathfinder_leg(monkeypatch, landing):
         assert outcome["reason"] == "unsafe_landing"
     if landing == "respawned":
         assert outcome["respawned"] is True and outcome["moved_dist"] == 0.0
+
+
+@pytest.mark.parametrize("shooter_visible", [True, False])
+def test_arrow_retreat_uses_the_live_shooter_when_nearest_hostile_is_a_creeper(monkeypatch, shooter_visible):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    creeper = {"id": 77, "name": "creeper", "dist": 4.2, "pos": [4.7, 30, 0.5]}
+    skeleton = {"id": 88, "name": "skeleton", "dist": 8.0, "pos": [0.5, 30, -7.5]}
+    status = {
+        "pos": [0.5, 30, 0.5], "dimension": "overworld", "health": 4.7, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": creeper,
+    }
+    retreat_targets = []
+
+    class GullyBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                events = [{"seq": 1, "type": "hurt", "source": "arrow"}]
+                return {"events": [] if kwargs["params"]["since"] else events, "last_seq": 1}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [creeper, skeleton] if shooter_visible else [creeper]}
+            return {"ok": True}
+
+    def flee(_env, threat_pos, **kwargs):
+        retreat_targets.append((threat_pos, kwargs.get("other_melee", [])))
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "dig_cover_pocket", lambda *_: {"ok": False, "reason": "no_solid_wall"})
+    def seek_cover(*_args, **_kwargs):
+        pytest.fail("nearby creeper makes stationary cover unsafe")
+
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    guard = GenerationGuard(GullyBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    assert guard.poll() is not None
+
+    expected = (skeleton["pos"], [creeper["pos"]]) if shooter_visible else (creeper["pos"], [])
+    assert retreat_targets == [expected]
+
+
+@pytest.mark.parametrize("followup", ["stalled", "progress", "new_life"])
+def test_water_escape_reselects_a_shore_after_a_stalled_path(followup, monkeypatch):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    blocked_bank = [0.5, 64, -4.5]
+    alternative_bank = [3.5, 63, 0.5]
+    status = {
+        "pos": [0.5, 62.8, 0.5], "dimension": "overworld", "last_death": {"t": 1},
+        "in_water": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    attempts = []
+
+    class CreekBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "move_to":
+                bank = [body[key] for key in ("x", "y", "z")]
+                attempts.append(bank)
+                if len(attempts) == 1:
+                    raise ApiError("path_not_found", "bank is unreachable")
+                status.update(pos=bank, in_water=False, on_ground=True)
+            if action == "control" and body.get("forward") and len(attempts) == 1:
+                if followup == "progress":
+                    status["pos"] = [0.5, 63.2, -2.0]
+                else:
+                    raise ApiError("blocked", "cannot clear the lip")
+            return {"ok": True}
+
+    env = CombatEnv(CreekBot())
+
+    def choose_shore(_pos, *, excluded_shores, **_kwargs):
+        return alternative_bank if tuple(blocked_bank) in excluded_shores else blocked_bank
+
+    monkeypatch.setattr(env, "_find_walkable_shore_target", choose_shore)
+    monkeypatch.setattr(env, "_dry_bank_is_walkable", lambda _pos: True)
+    assert env.escape_deep_water_to_shore()["in_water"] is True
+    if followup == "new_life":
+        status["last_death"] = {"t": 2}
+    assert env.escape_deep_water_to_shore()["ok"] is True
+
+    assert attempts == [blocked_bank, alternative_bank if followup == "stalled" else blocked_bank]
+
+
+@pytest.mark.parametrize("terrain", ["step", "deep_drop", "lava", "low_ceiling"])
+def test_grounded_retreat_can_step_down_one_verified_block_in_a_tunnel(terrain):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [0.5, 64, 0.5], "dimension": "overworld", "ready": True, "alive": True, "on_ground": True,
+    }
+    moves = []
+
+    class StairBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if z != 0 or x < 0 or x > 2:
+                    return {"name": "stone"}
+                if x == 0:
+                    return {"name": "stone" if y <= 63 else "air"}
+                floor = 61 if terrain == "deep_drop" else 62
+                if floor == y and terrain == "lava":
+                    return {"name": "lava"}
+                if terrain == "low_ceiling" and y == 65:
+                    return {"name": "stone"}
+                return {"name": "stone" if y <= floor else "air"}
+            if action == "control":
+                moves.append(body)
+                status["pos"] = [1.3, 63, 0.5]
+            return {"ok": True}
+
+    outcome = CombatEnv(StairBot()).flee([-0.4, 64, 0.5], allow_shaft_seal=False, wait_for_ground=True)
+
+    assert outcome["ok"] is (terrain == "step")
+    if terrain == "step":
+        move, = moves
+        assert move["forward"] and not move["jump"] and not move["sprint"]
+    else:
+        assert moves == []
+        assert outcome["reason"] == "no_safe_retreat"
