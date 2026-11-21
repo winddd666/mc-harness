@@ -8133,6 +8133,59 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         assert not status.get("in_lava")
 
 
+@pytest.mark.parametrize("distance", [4.0, 8.0])
+def test_surface_scout_hands_off_water_near_drowned_before_damage(monkeypatch, distance):
+    import threading
+
+    observed = threading.Event()
+    stopped = threading.Event()
+    status = {
+        "pos": [-11052.6, 64, 11027], "health": 20, "alive": True, "ready": True, "on_ground": True,
+        "nearest_hostile": {"id": 44, "name": "drowned", "dist": distance, "pos": [-11048.6, 62, 11027]},
+    }
+    calls = []
+
+    class ScoutBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                observed.set()
+                return dict(status)
+            if action == "inventory":
+                return {"items": []}
+            if action == "move_to":
+                calls.append(action)
+                status.update(in_water=True, on_ground=False)
+                if distance <= 6:
+                    assert stopped.wait(2.0), "scouting continued near a drowned after entering water"
+                else:
+                    assert observed.wait(2.0)
+            if action == "stop":
+                calls.append(action)
+                stopped.set()
+            return {"ok": True}
+
+    bot = ScoutBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_escape_water", lambda *_a, **_kw: pytest.fail("direct shore recovery expected"))
+
+    def reach_shore(pos, *, keep_shield, shield_target_id):
+        assert shield_target_id == 44 and pos == [-11048.6, 62, 11027]
+        calls.append("shore")
+        status.update(in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_scout_surface", lambda: json.dumps(
+        bot.call("move_to", {"x": -11042, "z": 11027, "stop_on": ["death"]}),
+    )))
+    if distance <= 6:
+        assert calls == ["move_to", "stop", "shore"]
+        assert result["reflex_mode"] == "water_surface" and not result["status_after"]["in_water"]
+        assert guard._water_hurt_streak == 0
+    else:
+        assert calls == ["move_to"] and result["ok"] is True
+
+
 @pytest.mark.parametrize("interrupted_error", [False, True])
 def test_close_creeper_preempts_movement_that_ignores_ordinary_hurt(monkeypatch, interrupted_error):
     import threading
