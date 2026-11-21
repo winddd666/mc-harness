@@ -6712,6 +6712,53 @@ def test_retreat_rechecks_airborne_landing(monkeypatch, lands_in_water, mob, tri
         assert calls.index("status") < calls.index("control")
 
 
+@pytest.mark.parametrize("landing", ["dry", "airborne"])
+def test_unshielded_creeper_retreat_waits_for_a_later_landing(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    creeper = {"id": 4881399, "name": "creeper", "pos": [0.5, 60, 3.5], "dist": 3.9}
+    status = {
+        "pos": [0.5, 63.1, 0.5], "health": 20, "food": 20,
+        "ready": True, "alive": True, "on_ground": False, "nearest_hostile": creeper,
+    }
+    samples = []
+    moves = []
+
+    class CaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                samples.append(kwargs["timeout_s"])
+                if len(samples) == 4 and landing == "dry":
+                    status.update(on_ground=True, pos=[0.5, 60, 0.5])
+                return dict(status)
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [creeper]}
+            if action == "control" and body.get("forward"):
+                assert status["on_ground"] is True
+                moves.append(action)
+                status["pos"] = [0.5, 60, -2.8]
+            return {"ok": True}
+
+    env = CombatEnv(CaveBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda *_args: {"enclosure": "open_cave"})
+    monkeypatch.setattr(env, "probe_retreat", lambda _pos, _yaw, distance: (60, False) if distance == 3.5 else None)
+    result = CombatControllerSlot().handle(
+        env, {"source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": creeper["id"]},
+    )
+
+    assert len(samples) == (4 if landing == "dry" else 5)
+    assert all(0 < timeout <= 0.65 for timeout in samples)
+    retreat, = result["actions"]
+    assert retreat["ok"] is (landing == "dry")
+    assert moves == (["control"] if landing == "dry" else [])
+
+
 @pytest.mark.parametrize("short_bank", [False, True])
 def test_poll_nether_retreat_checks_footing_at_high_health(monkeypatch, short_bank):
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
