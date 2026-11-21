@@ -3213,6 +3213,52 @@ def test_low_health_retreat_keeps_shield_against_a_nearby_shooter(distance_after
         assert posture_calls[-1] == ("posture", {})
 
 
+@pytest.mark.parametrize("second_shooter", [False, True])
+def test_unshielded_boundary_retreat_accounts_for_a_second_shooter(second_shooter):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    origin = [0.5, 7.0, 0.5]
+    primary = {"id": 77, "name": "skeleton", "pos": [8.2, 7.0, 0.5], "dist": 7.7}
+    secondary = {"id": 78, "name": "skeleton", "pos": [-7.5, 7.0, 0.5], "dist": 8.0}
+    pos = list(origin)
+    yaw = 0.0
+
+    class CaveBot:
+        def status(self):
+            return {"pos": list(pos), "health": 7, "food": 20, "ready": True,
+                    "alive": True, "on_ground": True, "nearest_hostile": dict(primary)}
+
+        def call(self, action, body=None, **kwargs):
+            nonlocal yaw
+            if action == "inventory":
+                return {"items": [{"name": "stone_sword", "count": 1}], "offhand": {"name": "iron_pickaxe"}}
+            if action == "get_entities":
+                return {"entities": [primary, secondary] if second_shooter else [primary]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 7 else "air"}
+            if action == "look" and "yaw" in body:
+                yaw = body["yaw"]
+            if action == "control" and body.get("forward"):
+                ux, uz = yaw_to_unit_xz(yaw)
+                pos[0] += 2.5 * ux
+                pos[2] += 2.5 * uz
+            if action == "move_to":
+                pos[:] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(
+        CombatEnv(CaveBot()), {"source": "boundary_threat", "primary_entity_id": 77, "primary_type": "skeleton"},
+    )
+
+    assert outcome["actions"][0]["action"] == "flee"
+    assert outcome["actions"][0]["ok"] is True
+    if second_shooter:
+        assert abs(pos[2] - origin[2]) > 2.0
+        assert math.dist(pos, secondary["pos"]) >= secondary["dist"] - 0.3
+    else:
+        assert pos == pytest.approx([-2.0, 7.0, 0.5])
+
+
 @pytest.mark.parametrize("entry", ["poll", "boundary"])
 def test_recent_melee_damage_defers_eating_with_shield_up(entry, monkeypatch):
     clock = [1000.0]
