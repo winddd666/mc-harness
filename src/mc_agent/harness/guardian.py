@@ -3842,6 +3842,10 @@ class GenerationGuard:
                     for k in ("pos", "health", "food", "in_water", "on_ground", "is_day", "nearest_hostile")
                 },
             }
+            if outcome.get("mode") == "network_timeout":
+                receipt["status_after"].update({
+                    key: st_after.get(key) for key in ("dimension", "last_death")
+                })
             self.events.emit("guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary)
             return receipt
         finally:
@@ -4039,6 +4043,7 @@ class GenerationGuard:
         unstick_still_wet = False
         tool_returned_in_water = False
         waiting_for_shore_landing = False
+        same_threat_after_timeout = False
         if tool_results:
             try:
                 last_tool_result = json.loads(tool_results[-1])
@@ -4047,6 +4052,29 @@ class GenerationGuard:
             if isinstance(last_tool_result, dict):
                 tool_returned_in_water = in_water
                 tool_status = last_tool_result.get("status_after")
+                if (
+                    last_tool_result.get("preempted_by_reflex") is True
+                    and last_tool_result.get("reflex_mode") == "network_timeout"
+                    and isinstance(tool_status, dict) and not fresh
+                ):
+                    previous_name, previous_dist, previous_id, _ = self._extract_hostile_info(tool_status)
+                    pos, previous_pos = status.get("pos"), tool_status.get("pos")
+                    health = status.get("health")
+                    same_threat_after_timeout = (
+                        nh_name in PRE_HURT_MELEE_MOBS and nh_name == previous_name
+                        and nh_id is not None and nh_id == previous_id and nh_dist >= max(1.5, previous_dist - 0.25)
+                        and isinstance(health, (int, float)) and health > LOW_HP_BUNKER_MAX
+                        and health == tool_status.get("health")
+                        and status.get("on_ground") is True and tool_status.get("on_ground") is True
+                        and all(key in tool_status and tool_status[key] == status.get(key) for key in ("dimension", "last_death"))
+                        and not status.get("on_fire")
+                        and all(
+                            isinstance(point, (list, tuple)) and len(point) >= 3
+                            and all(isinstance(coord, (int, float)) for coord in point[:3])
+                            for point in (pos, previous_pos)
+                        )
+                        and math.dist(pos[:3], previous_pos[:3]) <= 0.2
+                    )
                 water_reflex = (
                     last_tool_result.get("preempted_by_reflex") is True
                     and last_tool_result.get("reflex_mode") == "water_surface"
@@ -4079,7 +4107,7 @@ class GenerationGuard:
         )
 
         boundary_trigger: ThreatTrigger | None = None
-        if not (in_water or in_lava or hot_floor_only or waiting_for_shore_landing):
+        if not (in_water or in_lava or hot_floor_only or waiting_for_shore_landing or same_threat_after_timeout):
             boundary_trigger = self._detect_pre_hurt_trigger(status)
         if boundary_trigger is None and not in_water and not in_lava and other_hurts and nh_name and nh_dist <= 15.0:
             boundary_trigger = {

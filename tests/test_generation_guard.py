@@ -1362,6 +1362,49 @@ def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_c
     assert "posture" in stop_calls
 
 
+@pytest.mark.parametrize("change", ["none", "hurt", "approaching", "another_enemy", "respawned"])
+def test_boundary_avoids_repeating_an_unchanged_melee_warning_after_network_timeout(monkeypatch, change):
+    spider = {"id": 7, "name": "spider", "pos": [2.5, 64, 0.5], "dist": 2.0}
+    status = {"pos": [0.5, 64, 0.5], "health": 18, "food": 20, "on_ground": True, "ready": True,
+              "alive": True, "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": spider}
+    events = []
+    calls = []
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [row for row in events if row["seq"] > kwargs["params"]["since"]]}
+            return {"ok": True}
+
+    def combat(trigger):
+        calls.append(trigger)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("attack stalled")
+        return {"handled": True, "mode": "cover_or_flee"}
+
+    guard = GenerationGuard(RidgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+    receipt = guard.handle_preemption({
+        "source": "tool_interrupted_hurt", "primary_entity_id": 7, "primary_type": "spider", "hurt_source": "mob_attack",
+    }, interrupted_name="mc_dig")
+    assert receipt["reflex_mode"] == "network_timeout"
+    if change == "hurt":
+        status["health"] = 16
+        events.append({"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": spider})
+    elif change == "approaching":
+        status["nearest_hostile"] = {**spider, "dist": 1.4}
+    elif change == "another_enemy":
+        status["nearest_hostile"] = {**spider, "id": 8}
+    elif change == "respawned":
+        status["last_death"] = {"t": 2}
+    guard.stabilize_after_tools([json.dumps(receipt)])
+
+    assert len(calls) == (1 if change == "none" else 2)
+
+
 @pytest.mark.parametrize("api_error", [False, True])
 def test_hurt_interrupted_move_enters_lava_reflex_with_distant_hostile(monkeypatch, api_error):
     moves = []
