@@ -1672,7 +1672,9 @@ class MacroSkills:
                     reason = advance(heading)
                     explore_wider = reason in terrain_blocks
                     offsets = (-2, 2, -3, 3, -1, 1, 4) if explore_wider else (-1, 1, -2, 2, -3, 3, 4)
-                    for offset in offsets:
+                    # Novelty may rank a wide turn before a legal 45° detour.
+                    # Keep eligible turns first until a terrain block permits wider turns.
+                    for offset in sorted(offsets, key=lambda off: not explore_wider and abs(off) > 1):
                         if reason not in detour_reasons:
                             break
                         if abs(offset) > 1 and not explore_wider:

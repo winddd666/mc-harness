@@ -3110,6 +3110,36 @@ def test_surface_scout_detours_around_fence_and_server_timeout() -> None:
     assert all(fence.check_point(body["x"], body["z"]) is None for body in backend.moves)
 
 
+@pytest.mark.parametrize("near_turns_clear", [True, False])
+def test_scout_novelty_cannot_skip_legal_turns_after_path_failure(monkeypatch, near_turns_clear) -> None:
+    from mc_agent.harness.world_memory import WorldMemory
+
+    backend = _SurfaceScoutBackend()
+    monkeypatch.setattr(
+        WorldMemory, "score_direction_novelty",
+        lambda self, pos, direction, **kwargs: 10 if direction in {"northeast", "southeast"} else 0,
+        raising=False,
+    )
+
+    def move(request, body):
+        if len(backend.moves) == 1 or not near_turns_clear:
+            return httpx.Response(200, json={"ok": False, "error": {"code": "path_not_found", "message": "blocked"}})
+        return backend.arrive(request, body)
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east")
+
+    assert all(body["x"] > 0.5 for body in backend.moves)
+    if near_turns_clear:
+        assert result["segments_completed"] == 5
+        assert len(backend.moves) == 6
+    else:
+        assert len(backend.moves) == 3
+        assert result["stop_reason"] == "path_not_found"
+        assert result["distance_traveled"] == 0
+
+
 def test_surface_scout_checks_for_water_before_moving() -> None:
     backend = _SurfaceScoutBackend()
 
