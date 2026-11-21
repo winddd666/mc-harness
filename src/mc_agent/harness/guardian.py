@@ -1874,9 +1874,10 @@ class GenerationGuard:
                     follow_unarmed_retreat = (
                         not has_shield and not has_melee_weapon and cf and cf.get("ok") and cf_result.get("mode") == "flee"
                     )
-                    if hurt_src in MELEE_HURT_SOURCES and (
-                        face_after_melee_retreat or shield_when_cornered or follow_unarmed_retreat
-                    ):
+                    melee_after_retreat = hurt_src in MELEE_HURT_SOURCES or (
+                        nether_melee_retreat and not hurt_src and now - self._last_melee_hurt_at < 4.0
+                    )
+                    if melee_after_retreat and (face_after_melee_retreat or shield_when_cornered or follow_unarmed_retreat):
                         try:
                             landing = self.bot.call("status", method="GET", timeout_s=0.6)
                         except (ApiError, httpx.HTTPError):

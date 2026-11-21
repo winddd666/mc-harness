@@ -3300,7 +3300,8 @@ def test_r19_lava_pit_places_netherrack_filler_before_second_sprint(monkeypatch)
 
 
 @pytest.mark.parametrize("landing", ["cornered", "short", "moved", "clear", "respawned"])
-def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypatch, landing):
+@pytest.mark.parametrize("trailing_event", [None, "unattributed", "arrow"])
+def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypatch, landing, trailing_event):
     attacker = {"id": 77, "name": "wither_skeleton", "dist": 3.1, "pos": [3602.5, 64, 1817.6]}
     status = {"pos": [3599.4, 64, 1817.6], "dimension": "the_nether", "health": 14.4,
               "ready": True, "alive": True, "on_ground": True, "blocking": True, "food": 17,
@@ -3312,8 +3313,12 @@ def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypat
             if action == "status":
                 return dict(status)
             if action == "events":
-                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": attacker}
-                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+                hurts = [{"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": attacker}]
+                if trailing_event == "unattributed":
+                    hurts += [{"seq": 2, "type": "hurt", "source": "wither"}, {"seq": 3, "type": "hurt"}]
+                elif trailing_event == "arrow":
+                    hurts += [{"seq": 2, "type": "hurt", "source": "arrow"}, {"seq": 3, "type": "hurt"}]
+                return {"events": [] if kwargs["params"]["since"] else hurts}
             if action == "inventory":
                 return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
             if action == "look":
@@ -3335,7 +3340,7 @@ def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypat
     incident = guard.poll()
 
     actions = [a["action"] for a in incident["actions"]]
-    should_face = landing in {"cornered", "short", "moved"}
+    should_face = trailing_event != "arrow" and landing in {"cornered", "short", "moved"}
     assert actions == (["combat_or_flee", "face_attacker_after_retreat"] if should_face else ["combat_or_flee"])
     assert looks == ([{"entity_id": 78}] if should_face else [])
 
