@@ -3291,6 +3291,46 @@ def test_water_retreat_turns_inward_at_geofence():
     assert motions[1]["forward"] is True
 
 
+def test_open_water_outside_geofence_can_swim_toward_the_safe_radius():
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    geofence = VoidGeofence(center_x=-11029.5, center_z=-11008.5, radius=220, margin=8)
+    status = {"pos": [-11016.5, 62.2, -10782.8], "in_water": True, "on_ground": False,
+              "alive": True, "ready": True, "yaw": math.pi}
+    moves = []
+    swims = []
+
+    class WaterBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "water"}
+            if action == "move_to":
+                assert geofence.check_point(body["x"], body["z"]) is None
+                moves.append(body)
+                raise ApiError("path_not_found", "pathfinder cannot leave the water")
+            if action == "control" and body.get("forward"):
+                x, y, z = status["pos"]
+                dx, dz = yaw_to_unit_xz(body["yaw"])
+                end = [x + 5 * dx, y, z + 5 * dz]
+                assert geofence.distance_from_center(end[0], end[2]) < geofence.distance_from_center(x, z)
+                swims.append(end)
+                status["pos"] = end
+            return {"ok": True}
+
+    result = CombatEnv(WaterBot(), geofence=geofence).escape_deep_water_to_shore()
+
+    assert len(moves) == 1 and len(swims) == 1
+    assert result["pos_after"] == swims[0]
+    assert result["in_water"] is True
+    assert "surface_retreat_geofence_blocked" not in result["actions"]
+
+
 def test_bug031_watchdog_thread_and_readonly_status_never_raise_reflex_preempted():
     """BUG-031: background scene-watchdog threads and GET/status/inventory/events calls MUST never raise ReflexPreempted."""
     import threading

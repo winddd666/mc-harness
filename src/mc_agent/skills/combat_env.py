@@ -2342,10 +2342,20 @@ class CombatEnv:
                 "pos_after": pos,
             }
 
-        def swim_step_allowed(pos: Sequence[float], yaw: float, distance: float = 5.0) -> bool:
+        def swim_step_allowed(
+            pos: Sequence[float], yaw: float, distance: float = 5.0,
+            *, inward_target: tuple[float, float] | None = None,
+        ) -> bool:
             ux, uz = yaw_to_unit_xz(yaw)
             x, z = float(pos[0]) + distance * ux, float(pos[2]) + distance * uz
-            return self._point_allowed(x, z, action="water_retreat") and not (
+            can_step_inward = (
+                inward_target is not None
+                and not self._point_allowed(pos[0], pos[2], action="water_retreat")
+                and math.hypot(inward_target[0] - pos[0], inward_target[1] - pos[2]) >= distance
+                and math.hypot(inward_target[0] - x, inward_target[1] - z)
+                < math.hypot(inward_target[0] - pos[0], inward_target[1] - pos[2])
+            )
+            return (can_step_inward or self._point_allowed(x, z, action="water_retreat")) and not (
                 avoid_close_threat and has_threat and self._crosses_near_water_threat(pos, x, z, threat_pos)
             )
 
@@ -2548,12 +2558,25 @@ class CombatEnv:
             else:
                 away_yaw = None
 
+            inward_target = None
+            clamp = getattr(self.geofence, "clamped_move_target", None)
+            if away_yaw is None and callable(clamp):
+                candidate = clamp(swim_pos[0], swim_pos[2])
+                if candidate and self._point_allowed(*candidate, action="water_retreat") and not (
+                    avoid_close_threat and has_threat
+                    and self._crosses_near_water_threat(swim_pos, *candidate, threat_pos)
+                ):
+                    inward_target = candidate
+                    away_yaw = aim_yaw_pitch(swim_pos, [candidate[0], swim_pos[1], candidate[1]])[0]
+                    actions.append("surface_retreat_inward")
+
             if away_yaw is None:
                 actions.append("surface_retreat_geofence_blocked")
             elif st_mid.get("in_water"):
                 ux, uz = yaw_to_unit_xz(away_yaw)
                 px, py, pz = map(float, swim_pos[:3])
                 step_dist = 12.0 if swim_step_allowed(swim_pos, away_yaw, 12.0) else 5.0
+                target_x, target_z = inward_target or (px + ux * step_dist, pz + uz * step_dist)
                 try:
                     self.bot.call("look", {"yaw": away_yaw, "pitch": -15.0})
                 except (ApiError, httpx.HTTPError):
@@ -2562,9 +2585,9 @@ class CombatEnv:
                     self.bot.call(
                         "move_to",
                         {
-                            "x": px + ux * step_dist,
+                            "x": target_x,
                             "y": max(63.0, py + 1.0) if py >= 61.0 else py + 1.0,
-                            "z": pz + uz * step_dist,
+                            "z": target_z,
                             "range": 1.5,
                             "timeout": 2800,
                             "stop_on": ["death"],
@@ -2578,7 +2601,10 @@ class CombatEnv:
                 interruption = interrupted_water_escape(st_mid)
                 if interruption is not None:
                     return interruption
-                if st_mid.get("in_water") and swim_step_allowed(st_mid.get("pos") or swim_pos, away_yaw):
+                current = st_mid.get("pos") or swim_pos
+                if inward_target is not None and not self._point_allowed(current[0], current[2], action="water_retreat"):
+                    away_yaw = aim_yaw_pitch(current, [target_x, current[1], target_z])[0]
+                if st_mid.get("in_water") and swim_step_allowed(current, away_yaw, inward_target=inward_target):
                     try:
                         self.bot.call(
                             "control",
