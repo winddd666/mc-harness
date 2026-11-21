@@ -2720,7 +2720,7 @@ class GenerationGuard:
                 watch_hot_floor=tool_name in HOT_FLOOR_WATCH_TOOLS,
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
-                check_support_dig=tool_name == "mc_dig",
+                check_support_dig=tool_name in {"mc_dig", "mc_skill_staircase"},
                 check_food_use=tool_name == "mc_use_item",
             ):
                 result = invoke_fn()

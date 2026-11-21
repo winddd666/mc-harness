@@ -6922,8 +6922,13 @@ def test_bug072_real_flee_entry_accepts_the_mining_sessions_httpx_timeout(monkey
     assert final.connect <= 0.5 and final.write <= 0.5 and final.pool <= 0.5
 
 
-@pytest.mark.parametrize("terrain", ["deep_drop", "shallow_drop", "lava", "side_dig", "edge_support", "edge_dig"])
-def test_explicit_dig_checks_the_landing_before_removing_support(terrain):
+@pytest.mark.parametrize(("tool", "terrain"), [
+    ("mc_dig", "deep_drop"), ("mc_dig", "shallow_drop"), ("mc_dig", "lava"),
+    ("mc_dig", "side_dig"), ("mc_dig", "edge_support"), ("mc_dig", "edge_dig"),
+    ("mc_skill_staircase", "deep_drop"), ("mc_skill_staircase", "shallow_drop"),
+    ("mc_skill_staircase", "dripstone"), ("mc_skill_staircase", "side_dig"),
+])
+def test_dig_checks_the_landing_before_removing_support(tool, terrain):
     from mc_agent.harness.mc_tools import McToolset
 
     target = [2015 if terrain in {"side_dig", "edge_dig"} else 2014, 70, 1882]
@@ -6940,6 +6945,8 @@ def test_explicit_dig_checks_the_landing_before_removing_support(terrain):
                 y = body["pos"][1]
                 if y == 69 and terrain == "lava":
                     return {"name": "lava"}
+                if y == 69 and terrain == "dripstone":
+                    return {"name": "pointed_dripstone"}
                 if y == 68 and terrain == "shallow_drop":
                     return {"name": "netherrack"}
                 return {"name": "netherrack" if y >= 70 else "air"}
@@ -6951,16 +6958,21 @@ def test_explicit_dig_checks_the_landing_before_removing_support(terrain):
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
     toolset = McToolset(bot)
 
-    result = json.loads(guard.run_tool_with_reflex("mc_dig", lambda: toolset.mc_dig(*target)))
+    def invoke():
+        if tool == "mc_dig":
+            return toolset.mc_dig(*target)
+        return json.dumps(bot.call("dig", {"pos": target, "collect": True, "stop_on": ["death"]}))
 
-    if terrain in {"deep_drop", "lava", "edge_support"}:
+    result = json.loads(guard.run_tool_with_reflex(tool, invoke))
+
+    if terrain in {"deep_drop", "lava", "dripstone", "edge_support"}:
         assert result["ok"] is False and result["requires_replan"] is True
         assert result["error"]["code"] == "unsafe_landing"
         assert digs == []
     else:
         assert result["ok"] is True and digs == [target]
     if terrain == "side_dig":
-        assert probes == [target]
+        assert probes == ([target] if tool == "mc_dig" else [])
 
 
 @pytest.mark.parametrize("terrain", ["wall", "fire", "unknown", "drifted_during_probe", "missed_landing"])

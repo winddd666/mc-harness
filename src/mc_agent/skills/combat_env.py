@@ -93,6 +93,7 @@ HAZARD_BLOCK_TYPES: tuple[str, ...] = (
     "sweet_berry_bush",
     "powder_snow",
     "cobweb",
+    "pointed_dripstone",
 )
 
 SURFACE_SHORE_PRIORITY_BLOCKS: tuple[str, ...] = (
@@ -156,6 +157,7 @@ TRAP_BLOCKS: frozenset[str] = frozenset(
         "powder_snow",
         "cobweb",
         "magma_block",
+        "pointed_dripstone",
     }
 )
 
