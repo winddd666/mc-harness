@@ -1846,14 +1846,15 @@ class GenerationGuard:
                         else:
                             self._consecutive_flees = 0
                     cf_result = (cf or {}).get("result") or {}
-                    face_after_blocked_retreat = (
+                    face_after_melee_retreat = (
                         str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
-                        and already_blocking and cf_result.get("reason") == "no_safe_retreat"
+                        and already_blocking and cf_result.get("mode") == "flee"
+                        and cf_result.get("reason") in {None, "no_safe_retreat", "unsafe_landing"}
                     )
                     follow_unarmed_retreat = (
                         not has_shield and not has_melee_weapon and cf and cf.get("ok") and cf_result.get("mode") == "flee"
                     )
-                    if hurt_src in MELEE_HURT_SOURCES and (face_after_blocked_retreat or follow_unarmed_retreat):
+                    if hurt_src in MELEE_HURT_SOURCES and (face_after_melee_retreat or follow_unarmed_retreat):
                         try:
                             landing = self.bot.call("status", method="GET", timeout_s=0.6)
                         except (ApiError, httpx.HTTPError):
@@ -1869,7 +1870,7 @@ class GenerationGuard:
                             and isinstance(current_hp, (int, float)) and 0 < current_hp <= LOW_HP_BUNKER_MAX
                             and mob in PRE_HURT_MELEE_MOBS and target_id is not None and dist <= 3.5
                         ):
-                            if face_after_blocked_retreat and landing.get("blocking"):
+                            if face_after_melee_retreat and landing.get("blocking"):
                                 actions.append(self._action(
                                     "face_attacker_after_retreat",
                                     lambda: self.bot.call("look", {"entity_id": target_id}, timeout_s=0.9),

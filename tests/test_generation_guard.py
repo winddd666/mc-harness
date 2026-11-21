@@ -3247,8 +3247,8 @@ def test_r19_lava_pit_places_netherrack_filler_before_second_sprint(monkeypatch)
     assert out_p["actions"].count("lava_jump_sprint") == 1
 
 
-@pytest.mark.parametrize("landing", ["cornered", "clear", "respawned"])
-def test_poll_refaces_a_close_melee_attacker_with_shield_after_failed_retreat(monkeypatch, landing):
+@pytest.mark.parametrize("landing", ["cornered", "short", "moved", "clear", "respawned"])
+def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypatch, landing):
     attacker = {"id": 77, "name": "wither_skeleton", "dist": 3.1, "pos": [3602.5, 64, 1817.6]}
     status = {"pos": [3599.4, 64, 1817.6], "dimension": "the_nether", "health": 14.4,
               "ready": True, "alive": True, "on_ground": True, "blocking": True, "food": 17,
@@ -3271,18 +3271,21 @@ def test_poll_refaces_a_close_melee_attacker_with_shield_after_failed_retreat(mo
 
     guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
 
-    def blocked_retreat(_threat_pos, *, wait_for_ground):
+    def retreat(_threat_pos, *, wait_for_ground):
         status.update(health=9.56, nearest_hostile={"id": 78, "name": "wither_skeleton", "dist": 5 if landing == "clear" else 2.2})
         if landing == "respawned":
             status["last_death"] = {"t": 2}
+        if landing in {"short", "moved"}:
+            return {"ok": landing == "moved", "mode": "flee", "moved_dist": 1.2 if landing == "short" else 2.64}
         return {"ok": False, "mode": "flee", "reason": "no_safe_retreat"}
 
-    monkeypatch.setattr(guard.combat_env, "flee", blocked_retreat)
+    monkeypatch.setattr(guard.combat_env, "flee", retreat)
     incident = guard.poll()
 
     actions = [a["action"] for a in incident["actions"]]
-    assert actions == (["combat_or_flee", "face_attacker_after_retreat"] if landing == "cornered" else ["combat_or_flee"])
-    assert looks == ([{"entity_id": 78}] if landing == "cornered" else [])
+    should_face = landing in {"cornered", "short", "moved"}
+    assert actions == (["combat_or_flee", "face_attacker_after_retreat"] if should_face else ["combat_or_flee"])
+    assert looks == ([{"entity_id": 78}] if should_face else [])
 
 
 @pytest.mark.parametrize("nearby", [False, True])
