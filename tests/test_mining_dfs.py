@@ -991,6 +991,53 @@ def test_offset_route_with_a_changed_height_is_not_recorded_as_level(monkeypatch
     assert branch.status == "pending"
 
 
+@pytest.mark.parametrize("steps", [1, 2])
+def test_interrupted_sidestep_only_promotes_a_confirmed_offset(monkeypatch, steps: int) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec, _MiningDeadline
+
+    anchor = (0, 54, 0)
+    world = _MockMineWorld(start_pos=(0.5, 54.0, 0.5), surface_y=72, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    for x in range(3):
+        for y in (54, 55):
+            world.blocks[(x, y, 0)] = "air"
+
+    with BotSession("tok", bot_username="InterruptedOffset", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 72, -18), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        branch = BranchSpec("offset_retry", "north", 39, sidestep_dir="east", resume_kind="stair_down",
+                            offset_tried=True, branch_target_y=15)
+        junction = engine._create_node(
+            kind="switchback", anchor=anchor, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, anchor]), branches=[branch],
+        )
+        starts = []
+
+        def cut_offset(**kwargs):
+            starts.append(tuple(math.floor(v) for v in world.pos))
+            for step in range(1, steps + 1):
+                world.pos[0] = step + 0.5
+                engine.bot.status()
+            raise _MiningDeadline
+
+        monkeypatch.setattr(engine, "_dig_level_edge", cut_offset)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1)
+        assert result["stop_reason"] == "time_slice_progress"
+        if steps == 1:
+            assert branch.status == "pending" and engine.active_node_id == junction.node_id
+            engine.run(target="ancient_debris", target_y=15, goal_count=1)
+            assert starts == [anchor, anchor]
+        else:
+            assert branch.status == "completed"
+            tip = engine.nodes[engine.active_node_id]
+            assert tip.kind == "switchback" and tip.parent_id == junction.node_id
+            assert tip.edge_from_parent == ShaftEdge("offset_sidestep", "east", [anchor, (1, 54, 0), (2, 54, 0)])
+            assert tip.branches == [BranchSpec("stair_down", "north", 39, offset_tried=True, branch_target_y=15)]
+
+
 def test_mining_dfs_64_block_radar_steers_spine_toward_distant_diamond() -> None:
     """P1-5 fix: 64-block radar detects exposed diamond ore 18 blocks east in cave wall and steers Spine east."""
     world = _MockMineWorld(

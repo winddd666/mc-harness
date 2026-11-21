@@ -5222,6 +5222,15 @@ class MiningDFSEngine:
     def _record_partial_branch(
         self, node: ShaftNode, branch: BranchSpec, route: list[tuple[int, int, int]], steps_taken: int,
     ) -> None:
+        if branch.kind == "offset_retry":
+            direction = branch.sidestep_dir or LEFT_RIGHT_DIRS[branch.direction][0]
+            dx, dz = DIRECTIONS[direction]
+            x, y, z = node.anchor
+            if 2 <= steps_taken <= OFFSET_RETRY_STEPS and all(
+                pt == (x + step * dx, y, z + step * dz) for step, pt in enumerate(route)
+            ):
+                self._record_offset_branch(node, branch, route, direction)
+            return
         branch.status = "completed"
         self._create_node(
             kind="switchback" if branch.kind.startswith("stair") else "spine",
@@ -5230,6 +5239,21 @@ class MiningDFSEngine:
             branches=[dataclasses.replace(
                 branch, status="pending", completed_waypoints=[],
                 steps=max(1, branch.steps - steps_taken),
+            )],
+        )
+
+    def _record_offset_branch(
+        self, node: ShaftNode, branch: BranchSpec, route: list[tuple[int, int, int]], direction: str,
+    ) -> ShaftNode:
+        resume_kind = branch.resume_kind or "stair_down"
+        branch.status = "completed"
+        return self._create_node(
+            kind="spine" if resume_kind == "spine_forward" else "switchback",
+            anchor=route[-1], parent_id=node.node_id,
+            edge_from_parent=ShaftEdge("offset_sidestep", direction, list(route)),
+            branches=[BranchSpec(
+                kind=resume_kind, direction=branch.direction, steps=branch.steps,
+                offset_tried=True, branch_target_y=branch.branch_target_y,
             )],
         )
 
@@ -6195,12 +6219,13 @@ class MiningDFSEngine:
                     next_branch.status = "pruned"
                     next_branch.prune_reason = "stair_support"
                     continue
-                resume_k = next_branch.resume_kind or "stair_down"
-            if is_level and _floor_pos(self.bot.status()["pos"])[1] != node.anchor[1]:
-                reached, reason = self._resume_shaft_tip(node.node_id, min_hp_ref=min_hp_ref)
-                if not reached:
-                    stop_reason = reason or "movement_not_confirmed"
-                    break
+            if is_level:
+                stance = _floor_pos(self.bot.status()["pos"])
+                if stance[1] != node.anchor[1] or (branch_kind == "offset_retry" and stance != node.anchor):
+                    reached, reason = self._resume_shaft_tip(node.node_id, min_hp_ref=min_hp_ref)
+                    if not reached:
+                        stop_reason = reason or "movement_not_confirmed"
+                        break
             next_branch.status = "active"
             if branch_kind in {"stair_down", "stair_up"}:
                 is_up = branch_kind == "stair_up"
@@ -6255,22 +6280,7 @@ class MiningDFSEngine:
                 if er == "quota_reached":
                     next_branch.status = "completed"
                     if steps_done >= 1:
-                        end_anchor_o = tuple(edge_res["end_anchor"])
-                        self._create_node(
-                            kind="spine" if resume_k == "spine_forward" else "switchback",
-                            anchor=end_anchor_o,
-                            parent_id=node.node_id,
-                            edge_from_parent=ShaftEdge("offset_sidestep", lat_dir, edge_res["waypoints"]),
-                            branches=[
-                                BranchSpec(
-                                    kind=resume_k,
-                                    direction=next_branch.direction,
-                                    steps=next_branch.steps,
-                                    offset_tried=True,
-                                    branch_target_y=next_branch.branch_target_y,
-                                )
-                            ],
-                        )
+                        self._record_offset_branch(node, next_branch, edge_res["waypoints"], lat_dir)
                     stop_reason = "quota_reached"
                     break
                 if er in {"hurt", "not_ready", "pickaxe_low"}:
@@ -6283,25 +6293,7 @@ class MiningDFSEngine:
                     stop_reason = "time_slice_progress"
                     break
                 if steps_done >= 2:
-                    next_branch.status = "completed"
-                    end_anchor = tuple(edge_res["end_anchor"])
-                    retry_branches = [
-                        BranchSpec(
-                            kind=resume_k,
-                            direction=next_branch.direction,
-                            steps=next_branch.steps,
-                            offset_tried=True,
-                            branch_target_y=next_branch.branch_target_y,
-                        )
-                    ]
-                    child_kind = "spine" if resume_k == "spine_forward" else "switchback"
-                    sh_node = self._create_node(
-                        kind=child_kind,
-                        anchor=end_anchor,
-                        parent_id=node.node_id,
-                        edge_from_parent=ShaftEdge("offset_sidestep", lat_dir, edge_res["waypoints"]),
-                        branches=retry_branches,
-                    )
+                    sh_node = self._record_offset_branch(node, next_branch, edge_res["waypoints"], lat_dir)
                     self._maybe_place_torch_at_node(sh_node)
                     if er == "time_slice":
                         stop_reason = "time_slice_progress"
