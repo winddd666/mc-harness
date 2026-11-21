@@ -8265,6 +8265,40 @@ def test_flooded_cave_escape_uses_local_water_level(terrain):
         assert result["ok"] is True and result["in_water"] is False
 
 
+def test_directed_water_escape_searches_the_bank_at_the_post_surge_water_level():
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [11208.5, 59.2, -11028.5], "in_water": True, "submerged": True,
+        "on_ground": False, "alive": True, "ready": True,
+    }
+    bank = [11206, 62, -11048]
+    moves = []
+
+    class ShoreBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "control" and body.get("ms") == 750:
+                status.update(pos=[11206.5, 62.2, -11040.5], submerged=False)
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": bank}]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "move_to":
+                goal = [body["x"], body["y"], body["z"]]
+                moves.append(goal)
+                if goal == [11206.5, 63.0, -11047.5]:
+                    status.update(pos=goal, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(ShoreBot()).escape_deep_water_to_shore()
+
+    assert moves == [[11206.5, 63.0, -11047.5]]
+    assert result["ok"] is True and result["in_water"] is False
+
+
 @pytest.mark.parametrize("under_attack", [False, True])
 def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attack):
     from mc_agent.skills.combat_env import CombatEnv
