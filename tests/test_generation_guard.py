@@ -3308,7 +3308,7 @@ def test_deep_lava_keeps_swimming_up_while_the_head_is_submerged():
     assert result["ok"] is True and result["in_lava"] is False
 
 
-@pytest.mark.parametrize("bank", ["unsupported", "still_blocked", "clear_after_dig"])
+@pytest.mark.parametrize("bank", ["unsupported", "still_blocked", "clear_after_dig", "obsidian", "crying_obsidian"])
 def test_lava_notch_checks_bank_support_and_actual_clearance(bank):
     from mc_agent.skills.combat_env import CombatEnv
 
@@ -3319,6 +3319,10 @@ def test_lava_notch_checks_bank_support_and_actual_clearance(bank):
     blocks = {(0, 64, 0): "lava"}
     if bank != "unsupported":
         blocks.update({(0, 64, -1): "netherrack", (0, 65, -1): "netherrack"})
+    hard_block = bank in {"obsidian", "crying_obsidian"}
+    if hard_block:
+        blocks[(0, 65, -1)] = bank
+        blocks.update({(0, 64, 1): "netherrack", (0, 65, 1): "netherrack"})
     digs = []
 
     class LavaBot:
@@ -3335,14 +3339,22 @@ def test_lava_notch_checks_bank_support_and_actual_clearance(bank):
             if action == "dig":
                 pos = tuple(body["pos"])
                 digs.append(pos)
-                if bank == "clear_after_dig":
+                if bank == "clear_after_dig" or (hard_block and pos == (0, 65, 1)):
                     blocks.pop(pos)
-            if action == "control" and body.get("forward") and digs and bank == "clear_after_dig":
-                status.update(pos=[0.5, 65, -0.5], in_lava=False, on_ground=True)
+            if action == "control" and body.get("forward") and digs:
+                if hard_block and digs[-1] == (0, 65, 1):
+                    status.update(pos=[0.5, 65, 1.5], in_lava=False, on_ground=True)
+                elif bank == "clear_after_dig":
+                    status.update(pos=[0.5, 65, -0.5], in_lava=False, on_ground=True)
             return {"ok": True}
 
     escaped = CombatEnv(LavaBot()).escape_lava()
 
+    if hard_block:
+        assert escaped["ok"] and "lava_notch_south" in escaped["actions"]
+        assert "lava_notch_hard_block" in escaped["actions"]
+        assert digs == [(0, 65, 1)]
+        return
     assert escaped["ok"] is (bank == "clear_after_dig")
     assert ("lava_notch_north" in escaped["actions"]) is (bank == "clear_after_dig")
     assert digs == ([] if bank == "unsupported" else [(0, 65, -1)])

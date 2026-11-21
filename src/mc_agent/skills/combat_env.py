@@ -1662,6 +1662,10 @@ class CombatEnv:
             blocks = [self._get_block_name(ex, cy, ez, strict=True) for cy in clearance]
             if any(not block or block in HAZARD_BLOCK_TYPES or block == "bedrock" for block in blocks):
                 continue
+            if any(block in {"obsidian", "crying_obsidian"} for block in blocks):
+                # Neither block can clear within the one-second emergency dig budget.
+                actions.append("lava_notch_hard_block")
+                continue
             dig_keys = [
                 (dim0, (ex, cy, ez), block, held_name)
                 for cy, block in zip(clearance, blocks)
