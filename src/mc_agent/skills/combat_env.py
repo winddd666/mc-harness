@@ -2073,6 +2073,8 @@ class CombatEnv:
                     short_yaws = sorted(yaws, key=lambda yaw: blast_clearance(yaw, 1.65), reverse=True)
                 elif wait_for_ground:
                     short_yaws.extend(yaws[:3])
+                    if threat_pos is not None and not (other_shooters or other_melee):
+                        short_yaws.extend(pref_yaw + math.radians(angle) for angle in (70, -70))
                 for chosen_yaw in short_yaws:
                     if require_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
                         continue

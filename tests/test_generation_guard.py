@@ -11119,6 +11119,49 @@ def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(m
         assert attacks == []
 
 
+@pytest.mark.parametrize("unbroken_ledge", [True, False])
+def test_short_retreat_checks_diagonal_supported_ledge(unbroken_ledge):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    origin = [0.3, 63.0, 0.3]
+    status = {"pos": origin, "on_ground": True, "alive": True, "ready": True, "dimension": "overworld"}
+    support = {(-2, -1), (-2, 0), (-1, -1), (-1, 0), (0, -1), (0, 0)}
+    if not unbroken_ledge:
+        support.remove((-2, -1))
+    steps = []
+    away = math.radians(15)
+    away_dx, away_dz = yaw_to_unit_xz(away)
+    threat = [origin[0] - 2.8 * away_dx, origin[1], origin[2] - 2.8 * away_dz]
+
+    class LedgeBot:
+        yaw = 0.0
+
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, z = body["pos"]
+                return {"name": "stone" if y == 62 and (x, z) in support else "air"}
+            if action == "look":
+                self.yaw = body["yaw"]
+            elif action == "control":
+                assert body["ms"] == 220 and not body["jump"] and not body["sprint"]
+                steps.append(self.yaw)
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                status["pos"] = [origin[0] + 0.8 * dx, origin[1], origin[2] + 0.8 * dz]
+            elif action == "move_to":
+                pytest.fail("Short ledge cannot support a second retreat leg")
+            return {"ok": True}
+
+    outcome = CombatEnv(LedgeBot()).flee(threat, allow_shaft_seal=False, wait_for_ground=True)
+
+    assert outcome["ok"] is unbroken_ledge
+    assert steps == ([pytest.approx(math.radians(85))] if unbroken_ledge else [])
+    if not unbroken_ledge:
+        assert outcome["reason"] == "no_safe_retreat"
+
+
 @pytest.mark.parametrize("short_only", [False, True])
 def test_creeper_retreat_does_not_take_the_only_route_toward_the_blast(monkeypatch, short_only):
     from mc_agent.skills.combat_env import CombatEnv
