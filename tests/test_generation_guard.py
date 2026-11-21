@@ -4557,11 +4557,15 @@ def test_failed_nether_cover_falls_back_to_checked_retreat_only_in_same_life(mon
     assert retreats == ([] if respawned else [(blaze["pos"], True)])
 
 
-@pytest.mark.parametrize("sighting", ["exposed", "covered", "timeout", "covered_with_melee", "fireball_in_cover"])
+@pytest.mark.parametrize(
+    "sighting", ["exposed", "covered", "timeout", "covered_with_melee", "fireball_in_cover", "burn_after_fireball"],
+)
 @pytest.mark.parametrize("health", [4.2, 16.0])
 def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, sighting, health):
     from mc_agent.skills.combat_env import CombatEnv
 
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     primary = {"name": "blaze", "id": 44, "dist": 7.8, "pos": [1534.2, 62, 3108.9]}
     secondary = {"name": "blaze", "id": 45, "dist": 14.4, "pos": [1529.5, 58, 3101.3]}
     distant = {"name": "blaze", "id": 46, "dist": 17.9, "pos": [1532, 58.5, 3097.5]}
@@ -4602,22 +4606,27 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
 
     def blocks_shot(_env, _pos, shooter_pos):
         cover_checks.append(shooter_pos)
-        return shooter_pos == primary["pos"] or sighting in {"covered", "covered_with_melee", "fireball_in_cover"}
+        return shooter_pos == primary["pos"] or sighting in {"covered", "covered_with_melee", "fireball_in_cover", "burn_after_fireball"}
 
     guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(CombatEnv, "_blocks_shot", blocks_shot)
-    if sighting == "fireball_in_cover":
+    if sighting in {"fireball_in_cover", "burn_after_fireball"}:
         monkeypatch.setattr(CombatEnv, "probe_retreat", lambda *_args: None)
+    if sighting == "burn_after_fireball":
+        guard._last_ranged_hurt_at = 999.0
     monkeypatch.setattr(guard.combat_env, "flee", flee)
     incident = guard.poll()
 
     if sighting == "timeout":
         assert cover_checks == [] and calls == [(None, True, ())]
-    elif sighting in {"covered_with_melee", "fireball_in_cover"}:
+    elif (
+        sighting in {"covered_with_melee", "fireball_in_cover"}
+        or (sighting == "burn_after_fireball" and health <= 10)
+    ):
         assert cover_checks == [] and calls == [(primary["pos"], True, [secondary["pos"]])]
     else:
         assert cover_checks == [primary["pos"], secondary["pos"]]
-        if sighting == "covered":
+        if sighting in {"covered", "burn_after_fireball"}:
             assert calls == []
             retreat = next(a for a in incident["actions"] if a["action"] == "combat_or_flee")
             assert retreat["result"]["mode"] == "natural_cover"

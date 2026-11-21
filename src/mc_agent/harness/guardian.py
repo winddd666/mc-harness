@@ -243,7 +243,7 @@ class GenerationGuard:
     FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
     MELEE_EAT_DEFER_S = 10.0
-    NETHER_BURN_EAT_DEFER_S = 12.0
+    NETHER_BURN_RANGED_WINDOW_S = 12.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
@@ -534,6 +534,14 @@ class GenerationGuard:
     def _unstick_in_wall(self, before: dict[str, Any]) -> dict[str, Any]:
         return self._run_recovery_macro(before, lambda skills: skills.unstick(), budget_s=self.IN_WALL_RECOVERY_BUDGET_S)
 
+    def _low_health_burning_after_ranged_hit(self, status: dict[str, Any], now: float) -> bool:
+        health = status.get("health")
+        return (
+            bool(status.get("on_fire"))
+            and isinstance(health, (int, float)) and 0 < health <= LOW_HP_BUNKER_MAX
+            and now - self._last_ranged_hurt_at < self.NETHER_BURN_RANGED_WINDOW_S
+        )
+
     def _defend_or_flee(
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
         *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True,
@@ -614,10 +622,13 @@ class GenerationGuard:
             # A wall that blocks projectiles cannot protect us from a melee attacker already in reach.
             if pos and (prefer_cover or check_blaze_cover) and not recent_melee:
                 cover_budget = 1.25 if check_blaze_cover else 2.25
+                allow_stationary = allow_stationary_cover and not (
+                    "nether" in dimension and self._low_health_burning_after_ranged_hit(status, now)
+                )
                 cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + cover_budget)
                 try:
                     cover = CombatEnv(cover_bot, geofence=self.geofence).seek_natural_cover(
-                        pos, other_shooters=other_shooters, allow_stationary=allow_stationary_cover,
+                        pos, other_shooters=other_shooters, allow_stationary=allow_stationary,
                     )
                 except _RecoveryBudgetExceeded:
                     self._stop_after_recovery_timeout()
@@ -924,7 +935,7 @@ class GenerationGuard:
         protecting_against_recent_hit = status.get("blocking") and (recent_ranged_hit or recent_melee_hit)
         # A Nether shooter can keep firing while missing from the nearest-hostile snapshot.
         recent_nether_threat = in_nether and (
-            recent_melee_hit or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_EAT_DEFER_S)
+            recent_melee_hit or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_RANGED_WINDOW_S)
         )
         recent_trident_hit = now - self._last_trident_hurt_at < 8.0
         if (
@@ -2352,14 +2363,9 @@ class GenerationGuard:
                 and now - max(self._last_ranged_hurt_at, self._last_melee_hurt_at) >= 4.0
                 and status.get("on_ground") is True and status.get("pos")
             ):
-                burning_after_ranged_hit = (
-                    status.get("on_fire")
-                    and isinstance(health, (int, float)) and health <= LOW_HP_BUNKER_MAX
-                    and now - self._last_ranged_hurt_at < self.NETHER_BURN_EAT_DEFER_S
-                )
                 cover = self._recheck_cover_after_blocked_flee(
                     status["pos"], entity_id, min(now + 1.25, deadline),
-                    allow_stationary=not burning_after_ranged_hit,
+                    allow_stationary=not self._low_health_burning_after_ranged_hit(status, now),
                 )
                 if cover and (cover.get("ok") or cover.get("respawned")):
                     return {**cover, "requires_replan": True, "pos_before": status["pos"]}
