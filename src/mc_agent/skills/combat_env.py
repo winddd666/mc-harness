@@ -2867,8 +2867,10 @@ class SubcorticalInstinctController:
 
     def _strike_cornered_hostile(
         self, env: CombatEnv, target_id: int, counts: dict[str, int], held_name: str | None,
+        *, status: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        status = env._safe_status({"ready": False})
+        if status is None:
+            status = env._safe_status({"ready": False})
         health = status.get("health")
         nearest = status.get("nearest_hostile")
         if (
@@ -3367,6 +3369,19 @@ class SubcorticalInstinctController:
                     check_melee_guard = flee_ok and (sealed or fl.get("mode") == "flee") and mob_name in PRE_HURT_MELEE_MOBS
                     if (not flee_ok or check_ranged_guard or check_melee_guard) and not fl.get("respawned") and has_shield:
                         st_fl = env._safe_status({"ready": False})
+                        if (
+                            not flee_ok and fl.get("reason") == "no_safe_retreat"
+                            and st_fl.get("blocking") and st_fl.get("dimension") == st.get("dimension") == "overworld"
+                            and st_fl.get("last_death") == st.get("last_death")
+                            and held_name in MELEE_WEAPON_ORDER and mob_name in LONE_COUNTERKILL_MOBS
+                            and isinstance(mob_id, int) and len(nearby_hostiles) == 1
+                            and nearby_hostiles[0].get("id") == mob_id and not nearby_hostiles[0].get("blocked_by_wall")
+                            and time.monotonic() + 1.25 < deadline
+                        ):
+                            strike = self._strike_cornered_hostile(env, mob_id, counts, held_name, status=st_fl)
+                            if strike is not None:
+                                actions.append(strike)
+                                st_fl = env._safe_status({"ready": False})
                         nearest_raw = st_fl.get("nearest_hostile")
                         nearest = nearest_raw if isinstance(nearest_raw, dict) else {}
                         nearest_id = nearest.get("id")

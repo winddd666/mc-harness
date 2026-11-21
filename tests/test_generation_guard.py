@@ -10595,3 +10595,64 @@ def test_arrow_poll_without_filler_checks_natural_cover_before_repeating_flee(mo
         expected.append("flee")
     assert checks == expected
     assert incident["actions"][-1]["result"]["mode"] == ("natural_cover" if covered else "flee")
+
+
+@pytest.mark.parametrize("scenario", ["cornered", "second_hostile", "out_of_reach", "respawned", "blocked_by_wall"])
+def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(monkeypatch, scenario):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    distance = 1.5 if scenario == "out_of_reach" else 0.6
+    zombie = {
+        "id": 11, "name": "zombie_villager", "dist": distance, "pos": [0.5 + distance, 29, 0.5],
+        "blocked_by_wall": scenario == "blocked_by_wall",
+    }
+    status = {
+        "pos": [0.5, 29, 0.5], "dimension": "overworld", "health": 4.7, "food": 20,
+        "alive": True, "ready": True, "on_ground": True, "blocking": False,
+        "nearest_hostile": zombie, "last_death": {"t": 1},
+    }
+    calls = []
+
+    class TunnelBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                sword = {"name": "iron_sword", "count": 1}
+                return {"items": [sword], "held": sword, "offhand": {"name": "shield", "count": 1}}
+            if action == "get_entities":
+                mobs = [zombie]
+                if scenario == "second_hostile":
+                    mobs.append({"id": 12, "name": "husk", "dist": 2.0, "pos": [0.5, 29, 2.5]})
+                return {"entities": mobs}
+            if action == "get_block":
+                return {"name": "air"}
+            if action in {"attack", "posture"}:
+                calls.append((action, body))
+            if action == "attack":
+                assert status["blocking"] is True
+                status["blocking"] = False
+                return {"hits": 1}
+            if action == "posture":
+                status["blocking"] = bool(body.get("shield"))
+            return {"ok": True}
+
+    def flee(_env, _pos, **_kwargs):
+        if scenario == "respawned":
+            status.update(health=20, last_death={"t": 2})
+        return {"ok": False, "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    outcome = CombatControllerSlot().handle(CombatEnv(TunnelBot()), {
+        "source": "pre_hurt_melee", "primary_type": "zombie_villager", "primary_entity_id": 11,
+    })
+
+    attacks = [body for action, body in calls if action == "attack"]
+    if scenario == "cornered":
+        attack, = attacks
+        assert attack["entity_id"] == 11 and attack["max_hits"] == 1
+        assert outcome["actions"][-1]["action"] == "cornered_melee_strike"
+        assert outcome["latched_guard"] is True and status["blocking"] is True
+    else:
+        assert attacks == []
