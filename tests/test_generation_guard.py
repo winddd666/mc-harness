@@ -1076,8 +1076,8 @@ def test_death_during_combat_does_not_suppress_the_next_threat_at_spawn(monkeypa
     assert "pre_hurt_ranged" in second["reasons"]
 
 
-@pytest.mark.parametrize("combat_duration", [4.0, 6.0])
-def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch, combat_duration):
+@pytest.mark.parametrize("combat_duration, entry_time", [(4.0, 0.0), (6.0, 0.0), (4.3, 1.5)])
+def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch, combat_duration, entry_time):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     zombie = {"id": 42, "name": "zombie", "pos": [2.0, 11, 0.5], "dist": 1.5}
@@ -1089,6 +1089,8 @@ def test_post_combat_food_only_starts_when_it_fits_the_reflex_budget(monkeypatch
 
     class CaveBot:
         def call(self, action, body=None, **kwargs):
+            if action == "stop" and clock[0] == 1000.0:
+                clock[0] += entry_time
             if action == "status":
                 return dict(status)
             if action == "inventory":
@@ -10967,3 +10969,172 @@ def test_grounded_retreat_can_step_down_one_verified_block_in_a_tunnel(terrain):
     else:
         assert moves == []
         assert outcome["reason"] == "no_safe_retreat"
+
+
+@pytest.mark.parametrize("landing", ["grounded", "water", "respawned", "airborne"])
+def test_directed_shore_rechecks_an_airborne_bot_over_the_bank(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    bank = [0.5, 63.0, 4.5]
+    status = {
+        "pos": [0.5, 62.2, 0.5], "dimension": "overworld", "last_death": {"t": 1},
+        "in_water": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    moves = []
+    jump = []
+
+    class BankBot:
+        def status(self):
+            if clock[0] >= 1000.15:
+                if landing == "grounded":
+                    status.update(in_water=False, on_ground=True, pos=bank)
+                elif landing == "water":
+                    status.update(in_water=True, on_ground=False)
+                elif landing == "respawned":
+                    status.update(pos=[2.5, 70, 2.5], last_death={"t": 2})
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "move_to":
+                moves.append(body)
+                status.update(pos=[0.5, 63.5, 4.5], in_water=False, on_ground=False)
+            if action == "posture":
+                jump.append(body.get("jump"))
+            return {"ok": True}
+
+    env = CombatEnv(BankBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_args, **_kwargs: bank)
+    outcome = env.escape_deep_water_to_shore()
+
+    assert len(moves) == 2
+    assert 1000.15 <= clock[0] <= 1000.31
+    assert outcome["ok"] is (landing == "grounded")
+    if landing == "water":
+        assert outcome["in_water"] is True and jump[-1] is True
+    elif landing == "respawned":
+        assert outcome["mode"] == "respawned"
+    elif landing == "airborne":
+        assert outcome["reason"] == "shore_landing_unconfirmed"
+
+
+@pytest.mark.parametrize("cause", ["wall_error", "wall_result", "wall_watch", "arrow", "respawned"])
+def test_staircase_preempts_for_fresh_suffocation_without_a_nearby_mob(monkeypatch, cause):
+    import threading
+
+    actor = threading.current_thread()
+    watcher_read = threading.Event()
+    stopped = threading.Event()
+    status = {
+        "pos": [6073.5, 52, -218.5], "dimension": "overworld", "last_death": {"t": 1},
+        "alive": True, "ready": True, "on_ground": True, "health": 12, "nearest_hostile": None,
+    }
+    damage = []
+    continued = []
+    unstuck = []
+
+    class StairBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                observed = dict(status)
+                if threading.current_thread() is not actor:
+                    watcher_read.set()
+                return observed
+            if action == "events":
+                since = kwargs["params"]["since"]
+                rows = [row for row in damage if row["seq"] > since]
+                if cause == "respawned" and rows:
+                    status.update(last_death={"t": 2}, health=20)
+                return {"events": rows, "last_seq": len(damage)}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 52 else "air"}
+            if action == "stop":
+                stopped.set()
+                return {"ok": True}
+            if action == "dig":
+                if cause == "wall_watch":
+                    assert watcher_read.wait(2.0)
+                damage.append({"seq": 1, "type": "hurt", "source": "arrow" if cause == "arrow" else "in_wall"})
+                status["health"] = 11
+                if cause == "wall_watch":
+                    assert stopped.wait(1.5)
+                if cause in {"wall_watch", "wall_result"}:
+                    return {"interrupted_by": "hurt"}
+                raise ApiError("interrupted", "stopped because of hurt")
+            continued.append(action)
+            return {"ok": True}
+
+    bot = StairBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_unstick_in_wall", lambda before: unstuck.append(before["last_death"]) or {"ok": True})
+
+    def staircase():
+        dig = {"pos": [6073, 53, -220]}
+        if cause == "wall_watch":
+            dig["stop_on"] = ["death"]
+        try:
+            bot.call("dig", dig)
+        except ApiError:
+            continued.append("ignored")
+        return json.dumps({"ok": True})
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_staircase", staircase))
+
+    if cause == "arrow":
+        assert result == {"ok": True}
+        assert continued == ["ignored"] and unstuck == []
+    else:
+        assert result["preempted_by_reflex"]
+        assert continued == []
+        assert result["reflex_mode"] == ("life_unavailable" if cause == "respawned" else "unstick_in_wall")
+        assert unstuck == ([] if cause == "respawned" else [{"t": 1}])
+
+
+@pytest.mark.parametrize("mode", ["cover", "bunker"])
+def test_subcortical_recovery_macros_share_the_combat_transport_deadline(monkeypatch, mode):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {"pos": [0.5, 74, 0.5], "dimension": "overworld", "ready": True, "alive": True, "on_ground": True}
+    calls = []
+    events = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "dig":
+                calls.append(kwargs["timeout_s"])
+                clock[0] += kwargs["timeout_s"]
+                return {"ok": True}
+            return {"ok": True}
+
+    class SurvivalRecovery:
+        def on_encounter(self, env, _trigger):
+            if mode == "cover":
+                env.build_tactical("cover_pocket")
+            else:
+                env.skills.dig_safety_bunker(urgent=True)
+            return {"handled": True, "mode": "covered", "actions": [], "status_after": dict(status)}
+
+    def recovery(skills, **_kwargs):
+        return skills.bot.call("dig", {"pos": [0, 75, 0]}, timeout_s=30.0)
+
+    monkeypatch.setattr(MacroSkills, "dig_cover_pocket", recovery)
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", recovery)
+    raw_bot = CaveBot()
+    skills = MacroSkills(raw_bot)
+    guard = GenerationGuard(raw_bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
+    guard.combat_slot.register(SurvivalRecovery())
+
+    outcome = guard._run_subcortical_combat({"source": "pre_hurt_melee"})
+
+    assert outcome["reason"] == "time_budget"
+    budget_event, = [event for event in events if event["type"] == "guardian.combat_budget_exceeded"]
+    assert budget_event["endpoint"] == "dig"
+    assert calls == [7.5]
+    assert clock[0] <= 1009.0
+    assert guard.combat_env.skills is skills and skills.bot is raw_bot
