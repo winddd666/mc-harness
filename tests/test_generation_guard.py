@@ -6653,10 +6653,11 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
         assert retreat["respawned"] is True
 
 
-def test_melee_swarm_retreat_avoids_another_attacker_on_the_route():
+@pytest.mark.parametrize("primary_name, primary_distance", [("zombie", 0.8), ("creeper", 3.8), ("creeper", 2.1)])
+def test_retreat_avoids_another_attacker_when_it_has_room(primary_name, primary_distance):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
 
-    primary = {"id": 42, "name": "zombie", "dist": 0.8, "pos": [-0.3, 74, 0.5]}
+    primary = {"id": 42, "name": primary_name, "dist": primary_distance, "pos": [0.5 - primary_distance, 74, 0.5]}
     secondary = {"id": 43, "name": "zombie", "dist": 3.0, "pos": [3.5, 74, 0.5]}
     spider = {"id": 44, "name": "spider", "dist": 4.0, "pos": [0.5, 74, -3.5]}
     status = {
@@ -6692,12 +6693,18 @@ def test_melee_swarm_retreat_avoids_another_attacker_on_the_route():
                 status["pos"] = [body["x"], body["y"], body["z"]]
             return {"ok": True}
 
+    source = "pre_hurt_creeper" if primary_name == "creeper" else "pre_hurt_melee"
     outcome = CombatControllerSlot().handle(
-        CombatEnv(SwarmBot()), {"source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie"}
+        CombatEnv(SwarmBot()), {"source": source, "primary_entity_id": 42, "primary_type": primary_name}
     )
-    assert outcome["mode"] == "cover_or_flee"
+    assert outcome["mode"] == ("creeper_evade" if primary_name == "creeper" else "cover_or_flee")
     assert len(forward) == 1
-    assert forward[0][2] > 2.0
+    if primary_name == "creeper" and primary_distance == 2.1:
+        assert forward[0] == pytest.approx([3.5, 74, 0.5])
+    else:
+        assert forward[0][2] > 2.0
+        if primary_name == "creeper":
+            assert math.dist(forward[0], primary["pos"]) > 5.5
 
 
 @pytest.mark.parametrize("landing", ["grounded", "still_airborne", "water", "respawned"])

@@ -1915,6 +1915,7 @@ class CombatEnv:
         initial_landing_checks: int = 3,
         other_shooters: Sequence[Sequence[float]] = (),
         other_melee: Sequence[Sequence[float]] = (),
+        avoid_blast: bool = False,
         use_nearest_hostile: bool = True,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
@@ -2003,8 +2004,15 @@ class CombatEnv:
 
             def threat_clearance(yaw: float) -> float:
                 ux, uz = yaw_to_unit_xz(yaw)
+                if avoid_blast:
+                    dx, dy, dz = threat_offsets[0]
+                    # Keep the original order unless the heading quickly clears the blast radius.
+                    if dx * ux + dz * uz > 1e-6 or math.hypot(dx - ux * 3, dy, dz - uz * 3) < 5.5:
+                        return -1.0
                 nearest = math.inf
                 for index, (dx, dy, dz) in enumerate(threat_offsets):
+                    if avoid_blast and index == 0:
+                        continue
                     # The primary melee attacker is already in reach. Compare clearance
                     # after the initial step while checking the entire route for other mobs.
                     start = min(1.65, disengage_range) if other_melee and index == 0 else 0.0
@@ -2931,6 +2939,17 @@ class SubcorticalInstinctController:
         # Count close-range engaged hostiles (<=8.5m) for swarm/solo gates so mobs outside enclosed
         # walls (`10..16m`) never trick a sword+shield bot into pure circle-fleeing inside a room.
         nearby_hostiles = [e for e in hostiles if float(e.get("dist", 99.0)) <= 8.5]
+        other_melee = []
+        if any_creeper_close or mob_name in PRE_HURT_MELEE_MOBS:
+            for hostile in nearby_hostiles:
+                hostile_pos = hostile.get("pos")
+                if (
+                    hostile is not primary and hostile.get("id") != mob_id
+                    and _clean_block_name(hostile.get("name")) in PRE_HURT_MELEE_MOBS
+                    and isinstance(hostile_pos, (list, tuple)) and len(hostile_pos) >= 3
+                    and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in hostile_pos[:3])
+                ):
+                    other_melee.append(hostile_pos)
         mode = "stabilize"
         latched_guard = False
 
@@ -2998,8 +3017,13 @@ class SubcorticalInstinctController:
                     if post_creepers:
                         sealed_ok = False
             if not sealed_ok:
+                rank_melee_clearance = bool(other_melee) and not any(
+                    hostile is not primary and _clean_block_name(hostile.get("name")) == "creeper"
+                    for hostile in nearby_hostiles
+                )
                 flee_res = env.flee(
                     c_pos, distance=11.5, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
+                    **({"other_melee": other_melee, "avoid_blast": True} if rank_melee_clearance else {}),
                     **({"initial_landing_checks": 5} if not has_shield and st.get("on_ground") is False else {}),
                     **({"use_nearest_hostile": False} if not c_pos else {}),
                 )
@@ -3270,17 +3294,6 @@ class SubcorticalInstinctController:
                                 pos, [hostile for hostile in hostiles if hostile is not primary], max_distance=12.0,
                             )
                         ]
-                    other_melee = []
-                    if mob_name in PRE_HURT_MELEE_MOBS:
-                        for hostile in nearby_hostiles:
-                            hostile_pos = hostile.get("pos")
-                            if (
-                                hostile is not primary and hostile.get("id") != mob_id
-                                and _clean_block_name(hostile.get("name")) in PRE_HURT_MELEE_MOBS
-                                and isinstance(hostile_pos, (list, tuple)) and len(hostile_pos) >= 3
-                                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in hostile_pos[:3])
-                            ):
-                                other_melee.append(hostile_pos)
                     hurt_midair = st.get("on_ground") is False and trigger.get("source") == "tool_interrupted_hurt"
                     fl = env.flee(
                         mob_pos, distance=14.0, urgent=True,
