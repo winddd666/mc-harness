@@ -3352,6 +3352,55 @@ def test_low_health_retreat_keeps_shield_against_a_nearby_shooter(distance_after
         assert posture_calls[-1] == ("posture", {})
 
 
+@pytest.mark.parametrize("landing", ["near_melee", "clear", "respawned"])
+def test_low_health_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    primary = {"id": 77, "name": "husk", "pos": [1.3, 69, 0.5], "dist": 0.8}
+    status = {
+        "pos": [0.5, 69, 0.5], "health": 7.0, "food": 17, "ready": True, "alive": True,
+        "on_ground": True, "blocking": True, "last_death": {"t": 1}, "nearest_hostile": primary,
+    }
+    posture_calls = []
+
+    class RetreatBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [primary]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 69 else "air"}
+            if action in {"look", "posture"}:
+                posture_calls.append((action, body))
+            if action == "posture":
+                status["blocking"] = body.get("shield", False)
+            return {"ok": True}
+
+    def short_retreat(*args, **kwargs):
+        status.update(pos=[-1.68, 69, 0.5], health=4.84)
+        status["nearest_hostile"] = {"id": 78, "name": "husk", "dist": 2.3 if landing != "clear" else 4.0}
+        if landing == "respawned":
+            status["last_death"] = {"t": 2}
+        return {"ok": True, "mode": "flee", "moved_dist": 2.18}
+
+    env = CombatEnv(RetreatBot())
+    monkeypatch.setattr(env, "flee", short_retreat)
+    outcome = CombatControllerSlot().handle(
+        env, {"source": "pre_hurt_melee", "primary_entity_id": 77, "primary_type": "husk"},
+    )
+
+    assert outcome["latched_guard"] is (landing == "near_melee")
+    if landing == "near_melee":
+        assert posture_calls[-2:] == [("look", {"entity_id": 78}), ("posture", {"shield": True, "sneak": False, "jump": False})]
+        assert status["blocking"] is True
+    else:
+        assert posture_calls[-1] == ("posture", {})
+
+
 @pytest.mark.parametrize("second_shooter", [False, True])
 def test_unshielded_boundary_retreat_accounts_for_a_second_shooter(second_shooter):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz

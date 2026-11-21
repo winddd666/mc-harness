@@ -2745,27 +2745,39 @@ class SubcorticalInstinctController:
                     self._last_flee_at = now_flee
                     flee_ok = bool(fl.get("ok"))
                     check_ranged_guard = flee_ok and fl.get("mode") == "flee" and mob_name in RANGED_MOBS
-                    if (not flee_ok or check_ranged_guard) and not fl.get("respawned") and has_shield:
-                        st_fl = env._safe_status(st)
-                        nearest = st_fl.get("nearest_hostile")
-                        still_exposed = (
-                            check_ranged_guard
-                            and isinstance(nearest, dict)
-                            and mob_id is not None and nearest.get("id") == mob_id
-                            and isinstance(nearest.get("dist"), (int, float)) and nearest["dist"] <= 12.0
-                            and isinstance(st_fl.get("health"), (int, float)) and st_fl["health"] <= 10.0
+                    check_melee_guard = flee_ok and fl.get("mode") == "flee" and mob_name in PRE_HURT_MELEE_MOBS
+                    if (not flee_ok or check_ranged_guard or check_melee_guard) and not fl.get("respawned") and has_shield:
+                        st_fl = env._safe_status({"ready": False})
+                        nearest_raw = st_fl.get("nearest_hostile")
+                        nearest = nearest_raw if isinstance(nearest_raw, dict) else {}
+                        nearest_id = nearest.get("id")
+                        nearest_dist = nearest.get("dist")
+                        low_health_after = isinstance(st_fl.get("health"), (int, float)) and st_fl["health"] <= 10.0
+                        ranged_still_exposed = (
+                            check_ranged_guard and low_health_after and nearest_id == mob_id and mob_id is not None
+                            and isinstance(nearest_dist, (int, float)) and nearest_dist <= 12.0
+                        )
+                        melee_still_close = (
+                            check_melee_guard and low_health_after and st_fl.get("blocking")
+                            and isinstance(nearest_id, int) and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
+                            and isinstance(nearest_dist, (int, float)) and nearest_dist <= 3.5
                         )
                         if (
-                            (not flee_ok or still_exposed)
+                            (not flee_ok or ranged_still_exposed or melee_still_close)
                             and st_fl.get("ready") is not False
                             and st_fl.get("alive") is not False
                             and not st_fl.get("in_water")
                             and not st_fl.get("in_lava")
+                            and st_fl.get("last_death") == st.get("last_death")
+                            and st_fl.get("dimension") == st.get("dimension")
                         ):
+                            guard_target = nearest_id if melee_still_close else mob_id
                             latched_guard = self._latch_shield_at_threat(
                                 env,
-                                int(mob_id) if mob_id is not None else None,
+                                int(guard_target) if guard_target is not None else None,
                             )
+                            if melee_still_close:
+                                actions.append({"action": "guard_melee_after_retreat", "ok": latched_guard, "entity_id": guard_target})
                     elif (
                         not flee_ok and fl.get("reason") in {"no_safe_retreat", "unsafe_landing"}
                         and not fl.get("respawned") and not has_shield and has_weapon
