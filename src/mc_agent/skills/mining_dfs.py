@@ -5843,7 +5843,10 @@ class MiningDFSEngine:
                     ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref, max_y=cur_pos[1])
                 else:
                     ok_nav, err_nav = self._resume_shaft_tip(active.node_id, min_hp_ref=min_hp_ref)
-                    if not ok_nav and active.kind == "switchback" and err_nav not in {"hurt", "not_ready", "not_grounded"}:
+                    if (
+                        not ok_nav and active.kind in {"switchback", "spine"}
+                        and err_nav not in {"hurt", "not_ready", "not_grounded"}
+                    ):
                         ok_nav = self._resume_deepest_branch(active, min_hp_ref=min_hp_ref)
                 if not ok_nav:
                     if resume_at_depth:

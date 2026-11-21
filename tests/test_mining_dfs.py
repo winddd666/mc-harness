@@ -3838,6 +3838,56 @@ def test_explore_rejoins_a_recorded_stair_far_from_its_collar(monkeypatch) -> No
     assert engine.collar_node_id == collar.node_id
 
 
+def test_blocked_spine_rejoin_tries_another_pending_node_at_depth(monkeypatch) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    junction_pos, pending_pos, spent_pos = (0, 16, 0), (6, 15, 0), (12, 15, 0)
+    world = _MockMineWorld(start_pos=(0.5, 16.0, 0.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    for x, y, z in (junction_pos, pending_pos):
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(8, 15, 0)] = "ancient_debris"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+
+    with BotSession("tok", bot_username="BlockedSpineRejoin", transport=httpx.MockTransport(world.handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -48), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        junction = engine._create_node(
+            kind="spine", anchor=junction_pos, parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, junction_pos]), branches=[],
+        )
+        pending = engine._create_node(
+            kind="spine", anchor=pending_pos, parent_id=junction.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "east", [junction_pos, pending_pos]),
+            branches=[BranchSpec("spine_forward", "east", 4)],
+        )
+        spent = engine._create_node(
+            kind="spine", anchor=spent_pos, parent_id=pending.node_id,
+            edge_from_parent=ShaftEdge("branch_leaf", "east", [pending_pos, spent_pos]), branches=[],
+        )
+        attempted = []
+
+        def rejoin(node_id, **kwargs):
+            attempted.append(node_id)
+            if node_id == spent.node_id:
+                engine.active_node_id = junction.node_id
+                return False, "backtrack_blocked"
+            assert node_id == pending.node_id
+            world.pos = [6.5, 15.0, 0.5]
+            engine.active_node_id = pending.node_id
+            return True, None
+
+        monkeypatch.setattr(engine, "_resume_shaft_tip", rejoin)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1)
+
+    assert attempted == [spent.node_id, pending.node_id]
+    assert result["stop_reason"] == "quota_reached"
+    assert engine.nodes[collar.node_id] is collar
+
+
 @pytest.mark.parametrize("rejoinable", [True, False])
 def test_explore_keeps_a_far_collar_when_displaced_near_its_deep_tip(monkeypatch, rejoinable: bool) -> None:
     from mc_agent.skills.mining_dfs import BranchSpec
