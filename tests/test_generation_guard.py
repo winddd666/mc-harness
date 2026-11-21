@@ -9217,6 +9217,48 @@ def test_water_retry_rechecks_nearby_bank_before_swimming_past_it(monkeypatch, b
         assert result["ok"] is True and result["in_water"] is False
 
 
+@pytest.mark.parametrize("has_threat", [False, True])
+def test_failed_shallow_bank_hop_retries_with_sustained_climb(monkeypatch, has_threat):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    bank = [7853.5, 63, 2766.5]
+    lip = [7854.3, 62.4, 2766.6]
+    status = {
+        "pos": [7864.5, 62.8, 2762.5], "in_water": True, "on_ground": False,
+        "submerged": False, "oxygen": 300, "alive": True, "ready": True, "dimension": "overworld",
+    }
+    jumps = []
+
+    class ShoreBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                return {"name": "stone" if body["pos"] == [7853, 62, 2766] else "air"}
+            if action == "move_to":
+                assert [body["x"], body["y"], body["z"]] == bank
+                status["pos"] = lip
+                raise ApiError("path_not_found", "cannot climb bank")
+            if action == "control" and body.get("forward"):
+                assert body["jump"] is True
+                jumps.append((body["ms"], body["sprint"]))
+                if jumps[-1] == (1150, False):
+                    status.update(pos=bank, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    env = CombatEnv(ShoreBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_a, **_kw: bank)
+    threat = [7866.5, 62.8, 2762.5] if has_threat else None
+
+    assert env.escape_deep_water_to_shore(threat)["in_water"] is True
+    retry = env.escape_deep_water_to_shore(threat)
+
+    assert "shore_bank_retry" in retry["actions"]
+    assert jumps == [(450, True), (450, True) if has_threat else (1150, False)]
+    assert retry["ok"] is not has_threat and retry["in_water"] is has_threat
+
+
 @pytest.mark.parametrize("bank_state", [
     "clear", "flooded", "new_life", "observed_after_tool", "observed_during_poll", "higher_bank", "too_high",
 ])

@@ -2640,7 +2640,12 @@ class CombatEnv:
                 lip_height = float(shore_target[1]) - float(mid_pos[1])
                 lip_distance = math.hypot(shore_target[0] - mid_pos[0], shore_target[2] - mid_pos[2])
                 lip_ms = 1150 if lip_height > 0.05 else 850
-                if 0.6 < lip_distance <= 1.8 and 0.0 <= lip_height <= 1.25:
+                shallow_lip = 0.6 < lip_distance <= 1.8 and 0.0 <= lip_height <= 1.25
+                # A failed short hop can leave the bot pressed against the same low bank.
+                sustained_climb = (
+                    shallow_lip and retrying_bank and not (has_threat or shield_target_id is not None or sneak_on_magma)
+                )
+                if shallow_lip and not sustained_climb:
                     # A full swim pulse can carry the bot across a shallow one-block bank.
                     lip_ms = 450
                 try:
@@ -2648,7 +2653,7 @@ class CombatEnv:
                     self.bot.call("look", {"yaw": syaw_m, "pitch": -10.0})
                     self.bot.call(
                         "control",
-                        {"forward": True, "jump": True, "sprint": True, "ms": lip_ms, "stop_on": ["death"]},
+                        {"forward": True, "jump": True, "sprint": not sustained_climb, "ms": lip_ms, "stop_on": ["death"]},
                     )
                     actions.append("shore_lip_jump")
                 except (ApiError, httpx.HTTPError) as err:
