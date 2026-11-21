@@ -522,17 +522,21 @@ class GenerationGuard:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget"}
 
-    def _douse_after_lava(self, before: dict[str, Any]) -> dict[str, Any] | None:
-        try:
-            after = self.bot.call("status", method="GET", timeout_s=0.5)
-        except (ApiError, httpx.HTTPError):
-            return None
+    def _douse_after_lava(
+        self, before: dict[str, Any], *, after: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if after is None:
+            try:
+                after = self.bot.call("status", method="GET", timeout_s=0.5)
+            except (ApiError, httpx.HTTPError):
+                return None
         health = after.get("health")
         _, hostile_dist, _, _ = self._extract_hostile_info(after)
         if (
             after.get("ready") is True and after.get("alive") is not False and after.get("pos")
             and after.get("on_ground") is True and after.get("on_fire") and not after.get("in_water") and not after.get("in_lava")
-            and isinstance(health, (int, float)) and 0 < health <= 4.0 and hostile_dist > 8.0
+            and "nether" not in str(after.get("dimension") or "").lower()
+            and isinstance(health, (int, float)) and 0 < health <= 10.0 and hostile_dist > 8.0
             and after.get("last_death") == before.get("last_death") and after.get("dimension") == before.get("dimension")
         ):
             try:
@@ -3420,6 +3424,14 @@ class GenerationGuard:
                     )
                 )
                 esc_ok = bool(act.get("ok") and not act_res.get("in_lava") and not lava_died)
+                lava_actions = [act]
+                if esc_ok:
+                    douse = self._douse_after_lava(st_pre, after=st_after)
+                    if douse is not None:
+                        lava_actions.append(douse)
+                        st_after = self.combat_env._safe_status(st_after)
+                        lava_died = life_changed(st_after)
+                        esc_ok = not lava_died
                 if lava_died:
                     summary = f"执行 {interrupted_name} 途中滑入岩浆，抢占逃生期间已死亡并重生（装备已掉落，先重整背包再继续）"
                 elif esc_ok:
@@ -3433,7 +3445,7 @@ class GenerationGuard:
                     "handled": esc_ok,
                     "mode": "lava_escape",
                     "summary": summary,
-                    "actions": [act],
+                    "actions": lava_actions,
                     "status_after": st_after,
                     **({"respawned": True} if lava_died else {}),
                 }

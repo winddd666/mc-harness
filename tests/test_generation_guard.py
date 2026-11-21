@@ -5457,11 +5457,11 @@ def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, sc
 
 
 @pytest.mark.parametrize("water_floor", ["stone", "lava", "air"])
-@pytest.mark.parametrize("entry", ["poll", "boundary"])
+@pytest.mark.parametrize("entry", ["poll", "boundary", "tool"])
 def test_critical_post_lava_burning_can_douse_in_verified_adjacent_water(monkeypatch, water_floor, entry):
     status = {
         "pos": [0.5, 63.6, 0.5], "health": 5, "food": 20, "dimension": "overworld",
-        "ready": True, "alive": True, "in_lava": True, "on_ground": False, "on_fire": True,
+        "ready": True, "alive": True, "in_water": False, "in_lava": True, "on_ground": False, "on_fire": True,
     }
     targets = []
 
@@ -5487,16 +5487,21 @@ def test_critical_post_lava_burning_can_douse_in_verified_adjacent_water(monkeyp
     guard = GenerationGuard(CaveBot(), EventSink(events.append), checkpoint=lambda: None)
 
     def escape(**_kwargs):
-        status.update(pos=[0.5, 64, 0.5], health=2.6, in_lava=False, on_ground=True)
+        status.update(pos=[0.5, 64, 0.5], health=9.8, in_lava=False, on_ground=True)
         return {"ok": True, "in_lava": False, "pos_after": status["pos"]}
 
     monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
     if entry == "poll":
         guard.poll()
-    else:
+    elif entry == "boundary":
         guard.stabilize_after_tools()
+    else:
+        receipt = guard.handle_preemption(
+            {"source": "boundary_threat", "primary_type": "lava"}, interrupted_name="mc_skill_mine_dfs",
+        )
+        assert receipt["status_after"]["in_water"] is (water_floor == "stone")
     escape_event, douse = (event for event in events if event["type"] == "guardian.action.completed")
-    assert escape_event["action"] == ("escape_lava" if entry == "poll" else "boundary_escape_lava")
+    assert escape_event["action"] == ("boundary_escape_lava" if entry == "boundary" else "escape_lava")
     assert douse["action"] == "douse_in_water"
     assert douse["ok"] is (water_floor == "stone")
     assert targets == ([[1.5, 63, 0.5]] if water_floor == "stone" else [])
