@@ -2122,6 +2122,7 @@ class GenerationGuard:
         stop_evt = threading.Event()
         attack_active = threading.Event()
         attack_state_lock = threading.Lock()
+        attack_target_id: int | None = None
         actor_thread_id = threading.get_ident()
         pending_trigger: list[ThreatTrigger] = []
 
@@ -2178,15 +2179,18 @@ class GenerationGuard:
                         )
                         held = st.get("held")
                         held_name = str(held.get("name") or "").removeprefix("minecraft:") if isinstance(held, dict) else ""
-                        losing_unarmed_fight = (
-                            not st.get("in_water") and not st.get("blocking") and held_name not in MELEE_WEAPON_ORDER
+                        losing_close_melee = (
+                            not st.get("in_water")
                             and st.get("ready") is not False and st.get("alive") is not False
                             and isinstance(cur_hp, (int, float)) and 0 < cur_hp <= 10
                             and watch_hp0 is not None and watch_hp0 - cur_hp >= 4.0
                             and nh_name in PRE_HURT_MELEE_MOBS and nh_dist <= 4.0
                         )
                         with attack_state_lock:
-                            stop_attack = (water_danger or losing_unarmed_fight) and attack_active.is_set() and not stop_evt.is_set()
+                            unarmed = not st.get("blocking") and held_name not in MELEE_WEAPON_ORDER
+                            other_melee_attacker = nh_id is not None and attack_target_id is not None and nh_id != attack_target_id
+                            melee_danger = losing_close_melee and (unarmed or other_melee_attacker)
+                            stop_attack = (water_danger or melee_danger) and attack_active.is_set() and not stop_evt.is_set()
                             if stop_attack:
                                 pending_trigger.append({
                                     "source": "boundary_threat" if water_danger else "tool_interrupted_hurt",
@@ -2276,6 +2280,7 @@ class GenerationGuard:
             watcher_thread.start()
 
         def _wrapped_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+            nonlocal attack_target_id
             clean_path = str(path or "").lstrip("/")
             is_actor_thread = threading.get_ident() == actor_thread_id
             is_readonly_poll = (
@@ -2287,13 +2292,17 @@ class GenerationGuard:
             if watch_attack_emergency:
                 if clean_path != "attack":
                     return actor_call(path, body, **kwargs)
-                attack_active.set()
+                entity_id = body.get("entity_id") if isinstance(body, dict) else None
+                with attack_state_lock:
+                    attack_target_id = entity_id if isinstance(entity_id, int) else None
+                    attack_active.set()
                 try:
                     try:
                         result = actor_call(path, body, **kwargs)
                     finally:
                         with attack_state_lock:
                             attack_active.clear()
+                            attack_target_id = None
                 except ApiError as exc:
                     if exc.code == "interrupted" and pending_trigger:
                         raise ReflexPreempted(pending_trigger[0]) from None

@@ -7394,13 +7394,14 @@ def test_attack_replans_only_on_confirmed_magma(still_magma):
 
 
 @pytest.mark.parametrize("attack_result", ["returned", "interrupted", "read_timeout"])
-@pytest.mark.parametrize("hazard", ["water", "unarmed_melee"])
+@pytest.mark.parametrize("hazard", ["water", "unarmed_melee", "other_melee"])
 def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result, hazard):
     import threading
 
     stopped = threading.Event()
     observed = threading.Event()
     actions = []
+    attack_target = 44 if hazard == "other_melee" else 27
     status = {
         "pos": [0.5, 63, 0.5], "health": 12, "ready": True, "alive": True, "on_ground": True,
         "nearest_hostile": {"id": 27, "name": "drowned" if hazard == "water" else "zombie", "dist": 2.0, "pos": [2.5, 62, 0.5]},
@@ -7418,7 +7419,8 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
                     status.update(in_water=True, on_ground=False, health=6.7)
                 else:
                     assert observed.wait(2.0)
-                    status.update(health=6.7, held={"name": "wooden_pickaxe"})
+                    weapon = "iron_sword" if hazard == "other_melee" else "wooden_pickaxe"
+                    status.update(health=6.7, held={"name": weapon})
                 assert stopped.wait(2.0), "attack remained active after the survival hazard"
                 if attack_result == "read_timeout":
                     raise httpx.ReadTimeout("attack timed out")
@@ -7455,7 +7457,7 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
     monkeypatch.setattr(guard.combat_slot, "handle", retreat)
 
     def attack():
-        return json.dumps(bot.call("attack", {"entity_id": 27, "timeout": 6000}))
+        return json.dumps(bot.call("attack", {"entity_id": attack_target, "timeout": 6000}))
 
     if attack_result == "read_timeout":
         with pytest.raises(httpx.ReadTimeout, match="attack timed out"):
