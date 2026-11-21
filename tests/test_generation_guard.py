@@ -11020,3 +11020,75 @@ def test_directed_shore_rechecks_an_airborne_bot_over_the_bank(monkeypatch, land
         assert outcome["mode"] == "respawned"
     elif landing == "airborne":
         assert outcome["reason"] == "shore_landing_unconfirmed"
+
+
+@pytest.mark.parametrize("cause", ["wall_error", "wall_result", "wall_watch", "arrow", "respawned"])
+def test_staircase_preempts_for_fresh_suffocation_without_a_nearby_mob(monkeypatch, cause):
+    import threading
+
+    actor = threading.current_thread()
+    watcher_read = threading.Event()
+    stopped = threading.Event()
+    status = {
+        "pos": [6073.5, 52, -218.5], "dimension": "overworld", "last_death": {"t": 1},
+        "alive": True, "ready": True, "on_ground": True, "health": 12, "nearest_hostile": None,
+    }
+    damage = []
+    continued = []
+    unstuck = []
+
+    class StairBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                observed = dict(status)
+                if threading.current_thread() is not actor:
+                    watcher_read.set()
+                return observed
+            if action == "events":
+                since = kwargs["params"]["since"]
+                rows = [row for row in damage if row["seq"] > since]
+                if cause == "respawned" and rows:
+                    status.update(last_death={"t": 2}, health=20)
+                return {"events": rows, "last_seq": len(damage)}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 52 else "air"}
+            if action == "stop":
+                stopped.set()
+                return {"ok": True}
+            if action == "dig":
+                if cause == "wall_watch":
+                    assert watcher_read.wait(2.0)
+                damage.append({"seq": 1, "type": "hurt", "source": "arrow" if cause == "arrow" else "in_wall"})
+                status["health"] = 11
+                if cause == "wall_watch":
+                    assert stopped.wait(1.5)
+                if cause in {"wall_watch", "wall_result"}:
+                    return {"interrupted_by": "hurt"}
+                raise ApiError("interrupted", "stopped because of hurt")
+            continued.append(action)
+            return {"ok": True}
+
+    bot = StairBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_unstick_in_wall", lambda before: unstuck.append(before["last_death"]) or {"ok": True})
+
+    def staircase():
+        dig = {"pos": [6073, 53, -220]}
+        if cause == "wall_watch":
+            dig["stop_on"] = ["death"]
+        try:
+            bot.call("dig", dig)
+        except ApiError:
+            continued.append("ignored")
+        return json.dumps({"ok": True})
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_staircase", staircase))
+
+    if cause == "arrow":
+        assert result == {"ok": True}
+        assert continued == ["ignored"] and unstuck == []
+    else:
+        assert result["preempted_by_reflex"]
+        assert continued == []
+        assert result["reflex_mode"] == ("life_unavailable" if cause == "respawned" else "unstick_in_wall")
+        assert unstuck == ([] if cause == "respawned" else [{"t": 1}])

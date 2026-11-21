@@ -344,6 +344,7 @@ class ThreatTrigger(TypedDict, total=False):
     primary_pos: list[float] | None
     distance: float | None
     hurt_source: str | None
+    observed_life: tuple[Any, Any]
 
 
 class CombatOutcome(TypedDict, total=False):

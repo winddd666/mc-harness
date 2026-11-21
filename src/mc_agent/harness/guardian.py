@@ -2879,14 +2879,52 @@ class GenerationGuard:
         attack_target_id: int | None = None
         actor_thread_id = threading.get_ident()
         pending_trigger: list[ThreatTrigger] = []
+        watch_wall_damage = check_support_dig or watch_mining_water
 
-        def interrupted_action_trigger(max_enemy_distance: float) -> ThreatTrigger | None:
+        def wall_damage_trigger(status: dict[str, Any], call: Callable[..., dict[str, Any]]) -> ThreatTrigger | None:
+            if (
+                not watch_wall_damage or status.get("ready") is False or status.get("alive") is False
+                or status.get("in_water") or status.get("in_lava") or not status.get("pos")
+            ):
+                return None
+            since = self.cursor
+            try:
+                page = call(
+                    "events", method="GET", params={"since": since, "limit": 100}, timeout_s=0.4, allow_reauth=False,
+                )
+            except (ApiError, httpx.HTTPError):
+                return None
+            if not isinstance(page, dict):
+                return None
+            for event in reversed(page.get("events") or []):
+                if not isinstance(event, dict) or not isinstance(event.get("seq"), int) or event["seq"] <= since:
+                    continue
+                if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
+                    return None
+                if event.get("type") != "hurt":
+                    continue
+                source = str(event.get("source") or "").strip().lower()
+                timestamp = event.get("t")
+                stale = isinstance(timestamp, (int, float)) and time.time() - timestamp / 1000 > 3.0
+                if source not in IN_WALL_HURT_SOURCES or stale:
+                    return None
+                return {
+                    "source": "tool_interrupted_hurt", "primary_type": "in_wall", "primary_pos": status["pos"],
+                    "primary_entity_id": None, "distance": 0.0, "hurt_source": source,
+                    "observed_life": (status.get("dimension"), status.get("last_death")),
+                }
+            return None
+
+        def interrupted_action_trigger(max_enemy_distance: float, *, wall_only: bool) -> ThreatTrigger | None:
             try:
                 status = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
             except (ApiError, httpx.HTTPError):
                 return None
             if not isinstance(status, dict):
                 return None
+            wall = wall_damage_trigger(status, actor_call)
+            if wall is not None or wall_only:
+                return wall
             if status.get("in_lava"):
                 return {
                     "source": "boundary_threat", "primary_entity_id": None, "primary_type": "lava",
@@ -2905,6 +2943,7 @@ class GenerationGuard:
             if stop_evt.wait(0.30):
                 return
             watch_hp0: float | None = None
+            last_wall_health: float | None = None
             previous_tile = checked_hot_floor = None
             while not stop_evt.is_set():
                 try:
@@ -2974,6 +3013,18 @@ class GenerationGuard:
                         if stop_evt.wait(0.30):
                             return
                         continue
+                    wall = None
+                    if watch_wall_damage and isinstance(cur_hp, (int, float)):
+                        if last_wall_health is not None and cur_hp < last_wall_health:
+                            wall = wall_damage_trigger(st, orig_call)
+                        last_wall_health = float(cur_hp)
+                    if wall is not None and not stop_evt.is_set():
+                        pending_trigger.append(wall)
+                        try:
+                            orig_call("stop", {}, allow_reauth=False, timeout_s=1.5)
+                        except (ApiError, httpx.HTTPError):
+                            pass
+                        return
                     hp_dropped = (
                         isinstance(watch_hp0, (int, float))
                         and isinstance(cur_hp, (int, float))
@@ -3190,7 +3241,7 @@ class GenerationGuard:
                     or trigger.get("source") in {"pre_hurt_creeper", "tool_water_threat"}
                 )
                 mining_oxygen = watch_mining_water and trigger.get("source") == "tool_water_threat"
-                if not caller_ignores_hurt or movement_emergency or mining_oxygen:
+                if not caller_ignores_hurt or movement_emergency or mining_oxygen or trigger.get("primary_type") == "in_wall":
                     raise ReflexPreempted(trigger) from None
 
             try:
@@ -3201,17 +3252,17 @@ class GenerationGuard:
                 raise
             except ApiError as err:
                 apply_pending_preemption()
-                if not self._in_reflex and not caller_ignores_hurt:
+                if not self._in_reflex and (not caller_ignores_hurt or watch_wall_damage):
                     if err.code == "interrupted" and clean_path in ACTION_LOCK_ENDPOINTS:
-                        trigger = interrupted_action_trigger(14.0)
+                        trigger = interrupted_action_trigger(14.0, wall_only=caller_ignores_hurt)
                         if trigger is not None:
                             raise ReflexPreempted(trigger) from None
                 raise
 
             apply_pending_preemption()
-            if not self._in_reflex and not caller_ignores_hurt:
+            if not self._in_reflex and (not caller_ignores_hurt or watch_wall_damage):
                 if isinstance(res, dict) and res.get("interrupted_by") == "hurt" and clean_path in ACTION_LOCK_ENDPOINTS:
-                    trigger = interrupted_action_trigger(15.0)
+                    trigger = interrupted_action_trigger(15.0, wall_only=caller_ignores_hurt)
                     if trigger is not None:
                         raise ReflexPreempted(trigger)
             if unstick_before is not None:
@@ -3225,8 +3276,9 @@ class GenerationGuard:
             stop_evt.set()
             self.raw_bot.call = orig_call
             if watcher_thread is not None:
-                # Finish a dispatched /stop before issuing a shore recovery mutation.
-                watcher_thread.join(timeout=1.55 if watch_attack_emergency and pending_trigger else 0.05)
+                # Finish a dispatched /stop before issuing a recovery mutation.
+                wait_for_stop = pending_trigger and (watch_attack_emergency or pending_trigger[0].get("primary_type") == "in_wall")
+                watcher_thread.join(timeout=1.55 if wait_for_stop else 0.05)
 
     def handle_preemption(self, trigger: ThreatTrigger, *, interrupted_name: str) -> dict[str, Any]:
         """Execute full 0-LLM subcortical combat/evasion takeover on the main thread (no tool auto-replay)."""
@@ -3245,7 +3297,10 @@ class GenerationGuard:
                     or (after.get("dimension") and st_pre.get("dimension") and after["dimension"] != st_pre["dimension"])
                 )
 
-            life_unavailable = st_pre.get("ready") is False or st_pre.get("alive") is False
+            observed_life = trigger.get("observed_life")
+            life_unavailable = st_pre.get("ready") is False or st_pre.get("alive") is False or (
+                observed_life is not None and observed_life != (st_pre.get("dimension"), st_pre.get("last_death"))
+            )
             lava_threat = trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava"))
             hot_floor_trigger = trigger.get("primary_type") == "hot_floor"
             hp_pre = st_pre.get("health")
@@ -3317,6 +3372,13 @@ class GenerationGuard:
                     "status_after": st_after,
                     **({"respawned": True} if lava_died else {}),
                 }
+            elif trigger.get("primary_type") == "in_wall" and not st_pre.get("in_water"):
+                unstick = self._action("unstick_in_wall", lambda: self._unstick_in_wall(st_pre))
+                st_after = self.combat_env._safe_status(st_pre)
+                life_unavailable = life_changed(st_after) or bool((unstick.get("result") or {}).get("respawned"))
+                mode = "life_unavailable" if life_unavailable else "unstick_in_wall"
+                summary = f"执行 {interrupted_name} 途中窒息，已中断动作并尝试脱困，当前 HP={st_after.get('health')}"
+                outcome = {"handled": bool(unstick.get("ok")) and not life_unavailable, "mode": mode, "actions": [unstick]}
             elif hot_floor_trigger or on_hot_floor:
                 actions = []
                 st_after = st_pre
