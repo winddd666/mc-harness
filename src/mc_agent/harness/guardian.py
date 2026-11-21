@@ -1872,12 +1872,15 @@ class GenerationGuard:
                         else:
                             self._consecutive_flees = 0
                     cf_result = (cf or {}).get("result") or {}
-                    nether_melee_retreat = (
-                        str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
-                        and cf_result.get("mode") == "flee"
+                    dimension = str(status.get("dimension") or "").removeprefix("minecraft:")
+                    melee_retreat = cf_result.get("mode") == "flee"
+                    nether_melee_retreat = dimension == "the_nether" and melee_retreat
+                    mixed_surface_retreat = (
+                        dimension == "overworld" and melee_retreat and 0.0 < hp_val <= 4.0
+                        and now - self._last_ranged_hurt_at < 8.0
                     )
                     face_after_melee_retreat = (
-                        nether_melee_retreat and already_blocking
+                        already_blocking and (nether_melee_retreat or mixed_surface_retreat)
                         and cf_result.get("reason") in {None, "no_safe_retreat", "unsafe_landing"}
                     )
                     shield_when_cornered = (

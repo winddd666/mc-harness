@@ -3403,6 +3403,47 @@ def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypat
     assert looks == ([{"entity_id": 78}] if should_face else [])
 
 
+@pytest.mark.parametrize("recent_arrow", [False, True])
+def test_poll_refaces_melee_after_mixed_surface_damage_and_retreat(monkeypatch, recent_arrow):
+    front = {"id": 44, "name": "zombie", "dist": 2.5, "pos": [9250.0, 64, -11469.5]}
+    flank = {"id": 55, "name": "zombie", "dist": 1.9, "pos": [9249.8, 64, -11469.6]}
+    status = {
+        "pos": [9252.5, 64, -11469.5], "health": 3.34, "food": 17, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "blocking": True, "nearest_hostile": front,
+    }
+    looks = []
+
+    class SurfaceBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                if kwargs["params"]["since"]:
+                    return {"events": []}
+                hits = [{"seq": 2, "type": "hurt", "source": "mob_attack", "source_entity": front}]
+                if recent_arrow:
+                    hits.insert(0, {"seq": 1, "type": "hurt", "source": "arrow"})
+                return {"events": hits}
+            if action == "inventory":
+                return {"items": [{"name": "diamond_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "look":
+                looks.append(body)
+            return {"ok": True}
+
+    guard = GenerationGuard(SurfaceBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def retreat(*args, **kwargs):
+        status.update(pos=[9250.1, 64, -11467.9], health=2.55, nearest_hostile=flank)
+        return {"ok": True, "mode": "flee", "moved_dist": 2.26}
+
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    incident = guard.poll()
+
+    expected = ["combat_or_flee", "face_attacker_after_retreat"] if recent_arrow else ["combat_or_flee"]
+    assert [action["action"] for action in incident["actions"]] == expected
+    assert looks == ([{"entity_id": 55}] if recent_arrow else [])
+
+
 @pytest.mark.parametrize("distance", [2.2, 5.0])
 def test_poll_raises_main_hand_shield_when_cornered_by_nether_melee(monkeypatch, distance):
     attacker = {"id": 77, "name": "wither_skeleton", "dist": distance, "pos": [-417.8 + distance, 53, -1880.3]}
