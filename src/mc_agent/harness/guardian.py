@@ -846,14 +846,21 @@ class GenerationGuard:
                     return cover
             if cover_only:
                 return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
-            critical_arrow_knockback = (
-                dimension == "overworld" and ranged and prefer_cover and unshielded
-                and isinstance(health, (int, float)) and 0 < health <= 6.0
+            critical_knockback = (
+                dimension == "overworld" and unshielded
                 and status.get("on_ground") is False and not status.get("on_fire")
+                and isinstance(health, (int, float)) and 0 < health <= 6.0
+                and (
+                    (ranged and prefer_cover)
+                    or (
+                        not ranged and recent_melee and health <= 4.0
+                        and nh_name in PRE_HURT_MELEE_MOBS and nh_distance <= 3.5
+                    )
+                )
             )
             return self.combat_env.flee(
                 pos, wait_for_ground=True,
-                **({"initial_landing_checks": 5} if critical_arrow_knockback else {}),
+                **({"initial_landing_checks": 5} if critical_knockback else {}),
                 **({"other_shooters": other_shooters} if other_shooters else {}),
                 **({"other_melee": other_melee} if other_melee else {}),
                 **({"use_nearest_hostile": False} if resolve_melee and pos is None else {}),

@@ -7564,6 +7564,52 @@ def test_unarmed_melee_reflex_checks_footing_before_retreat(monkeypatch):
     assert retreat["result"]["reason"] == "no_safe_retreat"
 
 
+@pytest.mark.parametrize("landing", ["grounded", "airborne", "respawned"])
+def test_unshielded_critical_melee_knockback_rechecks_late_landing(monkeypatch, landing):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    zombie = {"id": 42, "name": "zombie", "dist": 2.0, "pos": [0.5, 68, 2.5]}
+    status = {"pos": [0.5, 68.6, 0.5], "health": 2.5, "food": 20, "ready": True, "alive": True,
+              "on_ground": False, "last_death": {"t": 1}, "dimension": "overworld", "nearest_hostile": zombie}
+    motions = []
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if clock[0] >= 1000.45 and status["on_ground"] is False:
+                    if landing == "grounded":
+                        status.update(pos=[0.5, 68, 0.5], on_ground=True)
+                    elif landing == "respawned":
+                        status.update(last_death={"t": 2})
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": zombie}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 68 else "air"}
+            if action == "control" and body.get("forward"):
+                assert status["on_ground"] is True
+                motions.append(action)
+                status["pos"] = [0.5, 68, -1.5]
+            if action == "move_to":
+                assert status["on_ground"] is True
+                motions.append(action)
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    guard = GenerationGuard(RidgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    retreat, = guard.poll()["actions"]
+    assert 1000.45 <= clock[0] <= 1000.65
+    assert retreat["ok"] is (landing == "grounded")
+    assert motions == (["control", "move_to"] if landing == "grounded" else [])
+    assert bool(retreat["result"].get("respawned")) is (landing == "respawned")
+
+
 @pytest.mark.parametrize("after_first", ["close", "clear", "respawned"])
 def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_first):
     pos = [0.5, 64.0, 0.5]
