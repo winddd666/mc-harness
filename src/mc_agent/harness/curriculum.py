@@ -1584,7 +1584,10 @@ def select_next_target(
             enriched_pb = dataclasses.replace(enriched_pb, tier=1)
             mem_boosted = True
         if cur_dim == "the_nether":
-            if key.startswith("minecraft:nether/"):
+            if key in {"minecraft:nether/find_fortress", "minecraft:nether/obtain_blaze_rod"}:
+                enriched_pb = dataclasses.replace(enriched_pb, tier=0)
+                mem_boosted = True
+            elif key.startswith("minecraft:nether/"):
                 enriched_pb = dataclasses.replace(enriched_pb, tier=1)
                 mem_boosted = True
             else:
@@ -2112,6 +2115,15 @@ class CurriculumSupervisor:
             satisfied_by_zero_llm = False
             paused_for_world_job = False
             eff_task = target.task
+            if base_playbook.key == "minecraft:story/follow_ender_eye":
+                tri_xz = getattr(self.toolset, "_triangulated_stronghold_xz", None)
+                if isinstance(tri_xz, list) and len(tri_xz) == 2:
+                    eff_task = (
+                        f"【跨轮记忆：已通过两眼三角定位锁定要塞估算坐标 X={tri_xz[0]}, Z={tri_xz[1]}】"
+                        f"无需再次从头掷眼测向！直接前往 ({tri_xz[0]}, {tri_xz[1]}) 上方（距目标 <=30m 时最多掷 1 颗确认钻地），"
+                        f"抵达后立即连续调用 mc_skill_staircase(vertical='down', steps=16) 下挖至 Y=10~-10 寻找 stone_bricks / end_portal_frame！\n"
+                        + eff_task
+                    )
             eff_extra_tools = target.extra_tools
 
             with JsonlEvents(ep_events_path) as listener:

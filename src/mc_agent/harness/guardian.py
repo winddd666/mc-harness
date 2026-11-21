@@ -208,6 +208,7 @@ class _GuardSession:
 
 class GenerationGuard:
     WATER_ESCAPE_BUDGET_S = 20.0
+    SURFACE_WATER_ESCAPE_BUDGET_S = 4.0
     TRIDENT_WATER_ESCAPE_BUDGET_S = 4.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
@@ -386,9 +387,11 @@ class GenerationGuard:
         *,
         budget_s: float,
         timeout_details: dict[str, Any] | None = None,
+        confirm_shore: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
-        recovery_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + budget_s)
+        deadline = time.monotonic() + budget_s
+        recovery_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
         if isinstance(skills, MacroSkills):
             # Keep the shared avoidance records while leaving the tool runner's session binding intact.
             skills = copy(skills)
@@ -398,6 +401,16 @@ class GenerationGuard:
             if not result.get("ok") and (result.get("mode") != "flee" or result.get("respawned")):
                 return result
             after = recovery_bot.status()
+            if (
+                confirm_shore and after.get("on_ground") is False and not after.get("in_water")
+                and not after.get("in_lava") and after.get("alive") is not False and after.get("ready") is not False
+                and deadline - time.monotonic() >= 0.35
+            ):
+                time.sleep(0.1)
+                try:
+                    after = recovery_bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget", "partial": True, **(timeout_details or {})}
@@ -410,6 +423,11 @@ class GenerationGuard:
             return {**result, "ok": False, "respawned": True}
         if after.get("ready") is False:
             return {**result, "ok": False, "reason": "not_ready"}
+        if confirm_shore and (after.get("on_ground") is False or after.get("in_water") or after.get("in_lava")):
+            return {
+                **result, "ok": False, "reason": "shore_landing_unconfirmed", "pos_after": end,
+                "in_water": bool(after.get("in_water")), "in_lava": bool(after.get("in_lava")),
+            }
         if result.get("mode") == "flee" and after.get("in_lava"):
             return {**result, "ok": False, "reason": "retreat_into_lava", "pos_after": after.get("pos") or end}
         return result
@@ -419,6 +437,7 @@ class GenerationGuard:
             before, lambda skills: skills.escape_water(),
             budget_s=self.WATER_ESCAPE_BUDGET_S if budget_s is None else budget_s,
             timeout_details={"in_water": True},
+            confirm_shore=True,
         )
 
     def _swimming_at_low_health(self, status: dict[str, Any]) -> bool:
@@ -464,28 +483,46 @@ class GenerationGuard:
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
             if not pos:
                 pos = nh_pos
+            now = time.monotonic()
+            recent_melee = now - self._last_melee_hurt_at < 4.0
+            mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
+            burning_blaze = "nether" in dimension and ranged and low_health and status.get("on_fire") and nh_name == "blaze"
+            attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
+            primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
             other_shooters = []
             check_blaze_cover = False
             if (
-                "nether" in dimension and ranged and low_health and status.get("on_fire")
-                and nh_name == "blaze" and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
+                (mixed_hurt or (burning_blaze and primary_id is not None))
+                and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
             ):
-                attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
-                primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
-                if primary_id is not None:
-                    try:
-                        sighting = self.bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
-                    except (ApiError, httpx.HTTPError):
-                        sighting = {}
-                    for shooter_id, shooter_pos in ranged_retreat_positions(
-                        retreat_pos, sighting.get("entities") or [], max_distance=16.0,
-                    ):
-                        if shooter_id == primary_id:
-                            pos = shooter_pos
-                            check_blaze_cover = True
-                        elif shooter_id is not None:
-                            other_shooters.append(shooter_pos)
-            if pos and (prefer_cover or check_blaze_cover):
+                try:
+                    sighting = self.bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
+                except (ApiError, httpx.HTTPError):
+                    sighting = {}
+                entities = sighting.get("entities") or []
+                if mixed_hurt and not pos and primary_id is not None:
+                    for entity in entities:
+                        if not isinstance(entity, dict) or entity.get("id") != primary_id:
+                            continue
+                        live_pos = entity.get("pos")
+                        if (
+                            isinstance(live_pos, (tuple, list)) and len(live_pos) >= 3
+                            and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in live_pos[:3])
+                        ):
+                            pos = live_pos
+                            break
+                for shooter_id, shooter_pos in ranged_retreat_positions(retreat_pos, entities, max_distance=16.0):
+                    if shooter_id is None:
+                        continue
+                    if shooter_id == primary_id:
+                        pos = shooter_pos
+                        check_blaze_cover = burning_blaze
+                    else:
+                        other_shooters.append(shooter_pos)
+                if mixed_hurt and not pos and other_shooters:
+                    pos = other_shooters.pop(0)
+            # A wall that blocks projectiles cannot protect us from a melee attacker already in reach.
+            if pos and (prefer_cover or check_blaze_cover) and not recent_melee:
                 cover_budget = 1.25 if check_blaze_cover else 2.25
                 cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + cover_budget)
                 try:
@@ -741,12 +778,22 @@ class GenerationGuard:
         nh_name, nh_dist, _, _ = self._extract_hostile_info(status)
         if nh_name and nh_dist <= min_dist:
             return False
+        health = status.get("health")
+        if isinstance(health, (int, float)) and health <= 4.0:
+            # In-flight projectiles can still reach a critical-health bot just beyond that range.
+            ranged_min_dist = max(ranged_min_dist, 20.0)
         ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
         now = time.monotonic()
+        recent_ranged_hit = now - self._last_ranged_hurt_at < 8.0
         protecting_against_recent_hit = status.get("blocking") and (
-            now - self._last_ranged_hurt_at < 8.0 or now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
+            recent_ranged_hit or now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
         )
-        if (ranged_in_range or protecting_against_recent_hit) and not self._inside_own_shaft():
+        # A Nether shooter can keep firing while missing from the nearest-hostile snapshot.
+        burning_after_ranged_hit = (
+            status.get("on_fire") and recent_ranged_hit
+            and str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+        )
+        if (ranged_in_range or protecting_against_recent_hit or burning_after_ranged_hit) and not self._inside_own_shaft():
             return False
         return True
 
@@ -2630,6 +2677,7 @@ class GenerationGuard:
         ended_wet_in_payload = any('"in_water": true' in str(r or "").lower() for r in (tool_results or []))
         handled_water_in_tool = False
         unstick_still_wet = False
+        tool_stopped_in_water = False
         waiting_for_shore_landing = False
         if tool_results:
             try:
@@ -2652,6 +2700,10 @@ class GenerationGuard:
                         and isinstance(shore_hostile, dict) and shore_hostile.get("id") == nh_id
                     )
                 tool_error = last_tool_result.get("error")
+                tool_stopped_in_water = (
+                    last_tool_result.get("stop_reason") == "in_water"
+                    and isinstance(tool_error, dict) and tool_error.get("code") == "in_water"
+                )
                 unstick_still_wet = (
                     isinstance(tool_error, dict) and (
                         (tool_error.get("code") == "water_escape_failed" and last_tool_result.get("in_water") is True)
@@ -2806,7 +2858,12 @@ class GenerationGuard:
                 esc_b_ok = False
                 esc_b_respawned = False
                 if not forced_shore_b:
-                    esc = self._action("boundary_escape_water", lambda: self._escape_water(status), raise_on_http_error=False)
+                    escape_budget = self.SURFACE_WATER_ESCAPE_BUDGET_S if tool_stopped_in_water else None
+                    esc = self._action(
+                        "boundary_escape_water",
+                        lambda: self._escape_water(status, **({"budget_s": escape_budget} if escape_budget else {})),
+                        raise_on_http_error=False,
+                    )
                     esc_b_res = esc.get("result") if isinstance(esc.get("result"), dict) else {}
                     esc_b_ok = bool(esc.get("ok") and esc_b_res.get("in_water") is not True)
                     esc_b_respawned = bool(esc_b_res.get("respawned"))
