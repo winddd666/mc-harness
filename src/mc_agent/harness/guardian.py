@@ -296,7 +296,7 @@ class GenerationGuard:
         self._ranged_cover_active_until: float = float("-inf")
         self._last_ranged_hurt_at = float("-inf")
         self._last_melee_hurt_at = float("-inf")
-        self._last_lava_hurt_at = float("-inf")
+        self._last_lava_contact_at = float("-inf")
         self._last_fire_contact_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
         self._last_dig_cover_block: tuple[int, int, int] | None = None
@@ -684,7 +684,7 @@ class GenerationGuard:
                 if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
                     self._last_ranged_hurt_at = float("-inf")
                     self._last_melee_hurt_at = float("-inf")
-                    self._last_lava_hurt_at = float("-inf")
+                    self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
@@ -695,7 +695,7 @@ class GenerationGuard:
                     elif source in MELEE_HURT_SOURCES:
                         self._last_melee_hurt_at = now
                     elif source in LAVA_HURT_SOURCES:
-                        self._last_lava_hurt_at = now
+                        self._last_lava_contact_at = now
                     elif source == "in_fire":
                         self._last_fire_contact_at = now
         return fresh
@@ -1090,6 +1090,8 @@ class GenerationGuard:
         deaths = [e for e in fresh if e.get("type") in {"death", "death_loop", "disconnected", "spawn"}]
         in_water = bool(status.get("in_water"))
         raw_in_lava = bool(status.get("in_lava"))
+        if raw_in_lava and ready and status.get("alive") is not False and not deaths:
+            self._last_lava_contact_at = now
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or (
             hurt_by_lava and not deaths and not disconnected and ready and status.get("alive") is not False
@@ -1181,7 +1183,7 @@ class GenerationGuard:
         hurt = bool(hurts) or dropped
         contact_fire = any(str(h.get("source") or "").strip().lower() == "in_fire" for h in hurts)
         environmental_burning = (
-            bool(hurts) and (contact_fire or now - self._last_lava_hurt_at < 15.0)
+            bool(hurts) and (contact_fire or now - self._last_lava_contact_at < 15.0)
             and all(str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts)
         )
         non_combat_only_hurt = (
@@ -2503,6 +2505,8 @@ class GenerationGuard:
                 except _RecoveryBudgetExceeded:
                     pass
             if lava_threat:
+                if st_pre.get("in_lava") and st_pre.get("ready") is not False and st_pre.get("alive") is not False:
+                    self._last_lava_contact_at = time.monotonic()
                 act = self._action("escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
                 act_res = act.get("result") if isinstance(act.get("result"), dict) else {}
                 try:
@@ -2884,6 +2888,8 @@ class GenerationGuard:
         now_b = time.monotonic()
         in_water = bool(status.get("in_water"))
         raw_in_lava = bool(status.get("in_lava"))
+        if raw_in_lava:
+            self._last_lava_contact_at = now_b
         oxygen = status.get("oxygen")
         hurts = [e for e in fresh if e.get("type") == "hurt"]
         other_hurts = [e for e in hurts if str(e.get("source") or "").strip().lower() != "hot_floor"]

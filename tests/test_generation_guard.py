@@ -4564,6 +4564,54 @@ def test_explicit_food_use_reuses_eating_safety_check(item, shooter_distance, al
         assert uses == []
 
 
+def test_lava_contact_without_damage_preserves_later_melee_reflex(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [3566.3, 64.4, 1791.1], "health": 20, "food": 20, "dimension": "the_nether",
+        "in_lava": True, "on_ground": False, "on_fire": True, "alive": True, "ready": True,
+        "nearest_hostile": {"name": "wither_skeleton", "id": 44, "dist": 6.0},
+    }
+    hurts = []
+
+    class LavaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hurt for hurt in hurts if hurt["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(LavaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def escape_lava(*, force_rim_escape):
+        assert force_rim_escape is False
+        status.update(in_lava=False, on_ground=True, pos=[3566.3, 65, 1791.1])
+        return {"ok": True, "in_lava": False}
+
+    retreats = []
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape_lava)
+    monkeypatch.setattr(guard, "_defend_or_flee", lambda *args, **kwargs: retreats.append(True) or {
+        "ok": False, "mode": "flee", "reason": "no_safe_retreat",
+    })
+    assert guard.poll()["actions"][0]["action"] == "escape_lava"
+
+    clock[0] += 10.0
+    status["health"] = 17.5
+    hurts.append({"seq": 1, "type": "hurt", "source": "on_fire"})
+    assert guard.poll() is None
+    assert retreats == []
+
+    clock[0] += 4.0
+    status["health"] = 12.0
+    hurts.extend([{"seq": 2, "type": "hurt", "source": "mob_attack"}, {"seq": 3, "type": "hurt", "source": "on_fire"}])
+    incident = guard.poll()
+    assert incident["requires_replan"] and incident["actions"][0]["action"] == "combat_or_flee"
+    assert retreats == [True]
+
+
 @pytest.mark.parametrize("recent_reaction", [False, True])
 @pytest.mark.parametrize("foot_block, clears", [("fire", True), ("soul_fire", False), ("netherrack", False)])
 def test_contact_fire_only_digs_a_live_flame_at_the_feet(monkeypatch, foot_block, clears, recent_reaction):
