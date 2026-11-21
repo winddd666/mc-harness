@@ -1915,6 +1915,7 @@ class CombatEnv:
         initial_landing_checks: int = 3,
         other_shooters: Sequence[Sequence[float]] = (),
         other_melee: Sequence[Sequence[float]] = (),
+        avoid_blast: bool = False,
         use_nearest_hostile: bool = True,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
@@ -2003,8 +2004,15 @@ class CombatEnv:
 
             def threat_clearance(yaw: float) -> float:
                 ux, uz = yaw_to_unit_xz(yaw)
+                if avoid_blast:
+                    dx, dy, dz = threat_offsets[0]
+                    # Keep the original order unless the heading quickly clears the blast radius.
+                    if dx * ux + dz * uz > 1e-6 or math.hypot(dx - ux * 3, dy, dz - uz * 3) < 5.5:
+                        return -1.0
                 nearest = math.inf
                 for index, (dx, dy, dz) in enumerate(threat_offsets):
+                    if avoid_blast and index == 0:
+                        continue
                     # The primary melee attacker is already in reach. Compare clearance
                     # after the initial step while checking the entire route for other mobs.
                     start = min(1.65, disengage_range) if other_melee and index == 0 else 0.0
@@ -2334,10 +2342,20 @@ class CombatEnv:
                 "pos_after": pos,
             }
 
-        def swim_step_allowed(pos: Sequence[float], yaw: float, distance: float = 5.0) -> bool:
+        def swim_step_allowed(
+            pos: Sequence[float], yaw: float, distance: float = 5.0,
+            *, inward_target: tuple[float, float] | None = None,
+        ) -> bool:
             ux, uz = yaw_to_unit_xz(yaw)
             x, z = float(pos[0]) + distance * ux, float(pos[2]) + distance * uz
-            return self._point_allowed(x, z, action="water_retreat") and not (
+            can_step_inward = (
+                inward_target is not None
+                and not self._point_allowed(pos[0], pos[2], action="water_retreat")
+                and math.hypot(inward_target[0] - pos[0], inward_target[1] - pos[2]) >= distance
+                and math.hypot(inward_target[0] - x, inward_target[1] - z)
+                < math.hypot(inward_target[0] - pos[0], inward_target[1] - pos[2])
+            )
+            return (can_step_inward or self._point_allowed(x, z, action="water_retreat")) and not (
                 avoid_close_threat and has_threat and self._crosses_near_water_threat(pos, x, z, threat_pos)
             )
 
@@ -2540,12 +2558,25 @@ class CombatEnv:
             else:
                 away_yaw = None
 
+            inward_target = None
+            clamp = getattr(self.geofence, "clamped_move_target", None)
+            if away_yaw is None and callable(clamp):
+                candidate = clamp(swim_pos[0], swim_pos[2])
+                if candidate and self._point_allowed(*candidate, action="water_retreat") and not (
+                    avoid_close_threat and has_threat
+                    and self._crosses_near_water_threat(swim_pos, *candidate, threat_pos)
+                ):
+                    inward_target = candidate
+                    away_yaw = aim_yaw_pitch(swim_pos, [candidate[0], swim_pos[1], candidate[1]])[0]
+                    actions.append("surface_retreat_inward")
+
             if away_yaw is None:
                 actions.append("surface_retreat_geofence_blocked")
             elif st_mid.get("in_water"):
                 ux, uz = yaw_to_unit_xz(away_yaw)
                 px, py, pz = map(float, swim_pos[:3])
                 step_dist = 12.0 if swim_step_allowed(swim_pos, away_yaw, 12.0) else 5.0
+                target_x, target_z = inward_target or (px + ux * step_dist, pz + uz * step_dist)
                 try:
                     self.bot.call("look", {"yaw": away_yaw, "pitch": -15.0})
                 except (ApiError, httpx.HTTPError):
@@ -2554,9 +2585,9 @@ class CombatEnv:
                     self.bot.call(
                         "move_to",
                         {
-                            "x": px + ux * step_dist,
+                            "x": target_x,
                             "y": max(63.0, py + 1.0) if py >= 61.0 else py + 1.0,
-                            "z": pz + uz * step_dist,
+                            "z": target_z,
                             "range": 1.5,
                             "timeout": 2800,
                             "stop_on": ["death"],
@@ -2570,7 +2601,10 @@ class CombatEnv:
                 interruption = interrupted_water_escape(st_mid)
                 if interruption is not None:
                     return interruption
-                if st_mid.get("in_water") and swim_step_allowed(st_mid.get("pos") or swim_pos, away_yaw):
+                current = st_mid.get("pos") or swim_pos
+                if inward_target is not None and not self._point_allowed(current[0], current[2], action="water_retreat"):
+                    away_yaw = aim_yaw_pitch(current, [target_x, current[1], target_z])[0]
+                if st_mid.get("in_water") and swim_step_allowed(current, away_yaw, inward_target=inward_target):
                     try:
                         self.bot.call(
                             "control",
@@ -2931,6 +2965,17 @@ class SubcorticalInstinctController:
         # Count close-range engaged hostiles (<=8.5m) for swarm/solo gates so mobs outside enclosed
         # walls (`10..16m`) never trick a sword+shield bot into pure circle-fleeing inside a room.
         nearby_hostiles = [e for e in hostiles if float(e.get("dist", 99.0)) <= 8.5]
+        other_melee = []
+        if any_creeper_close or mob_name in PRE_HURT_MELEE_MOBS:
+            for hostile in nearby_hostiles:
+                hostile_pos = hostile.get("pos")
+                if (
+                    hostile is not primary and hostile.get("id") != mob_id
+                    and _clean_block_name(hostile.get("name")) in PRE_HURT_MELEE_MOBS
+                    and isinstance(hostile_pos, (list, tuple)) and len(hostile_pos) >= 3
+                    and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in hostile_pos[:3])
+                ):
+                    other_melee.append(hostile_pos)
         mode = "stabilize"
         latched_guard = False
 
@@ -2998,8 +3043,13 @@ class SubcorticalInstinctController:
                     if post_creepers:
                         sealed_ok = False
             if not sealed_ok:
+                rank_melee_clearance = bool(other_melee) and not any(
+                    hostile is not primary and _clean_block_name(hostile.get("name")) == "creeper"
+                    for hostile in nearby_hostiles
+                )
                 flee_res = env.flee(
                     c_pos, distance=11.5, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
+                    **({"other_melee": other_melee, "avoid_blast": True} if rank_melee_clearance else {}),
                     **({"initial_landing_checks": 5} if not has_shield and st.get("on_ground") is False else {}),
                     **({"use_nearest_hostile": False} if not c_pos else {}),
                 )
@@ -3031,6 +3081,27 @@ class SubcorticalInstinctController:
                 })
                 close_pos = close_creeper.get("pos") if close_creeper else None
                 if (
+                    st_chk.get("in_water") and not st_chk.get("in_lava")
+                    and not flee_res.get("respawned")
+                    and st_chk.get("ready") is not False and st_chk.get("alive") is not False
+                    and st_chk.get("last_death") == st.get("last_death")
+                    and st_chk.get("dimension") == st.get("dimension")
+                    and time.monotonic() < deadline
+                ):
+                    shore = env.escape_deep_water_to_shore(
+                        close_pos or c_pos, keep_shield=has_shield,
+                        shield_target_id=(close_creeper or creeper_ent or {}).get("id"),
+                        avoid_close_threat=True,
+                    )
+                    actions.append({"action": "creeper_water_retreat", **shore})
+                    st_chk = env._safe_status({"ready": False})
+                    latched_guard = bool(
+                        has_shield and st_chk.get("blocking") and not shore.get("respawned")
+                        and st_chk.get("ready") is not False and st_chk.get("alive") is not False
+                        and st_chk.get("last_death") == st.get("last_death")
+                        and st_chk.get("dimension") == st.get("dimension")
+                    )
+                elif (
                     not has_shield and isinstance(close_pos, (list, tuple)) and len(close_pos) >= 3
                     and flee_res.get("ok") and not flee_res.get("respawned")
                     and st_chk.get("ready") is not False and st_chk.get("alive") is not False
@@ -3045,6 +3116,7 @@ class SubcorticalInstinctController:
                     and has_shield
                     and st_chk.get("ready") is not False
                     and st_chk.get("alive") is not False
+                    and not st_chk.get("in_water")
                     and st_chk.get("last_death") == st.get("last_death")
                     and st_chk.get("dimension") == st.get("dimension")
                 ):
@@ -3270,17 +3342,6 @@ class SubcorticalInstinctController:
                                 pos, [hostile for hostile in hostiles if hostile is not primary], max_distance=12.0,
                             )
                         ]
-                    other_melee = []
-                    if mob_name in PRE_HURT_MELEE_MOBS:
-                        for hostile in nearby_hostiles:
-                            hostile_pos = hostile.get("pos")
-                            if (
-                                hostile is not primary and hostile.get("id") != mob_id
-                                and _clean_block_name(hostile.get("name")) in PRE_HURT_MELEE_MOBS
-                                and isinstance(hostile_pos, (list, tuple)) and len(hostile_pos) >= 3
-                                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in hostile_pos[:3])
-                            ):
-                                other_melee.append(hostile_pos)
                     hurt_midair = st.get("on_ground") is False and trigger.get("source") == "tool_interrupted_hurt"
                     fl = env.flee(
                         mob_pos, distance=14.0, urgent=True,
