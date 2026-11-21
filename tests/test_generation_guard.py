@@ -941,6 +941,35 @@ def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life
     assert [event["type"] for event in events] == ["guardian.preempted_tool"]
 
 
+@pytest.mark.parametrize("life", [
+    {"ready": False, "alive": True},
+    {"ready": True, "alive": False, "health": 0},
+    {},
+])
+def test_combat_slot_stops_when_life_becomes_unavailable_after_entry(life):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    calls = []
+
+    class RespawningBot:
+        def status(self):
+            calls.append("status")
+            return dict(life)
+
+        def call(self, action, body=None, **kwargs):
+            calls.append(action)
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(CombatEnv(RespawningBot()), {
+        "source": "tool_interrupted_hurt", "primary_type": "zombie", "primary_entity_id": 42,
+    })
+
+    assert outcome["mode"] == "life_unavailable"
+    assert outcome["handled"] is False and outcome["requires_replan"] is True
+    assert outcome["actions"] == [] and outcome["status_after"] == life
+    assert calls == ["stop", "control", "status"]
+
+
 @pytest.mark.parametrize("recovery", ["shore_receipt", "status_changed"])
 def test_water_tool_preemption_reports_life_unavailable_after_respawn(monkeypatch, recovery):
     status = {

@@ -3014,6 +3014,22 @@ class SubcorticalInstinctController:
         if isinstance(active_deadline, (int, float)):
             deadline = min(deadline, active_deadline)
         st = env.bot.status()
+        pos = st.get("pos")
+        health = st.get("health")
+        if (
+            st.get("ready") is False or st.get("alive") is False
+            or not isinstance(pos, (list, tuple)) or len(pos) < 3
+            or (isinstance(health, (int, float)) and health <= 0)
+        ):
+            return {
+                "handled": False,
+                "mode": "life_unavailable",
+                "summary": "角色已死亡或状态尚未就绪，等待刷新后重新规划",
+                "actions": [],
+                "status_after": st,
+                "requires_replan": True,
+                "latched_guard": False,
+            }
         if bool(st.get("in_lava")):
             esc_lava = env.escape_lava()
             st_lava_after = env.bot.status()
@@ -3026,8 +3042,7 @@ class SubcorticalInstinctController:
                 "requires_replan": True,
                 "latched_guard": False,
             }
-        pos = st.get("pos") or [0.0, 64.0, 0.0]
-        hp = float(st.get("health") or 20.0)
+        hp = float(health or 20.0)
         try:
             inv0 = env.bot.call("inventory", method="GET")
         except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
@@ -3746,7 +3761,7 @@ class CombatControllerSlot:
             return outcome
         finally:
             # 2. Exit rule: NEVER leave shield/sneak/jump stuck at 30% speed unless explicitly latched
-            if not outcome.get("latched_guard", False):
+            if outcome.get("mode") != "life_unavailable" and not outcome.get("latched_guard", False):
                 st_end = outcome.get("status_after") if isinstance(outcome, dict) else None
                 wet_submerged = isinstance(st_end, dict) and bool(st_end.get("in_water")) and (
                     bool(st_end.get("submerged"))

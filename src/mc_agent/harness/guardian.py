@@ -3683,7 +3683,9 @@ class GenerationGuard:
                             st_after = outcome.get("status_after") or self.bot.status()
                         except (ApiError, httpx.HTTPError):
                             st_after = st_pre
-                        life_unavailable = isinstance(st_after, dict) and life_changed(st_after)
+                        life_unavailable = outcome.get("mode") == "life_unavailable" or (
+                            isinstance(st_after, dict) and life_changed(st_after)
+                        )
                         post_name, post_dist, post_id, post_pos = self._extract_hostile_info(st_after if isinstance(st_after, dict) else {})
                         close_drowned_after_reflex = (
                             trigger.get("source") == "tool_interrupted_hurt"
