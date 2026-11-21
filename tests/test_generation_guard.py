@@ -10925,3 +10925,45 @@ def test_water_escape_reselects_a_shore_after_a_stalled_path(followup, monkeypat
     assert env.escape_deep_water_to_shore()["ok"] is True
 
     assert attempts == [blocked_bank, alternative_bank if followup == "stalled" else blocked_bank]
+
+
+@pytest.mark.parametrize("terrain", ["step", "deep_drop", "lava", "low_ceiling"])
+def test_grounded_retreat_can_step_down_one_verified_block_in_a_tunnel(terrain):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [0.5, 64, 0.5], "dimension": "overworld", "ready": True, "alive": True, "on_ground": True,
+    }
+    moves = []
+
+    class StairBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if z != 0 or x < 0 or x > 2:
+                    return {"name": "stone"}
+                if x == 0:
+                    return {"name": "stone" if y <= 63 else "air"}
+                floor = 61 if terrain == "deep_drop" else 62
+                if floor == y and terrain == "lava":
+                    return {"name": "lava"}
+                if terrain == "low_ceiling" and y == 65:
+                    return {"name": "stone"}
+                return {"name": "stone" if y <= floor else "air"}
+            if action == "control":
+                moves.append(body)
+                status["pos"] = [1.3, 63, 0.5]
+            return {"ok": True}
+
+    outcome = CombatEnv(StairBot()).flee([-0.4, 64, 0.5], allow_shaft_seal=False, wait_for_ground=True)
+
+    assert outcome["ok"] is (terrain == "step")
+    if terrain == "step":
+        move, = moves
+        assert move["forward"] and not move["jump"] and not move["sprint"]
+    else:
+        assert moves == []
+        assert outcome["reason"] == "no_safe_retreat"

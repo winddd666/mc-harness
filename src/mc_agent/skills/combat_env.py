@@ -705,7 +705,7 @@ class CombatEnv:
 
     def probe_retreat(
         self, origin: Sequence[float], yaw: float, dist: float, *, cross_magma: bool = False,
-        deadline: float | None = None,
+        deadline: float | None = None, allow_step_down: bool = False,
     ) -> tuple[int, bool] | None:
         """Check support and clearance under the entire hitbox along a short retreat."""
         ox, oy, oz = map(float, origin[:3])
@@ -739,9 +739,19 @@ class CombatEnv:
                 foot, head, floor = (
                     self._get_block_name(hx, walk_y + dy, hz, strict=True, **probe_kwargs) for dy in (0, 1, -1)
                 )
+                # Feet can remain on a trailing upper block until the hitbox clears its edge.
+                if (
+                    allow_step_down and walk_y == start_y - 1 and step < samples
+                    and (hx, hz) != (bx, bz) and (hx + 0.5 - nx) * ux + (hz + 0.5 - nz) * uz < 0
+                    and foot and foot not in HAZARD_BLOCK_TYPES and _is_solid_ground(foot) and _is_passable(head)
+                    and _is_passable(self._get_block_name(hx, walk_y + 2, hz, strict=True, **probe_kwargs))
+                ):
+                    continue
                 if not _is_passable(foot) or not _is_passable(head) or not floor or floor in floor_hazards:
                     return None
                 if (hx, hz) != (bx, bz) and _is_passable(floor):
+                    if allow_step_down and walk_y < start_y:
+                        return None
                     floor = self._get_block_name(hx, walk_y - 2, hz, strict=True, **probe_kwargs)
                 if not floor or floor in floor_hazards or not _is_solid_ground(floor):
                     return None
@@ -2066,6 +2076,14 @@ class CombatEnv:
                     if route == (foot_y, False):
                         short_step = True
                         break
+                if not short_step and wait_for_ground and str(st0.get("dimension") or "").removeprefix("minecraft:") == "overworld":
+                    for chosen_yaw in short_yaws:
+                        if keep_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
+                            continue
+                        route = self.probe_retreat(pos0, chosen_yaw, 1.65, allow_step_down=True)
+                        if route == (foot_y - 1, False):
+                            short_step = True
+                            break
             if not short_step:
                 return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0, "pos_after": pos0}
 
