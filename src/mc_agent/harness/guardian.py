@@ -138,7 +138,7 @@ class _UnsafeFleeExit(BaseException):
 
 
 class _UnsafeDig(BaseException):
-    """Unwind a dig that would expose the bot to an unsafe drop or overhead lava."""
+    """Unwind a dig that would expose the bot to an unsafe drop or overhead fluid."""
 
 
 class _UnsafeFoodUse(BaseException):
@@ -2848,9 +2848,11 @@ class GenerationGuard:
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.0)
         env = CombatEnv(probe_bot)
         try:
-            if check_roof and env.lava_above_headroom(pos, target):
-                self.events.emit("guardian.lava_roof_dig_blocked", target=list(target), pos=pos)
-                return "unsafe_lava_roof"
+            if check_roof:
+                fluid = env.fluid_above_headroom(pos, target)
+                if fluid == "lava" or (fluid == "water" and not status.get("in_water") and not status.get("submerged")):
+                    self.events.emit(f"guardian.{fluid}_roof_dig_blocked", target=list(target), pos=pos)
+                    return f"unsafe_{fluid}_roof"
             if not check_support or env.can_remove_footing(pos, target):
                 return None
         except _RecoveryBudgetExceeded:
@@ -2900,10 +2902,11 @@ class GenerationGuard:
             }, ensure_ascii=False)
         except _UnsafeDig as error:
             code = error.args[0]
-            message = (
-                "头顶待挖方块上方有岩浆，请从侧面寻找脱困路线。"
-                if code == "unsafe_lava_roof" else "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。"
-            )
+            message = {
+                "unsafe_lava_roof": "头顶待挖方块上方有岩浆，请从侧面寻找脱困路线。",
+                "unsafe_water_roof": "头顶待挖方块上方有水，请从侧面寻找脱困路线。",
+                "unsafe_landing": "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。",
+            }[code]
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,

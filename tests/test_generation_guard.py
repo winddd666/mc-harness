@@ -7502,15 +7502,22 @@ def test_bug072_real_flee_entry_accepts_the_mining_sessions_httpx_timeout(monkey
     assert final.connect <= 0.5 and final.write <= 0.5 and final.pool <= 0.5
 
 
-@pytest.mark.parametrize("above_roof", ["lava", "flowing_lava", "air"])
-def test_unstick_preserves_a_roof_that_holds_back_lava(above_roof):
+@pytest.mark.parametrize(("above_roof", "in_water", "error_code"), [
+    ("lava", False, "unsafe_lava_roof"), ("flowing_lava", False, "unsafe_lava_roof"),
+    ("water", False, "unsafe_water_roof"), ("flowing_water", False, "unsafe_water_roof"),
+    ("water", True, None), ("air", False, None),
+])
+def test_unstick_preserves_a_roof_that_holds_back_fluid(above_roof, in_water, error_code):
     target = [-421, 26, -1914]
     digs = []
 
     class PocketBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                return {"pos": [-420.5, 24, -1913.5], "on_ground": True, "ready": True, "alive": True}
+                return {
+                    "pos": [-420.5, 24, -1913.5], "on_ground": True,
+                    "in_water": in_water, "ready": True, "alive": True,
+                }
             if action == "get_block":
                 assert body["pos"] == [-421, 27, -1914]
                 return {"name": above_roof}
@@ -7524,10 +7531,10 @@ def test_unstick_preserves_a_roof_that_holds_back_lava(above_roof):
         "mc_skill_unstick", lambda: json.dumps(bot.call("dig", {"pos": target, "stop_on": ["death"]})),
     ))
 
-    if above_roof == "air":
+    if error_code is None:
         assert result["ok"] is True and digs == [target]
     else:
-        assert result["error"]["code"] == "unsafe_lava_roof" and result["requires_replan"] is True
+        assert result["error"]["code"] == error_code and result["requires_replan"] is True
         assert digs == []
 
 

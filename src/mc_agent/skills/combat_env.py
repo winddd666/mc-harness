@@ -658,16 +658,19 @@ class CombatEnv:
             "candidates": candidates,
         }
 
-    def lava_above_headroom(self, pos: Sequence[float], target: Sequence[int]) -> bool:
-        """Check whether removing a block above the bot would expose its column to lava."""
+    def fluid_above_headroom(self, pos: Sequence[float], target: Sequence[int]) -> str | None:
+        """Identify water or lava held back by a block above the bot."""
         x, y, z = pos[:3]
         tx, ty, tz = target[:3]
         feet_y = math.floor(y + 0.05)
-        return (
-            ty in {feet_y + 1, feet_y + 2}
-            and (tx, tz) in _hitbox_columns(x, z)
-            and _is_lava_block(self._get_block_name(tx, ty + 1, tz, strict=True))
-        )
+        if ty not in {feet_y + 1, feet_y + 2} or (tx, tz) not in _hitbox_columns(x, z):
+            return None
+        block = self._get_block_name(tx, ty + 1, tz, strict=True)
+        if _is_lava_block(block):
+            return "lava"
+        if block in {"water", "flowing_water"}:
+            return "water"
+        return None
 
     def can_remove_footing(self, pos: Sequence[float], target: Sequence[int]) -> bool:
         """Allow ordinary digs and check the landing for a dig through the current floor."""
