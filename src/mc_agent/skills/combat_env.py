@@ -276,6 +276,24 @@ def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
     )
 
 
+def ranged_retreat_positions(
+    origin: Sequence[float], entities: Sequence[dict[str, Any]], *, max_distance: float,
+) -> list[tuple[int | None, Sequence[float]]]:
+    positions = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        pos = entity.get("pos")
+        if (
+            _clean_block_name(entity.get("name")) in RANGED_MOBS
+            and isinstance(pos, (list, tuple)) and len(pos) >= 3
+            and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
+            and math.dist(origin[:3], pos[:3]) <= max_distance
+        ):
+            positions.append((entity.get("id"), pos))
+    return positions
+
+
 def _is_solid_ground(name: str) -> bool:
     if _is_passable(name):
         return False
@@ -2659,15 +2677,11 @@ class SubcorticalInstinctController:
                             pass
                     other_shooters = []
                     if mob_name in RANGED_MOBS and not has_shield:
-                        for hostile in hostiles:
-                            shooter_pos = hostile.get("pos")
-                            if (
-                                hostile is not primary and _clean_block_name(hostile.get("name")) in RANGED_MOBS
-                                and isinstance(shooter_pos, (list, tuple)) and len(shooter_pos) >= 3
-                                and all(isinstance(coord, (float, int)) and math.isfinite(coord) for coord in shooter_pos[:3])
-                                and self._entity_dist(pos, hostile) <= 12.0
-                            ):
-                                other_shooters.append(shooter_pos)
+                        other_shooters = [
+                            shooter_pos for _, shooter_pos in ranged_retreat_positions(
+                                pos, [hostile for hostile in hostiles if hostile is not primary], max_distance=12.0,
+                            )
+                        ]
                     fl = env.flee(
                         mob_pos, distance=14.0, urgent=True,
                         wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon,

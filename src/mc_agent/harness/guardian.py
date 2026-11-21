@@ -34,6 +34,7 @@ from ..skills.combat_env import (
     CombatEnv,
     ThreatTrigger,
     aim_yaw_pitch,
+    ranged_retreat_positions,
 )
 from ..skills.library import MacroSkills, best_melee_weapon_in_inv
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
@@ -455,9 +456,29 @@ class GenerationGuard:
             and best_melee_weapon_in_inv(counts) is None and not self._inside_own_shaft()
         )
         if "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
+            nh_name, _, nh_id, nh_pos = self._extract_hostile_info(status)
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
             if not pos:
-                _, _, _, pos = self._extract_hostile_info(status)
+                pos = nh_pos
+            other_shooters = []
+            if (
+                "nether" in dimension and ranged and low_health and status.get("on_fire")
+                and nh_name == "blaze" and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
+            ):
+                attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
+                primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
+                if primary_id is not None:
+                    try:
+                        sighting = self.bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
+                    except (ApiError, httpx.HTTPError):
+                        sighting = {}
+                    for shooter_id, shooter_pos in ranged_retreat_positions(
+                        retreat_pos, sighting.get("entities") or [], max_distance=16.0,
+                    ):
+                        if shooter_id == primary_id:
+                            pos = shooter_pos
+                        elif shooter_id is not None:
+                            other_shooters.append(shooter_pos)
             if prefer_cover and pos:
                 cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.25)
                 try:
@@ -467,7 +488,10 @@ class GenerationGuard:
                     cover = None
                 if cover is not None:
                     return cover
-            return self.combat_env.flee(pos, wait_for_ground=retreat_only)
+            return self.combat_env.flee(
+                pos, wait_for_ground=retreat_only,
+                **({"other_shooters": other_shooters} if other_shooters else {}),
+            )
         result = self._run_recovery_macro(
             status,
             lambda skills: skills.defend_or_flee(
