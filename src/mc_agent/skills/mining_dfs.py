@@ -5199,6 +5199,8 @@ class MiningDFSEngine:
                     return True
                 route = verified_route
                 steps_taken = node.anchor[1] - route[-1][1]
+        elif branch.kind != "stair_up" and any(pt[1] != node.anchor[1] for pt in route):
+            return True
         if steps_taken <= 0 or route[-1] == node.anchor:
             return True
         if deadline_failure is None:
@@ -6183,6 +6185,7 @@ class MiningDFSEngine:
                 continue
 
             branch_kind = next_branch.kind
+            is_level = branch_kind not in {"stair_down", "stair_up"}
             if branch_kind == "offset_retry":
                 lat_dir = next_branch.sidestep_dir or LEFT_RIGHT_DIRS[next_branch.direction][0]
                 if self._offset_cuts_incoming_stair(node, lat_dir):
@@ -6190,6 +6193,11 @@ class MiningDFSEngine:
                     next_branch.prune_reason = "stair_support"
                     continue
                 resume_k = next_branch.resume_kind or "stair_down"
+            if is_level and _floor_pos(self.bot.status()["pos"])[1] != node.anchor[1]:
+                reached, reason = self._resume_shaft_tip(node.node_id, min_hp_ref=min_hp_ref)
+                if not reached:
+                    stop_reason = reason or "movement_not_confirmed"
+                    break
             next_branch.status = "active"
             if branch_kind in {"stair_down", "stair_up"}:
                 is_up = branch_kind == "stair_up"
@@ -6225,6 +6233,11 @@ class MiningDFSEngine:
             catch_placed += int(edge_res["catch_placed"])
             deferred_added += int(edge_res["deferred_added"])
             mined_ores.extend(edge_res["mined_ores"])
+            if is_level and any(pt[1] != node.anchor[1] for pt in edge_res["waypoints"]):
+                # A sidestep or level corridor cannot connect nodes on different floors.
+                next_branch.status = "pending"
+                stop_reason = er if er in {"hurt", "not_ready", "pickaxe_low"} else "movement_not_confirmed"
+                break
             if er == "dig_cell_avoided":
                 if steps_done == 0:
                     next_branch.status = "pending"
