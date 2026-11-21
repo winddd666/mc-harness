@@ -1909,7 +1909,7 @@ class McToolset:
                 direction = SURFACE_SCOUT_DIRECTIONS[sector % len(SURFACE_SCOUT_DIRECTIONS)]
         result["scout_direction"] = direction
         result["scout_hint"] = (
-            f"可直接调用 mc_skill_scout_surface(direction='{direction}')。位移后请重新测向，绕障改向后尤其需要复测。"
+            f"可直接调用 mc_skill_scout_surface(direction='{direction}', track_ender_eye=True)。位移后请重新测向。"
             if direction else "本次掷眼没有获得有效的水平向量。请在开阔处重新测向后再决定方向。"
         )
         return json.dumps(receipt, ensure_ascii=False)
@@ -2526,6 +2526,7 @@ class McToolset:
         target_types: list[str] | None = None,
         max_duration_s: float | str = 45.0,
         step_dist: float | str = 28.0,
+        track_ender_eye: bool = False,
     ) -> str:
         try:
             if any(isinstance(v, bool) for v in (max_duration_s, step_dist)):
@@ -2551,6 +2552,7 @@ class McToolset:
         return self._run_skill(
             lambda: self.skills.scout_surface(
                 direction=direction, target_types=target_types, max_duration_s=budget_s, step_dist=step,
+                track_ender_eye=track_ender_eye,
             )
         )
 
@@ -3347,6 +3349,7 @@ class McToolset:
                         ),
                         "max_duration_s": _ScoutNumberParameter("本次预算秒数，默认45，最多50", kind="scout_number", required=False),
                         "step_dist": _ScoutNumberParameter("每段距离主世界28至32格（默认28），下界16至20格（默认20）", kind="scout_number", required=False),
+                        "track_ender_eye": Parameter("追眼时传 true，并使用掷眼回执的明确方向。宽绕或上岸后停下重新测向", kind="boolean", required=False),
                     },
                     handler=self.mc_skill_scout_surface,
                     concurrency="exclusive",

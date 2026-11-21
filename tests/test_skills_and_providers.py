@@ -2744,7 +2744,58 @@ def test_ender_eye_reports_scout_direction_from_observed_vector(vector, directio
     if direction is None:
         assert "重新测向" in result["scout_hint"]
     else:
-        assert f"mc_skill_scout_surface(direction='{direction}')" in result["scout_hint"]
+        assert f"mc_skill_scout_surface(direction='{direction}', track_ender_eye=True)" in result["scout_hint"]
+
+
+@pytest.mark.parametrize("tracking", [False, True])
+def test_tracking_ender_eye_stops_before_wide_detour_after_first_hop(tracking) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    backend = _SurfaceScoutBackend()
+
+    def handle(request):
+        if request.url.path.endswith("/get_block") and json.loads(request.content)["pos"][0] > 33:
+            return backend.ok({"name": "water"})
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence())
+        registry = tools.registry(profile="compact", extra_tools=("mc_skill_scout_surface",))
+        result = json.loads(registry.execute({
+            "function": {
+                "name": "mc_skill_scout_surface",
+                "arguments": json.dumps({"direction": "east", "track_ender_eye": tracking}),
+            },
+        }))
+
+    if tracking:
+        assert len(backend.moves) == 1
+        assert result["segments_completed"] == 1
+        assert result["distance_traveled"] == 28
+        assert result["final_pos"] == [28.5, 64, 0.5]
+        assert result["stop_reason"] == "remeasure_after_detour"
+        assert result["requires_replan"] is True
+    else:
+        assert len(backend.moves) == 5
+        assert result["direction"] == "north"
+
+
+def test_tracking_ender_eye_stops_after_observed_backward_movement() -> None:
+    backend = _SurfaceScoutBackend()
+
+    def move(request, body):
+        return backend.arrive(request, {**body, "x": -4.5})
+
+    backend.move = move
+    with BotSession("offline", transport=httpx.MockTransport(backend.handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="east", track_ender_eye=True)
+
+    assert len(backend.moves) == 1
+    assert result["stop_reason"] == "remeasure_after_detour"
+    assert result["segments_completed"] == 0
+    assert result["distance_traveled"] == 5
+    assert result["final_pos"] == [-4.5, 64, 0.5]
 
 
 @pytest.mark.parametrize("hazard,target", [("lava", "nether_bricks"), ("magma_block", "blaze"), ("cave_air", "nether_bricks")])

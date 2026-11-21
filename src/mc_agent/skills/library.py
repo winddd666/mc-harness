@@ -1391,6 +1391,8 @@ class MacroSkills:
         target_types: list[str] | None = None,
         max_duration_s: float = 45.0,
         step_dist: float = 28.0,
+        *,
+        track_ender_eye: bool = False,
     ) -> dict[str, Any]:
         """Scout in bounded hops, measuring horizontal distance between observed positions."""
         direction = direction.strip().lower()
@@ -1403,7 +1405,7 @@ class MacroSkills:
             "detected_pois": [],
             "detected_entities": [],
         }
-        if direction not in ("auto", *SURFACE_SCOUT_DIRECTIONS):
+        if direction not in SURFACE_SCOUT_DIRECTIONS and (direction != "auto" or track_ender_eye):
             return {**result, "stop_reason": "invalid_direction", "requires_replan": True}
         if not math.isfinite(max_duration_s) or not math.isfinite(step_dist):
             return {**result, "stop_reason": "invalid_budget_or_step", "requires_replan": True}
@@ -1414,6 +1416,11 @@ class MacroSkills:
         }
         distance = 0.0
         found_target = False
+        eye_heading = SURFACE_SCOUT_DIRECTIONS.index(direction) if track_ender_eye else None
+        eye_headings = (
+            {(eye_heading + offset) % len(SURFACE_SCOUT_DIRECTIONS) for offset in (-1, 0, 1)}
+            if eye_heading is not None else None
+        )
 
         def observe() -> dict[str, Any]:
             nonlocal distance
@@ -1540,7 +1547,7 @@ class MacroSkills:
             if status.get("in_water") or status.get("submerged") or status.get("on_ground") is False:
                 return "in_water"
             result["shore_recoveries"] = result.get("shore_recoveries", 0) + 1
-            return None
+            return "remeasure_after_detour" if track_ender_eye else None
 
         def advance(heading: int) -> str:
             nonlocal direction, status
@@ -1576,9 +1583,14 @@ class MacroSkills:
                 return move_error
             if status.get("in_water") or status.get("submerged"):
                 return reach_dry_bank([x, y, z]) or "liquid_ahead"
+            px, py, pz = status["pos"]
+            if eye_heading is not None:
+                angle = eye_heading * math.pi / 4
+                forward = (px - x) * math.cos(angle) + (pz - z) * math.sin(angle)
+                if forward < -0.5:
+                    return "remeasure_after_detour"
             if move_error:
                 return move_error
-            px, py, pz = status["pos"]
             if nether_probe is not None:
                 if status.get("on_ground") is not True or abs(py - landing_y) > 0.75:
                     return "unsafe_nether_landing"
@@ -1663,8 +1675,13 @@ class MacroSkills:
                             break
                         if abs(offset) > 1 and not explore_wider:
                             break
-                        reason = advance((heading + offset) % len(SURFACE_SCOUT_DIRECTIONS))
+                        candidate = (heading + offset) % len(SURFACE_SCOUT_DIRECTIONS)
+                        if eye_headings is not None and candidate not in eye_headings:
+                            continue
+                        reason = advance(candidate)
                         explore_wider |= reason in terrain_blocks
+                    if track_ender_eye and reason in detour_reasons:
+                        reason = "remeasure_after_detour"
                     if reason != "segment_completed":
                         break
                 else:
@@ -1690,6 +1707,8 @@ class MacroSkills:
         if not result["ok"]:
             result["requires_replan"] = True
             result.setdefault("error", {"code": reason})
+        if reason == "remeasure_after_detour":
+            result["error"]["message"] = "追眼路线受阻或发生绕行。请在当前安全位置重新掷眼，再按新回执的方向继续。"
         biome = str(result["biome"] or "").lower()
         if any(part in biome for part in ("ocean", "dark_forest", "jungle")):
             result["biome_hint"] = "当前群系不利于寻村，请改走朝向平原、草原或其他开阔干地的方向。"
