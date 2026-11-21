@@ -271,6 +271,7 @@ class GenerationGuard:
         self._no_water_until = float("-inf")
         self._last_pre_hurt_melee_at = float("-inf")
         self._last_fire_douse_at = float("-inf")
+        self._last_fire_clear_at = float("-inf")
         self._last_non_combat_alert_at = float("-inf")
         self._last_gear_check_at = float("-inf")
         self._last_torch_place_at = float("-inf")
@@ -406,6 +407,14 @@ class GenerationGuard:
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             return {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
+
+    def _clear_contact_fire(self, pos: list[float] | tuple[float, ...]) -> dict[str, Any]:
+        try:
+            with self.bot.limit_until(time.monotonic() + 1.25):
+                return self.combat_env.extinguish_fire_at_feet(pos)
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return {"ok": False, "reason": "time_budget"}
 
     def _run_recovery_macro(
         self,
@@ -1141,8 +1150,9 @@ class GenerationGuard:
         eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
         should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not (hot_floor_only or needs_hot_floor_guard)
         hurt = bool(hurts) or dropped
-        burning_after_lava = (
-            bool(hurts) and now - self._last_lava_hurt_at < 15.0
+        contact_fire = any(str(h.get("source") or "").strip().lower() == "in_fire" for h in hurts)
+        environmental_burning = (
+            bool(hurts) and (contact_fire or now - self._last_lava_hurt_at < 15.0)
             and all(str(h.get("source") or "").strip().lower() in FIRE_HURT_SOURCES for h in hurts)
         )
         non_combat_only_hurt = (
@@ -1152,7 +1162,7 @@ class GenerationGuard:
             and not in_water
             and not deaths
             and (
-                burning_after_lava or (
+                environmental_burning or (
                     (not nh_name0 or nh_dist0 > 8.0)
                     and all(
                         str(h.get("source") or "").strip().lower() in NON_COMBAT_HURT_SOURCES
@@ -1208,12 +1218,19 @@ class GenerationGuard:
             and "nether" not in str(status.get("dimension") or "").lower()
             and (now - self._last_fire_douse_at >= 12.0)
         )
+        fire_pos = status.get("pos")
+        can_clear_fire = (
+            environmental_burning and contact_fire and not in_water and not in_lava and not status.get("busy")
+            and status.get("on_ground") is True and isinstance(fire_pos, (list, tuple)) and len(fire_pos) >= 3
+            and now - self._last_fire_clear_at >= 2.0
+        )
 
         if not (
             effective_combat_hurt
             or needs_hot_floor_guard
             or critical_non_combat
             or can_try_fire_douse
+            or can_clear_fire
             or deaths
             or disconnected
             or needs_float
@@ -1492,7 +1509,13 @@ class GenerationGuard:
                             attacker=att_w_dict,
                         )
             elif non_combat_only_hurt and not in_water and not in_lava:
-                if can_try_fire_douse:
+                fire_cleared = False
+                if can_clear_fire:
+                    self._last_fire_clear_at = now
+                    clear = self._action("clear_contact_fire", lambda: self._clear_contact_fire(fire_pos))
+                    actions.append(clear)
+                    fire_cleared = clear["ok"]
+                if can_try_fire_douse and not fire_cleared:
                     self._last_fire_douse_at = now
                     if counts.get("water_bucket", 0) > 0:
                         actions.append(self._action("douse_fire", lambda: self.combat_env.build_tactical("place_water_feet")))

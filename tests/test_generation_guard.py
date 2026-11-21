@@ -4260,6 +4260,40 @@ def test_explicit_food_use_reuses_eating_safety_check(item, shooter_distance, al
         assert uses == []
 
 
+@pytest.mark.parametrize("foot_block, clears", [("fire", True), ("soul_fire", False), ("netherrack", False)])
+def test_contact_fire_only_digs_a_live_flame_at_the_feet(foot_block, clears):
+    blocks = {(-419, 52, -1881): foot_block}
+    digs = []
+
+    class FireBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [-418.3, 52, -1880.5], "health": 10, "food": 20, "dimension": "the_nether",
+                    "on_ground": True, "on_fire": True, "alive": True, "ready": True, "blocking": True,
+                    "nearest_hostile": {"id": 44, "name": "blaze", "dist": 5.5},
+                }
+            if action == "events":
+                return {"events": [] if kwargs["params"]["since"] else [{"seq": 1, "type": "hurt", "source": "in_fire"}]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                return {"name": blocks.get(tuple(body["pos"]), "air")}
+            if action == "dig":
+                assert kwargs["timeout_s"] <= 0.6 and kwargs["allow_reauth"] is False
+                digs.append(body["pos"])
+                if clears:
+                    blocks[tuple(body["pos"])] = "air"
+            return {"ok": True}
+
+    guard = GenerationGuard(FireBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+    clear, = incident["actions"]
+    assert clear["action"] == "clear_contact_fire" and clear["ok"] is clears
+    assert digs == ([] if foot_block == "netherrack" else [[-419, 52, -1881]])
+    assert not incident["requires_replan"]
+
+
 def test_boundary_does_not_eat_while_still_taking_contact_fire_damage(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
