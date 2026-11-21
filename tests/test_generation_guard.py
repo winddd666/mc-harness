@@ -5047,15 +5047,16 @@ def test_low_health_mixed_hurt_retreat_accounts_for_the_shooter(monkeypatch, sho
     assert retreats == [expected]
 
 
+@pytest.mark.parametrize("shielded", [False, True])
 @pytest.mark.parametrize("scan", ["visible", "timeout"])
-def test_unshielded_surface_ranged_retreat_accounts_for_nearby_shooters(monkeypatch, scan):
+def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, scan, shielded):
     from mc_agent.skills.combat_env import CombatEnv
 
     primary = {"id": 4882325, "name": "pillager", "pos": [-10959.1, 72, -11030.2], "dist": 7.3}
     secondary = {"id": 4883019, "name": "pillager", "pos": [-10965.5, 72, -11050.4], "dist": 13.5}
     status = {
-        "pos": [-10962.4, 72, -11038], "health": 5.33, "food": 20, "dimension": "overworld",
-        "ready": True, "alive": True, "on_ground": True, "blocking": False,
+        "pos": [-10962.4, 72, -11038], "health": 2.39 if shielded else 5.33, "food": 20, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "blocking": shielded,
         "nearest_hostile": primary,
     }
     plans = []
@@ -5068,7 +5069,10 @@ def test_unshielded_surface_ranged_retreat_accounts_for_nearby_shooters(monkeypa
                 hit = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": primary}
                 return {"events": [] if kwargs["params"]["since"] else [hit]}
             if action == "inventory":
-                return {"items": [], "offhand": None}
+                return {"items": [], "offhand": {"name": "shield"} if shielded else None}
+            if action == "look":
+                assert shielded
+                return {"ok": True}
             if action == "get_entities":
                 assert kwargs["timeout_s"] == 0.6 and kwargs["allow_reauth"] is False
                 if scan == "timeout":
@@ -5091,7 +5095,10 @@ def test_unshielded_surface_ranged_retreat_accounts_for_nearby_shooters(monkeypa
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
     monkeypatch.setattr(guard.combat_env, "flee", flee)
 
-    assert [a["action"] for a in guard.poll()["actions"]] == ["dig_cover", "combat_or_flee"]
+    expected_actions = ["dig_cover", "combat_or_flee"]
+    if shielded:
+        expected_actions = ["face_attacker", *expected_actions, "face_attacker_after_retreat"]
+    assert [a["action"] for a in guard.poll()["actions"]] == expected_actions
     extra = [secondary["pos"]] if scan == "visible" else []
     assert plans == [("cover", primary["pos"], extra), ("flee", primary["pos"], extra)]
 

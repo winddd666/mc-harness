@@ -697,10 +697,13 @@ class GenerationGuard:
             mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
             burning_blaze = "nether" in dimension and ranged and status.get("on_fire") and nh_name == "blaze"
             offhand = status.get("offhand")
-            unshielded_surface_ranged = (
-                dimension == "overworld" and ranged and low_health and status.get("on_ground") is True
-                and not status.get("blocking") and not counts.get("shield")
+            unshielded = (
+                not status.get("blocking") and not counts.get("shield")
                 and (not isinstance(offhand, dict) or str(offhand.get("name") or "").removeprefix("minecraft:") != "shield")
+            )
+            scan_surface_shooters = (
+                dimension == "overworld" and ranged and low_health and status.get("on_ground") is True
+                and (unshielded or prefer_cover)
             )
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
@@ -716,7 +719,7 @@ class GenerationGuard:
             other_shooters = []
             check_blaze_cover = False
             if (
-                (mixed_hurt or unshielded_surface_ranged or (burning_blaze and primary_id is not None))
+                (mixed_hurt or scan_surface_shooters or (burning_blaze and primary_id is not None))
                 and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
             ):
                 try:
@@ -743,7 +746,7 @@ class GenerationGuard:
                         check_blaze_cover = burning_blaze
                     else:
                         other_shooters.append(shooter_pos)
-                if (mixed_hurt or unshielded_surface_ranged) and not pos and other_shooters:
+                if (mixed_hurt or scan_surface_shooters) and not pos and other_shooters:
                     pos = other_shooters.pop(0)
             # A wall that blocks projectiles cannot protect us from a melee attacker already in reach.
             if pos and (prefer_cover or check_blaze_cover) and not recent_melee:
@@ -2068,11 +2071,17 @@ class GenerationGuard:
                             shooter_pos = self._find_hostile_position(att_id_r, att_name_r)
                             if shooter_pos is not None:
                                 attacker = {**(att_obj or {}), "pos": shooter_pos}
+                        critical_shielded_cover = (
+                            already_blocking and ranged_hurt_only and not skip_cover_for_blast and 0 < hp_val <= 4.0
+                            and status.get("on_ground") is True
+                            and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                        )
+                        unshielded_cover = not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX
                         cf = self._action(
                             "combat_or_flee",
                             lambda: self._defend_or_flee(
                                 status, attacker, counts, ranged=True,
-                                prefer_cover=not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX,
+                                prefer_cover=unshielded_cover or critical_shielded_cover,
                                 allow_stationary_cover=not fresh_blast,
                             ),
                         )
