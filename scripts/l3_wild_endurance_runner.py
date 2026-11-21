@@ -58,6 +58,7 @@ VILLAGE_APPROACH_RANGE = (120.0, 180.0)
 STRONGHOLD_STAGE = "village_to_stronghold_end"
 STRONGHOLD_DISTANCE_RANGE = (120.0, 600.0)
 STRONGHOLD_TRAVEL_RADIUS = 720.0
+STRONGHOLD_LOCATE_TIMEOUT_S = 60
 FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
@@ -361,11 +362,13 @@ def _locate_coords(reply: str) -> tuple[int, int] | None:
     return int(m.group(1)), int(m.group(2))
 
 
-def _locate_structure(dim: str, cx: int, cz: int, structure_id: str) -> tuple[int, int] | None:
+def _locate_structure(
+    dim: str, cx: int, cz: int, structure_id: str, *, timeout_s: int = 30,
+) -> tuple[int, int] | None:
     """`locate structure` inside `dim`, returning None when the server says it cannot find one."""
     out = rcon_batch(
         [f"execute in {dim} positioned {cx} 64 {cz} run locate structure {structure_id}"],
-        timeout=30,
+        timeout=timeout_s,
     )
     reply = str((out[0] if out else {}).get("reply") or "")
     if "could not" in reply.lower() or "cannot" in reply.lower():
@@ -430,8 +433,12 @@ def select_stronghold_village_site(
 ) -> tuple[tuple[float, float, float, str], tuple[int, int], tuple[int, int]]:
     """Find a dry village start and the nearest reachable stronghold for this slot."""
     dim = "minecraft:overworld"
+
+    def locate(x: int, z: int, structure_id: str) -> tuple[int, int] | None:
+        return _locate_structure(dim, x, z, structure_id, timeout_s=STRONGHOLD_LOCATE_TIMEOUT_S)
+
     anchor = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
-    nearest = _locate_structure(dim, *anchor, "minecraft:stronghold")
+    nearest = locate(*anchor, "minecraft:stronghold")
     probes = [anchor]
     if nearest is not None:
         hx, hz = nearest
@@ -443,13 +450,13 @@ def select_stronghold_village_site(
     seen_villages = set()
     nearby_pairs = 0
     for probe in probes:
-        village = _locate_structure(dim, *probe, "#minecraft:village")
+        village = locate(*probe, "#minecraft:village")
         if village is None or village in seen_villages:
             continue
         seen_villages.add(village)
         if min(CANDIDATE_SITES, key=lambda site: math.dist(site, village)) != anchor:
             continue
-        stronghold = _locate_structure(dim, *village, "minecraft:stronghold")
+        stronghold = locate(*village, "minecraft:stronghold")
         if (
             stronghold is None
             or min(CANDIDATE_SITES, key=lambda site: math.dist(site, stronghold)) != anchor
@@ -467,7 +474,7 @@ def select_stronghold_village_site(
                 math.dist(xz, village) <= 32
                 and inner <= math.dist(xz, stronghold) <= outer
                 and _portal_free_landing(bot)
-                and _locate_structure(dim, math.floor(xz[0]), math.floor(xz[1]), "minecraft:stronghold") == stronghold
+                and locate(math.floor(xz[0]), math.floor(xz[1]), "minecraft:stronghold") == stronghold
             ):
                 return (*pos, str(status.get("biome") or "")), village, stronghold
     raise RuntimeError(
