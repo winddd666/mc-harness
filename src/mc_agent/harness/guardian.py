@@ -2854,18 +2854,24 @@ class GenerationGuard:
                         held_name = str(held.get("name") or "").removeprefix("minecraft:") if isinstance(held, dict) else ""
                         unarmed = not st.get("blocking") and held_name not in MELEE_WEAPON_ORDER
                         retreat_hp = 14.0 if unarmed else 10.0
-                        losing_close_melee = (
+                        losing_health_on_land = (
                             not st.get("in_water")
                             and st.get("ready") is not False and st.get("alive") is not False
-                            and isinstance(cur_hp, (int, float)) and 0 < cur_hp <= retreat_hp
+                            and isinstance(cur_hp, (int, float)) and 0 < cur_hp
                             and watch_hp0 is not None and watch_hp0 - cur_hp >= 4.0
-                            and nh_name in PRE_HURT_MELEE_MOBS and nh_dist <= 4.0
                         )
                         with attack_state_lock:
-                            other_melee_attacker = nh_id is not None and attack_target_id is not None and nh_id != attack_target_id
-                            melee_danger = losing_close_melee and (unarmed or other_melee_attacker)
+                            other_attacker = nh_id is not None and attack_target_id is not None and nh_id != attack_target_id
+                            melee_danger = (
+                                losing_health_on_land and cur_hp <= retreat_hp and nh_dist <= 4.0
+                                and nh_name in PRE_HURT_MELEE_MOBS and (unarmed or other_attacker)
+                            )
+                            ranged_danger = (
+                                losing_health_on_land and cur_hp <= 10.0 and nh_dist <= 4.0
+                                and nh_name in RANGED_MOBS and other_attacker
+                            )
                             stop_attack = (
-                                (lava_danger or water_danger or melee_danger)
+                                (lava_danger or water_danger or melee_danger or ranged_danger)
                                 and attack_active.is_set() and not stop_evt.is_set()
                             )
                             if stop_attack:

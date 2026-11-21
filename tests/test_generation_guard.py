@@ -9783,7 +9783,9 @@ def test_nether_attack_checks_footing_toward_nearby_blaze(terrain):
 
 
 @pytest.mark.parametrize("attack_result", ["returned", "interrupted", "read_timeout"])
-@pytest.mark.parametrize("hazard", ["water", "ranged_water", "lava", "unarmed_melee", "unarmed_above_critical", "other_melee"])
+@pytest.mark.parametrize("hazard", [
+    "water", "ranged_water", "lava", "unarmed_melee", "unarmed_above_critical", "other_melee", "other_ranged",
+])
 def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, attack_result, hazard):
     import threading
 
@@ -9791,14 +9793,16 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
     stopped = threading.Event()
     observed = threading.Event()
     actions = []
-    attack_target = 44 if hazard == "other_melee" else 27
+    armed = hazard in {"other_melee", "other_ranged"}
+    attack_target = 44 if armed else 27
     above_critical = hazard == "unarmed_above_critical"
     in_water = hazard in {"water", "ranged_water"}
     drowned_distance = 8.5 if hazard == "ranged_water" else 2.0
     hostile_pos = [0.5 + drowned_distance, 62, 0.5]
+    hostile_name = {"other_ranged": "pillager", "water": "drowned", "ranged_water": "drowned"}.get(hazard, "zombie")
     status = {
         "pos": [0.5, 63, 0.5], "health": 18 if above_critical else 12, "ready": True, "alive": True, "on_ground": True,
-        "nearest_hostile": {"id": 27, "name": "drowned" if in_water else "zombie", "dist": drowned_distance, "pos": hostile_pos},
+        "nearest_hostile": {"id": 27, "name": hostile_name, "dist": drowned_distance, "pos": hostile_pos},
     }
 
     class AttackBot:
@@ -9815,7 +9819,7 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
                     status.update(in_water=in_water, in_lava=hazard == "lava", on_ground=False, health=health)
                 else:
                     assert observed.wait(2.0)
-                    weapon = "iron_sword" if hazard == "other_melee" else "wooden_pickaxe"
+                    weapon = "iron_sword" if armed else "wooden_pickaxe"
                     status.update(health=12 if above_critical else 6.7, held={"name": weapon})
                 assert stopped.wait(2.0), "attack remained active after the survival hazard"
                 if attack_result == "read_timeout":
