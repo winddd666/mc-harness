@@ -2920,6 +2920,46 @@ def test_first_dig_timeout_does_not_block_the_next_safe_descent(monkeypatch) -> 
     assert engine.collar_node_id == collar.node_id
 
 
+def test_repeated_first_dig_timeouts_relocate_an_idle_nether_collar(monkeypatch) -> None:
+    import mc_agent.skills.mining_dfs as mining
+
+    clock = _MiningClock()
+    monkeypatch.setattr(mining.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mining.time, "sleep", clock.sleep)
+    world = _MockMineWorld(start_pos=(0.5, 64.0, 0.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    old_site, new_site = (0, 64, 0), (18, 64, 0)
+    world.blocks[(18, 64, -1)] = "ancient_debris"
+    attempts = []
+
+    def handler(request):
+        if request.url.path.endswith("/dig") and world.pos[0] < 10:
+            attempts.append(tuple(json.loads(request.content)["pos"]))
+            clock.now += request.extensions["timeout"]["read"]
+            raise httpx.ReadTimeout("first dig stalled at the collar", request=request)
+        return world.handler(request)
+
+    with BotSession("tok", bot_username="IdleNetherCollar", transport=httpx.MockTransport(handler)) as bot:
+        engine = MacroSkills(bot).mining_dfs
+        engine._init_collar(old_site, target_y=15, geofence=None, viable_dirs=["north", "east", "south", "west"])
+
+        def relocate(pos, **kwargs):
+            assert pos == old_site
+            world.pos = [18.5, 64.0, 0.5]
+            return new_site
+
+        monkeypatch.setattr(engine, "_relocate_to_fresh_collar_site", relocate)
+        args = dict(target="ancient_debris", target_y=15, goal_count=1, max_duration_s=55)
+        for _ in range(mining.IDLE_CALLS_BEFORE_RELOCATE):
+            result = engine.run(**args)
+            assert result["timeout_path"] == "dig" and result["dug_count"] == 0
+        result = engine.run(**args)
+
+    assert len(set(attempts)) == len(attempts) == mining.IDLE_CALLS_BEFORE_RELOCATE
+    assert engine.nodes[engine.collar_node_id].anchor == new_site
+    assert result["stop_reason"] == "quota_reached"
+
+
 @pytest.mark.parametrize("dry_turn", [True, False])
 def test_timeout_after_walking_to_a_nether_switchback_cools_its_first_dig(monkeypatch, dry_turn: bool) -> None:
     import mc_agent.skills.mining_dfs as mining

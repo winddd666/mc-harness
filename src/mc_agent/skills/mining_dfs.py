@@ -5311,7 +5311,19 @@ class MiningDFSEngine:
                         message="镐耐久不足，回井口补给途中达到时间上限。请继续 action='return_collar'，补好镐后再 explore。",
                     )
                 else:
-                    if moved or scoped.dug_count or gained:
+                    made_progress = bool(moved or scoped.dug_count or gained)
+                    if (
+                        scoped.timeout_dig_pos is not None and scoped.timeout_dig_read_s >= 1.0
+                        and not (scoped.dug_count or gained)
+                        and len(self.nodes) == 1 and self.collar_node_id in self.nodes
+                        and scoped.first_pos and result["pos_after"]
+                        and _floor_pos(scoped.first_pos) == _floor_pos(result["pos_after"])
+                    ):
+                        # A timed-out first dig bypasses the normal end-of-slice idle check.
+                        self.idle_calls += 1
+                    elif made_progress:
+                        self.idle_calls = 0
+                    if made_progress:
                         result.update(
                             ok=True,
                             requires_replan=False,
