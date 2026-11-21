@@ -3081,6 +3081,27 @@ class SubcorticalInstinctController:
                 })
                 close_pos = close_creeper.get("pos") if close_creeper else None
                 if (
+                    st_chk.get("in_water") and not st_chk.get("in_lava")
+                    and not flee_res.get("respawned")
+                    and st_chk.get("ready") is not False and st_chk.get("alive") is not False
+                    and st_chk.get("last_death") == st.get("last_death")
+                    and st_chk.get("dimension") == st.get("dimension")
+                    and time.monotonic() < deadline
+                ):
+                    shore = env.escape_deep_water_to_shore(
+                        close_pos or c_pos, keep_shield=has_shield,
+                        shield_target_id=(close_creeper or creeper_ent or {}).get("id"),
+                        avoid_close_threat=True,
+                    )
+                    actions.append({"action": "creeper_water_retreat", **shore})
+                    st_chk = env._safe_status({"ready": False})
+                    latched_guard = bool(
+                        has_shield and st_chk.get("blocking") and not shore.get("respawned")
+                        and st_chk.get("ready") is not False and st_chk.get("alive") is not False
+                        and st_chk.get("last_death") == st.get("last_death")
+                        and st_chk.get("dimension") == st.get("dimension")
+                    )
+                elif (
                     not has_shield and isinstance(close_pos, (list, tuple)) and len(close_pos) >= 3
                     and flee_res.get("ok") and not flee_res.get("respawned")
                     and st_chk.get("ready") is not False and st_chk.get("alive") is not False
@@ -3095,6 +3116,7 @@ class SubcorticalInstinctController:
                     and has_shield
                     and st_chk.get("ready") is not False
                     and st_chk.get("alive") is not False
+                    and not st_chk.get("in_water")
                     and st_chk.get("last_death") == st.get("last_death")
                     and st_chk.get("dimension") == st.get("dimension")
                 ):

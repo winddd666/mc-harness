@@ -7055,6 +7055,57 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert len(pulses) == len(actions) == 1
 
 
+@pytest.mark.parametrize("landing", ["water", "lava", "respawn"])
+def test_creeper_retreat_hands_off_to_water_escape_in_the_same_life(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    creeper = {"id": 42, "name": "creeper", "pos": [0.5, 62, 4.5], "dist": 4.0}
+    status = {
+        "pos": [0.5, 62.5, 0.5], "health": 20, "on_ground": False,
+        "ready": True, "alive": True, "dimension": "overworld", "last_death": {"t": 1},
+        "nearest_hostile": creeper,
+    }
+    shore_calls = []
+
+    class BankBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [creeper]}
+            if action == "get_block":
+                return {"name": "air"}
+            return {"ok": True}
+
+    def invalid_retreat(*_args, **_kwargs):
+        status.update(pos=[0.5, 61.3, 0.5], in_water=True, in_lava=landing == "lava")
+        if landing == "respawn":
+            status["last_death"] = {"t": 2}
+        return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0}
+
+    def reach_shore(threat_pos, **kwargs):
+        shore_calls.append((threat_pos, kwargs))
+        status.update(pos=[0.5, 62, -5.5], in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    env = CombatEnv(BankBot())
+    monkeypatch.setattr(env, "flee", invalid_retreat)
+    monkeypatch.setattr(env, "escape_deep_water_to_shore", reach_shore)
+    result = CombatControllerSlot().handle(
+        env, {"source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 42},
+    )
+
+    assert result["mode"] == "creeper_evade"
+    if landing == "water":
+        assert shore_calls == [(creeper["pos"], {"keep_shield": True, "shield_target_id": 42, "avoid_close_threat": True})]
+        assert result["status_after"]["in_water"] is False
+    else:
+        assert shore_calls == []
+
+
 def test_creeper_retreat_does_not_report_success_if_the_final_sample_is_dead(monkeypatch):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
@@ -7256,6 +7307,7 @@ def test_retreat_rechecks_airborne_landing(monkeypatch, lands_in_water, mob, tri
     hostile = {"id": 66, "name": mob, "pos": [0.5, 64.0, 4.5], "dist": 4.0}
     pos = [0.5, 64.4, 0.5]
     landing_checked = False
+    blocking = False
     calls = []
 
     class ShoreBot:
@@ -7264,11 +7316,12 @@ def test_retreat_rechecks_airborne_landing(monkeypatch, lands_in_water, mob, tri
                 "pos": list(pos), "health": 20, "food": 20, "ready": True, "alive": True,
                 "on_ground": landing_checked and not lands_in_water,
                 "in_water": landing_checked and lands_in_water,
+                "blocking": blocking,
                 "nearest_hostile": {**hostile, "dist": math.dist(pos, hostile["pos"])},
             }
 
         def call(self, action, body=None, **kwargs):
-            nonlocal landing_checked
+            nonlocal landing_checked, blocking
             if action != "control" or (body or {}).get("forward"):
                 calls.append(action)
             if action == "status":
@@ -7282,6 +7335,8 @@ def test_retreat_rechecks_airborne_landing(monkeypatch, lands_in_water, mob, tri
                 return {"entities": [self.status()["nearest_hostile"]]}
             if action == "get_block":
                 return {"name": "stone" if body["pos"][1] < 64 else "air"}
+            if action == "posture":
+                blocking = bool(body.get("shield"))
             if action == "control" and body.get("forward"):
                 assert landing_checked and not lands_in_water
                 pos[2] -= 2.3
@@ -7289,7 +7344,13 @@ def test_retreat_rechecks_airborne_landing(monkeypatch, lands_in_water, mob, tri
                 pos[:] = [body["x"], body["y"], body["z"]]
             return {"ok": True}
 
-    result = CombatControllerSlot().handle(CombatEnv(ShoreBot()), {
+    def water_retreat(*_args, **_kwargs):
+        calls.append("water_retreat")
+        return {"ok": False, "in_water": True}
+
+    env = CombatEnv(ShoreBot())
+    monkeypatch.setattr(env, "escape_deep_water_to_shore", water_retreat)
+    result = CombatControllerSlot().handle(env, {
         "source": trigger, "primary_entity_id": 66, "primary_type": mob,
     })
     retreat = next(action for action in result["actions"] if action["action"] == retreat_action)
@@ -7299,6 +7360,7 @@ def test_retreat_rechecks_airborne_landing(monkeypatch, lands_in_water, mob, tri
         assert retreat["reason"] == "unsafe_landing"
         assert result["latched_guard"] is (mob == "creeper")
         assert "control" not in calls and "move_to" not in calls
+        assert ("water_retreat" in calls) is (mob == "creeper")
     else:
         assert calls.index("status") < calls.index("control")
 
