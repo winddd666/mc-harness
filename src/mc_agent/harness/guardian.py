@@ -586,7 +586,7 @@ class GenerationGuard:
                 except _RecoveryBudgetExceeded:
                     self._stop_after_recovery_timeout()
                     cover = None
-                if cover is not None:
+                if cover is not None and (cover.get("ok") or cover.get("respawned")):
                     return cover
             return self.combat_env.flee(
                 pos, wait_for_ground=True,

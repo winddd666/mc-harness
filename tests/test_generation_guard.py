@@ -4297,6 +4297,48 @@ def test_indirect_magic_uses_checked_retreat_without_digging_a_bunker(monkeypatc
         assert retreats == [] and incident is None
 
 
+@pytest.mark.parametrize("respawned", [False, True])
+def test_failed_nether_cover_falls_back_to_checked_retreat_only_in_same_life(monkeypatch, respawned):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    blaze = {"id": 44, "name": "blaze", "dist": 4.1, "pos": [3190.5, 66.2, -2046.4]}
+    status = {
+        "pos": [3186.9, 68, -2045.5], "health": 2.1, "food": 17, "dimension": "the_nether",
+        "ready": True, "alive": True, "on_ground": True, "on_fire": True, "blocking": True,
+        "nearest_hostile": blaze,
+    }
+    retreats = []
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hit = {"seq": 1, "type": "hurt", "source": "on_fire"}
+                return {"events": [] if kwargs["params"]["since"] else [hit]}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [blaze]}
+            return {"ok": True}
+
+    def fail_cover(_env, pos):
+        assert pos == blaze["pos"]
+        return {"ok": False, "mode": "natural_cover", "reason": "cover_unconfirmed", "respawned": respawned}
+
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def flee(pos, *, wait_for_ground):
+        retreats.append((pos, wait_for_ground))
+        return {"ok": True, "mode": "flee"}
+
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", fail_cover)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    retreat = next(action for action in guard.poll()["actions"] if action["action"] == "combat_or_flee")
+    assert retreat["result"]["mode"] == ("natural_cover" if respawned else "flee")
+    assert retreats == ([] if respawned else [(blaze["pos"], True)])
+
+
 @pytest.mark.parametrize("sighting", ["exposed", "covered", "timeout", "covered_with_melee"])
 @pytest.mark.parametrize("health", [4.2, 16.0])
 def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, sighting, health):
@@ -7598,7 +7640,7 @@ def test_dig_checks_the_landing_before_removing_support(tool, terrain):
         assert probes == ([target] if tool == "mc_dig" else [])
 
 
-@pytest.mark.parametrize("terrain", ["wall", "fire", "unknown", "drifted_during_probe", "missed_landing"])
+@pytest.mark.parametrize("terrain", ["wall", "fire", "unknown", "drifted_during_probe", "missed_landing", "respawned"])
 def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing(terrain):
     from mc_agent.skills.combat_env import CombatEnv
 
@@ -7635,7 +7677,9 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
                 return {"name": "stone" if y == 63 else "air"}
             if action == "move_to":
                 moves.append(body)
-                if terrain != "missed_landing":
+                if terrain == "respawned":
+                    status.update(pos=[1.5, 64.0, 0.5], last_death={"t": 1})
+                elif terrain != "missed_landing":
                     status["pos"] = [body["x"], body["y"], body["z"]]
             return {"ok": True}
 
@@ -7658,6 +7702,7 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
             assert result["mode"] == "natural_cover"
         else:
             assert result["reason"] == "cover_unconfirmed"
+            assert bool(result.get("respawned")) is (terrain == "respawned")
 
 
 @pytest.mark.parametrize("action", ["control", "move_to"])

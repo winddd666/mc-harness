@@ -1781,17 +1781,20 @@ class CombatEnv:
         after = self._safe_status({"ready": False})
         final_pos = after.get("pos")
         self.invalidate_block_cache()
+        respawned = after.get("alive") is False or bool(
+            final_pos and (after.get("last_death") != before.get("last_death")
+                           or after.get("dimension") != before.get("dimension"))
+        )
         confirmed = bool(
             final_pos and math.dist(final_pos[:3], target) <= 0.6 and after.get("on_ground") is True
-            and after.get("ready") is not False and after.get("alive") is not False
+            and after.get("ready") is not False and not respawned
             and not after.get("in_water") and not after.get("in_lava")
-            and after.get("last_death") == before.get("last_death")
-            and after.get("dimension") == before.get("dimension")
             and all(self._blocks_shot(final_pos, shooter) for shooter in shooters)
         )
         return {
             "ok": confirmed, "mode": "natural_cover", "pos_after": final_pos,
             **({"reason": "cover_unconfirmed"} if not confirmed else {}),
+            **({"respawned": True} if respawned else {}),
         }
 
     def flee(
