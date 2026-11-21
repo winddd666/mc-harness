@@ -5228,6 +5228,54 @@ def test_poll_enters_water_near_recent_shooter_before_next_hurt(monkeypatch, rec
     assert not status["in_water"]
 
 
+@pytest.mark.parametrize("respawned", [False, True])
+def test_ranged_knockback_into_water_goes_to_shore_in_same_poll(monkeypatch, respawned):
+    shooter = {"id": 44, "name": "skeleton", "dist": 6.0, "pos": [6.5, 67.0, 0.5]}
+    status = {
+        "pos": [0.5, 63.2, 0.5], "health": 9.5, "food": 20, "oxygen": 400,
+        "in_water": False, "on_ground": False, "alive": True, "ready": True,
+        "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": shooter,
+    }
+    shore_calls = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [] if kwargs["params"]["since"] else [{"seq": 1, "type": "hurt", "source": "arrow"}]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    def fall_into_water(_pos, *, wait_for_ground):
+        assert wait_for_ground is True
+        status.update(in_water=True, health=1.5, pos=[-1.5, 62.6, 0.5])
+        if respawned:
+            status["last_death"] = {"t": 2}
+        return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0}
+
+    def reach_shore(attacker_pos, *, keep_shield, shield_target_id, surface_first):
+        shore_calls.append((attacker_pos, keep_shield, shield_target_id, surface_first))
+        status.update(in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", fall_into_water)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+
+    incident = guard.poll()
+
+    names = [action["action"] for action in incident["actions"]]
+    if respawned:
+        assert names == ["combat_or_flee"]
+        assert shore_calls == []
+    else:
+        assert names == ["combat_or_flee", "escape_to_shore"]
+        assert shore_calls == [(shooter["pos"], False, 44, False)]
+        assert incident["status"]["in_water"] is False
+
+
 def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_position():
     status = {
         "pos": [6378.7, 62.2, -6442.3], "health": 17, "food": 20, "oxygen": 180, "yaw": -1.5708,

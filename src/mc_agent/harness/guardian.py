@@ -1517,7 +1517,35 @@ class GenerationGuard:
                             self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                         if cf_mode == "flee":
                             self._consecutive_flees += 1
-                            if (
+                            if cf_result.get("reason") == "unsafe_landing" and not cf_result.get("respawned"):
+                                try:
+                                    landing = self.bot.call("status", method="GET", timeout_s=0.6)
+                                except (ApiError, httpx.HTTPError):
+                                    landing = {"ready": False}
+                                if (
+                                    landing.get("in_water") and not landing.get("in_lava")
+                                    and landing.get("ready") is not False and landing.get("alive") is not False
+                                    and landing.get("last_death") == status.get("last_death")
+                                    and landing.get("dimension") == status.get("dimension")
+                                ):
+                                    shore_pos = (attacker.get("pos") if isinstance(attacker, dict) else None) or att_pos_r
+                                    if shore_pos is None and isinstance(att_id_r, int):
+                                        shore_pos = self._find_hostile_position(att_id_r, att_name_r)
+                                    oxygen_w = landing.get("oxygen")
+                                    shore = self._action(
+                                        "escape_to_shore",
+                                        lambda: self.combat_env.escape_deep_water_to_shore(
+                                            shore_pos, keep_shield=has_shield or bool(landing.get("blocking")),
+                                            shield_target_id=att_id_r,
+                                            surface_first=isinstance(oxygen_w, (int, float)) and oxygen_w <= 0,
+                                        ),
+                                    )
+                                    actions.append(shore)
+                                    self._last_water_escape_at = time.monotonic()
+                                    self._last_water_escape_failed = not (
+                                        shore.get("ok") and (shore.get("result") or {}).get("in_water") is not True
+                                    )
+                            elif (
                                 not has_shield and not skip_cover_for_blast
                                 and status.get("on_ground") is False
                                 and cf_result.get("reason") == "no_safe_retreat"
@@ -1657,6 +1685,7 @@ class GenerationGuard:
             and not in_lava
             and not in_water
             and not needs_float
+            and not any(a["action"] == "escape_to_shore" for a in actions)
             and not status.get("busy")
         )
         replan = (
