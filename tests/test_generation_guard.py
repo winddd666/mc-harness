@@ -4990,10 +4990,11 @@ def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(mo
 
 
 @pytest.mark.parametrize(
-    "health, shooter_dist, recent_nether_fireball",
-    [(5.3, 6.2, False), (17.6, None, True), (2.53, 18.7, False)],
+    "health, shooter_dist, fireball_age",
+    [(5.3, 6.2, None), (17.6, None, 5.0), (14.3, None, 9.0), (2.53, 18.7, None)],
 )
-def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shooter_dist, recent_nether_fireball):
+def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shooter_dist, fireball_age):
+    recent_nether_fireball = fireball_age is not None
     clock = [7000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     use_items: list[dict] = []
@@ -5046,7 +5047,7 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shoo
     guard = GenerationGuard(_SkeletonRangeBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=_EnclosedSkills())
     if recent_nether_fireball:
         guard._drain_events_pages()
-        clock[0] += 5.0
+        clock[0] += fireball_age
     else:
         guard._mark_ranged_engagement(clock[0], attacker={"id": 612494, "name": "skeleton"})
     assert guard.poll() is None

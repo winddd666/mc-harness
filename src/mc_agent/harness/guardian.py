@@ -243,6 +243,7 @@ class GenerationGuard:
     FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
     MELEE_EAT_DEFER_S = 10.0
+    NETHER_BURN_EAT_DEFER_S = 12.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
@@ -920,7 +921,7 @@ class GenerationGuard:
         protecting_against_recent_hit = status.get("blocking") and (recent_ranged_hit or recent_melee_hit)
         # A Nether shooter can keep firing while missing from the nearest-hostile snapshot.
         recent_nether_threat = in_nether and (
-            recent_melee_hit or (status.get("on_fire") and recent_ranged_hit)
+            recent_melee_hit or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_EAT_DEFER_S)
         )
         recent_trident_hit = now - self._last_trident_hurt_at < 8.0
         if (
