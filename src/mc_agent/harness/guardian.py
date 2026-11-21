@@ -562,7 +562,7 @@ class GenerationGuard:
                 if cover is not None:
                     return cover
             return self.combat_env.flee(
-                pos, wait_for_ground=retreat_only,
+                pos, wait_for_ground=retreat_only or status.get("on_ground") is False,
                 **({"other_shooters": other_shooters} if other_shooters else {}),
             )
         result = self._run_recovery_macro(

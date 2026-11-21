@@ -5278,6 +5278,45 @@ def test_retreat_rechecks_airborne_landing(monkeypatch, lands_in_water, mob, tri
         assert calls.index("status") < calls.index("control")
 
 
+def test_poll_nether_retreat_waits_for_landing_at_high_health(monkeypatch):
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
+    status = {
+        "pos": [-407.7, 59.8, -1887.3], "health": 14.83, "food": 20, "dimension": "the_nether",
+        "on_ground": False, "alive": True, "ready": True,
+        "nearest_hostile": {"id": 77, "name": "wither_skeleton", "pos": [-407.7, 59, -1883.3], "dist": 4},
+    }
+    landings = []
+    movements = []
+
+    class LedgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if kwargs["timeout_s"] <= 0.45:
+                    landings.append(action)
+                    status.update(on_ground=True, pos=[-407.7, 59.0, -1887.3])
+                return dict(status)
+            if action == "events":
+                return {"events": [] if kwargs["params"]["since"] else [{"seq": 1, "type": "hurt", "source": "mob_attack"}]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                return {"name": "netherrack" if body["pos"][1] < 59 else "air"}
+            if action == "control" and body.get("forward"):
+                assert landings and status["on_ground"]
+                movements.append(action)
+                status["pos"] = [-407.7, 59.0, -1889.6]
+            if action == "move_to":
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    guard = GenerationGuard(LedgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    assert landings == ["status"] and movements == ["control"]
+    retreat, = incident["actions"]
+    assert retreat["action"] == "combat_or_flee" and retreat["ok"]
+
+
 def test_missing_offhand_pickaxe_for_bunker_still_allows_boundary_retreat():
     pos = [5199.5, 84, 7615.5]
     shooter = {"id": 42, "name": "skeleton", "dist": 8.0, "pos": [5207.5, 84, 7615.5]}
