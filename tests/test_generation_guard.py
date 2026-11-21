@@ -1456,6 +1456,49 @@ def test_bug_010_respawn_not_ready_skips_eat_and_retries_after_ready(monkeypatch
     assert use_item_calls == [{"item": "bread"}]
 
 
+@pytest.mark.parametrize("state", ["ready", "loading", "died_again"])
+def test_guardian_defends_current_life_when_spawn_and_hurt_share_a_poll(monkeypatch, state):
+    old_attacker = {"id": 30, "name": "skeleton", "pos": [12.5, 64, 0.5]}
+    zombie = {"id": 44, "name": "zombie", "pos": [1.8, 61, 0.5], "dist": 1.3}
+    hits = [
+        {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": old_attacker},
+        {"seq": 2, "type": "death"},
+        {"seq": 3, "type": "spawn"},
+        {"seq": 4, "type": "hurt", "source": "mob_attack", "source_entity": zombie},
+    ]
+    if state == "died_again":
+        hits.append({"seq": 5, "type": "death"})
+    retreats = []
+
+    class RespawnBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [0.5, 61, 0.5], "health": 7, "food": 20, "dimension": "overworld",
+                    "ready": state == "ready", "alive": state != "died_again", "on_ground": False,
+                    "nearest_hostile": zombie,
+                }
+            if action == "events":
+                since = kwargs["params"]["since"]
+                return {"events": [event for event in hits if event["seq"] > since]}
+            if action == "inventory":
+                return {"items": []}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(RespawnBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def retreat(_status, attacker, _counts):
+        retreats.append(attacker)
+        return {"ok": True, "mode": "flee"}
+
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    incident = guard.poll()
+    assert "death_or_connection_changed" in incident["reasons"]
+    assert incident["requires_replan"]
+    assert incident["event_seqs"] == [event["seq"] for event in hits]
+    assert retreats == ([zombie] if state == "ready" else [])
+
+
 def test_bug_011_guardian_http_error_returns_network_uncertain_without_crashing_episode(monkeypatch):
     """BUG-011: httpx.HTTPError (ReadTimeout/ReadError) inside _action or guard.poll() must never raise RuntimeError or terminate episode."""
     clock = [700.0]

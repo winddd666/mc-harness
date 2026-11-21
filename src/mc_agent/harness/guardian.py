@@ -1091,26 +1091,45 @@ class GenerationGuard:
                 self.disconnected = True
             return None
 
+        hurts = [e for e in fresh if e.get("type") == "hurt"]
+        deaths = [e for e in fresh if e.get("type") in {"death", "death_loop", "disconnected", "spawn"}]
+        life_transition_pending = bool(deaths)
+        if deaths and hurts and deaths[-1]["type"] == "spawn":
+            # The server can deliver the last death and the new life's first hits together.
+            spawn_seq = int(deaths[-1]["seq"])
+            post_spawn_hurts = [e for e in hurts if int(e["seq"]) > spawn_seq]
+            if post_spawn_hurts and status.get("ready") and status.get("alive") is not False:
+                try:
+                    current = self.bot.status()
+                except (ApiError, httpx.HTTPError):
+                    current = {}
+                if (
+                    current.get("ready") and current.get("alive") is not False
+                    and current.get("last_death") == status.get("last_death")
+                    and current.get("dimension") == status.get("dimension")
+                ):
+                    status = current
+                    hurts = post_spawn_hurts
+                    life_transition_pending = False
+
         health = status.get("health")
         dropped = isinstance(health, (int, float)) and self.previous_health is not None and health < self.previous_health - 0.2
         ready = bool(status.get("ready", status.get("alive", True)))
         disconnected = self.previous_ready is True and not ready
         self.previous_ready = ready
         self.previous_health = float(health) if isinstance(health, (int, float)) else None
-        hurts = [e for e in fresh if e.get("type") == "hurt"]
         other_hurts = [e for e in hurts if str(e.get("source") or "").strip().lower() != "hot_floor"]
         in_wall_hurt = any(str(h.get("source") or "") in IN_WALL_HURT_SOURCES for h in hurts)
-        deaths = [e for e in fresh if e.get("type") in {"death", "death_loop", "disconnected", "spawn"}]
         in_water = bool(status.get("in_water"))
         raw_in_lava = bool(status.get("in_lava"))
-        if raw_in_lava and ready and status.get("alive") is not False and not deaths:
+        if raw_in_lava and ready and status.get("alive") is not False and not life_transition_pending:
             self._last_lava_contact_at = now
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
         in_lava = raw_in_lava or (
-            hurt_by_lava and not deaths and not disconnected and ready and status.get("alive") is not False
+            hurt_by_lava and not life_transition_pending and not disconnected and ready and status.get("alive") is not False
         )
         if (
-            not in_lava and not in_water and not deaths and ready and status.get("alive") is not False
+            not in_lava and not in_water and not life_transition_pending and ready and status.get("alive") is not False
             and status.get("on_ground") is False and "nether" in str(status.get("dimension") or "").lower()
             and status.get("pos")
             and any(
@@ -1204,7 +1223,7 @@ class GenerationGuard:
             and bool(hurts)
             and not in_lava
             and not in_water
-            and not deaths
+            and not life_transition_pending
             and (
                 environmental_burning or (
                     (not nh_name0 or nh_dist0 > 8.0)
@@ -1309,6 +1328,7 @@ class GenerationGuard:
         if deaths or disconnected or not ready or status.get("alive") is False:
             self._consecutive_flees = 0
             self._water_hurt_streak = 0
+        if life_transition_pending or disconnected or not ready or status.get("alive") is False:
             if needs_food and not self.retry_after_ready:
                 self.retry_after_ready = True
                 self.events.emit("guardian.eat_deferred", reason="deaths_or_not_ready", retry_after_ready=True)
