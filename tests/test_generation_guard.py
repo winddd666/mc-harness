@@ -747,6 +747,55 @@ def test_arrow_cover_does_not_retreat_using_a_previous_lifes_attacker(monkeypatc
     assert incident["requires_replan"] is True
 
 
+@pytest.mark.parametrize("died_while_digging", [False, True])
+def test_arrow_cover_deadline_stops_pending_dig_before_retreat(monkeypatch, died_while_digging):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [7821.6, 66.0, 2774.5], "health": 17.2, "food": 20, "on_ground": True,
+        "alive": True, "ready": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    calls = []
+
+    class ShotBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hits = [{"seq": 1, "type": "hurt", "source": "arrow"}]
+                return {"events": [e for e in hits if e["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 2}]}
+            calls.append((action, kwargs.get("timeout_s")))
+            if action == "dig":
+                clock[0] += min(kwargs.get("timeout_s", 8.0), 6.94)
+                if died_while_digging:
+                    status.update(pos=[7790.5, 66.1, 2771.5], health=20, last_death={"t": 2})
+                raise httpx.ReadTimeout("cover dig stalled")
+            assert action == "stop"
+            return {"ok": True}
+
+    def dig_cover(scoped):
+        scoped.bot.call("dig", {"pos": [7822, 66, 2774]}, timeout_s=8.0)
+
+    def retreat(*_args, **_kwargs):
+        assert calls[-1] == ("stop", 1.5)
+        calls.append(("retreat", None))
+        return {"ok": True, "mode": "flee"}
+
+    monkeypatch.setattr(MacroSkills, "dig_cover_pocket", dig_cover)
+    bot = ShotBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(bot))
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    incident = guard.poll()
+
+    cover, *other_actions = incident["actions"]
+    assert cover["result"]["reason"] == "time_budget"
+    assert cover["result"].get("respawned", False) is died_while_digging
+    assert [a["action"] for a in other_actions] == ([] if died_while_digging else ["combat_or_flee"])
+    assert calls[:2] == [("dig", 3.5), ("stop", 1.5)]
+
+
 def test_escape_lava_does_not_trust_in_water_false_and_nether_skips_water_bucket(monkeypatch):
     """Reproduces hy4_hy_7_village: escape_water() lied ok=True in lava, looping 11 ticks to death."""
     from mc_agent.skills.safety import SafetyEmergency, check_and_stabilize
