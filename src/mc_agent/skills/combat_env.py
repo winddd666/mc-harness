@@ -1533,13 +1533,28 @@ class CombatEnv:
                     ):
                         # Allow a jump that cleared the lava to settle before trying another placement.
                         checked_bridge_landing = True
-                        time.sleep(0.1)
-                        remaining = bridge_deadline - time.monotonic()
-                        if remaining > 0:
+                        landing_deadline = min(bridge_deadline, time.monotonic() + 0.35)
+                        for sample in range(2):
+                            if sample:
+                                # Wait again only while the hitbox is over the side bridge.
+                                p_landing = st.get("pos")
+                                if (
+                                    not side_step or st.get("in_lava") or not _landing_unconfirmed(st)
+                                    or _did_respawn_during_lava(st) or not p_landing
+                                    or p_landing[1] < place_pos[1] + 0.95
+                                    or _hitbox_columns(p_landing[0], p_landing[2]) != [(place_pos[0], place_pos[2])]
+                                ):
+                                    break
+                            if landing_deadline - time.monotonic() <= 0.1:
+                                break
+                            time.sleep(0.1)
+                            remaining = landing_deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
                             try:
                                 st = self.bot.call("status", method="GET", timeout_s=min(0.25, remaining), allow_reauth=False)
                             except (ApiError, httpx.HTTPError):
-                                pass
+                                break
                     if _should_exit_lava(st):
                         if side_step and st.get("on_ground") is True and not _did_respawn_during_lava(st):
                             # Sprint momentum can carry the bot off a one-block landing.
