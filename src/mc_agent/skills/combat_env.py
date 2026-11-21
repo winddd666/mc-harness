@@ -2783,8 +2783,9 @@ class SubcorticalInstinctController:
         except Exception:
             inv0 = {}
         counts, has_shield, held_name = env._inventory_counts_and_shield(inv0)
+        equipped_gear = []
         if isinstance(inv0, dict) and (isinstance(inv0.get("armor"), dict) or "offhand" in inv0):
-            auto_equip_survival_gear(env.bot, inv0, allow_armor=True, allow_shield=has_shield)
+            equipped_gear = auto_equip_survival_gear(env.bot, inv0, allow_armor=True, allow_shield=has_shield)
 
         hostiles = self._find_live_hostiles(env, radius=16)
         nh = st.get("nearest_hostile") if isinstance(st.get("nearest_hostile"), dict) else None
@@ -2842,7 +2843,8 @@ class SubcorticalInstinctController:
             not in_water
             and has_shield
             and not st.get("blocking")
-            and trigger.get("source") in {"pre_hurt_ranged", "pre_hurt_melee", "pre_hurt_creeper"}
+            and not (any_creeper_close or creeper_warning)
+            and trigger.get("source") in {"pre_hurt_ranged", "pre_hurt_melee"}
         ):
             if mob_id is not None:
                 try:
@@ -2867,9 +2869,18 @@ class SubcorticalInstinctController:
         # 1) Creeper emergency: NEVER melee in blast radius — shield & retreat / seal shaft
         elif any_creeper_close or creeper_warning:
             mode = "creeper_evade"
-            self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
             creeper_ent = primary
             c_pos = mob_pos
+            if has_shield:
+                offhand = inv0.get("offhand") if isinstance(inv0, dict) else None
+                offhand_name = _clean_block_name(offhand.get("name")) if isinstance(offhand, dict) else ""
+                if offhand_name != "shield" and counts.get("shield", 0) > 0 and "equip:shield" not in equipped_gear:
+                    try:
+                        env.bot.call("equip", {"item": "shield", "slot": "off-hand"})
+                    except (ApiError, httpx.HTTPError):
+                        pass
+                raised = self._latch_shield_at_threat(env, mob_id)
+                actions.append({"action": "raise_shield_creeper", "ok": raised})
             snap = env.arena_snapshot(pos)
             sealed_ok = False
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
@@ -2887,17 +2898,6 @@ class SubcorticalInstinctController:
                     if post_creepers:
                         sealed_ok = False
             if not sealed_ok:
-                if has_shield:
-                    if isinstance(creeper_ent, dict) and creeper_ent.get("id") is not None:
-                        try:
-                            env.bot.call("look", {"entity_id": creeper_ent["id"]})
-                        except (ApiError, httpx.HTTPError):
-                            pass
-                    try:
-                        env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
-                        actions.append({"action": "raise_shield_creeper", "ok": True})
-                    except (ApiError, httpx.HTTPError):
-                        pass
                 flee_res = env.flee(
                     c_pos, distance=11.5, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
                     **({"initial_landing_checks": 5} if not has_shield and st.get("on_ground") is False else {}),

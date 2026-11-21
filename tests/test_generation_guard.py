@@ -6733,6 +6733,60 @@ def test_creeper_retreat_does_not_report_success_if_the_final_sample_is_dead(mon
     assert outcome["requires_replan"] and outcome["status_after"]["alive"] is False
 
 
+@pytest.mark.parametrize("shield_in_offhand", [True, False])
+def test_creeper_retreat_raises_shield_once_before_terrain_probe(monkeypatch, shield_in_offhand):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    creeper = {"id": 55, "name": "creeper", "pos": [4.3, 64.0, 0.5], "dist": 3.8}
+    status = {
+        "pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "ready": True, "alive": True,
+        "on_ground": True, "nearest_hostile": creeper,
+    }
+    calls = []
+
+    class CreekBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **_kwargs):
+            calls.append((action, body))
+            if action == "inventory":
+                return {
+                    "items": [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}],
+                    "offhand": {"name": "shield"} if shield_in_offhand else None,
+                    "held": {"name": "iron_pickaxe"},
+                }
+            if action == "get_entities":
+                return {"entities": [status["nearest_hostile"]] if status["nearest_hostile"] else []}
+            return {"ok": True}
+
+    env = CombatEnv(CreekBot())
+
+    def probe(_pos):
+        calls.append(("probe", None))
+        return {"enclosure": "open"}
+
+    def retreat(_pos, **_kwargs):
+        status.update(pos=[-6.5, 64.0, 0.5], nearest_hostile=None)
+        return {"ok": True, "moved_dist": 7.0}
+
+    monkeypatch.setattr(env, "arena_snapshot", probe)
+    monkeypatch.setattr(env, "flee", retreat)
+    result = SubcorticalInstinctController().on_encounter(env, {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": creeper["id"],
+        "primary_pos": creeper["pos"], "distance": 3.8,
+    })
+
+    shield_equip = [] if shield_in_offhand else [("equip", {"item": "shield", "slot": "off-hand"})]
+    assert [(action, body) for action, body in calls if action in {"equip", "look", "posture", "probe"}] == [
+        *shield_equip,
+        ("look", {"entity_id": creeper["id"]}),
+        ("posture", {"shield": True, "sneak": False, "jump": False}),
+        ("probe", None),
+    ]
+    assert result["mode"] == "creeper_evade"
+
+
 def test_melee_warning_faces_nearby_creeper_before_raising_shield(monkeypatch):
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
 
