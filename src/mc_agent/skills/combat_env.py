@@ -2649,6 +2649,9 @@ class CombatEnv:
         return {"ok": True, "near_lava": True, "sneak": sneaking, "sealed": sealed}
 
 
+SUBCORTICAL_COMBAT_BUDGET_S = 7.5
+
+
 class SubcorticalInstinctController:
     """Built-in 0-LLM aggressive instinct controller prior to teammate's full `combat.py` plug-in.
 
@@ -2763,7 +2766,7 @@ class SubcorticalInstinctController:
 
     def on_encounter(self, env: CombatEnv, trigger: ThreatTrigger) -> CombatOutcome:
         actions: list[dict[str, Any]] = []
-        deadline = time.monotonic() + 7.5
+        deadline = time.monotonic() + SUBCORTICAL_COMBAT_BUDGET_S
         st = env.bot.status()
         if bool(st.get("in_lava")):
             esc_lava = env.escape_lava()

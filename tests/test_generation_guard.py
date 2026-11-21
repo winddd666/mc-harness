@@ -901,6 +901,48 @@ def test_tool_preemption_skips_combat_when_life_is_unavailable(monkeypatch, life
     assert [event["type"] for event in events] == ["guardian.preempted_tool"]
 
 
+def test_poll_combat_reflex_bounds_stalled_attack_and_releases_controls(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    zombie = {"id": 42, "name": "zombie", "pos": [2.5, 64.0, 0.5], "dist": 2.0}
+    status = {
+        "pos": [0.5, 64.0, 0.5], "health": 14, "food": 20, "on_ground": True,
+        "alive": True, "ready": True, "nearest_hostile": zombie,
+    }
+    calls = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            calls.append((action, kwargs.get("timeout_s")))
+            if action == "attack":
+                clock[0] += min(12.0, kwargs["timeout_s"])
+                raise httpx.ReadTimeout("combat request stalled")
+            return {"ok": True}
+
+    class StalledAttack:
+        def on_encounter(self, env, trigger):
+            assert trigger["source"] == "pre_hurt_melee"
+            env.bot.call("attack", {"entity_id": 42}, timeout_s=20.0)
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.combat_slot.register(StalledAttack())
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+    incident = guard.poll()
+
+    combat, = incident["actions"]
+    assert combat["ok"] is False
+    assert combat["result"]["reason"] == "time_budget"
+    assert incident["requires_replan"] is True
+    assert ("attack", 7.5) in calls
+    assert [a for a, _ in calls[-3:]] == ["stop", "control", "posture"]
+
+
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
     """Reproduces glm_glm_3_village / hy4_hy_8_nether: ReadTimeout in subcortical_combat must /stop & not crash run."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
