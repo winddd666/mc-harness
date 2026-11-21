@@ -1378,31 +1378,39 @@ class CombatEnv:
                 return _lava_result(st)
 
         # 4. Last resort: carve a 2-high notch out of an adjacent solid bank and leap onto it
-        p_cur = st.get("pos") or pos0
-        bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
         for dname, (dx, dz) in CARDINAL_VECTORS.items():
             if time.monotonic() >= lava_deadline:
                 break
+            p_cur = st.get("pos") or pos0
+            bx, by, bz = math.floor(float(p_cur[0])), math.floor(float(p_cur[1]) + 0.05), math.floor(float(p_cur[2]))
             ex, ez = bx + dx, bz + dz
             if not self._point_allowed(ex + 0.5, ez + 0.5, action="escape_lava"):
                 continue
-            b_foot = self._get_block_name(ex, by, ez)
-            b_head = self._get_block_name(ex, by + 1, ez)
-            b_top = self._get_block_name(ex, by + 2, ez)
-            if b_foot in {"lava", "flowing_lava", "bedrock"} or b_head in {"lava", "flowing_lava", "bedrock"}:
+            foot = self._get_block_name(ex, by, ez, strict=True)
+            if not foot or foot in HAZARD_BLOCK_TYPES:
                 continue
-            dug_any = False
-            for cy in (by + 1, by + 2):
-                bn = self._get_block_name(ex, cy, ez)
-                if not _is_passable(bn) and bn not in {"lava", "flowing_lava", "water", "flowing_water", "bedrock"}:
+            floor_y = by if _is_solid_ground(foot) else by - 1
+            floor = self._get_block_name(ex, floor_y, ez, strict=True)
+            if not floor or not _is_solid_ground(floor) or floor in HAZARD_BLOCK_TYPES:
+                continue
+            clearance = (floor_y + 1, floor_y + 2)
+            blocks = [self._get_block_name(ex, cy, ez, strict=True) for cy in clearance]
+            if any(not block or block in HAZARD_BLOCK_TYPES or block == "bedrock" for block in blocks):
+                continue
+            for cy, block in zip(clearance, blocks):
+                if not _is_passable(block):
                     try:
                         self.bot.call("dig", {"pos": [ex, cy, ez], "collect": False, "stop_on": ["death"]})
-                        dug_any = True
                     except (ApiError, httpx.HTTPError) as err:
                         if isinstance(err, httpx.HTTPError):
                             self._best_effort_stop()
                         break
-            if dug_any or (_is_passable(b_head) and _is_passable(b_top)):
+            self.invalidate_block_cache()
+            floor = self._get_block_name(ex, floor_y, ez, strict=True)
+            if (
+                floor and _is_solid_ground(floor) and floor not in HAZARD_BLOCK_TYPES
+                and all(_is_passable(self._get_block_name(ex, cy, ez, strict=True)) for cy in clearance)
+            ):
                 yaw_out = math.atan2(-(ex + 0.5 - float(p_cur[0])), -(ez + 0.5 - float(p_cur[2])))
                 try:
                     self.bot.call("look", {"yaw": yaw_out, "pitch": 0.0})

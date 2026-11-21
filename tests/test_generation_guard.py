@@ -2973,6 +2973,47 @@ def test_deep_lava_keeps_swimming_up_while_the_head_is_submerged():
     assert result["ok"] is True and result["in_lava"] is False
 
 
+@pytest.mark.parametrize("bank", ["unsupported", "still_blocked", "clear_after_dig"])
+def test_lava_notch_checks_bank_support_and_actual_clearance(bank):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [0.5, 64.3, 0.5], "dimension": "the_nether", "health": 12,
+        "in_lava": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    blocks = {(0, 64, 0): "lava"}
+    if bank != "unsupported":
+        blocks.update({(0, 64, -1): "netherrack", (0, 65, -1): "netherrack"})
+    digs = []
+
+    class LavaBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_block":
+                return {"name": blocks.get(tuple(body["pos"]), "air")}
+            if action == "dig":
+                pos = tuple(body["pos"])
+                digs.append(pos)
+                if bank == "clear_after_dig":
+                    blocks.pop(pos)
+            if action == "control" and body.get("forward") and digs and bank == "clear_after_dig":
+                status.update(pos=[0.5, 65, -0.5], in_lava=False, on_ground=True)
+            return {"ok": True}
+
+    escaped = CombatEnv(LavaBot()).escape_lava()
+
+    assert escaped["ok"] is (bank == "clear_after_dig")
+    assert ("lava_notch_north" in escaped["actions"]) is (bank == "clear_after_dig")
+    assert digs == ([] if bank == "unsupported" else [(0, 65, -1)])
+    assert not any(a.startswith("lava_notch_") for a in escaped["actions"] if a != "lava_notch_north")
+
+
 def test_r19_lava_pit_places_netherrack_filler_before_second_sprint(monkeypatch):
     """Reproduces r19_short hy4_hy_8_nether: boxed Nether pit must try netherrack bridge right after first sprint instead of starving."""
     from mc_agent.skills.combat_env import CombatEnv
