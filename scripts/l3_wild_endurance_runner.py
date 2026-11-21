@@ -1811,9 +1811,9 @@ STRONGHOLD_FOCUS = (
         "task": (
             "从村庄出发寻找并进入天然主世界要塞。背包有 14 颗末影之眼。先在开阔处调用 "
             "mc_use_item(item='ender_eye')。把回执的 scout_direction 原样传给斥候工具。"
-            "若只能读 eye_vector=[dx,dz]，正 X 向东、负 X 向西、正 Z 向南、负 Z 向北。"
-            "若回执没有 eye_vector 或 projectile 指向其他实体，立即用 mc_get_entities(types=['eye_of_ender'], radius=32)，"
-            "把眼的位置减去你的位置得到方向。"
+            "缺少 scout_direction 时，立即用 mc_get_entities(types=['eye_of_ender'], radius=32)，"
+            "把眼的位置减去你的位置。正 X 向东、负 X 向西、正 Z 向南、负 Z 向北。"
+            "[0,0] 表示方向未测出。等眼飞开再查一次，仍无方向且眼多于 12 颗时才补投一次。"
             "沿眼指向用 mc_skill_scout_surface(direction=方向, target_types=['end_portal_frame'], "
             "step_dist=30, max_duration_s=45) 分段推进。用 mc_skill_collect_drops 回收附近落下的眼。"
             "沿同一方向继续走，至少离上次投掷点 100 格再复测。只剩 12 颗时优先用现有方向和方块线索定位。"
