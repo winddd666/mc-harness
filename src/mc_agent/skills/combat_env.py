@@ -383,6 +383,7 @@ class CombatEnv:
         self._block_cache: dict[tuple[int, int, int], tuple[str | None, float]] = {}
         self._hazard_cache: tuple[tuple[int, int, int], int, float, list[dict[str, Any]]] | None = None
         self._stalled_lava_shore: tuple[tuple[float, ...], tuple[float, ...], float] | None = None
+        self._stalled_lava_swim: tuple[tuple[float, ...], float, str, float] | None = None
         self._stalled_water_shore: tuple[tuple[float, ...], tuple[float, ...], tuple[Any, Any], float] | None = None
         self._stalled_lava_notch: dict[tuple[str, tuple[int, int, int], str, str | None], float] = {}
 
@@ -656,6 +657,17 @@ class CombatEnv:
             "cornered": True,
             "candidates": candidates,
         }
+
+    def lava_above_headroom(self, pos: Sequence[float], target: Sequence[int]) -> bool:
+        """Check whether removing a block above the bot would expose its column to lava."""
+        x, y, z = pos[:3]
+        tx, ty, tz = target[:3]
+        feet_y = math.floor(y + 0.05)
+        return (
+            ty in {feet_y + 1, feet_y + 2}
+            and (tx, tz) in _hitbox_columns(x, z)
+            and _is_lava_block(self._get_block_name(tx, ty + 1, tz, strict=True))
+        )
 
     def can_remove_footing(self, pos: Sequence[float], target: Sequence[int]) -> bool:
         """Allow ordinary digs and check the landing for a dig through the current floor."""
@@ -1194,6 +1206,7 @@ class CombatEnv:
             if not rim_lava_active:
                 if not _landing_unconfirmed(st):
                     self._stalled_lava_shore = None
+                    self._stalled_lava_swim = None
                 unconfirmed = _landing_unconfirmed(st)
                 return {
                     "ok": not unconfirmed,
@@ -1279,6 +1292,7 @@ class CombatEnv:
             respawned = _did_respawn_during_lava(st_now)
             if respawned or (not still_in_lava and not _landing_unconfirmed(st_now)):
                 self._stalled_lava_shore = None
+                self._stalled_lava_swim = None
             airborne_over_lava = (
                 (not respawned)
                 and (not still_in_lava)
@@ -1343,6 +1357,7 @@ class CombatEnv:
         py = math.floor(float(pos0[1]) + 0.05)
         lava_shore_target: list[float] | None = None
         filler = self._pick_filler_block(counts)
+        blind_swim = False
         defer_blind_swim = False
         if not tried_yaws and time.monotonic() < lava_deadline:
             # Wide lava lake: filter shore types by dimension to keep find_blocks fast (<1s).
@@ -1394,11 +1409,28 @@ class CombatEnv:
                             break
                     if best_shore_yaw is not None:
                         break
-                tried_yaws = [best_shore_yaw] if best_shore_yaw is not None else [base_yaw]
+                blind_swim = best_shore_yaw is None
+                tried_yaws = [base_yaw if blind_swim else best_shore_yaw]
+                stalled_swim = self._stalled_lava_swim
+                if blind_swim and stalled_swim is not None:
+                    stalled_pos, stalled_yaw, stalled_dim, stalled_at = stalled_swim
+                    if (
+                        stalled_dim == dim0 and time.monotonic() - stalled_at < 15.0
+                        and math.dist(pos0[:3], stalled_pos) <= 1.25
+                        and abs(math.remainder(base_yaw - stalled_yaw, math.tau)) <= math.radians(15)
+                    ):
+                        tried_yaws = []
+                        for offset in (math.pi / 2, -math.pi / 2, math.pi):
+                            candidate = base_yaw + offset
+                            ux, uz = yaw_to_unit_xz(candidate)
+                            if self._point_allowed(pos0[0] + ux * 2.8, pos0[2] + uz * 2.8, action="escape_lava"):
+                                tried_yaws.append(candidate)
+                                break
+                        actions.append("lava_swim_heading_stalled")
                 health_after_ascent = st.get("health")
                 # At critical health, reserve time for usable blocks before following an unverified yaw.
                 defer_blind_swim = (
-                    best_shore_yaw is None and filler is not None
+                    blind_swim and bool(tried_yaws) and filler is not None
                     and isinstance(health_after_ascent, (int, float)) and health_after_ascent < 10.0
                 )
 
@@ -1406,16 +1438,25 @@ class CombatEnv:
 
         def _run_jump_sprint(cyaw: float) -> bool:
             nonlocal st
+            swim_start = st.get("pos") or pos0
+            completed = False
             try:
                 self.bot.call("look", {"yaw": cyaw, "pitch": 0.0}, timeout_s=0.6, allow_reauth=False)
                 jump_in_lava(swim_ms, advance=True)
+                completed = True
                 actions.append("lava_jump_sprint")
             except (ApiError, httpx.HTTPError) as err:
                 if isinstance(err, httpx.HTTPError):
                     actions.append("lava_jump_sprint_timeout")
                     self._best_effort_stop(timeout_s=0.5)
             self.invalidate_block_cache()
-            st = self._safe_status(st)
+            observed = self._safe_status()
+            if observed:
+                st = observed
+                if blind_swim and completed and st.get("in_lava") and st.get("pos") and not _did_respawn_during_lava(st):
+                    end = st["pos"]
+                    advanced = math.hypot(end[0] - swim_start[0], end[2] - swim_start[2]) >= 0.35
+                    self._stalled_lava_swim = None if advanced else (tuple(end[:3]), cyaw, dim0, time.monotonic())
             return _should_exit_lava(st)
 
         if tried_yaws and not defer_blind_swim and time.monotonic() < lava_deadline:
