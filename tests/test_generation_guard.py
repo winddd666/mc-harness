@@ -8234,7 +8234,9 @@ def test_explicit_flee_checks_support_before_each_motion(action, solid_exit, dim
         assert movements == []
 
 
-@pytest.mark.parametrize("cover", ["safe", "exposed", "fresh_hit"])
+@pytest.mark.parametrize(
+    "cover", ["safe", "exposed", "fresh_hit", "burning_after_hit", "burning_old_hit"],
+)
 def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, cover):
     from mc_agent.skills.combat_env import CombatEnv
 
@@ -8246,6 +8248,8 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
         "pos": [0.5, 64, 0.5], "dimension": "the_nether", "health": 8.3,
         "ready": True, "alive": True, "on_ground": True, "nearest_hostile": blaze,
     }
+    if cover.startswith("burning_"):
+        status.update(health=2.3, on_fire=True)
     checks = []
 
     class FortressBot:
@@ -8258,10 +8262,10 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
                 return {"entities": [blaze, second]}
             raise AssertionError(action)
 
-    def seek_cover(_env, pos, *, other_shooters):
+    def seek_cover(_env, pos, *, other_shooters, allow_stationary=True):
         checks.append("cover")
         assert pos == blaze["pos"] and other_shooters == [second["pos"]]
-        if cover == "safe":
+        if cover != "exposed" and allow_stationary:
             return {"ok": True, "mode": "natural_cover", "moved_dist": 0.0, "pos_after": status["pos"]}
         return None
 
@@ -8277,13 +8281,23 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
     guard._mark_ranged_engagement(987.0, attacker=blaze, in_cover=True)
     if cover == "fresh_hit":
         guard._last_ranged_hurt_at = 999.0
+    if cover == "burning_after_hit":
+        guard._last_ranged_hurt_at = 991.0
+    if cover == "burning_old_hit":
+        guard._last_ranged_hurt_at = 987.0
     result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
         bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
     )))
 
     assert result["requires_replan"]
-    assert result["mode"] == ("natural_cover" if cover == "safe" else "flee")
-    assert checks == {"safe": ["cover"], "exposed": ["cover", "flee"], "fresh_hit": ["flee"]}[cover]
+    assert result["mode"] == ("natural_cover" if cover in {"safe", "burning_old_hit"} else "flee")
+    assert checks == {
+        "safe": ["cover"],
+        "exposed": ["cover", "flee"],
+        "fresh_hit": ["flee"],
+        "burning_after_hit": ["cover", "flee"],
+        "burning_old_hit": ["cover"],
+    }[cover]
 
 
 @pytest.mark.parametrize("entry", ["poll", "boundary"])

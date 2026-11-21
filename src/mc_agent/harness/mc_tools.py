@@ -174,8 +174,9 @@ class McToolset:
         self._last_dimension: str = "overworld"
         self._last_biome: str = ""
         self._entity_observations: dict[int, dict[str, Any]] = {}
-        self._entity_observed_mono: float = 0.0
+        self._entity_observed_mono: float | None = None
         self._entity_observed_dimension: str = "overworld"
+        self._status_hostile_id: int | None = None
         self._geofence_blocked_count: int = 0
         self._path_not_found_targets: list[tuple[float, float]] = []
         self._empty_max_scans: dict[tuple[str, tuple[str, ...]], tuple[int, tuple[float, float] | None]] = {}
@@ -335,7 +336,10 @@ class McToolset:
 
     def _update_status_cache(self, st: dict[str, Any]) -> None:
         pos = st.get("pos")
+        hostile = st.get("nearest_hostile")
+        hostile_id = hostile.get("id") if isinstance(hostile, dict) else None
         with self._state_lock:
+            self._status_hostile_id = hostile_id if type(hostile_id) is int else None
             self._in_water = bool(st.get("in_water") or st.get("submerged"))
             if st.get("dimension"):
                 self._last_dimension = normalize_dimension(st.get("dimension"))
@@ -967,9 +971,10 @@ class McToolset:
             ents = (res_ent or {}).get("entities") or []
             dim_ent, pos_ent, _ = self._cached_env(fetch_if_missing=False)
             if isinstance(parsed, dict) and parsed.get("ok") is True:
-                self._entity_observations = {int(ent["id"]): ent for ent in ents if isinstance(ent, dict) and isinstance(ent.get("id"), int)}
-                self._entity_observed_mono = time.monotonic()
-                self._entity_observed_dimension = dim_ent
+                with self._state_lock:
+                    self._entity_observations = {int(ent["id"]): ent for ent in ents if isinstance(ent, dict) and isinstance(ent.get("id"), int)}
+                    self._entity_observed_mono = time.monotonic()
+                    self._entity_observed_dimension = dim_ent
             if ents:
                 self.world_memory.observe_entities(ents, dim=dim_ent)
             elif types and isinstance(res_ent, dict) and pos_ent is not None:
@@ -2012,19 +2017,29 @@ class McToolset:
         interval_ms: int | None = None,
         timeout_ms: int = 20000,
     ) -> str:
-        seen = self._entity_observations.get(entity_id)
-        if (seen is not None and time.monotonic() - self._entity_observed_mono <= 3.0
-                and self._entity_observed_dimension == self._last_dimension
-                and isinstance(seen.get("dist"), (int, float)) and seen["dist"] > 32.0):
+        with self._state_lock:
+            seen = self._entity_observations.get(entity_id)
+            seen_at = self._entity_observed_mono
+            observed_context = seen_at is not None or self._status_hostile_id == entity_id
+            current_dimension = self._entity_observed_dimension == self._last_dimension
+        distance = seen.get("dist") if seen is not None else None
+        if observed_context and (
+            seen_at is None or time.monotonic() - seen_at > 3.0 or not current_dimension
+            or not isinstance(distance, (int, float)) or distance > 32.0
+        ):
             try:
                 live = self.bot.call("get_entities", {"radius": 64}, timeout_s=2.0).get("entities") or []
                 target = next((ent for ent in live if isinstance(ent, dict) and ent.get("id") == entity_id), None)
                 if target is None or (isinstance(target.get("dist"), (int, float)) and target["dist"] > 32.0):
+                    message = (
+                        "目标仍超出近战追击范围。请确认安全路线并靠近，或换附近目标。"
+                        if target else f"实体 {entity_id} 已不可见。请重新调 mc_get_entities 获取最新 id 和位置。"
+                    )
                     return json.dumps({
                         "ok": False, "requires_replan": True,
                         "error": {"code": "target_out_of_reach" if target else "target_not_visible", "entity_id": entity_id,
                                   "dist": target.get("dist") if target else None,
-                                  "message": "目标已超出近战追击范围或不再可见；请放弃空挥，先确认安全路线并靠近目标，或选择附近目标。"},
+                                  "message": message},
                     }, ensure_ascii=False)
             except (ApiError, httpx.HTTPError):
                 pass
@@ -2048,7 +2063,7 @@ class McToolset:
             payload["max_hits"] = max(1, min(100, int(max_hits)))
         if interval_ms is not None:
             payload["interval_ms"] = max(50, min(5000, int(interval_ms)))
-        raw = self._call_json("attack", payload)
+        raw = self._annotate_stale_entity(self._call_json("attack", payload), entity_id)
         try:
             parsed = json.loads(raw)
         except ValueError:

@@ -4310,18 +4310,33 @@ def test_place_failure_has_specific_recovery_without_world_mutation(code, word) 
     assert word in result["error"]["recovery_hint"]
 
 
-@pytest.mark.parametrize("live_distance,attack_expected", [(45.0, False), (None, False), (2.0, True)])
-def test_attack_rechecks_observed_distant_target_before_chasing(live_distance, attack_expected) -> None:
+@pytest.mark.parametrize("observed_distance,age,live_distance,expected_error", [
+    (45.0, 0.0, 45.0, "target_out_of_reach"),
+    (45.0, 0.0, None, "target_not_visible"),
+    (45.0, 0.0, 2.0, None),
+    (2.0, 24.5, None, "target_not_visible"),
+    (2.0, 19.6, 2.0, None),
+    (None, 4.7, None, "target_not_visible"),
+])
+def test_attack_rechecks_stale_or_distant_targets(monkeypatch, observed_distance, age, live_distance, expected_error) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     calls = []
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
         calls.append(path)
         if path == "get_entities":
-            dist = 45.0 if calls.count(path) == 1 else live_distance
+            if json.loads(request.content)["radius"] == 28:
+                return httpx.Response(200, json={"ok": True, "result": {"entities": []}})
+            dist = observed_distance if observed_distance is not None and calls.count(path) == 1 else live_distance
             result = {"entities": [] if dist is None else [{"id": 77, "name": "glow_squid", "type": "animal", "dist": dist, "pos": [0.5, 64, dist]}]}
+        elif path == "status":
+            result = {"pos": [0.5, 64, 0.5], "nearest_hostile": {"id": 77, "name": "creeper", "dist": 2.7}}
+        elif path == "get_block":
+            result = {"name": "stone"}
         elif path == "inventory":
             result = {"items": []}
         elif path == "attack":
@@ -4332,14 +4347,33 @@ def test_attack_rechecks_observed_distant_target_before_chasing(live_distance, a
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         tools = McToolset(bot)
-        assert json.loads(tools.mc_get_entities(radius=64))["ok"] is True
+        initial = tools.mc_get_entities(radius=64) if observed_distance is not None else tools.mc_status()
+        assert json.loads(initial)["ok"] is True
+        clock[0] += age
         result = json.loads(tools.mc_attack(entity_id=77))
-    assert ("attack" in calls) is attack_expected
-    assert result["ok"] is attack_expected
+    assert ("attack" in calls) is (expected_error is None)
+    assert result["ok"] is (expected_error is None)
     assert calls.count("get_entities") == 2
-    if not attack_expected:
+    if expected_error is not None:
         assert "inventory" not in calls
-        assert result["error"]["code"] in {"target_out_of_reach", "target_not_visible"}
+        assert result["requires_replan"] is True
+        assert result["error"]["code"] == expected_error
+
+
+def test_attack_disappearing_entity_reuses_the_stale_id_hint() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handle(request):
+        if request.url.path.endswith("/inventory"):
+            return httpx.Response(200, json={"ok": True, "result": {"items": []}})
+        assert request.url.path.endswith("/attack")
+        return httpx.Response(200, json={"ok": False, "error": {"code": "no_such_entity", "message": "gone"}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = json.loads(McToolset(bot).mc_attack(entity_id=77))
+    assert result["ok"] is False
+    assert result["requires_replan"] is True
+    assert "mc_get_entities" in result["error"]["message"]
 
 
 @pytest.mark.parametrize("filler", ["stone", "netherrack", "tuff"])

@@ -2345,13 +2345,22 @@ class GenerationGuard:
             ranged = name in RANGED_MOBS
             if not name or distance > (16.0 if ranged else 6.0):
                 return None
+            health = status.get("health")
             if (
                 allow_cover and ranged and "nether" in str(status.get("dimension") or "").lower()
                 and now < self._ranged_cover_active_until
                 and now - max(self._last_ranged_hurt_at, self._last_melee_hurt_at) >= 4.0
                 and status.get("on_ground") is True and status.get("pos")
             ):
-                cover = self._recheck_cover_after_blocked_flee(status["pos"], entity_id, min(now + 1.25, deadline))
+                burning_after_ranged_hit = (
+                    status.get("on_fire")
+                    and isinstance(health, (int, float)) and health <= LOW_HP_BUNKER_MAX
+                    and now - self._last_ranged_hurt_at < self.NETHER_BURN_EAT_DEFER_S
+                )
+                cover = self._recheck_cover_after_blocked_flee(
+                    status["pos"], entity_id, min(now + 1.25, deadline),
+                    allow_stationary=not burning_after_ranged_hit,
+                )
                 if cover and (cover.get("ok") or cover.get("respawned")):
                     return {**cover, "requires_replan": True, "pos_before": status["pos"]}
             if threat_pos is None:
@@ -2364,7 +2373,6 @@ class GenerationGuard:
             )
             result = recovery.get("result")
             if recovery.get("ok") and isinstance(result, dict):
-                health = status.get("health")
                 if (
                     ranged and entity_id is not None and status.get("blocking")
                     and isinstance(health, (int, float)) and health <= LOW_HP_BUNKER_MAX
@@ -2389,7 +2397,7 @@ class GenerationGuard:
             return None
 
     def _recheck_cover_after_blocked_flee(
-        self, pos: list[float], target_id: int | None, deadline: float,
+        self, pos: list[float], target_id: int | None, deadline: float, *, allow_stationary: bool,
     ) -> dict[str, Any] | None:
         bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
         try:
@@ -2401,7 +2409,9 @@ class GenerationGuard:
             others = [point for entity_id, point in shooters if entity_id != target_id]
             cover = self._action(
                 "unsafe_exit_cover",
-                lambda: CombatEnv(bot, geofence=self.geofence).seek_natural_cover(target, other_shooters=others),
+                lambda: CombatEnv(bot, geofence=self.geofence).seek_natural_cover(
+                    target, other_shooters=others, allow_stationary=allow_stationary,
+                ),
             )
             return cover.get("result")
         except _RecoveryBudgetExceeded:
