@@ -2224,9 +2224,11 @@ class CombatEnv:
                 pass
         if (
             shore_target is not None and not still_wet and st_end.get("on_ground") is False
-            and not st_end.get("in_lava") and math.dist(pos_end[:3], shore_target) <= 0.6
+            and not st_end.get("in_lava")
+            and math.hypot(pos_end[0] - shore_target[0], pos_end[2] - shore_target[2]) <= 0.6
+            and -0.6 <= pos_end[1] - shore_target[1] <= 1.25
         ):
-            # The landing move can finish inside its goal radius one physics tick before contact.
+            # A shore hop can end above the bank before the feet reach it.
             time.sleep(0.1)
             try:
                 st_end = self.bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)

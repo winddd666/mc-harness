@@ -6221,7 +6221,7 @@ def test_water_boundary_avoids_a_shore_path_that_crosses_a_creeper(monkeypatch):
     assert note is not None and "登岸" in note
 
 
-@pytest.mark.parametrize("landing", ["grounded", "airborne", "in_water", "settled", "respawned"])
+@pytest.mark.parametrize("landing", ["grounded", "airborne", "in_water", "settled", "settled_above", "respawned"])
 def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
     from mc_agent.skills.combat_env import CombatEnv
 
@@ -6239,8 +6239,8 @@ def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
             if action == "status":
                 landing_reads.append(kwargs["timeout_s"])
                 assert kwargs["allow_reauth"] is False
-                if landing == "settled":
-                    status.update(on_ground=True)
+                if landing in {"settled", "settled_above"}:
+                    status.update(on_ground=True, pos=[10938.5, 64.0, -11007.5])
                 elif landing == "respawned":
                     status.update(on_ground=True, last_death={"t": 1})
                 return self.status()
@@ -6260,6 +6260,8 @@ def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
                         status.update(pos=[10938.5, 64.0, -11007.5], on_ground=True)
                     elif landing in {"settled", "respawned"}:
                         status.update(pos=[10938.5, 64.0, -11007.7])
+                    elif landing == "settled_above":
+                        status.update(pos=[10938.4, 64.9, -11007.5])
                     elif landing == "in_water":
                         status.update(pos=[10937.7, 63.0, -11007.3], in_water=True)
             return {"ok": True}
@@ -6271,10 +6273,10 @@ def test_shore_escape_confirms_landing_after_airborne_edge_receipt(landing):
     assert moves[1]["timeout"] < moves[0]["timeout"]
     assert moves[1]["stop_on"] == ["death"]
     assert tuple(moves[1][axis] for axis in ("x", "y", "z")) == (10938.5, 64.0, -11007.5)
-    assert result["ok"] is (landing in {"grounded", "settled"})
+    assert result["ok"] is (landing in {"grounded", "settled", "settled_above"})
     assert result["in_water"] is (landing == "in_water")
     assert posture[-1]["jump"] is (landing == "in_water")
-    assert landing_reads == ([0.25] if landing in {"settled", "respawned"} else [])
+    assert landing_reads == ([0.25] if landing in {"settled", "settled_above", "respawned"} else [])
     if landing == "respawned":
         assert result["mode"] == "respawned"
 
