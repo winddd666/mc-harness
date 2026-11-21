@@ -387,9 +387,11 @@ class GenerationGuard:
         *,
         budget_s: float,
         timeout_details: dict[str, Any] | None = None,
+        confirm_shore: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
-        recovery_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + budget_s)
+        deadline = time.monotonic() + budget_s
+        recovery_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
         if isinstance(skills, MacroSkills):
             # Keep the shared avoidance records while leaving the tool runner's session binding intact.
             skills = copy(skills)
@@ -399,6 +401,16 @@ class GenerationGuard:
             if not result.get("ok") and (result.get("mode") != "flee" or result.get("respawned")):
                 return result
             after = recovery_bot.status()
+            if (
+                confirm_shore and after.get("on_ground") is False and not after.get("in_water")
+                and not after.get("in_lava") and after.get("alive") is not False and after.get("ready") is not False
+                and deadline - time.monotonic() >= 0.35
+            ):
+                time.sleep(0.1)
+                try:
+                    after = recovery_bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget", "partial": True, **(timeout_details or {})}
@@ -411,6 +423,11 @@ class GenerationGuard:
             return {**result, "ok": False, "respawned": True}
         if after.get("ready") is False:
             return {**result, "ok": False, "reason": "not_ready"}
+        if confirm_shore and (after.get("on_ground") is False or after.get("in_water") or after.get("in_lava")):
+            return {
+                **result, "ok": False, "reason": "shore_landing_unconfirmed", "pos_after": end,
+                "in_water": bool(after.get("in_water")), "in_lava": bool(after.get("in_lava")),
+            }
         if result.get("mode") == "flee" and after.get("in_lava"):
             return {**result, "ok": False, "reason": "retreat_into_lava", "pos_after": after.get("pos") or end}
         return result
@@ -420,6 +437,7 @@ class GenerationGuard:
             before, lambda skills: skills.escape_water(),
             budget_s=self.WATER_ESCAPE_BUDGET_S if budget_s is None else budget_s,
             timeout_details={"in_water": True},
+            confirm_shore=True,
         )
 
     def _swimming_at_low_health(self, status: dict[str, Any]) -> bool:

@@ -85,8 +85,9 @@ def test_guard_ignores_old_damage_and_keeps_water_and_respawn_semantics(mode, mo
         action = request.url.path.rsplit("/", 1)[-1]
         body = json.loads(request.content) if request.content else {}
         if action == "status":
+            wet = mode == "water" and not escaped
             result = {"health": 20, "food": 20, "alive": True, "ready": True, "pos": [0.5, 64, 0.5],
-                      "in_water": mode == "water", "submerged": mode == "water", "on_ground": mode != "water",
+                      "in_water": wet, "submerged": wet, "on_ground": not wet,
                       "oxygen": 100, "blocking": mode == "water", "jumping": state["jumping"]}
         elif action == "events":
             result = {"last_seq": 51 if mode == "respawn" else 50, "events": (
@@ -348,7 +349,7 @@ def test_water_reflex_escapes_to_dry_land_instead_of_floating_in_place(monkeypat
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return {"pos": [0.5, 60.0, 0.5], "health": 8.0, "food": 20.0, "alive": True, "ready": True,
-                        "in_water": True, "submerged": True, "on_ground": False, "jumping": False}
+                        "in_water": not escaped, "submerged": not escaped, "on_ground": bool(escaped), "jumping": False}
             if action == "events":
                 return {"events": [], "last_seq": 0}
             if action == "inventory":
@@ -383,7 +384,7 @@ def test_hurt_while_standing_in_shallow_water_still_escapes(monkeypatch):
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return {"pos": [0.5, 16.0, 0.5], "health": 4.3, "food": 20.0, "alive": True, "ready": True,
-                        "in_water": True, "submerged": False, "on_ground": True, "jumping": False, "oxygen": 280}
+                        "in_water": not escaped, "submerged": False, "on_ground": True, "jumping": False, "oxygen": 280}
             if action == "events":
                 return {"events": [{"seq": 1, "type": "hurt", "health": 4.3, "source": "arrow"}], "last_seq": 1}
             if action == "inventory":
@@ -5871,6 +5872,54 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     assert shore["action"] == "boundary_escape_to_shore" and shore["ok"] is True
     assert all(start + timeout <= 1000.0 + budget_s for _, timeout, start in calls[:-1])
     assert skills.bot is bot
+
+
+@pytest.mark.parametrize("landing", ["grounded", "airborne", "wet_again"])
+def test_water_macro_checks_that_a_dry_jump_reaches_ground(monkeypatch, landing):
+    monkeypatch.setattr("mc_agent.harness.guardian.time.sleep", lambda _: None)
+    status = {
+        "pos": [9148.7, 63.4, -11301.5], "health": 20, "food": 20, "oxygen": 140,
+        "in_water": True, "on_ground": False, "ready": True, "alive": True,
+    }
+    rechecks = []
+    shore_calls = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if kwargs.get("timeout_s") == 0.25:
+                    rechecks.append(action)
+                    status.update(on_ground=landing == "grounded", in_water=landing == "wet_again")
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    class EscapeMacro:
+        def escape_water(self):
+            status.update(in_water=False, pos=[9149.7, 64.2, -11301.6])
+            return {"ok": True, "in_water": False, "pos_after": status["pos"]}
+
+    def reach_shore(*args, **kwargs):
+        shore_calls.append(dict(status))
+        return {"ok": False, "in_water": status["in_water"]}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=EscapeMacro())
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    incident = guard.poll()
+
+    assert rechecks == ["status"]
+    water = incident["actions"][0]
+    assert water["action"] == "escape_water"
+    assert water["ok"] is (landing == "grounded")
+    if landing == "grounded":
+        assert shore_calls == []
+    else:
+        assert water["result"]["reason"] == "shore_landing_unconfirmed"
+        assert water["result"]["in_water"] is (landing == "wet_again")
+        assert len(shore_calls) == 1
 
 
 @pytest.mark.parametrize("terrain", ["scan", "radial", "open_water"])
