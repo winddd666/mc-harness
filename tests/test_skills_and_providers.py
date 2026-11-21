@@ -2827,9 +2827,28 @@ def test_tracking_ender_eye_stops_before_wide_detour_after_first_hop(tracking) -
         assert result["final_pos"] == [28.5, 64, 0.5]
         assert result["stop_reason"] == "remeasure_after_detour"
         assert result["requires_replan"] is True
+        assert "needs_new_vantage" not in result
     else:
         assert len(backend.moves) == 5
         assert result["direction"] == "north"
+
+
+def test_tracking_ender_eye_requests_new_vantage_when_blocked_in_place() -> None:
+    backend = _SurfaceScoutBackend()
+
+    def handle(request):
+        if request.url.path.endswith("/get_block"):
+            return backend.ok({"name": "water"})
+        return backend.handle(request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = MacroSkills(bot).scout_surface(direction="southeast", track_ender_eye=True)
+
+    assert backend.moves == []
+    assert result["distance_traveled"] == 0
+    assert result["stop_reason"] == "remeasure_after_detour"
+    assert result["needs_new_vantage"] is True
+    assert "先换到" in result["error"]["message"]
 
 
 def test_tracking_ender_eye_stops_after_observed_backward_movement() -> None:

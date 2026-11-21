@@ -1608,6 +1608,7 @@ class MacroSkills:
         detour_reasons = SURFACE_SCOUT_PATH_ERRORS | terrain_blocks
         try:
             status = observe()
+            origin = result["final_pos"]
             dimension = normalize_dimension(status.get("dimension"))
             nether = dimension == "the_nether"
             nether_probe = None
@@ -1708,7 +1709,12 @@ class MacroSkills:
             result["requires_replan"] = True
             result.setdefault("error", {"code": reason})
         if reason == "remeasure_after_detour":
-            result["error"]["message"] = "追眼路线受阻或发生绕行。请在当前安全位置重新掷眼，再按新回执的方向继续。"
+            final = result["final_pos"]
+            if math.hypot(final[0] - origin[0], final[2] - origin[2]) < 1.0:
+                result["needs_new_vantage"] = True
+                result["error"]["message"] = "原测向点附近未能推进。请先换到可达的开阔干地并确认已离开原处，再重新掷眼。"
+            else:
+                result["error"]["message"] = "追眼路线受阻或发生绕行。请在当前安全位置重新掷眼，再按新回执的方向继续。"
         biome = str(result["biome"] or "").lower()
         if any(part in biome for part in ("ocean", "dark_forest", "jungle")):
             result["biome_hint"] = "当前群系不利于寻村，请改走朝向平原、草原或其他开阔干地的方向。"
