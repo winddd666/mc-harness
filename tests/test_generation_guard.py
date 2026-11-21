@@ -5217,6 +5217,46 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shoo
     assert use_items == [{"item": "cooked_beef"}]
 
 
+@pytest.mark.parametrize("position", ["failed_cover", "moved", "window_elapsed"])
+def test_recent_arrow_defers_eating_at_failed_cover_site(monkeypatch, position):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [-2945.7, -8, -10074.3], "dimension": "overworld", "health": 9.56, "food": 19,
+        "ready": True, "alive": True, "on_ground": True, "blocking": False, "nearest_hostile": None,
+    }
+    eats = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hit = {"seq": 1, "type": "hurt", "source": "arrow"}
+                return {"events": [] if kwargs["params"]["since"] else [hit]}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 1}]}
+            if action == "use_item":
+                eats.append(body)
+            return {"ok": True}
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._drain_events_pages()
+    guard._last_dig_cover_block = (-2946, -8, -10075)
+    guard._last_dig_cover_fail_at = clock[0]
+    if position == "moved":
+        status["pos"] = [-2943.7, -8, -10074.3]
+    clock[0] += 8.1 if position == "window_elapsed" else 3.75
+
+    incident = guard.poll()
+
+    if position == "failed_cover":
+        assert incident is None and eats == []
+    else:
+        assert [action["action"] for action in incident["actions"]] == ["eat"]
+        assert eats == [{"item": "cooked_beef"}]
+
+
 @pytest.mark.parametrize("sources", [("mob_attack", "fireball"), ("fireball", "mob_attack")])
 def test_mixed_nether_damage_keeps_melee_eat_cooldown_regardless_of_event_order(monkeypatch, sources):
     clock = [1000.0]

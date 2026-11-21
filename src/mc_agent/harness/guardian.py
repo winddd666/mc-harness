@@ -809,6 +809,7 @@ class GenerationGuard:
                     self._nether_melee_eat_defer_until = float("-inf")
                     self._last_lava_contact_at = float("-inf")
                     self._last_fire_contact_at = float("-inf")
+                    self._last_dig_cover_fail_at = float("-inf")
                     self._last_cornered_creeper = None
                     self._last_stalled_lava = None
                     self._blocked_bunker = None
@@ -984,8 +985,15 @@ class GenerationGuard:
             or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_RANGED_WINDOW_S)
         )
         recent_trident_hit = now - self._last_trident_hurt_at < 8.0
+        pos = status.get("pos")
+        recent_failed_cover = (
+            recent_ranged_hit and now - self._last_dig_cover_fail_at < 8.0
+            and isinstance(health, (int, float)) and 0 < health <= LOW_HP_BUNKER_MAX
+            and isinstance(pos, (list, tuple)) and len(pos) >= 3
+            and (math.floor(pos[0]), math.floor(pos[1] + 0.05), math.floor(pos[2])) == self._last_dig_cover_block
+        )
         if (
-            (ranged_in_range or protecting_against_recent_hit or recent_nether_threat or recent_trident_hit)
+            (ranged_in_range or protecting_against_recent_hit or recent_nether_threat or recent_trident_hit or recent_failed_cover)
             and not self._inside_own_shaft()
         ):
             return False
@@ -1864,6 +1872,7 @@ class GenerationGuard:
                         self._last_dig_cover_block = block
                         self._last_dig_cover_at = time.monotonic()
                         if result.get("ok"):
+                            self._last_dig_cover_fail_at = float("-inf")
                             self._mark_ranged_engagement(now, attacker=att_obj, in_cover=True)
                         else:
                             self._last_dig_cover_fail_at = now
