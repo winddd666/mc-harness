@@ -1339,6 +1339,11 @@ class CombatEnv:
         if not tried_yaws and time.monotonic() < lava_deadline:
             # Wide lava lake: filter shore types by dimension to keep find_blocks fast (<1s).
             shore_blocks = NETHER_SHORE_BLOCKS if "nether" in dim else SHORE_LAND_BLOCKS
+            stalled = self._stalled_lava_shore
+            excluded_shore = (
+                stalled[0] if stalled is not None and math.dist(pos0[:3], stalled[1]) <= 1.25
+                and time.monotonic() - stalled[2] < 15.0 else None
+            )
             try:
                 lava_shore_target = self._find_walkable_shore_target(
                     pos0,
@@ -1348,12 +1353,15 @@ class CombatEnv:
                     max_y=py + 2,
                     max_candidates=6,
                     deadline=terrain_deadline,
+                    excluded_shore=excluded_shore,
                 )
             except _TerrainProbeExpired:
                 pass
             if lava_shore_target is not None:
                 tried_yaws = [aim_yaw_pitch(pos0, lava_shore_target)[0]]
             else:
+                if excluded_shore is not None:
+                    actions.append("lava_shore_path_stalled")
                 base_yaw = float(st.get("yaw") or 0.0)
                 best_shore_yaw: float | None = None
                 for probe_dist in (4.5, 9.0):
@@ -1897,6 +1905,7 @@ class CombatEnv:
         max_candidates: int = 10,
         avoid_close_threat: bool = False,
         deadline: float | None = None,
+        excluded_shore: Sequence[float] | None = None,
     ) -> list[float] | None:
         """Query `find_blocks` for nearby solid shoreline with 2-high passable headroom."""
         start_x, start_z = float(pos0[0]), float(pos0[2])
@@ -1934,6 +1943,8 @@ class CombatEnv:
                     continue
                 cx, cy, cz = int(rpos[0]), int(rpos[1]), int(rpos[2])
                 if cy < min_y or (max_y is not None and cy > max_y):
+                    continue
+                if excluded_shore is not None and (cx + 0.5, float(cy + 1), cz + 0.5) == tuple(excluded_shore):
                     continue
                 if not _is_solid_ground(_clean_block_name(row.get("name"))):
                     continue

@@ -3626,7 +3626,8 @@ def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch):
     assert calls[-1][2] == 2.0
 
 
-def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkeypatch):
+@pytest.mark.parametrize("fallback", ["bridge", "alternate_bank"])
+def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkeypatch, fallback):
     from mc_agent.skills.combat_env import CombatEnv
 
     monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _: None)
@@ -3637,6 +3638,7 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
     }
     calls = []
     can_bridge = False
+    headings = []
 
     class LavaBot:
         def status(self):
@@ -3647,10 +3649,21 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
                 return {"items": [{"name": "cobblestone", "count": 4}] if can_bridge else []}
             if action == "get_block":
                 return {"name": "lava" if body["pos"][1] <= 64 else "air"}
+            if action == "find_blocks":
+                return {"blocks": [
+                    {"name": "netherrack", "pos": [3188, 65, -2047]},
+                    {"name": "basalt", "pos": [3183, 64, -2047]},
+                ]}
+            if action == "look":
+                headings.append(body["yaw"])
             if action == "move_to":
                 calls.append(action)
-                # The pathfinder replies successfully before the bot leaves the lava hitbox.
-                status["pos"] = [3186.7, 64.6, -2046.2]
+                if body["x"] == shore[0]:
+                    # The pathfinder replies successfully before the bot leaves the lava hitbox.
+                    status["pos"] = [3186.7, 64.6, -2046.2]
+                else:
+                    assert fallback == "alternate_bank" and body["x"] == 3183.5
+                    status.update(in_lava=False, on_ground=True, pos=[body["x"], body["y"], body["z"]])
             if action == "place":
                 calls.append(action)
                 status.update(in_lava=False, on_ground=True, pos=[3186.7, 65, -2046.2])
@@ -3658,14 +3671,20 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
 
     env = CombatEnv(LavaBot())
     monkeypatch.setattr(env, "scan_safe_yaws", lambda *args, **kwargs: {})
-    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *args, **kwargs: shore)
+    if fallback == "bridge":
+        monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *args, **kwargs: shore)
     first = env.escape_lava()
     assert not first["ok"] and "lava_move_to_shore" in first["actions"]
 
-    can_bridge = True
+    can_bridge = fallback == "bridge"
     second = env.escape_lava()
-    assert second["ok"] and "lava_shore_path_stalled" in second["actions"]
-    assert calls == ["move_to", "place"]
+    assert second["ok"]
+    if fallback == "bridge":
+        assert "lava_shore_path_stalled" in second["actions"]
+        assert calls == ["move_to", "place"]
+    else:
+        assert calls == ["move_to", "move_to"]
+        assert headings[0] < 0 < headings[1]
 
 
 @pytest.mark.parametrize("lands_after_jump", [False, True])
