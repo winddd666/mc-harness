@@ -802,10 +802,11 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         tier=3,
         budget_class="expedition",
         task=(
-            "解锁 story/follow_ender_eye(60分) 并顺势推进至末地传送门："
-            "1) 若包内有 ender_eye，先选定主手调 mc_use_item(item='ender_eye') 掷出末影之眼（返回体含 eye_vector 方向；严禁掷眼后原地反复调 mc_skill_collect_drops 浪费时间）；"
-            "2) 沿 eye_vector 方向调用 mc_skill_scout_surface(direction=<方向>, max_duration_s=45, step_dist=30) 高速推进 150m 后再次掷眼复核；若 eye_vector 方向发生反转（说明已越过要塞），立刻把移动步长折半（mc_move_to 退回 30~50m）精确定位；"
-            "3) 当末影之眼向下钻地或小范围来回反转时，调 mc_skill_staircase(vertical='down', steps=12) 下挖并扫描 stone_bricks / mossy_stone_bricks / end_portal_frame / spawner，进入要塞房间即解锁！"
+            "解锁 story/follow_ender_eye(60分) 并顺势推进至末地传送门（严禁调用 mc_skill_collect_drops 捡眼！）："
+            "1) 选定主手调 mc_use_item(item='ender_eye') 掷出 1 颗末影之眼，直接读取返回体中的 scout_heading（及 eye_vector）；"
+            "2) 沿 scout_heading 调 mc_skill_scout_surface(direction=<scout_heading>, target_types=['end_portal_frame'], max_duration_s=45, step_dist=32) 推进；"
+            "【省眼铁律】必须累计水平前进 >= 100m 后才允许掷下一颗眼！若 scout_surface 因 in_water/地形只走了 <60m，严禁原地重掷，先调 mc_skill_unstick 上岸或偏转 45 度方向继续跑够 100m 再掷第二颗；"
+            "3) 一旦 scout_heading 发生反向（说明已越过要塞）或 landed_at 的 Y 低于当前脚下 Y（末影之眼钻地），立即停止掷眼：若刚跨过则退回中点 30~50m，然后**立刻连续调用 mc_skill_staircase(vertical='down', steps=16) 下挖至 Y=10~-10**（要塞常在地下深处），每下挖一段调 mc_find_blocks(types=['stone_bricks','mossy_stone_bricks','cracked_stone_bricks','iron_bars','end_portal_frame'], radius=24) 探测，扫到砖墙或传送门框架后直接挖通进入房间即解锁 60 分！"
         ),
         extra_tools=("mc_use_item", "mc_skill_scout_surface", "mc_interact", "mc_posture"),
         advancement_id="minecraft:story/follow_ender_eye",
