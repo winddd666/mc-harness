@@ -3871,6 +3871,49 @@ def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch, transpo
     assert calls[-1][2] == 2.0
 
 
+@pytest.mark.parametrize("west_blocked", [False, True])
+def test_lava_escape_changes_unverified_swim_heading_after_stalling(monkeypatch, west_blocked):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [3184.7, 67.2, -2048.3], "yaw": 0.0, "health": 20,
+        "dimension": "the_nether", "in_lava": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    swim_headings = []
+
+    class LavaBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                return {"name": "lava" if body["pos"][1] <= 67 else "air"}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "look":
+                status["yaw"] = body["yaw"]
+            if action == "control" and body.get("forward"):
+                swim_headings.append(status["yaw"])
+                if status["yaw"] != 0:
+                    x = 3182.5 if status["yaw"] > 0 else 3186.9
+                    status.update(in_lava=False, on_ground=True, pos=[x, 67, -2048.3])
+            return {"ok": True}
+
+    env = CombatEnv(LavaBot())
+    if west_blocked:
+        monkeypatch.setattr(env, "_point_allowed", lambda x, _z, **_kwargs: x >= 3184.7)
+    assert env.escape_lava()["in_lava"] is True
+    clock[0] += 3.0
+    escaped = env.escape_lava()
+
+    assert escaped["ok"] is True
+    assert swim_headings == pytest.approx([0.0, (-1 if west_blocked else 1) * math.pi / 2])
+
+
 @pytest.mark.parametrize("fallback", ["bridge", "alternate_bank"])
 @pytest.mark.parametrize("status_timeout", [False, True])
 def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkeypatch, fallback, status_timeout):
