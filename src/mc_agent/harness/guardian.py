@@ -1449,7 +1449,9 @@ class GenerationGuard:
                     and not self._swimming_at_low_health(status) and not close_drowned_hit
                 ):
                     if not _already("escape_water"):
-                        actions.append(self._action("escape_water", lambda: self._escape_water(status)))
+                        trident_hit = any(str(h.get("source") or "").strip().lower() == "trident" for h in hurts)
+                        budget = {"budget_s": self.TRIDENT_WATER_ESCAPE_BUDGET_S} if trident_hit else {}
+                        actions.append(self._action("escape_water", lambda: self._escape_water(status, **budget)))
                     esc_act = next((a for a in actions if a.get("action") == "escape_water"), None)
                     esc_res = esc_act.get("result") if isinstance(esc_act, dict) and isinstance(esc_act.get("result"), dict) else {}
                     esc_succeeded = bool(esc_act and esc_act.get("ok") and esc_res.get("in_water") is not True)
@@ -2946,10 +2948,15 @@ class GenerationGuard:
                 esc_b_ok = False
                 esc_b_respawned = False
                 if not forced_shore_b:
-                    escape_budget = self.SURFACE_WATER_ESCAPE_BUDGET_S if tool_stopped_in_water else None
+                    trident_hit = any(str(h.get("source") or "").strip().lower() == "trident" for h in hurts)
+                    budget = {}
+                    if trident_hit:
+                        budget["budget_s"] = self.TRIDENT_WATER_ESCAPE_BUDGET_S
+                    elif tool_stopped_in_water:
+                        budget["budget_s"] = self.SURFACE_WATER_ESCAPE_BUDGET_S
                     esc = self._action(
                         "boundary_escape_water",
-                        lambda: self._escape_water(status, **({"budget_s": escape_budget} if escape_budget else {})),
+                        lambda: self._escape_water(status, **budget),
                         raise_on_http_error=False,
                     )
                     esc_b_res = esc.get("result") if isinstance(esc.get("result"), dict) else {}

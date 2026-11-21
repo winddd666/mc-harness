@@ -6169,8 +6169,8 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
     assert status["in_water"] is False and "登岸" in note
 
 
-@pytest.mark.parametrize("surface_tool_stopped", [False, True])
-def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, surface_tool_stopped):
+@pytest.mark.parametrize("scenario", ["ordinary", "surface_tool", "boundary_trident", "poll_trident"])
+def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     events = []
@@ -6183,7 +6183,14 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
             if action == "status":
                 return dict(status)
             if action == "events":
+                if scenario.endswith("trident") and not kwargs["params"]["since"]:
+                    return {"events": [
+                        {"seq": 1, "type": "hurt", "source": "trident"},
+                        {"seq": 2, "type": "hurt", "source": "mob_attack"},
+                    ]}
                 return {"events": []}
+            if action == "inventory":
+                return {"items": []}
             calls.append((action, kwargs["timeout_s"], clock[0]))
             assert kwargs["allow_reauth"] is False
             if action == "get_block":
@@ -6210,15 +6217,19 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
         "ok": False, "stop_reason": "in_water", "pos_after": status["pos"],
         "error": {"code": "in_water"},
     }
-    tool_results = [json.dumps(receipt)] if surface_tool_stopped else None
-    assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools(tool_results)
+    if scenario == "poll_trident":
+        assert guard.poll() is not None
+    else:
+        tool_results = [json.dumps(receipt)] if scenario == "surface_tool" else None
+        assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools(tool_results)
     completed = [e for e in events if e["type"] == "guardian.action.completed"]
     shallow, shore = completed
-    assert shallow["action"] == "boundary_escape_water"
-    budget_s = 4.0 if surface_tool_stopped else 20.0
+    prefix = "" if scenario == "poll_trident" else "boundary_"
+    assert shallow["action"] == f"{prefix}escape_water"
+    budget_s = 20.0 if scenario == "ordinary" else 4.0
     assert shallow["duration"] == pytest.approx(budget_s)
     assert shallow["result"] == {"ok": False, "reason": "time_budget", "partial": True, "in_water": True}
-    assert shore["action"] == "boundary_escape_to_shore" and shore["ok"] is True
+    assert shore["action"] == f"{prefix}escape_to_shore" and shore["ok"] is True
     assert all(start + timeout <= 1000.0 + budget_s for _, timeout, start in calls[:-1])
     assert skills.bot is bot
 
