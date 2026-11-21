@@ -1561,10 +1561,13 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
 
     local_fixture = scene.stage in LOCAL_FIXTURE_STAGES
     radius = 2.0 if local_fixture else 64.0
+    stronghold_start = scene.stage == STRONGHOLD_STAGE
+    sample_limit = 5 if stronghold_start else 2
     station = {"brewing_alchemy": "brewing_stand", "enchant_anvil": "enchanting_table"}.get(scene.stage)
     station_pos = [math.floor(scene.x) + 2, round(scene.y), math.floor(scene.z)]
     for i in range(attempts):
-        for sample in range(2):
+        consecutive = 0
+        for sample in range(sample_limit):
             try:
                 st = bot.status()
             except Exception:
@@ -1589,15 +1592,19 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
                     and st.get("on_ground") is not False
                     and not (st.get("in_water") or st.get("in_lava"))
                 )
-            if inside and scene.stage == STRONGHOLD_STAGE:
-                inside = (
-                    _dry_overworld_position(st) is not None and math.hypot(dx, dz) <= 6.0 and abs(dy) <= 2.0
-                )
-            if not inside:
+            wait_for_ground = False
+            if inside and stronghold_start:
+                near_anchor = math.hypot(dx, dz) <= 6.0 and abs(dy) <= 2.0
+                inside = near_anchor and _dry_overworld_position(st) is not None
+                wait_for_ground = near_anchor and not (st.get("in_water") or st.get("in_lava"))
+            consecutive = consecutive + 1 if inside else 0
+            if consecutive == 2:
                 break
-            if sample == 0:
+            if not inside and not wait_for_ground:
+                break
+            if sample + 1 < sample_limit:
                 time.sleep(1.2)
-        else:
+        if consecutive == 2:
             try:
                 block = bot.call("get_block", {"pos": station_pos}, timeout_s=5.0) if station else {}
                 actual = str((block or {}).get("name") or "").removeprefix("minecraft:")
@@ -1611,9 +1618,13 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
                 )
                 return True
             print(f"[Scene] expected {station} at {station_pos}, got {actual or '?'}", flush=True)
+        footing = (
+            f" on_ground={st.get('on_ground')} in_water={st.get('in_water')} in_lava={st.get('in_lava')}"
+            if stronghold_start else ""
+        )
         print(
             f"[Scene] entry verify failed (attempt {i + 1}/{attempts}) bot={bot_name} "
-            f"dim={dim} pos={pos} expected {scene.dim}@({scene.x:.1f},{scene.y:.1f},{scene.z:.1f})",
+            f"dim={dim} pos={pos}{footing} expected {scene.dim}@({scene.x:.1f},{scene.y:.1f},{scene.z:.1f})",
             flush=True,
         )
         if local_fixture:
