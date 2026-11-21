@@ -2214,14 +2214,17 @@ class MiningDFSEngine:
 
     def _resume_deepest_branch(
         self, node: ShaftNode, *, min_hp_ref: list[float], descendants_only: bool = False,
-        max_y: int | None = None,
+        max_y: int | None = None, blocked_branches: set[int] | None = None,
     ) -> bool:
         ceiling = node.anchor[1] if max_y is None else min(max_y, node.anchor[1])
         candidates = []
         for candidate in self.nodes.values():
             if candidate.node_id == node.node_id or candidate.anchor[1] > ceiling:
                 continue
-            if not any(branch.status == "pending" for branch in candidate.branches):
+            if not any(
+                branch.status == "pending" and (blocked_branches is None or id(branch) not in blocked_branches)
+                for branch in candidate.branches
+            ):
                 continue
             if descendants_only:
                 route = self._find_node_path(node.node_id, candidate.node_id)
@@ -6130,6 +6133,10 @@ class MiningDFSEngine:
                         node.branches.extend(alternatives)
                         continue
                 if any(b.status == "pending" for b in node.branches):
+                    if node.kind == "spine" and self._resume_deepest_branch(
+                        node, min_hp_ref=min_hp_ref, blocked_branches=blocked_branches,
+                    ):
+                        continue
                     stop_reason = "dig_cell_avoided"
                     break
                 spine_blocked = any(b.kind == "spine_forward" and b.status == "pruned" for b in node.branches)

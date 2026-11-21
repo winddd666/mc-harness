@@ -3007,6 +3007,49 @@ def test_first_dig_timeout_does_not_block_the_next_safe_descent(monkeypatch) -> 
     assert engine.collar_node_id == collar.node_id
 
 
+@pytest.mark.parametrize("other_branch_cooling", [False, True])
+def test_cooling_leaf_resumes_a_pending_branch_at_the_same_depth(monkeypatch, other_branch_cooling: bool) -> None:
+    from mc_agent.skills.mining_dfs import BranchSpec
+
+    world = _MockMineWorld(start_pos=(0.5, 15.0, 3.5), surface_y=64, dimension="the_nether",
+                           inventory_items=[{"name": "diamond_pickaxe", "count": 1, "slot": 9}])
+    route = [(0, 15, z) for z in range(4)]
+    for x, y, z in route:
+        world.blocks[(x, y, z)] = world.blocks[(x, y + 1, z)] = "air"
+    world.blocks[(2, 15, 0)] = "ancient_debris"
+    monkeypatch.setattr("mc_agent.skills.mining_dfs.time.sleep", lambda _: None)
+
+    with BotSession("tok", bot_username="CoolingLeafAtDepth", transport=httpx.MockTransport(world.handler)) as bot:
+        skills = MacroSkills(bot)
+        engine = skills.mining_dfs
+        collar = engine._create_node(kind="collar", anchor=(0, 64, -49), parent_id=None,
+                                     edge_from_parent=None, branches=[])
+        engine.collar_node_id = collar.node_id
+        engine.collar_ceiling_y = collar.anchor[1]
+        junction = engine._create_node(
+            kind="spine", anchor=route[0], parent_id=collar.node_id,
+            edge_from_parent=ShaftEdge("stair_down", "south", [collar.anchor, route[0]]),
+            branches=[BranchSpec("spine_forward", "east", 4)],
+        )
+        cooling = BranchSpec("branch_leaf", "south", 5)
+        engine._create_node(
+            kind="spine", anchor=route[-1], parent_id=junction.node_id,
+            edge_from_parent=ShaftEdge("branch_leaf", "south", route), branches=[cooling],
+        )
+        stalled = (0, 16, 4)
+        skills._avoid_temporarily(stalled, "dig_timeout", 30.0)
+        if other_branch_cooling:
+            skills._avoid_temporarily((1, 16, 0), "dig_timeout", 30.0)
+        result = engine.run(target="ancient_debris", target_y=15, goal_count=1)
+
+    assert result["stop_reason"] == ("dig_cell_avoided" if other_branch_cooling else "quota_reached")
+    if other_branch_cooling:
+        assert engine.active_node_id == junction.node_id and not world.dig_log
+    assert result["pos_after"][1] == 15
+    assert engine.nodes[collar.node_id] is collar and cooling.status == "pending"
+    assert all(pos != stalled for pos, _, _ in world.dig_log)
+
+
 def test_repeated_first_dig_timeouts_relocate_an_idle_nether_collar(monkeypatch) -> None:
     import mc_agent.skills.mining_dfs as mining
 
