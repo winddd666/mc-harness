@@ -4656,8 +4656,11 @@ def test_mine_dfs_triggers_retention_cleanup() -> None:
     assert state["cobblestone"] == 192
 
 
-@pytest.mark.parametrize("mode", ["owned", "carried", "crafted", "unsafe", "dead", "no_transfer", "timeout", "unconfirmed_place"])
-def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
+@pytest.mark.parametrize("mode", [
+    "owned", "carried", "crafted", "unsafe", "dead", "no_transfer", "timeout", "unconfirmed_place",
+    "late_death", "lost_put_reply", "unreleased", "action_timeout",
+])
+def test_mine_dfs_stashes_clutter_off_the_return_lane(mode, monkeypatch) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     origin = [0.5, 30.0, 0.5]
@@ -4671,6 +4674,10 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
     stored = 0
     picked = False
     actions = []
+    clock = [100.0]
+    if mode in {"lost_put_reply", "action_timeout"}:
+        monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
 
     def handler(request):
         nonlocal cobble, bag_chest, chest, stored, picked, died
@@ -4678,6 +4685,8 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
         body = json.loads(request.content) if request.content else {}
         actions.append(route)
         if route == "inventory":
+            if mode == "late_death" and stored:
+                died = True
             stones = [{"name": "cobblestone", "count": min(64, cobble - n)} for n in range(0, cobble, 64)]
             protected = [{"name": "stone_pickaxe", "count": 1}] * protected_count
             items = [] if died else stones + protected + [{"name": name, "count": 8} for name in plank_stacks]
@@ -4720,7 +4729,7 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
                 "container": [{"name": "cobblestone", "count": stored}] if stored else [],
             }}
         elif route == "stop":
-            result = {"released": True}
+            result = {"released": mode != "unreleased"}
         elif route == "act":
             assert body["target"]["pos"] == side and chest and mode != "unsafe"
             if mode == "dead":
@@ -4735,9 +4744,19 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
                 cobble -= sum(op["count"] for op in ops)
             if mode == "timeout":
                 raise httpx.ReadTimeout("offline lost storage receipt", request=request)
+            if mode in {"lost_put_reply", "unreleased"}:
+                raise httpx.RemoteProtocolError("offline lost reply after deposit", request=request)
+            if mode == "action_timeout":
+                clock[0] += sum(request.extensions["timeout"].values())
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "action_timeout", "message": "deposit executed before action timeout",
+                }})
             result = {"window": {"window": "generic_9x3", "sections": {
                 "container": [{"name": "cobblestone", "count": stored}],
             }}}
+        elif route in {"disconnect", "connect"} and mode == "action_timeout":
+            clock[0] += 5.0
+            result = {}
         elif route == "move_to":
             assert body["x"] == 0.5 and body["y"] == 30
             origin[2] = body["z"]
@@ -4753,7 +4772,7 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
             tools.skills.remember_placed_storage("chest", side, "overworld")
         tools.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
         outcome = json.loads(tools.mc_skill_mine_dfs(target="diamond"))
-        if mode not in {"unsafe", "dead", "no_transfer", "unconfirmed_place"}:
+        if mode not in {"unsafe", "dead", "no_transfer", "unconfirmed_place", "late_death", "unreleased"}:
             bot.call("move_to", {"x": 0.5, "y": 30, "z": -1.5})
             bot.call("move_to", {"x": 0.5, "y": 30, "z": 0.5})
             assert any(item["name"] == "diamond" for item in bot.inventory()["items"])
@@ -4768,6 +4787,14 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
     elif mode in {"dead", "no_transfer"}:
         assert not outcome.get("inventory_cleaned") and stored == 0
         assert outcome["inventory_cleanup"]["error"] == ("dead" if mode == "dead" else "storage_transfer_unconfirmed")
+    elif mode == "late_death":
+        assert not outcome.get("inventory_cleaned") and stored == 192
+        assert outcome["inventory_cleanup"]["error"] == "storage_life_changed"
+        assert outcome["inventory_cleanup"]["empty_slots"] == 0
+    elif mode == "unreleased":
+        assert not outcome.get("inventory_cleaned") and stored == 192
+        assert outcome["inventory_cleanup"]["error"] == "storage_action_unconfirmed"
+        assert actions.count("view") == actions.count("act") == actions.count("stop") == 1
     else:
         assert outcome["inventory_cleanup"]["method"] == ("placed_storage" if mode in {"carried", "crafted"} else "owned_storage")
         assert outcome["inventory_cleanup"]["empty_slots"] >= 3
@@ -4775,6 +4802,11 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
         assert cobble == 192 and stored == 192
         if mode == "crafted":
             assert plank_stacks == ["birch_planks"]
+        if mode in {"lost_put_reply", "action_timeout"}:
+            assert actions.count("act") == 1 and actions.count("stop") == 1
+            assert actions.index("act") < actions.index("stop") < actions.index("move_to")
+            assert "disconnect" not in actions and "connect" not in actions
+            assert clock[0] <= 108.0
     assert "drop" not in actions
 
 
@@ -4843,7 +4875,8 @@ def test_mine_cleanup_skips_passage_storage_and_tries_a_backup(fault) -> None:
         assert result["inventory_cleanup"]["storage_skipped"] == [{"pos": first, "reason": "section_full"}]
 
 
-def test_native_dfs_stashes_full_inventory_before_collecting_ore(monkeypatch) -> None:
+@pytest.mark.parametrize("lost_reply", [False, True])
+def test_native_dfs_stashes_full_inventory_before_collecting_ore(monkeypatch, lost_reply) -> None:
     from mc_agent.skills.mining_dfs import _BudgetSession
 
     monkeypatch.setattr(time, "sleep", lambda _: None)
@@ -4873,12 +4906,17 @@ def test_native_dfs_stashes_full_inventory_before_collecting_ore(monkeypatch) ->
             result = {"name": name}
         elif route == "view":
             assert body["target"]["pos"] == side
-            result = {"sections": {"container": []}}
+            result = {"sections": {"container": [{"name": "cobblestone", "count": stored}] if stored else []}}
         elif route == "act":
             assert body["target"]["pos"] == side
-            stored = body["ops"][0]["count"]
-            cobble -= stored
-            result = {"done": [{"to": "container", "put": "cobblestone", "count": stored}]}
+            count = body["ops"][0]["count"]
+            stored += count
+            cobble -= count
+            if lost_reply:
+                raise httpx.RemoteProtocolError("offline lost reply after deposit", request=request)
+            result = {"done": [{"to": "container", "put": "cobblestone", "count": count}]}
+        elif route == "stop":
+            result = {"released": True}
         elif route == "get_entities":
             result = {"entities": [] if diamond else [{"id": 11, "item": "diamond", "pos": [1.5, 30.0, 0.5]}]}
         elif route == "move_to":
@@ -4904,6 +4942,7 @@ def test_native_dfs_stashes_full_inventory_before_collecting_ore(monkeypatch) ->
 
     assert confirmed is True and diamond == 1
     assert cobble == stored == 192
+    assert actions.count("act") == 1 and actions.count("stop") == int(lost_reply)
     assert "drop" not in actions and actions.index("act") < actions.index("move_to")
 
 

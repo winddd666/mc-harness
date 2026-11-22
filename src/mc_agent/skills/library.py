@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import copy
+from functools import partial
 import inspect
 import math
 import re
@@ -1308,9 +1309,13 @@ class _SkillBudgetSession:
     # window/view opens a GUI under the server's action lease.
     _READS = frozenset({"status", "inventory", "get_block", "find_blocks", "get_entities"})
 
-    def __init__(self, bot: BotSession, max_duration_s: float, *, bound_transport_retries: bool = False) -> None:
+    def __init__(
+        self, bot: BotSession, max_duration_s: float, *,
+        bound_transport_retries: bool = False, single_attempt: bool = False,
+    ) -> None:
         self.bot = bot
-        self.bound_transport_retries = bound_transport_retries
+        self.bound_transport_retries = bound_transport_retries or single_attempt
+        self.single_attempt = single_attempt
         budget = max(0.0, float(max_duration_s))
         self.finish_at = time.monotonic() + budget
         self.deadline = self.finish_at - min(1.0, budget / 4)
@@ -1337,7 +1342,34 @@ class _SkillBudgetSession:
         phase = min(0.25, per_attempt / 4)
         return httpx.Timeout(min(read_cap, per_attempt - 3 * phase), pool=phase, connect=phase, write=phase)
 
-    def _mining_budget_scope(self, deadline: float) -> Any | None:
+    @staticmethod
+    def _single_attempt_call(call: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+        if getattr(call, "__func__", None) is not BotSession.call:
+            return call
+        bot = copy(call.__self__)
+        client = bot._client
+        bot._recovering_quarantine = True
+
+        def send(request: Callable[..., httpx.Response], *args: Any, **kwargs: Any) -> httpx.Response:
+            try:
+                return request(*args, **kwargs)
+            except httpx.RemoteProtocolError as error:
+                # The missing reply can follow an executed write. Use the normal timeout/stop path.
+                raise httpx.ReadTimeout(str(error)) from error
+
+        bot._client = SimpleNamespace(get=partial(send, client.get), request=partial(send, client.request))
+
+        def call_once(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+            try:
+                return call.__func__(bot, path, body, **kwargs)
+            except ApiError as error:
+                if error.code in {"action_timeout", "action_quarantined"}:
+                    raise httpx.ReadTimeout(error.message) from error
+                raise
+
+        return call_once
+
+    def _mining_budget_scope(self, deadline: float, *, single_attempt: bool) -> Any | None:
         if getattr(self.bot, "_mining_deadline", None) is None:
             return None
         from .mining_dfs import _BudgetSession
@@ -1348,10 +1380,13 @@ class _SkillBudgetSession:
         scoped = copy(owner)
         scoped.deadline = min(deadline, owner.deadline)
         scoped.timeout_path = None
+        if single_attempt:
+            scoped._call = self._single_attempt_call(scoped._call)
         return scoped
 
     def _call_in_mining_budget(
-        self, scoped: Any, path: str, body: dict[str, Any] | None, *, stop_deadline: float, **kwargs: Any,
+        self, scoped: Any, path: str, body: dict[str, Any] | None, *,
+        stop_deadline: float, single_attempt: bool, **kwargs: Any,
     ) -> dict[str, Any]:
         from .mining_dfs import _MiningDeadline
 
@@ -1363,7 +1398,9 @@ class _SkillBudgetSession:
                 return {}
             timeout_path = path if isinstance(error, httpx.RemoteProtocolError) else scoped.timeout_path
             self.pending_action = timeout_path is not None and path not in self._READS
-            released = not self.pending_action or self.stop_pending(deadline=stop_deadline)
+            released = not self.pending_action or self.stop_pending(
+                deadline=stop_deadline, single_attempt=single_attempt,
+            )
             if not released or scoped.deadline >= owner.deadline or owner.deadline - time.monotonic() <= 0.2:
                 owner.timeout_path = timeout_path
                 raise _MiningDeadline() from error
@@ -1376,7 +1413,7 @@ class _SkillBudgetSession:
 
     def call(
         self, path: str, body: dict[str, Any] | None = None, *, timeout_s: float | None = None,
-        _transport_budget: tuple[float, float] | None = None, **kwargs: Any,
+        _transport_budget: tuple[float, float, bool] | None = None, **kwargs: Any,
     ) -> dict[str, Any]:
         deadline, finish_at = self.deadline, self.finish_at
         if _transport_budget is not None:
@@ -1390,16 +1427,21 @@ class _SkillBudgetSession:
         timeout = remaining if timeout_s is None else min(remaining, timeout_s)
         request_timeout: float | httpx.Timeout = timeout
         bounded = self.bound_transport_retries or _transport_budget is not None
+        single_attempt = self.single_attempt or (_transport_budget is not None and _transport_budget[2])
+        call = self.bot.call
         if bounded:
             if isinstance(self.bot, _SkillBudgetSession):
-                kwargs["_transport_budget"] = (deadline, finish_at)
-            elif (mining_scope := self._mining_budget_scope(deadline)) is not None:
+                kwargs["_transport_budget"] = (deadline, finish_at, single_attempt)
+            elif (mining_scope := self._mining_budget_scope(deadline, single_attempt=single_attempt)) is not None:
                 return self._call_in_mining_budget(
-                    mining_scope, path, body, stop_deadline=finish_at, timeout_s=timeout, **kwargs,
+                    mining_scope, path, body, stop_deadline=finish_at, single_attempt=single_attempt,
+                    timeout_s=timeout, **kwargs,
                 )
-            elif getattr(self.bot.call, "__func__", None) is BotSession.call:
+            elif getattr(call, "__func__", None) is BotSession.call:
                 request_timeout = self._retry_timeout(deadline - time.monotonic(), timeout)
                 kwargs["allow_reauth"] = False
+                if single_attempt:
+                    call = self._single_attempt_call(call)
                 if path in {"move_to", "control"} and body is not None:
                     field = "timeout" if path == "move_to" else "ms"
                     milliseconds = int((request_timeout.read - 0.2) * 1000)
@@ -1408,8 +1450,8 @@ class _SkillBudgetSession:
                     body = {**body, field: min(milliseconds, int(body.get(field, milliseconds)))}
         try:
             if self.supports_timeout:
-                return self.bot.call(path, body, timeout_s=request_timeout, **kwargs)
-            return self.bot.call(path, body)
+                return call(path, body, timeout_s=request_timeout, **kwargs)
+            return call(path, body)
         except (httpx.TimeoutException, httpx.RemoteProtocolError) as error:
             # The initiating scope owns timeout state and the stop reserve.
             if _transport_budget is not None or (isinstance(error, httpx.RemoteProtocolError) and not bounded):
@@ -1434,25 +1476,21 @@ class _SkillBudgetSession:
             return inv
         return self.bot.inventory()
 
-    def stop_pending(self, *, deadline: float | None = None) -> bool:
+    def stop_pending(self, *, deadline: float | None = None, single_attempt: bool = False) -> bool:
         finish_at = self.finish_at if deadline is None else min(deadline, self.finish_at)
         remaining = finish_at - time.monotonic()
+        single_attempt = self.single_attempt or single_attempt
+        bounded = self.bound_transport_retries or single_attempt
         if self.pending_action and remaining > 0 and self.supports_timeout:
             self.pending_action = False
             try:
-                timeout: float | httpx.Timeout = min(1.0, remaining)
-                mining_scope = self._mining_budget_scope(finish_at) if self.bound_transport_retries else None
-                if mining_scope is not None:
-                    stopped = self._call_in_mining_budget(
-                        mining_scope, "stop", {}, stop_deadline=finish_at, timeout_s=timeout, allow_reauth=False,
-                    )
-                elif self.bound_transport_retries and isinstance(self.bot, _SkillBudgetSession):
-                    stopped = self.bot.call(
-                        "stop", {}, timeout_s=timeout, allow_reauth=False, _transport_budget=(finish_at, finish_at),
+                timeout = min(1.0, remaining)
+                if bounded:
+                    stopped = self.call(
+                        "stop", {}, timeout_s=timeout, allow_reauth=False,
+                        _transport_budget=(finish_at, finish_at, single_attempt),
                     )
                 else:
-                    if self.bound_transport_retries and getattr(self.bot.call, "__func__", None) is BotSession.call:
-                        timeout = self._retry_timeout(remaining, timeout)
                     stopped = self.bot.call("stop", {}, timeout_s=timeout, allow_reauth=False)
             except (ApiError, httpx.HTTPError, _SkillDeadline):
                 return False
@@ -2447,11 +2485,15 @@ class MacroSkills:
         error = stored.get("error")
         if error in {"dead", "death", "disconnected", "not_connected", "interrupted", "hurt"}:
             return [], {**result, "error": error}
-        live = self.bot.status()
-        if (
-            live.get("alive") is False or live.get("last_death") != status.get("last_death")
-            or normalize_dimension(live.get("dimension")) != dim
-        ):
+
+        def life_changed() -> bool:
+            live = self.bot.status()
+            return (
+                live.get("alive") is False or live.get("last_death") != status.get("last_death")
+                or normalize_dimension(live.get("dimension")) != dim
+            )
+
+        if life_changed():
             return [], {**result, "error": "storage_life_changed"}
 
         receipt: dict[str, int] = {}
@@ -2469,7 +2511,10 @@ class MacroSkills:
             {"item": name, "count": min(n, receipt[name])}
             for name, n in planned.items() if receipt.get(name, 0) > 0
         ]
-        result["empty_slots"] = _compute_empty_slots(self.bot.inventory())
+        inventory = self.bot.inventory()
+        if life_changed():
+            return [], {**result, "error": "storage_life_changed"}
+        result["empty_slots"] = _compute_empty_slots(inventory)
         if not actual:
             result["error"] = error or "storage_transfer_unconfirmed"
         elif error:
@@ -2480,7 +2525,7 @@ class MacroSkills:
         self, inv: dict[str, Any], min_free: int, deadline: float,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         budget = min(8.0, deadline - time.monotonic() - 0.5)
-        session = _SkillBudgetSession(self.bot, budget, bound_transport_retries=True)
+        session = _SkillBudgetSession(self.bot, budget, single_attempt=True)
         scoped = copy(self)
         scoped.bot = session
         try:
@@ -2498,7 +2543,7 @@ class MacroSkills:
         return latest if isinstance(latest, dict) else inv, stored
 
     def clean_mining_inventory(self, max_duration_s: float) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-        session = _SkillBudgetSession(self.bot, max_duration_s, bound_transport_retries=True)
+        session = _SkillBudgetSession(self.bot, max_duration_s, single_attempt=True)
         scoped = copy(self)
         scoped.bot = session
         try:
