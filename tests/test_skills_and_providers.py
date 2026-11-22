@@ -3069,6 +3069,64 @@ def test_skill_smelt_recovers_tracked_output_before_mining(monkeypatch, fuel_put
         assert toolset.world_memory.get_conversion_jobs() == []
 
 
+def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    furnace = [-12268, 31, -6065]
+    phase = "load"
+    owned = 0
+    operations = []
+
+    def handler(request):
+        nonlocal owned
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [
+                {"name": "raw_iron", "count": 6}, {"name": "coal", "count": 1},
+                {"name": "iron_ingot", "count": owned},
+            ]}
+        elif route == "status":
+            result = {"pos": [-12267.5, 31.0, -6064.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1.0}]}
+        elif route == "view":
+            count = {"load": 6, "waiting": 0, "empty_receipt": 2, "confirmed": 2}[phase]
+            result = {"sections": {"output": [{"name": "iron_ingot", "count": count}] if count else []}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            op = body["ops"][0]
+            operations.append((phase, op["op"]))
+            if phase == "load" and op["op"] == "put":
+                result = {"done": [{"put": "raw_iron", "count": 6, "to": "input"}]}
+            elif phase == "load":
+                owned += 4
+                result = {"done": [{"took": {"iron_ingot": 4}}]}
+            else:
+                if phase == "confirmed":
+                    owned += 2
+                result = {"done": []}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        first = json.loads(tools.mc_skill_smelt("raw_iron", count=6))
+        assert first["collected"] == [{"name": "iron_ingot", "count": 4}]
+        assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
+        phase = "waiting"
+        assert tools.skills.collect_nearby_smelt_output(5.0) is None
+        phase = "empty_receipt"
+        assert tools.skills.collect_nearby_smelt_output(5.0) is None
+        assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
+        phase = "confirmed"
+        assert tools.skills.collect_nearby_smelt_output(5.0) == {"pos": furnace, "took": {"iron_ingot": 2}}
+        assert tools.skills.collect_nearby_smelt_output(5.0) is None
+        assert tools.world_memory.get_conversion_jobs() == []
+        assert operations == [("load", "put"), ("load", "take"), ("empty_receipt", "take"), ("confirmed", "take")]
+
+
 @pytest.mark.parametrize("code", ["no_window", "missing_item"])
 def test_skill_smelt_tries_a_second_nearby_furnace_only_after_open_failure(code) -> None:
     from mc_agent.harness.mc_tools import McToolset

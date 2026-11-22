@@ -5203,6 +5203,7 @@ class MacroSkills:
                 got.setdefault("_auto_dropped", 0)
             try:
                 res = self.bot.call("window/act", {"target": {"pos": pos}, "ops": take_ops})
+                taken = self._furnace_take_receipt(self.bot, res, got, inv_now)
             except (ApiError, httpx.HTTPError) as err:
                 failures.append({
                     "pos": pos,
@@ -5211,7 +5212,6 @@ class MacroSkills:
                     "got": got,
                 })
                 continue
-            taken = self._furnace_take_receipt(res, got)
             if not taken:
                 failures.append({"pos": pos, "error": "no_output_taken", "job_id": (job or {}).get("id")})
                 continue
@@ -5227,8 +5227,13 @@ class MacroSkills:
         }
 
     @staticmethod
-    def _furnace_take_receipt(result: dict[str, Any], preview: dict[str, int]) -> dict[str, int]:
+    def _furnace_take_receipt(
+        bot: Any, result: dict[str, Any], preview: dict[str, int], inventory_before: dict[str, Any],
+    ) -> dict[str, int]:
         done = result.get("done")
+        if done == []:
+            gained = _positive_inv_delta(_inventory_counts_from_raw(inventory_before), _inventory_counts(bot))
+            return {item: min(count, gained[item]) for item, count in preview.items() if count > 0 and item in gained}
         receipts = [
             step["took"] for step in done
             if isinstance(step, dict) and isinstance(step.get("took"), dict)
@@ -5330,13 +5335,15 @@ class MacroSkills:
             view = session.call("window/view", {"target": target})
             output = (view.get("sections") or {}).get("output") or []
             count = sum(int(row.get("count") or 0) for row in output if _clean_block(row.get("name")) == item)
-            if count <= 0 or not _can_fit_item_in_inventory(
-                session.inventory(), item, count, check_craft_inputs=False
-            ):
+            if count <= 0:
+                return None
+            inventory_before = session.inventory()
+            if not _can_fit_item_in_inventory(inventory_before, item, count, check_craft_inputs=False):
                 return None
             result = session.call("window/act", {
                 "target": target, "ops": [{"op": "take", "from": "output", "item": item, "count": count}],
             })
+            taken = self._furnace_take_receipt(session, result, {item: count}, inventory_before)
         except (_SkillDeadline, httpx.TimeoutException):
             session.stop_pending()
             return None
@@ -5345,7 +5352,6 @@ class MacroSkills:
                 raise
             return None
 
-        taken = self._furnace_take_receipt(result, {item: count})
         if not taken:
             return None
         self._settle_furnace_output(pos, dim, taken)
@@ -5615,7 +5621,7 @@ class MacroSkills:
                 "window/act",
                 {"target": target, "ops": [{"op": "take", "from": "output", "count": cnt}]},
             )
-            taken = self._furnace_take_receipt(result, {_clean_block(out_item.get("name")): cnt})
+            taken = self._furnace_take_receipt(self.bot, result, {_clean_block(out_item.get("name")): cnt}, inv_take)
             collected.extend({"name": item, "count": n} for item, n in taken.items())
             if furnace_pos is not None and dim is not None:
                 self._settle_furnace_output(furnace_pos, dim, taken)
