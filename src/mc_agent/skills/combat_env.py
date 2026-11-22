@@ -2430,6 +2430,7 @@ class CombatEnv:
         surface_first: bool = False,
         avoid_close_threat: bool = False,
         sneak_on_magma: bool = False,
+        prefer_recent_dry_bank: bool = False,
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
         st0 = self.bot.status()
@@ -2626,13 +2627,30 @@ class CombatEnv:
             if life == stalled_life and time.monotonic() - stalled_at < 15.0 and math.dist(search_pos[:3], stalled_pos) <= 2.5:
                 excluded_shore = stalled_shore
                 actions.append("shore_lip_stalled")
+
+        def return_to_dry_bank(*, max_dist: float, max_height: float) -> list[float] | None:
+            if self._last_dry_bank is None:
+                return None
+            bank, bank_life, bank_at = self._last_dry_bank
+            if (
+                life == bank_life and time.monotonic() - bank_at < 60.0 and bank != excluded_shore
+                and shore_bank_in_reach(search_pos, bank, max_dist=max_dist, max_height=max_height)
+                and self._dry_bank_is_walkable(bank)
+            ):
+                self._last_dry_bank = None
+                actions.append("return_to_dry_bank")
+                return list(bank)
+            return None
+
         retrying_bank = (
             retry_bank is not None and tuple(retry_bank) != excluded_shore and shore_bank_in_reach(search_pos, retry_bank)
         )
         if retrying_bank:
             shore_target = retry_bank
             actions.append("shore_bank_retry")
-        else:
+        elif prefer_recent_dry_bank:
+            shore_target = return_to_dry_bank(max_dist=3.5, max_height=1.25)
+        if shore_target is None:
             shore_target = self._find_walkable_shore_target(
                 search_pos,
                 block_types=SHORE_LAND_BLOCKS,
@@ -2673,16 +2691,8 @@ class CombatEnv:
                 if shore_target is not None:
                     break
 
-        if shore_target is None and self._last_dry_bank is not None:
-            bank, bank_life, bank_at = self._last_dry_bank
-            if (
-                life == bank_life and time.monotonic() - bank_at < 60.0 and bank != excluded_shore
-                and shore_bank_in_reach(search_pos, bank, max_dist=36.0, max_height=2.0)
-                and self._dry_bank_is_walkable(bank)
-            ):
-                shore_target = list(bank)
-                self._last_dry_bank = None
-                actions.append("return_to_dry_bank")
+        if shore_target is None:
+            shore_target = return_to_dry_bank(max_dist=36.0, max_height=2.0)
 
         # 3. Move to shore target (plus shoreline lip jump) or swim up and away from threat.
         shore_path_unreachable = False

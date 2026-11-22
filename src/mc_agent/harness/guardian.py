@@ -317,6 +317,7 @@ class GenerationGuard:
         self.last_reaction = float("-inf")
         self._last_water_escape_at = float("-inf")
         self._last_water_escape_failed = False
+        self._last_underground_water_preemption: tuple[tuple[Any, Any], float] | None = None
         self._water_hurt_streak = 0
         self._no_water_until = float("-inf")
         self._last_pre_hurt_melee_at = float("-inf")
@@ -4057,6 +4058,15 @@ class GenerationGuard:
                 )
                 if underwater_danger:
                     pre_actions: list[dict[str, Any]] = []
+                    water_pos = st_pre.get("pos")
+                    repeated_underground_water = False
+                    if surface_first_pre and water_pos and water_pos[1] < 55:
+                        life = (st_pre.get("dimension"), st_pre.get("last_death"))
+                        previous = self._last_underground_water_preemption
+                        repeated_underground_water = (
+                            previous is not None and previous[0] == life and now_pre - previous[1] < 60.0
+                        )
+                        self._last_underground_water_preemption = (life, now_pre)
                     nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
                     drowned_during_tool = nh_pre_name == "drowned" and (
                         (interrupted_name == "mc_attack" and nh_pre_dist <= self.ATTACK_WATER_THREAT_RANGE)
@@ -4124,6 +4134,8 @@ class GenerationGuard:
                                 keep_shield=has_shield_pre,
                                 shield_target_id=att_pre.get("id") if isinstance(att_pre, dict) else None,
                                 **({"surface_first": True} if drowning_pre or surface_first_pre else {}),
+                                **({"prefer_recent_dry_bank": True, "avoid_close_threat": True}
+                                   if repeated_underground_water else {}),
                             ),
                             raise_on_http_error=False,
                         )
@@ -4152,6 +4164,9 @@ class GenerationGuard:
                             self._water_hurt_streak = 0
                         recovery = "已脱离水域" if left_water else f"上浮后 in_water={bool(st_after.get('in_water'))}"
                         summary = f"执行 {interrupted_name} 途中水下遇险，{recovery}，当前 HP={st_after.get('health')}"
+                        if repeated_underground_water:
+                            water_block = tuple(map(math.floor, water_pos[:3]))
+                            summary += f"。矿道重复进水，请避开水格 {water_block}，沿确认干燥可通行的方向换一段巷道再采矿"
                         outcome = {
                             "handled": True, "mode": "water_surface", "summary": summary,
                             "actions": pre_actions, "status_after": st_after,
@@ -4175,8 +4190,20 @@ class GenerationGuard:
                             st_after = self.bot.status()
                         except (ApiError, httpx.HTTPError):
                             st_after = st_pre
-                        summary = f"执行 {interrupted_name} 途中遇袭，小脑接管超时已安全止步（{act['error'].get('message')}）"
-                        outcome = {"handled": False, "mode": "network_timeout", "summary": summary, "actions": [act], "status_after": st_after}
+                        life_unavailable = life_changed(st_after)
+                        _, hostile_dist, _, _ = self._extract_hostile_info(st_after)
+                        summary = f"执行 {interrupted_name} 途中遇袭，小脑接管超时（{act['error'].get('message')}）"
+                        if life_unavailable:
+                            summary += "，角色状态已变化，请按最新状态重新规划"
+                        elif 0 <= hostile_dist <= 4.0 and not st_after.get("in_lava") and not st_after.get("in_water"):
+                            summary += (
+                                f"，敌对生物仍在 {hostile_dist:.1f}m 内。下一步立即调用 mc_skill_flee 撤退，"
+                                "或先在安全位置封堵敌人来路。脱险前禁止继续挖掘或调用 mc_skill_mine_dfs（包括 reset）"
+                            )
+                        outcome = {
+                            "handled": False, "mode": "life_unavailable" if life_unavailable else "network_timeout",
+                            "summary": summary, "actions": [act], "status_after": st_after,
+                        }
                     elif isinstance(act.get("error"), dict):
                         try:
                             st_after = self.bot.call("status", method="GET", timeout_s=0.6, allow_reauth=False)

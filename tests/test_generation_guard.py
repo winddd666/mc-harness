@@ -1503,6 +1503,45 @@ def test_boundary_avoids_repeating_an_unchanged_melee_warning_after_network_time
     assert len(calls) == (1 if change == "none" else 2)
 
 
+@pytest.mark.parametrize("after, should_retreat", [
+    ({}, True),
+    ({"nearest_hostile": {"name": "zombie", "dist": 4.1}}, False),
+    ({"last_death": {"t": 2}}, False),
+    ({"in_lava": True}, False),
+])
+def test_bug095_mining_interruption_keeps_escape_priority_after_combat_timeout(monkeypatch, after, should_retreat):
+    status = {
+        "pos": [-12208.4, -53.4, -6133.5], "health": 11, "food": 20, "on_ground": True,
+        "ready": True, "alive": True, "dimension": "overworld", "last_death": {"t": 1},
+        "nearest_hostile": {"id": 42, "name": "zombie", "dist": 1.6},
+    }
+
+    class MineBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            return {"ok": True}
+
+    def combat(_trigger):
+        status.update(after)
+        raise httpx.ReadTimeout("attack stalled")
+
+    guard = GenerationGuard(MineBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
+
+    receipt = guard.handle_preemption({
+        "source": "tool_interrupted_hurt", "primary_entity_id": 42, "primary_type": "zombie",
+        "hurt_source": "mob_attack",
+    }, interrupted_name="mc_skill_mine_dfs")
+
+    assert receipt["requires_replan"] and receipt["status_after"]["health"] == 11
+    assert receipt["reflex_mode"] == ("life_unavailable" if "last_death" in after else "network_timeout")
+    assert ("立即调用 mc_skill_flee" in receipt["message"]) is should_retreat
+    assert ("禁止继续挖掘或调用 mc_skill_mine_dfs（包括 reset）" in receipt["message"]) is should_retreat
+
+
 @pytest.mark.parametrize("api_error", [False, True])
 def test_hurt_interrupted_move_enters_lava_reflex_with_distant_hostile(monkeypatch, api_error):
     moves = []
@@ -11986,6 +12025,57 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
     assert result["reflex_mode"] == "water_surface"
     assert calls == [action, "stop", "surface"]
     assert guard._water_hurt_streak == 0
+
+
+@pytest.mark.parametrize("retry, expected_bank", [
+    ("same_life", "known"),
+    ("bank_flooded", "alternate"),
+    ("new_life", "alternate"),
+    ("after_window", "alternate"),
+])
+def test_bug098_repeated_mining_water_preemption_prefers_verified_dry_tunnel(monkeypatch, retry, expected_bank):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    wet = [10.5, 22, 10.5]
+    known_bank = [9.5, 22, 10.5]
+    alternate_bank = [12.5, 22, 10.5]
+    status = {
+        "pos": wet, "health": 20, "oxygen": 110, "dimension": "overworld", "last_death": {"t": 1},
+        "ready": True, "alive": True, "in_water": True, "submerged": True, "on_ground": False,
+    }
+    moves = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                y = body["pos"][1]
+                return {"name": "stone" if y == 21 else "water" if y == 22 and retry == "bank_flooded" else "air"}
+            if action == "move_to":
+                goal = [body[key] for key in ("x", "y", "z")]
+                moves.append(goal)
+                status.update(pos=goal, in_water=False, submerged=False, on_ground=True)
+            if action == "events":
+                return {"events": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "_find_walkable_shore_target", lambda *_a, **_kw: alternate_bank)
+    trigger = {"source": "tool_water_threat", "primary_type": "water"}
+    first = guard.handle_preemption(trigger, interrupted_name="mc_skill_mine_dfs")
+    assert first["reflex_mode"] == "water_surface" and "矿道重复进水" not in first["message"]
+
+    clock[0] += 61.0 if retry == "after_window" else 5.0
+    if retry == "new_life":
+        status["last_death"] = {"t": 2}
+    guard.combat_env.remember_dry_bank({**status, "pos": known_bank})
+    status.update(pos=wet, in_water=True, submerged=True, on_ground=False)
+    second = guard.handle_preemption(trigger, interrupted_name="mc_skill_unstick")
+
+    assert second["reflex_mode"] == "water_surface" and second["status_after"]["in_water"] is False
+    assert moves == [alternate_bank, known_bank if expected_bank == "known" else alternate_bank]
+    assert ("避开水格 (10, 22, 10)" in second["message"]) is (retry in {"same_life", "bank_flooded"})
 
 
 @pytest.mark.parametrize("landing, expected_error", [
