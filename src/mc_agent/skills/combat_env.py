@@ -407,6 +407,7 @@ class ThreatTrigger(TypedDict, total=False):
 
 
 class CombatOutcome(TypedDict, total=False):
+    ok: bool
     handled: bool
     mode: str
     summary: str
@@ -3707,6 +3708,16 @@ class SubcorticalInstinctController:
             return 99.0
 
     @staticmethod
+    def _water_recovery_lost_life(before: dict[str, Any], after: dict[str, Any], recovery: dict[str, Any]) -> bool:
+        health = after.get("health")
+        return bool(
+            recovery.get("respawned") or recovery.get("mode") in {"respawned", "not_ready"}
+            or after.get("ready") is False or after.get("alive") is False
+            or (isinstance(health, (int, float)) and health <= 0)
+            or any(after.get(key) != before.get(key) for key in ("last_death", "dimension"))
+        )
+
+    @staticmethod
     def _is_falling_fast(status: dict[str, Any], origin: Sequence[float]) -> bool:
         if status.get("on_ground") is not False or status.get("in_water") or status.get("in_lava"):
             return False
@@ -4342,15 +4353,37 @@ class SubcorticalInstinctController:
                     break
                 hp_cur = float(st_cur.get("health") or 20.0)
                 if _water_requires_surface(st_cur, oxygen_bubbles=10):
-                    esc_cur = env.surface_from_water(st_cur)
-                    actions.append({"action": "water_surface_abort", **esc_cur})
-                    st_w = env._safe_status(st_cur)
-                    if not esc_cur.get("respawned") and (
+                    nearest = st_cur.get("nearest_hostile")
+                    nearest = nearest if isinstance(nearest, dict) else {}
+                    close_melee = (
+                        hp_cur <= 12.0 and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
+                        and not nearest.get("blocked_by_wall") and self._entity_dist(st_cur.get("pos"), nearest) <= 3.5
+                    )
+                    unavailable = {**st_cur, "ready": False}
+                    if close_melee:
+                        attacker_id = nearest.get("id")
+                        attacker_pos = nearest.get("pos") or (mob_pos if attacker_id == mob_id else None)
+                        esc_cur = env.escape_deep_water_to_shore(
+                            attacker_pos, keep_shield=has_shield, shield_target_id=attacker_id,
+                            surface_first=True, avoid_close_threat=attacker_pos is not None, under_attack=True,
+                        )
+                        actions.append({"action": "water_surface_shore", **esc_cur})
+                    else:
+                        esc_cur = env.surface_from_water(st_cur)
+                        actions.append({"action": "water_surface_abort", **esc_cur})
+                    st_w = env._safe_status(unavailable)
+                    if self._water_recovery_lost_life(st_cur, st_w, esc_cur):
+                        mode = "life_unavailable"
+                        break
+                    if not close_melee and (
                         not esc_cur.get("ok") or esc_cur.get("in_water") or st_w.get("in_water")
                     ):
                         shore_w = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield, shield_target_id=mob_id)
                         actions.append({"action": "water_surface_shore", "ok": bool(shore_w.get("ok"))})
-                        st_w = env._safe_status(st_w)
+                        st_w = env._safe_status(unavailable)
+                        if self._water_recovery_lost_life(st_cur, st_w, shore_w):
+                            mode = "life_unavailable"
+                            break
                     nh_w = st_w.get("nearest_hostile")
                     nh_w_dist = float(nh_w.get("dist", 99.0)) if isinstance(nh_w, dict) and nh_w.get("name") else 99.0
                     if has_shield and st_w.get("alive") is not False and not st_w.get("in_water") and (nh_w_dist <= 8.0 or not esc_cur.get("ok")):
@@ -4853,7 +4886,10 @@ class SubcorticalInstinctController:
 
         # 4) Check for a surviving attacker before handing back control or eating.
         has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
-        st_post = env._safe_status(st)
+        st_post = env._safe_status({"ready": False} if mode == "life_unavailable" else st)
+        if mode in {"water_surface", "water_surface_abort"} and self._water_recovery_lost_life(st, st_post, {}):
+            mode = "life_unavailable"
+            latched_guard = False
         nh_post = st_post.get("nearest_hostile")
         retreat_hp = st_post.get("health")
         retreats = [a for a in actions if a["action"] == "flee" and not a.get("respawned")]
@@ -5052,7 +5088,7 @@ class SubcorticalInstinctController:
         food_start_deadline = deadline - 2.5
         if (
             env.post_combat_food
-            and mode != "falling"
+            and mode not in {"falling", "life_unavailable"}
             and not latched_guard
             and time.monotonic() < food_start_deadline
             and st_post.get("ready", True)
@@ -5081,8 +5117,11 @@ class SubcorticalInstinctController:
         )
         if mode == "falling":
             summary = f"快速下坠期间已暂停反击，当前 HP={st_post.get('health')} pos={st_post.get('pos')}"
+        if mode == "life_unavailable":
+            summary = "交战期间角色已死亡或状态尚未就绪，等待刷新后重新规划"
         return {
-            "handled": bool(actions),
+            **({"ok": False} if mode == "life_unavailable" else {}),
+            "handled": bool(actions) and mode != "life_unavailable",
             "mode": mode,
             "summary": summary,
             "actions": actions,

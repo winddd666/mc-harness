@@ -6500,8 +6500,10 @@ class GenerationGuard:
                     lambda: self._run_subcortical_combat(boundary_trigger),
                     raise_on_http_error=False,
                 )
-                self._mark_pre_hurt_cooldown(boundary_trigger, time.monotonic())
                 res_d = act.get("result") if isinstance(act.get("result"), dict) else {}
+                if res_d.get("mode") == "life_unavailable":
+                    return None
+                self._mark_pre_hurt_cooldown(boundary_trigger, time.monotonic())
                 if boundary_trigger.get("source") == "pre_hurt_ranged" or str(boundary_trigger.get("primary_type") or "") in RANGED_MOBS:
                     self._mark_ranged_engagement(
                         time.monotonic(),

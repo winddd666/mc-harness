@@ -9749,6 +9749,79 @@ def test_combat_surfaces_only_when_water_status_indicates_danger(monkeypatch, st
     assert bool(final_posture.get("jump")) is surface_needed
 
 
+@pytest.mark.parametrize("ending", ["dry_bank", "respawn_on_shore", "respawn_during_float"])
+def test_low_health_counter_kill_uses_direct_shore_under_melee_pressure(monkeypatch, ending):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    attacker = {"id": 1180912, "name": "zombie", "pos": [3.1, 63.0, 0.5], "dist": 2.6}
+    status = {
+        "pos": [0.5, 63, 0.5], "health": 11.5, "food": 15, "alive": True, "ready": True,
+        "on_ground": False, "in_water": False, "dimension": "overworld", "nearest_hostile": attacker,
+        "last_death": None,
+    }
+    calls = []
+
+    class BankBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            calls.append((action, body))
+            if action == "attack":
+                status.update(health=9.4, in_water=True, submerged=True, oxygen=19)
+                if ending == "respawn_during_float":
+                    status["nearest_hostile"] = {**attacker, "blocked_by_wall": True}
+                return {"hits": 1, "killed": False}
+            if action == "inventory":
+                return {
+                    "items": [{"name": "iron_sword", "count": 1}, {"name": "cooked_beef", "count": 3}],
+                    "offhand": {"name": "shield", "count": 1},
+                }
+            if action == "get_entities":
+                return {"entities": [attacker]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 63 else "air"}
+            return {"ok": True}
+
+    env = CombatEnv(BankBot())
+
+    def respawn():
+        status.update(in_water=False, submerged=False, on_ground=True, last_death={"t": 1}, health=20, nearest_hostile=None)
+        return {"ok": False, "in_water": False, "respawned": True}
+
+    def surface(_status):
+        calls.append(("surface", {}))
+        assert ending == "respawn_during_float"
+        return respawn()
+
+    def shore(pos, **kwargs):
+        calls.append(("shore", kwargs))
+        assert pos == attacker["pos"]
+        assert kwargs == {
+            "keep_shield": True, "shield_target_id": attacker["id"], "surface_first": True,
+            "avoid_close_threat": True, "under_attack": True,
+        }
+        if ending == "respawn_on_shore":
+            return respawn()
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(env, "surface_from_water", surface)
+    monkeypatch.setattr(env, "escape_deep_water_to_shore", shore)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_melee", "primary_entity_id": attacker["id"], "primary_type": "zombie", "distance": 2.8,
+    })
+
+    after_first_hit = [name for name, _ in calls][next(i for i, (name, _) in enumerate(calls) if name == "attack") + 1:]
+    if ending == "dry_bank":
+        assert after_first_hit == ["shore", "look", "posture"]
+        assert outcome["mode"] == "water_surface_abort" and outcome["latched_guard"] is True
+    else:
+        assert after_first_hit == (["surface"] if ending == "respawn_during_float" else ["shore"])
+        assert outcome["mode"] == "life_unavailable"
+        assert outcome["ok"] is False and outcome["handled"] is False and not outcome["latched_guard"]
+
+
 def test_r21_water_surface_abort_latches_shield_and_post_combat_eat_skips_ranged():
     """Reproduces r21_short hy4_hy_3_midgame: water_surface_abort near drowned latches shield & skips ranged/latched post-combat eat."""
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
