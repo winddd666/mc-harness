@@ -2603,16 +2603,16 @@ def main() -> int:
         def _guard_scene_anchor(ev: dict[str, Any]) -> None:
             nonlocal portal_crossing
             kind = ev.get("type")
-            if scene.stage == "probe_obsidian_portal":
-                call_id = ev.get("call_id")
+            call_id = ev.get("call_id")
+            if kind == "tool.started":
                 function = ev.get("function") or {}
-                if kind == "tool.started" and call_id and function.get("name") == "mc_skill_build_portal":
+                if call_id and function.get("name") == "mc_skill_build_portal":
                     portal_calls.add(call_id)
-                elif kind == "tool.completed" and call_id in portal_calls:
-                    portal_calls.remove(call_id)
-                    receipt = portal_crossing_receipt(ev.get("result"))
-                    if receipt and (portal_crossing is None or portal_crossing["reused_existing_portal"]):
-                        portal_crossing = receipt
+            elif kind == "tool.completed" and call_id in portal_calls:
+                portal_calls.remove(call_id)
+                receipt = portal_crossing_receipt(ev.get("result"))
+                if receipt and (portal_crossing is None or portal_crossing["reused_existing_portal"]):
+                    portal_crossing = receipt
             if portal_guard is not None and kind in (
                 "curriculum.pre_ensure.started", "curriculum.pre_ensure.completed", "run.started", "run.finished",
             ):

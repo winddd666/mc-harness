@@ -645,7 +645,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 tool_calls[tname] += 1
                 payload = _decode_payload(ev.get("result") if "result" in ev else ev.get("output"))
                 if (
-                    stage == "probe_obsidian_portal" and tname == "mc_skill_build_portal"
+                    tname == "mc_skill_build_portal"
                     and (portal_crossing is None or portal_crossing.get("reused_existing_portal"))
                 ):
                     receipt = _load_runner_module().portal_crossing_receipt(payload)
@@ -868,10 +868,10 @@ def _write_markdown(
         lines.append("*（所有已收官 bot 场景入口正常）*")
     portal_rows = [r for r in rows if r.portal_crossing]
     if portal_rows:
-        lines.extend(["", "| Bot | 穿门方式 | 本次放置黑曜石 | 过门成就 |", "|---|---|---:|---|"])
+        lines.extend(["", "| Bot | 穿门方式 | 回执黑曜石数 | 过门成就 |", "|---|---|---:|---|"])
         for r in portal_rows:
             crossing = r.portal_crossing
-            how = "复用既有门" if crossing.get("reused_existing_portal") else "本次搭建"
+            how = "复用既有门" if crossing.get("reused_existing_portal") else "搭建后穿门"
             placed = crossing.get("placed_obsidian")
             lines.append(f"| `{r.name}` | {how} | {placed if placed is not None else '—'} | {r.portal_advancement} |")
     wd_rows = [r for r in rows if r.scene_ticks is not None]
