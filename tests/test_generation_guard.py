@@ -15705,8 +15705,10 @@ def test_guardian_wall_recovery_respects_deadline_and_death(entry, failure, monk
         assert attempts == [("dig", 6.0)]
 
 
-@pytest.mark.parametrize("starts_submerged", [True, False])
-def test_bug056_subcortical_water_escape_uses_budget_once(starts_submerged, monkeypatch):
+@pytest.mark.parametrize(("starts_submerged", "low_health_after_s", "float_timeout"), [
+    (True, None, 20.0), (False, None, 20.0), (False, 3.0, 2.5), (False, 5.25, None),
+])
+def test_bug056_subcortical_water_escape_uses_budget_once(starts_submerged, low_health_after_s, float_timeout, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     calls = []
@@ -15731,10 +15733,13 @@ def test_bug056_subcortical_water_escape_uses_budget_once(starts_submerged, monk
             if action == "attack":
                 calls.append("attack")
                 status.update(in_water=True, submerged=True, on_ground=False)
+                if low_health_after_s is not None:
+                    clock[0] += low_health_after_s
+                    status.update(health=8.1, nearest_hostile={"id": 43, "name": "skeleton", "dist": 8.0})
                 return {"hits": 1, "killed": False}
             if action == "move_to":
                 calls.append("water_move")
-                assert kwargs["timeout_s"] == pytest.approx(20.0)
+                assert float_timeout is not None and kwargs["timeout_s"] == pytest.approx(float_timeout)
                 clock[0] += kwargs["timeout_s"]
                 raise httpx.ReadTimeout("water move reached its deadline")
             if action == "stop" and kwargs["timeout_s"] == 1.5:
@@ -15748,6 +15753,10 @@ def test_bug056_subcortical_water_escape_uses_budget_once(starts_submerged, monk
 
     def blocked_shore(*args, **kwargs):
         calls.append("shore")
+        if low_health_after_s is not None:
+            assert guard.bot.active_deadline - clock[0] == pytest.approx(2.25 if float_timeout is None else 2.0)
+            status.update(in_water=False, submerged=False, on_ground=True)
+            return {"ok": True, "in_water": False}
         return {"ok": False, "in_water": True}
 
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", blocked_shore)
@@ -15760,8 +15769,9 @@ def test_bug056_subcortical_water_escape_uses_budget_once(starts_submerged, monk
         assert receipt["reflex_mode"] == "water_surface_abort"
         result = next(e["result"] for e in events if e["type"] == "guardian.action.completed")
     assert result["actions"][-2]["reason"] == "time_budget"
-    assert result["actions"][-1] == {"action": "water_surface_shore", "ok": False}
-    assert calls == (["attack"] if not starts_submerged else []) + ["water_move", "water_stop", "shore"]
+    assert result["actions"][-1] == {"action": "water_surface_shore", "ok": low_health_after_s is not None}
+    float_calls = [] if float_timeout is None else ["water_move", "water_stop"]
+    assert calls == (["attack"] if not starts_submerged else []) + float_calls + ["shore"]
     assert skills.bot is bot
 
 

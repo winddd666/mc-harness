@@ -849,6 +849,17 @@ class GenerationGuard:
             return False
 
     def _escape_water_for_combat(self, before: dict[str, Any]) -> dict[str, Any]:
+        health = before.get("health")
+        deadline = self.bot.active_deadline
+        if (
+            deadline is not None and before.get("in_water") is True
+            and isinstance(health, (int, float)) and 0 < health <= 10.0
+        ):
+            # Leave time for a directed shore attempt if a short ascent does not reach dry ground.
+            budget_s = min(self.COMBAT_WATER_ESCAPE_BUDGET_S, deadline - time.monotonic() - 2.0)
+            if budget_s <= 0.25:
+                return {"ok": False, "reason": "time_budget", "in_water": True}
+            return self._escape_water(before, budget_s=budget_s)
         with self.bot.pause_deadline("escape_water"):
             return self._escape_water(before)
 
