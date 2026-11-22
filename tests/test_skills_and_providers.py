@@ -3188,7 +3188,7 @@ def test_skill_smelt_recovers_tracked_output_before_mining(monkeypatch, fuel_put
         assert toolset.world_memory.get_conversion_jobs() == []
 
 
-@pytest.mark.parametrize("receipt", ["empty", "absent", "no_took", "inventory_timeout"])
+@pytest.mark.parametrize("receipt", ["empty", "absent", "no_took", "inventory_timeout", "take_timeout"])
 def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified(receipt) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
@@ -3217,6 +3217,8 @@ def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified(rec
         elif route == "view":
             count = {"load": 6, "waiting": 0, "empty_receipt": 2, "confirmed": max(0, 6 - owned)}[phase]
             result = {"sections": {"output": [{"name": "iron_ingot", "count": count}] if count else []}}
+        elif route == "stop":
+            result = {"released": True}
         elif route == "act":
             assert body["target"]["pos"] == furnace
             op = body["ops"][0]
@@ -3229,6 +3231,8 @@ def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified(rec
             else:
                 if phase == "confirmed":
                     owned += 2
+                    if receipt == "take_timeout":
+                        raise httpx.ReadTimeout("offline lost take response", request=request)
                     fail_inventory = receipt == "inventory_timeout"
                 result = {
                     "absent": {},
@@ -3244,12 +3248,16 @@ def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified(rec
         assert first["collected"] == [{"name": "iron_ingot", "count": 4}]
         assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
         phase = "waiting"
+        if receipt == "take_timeout":
+            repeated = json.loads(tools.mc_skill_smelt("raw_iron", count=2))
+            assert repeated["error"] == "pending_smelt_batch"
+            assert repeated["furnace_pos"] == furnace and repeated["pending_count"] == 2
         assert tools.skills.collect_nearby_smelt_output(5.0) is None
         phase = "empty_receipt"
         assert tools.skills.collect_nearby_smelt_output(5.0) is None
         assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
         phase = "confirmed"
-        if receipt == "inventory_timeout":
+        if receipt in {"inventory_timeout", "take_timeout"}:
             assert tools.skills.collect_nearby_smelt_output(5.0) is None
             assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
         assert tools.skills.collect_nearby_smelt_output(5.0) == {"pos": furnace, "took": {"iron_ingot": 2}}

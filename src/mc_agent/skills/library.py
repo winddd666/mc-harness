@@ -5584,10 +5584,11 @@ class MacroSkills:
             if dropped:
                 got.setdefault("_auto_dropped", 0)
             try:
-                res = self.bot.call("window/act", {"target": {"pos": pos}, "ops": take_ops})
+                request = {"target": {"pos": pos}, "ops": take_ops}
                 if job is not None and job.get("kind") == "sync_furnace":
-                    taken = self._verify_sync_furnace_take(self.bot, res, got, inv_now, pos, norm_dim)
+                    taken = self._take_sync_furnace_output(self.bot, request, got, inv_now, pos, norm_dim)
                 else:
+                    res = self.bot.call("window/act", request)
                     taken = self._furnace_take_receipt(self.bot, res, got, inv_now, legacy_preview=True)
             except (ApiError, httpx.HTTPError) as err:
                 failures.append({
@@ -5631,18 +5632,22 @@ class MacroSkills:
             _merge_counts(taken, {_clean_block(name): int(n) for name, n in receipt.items()})
         return taken
 
-    def _verify_sync_furnace_take(
-        self, bot: Any, result: dict[str, Any], preview: dict[str, int], inventory_before: dict[str, Any],
+    def _take_sync_furnace_output(
+        self, bot: Any, request: dict[str, Any], preview: dict[str, int], inventory_before: dict[str, Any],
         pos: list[int] | None, dim: str | None,
     ) -> dict[str, int]:
         counts_before = _inventory_counts_from_raw(inventory_before)
-        keys = []
-        if pos is not None and dim is not None:
-            for item, count in preview.items():
-                if count > 0:
-                    key = (dim, tuple(pos), item)
-                    self._pending_furnace_takes[key] = (counts_before.get(item, 0), count)
-                    keys.append(key)
+        keys = {
+            (dim, tuple(pos), item): count for item, count in preview.items() if count > 0
+        } if pos is not None and dim is not None else {}
+        for key, count in keys.items():
+            if key in self._pending_furnace_takes:
+                reconciled = self._reconcile_furnace_take(key, count, inventory_before)
+                if reconciled is None or reconciled:
+                    return reconciled or {}
+        for key, count in keys.items():
+            self._pending_furnace_takes[key] = (counts_before.get(key[2], 0), count)
+        result = bot.call("window/act", request)
         taken = self._furnace_take_receipt(bot, result, preview, inventory_before)
         if taken:
             for key in keys:
@@ -5772,10 +5777,8 @@ class MacroSkills:
             if not taken:
                 if count <= 0 or not _can_fit_item_in_inventory(inventory_before, item, count, check_craft_inputs=False):
                     return None
-                result = session.call("window/act", {
-                    "target": target, "ops": [{"op": "take", "from": "output", "item": item, "count": count}],
-                })
-                taken = self._verify_sync_furnace_take(session, result, {item: count}, inventory_before, pos, dim)
+                request = {"target": target, "ops": [{"op": "take", "from": "output", "item": item, "count": count}]}
+                taken = self._take_sync_furnace_output(session, request, {item: count}, inventory_before, pos, dim)
         except (_SkillDeadline, httpx.TimeoutException):
             session.stop_pending()
             return None
@@ -5792,6 +5795,24 @@ class MacroSkills:
         if cleanup:
             recovered["furnace_cleanup"] = cleanup
         return recovered
+
+    def _pending_sync_smelt_batch(
+        self, pos: list[int] | None, dim: str | None, input_item: str,
+    ) -> dict[str, Any] | None:
+        if pos is None or dim is None:
+            return None
+        item = _clean_block(input_item)
+        pending = sum(
+            j["remaining"] for j in self._get_world_memory().get_conversion_jobs(dim=dim)
+            if j["kind"] == "sync_furnace" and j["pos"] == pos and j["input_item"] == item
+        )
+        if pending <= 0:
+            return None
+        return {
+            "ok": False, "error": "pending_smelt_batch", "requires_replan": True,
+            "furnace_pos": pos, "pending_count": pending, "output_item": SMELT_OUTPUTS.get(item),
+            "message": "同一座炉的上一批还有待核对的产物。请先检查炉窗和背包，等上一批结清再补料。",
+        }
 
     def _record_sync_furnace_load(
         self, pos: list[int] | None, dim: str | None, item: str, result: dict[str, Any], fallback_count: int
@@ -5913,6 +5934,9 @@ class MacroSkills:
             if furnace_pos and dim is not None and int(furnace_pos[1]) < 55:
                 self._temporary_furnaces.add((dim, tuple(int(v) for v in furnace_pos[:3])))
 
+        pending_batch = self._pending_sync_smelt_batch(furnace_pos, dim, input_item)
+        if pending_batch:
+            return pending_batch
         target = {"pos": furnace_pos} if furnace_pos else {"block": "furnace"}
         counts = _inventory_counts(self.bot)
 
@@ -5999,6 +6023,9 @@ class MacroSkills:
                 if alternate is None or float(alternate.get("dist", 99)) > 4.0:
                     raise
                 furnace_pos = alternate["pos"]
+                pending_batch = self._pending_sync_smelt_batch(furnace_pos, dim, input_item)
+                if pending_batch:
+                    return pending_batch
                 target = {"pos": furnace_pos}
                 session.progress["furnace_pos"] = furnace_pos
                 load_result = self.bot.call("window/act", {"target": target, "ops": load_ops})
@@ -6057,12 +6084,9 @@ class MacroSkills:
                     }
         for out_item in outputs_to_take:
             cnt = int(out_item.get("count") or 0)
-            result = self.bot.call(
-                "window/act",
-                {"target": target, "ops": [{"op": "take", "from": "output", "count": cnt}]},
-            )
-            taken = self._verify_sync_furnace_take(
-                self.bot, result, {_clean_block(out_item.get("name")): cnt}, inv_take, furnace_pos, dim,
+            request = {"target": target, "ops": [{"op": "take", "from": "output", "count": cnt}]}
+            taken = self._take_sync_furnace_output(
+                self.bot, request, {_clean_block(out_item.get("name")): cnt}, inv_take, furnace_pos, dim,
             )
             collected.extend({"name": item, "count": n} for item, n in taken.items())
             if furnace_pos is not None and dim is not None:
