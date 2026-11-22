@@ -2337,28 +2337,83 @@ class MacroSkills:
                     carried = "chest"
             if site is not None:
                 placed = self.bot.call("place", {"item": carried, "pos": site})
-                if placed.get("pos") and placed["pos"] != site:
-                    return [], result
+                if (placed.get("pos") and placed["pos"] != site) or self._container_block_at(site) != carried:
+                    return [], {**result, "error": "storage_placement_unconfirmed"}
                 self.remember_placed_storage(carried, site, dim)
                 result["method"] = "placed_storage"
         if site is None:
             result["message"] = "附近暂无已确认可用的自有容器，且没有可放置的侧格。请换到有侧格或仓储的位置腾出空位。"
             return [], result
 
-        stored = self.container_batch(planned, action="put", x=site[0], y=site[1], z=site[2], dim=dim)
-        after = self.bot.inventory()
-        counts = _inventory_counts_from_raw(after)
+        result["pos"] = site
+        return self._verify_mining_storage(planned, site, dim, status, result)
+
+    @staticmethod
+    def _storage_window_counts(view: Any) -> dict[str, int] | None:
+        if not isinstance(view, dict):
+            return None
+        rows = (view.get("sections") or {}).get("container")
+        if not isinstance(rows, list):
+            return None
+        return _inventory_counts_from_raw({"items": rows})
+
+    def _verify_mining_storage(
+        self, planned: dict[str, int], site: list[int], dim: str,
+        status: dict[str, Any], result: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        target = {"target": {"pos": site}}
+        starting = self._storage_window_counts(self.bot.call("window/view", target))
+        if starting is None:
+            return [], {**result, "error": "storage_window_unconfirmed"}
+
+        session = self.bot
+        deadline = session.deadline
+        session.deadline = max(time.monotonic(), deadline - 2.0)
+        try:
+            stored = self.container_batch(planned, action="put", x=site[0], y=site[1], z=site[2], dim=dim)
+        except (_SkillDeadline, httpx.TimeoutException):
+            session.deadline = deadline
+            if session.pending_action and not session.stop_pending():
+                return [], {**result, "error": "storage_action_unconfirmed"}
+            session.timed_out = False
+            stored = {"ok": False, "error": "storage_timeout"}
+        finally:
+            session.deadline = deadline
+
+        error = stored.get("error")
+        if error in {"dead", "death", "disconnected", "not_connected", "interrupted", "hurt"}:
+            return [], {**result, "error": error}
+        live = self.bot.status()
+        if (
+            live.get("alive") is False or live.get("last_death") != status.get("last_death")
+            or normalize_dimension(live.get("dimension")) != dim
+        ):
+            return [], {**result, "error": "storage_life_changed"}
+
+        receipt: dict[str, int] = {}
+        done = stored.get("done")
+        for op in done if isinstance(done, list) else []:
+            if isinstance(op, dict) and op.get("to") == "container" and op.get("put"):
+                name = _clean_block(op["put"])
+                receipt[name] = receipt.get(name, 0) + int(op.get("count") or 0)
+        if not receipt:
+            ending = self._storage_window_counts(stored.get("window"))
+            if ending is None:
+                ending = self._storage_window_counts(self.bot.call("window/view", target))
+            receipt = _positive_inv_delta(starting, ending) if ending is not None else {}
         actual = [
-            {"item": name, "count": min(n, before[name] - counts.get(name, 0))}
-            for name, n in planned.items() if before[name] > counts.get(name, 0)
+            {"item": name, "count": min(n, receipt[name])}
+            for name, n in planned.items() if receipt.get(name, 0) > 0
         ]
-        result.update(pos=site, empty_slots=_compute_empty_slots(after))
-        if not stored.get("ok"):
-            result["error"] = stored.get("error")
+        result["empty_slots"] = _compute_empty_slots(self.bot.inventory())
+        if not actual:
+            result["error"] = error or "storage_transfer_unconfirmed"
+        elif error:
+            result["reconciled_after"] = error
         return actual, result
 
     def clean_mining_inventory(self, max_duration_s: float) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-        session = _SkillBudgetSession(self.bot, max_duration_s)
+        session = _SkillBudgetSession(self.bot, max_duration_s, bound_transport_retries=True)
         scoped = copy(self)
         scoped.bot = session
         try:
