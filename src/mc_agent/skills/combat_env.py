@@ -2699,6 +2699,41 @@ class CombatEnv:
             and _is_passable(feet) and _is_passable(head)
         )
 
+    def _adjacent_water_air_pocket(
+        self, pos: Sequence[float], *, threat_pos: Sequence[float] | None = None,
+    ) -> list[float] | None:
+        x, y, z = pos[:3]
+        bx, by, bz = math.floor(x), math.floor(y), math.floor(z)
+        water = {"water", "flowing_water"}
+        air = {"air", "cave_air", "void_air"}
+        swim_clearance = water | air
+        overhead_hazards = set(HAZARD_BLOCK_TYPES) - water
+        deadline = time.monotonic() + 0.5
+
+        def clear_swim_step(px: float, pz: float) -> bool:
+            return self._point_allowed(px, pz, action="water_retreat") and all(
+                self._get_block_name(hx, by, hz, deadline=deadline) in swim_clearance
+                and self._get_block_name(hx, by + 1, hz, deadline=deadline) in swim_clearance
+                and self._get_block_name(hx, by + 2, hz, deadline=deadline) not in overhead_hazards
+                for hx, hz in _hitbox_columns(px, pz)
+            )
+
+        self.invalidate_block_cache()
+        try:
+            if self._get_block_name(bx, by + 1, bz, deadline=deadline) not in water:
+                return None
+            for dx, dz in CARDINAL_VECTORS.values():
+                tx, tz = bx + dx + 0.5, bz + dz + 0.5
+                if threat_pos is not None and self._crosses_near_water_threat(pos, tx, tz, threat_pos):
+                    continue
+                if any(self._get_block_name(bx + dx, ay, bz + dz, deadline=deadline) not in air for ay in (by + 2, by + 3)):
+                    continue
+                if all(clear_swim_step(x + (tx - x) * f, z + (tz - z) * f) for f in (0.25, 0.5, 0.75, 1.0)):
+                    return [tx, y, tz]
+        except _TerrainProbeExpired:
+            pass
+        return None
+
     def escape_deep_water_to_shore(
         self,
         threat_pos: Sequence[float] | None = None,
@@ -2866,6 +2901,7 @@ class CombatEnv:
                 and swim_step_allowed(pos0, float(st0.get("yaw") or 0.0))
             )
             for _ in range(2):
+                surge_origin = search_status.get("pos") or pos0
                 try:
                     self.bot.call(
                         "control",
@@ -2887,6 +2923,57 @@ class CombatEnv:
                     and raised_pos and raised_pos[1] - pos0[1] >= 0.5
                 ):
                     break
+            if (
+                surface_first and search_status.get("in_water") and search_status.get("submerged")
+                and isinstance(oxygen, (int, float)) and oxygen <= 0 and raised_pos
+                and raised_pos[1] - surge_origin[1] < 0.5
+            ):
+                pocket = self._adjacent_water_air_pocket(raised_pos, threat_pos=threat_pos if avoid_close_threat else None)
+                if pocket is not None:
+                    try:
+                        current = self.bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
+                    except (ApiError, httpx.HTTPError):
+                        current = search_status
+                        pocket = None
+                    interruption = interrupted_water_escape(current)
+                    if interruption is not None:
+                        return interruption
+                    search_status = current
+                    current_pos = current.get("pos")
+                    current_oxygen = current.get("oxygen")
+                    if (
+                        pocket is not None and current.get("in_water") and current.get("submerged")
+                        and isinstance(current_oxygen, (int, float)) and current_oxygen <= 0
+                        and current_pos and math.dist(current_pos[:3], raised_pos[:3]) <= 0.25
+                    ):
+                        yaw, _ = aim_yaw_pitch(current_pos, pocket)
+                        try:
+                            self.bot.call("look", {"yaw": yaw, "pitch": -15.0}, timeout_s=0.2, allow_reauth=False)
+                            self.bot.call(
+                                "control", {"forward": True, "jump": True, "ms": 420, "stop_on": ["death"]},
+                                timeout_s=0.65, allow_reauth=False,
+                            )
+                            actions.append("water_air_pocket")
+                        except httpx.HTTPError:
+                            self._best_effort_stop(timeout_s=0.3)
+                        except ApiError:
+                            pass
+                        try:
+                            search_status = self.bot.call("status", method="GET", timeout_s=0.3, allow_reauth=False)
+                        except (ApiError, httpx.HTTPError):
+                            search_status = {**current, "ready": False}
+                        interruption = interrupted_water_escape(search_status)
+                        if interruption is not None:
+                            return interruption
+                    oxygen = search_status.get("oxygen")
+                    if (
+                        search_status.get("in_water") and search_status.get("submerged") is False
+                        and isinstance(oxygen, (int, float)) and oxygen > 0
+                    ):
+                        return {
+                            "ok": False, "in_water": True, "mode": "breathing", "actions": actions,
+                            "pos_after": search_status.get("pos"),
+                        }
             if surface_first and not search_status.get("in_water") and search_status.get("on_ground") is not False:
                 if sneak_on_magma:
                     try:

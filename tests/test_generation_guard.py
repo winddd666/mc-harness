@@ -11969,6 +11969,69 @@ def test_drowning_continues_a_verified_ascent_before_trying_to_path_to_shore(ris
     assert actions == (["up", "up"] if rising else ["up", "move_to"])
 
 
+@pytest.mark.parametrize("pocket", ["breathes", "no_air", "lava", "lava_overhead", "respawned", "still_submerged", "probe_timeout"])
+def test_stalled_drowning_ascent_tries_an_adjacent_air_pocket_before_the_bank(monkeypatch, pocket):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    status = {"pos": [34027.5, 61.2, 34000.5], "in_water": True, "submerged": True, "oxygen": 0,
+              "on_ground": False, "ready": True, "alive": True, "dimension": "overworld", "last_death": {"t": 1}}
+    motions = []
+
+    class FloodedPassageBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                assert kwargs["timeout_s"] <= 0.3 and kwargs["allow_reauth"] is False
+                return self.status()
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if pocket == "probe_timeout" and kwargs.get("timeout_s") is not None:
+                    raise httpx.ReadTimeout("water geometry unavailable")
+                if z == 34000 and x == 34027:
+                    if pocket == "lava_overhead" and y == 63:
+                        return {"name": "lava"}
+                    return {"name": "water" if y <= 62 else "stone"}
+                if z == 34000 and x == 34028:
+                    if pocket == "lava" and y == 62:
+                        return {"name": "lava"}
+                    return {"name": "water" if y <= 62 or pocket == "no_air" else "air"}
+                return {"name": "stone"}
+            if action == "look":
+                status["yaw"] = body["yaw"]
+            if action == "control":
+                if not body.get("forward"):
+                    motions.append("up")
+                    return {"ok": True}
+                motions.append("side")
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                assert dx == pytest.approx(1) and dz == pytest.approx(0)
+                assert body["jump"] and body["stop_on"] == ["death"]
+                status["pos"] = [34028.5, 62, 34000.5]
+                if pocket == "respawned":
+                    status.update(in_water=False, last_death={"t": 2})
+                if pocket == "breathes":
+                    status.update(submerged=False, oxygen=20)
+            if action == "move_to":
+                motions.append("bank")
+                status.update(pos=[body["x"], body["y"], body["z"]], in_water=False, submerged=False, on_ground=True)
+            return {"ok": True}
+
+    env = CombatEnv(FloodedPassageBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_a, **_kw: [34028.5, 64.0, 34001.5])
+    result = env.escape_deep_water_to_shore(surface_first=True)
+
+    if pocket == "breathes":
+        assert motions == ["up", "side"]
+        assert result["mode"] == "breathing" and result["in_water"] is True and result["ok"] is False
+    elif pocket == "respawned":
+        assert motions == ["up", "side"] and result["mode"] == "respawned"
+    else:
+        expected = ["up", "side", "bank"] if pocket == "still_submerged" else ["up", "bank"]
+        assert motions == expected and result["ok"] is True
+
+
 @pytest.mark.parametrize("starts_in_lava, surface_first", [(True, True), (False, True), (False, False)])
 def test_directed_shore_escape_does_not_report_lava_as_dry_land(starts_in_lava, surface_first):
     from mc_agent.skills.combat_env import CombatEnv
