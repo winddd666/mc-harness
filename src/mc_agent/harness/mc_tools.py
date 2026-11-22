@@ -1719,7 +1719,9 @@ class McToolset:
                 res_pl = parsed_pl.get("result") if isinstance(parsed_pl.get("result"), dict) else {}
                 p_xyz = res_pl.get("pos") or ([x, y, z] if (x is not None and y is not None and z is not None) else None)
                 if isinstance(p_xyz, (list, tuple)) and len(p_xyz) >= 3:
-                    self.world_memory.record_poi(item, [int(p_xyz[0]), int(p_xyz[1]), int(p_xyz[2])], dim=self._last_dimension)
+                    pos = [int(p_xyz[0]), int(p_xyz[1]), int(p_xyz[2])]
+                    self.world_memory.record_poi(item, pos, dim=self._last_dimension)
+                    self.skills.remember_placed_storage(item, pos, self._last_dimension)
         except Exception:
             pass
         return raw_place
@@ -3023,14 +3025,13 @@ class McToolset:
             if isinstance(res, dict):
                 # BUG-029: mine_dfs is the main long-mining path and does not
                 # call _ensure_free_slots; enforce retention caps here.
-                try:
-                    _, cleaned = self.skills._ensure_free_slots(min_free=3)
-                except Exception:
-                    cleaned = []
-                if cleaned:
-                    res["inventory_cleaned"] = [
-                        {"item": d.get("item"), "count": d.get("count")} for d in cleaned
-                    ]
+                cleanup_budget = min(8.0, started + eff_duration_s + 3.0 - time.monotonic())
+                if cleanup_budget > 0:
+                    cleaned, cleanup = self.skills.clean_mining_inventory(cleanup_budget)
+                    if cleaned:
+                        res["inventory_cleaned"] = cleaned
+                    if cleanup is not None:
+                        res["inventory_cleanup"] = cleanup
             return res
 
         return self._run_skill(_invoke)

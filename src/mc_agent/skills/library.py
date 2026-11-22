@@ -801,6 +801,23 @@ _TRASH_TIER4_COBBLE: tuple[str, ...] = (
 )
 
 _TRASH_TIER_NETHER: tuple[str, ...] = ("netherrack",)
+_MINING_RETENTION_CAPS = {
+    **dict.fromkeys(_TRASH_TIER3_DIRT, 64),
+    **dict.fromkeys(_TRASH_TIER_NETHER, 128),
+    **dict.fromkeys(_TRASH_TIER4_COBBLE, 192),
+}
+
+
+def _inventory_retention_plan(counts: dict[str, int]) -> list[tuple[str, int]]:
+    cobble = sum(counts.get(name, 0) for name in _TRASH_TIER4_COBBLE)
+    tier2_keep = 0 if cobble >= 64 else 64
+    return [
+        *((name, 0) for name in _TRASH_TIER1_ZERO_KEEP),
+        *((name, tier2_keep) for name in _TRASH_TIER2_DECOR_STONES),
+        *((name, tier2_keep) for name in _TRASH_TIER2_LOOSE_BLOCKS),
+        *_MINING_RETENTION_CAPS.items(),
+    ]
+
 
 _UNSTACKABLE_ITEMS: frozenset[str] = frozenset(
     {
@@ -1370,6 +1387,7 @@ class MacroSkills:
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
         self._drop_retry_after: dict[tuple[str, int, tuple[int, ...], tuple[int, ...]], float] = {}
         self._temporary_furnaces: set[tuple[str, tuple[int, ...]]] = set()
+        self._placed_storage: dict[tuple[str, tuple[int, ...]], str] = {}
         self._mining_dfs: Any = None
         self.world_memory: Any = None
         self._terrain_nav: Any = None
@@ -2067,16 +2085,7 @@ class MacroSkills:
             if (empty_now >= min_free and not over_cap) or drop_ops >= max_drop_ops:
                 break
 
-            cobble_total = per_item_counts.get("cobblestone", 0) + per_item_counts.get("cobbled_deepslate", 0)
-            tier2_keep = 0 if cobble_total >= 64 else 64
-            plan_specs: list[tuple[str, int]] = [
-                *((name, 0) for name in _TRASH_TIER1_ZERO_KEEP),
-                *((name, tier2_keep) for name in _TRASH_TIER2_DECOR_STONES),
-                *((name, tier2_keep) for name in _TRASH_TIER2_LOOSE_BLOCKS),
-                *((name, 64) for name in _TRASH_TIER3_DIRT),
-                *((name, 128) for name in _TRASH_TIER_NETHER),
-                *((name, 192) for name in _TRASH_TIER4_COBBLE),
-            ]
+            plan_specs = _inventory_retention_plan(per_item_counts)
             est_free = empty_now
             made_drop = False
             for name, keep in plan_specs:
@@ -2142,6 +2151,129 @@ class MacroSkills:
             if not isinstance(inv, dict):
                 return {}, dropped
         return inv, dropped
+
+    def remember_placed_storage(self, item: str, pos: list[int], dim: str) -> None:
+        item = _clean_block(item)
+        if item in {"chest", "barrel", "trapped_chest"}:
+            self._placed_storage[(normalize_dimension(dim), tuple(int(v) for v in pos[:3]))] = item
+
+    def _storage_side_cell(self, origin: list[float]) -> list[int] | None:
+        x, y, z = (math.floor(v) for v in origin[:3])
+        if not 0 <= origin[1] - y < 0.1:
+            return None
+        air = {"air", "cave_air", "void_air"}
+        solid = {"stone", "deepslate", "dirt", "cobblestone", "cobbled_deepslate", "andesite", "granite", "tuff", "netherrack"}
+        cache: dict[tuple[int, int, int], str] = {}
+
+        def block(dx: int, dy: int, dz: int) -> str:
+            return _cached_block_name(self.bot, x + dx, y + dy, z + dz, cache)
+
+        for dx, dz in ((1, 0), (0, 1)):
+            if not all(block(k * dx, dy, k * dz) in air for k in (-1, 1) for dy in (0, 1)):
+                continue
+            for k in (1, -1):
+                sx, sz = k * dz, k * dx
+                # Place only in a supported recess with a closed far wall.
+                if block(sx, -1, sz) not in solid or block(2 * sx, 0, 2 * sz) not in solid:
+                    continue
+                if any(block(sx, dy, sz) not in air for dy in (0, 1)):
+                    continue
+                if not all(block(sx + bend * dx, 0, sz + bend * dz) in solid for bend in (-1, 1)):
+                    continue
+                if self.geofence and self.geofence.check_point(x + sx, z + sz, action="mc_place"):
+                    continue
+                return [x + sx, y, z + sz]
+        return None
+
+    def _stash_mining_clutter(self, inv: dict[str, Any], min_free: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        before = _inventory_counts_from_raw(inv)
+        free = _compute_empty_slots(inv)
+        needed = min_free - free
+        planned: dict[str, int] = {}
+        for item, keep in _inventory_retention_plan(before):
+            excess = before.get(item, 0) - keep
+            if excess <= 0 or (needed <= 0 and item not in _MINING_RETENTION_CAPS):
+                continue
+            count = excess if item in _MINING_RETENTION_CAPS else min(excess, 64 * needed)
+            planned[item] = count
+            occupied = sum(
+                1 for row in inv.get("items") or []
+                if _clean_block(row.get("name")) == item and int(row.get("count") or 0) > 0
+            )
+            needed -= max(0, occupied - math.ceil((before[item] - count) / 64))
+        result: dict[str, Any] = {"method": "no_safe_storage", "empty_slots": free}
+        if not planned:
+            result["method"] = "no_clutter"
+            return [], result
+
+        status = self.bot.status()
+        origin = status.get("pos")
+        if not origin or status.get("in_water") or status.get("in_lava"):
+            return [], result
+        dim = normalize_dimension(status.get("dimension"))
+        site = None
+        for (site_dim, pos), name in sorted(
+            self._placed_storage.items(), key=lambda pair: math.dist(origin[:3], pair[0][1]),
+        ):
+            if site_dim != dim or math.dist(origin[:3], [v + 0.5 for v in pos]) > 2.5:
+                continue
+            if self._container_block_at(list(pos)) == name:
+                site = list(pos)
+                result["method"] = "owned_storage"
+                break
+
+        carried = next((name for name in ("chest", "barrel") if before.get(name, 0) >= 1), None)
+        # A new stack needs an empty slot even when enough planks are in the bag.
+        can_craft = _total_planks(before) >= 16 and free > 0
+        if site is None and (carried or can_craft):
+            site = self._storage_side_cell(origin)
+            if site is not None and not carried:
+                tables = self.bot.call("find_blocks", {"radius": 2, "types": ["crafting_table"], "limit": 1})
+                if not tables.get("blocks"):
+                    site = None
+                else:
+                    self.bot.call("craft", {"item": "chest", "count": 1})
+                    carried = "chest"
+            if site is not None:
+                placed = self.bot.call("place", {"item": carried, "pos": site})
+                if placed.get("pos") and placed["pos"] != site:
+                    return [], result
+                self.remember_placed_storage(carried, site, dim)
+                result["method"] = "placed_storage"
+        if site is None:
+            result["message"] = "附近暂无已确认可用的自有容器，且没有可放置的侧格。请换到有侧格或仓储的位置腾出空位。"
+            return [], result
+
+        stored = self.container_batch(planned, action="put", x=site[0], y=site[1], z=site[2], dim=dim)
+        after = self.bot.inventory()
+        counts = _inventory_counts_from_raw(after)
+        actual = [
+            {"item": name, "count": min(n, before[name] - counts.get(name, 0))}
+            for name, n in planned.items() if before[name] > counts.get(name, 0)
+        ]
+        result.update(pos=site, empty_slots=_compute_empty_slots(after))
+        if not stored.get("ok"):
+            result["error"] = stored.get("error")
+        return actual, result
+
+    def clean_mining_inventory(self, max_duration_s: float) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        session = _SkillBudgetSession(self.bot, max_duration_s)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            inv = session.inventory()
+            if _compute_empty_slots(inv) < 3:
+                return scoped._stash_mining_clutter(inv, 3)
+            counts = _inventory_counts_from_raw(inv)
+            if not any(counts.get(item, 0) > cap for item, cap in _MINING_RETENTION_CAPS.items()):
+                return [], None
+            _, dropped = scoped._ensure_free_slots(min_free=3, inv_snapshot=inv)
+            return dropped, None
+        except (_SkillDeadline, httpx.TimeoutException):
+            session.stop_pending()
+            return [], {"method": "cleanup_time_budget"}
+        except (ApiError, httpx.HTTPError) as error:
+            return [], {"method": "cleanup_failed", "error": getattr(error, "code", type(error).__name__)}
 
     def _safe_craft(
         self,

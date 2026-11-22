@@ -4439,6 +4439,104 @@ def test_mine_dfs_triggers_retention_cleanup() -> None:
     assert state["cobblestone"] == 192
 
 
+@pytest.mark.parametrize("mode", ["owned", "carried", "crafted", "unsafe"])
+def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    origin = [0.5, 30.0, 0.5]
+    side = [1, 30, 0]
+    cobble = 384
+    bag_chest = mode == "carried"
+    plank_stacks = ["oak_planks", "birch_planks"] if mode == "crafted" else []
+    protected_count = 30 - int(bag_chest) - len(plank_stacks) - int(mode == "crafted")
+    chest = mode in {"owned", "unsafe"}
+    stored = 0
+    picked = False
+    actions = []
+
+    def handler(request):
+        nonlocal cobble, bag_chest, chest, stored, picked
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        actions.append(route)
+        if route == "inventory":
+            stones = [{"name": "cobblestone", "count": min(64, cobble - n)} for n in range(0, cobble, 64)]
+            protected = [{"name": "stone_pickaxe", "count": 1}] * protected_count
+            items = stones + protected + [{"name": name, "count": 8} for name in plank_stacks]
+            if bag_chest:
+                items.append({"name": "chest", "count": 1})
+            if picked:
+                items.append({"name": "diamond", "count": 1})
+            result = {"items": items}
+        elif route == "status":
+            result = {"pos": origin, "dimension": "overworld", "health": 20}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            if [x, y, z] == side and chest:
+                name = "chest"
+            elif x == 0 and y in (30, 31):
+                name = "air"
+            elif x == 1 and z == 0 and y in (30, 31) and mode in {"carried", "crafted"}:
+                name = "air"
+            else:
+                name = "stone"
+            result = {"name": name}
+        elif route == "find_blocks":
+            assert mode == "crafted" and body["types"] == ["crafting_table"]
+            result = {"blocks": [{"name": "crafting_table", "pos": [-1, 30, 0], "dist": 1}]}
+        elif route == "craft":
+            assert mode == "crafted" and body == {"item": "chest", "count": 1}
+            plank_stacks.pop(0)
+            bag_chest = True
+            result = {"crafted": "chest", "gained": 1}
+        elif route == "place":
+            assert body == {"item": "chest", "pos": side} and bag_chest
+            bag_chest = False
+            chest = True
+            result = {"pos": side, "placed": "chest"}
+        elif route == "act":
+            assert body["target"]["pos"] == side and chest and mode != "unsafe"
+            ops = body["ops"]
+            assert all(op["op"] == "put" and op["item"] == "cobblestone" for op in ops)
+            stored += sum(op["count"] for op in ops)
+            cobble -= sum(op["count"] for op in ops)
+            result = {"window": {"window": "generic_9x3", "sections": {
+                "container": [{"name": "cobblestone", "count": stored}],
+            }}}
+        elif route == "move_to":
+            assert body["x"] == 0.5 and body["y"] == 30
+            origin[2] = body["z"]
+            picked = picked or body["z"] == -1.5
+            result = {"pos": list(origin)}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        if mode == "owned":
+            tools.skills.remember_placed_storage("chest", side, "overworld")
+        tools.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
+        outcome = json.loads(tools.mc_skill_mine_dfs(target="diamond"))
+        if mode != "unsafe":
+            bot.call("move_to", {"x": 0.5, "y": 30, "z": -1.5})
+            bot.call("move_to", {"x": 0.5, "y": 30, "z": 0.5})
+            assert any(item["name"] == "diamond" for item in bot.inventory()["items"])
+
+    if mode == "unsafe":
+        assert outcome["inventory_cleanup"]["method"] == "no_safe_storage"
+        assert "act" not in actions and "place" not in actions
+        assert cobble == 384
+    else:
+        assert outcome["inventory_cleanup"]["method"] == ("owned_storage" if mode == "owned" else "placed_storage")
+        assert outcome["inventory_cleanup"]["empty_slots"] >= 3
+        assert outcome["inventory_cleaned"] == [{"item": "cobblestone", "count": 192}]
+        assert cobble == 192 and stored == 192
+        if mode == "crafted":
+            assert plank_stacks == ["birch_planks"]
+    assert "drop" not in actions
+
+
 def test_staircase_first_step_uses_total_budget(monkeypatch) -> None:
     """BUG-037: a 20s first step must not die at the 15s per-step cap."""
     import mc_agent.skills.library as library
