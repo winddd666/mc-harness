@@ -5461,6 +5461,64 @@ def test_recent_trident_hit_defers_food_until_the_projectile_threat_passes(monke
     assert dishes == ["cooked_beef"]
 
 
+@pytest.mark.parametrize("pressure", ["missing_shooter", "other_nearest", "melee_only", "new_life"])
+def test_low_health_poll_defers_food_after_attack_read_timeout_under_arrow_fire(monkeypatch, pressure):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    zombie = {"id": 51, "name": "zombie", "pos": [2.5, 71, 0.5], "dist": 2.0}
+    status = {
+        "pos": [0.5, 71, 0.5], "health": 7.67, "food": 20, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "blocking": False, "nearest_hostile": zombie,
+    }
+    events = []
+    commands = []
+
+    class PortalBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [event for event in events if event["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}, {"name": "cooked_beef", "count": 1}]}
+            if action in {"stop", "use_item"}:
+                commands.append(action)
+                return {"ok": True}
+            raise AssertionError(action)
+
+    log = []
+    guard = GenerationGuard(PortalBot(), EventSink(log.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def attack(_env, trigger):
+        assert trigger["primary_entity_id"] == zombie["id"]
+        events.append({"seq": 1, "type": "hurt", "source": "mob_attack" if pressure == "melee_only" else "arrow"})
+        status["nearest_hostile"] = {**zombie, "dist": 9.0} if pressure == "other_nearest" else None
+        raise httpx.ReadTimeout("attack reply timed out", request=httpx.Request("POST", "http://localhost/attack"))
+
+    monkeypatch.setattr(guard.combat_slot, "handle", attack)
+    first = guard.poll()
+    assert first["event_seqs"] == [1]
+    assert first["actions"][0]["error"]["code"] == "network_uncertain"
+    assert commands == ["stop"]
+    assert any(event.get("endpoint") == "attack" for event in log)
+
+    clock[0] += 3.1
+    if pressure == "new_life":
+        events.append({"seq": 2, "type": "spawn"})
+        status["last_death"] = {"t": 2}
+        assert "death_or_connection_changed" in guard.poll()["reasons"]
+        clock[0] += 3.1
+    status["food"] = 19
+    incident = guard.poll()
+    if pressure in {"missing_shooter", "other_nearest"}:
+        assert incident is None and commands == ["stop"]
+        clock[0] += 5.0
+        incident = guard.poll()
+    assert incident["actions"][0]["action"] == "eat"
+    assert commands == ["stop", "use_item"]
+
+
 def test_r19_poll_skips_eat_in_close_melee_range_after_combat_timeout(monkeypatch):
     """Reproduces r19_short hy4_hy_3_midgame: never drop shield to eat when a hostile is <= 5.5m after melee cooldown."""
     clock = [6000.0]

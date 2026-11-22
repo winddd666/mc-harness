@@ -355,6 +355,7 @@ class GenerationGuard:
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
         self._last_ranged_hurt_at = float("-inf")
+        self._last_attack_read_timeout_at = float("-inf")
         self._last_trident_hurt_at = float("-inf")
         self._last_melee_hurt_at = float("-inf")
         self._nether_melee_eat_defer_until = float("-inf")
@@ -1152,6 +1153,8 @@ class GenerationGuard:
                 }:
                     event_details["endpoint"] = endpoint
                 if endpoint == "attack":
+                    if isinstance(error, httpx.ReadTimeout):
+                        self._last_attack_read_timeout_at = time.monotonic()
                     try:
                         attack_request = json.loads(error.request.content)
                     except (httpx.RequestNotRead, ValueError):
@@ -1217,6 +1220,7 @@ class GenerationGuard:
                     self._ranged_combat_stance_until = float("-inf")
                     self._ranged_cover_active_until = float("-inf")
                     self._last_ranged_hurt_at = float("-inf")
+                    self._last_attack_read_timeout_at = float("-inf")
                     self._last_trident_hurt_at = float("-inf")
                     self._last_melee_hurt_at = float("-inf")
                     self._nether_melee_eat_defer_until = float("-inf")
@@ -1418,6 +1422,7 @@ class GenerationGuard:
         if nh_name and nh_dist <= (WARDEN_EVADE_DISTANCE if nh_name == "warden" else min_dist):
             return False
         health = status.get("health")
+        low_health = isinstance(health, (int, float)) and 0 < health <= LOW_HP_BUNKER_MAX
         if isinstance(health, (int, float)) and health <= 4.0:
             # In-flight projectiles can still reach a critical-health bot just beyond that range.
             ranged_min_dist = max(ranged_min_dist, 20.0)
@@ -1425,6 +1430,10 @@ class GenerationGuard:
         if not self._eat_history_checked and status.get("blocking") and status.get("ready") is True:
             self._recover_recent_ranged_hit_for_eating()
         recent_ranged_hit = now - self._last_ranged_hurt_at < self.RANGED_EAT_DEFER_S
+        # A melee attack can time out while arrows still arrive from outside the nearest-hostile snapshot.
+        exposed_after_attack_timeout = (
+            low_health and recent_ranged_hit and now - self._last_attack_read_timeout_at < self.RANGED_EAT_DEFER_S
+        )
         recent_melee_hit = now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
         in_nether = str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
         protecting_against_recent_hit = status.get("blocking") and (recent_ranged_hit or recent_melee_hit)
@@ -1435,10 +1444,7 @@ class GenerationGuard:
         )
         trident_age = now - self._last_trident_hurt_at
         trident_threat = trident_age < self.RANGED_EAT_DEFER_S
-        if (
-            not trident_threat and trident_age < self.TRIDENT_EAT_THREAT_S
-            and isinstance(health, (int, float)) and 0 < health <= LOW_HP_BUNKER_MAX
-        ):
+        if not trident_threat and trident_age < self.TRIDENT_EAT_THREAT_S and low_health:
             trident_threat = nh_name == "drowned" and nh_dist <= ranged_min_dist
             if not trident_threat and not ranged_in_range:
                 try:
@@ -1457,12 +1463,15 @@ class GenerationGuard:
         pos = status.get("pos")
         recent_failed_cover = (
             recent_ranged_hit and now - self._last_dig_cover_fail_at < 8.0
-            and isinstance(health, (int, float)) and 0 < health <= LOW_HP_BUNKER_MAX
+            and low_health
             and isinstance(pos, (list, tuple)) and len(pos) >= 3
             and (math.floor(pos[0]), math.floor(pos[1] + 0.05), math.floor(pos[2])) == self._last_dig_cover_block
         )
         if (
-            (ranged_in_range or protecting_against_recent_hit or recent_nether_threat or trident_threat or recent_failed_cover)
+            (
+                ranged_in_range or exposed_after_attack_timeout or protecting_against_recent_hit
+                or recent_nether_threat or trident_threat or recent_failed_cover
+            )
             and not self._inside_own_shaft()
         ):
             return False
