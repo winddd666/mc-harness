@@ -592,7 +592,11 @@ ORES_1_21: dict[str, dict[str, Any]] = {
         "min_pickaxe": "stone_pickaxe",
         "drop": "raw_iron",
         "keywords": ["铁矿", "铁", "iron", "raw_iron", "deepslate_iron_ore"],
-        "tip": "mc_find_blocks 仅扫暴露在空气中的方块！若地表山崖没看到，下探天然洞窟/水谷裂谷或斜向挖阶梯至 Y=16~48 附近。",
+        "tip": (
+            "mc_find_blocks 仅扫暴露矿块。若地表山崖没看到，可沿干燥洞道或分段挖阶梯下探至 Y=16–48。"
+            "铁器开局缺铁且尚无铁镐时，到 Y=16 就停用向下阶梯，持石镐用 mc_skill_mine_dfs(target='iron', target_y=16) 水平找矿。"
+            "若已低于 Y=16 且附近无可采铁矿，沿确认可走的路线返回该层再找。"
+        ),
     },
     "lapis_ore": {
         "id": "lapis_ore",
