@@ -3677,7 +3677,8 @@ class SubcorticalInstinctController:
                     or st_chk.get("dimension") != st.get("dimension")
                 )
                 can_continue = not changed_life and st_chk.get("ready") is not False and bool(st_chk.get("pos"))
-                post_h = self._find_live_hostiles(env, radius=8) if can_continue else []
+                post_scan = self._scan_live_hostiles(env, radius=8, timeout_s=0.6) if can_continue else None
+                post_h = post_scan or []
                 close_creeper = next(
                     (
                         e
@@ -3695,11 +3696,15 @@ class SubcorticalInstinctController:
                         and self._entity_dist(st_chk.get("pos"), nh_chk) <= 5.5
                     ):
                         close_creeper = nh_chk
-                creeper_still_close = close_creeper is not None
+                retreat_ok = bool(flee_res.get("ok"))
+                clearance_confirmed = post_scan is not None and close_creeper is None
+                retreat_reason = flee_res.get("reason")
+                if retreat_ok and can_continue and post_scan is None and close_creeper is None:
+                    retreat_reason = "blast_clearance_unconfirmed"
                 actions.append({
-                    "action": "retreat_from_creeper", "ok": bool(flee_res.get("ok")) and can_continue and not creeper_still_close,
+                    "action": "retreat_from_creeper", "ok": retreat_ok and can_continue and clearance_confirmed,
                     "moved": flee_res.get("moved_dist"),
-                    **({"reason": flee_res["reason"]} if flee_res.get("reason") else {}),
+                    **({"reason": retreat_reason} if retreat_reason else {}),
                     **({"creeper_distance": self._entity_dist(st_chk.get("pos"), close_creeper)} if close_creeper else {}),
                     **({"respawned": True} if changed_life else {}),
                 })
@@ -3724,7 +3729,7 @@ class SubcorticalInstinctController:
                     )
                 elif (
                     not has_shield and isinstance(close_pos, (list, tuple)) and len(close_pos) >= 3
-                    and flee_res.get("ok") and can_continue
+                    and can_continue and retreat_made_progress(retreat_ok, flee_res.get("moved_dist"), retreat_reason)
                     and st_chk.get("on_ground") is True and not st_chk.get("in_water") and not st_chk.get("in_lava")
                     and time.monotonic() < deadline
                 ):
@@ -3757,14 +3762,14 @@ class SubcorticalInstinctController:
                                 followup.update(ok=False, reason="blast_clearance_unconfirmed")
                     actions.append({"action": "creeper_followup_retreat", **followup})
                 if (
-                    (not flee_res.get("ok") or creeper_still_close)
+                    (not retreat_ok or not clearance_confirmed)
                     and can_continue
                     and has_shield
                     and not st_chk.get("in_water")
                 ):
                     cid = (close_creeper or creeper_ent or {}).get("id")
                     latched_guard = self._latch_shield_at_threat(env, int(cid) if cid is not None else None)
-                elif flee_res.get("ok") and can_continue and has_shield and st_chk.get("blocking"):
+                elif retreat_ok and can_continue and has_shield and st_chk.get("blocking"):
                     nearest = st_chk.get("nearest_hostile")
                     nearest = nearest if isinstance(nearest, dict) else {}
                     health_after = st_chk.get("health")

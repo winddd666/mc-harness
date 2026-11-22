@@ -9464,7 +9464,9 @@ def test_unshielded_critical_melee_knockback_rechecks_late_landing(monkeypatch, 
     assert bool(retreat["result"].get("respawned")) is (landing == "respawned")
 
 
-@pytest.mark.parametrize("after_first", ["close", "pursued", "scan_unavailable", "clear", "respawned"])
+@pytest.mark.parametrize("after_first", [
+    "close", "pursued", "scan_unavailable", "first_scan_unavailable", "first_scan_empty", "clear", "respawned",
+])
 def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_first):
     pos = [0.5, 64.0, 0.5]
     creeper_pos = [0.5, 64.0, 4.7]
@@ -9477,15 +9479,22 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
             nonlocal yaw, last_death
             creeper = {"id": 66, "name": "creeper", "pos": list(creeper_pos), "dist": math.dist(pos, creeper_pos)}
             if action == "status":
+                nearest = creeper
+                if pulses and after_first in {"first_scan_unavailable", "first_scan_empty"}:
+                    nearest = {"id": 67, "name": "zombie", "dist": 4.0}
                 return {
                     "pos": list(pos), "health": 20, "food": 20, "on_ground": True, "yaw": yaw,
-                    "ready": True, "alive": True, "last_death": last_death, "nearest_hostile": creeper,
+                    "ready": True, "alive": True, "last_death": last_death, "nearest_hostile": nearest,
                 }
             if action == "events":
                 return {"events": []}
             if action == "inventory":
                 return {"items": [], "offhand": None}
             if action == "get_entities":
+                if len(pulses) == 1 and after_first == "first_scan_unavailable":
+                    raise httpx.ReadTimeout("first creeper rescan timed out")
+                if len(pulses) == 1 and after_first == "first_scan_empty":
+                    return {"entities": []}
                 if len(pulses) == 2 and after_first == "scan_unavailable":
                     raise httpx.ReadTimeout("creeper scan timed out")
                 return {"entities": [creeper]}
@@ -9518,7 +9527,9 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
     reaction, = incident["actions"]
     actions = reaction["result"]["actions"]
     assert actions[0]["action"] == "retreat_from_creeper"
-    assert actions[0]["ok"] is (after_first == "clear")
+    assert actions[0]["ok"] is (after_first in {"clear", "first_scan_empty"})
+    if after_first == "first_scan_unavailable":
+        assert actions[0]["reason"] == "blast_clearance_unconfirmed"
     assert pulses[0] == pytest.approx([0.5, 64.0, -1.8])
     if after_first in {"close", "pursued", "scan_unavailable"}:
         assert actions[0]["creeper_distance"] == pytest.approx(4.6)
@@ -9533,14 +9544,17 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
 
 
 @pytest.mark.parametrize("pursuer_blocked", [False, True])
-def test_creeper_followup_uses_fresh_melee_position_to_choose_a_safe_route(monkeypatch, pursuer_blocked):
+@pytest.mark.parametrize(("first_move", "reason"), [
+    (1.6, None), (1.4, None), (0.0, "no_safe_retreat"), (1.4, "unsafe_landing"),
+])
+def test_creeper_followup_uses_fresh_melee_position_to_choose_a_safe_route(monkeypatch, pursuer_blocked, first_move, reason):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
 
     landing = [17054.4, 25, 29963.1]
     creeper = {"id": 42, "name": "creeper", "pos": [17059.76, 25, 29963.1], "dist": 4}
     zombie = {"id": 43, "name": "zombie", "pos": [17049.8, 25, 29963.1], "dist": 4.6,
               "blocked_by_wall": pursuer_blocked}
-    status = {"pos": [17055.8, 25, 29963.1], "health": 20, "food": 20, "ready": True, "alive": True,
+    status = {"pos": [landing[0] + first_move, 25, 29963.1], "health": 20, "food": 20, "ready": True, "alive": True,
               "on_ground": True, "dimension": "overworld", "nearest_hostile": creeper}
     moves = []
     first_retreat = False
@@ -9582,13 +9596,21 @@ def test_creeper_followup_uses_fresh_melee_position_to_choose_a_safe_route(monke
             return followup(threat_pos, **kwargs)
         first_retreat = True
         status.update(pos=landing, nearest_hostile=zombie)
-        return {"ok": True, "mode": "flee", "moved_dist": 5.2, "pos_after": landing}
+        return {
+            "ok": first_move >= 1.5 and reason is None, "mode": "flee", "moved_dist": first_move,
+            "pos_after": landing, "reason": reason,
+        }
 
     monkeypatch.setattr(env, "flee", flee)
     result = CombatControllerSlot().handle(env, {
         "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 42,
     })
 
+    if reason:
+        retreat, = result["actions"]
+        assert not retreat["ok"] and retreat["reason"] == reason
+        assert moves == []
+        return
     assert result["actions"][1]["action"] == "creeper_followup_retreat" and result["actions"][1]["ok"]
     assert math.dist(moves[-1], creeper["pos"]) > 5.5
     assert (math.dist(moves[0], zombie["pos"]) < 3.0) is pursuer_blocked
