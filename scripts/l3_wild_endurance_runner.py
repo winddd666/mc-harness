@@ -525,6 +525,7 @@ def select_stronghold_village_site(
     inner, outer = STRONGHOLD_DISTANCE_RANGE
     seen_villages = set()
     rejected: Counter[str] = Counter()
+    failed_landings: Counter[str] = Counter()
     nearby_pairs = 0
     for probe in village_probes():
         village = locate(*probe, "#minecraft:village")
@@ -541,29 +542,50 @@ def select_stronghold_village_site(
         if not in_region(stronghold):
             rejected["stronghold_outside_region"] += 1
             continue
-        if not inner - 32 <= math.dist(village, stronghold) <= outer + 32:
+        pair_distance = math.dist(village, stronghold)
+        if not inner - 32 <= pair_distance <= outer + 32:
             rejected["pair_outside_distance"] += 1
             continue
         nearby_pairs += 1
-        for _ in range(2):
-            _, status = _spread_overworld(bot, bot_name, *village, 16)
+        vx, vz = village
+        hx, hz = stronghold
+        ux, uz = (hx - vx) / pair_distance, (hz - vz) / pair_distance
+        # Sample near the village as before, then aim at ground on the correct
+        # side of the distance boundary and try both flanks if that ground is bad.
+        safe_distance = min(max(pair_distance, inner + 8), outer - 8)
+        forward = min(31, max(-31, pair_distance - safe_distance))
+        lateral = min(16, math.sqrt(31**2 - forward**2))
+        probes = {(vx, vz, 16): None}
+        for across in (0.0, lateral, -lateral):
+            dx, dz = forward * ux - across * uz, forward * uz + across * ux
+            radius = max(1, min(6, int((32 - math.hypot(dx, dz)) / math.sqrt(2))))
+            probes[(vx + round(dx), vz + round(dz), radius)] = None
+        for x, z, radius in probes:
+            _, status = _spread_overworld(bot, bot_name, x, z, radius)
             pos = _dry_overworld_position(status)
             if pos is None:
+                failed_landings["not_dry_overworld_ground"] += 1
                 continue
             xz = pos[0], pos[2]
-            if (
-                math.dist(xz, village) <= 32
-                and inner <= math.dist(xz, stronghold) <= outer
-                and _portal_free_landing(bot)
-                and locate(math.floor(xz[0]), math.floor(xz[1]), "minecraft:stronghold") == stronghold
-            ):
-                return (*pos, str(status.get("biome") or "")), village, stronghold
+            if math.dist(xz, village) > 32:
+                failed_landings["outside_village_radius"] += 1
+                continue
+            if not inner <= math.dist(xz, stronghold) <= outer:
+                failed_landings["outside_stronghold_distance"] += 1
+                continue
+            if not _portal_free_landing(bot):
+                failed_landings["nearby_portal"] += 1
+                continue
+            if locate(math.floor(xz[0]), math.floor(xz[1]), "minecraft:stronghold") != stronghold:
+                failed_landings["nearest_stronghold_changed"] += 1
+                continue
+            return (*pos, str(status.get("biome") or "")), village, stronghold
         rejected["no_safe_landing"] += 1
     raise RuntimeError(
         "Could not find a safe village with a stronghold 120–600m away in the assigned region "
         f"({len(seen_villages)} distinct villages located, {nearby_pairs} pairs sent to landing checks; "
         f"site slot {start_idx}, region={anchor}, focused strongholds={len(seen_strongholds)}, "
-        f"rejected={dict(rejected)})"
+        f"rejected={dict(rejected)}, landing_rejected={dict(failed_landings)})"
     )
 
 
