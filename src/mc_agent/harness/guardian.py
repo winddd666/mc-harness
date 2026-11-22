@@ -5873,6 +5873,7 @@ class GenerationGuard:
         tool_returned_in_water = False
         waiting_for_shore_landing = False
         same_threat_after_timeout = False
+        staircase_surface_exit = False
         flowing_lava_target: list[int] | None = None
         if tool_results:
             try:
@@ -5880,6 +5881,20 @@ class GenerationGuard:
             except (TypeError, ValueError):
                 last_tool_result = None
             if isinstance(last_tool_result, dict):
+                surface_evidence = last_tool_result.get("surface_evidence")
+                if (
+                    last_tool_result.get("ok") is True and last_tool_result.get("stop_reason") == "reached_surface"
+                    and last_tool_result.get("vertical") == "up" and isinstance(surface_evidence, dict)
+                    and status.get("on_ground") is True
+                    and not any(event.get("type") in {"death", "death_loop", "disconnected", "spawn"} for event in fresh)
+                ):
+                    exit_pos = surface_evidence.get("pos")
+                    current_pos = status.get("pos")
+                    staircase_surface_exit = all(
+                        isinstance(point, (list, tuple)) and len(point) >= 3
+                        and all(type(coord) in (int, float) and math.isfinite(coord) for coord in point[:3])
+                        for point in (exit_pos, current_pos)
+                    ) and math.dist(exit_pos[:3], current_pos[:3]) <= 0.5
                 error = last_tool_result.get("error")
                 if (
                     isinstance(error, dict) and error.get("code") == "interact_flowing_fluid"
@@ -6173,6 +6188,8 @@ class GenerationGuard:
                     notes.append("塌方破墙脱困")
 
             if boundary_trigger is not None and not still_lava and not still_wet:
+                if staircase_surface_exit and boundary_trigger.get("source") == "pre_hurt_ranged":
+                    boundary_trigger["staircase_surface_exit"] = True
                 self._mark_pre_hurt_cooldown(boundary_trigger, time.monotonic())
                 act = self._action(
                     "boundary_subcortical_combat",
@@ -6185,7 +6202,7 @@ class GenerationGuard:
                     self._mark_ranged_engagement(
                         time.monotonic(),
                         trigger=boundary_trigger,
-                        in_cover=res_d.get("mode") in {"cover_pocket", "bunker_sealed", "sealed_shaft"},
+                        in_cover=res_d.get("mode") in {"cover_pocket", "bunker_sealed", "sealed_shaft", "natural_cover"},
                     )
                 if act.get("ok"):
                     notes.append(str(res_d.get("summary") or f"处置近身威胁 {nh_name}"))

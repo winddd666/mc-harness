@@ -11482,6 +11482,74 @@ def test_missing_offhand_pickaxe_for_bunker_still_allows_boundary_retreat():
     assert moves == [[5197.2, 84, 7615.5]]
 
 
+@pytest.mark.parametrize("scene", ["wall", "open", "unsupported", "creeper", "shooter_changed", "stale_exit"])
+def test_staircase_surface_exit_checks_cover_after_point_blank_shooter_blocks_retreat(monkeypatch, scene):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    origin = [356580.5, 64, 369945.5]
+    shooter = {"id": 1027040, "name": "skeleton", "dist": 1.5, "pos": [356582, 64, 369945.5]}
+    status = {
+        "pos": origin, "dimension": "overworld", "last_death": {"t": 1}, "health": 20, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
+    }
+    moves = []
+    retreated = False
+
+    class ExitBot:
+        def call(self, action, body=None, **_kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "iron_pickaxe"}}
+            if action == "get_entities":
+                if retreated and scene == "creeper":
+                    return {"entities": [shooter, {"id": 4, "name": "creeper", "dist": 4.4}]}
+                return {"entities": [{**shooter, "id": 43} if retreated and scene == "shooter_changed" else shooter]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if y == 63 and (scene != "unsupported" or z == 369945):
+                    return {"name": "stone"}
+                if scene != "open" and x == 356581 and 64 <= y <= 66 and z in {369946, 369947}:
+                    return {"name": "stone"}
+                return {"name": "air"}
+            if action == "move_to":
+                moves.append(body)
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            elif action not in {"stop", "control", "posture"}:
+                pytest.fail(f"Unexpected action near surface exit: {action}")
+            return {"ok": True}
+
+    def flee(*_args, **_kwargs):
+        nonlocal retreated
+        retreated = True
+        return {"ok": False, "mode": "flee", "moved_dist": 0.0, "reason": "no_safe_retreat"}
+
+    env_events = EventSink(lambda _: None)
+    guard = GenerationGuard(ExitBot(), env_events, checkpoint=lambda: None)
+    monkeypatch.setattr(CombatEnv, "arena_snapshot", lambda *_args: {"enclosure": "surface"})
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    exit_pos = [origin[0], origin[1], origin[2] - 2.0] if scene == "stale_exit" else origin
+    guard.stabilize_after_tools([json.dumps({
+        "ok": True, "vertical": "up", "steps_done": 10, "stop_reason": "reached_surface",
+        "pos_after": exit_pos, "surface_evidence": {"floor": "dirt", "pos": exit_pos},
+    })])
+
+    outcome, = [
+        event["result"] for event in env_events.events
+        if event["type"] == "guardian.action.completed" and event["action"] == "boundary_subcortical_combat"
+    ]
+    assert retreated and outcome["actions"][0]["reason"] == "no_safe_retreat"
+    assert (outcome["mode"] == "natural_cover") is (scene == "wall")
+    if scene == "wall":
+        move, = moves
+        assert [move["x"], move["y"], move["z"]] == pytest.approx([356580.5, 64, 369947.7])
+        assert outcome["actions"][-1]["ok"]
+    else:
+        assert moves == []
+
+
 @pytest.mark.parametrize(("health", "fresh_hurt", "expect_retreat"), [(3.3, True, True), (8.0, True, False), (3.3, False, False)])
 def test_guardian_handles_fresh_critical_combat_hurt_inside_reaction_cooldown(monkeypatch, health, fresh_hurt, expect_retreat):
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)

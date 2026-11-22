@@ -385,6 +385,7 @@ class ThreatTrigger(TypedDict, total=False):
     observed_life: tuple[Any, Any]
     water_observation: dict[str, Any]
     action_released: bool
+    staircase_surface_exit: bool
 
 
 class CombatOutcome(TypedDict, total=False):
@@ -3721,15 +3722,17 @@ class SubcorticalInstinctController:
         except (ApiError, httpx.HTTPError):
             return False
 
-    def _cover_after_shielded_arrow_stall(
+    def _cover_after_projectile_stall(
         self, env: CombatEnv, before: dict[str, Any], shooter_id: int, *, deadline: float,
+        max_health: float | None,
     ) -> dict[str, Any] | None:
         landing = env._safe_status({"ready": False}, timeout_s=0.3)
         health = landing.get("health")
         pos = landing.get("pos")
         if (
             landing.get("ready") is not True or landing.get("alive") is False or landing.get("on_ground") is not True
-            or not pos or not isinstance(health, (int, float)) or not 0 < health <= 6.0
+            or not pos or not isinstance(health, (int, float)) or not math.isfinite(health) or health <= 0
+            or (max_health is not None and health > max_health)
             or any(landing.get(key) for key in ("busy", "in_water", "in_lava", "submerged", "on_fire"))
             or any(landing.get(key) != before.get(key) for key in ("dimension", "last_death"))
         ):
@@ -4599,12 +4602,19 @@ class SubcorticalInstinctController:
                         not flee_ok and fl.get("reason") == "no_safe_retreat" and hp <= 4.0
                         and trigger.get("hurt_source") == "arrow"
                     )
+                    close_shooter_at_exit = (
+                        trigger.get("staircase_surface_exit") is True and not has_shield
+                        and mob_name in RANGED_MOBS and isinstance(mob_id, int) and mob_id == trig_id
+                        and 0 < mob_dist <= 3.5
+                        and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                    )
                     if (
-                        shielded_arrow_interrupt and not flee_ok and not fl.get("respawned")
+                        (shielded_arrow_interrupt or close_shooter_at_exit) and not flee_ok and not fl.get("respawned")
                         and fl.get("reason") == "no_safe_retreat" and time.monotonic() + 2.0 < deadline
                     ):
-                        natural_cover = self._cover_after_shielded_arrow_stall(
+                        natural_cover = self._cover_after_projectile_stall(
                             env, st, mob_id, deadline=min(deadline - 0.7, time.monotonic() + 2.25),
+                            max_health=None if close_shooter_at_exit else 6.0,
                         )
                         if natural_cover is not None:
                             actions.append({"action": "natural_cover", **natural_cover})
