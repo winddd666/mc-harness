@@ -1650,6 +1650,7 @@ class SceneWatchdog(threading.Thread):
         self._returned_while_dead = False
         self._last_total = -1
         self._inv_tick = 0
+        self._outside_fence_ticks = 0
         self._ticks = 0
         self._preempt_skips = 0
 
@@ -1713,8 +1714,10 @@ class SceneWatchdog(threading.Thread):
             # guardian._wrapped_call raises ReflexPreempted(BaseException) during a reflex takeover;
             # letting it escape would kill the watchdog thread for the rest of the run (r18 ds_ds_4).
             self._preempt_skips += 1
+            self._outside_fence_ticks = 0
             return
         if not st:
+            self._outside_fence_ticks = 0
             return
         ready = bool(st.get("ready"))
         health = float(st.get("health") or 0.0)
@@ -1735,6 +1738,7 @@ class SceneWatchdog(threading.Thread):
             except BaseException:
                 pass
         if not ready and not dead_signal:
+            self._outside_fence_ticks = 0
             return
         pos = st.get("pos") or []
         dim = str(st.get("dimension") or "overworld").lower()
@@ -1750,6 +1754,14 @@ class SceneWatchdog(threading.Thread):
             else float("inf")
         )
         drifted = dim_matches and dist > self.scene.drift_limit and ready
+        # A macro can leave the working radius and its inward steps can then
+        # be denied by the fence. Confirm displacement outside the outer edge.
+        outside_fence = (
+            ready and not dead_signal and bool(st.get("dimension")) and dim_matches
+            and math.isfinite(dist) and dist > self.scene.radius
+        )
+        self._outside_fence_ticks = self._outside_fence_ticks + 1 if outside_fence else 0
+        outside_fence_confirmed = self._outside_fence_ticks >= 2
         suspected_death = dead_signal and (new_status_death if has_death_stamp else not self._returned_while_dead)
         self._ticks += 1
         if self._ticks % 15 == 0:  # ~2 min at the default 8s interval
@@ -1791,7 +1803,7 @@ class SceneWatchdog(threading.Thread):
                     emptied_after_death = unhandled_death and total <= 2
                     suspected_death = not stashing and (collapsed_at_anchor or emptied_after_death)
                     self._last_total = total
-        if not (wrong_dim or drifted or suspected_death):
+        if not (wrong_dim or drifted or suspected_death or outside_fence_confirmed):
             return
         now = time.monotonic()
         if now - self._last_return < 20.0:
@@ -1800,6 +1812,8 @@ class SceneWatchdog(threading.Thread):
             reason = "death_return"
         elif wrong_dim:
             reason = f"wrong_dimension({dim})"
+        elif outside_fence_confirmed and not drifted:
+            reason = "outside_fence_return"
         else:
             reason = f"drift_{dist:.0f}m"
         near_empty = self._last_total >= 0 and self._last_total <= 2
@@ -1813,6 +1827,7 @@ class SceneWatchdog(threading.Thread):
         except Exception as exc:  # never kill the watchdog thread on a transient RCON hiccup
             print(f"[Scene Restock] {self.bot_name} failed reason={reason}: {exc}", flush=True)
         else:
+            self._outside_fence_ticks = 0
             if suspected_death:
                 self._death_handled_at = now
                 self._death_handled_wall_ms = max(
