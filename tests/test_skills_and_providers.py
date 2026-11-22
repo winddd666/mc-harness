@@ -853,7 +853,7 @@ def test_targeted_drop_recovery_refreshes_each_stack_and_skips_unsafe_routes(mon
         assert moves == [1, 2, 4]
 
 
-@pytest.mark.parametrize("pickup", ["collected", "partial", "unsafe", "gone", "unreleased"])
+@pytest.mark.parametrize("pickup", ["collected", "partial", "unsafe", "gone", "unreleased", "stale", "after_hostile"])
 def test_mine_dfs_checks_observed_target_drops_before_digging(monkeypatch, pickup) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
@@ -876,7 +876,7 @@ def test_mine_dfs_checks_observed_target_drops_before_digging(monkeypatch, picku
         if route == "get_entities":
             if pickup == "gone" and actions.count("get_entities") == 2:
                 clock[0] += 0.75
-            result = {"entities": drops}
+            result = {"entities": [] if body.get("types") == ["hostile"] else drops}
         elif route == "status":
             result = {"pos": position, "dimension": "overworld"}
         elif route == "get_block":
@@ -906,26 +906,35 @@ def test_mine_dfs_checks_observed_target_drops_before_digging(monkeypatch, picku
 
     def mine(**kwargs):
         actions.append("dfs")
-        assert kwargs["max_duration_s"] == pytest.approx(31.25 if pickup == "gone" else 32)
+        refreshed = pickup == "gone" and actions.count("dfs") == 1
+        assert kwargs["max_duration_s"] == pytest.approx(31.25 if refreshed else 32)
         return {"ok": True, "dug_count": 1}
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         tools = McToolset(bot)
         tools.skills.mine_dfs = mine
         tools.mc_get_entities(radius=6, types=["item"])
-        clock[0] += 3.8
+        if pickup == "after_hostile":
+            clock[0] += 2.0
+            tools.mc_get_entities(radius=6, types=["hostile"])
+            clock[0] += 1.8
+        else:
+            clock[0] += 6.001 if pickup == "stale" else 3.8
         if pickup == "gone":
             drops.pop(0)
         result = json.loads(tools.mc_skill_mine_dfs(target="iron", goal_count=2))
+        if pickup == "gone":
+            repeated = json.loads(tools.mc_skill_mine_dfs(target="iron", goal_count=2))
+            assert "pickup_before_mining" not in repeated
 
-    if pickup in {"collected", "partial"}:
-        expected = 2 if pickup == "collected" else 1
+    if pickup in {"collected", "partial", "stale", "after_hostile"}:
+        expected = 1 if pickup == "partial" else 2
         assert "dfs" not in actions
         assert result["ok"] is True and result["goal_met"] is (expected == 2) and result["dug_count"] == 0
         assert result["gained"] == {"raw_iron": expected} and result["target_gained"] == expected
         attempt = result["pickup_before_mining"]["attempts"][0]
         assert attempt["pickup_inventory_gain"] == expected
-        assert attempt["picked_up"] == (2 if pickup == "collected" else 0)
+        assert attempt["picked_up"] == (0 if pickup == "partial" else 2)
     elif pickup == "unreleased":
         assert "dfs" not in actions and actions.count("move_to") == 1 and actions.count("stop") == 1
         assert result["ok"] is False and result["pickup_before_mining"]["stop_confirmed"] is False

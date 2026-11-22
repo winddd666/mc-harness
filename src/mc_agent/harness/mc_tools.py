@@ -188,6 +188,7 @@ class McToolset:
         self._entity_observations: dict[int, dict[str, Any]] = {}
         self._entity_observed_mono: float | None = None
         self._entity_observed_dimension: str = "overworld"
+        self._nearby_drop_observation: tuple[str, frozenset[str]] | None = None
         self._status_hostile_id: int | None = None
         self._geofence_blocked_count: int = 0
         self._path_not_found_targets: list[tuple[float, float]] = []
@@ -983,10 +984,16 @@ class McToolset:
             ents = (res_ent or {}).get("entities") or []
             dim_ent, pos_ent, _ = self._cached_env(fetch_if_missing=False)
             if isinstance(parsed, dict) and parsed.get("ok") is True:
+                nearby_drops = frozenset(
+                    _normalize_drop_name(ent.get("item")) for ent in ents
+                    if isinstance(ent, dict) and isinstance(ent.get("dist"), (int, float)) and ent["dist"] <= 4.5
+                ) - {""}
                 with self._state_lock:
                     self._entity_observations = {int(ent["id"]): ent for ent in ents if isinstance(ent, dict) and isinstance(ent.get("id"), int)}
                     self._entity_observed_mono = time.monotonic()
                     self._entity_observed_dimension = dim_ent
+                    if nearby_drops or not types or "item" in types:
+                        self._nearby_drop_observation = (dim_ent, nearby_drops) if nearby_drops else None
             if ents:
                 self.world_memory.observe_entities(ents, dim=dim_ent)
             elif types and isinstance(res_ent, dict) and pos_ent is not None:
@@ -2975,25 +2982,21 @@ class McToolset:
     def _collect_observed_mining_drops(self, target: str, budget_s: float) -> dict[str, Any] | None:
         if budget_s <= 0:
             return None
-        with self._state_lock:
-            dim = self._last_dimension
-            if (
-                self._entity_observed_mono is None or time.monotonic() - self._entity_observed_mono > 6.0
-                or self._entity_observed_dimension != dim
-            ):
-                return None
-            entities = tuple(self._entity_observations.values())
-
         from ..skills.mining_dfs import _resolve_target_profile
 
-        wanted = frozenset(_resolve_target_profile(target, None, dimension=dim)["expected_items"])
-        if any(
-            isinstance(ent.get("dist"), (int, float)) and ent["dist"] <= 4.5
-            and _normalize_drop_name(ent.get("item")) in wanted for ent in entities
-        ):
-            # Cached entities trigger the check. The shared picker refreshes coordinates and verifies the route.
-            return self.skills._collect_target_drops(wanted, 5, 4, max_duration_s=budget_s, single_attempt=True)
-        return None
+        with self._state_lock:
+            observation = self._nearby_drop_observation
+            if observation is None or observation[0] != self._last_dimension:
+                return None
+            dim, seen_items = observation
+            wanted = frozenset(_resolve_target_profile(target, None, dimension=dim)["expected_items"])
+            if wanted.isdisjoint(seen_items):
+                return None
+            remaining_items = seen_items - wanted
+            self._nearby_drop_observation = (dim, remaining_items) if remaining_items else None
+
+        # Consume each hint once. The picker always obtains fresh coordinates and verifies the route.
+        return self.skills._collect_target_drops(wanted, 5, 4, max_duration_s=budget_s, single_attempt=True)
 
     def mc_skill_mine_dfs(
         self,
