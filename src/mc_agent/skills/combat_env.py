@@ -3506,7 +3506,7 @@ class SubcorticalInstinctController:
                                 break
                 except ApiError as err:
                     actions.append({"action": "shield_rush_attack", "ok": False, "code": err.code})
-                    if err.code not in {"entity_not_found", "invalid_entity", "target_dead"}:
+                    if err.code not in {"no_such_entity", "entity_not_found", "invalid_entity", "target_dead"}:
                         fl = env.flee(mob_pos, distance=12.0, urgent=True)
                         actions.append({"action": "fallback_flee", "ok": bool(fl.get("ok"))})
             else:

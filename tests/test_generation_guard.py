@@ -2750,7 +2750,8 @@ def test_non_combat_fire_fall_hurt_skips_shield_spam_and_water_trident_equips_sh
     assert out_tp["ok"] is False and out_tp.get("respawned") is True
 
 
-def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush():
+@pytest.mark.parametrize("shooter_disappears", [False, True])
+def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush(shooter_disappears):
     """Reproduces r15 cave_combat: distant mobs >8.5m outside walls must not disable sword counter_kill or multi-hit shield_rush_ranged."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
 
@@ -2801,6 +2802,8 @@ def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush():
                 return {"name": "stone" if p[1] < 64 or abs(p[0]) >= 5 or abs(p[2]) >= 5 else "air"}
             if action == "attack":
                 strikes["n"] += 1
+                if self.solo_skeleton and shooter_disappears and strikes["n"] == 2:
+                    raise ApiError("no_such_entity", "entity is no longer visible")
                 return {"hits": 1, "killed": strikes["n"] >= 2}
             return {"ok": True}
 
@@ -2820,7 +2823,11 @@ def test_cave_combat_ignores_distant_wall_hostiles_and_finishes_shield_rush():
     )
     assert out_s["mode"] == "shield_rush_ranged"
     assert strikes["n"] == 2
-    assert any(a["action"] == "shield_rush_attack" and a.get("killed") is True for a in out_s["actions"])
+    if shooter_disappears:
+        assert {"action": "shield_rush_attack", "ok": False, "code": "no_such_entity"} in out_s["actions"]
+        assert not any(a["action"] == "fallback_flee" for a in out_s["actions"])
+    else:
+        assert any(a["action"] == "shield_rush_attack" and a.get("killed") is True for a in out_s["actions"])
 
 
 @pytest.mark.parametrize("ranged", [False, True])
