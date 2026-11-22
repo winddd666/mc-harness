@@ -2499,10 +2499,30 @@ class GenerationGuard:
                                 already_blocking and pocket_unavailable_here
                                 and isinstance(moved_dist, (int, float)) and moved_dist > 0.0
                             )
-                            if (
-                                cf.get("ok") and not cf_result.get("respawned")
-                                and (not has_shield or recent_cover_fail or moved_after_failed_pocket)
+                            shore = None
+                            if cf_result.get("reason") == "unsafe_landing":
+                                shore = self._recover_water_landing_after_retreat(
+                                    status, cf_result, threat_pos=att_pos_r, threat_id=att_id_r,
+                                    threat_name=att_name_r, has_shield=has_shield,
+                                )
+                                if shore is not None:
+                                    actions.append(shore)
+                            stalled_under_arrows = (
+                                not has_shield and hurt_src == "arrow" and 0 < hp_val <= LOW_HP_BUNKER_MAX
+                                and cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
+                            )
+                            retry_pocket_after_knockback = (
+                                not has_shield and not skip_cover_for_blast and status.get("on_ground") is False
+                                and cf_result.get("reason") == "no_safe_retreat"
+                            )
+                            critical_landing = (
+                                cf.get("ok") and (not has_shield or recent_cover_fail or moved_after_failed_pocket)
                                 and (hurt_src == "arrow" or trident_attacker_id is not None) and 0 < hp_val <= 6.0
+                            )
+                            natural_cover = None
+                            if (
+                                shore is None and not cf_result.get("respawned")
+                                and (critical_landing or stalled_under_arrows)
                                 and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                             ):
                                 try:
@@ -2510,6 +2530,10 @@ class GenerationGuard:
                                 except (ApiError, httpx.HTTPError):
                                     landing = {}
                                 landing_hp = landing.get("health")
+                                pocket_already_tried = (
+                                    cover_block(landing.get("pos")) == self._last_dig_cover_block
+                                    and now - self._last_dig_cover_at < 20.0
+                                )
                                 if (
                                     landing.get("ready") is True and landing.get("alive") is True
                                     and landing.get("on_ground") is True and landing.get("pos")
@@ -2517,6 +2541,7 @@ class GenerationGuard:
                                     and bool(landing.get("blocking")) == has_shield
                                     and all(landing.get(key) == status.get(key) for key in ("last_death", "dimension"))
                                     and isinstance(landing_hp, (int, float)) and 0 < landing_hp <= 4.0
+                                    and (not retry_pocket_after_knockback or pocket_already_tried)
                                 ):
                                     natural_cover = self._action(
                                         "natural_cover_after_retreat",
@@ -2528,18 +2553,7 @@ class GenerationGuard:
                                     actions.append(natural_cover)
                                     if natural_cover.get("ok"):
                                         self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
-                            elif cf_result.get("reason") == "unsafe_landing":
-                                shore = self._recover_water_landing_after_retreat(
-                                    status, cf_result, threat_pos=att_pos_r, threat_id=att_id_r,
-                                    threat_name=att_name_r, has_shield=has_shield,
-                                )
-                                if shore is not None:
-                                    actions.append(shore)
-                            elif (
-                                not has_shield and not skip_cover_for_blast
-                                and status.get("on_ground") is False
-                                and cf_result.get("reason") == "no_safe_retreat"
-                            ):
+                            if retry_pocket_after_knockback and natural_cover is None:
                                 # The retreat waited out knockback but found no route.
                                 landing = self.combat_env._safe_status({"ready": False})
                                 landing_block = cover_block(landing.get("pos"))

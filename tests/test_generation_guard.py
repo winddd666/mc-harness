@@ -13104,6 +13104,50 @@ def test_critical_projectile_retreat_checks_cover_from_landing(
     assert (guard._ranged_cover_active_until > guard.last_reaction) is (landing == "covered")
 
 
+@pytest.mark.parametrize(("reason", "grounded"), [
+    ("no_safe_retreat", True), ("unsafe_landing", True), ("unsafe_landing", False),
+])
+def test_critical_unshielded_arrow_retreat_checks_cover_after_a_stalled_landing(monkeypatch, reason, grounded):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    shooter = {"id": 41, "name": "skeleton", "dist": 7.0}
+    status = {
+        "pos": [22788.3, 63.2, 17812.7], "dimension": "overworld", "health": 6.7, "food": 17,
+        "ready": True, "alive": True, "on_ground": False, "nearest_hostile": shooter, "last_death": {"t": 1},
+    }
+
+    class QuarryBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": shooter}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 24}], "offhand": None}
+            if action == "get_entities":
+                return {"entities": [shooter]}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(QuarryBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_dig_cover_block = (22788, 63, 17812)
+    guard._last_dig_cover_at = clock[0] - 15
+
+    def defend(landing, attacker, counts, *, cover_only=False, **kwargs):
+        if cover_only:
+            assert landing["on_ground"] and landing["health"] == 3.7 and kwargs["prefer_cover"]
+            return {"ok": True, "mode": "natural_cover"}
+        status.update(health=3.7, pos=[22788.3, 63 if grounded else 63.2, 17812.7], on_ground=grounded)
+        return {"ok": False, "mode": "flee", "reason": reason, "moved_dist": 0.0, "pos_after": status["pos"]}
+
+    monkeypatch.setattr(guard, "_defend_or_flee", defend)
+    incident = guard.poll()
+
+    assert [action["action"] for action in incident["actions"]] == (
+        ["combat_or_flee", "natural_cover_after_retreat"] if grounded else ["combat_or_flee"]
+    )
+
+
 @pytest.mark.parametrize("scenario", ["cornered", "second_hostile", "out_of_reach", "respawned", "blocked_by_wall"])
 def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(monkeypatch, scenario):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
