@@ -2084,6 +2084,32 @@ STRONGHOLD_FOCUS = (
 )
 
 
+def _install_bare_iron_guidance() -> None:
+    """Keep the bare scene's first iron pickaxe ahead of stockpiling."""
+    from mc_agent.harness import curriculum as cur
+
+    key = "bootstrap_iron_age"
+    playbook = cur.CURRICULUM_PLAYBOOKS[key]
+    task = (
+        "第 1 晚留在 Y=16 铁层安全发育。下井前在地表备 8~10 根原木等量木材、2 把石镐。"
+        "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
+        "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
+        "已有安全可用的熔炉时，先查看炉内产物和进度，取出已炼铁锭，等同批铁料烧完再算缺口。"
+        "需要补锭且包里有铁块时，先调用 mc_craft(item='iron_ingot', count=9) 拆一块并核对入包。"
+        "仅铁锭加粗铁仍不足 3 时才继续采铁。就近优先采暴露铁矿；需要下井或找矿时调用 "
+        "mc_skill_mine_dfs(action='explore', target='iron', target_y=16, max_duration_s=90)，"
+        "goal_count 只填 3 减去当前铁锭和粗铁后的正数缺口。每片结束重查实包，"
+        "即使 ok=false 或 movement_not_confirmed 也核对 gained.raw_iron。"
+        "铁原料齐后为取货和制镐留足本集时间。铁锭还不足时，先找安全站位并核对燃料。"
+        "缺燃料先补燃料，再调用 mc_skill_smelt，input_item 填 raw_iron，count 填所缺铁锭数。"
+        "实包到 3 锭后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，查询手持物确认铁镐。"
+        "剩余时间和铁料充足时，再用余铁做盾与铁甲。站位不安全或剩余时间不足时保留已有材料，下集优先制镐。"
+    )
+    cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
+        playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task, post_ensure_task=task,
+    )
+
+
 def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | None = None) -> bool:
     """Force the first `episodes` curriculum picks to a stage-specific target (SCENE-001).
 
@@ -2619,6 +2645,8 @@ def main() -> int:
             _reassert_scene_geofence(toolset, scene, dimension="overworld", supervisor=scene_state["sup"])
             return True
 
+        if args.stage == "bare":
+            _install_bare_iron_guidance()
         install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         if portal_guard is not None:
             from mc_agent.harness import curriculum as cur
