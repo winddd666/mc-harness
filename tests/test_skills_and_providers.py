@@ -896,6 +896,54 @@ def test_collect_drops_accounts_for_the_protocol_retry_in_its_budget(monkeypatch
     assert clock[0] <= 106.0
 
 
+@pytest.mark.parametrize("fault_path", ["status", "move_to"])
+def test_dfs_drop_recovery_shares_short_deadline_with_native_budget(monkeypatch, fault_path) -> None:
+    from mc_agent.skills.mining_dfs import _BudgetSession
+
+    clock = [100.0]
+    faults = []
+    stops = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == fault_path and len(faults) < 2:
+            timeout = request.extensions["timeout"]
+            faults.append(sum(timeout.values()))
+            clock[0] += min(4.95, timeout["read"] - 0.01) if len(faults) == 1 else faults[-1]
+            if len(faults) == 1:
+                raise httpx.RemoteProtocolError("offline keepalive closed", request=request)
+            raise httpx.ReadTimeout("offline retry stalled", request=request)
+        if path == "get_block":
+            result = {"name": "stone" if body["pos"][1] == 63 else "air"}
+        elif path == "stop":
+            stops.append(clock[0])
+            clock[0] += sum(request.extensions["timeout"].values())
+            result = {"released": True}
+        else:
+            result = {
+                "status": {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"},
+                "get_entities": {"entities": [{"id": 1, "item": "diamond", "pos": [1.5, 64.0, 0.5]}]},
+                "inventory": {"items": []},
+            }[path]
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        dfs = _BudgetSession(bot, deadline=130.0)
+        dfs.dug_count = 1
+        result = MacroSkills(dfs.session)._collect_nearby_items(
+            bot_y=64.0, radius=6, max_pickups=2, target_items={"diamond"},
+        )
+        assert result["error"]["code"] == "pickup_time_budget"
+        assert len(faults) == 2 and sum(faults) + 0.15 <= 5.0 + 1e-9
+        assert clock[0] <= 106.0
+        assert len(stops) == int(fault_path == "move_to")
+        assert dfs.deadline == 130.0 and dfs.timeout_path is None
+        assert dfs.session.status()["pos"] == [0.5, 64.0, 0.5]
+
+
 def test_unstick_uses_floor_on_negative_coords_and_clears_hitbox() -> None:
     solid_blocks = {
         (-4, 103, -6): "dirt",

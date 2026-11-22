@@ -1337,6 +1337,45 @@ class _SkillBudgetSession:
         phase = min(0.25, per_attempt / 4)
         return httpx.Timeout(min(read_cap, per_attempt - 3 * phase), pool=phase, connect=phase, write=phase)
 
+    def _mining_budget_scope(self, deadline: float) -> Any | None:
+        if getattr(self.bot, "_mining_deadline", None) is None:
+            return None
+        from .mining_dfs import _BudgetSession
+
+        owner = getattr(self.bot.call, "__self__", None)
+        if not isinstance(owner, _BudgetSession):
+            return None
+        scoped = copy(owner)
+        scoped.deadline = min(deadline, owner.deadline)
+        scoped.timeout_path = None
+        return scoped
+
+    def _call_in_mining_budget(
+        self, scoped: Any, path: str, body: dict[str, Any] | None, **kwargs: Any,
+    ) -> dict[str, Any]:
+        from .mining_dfs import _MiningDeadline
+
+        owner = self.bot.call.__self__
+        try:
+            result = scoped.call(path, body, **kwargs)
+        except _MiningDeadline:
+            if path == "stop":
+                return {}
+            if scoped.deadline >= owner.deadline or owner.deadline - time.monotonic() <= 0.2:
+                owner.timeout_path = scoped.timeout_path
+                raise
+            self.timed_out = True
+            self.pending_action = scoped.timeout_path is not None and path not in self._READS
+            if self.pending_action and not self.stop_pending():
+                owner.timeout_path = scoped.timeout_path
+                raise
+            raise _SkillDeadline() from None
+        owner.first_pos = scoped.first_pos
+        owner.last_status = scoped.last_status
+        owner.first_inventory = scoped.first_inventory
+        owner.last_inventory = scoped.last_inventory
+        return result
+
     def call(
         self, path: str, body: dict[str, Any] | None = None, *, timeout_s: float | None = None,
         _transport_deadline: float | None = None, **kwargs: Any,
@@ -1348,6 +1387,8 @@ class _SkillBudgetSession:
             limit = self.deadline if _transport_deadline is None else min(self.deadline, _transport_deadline)
             if isinstance(self.bot, _SkillBudgetSession):
                 kwargs["_transport_deadline"] = limit
+            elif (mining_scope := self._mining_budget_scope(limit)) is not None:
+                return self._call_in_mining_budget(mining_scope, path, body, timeout_s=timeout, **kwargs)
             elif getattr(self.bot.call, "__func__", None) is BotSession.call:
                 request_timeout = self._retry_timeout(limit - time.monotonic(), timeout)
                 kwargs["allow_reauth"] = False
@@ -1388,9 +1429,13 @@ class _SkillBudgetSession:
             self.pending_action = False
             try:
                 timeout: float | httpx.Timeout = min(1.0, remaining)
-                if self.bound_transport_retries and getattr(self.bot.call, "__func__", None) is BotSession.call:
-                    timeout = self._retry_timeout(remaining, timeout)
-                stopped = self.bot.call("stop", {}, timeout_s=timeout, allow_reauth=False)
+                mining_scope = self._mining_budget_scope(self.finish_at) if self.bound_transport_retries else None
+                if mining_scope is not None:
+                    stopped = self._call_in_mining_budget(mining_scope, "stop", {}, timeout_s=timeout, allow_reauth=False)
+                else:
+                    if self.bound_transport_retries and getattr(self.bot.call, "__func__", None) is BotSession.call:
+                        timeout = self._retry_timeout(remaining, timeout)
+                    stopped = self.bot.call("stop", {}, timeout_s=timeout, allow_reauth=False)
             except (ApiError, httpx.HTTPError, _SkillDeadline):
                 return False
             return stopped.get("released") is True or (
