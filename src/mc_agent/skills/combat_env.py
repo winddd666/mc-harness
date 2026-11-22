@@ -2138,6 +2138,7 @@ class CombatEnv:
         keep_blast_clearance: bool = False,
         use_nearest_hostile: bool = True,
         min_threat_distance: float | None = None,
+        allow_second_leg: bool = True,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
         def respawned_since(before: dict[str, Any], after: dict[str, Any]) -> bool:
@@ -2366,7 +2367,7 @@ class CombatEnv:
         if wait_for_ground:
             st_mid = settle_airborne(st_mid, st0)
         result = retreat_result(st_mid)
-        if short_step or result.get("respawned") or result.get("reason") == "unsafe_landing":
+        if not allow_second_leg or short_step or result.get("respawned") or result.get("reason") == "unsafe_landing":
             return result
 
         mid_pos = result["pos_after"]
@@ -4227,23 +4228,44 @@ class SubcorticalInstinctController:
             and self._entity_dist(st_post.get("pos"), nh_post) <= 5.0
             and st_post.get("ready") is not False and st_post.get("alive") is not False
             and not st_post.get("in_water") and not st_post.get("in_lava")
+            and all(st_post.get(key) == st.get(key) for key in ("last_death", "dimension"))
         ):
             survivor_id = nh_post.get("id")
+            if has_shield and st_post.get("on_ground") is False and time.monotonic() + 0.35 < deadline:
+                latched_guard = self._latch_shield_at_threat(env, survivor_id)
             survivor_pos = nh_post.get("pos")
-            if survivor_pos is None and survivor_id is not None:
-                survivors = self._find_live_hostiles(env, radius=6)
+            if survivor_pos is None and survivor_id is not None and time.monotonic() + 1.15 < deadline:
+                survivors = self._find_live_hostiles(env, radius=6, timeout_s=0.5)
                 survivor = next((hostile for hostile in survivors if hostile.get("id") == survivor_id), {})
                 survivor_pos = survivor.get("pos")
-            retreat = env.flee(survivor_pos, distance=12.0, urgent=True)
-            actions.append({"action": "low_hp_abort_flee", "ok": bool(retreat.get("ok")), "entity_id": survivor_id})
+            retreat = {"ok": False, "reason": "time_budget"}
+            if time.monotonic() + 1.15 < deadline:
+                retreat = env.flee(
+                    survivor_pos, distance=12.0, urgent=True, wait_for_ground=True,
+                    allow_second_leg=time.monotonic() + 3.5 < deadline,
+                )
+            actions.append({"action": "low_hp_abort_flee", "entity_id": survivor_id, **retreat})
             mode = "low_hp_disengage"
             st_post = env._safe_status(st_post)
-            if (
-                has_shield and not retreat.get("ok") and not retreat.get("respawned")
-                and st_post.get("ready") is not False and st_post.get("alive") is not False
-                and not st_post.get("in_water") and not st_post.get("in_lava")
-            ):
-                latched_guard = self._latch_shield_at_threat(env, survivor_id)
+            nearest = st_post.get("nearest_hostile")
+            pursuing = (
+                isinstance(nearest, dict) and isinstance(nearest.get("id"), int)
+                and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
+                and not nearest.get("blocked_by_wall") and self._entity_dist(st_post.get("pos"), nearest) <= 5.5
+            )
+            life_unavailable = (
+                retreat.get("respawned") or st_post.get("ready") is False or st_post.get("alive") is False
+                or any(st_post.get(key) != st.get(key) for key in ("last_death", "dimension"))
+            )
+            if life_unavailable:
+                mode = "life_unavailable"
+            same_dry_life = not life_unavailable and not st_post.get("in_water") and not st_post.get("in_lava")
+            if not same_dry_life or (retreat.get("ok") and not pursuing):
+                latched_guard = False
+            elif has_shield and time.monotonic() + 0.35 < deadline:
+                target_id = nearest["id"] if pursuing else survivor_id
+                latched_guard = self._latch_shield_at_threat(env, target_id)
+                actions.append({"action": "guard_surviving_melee", "ok": latched_guard, "entity_id": target_id})
         hp_post = float(st_post.get("health") or 20.0)
         food_post = int(st_post.get("food") or 20)
         nh_post = st_post.get("nearest_hostile")

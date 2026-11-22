@@ -5706,6 +5706,78 @@ def test_melee_retreat_keeps_the_shield_up_when_a_point_blank_attacker_pursues(m
         assert poses[-1] == {}
 
 
+@pytest.mark.parametrize("landing", ["pursued", "clear", "still_airborne", "water", "respawned"])
+def test_low_health_after_a_kill_waits_for_safe_footing_and_faces_the_pursuer(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda _delay: None)
+    target = {"id": 291033, "name": "zombie", "dist": 0.8, "pos": [1.3, 75, 0.5]}
+    survivor = {"id": 291376, "name": "zombie", "dist": 2.3, "pos": [2.8, 75, 0.5]}
+    sword = {"name": "iron_sword", "count": 1}
+    shield = {"name": "shield", "count": 1}
+    status = {
+        "pos": [0.5, 75, 0.5], "health": 16.3, "food": 20, "dimension": "overworld", "last_death": {"t": 1},
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": target,
+        "held": sword, "offhand": shield, "blocking": True,
+    }
+    actions = []
+
+    class CaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [sword], "held": sword, "offhand": shield}
+            if action == "get_entities":
+                if body["radius"] == 6:
+                    assert kwargs["timeout_s"] == 0.5
+                    actions.append("sighting")
+                    return {"entities": [survivor]}
+                return {"entities": [target]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 75 else "air"}
+            if action == "attack":
+                assert body["entity_id"] == target["id"]
+                clock[0] += 5.8
+                hostile_hint = {key: survivor[key] for key in ("id", "name", "dist")}
+                status.update(health=6.02, on_ground=False, pos=[0.5, 75.4, 0.5], nearest_hostile=hostile_hint)
+                return {"killed": True, "hits": 1}
+            if action == "status":
+                actions.append("landing_check")
+                if landing == "respawned":
+                    status.update(last_death={"t": 2}, pos=[25.5, 75, 0.5], blocking=False)
+                elif landing == "water":
+                    status.update(in_water=True, submerged=True, blocking=False)
+                elif landing != "still_airborne":
+                    status.update(on_ground=True, pos=[0.5, 75, 0.5])
+                return self.status()
+            if action == "look" and "entity_id" in body:
+                actions.append(("face", body["entity_id"]))
+            if action == "posture":
+                status["blocking"] = bool(body.get("shield"))
+            if action == "control" and body.get("forward"):
+                assert status["on_ground"] and not status.get("in_water")
+                actions.append("retreat")
+                status.update(pos=[-1.5, 75, 0.5], nearest_hostile=survivor if landing == "pursued" else None)
+            assert action != "move_to", "there is only time for one safe retreat pulse"
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(CombatEnv(CaveBot()), {
+        "source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": target["id"],
+    })
+
+    retreat, = (action for action in outcome["actions"] if action["action"] == "low_hp_abort_flee")
+    assert actions[:3] == [("face", survivor["id"]), "sighting", "landing_check"]
+    assert ("retreat" in actions) is (landing in {"pursued", "clear"})
+    assert retreat["ok"] is (landing in {"pursued", "clear"})
+    assert outcome["mode"] == ("life_unavailable" if landing == "respawned" else "low_hp_disengage")
+    assert status["blocking"] is outcome["latched_guard"] is (landing in {"pursued", "still_airborne"})
+    assert actions.count(("face", survivor["id"])) == (2 if landing in {"pursued", "still_airborne"} else 1)
+
+
 @pytest.mark.parametrize("second_shooter", [False, True])
 def test_unshielded_boundary_retreat_accounts_for_a_second_shooter(second_shooter):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
