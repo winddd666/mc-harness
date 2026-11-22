@@ -2187,10 +2187,11 @@ class MacroSkills:
         if item in {"chest", "barrel", "trapped_chest"}:
             self._placed_storage[(normalize_dimension(dim), tuple(int(v) for v in pos[:3]))] = item
 
-    def _storage_side_cell(self, origin: list[float]) -> list[int] | None:
+    def _corridor_side_recess(self, origin: list[float]) -> tuple[list[int] | None, bool]:
+        """Locate an enclosed recess beside a through corridor, or identify a closed narrow lane."""
         x, y, z = (math.floor(v) for v in origin[:3])
         if not 0 <= origin[1] - y < 0.1:
-            return None
+            return None, False
         air = {"air", "cave_air", "void_air"}
         solid = {"stone", "deepslate", "dirt", "cobblestone", "cobbled_deepslate", "andesite", "granite", "tuff", "netherrack"}
         cache: dict[tuple[int, int, int], str] = {}
@@ -2201,19 +2202,44 @@ class MacroSkills:
         for dx, dz in ((1, 0), (0, 1)):
             if not all(block(k * dx, dy, k * dz) in air for k in (-1, 1) for dy in (0, 1)):
                 continue
+            if not all(block(k * dx, -1, k * dz) in solid for k in (-1, 1)):
+                continue
+            closed_flanks = 0
             for k in (1, -1):
                 sx, sz = k * dz, k * dx
-                # Place only in a supported recess with a closed far wall.
-                if block(sx, -1, sz) not in solid or block(2 * sx, 0, 2 * sz) not in solid:
+                flank = [block(sx, dy, sz) for dy in (0, 1)]
+                if all(name in solid for name in flank):
+                    closed_flanks += 1
                     continue
-                if any(block(sx, dy, sz) not in air for dy in (0, 1)):
+                if any(name not in air for name in flank):
+                    continue
+                if block(sx, -1, sz) not in solid or block(2 * sx, 0, 2 * sz) not in solid:
                     continue
                 if not all(block(sx + bend * dx, 0, sz + bend * dz) in solid for bend in (-1, 1)):
                     continue
+                closed_flanks += 1
                 if self.geofence and self.geofence.check_point(x + sx, z + sz, action="mc_place"):
                     continue
-                return [x + sx, y, z + sz]
-        return None
+                return [x + sx, y, z + sz], True
+            if closed_flanks == 2:
+                return None, True
+        return None, False
+
+    def _underground_utility_site(self, status: dict[str, Any]) -> tuple[list[int] | None, bool]:
+        pos = status.get("pos")
+        if (
+            not pos or pos[1] >= 55 or status.get("on_ground") is not True
+            or status.get("in_water") or status.get("in_lava")
+        ):
+            return None, False
+        return self._corridor_side_recess(pos)
+
+    @staticmethod
+    def _no_safe_utility_position() -> dict[str, Any]:
+        return {
+            "ok": False, "error": "no_safe_utility_position", "requires_replan": True,
+            "message": "矿道两侧没有可用侧格。请到带侧龛的拓宽处放置，保持回程通道畅通。",
+        }
 
     def _stash_mining_clutter(self, inv: dict[str, Any], min_free: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         before = _inventory_counts_from_raw(inv)
@@ -2256,7 +2282,7 @@ class MacroSkills:
         # A new stack needs an empty slot even when enough planks are in the bag.
         can_craft = _total_planks(before) >= 16 and free > 0
         if site is None and (carried or can_craft):
-            site = self._storage_side_cell(origin)
+            site, _ = self._corridor_side_recess(origin)
             if site is not None and not carried:
                 tables = self.bot.call("find_blocks", {"radius": 2, "types": ["crafting_table"], "limit": 1})
                 if not tables.get("blocks"):
@@ -3080,6 +3106,13 @@ class MacroSkills:
         # Leave time to clear a newly placed underground table after crafting.
         if temporary_tables is not None:
             self._reserve_crafting_table_cleanup(py)
+        side, narrow_lane = self._underground_utility_site(st)
+        if narrow_lane:
+            if side is None:
+                return self._no_safe_utility_position()
+            placed = self.bot.call("place", {"item": "crafting_table", "pos": side})
+            self._remember_crafting_table_placement(placed.get("pos") or side, temporary_tables)
+            return {"ok": True, "reused": False, "pos": side, **placed}
         try:
             placed = self.bot.call("place", {"item": "crafting_table"})
             self._remember_crafting_table_placement(placed.get("pos"), temporary_tables)
@@ -5665,10 +5698,18 @@ class MacroSkills:
                 cg = self.craft_gear("furnace", 1)
                 if not cg.get("ok"):
                     return cg
+            side, narrow_lane = self._underground_utility_site(furnace_status)
+            if narrow_lane and side is None:
+                return self._no_safe_utility_position()
+            payload = {"item": "furnace"}
+            if side is not None:
+                payload["pos"] = side
             try:
-                placed = self.bot.call("place", {"item": "furnace"})
-                furnace_pos = placed.get("pos")
+                placed = self.bot.call("place", payload)
+                furnace_pos = placed.get("pos") or side
             except ApiError as err:
+                if narrow_lane:
+                    return {"ok": False, "error": err.code, "message": err.message, **err.context}
                 fpos = furnace_status.get("pos") or self.bot.status().get("pos") or [0, 64, 0]
                 fx, fy, fz = math.floor(float(fpos[0])), math.floor(float(fpos[1])), math.floor(float(fpos[2]))
                 for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (1, 1, 0)):

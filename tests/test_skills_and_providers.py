@@ -3286,6 +3286,84 @@ def test_skill_smelt_only_reclaims_its_empty_unlit_underground_furnace(site) -> 
             assert not digs and present
 
 
+@pytest.mark.parametrize("item", ["crafting_table", "furnace"])
+@pytest.mark.parametrize("has_recess", [True, False])
+def test_new_utility_uses_side_recess_and_keeps_both_passages_open(item, has_recess) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    side = [0, -54, 1]
+    placements = []
+    uses = []
+    placed = False
+
+    def handler(request):
+        nonlocal placed
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "status":
+            result = {"pos": [0.5, -54.0, 0.5], "dimension": "overworld", "health": 20, "on_ground": True}
+        elif path == "inventory":
+            result = {"items": [
+                {"name": item, "count": int(not placed)}, {"name": "coal", "count": 1},
+                {"name": "raw_iron", "count": 1}, {"name": "cobbled_deepslate", "count": 3},
+                {"name": "stick", "count": 2}, {"name": "stone_pickaxe", "count": 1},
+            ]}
+        elif path == "find_blocks":
+            result = {"blocks": []}
+        elif path == "get_block":
+            x, y, z = body["pos"]
+            if placed and body["pos"] == side:
+                name = item
+            elif (z == 0 or (has_recess and x == 0 and z == 1)) and y in (-54, -53):
+                name = "air"
+            else:
+                name = "deepslate"
+            result = {"name": name}
+        elif path == "place":
+            placements.append(body)
+            assert body == {"item": item, "pos": side} and has_recess
+            placed = True
+            result = {"placed": item, "pos": side}
+        elif path == "craft":
+            uses.append(path)
+            assert placed
+            result = {"crafted": "stone_pickaxe", "gained": 1}
+        elif path == "equip":
+            result = {"held": "stone_pickaxe"}
+        elif path == "dig":
+            assert item == "crafting_table" and body["pos"] == side
+            result = {"dug": item, "gained": {item: 1}}
+            placed = False
+        elif path == "view":
+            assert body["target"]["pos"] == side and placed
+            result = {"window": "furnace", "info": {"burning": True}, "sections": {
+                "output": [{"name": "iron_ingot", "count": 1}], "input": [], "fuel": [],
+            }}
+        elif path == "act":
+            uses.append(path)
+            assert body["target"]["pos"] == side and placed
+            done = [{"took": {"iron_ingot": 1}}] if body["ops"][0]["op"] == "take" else True
+            result = {"done": done}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        raw = tools.mc_skill_craft_gear("stone_pickaxe") if item == "crafting_table" else tools.mc_skill_smelt("raw_iron", 1)
+        result = json.loads(raw)
+        for x in (-1, 1):
+            for y in (-54, -53):
+                assert bot.call("get_block", {"pos": [x, y, 0]})["name"] == "air"
+
+    if has_recess:
+        assert result["ok"] and placements and uses
+        assert placed is (item == "furnace")  # The active furnace stays off the return lane.
+    else:
+        assert result["error"] == "no_safe_utility_position"
+        assert not placements and not uses
+
+
 def test_skill_smelt_stops_pending_furnace_view_after_timeout(monkeypatch) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
