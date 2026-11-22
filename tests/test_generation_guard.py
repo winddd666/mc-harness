@@ -2725,6 +2725,55 @@ def test_combat_timeout_records_only_a_known_endpoint(path, endpoint):
     assert stops == ["stop"]
 
 
+@pytest.mark.parametrize("landing", ["shooter", "clear", "respawned"])
+def test_poll_restores_shield_toward_remaining_shooter_after_attack_timeout(monkeypatch, landing):
+    zombie = {"id": 42, "name": "zombie", "dist": 1.6, "pos": [4025.6, 69, 26022.5]}
+    skeleton = {"id": 178789, "name": "skeleton", "dist": 7.1, "pos": [4027.3, 69, 26029.7]}
+    shield = {"name": "shield", "count": 1}
+    status = {
+        "pos": [4024, 69, 26022.5], "health": 20, "food": 20, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "blocking": False, "offhand": shield,
+        "last_death": {"t": 1}, "nearest_hostile": zombie,
+    }
+    commands = []
+
+    class ArenaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": shield}
+            commands.append((action, body))
+            if action == "stop":
+                status["nearest_hostile"] = None if landing == "clear" else skeleton
+                if landing == "respawned":
+                    status["last_death"] = {"t": 2}
+            if action == "posture":
+                status["blocking"] = body.get("shield") is True
+                return {"blocking": status["blocking"]}
+            return {"ok": True}
+
+    guard = GenerationGuard(ArenaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def attack(_trigger):
+        request = httpx.Request("POST", "https://example.invalid/attack", json={"entity_id": 42})
+        raise httpx.ReadTimeout("attack reply timed out", request=request)
+
+    monkeypatch.setattr(guard, "_run_subcortical_combat", attack)
+    incident = guard.poll()
+
+    assert incident["actions"][0]["error"]["code"] == "network_uncertain"
+    expected = [("stop", {})]
+    if landing == "shooter":
+        expected += [("look", {"entity_id": 178789}), ("posture", {"shield": True, "jump": False, "sneak": False})]
+        assert incident["actions"][-1] == {"action": "raise_shield_after_combat_timeout", "ok": True}
+    assert commands == expected
+    assert incident["status"]["blocking"] is (landing == "shooter")
+
+
 def test_bug_011_guardian_http_error_returns_network_uncertain_without_crashing_episode(monkeypatch):
     """BUG-011: httpx.HTTPError (ReadTimeout/ReadError) inside _action or guard.poll() must never raise RuntimeError or terminate episode."""
     clock = [700.0]

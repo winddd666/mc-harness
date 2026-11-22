@@ -2850,6 +2850,16 @@ class GenerationGuard:
                             reasons.append("hot_floor")
                         replan = True
                         post_status = self.combat_env._safe_status(post_status)
+        if (
+            post_status.get("on_ground") is True and "death_or_connection_changed" not in reasons
+            and any(
+                action["action"] == "subcortical_combat" and (action.get("error") or {}).get("timeout") is True
+                for action in actions
+            )
+            and self._restore_shield_near_threat(status, post_status, self.bot)
+        ):
+            actions.append({"action": "raise_shield_after_combat_timeout", "ok": True})
+            post_status = {**post_status, "blocking": True}
         if pre_trigger is not None and post_events_verified and not any(e.get("type") == "hurt" for e in fresh):
             if reasons in (["pre_hurt_creeper"], ["pre_hurt_melee"]) and self._repeat_stationary_retreat_warning(
                 pre_trigger, status, post_status, actions,
