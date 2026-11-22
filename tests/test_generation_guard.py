@@ -14200,6 +14200,65 @@ def test_bug116_dfs_rejects_dangerous_waypoint_and_keeps_mining(monkeypatch, tmp
     assert rejected_events and {event["reason"] for event in rejected_events} == {reason}
 
 
+def test_bug116_dfs_reroutes_when_guard_footing_reads_time_out(monkeypatch, tmp_path):
+    from mc_agent.skills.mining_dfs import MiningDFSEngine
+    from test_mining_dfs import _MockMineWorld
+
+    world = _MockMineWorld(start_pos=(0.5, 80.0, 0.5), surface_y=80, dimension="overworld")
+    world.blocks.update({(0, 74, -4): "lava", (0, 75, -4): "air", (0, 76, -4): "air"})
+    for x in (-3, -4, -5, 3, 4, 5):
+        world.blocks[(x, 74, -3)] = "iron_ore"
+
+    rejected_landing = [0.5, 79, -0.5]
+    checking_rejected_landing = False
+    read_timeouts = []
+    dispatched_moves = []
+
+    def handler(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint in {"get_block", "move_to"}:
+            body = json.loads(request.content)
+            if endpoint == "get_block" and checking_rejected_landing and body["pos"] == [0, 78, -1]:
+                read_timeouts.append(body["pos"])
+                raise httpx.ReadTimeout("support probe timed out", request=request)
+            if endpoint == "move_to":
+                dispatched_moves.append([body[axis] for axis in ("x", "y", "z")])
+        return world.handler(request)
+
+    events = EventSink(lambda _: None)
+    with BotSession("tok", bot_username="Miner", transport=httpx.MockTransport(handler)) as bot:
+        guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+        verify = guard._verify_mining_landing
+
+        def verify_with_fault_scope(target):
+            nonlocal checking_rejected_landing
+            checking_rejected_landing = target == rejected_landing
+            try:
+                return verify(target)
+            finally:
+                checking_rejected_landing = False
+
+        monkeypatch.setattr(guard, "_verify_mining_landing", verify_with_fault_scope)
+        dfs = MiningDFSEngine(MacroSkills(bot), ledger_path=tmp_path / "ledger.json")
+        result = json.loads(guard.run_tool_with_reflex(
+            "mc_skill_mine_dfs",
+            lambda: json.dumps(dfs.run(
+                target="iron", goal_count=3, target_y=74, max_duration_s=20, strategy="fishbone_scan",
+            )),
+        ))
+
+    rejected = [event for event in events.events if event["type"] == "guardian.mining_landing_blocked"]
+    assert len(read_timeouts) >= 2 and rejected
+    assert all(
+        event["target"] == rejected_landing and event["reason"] == "mining_footing_unavailable"
+        and not event.get("probe_reused")
+        for event in rejected
+    )
+    assert dispatched_moves and rejected_landing not in dispatched_moves
+    assert result["ok"] and result["goal_met"] and result["stop_reason"] == "quota_reached"
+    assert result["target_gained"] == world._count("raw_iron") == 3
+
+
 @pytest.mark.parametrize("placement", [
     "complete", "existing_wall", "partial", "receipt_only", "threat_inside",
     "already_sealed", "sealed_with_exposed_mob", "sealed_unknown_threat",
