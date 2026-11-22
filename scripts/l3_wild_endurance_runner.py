@@ -51,13 +51,17 @@ BOT = "MapTest_01"
 TOKEN_FILE = MAIN_ROOT / ".state-maptest" / "tokens.json"
 ENV_FILE = pathlib.Path(os.environ.get("MC_ENV_FILE", str(MAIN_ROOT / ".env.beast")))
 
-LIVE_STATE_DIR = WT_ROOT / ".state-l3-live"
-RUNS_DIR = WT_ROOT / "runs"
+LIVE_STATE_DIR = pathlib.Path(os.environ.get("MC_FLEET_LIVE_STATE_DIR") or (WT_ROOT / ".state-l3-live"))
+RUNS_DIR = pathlib.Path(os.environ.get("MC_FLEET_RUNS_ROOT") or (WT_ROOT / "runs"))
 DAY2_VILLAGE_STAGE = "day2_village_near"
 VILLAGE_APPROACH_RANGE = (120.0, 180.0)
 STRONGHOLD_STAGE = "village_to_stronghold_end"
 STRONGHOLD_DISTANCE_RANGE = (120.0, 600.0)
 STRONGHOLD_TRAVEL_RADIUS = 720.0
+STRONGHOLD_LOCATE_TIMEOUT_S = 60
+PROBE_HEIGHTS = {"probe_iron_y16": 16, "probe_diamond_y54": -54}
+PROBE_STAGES = (*PROBE_HEIGHTS, "probe_obsidian_portal")
+PROBE_THROUGHPUT_TARGETS = {"probe_iron_y16": ("raw_iron", 24), "probe_diamond_y54": ("diamond", 16)}
 FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
@@ -208,46 +212,37 @@ def _portal_free_landing(bot: Any) -> bool:
     return result.get("blocks") == []
 
 
+def _dry_wild_slot(start_idx: int) -> tuple[int, int]:
+    ring, slot_idx = divmod(int(start_idx), len(CANDIDATE_SITES))
+    # The layout spans 22,000 blocks per axis. Leave space for both local search areas
+    # between successive copies of it.
+    return slot_idx, max(0, ring) * 24_000
+
+
 def select_dry_isolated_wild_site(
     bot: Any, bot_name: str, start_idx: int = 0, *, day1: bool = False,
 ) -> tuple[float, float, float, str]:
     """Find a dry, wooded Overworld landing for the configured slot."""
-    from mc_agent.kb import normalize_dimension
-
-    ring = max(0, int(start_idx)) // len(CANDIDATE_SITES)
-    ring_shift = ring * 2500
-    slot_idx = int(start_idx) % len(CANDIDATE_SITES)
+    slot_idx, ring_shift = _dry_wild_slot(start_idx)
+    x, z = CANDIDATE_SITES[slot_idx]
+    regions = (0,)
     if day1:
         # r41 global fallbacks sent two bots to a shared portal area. Translate the
         # whole slot layout for backups, keeping the same separation in each region.
-        x, z = CANDIDATE_SITES[slot_idx]
-        offsets = ((0, 0), (160, 0), (-160, 0), (0, 160), (0, -160),
-                   (360, 0), (-360, 0), (0, 360), (0, -360))
-        candidates = [
-            (x + region_dx + dx, z + dz)
-            for region_dx in (0, 30_000, -30_000)
-            for dx, dz in offsets
-        ]
+        regions = (0, 30_000, -30_000)
     else:
-        base_order = CANDIDATE_SITES[slot_idx:] + CANDIDATE_SITES[:slot_idx]
-        candidates = [(cx + ring_shift, cz + ring_shift) for cx, cz in base_order]
+        x, z = x + ring_shift, z + ring_shift
+    offsets = ((0, 0), (160, 0), (-160, 0), (0, 160), (0, -160),
+               (360, 0), (-360, 0), (0, 360), (0, -360))
+    candidates = [(x + region + dx, z + dz) for region in regions for dx, dz in offsets]
     for cx, cz in candidates:
-        settled, st = _spread_overworld(bot, bot_name, cx, cz, 32)
-        pos = settled or [cx, 64, cz]
-        if day1:
-            pos = st.get("pos")
-            if (
-                not st.get("dimension")
-                or normalize_dimension(st["dimension"]) != "overworld"
-                or not isinstance(pos, (list, tuple))
-                or len(pos) < 3
-                or math.hypot(float(pos[0]) - cx, float(pos[2]) - cz) > 48.0
-            ):
-                continue
+        _, st = _spread_overworld(bot, bot_name, cx, cz, 32)
+        pos = _dry_overworld_position(st)
+        if pos is None or math.hypot(pos[0] - cx, pos[2] - cz) > 48.0:
+            continue
         biome = str(st.get("biome") or "").lower()
-        in_water = bool(st.get("in_water"))
         # Skip pure ocean spawns so we land on a true terrestrial island/continent
-        if in_water or ("ocean" in biome) or ("river" in biome and float(pos[1]) <= 63.0):
+        if "ocean" in biome or ("river" in biome and pos[1] <= 63.0):
             continue
         # Ensure tree logs exist within 48m so bare-hand bootstrap isn't on a barren sandbar
         fb = bot.call(
@@ -272,10 +267,11 @@ def select_dry_isolated_wild_site(
         if day1 and not _portal_free_landing(bot):
             print(f"[Day 1] {bot_name} skipped portal-unsafe landing near ({cx}, {cz})", flush=True)
             continue
-        return float(pos[0]), float(pos[1]), float(pos[2]), biome
+        print(f"[Scene] {bot_name} dry site slot={start_idx} assigned=({x},{z}) picked=({cx},{cz})", flush=True)
+        return (*pos, biome)
     if day1:
         raise RuntimeError("Could not find a wooded, portal-free Day 1 landing in the assigned regions")
-    raise RuntimeError("Could not find a wooded dry wild spawn site across CANDIDATE_SITES")
+    raise RuntimeError(f"Could not find a wooded dry landing for site slot {start_idx} near ({x},{z})")
 
 
 def select_village_wild_site(
@@ -397,11 +393,13 @@ def _locate_coords(reply: str) -> tuple[int, int] | None:
     return int(m.group(1)), int(m.group(2))
 
 
-def _locate_structure(dim: str, cx: int, cz: int, structure_id: str) -> tuple[int, int] | None:
+def _locate_structure(
+    dim: str, cx: int, cz: int, structure_id: str, *, timeout_s: int = 30,
+) -> tuple[int, int] | None:
     """`locate structure` inside `dim`, returning None when the server says it cannot find one."""
     out = rcon_batch(
         [f"execute in {dim} positioned {cx} 64 {cz} run locate structure {structure_id}"],
-        timeout=30,
+        timeout=timeout_s,
     )
     reply = str((out[0] if out else {}).get("reply") or "")
     if "could not" in reply.lower() or "cannot" in reply.lower():
@@ -466,30 +464,37 @@ def select_stronghold_village_site(
 ) -> tuple[tuple[float, float, float, str], tuple[int, int], tuple[int, int]]:
     """Find a dry village start and the nearest reachable stronghold for this slot."""
     dim = "minecraft:overworld"
+
+    def locate(x: int, z: int, structure_id: str) -> tuple[int, int] | None:
+        return _locate_structure(dim, x, z, structure_id, timeout_s=STRONGHOLD_LOCATE_TIMEOUT_S)
+
     anchor = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
-    nearest = _locate_structure(dim, *anchor, "minecraft:stronghold")
+    nearest = locate(*anchor, "minecraft:stronghold")
     probes = [anchor]
     if nearest is not None:
         hx, hz = nearest
-        for offset in range(8):
-            bearing = ((start_idx + offset) % 8) * math.tau / 8
-            probes.append((hx + round(320 * math.cos(bearing)), hz + round(320 * math.sin(bearing))))
+        for radius in (320, 520):
+            for offset in range(8):
+                bearing = ((start_idx + offset) % 8) * math.tau / 8
+                probes.append((hx + round(radius * math.cos(bearing)), hz + round(radius * math.sin(bearing))))
     inner, outer = STRONGHOLD_DISTANCE_RANGE
     seen_villages = set()
+    nearby_pairs = 0
     for probe in probes:
-        village = _locate_structure(dim, *probe, "#minecraft:village")
+        village = locate(*probe, "#minecraft:village")
         if village is None or village in seen_villages:
             continue
         seen_villages.add(village)
         if min(CANDIDATE_SITES, key=lambda site: math.dist(site, village)) != anchor:
             continue
-        stronghold = _locate_structure(dim, *village, "minecraft:stronghold")
+        stronghold = locate(*village, "minecraft:stronghold")
         if (
             stronghold is None
             or min(CANDIDATE_SITES, key=lambda site: math.dist(site, stronghold)) != anchor
             or not inner - 32 <= math.dist(village, stronghold) <= outer + 32
         ):
             continue
+        nearby_pairs += 1
         for _ in range(2):
             _, status = _spread_overworld(bot, bot_name, *village, 16)
             pos = _dry_overworld_position(status)
@@ -500,10 +505,13 @@ def select_stronghold_village_site(
                 math.dist(xz, village) <= 32
                 and inner <= math.dist(xz, stronghold) <= outer
                 and _portal_free_landing(bot)
-                and _locate_structure(dim, math.floor(xz[0]), math.floor(xz[1]), "minecraft:stronghold") == stronghold
+                and locate(math.floor(xz[0]), math.floor(xz[1]), "minecraft:stronghold") == stronghold
             ):
                 return (*pos, str(status.get("biome") or "")), village, stronghold
-    raise RuntimeError("Could not find a safe village with a stronghold 120–600m away in the assigned region")
+    raise RuntimeError(
+        "Could not find a safe village with a stronghold 120–600m away in the assigned region "
+        f"({len(seen_villages)} distinct villages located, {nearby_pairs} pairs sent to landing checks)"
+    )
 
 
 def select_nether_structure_site(
@@ -675,7 +683,7 @@ def prepare_scene_ground(
     ix, iy, iz = math.floor(sx), int(round(sy)), math.floor(sz)
     cmds: list[str] = []
     if dim == "the_nether":
-        # Obsidian ledge (lava-proof), 3-block headroom, charged respawn anchor for in-Nether respawns.
+        # Lava-proof ledge with a lit shelter and a charged anchor for in-Nether respawns.
         # Every command MUST be prefixed with `execute in minecraft:the_nether run` — bare RCON
         # fill/setblock/tp would otherwise act on the overworld coordinates.
         pre = "execute in minecraft:the_nether run"
@@ -685,14 +693,16 @@ def prepare_scene_ground(
                 f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz + 3} minecraft:air",
                 f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:respawn_anchor[charges=4]",
-                # 4-high obsidian parapet on three sides with a 1x2 gate on the east edge: the ledge
-                # is a respawn point inside a hostile structure, so open sightlines just feed the
-                # death loop (r17 hy4_hy_6_nether_bastion: 24 deaths).
+                # A 1x2 east opening lets the bot out while excluding tall mobs such as wither
+                # skeletons. The roof protects the platform from attacks from above.
                 f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz + 3} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz - 2} {ix - 3} {iy + 3} {iz + 2} minecraft:obsidian",
                 f"{pre} fill {ix + 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 1} minecraft:obsidian",
                 f"{pre} fill {ix + 3} {iy} {iz + 1} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix + 3} {iy + 2} {iz} {ix + 3} {iy + 3} {iz} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy + 4} {iz - 3} {ix + 3} {iy + 4} {iz + 3} minecraft:obsidian",
+                f"{pre} setblock {ix} {iy + 3} {iz} minecraft:shroomlight",
                 f"{pre} tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
@@ -773,46 +783,30 @@ def prepare_scene_ground(
             ]
         )
         return cmds
-    if stage == "probe_iron_y16":
-        py = 16
-        cmds.extend(
-            [
-                f"fill {ix - 1} {py - 1} {iz - 1} {ix + 1} {py - 1} {iz + 1} minecraft:cobblestone",
-                f"fill {ix - 1} {py} {iz - 1} {ix + 1} {py + 2} {iz + 1} minecraft:air",
-                f"setblock {ix + 1} {py} {iz} minecraft:torch",
-                f"tp {bot_name} {ix + 0.5} {py} {iz + 0.5}",
-                f"spawnpoint {bot_name} {ix} {py} {iz}",
-            ]
-        )
-        return cmds
-    if stage == "probe_diamond_y54":
-        py = -54
-        cmds.extend(
-            [
-                f"fill {ix - 1} {py - 1} {iz - 1} {ix + 1} {py - 1} {iz + 1} minecraft:cobblestone",
-                f"fill {ix - 1} {py} {iz - 1} {ix + 1} {py + 2} {iz + 1} minecraft:air",
-                f"setblock {ix + 1} {py} {iz} minecraft:torch",
-                f"tp {bot_name} {ix + 0.5} {py} {iz + 0.5}",
-                f"spawnpoint {bot_name} {ix} {py} {iz}",
-            ]
-        )
-        return cmds
+    if stage in PROBE_HEIGHTS:
+        py = PROBE_HEIGHTS[stage]
+        pre = "execute in minecraft:overworld run"
+        return [
+            f"{pre} fill {ix - 1} {py - 1} {iz - 1} {ix + 1} {py - 1} {iz + 1} minecraft:cobblestone",
+            f"{pre} fill {ix - 1} {py} {iz - 1} {ix + 1} {py + 2} {iz + 1} minecraft:air",
+            f"{pre} setblock {ix + 1} {py} {iz} minecraft:torch",
+            f"{pre} tp {bot_name} {ix + 0.5} {py:.1f} {iz + 0.5}",
+            f"{pre} spawnpoint {bot_name} {ix} {py} {iz}",
+        ]
     if stage == "probe_obsidian_portal":
-        # Dry 7x7 cobblestone staging pad with an adjacent 4x4 obsidian sheet over lava + shallow water edge.
-        cmds.extend(
-            [
-                f"fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:cobblestone",
-                f"fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 6} {iz + 3} minecraft:air",
-                # Lava bed underneath + 16 obsidian blocks on top (east side, x = ix+2..ix+5)
-                f"fill {ix + 2} {iy - 2} {iz - 2} {ix + 5} {iy - 2} {iz + 1} minecraft:lava",
-                f"fill {ix + 2} {iy - 1} {iz - 2} {ix + 5} {iy - 1} {iz + 1} minecraft:obsidian",
-                f"fill {ix + 2} {iy} {iz - 2} {ix + 5} {iy + 4} {iz + 1} minecraft:air",
-                f"setblock {ix - 2} {iy} {iz - 2} minecraft:torch",
-                f"tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
-                f"spawnpoint {bot_name} {ix} {iy} {iz}",
-            ]
-        )
-        return cmds
+        # Keep lava under the mineable sheet, with solid sides and a floor below it.
+        pre = "execute in minecraft:overworld run"
+        return [
+            f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:cobblestone",
+            f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 6} {iz + 3} minecraft:air",
+            f"{pre} fill {ix + 1} {iy - 3} {iz - 3} {ix + 6} {iy - 2} {iz + 2} minecraft:cobblestone",
+            f"{pre} fill {ix + 2} {iy - 1} {iz - 2} {ix + 5} {iy - 1} {iz + 1} minecraft:obsidian",
+            f"{pre} fill {ix + 2} {iy - 2} {iz - 2} {ix + 5} {iy - 2} {iz + 1} minecraft:lava",
+            f"{pre} fill {ix + 2} {iy} {iz - 2} {ix + 5} {iy + 4} {iz + 1} minecraft:air",
+            f"{pre} setblock {ix - 2} {iy} {iz - 2} minecraft:torch",
+            f"{pre} tp {bot_name} {ix + 0.5} {iy:.1f} {iz + 0.5}",
+            f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
+        ]
     if stage == "deep_water":
         # Re-assert the dry staging pad on death return (idempotent, only when spawned at/below sea level).
         cmds.append(
@@ -1117,6 +1111,7 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"advancement grant {bot_name} only minecraft:story/smelt_iron",
                 f"advancement grant {bot_name} only minecraft:story/iron_tools",
                 f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+                f"advancement grant {bot_name} only minecraft:story/form_obsidian",
                 f"give {bot_name} minecraft:diamond_pickaxe 1",
                 f"give {bot_name} minecraft:iron_sword 1",
                 f"give {bot_name} minecraft:flint_and_steel 1",
@@ -1151,7 +1146,7 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
 
 
 NETHER_STAGES = frozenset(NETHER_STRUCTURES)
-LOCAL_FIXTURE_STAGES = frozenset({"brewing_alchemy", "cave_combat", "enchant_anvil", "village_trade"})
+LOCAL_FIXTURE_STAGES = frozenset({"brewing_alchemy", "cave_combat", "enchant_anvil", "village_trade", *PROBE_STAGES})
 
 # Surface slices where a night start is pure mob-farm noise (fleet passes --keep-time to every bot
 # except the first, so without this the village/brewing scenes would open at night).
@@ -1160,6 +1155,64 @@ SURFACE_DAYTIME_STAGES = frozenset({"village", "village_trade", "brewing_alchemy
 
 def scene_dimension(stage: str) -> str:
     return "the_nether" if stage in NETHER_STAGES else "overworld"
+
+
+def portal_crossing_receipt(result: Any) -> dict[str, Any] | None:
+    """Extract a confirmed crossing from a portal tool receipt."""
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return None
+    if not isinstance(result, dict) or (
+        result.get("ok") is not True
+        or result.get("portal_ignited") is not True
+        or result.get("entered_nether") is not True
+        or str(result.get("dimension") or "").removeprefix("minecraft:") != "the_nether"
+    ):
+        return None
+    return {
+        "placed_obsidian": result.get("placed_obsidian"),
+        "reused_existing_portal": result.get("reused_existing_portal") is True,
+        "portal_origin": result.get("portal_origin"),
+        "entry_pos": result.get("entry_pos"),
+    }
+
+
+def portal_advancement_confirmed(summary: dict[str, Any]) -> bool:
+    return ENTER_NETHER in (summary.get("score_breakdown") or {}) or any(
+        ENTER_NETHER in (episode.get("gained_advancements") or [])
+        or (episode.get("target") == ENTER_NETHER and episode.get("objective_verified") is True)
+        for episode in (summary.get("episodes") or [])
+    )
+
+
+def verify_portal_advancement(bot: Any, summary: dict[str, Any]) -> dict[str, str]:
+    """Read the advancement once after a confirmed crossing when course scoring did not see it."""
+    if portal_advancement_confirmed(summary):
+        return {"status": "confirmed"}
+    try:
+        result = bot.call(
+            "advancements", {"ids": [ENTER_NETHER], "include_criteria": False},
+            timeout_s=2.0, allow_reauth=False,
+        )
+    except Exception as exc:
+        return {"status": "unavailable", "error": str(getattr(exc, "code", None) or type(exc).__name__)}
+    rows = result.get("advancements") if isinstance(result, dict) and result.get("ready") is not False else None
+    if not isinstance(rows, list):
+        return {"status": "unavailable", "error": "invalid_response"}
+    confirmed = any(
+        isinstance(row, dict)
+        and row.get("id") in (ENTER_NETHER, ENTER_NETHER.removeprefix("minecraft:"))
+        and row.get("status") == "completed"
+        for row in rows
+    )
+    return {"status": "confirmed" if confirmed else "missing"}
+
+
+def _fixture_position(stage: str, x: float, y: float, z: float) -> tuple[float, float, float]:
+    height = PROBE_HEIGHTS[stage] if stage in PROBE_HEIGHTS else round(y)
+    return math.floor(x) + 0.5, float(height), math.floor(z) + 0.5
 
 
 def compute_stage_baseline(stage: str) -> dict[str, Any]:
@@ -1245,10 +1298,8 @@ def build_reset_cmds(
 ) -> list[str]:
     """Build the checkpoint reset RCON batch (dimension-aware; shared by live reset and --print-plan)."""
     dim = dim or scene_dimension(stage)
-    if stage == "probe_iron_y16":
-        sy = 16.0
-    elif stage == "probe_diamond_y54":
-        sy = -54.0
+    if stage in PROBE_STAGES:
+        sx, sy, sz = _fixture_position(stage, sx, sy, sz)
     ix, iy, iz = math.floor(sx), int(round(sy)), math.floor(sz)
     cmds: list[str] = ["difficulty normal", f"gamemode survival {bot_name}", f"clear {bot_name}"]
     if dim == "the_nether":
@@ -1264,7 +1315,7 @@ def build_reset_cmds(
             ]
         )
     else:
-        prefix = "execute in minecraft:overworld run " if stage == STRONGHOLD_STAGE else ""
+        prefix = "execute in minecraft:overworld run " if stage in {STRONGHOLD_STAGE, *PROBE_STAGES} else ""
         cmds.extend(
             [
                 f"{prefix}tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
@@ -1458,6 +1509,9 @@ class SceneWatchdog(threading.Thread):
         self.fence_repair = fence_repair
         self._stop = threading.Event()
         self._last_return = 0.0
+        self._death_handled_at = time.monotonic()
+        self._death_handled_wall_ms = time.time() * 1000
+        self._returned_while_dead = False
         self._last_total = -1
         self._inv_tick = 0
         self._ticks = 0
@@ -1532,6 +1586,11 @@ class SceneWatchdog(threading.Thread):
         # The API reports ready=false for the whole death/respawn window; do not skip it, otherwise
         # the death itself is never observed and the bot comes back with an empty inventory.
         dead_signal = health <= 0.0 or alive is False
+        wall_ms = time.time() * 1000
+        last_death = st.get("last_death")
+        death_ms = last_death.get("t") if isinstance(last_death, dict) else None
+        has_death_stamp = isinstance(death_ms, (int, float)) and 0 < death_ms <= wall_ms + 5000
+        new_status_death = has_death_stamp and death_ms > max(self._death_handled_wall_ms, wall_ms - 60000)
         if self.fence_repair is not None and ready and not dead_signal:
             try:
                 self.fence_repair(st.get("dimension"), st.get("pos"))
@@ -1555,7 +1614,7 @@ class SceneWatchdog(threading.Thread):
             else float("inf")
         )
         drifted = dim_matches and dist > self.scene.drift_limit and ready
-        suspected_death = dead_signal
+        suspected_death = dead_signal and (new_status_death if has_death_stamp else not self._returned_while_dead)
         self._ticks += 1
         if self._ticks % 15 == 0:  # ~2 min at the default 8s interval
             print(
@@ -1564,14 +1623,20 @@ class SceneWatchdog(threading.Thread):
                 f"preempt_skips={self._preempt_skips}",
                 flush=True,
             )
-        if not suspected_death:
+        if not dead_signal:
+            self._returned_while_dead = False
+            unhandled_death = new_status_death
+            # The same event may reach the local ledger after a status-based restock.
+            # Use the server's stable timestamp when it is available.
+            if not has_death_stamp:
+                recent_deaths = getattr(self.bot, "recent_deaths_in_window", None)
+                unhandled_death = callable(recent_deaths) and any(
+                    observed_at > self._death_handled_at for observed_at in recent_deaths()
+                )
             self._inv_tick += 1
-            if self._inv_tick % 3 == 1:  # sample on the very first tick, then every 3rd (~24s)
+            if unhandled_death or self._inv_tick % 3 == 1:
                 total = self._owned_total()
                 if total is not None:
-                    # Only infer death from an inventory collapse when the bot is back at the scene
-                    # anchor and not standing next to a known chest (otherwise chest deposits and
-                    # deliberate stashing would trigger free-gear restocks).
                     at_anchor = dim_matches and dist <= 48.0
                     stashing = False
                     if self.near_container is not None:
@@ -1579,14 +1644,16 @@ class SceneWatchdog(threading.Thread):
                             stashing = bool(self.near_container(dim, pos))
                         except Exception:
                             stashing = False
-                    if (
+                    collapsed_at_anchor = (
                         at_anchor
-                        and not stashing
                         and self._last_total >= 6
                         and total <= max(1, self._last_total // 4)
                         and self._last_total - total >= 6
-                    ):
-                        suspected_death = True
+                    )
+                    # An inventory collapse alone is reliable only at the anchor. A recent
+                    # recorded death can also confirm an empty inventory after a distant respawn.
+                    emptied_after_death = unhandled_death and total <= 2
+                    suspected_death = not stashing and (collapsed_at_anchor or emptied_after_death)
                     self._last_total = total
         if not (wrong_dim or drifted or suspected_death):
             return
@@ -1609,6 +1676,13 @@ class SceneWatchdog(threading.Thread):
             )
         except Exception as exc:  # never kill the watchdog thread on a transient RCON hiccup
             print(f"[Scene Restock] {self.bot_name} failed reason={reason}: {exc}", flush=True)
+        else:
+            if suspected_death:
+                self._death_handled_at = now
+                self._death_handled_wall_ms = max(
+                    self._death_handled_wall_ms, wall_ms, death_ms if has_death_stamp else 0,
+                )
+                self._returned_while_dead = dead_signal
         finally:
             self._last_return = time.monotonic()
             self._last_total = -1
@@ -1688,10 +1762,14 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
 
     local_fixture = scene.stage in LOCAL_FIXTURE_STAGES
     radius = 2.0 if local_fixture else 64.0
+    stronghold_start = scene.stage == STRONGHOLD_STAGE
+    probe_start = scene.stage in PROBE_STAGES
+    sample_limit = 5 if stronghold_start else 2
     station = {"brewing_alchemy": "brewing_stand", "enchant_anvil": "enchanting_table"}.get(scene.stage)
     station_pos = [math.floor(scene.x) + 2, round(scene.y), math.floor(scene.z)]
     for i in range(attempts):
-        for sample in range(2):
+        consecutive = 0
+        for sample in range(sample_limit):
             try:
                 st = bot.status()
             except Exception:
@@ -1716,15 +1794,21 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
                     and st.get("on_ground") is not False
                     and not (st.get("in_water") or st.get("in_lava"))
                 )
-            if inside and scene.stage == STRONGHOLD_STAGE:
-                inside = (
-                    _dry_overworld_position(st) is not None and math.hypot(dx, dz) <= 6.0 and abs(dy) <= 2.0
-                )
-            if not inside:
+            wait_for_ground = False
+            if inside and stronghold_start:
+                near_anchor = math.hypot(dx, dz) <= 6.0 and abs(dy) <= 2.0
+                inside = near_anchor and _dry_overworld_position(st) is not None
+                wait_for_ground = near_anchor and not (st.get("in_water") or st.get("in_lava"))
+            if inside and probe_start:
+                inside = _dry_overworld_position(st) is not None
+            consecutive = consecutive + 1 if inside else 0
+            if consecutive == 2:
                 break
-            if sample == 0:
+            if not inside and not wait_for_ground:
+                break
+            if sample + 1 < sample_limit:
                 time.sleep(1.2)
-        else:
+        if consecutive == 2:
             try:
                 block = bot.call("get_block", {"pos": station_pos}, timeout_s=5.0) if station else {}
                 actual = str((block or {}).get("name") or "").removeprefix("minecraft:")
@@ -1738,9 +1822,13 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
                 )
                 return True
             print(f"[Scene] expected {station} at {station_pos}, got {actual or '?'}", flush=True)
+        footing = (
+            f" on_ground={st.get('on_ground')} in_water={st.get('in_water')} in_lava={st.get('in_lava')}"
+            if stronghold_start or probe_start else ""
+        )
         print(
             f"[Scene] entry verify failed (attempt {i + 1}/{attempts}) bot={bot_name} "
-            f"dim={dim} pos={pos} expected {scene.dim}@({scene.x:.1f},{scene.y:.1f},{scene.z:.1f})",
+            f"dim={dim} pos={pos}{footing} expected {scene.dim}@({scene.x:.1f},{scene.y:.1f},{scene.z:.1f})",
             flush=True,
         )
         if local_fixture:
@@ -1911,7 +1999,7 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "task": (
             "你已在 Y=16 地下安全口袋，背包有石镐、木板、煤、火把与食物，无需回地表。"
             "持续调用 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=24, max_duration_s=90) "
-            "最大化挖取粗铁，拿到足够粗铁后可用 mc_skill_craft_gear 烧铁做铁镐并继续挖铁，严禁回地表或闲逛。"
+            "最大化挖取粗铁，每片根据 gained.raw_iron 核对实际入包。保留粗铁计量，本场只做采集，继续在 Y=16 附近作业。"
         ),
         "extra_tools": (),
     },
@@ -1929,18 +2017,19 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "extra_tools": (),
     },
     "probe_obsidian_portal": {
-        "key": "minecraft:story/enter_the_nether",
+        "key": ENTER_NETHER,
         "title": "30分：采够 10 块黑曜石并搭建点亮下界传送门进入下界",
         "points": 30,
         "tier": 2,
         "budget_class": "short",
         "task": (
-            "你已在干地平台，东侧脚边有现成黑曜石片（下方有岩浆），背包已有钻石镐、打火石、水桶、圆石和 4 块黑曜石。"
-            "立即用 mc_skill_mine_blocks(types=['obsidian'], count=6) 再采 6 块黑曜石凑够 10 块，"
-            "随后直接调用 mc_skill_build_nether_portal 搭建、点亮并走入下界传送门（解锁 story/form_obsidian 与 story/enter_the_nether）。"
+            "干地平台东侧脚边有现成黑曜石片，下方有岩浆。开局背包有钻石镐、打火石、水桶、圆石和 4 块黑曜石。"
+            "站在西侧圆石上，用 mc_skill_mine_blocks(block_types=['obsidian'], count=2, radius=8) 分批采，"
+            "每批根据实际入包量更新缺口。若某格超时，保留站位安全并换相邻露头，避免原地连续调用 mc_dig。"
+            "有 10 块黑曜石后，在干地调用 mc_skill_build_portal(enter=True) 建门、点火并穿门。"
         ),
-        "extra_tools": ("mc_skill_build_nether_portal",),
-        "advancement_id": "minecraft:story/enter_the_nether",
+        "extra_tools": ("mc_skill_build_portal",),
+        "advancement_id": ENTER_NETHER,
     },
 }
 
@@ -1950,16 +2039,27 @@ STRONGHOLD_FOCUS = (
         "key": FOLLOW_ENDER_EYE,
         "title": "60分：从村庄跟随末影之眼进入要塞",
         "task": (
-            "从村庄出发寻找并进入天然主世界要塞。背包有 14 颗末影之眼。先在开阔处调用 "
-            "mc_use_item(item='ender_eye')。用回执中的 eye_vector=[dx,dz] 判断方向。"
-            "正 X 向东，正 Z 向南，两轴都明显时用对应对角方向。bearing_deg 的 0/90/180/270 分别是南/西/北/东。"
-            "若回执没有 eye_vector 或 projectile 指向其他实体，立即用 mc_get_entities(types=['eye_of_ender'], radius=32)，"
-            "把眼的位置减去你的位置得到方向。"
+            "从村庄出发寻找并进入天然主世界要塞。每集先用 mc_inventory 核对剩余末影之眼，优先沿已有估算坐标或要塞方块线索推进。"
+            "需要测向且库存多于 12 颗时，才在开阔处调用 mc_use_item(item='ender_eye')。"
+            "确认 projectile 是 eye_of_ender 后，把回执的 scout_direction 原样传给斥候工具。"
+            "回执缺少有效方向或 projectile 不符时，立即用 mc_get_entities(types=['eye_of_ender'], radius=32)，"
+            "把眼的位置减去你的位置。正 X 向东、负 X 向西、正 Z 向南、负 Z 向北。"
+            "[0,0] 表示方向未测出。等眼飞开再查一次，仍无方向且眼多于 12 颗时才补投一次。"
+            "工具给出 suggested_second_throw_xz 时，可先走到围栏内的干地观测点再投第二颗。"
+            "有 triangulated_stronghold_xz 时，把它当作估算坐标，留住剩余的眼并分段接近，再用方块扫描确认。"
             "沿眼指向用 mc_skill_scout_surface(direction=方向, target_types=['end_portal_frame'], "
-            "step_dist=30, max_duration_s=45) 分段推进。用 mc_skill_collect_drops 回收附近落下的眼后再测向，"
-            "尽量为门框保留 12 颗。"
-            "眼向下或转向时，分开扫描 end_portal_frame、stone_bricks 与 mossy_stone_bricks，"
-            "用 mc_skill_staircase(vertical='down', steps=8) 分段下挖，留火把和回程阶梯。"
+            "step_dist=30, max_duration_s=45, track_ender_eye=True) 分段推进。"
+            "若回执是 remeasure_after_detour，先停下；需要换观测点时先移到可达开阔干地。"
+            "有估算坐标就沿可达路线接近，眼多于 12 颗时才考虑复测。"
+            "确认附近有掉落的眼后，再用 mc_skill_collect_drops 回收。"
+            "没有第二观测点建议时，至少离上次投掷点 100 格再复测。若两次有效方向相反，用 mc_move_to 向上一观测点回走一半距离，"
+            "缩小搜索范围。库存 12 颗及以下时，留给门框，沿已有方向和方块线索定位。"
+            "eye_went_down 为 true、到达估算坐标附近或出现方向反转时，分开扫描 end_portal_frame、stone_bricks 与 mossy_stone_bricks。"
+            "看到门框或成片要塞砖后，记下回执的 X/Y/Z，结束长距离斥候。"
+            "若只有靠近黑曜石的零散地表砖和箱子，继续核对地下结构。"
+            "用 mc_skill_staircase(vertical='down', steps=8, stop_on_ore=False) 分段下挖，留火把和回程阶梯。"
+            "下到与砖群同层后，沿安全实心地面用 mc_skill_tunnel 分段朝砖群 X/Z 接近。"
+            "遇岩浆或连续挖掘失败，沿既有阶梯撤回干地，从另一侧下挖。"
             "进入实际要塞结构才触发 follow_ender_eye。"
         ),
         "extra_tools": STRONGHOLD_TOOLS,
@@ -1969,14 +2069,70 @@ STRONGHOLD_FOCUS = (
         "title": "60分：找到要塞传送门房并进入末地",
         "task": (
             "沿之前的地下入口继续调查要塞。用 mc_find_blocks(types=['end_portal_frame'], radius=64) "
-            "找传送门框。按观测到的坐标安全下到同层，先照明并确认岩浆与落脚点。"
+            "找传送门框并记住观测到的 X/Y/Z。若扫描为空，回到最近确认过的要塞石砖或走廊，沿相连的通道逐段走，"
+            "到下一处分岔后再扫门框。若还在地表，沿之前确认的入口或末影之眼估算点重新下探。"
+            "避免用 direction='auto' 的地表斥候盲搜；只有死亡回村且丢失路线时才重新测向，眼多于 12 颗才投。"
+            "找到门框后，用阶梯先上到或下到门框附近的高度，勿隔层直传 y 寻路。"
+            "确认落脚点和岩浆后再水平接近。用门框坐标减当前坐标，负 Z 向北、正 Z 向南，负 X 向西、正 X 向东。"
+            "优先走现有通道，需挖通时每次掘进 4–8 格。核对回执位置确实更接近门框，距离增大就改向。"
             "对每一个没有眼的门框，在可触及范围内调用 mc_interact(x=框的X, y=框的Y, z=框的Z, item='ender_eye')。"
             "用 mc_get_block 核对门框的 eye 状态。全部激活后扫描 end_portal，走进传送门并用 mc_status 确认 the_end。"
-            "若死亡回村，拿补给沿记住的路线返回，必要时再用末影之眼与地表斥候重新定位。"
+            "若死亡回村，拿补给沿记住的路线返回。"
         ),
         "extra_tools": (*STRONGHOLD_TOOLS, "mc_interact", "mc_get_block"),
     },
 )
+
+
+def _install_bare_stone_guidance() -> None:
+    """Give a bare scene a local quarry when the surface has no exposed stone."""
+    from mc_agent.harness import curriculum as cur
+
+    key = "bootstrap_stone_age"
+    playbook = cur.CURRICULUM_PLAYBOOKS[key]
+    task = (
+        "先核对实包与当前站位。水中先找干地上岸；人在地下、缺镐又缺木时走已有安全通道返回可取木料的位置。"
+        "地表缺开局木料时用 mc_skill_harvest_logs 按缺口取 4~6 根原木，先合工作台、木棍和 wooden_pickaxe。"
+        "木镐已可用时开始找石，木料储备等有石斧再补。扫描 16 格内可达的露出 stone、cobblestone。"
+        "有可采露石时用 mc_skill_mine_blocks(block_types=['stone','cobblestone'], radius=16) 采实际入包的圆石。"
+        "16 格内无可达露石时，在当前干燥且有支撑的落脚点运行 mc_skill_staircase(vertical='down', steps=6, stop_on_ore=False)，"
+        "穿过表土后停在露石处采圆石。先核对阶梯回执；缺支撑时用有支撑面的垫块或换一个安全方向，"
+        "见水、岩浆或落差时换方向。保留可回走的阶梯。"
+        "从零备齐两把石镐和一座炉需要 14 圆石，已有的装备及圆石按实包扣除。"
+        "材料齐时先造炉，再用 mc_skill_craft_gear(item='stone_pickaxe', count=2) 合两把石镐。"
+        "多余圆石才用来合石斧。安全地表有多余木板时可留据点箱，铁器课用 mc_skill_mine_dfs 下到 Y=16。"
+    )
+    cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
+        playbook, title="Day 1 石器与石料准备", task=task,
+    )
+
+
+def _install_bare_iron_guidance() -> None:
+    """Keep the bare scene's first iron pickaxe ahead of stockpiling."""
+    from mc_agent.harness import curriculum as cur
+
+    key = "bootstrap_iron_age"
+    playbook = cur.CURRICULUM_PLAYBOOKS[key]
+    task = (
+        "第 1 晚留在 Y=16 铁层安全发育，夜里无甲时先留在井下。"
+        "仍在地表（Y>=55）时，下井前备足 12 根原木等量木材与 2 把石镐。"
+        "石器课若只做了第一把石镐，先在已露出的石层补第二把，需要炉子时留 8 圆石。"
+        "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
+        "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
+        "已有安全可用的熔炉时，先查看炉内产物和进度，取出已炼铁锭，等同批铁料烧完再算缺口。"
+        "需要补锭且包里有铁块时，先调用 mc_craft(item='iron_ingot', count=9) 拆一块并核对入包。"
+        "仅铁锭加粗铁仍不足 3 时才继续采铁。就近优先采暴露铁矿；需要下井或找矿时调用 "
+        "mc_skill_mine_dfs(action='explore', target='iron', target_y=16, max_duration_s=90)，"
+        "goal_count 只填 3 减去当前铁锭和粗铁后的正数缺口。每片结束重查实包，"
+        "即使 ok=false 或 movement_not_confirmed 也核对 gained.raw_iron。"
+        "铁原料齐后为取货和制镐留足本集时间。铁锭还不足时，先找安全站位并核对燃料。"
+        "缺燃料先补燃料，再调用 mc_skill_smelt，input_item 填 raw_iron，count 填所缺铁锭数。"
+        "实包到 3 锭后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，查询手持物确认铁镐。"
+        "剩余时间和铁料充足时，就地用余铁做盾与铁甲。站位不安全或剩余时间不足时保留已有材料，下集优先制镐。"
+    )
+    cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
+        playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task, post_ensure_task=task,
+    )
 
 
 def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | None = None) -> bool:
@@ -2026,9 +2182,17 @@ def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | N
                 f"酿造台在 ({x + 2}, {y}, {z})。查询水源时看这两个坐标和 level=0。"
                 + target_kwargs["task"]
             )
+        elif stage == "probe_obsidian_portal" and scene is not None:
+            x, y, z = math.floor(scene.x), round(scene.y), math.floor(scene.z)
+            target_kwargs["task"] = (
+                f"场景台面中心在 ({scene.x:.1f}, {y}, {scene.z:.1f})。"
+                f"黑曜石片范围 X={x + 2}..{x + 5}、Y={y - 1}、Z={z - 2}..{z + 1}。"
+                + target_kwargs["task"]
+            )
         targets = (cur.CurriculumTarget(**target_kwargs),)
         remaining = int(spec.get("episodes", episodes))
     original = cur.select_next_target
+    portal_playbook = cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] if stage == "probe_obsidian_portal" else None
 
     def _wrapped(bot: Any, **kwargs: Any):
         nonlocal remaining
@@ -2039,8 +2203,14 @@ def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | N
                 if target.advancement_id not in completed:
                     if remaining is not None:
                         remaining -= 1
+                    if portal_playbook is not None:
+                        # Keep the standard key for material-progress accounting while the
+                        # supervisor uses the scene playbook for this focused episode.
+                        cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] = target
                     return target, frontier
             remaining = 0
+        if portal_playbook is not None:
+            cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] = portal_playbook
         return original(bot, **kwargs)
 
     cur.select_next_target = _wrapped
@@ -2100,6 +2270,44 @@ class TraderKeeper(threading.Thread):
                 raise
             except BaseException as exc:
                 print(f"[Trader Keeper] {self.bot_name} tick error: {exc!r}", flush=True)
+
+
+def _network_error_summary(
+    runs_dir: pathlib.Path,
+    episodes: list[dict[str, Any]],
+    *,
+    error: Exception,
+    elapsed_s: float,
+    duration_s: float,
+) -> dict[str, Any]:
+    """Preserve the last course checkpoint when a transport error aborts the supervisor."""
+    checkpoint: dict[str, Any] = {}
+    last_episode = episodes[-1] if episodes else {}
+    report_file = last_episode.get("report_file")
+    if report_file:
+        for path in sorted(runs_dir.glob("curriculum-*.json"), reverse=True):
+            try:
+                candidate = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            saved = candidate.get("episodes") if isinstance(candidate, dict) else None
+            if (
+                isinstance(saved, list) and saved and isinstance(saved[-1], dict)
+                and saved[-1].get("report_file") == report_file
+            ):
+                checkpoint = candidate
+                break
+    return {
+        "status": "network_error",
+        "error": f"{type(error).__name__}: {error}",
+        "elapsed_s": round(elapsed_s, 1),
+        "duration_s": duration_s,
+        "episodes_completed": len(episodes),
+        "final_score": checkpoint.get("current_score", last_episode.get("score_after")),
+        "completed_count": checkpoint.get("completed_count"),
+        "score_breakdown": checkpoint.get("score_breakdown") or {},
+        "episodes": episodes,
+    }
 
 
 def _write_not_ready_summary(
@@ -2218,9 +2426,7 @@ def main() -> int:
             "brewing_alchemy",
             "cave_combat",
             "deep_water",
-            "probe_iron_y16",
-            "probe_diamond_y54",
-            "probe_obsidian_portal",
+            *PROBE_STAGES,
         ],
         default="bare",
         help="Starting checkpoint stage for sliced testing",
@@ -2243,7 +2449,7 @@ def main() -> int:
         "--plan-pos",
         type=str,
         default=None,
-        help="Anchor x,y,z used by --print-plan (defaults to the slot's search origin)",
+        help="Anchor x,y,z for --print-plan (defaults to the slot origin; probes use their fixed Y)",
     )
     args = parser.parse_args()
     if args.max_episodes < 0:
@@ -2259,9 +2465,18 @@ def main() -> int:
             except ValueError:
                 raise SystemExit("--plan-pos must be 'x,y,z'")
         else:
-            sites = NETHER_CANDIDATE_SITES if args.stage in NETHER_STAGES else CANDIDATE_SITES
-            ax, az = sites[args.site_index % len(sites)]
+            if args.stage in NETHER_STAGES:
+                ax, az = NETHER_CANDIDATE_SITES[args.site_index % len(NETHER_CANDIDATE_SITES)]
+            else:
+                slot_idx, ring_shift = _dry_wild_slot(args.site_index)
+                ax, az = CANDIDATE_SITES[slot_idx]
+                if not args.day1 and args.stage not in (
+                    "village", "village_trade", "deep_water", DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE,
+                ):
+                    ax, az = ax + ring_shift, az + ring_shift
             px, py, pz = float(ax) + 0.5, 64.0, float(az) + 0.5
+        if args.stage in PROBE_STAGES:
+            px, py, pz = _fixture_position(args.stage, px, py, pz)
         dim = scene_dimension(args.stage)
         plan = {
             "bot": bot_name,
@@ -2284,6 +2499,8 @@ def main() -> int:
             }
             plan["geofence_radius"] = STRONGHOLD_TRAVEL_RADIUS
             plan["focus"] = [FOLLOW_ENDER_EYE, ENTER_END] if args.focus_episodes > 0 else []
+        elif args.stage in PROBE_STAGES:
+            plan["focus"] = [SCENE_FOCUS[args.stage]["key"]] if args.focus_episodes > 0 else []
         elif args.stage in NETHER_STAGES:
             plan["site_search"] = {
                 "structure": NETHER_STRUCTURES[args.stage],
@@ -2302,6 +2519,7 @@ def main() -> int:
     os.environ["MC_WORLD_MEMORY_PATH"] = str(mem_path)
 
     import mc_agent
+    from httpx import TransportError
     from mc_agent.auth import TokenStore
     from mc_agent.bot import BotSession
     from mc_agent.config import Settings
@@ -2327,14 +2545,11 @@ def main() -> int:
         base_url=settings.mc_api_base_url,
         reauth_callback=build_token_refresher(bot_name, token_file, settings),
     ) as bot:
-        starting_site = None
         village_xz = None
         stronghold_xz = None
         try:
-            st = ensure_bot_ready(bot, timeout_s=45.0)
-            if args.day1:
-                starting_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=True)
-            elif args.stage == DAY2_VILLAGE_STAGE:
+            ensure_bot_ready(bot, timeout_s=45.0)
+            if args.stage == DAY2_VILLAGE_STAGE:
                 starting_site, village_xz = select_day2_village_site(bot, bot_name, args.site_index)
             elif args.stage == STRONGHOLD_STAGE:
                 starting_site, village_xz, stronghold_xz = select_stronghold_village_site(bot, bot_name, args.site_index)
@@ -2342,6 +2557,12 @@ def main() -> int:
                 starting_site = select_nether_structure_site(
                     bot, bot_name, NETHER_STRUCTURES[args.stage], start_idx=args.site_index,
                 )
+            elif args.stage in ("village", "village_trade"):
+                starting_site = select_village_wild_site(bot, bot_name, start_idx=args.site_index)
+            elif args.stage == "deep_water":
+                starting_site = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
+            else:
+                starting_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=args.day1)
         except Exception as exc:
             msg = str(exc) or exc.__class__.__name__
             print(f"[Startup] {bot_name} not ready: {msg}", flush=True)
@@ -2355,20 +2576,9 @@ def main() -> int:
                 error=msg,
             )
             return 0
-        if starting_site is not None:
-            sx, sy, sz, biome = starting_site
-        elif args.stage in ("village", "village_trade"):
-            sx, sy, sz, biome = select_village_wild_site(
-                bot,
-                bot_name,
-                start_idx=args.site_index,
-            )
-        elif args.stage == "deep_water":
-            sx, sy, sz, biome = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
-        else:
-            sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
+        sx, sy, sz, biome = starting_site
         if args.stage in LOCAL_FIXTURE_STAGES:
-            sx, sy, sz = math.floor(sx) + 0.5, float(round(sy)), math.floor(sz) + 0.5
+            sx, sy, sz = _fixture_position(args.stage, sx, sy, sz)
         dim = scene_dimension(args.stage)
         scene = SceneAnchor(stage=args.stage, dim=dim, x=sx, y=sy, z=sz, village_xz=village_xz)
         if args.stage == STRONGHOLD_STAGE:
@@ -2380,7 +2590,7 @@ def main() -> int:
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
         entry_ok = verify_scene_entry(bot, bot_name, scene)
-        if not entry_ok and args.stage in (NETHER_STAGES | {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE}):
+        if not entry_ok and args.stage in (NETHER_STAGES | {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE, *PROBE_STAGES}):
             msg = f"Scene {args.stage} landing could not be verified"
             _write_not_ready_summary(
                 out_file,
@@ -2394,6 +2604,16 @@ def main() -> int:
             return 0
         if args.stage == "village_trade":
             _pin_villager_near(bot, bot_name, [sx + 2.0, sy, sz])
+
+        probe_target = PROBE_THROUGHPUT_TARGETS.get(scene.stage)
+        probe_start_count = None
+        if probe_target is not None:
+            try:
+                probe_inventory = bot.call("inventory", method="GET", timeout_s=2.0, allow_reauth=False)
+                if isinstance(probe_inventory.get("items"), list):
+                    probe_start_count = total_owned_counts(probe_inventory).get(probe_target[0], 0)
+            except Exception:
+                pass
 
         geofence = _scene_geofence_cls(VoidGeofence)(
             center_x=sx, center_z=sz, radius=scene.radius, margin=8.0
@@ -2436,6 +2656,8 @@ def main() -> int:
             return False
 
         scene_state: dict[str, Any] = {"sup": None}
+        portal_calls: set[str] = set()
+        portal_crossing: dict[str, Any] | None = None
         portal_guard = (
             OverworldProgressGuard(bot, bot_name, scene)
             if args.day1 or args.stage in {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE}
@@ -2448,6 +2670,9 @@ def main() -> int:
             _reassert_scene_geofence(toolset, scene, dimension="overworld", supervisor=scene_state["sup"])
             return True
 
+        if args.stage == "bare":
+            _install_bare_stone_guidance()
+            _install_bare_iron_guidance()
         install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         if portal_guard is not None:
             from mc_agent.harness import curriculum as cur
@@ -2463,7 +2688,18 @@ def main() -> int:
             cur.select_next_target = _select_guarded_target
 
         def _guard_scene_anchor(ev: dict[str, Any]) -> None:
+            nonlocal portal_crossing
             kind = ev.get("type")
+            call_id = ev.get("call_id")
+            if kind == "tool.started":
+                function = ev.get("function") or {}
+                if call_id and function.get("name") == "mc_skill_build_portal":
+                    portal_calls.add(call_id)
+            elif kind == "tool.completed" and call_id in portal_calls:
+                portal_calls.remove(call_id)
+                receipt = portal_crossing_receipt(ev.get("result"))
+                if receipt and (portal_crossing is None or portal_crossing["reused_existing_portal"]):
+                    portal_crossing = receipt
             if portal_guard is not None and kind in (
                 "curriculum.pre_ensure.started", "curriculum.pre_ensure.completed", "run.started", "run.finished",
             ):
@@ -2508,8 +2744,23 @@ def main() -> int:
         if trader_keeper is not None:
             trader_keeper.start()
             print(f"[Scene] trader keeper started for {bot_name} (15s re-anchor)", flush=True)
+
+        protected_focus = {
+            STRONGHOLD_STAGE: (FOLLOW_ENDER_EYE, ENTER_END),
+            "probe_obsidian_portal": (ENTER_NETHER,),
+        }.get(args.stage, ())
+
+        class SceneFocusSupervisor(CurriculumSupervisor):
+            def _detect_surface_preempt_opportunity(self, *, current_key: str, **kwargs: Any) -> str | None:
+                if current_key in protected_focus:
+                    return None
+                return super()._detect_surface_preempt_opportunity(current_key=current_key, **kwargs)
+
+        supervisor_class = (
+            SceneFocusSupervisor if protected_focus and args.focus_episodes > 0 else CurriculumSupervisor
+        )
         try:
-            sup = CurriculumSupervisor(
+            sup = supervisor_class(
                 bot,
                 chat_fn=qwen.chat,
                 model_name=f"{qwen.model}@{qwen.base_url}",
@@ -2523,7 +2774,15 @@ def main() -> int:
                 on_episode_event=_guard_scene_anchor,
             )
             scene_state["sup"] = sup
-            summary = sup.run(max_episodes=args.max_episodes or None)
+            run_started = time.monotonic()
+            try:
+                summary = sup.run(max_episodes=args.max_episodes or None)
+            except TransportError as exc:
+                summary = _network_error_summary(
+                    runs_dir, sup.episodes, error=exc,
+                    elapsed_s=time.monotonic() - run_started, duration_s=args.duration_s,
+                )
+                print(f"[Wild Run Network Error] {bot_name} {summary['error']}", flush=True)
         finally:
             if trader_keeper is not None:
                 trader_keeper.stop()
@@ -2546,16 +2805,19 @@ def main() -> int:
                 except Exception:
                     pass
 
-        try:
-            inv_end = bot.inventory()
-            st_end = bot.status()
-        except ApiError:
+        inv_end, st_end = {}, {}
+        if summary.get("status") != "network_error":
             try:
-                st_end = ensure_bot_ready(bot, timeout_s=30.0, max_cooldown_wait_s=120.0, attempts=2)
                 inv_end = bot.inventory()
-            except Exception:
-                inv_end = {}
-                st_end = {}
+                st_end = bot.status()
+            except TransportError as exc:
+                print(f"[Final Snapshot] {bot_name} {type(exc).__name__}: {exc}", flush=True)
+            except ApiError:
+                try:
+                    st_end = ensure_bot_ready(bot, timeout_s=30.0, max_cooldown_wait_s=120.0, attempts=2)
+                    inv_end = bot.inventory()
+                except Exception:
+                    inv_end, st_end = {}, {}
         payload = {
             "bot": bot_name,
             "tag": args.tag,
@@ -2593,6 +2855,12 @@ def main() -> int:
             "guardian_totals": guardian_totals,
             "curriculum_summary": summary,
         }
+        if portal_crossing is not None:
+            payload["scene"]["portal_crossing"] = portal_crossing
+            payload["scene"]["portal_advancement"] = verify_portal_advancement(bot, summary)
+        if probe_target is not None:
+            item, threshold = probe_target
+            payload["scene"]["throughput"] = {"item": item, "threshold": threshold, "start_count": probe_start_count}
         if village_xz is not None:
             vx, vz = village_xz
             payload["scene"]["village"] = {"x": vx, "z": vz, "spawn_distance_m": round(math.hypot(sx - vx, sz - vz), 2)}
