@@ -1552,10 +1552,10 @@ class MacroSkills:
             result["shore_recoveries"] = result.get("shore_recoveries", 0) + 1
             return "remeasure_after_detour" if track_ender_eye else None
 
-        def advance(heading: int) -> str:
+        def advance(heading: int, length: float) -> str:
             nonlocal direction, status
             x, y, z = status["pos"]
-            tx, tz = waypoint(heading, step)
+            tx, tz = waypoint(heading, length)
             if not fence_allows(tx, tz):
                 return "void_geofence_blocked"
             landing_y = None
@@ -1576,7 +1576,7 @@ class MacroSkills:
                 previous_pos, previous_step, expires = previous
                 if (
                     time.monotonic() < expires and math.dist((x, y, z), previous_pos) <= 2.0
-                    and abs(step - previous_step) <= 0.5
+                    and abs(length - previous_step) <= 0.5
                 ):
                     return "scout_route_cooldown"
             health_before = status.get("health")
@@ -1603,7 +1603,7 @@ class MacroSkills:
                     return "remeasure_after_detour"
             if move_error:
                 if move_error in {"path_not_found", "no_path"} and math.dist((x, y, z), (px, py, pz)) < 1.0:
-                    self._failed_scout_routes[route_key] = ((x, y, z), step, time.monotonic() + 180.0)
+                    self._failed_scout_routes[route_key] = ((x, y, z), length, time.monotonic() + 180.0)
                 return move_error
             if nether_probe is not None:
                 if status.get("on_ground") is not True or abs(py - landing_y) > 0.75:
@@ -1612,13 +1612,16 @@ class MacroSkills:
                 session._remaining()
                 if landing is None:
                     return "unsafe_nether_landing"
-            if math.hypot(px - tx, pz - tz) > 3.0:
+            arrival_tolerance = 0.75 if length == short_nether_hop else 3.0
+            if math.hypot(px - tx, pz - tz) > arrival_tolerance:
                 return "stalled"
             direction = SURFACE_SCOUT_DIRECTIONS[heading]
             result["segments_completed"] += 1
             return "target_found" if scan(status) else "segment_completed"
 
         terrain_blocks = {"void_geofence_blocked", "liquid_ahead", "unsafe_nether_route"}
+        nether_route_blocks = {"void_geofence_blocked", "unsafe_nether_route"}
+        short_nether_hop = 4.0
         detour_reasons = SURFACE_SCOUT_PATH_ERRORS | terrain_blocks | {"scout_route_cooldown"}
         try:
             status = observe()
@@ -1682,7 +1685,8 @@ class MacroSkills:
                         reason = "target_found" if nether and danger == "nearby_hostile" and scan(status) else danger
                         break
                     heading = SURFACE_SCOUT_DIRECTIONS.index(direction)
-                    reason = advance(heading)
+                    reason = advance(heading, step)
+                    try_short_hop = nether and not track_ender_eye and reason in nether_route_blocks
                     explore_wider = reason in terrain_blocks
                     offsets = (-2, 2, -3, 3, -1, 1, 4) if explore_wider else (-1, 1, -2, 2, -3, 3, 4)
                     # Novelty may rank a wide turn before a legal 45° detour.
@@ -1695,8 +1699,17 @@ class MacroSkills:
                         candidate = (heading + offset) % len(SURFACE_SCOUT_DIRECTIONS)
                         if eye_headings is not None and candidate not in eye_headings:
                             continue
-                        reason = advance(candidate)
+                        reason = advance(candidate, step)
+                        try_short_hop &= reason in nether_route_blocks
                         explore_wider |= reason in terrain_blocks
+                    if try_short_hop:
+                        for offset in (0, *offsets):
+                            candidate = (heading + offset) % len(SURFACE_SCOUT_DIRECTIONS)
+                            reason = advance(candidate, short_nether_hop)
+                            if reason not in nether_route_blocks:
+                                break
+                        if reason == "segment_completed":
+                            reason = "short_nether_hop"
                     if track_ender_eye and reason in detour_reasons:
                         reason = "remeasure_after_detour"
                     if reason != "segment_completed":
@@ -1714,7 +1727,7 @@ class MacroSkills:
             reason = "transport_error"
         result.update(
             ok=reason == "target_found" or (
-                reason in {"segment_limit", "time_budget"} and result["segments_completed"] > 0
+                reason in {"segment_limit", "time_budget", "short_nether_hop"} and result["segments_completed"] > 0
             ),
             stop_reason=reason,
             distance_traveled=round(distance, 2),

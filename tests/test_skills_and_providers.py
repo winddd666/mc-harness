@@ -3224,6 +3224,45 @@ def test_nether_scout_detours_unsafe_floor_and_stops_at_fortress_evidence(hazard
     assert all("netherrack" not in types for types in queries)
 
 
+@pytest.mark.parametrize("magma_on_short_route", [False, True])
+def test_nether_scout_falls_back_to_a_safe_short_hop(magma_on_short_route) -> None:
+    pos = [0.5, 64, 0.5]
+    moves = []
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            return _SurfaceScoutBackend.ok({
+                "pos": pos, "dimension": "the_nether", "on_ground": True, "health": 20,
+            })
+        if route == "get_block":
+            x, y, z = body["pos"]
+            floor = "air"
+            if y == 63 and 0 <= x <= 5 and z == 0:
+                floor = "magma_block" if magma_on_short_route and x == 2 else "netherrack"
+            return _SurfaceScoutBackend.ok({"name": floor})
+        if route in {"find_blocks", "get_entities"}:
+            return _SurfaceScoutBackend.ok({"blocks" if route == "find_blocks" else "entities": []})
+        assert route == "move_to"
+        moves.append(body)
+        pos[:] = [body["x"], body["y"], body["z"]]
+        return _SurfaceScoutBackend.ok({"pos": pos})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        receipt = MacroSkills(bot).scout_surface(direction="east", step_dist=16)
+
+    if magma_on_short_route:
+        assert moves == []
+        assert receipt["stop_reason"] == "unsafe_nether_route"
+    else:
+        assert len(moves) == 1
+        assert [moves[0][key] for key in ("x", "y", "z")] == [4.5, 64, 0.5]
+        assert receipt["ok"] is True
+        assert receipt["stop_reason"] == "short_nether_hop"
+        assert receipt["distance_traveled"] == 4
+
+
 @pytest.mark.parametrize("floor,reason", [("cave_air", "bridge_gap_ahead"), ("netherrack", "nether_tunnel_floor_unsupported")])
 def test_nether_tunnel_reports_the_actual_floor_blocker(floor, reason) -> None:
     from mc_agent.harness.geofence import VoidGeofence
