@@ -353,6 +353,7 @@ class GenerationGuard:
         self._last_burn_hurt_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
         self._blocked_bunker: tuple[tuple[Any, ...], list[int], str] | None = None
+        self._blocked_flee_site: tuple[tuple[float, ...], tuple[Any, Any], float] | None = None
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
         self.stats = {
@@ -1064,6 +1065,7 @@ class GenerationGuard:
                     self._water_hurt_streak = 0
                     self._last_water_escape_failed = False
                     self._blocked_bunker = None
+                    self._blocked_flee_site = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     self._stationary_warnings.clear()
@@ -3059,6 +3061,13 @@ class GenerationGuard:
             result = recovery.get("result")
             if isinstance(result, dict) and result.get("respawned"):
                 return {**result, "requires_replan": True, "pos_before": status.get("pos")}
+            if (
+                allow_cover and isinstance(result, dict) and result.get("reason") == "no_safe_retreat"
+                and result.get("pos_after") and status.get("on_ground") is True
+            ):
+                self._blocked_flee_site = (
+                    tuple(result["pos_after"][:3]), (status.get("dimension"), status.get("last_death")), time.monotonic(),
+                )
             if recovery.get("ok") and isinstance(result, dict):
                 cover_deadline = min(now + 4.0, deadline)
                 if (
@@ -3188,11 +3197,20 @@ class GenerationGuard:
             return
         deadline = time.monotonic() + 0.8
         bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline, call_override=call)
+        near_failed_retreat = False
         try:
             status = bot.status()
             if status.get("ready") is False or status.get("alive") is False:
                 return
             name, distance, nearest_id, target = self._extract_hostile_info(status)
+            pos = status.get("pos")
+            if pos and self._blocked_flee_site is not None:
+                blocked_pos, life, blocked_at = self._blocked_flee_site
+                near_failed_retreat = (
+                    time.monotonic() - blocked_at < 10.0
+                    and life == (status.get("dimension"), status.get("last_death"))
+                    and math.dist(pos[:3], blocked_pos) <= 2.5
+                )
             if nearest_id == entity_id and name == "creeper":
                 raise _UnsafeCreeperAttack(entity_id)
             if nearest_id != entity_id or not name:
@@ -3203,7 +3221,23 @@ class GenerationGuard:
                     for entity in sighting.get("entities") or []
                 ):
                     raise _UnsafeCreeperAttack(entity_id)
-            pos = status.get("pos")
+            if near_failed_retreat and not status.get("in_water"):
+                if status.get("on_ground") is not True or status.get("in_lava"):
+                    raise _UnsafeCombatStep
+                if nearest_id != entity_id or target is None:
+                    target = self._find_hostile_position(entity_id, "", session=bot, timeout_s=0.3)
+                if target is None:
+                    raise _UnsafeCombatStep
+                travel = math.hypot(target[0] - pos[0], target[2] - pos[2])
+                if travel < 0.9 and abs(target[1] - pos[1]) > 2.0:
+                    raise _UnsafeCombatStep("cliff")
+                if travel >= 0.9:
+                    yaw, _ = aim_yaw_pitch(pos, target)
+                    route = CombatEnv(bot, geofence=self.geofence).probe_ray(
+                        pos, yaw, dist=min(travel, 6.0), deadline=deadline,
+                    )
+                    if not route["safe"]:
+                        raise _UnsafeCombatStep(route["hazard"])
             if nearest_id != entity_id or not pos or status.get("on_ground") is not True or status.get("in_lava"):
                 return
             dimension = str(status.get("dimension") or "").lower().removeprefix("minecraft:")
@@ -3231,6 +3265,8 @@ class GenerationGuard:
                 if env.probe_retreat(pos, yaw, travel, deadline=deadline) is None:
                     raise _UnsafeCombatStep
         except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
+            if near_failed_retreat and not status.get("in_water"):
+                raise _UnsafeCombatStep from None
             return
 
     @contextmanager

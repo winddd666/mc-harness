@@ -10765,6 +10765,63 @@ def test_blocked_flee_checks_cover_after_a_critical_landing(monkeypatch, blockin
     assert result["ok"] is (landing != "new_life") and result["requires_replan"]
 
 
+@pytest.mark.parametrize("terrain", ["cliff", "same_column", "missing_target", "clear", "new_life", "moved", "expired"])
+def test_attack_rechecks_footing_near_a_recent_failed_retreat(monkeypatch, terrain):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    origin = [0.5, 9, 0.5]
+    hostile = {"id": 42, "name": "zombie", "pos": [5.5, 9, 0.5], "dist": 5.0}
+    status = {"pos": origin, "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": hostile,
+              "health": 8, "food": 20, "ready": True, "alive": True, "on_ground": True}
+    attacks = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_entities":
+                return {"entities": []}
+            if action == "get_block":
+                x, y, _ = body["pos"]
+                return {"name": "stone" if y == 8 and (terrain == "clear" or x <= 1) else "air"}
+            if action == "attack":
+                attacks.append(body["entity_id"])
+                return {"ok": True, "hits": 1}
+            pytest.fail(f"Unexpected action during attack: {action}")
+
+    monkeypatch.setattr(CombatEnv, "probe_retreat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(CombatEnv, "flee", lambda *_args, **_kwargs: {
+        "ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0, "pos_after": origin,
+    })
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    flee = guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 5.5, "z": 0.5, "stop_on": ["death"]}),
+    ))
+    assert json.loads(flee)["error"]["code"] == "unsafe_landing"
+
+    clock[0] += 11.0 if terrain == "expired" else 4.8
+    if terrain == "same_column":
+        hostile["pos"] = [0.5, -22, 0.5]
+    elif terrain == "missing_target":
+        hostile.pop("pos")
+    elif terrain == "new_life":
+        status["last_death"] = {"t": 2}
+    elif terrain == "moved":
+        status["pos"] = [4.5, 9, 0.5]
+    attack = json.loads(guard.run_tool_with_reflex("mc_attack", lambda: json.dumps(
+        bot.call("attack", {"entity_id": 42, "max_hits": 8}),
+    )))
+
+    safe = terrain in {"clear", "new_life", "moved", "expired"}
+    assert attacks == ([42] if safe else [])
+    assert attack["ok"] is safe
+    if not safe:
+        assert attack["error"]["code"] == "unsafe_landing"
+
+
 @pytest.mark.parametrize("pressure", ["arrow", "stale_arrow", "melee_and_arrow", "exposed"])
 def test_unsafe_overworld_flee_checks_cover_when_critical_arrows_bypass_shield(monkeypatch, pressure):
     from mc_agent.skills.combat_env import CombatEnv
