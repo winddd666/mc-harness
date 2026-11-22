@@ -13502,6 +13502,66 @@ def test_dfs_probes_fresh_support_before_moving_to_a_mining_step(monkeypatch, te
             assert rejected_events[0]["gained"] == {"raw_iron": 1}
 
 
+@pytest.mark.parametrize("terrain", ["unchanged", "repaired_edge", "repair_unconfirmed", "expiry", "unavailable"])
+def test_dfs_rechecks_a_rejected_waypoint_only_when_the_observation_can_change(monkeypatch, terrain):
+    target = [304191.2, 16.0, 309200.8]
+    # The west edge is outside the block below the waypoint center.
+    edge_support = [304190, 15, 309200]
+    clock = [100.0]
+    probes = []
+    movements = []
+    events = []
+    repaired = False
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            nonlocal repaired
+            if action == "get_block":
+                probes.append(body["pos"])
+                if terrain == "unavailable" and len(probes) <= 2:
+                    raise httpx.ReadTimeout("missing footing observation")
+                return {"name": "air" if body["pos"] == edge_support and not repaired else "stone"}
+            if action == "place":
+                assert body["pos"] == edge_support
+                repaired = terrain == "repaired_edge"
+            if action in {"move_to", "control"}:
+                movements.append(action)
+            return {"ok": True}
+
+    bot = ShaftBot()
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None)
+    waypoint = dict(zip(("x", "y", "z"), target), range=0.35)
+
+    def invoke():
+        nonlocal repaired
+        with pytest.raises(ApiError) as denied:
+            bot.call("move_to", waypoint)
+        assert denied.value.code == ("mining_footing_unavailable" if terrain == "unavailable" else "unsafe_landing")
+        if terrain == "unavailable":
+            repaired = True
+            return json.dumps(bot.call("move_to", waypoint))
+        for _ in range(2):
+            clock[0] += 0.75
+            with pytest.raises(ApiError, match="采矿落点"):
+                bot.call("move_to", {**waypoint, "range": 0.3})
+        if terrain == "expiry":
+            clock[0] += 0.6
+            repaired = True
+            return json.dumps(bot.call("move_to", waypoint))
+        if terrain in {"repaired_edge", "repair_unconfirmed"}:
+            bot.call("place", {"pos": edge_support, "item": "cobblestone"})
+        return json.dumps(bot.call("control", {"forward": True, "ms": 420}))
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", invoke))
+    accepted = terrain in {"repaired_edge", "expiry", "unavailable"}
+    assert result["ok"] is accepted
+    assert movements == (["control" if terrain == "repaired_edge" else "move_to"] if accepted else [])
+    assert probes.count(edge_support) == {"unchanged": 1, "repaired_edge": 2, "repair_unconfirmed": 2, "expiry": 2, "unavailable": 3}[terrain]
+    reuses = [event for event in events if event["type"] == "guardian.mining_landing_blocked" and event.get("probe_reused")]
+    assert len(reuses) == (0 if terrain == "unavailable" else 2)
+
+
 @pytest.mark.parametrize("floor", ["air", "lava", "unavailable"])
 def test_bug116_dfs_rejects_dangerous_waypoint_and_keeps_mining(monkeypatch, tmp_path, floor):
     from mc_agent.skills.mining_dfs import MiningDFSEngine

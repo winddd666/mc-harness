@@ -278,6 +278,12 @@ def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
     )
 
 
+def footing_blocks(pos: Sequence[float]) -> list[tuple[int, int, int]]:
+    x, y, z = pos[:3]
+    floor_y = math.floor(y + 0.05) - 1
+    return [(bx, floor_y, bz) for bx, bz in _hitbox_columns(x, z)]
+
+
 def _is_control_signal(error: Exception) -> bool:
     if not isinstance(error, RuntimeError):
         return False
@@ -737,10 +743,8 @@ class CombatEnv:
         return False
 
     def has_safe_footing(self, pos: Sequence[float], *, require_observation: bool = False) -> bool:
-        x, y, z = pos[:3]
-        floor_y = math.floor(y + 0.05) - 1
-        for bx, bz in _hitbox_columns(x, z):
-            floor = self._get_block_name(bx, floor_y, bz, strict=True)
+        for block in footing_blocks(pos):
+            floor = self._get_block_name(*block, strict=True)
             if not floor and require_observation:
                 raise _TerrainProbeExpired
             if not floor or floor in HAZARD_BLOCK_TYPES or not _is_solid_ground(floor):

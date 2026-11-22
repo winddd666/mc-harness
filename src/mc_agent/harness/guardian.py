@@ -41,6 +41,7 @@ from ..skills.combat_env import (
     _CombatFortificationInterrupted,
     _TerrainProbeExpired,
     aim_yaw_pitch,
+    footing_blocks,
     ranged_retreat_positions,
     retreat_made_progress,
 )
@@ -281,6 +282,7 @@ class GenerationGuard:
     STATUS_FULL_OXYGEN = 20.0
     TOOL_WATER_ESCAPE_BUBBLES = 10.0
     TOOL_WATER_SUBMERSION_GRACE_S = 2.0
+    MINING_UNSAFE_FOOTING_RECHECK_S = 2.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -4010,6 +4012,7 @@ class GenerationGuard:
         pending_trigger: list[ThreatTrigger] = []
         unstick_start: dict[str, Any] = {}
         mining_landing_error: _MiningLandingDenied | None = None
+        mining_landing_retry_at = 0.0
         mining_support_changed = False
         watch_terrain_damage = check_support_dig or watch_mining_water
         watch_low_oxygen = watch_mining_water or check_unstick_exit
@@ -4369,17 +4372,27 @@ class GenerationGuard:
             watcher_thread.start()
 
         def verify_mining_approach(target: list[float]) -> None:
-            nonlocal mining_landing_error, mining_support_changed
+            nonlocal mining_landing_error, mining_landing_retry_at, mining_support_changed
+            cached_denial = mining_landing_error
+            if (
+                cached_denial is None or cached_denial.code != "unsafe_landing" or cached_denial.context["target"] != target
+                or mining_support_changed or time.monotonic() >= mining_landing_retry_at
+            ):
+                cached_denial = None
             mining_support_changed = False
             try:
+                if cached_denial is not None:
+                    raise _MiningLandingDenied(cached_denial.code, cached_denial.message, context=cached_denial.context)
                 self._verify_mining_landing(target)
             except _MiningLandingDenied as error:
                 if pending_trigger:
                     raise ReflexPreempted(pending_trigger[0]) from None
                 mining_landing_error = error
+                if cached_denial is None:
+                    mining_landing_retry_at = time.monotonic() + self.MINING_UNSAFE_FOOTING_RECHECK_S
                 self.events.emit(
                     "guardian.mining_landing_blocked", tool="mc_skill_mine_dfs", target=target, reason=error.code,
-                    **(dig_progress or {}),
+                    **({"probe_reused": True} if cached_denial is not None else {}), **(dig_progress or {}),
                 )
                 raise
             if pending_trigger:
@@ -4556,10 +4569,12 @@ class GenerationGuard:
                             confirmed_gains = dig_progress.setdefault("gained", {})
                             confirmed_gains[name] = confirmed_gains.get(name, 0) + amount
             apply_pending_preemption()
-            if clean_path == "place" and isinstance(body, dict) and mining_landing_error is not None:
-                x, y, z = mining_landing_error.context["target"]
-                support = [math.floor(x), math.floor(y + 0.05) - 1, math.floor(z)]
-                if body.get("pos") == support and isinstance(res, dict) and res.get("ok") is not False:
+            if (
+                clean_path in {"place", "dig"} and isinstance(body, dict) and mining_landing_error is not None
+                and isinstance(res, dict) and res.get("ok") is not False
+            ):
+                changed = body.get("pos")
+                if isinstance(changed, (tuple, list)) and tuple(changed) in footing_blocks(mining_landing_error.context["target"]):
                     mining_support_changed = True
             if not self._in_reflex and (not caller_ignores_hurt or watch_terrain_damage):
                 if isinstance(res, dict) and res.get("interrupted_by") == "hurt" and clean_path in ACTION_LOCK_ENDPOINTS:
