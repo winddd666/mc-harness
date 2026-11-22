@@ -11356,6 +11356,52 @@ def test_water_combat_retries_shore_after_unconfirmed_landing(monkeypatch, secon
     assert shore_attempts == [[3.3, 62.5, 0.5], None]
 
 
+@pytest.mark.parametrize(("entry", "pressure"), [
+    ("poll", "low_hp"), ("poll", "fresh_health"), ("poll", "burst"),
+    ("boundary", "low_hp"), ("boundary", "burst"), ("tool", "low_hp"),
+])
+def test_swimming_melee_pressure_prefers_shore_without_a_live_attacker_snapshot(monkeypatch, entry, pressure):
+    health = 8.166667 if pressure == "low_hp" else 14.0
+    status = {
+        "pos": [19023.7, 62.4, 41009.2], "health": health, "food": 20, "oxygen": 200,
+        "in_water": True, "on_ground": False, "ready": True, "alive": True,
+    }
+    events = [{"seq": 1, "type": "hurt", "source": "mob_attack", "health": 8.0 if pressure == "fresh_health" else health}]
+    if pressure == "burst":
+        events.append({"seq": 2, "type": "hurt", "source": "mob_attack", "health": health})
+    calls = []
+
+    class PoolBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [event for event in events if event["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            pytest.fail(f"Unexpected action without an identified attacker: {action}")
+
+    def reach_shore(threat_pos, *, keep_shield, shield_target_id, under_attack):
+        assert threat_pos is None and shield_target_id is None and not keep_shield and under_attack
+        calls.append("shore")
+        status.update(in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    guard = GenerationGuard(PoolBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    monkeypatch.setattr(guard, "_escape_water", lambda *_a, **_kw: pytest.fail("Ordinary escape delayed shore movement"))
+
+    if entry == "poll":
+        assert guard.poll()["actions"][-1]["action"] == "escape_to_shore"
+    elif entry == "boundary":
+        assert "登岸" in guard.stabilize_after_tools()
+    else:
+        result = guard.handle_preemption({"source": "tool_interrupted_hurt", "hurt_source": "mob_attack"},
+                                         interrupted_name="mc_skill_unstick")
+        assert result["reflex_mode"] == "water_surface"
+    assert calls == ["shore"] and status["on_ground"]
+
+
 @pytest.mark.parametrize("landing", ["grounded", "grounded_on_second_sample", "airborne", "wet_again"])
 def test_water_macro_checks_that_a_dry_jump_reaches_ground(monkeypatch, landing):
     monkeypatch.setattr("mc_agent.harness.guardian.time.sleep", lambda _: None)
@@ -11789,10 +11835,11 @@ def test_open_water_retreat_rechecks_the_last_confirmed_dry_bank(monkeypatch, ba
     assert result["ok"] is safe_bank
 
 
-@pytest.mark.parametrize("under_attack", [False, True])
-def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attack):
+@pytest.mark.parametrize("threat", ["none", "known", "unlocated"])
+def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(threat):
     from mc_agent.skills.combat_env import CombatEnv
 
+    under_attack = threat != "none"
     status = {"pos": [10989.2, 62.7, -10987.8], "in_water": True, "on_ground": False,
               "alive": True, "ready": True}
     ledge = [10992, 62, -10985]
@@ -11822,7 +11869,9 @@ def test_short_shore_crossing_limits_pathfinder_wait_when_threatened(under_attac
                 status.update(pos=[10992.5, 63.0, -10984.5], in_water=False, on_ground=True)
             return {"ok": True}
 
-    result = CombatEnv(ShoreBot()).escape_deep_water_to_shore(shield_target_id=44 if under_attack else None)
+    result = CombatEnv(ShoreBot()).escape_deep_water_to_shore(
+        shield_target_id=44 if threat == "known" else None, under_attack=threat == "unlocated",
+    )
 
     assert motions == ["move_to", "jump"]
     assert result["ok"] is True and result["in_water"] is False

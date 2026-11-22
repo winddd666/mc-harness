@@ -2675,6 +2675,7 @@ class CombatEnv:
         avoid_close_threat: bool = False,
         sneak_on_magma: bool = False,
         prefer_recent_dry_bank: bool = False,
+        under_attack: bool = False,
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
         st0 = self.bot.status()
@@ -2947,7 +2948,7 @@ class CombatEnv:
         shore_path_unreachable = False
         if shore_target is not None:
             shore_dist = math.hypot(shore_target[0] - shore_x, shore_target[2] - shore_z)
-            contested_short_crossing = (has_threat or shield_target_id is not None) and shore_dist <= 5.0
+            contested_short_crossing = (under_attack or has_threat or shield_target_id is not None) and shore_dist <= 5.0
 
             def hop_to_shore(position: Sequence[float], *, ms: int, sprint: bool) -> None:
                 try:

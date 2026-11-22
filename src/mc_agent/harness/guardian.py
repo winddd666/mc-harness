@@ -787,6 +787,20 @@ class GenerationGuard:
         )
 
     @staticmethod
+    def _urgent_swimming_melee(
+        status: dict[str, Any], hits: Sequence[dict[str, Any]] = (), *, interrupted_source: str | None = None,
+    ) -> bool:
+        if not status.get("in_water") or not (status.get("on_ground") is False or status.get("submerged")):
+            return False
+        melee_hits = [hit for hit in hits if str(hit.get("source") or "").strip().lower() in MELEE_HURT_SOURCES]
+        if len(melee_hits) >= 2:
+            return True
+        if not melee_hits and str(interrupted_source or "").strip().lower() not in MELEE_HURT_SOURCES:
+            return False
+        health_samples = [status.get("health"), *(hit.get("health") for hit in melee_hits)]
+        return any(isinstance(health, (int, float)) and 0 < health <= 10.0 for health in health_samples)
+
+    @staticmethod
     def _unattributed_fall_only(hurts: list[dict[str, Any]]) -> bool:
         return bool(hurts) and all(
             str(hit.get("source") or "").strip().lower() == "fall"
@@ -2223,6 +2237,8 @@ class GenerationGuard:
                 att_pos_w = att_w_dict.get("pos") if att_w_dict else nh_pos
                 close_drowned_hit = nh_name == "drowned" and nh_dist <= 6.0 and hurt_src_w in MELEE_HURT_SOURCES
                 close_water_melee_hit = nearby_water_melee and hurt_src_w in MELEE_HURT_SOURCES
+                urgent_water_melee = self._urgent_swimming_melee(status, hurts)
+                melee_shore = close_water_melee_hit or urgent_water_melee
                 swimming = status.get("on_ground") is False or bool(status.get("submerged"))
                 retry_shore_after_hit = (
                     swimming and recent_water_escape_failed
@@ -2261,8 +2277,8 @@ class GenerationGuard:
                 esc_err_code: str | None = None
                 if (
                     not transient_err and not forced_water_shore and not no_water_reentry and not drowning
-                    and not self._swimming_at_low_health(status) and not (close_drowned_hit or close_water_melee_hit)
-                    and not retry_shore_after_hit and not urgent_trident_shore and not underwater_hot_floor
+                    and not self._swimming_at_low_health(status) and not (close_drowned_hit or melee_shore)
+                    and not (retry_shore_after_hit or urgent_trident_shore or underwater_hot_floor)
                 ):
                     if not _already("escape_water"):
                         short_escape = any(self._short_water_escape_after_hit(status, h.get("source")) for h in hurts)
@@ -2286,17 +2302,19 @@ class GenerationGuard:
                     and not esc_respawned and not esc_handled_lava
                     and esc_err_code not in {"not_connected", "not_ready", "wrong_server", "network_uncertain"}
                 ):
-                    if (close_drowned_hit or close_water_melee_hit) and att_pos_w is None:
+                    if (close_drowned_hit or melee_shore) and att_pos_w is None:
                         target_id = att_w_dict.get("id") if att_w_dict else nh_id
                         target_name = str(att_w_dict.get("name") or "").removeprefix("minecraft:") if att_w_dict else nh_name
-                        att_pos_w = self._find_hostile_position(target_id, target_name, timeout_s=0.6)
+                        if target_id is not None or target_name:
+                            att_pos_w = self._find_hostile_position(target_id, target_name, timeout_s=0.6)
                     shore_act = self._action(
                         "escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
                             att_pos_w, keep_shield=has_shield,
                             shield_target_id=att_w_dict.get("id") if att_w_dict else nh_id,
                             **({"surface_first": True} if drowning else {}),
-                            **({"avoid_close_threat": True} if close_water_melee_hit and att_pos_w else {}),
+                            **({"avoid_close_threat": True} if melee_shore and att_pos_w else {}),
+                            **({"under_attack": True} if urgent_water_melee else {}),
                             **({"sneak_on_magma": True} if underwater_hot_floor else {}),
                         ),
                     )
@@ -4403,10 +4421,11 @@ class GenerationGuard:
                     )
                     if hurt_pre_water:
                         self._water_hurt_streak += 1
+                    urgent_water_melee = self._urgent_swimming_melee(st_pre, interrupted_source=trigger.get("hurt_source"))
                     forced_pre_shore = (
                         self._water_hurt_streak >= 3 or now_pre < self._no_water_until
                         or self._swimming_at_low_health(st_pre) or drowned_during_tool
-                        or surface_first_pre
+                        or surface_first_pre or urgent_water_melee
                     )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
@@ -4453,7 +4472,7 @@ class GenerationGuard:
                         esc_pre_handled_lava = esc_pre_res.get("mode") == "lava_escape"
                     if not esc_pre_ok and not esc_pre_respawned and not esc_pre_handled_lava:
                         shore_threat_pos = trigger.get("primary_pos") or (att_pre.get("pos") if isinstance(att_pre, dict) else None)
-                        if drowned_during_tool and shore_threat_pos is None and att_pre:
+                        if (drowned_during_tool or urgent_water_melee) and shore_threat_pos is None and att_pre:
                             shore_threat_pos = self._find_hostile_position(att_pre.get("id"), nh_pre_name, timeout_s=0.6)
                         shore_pre = self._action(
                             "escape_to_shore",
@@ -4462,8 +4481,10 @@ class GenerationGuard:
                                 keep_shield=has_shield_pre,
                                 shield_target_id=att_pre.get("id") if isinstance(att_pre, dict) else None,
                                 **({"surface_first": True} if drowning_pre or surface_first_pre else {}),
-                                **({"prefer_recent_dry_bank": True, "avoid_close_threat": True}
-                                   if repeated_underground_water else {}),
+                                **({"prefer_recent_dry_bank": True} if repeated_underground_water else {}),
+                                **({"avoid_close_threat": True}
+                                   if repeated_underground_water or (urgent_water_melee and shore_threat_pos) else {}),
+                                **({"under_attack": True} if urgent_water_melee else {}),
                             ),
                             raise_on_http_error=False,
                         )
@@ -5131,10 +5152,13 @@ class GenerationGuard:
                 )
                 surface_first = drowning or (continuing_water_escape and bool(status.get("submerged")))
                 nearby_water_melee = self._has_close_melee_in_water(status)
+                urgent_water_melee = self._urgent_swimming_melee(status, hurts) and not any(
+                    e.get("type") in {"death", "death_loop", "disconnected", "spawn"} for e in fresh
+                )
                 forced_shore_b = (
                     self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
                     or handled_water_in_tool or unstick_still_wet or self._swimming_at_low_health(status)
-                    or continuing_water_escape or underwater_hot_floor or nearby_water_melee
+                    or continuing_water_escape or underwater_hot_floor or nearby_water_melee or urgent_water_melee
                     or (shore_threat_name == "creeper" and nh_dist <= 6.0)
                 )
                 esc_b_ok = False
@@ -5167,12 +5191,16 @@ class GenerationGuard:
                 elif not esc_b_respawned:
                     if shore_threat_pos is None and nh_dist <= 16.0 and (shield_target_b is not None or shore_threat_name):
                         shore_threat_pos = self._find_hostile_position(shield_target_b, shore_threat_name, timeout_s=0.6)
+                    avoid_water_attacker = shore_threat_name == "creeper" or nearby_water_melee or (
+                        urgent_water_melee and shore_threat_pos is not None
+                    )
                     shore_b = self._action(
                         "boundary_escape_to_shore",
                         lambda: self.combat_env.escape_deep_water_to_shore(
                             shore_threat_pos, keep_shield=has_shield_b, shield_target_id=shield_target_b,
                             **({"surface_first": True} if surface_first else {}),
-                            **({"avoid_close_threat": True} if shore_threat_name == "creeper" or nearby_water_melee else {}),
+                            **({"avoid_close_threat": True} if avoid_water_attacker else {}),
+                            **({"under_attack": True} if urgent_water_melee else {}),
                             **({"sneak_on_magma": True} if underwater_hot_floor else {}),
                         ),
                         raise_on_http_error=False,
