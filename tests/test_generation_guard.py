@@ -14749,8 +14749,8 @@ def test_short_ranged_retreat_checks_cover_before_the_next_arrow(monkeypatch, la
             status["nearest_hostile"] = {"id": 42, "name": "zombie", "dist": 0.9}
         return {"ok": True, "mode": "flee", "moved_dist": moved}
 
-    def cover(pos, *, other_shooters, allow_stationary):
-        assert pos == shooter["pos"] and not other_shooters and allow_stationary
+    def cover(pos, *, other_shooters, allow_stationary, verify_live_shooters):
+        assert pos == shooter["pos"] and not other_shooters and allow_stationary and verify_live_shooters
         checks.append(status["pos"])
         return {"ok": True, "mode": "natural_cover"}
 
@@ -14799,8 +14799,9 @@ def test_interrupted_arrow_tool_checks_natural_cover_after_no_safe_retreat(monke
             clock[0] += 6.0
         return {"ok": False, "moved_dist": 0.0, "reason": "no_safe_retreat", "respawned": fallback == "respawned"}
 
-    def seek_cover(pos, *, other_shooters, allow_stationary):
+    def seek_cover(pos, *, other_shooters, allow_stationary, verify_live_shooters):
         assert pos == shooter["pos"] and other_shooters == [second_shooter["pos"]] and not allow_stationary
+        assert verify_live_shooters
         checks.append("cover")
         if fallback == "covered":
             status.update(pos=[0.5, 71, -1.7])
@@ -14817,6 +14818,74 @@ def test_interrupted_arrow_tool_checks_natural_cover_after_no_safe_retreat(monke
 
     assert checks == (["flee", "cover"] if fallback in {"covered", "exposed"} else ["flee"])
     assert outcome["mode"] == ("natural_cover" if fallback == "covered" else "cover_or_flee")
+
+
+@pytest.mark.parametrize("event_source", [
+    "arrow", "same_shooter_missing_pos", "other_shooter", "old_arrow", "melee", "read_timeout", "new_life",
+])
+def test_mining_reflex_recovers_missing_arrow_source_before_a_stalled_retreat(monkeypatch, event_source):
+    monkeypatch.setattr("mc_agent.harness.guardian.time.time", lambda: 1000.0)
+    shooter = {"id": 505830, "name": "skeleton", "pos": [41043.6, -2, 18938.5], "dist": 3.1}
+    alternate = {"id": 505831, "name": "skeleton", "pos": [41040.5, -2, 18944.5], "dist": 6.0}
+    targeted = alternate if event_source == "other_shooter" else shooter
+    status = {
+        "pos": [41040.5, -2, 18938.5], "health": 3.0, "food": 17, "dimension": "overworld",
+        "alive": True, "ready": True, "on_ground": True, "last_death": {"t": 2 if event_source == "new_life" else 1},
+        "nearest_hostile": shooter,
+    }
+    event = {
+        "seq": 1, "t": 995000 if event_source == "old_arrow" else 999500,
+        "type": "hurt", "source": "mob_attack" if event_source == "melee" else "arrow",
+        "source_entity": targeted,
+    }
+    if event_source == "same_shooter_missing_pos":
+        event["source_entity"] = {"id": shooter["id"], "name": shooter["name"]}
+    calls = []
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                if kwargs.get("timeout_s") == 0.4:
+                    calls.append("read_hurt")
+                    if event_source == "read_timeout":
+                        raise httpx.ReadTimeout("hurt events not returned")
+                return {"events": [event] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                if event_source == "same_shooter_missing_pos":
+                    return {"entities": [event["source_entity"]]}
+                return {"entities": [shooter, alternate] if event_source == "other_shooter" else [shooter]}
+            return {"ok": True}
+
+    def flee(pos, **_kwargs):
+        calls.append("flee")
+        assert pos == targeted["pos"]
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    def cover(pos, *, other_shooters, allow_stationary, verify_live_shooters):
+        calls.append("cover")
+        assert pos == targeted["pos"] and not allow_stationary and verify_live_shooters
+        assert other_shooters == ([shooter["pos"]] if event_source == "other_shooter" else [])
+        return {"ok": True, "mode": "natural_cover", "pos_after": status["pos"]}
+
+    guard = GenerationGuard(ShaftBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave"})
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    monkeypatch.setattr(guard.combat_env, "seek_natural_cover", cover)
+    result = guard.handle_preemption({
+        "source": "tool_interrupted_hurt", "primary_type": "skeleton", "primary_entity_id": shooter["id"],
+        "primary_pos": shooter["pos"], "distance": 3.1, "observed_life": ("overworld", {"t": 1}),
+    }, interrupted_name="mc_skill_mine_dfs")
+
+    if event_source == "new_life":
+        assert calls == [] and result["reflex_mode"] == "life_unavailable"
+    elif event_source in {"arrow", "same_shooter_missing_pos", "other_shooter"}:
+        assert calls == ["read_hurt", "flee", "cover"] and result["reflex_mode"] == "natural_cover"
+    else:
+        assert calls == ["read_hurt", "flee"] and result["reflex_mode"] == "cover_or_flee"
 
 
 @pytest.mark.parametrize("unbroken_ledge", [True, False])

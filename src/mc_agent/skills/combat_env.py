@@ -4223,6 +4223,7 @@ class SubcorticalInstinctController:
                         if cover_after_retreat:
                             natural_cover = env.seek_natural_cover(
                                 mob_pos, other_shooters=other_shooters, allow_stationary=short_ranged_retreat,
+                                verify_live_shooters=True,
                             )
                         if natural_cover is not None:
                             actions.append({"action": "natural_cover", **natural_cover})

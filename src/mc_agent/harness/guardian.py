@@ -3795,6 +3795,7 @@ class GenerationGuard:
                 return {
                     "source": "tool_interrupted_hurt", "primary_entity_id": entity_id, "primary_type": name,
                     "primary_pos": pos, "distance": dist,
+                    "observed_life": (status.get("dimension"), status.get("last_death")),
                 }
             return None
 
@@ -4012,7 +4013,7 @@ class GenerationGuard:
                                 "primary_pos": pos_w,
                                 "distance": dist_w,
                                 **({"observed_life": (st.get("dimension"), st.get("last_death"))}
-                                   if src_w == "tool_water_threat" else {}),
+                                   if src_w in {"tool_water_threat", "tool_interrupted_hurt"} else {}),
                             }
                         )
                         try:
@@ -4253,23 +4254,35 @@ class GenerationGuard:
                 st_pre = settled
             lava_threat = trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava"))
             distance = trigger.get("distance")
+            hp_pre = st_pre.get("health")
+            trigger_name = str(trigger.get("primary_type") or "").removeprefix("minecraft:")
+            distant_creeper = trigger_name == "creeper" and isinstance(distance, (int, float)) and distance > 8.5
+            missing_arrow_source = (
+                trigger_name in RANGED_MOBS and isinstance(hp_pre, (int, float)) and 0 < hp_pre <= 4.0
+                and not trigger.get("hurt_source")
+            )
             if (
                 not life_unavailable and not lava_threat and not st_pre.get("in_water")
-                and trigger.get("source") == "tool_interrupted_hurt" and trigger.get("primary_type") == "creeper"
-                and isinstance(distance, (int, float)) and distance > 8.5
+                and trigger.get("source") == "tool_interrupted_hurt" and (distant_creeper or missing_arrow_source)
             ):
                 hurt = self._fresh_tool_hurt_event(self.bot.call) or {}
                 hurt_source = str(hurt.get("source") or "").strip().lower()
-                if hurt_source in MELEE_HURT_SOURCES:
+                arrow_hit = missing_arrow_source and hurt_source == "arrow"
+                if arrow_hit or (distant_creeper and hurt_source in MELEE_HURT_SOURCES):
                     trigger = {**trigger, "hurt_source": hurt_source}
-                    attacker = hurt.get("source_entity") or hurt.get("likely_attacker")
-                    if isinstance(attacker, dict) and isinstance(attacker.get("id"), int) and attacker.get("name"):
+                    attacker = hurt.get("source_entity")
+                    if not arrow_hit and not attacker:
+                        attacker = hurt.get("likely_attacker")
+                    attacker = attacker if isinstance(attacker, dict) else {}
+                    attacker_name = str(attacker.get("name") or "").removeprefix("minecraft:")
+                    if attacker_name and isinstance(attacker.get("id"), int) and (not arrow_hit or attacker_name in RANGED_MOBS):
+                        same_attacker = attacker["id"] == trigger.get("primary_entity_id")
                         trigger.update(
-                            primary_entity_id=attacker["id"], primary_type=attacker["name"],
-                            primary_pos=attacker.get("pos"), distance=attacker.get("dist"),
+                            primary_entity_id=attacker["id"], primary_type=attacker_name,
+                            primary_pos=attacker.get("pos") or (trigger.get("primary_pos") if same_attacker else None),
+                            distance=attacker.get("dist", trigger.get("distance") if same_attacker else None),
                         )
             hot_floor_trigger = trigger.get("primary_type") == "hot_floor"
-            hp_pre = st_pre.get("health")
             dimension = str(st_pre.get("dimension") or "").lower().removeprefix("minecraft:")
             check_hot_floor = hot_floor_trigger or (
                 (
