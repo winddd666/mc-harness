@@ -265,6 +265,11 @@ DEFAULT_EQUIP_SLOTS: dict[str, str] = {
     "diamond_hoe": "hand",
 }
 
+_REUSABLE_CRAFT_ITEMS = frozenset({
+    "flint_and_steel", "diamond_pickaxe", "iron_pickaxe", "stone_pickaxe", "diamond_sword", "iron_sword",
+    "shield", "bucket", "shears", "compass", "lodestone", "enchanting_table", "anvil", "brewing_stand", "crafting_table",
+})
+
 # Material requirements (planks_needed, sticks_needed) for plank/stick auto-crafting helpers.
 TOOL_WOOD_NEEDS: dict[str, tuple[int, int]] = {
     "crafting_table": (4, 0),
@@ -4389,6 +4394,20 @@ class MacroSkills:
             if session is not None:
                 session.deadline = deadline
 
+        requested_item = resolve_item_alias(item)
+        inventory = result.get("inventory")
+        if (
+            result.get("error") == "missing_ingredients"
+            and requested_item in _REUSABLE_CRAFT_ITEMS
+            and isinstance(inventory, dict)
+        ):
+            owned = int(inventory.get(requested_item, 0))
+            if owned >= max(1, min(64, count)):
+                result = {
+                    "ok": True, "already_owned": True, "item": requested_item, "owned_count": owned,
+                    "gained": 0, "inventory": inventory, "message": f"已持有 {requested_item}×{owned}，本次合成增加 0 件。",
+                }
+
         craft_timed_out = session is not None and session.timed_out
         if session is not None and owns_budget and craft_timed_out:
             pending = session.pending_action
@@ -4409,9 +4428,18 @@ class MacroSkills:
 
         if result.get("ok"):
             equip_item = resolve_item_alias(str(result.get("crafted") or item))
-            slot = equip_slot or DEFAULT_EQUIP_SLOTS.get(equip_item)
+            already_owned = result.get("already_owned") is True
+            slot = equip_slot or (None if already_owned else DEFAULT_EQUIP_SLOTS.get(equip_item))
             result["equipped_slot"] = None
-            if slot and not any(row.get("error") in interruptions for row in cleanup):
+            blocked = next((row["error"] for row in cleanup if row.get("error") in interruptions), None)
+            if slot and equip_slot:
+                if blocked:
+                    result["equip_error"] = {"code": blocked, "message": "装备请求因动作中断而未执行。"}
+                else:
+                    result.update(scoped._equip_crafted_gear(equip_item, slot, already_owned=already_owned))
+                if already_owned and result.get("equip_error"):
+                    result.update(ok=False, requires_replan=True)
+            elif slot and not blocked:
                 try:
                     equipped = scoped.bot.call("equip", {"item": equip_item, "slot": slot})
                 except (ApiError, _SkillDeadline):
@@ -4424,6 +4452,35 @@ class MacroSkills:
             if (craft_timed_out or session.timed_out) and result.get("stop_reason") != "time_budget":
                 result["deadline_hit"] = True
         return result
+
+    def _equip_crafted_gear(self, item: str, slot: str, *, already_owned: bool) -> dict[str, Any]:
+        slot = "torso" if slot == "chest" else slot
+
+        def equipped_item() -> dict[str, Any]:
+            inv = self.bot.inventory()
+            if slot in {"hand", "off-hand"}:
+                row = inv.get("held" if slot == "hand" else "offhand")
+            else:
+                armor = inv.get("armor") or {}
+                row = (armor.get("chest") or armor.get("torso")) if slot == "torso" else armor.get(slot)
+            return row if isinstance(row, dict) else {"name": row} if isinstance(row, str) else {}
+
+        try:
+            observed = equipped_item() if already_owned else {}
+            if _clean_block(observed.get("name")) != item:
+                self.bot.call("equip", {"item": item, "slot": slot})
+                observed = equipped_item()
+        except (ApiError, _SkillDeadline, httpx.HTTPError) as err:
+            code = "time_budget" if isinstance(err, (_SkillDeadline, httpx.TimeoutException)) else getattr(err, "code", type(err).__name__)
+            return {"equip_error": {"code": code, "message": f"无法确认 {item} 已装备到 {slot}。"}}
+        if _clean_block(observed.get("name")) != item:
+            return {"equip_error": {"code": "equip_unconfirmed", "message": f"复查 {slot} 时未见 {item}。"}}
+        if not already_owned and observed.get("durability_used"):
+            return {
+                "equipped_item": observed,
+                "equip_error": {"code": "equip_unconfirmed", "message": f"{slot} 仍是已磨损的 {item}，请核对新制品。"},
+            }
+        return {"equipped_slot": slot, "equipped_item": observed}
 
     def _recover_crafting_tables(self, positions: list[list[int]]) -> list[dict[str, Any]]:
         cleanup: list[dict[str, Any]] = []

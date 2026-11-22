@@ -4630,6 +4630,94 @@ def test_craft_gear_shares_episode_budget_and_keeps_completed_craft(monkeypatch,
         assert result["equipped_slot"] is None
 
 
+@pytest.mark.parametrize(
+    "mode",
+    ["equip_shield", "shield_in_slot", "equip_unconfirmed", "owned", "short", "make_sticks", "with_sticks", "old_pick_selected"],
+)
+def test_craft_gear_reuses_only_after_shortage_and_confirms_explicit_equip(mode) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    worn = {"name": "stone_pickaxe", "count": 1, "durability_used": 130}
+    fresh = {"name": "stone_pickaxe", "count": 1}
+    item, slot, count = "flint_and_steel", None, 1
+    bag = [{"name": item, "count": 1}]
+    offhand = held = None
+    if mode in {"equip_shield", "shield_in_slot", "equip_unconfirmed"}:
+        item, slot = "shield", "off-hand"
+        shield = {"name": item, "count": 1}
+        bag = [] if mode == "shield_in_slot" else [shield]
+        offhand = shield if mode == "shield_in_slot" else None
+    elif mode in {"make_sticks", "with_sticks", "old_pick_selected"}:
+        item, slot, held = "stone_pickaxe", "hand", worn
+        wood = "oak_planks" if mode == "make_sticks" else "stick"
+        bag = [worn, {"name": "cobblestone", "count": 3}, {"name": wood, "count": 2}]
+    elif mode == "short":
+        count = 2
+    crafts, equips = [], []
+
+    def handler(request):
+        nonlocal offhand, held
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": bag, "offhand": offhand, "held": held}
+        elif route == "status":
+            result = {"pos": [0.5, 64, 0.5], "dimension": "overworld"}
+        elif route == "find_blocks":
+            assert body["types"] == ["crafting_table"]
+            result = {"blocks": [{"pos": [1, 64, 0], "dist": 1}]}
+        elif route == "craft":
+            crafts.append(body["item"])
+            if body["item"] == "stick":
+                assert mode == "make_sticks" and bag.pop(2)["name"] == "oak_planks"
+                bag.append({"name": "stick", "count": 4})
+                result = {"crafted": "stick", "gained": 4}
+            else:
+                assert body == {"item": "stone_pickaxe", "count": 1}
+                assert bag[1]["count"] == 3 and bag[2]["count"] >= 2
+                bag.pop(1)
+                bag[1]["count"] -= 2
+                bag.append(fresh)
+                result = {"crafted": "stone_pickaxe", "gained": 1}
+        elif route == "equip":
+            assert body == {"item": item, "slot": slot}
+            equips.append(body)
+            if mode == "equip_shield":
+                offhand = bag.pop()
+            elif mode in {"make_sticks", "with_sticks"}:
+                assert bag[-1] == fresh
+                held = fresh
+            result = {"held": held}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        result = json.loads(tools.mc_skill_craft_gear(item, count=count, equip_slot=slot))
+
+    if mode == "short":
+        assert result["error"] == "missing_ingredients" and not crafts and not equips
+    elif mode in {"make_sticks", "with_sticks", "old_pick_selected"}:
+        assert result["ok"] is True and result["gained"] == 1 and not result.get("already_owned")
+        assert crafts == (["stick", "stone_pickaxe"] if mode == "make_sticks" else ["stone_pickaxe"])
+        assert len(equips) == 1
+        if mode == "old_pick_selected":
+            assert result["equipped_slot"] is None and result["equipped_item"] == worn
+            assert result["equip_error"]["code"] == "equip_unconfirmed"
+        else:
+            assert result["equipped_slot"] == "hand" and result["equipped_item"] == fresh
+    else:
+        assert result["already_owned"] is True and result["owned_count"] == 1 and result["gained"] == 0 and not crafts
+        assert len(equips) == int(mode in {"equip_shield", "equip_unconfirmed"})
+        if mode == "equip_unconfirmed":
+            assert result["ok"] is False and result["equip_error"]["code"] == "equip_unconfirmed"
+        else:
+            assert result["ok"] is True and result["equipped_slot"] == slot
+            if slot:
+                assert offhand["name"] == "shield"
+
+
 @pytest.mark.parametrize("placement", ["new", "reused", "rejected", "timed_out", "unreleased", "surface"])
 def test_craft_gear_clears_its_own_table_from_a_narrow_mine(monkeypatch, placement) -> None:
     from mc_agent.harness.mc_tools import McToolset
