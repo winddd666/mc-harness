@@ -8234,6 +8234,84 @@ def test_combat_retreat_that_enters_lava_hands_off_to_escape_immediately(monkeyp
         assert "战斗后脱离岩浆" in incident
 
 
+@pytest.mark.parametrize("entry", ["before_reflex", "after_reflex"])
+@pytest.mark.parametrize("landing", ["lava", "dry", "still_falling", "new_life"])
+def test_nether_fast_fall_during_tool_preemption_waits_for_contact(monkeypatch, entry, landing):
+    rim = [1858.6, 69, 1808.9]
+    airborne = [1862.4, 34.6, 1809.8]
+    fall = {"pos": airborne, "on_ground": False, "velocity": [0.262, -38.118, 0.061]}
+    skeleton = {"id": 877411, "name": "wither_skeleton", "dist": 7.7}
+    status = {
+        "pos": rim, "on_ground": True, "velocity": [0, 0, 0], "dimension": "the_nether", "last_death": {"t": 1},
+        "health": 14.93, "food": 20, "ready": True, "alive": True, "in_lava": False, "in_water": False,
+        "nearest_hostile": skeleton,
+    }
+    calls = []
+
+    class FortressBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                return dict(status)
+            if endpoint == "events":
+                return {"events": []}
+            if endpoint == "dig":
+                if entry == "before_reflex":
+                    status.update(fall)
+                return {"interrupted_by": "hurt"}
+            pytest.fail(f"Unexpected API call during airborne handoff: {endpoint}")
+
+    bot = FortressBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def wait(seconds):
+        assert seconds == 0.1
+        calls.append("wait")
+        if landing == "lava":
+            status.update(pos=[1863.2, 28.1, 1810.3], in_lava=True, velocity=[0, -2.5, 0])
+        elif landing == "dry":
+            status.update(pos=[1863.1, 29, 1810.0], on_ground=True, velocity=[0, 0, 0])
+        elif landing == "new_life":
+            status.update(pos=[-130.5, 64, 63.5], last_death={"t": 2}, dimension="overworld", on_ground=True)
+
+    def fight(_trigger):
+        calls.append("combat")
+        if entry == "after_reflex":
+            status.update(fall)
+        else:
+            assert status["on_ground"] is True
+        return {"handled": True, "mode": "cover_or_flee", "status_after": dict(status)}
+
+    def escape():
+        calls.append("escape")
+        assert status["in_lava"] is True
+        status.update(pos=[1864.5, 29, 1810.5], in_lava=False, on_ground=True)
+        return {"ok": True, "in_lava": False, "pos_after": status["pos"]}
+
+    monkeypatch.setattr("mc_agent.harness.guardian.time.sleep", wait)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", fight)
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+    receipt = json.loads(guard.run_tool_with_reflex("mc_skill_staircase", lambda: json.dumps(
+        bot.call("dig", {"pos": [1859, 69, 1808]}),
+    )))
+
+    expected = ["combat"] if entry == "after_reflex" else []
+    expected += ["wait", "wait"] if landing == "still_falling" else ["wait"]
+    if landing == "lava":
+        expected += ["escape"]
+        assert receipt["reflex_mode"] == "lava_escape" and receipt["status_after"]["in_lava"] is False
+    elif landing == "new_life":
+        assert receipt["reflex_mode"] == "life_unavailable"
+    elif landing == "still_falling":
+        assert receipt["reflex_mode"] == "falling" and receipt["status_after"]["on_ground"] is False
+    else:
+        if entry == "before_reflex":
+            expected += ["combat"]
+        assert receipt["reflex_mode"] == "cover_or_flee"
+    assert calls == expected
+    assert receipt["requires_replan"] is True
+    assert receipt["pos_at_preemption"] == (airborne if entry == "before_reflex" else rim)
+
+
 @pytest.mark.parametrize("bridge_edge", [False, True])
 def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(monkeypatch, bridge_edge):
     """Reproduces r20_short ds_ds_4_nether_fortress:

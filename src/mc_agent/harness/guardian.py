@@ -662,6 +662,18 @@ class GenerationGuard:
                 break
         return after
 
+    @staticmethod
+    def _nether_fast_fall(status: dict[str, Any]) -> bool:
+        velocity = status.get("velocity")
+        return bool(
+            str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+            and status.get("on_ground") is False and status.get("pos")
+            and status.get("ready") is True and status.get("alive") is not False
+            and not any(status.get(key) for key in ("in_water", "in_lava", "submerged"))
+            and isinstance(velocity, (list, tuple)) and len(velocity) >= 2
+            and isinstance(velocity[1], (int, float)) and math.isfinite(velocity[1]) and velocity[1] <= -10.0
+        )
+
     def _run_recovery_macro(
         self,
         before: dict[str, Any],
@@ -4693,12 +4705,19 @@ class GenerationGuard:
                 observed_life is not None and observed_life != (st_pre.get("dimension"), st_pre.get("last_death"))
             )
             tool_water_threat = trigger.get("source") == "tool_water_threat"
+            fall_start_pos = None
+            falling_summary = f"执行 {interrupted_name} 途中快速下坠，尚未确认落点，请待落地后重新规划"
             if tool_water_threat and not life_unavailable and st_pre.get("in_water") is False:
                 settled = self._settle_dry_landing(st_pre, st_pre, self.bot, deadline=time.monotonic() + 0.7)
                 life_unavailable = life_changed(settled) or (
                     observed_life is not None
                     and observed_life != (settled.get("dimension"), settled.get("last_death"))
                 )
+                st_pre = settled
+            elif not life_unavailable and trigger.get("primary_type") != "lava" and self._nether_fast_fall(st_pre):
+                fall_start_pos = st_pre["pos"]
+                settled = self._settle_dry_landing(st_pre, st_pre, self.bot, deadline=time.monotonic() + 0.7)
+                life_unavailable = life_changed(settled)
                 st_pre = settled
             lava_threat = trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava"))
             distance = trigger.get("distance")
@@ -4808,6 +4827,13 @@ class GenerationGuard:
                     "status_after": st_after,
                     **({"respawned": True} if lava_died else {}),
                 }
+            elif (
+                fall_start_pos is not None and st_pre.get("on_ground") is False
+                and not (st_pre.get("in_water") or st_pre.get("submerged"))
+            ):
+                st_after = st_pre
+                summary = falling_summary
+                outcome = {"handled": False, "mode": "falling", "actions": []}
             elif trigger.get("primary_type") == "in_wall" and not st_pre.get("in_water"):
                 unstick = self._action("unstick_in_wall", lambda: self._unstick_in_wall(st_pre))
                 st_after = self.combat_env._safe_status(st_pre)
@@ -5062,6 +5088,10 @@ class GenerationGuard:
                         life_unavailable = outcome.get("mode") == "life_unavailable" or (
                             isinstance(st_after, dict) and life_changed(st_after)
                         )
+                        falling_after = isinstance(st_after, dict) and not life_unavailable and self._nether_fast_fall(st_after)
+                        if falling_after:
+                            st_after = self._settle_dry_landing(st_pre, st_after, self.bot, deadline=time.monotonic() + 0.7)
+                            life_unavailable = life_changed(st_after)
                         post_name, post_dist, post_id, post_pos = self._extract_hostile_info(st_after if isinstance(st_after, dict) else {})
                         close_drowned_after_reflex = (
                             trigger.get("source") == "tool_interrupted_hurt"
@@ -5071,11 +5101,33 @@ class GenerationGuard:
                             and st_after.get("dimension") == st_pre.get("dimension")
                         )
                         if not life_unavailable and isinstance(st_after, dict) and st_after.get("in_lava"):
-                            self._action("escape_lava", lambda: self.combat_env.escape_lava(), raise_on_http_error=False)
+                            self._last_lava_contact_at = time.monotonic()
+                            lava_escape = self._action("escape_lava", self.combat_env.escape_lava, raise_on_http_error=False)
                             try:
                                 st_after = self.bot.status()
                             except (ApiError, httpx.HTTPError):
                                 pass
+                            if falling_after:
+                                lava_result = lava_escape.get("result") or {}
+                                life_unavailable = bool(lava_result.get("respawned") or life_changed(st_after))
+                                escaped = (
+                                    not life_unavailable and lava_escape.get("ok") is True
+                                    and st_after.get("ready") is True
+                                    and st_after.get("in_lava") is False and st_after.get("on_ground") is True
+                                )
+                                escape_summary = "已脱困" if escaped else "尚未确认安全落地"
+                                outcome = {
+                                    **outcome, "handled": escaped, "mode": "lava_escape", "status_after": st_after,
+                                    "summary": f"执行 {interrupted_name} 途中下坠后接触岩浆，已转为脱困。{escape_summary}",
+                                }
+                        elif (
+                            falling_after and not life_unavailable and st_after.get("on_ground") is False
+                            and not (st_after.get("in_water") or st_after.get("submerged"))
+                        ):
+                            outcome = {
+                                **outcome, "handled": False, "mode": "falling", "summary": falling_summary,
+                                "status_after": st_after,
+                            }
                         elif (
                             isinstance(st_after, dict)
                             and not life_unavailable
@@ -5138,7 +5190,7 @@ class GenerationGuard:
             stop_reason = trigger.get("source") or "guardian_preempted"
             water_observation = trigger.get("water_observation")
             wet_pos = (water_observation or {}).get("pos")
-            preempt_pos = wet_pos or st_pre.get("pos")
+            preempt_pos = wet_pos or fall_start_pos or st_pre.get("pos")
             release = {"action_released": trigger["action_released"]} if "action_released" in trigger else {}
             work_observation: dict[str, Any] = {}
             if (
@@ -5183,6 +5235,8 @@ class GenerationGuard:
                 receipt["status_after"].update({
                     key: st_after.get(key) for key in ("dimension", "last_death")
                 })
+            if outcome.get("mode") == "falling":
+                receipt["status_after"]["velocity"] = st_after.get("velocity")
             lava_status = {}
             if outcome.get("mode") == "lava_escape":
                 receipt["status_after"].update({key: st_after.get(key) for key in ("in_lava", "on_fire")})
