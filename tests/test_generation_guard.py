@@ -9313,6 +9313,61 @@ def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monk
     assert pulses == ([{"forward": True, "ms": 220, "stop_on": ["death"]}] if expected_step else [])
 
 
+@pytest.mark.parametrize("landing", [
+    "stable", "settled_after_slide", "unsafe_after_slide", "still_sliding", "large_slide",
+    "different_floor", "respawned", "deadline",
+])
+def test_short_melee_retreat_reprobes_after_a_small_same_life_slide(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    status = {"pos": [0.5, 64, 0.5], "on_ground": True, "ready": True, "alive": True,
+              "dimension": "overworld", "last_death": {"t": 1}, "health": 2.333}
+    reads = 0
+    rescanned = False
+    moves = []
+
+    class BankBot:
+        def call(self, action, body=None, **kwargs):
+            nonlocal reads, rescanned
+            if action == "status":
+                reads += 1
+                if reads == 1 and landing != "stable":
+                    status["pos"] = [0.9, 63 if landing == "different_floor" else 64, 0.5]
+                    if landing == "large_slide":
+                        status["pos"] = [1.2, 64, 0.5]
+                    if landing == "respawned":
+                        status["last_death"] = {"t": 2}
+                    if landing == "deadline":
+                        clock[0] += 0.7
+                if reads == 2 and landing == "still_sliding":
+                    status["pos"] = [1.13, 64, 0.5]
+                return dict(status)
+            if action == "get_block":
+                rescanned |= reads > 0
+                assert kwargs["timeout_s"] <= 0.35
+                name = "water" if reads and landing == "unsafe_after_slide" else "stone"
+                return {"name": name if body["pos"][1] == 63 else "air"}
+            if action == "look":
+                status["yaw"] = body["yaw"]
+                moves.append(action)
+                return {"ok": True}
+            if action == "control":
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                x, y, z = status["pos"]
+                status["pos"] = [x + 0.7 * dx, y, z + 0.7 * dz]
+                moves.append(action)
+                return {"ok": True}
+            pytest.fail(f"Unexpected retreat action: {action}")
+
+    reached = CombatEnv(BankBot()).step_away_from_melee(dict(status), [2.1, 64, 0.5], deadline=1001.5)
+
+    assert reached is (landing in {"stable", "settled_after_slide"})
+    assert rescanned is (landing in {"settled_after_slide", "unsafe_after_slide", "still_sliding"})
+    assert moves == (["look", "control"] if reached else [])
+
+
 @pytest.mark.parametrize("moved, remaining, same_target, expected", [
     (1.97, 1.6, True, True),
     (1.97, 2.0, True, False),

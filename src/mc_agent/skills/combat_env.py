@@ -2478,25 +2478,38 @@ class CombatEnv:
     def step_away_from_melee(self, status: dict[str, Any], threat_pos: Sequence[float], *, deadline: float) -> bool:
         """Take one short, supported step away from a still-close attacker."""
         origin = status["pos"]
-        away, _ = aim_yaw_pitch(threat_pos, origin)
         foot_y = math.floor(float(origin[1]) + 0.05)
-        self.invalidate_block_cache()
+        planned_from = origin
+        probe_deadline = deadline - 0.85
         try:
-            for offset in (0, 45, -45):
-                yaw = away + math.radians(offset)
-                if self.probe_retreat(origin, yaw, 1.65, deadline=deadline - 0.85) == (foot_y, False):
+            for _ in range(2):
+                if time.monotonic() >= probe_deadline:
+                    return False
+                away, _ = aim_yaw_pitch(threat_pos, planned_from)
+                self.invalidate_block_cache()
+                yaw = None
+                for offset in (0, 45, -45):
+                    heading = away + math.radians(offset)
+                    if self.probe_retreat(planned_from, heading, 1.65, deadline=probe_deadline) == (foot_y, False):
+                        yaw = heading
+                        break
+                current = self.bot.call("status", method="GET", timeout_s=0.2, allow_reauth=False)
+                pos = current.get("pos")
+                if (
+                    not pos or math.dist(pos[:3], origin[:3]) > 0.65 or math.floor(float(pos[1]) + 0.05) != foot_y
+                    or current.get("on_ground") is not True or current.get("in_water") or current.get("in_lava")
+                    or current.get("ready") is False or current.get("alive") is False
+                    or current.get("last_death") != status.get("last_death") or current.get("dimension") != status.get("dimension")
+                    or time.monotonic() + 0.65 >= deadline
+                ):
+                    return False
+                if math.dist(pos[:3], planned_from[:3]) <= 0.2:
+                    if yaw is None:
+                        return False
                     break
+                # The first retreat can still carry the bot a short distance. Recheck the new footing once.
+                planned_from = pos
             else:
-                return False
-            current = self.bot.call("status", method="GET", timeout_s=0.2, allow_reauth=False)
-            pos = current.get("pos")
-            if (
-                not pos or math.dist(pos[:3], origin[:3]) > 0.2
-                or current.get("on_ground") is not True or current.get("in_water") or current.get("in_lava")
-                or current.get("ready") is False or current.get("alive") is False
-                or current.get("last_death") != status.get("last_death") or current.get("dimension") != status.get("dimension")
-                or time.monotonic() + 0.65 >= deadline
-            ):
                 return False
             self.bot.call("look", {"yaw": yaw, "pitch": 0.0}, timeout_s=0.15, allow_reauth=False)
             result = self.bot.call(
