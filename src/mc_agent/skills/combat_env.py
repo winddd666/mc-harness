@@ -2427,7 +2427,7 @@ class CombatEnv:
         try:
             for offset in (0, 45, -45):
                 yaw = away + math.radians(offset)
-                if self.probe_retreat(origin, yaw, 1.65, deadline=deadline - 0.65) == (foot_y, False):
+                if self.probe_retreat(origin, yaw, 1.65, deadline=deadline - 0.85) == (foot_y, False):
                     break
             else:
                 return False
@@ -2438,7 +2438,7 @@ class CombatEnv:
                 or current.get("on_ground") is not True or current.get("in_water") or current.get("in_lava")
                 or current.get("ready") is False or current.get("alive") is False
                 or current.get("last_death") != status.get("last_death") or current.get("dimension") != status.get("dimension")
-                or time.monotonic() + 0.45 >= deadline
+                or time.monotonic() + 0.65 >= deadline
             ):
                 return False
             self.bot.call("look", {"yaw": yaw, "pitch": 0.0}, timeout_s=0.15, allow_reauth=False)
@@ -2446,9 +2446,25 @@ class CombatEnv:
                 "control", {"forward": True, "ms": 220, "stop_on": ["death"]},
                 timeout_s=0.3, allow_reauth=False,
             )
+            remaining = deadline - time.monotonic()
+            if not result.get("ok", True) or remaining <= 0:
+                return False
+            landed = self.bot.call("status", method="GET", timeout_s=min(0.2, remaining), allow_reauth=False)
         except (ApiError, httpx.HTTPError, _TerrainProbeExpired):
             return False
-        return bool(result.get("ok", True))
+        end = landed.get("pos")
+        if (
+            not end or landed.get("on_ground") is not True or landed.get("ready") is False
+            or landed.get("alive") is False or landed.get("in_water") or landed.get("in_lava")
+            or landed.get("last_death") != status.get("last_death") or landed.get("dimension") != status.get("dimension")
+            or math.floor(float(end[1]) + 0.05) != foot_y
+        ):
+            return False
+        return (
+            math.hypot(end[0] - pos[0], end[2] - pos[2]) >= 0.25
+            and math.hypot(end[0] - threat_pos[0], end[2] - threat_pos[2])
+            > math.hypot(pos[0] - threat_pos[0], pos[2] - threat_pos[2])
+        )
 
     def _point_allowed(self, x: float, z: float, *, action: str = "combat_env") -> bool:
         """Return True unless an enabled VoidGeofence rejects `(x, z)` via `check_point`."""

@@ -8890,7 +8890,9 @@ def test_exposed_cave_melee_retreats_before_digging_a_cover_pocket(monkeypatch, 
 
 
 @pytest.mark.parametrize("complete", [True, False])
-@pytest.mark.parametrize("terrain", ["safe", "drop", "target_gone", "blocked_by_wall"])
+@pytest.mark.parametrize("terrain", [
+    "safe", "drop", "target_gone", "blocked_by_wall", "stalled", "knockback", "wet_landing", "respawned_after_step",
+])
 @pytest.mark.parametrize("shaft", [False, True])
 def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monkeypatch, terrain, complete, shaft):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
@@ -8927,7 +8929,13 @@ def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monk
                 pulses.append(body)
                 dx, dz = yaw_to_unit_xz(status["yaw"])
                 assert dx < 0 and dz == pytest.approx(0)
-                status["pos"] = [-1.7 + 0.7 * dx, 69, 0.5 + 0.7 * dz]
+                if terrain != "stalled":
+                    displacement = -0.7 if terrain == "knockback" else 0.7
+                    status["pos"] = [-1.7 + displacement * dx, 69, 0.5 + displacement * dz]
+                if terrain == "wet_landing":
+                    status["in_water"] = True
+                if terrain == "respawned_after_step":
+                    status["last_death"] = {"t": 2}
             return {"ok": True}
 
     def initial_retreat(_threat_pos, **kwargs):
@@ -8949,7 +8957,8 @@ def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monk
     assert followups == ([] if terrain in {"target_gone", "blocked_by_wall"} else [
         {"action": "followup_melee_retreat", "ok": terrain == "safe", "entity_id": 42},
     ])
-    assert pulses == ([{"forward": True, "ms": 220, "stop_on": ["death"]}] if terrain == "safe" else [])
+    expected_step = terrain in {"safe", "stalled", "knockback", "wet_landing", "respawned_after_step"}
+    assert pulses == ([{"forward": True, "ms": 220, "stop_on": ["death"]}] if expected_step else [])
 
 
 @pytest.mark.parametrize("moved, remaining, same_target, expected", [
