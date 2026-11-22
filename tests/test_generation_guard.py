@@ -6791,6 +6791,62 @@ def test_nether_guard_retreats_before_digging_when_critical_melee_persists(monke
     assert calls == (["emergency_bunker"] if bunker_first else ["retreat"])
 
 
+@pytest.mark.parametrize("outcome", [
+    "reported_dead", "api_dead", "dead_snapshot", "respawned", "not_ready", "sealed_after_respawn", "same_life",
+])
+def test_poll_only_retreats_after_a_bunker_failure_in_the_same_life(monkeypatch, outcome):
+    status = {
+        "pos": [27953.3, 65, 34988.4], "health": 3.33, "food": 17, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": True, "last_death": {"t": 1},
+    }
+    calls = []
+
+    class NightBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack"}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [{"name": "stone_pickaxe", "count": 1}, {"name": "cobblestone", "count": 6}]}
+            raise AssertionError(action)
+
+    def dig_bunker(_skills, *, urgent):
+        assert urgent
+        calls.append("dig")
+        if outcome == "api_dead":
+            raise ApiError("dead", "stopped because of death")
+        if outcome == "dead_snapshot":
+            status.update(alive=False, health=0)
+        elif outcome == "not_ready":
+            status["ready"] = False
+        elif outcome in {"respawned", "sealed_after_respawn"}:
+            status.update(last_death={"t": 2}, health=20)
+        if outcome == "sealed_after_respawn":
+            return {"ok": True, "inside_shaft": True, "roof_placed": True}
+        return {"ok": False, "reason": "dig_failed", "error": "dead" if outcome == "reported_dead" else "interrupted"}
+
+    def retreat(*_args, **_kwargs):
+        calls.append("retreat")
+        return {"ok": True, "mode": "flee", "moved_dist": 2.01}
+
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", dig_bunker)
+    guard = GenerationGuard(NightBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", retreat)
+
+    incident = guard.poll()
+
+    if outcome == "same_life":
+        assert calls == ["dig", "retreat"]
+        assert [step["action"] for step in incident["actions"]] == ["emergency_bunker", "combat_or_flee"]
+    else:
+        assert calls == ["dig"]
+        assert "death_or_connection_changed" in incident["reasons"]
+        bunker, = incident["actions"]
+        assert bunker["action"] == "emergency_bunker" and not bunker["ok"]
+
+
 @pytest.mark.parametrize("reason", ["unsafe_open_side", "unsafe_floor"])
 def test_repeated_melee_hurt_skips_bunker_when_the_same_block_still_blocks_it(monkeypatch, reason):
     clock = [1000.0]

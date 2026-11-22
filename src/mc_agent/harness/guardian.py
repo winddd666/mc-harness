@@ -1099,8 +1099,22 @@ class GenerationGuard:
                 return None
 
         self._blocked_bunker = None
-        action = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
+
+        def checked_bunker() -> dict[str, Any]:
+            result = self._skills().dig_safety_bunker(urgent=True)
+            if result.get("respawned") or result.get("error") == "dead":
+                return {**result, "ok": False, "respawned": True}
+            after = self.bot.call("status", method="GET", timeout_s=0.45)
+            if after.get("alive") is False or any(after.get(key) != status.get(key) for key in ("last_death", "dimension")):
+                return {**result, "ok": False, "respawned": True}
+            if after.get("ready") is False:
+                return {**result, "ok": False, "life_unavailable": True}
+            return result
+
+        action = self._action("emergency_bunker", checked_bunker)
         result = action.get("result") or {}
+        if result.get("respawned") or result.get("life_unavailable"):
+            return action
         reason = result.get("reason")
         tile = site[2]
         if reason == "unsafe_floor":
@@ -2740,7 +2754,18 @@ class GenerationGuard:
                     if bunker is not None:
                         actions.append(bunker)
                     bunker_result = (bunker or {}).get("result") or {}
-                    if bunker and bunker["ok"]:
+                    bunker_error = ((bunker or {}).get("error") or {}).get("code")
+                    bunker_life_unavailable = (
+                        bunker_result.get("respawned") or bunker_result.get("life_unavailable")
+                        or bunker_error in {
+                            "dead", "not_ready", "not_connected", "wrong_server", "not_loaded",
+                            "chunk_not_loaded", "world_not_ready", "network_uncertain",
+                        }
+                    )
+                    if bunker_life_unavailable:
+                        self._consecutive_flees = 0
+                        reasons.append("death_or_connection_changed")
+                    elif bunker and bunker["ok"]:
                         self._consecutive_flees = 0
                         if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
                             self._last_melee_hurt_at = float("-inf")
