@@ -16534,9 +16534,16 @@ def test_bug009_full_air_reading_uses_water_motion_and_duration(monkeypatch, con
             assert "water_reentry_site" not in result and "water_reentry_site" not in preempted
 
 
-@pytest.mark.parametrize("recovery", ["landed", "unreleased", "still_wet", "respawned", "missing_water_pos"])
+@pytest.mark.parametrize("recovery", [
+    "landed", "unreleased", "still_wet", "respawned", "missing_water_pos",
+    "jump_lands", "jump_stays_airborne", "jump_reenters_water", "jump_respawned", "jump_threat",
+])
 def test_first_mining_submersion_names_the_water_site_only_after_safe_handoff(monkeypatch, recovery):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.harness.guardian.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     wet = [309368.5, 61, 301962.5]
+    bank = [309369.4, 64, 301962.5]
     status = {
         "pos": wet, "in_water": True, "submerged": True, "on_ground": False, "health": 20,
         "oxygen": 17, "dimension": "overworld", "last_death": {"t": 1}, "ready": True, "alive": True,
@@ -16545,6 +16552,15 @@ def test_first_mining_submersion_names_the_water_site_only_after_safe_handoff(mo
     class CoastBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
+                if recovery == "jump_lands" and clock[0] >= 1000.49:
+                    status.update(pos=bank, on_ground=True)
+                if clock[0] >= 1000.09:
+                    if recovery == "jump_reenters_water":
+                        status.update(in_water=True, submerged=True)
+                    elif recovery == "jump_respawned":
+                        status.update(pos=bank, on_ground=True, last_death={"t": 2})
+                    elif recovery == "jump_threat":
+                        status["nearest_hostile"] = {"name": "drowned", "id": 65, "dist": 3.0}
                 return dict(status)
             if action == "events":
                 return {"events": []}
@@ -16555,8 +16571,13 @@ def test_first_mining_submersion_names_the_water_site_only_after_safe_handoff(mo
             return {"ok": False, "in_water": True}
         if recovery == "respawned":
             status["last_death"] = {"t": 2}
-        status.update(pos=[309369.4, 64, 301962.5], in_water=False, submerged=False, on_ground=True)
-        return {"ok": True, "in_water": False, "pos_after": status["pos"]}
+        jumping = recovery.startswith("jump_")
+        pos = [bank[0], bank[1] + 0.4, bank[2]] if jumping else bank
+        status.update(pos=pos, in_water=False, submerged=False, on_ground=not jumping)
+        return {
+            "ok": True, "in_water": False, "pos_after": bank,
+            "actions": ["move_to_shore", "shore_lip_jump"] if jumping else ["move_to_shore"],
+        }
 
     guard = GenerationGuard(CoastBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
@@ -16568,12 +16589,19 @@ def test_first_mining_submersion_names_the_water_site_only_after_safe_handoff(mo
         "action_released": recovery != "unreleased",
     }, interrupted_name="mc_skill_mine_blocks")
 
-    if recovery == "landed":
+    if recovery in {"landed", "jump_lands"}:
         assert receipt["water_reentry_site"] == [309368, 61, 301962]
         assert "[309368, 61, 301962]" in receipt["message"]
         assert "沿干地换一个采矿入口" in receipt["message"]
     else:
         assert "water_reentry_site" not in receipt
+    assert receipt.get("shore_landing_confirmed_after_jump", False) is (recovery == "jump_lands")
+    if recovery == "jump_respawned":
+        assert receipt["reflex_mode"] == "life_unavailable"
+    if recovery.startswith("jump_"):
+        assert 1000.09 <= clock[0] <= 1000.7
+        if recovery in {"jump_threat", "jump_reenters_water", "jump_respawned"}:
+            assert clock[0] < 1000.2
 
 
 @pytest.mark.parametrize("site", [
