@@ -12959,13 +12959,15 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
-def test_lava_watcher_preempts_death_only_mining_and_waits_for_stop(monkeypatch, interrupted):
+@pytest.mark.parametrize("contact", ["in_lava", "lava_hurt", "lava_hurt_then_heal"])
+def test_lava_watcher_preempts_death_only_mining_and_waits_for_stop(monkeypatch, interrupted, contact):
     import threading
     import time
 
     stop_started = threading.Event()
     dig_returning = threading.Event()
     stop_finished = threading.Event()
+    watcher_sampled = threading.Event()
     status = {
         "pos": [6391.6, 64, -6359.7], "health": 20, "ready": True, "alive": True,
         "dimension": "overworld", "on_ground": True, "in_lava": False,
@@ -12975,14 +12977,24 @@ def test_lava_watcher_preempts_death_only_mining_and_waits_for_stop(monkeypatch,
     class LavaBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                return dict(status)
+                snapshot = dict(status)
+                if threading.current_thread().name == "mc-creeper-watch":
+                    watcher_sampled.set()
+                return snapshot
             if action == "get_block":
                 return {"name": "stone"}
             if action == "events":
+                if contact != "in_lava" and status.get("on_fire"):
+                    return {"events": [{"seq": 1, "type": "hurt", "source": "lava"}]}
                 return {"events": []}
             if action == "dig":
                 assert body["stop_on"] == ["death"]
-                status.update(pos=[6391.6, 63, -6359.7], health=4.3, on_ground=False, in_lava=True)
+                assert watcher_sampled.wait(1.5)
+                status.update(
+                    pos=[6391.6, 63, -6359.7], health=4.3 if contact == "in_lava" else 16.528, on_ground=contact != "in_lava",
+                    in_lava=contact == "in_lava", on_fire=True,
+                    nearest_hostile={"id": 255310, "name": "witch", "dist": 12.1},
+                )
                 assert stop_started.wait(1.5)
                 dig_returning.set()
                 if interrupted:
@@ -12997,10 +13009,13 @@ def test_lava_watcher_preempts_death_only_mining_and_waits_for_stop(monkeypatch,
     bot = LavaBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
 
-    def escape():
+    def escape(*, force_rim_escape=False):
         assert stop_finished.is_set()
+        assert force_rim_escape is (contact != "in_lava")
         escapes.append(status["pos"])
         status.update(pos=[6390.5, 64, -6359.7], on_ground=True, in_lava=False)
+        if contact == "lava_hurt_then_heal":
+            status["health"] = 20
         return {"ok": True, "in_lava": False}
 
     monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
@@ -13010,6 +13025,7 @@ def test_lava_watcher_preempts_death_only_mining_and_waits_for_stop(monkeypatch,
 
     assert escapes == [[6391.6, 63, -6359.7]]
     assert result["reflex_mode"] == "lava_escape" and result["status_after"]["on_ground"] is True
+    assert "并脱困" in result["message"]
 
 
 @pytest.mark.parametrize("retry, expected_bank", [
