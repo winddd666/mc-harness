@@ -3833,8 +3833,12 @@ class SubcorticalInstinctController:
                                 )
                             )
                         )
+                        same_close_pursuit = (
+                            trigger.get("source") == "pre_hurt_melee" and 0 < mob_dist <= 1.25
+                            and nearest_id == mob_id and nearest.get("blocked_by_wall") is not True
+                        )
                         melee_still_close = (
-                            check_melee_guard and (low_health_after or sealed) and st_fl.get("blocking")
+                            check_melee_guard and (low_health_after or sealed or same_close_pursuit) and st_fl.get("blocking")
                             and isinstance(nearest_id, int) and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
                             and isinstance(nearest_dist, (int, float)) and nearest_dist <= 3.5
                         )

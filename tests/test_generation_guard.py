@@ -5346,6 +5346,50 @@ def test_seal_during_melee_retreat_reports_cover_and_keeps_shield_if_needed(monk
     assert status["blocking"] is hostile_still_close
 
 
+@pytest.mark.parametrize("landing", ["pursued", "different_mob", "too_far", "behind_wall", "ordinary_retreat"])
+def test_melee_retreat_keeps_the_shield_up_when_a_point_blank_attacker_pursues(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    zombie = {"id": 77, "name": "zombie", "dist": 2.0 if landing == "ordinary_retreat" else 0.3}
+    status = {
+        "pos": [-6996.5, 120, 5825.5], "health": 17.2, "food": 20, "ready": True, "alive": True,
+        "dimension": "overworld", "on_ground": True, "blocking": False, "nearest_hostile": zombie,
+    }
+    poses = []
+
+    class VillageBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                return {"entities": [zombie]}
+            if action == "posture":
+                poses.append(body)
+                status["blocking"] = bool(body.get("shield"))
+            return {"ok": True}
+
+    def retreat(*_a, **_kw):
+        after = {**zombie, "id": 78 if landing == "different_mob" else 77,
+                 "dist": 3.6 if landing == "too_far" else 3.5, "blocked_by_wall": landing == "behind_wall"}
+        status.update(pos=[-6992.6, 120, 5824.5], health=14.41, nearest_hostile=after)
+        return {"ok": True, "mode": "flee", "moved_dist": 5.18}
+
+    env = CombatEnv(VillageBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda *_a: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", retreat)
+    outcome = CombatControllerSlot().handle(env, {"source": "pre_hurt_melee", "primary_entity_id": 77})
+
+    assert outcome["latched_guard"] is (landing == "pursued")
+    assert status["blocking"] is (landing == "pursued")
+    if landing == "pursued":
+        assert outcome["actions"][-1] == {"action": "guard_melee_after_retreat", "ok": True, "entity_id": 77}
+    else:
+        assert poses[-1] == {}
+
+
 @pytest.mark.parametrize("second_shooter", [False, True])
 def test_unshielded_boundary_retreat_accounts_for_a_second_shooter(second_shooter):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
