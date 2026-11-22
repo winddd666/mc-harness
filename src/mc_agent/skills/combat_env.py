@@ -3408,19 +3408,22 @@ class SubcorticalInstinctController:
                     latched_guard = self._latch_shield_at_threat(env, int(cid) if cid is not None else None)
                 elif flee_res.get("ok") and can_continue and has_shield and st_chk.get("blocking"):
                     nearest = st_chk.get("nearest_hostile")
+                    nearest = nearest if isinstance(nearest, dict) else {}
                     health_after = st_chk.get("health")
+                    name = _clean_block_name(nearest.get("name"))
+                    distance = self._entity_dist(st_chk.get("pos"), nearest)
+                    guard_melee = name in PRE_HURT_MELEE_MOBS and distance <= 5.5
+                    guard_ranged = name in RANGED_MOBS and distance <= 16.0 and not nearest.get("blocked_by_wall")
                     if (
                         isinstance(health_after, (int, float)) and 0 < health_after <= 8.0
                         and st_chk.get("on_ground") is True and not (st_chk.get("in_water") or st_chk.get("in_lava"))
                         and st_chk.get("ready") is not False and st_chk.get("alive") is not False and st_chk.get("pos")
                         and all(st_chk.get(key) == st.get(key) for key in ("last_death", "dimension"))
-                        and isinstance(nearest, dict) and isinstance(nearest.get("id"), int)
-                        and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
-                        and self._entity_dist(st_chk["pos"], nearest) <= 5.5
+                        and isinstance(nearest.get("id"), int) and (guard_melee or guard_ranged)
                     ):
                         latched_guard = self._latch_shield_at_threat(env, nearest["id"])
-                        actions.append({"action": "guard_melee_after_creeper_retreat", "ok": latched_guard,
-                                        "entity_id": nearest["id"]})
+                        action = "guard_ranged_after_creeper_retreat" if guard_ranged else "guard_melee_after_creeper_retreat"
+                        actions.append({"action": action, "ok": latched_guard, "entity_id": nearest["id"]})
 
         # 2) Lone/pair melee hostile + healthy + weapon -> 0-LLM counter-kill loop!
         elif (

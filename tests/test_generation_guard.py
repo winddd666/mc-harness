@@ -8369,12 +8369,19 @@ def test_creeper_retreat_does_not_report_success_if_the_final_sample_is_dead(mon
     assert outcome["requires_replan"] and outcome["status_after"]["alive"] is False
 
 
-@pytest.mark.parametrize("after", ["close_melee", "far_melee", "healthy", "new_life", "still_wet"])
-def test_low_health_creeper_retreat_keeps_shield_facing_surviving_melee(monkeypatch, after):
+@pytest.mark.parametrize("after", [
+    "close_melee", "far_melee", "shooter", "blocked_shooter", "far_shooter", "healthy", "new_life", "still_wet",
+])
+def test_low_health_creeper_retreat_keeps_shield_facing_surviving_hostile(monkeypatch, after):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
     creeper = {"id": 42, "name": "creeper", "dist": 2.8, "pos": [0.5, 68, 3.3]}
-    zombie = {"id": 43, "name": "zombie", "dist": 5.6 if after == "far_melee" else 5.4}
+    if after.endswith("shooter"):
+        survivor = {"id": 43, "name": "skeleton", "dist": 16.1 if after == "far_shooter" else 11.8}
+        if after == "blocked_shooter":
+            survivor["blocked_by_wall"] = True
+    else:
+        survivor = {"id": 43, "name": "zombie", "dist": 5.6 if after == "far_melee" else 5.4}
     status = {"pos": [0.5, 68, 0.5], "health": 16.4, "food": 20, "ready": True, "alive": True,
               "on_ground": True, "blocking": False, "dimension": "overworld", "last_death": {"t": 1},
               "nearest_hostile": creeper}
@@ -8389,7 +8396,8 @@ def test_low_health_creeper_retreat_keeps_shield_facing_surviving_melee(monkeypa
             if action == "inventory":
                 return {"items": [], "offhand": {"name": "shield"}}
             if action == "get_entities":
-                return {"entities": [status["nearest_hostile"]]}
+                nearest = status["nearest_hostile"]
+                return {"entities": [nearest] if nearest["dist"] <= body["radius"] else []}
             if action == "look":
                 looks.append(body["entity_id"])
             if action == "posture":
@@ -8398,7 +8406,8 @@ def test_low_health_creeper_retreat_keeps_shield_facing_surviving_melee(monkeypa
             return {"ok": True}
 
     def retreat(*_a, **_kw):
-        status.update(pos=[0.5, 68, -6.9], health=12.0 if after == "healthy" else 5.73, nearest_hostile=zombie,
+        hp = 1.7 if after.endswith("shooter") else 12.0 if after == "healthy" else 5.73
+        status.update(pos=[0.5, 68, -6.9], health=hp, nearest_hostile=survivor,
                       last_death={"t": 2 if after == "new_life" else 1}, in_water=after == "still_wet")
         return {"ok": True, "mode": "flee", "moved_dist": 7.4}
 
@@ -8411,12 +8420,16 @@ def test_low_health_creeper_retreat_keeps_shield_facing_surviving_melee(monkeypa
         "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 42,
     })
 
-    assert result["latched_guard"] is (after == "close_melee" or after == "still_wet")
-    assert looks == ([42, 43] if after == "close_melee" else [42])
-    assert status["blocking"] is (after == "close_melee" or after == "still_wet")
-    if after == "close_melee":
+    face_survivor = after in {"close_melee", "shooter"}
+    guard_latched = face_survivor or after == "still_wet"
+    assert result["latched_guard"] is guard_latched
+    assert looks == ([42, 43] if face_survivor else [42])
+    assert status["blocking"] is guard_latched
+    if face_survivor:
         assert posture[-1] == {"shield": True, "sneak": False, "jump": False}
-        assert result["actions"][-1]["action"] == "guard_melee_after_creeper_retreat"
+        assert result["actions"][-1]["action"] == (
+            "guard_ranged_after_creeper_retreat" if after == "shooter" else "guard_melee_after_creeper_retreat"
+        )
 
 
 @pytest.mark.parametrize("shield_in_offhand", [True, False])
