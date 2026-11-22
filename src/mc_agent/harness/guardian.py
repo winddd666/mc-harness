@@ -27,6 +27,8 @@ from ..bot import BotSession
 from ..errors import ApiError
 from .control import RequestCancelled, RunTimedOut
 from ..skills.combat_env import (
+    CORNERED_PIGLIN_MAX_HEALTH,
+    CORNERED_PIGLIN_REACH,
     LONE_COUNTERKILL_MOBS,
     MELEE_WEAPON_ORDER,
     PRE_HURT_MELEE_MOBS,
@@ -41,6 +43,7 @@ from ..skills.combat_env import (
     _CombatFortificationInterrupted,
     _TerrainProbeExpired,
     aim_yaw_pitch,
+    footing_blocks,
     ranged_retreat_positions,
     retreat_made_progress,
 )
@@ -281,6 +284,7 @@ class GenerationGuard:
     STATUS_FULL_OXYGEN = 20.0
     TOOL_WATER_ESCAPE_BUBBLES = 10.0
     TOOL_WATER_SUBMERSION_GRACE_S = 2.0
+    MINING_UNSAFE_FOOTING_RECHECK_S = 2.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -1115,7 +1119,7 @@ class GenerationGuard:
         return shore
 
     def _try_cornered_melee_strike(
-        self, before: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
+        self, before: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int], *, hurt_source: str,
     ) -> dict[str, Any] | None:
         controller = self.combat_slot.controller
         if not isinstance(controller, SubcorticalInstinctController):
@@ -1127,10 +1131,16 @@ class GenerationGuard:
         name, distance, target_id, _ = self._extract_hostile_info(landing)
         attacker_id = (attacker or {}).get("id")
         hp = landing.get("health")
+        nether_piglin = (
+            name == "piglin" and hurt_source == "mob_attack"
+            and str(landing.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+            and target_id == self._extract_hostile_info(before)[2]
+        )
+        max_health, reach = (CORNERED_PIGLIN_MAX_HEALTH, CORNERED_PIGLIN_REACH) if nether_piglin else (6.0, 1.25)
         if (
-            name not in LONE_COUNTERKILL_MOBS or target_id is None or not 0 <= distance <= 1.25
+            (not nether_piglin and name not in LONE_COUNTERKILL_MOBS) or target_id is None or not 0 <= distance <= reach
             or (isinstance(attacker_id, int) and target_id != attacker_id)
-            or not isinstance(hp, (int, float)) or not 0 < hp <= 6.0
+            or not isinstance(hp, (int, float)) or not 0 < hp <= max_health
             or landing.get("ready") is not True or landing.get("alive") is not True or landing.get("on_ground") is not True
             or any(landing.get(key) for key in ("busy", "in_water", "in_lava", "on_fire"))
             or any(landing.get(key) != before.get(key) for key in ("last_death", "dimension"))
@@ -1144,7 +1154,7 @@ class GenerationGuard:
         if not isinstance(hostiles, list) or len(hostiles) != 1 or not isinstance(hostiles[0], dict):
             return None
         target = hostiles[0]
-        if target.get("id") != target_id or target.get("blocked_by_wall") is not False:
+        if target.get("id") != target_id or target.get("blocked_by_wall") is not False or target.get("alive") is False:
             return None
 
         def strike() -> dict[str, Any]:
@@ -1157,6 +1167,7 @@ class GenerationGuard:
                     held_name = str(held.get("name") or "").removeprefix("minecraft:") if isinstance(held, dict) else None
                     return controller.strike_cornered_hostile(
                         self.combat_env, target_id, counts, held_name, status=current,
+                        visible_piglin=target if nether_piglin else None,
                     ) or {"ok": False, "reason": "opening_unconfirmed"}
             except _RecoveryBudgetExceeded:
                 self._stop_after_recovery_timeout()
@@ -3033,12 +3044,14 @@ class GenerationGuard:
                         else:
                             self._consecutive_flees = 0
                     cf_result = (cf or {}).get("result") or {}
+                    piglin_hurt = dimension == "the_nether" and nh_name == "piglin" and hurt_src == "mob_attack"
                     if (
                         not has_shield and has_melee_weapon and hurt_src in MELEE_HURT_SOURCES
-                        and 0 < hp_val <= 8.0 and not cf_result.get("respawned")
+                        and 0 < hp_val <= (CORNERED_PIGLIN_MAX_HEALTH if piglin_hurt else 8.0)
+                        and not cf_result.get("ok") and not cf_result.get("respawned")
                         and cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
                     ):
-                        strike = self._try_cornered_melee_strike(status, attacker, counts)
+                        strike = self._try_cornered_melee_strike(status, attacker, counts, hurt_source=hurt_src)
                         if strike is not None:
                             actions.append(strike)
                     melee_retreat = cf_result.get("mode") == "flee"
@@ -3977,6 +3990,7 @@ class GenerationGuard:
         self,
         *,
         dig_progress: dict[str, Any] | None = None,
+        last_work_action: dict[str, Any] | None = None,
         enable_creeper_watcher: bool = True,
         deadline: float | None = None,
         check_unstick_exit: bool = False,
@@ -4009,6 +4023,7 @@ class GenerationGuard:
         pending_trigger: list[ThreatTrigger] = []
         unstick_start: dict[str, Any] = {}
         mining_landing_error: _MiningLandingDenied | None = None
+        mining_landing_retry_at = 0.0
         mining_support_changed = False
         watch_terrain_damage = check_support_dig or watch_mining_water
         watch_low_oxygen = watch_mining_water or check_unstick_exit
@@ -4368,17 +4383,27 @@ class GenerationGuard:
             watcher_thread.start()
 
         def verify_mining_approach(target: list[float]) -> None:
-            nonlocal mining_landing_error, mining_support_changed
+            nonlocal mining_landing_error, mining_landing_retry_at, mining_support_changed
+            cached_denial = mining_landing_error
+            if (
+                cached_denial is None or cached_denial.code != "unsafe_landing" or cached_denial.context["target"] != target
+                or mining_support_changed or time.monotonic() >= mining_landing_retry_at
+            ):
+                cached_denial = None
             mining_support_changed = False
             try:
+                if cached_denial is not None:
+                    raise _MiningLandingDenied(cached_denial.code, cached_denial.message, context=cached_denial.context)
                 self._verify_mining_landing(target)
             except _MiningLandingDenied as error:
                 if pending_trigger:
                     raise ReflexPreempted(pending_trigger[0]) from None
                 mining_landing_error = error
+                if cached_denial is None:
+                    mining_landing_retry_at = time.monotonic() + self.MINING_UNSAFE_FOOTING_RECHECK_S
                 self.events.emit(
                     "guardian.mining_landing_blocked", tool="mc_skill_mine_dfs", target=target, reason=error.code,
-                    **(dig_progress or {}),
+                    **({"probe_reused": True} if cached_denial is not None else {}), **(dig_progress or {}),
                 )
                 raise
             if pending_trigger:
@@ -4516,6 +4541,18 @@ class GenerationGuard:
                 ):
                     raise ReflexPreempted(trigger) from None
 
+            if last_work_action is not None and clean_path in {"dig", "move_to"} and isinstance(body, dict):
+                target = body.get("pos") if clean_path == "dig" else [body.get(axis) for axis in ("x", "y", "z")]
+                if (
+                    isinstance(target, (list, tuple)) and len(target) == 3
+                    and all(
+                        (clean_path == "move_to" and axis == 1 and coord is None)
+                        or type(coord) is int or (type(coord) is float and math.isfinite(coord))
+                        for axis, coord in enumerate(target)
+                    )
+                ):
+                    last_work_action.update(endpoint=clean_path, target=list(target))
+
             try:
                 res = actor_call(path, body, **kwargs)
             except _RecoveryBudgetExceeded:
@@ -4543,10 +4580,12 @@ class GenerationGuard:
                             confirmed_gains = dig_progress.setdefault("gained", {})
                             confirmed_gains[name] = confirmed_gains.get(name, 0) + amount
             apply_pending_preemption()
-            if clean_path == "place" and isinstance(body, dict) and mining_landing_error is not None:
-                x, y, z = mining_landing_error.context["target"]
-                support = [math.floor(x), math.floor(y + 0.05) - 1, math.floor(z)]
-                if body.get("pos") == support and isinstance(res, dict) and res.get("ok") is not False:
+            if (
+                clean_path in {"place", "dig"} and isinstance(body, dict) and mining_landing_error is not None
+                and isinstance(res, dict) and res.get("ok") is not False
+            ):
+                changed = body.get("pos")
+                if isinstance(changed, (tuple, list)) and tuple(changed) in footing_blocks(mining_landing_error.context["target"]):
                     mining_support_changed = True
             if not self._in_reflex and (not caller_ignores_hurt or watch_terrain_damage):
                 if isinstance(res, dict) and res.get("interrupted_by") == "hurt" and clean_path in ACTION_LOCK_ENDPOINTS:
@@ -4590,7 +4629,9 @@ class GenerationGuard:
             return event
         return None
 
-    def handle_preemption(self, trigger: ThreatTrigger, *, interrupted_name: str) -> dict[str, Any]:
+    def handle_preemption(
+        self, trigger: ThreatTrigger, *, interrupted_name: str, last_work_action: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Execute full 0-LLM subcortical combat/evasion takeover on the main thread (no tool auto-replay)."""
         self._in_reflex = True
         try:
@@ -5079,8 +5120,29 @@ class GenerationGuard:
                     )
             stop_reason = trigger.get("source") or "guardian_preempted"
             water_observation = trigger.get("water_observation")
-            preempt_pos = (water_observation or {}).get("pos") or st_pre.get("pos")
+            wet_pos = (water_observation or {}).get("pos")
+            preempt_pos = wet_pos or st_pre.get("pos")
             release = {"action_released": trigger["action_released"]} if "action_released" in trigger else {}
+            work_observation: dict[str, Any] = {}
+            if (
+                interrupted_name in MINING_WATER_WATCH_TOOLS and tool_water_threat and outcome.get("mode") == "water_surface"
+                and trigger.get("action_released") is True
+                and water_observation and water_observation.get("reason") == "sustained_submersion"
+                and water_observation.get("submerged") is True and water_observation.get("in_water") is True
+                and isinstance(wet_pos, (list, tuple)) and len(wet_pos) >= 3
+                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in wet_pos[:3])
+                and st_after.get("ready") is True and st_after.get("alive") is not False
+                and st_after.get("in_water") is False and st_after.get("on_ground") is True
+                and not (st_after.get("submerged") or st_after.get("in_lava") or life_changed(st_after))
+            ):
+                water_site = [math.floor(coord) for coord in wet_pos[:3]]
+                work_observation["water_reentry_site"] = water_site
+                summary += f"。请沿干地换一个采矿入口，避开刚才持续沉头的水坑 {water_site}。仅改采集数量仍可能回到原处"
+            if last_work_action:
+                work_observation["last_work_action"] = last_work_action
+                threat_id = trigger.get("primary_entity_id")
+                if isinstance(threat_id, int):
+                    work_observation["preemption_threat"] = {"id": threat_id, "name": trigger.get("primary_type")}
             receipt = {
                 "ok": False,
                 "requires_replan": True,
@@ -5098,6 +5160,7 @@ class GenerationGuard:
                 **({"pos_after": st_after["pos"]} if st_after.get("pos") is not None else {}),
                 **({"water_risk": water_observation["reason"]} if water_observation and water_observation.get("reason") else {}),
                 **release,
+                **work_observation,
             }
             if outcome.get("mode") == "network_timeout":
                 receipt["status_after"].update({
@@ -5109,7 +5172,7 @@ class GenerationGuard:
                 lava_status["status_after"] = receipt["status_after"]
             self.events.emit(
                 "guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary,
-                stop_reason=stop_reason, **lava_status, **release,
+                stop_reason=stop_reason, **lava_status, **release, **work_observation,
                 **({"water_observation": water_observation} if water_observation is not None else {}),
             )
             return receipt
@@ -5217,9 +5280,13 @@ class GenerationGuard:
         # Leave time for the watcher to exit and for the final bounded stop request.
         deadline = time.monotonic() + budget_s - 2.0 if budget_s is not None else None
         dig_progress: dict[str, Any] = {}
+        last_work_action: dict[str, Any] | None = (
+            {} if tool_name in MINING_WATER_WATCH_TOOLS or tool_name == "mc_skill_harvest_logs" else None
+        )
         try:
             with self._intercept_bot_calls(
                 dig_progress=dig_progress,
+                last_work_action=last_work_action,
                 enable_creeper_watcher=not (is_flee or is_attack),
                 deadline=deadline,
                 check_unstick_exit=is_unstick,
@@ -5321,7 +5388,7 @@ class GenerationGuard:
                 self._stop_after_recovery_timeout()
             raise
         except ReflexPreempted as preempt:
-            receipt = self.handle_preemption(preempt.trigger, interrupted_name=tool_name)
+            receipt = self.handle_preemption(preempt.trigger, interrupted_name=tool_name, last_work_action=last_work_action)
             if dig_progress:
                 receipt.update(partial_progress=True, **dig_progress)
             return json.dumps(receipt, ensure_ascii=False)

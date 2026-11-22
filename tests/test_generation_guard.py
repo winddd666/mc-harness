@@ -1392,6 +1392,48 @@ def test_terrain_interruption_does_not_attribute_hurt_to_a_distant_creeper(monke
         assert result == {"interrupted_by": "hurt"}
 
 
+@pytest.mark.parametrize("endpoint, body, expected", [
+    ("dig", {"pos": [11, 67, 24]}, [11, 67, 24]),
+    ("move_to", {"x": 11.5, "y": 69, "z": 24.5}, [11.5, 69, 24.5]),
+    ("move_to", {"x": 11.5, "z": 24.5}, [11.5, None, 24.5]),
+    ("dig", {"pos": [11, 24]}, None),
+])
+def test_interrupted_harvest_receipt_reports_the_dispatched_work_target(monkeypatch, endpoint, body, expected):
+    shooter = {"id": 809241, "name": "skeleton", "dist": 2.3}
+    status = {
+        "pos": [10.5, 65, 20.5], "dimension": "overworld", "health": 12.0,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
+    }
+    emitted = []
+
+    class CaveBot:
+        def call(self, action, payload=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == endpoint:
+                assert payload == body
+                return {"interrupted_by": "hurt"}
+            return {"ok": True}
+
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(emitted.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", lambda _trigger: {
+        "handled": True, "mode": "cover_or_flee", "status_after": dict(status),
+    })
+    receipt = json.loads(guard.run_tool_with_reflex("mc_skill_harvest_logs", lambda: json.dumps(bot.call(endpoint, body))))
+
+    assert receipt["error"]["code"] == "guardian_preempted"
+    assert receipt["pos_at_preemption"] == status["pos"]
+    event, = [event for event in emitted if event["type"] == "guardian.preempted_tool"]
+    if expected is None:
+        assert "last_work_action" not in receipt and "last_work_action" not in event
+    else:
+        assert receipt["last_work_action"] == event["last_work_action"] == {"endpoint": endpoint, "target": expected}
+        assert receipt["preemption_threat"] == event["preemption_threat"] == {"id": shooter["id"], "name": shooter["name"]}
+
+
 def test_watched_movement_ignores_confirmed_stalagmite_damage_near_a_distant_creeper(monkeypatch):
     import threading
 
@@ -3970,6 +4012,73 @@ def test_poll_tries_one_stationary_strike_when_an_armed_bot_cannot_retreat(monke
     assert stops == (["stop"] if situation == "timeout" else [])
 
 
+@pytest.mark.parametrize("situation", [
+    "identified", "unattributed", "other_attacker", "second_hostile", "wall",
+    "out_of_reach", "escaped", "respawned", "different_life_after_scan", "weapon_changed",
+])
+def test_armed_nether_bot_strikes_once_after_a_lone_piglin_blocks_retreat(monkeypatch, situation):
+    pos = [38023.3, 66.9, 39359.4]
+    distance = 3.0 if situation == "out_of_reach" else 2.2
+    piglin = {
+        "id": 839861, "name": "piglin", "pos": [pos[0] + distance, pos[1], pos[2]],
+        "dist": distance, "blocked_by_wall": situation == "wall",
+    }
+    sword = {"name": "iron_sword", "count": 1}
+    status = {
+        "pos": pos, "health": 7.5, "food": 20, "ready": True, "alive": True, "on_ground": True,
+        "dimension": "the_nether", "last_death": {"t": 1}, "nearest_hostile": piglin, "held": sword,
+    }
+    hit = {"seq": 1, "type": "hurt", "source": "mob_attack"}
+    if situation != "unattributed":
+        hit["source_entity"] = {**piglin, "id": piglin["id"] + int(situation == "other_attacker")}
+    attacks = []
+    stop_calls = []
+
+    class NetherBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": [sword], "held": status["held"], "offhand": None}
+            if action == "get_entities":
+                assert body == {"types": ["hostile"], "radius": 6} and kwargs["timeout_s"] == 0.35
+                if situation == "different_life_after_scan":
+                    status["last_death"] = {"t": 2}
+                if situation == "weapon_changed":
+                    status["held"] = {"name": "iron_pickaxe"}
+                return {"entities": [piglin, {"id": 839862, "name": "wither_skeleton"}] if situation == "second_hostile" else [piglin]}
+            if action == "attack":
+                attacks.append(body)
+                return {"hits": 1, "killed": False, "hit_log": [{"hit": 1, "entity_id": piglin["id"]}]}
+            if action == "stop":
+                stop_calls.append(action)
+                return {"ok": True}
+            pytest.fail(f"Unexpected mutation while cornered: {action}")
+
+    def retreat(*_args, **_kwargs):
+        if situation == "escaped":
+            return {"mode": "flee", "ok": True, "moved_dist": 4.0}
+        return {"mode": "flee", "ok": False, "reason": "no_safe_retreat", "respawned": situation == "respawned"}
+
+    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_try_emergency_bunker", lambda _status: None)
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    incident = guard.poll()
+
+    if situation in {"identified", "unattributed"}:
+        attack, = attacks
+        assert attack["entity_id"] == piglin["id"] and attack["max_hits"] == 1 and attack["chase"] is False
+        assert attack["feedback"] is True and attack["timeout"] <= 350
+        strike = incident["actions"][-1]
+        assert strike["action"] == "cornered_melee_strike"
+        assert strike["result"]["ok"] is True and strike["result"]["killed"] is False
+    else:
+        assert attacks == []
+    assert stop_calls == []
+
+
 @pytest.mark.parametrize(("remaining_hostile", "retreat_works"), [(True, True), (True, False), (False, True)])
 def test_counter_kill_disengages_from_second_hostile_at_critical_health(monkeypatch, remaining_hostile, retreat_works):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
@@ -4961,6 +5070,7 @@ def test_bug031_watchdog_thread_and_readonly_status_never_raise_reflex_preempted
         raw_receipt = guard.run_tool_with_reflex("mc_skill_harvest_logs", _actor_tool)
         receipt = json.loads(raw_receipt)
         actor_preempted["done"] = bool(receipt.get("preempted_by_reflex"))
+        assert "last_work_action" not in receipt
         # Let watchdog run a few more ticks post-preemption too
         time.sleep(0.08)
     finally:
@@ -13459,6 +13569,66 @@ def test_dfs_probes_fresh_support_before_moving_to_a_mining_step(monkeypatch, te
             assert rejected_events[0]["gained"] == {"raw_iron": 1}
 
 
+@pytest.mark.parametrize("terrain", ["unchanged", "repaired_edge", "repair_unconfirmed", "expiry", "unavailable"])
+def test_dfs_rechecks_a_rejected_waypoint_only_when_the_observation_can_change(monkeypatch, terrain):
+    target = [304191.2, 16.0, 309200.8]
+    # The west edge is outside the block below the waypoint center.
+    edge_support = [304190, 15, 309200]
+    clock = [100.0]
+    probes = []
+    movements = []
+    events = []
+    repaired = False
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            nonlocal repaired
+            if action == "get_block":
+                probes.append(body["pos"])
+                if terrain == "unavailable" and len(probes) <= 2:
+                    raise httpx.ReadTimeout("missing footing observation")
+                return {"name": "air" if body["pos"] == edge_support and not repaired else "stone"}
+            if action == "place":
+                assert body["pos"] == edge_support
+                repaired = terrain == "repaired_edge"
+            if action in {"move_to", "control"}:
+                movements.append(action)
+            return {"ok": True}
+
+    bot = ShaftBot()
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None)
+    waypoint = dict(zip(("x", "y", "z"), target), range=0.35)
+
+    def invoke():
+        nonlocal repaired
+        with pytest.raises(ApiError) as denied:
+            bot.call("move_to", waypoint)
+        assert denied.value.code == ("mining_footing_unavailable" if terrain == "unavailable" else "unsafe_landing")
+        if terrain == "unavailable":
+            repaired = True
+            return json.dumps(bot.call("move_to", waypoint))
+        for _ in range(2):
+            clock[0] += 0.75
+            with pytest.raises(ApiError, match="采矿落点"):
+                bot.call("move_to", {**waypoint, "range": 0.3})
+        if terrain == "expiry":
+            clock[0] += 0.6
+            repaired = True
+            return json.dumps(bot.call("move_to", waypoint))
+        if terrain in {"repaired_edge", "repair_unconfirmed"}:
+            bot.call("place", {"pos": edge_support, "item": "cobblestone"})
+        return json.dumps(bot.call("control", {"forward": True, "ms": 420}))
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", invoke))
+    accepted = terrain in {"repaired_edge", "expiry", "unavailable"}
+    assert result["ok"] is accepted
+    assert movements == (["control" if terrain == "repaired_edge" else "move_to"] if accepted else [])
+    assert probes.count(edge_support) == {"unchanged": 1, "repaired_edge": 2, "repair_unconfirmed": 2, "expiry": 2, "unavailable": 3}[terrain]
+    reuses = [event for event in events if event["type"] == "guardian.mining_landing_blocked" and event.get("probe_reused")]
+    assert len(reuses) == (0 if terrain == "unavailable" else 2)
+
+
 @pytest.mark.parametrize("floor", ["air", "lava", "unavailable"])
 def test_bug116_dfs_rejects_dangerous_waypoint_and_keeps_mining(monkeypatch, tmp_path, floor):
     from mc_agent.skills.mining_dfs import MiningDFSEngine
@@ -14821,14 +14991,17 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
         expected_count = 1 if oxygen == 285 else 2
         assert result["partial_progress"] is True
         assert result["dug_count"] == expected_count and result["gained"] == {"cobblestone": expected_count}
+        assert result["last_work_action"] == {"endpoint": "dig", "target": body["pos"]}
     else:
         assert "partial_progress" not in result and "dug_count" not in result and "gained" not in result
+        assert "last_work_action" not in result
     assert guard._water_hurt_streak == 0
 
 
 @pytest.mark.parametrize("condition, oxygen, expected_reason, sample_count", [
     ("brief", 20, None, 2), ("brief", 140, None, 2),
-    ("continuous", 20, "sustained_submersion", 3), ("continuous", 140, "sustained_submersion", 3),
+    ("continuous", 17, "sustained_submersion", 3), ("continuous", 20, "sustained_submersion", 3),
+    ("continuous", 140, "sustained_submersion", 3),
     ("continuous", 400, "sustained_submersion", 3), ("continuous", None, "sustained_submersion", 3),
     ("health_missing", None, "sustained_submersion", 3), ("sinking", 20, "sustained_sinking", 2),
     ("new_life", 400, "sustained_submersion", 4),
@@ -14903,6 +15076,53 @@ def test_bug009_full_air_reading_uses_water_motion_and_duration(monkeypatch, con
         assert observation["reason"] == expected_reason and observation["submerged"] is True
         first_current_life_sample = 1 if condition == "new_life" else 0
         assert observation["submerged_for_s"] == pytest.approx(samples[-1] - samples[first_current_life_sample])
+        if expected_reason == "sustained_submersion":
+            assert result["water_reentry_site"] == preempted["water_reentry_site"] == [-10891, 58, 2566]
+            assert "沿干地换一个采矿入口" in result["message"]
+        else:
+            assert "water_reentry_site" not in result and "water_reentry_site" not in preempted
+
+
+@pytest.mark.parametrize("recovery", ["landed", "unreleased", "still_wet", "respawned", "missing_water_pos"])
+def test_first_mining_submersion_names_the_water_site_only_after_safe_handoff(monkeypatch, recovery):
+    wet = [309368.5, 61, 301962.5]
+    status = {
+        "pos": wet, "in_water": True, "submerged": True, "on_ground": False, "health": 20,
+        "oxygen": 17, "dimension": "overworld", "last_death": {"t": 1}, "ready": True, "alive": True,
+    }
+
+    class CoastBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            return {"ok": True, "items": []}
+
+    def shore(*_args, **_kwargs):
+        if recovery == "still_wet":
+            return {"ok": False, "in_water": True}
+        if recovery == "respawned":
+            status["last_death"] = {"t": 2}
+        status.update(pos=[309369.4, 64, 301962.5], in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False, "pos_after": status["pos"]}
+
+    guard = GenerationGuard(CoastBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    water = {**status, "reason": "sustained_submersion", "submerged_for_s": 2.05}
+    if recovery == "missing_water_pos":
+        water.pop("pos")
+    receipt = guard.handle_preemption({
+        "source": "tool_water_threat", "observed_life": ("overworld", {"t": 1}), "water_observation": water,
+        "action_released": recovery != "unreleased",
+    }, interrupted_name="mc_skill_mine_blocks")
+
+    if recovery == "landed":
+        assert receipt["water_reentry_site"] == [309368, 61, 301962]
+        assert "[309368, 61, 301962]" in receipt["message"]
+        assert "沿干地换一个采矿入口" in receipt["message"]
+    else:
+        assert "water_reentry_site" not in receipt
 
 
 @pytest.mark.parametrize("oxygen, reason", [(20, None), (400, None), (20, "drowned"), (400, "hurt")])
