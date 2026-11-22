@@ -8612,6 +8612,69 @@ def test_healthy_unarmed_bot_follows_up_short_retreat_when_the_attacker_gains_gr
     assert any(a["action"] == "followup_melee_retreat" for a in outcome["actions"]) is expected
 
 
+@pytest.mark.parametrize("pursuit", ["clear", "blocked", "lava", "out_of_range", "respawned", "time_budget"])
+def test_unarmed_night_retreat_rechecks_a_surviving_melee_pursuer(monkeypatch, pursuit):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    landing = [23043.5, 72, 9938.5]
+    zombie = {"id": 257948, "name": "zombie", "dist": 3.4, "pos": [23034.1, 72, 9932.5]}
+    distance = 9.2 if pursuit == "out_of_range" else 7.4
+    survivor = {**zombie, "dist": distance, "pos": [landing[0] - distance, *landing[1:]],
+                "blocked_by_wall": pursuit == "blocked"}
+    status = {
+        "pos": [23037.5, 72, 9932.5], "health": 20, "food": 20, "is_day": False,
+        "on_ground": True, "ready": True, "alive": True, "nearest_hostile": zombie,
+    }
+    plans = []
+    pulses = []
+
+    class FieldBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "stone_pickaxe", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [survivor if plans else zombie]}
+            if action == "get_block":
+                support = "lava" if pursuit == "lava" else "stone"
+                return {"name": support if body["pos"][1] < 72 else "air"}
+            if action == "look":
+                assert body["yaw"] == pytest.approx(-math.pi / 2)
+            if action == "control" and body.get("forward"):
+                pulses.append(body)
+                status.update(pos=[landing[0] + 2, *landing[1:]], nearest_hostile=None)
+            return {"ok": True}
+
+    env = CombatEnv(FieldBot())
+    real_flee = env.flee
+
+    def retreat(target, **kwargs):
+        plans.append(target)
+        if len(plans) > 1:
+            return real_flee(target, **kwargs)
+        status.update(pos=landing, nearest_hostile=survivor)
+        if pursuit == "respawned":
+            status["last_death"] = {"t": 1}
+        if pursuit == "time_budget":
+            clock[0] += 4.0
+        return {"ok": True, "mode": "flee", "moved_dist": 8.49}
+
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", retreat)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": zombie["id"], "distance": 3.4,
+    })
+
+    followups = [action for action in outcome["actions"] if action["action"] == "followup_melee_retreat"]
+    assert plans == [zombie["pos"]] + ([survivor["pos"]] if pursuit in {"clear", "lava"} else [])
+    assert [action["ok"] for action in followups] == {"clear": [True], "lava": [False]}.get(pursuit, [])
+    assert len(pulses) == (1 if pursuit == "clear" else 0)
+
+
 @pytest.mark.parametrize(
     "outcome", ["same_life", "respawned_nearby", "time_budget", "retreat_into_lava", "failed_retreat_into_lava"],
 )

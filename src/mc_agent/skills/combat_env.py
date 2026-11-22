@@ -3409,6 +3409,7 @@ class SubcorticalInstinctController:
         )
         mode = "stabilize"
         latched_guard = False
+        enclosure = None
 
         in_water = bool(st.get("in_water"))
         submerged = bool(st.get("submerged"))
@@ -3753,6 +3754,7 @@ class SubcorticalInstinctController:
         else:
             self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
             snap = env.arena_snapshot(pos)
+            enclosure = snap["enclosure"]
             has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
                 seal = env.fortify(st, lambda: env.build_tactical("full_seal", threat_pos=mob_pos))
@@ -4076,8 +4078,17 @@ class SubcorticalInstinctController:
         nh_post = st_post.get("nearest_hostile")
         retreat_hp = st_post.get("health")
         retreats = [a for a in actions if a["action"] == "flee" and not a.get("respawned")]
+        night_pursuit = (
+            enclosure == "surface" and st_post.get("is_day") is False
+            and trigger.get("source") == "pre_hurt_melee" and mob_name in PRE_HURT_MELEE_MOBS
+            and 0 < mob_dist <= 3.5
+            and isinstance(retreat_hp, (int, float)) and retreat_hp > 12.0
+            and any(a["ok"] and isinstance(a.get("moved"), (int, float)) and a["moved"] >= 4.0 for a in retreats)
+        )
         followup_range = 0.0
-        if isinstance(retreat_hp, (int, float)) and 0.0 < retreat_hp <= 12.0:
+        if night_pursuit:
+            followup_range = 8.0
+        elif isinstance(retreat_hp, (int, float)) and 0.0 < retreat_hp <= 12.0:
             followup_range = 3.5 if retreat_hp <= 10.0 else 1.5
         elif (
             isinstance(retreat_hp, (int, float)) and retreat_hp > 12.0
@@ -4097,22 +4108,30 @@ class SubcorticalInstinctController:
             and st_post.get("on_ground") is True and st_post.get("ready") is not False and st_post.get("alive") is not False
             and not st_post.get("in_water") and not st_post.get("in_lava")
             and st_post.get("last_death") == st.get("last_death") and st_post.get("dimension") == st.get("dimension")
-            and time.monotonic() + 1.5 < deadline
+            and time.monotonic() + (4.1 if night_pursuit else 1.5) < deadline
         ):
             target_id = nh_post["id"]
-            live_hostiles = self._find_live_hostiles(env, radius=5, timeout_s=0.6)
+            live_hostiles = self._find_live_hostiles(env, radius=10 if night_pursuit else 5, timeout_s=0.6)
             target = next((entity for entity in live_hostiles if entity.get("id") == target_id), {})
             target_pos = target.get("pos")
             if (
                 st_post.get("pos")
-                and time.monotonic() + 0.8 < deadline
+                and time.monotonic() + (3.5 if night_pursuit else 0.8) < deadline
                 and isinstance(target_pos, (list, tuple)) and len(target_pos) >= 3
                 and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
                 and target.get("blocked_by_wall") is not True
                 and self._entity_dist(st_post.get("pos"), target) <= followup_range
             ):
-                stepped = env.step_away_from_melee(st_post, target_pos, deadline=min(deadline, time.monotonic() + 1.5))
-                actions.append({"action": "followup_melee_retreat", "ok": stepped, "entity_id": target_id})
+                if night_pursuit:
+                    # The first retreat used the attacker's old position. Disengage from the live one.
+                    retreat = env.flee(
+                        target_pos, distance=8.5, urgent=True, wait_for_ground=True, allow_shaft_seal=False,
+                        other_melee=self._other_melee_positions(live_hostiles, target_id),
+                    )
+                    actions.append({"action": "followup_melee_retreat", "entity_id": target_id, **retreat})
+                else:
+                    stepped = env.step_away_from_melee(st_post, target_pos, deadline=min(deadline, time.monotonic() + 1.5))
+                    actions.append({"action": "followup_melee_retreat", "ok": stepped, "entity_id": target_id})
                 st_post = env._safe_status(st_post)
                 nh_post = st_post.get("nearest_hostile")
         if (
