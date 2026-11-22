@@ -3957,6 +3957,7 @@ class GenerationGuard:
                 "unsafe_exit_retreat",
                 lambda: env.flee(
                     threat_pos, distance=8.0, allow_shaft_seal=False, wait_for_ground=ranged,
+                    **({"keep_blast_clearance": True} if name == "creeper" else {}),
                     **({"other_shooters": other_shooters} if other_shooters else {}),
                 ),
                 raise_on_http_error=False,
@@ -3974,6 +3975,11 @@ class GenerationGuard:
                     tuple(result["pos_after"][:3]), (status.get("dimension"), status.get("last_death")), time.monotonic(),
                 )
             if recovery.get("ok") and isinstance(result, dict):
+                if name == "creeper":
+                    return {
+                        **self._confirm_creeper_exit(bot, status, result),
+                        "requires_replan": True, "pos_before": status.get("pos"),
+                    }
                 cover_deadline = min(now + 4.0, deadline)
                 if (
                     allow_cover and ranged and dimension == "overworld"
@@ -4104,6 +4110,54 @@ class GenerationGuard:
             return {"ok": True, "mode": "natural_cover", "pos_after": settled, "moved_dist": 0.0}
         except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
             return failed
+
+    def _confirm_creeper_exit(
+        self, bot: _GuardSession, before: dict[str, Any], retreat: dict[str, Any],
+    ) -> dict[str, Any]:
+        unconfirmed = {
+            **retreat, "ok": False, "reason": "blast_clearance_unconfirmed",
+            "error": {"code": "blast_clearance_unconfirmed", "message": "已移动，但尚未确认离开苦力怕爆炸范围。"},
+        }
+        try:
+            after = bot.call("status", method="GET", timeout_s=0.3, allow_reauth=False)
+            if after.get("alive") is False or any(
+                after.get(key) is not None and after[key] != before.get(key) for key in ("dimension", "last_death")
+            ):
+                return {
+                    **retreat, "ok": False, "mode": "respawned", "respawned": True,
+                    "moved_dist": 0.0, "pos_after": after.get("pos"),
+                }
+            if (
+                not self._same_life(before, after) or not after.get("pos") or after.get("on_ground") is not True
+                or after.get("in_water") or after.get("in_lava")
+            ):
+                return unconfirmed
+            sighting = bot.call("get_entities", {"radius": 8, "types": ["hostile"]}, timeout_s=0.35, allow_reauth=False)
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+            return unconfirmed
+
+        entities = sighting.get("entities") if isinstance(sighting, dict) else None
+        if not isinstance(entities, list):
+            return unconfirmed
+        distances = []
+        nearest = after.get("nearest_hostile")
+        for entity in [*entities, *([nearest] if isinstance(nearest, dict) else [])]:
+            name = entity.get("name") if isinstance(entity, dict) else None
+            if not isinstance(name, str) or not name:
+                return unconfirmed
+            if name.removeprefix("minecraft:") != "creeper" or entity.get("alive") is False:
+                continue
+            distance = entity.get("dist")
+            if type(distance) not in (int, float) or not math.isfinite(distance) or distance < 0:
+                return unconfirmed
+            distances.append(distance)
+        closest = min(distances, default=math.inf)
+        if closest <= 5.5:
+            return {
+                **retreat, "ok": False, "reason": "creeper_still_close", "creeper_distance": closest,
+                "error": {"code": "creeper_still_close", "message": "已移动，但苦力怕仍在爆炸范围内，请继续撤离。"},
+            }
+        return retreat
 
     def _cover_and_shooters_after_blocked_flee(
         self, pos: list[float], target_id: int | None, deadline: float, *, allow_stationary: bool,

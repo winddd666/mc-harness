@@ -14568,6 +14568,58 @@ def test_blocked_flee_preserves_the_checked_retreat_observation(monkeypatch, lan
         assert outcome["on_ground"] is False and outcome["in_water"] is (landing == "water")
 
 
+@pytest.mark.parametrize("landing", ["still_close", "second_creeper", "clear", "scan_timeout", "respawned"])
+def test_blocked_flee_checks_creeper_clearance_after_safe_step(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    origin = [378989.0, 92, 318967.5]
+    end = [378989.6, 92, 318968.1]
+    creeper = {"name": "creeper", "id": 1024313, "pos": [378985.2, 92, 318967.5], "dist": 3.8}
+    status = {"pos": origin, "ready": True, "alive": True, "dimension": "overworld",
+              "on_ground": True, "nearest_hostile": creeper, "last_death": {"t": 1}}
+
+    class RidgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "get_entities":
+                if landing == "scan_timeout":
+                    raise httpx.ReadTimeout("creeper scan timed out")
+                if landing == "second_creeper":
+                    return {"entities": [{"name": "creeper", "id": 1024314, "dist": 3.0,
+                                          "pos": [end[0], end[1], end[2] + 3]}]}
+                return {"entities": [creeper] if landing == "still_close" else []}
+            pytest.fail(f"Unexpected action during blocked flee: {action}")
+
+    def flee(_env, target, **kwargs):
+        assert target == creeper["pos"] and kwargs["keep_blast_clearance"]
+        status.update(pos=end, nearest_hostile=creeper if landing == "still_close" else None)
+        if landing == "respawned":
+            status.update(last_death={"t": 2})
+        return {"ok": True, "mode": "flee", "moved_dist": 0.85, "pos_after": end}
+
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    bot = RidgeBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 378990.0, "z": 318979, "stop_on": ["death"]}),
+    )))
+
+    assert result["ok"] is (landing == "clear")
+    assert result["requires_replan"] and result["pos_after"] == end
+    if landing == "respawned":
+        assert result["respawned"] and result["moved_dist"] == 0.0
+    else:
+        assert result["moved_dist"] == 0.85 and result["pos_before"] == origin
+    if landing in {"still_close", "second_creeper"}:
+        assert result["error"]["code"] == "creeper_still_close"
+        assert 0 < result["creeper_distance"] <= 5.5
+    if landing == "scan_timeout":
+        assert result["error"]["code"] == "blast_clearance_unconfirmed"
+
+
 @pytest.mark.parametrize(
     "cover", ["safe", "exposed", "fresh_hit", "burning_after_hit", "burning_old_hit"],
 )
