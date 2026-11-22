@@ -2063,6 +2063,17 @@ class GenerationGuard:
             or (now < self._ranged_cover_active_until)
             or (now < self._ranged_combat_stance_until)
         )
+        urgent_melee_hurt = (
+            effective_combat_hurt and 4.0 < hp_cur <= 8.0 and not status.get("blocking") and bool(other_hurts)
+            and all(str(h.get("source") or "").strip().lower() in MELEE_HURT_SOURCES for h in other_hurts)
+            and (
+                len(other_hurts) >= 2
+                or (
+                    nh_name0 in PRE_HURT_MELEE_MOBS and 0 <= nh_dist0 <= 3.5
+                    and status["nearest_hostile"].get("blocked_by_wall") is not True
+                )
+            )
+        )
         if effective_combat_hurt and not ranged_hurt_only:
             self._pre_hurt_suppress_until = float("-inf")
         critical_override = bool(
@@ -2071,6 +2082,7 @@ class GenerationGuard:
             or needs_hot_floor_guard
             or drowning
             or sustained_shield_damage
+            or urgent_melee_hurt
             or (effective_combat_hurt and in_water)
             or (effective_combat_hurt and other_hurts and hp_cur <= 4.0)
             or no_water_reentry

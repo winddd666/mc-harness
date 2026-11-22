@@ -10594,6 +10594,53 @@ def test_guardian_handles_fresh_critical_combat_hurt_inside_reaction_cooldown(mo
     assert (incident is not None) is expect_retreat
 
 
+@pytest.mark.parametrize(("pressure", "reacts"), [
+    ("close_melee", True), ("burst_without_sighting", True), ("above_threshold", False),
+    ("distant_melee", False), ("occluded_melee", False), ("shield_raised", False), ("status_only", False),
+])
+def test_low_health_unshielded_melee_pressure_can_bypass_reaction_cooldown(monkeypatch, pressure, reacts):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    nearest = {"id": 42, "name": "zombie", "dist": 6.0 if pressure == "distant_melee" else 2.1,
+               "blocked_by_wall": pressure == "occluded_melee"}
+    status = {"pos": [34026.3, 69, 34004.2], "health": 8.1 if pressure == "above_threshold" else 8.0,
+              "ready": True, "alive": True, "on_ground": True, "food": 20, "dimension": "overworld",
+              "blocking": pressure == "shield_raised", "nearest_hostile": None if pressure == "burst_without_sighting" else nearest}
+    hit_count = {"burst_without_sighting": 2, "status_only": 0}.get(pressure, 1)
+    hits = [{"seq": i + 1, "type": "hurt", "source": "mob_attack"} for i in range(hit_count)]
+    retreats = []
+
+    class HillBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": []}
+            raise AssertionError(action)
+
+    def retreat(*_a, **_kw):
+        retreats.append(True)
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    guard = GenerationGuard(HillBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.last_reaction = 999.0
+    guard.previous_health = 12.0
+    monkeypatch.setattr(guard, "_try_emergency_bunker", lambda *_a, **_kw: None)
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+
+    incident = guard.poll()
+    assert (incident is not None) is reacts
+    if reacts:
+        assert incident["reasons"] == ["fresh_hurt"] and incident["requires_replan"]
+    clock[0] += 0.3
+    assert guard.poll() is None
+    assert retreats == ([True] if reacts else [])
+
+
 def test_ranged_retreat_without_shield_resolves_the_shooter_from_live_entities(monkeypatch):
     retreat_targets = []
     shooter = {"id": 44, "name": "pillager", "pos": [-10936.8, 63.0, -10992.5]}
