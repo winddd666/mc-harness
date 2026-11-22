@@ -325,6 +325,9 @@ class GenerationGuard:
         self._last_water_escape_at = float("-inf")
         self._last_water_escape_failed = False
         self._last_underground_water_preemption: tuple[tuple[Any, Any], float] | None = None
+        self._last_surface_mining_water: tuple[
+            tuple[Any, Any], float, tuple[float, ...], tuple[tuple[float, float, float], ...],
+        ] | None = None
         self._water_hurt_streak = 0
         self._no_water_until = float("-inf")
         self._last_pre_hurt_melee_at = float("-inf")
@@ -4490,13 +4493,24 @@ class GenerationGuard:
                     pre_actions: list[dict[str, Any]] = []
                     water_pos = st_pre.get("pos")
                     repeated_underground_water = False
+                    surface_mining_water = mining_water_pre and surface_first_pre and water_pos and water_pos[1] >= 55
+                    recent_banks: tuple[tuple[float, float, float], ...] = ()
+                    repeated_surface_water = False
+                    life = (st_pre.get("dimension"), st_pre.get("last_death"))
                     if surface_first_pre and water_pos and water_pos[1] < 55:
-                        life = (st_pre.get("dimension"), st_pre.get("last_death"))
                         previous = self._last_underground_water_preemption
                         repeated_underground_water = (
                             previous is not None and previous[0] == life and now_pre - previous[1] < 60.0
                         )
                         self._last_underground_water_preemption = (life, now_pre)
+                    elif surface_mining_water and self._last_surface_mining_water is not None:
+                        previous_life, previous_at, previous_wet_pos, previous_banks = self._last_surface_mining_water
+                        repeated_surface_water = (
+                            previous_life == life and now_pre - previous_at < 60.0
+                            and math.dist(water_pos[:3], previous_wet_pos) <= 5.0
+                        )
+                        if repeated_surface_water:
+                            recent_banks = previous_banks
                     nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
                     drowned_during_tool = nh_pre_name == "drowned" and (
                         (interrupted_name == "mc_attack" and nh_pre_dist <= self.ATTACK_WATER_THREAT_RANGE)
@@ -4538,6 +4552,7 @@ class GenerationGuard:
                     esc_pre_ok = False
                     esc_pre_respawned = False
                     esc_pre_handled_lava = False
+                    shore_result: dict[str, Any] = {}
                     if not forced_pre_shore and not drowning_pre:
                         short_escape = self._short_water_escape_after_hit(st_pre, trigger.get("hurt_source")) or (
                             trigger.get("source") == "tool_interrupted_hurt"
@@ -4567,6 +4582,7 @@ class GenerationGuard:
                                 shield_target_id=att_pre.get("id") if isinstance(att_pre, dict) else None,
                                 **({"surface_first": True} if drowning_pre or surface_first_pre else {}),
                                 **({"prefer_recent_dry_bank": True} if repeated_underground_water else {}),
+                                **({"recently_used_banks": recent_banks} if recent_banks else {}),
                                 **({"avoid_close_threat": True}
                                    if repeated_underground_water or (urgent_water_melee and shore_threat_pos) else {}),
                                 **({"under_attack": True} if urgent_water_melee else {}),
@@ -4601,6 +4617,18 @@ class GenerationGuard:
                         if repeated_underground_water:
                             water_block = tuple(map(math.floor, water_pos[:3]))
                             summary += f"。矿道重复进水，请避开水格 {water_block}，沿确认干燥可通行的方向换一段巷道再采矿"
+                        if surface_mining_water:
+                            dry_pos = shore_result.get("pos_after")
+                            if shore_result.get("ok") and dry_pos:
+                                bank = (
+                                    math.floor(dry_pos[0]) + 0.5, float(math.floor(dry_pos[1] + 0.05)),
+                                    math.floor(dry_pos[2]) + 0.5,
+                                )
+                                if bank not in recent_banks:
+                                    recent_banks = (*recent_banks[-3:], bank)
+                            self._last_surface_mining_water = (life, now_pre, tuple(water_pos[:3]), recent_banks)
+                            if repeated_surface_water:
+                                summary += "。海岸重复进水，请沿干地离开这段水边，换一个采矿入口"
                         outcome = {
                             "handled": True, "mode": "water_surface", "summary": summary,
                             "actions": pre_actions, "status_after": st_after,

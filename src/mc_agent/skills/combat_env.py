@@ -2711,6 +2711,7 @@ class CombatEnv:
         sneak_on_magma: bool = False,
         prefer_recent_dry_bank: bool = False,
         under_attack: bool = False,
+        recently_used_banks: Sequence[tuple[float, float, float]] = (),
     ) -> dict[str, Any]:
         """Swim up and move toward the nearest walkable dry shoreline block (or retreat at surface)."""
         st0 = self.bot.status()
@@ -2906,11 +2907,12 @@ class CombatEnv:
             bank: (rim, bank_life, at) for bank, (rim, bank_life, at) in self._stalled_water_shores.items()
             if bank_life == life and now - at < 30.0
         }
-        excluded_shores = {
+        stalled_shores = {
             bank for bank, (rim, _, _) in self._stalled_water_shores.items() if math.dist(search_pos[:3], rim) <= 2.5
         }
-        if excluded_shores:
+        if stalled_shores:
             actions.append("shore_lip_stalled")
+        excluded_shores = stalled_shores.union(recently_used_banks)
 
         def return_to_dry_bank(*, max_dist: float, max_height: float) -> list[float] | None:
             if self._last_dry_bank is None:
@@ -2978,6 +2980,13 @@ class CombatEnv:
 
         if shore_target is None:
             shore_target = return_to_dry_bank(max_dist=36.0, max_height=2.0)
+
+        if shore_target is None:
+            # Preserve the confirmed way out when the search cannot find another bank.
+            for bank in reversed(recently_used_banks):
+                if bank not in stalled_shores and shore_bank_in_reach(search_pos, bank) and self._dry_bank_is_walkable(bank):
+                    shore_target = list(bank)
+                    break
 
         # 3. Move to shore target (plus shoreline lip jump) or swim up and away from threat.
         shore_path_unreachable = False

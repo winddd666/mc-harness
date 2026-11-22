@@ -14362,6 +14362,53 @@ def test_bug098_repeated_mining_water_preemption_prefers_verified_dry_tunnel(mon
     assert ("避开水格 (10, 22, 10)" in second["message"]) is (retry in {"same_life", "bank_flooded"})
 
 
+@pytest.mark.parametrize("retry", ["same_shore", "only_bank", "new_life", "after_window", "different_shore"])
+def test_surface_mining_water_reentry_uses_a_different_verified_bank(monkeypatch, retry):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    wet = [47984.6, 62.6, 54980.6]
+    banks = [(47983.5, 63.0, 54980.5), (47986.5, 63.0, 54981.5), (47981.5, 63.0, 54979.5)]
+    available = banks[:1] if retry == "only_bank" else banks
+    supports = {(math.floor(x), math.floor(y) - 1, math.floor(z)) for x, y, z in available}
+    status = {"pos": wet, "health": 20, "oxygen": 300, "dimension": "overworld", "last_death": {"t": 1},
+              "ready": True, "alive": True, "in_water": True, "submerged": False, "on_ground": False}
+    moves = []
+
+    class CoastBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "get_block":
+                return {"name": "stone" if tuple(body["pos"]) in supports else "air"}
+            if action == "move_to":
+                goal = tuple(body[axis] for axis in ("x", "y", "z"))
+                assert goal in available
+                moves.append(goal)
+                status.update(pos=list(goal), in_water=False, on_ground=True)
+            return {"ok": True}
+
+    def find_bank(_pos, *, excluded_shores, **_kwargs):
+        return next((list(bank) for bank in available if bank not in excluded_shores), None)
+
+    guard = GenerationGuard(CoastBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "_find_walkable_shore_target", find_bank)
+    trigger = {"source": "tool_water_threat", "primary_type": "water"}
+    attempts = 3 if retry == "same_shore" else 2
+    for i in range(attempts):
+        if i and retry == "new_life":
+            status["last_death"] = {"t": 2}
+        water_pos = [wet[0] + 8.0, *wet[1:]] if i and retry == "different_shore" else wet
+        status.update(pos=water_pos, in_water=True, on_ground=False)
+        receipt = guard.handle_preemption(trigger, interrupted_name="mc_skill_mine_blocks")
+        assert receipt["status_after"]["on_ground"] is True
+        assert ("海岸重复进水" in receipt["message"]) is bool(i and retry in {"same_shore", "only_bank"})
+        clock[0] += 61.0 if retry == "after_window" else 5.0
+
+    assert moves == (banks if retry == "same_shore" else [banks[0], banks[0]])
+
+
 @pytest.mark.parametrize("landing, expected_error", [
     ("shore", None),
     ("settled", None),
