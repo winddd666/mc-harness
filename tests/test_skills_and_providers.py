@@ -4632,25 +4632,36 @@ def test_craft_gear_shares_episode_budget_and_keeps_completed_craft(monkeypatch,
 
 @pytest.mark.parametrize(
     "mode",
-    ["equip_shield", "shield_in_slot", "equip_unconfirmed", "owned", "short", "make_sticks", "with_sticks", "old_pick_selected"],
+    [
+        "equip_shield", "shield_in_slot", "equip_unconfirmed", "owned", "short", "make_sticks", "with_sticks",
+        "old_pick_selected", "old_pick_durability", "old_pick_damage", "old_pick_default", "fresh_default", "owned_worn",
+    ],
 )
-def test_craft_gear_reuses_only_after_shortage_and_confirms_explicit_equip(mode) -> None:
+def test_craft_gear_reuses_only_after_shortage_and_confirms_equip(mode) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
-    worn = {"name": "stone_pickaxe", "count": 1, "durability_used": 130}
-    fresh = {"name": "stone_pickaxe", "count": 1}
+    wear = {"durability_used": 130}
+    if mode in {"old_pick_durability", "old_pick_default", "owned_worn"}:
+        wear = {"durability": [1, 131]}
+    elif mode == "old_pick_damage":
+        wear = {"damage": 130}
+    worn = {"name": "stone_pickaxe", "count": 1, **wear}
+    fresh = {"name": "stone_pickaxe", "count": 1, "durability": [131, 131]}
     item, slot, count = "flint_and_steel", None, 1
     bag = [{"name": item, "count": 1}]
     offhand = held = None
+    new_pick_request = mode in {"make_sticks", "with_sticks", "fresh_default"} or mode.startswith("old_pick_")
     if mode in {"equip_shield", "shield_in_slot", "equip_unconfirmed"}:
         item, slot = "shield", "off-hand"
         shield = {"name": item, "count": 1}
         bag = [] if mode == "shield_in_slot" else [shield]
         offhand = shield if mode == "shield_in_slot" else None
-    elif mode in {"make_sticks", "with_sticks", "old_pick_selected"}:
+    elif new_pick_request:
         item, slot, held = "stone_pickaxe", "hand", worn
         wood = "oak_planks" if mode == "make_sticks" else "stick"
         bag = [worn, {"name": "cobblestone", "count": 3}, {"name": wood, "count": 2}]
+    elif mode == "owned_worn":
+        item, held, bag = "stone_pickaxe", worn, [worn]
     elif mode == "short":
         count = 2
     crafts, equips = [], []
@@ -4684,7 +4695,7 @@ def test_craft_gear_reuses_only_after_shortage_and_confirms_explicit_equip(mode)
             equips.append(body)
             if mode == "equip_shield":
                 offhand = bag.pop()
-            elif mode in {"make_sticks", "with_sticks"}:
+            elif new_pick_request and not mode.startswith("old_pick_"):
                 assert bag[-1] == fresh
                 held = fresh
             result = {"held": held}
@@ -4694,15 +4705,16 @@ def test_craft_gear_reuses_only_after_shortage_and_confirms_explicit_equip(mode)
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         tools = McToolset(bot)
-        result = json.loads(tools.mc_skill_craft_gear(item, count=count, equip_slot=slot))
+        requested_slot = None if mode.endswith("_default") else slot
+        result = json.loads(tools.mc_skill_craft_gear(item, count=count, equip_slot=requested_slot))
 
     if mode == "short":
         assert result["error"] == "missing_ingredients" and not crafts and not equips
-    elif mode in {"make_sticks", "with_sticks", "old_pick_selected"}:
+    elif new_pick_request:
         assert result["ok"] is True and result["gained"] == 1 and not result.get("already_owned")
         assert crafts == (["stick", "stone_pickaxe"] if mode == "make_sticks" else ["stone_pickaxe"])
         assert len(equips) == 1
-        if mode == "old_pick_selected":
+        if mode.startswith("old_pick_"):
             assert result["equipped_slot"] is None and result["equipped_item"] == worn
             assert result["equip_error"]["code"] == "equip_unconfirmed"
         else:
@@ -4716,6 +4728,8 @@ def test_craft_gear_reuses_only_after_shortage_and_confirms_explicit_equip(mode)
             assert result["ok"] is True and result["equipped_slot"] == slot
             if slot:
                 assert offhand["name"] == "shield"
+            if mode == "owned_worn":
+                assert result["owned_items"] == [worn]
 
 
 @pytest.mark.parametrize("placement", ["new", "reused", "rejected", "timed_out", "unreleased", "surface"])

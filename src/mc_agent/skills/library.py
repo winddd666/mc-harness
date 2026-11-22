@@ -4407,6 +4407,15 @@ class MacroSkills:
                     "ok": True, "already_owned": True, "item": requested_item, "owned_count": owned,
                     "gained": 0, "inventory": inventory, "message": f"已持有 {requested_item}×{owned}，本次合成增加 0 件。",
                 }
+                if not equip_slot:
+                    try:
+                        snapshot = scoped.bot.inventory()
+                    except (ApiError, _SkillDeadline, httpx.HTTPError):
+                        snapshot = {}
+                    rows = [*(snapshot.get("items") or []), *(snapshot.get("armor") or {}).values(), snapshot.get("offhand")]
+                    owned_items = [row for row in rows if isinstance(row, dict) and _clean_block(row.get("name")) == requested_item]
+                    if owned_items:
+                        result["owned_items"] = owned_items
 
         craft_timed_out = session is not None and session.timed_out
         if session is not None and owns_budget and craft_timed_out:
@@ -4432,20 +4441,13 @@ class MacroSkills:
             slot = equip_slot or (None if already_owned else DEFAULT_EQUIP_SLOTS.get(equip_item))
             result["equipped_slot"] = None
             blocked = next((row["error"] for row in cleanup if row.get("error") in interruptions), None)
-            if slot and equip_slot:
+            if slot:
                 if blocked:
                     result["equip_error"] = {"code": blocked, "message": "装备请求因动作中断而未执行。"}
                 else:
                     result.update(scoped._equip_crafted_gear(equip_item, slot, already_owned=already_owned))
                 if already_owned and result.get("equip_error"):
                     result.update(ok=False, requires_replan=True)
-            elif slot and not blocked:
-                try:
-                    equipped = scoped.bot.call("equip", {"item": equip_item, "slot": slot})
-                except (ApiError, _SkillDeadline):
-                    equipped = None
-                if equipped:
-                    result["equipped_slot"] = slot
         if session is not None and owns_budget:
             if session.timed_out:
                 session.stop_pending()
@@ -4475,7 +4477,14 @@ class MacroSkills:
             return {"equip_error": {"code": code, "message": f"无法确认 {item} 已装备到 {slot}。"}}
         if _clean_block(observed.get("name")) != item:
             return {"equip_error": {"code": "equip_unconfirmed", "message": f"复查 {slot} 时未见 {item}。"}}
-        if not already_owned and observed.get("durability_used"):
+        durability = observed.get("durability")
+        if isinstance(durability, (list, tuple)) and len(durability) >= 2:
+            remaining, maximum = durability[:2]
+        else:
+            remaining, maximum = observed.get("durability_remaining"), observed.get("max_durability")
+        worn = isinstance(remaining, (int, float)) and isinstance(maximum, (int, float)) and remaining < maximum
+        used = (observed.get("durability_used"), observed.get("damage"))
+        if not already_owned and (worn or any(isinstance(value, (int, float)) and value > 0 for value in used)):
             return {
                 "equipped_item": observed,
                 "equip_error": {"code": "equip_unconfirmed", "message": f"{slot} 仍是已磨损的 {item}，请核对新制品。"},
