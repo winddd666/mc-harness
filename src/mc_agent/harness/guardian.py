@@ -284,6 +284,7 @@ class GenerationGuard:
     COMBAT_RECOVERY_BUDGET_S = 8.0
     COMBAT_COVER_BUDGET_S = 3.5
     INTERRUPTED_BUNKER_RETRY_S = 4.0
+    SPAWN_HURT_RESUME_S = 4.0
     UNSTICK_BUDGET_S = 30.0
     FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
@@ -347,6 +348,7 @@ class GenerationGuard:
         self.failures = 0
         self.disconnected = False
         self.retry_after_ready = False
+        self._pending_spawn_hurts: tuple[tuple[Any, Any], float, list[dict[str, Any]]] | None = None
         self._in_reflex = False
         self._consecutive_flees = 0
         self._shield_only_streak = 0
@@ -1339,6 +1341,7 @@ class GenerationGuard:
                     self._last_water_escape_failed = False
                     self._blocked_bunker = None
                     self._last_interrupted_bunker = None
+                    self._pending_spawn_hurts = None
                     self._blocked_flee_site = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
@@ -1878,10 +1881,29 @@ class GenerationGuard:
                         status = current
                         hurts = post_spawn_hurts
                         life_transition_pending = False
+            if life_transition_pending and status.get("alive") is not False:
+                combat_hurts = [
+                    h for h in post_spawn_hurts
+                    if str(h.get("source") or "").strip().lower() in MELEE_HURT_SOURCES | RANGED_HURT_SOURCES
+                ]
+                if combat_hurts:
+                    life = (status.get("dimension"), status.get("last_death"))
+                    self._pending_spawn_hurts = (life, now + self.SPAWN_HURT_RESUME_S, combat_hurts)
 
         health = status.get("health")
-        dropped = isinstance(health, (int, float)) and self.previous_health is not None and health < self.previous_health - 0.2
         ready = bool(status.get("ready", status.get("alive", True)))
+        resumed_spawn_hurt = False
+        if self._pending_spawn_hurts is not None and not life_transition_pending:
+            life, deadline, pending_hurts = self._pending_spawn_hurts
+            if now >= deadline or life != (status.get("dimension"), status.get("last_death")) or status.get("alive") is False:
+                self._pending_spawn_hurts = None
+            elif ready:
+                self._pending_spawn_hurts = None
+                if isinstance(health, (int, float)) and 0 < health < 20.0:
+                    hurts = [*pending_hurts, *hurts]
+                    resumed_spawn_hurt = True
+                    self.events.emit("guardian.spawn_hurt_resumed", event_seqs=[h["seq"] for h in pending_hurts])
+        dropped = isinstance(health, (int, float)) and self.previous_health is not None and health < self.previous_health - 0.2
         disconnected = self.previous_ready is True and not ready
         self.previous_ready = ready
         self.previous_health = float(health) if isinstance(health, (int, float)) else None
@@ -2083,6 +2105,7 @@ class GenerationGuard:
             or drowning
             or sustained_shield_damage
             or urgent_melee_hurt
+            or resumed_spawn_hurt
             or (effective_combat_hurt and in_water)
             or (effective_combat_hurt and other_hurts and hp_cur <= 4.0)
             or no_water_reentry

@@ -2893,6 +2893,60 @@ def test_guardian_defends_current_life_when_spawn_and_hurt_share_a_poll(monkeypa
     assert retreats == ([zombie] if state == "ready" else [])
 
 
+@pytest.mark.parametrize("transition", ["same_life", "other_life", "stale", "healed", "fell_only"])
+def test_guardian_resumes_fresh_spawn_combat_hurt_once_when_world_becomes_ready(monkeypatch, transition):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    zombie = {"id": 44, "name": "zombie", "pos": [1.8, 61, 0.5], "dist": 1.3}
+    status = {"pos": [0.5, 61, 0.5], "health": 7, "food": 20, "dimension": "overworld", "last_death": {"t": 1},
+              "ready": False, "alive": True, "on_ground": True}
+    events = [
+        {"seq": 1, "type": "hurt", "source": "arrow"},
+        {"seq": 2, "type": "death"},
+        {"seq": 3, "type": "spawn"},
+        {"seq": 4, "type": "hurt", "source": "fall" if transition == "fell_only" else "mob_attack", "source_entity": zombie},
+    ]
+    retreats = []
+    emitted = []
+
+    class RespawnBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [event for event in events if event["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory" and status["ready"]:
+                return {"items": []}
+            pytest.fail(f"Unexpected respawn command: {action}")
+
+    def retreat(_state, attacker, _counts):
+        retreats.append(attacker)
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    guard = GenerationGuard(RespawnBot(), EventSink(emitted.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_try_emergency_bunker", lambda *_a, **_kw: None)
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    first = guard.poll()
+    assert "death_or_connection_changed" in first["reasons"] and first["actions"] == []
+
+    status["ready"] = True
+    if transition == "other_life":
+        status["last_death"] = {"t": 2}
+    if transition == "healed":
+        status["health"] = 20
+    clock[0] += 4.1 if transition == "stale" else 0.5
+    resumed = guard.poll()
+    assert (resumed is not None) is (transition == "same_life")
+    if resumed is not None:
+        assert resumed["reasons"] == ["fresh_hurt"] and resumed["requires_replan"]
+        assert resumed["event_seqs"] == []
+    clock[0] += 0.5
+    assert guard.poll() is None
+    assert retreats == ([zombie] if transition == "same_life" else [])
+    recorded = [event["event_seqs"] for event in emitted if event["type"] == "guardian.spawn_hurt_resumed"]
+    assert recorded == ([[4]] if transition == "same_life" else [])
+
+
 @pytest.mark.parametrize("recheck", ["grounded", "airborne", "changed_life", "loading", "occluded", "unknown"])
 def test_low_health_spawn_reacts_to_visible_melee_before_first_new_hit(monkeypatch, recheck):
     origin = [6152.5, 68, 8.5]
