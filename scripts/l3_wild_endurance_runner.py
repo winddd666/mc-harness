@@ -1972,8 +1972,7 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "extra_tools": (),
     },
     "probe_obsidian_portal": {
-        # A dedicated key keeps the fixture instructions out of the generic portal pre-ensure playbook.
-        "key": "probe_obsidian_portal",
+        "key": ENTER_NETHER,
         "title": "30分：采够 10 块黑曜石并搭建点亮下界传送门进入下界",
         "points": 30,
         "tier": 2,
@@ -1985,7 +1984,7 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
             "有 10 块黑曜石后，在干地调用 mc_skill_build_portal(enter=True) 建门、点火并穿门。"
         ),
         "extra_tools": ("mc_skill_build_portal",),
-        "advancement_id": "minecraft:story/enter_the_nether",
+        "advancement_id": ENTER_NETHER,
     },
 }
 
@@ -2097,6 +2096,7 @@ def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | N
         targets = (cur.CurriculumTarget(**target_kwargs),)
         remaining = int(spec.get("episodes", episodes))
     original = cur.select_next_target
+    portal_playbook = cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] if stage == "probe_obsidian_portal" else None
 
     def _wrapped(bot: Any, **kwargs: Any):
         nonlocal remaining
@@ -2107,8 +2107,14 @@ def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | N
                 if target.advancement_id not in completed:
                     if remaining is not None:
                         remaining -= 1
+                    if portal_playbook is not None:
+                        # Keep the standard key for material-progress accounting while the
+                        # supervisor uses the scene playbook for this focused episode.
+                        cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] = target
                     return target, frontier
             remaining = 0
+        if portal_playbook is not None:
+            cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] = portal_playbook
         return original(bot, **kwargs)
 
     cur.select_next_target = _wrapped
@@ -2588,7 +2594,7 @@ def main() -> int:
 
         protected_focus = {
             STRONGHOLD_STAGE: (FOLLOW_ENDER_EYE, ENTER_END),
-            "probe_obsidian_portal": ("probe_obsidian_portal",),
+            "probe_obsidian_portal": (ENTER_NETHER,),
         }.get(args.stage, ())
 
         class SceneFocusSupervisor(CurriculumSupervisor):
