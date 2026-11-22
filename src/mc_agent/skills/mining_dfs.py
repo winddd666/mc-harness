@@ -383,8 +383,20 @@ class _BudgetSession:
             except httpx.TimeoutException as exc:
                 if first_step_probe and attempt == 0 and self.deadline - time.monotonic() > 1.0:
                     continue
-                self.timeout_path = endpoint
                 dig_pos = (payload or {}).get("pos")
+                if (
+                    endpoint == "dig"
+                    and self.dug_count > 0
+                    and (self.deadline - time.monotonic()) > 12.0
+                    and isinstance(dig_pos, (list, tuple))
+                    and len(dig_pos) >= 3
+                ):
+                    try:
+                        self._call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                    except Exception:
+                        pass
+                    raise ApiError("dig_timeout", f"dig stalled at {_floor_pos(dig_pos)}", status_code=408) from exc
+                self.timeout_path = endpoint
                 if endpoint == "dig" and isinstance(dig_pos, (list, tuple)) and len(dig_pos) >= 3:
                     self.timeout_dig_pos = _floor_pos(dig_pos)
                     self.timeout_dig_read_s = read_timeout
@@ -407,17 +419,17 @@ class _BudgetSession:
 
 
 def normalize_dfs_strategy(raw: str | None = None) -> str:
-    """Resolve DFS strategy (default 'fishbone_scan'; also supports 'fishbone', 'v5', 'radar')."""
-    val = str(raw if raw is not None else os.environ.get("MC_DFS_STRATEGY", "fishbone_scan")).strip().lower()
+    """Resolve DFS strategy (default 'radar'; also supports 'fishbone_scan', 'fishbone', 'v5')."""
+    val = str(raw if raw is not None else os.environ.get("MC_DFS_STRATEGY", "radar")).strip().lower()
     if val in {"fishbone", "conservative", "classic", "strip"}:
         return "fishbone"
-    if val in {"fishbone_scan", "fishbone_plus", "fbscan", "scan", ""}:
+    if val in {"fishbone_scan", "fishbone_plus", "fbscan", "scan"}:
         return "fishbone_scan"
     if val in {"v5", "v4_fixed", "patched_v4", "moderate"}:
         return "v5"
-    if val in {"radar", "aggressive", "guided", "surgical"}:
+    if val in {"radar", "aggressive", "guided", "surgical", ""}:
         return "radar"
-    return "fishbone_scan"
+    return "radar"
 
 
 @dataclasses.dataclass
