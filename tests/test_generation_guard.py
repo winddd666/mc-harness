@@ -6335,6 +6335,63 @@ def test_magic_damage_with_visible_witch_retreats_from_the_witch(monkeypatch, wi
     assert retreats == ([(witch, True)] if witch_visible else [(None, False)])
 
 
+@pytest.mark.parametrize("ground", ["safe", "lava_drop"])
+def test_bunker_rejection_keeps_an_armed_witch_retreat_on_verified_ground(monkeypatch, ground):
+    from mc_agent.skills.combat_env import yaw_to_unit_xz
+
+    origin = [17029.1, 87, 29985.6]
+    witch = {"id": 255310, "name": "witch", "dist": 9.1, "pos": [17022, 87, 29991.3]}
+    status = {
+        "pos": origin, "dimension": "overworld", "health": 12.3, "food": 20,
+        "alive": True, "ready": True, "on_ground": True, "nearest_hostile": witch,
+    }
+    moves = []
+    yaw = 0.0
+
+    class LedgeBot:
+        def call(self, action, body=None, **kwargs):
+            nonlocal yaw
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hits = [
+                    {"seq": 1, "type": "hurt", "source": "magic"},
+                    {"seq": 2, "type": "hurt", "source_entity": witch},
+                ]
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if y == 86:
+                    return {"name": "stone" if ground == "safe" or (x, z) == (17029, 29985) else "lava"}
+                return {"name": "air"}
+            if action == "look":
+                yaw = body["yaw"]
+                return {"ok": True}
+            if action == "control":
+                moves.append(body)
+                dx, dz = yaw_to_unit_xz(yaw)
+                status["pos"] = [origin[0] + 2.1 * dx, origin[1], origin[2] + 2.1 * dz]
+                return {"ok": True}
+            pytest.fail(f"Unexpected action after an unsafe bunker: {action}")
+
+    guard = GenerationGuard(LedgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", lambda *_args, **_kwargs: {
+        "ok": False, "reason": "unsafe_floor", "floor_pos": [17029, 83, 29985], "floor_block": "lava",
+    })
+    monkeypatch.setattr(MacroSkills, "defend_or_flee", lambda *_args, **_kwargs: pytest.fail("unchecked retreat"))
+
+    incident = guard.poll()
+
+    bunker, retreat = incident["actions"]
+    assert bunker["result"]["reason"] == "unsafe_floor"
+    assert retreat["action"] == "combat_or_flee" and retreat["ok"] is (ground == "safe")
+    assert retreat["result"].get("reason") == (None if ground == "safe" else "no_safe_retreat")
+    assert len(moves) == (1 if ground == "safe" else 0)
+
+
 @pytest.mark.parametrize("respawned", [False, True])
 def test_failed_nether_cover_falls_back_to_checked_retreat_only_in_same_life(monkeypatch, respawned):
     from mc_agent.skills.combat_env import CombatEnv
@@ -6500,7 +6557,8 @@ def test_repeated_melee_hurt_skips_bunker_when_the_same_block_still_blocks_it(mo
 
     guard = GenerationGuard(NightBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=BunkerSkills())
 
-    def retreat(*_args):
+    def retreat(*_args, require_safe_footing):
+        assert require_safe_footing
         retreats.append(True)
         return {"ok": False, "mode": "flee", "reason": "no_safe_retreat"}
 

@@ -807,7 +807,7 @@ class GenerationGuard:
     def _defend_or_flee(
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
         *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True, cover_only: bool = False,
-        trident_attacker_id: int | None = None, verify_live_shooters: bool = False,
+        trident_attacker_id: int | None = None, verify_live_shooters: bool = False, require_safe_footing: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
@@ -833,7 +833,7 @@ class GenerationGuard:
             dimension == "overworld" and isinstance(skills, MacroSkills)
             and best_melee_weapon_in_inv(counts) is None and not self._inside_own_shaft()
         )
-        if cover_only or "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
+        if cover_only or require_safe_footing or "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
             nh_name, nh_distance, nh_id, nh_pos = self._extract_hostile_info(status)
             now = time.monotonic()
             recent_melee = now - self._last_melee_hurt_at < 4.0
@@ -1016,10 +1016,14 @@ class GenerationGuard:
         self._last_water_escape_failed = not (shore.get("ok") and (shore.get("result") or {}).get("in_water") is not True)
         return shore
 
-    def _try_emergency_bunker(self, status: dict[str, Any]) -> dict[str, Any] | None:
+    @staticmethod
+    def _bunker_site(status: dict[str, Any]) -> tuple[Any, Any, tuple[int, ...] | None]:
         pos = status.get("pos")
         tile = tuple(math.floor(coord) for coord in pos[:3]) if pos else None
-        site = (status.get("dimension"), status.get("last_death"), tile)
+        return status.get("dimension"), status.get("last_death"), tile
+
+    def _try_emergency_bunker(self, status: dict[str, Any]) -> dict[str, Any] | None:
+        site = self._bunker_site(status)
         if self._blocked_bunker is not None and self._blocked_bunker[0] == site:
             _, block_pos, obstacle = self._blocked_bunker
             try:
@@ -1034,6 +1038,7 @@ class GenerationGuard:
         action = self._action("emergency_bunker", lambda: self._skills().dig_safety_bunker(urgent=True))
         result = action.get("result") or {}
         reason = result.get("reason")
+        tile = site[2]
         if reason == "unsafe_floor":
             block_pos, obstacle = result.get("floor_pos"), result.get("floor_block")
         else:
@@ -2640,16 +2645,23 @@ class GenerationGuard:
                         bunker = self._try_emergency_bunker(status)
                     if bunker is not None:
                         actions.append(bunker)
+                    bunker_result = (bunker or {}).get("result") or {}
                     if bunker and bunker["ok"]:
                         self._consecutive_flees = 0
-                        bunker_result = bunker.get("result") or {}
                         if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
                             self._last_melee_hurt_at = float("-inf")
                             self._nether_melee_eat_defer_until = float("-inf")
                     else:
+                        unsafe_footing = bunker_result.get("reason") in {"unsafe_floor", "unsafe_open_side"} or (
+                            self._blocked_bunker is not None and self._blocked_bunker[0] == self._bunker_site(status)
+                        )
                         cf = self._action(
                             "combat_or_flee",
-                            lambda: self._defend_or_flee(status, attacker, counts, **({"ranged": True} if indirect_magic else {})),
+                            lambda: self._defend_or_flee(
+                                status, attacker, counts,
+                                **({"ranged": True} if indirect_magic else {}),
+                                **({"require_safe_footing": True} if unsafe_footing else {}),
+                            ),
                         )
                         actions.append(cf)
                         if isinstance(cf.get("result"), dict) and cf["result"].get("mode") == "flee":
