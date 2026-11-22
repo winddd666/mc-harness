@@ -270,7 +270,7 @@ def test_sonic_boom_prioritizes_warden_retreat_over_blocking_or_eating(monkeypat
     assert combat["result"]["mode"] == "warden_evade"
 
 
-@pytest.mark.parametrize("route", ["flat", "cliff", "warden_chased", "scan_failed"])
+@pytest.mark.parametrize("route", ["flat", "cliff", "warden_chased", "scan_failed", "missing_nearby_warden"])
 def test_warden_retreat_continues_past_ordinary_melee_clearance(route):
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
 
@@ -291,6 +291,9 @@ def test_warden_retreat_continues_past_ordinary_melee_clearance(route):
                 scans.append(body["radius"])
                 if route == "scan_failed" and body["radius"] == 24:
                     raise httpx.ReadTimeout("warden scan stalled")
+                if route == "missing_nearby_warden" and body["radius"] == 24:
+                    far_warden = {"id": 270256, "name": "warden", "pos": [17254.25, 55, 29988], "dist": 19.0}
+                    return {"entities": [far_warden]}
                 return {"entities": [warden]}
             if action == "get_block":
                 x, y, _ = body["pos"]
@@ -304,6 +307,7 @@ def test_warden_retreat_continues_past_ordinary_melee_clearance(route):
             elif action == "move_to":
                 motions.append(body["x"])
                 status["pos"] = [body["x"] + 0.95, body["y"], body["z"]]
+                status["nearest_hostile"] = {"id": warden["id"], "name": "warden", "dist": 8.2}
                 if route == "warden_chased":
                     warden["pos"] = [status["pos"][0] + 8.2, 55, 29988]
             else:
@@ -320,7 +324,7 @@ def test_warden_retreat_continues_past_ordinary_melee_clearance(route):
     retreat, = outcome["actions"]
     assert retreat.get("reason") == {
         "flat": None, "cliff": "warden_still_in_range", "warden_chased": "warden_still_in_range",
-        "scan_failed": "warden_clearance_unconfirmed",
+        "scan_failed": "warden_clearance_unconfirmed", "missing_nearby_warden": "warden_clearance_unconfirmed",
     }[route]
 
 
@@ -12122,7 +12126,7 @@ def test_flee_only_confirms_a_shaft_seal_after_both_cells_are_solid(monkeypatch,
 
 @pytest.mark.parametrize("terrain", [
     "wall", "fire", "unknown", "drifted_during_probe", "missed_landing", "respawned",
-    "live_shooter_covered", "shooter_flanked", "scan_timeout",
+    "live_shooter_covered", "shooter_flanked", "scan_timeout", "wall_removed_during_scan",
 ])
 def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing(terrain):
     from mc_agent.skills.combat_env import CombatEnv
@@ -12134,6 +12138,7 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
     shooter = [8.5, 64.0, 0.5]
     moves = []
     status_reads = []
+    wall_removed = False
 
     class CoverBot:
         def status(self):
@@ -12143,6 +12148,7 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
             return dict(status)
 
         def call(self, action, body=None, **kwargs):
+            nonlocal wall_removed
             if action == "status":
                 return self.status()
             if action == "events":
@@ -12152,11 +12158,14 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
             if action == "get_entities":
                 if terrain == "scan_timeout":
                     raise httpx.ReadTimeout("shooter scan was unavailable")
+                if terrain == "wall_removed_during_scan":
+                    assert len(moves) == 1
+                    wall_removed = True
                 current_shooter = [0.5, 64.0, -5.0] if terrain == "shooter_flanked" else shooter
                 return {"entities": [{"id": 44, "name": "pillager", "pos": current_shooter}]}
             if action == "get_block":
                 x, y, z = body["pos"]
-                if y in (64, 65) and 3 <= x <= 5 and 1 <= z <= 2:
+                if not wall_removed and y in (64, 65) and 3 <= x <= 5 and 1 <= z <= 2:
                     if terrain == "unknown":
                         raise httpx.ReadTimeout("cover voxel was not read")
                     return {"name": "fire" if terrain == "fire" else "stone"}
@@ -12176,7 +12185,9 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
         result = next(a["result"] for a in incident["actions"] if a["action"] == "combat_or_flee")
     else:
         result = CombatEnv(bot).seek_natural_cover(
-            shooter, verify_live_shooters=terrain in {"live_shooter_covered", "shooter_flanked", "scan_timeout"},
+            shooter, verify_live_shooters=terrain in {
+                "live_shooter_covered", "shooter_flanked", "scan_timeout", "wall_removed_during_scan",
+            },
         )
 
     if terrain in {"fire", "unknown", "drifted_during_probe"}:
@@ -12189,8 +12200,9 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
         if result["ok"]:
             assert result["mode"] == "natural_cover"
         else:
+            failed_rescan = terrain in {"shooter_flanked", "scan_timeout", "wall_removed_during_scan"}
             assert result["reason"] == (
-                "shooter_lanes_unconfirmed" if terrain in {"shooter_flanked", "scan_timeout"} else "cover_unconfirmed"
+                "shooter_lanes_unconfirmed" if failed_rescan else "cover_unconfirmed"
             )
             assert bool(result.get("respawned")) is (terrain == "respawned")
 

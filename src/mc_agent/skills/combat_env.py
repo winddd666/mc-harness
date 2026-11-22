@@ -2119,6 +2119,8 @@ class CombatEnv:
         if not isinstance(entities, list):
             return False
         shooters = ranged_retreat_positions(pos, entities, max_distance=16.0)
+        # A wall checked before the entity scan may have changed while the scan was in flight.
+        self.invalidate_block_cache()
         return bool(shooters) and all(self._blocks_shot_across_hitbox(pos, shooter) for _, shooter in shooters)
 
     def flee(
@@ -3340,16 +3342,20 @@ class SubcorticalInstinctController:
         hostiles = self._scan_live_hostiles(env, radius=24, timeout_s=0.4)
         if hostiles is None:
             return unconfirmed
-        wardens = [entity.get("pos") for entity in hostiles if _clean_block_name(entity.get("name")) == "warden"]
+        wardens = [entity for entity in hostiles if _clean_block_name(entity.get("name")) == "warden"]
+        nearest = after.get("nearest_hostile")
+        if isinstance(nearest, dict) and _clean_block_name(nearest.get("name")) == "warden":
+            nearest_id = nearest.get("id")
+            if nearest_id is None or not any(entity.get("id") == nearest_id for entity in wardens):
+                return unconfirmed
+        positions = [entity.get("pos") for entity in wardens]
         if any(
             not isinstance(point, (list, tuple)) or len(point) < 3
             or not all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in point[:3])
-            for point in wardens
+            for point in positions
         ):
             return unconfirmed
-        if not wardens and _clean_block_name((after.get("nearest_hostile") or {}).get("name")) == "warden":
-            return unconfirmed
-        distance = min((math.hypot(pos[0] - point[0], pos[2] - point[2]) for point in wardens), default=math.inf)
+        distance = min((math.hypot(pos[0] - point[0], pos[2] - point[2]) for point in positions), default=math.inf)
         if distance < WARDEN_EVADE_DISTANCE:
             return {"ok": False, "reason": "warden_still_in_range", "warden_distance": round(distance, 2)}
         return {"ok": True}
