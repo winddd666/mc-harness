@@ -2366,11 +2366,13 @@ class CombatEnv:
             and not status.get("in_water") and not status.get("submerged") and not status.get("in_lava")
         ):
             x, y, z = map(math.floor, pos[:3])
-            self._last_dry_bank = (
-                (x + 0.5, float(y), z + 0.5),
-                (status.get("dimension"), status.get("last_death")),
-                time.monotonic(),
-            )
+            bank = (x + 0.5, float(y), z + 0.5)
+            life = (status.get("dimension"), status.get("last_death"))
+            self._last_dry_bank = (bank, life, time.monotonic())
+            if self._stalled_water_shore is not None and (bank, life) == (
+                self._stalled_water_shore[0], self._stalled_water_shore[2],
+            ):
+                self._stalled_water_shore = None
 
     def _dry_bank_is_walkable(self, bank: Sequence[float]) -> bool:
         self.invalidate_block_cache()
@@ -2855,13 +2857,15 @@ class CombatEnv:
         if not still_wet and landed:
             self._stalled_water_shore = None
             self.remember_dry_bank(st_end)
-        elif still_wet and observed_end_pos and shore_target is not None and life == (st_end.get("dimension"), st_end.get("last_death")):
+        elif observed_end_pos and shore_target is not None and life == (st_end.get("dimension"), st_end.get("last_death")):
             tried_lip = "shore_lip_jump" in actions
+            lip_height = shore_target[1] - pos_end[1]
+            near_lip = math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
             stalled_below_lip = (
-                tried_lip and shore_target[1] - pos_end[1] >= 1.75
-                and math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
+                tried_lip and near_lip and lip_height >= (1.75 if still_wet else 0.5)
+                and (still_wet or "shore_landing" in actions)
             )
-            no_approach = (tried_lip or shore_path_unreachable) and (
+            no_approach = still_wet and (tried_lip or shore_path_unreachable) and (
                 math.dist(search_pos[:3], shore_target) - math.dist(pos_end[:3], shore_target) < 0.5
             )
             if stalled_below_lip or no_approach:

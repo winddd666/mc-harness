@@ -12739,6 +12739,55 @@ def test_water_escape_reselects_a_shore_after_a_stalled_path(followup, monkeypat
     assert attempts == [blocked_bank, alternative_bank if followup == "stalled" else blocked_bank]
 
 
+@pytest.mark.parametrize("reentry", ["stalled", "confirmed_landing", "new_life"])
+def test_water_escape_changes_bank_after_dry_airborne_lip_attempt(monkeypatch, reentry):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    bank = [-5211.5, 24, -7783.5]
+    alternate = [-5209.5, 23, -7784.5]
+    below_bank = [-5211.5, 23.5, -7784.3]
+    status = {
+        "pos": [-5211.5, 23, -7784.3], "dimension": "overworld", "last_death": {"t": 1},
+        "in_water": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    attempts = []
+
+    class CavePoolBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                return self.status()
+            if endpoint == "move_to":
+                target = [body[key] for key in ("x", "y", "z")]
+                attempts.append(target)
+                if len(attempts) > 2:
+                    status.update(pos=target, in_water=False, on_ground=True)
+            if endpoint == "control" and body.get("forward") and len(attempts) == 1:
+                status.update(pos=below_bank, in_water=False, on_ground=False)
+            return {"ok": True}
+
+    env = CombatEnv(CavePoolBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda _pos, *, excluded_shores, **_: (
+        alternate if tuple(bank) in excluded_shores else bank
+    ))
+
+    first = env.escape_deep_water_to_shore()
+    assert first["reason"] == "shore_landing_unconfirmed" and first["in_water"] is False
+    assert attempts == [bank, bank]
+    if reentry == "confirmed_landing":
+        env.remember_dry_bank({**status, "pos": bank, "on_ground": True})
+    if reentry == "new_life":
+        status["last_death"] = {"t": 2}
+    status.update(pos=[-5211.5, 23, -7784.3], in_water=True)
+
+    second = env.escape_deep_water_to_shore()
+    assert second["ok"] is True
+    assert attempts[-1] == (alternate if reentry == "stalled" else bank)
+    assert ("shore_lip_stalled" in second["actions"]) is (reentry == "stalled")
+
+
 @pytest.mark.parametrize("terrain", ["step", "deep_drop", "lava", "low_ceiling"])
 def test_grounded_retreat_can_step_down_one_verified_block_in_a_tunnel(terrain):
     from mc_agent.skills.combat_env import CombatEnv
