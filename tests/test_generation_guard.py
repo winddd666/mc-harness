@@ -11382,6 +11382,56 @@ def test_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch, tool, ac
     assert guard._water_hurt_streak == 0
 
 
+@pytest.mark.parametrize("landing, expected_error", [
+    ("shore", None),
+    ("respawned", "respawned"),
+    ("unready", "shore_landing_unconfirmed"),
+    ("airborne", "shore_landing_unconfirmed"),
+    ("wet", "water_escape_failed"),
+    ("status_timeout", "shore_landing_unconfirmed"),
+])
+def test_unstick_water_success_requires_confirmed_same_life_landing(landing, expected_error):
+    status = {
+        "pos": [-7420.7, 61.5, 2631.7], "health": 12, "oxygen": 300, "last_death": {"t": 1},
+        "dimension": "overworld", "ready": True, "alive": True, "on_ground": False, "in_water": True,
+    }
+    finished = False
+
+    class SwimBot:
+        def call(self, action, body=None, **kwargs):
+            assert action == "status"
+            if finished and landing == "status_timeout":
+                raise httpx.ReadTimeout("landing status unavailable")
+            return dict(status)
+
+    bot = SwimBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def unstick():
+        nonlocal finished
+        start = bot.call("status", method="GET")
+        assert start["in_water"]
+        status.update(pos=[-7422.5, 64, 2630.5], in_water=False, on_ground=True)
+        if landing == "respawned":
+            status.update(pos=[-7421.5, 64.1, 2805.5], ready=False, last_death={"t": 2})
+        elif landing == "unready":
+            status["ready"] = False
+        elif landing == "airborne":
+            status["on_ground"] = False
+        elif landing == "wet":
+            status["in_water"] = True
+        finished = True
+        return json.dumps({"ok": True, "escaped_water": True, "in_water": False, "pos_after": status["pos"]})
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_unstick", unstick))
+
+    assert result["ok"] is (expected_error is None)
+    assert result["escaped_water"] is result["ok"]
+    if expected_error:
+        assert result["requires_replan"] is True and result["error"]["code"] == expected_error
+        assert result.get("respawned", False) is (landing == "respawned")
+
+
 @pytest.mark.parametrize("distance", [4.0, 8.0])
 def test_surface_scout_hands_off_water_near_drowned_before_damage(monkeypatch, distance):
     import threading

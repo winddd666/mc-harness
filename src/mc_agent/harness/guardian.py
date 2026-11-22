@@ -3172,7 +3172,7 @@ class GenerationGuard:
         """Intercept threats during actor macros, or watch immediate survival hazards during an attack."""
         orig_call = getattr(self.raw_bot, "call", None)
         if not callable(orig_call) or self._in_reflex:
-            yield
+            yield {}
             return
 
         actor_call = orig_call
@@ -3185,6 +3185,7 @@ class GenerationGuard:
         attack_target_id: int | None = None
         actor_thread_id = threading.get_ident()
         pending_trigger: list[ThreatTrigger] = []
+        unstick_start: dict[str, Any] = {}
         watch_wall_damage = check_support_dig or watch_mining_water
         watch_low_oxygen = watch_mining_water or check_unstick_exit
 
@@ -3469,7 +3470,10 @@ class GenerationGuard:
                     body = {**body, "timeout": remaining_ms}
                 return actor_call(path, body, **kwargs)
             if is_readonly_poll:
-                return actor_call(path, body, **kwargs)
+                observed = actor_call(path, body, **kwargs)
+                if check_unstick_exit and clean_path == "status" and not unstick_start and isinstance(observed, dict):
+                    unstick_start.update(observed)
+                return observed
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
             if (
@@ -3560,13 +3564,16 @@ class GenerationGuard:
 
         try:
             self.raw_bot.call = _wrapped_call
-            yield
+            yield unstick_start
         finally:
             stop_evt.set()
             self.raw_bot.call = orig_call
             if watcher_thread is not None:
                 # Finish a dispatched /stop before issuing a recovery mutation.
-                wait_for_stop = pending_trigger and (watch_attack_emergency or pending_trigger[0].get("primary_type") == "in_wall")
+                wait_for_stop = pending_trigger and (
+                    watch_attack_emergency or pending_trigger[0].get("primary_type") == "in_wall"
+                    or pending_trigger[0].get("source") == "tool_water_threat"
+                )
                 watcher_thread.join(timeout=1.55 if wait_for_stop else 0.05)
 
     def _fresh_tool_hurt_event(self, call: Callable[..., dict[str, Any]]) -> dict[str, Any] | None:
@@ -4016,6 +4023,38 @@ class GenerationGuard:
         self.events.emit("guardian.support_dig_blocked", target=list(target), pos=pos)
         return "unsafe_landing"
 
+    def _confirm_unstick_water_exit(self, receipt: str, before: dict[str, Any]) -> str:
+        try:
+            result = json.loads(receipt)
+        except (TypeError, ValueError):
+            return receipt
+        if not isinstance(result, dict) or result.get("ok") is not True or result.get("escaped_water") is not True:
+            return receipt
+        try:
+            after = self.bot.call("status", method="GET", timeout_s=0.6, allow_reauth=False)
+        except (ApiError, httpx.HTTPError):
+            after = {}
+        respawned = after.get("alive") is False or (
+            bool(before) and after.get("last_death") is not None and after["last_death"] != before.get("last_death")
+        )
+        if (
+            not respawned and before.get("in_water") is True and after.get("ready") is True
+            and after.get("in_water") is False and not after.get("in_lava") and not after.get("submerged")
+            and after.get("on_ground") is True
+            and after.get("dimension") == before.get("dimension")
+        ):
+            return receipt
+        code = "water_escape_failed" if after.get("in_water") is True else "shore_landing_unconfirmed"
+        if respawned:
+            code = "respawned"
+        message = "脱水期间角色死亡或重生，请按最新状态重新规划。" if respawned else "脱困结束后未确认登岸，请先检查当前状态。"
+        return json.dumps({
+            **result, "ok": False, "escaped_water": False, "requires_replan": True,
+            "in_water": after.get("in_water"), "pos_after": after.get("pos") or result.get("pos_after"),
+            **({"respawned": True} if respawned else {}),
+            "error": {"code": code, "message": message},
+        }, ensure_ascii=False)
+
     def run_tool_with_reflex(self, tool_name: str, invoke_fn: Callable[[], str]) -> str:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
         is_attack = tool_name == "mc_attack"
@@ -4047,11 +4086,11 @@ class GenerationGuard:
                 check_combat_step=tool_name == "mc_skill_combat",
                 check_support_dig=tool_name in {"mc_dig", "mc_skill_staircase"},
                 check_food_use=tool_name == "mc_use_item",
-            ):
+            ) as unstick_start:
                 result = invoke_fn()
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _RecoveryBudgetExceeded
-                return result
+            return self._confirm_unstick_water_exit(result, unstick_start) if is_unstick else result
         except _UnsafeFoodUse:
             return json.dumps({
                 "ok": False,
