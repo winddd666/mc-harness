@@ -2016,9 +2016,11 @@ class CurriculumSupervisor:
                 return trade_id
 
         # 2) Lava pool within <= 32m + bucket/iron ready -> 15pt `story/lava_bucket`
+        # Never interrupt an active `enter_the_nether` portal build/obsidian harvest.
         lava_id = "minecraft:story/lava_bucket"
         if (
             lava_id != current_key
+            and current_key != "minecraft:story/enter_the_nether"
             and lava_id not in completed_advs
             and self.cooldowns.get(lava_id, 0.0) <= time.monotonic()
             and (has_bucket or iron_equiv >= 3)
