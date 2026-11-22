@@ -14341,6 +14341,66 @@ def test_unstick_preserves_a_roof_that_holds_back_fluid(above_roof, in_water, er
         assert digs == []
 
 
+@pytest.mark.parametrize(("adjacent", "error_code"), [
+    ("lava", "unsafe_lava_dig"), ("flowing_lava", "unsafe_lava_dig"),
+    ("unknown", "unstick_dig_unverified"), ("dry", None), ("diagonal_lava", None),
+])
+def test_nether_unstick_preserves_blocks_holding_back_lava_from_the_side(adjacent, error_code):
+    target = (1493, 23, 1456)
+    hazard = (1493, 23, 1457)
+    blocks = {target: "netherrack"}
+    if adjacent in {"lava", "flowing_lava"}:
+        blocks[hazard] = adjacent
+    elif adjacent == "diagonal_lava":
+        blocks[(1494, 23, 1457)] = "lava"
+    digs = []
+    moves = []
+    events = []
+
+    class BastionBot:
+        def status(self):
+            return self.call("status", method="GET")
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {
+                    "pos": [1493.5, 21, 1456.5], "on_ground": True, "dimension": "the_nether",
+                    "in_lava": False, "ready": True, "alive": True,
+                }
+            if action == "events":
+                return {"events": []}
+            if action == "get_block":
+                pos = tuple(body["pos"])
+                if adjacent == "unknown" and pos == hazard:
+                    raise httpx.ReadTimeout("could not read the side of the block")
+                name = blocks.get(pos, "netherrack" if pos[1] <= 20 else "air")
+                return {"name": name, "diggable": name == "netherrack"}
+            if action == "dig":
+                cell = tuple(body["pos"])
+                digs.append(cell)
+                blocks.pop(cell, None)
+                return {"ok": True, "dug": "netherrack"}
+            if action == "control":
+                moves.append(body)
+            return {"ok": True}
+
+    bot = BastionBot()
+    skills = MacroSkills(bot)
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_unstick", lambda: json.dumps(skills.unstick())))
+
+    if error_code is None:
+        assert result["ok"] and digs == [target] and moves
+    else:
+        assert result["error"]["code"] == error_code and result["requires_replan"]
+        assert result["error"]["target"] == list(target)
+        assert digs == [] and moves == []
+        assert blocks[target] == "netherrack"
+    if adjacent in {"lava", "flowing_lava"}:
+        blocked, = [event for event in events if event["type"] == "guardian.lava_dig_blocked"]
+        assert blocked["target"] == list(target) and blocked["lava_pos"] == list(hazard)
+
+
 @pytest.mark.parametrize(("tool", "terrain"), [
     ("mc_dig", "deep_drop"), ("mc_dig", "shallow_drop"), ("mc_dig", "lava"),
     ("mc_dig", "airborne_lava"), ("mc_dig", "offset_lava"), ("mc_dig", "airborne_side_dig"),

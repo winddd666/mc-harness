@@ -175,7 +175,7 @@ class _UnsafeCreeperAttack(BaseException):
 
 
 class _UnsafeDig(BaseException):
-    """Unwind a dig that would expose the bot to an unsafe drop or overhead fluid."""
+    """Unwind a dig that would expose the bot to an unsafe drop or fluid."""
 
 
 class _MiningLandingDenied(ApiError):
@@ -5011,7 +5011,7 @@ class GenerationGuard:
                 if pending_trigger:
                     raise ReflexPreempted(pending_trigger[0])
                 if dig_hazard:
-                    raise _UnsafeDig(dig_hazard)
+                    raise _UnsafeDig(dig_hazard, list(body["pos"]))
             unstick_before = None
             if (
                 check_unstick_exit and clean_path == "control" and isinstance(body, dict)
@@ -5827,17 +5827,29 @@ class GenerationGuard:
         ):
             return None
 
-        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.0)
+        deadline = time.monotonic() + 1.0
+        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
         env = CombatEnv(probe_bot)
+        check_nether_lava = (
+            check_roof and str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+            and not any(status.get(key) for key in ("in_lava", "in_water", "submerged"))
+        )
         try:
             if check_roof and status.get("on_ground") is True:
                 fluid = env.fluid_above_headroom(pos, target)
                 if fluid == "lava" or (fluid == "water" and not status.get("in_water") and not status.get("submerged")):
                     self.events.emit(f"guardian.{fluid}_roof_dig_blocked", target=list(target), pos=pos)
                     return f"unsafe_{fluid}_roof"
+            if check_nether_lava:
+                lava = env.lava_at_unstick_opening(pos, target, deadline=deadline)
+                if lava is not None:
+                    self.events.emit("guardian.lava_dig_blocked", target=list(target), lava_pos=list(lava), pos=pos)
+                    return "unsafe_lava_dig"
             if not check_support or env.can_remove_footing(pos, target):
                 return None
-        except _RecoveryBudgetExceeded:
+        except (_RecoveryBudgetExceeded, _TerrainProbeExpired):
+            if check_nether_lava:
+                return "unstick_dig_unverified"
             if not check_support:
                 return None
         self.events.emit("guardian.support_dig_blocked", target=list(target), pos=pos)
@@ -5923,7 +5935,7 @@ class GenerationGuard:
         deadline = time.monotonic() + budget_s - 2.0 if budget_s is not None else None
         dig_progress: dict[str, Any] = {}
         last_work_action: dict[str, Any] | None = (
-            {} if tool_name in MINING_WATER_WATCH_TOOLS or tool_name == "mc_skill_harvest_logs" else None
+            {} if is_unstick or tool_name in MINING_WATER_WATCH_TOOLS or tool_name == "mc_skill_harvest_logs" else None
         )
         try:
             with self._intercept_bot_calls(
@@ -5969,12 +5981,15 @@ class GenerationGuard:
             message = {
                 "unsafe_lava_roof": "头顶待挖方块上方有岩浆，请从侧面寻找脱困路线。",
                 "unsafe_water_roof": "头顶待挖方块上方有水，请从侧面寻找脱困路线。",
+                "unsafe_lava_dig": "待挖方块旁有岩浆，请保留挡浆方块，改走已确认干燥的出口。",
+                "unstick_dig_unverified": "暂时无法确认待挖方块周围有无岩浆，请保留该方块并改走干燥出口。",
                 "unsafe_landing": "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。",
             }[code]
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
-                "error": {"code": code, "message": message},
+                "error": {"code": code, "message": message, "target": error.args[1]},
+                **({"partial_progress": True, **dig_progress} if dig_progress else {}),
             }, ensure_ascii=False)
         except _MiningLandingDenied as error:
             return json.dumps({

@@ -738,6 +738,24 @@ class CombatEnv:
             return "water"
         return None
 
+    def lava_at_unstick_opening(
+        self, pos: Sequence[float], target: Sequence[int], *, deadline: float,
+    ) -> tuple[int, int, int] | None:
+        """Check the faces that could let lava flow into a nearby opening before digging it."""
+        x, y, z = pos[:3]
+        tx, ty, tz = target[:3]
+        feet_y = math.floor(y + 0.05)
+        if not feet_y <= ty <= feet_y + 2 or not any(
+            abs(tx - bx) + abs(tz - bz) <= 1 for bx, bz in _hitbox_columns(x, z)
+        ):
+            return None
+        neighbors = [(tx, ty + 1, tz)]
+        neighbors.extend((tx + dx, ty, tz + dz) for dx, dz in CARDINAL_VECTORS.values())
+        for cell in neighbors:
+            if _is_lava_block(self._get_block_name(*cell, strict=True, deadline=deadline)):
+                return cell
+        return None
+
     def can_remove_footing(self, pos: Sequence[float], target: Sequence[int]) -> bool:
         """Allow ordinary digs and check the landing for a dig through the current floor."""
         x, y, z = pos[:3]
