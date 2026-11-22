@@ -11176,6 +11176,7 @@ def test_unstick_preserves_a_roof_that_holds_back_fluid(above_roof, in_water, er
     ("mc_dig", "side_dig"), ("mc_dig", "edge_support"), ("mc_dig", "edge_dig"),
     ("mc_skill_staircase", "deep_drop"), ("mc_skill_staircase", "shallow_drop"),
     ("mc_skill_staircase", "dripstone"), ("mc_skill_staircase", "side_dig"),
+    ("mc_skill_mine_dfs", "deep_drop"), ("mc_skill_mine_dfs", "shallow_drop"), ("mc_skill_mine_dfs", "side_dig"),
 ])
 def test_dig_checks_the_landing_before_removing_support(tool, terrain):
     from mc_agent.harness.mc_tools import McToolset
@@ -12352,7 +12353,7 @@ def test_mining_watcher_waits_only_for_confirmed_occluded_hostiles(monkeypatch, 
 
 
 @pytest.mark.parametrize("tool, action, body, oxygen", [
-    ("mc_skill_mine_dfs", "dig", {"pos": [41012, 21, 11034]}, 110),
+    ("mc_skill_mine_dfs", "dig", {"pos": [41013, 22, 11034]}, 110),
     ("mc_skill_mine_blocks", "dig", {"pos": [41012, 21, 11034], "stop_on": ["death"]}, 110),
     ("mc_skill_mine_blocks", "dig", {"pos": [41012, 21, 11034], "stop_on": ["death"]}, 285),
     ("mc_skill_unstick", "control", {"jump": True, "ms": 900, "stop_on": ["death"]}, 110),

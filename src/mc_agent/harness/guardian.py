@@ -4448,7 +4448,7 @@ class GenerationGuard:
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
                 check_combat_step=tool_name == "mc_skill_combat",
-                check_support_dig=tool_name in {"mc_dig", "mc_skill_staircase"},
+                check_support_dig=tool_name in {"mc_dig", "mc_skill_staircase", "mc_skill_mine_dfs"},
                 check_food_use=tool_name == "mc_use_item",
             ) as unstick_start:
                 result = invoke_fn()
