@@ -1165,6 +1165,59 @@ def scene_dimension(stage: str) -> str:
     return "the_nether" if stage in NETHER_STAGES else "overworld"
 
 
+def portal_crossing_receipt(result: Any) -> dict[str, Any] | None:
+    """Extract a confirmed crossing from a portal tool receipt."""
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return None
+    if not isinstance(result, dict) or (
+        result.get("ok") is not True
+        or result.get("portal_ignited") is not True
+        or result.get("entered_nether") is not True
+        or str(result.get("dimension") or "").removeprefix("minecraft:") != "the_nether"
+    ):
+        return None
+    return {
+        "placed_obsidian": result.get("placed_obsidian"),
+        "reused_existing_portal": result.get("reused_existing_portal") is True,
+        "portal_origin": result.get("portal_origin"),
+        "entry_pos": result.get("entry_pos"),
+    }
+
+
+def portal_advancement_confirmed(summary: dict[str, Any]) -> bool:
+    return ENTER_NETHER in (summary.get("score_breakdown") or {}) or any(
+        ENTER_NETHER in (episode.get("gained_advancements") or [])
+        or (episode.get("target") == ENTER_NETHER and episode.get("objective_verified") is True)
+        for episode in (summary.get("episodes") or [])
+    )
+
+
+def verify_portal_advancement(bot: Any, summary: dict[str, Any]) -> dict[str, str]:
+    """Read the advancement once after a confirmed crossing when course scoring did not see it."""
+    if portal_advancement_confirmed(summary):
+        return {"status": "confirmed"}
+    try:
+        result = bot.call(
+            "advancements", {"ids": [ENTER_NETHER], "include_criteria": False},
+            timeout_s=2.0, allow_reauth=False,
+        )
+    except Exception as exc:
+        return {"status": "unavailable", "error": str(getattr(exc, "code", None) or type(exc).__name__)}
+    rows = result.get("advancements") if isinstance(result, dict) and result.get("ready") is not False else None
+    if not isinstance(rows, list):
+        return {"status": "unavailable", "error": "invalid_response"}
+    confirmed = any(
+        isinstance(row, dict)
+        and row.get("id") in (ENTER_NETHER, ENTER_NETHER.removeprefix("minecraft:"))
+        and row.get("status") == "completed"
+        for row in rows
+    )
+    return {"status": "confirmed" if confirmed else "missing"}
+
+
 def _fixture_position(stage: str, x: float, y: float, z: float) -> tuple[float, float, float]:
     height = PROBE_HEIGHTS[stage] if stage in PROBE_HEIGHTS else round(y)
     return math.floor(x) + 0.5, float(height), math.floor(z) + 0.5
@@ -2519,6 +2572,8 @@ def main() -> int:
             return False
 
         scene_state: dict[str, Any] = {"sup": None}
+        portal_calls: set[str] = set()
+        portal_crossing: dict[str, Any] | None = None
         portal_guard = (
             OverworldProgressGuard(bot, bot_name, scene)
             if args.day1 or args.stage in {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE}
@@ -2546,7 +2601,18 @@ def main() -> int:
             cur.select_next_target = _select_guarded_target
 
         def _guard_scene_anchor(ev: dict[str, Any]) -> None:
+            nonlocal portal_crossing
             kind = ev.get("type")
+            if scene.stage == "probe_obsidian_portal":
+                call_id = ev.get("call_id")
+                function = ev.get("function") or {}
+                if kind == "tool.started" and call_id and function.get("name") == "mc_skill_build_portal":
+                    portal_calls.add(call_id)
+                elif kind == "tool.completed" and call_id in portal_calls:
+                    portal_calls.remove(call_id)
+                    receipt = portal_crossing_receipt(ev.get("result"))
+                    if receipt and (portal_crossing is None or portal_crossing["reused_existing_portal"]):
+                        portal_crossing = receipt
             if portal_guard is not None and kind in (
                 "curriculum.pre_ensure.started", "curriculum.pre_ensure.completed", "run.started", "run.finished",
             ):
@@ -2691,6 +2757,9 @@ def main() -> int:
             "guardian_totals": guardian_totals,
             "curriculum_summary": summary,
         }
+        if portal_crossing is not None:
+            payload["scene"]["portal_crossing"] = portal_crossing
+            payload["scene"]["portal_advancement"] = verify_portal_advancement(bot, summary)
         if village_xz is not None:
             vx, vz = village_xz
             payload["scene"]["village"] = {"x": vx, "z": vz, "spawn_distance_m": round(math.hypot(sx - vx, sz - vz), 2)}

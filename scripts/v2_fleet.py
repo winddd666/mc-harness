@@ -531,6 +531,8 @@ class BotRow:
     connection_changes: int = 0
     mixed_guardian_incidents: int = 0
     http_429_retries: int = 0
+    portal_crossing: dict[str, Any] | None = None
+    portal_advancement: str = ""
 
     @property
     def gained_short(self) -> list[str]:
@@ -575,6 +577,12 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     cs = summary.get("curriculum_summary")
     if not isinstance(cs, dict) or not cs:
         cs = summary
+    scene_meta = summary.get("scene") or {}
+    scene_stage = str(scene_meta.get("stage") or "")
+    stage = scene_stage or _stage_from_dirname(name)
+    portal_crossing = scene_meta.get("portal_crossing")
+    if not isinstance(portal_crossing, dict) or not portal_crossing:
+        portal_crossing = None
     episodes = cs.get("episodes") or summary.get("episodes") or []
     recorded_scores = (cs.get("final_score"), summary.get("final_score"), cs.get("current_score"))
     score_value = next((value for value in recorded_scores if value not in (None, "")), None)
@@ -636,6 +644,13 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 dt = max(0.0, el - st_info[0]) if st_info else float(ev.get("duration") or 0.0)
                 tool_calls[tname] += 1
                 payload = _decode_payload(ev.get("result") if "result" in ev else ev.get("output"))
+                if (
+                    stage == "probe_obsidian_portal" and tname == "mc_skill_build_portal"
+                    and (portal_crossing is None or portal_crossing.get("reused_existing_portal"))
+                ):
+                    receipt = _load_runner_module().portal_crossing_receipt(payload)
+                    if receipt:
+                        portal_crossing = receipt
                 if payload.get("preempted_by_reflex") is True:
                     preemption_receipts += 1
                 elif payload.get("ok") is False:
@@ -668,9 +683,9 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     score = int(score_value) if score_value is not None and status != "not_ready" else None
 
     slow_calls.sort(reverse=True)
-    scene_meta = summary.get("scene") or {}
-    scene_stage = str(scene_meta.get("stage") or "")
-    stage = scene_stage or _stage_from_dirname(name)
+    portal_advancement = str((scene_meta.get("portal_advancement") or {}).get("status") or "")
+    if portal_crossing and not portal_advancement:
+        portal_advancement = "confirmed" if _load_runner_module().portal_advancement_confirmed(cs) else "unconfirmed"
     scene_anchor = ""
     if isinstance(scene_meta.get("anchor"), dict):
         a = scene_meta["anchor"]
@@ -699,6 +714,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         preemptions=max(preemptions, event_preemptions),
         http_429=http_429,
         http_429_retries=http_429_retries,
+        portal_crossing=portal_crossing,
+        portal_advancement=portal_advancement,
         rate_waits=rate_waits,
         gained=sorted(set(gained)),
         top_tools=[(k, tool_calls[k], tool_fails[k]) for k in sorted(tool_calls, key=lambda t: -tool_calls[t])[:6]],
@@ -849,6 +866,14 @@ def _write_markdown(
             )
     else:
         lines.append("*（所有已收官 bot 场景入口正常）*")
+    portal_rows = [r for r in rows if r.portal_crossing]
+    if portal_rows:
+        lines.extend(["", "| Bot | 穿门方式 | 本次放置黑曜石 | 过门成就 |", "|---|---|---:|---|"])
+        for r in portal_rows:
+            crossing = r.portal_crossing
+            how = "复用既有门" if crossing.get("reused_existing_portal") else "本次搭建"
+            placed = crossing.get("placed_obsidian")
+            lines.append(f"| `{r.name}` | {how} | {placed if placed is not None else '—'} | {r.portal_advancement} |")
     wd_rows = [r for r in rows if r.scene_ticks is not None]
     if wd_rows:
         lines.extend(["", "| Bot | watchdog ticks | 反射抢占跳过 |", "|---|---:|---:|"])
@@ -963,6 +988,9 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             print(f"        crash: {tail[:150]}")
         if r.status == "not_ready":
             print(f"        not_ready: {(r.error or 'unknown')[:150]}")
+        if r.portal_crossing:
+            placed = r.portal_crossing.get("placed_obsidian")
+            print(f"        Nether crossing confirmed, placed_obsidian={placed}, advancement={r.portal_advancement}")
 
     print("\n--- CROSS-MODEL AGGREGATE (per model family) ---")
     for a in aggregate_by_squad(rows):
