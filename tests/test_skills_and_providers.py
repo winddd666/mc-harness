@@ -788,6 +788,88 @@ def test_collect_drops_smelt_charcoal_reservation_and_toolset_registration() -> 
     assert "mc_skill_unstick" in names
 
 
+def test_targeted_drop_recovery_refreshes_each_stack_and_skips_unsafe_routes(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    origin = [0.5, 64.0, 0.5]
+    pos = list(origin)
+    stacks = {
+        1: {"id": 1, "item": "diamondx2", "pos": [1.5, 64.0, 0.5]},
+        2: {"id": 2, "item": "diamond", "pos": [2.5, 64.0, 0.5]},
+        3: {"id": 3, "item": "diamond", "pos": [-1.5, 64.0, 0.5]},
+        4: {"id": 4, "item": "diamond", "pos": [1.5, 68.5, 1.5]},
+        5: {"id": 5, "item": "cobblestonex32", "pos": [0.5, 64.0, 3.5]},
+    }
+    moves = []
+    owned = 0
+
+    def handler(request):
+        nonlocal owned
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": list(pos), "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": "diamond", "count": owned}] if owned else []}
+        elif route == "get_entities":
+            result = {"entities": list(stacks.values())}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            result = {"name": "stone" if y < 64 or x == -1 else "air"}
+        elif route == "move_to":
+            dest = [body["x"], body["y"], body["z"]]
+            match = next(e for e in stacks.values() if e["pos"] == dest)
+            entity_id = match["id"]
+            assert entity_id in {1, 2, 4}
+            moves.append(entity_id)
+            pos[:] = dest
+            stacks.pop(entity_id)
+            owned += 2 if entity_id == 1 else 1
+            if entity_id == 1:
+                stacks[2]["pos"] = [3.0, 64.0, 0.5]  # Move after the first approach.
+            result = {"pos": list(pos)}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        first = json.loads(toolset.mc_skill_collect_drops(item_types=["diamond"], max_pickups=6))
+        assert first["gained"] == {"diamond": 3}
+        assert [(row["id"], row["picked_up"]) for row in first["attempts"]] == [(1, 2), (2, 1)]
+        assert first["attempts"][1]["item_pos"] == [3.0, 64.0, 0.5]
+        assert {row["id"]: row["reason"] for row in first["skipped"]} == {
+            3: "unsafe_route", 4: "height_difference", 5: "non_target_item",
+        }
+        stacks[4]["pos"] = [2.5, 64.0, 1.5]  # A new safe landing invalidates its prior rejection.
+        second = json.loads(toolset.mc_skill_collect_drops(item_types=["diamond"], max_pickups=6))
+        assert second["gained"] == {"diamond": 1}
+        assert moves == [1, 2, 4]
+        third = json.loads(toolset.mc_skill_collect_drops(item_types=["diamond"], max_pickups=6))
+        assert third["gained"] == {}
+        assert any(row["id"] == 3 and row["reason"] == "retry_cooldown" for row in third["skipped"])
+        assert moves == [1, 2, 4]
+
+
+def test_collect_drops_honors_explicit_budget_without_item_filter(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def handler(request):
+        assert request.url.path.endswith("/inventory")
+        timeout = request.extensions["timeout"]["read"]
+        assert timeout == pytest.approx(5.0)
+        clock[0] += timeout
+        raise httpx.ReadTimeout("offline slow inventory", request=request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).collect_drops(radius=8, max_duration_s=6.0)
+
+    assert result["error"] == "pickup_time_budget"
+    assert clock[0] <= 106.0
+
+
 def test_unstick_uses_floor_on_negative_coords_and_clears_hitbox() -> None:
     solid_blocks = {
         (-4, 103, -6): "dirt",

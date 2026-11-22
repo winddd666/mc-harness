@@ -1368,6 +1368,7 @@ class MacroSkills:
         self._pillar_fallbacks: dict[tuple[str, int, int], tuple[int, float]] = {}
         self._failed_scout_routes: dict[tuple[str, int], tuple[tuple[float, float, float], float, float]] = {}
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
+        self._drop_retry_after: dict[tuple[str, int, tuple[int, ...], tuple[int, ...]], float] = {}
         self._mining_dfs: Any = None
         self.world_memory: Any = None
         self._terrain_nav: Any = None
@@ -2946,8 +2947,11 @@ class MacroSkills:
         fallback_coord: bool = True,
         target_items: set[str] | frozenset[str] | None = None,
         exclude_items: set[str] | frozenset[str] | None = None,
+        verify_targets: bool | None = None,
     ) -> dict[str, Any]:
-        """Record bounded approach attempts, without claiming they prove item pickup."""
+        """Record bounded approach attempts and confirm targeted pickup with inventory reads."""
+        if target_items and (verify_targets is True or (verify_targets is None and target_items & _HIGH_VALUE_DROPS)):
+            return self._collect_target_drops(target_items, radius, max_pickups)
         attempts: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         try:
@@ -3071,8 +3075,147 @@ class MacroSkills:
                 time.sleep(0.25)  # Allow server inventory packets to arrive before verification.
         return {"attempts": attempts, "skipped": skipped}
 
-    def collect_drops(self, radius: int = 12, max_pickups: int = 8) -> dict[str, Any]:
+    def _collect_target_drops(
+        self, target_items: set[str] | frozenset[str], radius: int, max_pickups: int,
+    ) -> dict[str, Any]:
+        """Attempt each nearby target on a verified short route and retain unresolved positions."""
+        from .combat_env import CombatEnv
+
+        started = time.monotonic()
+        outer_deadline = getattr(self.bot, "_mining_deadline", started + 9.0)
+        if isinstance(self.bot, _SkillBudgetSession):
+            outer_deadline = self.bot.deadline
+        budget = min(8.0, outer_deadline - started - 0.5)
+        session = _SkillBudgetSession(self.bot, budget)
+        terrain = CombatEnv(session, geofence=self.geofence)
+        attempts: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        result: dict[str, Any] = {"attempts": attempts, "skipped": skipped}
+        for key, expires in list(self._drop_retry_after.items()):
+            if expires <= started:
+                del self._drop_retry_after[key]
+        handled: set[int] = set()
+
+        def scan() -> dict[int, dict[str, Any]]:
+            entities = session.call("get_entities", {"radius": min(radius, 6), "types": ["item"]})
+            return {
+                e["id"]: e for e in entities.get("entities") or []
+                if isinstance(e.get("id"), int) and isinstance(e.get("pos"), list) and len(e["pos"]) >= 3
+            }
+
+        try:
+            status = session.status()
+            entities = scan()
+            while entities and len(handled) < max_pickups:
+                origin = status.get("pos")
+                if not origin or status.get("in_water") or status.get("in_lava"):
+                    break
+                pending = []
+                for entity_id, ent in entities.items():
+                    if entity_id in handled:
+                        continue
+                    if _normalize_drop_name(ent.get("item")) in target_items:
+                        pending.append(ent)
+                    else:
+                        skipped.append({"id": entity_id, "item": ent.get("item"), "item_pos": ent["pos"], "reason": "non_target_item"})
+                if not pending:
+                    break
+                ent = min(pending, key=lambda e: math.dist(origin[:3], e["pos"][:3]))
+                entity_id, pos = ent["id"], ent["pos"][:3]
+                handled.add(entity_id)
+                item = _normalize_drop_name(ent.get("item"))
+                row = {"id": entity_id, "item": ent.get("item"), "item_pos": pos}
+                dy = pos[1] - origin[1]
+                key = (
+                    normalize_dimension(status.get("dimension")), entity_id,
+                    tuple(math.floor(v) for v in origin[:3]),
+                    tuple(math.floor(v * 2) for v in pos),
+                )
+                reason = None
+                if key in self._drop_retry_after:
+                    reason = "retry_cooldown"
+                elif abs(dy) > 1.25:
+                    row["height_difference"] = dy
+                    reason = "height_difference"
+                elif math.dist(origin[:3], pos) > 4.5:
+                    reason = "outside_short_pickup_range"
+                else:
+                    yaw = _yaw_toward(origin[0], origin[2], pos[0], pos[2])
+                    route = terrain.probe_retreat(origin, yaw, math.hypot(pos[0] - origin[0], pos[2] - origin[2]))
+                    if route is None or abs(route[0] - pos[1]) > 0.95:
+                        reason = "unsafe_route"
+                if reason:
+                    skipped.append({**row, "reason": reason})
+                    if reason != "retry_cooldown":
+                        self._drop_retry_after[key] = time.monotonic() + 20.0
+                    continue
+
+                attempts.append(row)
+                before = _inventory_counts(session)
+                remaining = session.deadline - time.monotonic()
+                if remaining < 0.5:
+                    raise _SkillDeadline()
+                move_s = min(1.6, remaining - 0.35)
+                try:
+                    session.call("move_to", {
+                        "x": pos[0], "y": route[0], "z": pos[2], "range": 0.25,
+                        "timeout": int(move_s * 1000), "stop_on": ["hurt", "death"],
+                    }, timeout_s=move_s + 0.2)
+                except ApiError as err:
+                    row["approach_error"] = {"code": err.code, "message": err.message}
+                    if err.code in ("interrupted", "hurt", "death", "dead", "disconnected", "not_connected"):
+                        result["error"] = row["approach_error"]
+                        break
+                time.sleep(min(0.2, max(0.0, session.deadline - time.monotonic())))
+                status = session.status()
+                entities = scan()
+                visible = entities.get(entity_id)
+                after = _inventory_counts(session)
+                gain = max(0, after.get(item, 0) - before.get(item, 0))
+                row["pos"] = status.get("pos")
+                if visible is not None:
+                    row["item_pos"] = visible["pos"][:3]
+                if row["pos"]:
+                    row["distance_after"] = round(math.dist(row["pos"][:3], row["item_pos"]), 2)
+                label = str(row["item"] or "")
+                suffix = label.rsplit("x", 1)[-1]
+                stack_count = int(suffix) if suffix.isdigit() else 1
+                row["picked_up"] = min(gain, stack_count) if visible is None else 0
+                row["pickup_inventory_gain"] = gain
+                if not row["picked_up"]:
+                    row["reason"] = "target_still_visible" if visible is not None else "pickup_unconfirmed"
+                    self._drop_retry_after[key] = time.monotonic() + 20.0
+        except (_SkillDeadline, httpx.TimeoutException):
+            session.stop_pending()
+            result["error"] = {"code": "pickup_time_budget", "message": "拾取预算已用尽。"}
+        except (ApiError, httpx.HTTPError) as err:
+            result["error"] = {"code": getattr(err, "code", type(err).__name__), "message": str(err)}
+        # A refreshed scan can see the same irrelevant entities several times.
+        result["skipped"] = list({row["id"]: row for row in skipped}.values())
+        return result
+
+    def collect_drops(
+        self, radius: int = 12, max_pickups: int = 8, *,
+        item_types: list[str] | None = None, max_duration_s: float | None = None,
+    ) -> dict[str, Any]:
         """Collect nearby ground item entities and report actual inventory delta."""
+        wanted = None if item_types is None else frozenset(_clean_block(item) for item in item_types) - {""}
+        if wanted is not None and not wanted:
+            return {"ok": False, "error": "bad_args", "message": "item_types 需要至少一个物品名。"}
+        if wanted is None and max_duration_s is None:
+            return self._collect_drops(radius, max_pickups, wanted)
+        session = _SkillBudgetSession(self.bot, 12.0 if max_duration_s is None else max_duration_s)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            return scoped._collect_drops(radius, max_pickups, wanted)
+        except (_SkillDeadline, httpx.TimeoutException):
+            session.stop_pending()
+            return {"ok": False, "error": "pickup_time_budget", "message": "拾取预算已用尽，请核对背包。"}
+
+    def _collect_drops(
+        self, radius: int, max_pickups: int, wanted: frozenset[str] | None,
+    ) -> dict[str, Any]:
         inv_raw, inv_before = _inventory_snapshot_and_counts(self.bot)
         inv_raw, auto_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         if auto_dropped:
@@ -3084,9 +3227,13 @@ class MacroSkills:
             radius=max(2, min(32, radius)),
             max_pickups=max(1, min(20, max_pickups)),
             fallback_coord=True,
+            target_items=wanted,
+            verify_targets=wanted is not None,
         )
         inv_after = _inventory_counts(self.bot)
         gained = _positive_inv_delta(inv_before, inv_after)
+        if wanted is not None:
+            gained = {item: n for item, n in gained.items() if item in wanted}
         state_after = self.bot.status()
         attempts = approaches["attempts"]
         out: dict[str, Any] = {
@@ -3341,6 +3488,7 @@ class MacroSkills:
                         radius=12,
                         target_items=expected_drops,
                         exclude_items=auto_dropped_names,
+                        verify_targets=False,
                     )
                     if inv_before is not None:
                         _merge_confirmed_inventory_gain()
@@ -3429,6 +3577,7 @@ class MacroSkills:
                     radius=12,
                     target_items=expected_drops,
                     exclude_items=auto_dropped_names,
+                    verify_targets=False,
                 )
             _merge_confirmed_inventory_gain()
         if (
@@ -3446,6 +3595,7 @@ class MacroSkills:
                     max_pickups=2,
                     target_items=expected_drops,
                     exclude_items=auto_dropped_names,
+                    verify_targets=False,
                 )
                 _merge_confirmed_inventory_gain()
 

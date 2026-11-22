@@ -2705,10 +2705,19 @@ class McToolset:
             )
         )
 
-    def mc_skill_collect_drops(self, radius: int = 12, max_pickups: int = 8) -> str:
+    def mc_skill_collect_drops(
+        self, radius: int = 12, max_pickups: int = 8, item_types: list[str] | None = None,
+    ) -> str:
         radius = max(2, min(32, int(radius)))
         max_pickups = max(1, min(20, int(max_pickups)))
-        return self._run_skill(lambda: self.skills.collect_drops(radius=radius, max_pickups=max_pickups))
+        if item_types is None:
+            return self._run_skill(lambda: self.skills.collect_drops(radius=radius, max_pickups=max_pickups))
+        budget, imminent = self._clamp_tool_budget(12.0, max_s=12.0)
+        if imminent:
+            return json.dumps({"ok": False, "error": "episode_deadline_imminent"}, ensure_ascii=False)
+        return self._run_skill(lambda: self.skills.collect_drops(
+            radius=radius, max_pickups=max_pickups, item_types=item_types, max_duration_s=budget,
+        ))
 
     def mc_skill_bind_bed(self, x: int, y: int, z: int) -> str:
         return self._run_skill(lambda: self.skills.bind_bed_spawn(x=x, y=y, z=z))
@@ -3533,6 +3542,7 @@ class McToolset:
                     parameters={
                         "radius": Parameter("扫描半径2-32，默认12", kind="integer", required=False),
                         "max_pickups": Parameter("最多尝试拾取个数，默认8", kind="integer", required=False),
+                        "item_types": Parameter("如 ['diamond']。指定后最多扫 6 格，只沿安全近路收取", kind="string_array", required=False),
                     },
                     handler=self.mc_skill_collect_drops,
                     concurrency="exclusive",
