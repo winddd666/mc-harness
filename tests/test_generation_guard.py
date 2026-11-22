@@ -11564,15 +11564,16 @@ def test_water_combat_retries_shore_after_unconfirmed_landing(monkeypatch, secon
 @pytest.mark.parametrize(("entry", "pressure"), [
     ("poll", "low_hp"), ("poll", "fresh_health"), ("poll", "burst"),
     ("boundary", "low_hp"), ("boundary", "burst"), ("tool", "low_hp"),
+    ("poll", "wading_burst"), ("boundary", "wading_burst"), ("tool", "wading_low_hp"),
 ])
-def test_swimming_melee_pressure_prefers_shore_without_a_live_attacker_snapshot(monkeypatch, entry, pressure):
-    health = 8.166667 if pressure == "low_hp" else 14.0
+def test_water_melee_pressure_prefers_shore_without_a_live_attacker_snapshot(monkeypatch, entry, pressure):
+    health = 8.166667 if pressure.endswith("low_hp") else 14.0
     status = {
         "pos": [19023.7, 62.4, 41009.2], "health": health, "food": 20, "oxygen": 200,
-        "in_water": True, "on_ground": False, "ready": True, "alive": True,
+        "in_water": True, "on_ground": pressure.startswith("wading_"), "ready": True, "alive": True,
     }
     events = [{"seq": 1, "type": "hurt", "source": "mob_attack", "health": 8.0 if pressure == "fresh_health" else health}]
-    if pressure == "burst":
+    if pressure.endswith("burst"):
         events.append({"seq": 2, "type": "hurt", "source": "mob_attack", "health": health})
     calls = []
 
@@ -12345,11 +12346,12 @@ def test_water_boundary_avoids_a_shore_path_that_crosses_a_creeper(monkeypatch):
 @pytest.mark.parametrize(("entry", "pressure"), [
     ("poll", "nearby"), ("poll", "at_surface"), ("poll", "fresh_hit"), ("boundary", "nearby"),
     ("poll", "distant"), ("poll", "occluded"),
+    ("poll", "wading_hit"), ("poll", "wading_occluded"), ("poll", "wading_idle"),
 ])
 def test_swimming_near_exposed_melee_uses_checked_shore_without_generic_float(monkeypatch, entry, pressure):
     zombie_pos = [19981.4, 62, 32993.7]
     distance = 7.0 if pressure == "distant" else 3.2
-    zombie = {"id": 357966, "name": "zombie", "dist": distance, "blocked_by_wall": pressure == "occluded"}
+    zombie = {"id": 357966, "name": "zombie", "dist": distance, "blocked_by_wall": pressure.endswith("occluded")}
     status = {
         "pos": [19981.4, 62, 32990.5], "health": 18.5, "food": 20, "oxygen": 220,
         "in_water": True, "submerged": True, "on_ground": False, "ready": True, "alive": True,
@@ -12357,6 +12359,8 @@ def test_swimming_near_exposed_melee_uses_checked_shore_without_generic_float(mo
     }
     if pressure == "at_surface":
         status.update(oxygen=300, submerged=False, jumping=True)
+    if pressure.startswith("wading_"):
+        status.update(oxygen=300, submerged=False, on_ground=True)
     calls = []
 
     class CreekBot:
@@ -12365,7 +12369,8 @@ def test_swimming_near_exposed_melee_uses_checked_shore_without_generic_float(mo
                 return dict(status)
             if action == "events":
                 hit = {"seq": 1, "type": "hurt", "source": "mob_attack"}
-                return {"events": [hit] if pressure == "fresh_hit" and not kwargs["params"]["since"] else []}
+                has_hit = pressure in {"fresh_hit", "wading_hit", "wading_occluded"}
+                return {"events": [hit] if has_hit and not kwargs["params"]["since"] else []}
             if action == "inventory":
                 return {"items": [], "offhand": None}
             if action == "get_entities":
@@ -12379,17 +12384,22 @@ def test_swimming_near_exposed_melee_uses_checked_shore_without_generic_float(mo
         status.update(in_water=False, submerged=False, on_ground=True)
         return {"ok": True, "in_water": False}
 
-    def reach_shore(threat_pos, *, keep_shield, shield_target_id, avoid_close_threat):
+    def reach_shore(threat_pos, *, keep_shield, shield_target_id, avoid_close_threat, under_attack=False):
         assert threat_pos == zombie_pos and shield_target_id == zombie["id"]
         assert not keep_shield and avoid_close_threat
+        assert under_attack is (pressure == "wading_hit")
         calls.append("shore")
         status.update(in_water=False, submerged=False, on_ground=True)
         return {"ok": True, "in_water": False}
 
     monkeypatch.setattr(guard, "_escape_water", float_to_surface)
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
-    assert (guard.poll() if entry == "poll" else guard.stabilize_after_tools()) is not None
-    assert calls == (["float"] if pressure in {"distant", "occluded"} else ["shore"])
+    outcome = guard.poll() if entry == "poll" else guard.stabilize_after_tools()
+    if pressure == "wading_idle":
+        assert outcome is None and calls == []
+    else:
+        assert outcome is not None
+        assert calls == (["float"] if pressure in {"distant", "occluded", "wading_occluded"} else ["shore"])
 
 
 @pytest.mark.parametrize("entry", ["poll", "mc_attack", "mc_move_to"])

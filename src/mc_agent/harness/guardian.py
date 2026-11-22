@@ -777,8 +777,10 @@ class GenerationGuard:
             and (status.get("on_ground") is False or bool(status.get("submerged")))
         )
 
-    def _has_close_melee_in_water(self, status: dict[str, Any]) -> bool:
-        if not status.get("in_water") or not (status.get("on_ground") is False or status.get("submerged")):
+    def _has_close_melee_in_water(self, status: dict[str, Any], *, include_wading: bool = False) -> bool:
+        if not status.get("in_water") or not (
+            include_wading or status.get("on_ground") is False or status.get("submerged")
+        ):
             return False
         name, distance, _, _ = self._extract_hostile_info(status)
         return (
@@ -786,17 +788,19 @@ class GenerationGuard:
             and not status["nearest_hostile"].get("blocked_by_wall")
         )
 
-    @staticmethod
-    def _urgent_swimming_melee(
-        status: dict[str, Any], hits: Sequence[dict[str, Any]] = (), *, interrupted_source: str | None = None,
+    def _urgent_water_melee(
+        self, status: dict[str, Any], hits: Sequence[dict[str, Any]] = (), *, interrupted_source: str | None = None,
     ) -> bool:
-        if not status.get("in_water") or not (status.get("on_ground") is False or status.get("submerged")):
+        if not status.get("in_water"):
             return False
         melee_hits = [hit for hit in hits if str(hit.get("source") or "").strip().lower() in MELEE_HURT_SOURCES]
         if len(melee_hits) >= 2:
             return True
         if not melee_hits and str(interrupted_source or "").strip().lower() not in MELEE_HURT_SOURCES:
             return False
+        # Ground contact in shallow water still leaves us exposed to the nearby attacker.
+        if status.get("on_ground") is True and self._has_close_melee_in_water(status, include_wading=True):
+            return True
         health_samples = [status.get("health"), *(hit.get("health") for hit in melee_hits)]
         return any(isinstance(health, (int, float)) and 0 < health <= 10.0 for health in health_samples)
 
@@ -2273,7 +2277,7 @@ class GenerationGuard:
                 att_pos_w = att_w_dict.get("pos") if att_w_dict else nh_pos
                 close_drowned_hit = nh_name == "drowned" and nh_dist <= 6.0 and hurt_src_w in MELEE_HURT_SOURCES
                 close_water_melee_hit = nearby_water_melee and hurt_src_w in MELEE_HURT_SOURCES
-                urgent_water_melee = self._urgent_swimming_melee(status, hurts)
+                urgent_water_melee = self._urgent_water_melee(status, hurts)
                 melee_shore = close_water_melee_hit or urgent_water_melee
                 swimming = status.get("on_ground") is False or bool(status.get("submerged"))
                 retry_shore_after_hit = (
@@ -4502,7 +4506,7 @@ class GenerationGuard:
                     )
                     if hurt_pre_water:
                         self._water_hurt_streak += 1
-                    urgent_water_melee = self._urgent_swimming_melee(st_pre, interrupted_source=trigger.get("hurt_source"))
+                    urgent_water_melee = self._urgent_water_melee(st_pre, interrupted_source=trigger.get("hurt_source"))
                     forced_pre_shore = (
                         self._water_hurt_streak >= 3 or now_pre < self._no_water_until
                         or self._swimming_at_low_health(st_pre) or drowned_during_tool
@@ -5233,7 +5237,7 @@ class GenerationGuard:
                 )
                 surface_first = drowning or (continuing_water_escape and bool(status.get("submerged")))
                 nearby_water_melee = self._has_close_melee_in_water(status)
-                urgent_water_melee = self._urgent_swimming_melee(status, hurts) and not any(
+                urgent_water_melee = self._urgent_water_melee(status, hurts) and not any(
                     e.get("type") in {"death", "death_loop", "disconnected", "spawn"} for e in fresh
                 )
                 forced_shore_b = (
