@@ -2148,6 +2148,7 @@ class CombatEnv:
             return failed
 
         placed = 0
+        placement_timed_out = False
         for cell in to_place:
             current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
             if not self._on_same_footing(before, current):
@@ -2156,18 +2157,29 @@ class CombatEnv:
                 self.bot.call("place", {"item": filler, "pos": list(cell)}, timeout_s=0.65, allow_reauth=False)
             except ApiError:
                 break
+            except httpx.ReadTimeout:
+                # The server may already have placed the block. Read it back once and stop building.
+                placement_timed_out = True
+                self._best_effort_stop(stop_control=False, timeout_s=0.2)
             self.invalidate_block_cache()
             block = self._get_block_name(*cell, strict=True)
             if block != filler:
                 break
             placed += 1
+            if placement_timed_out:
+                break
 
         after = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
         confirmed = (
             placed > 0 and (not melee or placed == len(to_place)) and self._on_same_footing(before, after)
             and self._blocks_shot(after["pos"], threat)
         )
-        return {"ok": confirmed, "mode": "placed_cover", "placed": placed, "pos_after": after.get("pos")}
+        result = {"ok": confirmed, "mode": "placed_cover", "placed": placed, "pos_after": after.get("pos")}
+        if placement_timed_out:
+            result["placement_timed_out"] = True
+            if not confirmed:
+                result["reason"] = "placement_unconfirmed"
+        return result
 
     def seek_natural_cover(
         self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,

@@ -17144,6 +17144,58 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
         assert attempts == []
 
 
+@pytest.mark.parametrize("placement", ["confirmed", "missing", "respawned", "first_of_two", "shooter_changed"])
+def test_arrow_cover_reads_back_a_placement_with_a_lost_response(placement):
+    shooter = {"id": 1119132, "name": "skeleton", "dist": 8, "pos": [381035.5, 67, 374009.5]}
+    status = {
+        "pos": [381027.5, 67, 374009.5], "health": 0.294, "ready": True, "alive": True,
+        "on_ground": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    wall = (381028, 67, 374009)
+    blocks = {} if placement == "first_of_two" else {(wall[0], wall[1] + 1, wall[2]): "stone"}
+    actions = []
+
+    class BareBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_entities":
+                if placement == "shooter_changed" and "stop" in actions:
+                    return {"entities": [{**shooter, "id": 1119133}]}
+                return {"entities": [shooter]}
+            if action == "get_block":
+                cell = tuple(body["pos"])
+                return {"name": blocks.get(cell, "stone" if cell[1] == 66 else "air")}
+            if action == "place":
+                actions.append(("place", tuple(body["pos"])))
+                if placement != "missing":
+                    blocks[tuple(body["pos"])] = body["item"]
+                if placement == "respawned":
+                    status.update(last_death={"t": 2}, pos=[381013.5, 67, 374016.5])
+                raise httpx.ReadTimeout("placement response lost")
+            if action == "stop":
+                actions.append(action)
+                return {"ok": True}
+            pytest.fail(f"Unexpected arrow cover action: {action}")
+
+    guard = GenerationGuard(BareBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    landing = dict(status)
+    result = guard._action(
+        "place_arrow_cover",
+        lambda: guard._place_arrow_cover(landing, {"dark_oak_log": 2 if placement == "first_of_two" else 1}, shooter["id"]),
+    )
+
+    assert actions == [("place", wall), "stop"]
+    assert result["ok"] is (placement == "confirmed")
+    cover = result["result"]
+    assert cover["placement_timed_out"] is True
+    assert cover["placed"] == (0 if placement == "missing" else 1)
+    if placement == "shooter_changed":
+        assert cover["reason"] == "projectile_lane_unconfirmed"
+    elif placement != "confirmed":
+        assert cover["reason"] == "placement_unconfirmed"
+
+
 @pytest.mark.parametrize("scenario", ["cornered", "second_hostile", "out_of_reach", "respawned", "blocked_by_wall"])
 def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(monkeypatch, scenario):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
