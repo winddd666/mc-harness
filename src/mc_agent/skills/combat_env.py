@@ -3495,9 +3495,14 @@ class SubcorticalInstinctController:
                 if remaining < 1.5:
                     break
                 attack_ms = min(2600, int((remaining - 0.9) * 1000))
+                attack_body = {"entity_id": eff_id, "timeout": attack_ms, "stop_on": ["death"]}
+                if target_ent is not None and self._entity_dist(st_cur.get("pos"), target_ent) <= 2.5:
+                    # A close counter can return after two swings. Reserve the longest sword/axe
+                    # interval (1250 ms) for a final server-side sleep if the target slips out of reach.
+                    attack_body.update(timeout=max(300, attack_ms - 1250), max_hits=2)
                 try:
                     atk = env.bot.call(
-                        "attack", {"entity_id": eff_id, "timeout": attack_ms, "stop_on": ["death"]},
+                        "attack", attack_body,
                         timeout_s=attack_ms / 1000 + 0.35, allow_reauth=False,
                     )
                     hits = atk.get("hits")

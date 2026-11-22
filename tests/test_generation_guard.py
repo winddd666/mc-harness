@@ -1372,6 +1372,63 @@ def test_guard_eats_at_the_next_safe_poll_after_combat(monkeypatch, combat_durat
     assert meals == ["cooked_beef"]
 
 
+@pytest.mark.parametrize("scenario", ["close", "leaves_reach", "far"])
+def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, scenario):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    distance = 4.0 if scenario == "far" else 1.6
+    zombie = {"id": 42, "name": "zombie", "dist": distance}
+    status = {
+        "pos": [-12208.4, -53.4, -6133.5], "health": 11, "ready": True, "alive": True,
+        "dimension": "overworld", "on_ground": False, "nearest_hostile": zombie,
+        "held": {"name": "iron_pickaxe"},
+    }
+    equipped = []
+    attacks = []
+
+    class MatchBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "wooden_axe", "count": 1}, {"name": "iron_pickaxe", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [] if attacks else [zombie]}
+            if action == "equip":
+                equipped.append(body)
+            if action == "attack":
+                attacks.append(body)
+                if scenario == "far":
+                    return {"hits": 2, "killed": True}
+                # The backend checks its timer between complete swing intervals.
+                ticks, hits = 0, 0
+                while ticks < body["timeout"]:
+                    if hits == 0 or scenario == "close":
+                        hits += 1
+                        if hits == body.get("max_hits"):
+                            break
+                    ticks += 1250
+                clock[0] += ticks / 1000
+                if ticks / 1000 > kwargs["timeout_s"]:
+                    raise httpx.ReadTimeout("attack reply timed out")
+                return {"hits": hits, "killed": hits == 2}
+            return {"ok": True}
+
+    outcome = SubcorticalInstinctController().on_encounter(CombatEnv(MatchBot()), {
+        "source": "tool_interrupted_hurt", "primary_entity_id": 42, "primary_type": "zombie",
+        "hurt_source": "mob_attack",
+    })
+
+    assert equipped == [{"item": "wooden_axe", "slot": "hand"}]
+    attack, = attacks
+    assert attack["timeout"] == (2600 if scenario == "far" else 1350)
+    assert attack.get("max_hits") == (None if scenario == "far" else 2)
+    assert outcome["mode"] == ("counter_kill" if scenario == "leaves_reach" else "counter_killed")
+
+
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
     """Reproduces glm_glm_3_village / hy4_hy_8_nether: ReadTimeout in subcortical_combat must /stop & not crash run."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
@@ -3059,11 +3116,12 @@ def test_combat_attacks_reserve_time_for_final_status_and_release(monkeypatch, r
             if action == "get_entities":
                 return {"entities": [threat]}
             if action == "attack":
-                ms = body["timeout"]
-                assert kwargs["timeout_s"] == pytest.approx(ms / 1000 + 0.35)
+                read_s = kwargs["timeout_s"]
+                requested_ms = round((read_s - 0.35) * 1000)
+                assert body["timeout"] == (requested_ms if ranged else max(300, requested_ms - 1250))
                 assert kwargs["allow_reauth"] is False
-                attacks.append(ms)
-                clock[0] += 2.7 if len(attacks) <= 2 else ms / 1000
+                attacks.append(requested_ms)
+                clock[0] += 2.7 if len(attacks) <= 2 else read_s
                 return {"hits": 1, "killed": len(attacks) == 3}
             return {"ok": True}
 
