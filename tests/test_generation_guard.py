@@ -1654,6 +1654,66 @@ def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, 
     assert outcome["mode"] == ("counter_kill" if scenario == "leaves_reach" else "counter_killed")
 
 
+@pytest.mark.parametrize("outcome", [
+    "fast_descent", "dropped_between_swings", "already_falling", "zero_hits_while_falling",
+    "server_timeout_while_falling", "short_knockback", "grounded_on_lower_floor",
+])
+def test_counter_aborts_during_a_large_fall_without_trying_to_flee(monkeypatch, outcome):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    zombie = {"id": 359290, "name": "zombie", "dist": 1.98, "pos": [40961.21, 8, 40988.52]}
+    origin = [40963.19, 8, 40988.52]
+    status = {
+        "pos": origin, "dimension": "overworld", "health": 17, "food": 20,
+        "on_ground": True, "ready": True, "alive": True, "nearest_hostile": zombie,
+    }
+    if outcome == "already_falling":
+        status.update(on_ground=False, velocity=[0, -12, 0])
+    calls = []
+
+    class CliffBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "stone_sword", "count": 1}], "held": {"name": "stone_sword"}}
+            if action == "get_entities":
+                return {"entities": [zombie]}
+            calls.append((action, body))
+            if action != "attack":
+                return {"ok": True}
+            if sum(endpoint == "attack" for endpoint, _ in calls) > 1:
+                return {"hits": 1, "killed": True}
+            status["on_ground"] = outcome == "grounded_on_lower_floor"
+            status["pos"] = [origin[0], 7.8 if outcome == "short_knockback" else 4, origin[2]]
+            if outcome in {"fast_descent", "zero_hits_while_falling", "server_timeout_while_falling"}:
+                status.update(pos=[origin[0], 7.2, origin[2]], velocity=[0, -12, 0])
+            if outcome == "server_timeout_while_falling":
+                raise ApiError("timeout", "attack timed out")
+            return {"hits": 0 if outcome == "zero_hits_while_falling" else 1, "killed": False}
+
+    env = CombatEnv(CliffBot())
+
+    def flee(*_args, **_kwargs):
+        calls.append(("flee", {}))
+        return {"ok": False, "reason": "unsafe_landing"}
+
+    monkeypatch.setattr(env, "flee", flee)
+    result = CombatControllerSlot().handle(env, {
+        "source": "tool_interrupted_hurt", "hurt_source": "mob_attack",
+        "primary_entity_id": zombie["id"], "primary_type": zombie["name"],
+    })
+
+    ordinary_exchange = outcome in {"short_knockback", "grounded_on_lower_floor"}
+    assert sum(action == "attack" for action, _ in calls) == (2 if ordinary_exchange else int(outcome != "already_falling"))
+    assert all(action != "flee" for action, _ in calls)
+    assert calls[-2:] == [("control", {"wait": False}), ("posture", {})]
+    assert result["mode"] == ("counter_killed" if ordinary_exchange else "falling")
+    assert result["requires_replan"]
+    assert result["status_after"]["pos"] == status["pos"]
+
+
 @pytest.mark.parametrize("outcome", ["hurt_receipt", "hurt_error", "respawned", "healthy"])
 def test_unshielded_counter_stops_on_hurt_at_borderline_health(monkeypatch, outcome):
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController

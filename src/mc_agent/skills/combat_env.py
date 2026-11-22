@@ -3270,6 +3270,22 @@ class SubcorticalInstinctController:
         except (TypeError, ValueError):
             return 99.0
 
+    @staticmethod
+    def _is_falling_fast(status: dict[str, Any], origin: Sequence[float]) -> bool:
+        if status.get("on_ground") is not False or status.get("in_water") or status.get("in_lava"):
+            return False
+        velocity = status.get("velocity")
+        if (
+            isinstance(velocity, (list, tuple)) and len(velocity) >= 2
+            and isinstance(velocity[1], (int, float)) and velocity[1] <= -10.0
+        ):
+            return True
+        pos = status.get("pos")
+        return (
+            isinstance(pos, (list, tuple)) and len(pos) >= 3
+            and isinstance(pos[1], (int, float)) and pos[1] <= origin[1] - 2.5
+        )
+
     def _find_live_hostiles(
         self, env: CombatEnv, radius: int = 16, *, timeout_s: float | None = None,
     ) -> list[dict[str, Any]]:
@@ -3777,7 +3793,7 @@ class SubcorticalInstinctController:
             weapon = self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
             mode = "counter_kill"
             killed = False
-            interrupted_by_hurt = False
+            retreat_action = None
             for _ in range(5):
                 if time.monotonic() >= deadline:
                     break
@@ -3787,6 +3803,9 @@ class SubcorticalInstinctController:
                     or any(st_cur.get(key) != st.get(key) for key in ("dimension", "last_death"))
                 ):
                     mode = "life_unavailable"
+                    break
+                if self._is_falling_fast(st_cur, pos):
+                    mode = "falling"
                     break
                 hp_cur = float(st_cur.get("health") or 20.0)
                 oxy_cur = st_cur.get("oxygen")
@@ -3876,40 +3895,42 @@ class SubcorticalInstinctController:
                         killed = True
                         break
                     if vulnerable_counter and atk.get("interrupted_by") == "hurt":
-                        interrupted_by_hurt = True
+                        retreat_action = "low_hp_abort_flee"
                         break
                     if isinstance(hits, (int, float)) and hits == 0:
-                        flee_uh = env.flee(mob_pos, distance=10.0, urgent=True)
-                        actions.append({"action": "unreachable_flee", "ok": bool(flee_uh.get("ok"))})
-                        mode = "cover_or_flee"
+                        retreat_action = "unreachable_flee"
                         break
                 except ApiError as err:
                     actions.append({"action": "melee_attack", "ok": False, "code": err.code})
                     if vulnerable_counter and err.code in {"hurt", "interrupted"}:
-                        interrupted_by_hurt = True
+                        retreat_action = "low_hp_abort_flee"
                         break
                     if err.code in {"entity_not_found", "invalid_entity", "target_dead"}:
                         killed = True
                         break
                     if err.code in {"timeout", "attack_zero_hits", "path_not_found", "no_path"}:
-                        flee_to = env.flee(mob_pos, distance=10.0, urgent=True)
-                        actions.append({"action": "attack_timeout_flee", "ok": bool(flee_to.get("ok"))})
-                        mode = "cover_or_flee"
+                        retreat_action = "attack_timeout_flee"
                     break
                 if not cur_hostiles:
                     killed = True
                     break
-            if interrupted_by_hurt:
-                after_hurt = env._safe_status({})
-                mode = "low_hp_disengage"
+            if retreat_action is not None:
+                after_attack = env._safe_status({})
+                interrupted_by_hurt = retreat_action == "low_hp_abort_flee"
+                mode = "low_hp_disengage" if interrupted_by_hurt else "cover_or_flee"
                 if (
-                    not after_hurt.get("pos") or after_hurt.get("ready") is False or after_hurt.get("alive") is False
-                    or any(after_hurt.get(key) != st.get(key) for key in ("dimension", "last_death"))
+                    not after_attack.get("pos") or after_attack.get("ready") is False or after_attack.get("alive") is False
+                    or any(after_attack.get(key) != st.get(key) for key in ("dimension", "last_death"))
                 ):
                     mode = "life_unavailable"
-                elif not (after_hurt.get("in_water") or after_hurt.get("in_lava")):
-                    retreat = env.flee(mob_pos, distance=12.0, urgent=True, wait_for_ground=True)
-                    actions.append({"action": "low_hp_abort_flee", "ok": bool(retreat.get("ok"))})
+                elif self._is_falling_fast(after_attack, pos):
+                    mode = "falling"
+                elif not interrupted_by_hurt or not (after_attack.get("in_water") or after_attack.get("in_lava")):
+                    retreat = env.flee(
+                        mob_pos, distance=12.0 if interrupted_by_hurt else 10.0, urgent=True,
+                        **({"wait_for_ground": True} if interrupted_by_hurt else {}),
+                    )
+                    actions.append({"action": retreat_action, "ok": bool(retreat.get("ok"))})
             elif killed:
                 mode = "counter_killed"
                 self._recent_flee_streak = 0
@@ -4312,6 +4333,7 @@ class SubcorticalInstinctController:
                 nh_post = st_post.get("nearest_hostile")
         if (
             mode == "counter_killed" and float(st_post.get("health") or 20.0) <= 8.0
+            and not self._is_falling_fast(st_post, pos)
             and isinstance(nh_post, dict) and nh_post.get("name") and nh_post.get("id") != mob_id
             and self._entity_dist(st_post.get("pos"), nh_post) <= 5.0
             and st_post.get("ready") is not False and st_post.get("alive") is not False
@@ -4378,6 +4400,7 @@ class SubcorticalInstinctController:
         food_start_deadline = deadline - 2.5
         if (
             env.post_combat_food
+            and mode != "falling"
             and not latched_guard
             and time.monotonic() < food_start_deadline
             and st_post.get("ready", True)
@@ -4404,6 +4427,8 @@ class SubcorticalInstinctController:
             f"遭遇 {mob_name or 'hostile'}(d={round(mob_dist, 1)}m, trigger={trigger.get('source')})，"
             f"已执行 0-LLM 小脑接管[{mode}]，当前 HP={st_post.get('health')} pos={st_post.get('pos')}"
         )
+        if mode == "falling":
+            summary = f"快速下坠期间已暂停反击，当前 HP={st_post.get('health')} pos={st_post.get('pos')}"
         return {
             "handled": bool(actions),
             "mode": mode,
