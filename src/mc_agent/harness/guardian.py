@@ -3789,7 +3789,10 @@ class GenerationGuard:
                     if not forced_pre_shore and not drowning_pre:
                         short_escape = self._short_water_escape_after_hit(st_pre, trigger.get("hurt_source")) or (
                             trigger.get("source") == "tool_interrupted_hurt"
-                            and (trigger.get("primary_type") == "drowned" or self._extract_hostile_info(st_pre)[0] == "drowned")
+                            and (
+                                trigger.get("primary_type") == "drowned" or nh_pre_name == "drowned"
+                                or (nh_pre_name in RANGED_MOBS and nh_pre_dist <= 16.0)
+                            )
                         )
                         budget = {"budget_s": self.COMBAT_WATER_ESCAPE_BUDGET_S} if short_escape else {}
                         esc_act = self._action(

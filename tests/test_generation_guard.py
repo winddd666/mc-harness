@@ -9086,7 +9086,7 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
 @pytest.mark.parametrize("scenario", [
     "ordinary", "surface_tool", "grounded_surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
     "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee", "boundary_arrow", "poll_arrow",
-    "poll_high_health_melee", "tool_high_health_melee",
+    "poll_high_health_melee", "tool_high_health_melee", "tool_ranged_status_only",
 ])
 def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monkeypatch, scenario):
     clock = [1000.0]
@@ -9098,6 +9098,8 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
               "submerged": scenario != "surface_partial_move", "on_ground": False, "alive": True, "ready": True}
     if scenario == "grounded_surface_tool":
         status.update(oxygen=400, submerged=False, on_ground=True)
+    if scenario == "tool_ranged_status_only":
+        status["nearest_hostile"] = {"id": 42, "name": "skeleton", "dist": 3.5}
     if scenario.endswith("arrow"):
         status.update(
             health=17.6, submerged=False, blocking=True,
@@ -9150,8 +9152,13 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     if scenario.startswith("poll_"):
         assert guard.poll() is not None
     elif scenario.startswith("tool_"):
-        trigger = {"source": "tool_interrupted_hurt", "hurt_source": "mob_attack", "primary_type": "zombie"}
-        report = guard.handle_preemption(trigger, interrupted_name="mc_skill_unstick")
+        if scenario == "tool_ranged_status_only":
+            trigger = {"source": "tool_interrupted_hurt", "primary_entity_id": 42, "primary_type": "skeleton"}
+            interrupted = "mc_skill_harvest_logs"
+        else:
+            trigger = {"source": "tool_interrupted_hurt", "hurt_source": "mob_attack", "primary_type": "zombie"}
+            interrupted = "mc_skill_unstick"
+        report = guard.handle_preemption(trigger, interrupted_name=interrupted)
         assert report["status_after"]["in_water"] is False
     else:
         if scenario == "flooded_staircase":
