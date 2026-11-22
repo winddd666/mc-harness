@@ -11843,6 +11843,94 @@ def test_shore_escape_hops_onto_a_verified_adjacent_bank_before_pathing(hop_resu
         assert result["ok"] is True and result["pos_after"] == bank
 
 
+@pytest.mark.parametrize("low_bank", ["grass_block", "stone", "blocked", "scan_timeout"])
+def test_shore_escape_prefers_an_accessible_low_bank_over_a_closer_high_lip(low_bank):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    high = [1, 64, 0]
+    low = [3, 62, 0]
+    status = {"pos": [0.5, 62.4, 0.5], "in_water": True, "on_ground": False, "alive": True, "ready": True}
+    moves = []
+    retry_options = []
+
+    class PoolBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "find_blocks":
+                if low_bank == "scan_timeout" and "stone" in body["types"]:
+                    retry_options.append(kwargs)
+                    raise httpx.ReadTimeout("low-bank scan stalled")
+                rows = [{"name": "grass_block", "pos": high}]
+                material = "stone" if low_bank in {"stone", "scan_timeout"} else "grass_block"
+                if material in body["types"]:
+                    rows.append({"name": material, "pos": low})
+                return {"blocks": rows}
+            if action == "get_block":
+                return {"name": "stone" if low_bank == "blocked" and body["pos"] == [3, 64, 0] else "air"}
+            if action == "move_to":
+                target = [body[axis] for axis in ("x", "y", "z")]
+                moves.append(target)
+                status.update(pos=target, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(PoolBot()).escape_deep_water_to_shore()
+
+    assert result["ok"] is True
+    assert moves == [[1.5, 65.0, 0.5] if low_bank in {"blocked", "scan_timeout"} else [3.5, 63.0, 0.5]]
+    if low_bank == "scan_timeout":
+        options, = retry_options
+        assert 0 < options["timeout_s"] <= 0.65 and options["allow_reauth"] is False
+
+
+@pytest.mark.parametrize("reentry", ["same_pool", "new_life", "expired"])
+def test_shore_escape_remembers_both_failed_banks_in_the_same_pool(monkeypatch, reentry):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    high_banks = ([1, 63, 0], [0, 64, -2])
+    low_bank = [4, 62, 0]
+    status = {"pos": [0.5, 62.4, 0.5], "in_water": True, "on_ground": False, "alive": True,
+              "ready": True, "dimension": "overworld", "last_death": {"t": 1}}
+    moves = []
+
+    class PoolBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": bank} for bank in (*high_banks, low_bank)]}
+            if action == "get_block":
+                return {"name": "air"}
+            if action == "move_to":
+                target = [body[axis] for axis in ("x", "y", "z")]
+                moves.append(target)
+                if target[1] > 63:
+                    raise ApiError("path_not_found", "bank above a steep lip")
+                status.update(pos=target, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    env = CombatEnv(PoolBot())
+    assert env.escape_deep_water_to_shore()["in_water"] is True
+    clock[0] += 8.5
+    assert env.escape_deep_water_to_shore()["in_water"] is True
+    clock[0] += 31.0 if reentry == "expired" else 8.5
+    if reentry == "new_life":
+        status["last_death"] = {"t": 2}
+    third = env.escape_deep_water_to_shore()
+
+    assert third["ok"] is (reentry == "same_pool")
+    assert moves == [[1.5, 64.0, 0.5], [0.5, 65.0, -1.5],
+                     [4.5, 63.0, 0.5] if reentry == "same_pool" else [1.5, 64.0, 0.5]]
+
+
 @pytest.mark.parametrize("same_life", [True, False])
 @pytest.mark.parametrize("under_attack", [False, True])
 def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(monkeypatch, same_life, under_attack):
@@ -11864,7 +11952,8 @@ def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(m
 
         def call(self, action, body=None, **kwargs):
             if action == "find_blocks":
-                return {"blocks": [{"name": "grass_block", "pos": point} for point in (high_bank, low_bank)]}
+                banks = (high_bank, low_bank) if targets else (high_bank,)
+                return {"blocks": [{"name": "grass_block", "pos": point} for point in banks]}
             if action == "get_block":
                 return {"name": "air"}
             if action == "move_to":
