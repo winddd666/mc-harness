@@ -57,6 +57,8 @@ SLOW_TOOL_THRESHOLD_S = 60.0
 KNOWN_STAGES: tuple[str, ...] = (
     "village_to_stronghold_end",
     "day2_village_near",
+    "probe_diamond_y54",
+    "probe_iron_y16",
     "nether_fortress",
     "brewing_alchemy",
     "nether_bastion",

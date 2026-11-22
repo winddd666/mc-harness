@@ -59,6 +59,7 @@ STRONGHOLD_STAGE = "village_to_stronghold_end"
 STRONGHOLD_DISTANCE_RANGE = (120.0, 600.0)
 STRONGHOLD_TRAVEL_RADIUS = 720.0
 STRONGHOLD_LOCATE_TIMEOUT_S = 60
+PROBE_HEIGHTS = {"probe_iron_y16": 16, "probe_diamond_y54": -54}
 FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
@@ -783,30 +784,16 @@ def prepare_scene_ground(
             ]
         )
         return cmds
-    if stage == "probe_iron_y16":
-        py = 16
-        cmds.extend(
-            [
-                f"fill {ix - 1} {py - 1} {iz - 1} {ix + 1} {py - 1} {iz + 1} minecraft:cobblestone",
-                f"fill {ix - 1} {py} {iz - 1} {ix + 1} {py + 2} {iz + 1} minecraft:air",
-                f"setblock {ix + 1} {py} {iz} minecraft:torch",
-                f"tp {bot_name} {ix + 0.5} {py} {iz + 0.5}",
-                f"spawnpoint {bot_name} {ix} {py} {iz}",
-            ]
-        )
-        return cmds
-    if stage == "probe_diamond_y54":
-        py = -54
-        cmds.extend(
-            [
-                f"fill {ix - 1} {py - 1} {iz - 1} {ix + 1} {py - 1} {iz + 1} minecraft:cobblestone",
-                f"fill {ix - 1} {py} {iz - 1} {ix + 1} {py + 2} {iz + 1} minecraft:air",
-                f"setblock {ix + 1} {py} {iz} minecraft:torch",
-                f"tp {bot_name} {ix + 0.5} {py} {iz + 0.5}",
-                f"spawnpoint {bot_name} {ix} {py} {iz}",
-            ]
-        )
-        return cmds
+    if stage in PROBE_HEIGHTS:
+        py = PROBE_HEIGHTS[stage]
+        pre = "execute in minecraft:overworld run"
+        return [
+            f"{pre} fill {ix - 1} {py - 1} {iz - 1} {ix + 1} {py - 1} {iz + 1} minecraft:cobblestone",
+            f"{pre} fill {ix - 1} {py} {iz - 1} {ix + 1} {py + 2} {iz + 1} minecraft:air",
+            f"{pre} setblock {ix + 1} {py} {iz} minecraft:torch",
+            f"{pre} tp {bot_name} {ix + 0.5} {py:.1f} {iz + 0.5}",
+            f"{pre} spawnpoint {bot_name} {ix} {py} {iz}",
+        ]
     if stage == "deep_water":
         # Re-assert the dry staging pad on death return (idempotent, only when spawned at/below sea level).
         cmds.append(
@@ -1128,7 +1115,7 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
 
 
 NETHER_STAGES = frozenset(NETHER_STRUCTURES)
-LOCAL_FIXTURE_STAGES = frozenset({"brewing_alchemy", "cave_combat", "enchant_anvil", "village_trade"})
+LOCAL_FIXTURE_STAGES = frozenset({"brewing_alchemy", "cave_combat", "enchant_anvil", "village_trade", *PROBE_HEIGHTS})
 
 # Surface slices where a night start is pure mob-farm noise (fleet passes --keep-time to every bot
 # except the first, so without this the village/brewing scenes would open at night).
@@ -1137,6 +1124,11 @@ SURFACE_DAYTIME_STAGES = frozenset({"village", "village_trade", "brewing_alchemy
 
 def scene_dimension(stage: str) -> str:
     return "the_nether" if stage in NETHER_STAGES else "overworld"
+
+
+def _fixture_position(stage: str, x: float, y: float, z: float) -> tuple[float, float, float]:
+    height = PROBE_HEIGHTS[stage] if stage in PROBE_HEIGHTS else round(y)
+    return math.floor(x) + 0.5, float(height), math.floor(z) + 0.5
 
 
 def compute_stage_baseline(stage: str) -> dict[str, Any]:
@@ -1222,10 +1214,8 @@ def build_reset_cmds(
 ) -> list[str]:
     """Build the checkpoint reset RCON batch (dimension-aware; shared by live reset and --print-plan)."""
     dim = dim or scene_dimension(stage)
-    if stage == "probe_iron_y16":
-        sy = 16.0
-    elif stage == "probe_diamond_y54":
-        sy = -54.0
+    if stage in PROBE_HEIGHTS:
+        sx, sy, sz = _fixture_position(stage, sx, sy, sz)
     ix, iy, iz = math.floor(sx), int(round(sy)), math.floor(sz)
     cmds: list[str] = ["difficulty normal", f"gamemode survival {bot_name}", f"clear {bot_name}"]
     if dim == "the_nether":
@@ -1241,7 +1231,7 @@ def build_reset_cmds(
             ]
         )
     else:
-        prefix = "execute in minecraft:overworld run " if stage == STRONGHOLD_STAGE else ""
+        prefix = "execute in minecraft:overworld run " if stage in {STRONGHOLD_STAGE, *PROBE_HEIGHTS} else ""
         cmds.extend(
             [
                 f"{prefix}tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
@@ -1666,6 +1656,7 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
     local_fixture = scene.stage in LOCAL_FIXTURE_STAGES
     radius = 2.0 if local_fixture else 64.0
     stronghold_start = scene.stage == STRONGHOLD_STAGE
+    probe_start = scene.stage in PROBE_HEIGHTS
     sample_limit = 5 if stronghold_start else 2
     station = {"brewing_alchemy": "brewing_stand", "enchant_anvil": "enchanting_table"}.get(scene.stage)
     station_pos = [math.floor(scene.x) + 2, round(scene.y), math.floor(scene.z)]
@@ -1701,6 +1692,8 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
                 near_anchor = math.hypot(dx, dz) <= 6.0 and abs(dy) <= 2.0
                 inside = near_anchor and _dry_overworld_position(st) is not None
                 wait_for_ground = near_anchor and not (st.get("in_water") or st.get("in_lava"))
+            if inside and probe_start:
+                inside = _dry_overworld_position(st) is not None
             consecutive = consecutive + 1 if inside else 0
             if consecutive == 2:
                 break
@@ -1724,7 +1717,7 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
             print(f"[Scene] expected {station} at {station_pos}, got {actual or '?'}", flush=True)
         footing = (
             f" on_ground={st.get('on_ground')} in_water={st.get('in_water')} in_lava={st.get('in_lava')}"
-            if stronghold_start else ""
+            if stronghold_start or probe_start else ""
         )
         print(
             f"[Scene] entry verify failed (attempt {i + 1}/{attempts}) bot={bot_name} "
@@ -1892,8 +1885,8 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
     },
     "probe_iron_y16": {
         "key": "minecraft:story/iron_tools",
-        "title": "10分：在 Y=16 地下快速挖铁、烧铁并做出铁镐",
-        "points": 10,
+        "title": "5分：在 Y=16 地下快速挖铁、烧铁并做出铁镐",
+        "points": 5,
         "tier": 1,
         "budget_class": "short",
         "task": (
@@ -2210,8 +2203,7 @@ def main() -> int:
             "brewing_alchemy",
             "cave_combat",
             "deep_water",
-            "probe_iron_y16",
-            "probe_diamond_y54",
+            *PROBE_HEIGHTS,
         ],
         default="bare",
         help="Starting checkpoint stage for sliced testing",
@@ -2234,7 +2226,7 @@ def main() -> int:
         "--plan-pos",
         type=str,
         default=None,
-        help="Anchor x,y,z used by --print-plan (defaults to the slot's search origin)",
+        help="Anchor x,y,z for --print-plan (defaults to the slot origin; probes use their fixed Y)",
     )
     args = parser.parse_args()
     if args.max_episodes < 0:
@@ -2253,6 +2245,8 @@ def main() -> int:
             sites = NETHER_CANDIDATE_SITES if args.stage in NETHER_STAGES else CANDIDATE_SITES
             ax, az = sites[args.site_index % len(sites)]
             px, py, pz = float(ax) + 0.5, 64.0, float(az) + 0.5
+        if args.stage in PROBE_HEIGHTS:
+            px, py, pz = _fixture_position(args.stage, px, py, pz)
         dim = scene_dimension(args.stage)
         plan = {
             "bot": bot_name,
@@ -2275,6 +2269,8 @@ def main() -> int:
             }
             plan["geofence_radius"] = STRONGHOLD_TRAVEL_RADIUS
             plan["focus"] = [FOLLOW_ENDER_EYE, ENTER_END] if args.focus_episodes > 0 else []
+        elif args.stage in PROBE_HEIGHTS:
+            plan["focus"] = [SCENE_FOCUS[args.stage]["key"]] if args.focus_episodes > 0 else []
         elif args.stage in NETHER_STAGES:
             plan["site_search"] = {
                 "structure": NETHER_STRUCTURES[args.stage],
@@ -2323,8 +2319,8 @@ def main() -> int:
         stronghold_xz = None
         try:
             st = ensure_bot_ready(bot, timeout_s=45.0)
-            if args.day1:
-                starting_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=True)
+            if args.day1 or args.stage in PROBE_HEIGHTS:
+                starting_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=args.day1)
             elif args.stage == DAY2_VILLAGE_STAGE:
                 starting_site, village_xz = select_day2_village_site(bot, bot_name, args.site_index)
             elif args.stage == STRONGHOLD_STAGE:
@@ -2359,7 +2355,7 @@ def main() -> int:
         else:
             sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
         if args.stage in LOCAL_FIXTURE_STAGES:
-            sx, sy, sz = math.floor(sx) + 0.5, float(round(sy)), math.floor(sz) + 0.5
+            sx, sy, sz = _fixture_position(args.stage, sx, sy, sz)
         dim = scene_dimension(args.stage)
         scene = SceneAnchor(stage=args.stage, dim=dim, x=sx, y=sy, z=sz, village_xz=village_xz)
         if args.stage == STRONGHOLD_STAGE:
@@ -2371,7 +2367,7 @@ def main() -> int:
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
         entry_ok = verify_scene_entry(bot, bot_name, scene)
-        if not entry_ok and args.stage in (NETHER_STAGES | {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE}):
+        if not entry_ok and args.stage in (NETHER_STAGES | {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE, *PROBE_HEIGHTS}):
             msg = f"Scene {args.stage} landing could not be verified"
             _write_not_ready_summary(
                 out_file,
