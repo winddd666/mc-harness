@@ -5757,6 +5757,8 @@ def test_critical_lava_escape_attempts_bridge_before_swimming_in_an_unverified_d
             return dict(status)
 
         def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
             if action == "inventory":
                 return {"items": [{"name": "cobblestone", "count": 4}]}
             if action == "get_block":
@@ -6018,7 +6020,10 @@ def test_lava_escape_skips_a_shore_path_that_left_the_bot_at_the_same_rim(monkey
         assert headings[0] < 0 < headings[1]
 
 
-@pytest.mark.parametrize("landing", ["grounded", "after_jump", "after_two_checks", "after_two_edge_checks", "loses_footing"])
+@pytest.mark.parametrize("landing", [
+    "grounded", "after_jump", "after_two_checks", "after_two_edge_checks", "loses_footing",
+    "underfoot", "underfoot_loses_footing",
+])
 def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsupported(monkeypatch, landing):
     """Reproduces r20_short hy4_hy_6_nether_bastion: when underfoot place fails no_support/blocked_by_self, place side bridge against bank & step onto it."""
     from mc_agent.errors import ApiError
@@ -6028,6 +6033,8 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
     bridge_state = {"in_lava": True, "on_ground": False, "pos": [249.5, 28.1, 208.5], "placed": set()}
     landing_reads = []
     brake_calls = []
+    underfoot = landing.startswith("underfoot")
+    loses_footing = landing.endswith("loses_footing")
 
     class _DeepBankLavaBot:
         def status(self):
@@ -6047,7 +6054,7 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
             if action == "status":
                 if brake_calls:
                     assert kwargs["method"] == "GET" and 0 < kwargs["timeout_s"] <= 0.35
-                    if landing == "loses_footing":
+                    if loses_footing:
                         bridge_state.update(on_ground=False, pos=[251.3, 28.7, 208.5])
                 elif "timeout_s" in kwargs and not bridge_state["in_lava"] and not bridge_state["on_ground"]:
                     assert kwargs["allow_reauth"] is False
@@ -6072,7 +6079,9 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
             if action == "place":
                 p = tuple(int(x) for x in pl.get("pos", [0, 0, 0]))
                 if p in {(249, 28, 208), (249, 27, 208)}:
-                    raise ApiError("no_support", "no solid face in open lava")
+                    if not underfoot:
+                        raise ApiError("no_support", "no solid face in open lava")
+                    bridge_state.update(in_lava=False, on_ground=True, pos=[249.2, 29.0, 208.3])
                 bridge_state["placed"].add(p)
                 return {"ok": True}
             if action == "control" and pl.get("forward") and bridge_state["placed"]:
@@ -6088,15 +6097,15 @@ def test_r20_lava_bridge_places_against_adjacent_solid_wall_when_underfoot_unsup
             return {"ok": True}
 
     out_b = CombatEnv(_DeepBankLavaBot()).escape_lava()
-    assert out_b["ok"] is (landing != "loses_footing") and out_b["in_lava"] is False
+    assert out_b["ok"] is (not loses_footing) and out_b["in_lava"] is False
     assert "lava_place_cobblestone" in out_b["actions"]
-    assert "lava_step_bridge" in out_b["actions"]
+    assert ("lava_step_bridge" in out_b["actions"]) is (not underfoot)
     assert out_b["actions"][-1] == "lava_bridge_sneak"
     assert brake_calls == [{"sneak": True, "jump": False, "shield": False}]
-    if landing == "loses_footing":
+    if loses_footing:
         assert out_b["reason"] == "lava_landing_unconfirmed"
     else:
-        assert out_b["pos_after"] == [250.5, 29.0, 208.5]
+        assert out_b["pos_after"] == ([249.2, 29.0, 208.3] if underfoot else [250.5, 29.0, 208.5])
     assert len(landing_reads) == {"after_jump": 1, "after_two_checks": 2, "after_two_edge_checks": 2}.get(landing, 0)
     assert all(0 < timeout <= 0.25 for timeout in landing_reads)
 
@@ -7398,6 +7407,39 @@ def test_lava_tool_preemption_uses_latest_landing_status(monkeypatch, landing):
     assert latest["on_ground"] is (landing in {"grounded", "respawned"})
     event, = [event for event in events if event["type"] == "guardian.preempted_tool"]
     assert event["status_after"] == latest
+
+
+@pytest.mark.parametrize("death_recorded", [False, True])
+def test_lava_landing_at_full_health_uses_death_record_instead_of_healing(monkeypatch, death_recorded):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [17087.0, 71.0, 29993.3], "health": 17.184, "ready": True, "alive": True,
+        "dimension": "minecraft:overworld", "in_lava": True, "on_ground": False,
+    }
+
+    class LavaBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "get_block":
+                return {"name": "air"}
+            if endpoint == "inventory":
+                return {"items": []}
+            if endpoint == "control" and body.get("forward"):
+                status.update(health=20, in_lava=False, on_ground=True, pos=[17086.1, 66.2, 30000.7])
+                if death_recorded:
+                    status["last_death"] = {"t": 1}
+            return {"ok": True}
+
+    env = CombatEnv(LavaBot())
+    monkeypatch.setattr(env, "scan_safe_yaws", lambda *args, **kwargs: {"best_yaw": 0.0})
+
+    result = env.escape_lava()
+
+    assert result["ok"] is (not death_recorded)
+    assert result.get("respawned", False) is death_recorded
 
 
 def test_r21_preempted_lava_death_reports_respawned_not_escaped():

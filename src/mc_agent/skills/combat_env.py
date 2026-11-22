@@ -1374,30 +1374,21 @@ class CombatEnv:
         # 1. Surface before spending time on a bucket or scanning for a shore.
         self.invalidate_block_cache()
         pos0 = st.get("pos") or [0.0, 64.0, 0.0]
+        start_x, start_z = float(pos0[0]), float(pos0[2])
         dim0 = str(st.get("dimension") or "").lower()
         last_death0 = st.get("last_death")
-        hp0 = float(st.get("health")) if isinstance(st.get("health"), (int, float)) else None
 
         def _did_respawn_during_lava(st_now: dict[str, Any]) -> bool:
             pos_now = st_now.get("pos") or pos0
-            moved = math.hypot(float(pos_now[0]) - float(pos0[0]), float(pos_now[2]) - float(pos0[2]))
+            moved = math.hypot(float(pos_now[0]) - start_x, float(pos_now[2]) - start_z)
             dim_now = str(st_now.get("dimension") or "").lower()
             ld_now = st_now.get("last_death")
-            hp_now = st_now.get("health")
-            died_heal = (
-                hp0 is not None
-                and isinstance(hp_now, (int, float))
-                and hp0 < 18.0
-                and float(hp_now) >= 19.5
-                and (float(hp_now) - hp0) >= 2.0
-            )
             return bool(
                 st_now.get("alive") is False
                 or st_now.get("ready") is False
                 or moved > 64.0
                 or (dim0 and dim_now and dim_now != dim0)
                 or (ld_now is not None and ld_now != last_death0)
-                or died_heal
             )
 
         def _should_exit_lava(st_now: dict[str, Any]) -> bool:
@@ -1813,8 +1804,8 @@ class CombatEnv:
                             except (ApiError, httpx.HTTPError):
                                 break
                     if _should_exit_lava(st):
-                        if side_step and st.get("on_ground") is True and not _did_respawn_during_lava(st):
-                            # Sprint momentum can carry the bot off a one-block landing.
+                        if st.get("on_ground") is True and not st.get("in_water") and not _did_respawn_during_lava(st):
+                            # Residual movement can carry the bot off either kind of one-block landing.
                             try:
                                 bridge_call("posture", {"sneak": True, "jump": False, "shield": bool(st.get("blocking"))}, timeout_s=0.35)
                                 actions.append("lava_bridge_sneak")
