@@ -4139,6 +4139,7 @@ class GenerationGuard:
                 last_tool_result = None
             if isinstance(last_tool_result, dict):
                 tool_returned_in_water = in_water
+                ended_wet_in_payload |= last_tool_result.get("stop_reason") == "in_water"
                 tool_status = last_tool_result.get("status_after")
                 if (
                     last_tool_result.get("preempted_by_reflex") is True

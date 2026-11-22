@@ -9055,7 +9055,7 @@ def test_bug069_surface_recovery_faces_skeleton_and_swims_away_using_live_positi
 
 
 @pytest.mark.parametrize("scenario", [
-    "ordinary", "surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
+    "ordinary", "surface_tool", "grounded_surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
     "boundary_trident", "poll_trident", "boundary_melee", "poll_melee", "tool_melee", "boundary_arrow", "poll_arrow",
     "poll_high_health_melee", "tool_high_health_melee",
 ])
@@ -9067,6 +9067,8 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
     health = 14 if scenario.endswith("melee") and "high_health" not in scenario else 20
     status = {"pos": [0.5, 52, 0.5], "health": health, "oxygen": 240, "in_water": True,
               "submerged": scenario != "surface_partial_move", "on_ground": False, "alive": True, "ready": True}
+    if scenario == "grounded_surface_tool":
+        status.update(oxygen=400, submerged=False, on_ground=True)
     if scenario.endswith("arrow"):
         status.update(
             health=17.6, submerged=False, blocking=True,
@@ -9131,7 +9133,7 @@ def test_bug056_guardian_bounds_shared_water_macro_and_falls_back_to_shore(monke
         if scenario in {"submerged_move", "surface_partial_move"}:
             receipt = {"ok": True, "result": {"pos": status["pos"], "partial_move": scenario == "surface_partial_move"}}
         tool_results = [json.dumps(receipt)] if scenario in {
-            "surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
+            "surface_tool", "grounded_surface_tool", "flooded_staircase", "submerged_move", "surface_partial_move",
         } else None
         assert "游向最近干燥陆地登岸" in guard.stabilize_after_tools(tool_results)
     completed = [e for e in events if e["type"] == "guardian.action.completed"]
