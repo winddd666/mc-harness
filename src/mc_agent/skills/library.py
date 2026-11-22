@@ -3652,7 +3652,7 @@ class MacroSkills:
             radius=radius,
             protected_msg="周围原木被服务端明确拒绝为 protected_region，请离开该保护区域后再砍树。",
             below_tol=1.5,
-            above_tol=3.5,
+            above_tol=2.5,
             inv_before=counts,
             auto_dropped_names=auto_dropped_names or None,
         )
@@ -3673,7 +3673,7 @@ class MacroSkills:
                     radius=32,
                     protected_msg="周围原木被服务端明确拒绝为 protected_region，请离开该保护区域后再砍树。",
                     below_tol=1.5,
-                    above_tol=3.5,
+                    above_tol=2.5,
                     inv_before=counts,
                     auto_dropped_names=auto_dropped_names or None,
                 )
