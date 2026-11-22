@@ -444,9 +444,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "确保完成 Day 1 早晨石器与据点箱基建：0) 若包内已有 cobblestone>=3 且有木棍/木板或工作台，直接就地调 mc_skill_craft_gear('stone_pickaxe')，切勿在地下砍树；"
             "0.5) 若身处地下(Y<55)且无可用镐且无原木/木板/木棍，严禁在地下反复扫树，立即调 mc_skill_unstick 或沿矿道向上返回地表；"
             "1) 若在水中先调 mc_skill_unstick 上岸；"
-            "2) 在地表先调 mc_skill_harvest_logs(target_logs=6) 速砍 1~2 棵树（严禁徒手硬砍 16 根，凑足 4~6 根原木立刻合工作台+wooden_pickaxe，挖 11 块圆石直出 stone_pickaxe + stone_axe + furnace；有了石斧再按需补 6~8 根原木速度快 4 倍；若 32m 内无树/出生点被砍秃/遇 dig_unconfirmed 保护区，立即调 mc_skill_scout_surface(direction='auto', target_types=['end_portal_frame'], max_duration_s=40) 强行跑出 100m+ 到新林区再砍树，或若已知远处树干坐标直接 mc_move_to 走过去，严禁在原地反复扫树或空手挖石头！）；"
-            "3) 合工作台、wooden_pickaxe（挖 11+ 圆石后立刻升级 stone_pickaxe + stone_axe/stone_sword + furnace）；"
-            "4) 挖掘至少 11 块圆石合出 stone_pickaxe、stone_axe（跳劈可高伤收猪/牛/羊且砍树极快）与 furnace；"
+            "2) 在地表先调 mc_skill_harvest_logs(target_logs=6) 速砍 1~2 棵树（严禁徒手硬砍 16 根，凑足 4~6 根原木立刻合工作台+wooden_pickaxe，挖 14 块圆石直出 2 把 stone_pickaxe + stone_axe + furnace；有了石斧再按需补 6~8 根原木速度快 4 倍；若 32m 内无树/出生点被砍秃/遇 dig_unconfirmed 保护区，立即调 mc_skill_scout_surface(direction='auto', target_types=['end_portal_frame'], max_duration_s=40) 强行跑出 100m+ 到新林区再砍树，或若已知远处树干坐标直接 mc_move_to 走过去，严禁在原地反复扫树或空手挖石头！）；"
+            "3) 合工作台、wooden_pickaxe（挖 14+ 圆石后立刻升级 2 把 stone_pickaxe + stone_axe/stone_sword + furnace）；"
+            "4) 挖掘至少 14 块圆石合出 2 把 stone_pickaxe（确保下矿 Y=16 不断镐）、stone_axe（跳劈可高伤收猪/牛/羊且砍树极快）与 furnace；"
             "5) 若在出生安全地表且木板充足，顺手合 1 个 chest 并放置为据点箱，把多余原木（随身留 6~8 块）存箱留底，防死亡爆装返贫。"
         ),
         extra_tools=("mc_skill_container", "mc_skill_scout_surface"),
@@ -458,8 +458,8 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         points=10,
         tier=0,
         budget_class="medium",
-        # D3 根治：仅客观保底石镐（若包/近箱已有铁料则由督导器动态直出铁镐，绝不在 pre_ensure 盲挖地下矿井）
-        pre_ensure=(("stone_pickaxe", 1),),
+        # D3 根治：保底 2 把石镐（总耐久 262，覆盖从地表 Y=70 挖阶梯至 Y=16 的 ~162 格消耗，防半路爆镐软锁回石器）
+        pre_ensure=(("stone_pickaxe", 2),),
         task=(
             "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
             "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 4 根原木，先顺手砍 4~6 根原木（或备好 2 把 stone_pickaxe）再下井，严防地下断镐无木软锁；"
@@ -883,6 +883,46 @@ _LATE_GRIND_FRONTIER_IDS: frozenset[str] = frozenset(
         "minecraft:adventure/totem_of_undying",
         "minecraft:adventure/voluntary_exile",
         "minecraft:adventure/whos_the_pillager_now",
+        # 80 分钟 2048x2048 空岛中极低命中率/强依赖罕见结构的冷门成就，统一压至 tier=3 防插队
+        "minecraft:adventure/hero_of_the_village",
+        "minecraft:adventure/revaulting",
+        "minecraft:adventure/trade_at_world_height",
+        "minecraft:adventure/craft_decorated_pot_using_only_sherds",
+        "minecraft:adventure/heart_transplanter",
+        "minecraft:adventure/kill_mob_near_sculk_catalyst",
+        "minecraft:adventure/play_jukebox_in_meadows",
+        "minecraft:adventure/trim_with_any_armor_pattern",
+        "minecraft:adventure/under_lock_and_key",
+        "minecraft:adventure/who_needs_rockets",
+        "minecraft:adventure/avoid_vibration",
+        "minecraft:adventure/brush_armadillo",
+        "minecraft:adventure/bullseye",
+        "minecraft:adventure/lighten_up",
+        "minecraft:adventure/minecraft_trials_edition",
+        "minecraft:adventure/read_power_of_chiseled_bookshelf",
+        "minecraft:adventure/salvage_sherd",
+        "minecraft:adventure/spyglass_at_ghast",
+        "minecraft:adventure/spyglass_at_parrot",
+        "minecraft:adventure/walk_on_powder_snow_with_leather_boots",
+        "minecraft:husbandry/feed_snifflet",
+        "minecraft:husbandry/froglights",
+        "minecraft:husbandry/leash_all_frog_variants",
+        "minecraft:husbandry/obtain_netherite_hoe",
+        "minecraft:husbandry/allay_deliver_cake_to_note_block",
+        "minecraft:husbandry/allay_deliver_item_to_player",
+        "minecraft:husbandry/axolotl_in_a_bucket",
+        "minecraft:husbandry/kill_axolotl_target",
+        "minecraft:husbandry/obtain_sniffer_egg",
+        "minecraft:husbandry/plant_any_sniffer_seed",
+        "minecraft:husbandry/remove_wolf_armor",
+        "minecraft:husbandry/repair_wolf_armor",
+        "minecraft:husbandry/ride_a_boat_with_a_goat",
+        "minecraft:husbandry/silk_touch_nest",
+        "minecraft:husbandry/tadpole_in_a_bucket",
+        "minecraft:husbandry/place_dried_ghast_in_water",
+        "minecraft:husbandry/safely_harvest_honey",
+        "minecraft:husbandry/wax_on",
+        "minecraft:husbandry/wax_off",
     }
 )
 
@@ -1366,6 +1406,7 @@ def _build_day2_village_search_target(
             brief_prefix
             + "执行 Day 2 白天食物补给与高速系统寻村（入夜或本集结束自动止损，绝不死磕）："
             f"{biome_note}MC 村庄仅生成在 plains/savanna/desert/taiga/snowy_plains，若进入海洋/深森林/丛林/沼泽立刻换方向。"
+            "0) 出发留底（仅当 16m 内已有据点箱且包内有富余备用物资时）：随身务必保留主力装备（1 把铁镐+盾牌+铁甲+斧+食物+8 原木+圆石），仅顺手用 mc_skill_container 把多余的备用铁镐/多余铁锭(>3)/多余原木(>8)/穿完钻石靴后多余钻石存箱留底（防路上阵亡返贫）；无近箱则直接出发，找到村庄后就地扎根，绝不跑回旧箱搬家；"
             + hop_clause
             + "1) 若包内食物不足 6 块且途中 24m 内有猪/牛/羊，顺手用斧收 2~3 只；"
             "2) 一旦 mc_skill_scout_surface 返回命中村庄方块(bell/dirt_path/hay_block/composter/lectern)或 villager/iron_golem，立即停止继续 scout，直接进村收割：①调 mc_find_blocks(radius=48, types=['bed','chest','hay_block','bell'])（严禁混入 dirt_path 以免挤爆 limit，且必须用通用别名 'bed' 覆盖全部 16 色村民床）；②优先找带床/箱子的村民屋调 mc_skill_bind_bed 绑重生点占为据点；③顺手采 4~8 块 hay_block 合面包、开屋里箱子拿贵重战利品；④完成后立即收工（多人服不指望睡觉跳夜，下集直接交易或转地下挖钻）。"
@@ -1449,6 +1490,69 @@ def select_next_target(
     leash_active = leash is not None
 
     if not leash_active:
+        # 尸袋安全回收：最近 260s 内、主世界、非虚空(y>=-60)、水平距离<=120m 且当前缺铁镐时，尝试 1 集捡回掉落装备
+        # 白天全距离可触发；入夜仅允许近距(<=40m)地下矿井(y<48)快速回井捡装，避免黑夜地表长途裸奔送双杀
+        if (
+            cur_dim == "overworld"
+            and not has_iron_or_better
+            and world_memory is not None
+            and isinstance(world_memory.last_death, dict)
+            and origin_pos is not None
+            and not _is_cooled("recover_death_drop")
+        ):
+            ld = world_memory.last_death
+            ld_pos = ld.get("pos")
+            ld_t = ld.get("t")
+            if (
+                normalize_dimension(ld.get("dim")) == "overworld"
+                and isinstance(ld_pos, (list, tuple))
+                and len(ld_pos) >= 3
+                and isinstance(ld_t, (int, float))
+            ):
+                death_age = float(now_t) - float(ld_t)
+                dx = float(ld_pos[0]) - float(origin_pos[0])
+                dz = float(ld_pos[2]) - float(origin_pos[2])
+                horiz_dist = math.hypot(dx, dz)
+                dy_pos = float(ld_pos[1])
+                is_underground_drop = dy_pos < 48.0
+                safe_time_ok = (not is_dusk_or_night) or (is_underground_drop and horiz_dist <= 40.0)
+                if 0.0 <= death_age <= 260.0 and dy_pos >= -60.0 and horiz_dist <= 120.0 and safe_time_ok:
+                    dp_i = [int(math.floor(float(ld_pos[0]))), int(math.floor(dy_pos)), int(math.floor(float(ld_pos[2])))]
+                    high_value_run = bool(
+                        completed.intersection(
+                            {
+                                "minecraft:story/iron_tools",
+                                "minecraft:story/mine_diamond",
+                                "minecraft:story/shiny_gear",
+                                "minecraft:story/obtain_armor",
+                            }
+                        )
+                    )
+                    use_short_budget = is_underground_drop or high_value_run or horiz_dist > 64.0
+                    ug_note = (
+                        f"死亡点位于地下 y={dp_i[1]}，请优先调 mc_move_to(x={dp_i[0]}, y={dp_i[1]}, z={dp_i[2]}, range=2) "
+                        "沿既有矿井/通道前往（严禁空手硬挖石头下潜，若路径彻底不通或遇岩浆/危险敌怪立即止损放弃）！"
+                        if is_underground_drop
+                        else f"请立即调 mc_move_to(x={dp_i[0]}, z={dp_i[2]}, range=2) 前往该坐标附近，"
+                    )
+                    return (
+                        CurriculumTarget(
+                            key="recover_death_drop",
+                            title=f"快速回收死亡掉落装备 @{dp_i}",
+                            points=0,
+                            tier=0,
+                            budget_class="short" if use_short_budget else "micro",
+                            pre_ensure=(),
+                            task=(
+                                f"[尸袋回收：你刚在约 {int(death_age)} 秒前阵亡于 {dp_i}（距此约 {horiz_dist:.0f}m，加载区块内 300s 有效）。"
+                                f"{ug_note}抵达附近后调 mc_get_entities(radius=16, types=['item']) "
+                                "走近地面掉落物捡回铁镐/钻石/护甲/盾牌等装备！若途中遇危险敌怪、路径不通或抵达后已无掉落物，立即止损收工，严禁恋战送双杀！]"
+                            ),
+                            extra_tools=(),
+                            advancement_id=None,
+                        ),
+                        frontier_data,
+                    )
         if cur_dim == "overworld" and not has_stone_or_better and not _is_cooled("bootstrap_stone_age"):
             pb0, _ = _enrich_target_with_world_memory(
                 CURRICULUM_PLAYBOOKS["bootstrap_stone_age"],
@@ -1516,6 +1620,7 @@ def select_next_target(
         not leash_active
         and enable_island_recon
         and not recon_done
+        and not is_dusk_or_night
         and world_memory is not None
         and cur_dim == "overworld"
         and not _is_cooled("island_recon_sweep")
@@ -1611,12 +1716,20 @@ def select_next_target(
         "minecraft:husbandry/tame_an_animal",
         "minecraft:adventure/trade",
     })
+    _DAYTIME_SURFACE_TARGETS = frozenset({
+        "minecraft:husbandry/plant_seed",
+        "minecraft:husbandry/breed_an_animal",
+        "minecraft:husbandry/tame_an_animal",
+        "minecraft:adventure/trade",
+    })
     is_deep_underground = cur_dim == "overworld" and origin_pos is not None and float(origin_pos[1]) < 48.0
 
     for key, pb in CURRICULUM_PLAYBOOKS.items():
         if key.startswith("bootstrap_"):
             continue
         if is_deep_underground and key in _SURFACE_ONLY_TARGETS:
+            continue
+        if is_dusk_or_night and key in _DAYTIME_SURFACE_TARGETS:
             continue
         if key == "minecraft:adventure/sleep_in_bed" and is_day_now:
             continue
@@ -2578,6 +2691,11 @@ class CurriculumSupervisor:
                 if self._day2_village_eps >= 3:
                     self.cooldowns["day2_village_search"] = time.monotonic() + 1200.0
                     self._day2_village_eps = 0
+            if target.key == "recover_death_drop":
+                self.cooldowns["recover_death_drop"] = max(
+                    self.cooldowns.get("recover_death_drop", 0.0),
+                    time.monotonic() + 260.0,
+                )
 
             report["curriculum_episode"] = ep_index
             report["curriculum_target"] = target.key

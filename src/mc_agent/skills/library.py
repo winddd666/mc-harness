@@ -1288,7 +1288,8 @@ class _SkillDeadline(Exception):
 class _SkillBudgetSession:
     """Bound one skill invocation without rebinding the shared bot."""
 
-    _READS = frozenset({"status", "inventory", "get_block", "find_blocks", "get_entities", "window/view"})
+    # window/view opens a GUI under the server's action lease.
+    _READS = frozenset({"status", "inventory", "get_block", "find_blocks", "get_entities"})
 
     def __init__(self, bot: BotSession, max_duration_s: float) -> None:
         self.bot = bot
@@ -3560,10 +3561,14 @@ class MacroSkills:
         return out
 
     def harvest_logs(
-        self, target_logs: int = 4, radius: int = 32, *, max_duration_s: float = 45.0
+        self, target_logs: int = 4, radius: int = 32, *, max_duration_s: float = 45.0,
+        cleanup_inventory: bool = False,
     ) -> dict[str, Any]:
         """Gather logs or nether stems within a shared skill budget."""
-        result = self._gather_with_budget(max_duration_s, lambda skills: skills._harvest_logs(target_logs, radius))
+        result = self._gather_with_budget(
+            max_duration_s, lambda skills: skills._harvest_logs(target_logs, radius),
+            cleanup_inventory=cleanup_inventory,
+        )
         if result.get("stop_reason") == "time_budget":
             logs = {
                 name: amount for name, amount in (result.get("gained") or {}).items()
@@ -5190,16 +5195,27 @@ class MacroSkills:
 
         collected: list[dict[str, Any]] = []
         session.progress.update(furnace_pos=furnace_pos, input=input_item, requested_count=smelt_n, collected=collected)
-        self.bot.call(
-            "window/act",
-            {
-                "target": target,
-                "ops": [
-                    {"op": "put", "item": input_item, "count": smelt_n, "to": "input"},
-                    {"op": "put", "item": chosen_fuel, "count": fuel_count, "to": "fuel"},
-                ],
-            },
-        )
+        load_ops = [
+            {"op": "put", "item": input_item, "count": smelt_n, "to": "input"},
+            {"op": "put", "item": chosen_fuel, "count": fuel_count, "to": "fuel"},
+        ]
+        try:
+            self.bot.call("window/act", {"target": target, "ops": load_ops})
+        except ApiError as exc:
+            if exc.code != "no_window":
+                raise
+            # An explicit open failure occurs before any inventory operations.
+            alternate = min(
+                (row for row in furnaces if row.get("pos") and row["pos"] != furnace_pos),
+                key=lambda row: float(row.get("dist", 99)),
+                default=None,
+            )
+            if alternate is None or float(alternate.get("dist", 99)) > 4.0:
+                raise
+            furnace_pos = alternate["pos"]
+            target = {"pos": furnace_pos}
+            session.progress["furnace_pos"] = furnace_pos
+            self.bot.call("window/act", {"target": target, "ops": load_ops})
 
         session.progress["fuel"] = {"item": chosen_fuel, "count": fuel_count}
         # Reserve time to reopen the furnace and take confirmed output.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 
 import httpx
@@ -382,7 +383,10 @@ def test_harvest_logs_prefers_low_trunk_over_closer_canopy() -> None:
     assert result["target_gained"] == {"oak_log": 1}
 
 
-def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch) -> None:
+@pytest.mark.parametrize("actor", [False, True])
+def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch, actor) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
     clock = [0.0]
     monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
     attempts = []
@@ -414,7 +418,15 @@ def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch)
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).harvest_logs(target_logs=4, max_duration_s=8.0)
+        if actor:
+            tools = McToolset(bot, episode_deadline_mono=5.8975)
+            skipped = json.loads(tools.mc_skill_harvest_logs(target_logs=6, radius=24))
+            assert skipped["stop_reason"] == "episode_deadline_imminent"
+            assert calls == []
+            tools = McToolset(bot, episode_deadline_mono=12.0)
+            result = json.loads(tools.mc_skill_harvest_logs(target_logs=4))
+        else:
+            result = MacroSkills(bot).harvest_logs(target_logs=4, max_duration_s=8.0)
 
     assert result["ok"] is False
     assert result["stop_reason"] == "time_budget"
@@ -423,6 +435,60 @@ def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch)
     assert attempts[1] <= 4.0
     assert calls[-1] == "stop"
     assert clock[0] <= 8.0
+
+
+@pytest.mark.parametrize("cleanup_times_out", [False, True])
+def test_actor_harvest_cleanup_respects_the_same_budget(monkeypatch, cleanup_times_out) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    cobblestone_stacks = 0
+    calls = []
+
+    def handler(request):
+        nonlocal now, cobblestone_stacks
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        if route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [
+                {"name": "cobblestone", "count": 64, "slot": slot}
+                for slot in range(9, 9 + cobblestone_stacks)
+            ]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": [1, 64, 0], "name": "oak_log", "dist": 1.0}]}
+        elif route == "dig":
+            now += 5.0
+            cobblestone_stacks = 4
+            result = {"dug": "oak_log", "gained": {"oak_log": 1}}
+        elif route == "drop":
+            timeout = request.extensions["timeout"]["read"]
+            assert 0 < timeout <= 2.0
+            assert json.loads(request.content) == {"item": "cobblestone", "count": 64}
+            if cleanup_times_out:
+                now += timeout
+                raise httpx.ReadTimeout("slow cleanup", request=request)
+            cobblestone_stacks -= 1
+            result = {"count": 64}
+        elif route == "stop":
+            result = {"released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot, episode_deadline_mono=12.0)
+        result = json.loads(tools.mc_skill_harvest_logs(target_logs=1))
+
+    assert result["ok"] is True
+    assert result["target_gained"] == {"oak_log": 1}
+    if cleanup_times_out:
+        assert result["cleanup_deadline_hit"] is True
+        assert calls[-2:] == ["drop", "stop"]
+    else:
+        assert result["inventory_cleaned"] == [{"item": "cobblestone", "count": 64}]
 
 
 @pytest.mark.parametrize("timeout_after_column", [False, True])
@@ -1764,6 +1830,134 @@ def test_move_to_far_coordinates_reports_one_waypoint_and_remaining_distance(tim
         assert response["requires_replan"] is True
 
 
+@pytest.mark.parametrize("preflight_has_position", [True, False])
+def test_budgeted_coordinate_move_with_entity_placeholder_never_enters_multihop(monkeypatch, preflight_has_position) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    origin = [3031.3, 64, -10005.5]
+    target = [2978, -10076]
+    calls = []
+    moves = []
+
+    def handler(request):
+        nonlocal now
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        timeout = request.extensions["timeout"]["read"]
+        if route == "status" and len(calls) == 1:
+            status = {"dimension": "overworld"}
+            if preflight_has_position:
+                status["pos"] = origin
+            return httpx.Response(200, json={"ok": True, "result": status})
+        if route == "status":
+            assert timeout <= 1.0
+            now += timeout
+            raise httpx.ReadTimeout("offline slow status after failed move", request=request)
+        assert route == "move_to"
+        assert timeout <= 25.0
+        moves.append(json.loads(request.content))
+        now += timeout
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked", "pos": origin},
+        })
+
+    def unexpected_fallback(*args, **kwargs):
+        raise AssertionError("episode move must not start legacy multi-hop recovery")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=44.1327)
+        monkeypatch.setattr(toolset.skills, "navigate_segmented", unexpected_fallback)
+        result = json.loads(toolset.mc_move_to(x=target[0], y=0, z=target[1], range=4, entity_id=0))
+
+    assert len(moves) == 1
+    assert "entity_id" not in moves[0] and "y" not in moves[0]
+    assert now <= 26.0
+    assert result["error"]["code"] == "path_not_found"
+    if preflight_has_position:
+        assert math.hypot(moves[0]["x"] - origin[0], moves[0]["z"] - origin[2]) == pytest.approx(32)
+        assert result["result"]["target_xz"] == target
+    else:
+        assert [moves[0]["x"], moves[0]["z"]] == target
+
+
+def test_move_to_counts_waypoint_and_direct_no_path_in_one_episode() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    moves = []
+
+    def handler(request):
+        path = request.url.path.rsplit("/", 1)[-1]
+        if path == "status":
+            return httpx.Response(200, json={
+                "ok": True, "result": {"pos": [0, 64, 0], "dimension": "overworld"},
+            })
+        assert path == "move_to"
+        moves.append(json.loads(request.content)["x"])
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked", "pos": [0, 64, 0]},
+        })
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=time.monotonic() + 60)
+        direct = json.loads(toolset.mc_move_to(x=35, z=0))
+        waypoint = json.loads(toolset.mc_move_to(x=40, z=0))
+        later = json.loads(toolset.mc_move_to(x=0, z=25))
+
+    assert moves == [35, 32, 0]
+    assert [out["path_not_found_count"] for out in (direct, waypoint, later)] == [1, 2, 3]
+    assert waypoint["requires_replan"] is True
+    assert waypoint["result"]["waypoint_xz"] == [32, 0]
+    assert waypoint["result"]["target_xz"] == [40, 0]
+    assert "近邻目标重复 2 次" in waypoint["result"]["hint"]
+    assert later["requires_replan"] is True
+
+
+def test_move_to_skips_a_retried_waypoint_within_the_failed_range(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    pos = [-5156.5, 58, -7644.3]
+    moves = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "status":
+            return httpx.Response(200, json={
+                "ok": True, "result": {"pos": pos, "dimension": "the_nether"},
+            })
+        assert route == "move_to"
+        moves.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "ok": False, "error": {"code": "path_not_found", "message": "blocked", "pos": pos},
+        })
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot, episode_deadline_mono=60)
+        toolset.mc_move_to(x=-5168, z=-7578, range=3)
+        now = 3.54
+        waypoint = json.loads(toolset.mc_move_to(x=-5168, z=-7578, range=5))
+        assert len(moves) == 2 and waypoint["path_not_found_count"] == 2
+
+        now = 6.38
+        retry = json.loads(toolset.mc_move_to(x=-5162, z=-7613, range=4))
+        assert len(moves) == 2
+        assert retry["error"]["code"] == "move_route_cooldown"
+        assert retry["requires_replan"] is True
+
+        wider = json.loads(toolset.mc_move_to(x=-5162, z=-7613, range=6))
+        assert wider["path_not_found_count"] == 3
+        pos[0] += 1.0
+        toolset.mc_move_to(x=-5162, z=-7613, range=4)
+        assert len(moves) == 4
+        pos[0] -= 1.0
+        now = 9.0
+        toolset.mc_move_to(x=-5162, z=-7613, range=4)
+        assert len(moves) == 5
+
+
 def test_move_to_fails_fast_when_action_lease_is_busy() -> None:
     """r12 P2-16: busy move_to blocked ~101s before returning."""
     from mc_agent.harness.mc_tools import McToolset
@@ -2692,6 +2886,90 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
     assert outcome["requires_replan"] is True
     assert outcome["collected"] == [{"name": "copper_ingot", "count": 2}]
     assert operations[-1] == {"op": "take", "from": "output", "count": 2}
+
+
+@pytest.mark.parametrize("code", ["no_window", "missing_item"])
+def test_skill_smelt_tries_a_second_nearby_furnace_only_after_open_failure(code) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    near = [-5284, 42, -7713]
+    alternate = [-5284, 43, -7713]
+    far = [-5284, 49, -7713]
+    actions = []
+
+    def handler(request):
+        operation = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if operation == "act":
+            actions.append(body)
+            if body["target"]["pos"] == near:
+                return httpx.Response(200, json={
+                    "ok": False, "error": {"code": code, "message": "furnace action failed"},
+                })
+        if operation == "view":
+            assert body["target"]["pos"] == alternate
+        responses = {
+            "inventory": {"items": [{"name": "cobblestone", "count": 12}, {"name": "coal", "count": 2}]},
+            "find_blocks": {"blocks": [
+                {"pos": far, "dist": 9.1}, {"pos": alternate, "dist": 3.1}, {"pos": near, "dist": 2.2},
+            ]},
+            "status": {"pos": [-5283.5, 40, -7712.3], "health": 20, "food": 20},
+            "act": {},
+            "view": {"sections": {"output": [{"name": "stone", "count": 12}]}},
+        }
+        return httpx.Response(200, json={"ok": True, "result": responses[operation]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_smelt("cobblestone", count=12, fuel_item="coal"))
+
+    if code == "no_window":
+        assert [action["target"]["pos"] for action in actions] == [near, alternate, alternate]
+        assert actions[0]["ops"] == actions[1]["ops"]
+        assert actions[2]["ops"] == [{"op": "take", "from": "output", "count": 12}]
+        assert result["ok"] is True
+        assert result["furnace_pos"] == alternate
+    else:
+        assert [action["target"]["pos"] for action in actions] == [near]
+        assert result["error"]["code"] == code
+
+
+def test_skill_smelt_stops_pending_furnace_view_after_timeout(monkeypatch) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    calls = []
+
+    def handler(request):
+        nonlocal now
+        route = request.url.path.rsplit("/", 1)[-1]
+        calls.append(route)
+        if route == "view":
+            if calls.count(route) == 1:
+                now += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("furnace view action still pending", request=request)
+            return httpx.Response(200, json={
+                "ok": False, "error": {"code": "busy", "message": "running window_view"},
+            })
+        responses = {
+            "inventory": {"items": [{"name": "raw_iron", "count": 6}, {"name": "coal", "count": 1}]},
+            "find_blocks": {"blocks": [{"name": "furnace", "pos": [1, 64, 0], "dist": 1}]},
+            "status": {"pos": [0.5, 64, 0.5], "health": 20, "food": 20},
+            "act": {},
+            "stop": {"released": False},
+        }
+        return httpx.Response(200, json={"ok": True, "result": responses[route]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_smelt("raw_iron", count=6, fuel_item="coal"))
+
+    assert now == pytest.approx(48.0)
+    assert calls.count("act") == 1
+    assert calls.count("view") == 1
+    assert calls[-2:] == ["view", "stop"]
+    assert result["error"] == "partial_smelt"
+    assert result["fuel"] == {"item": "coal", "count": 1}
+    assert result["collected"] == []
 
 
 class _SurfaceScoutBackend:

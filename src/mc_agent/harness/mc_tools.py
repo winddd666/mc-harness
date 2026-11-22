@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from copy import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import math
 import re
@@ -149,6 +149,16 @@ _PASSABLE_SIGHT_BLOCKS: set[str] = {
 }
 
 
+@dataclass(frozen=True)
+class _FailedMoveWaypoint:
+    dimension: str
+    origin: tuple[float, ...]
+    x: float
+    z: float
+    range_m: float
+    expires_at: float
+
+
 class McToolset:
     def __init__(
         self,
@@ -179,6 +189,7 @@ class McToolset:
         self._status_hostile_id: int | None = None
         self._geofence_blocked_count: int = 0
         self._path_not_found_targets: list[tuple[float, float]] = []
+        self._last_failed_waypoint: _FailedMoveWaypoint | None = None
         self._empty_max_scans: dict[tuple[str, tuple[str, ...]], tuple[int, tuple[float, float] | None]] = {}
         self.geofence = geofence if geofence is not None else VoidGeofence.from_env()
         self.world_memory = (
@@ -211,6 +222,7 @@ class McToolset:
         self._episode_deadline_mono = episode_deadline_mono
         self._geofence_blocked_count = 0
         self._path_not_found_targets.clear()
+        self._last_failed_waypoint = None
         self._empty_max_scans.clear()
 
     def _annotate_scan_ceiling(
@@ -1208,9 +1220,11 @@ class McToolset:
         ignore_hurt: bool = False,
     ) -> str:
         range = max(0.2, min(16.0, float(range)))
+        budgeted = self._episode_deadline_mono is not None
         payload: dict[str, Any] = {"range": range}
         geofence_clamped_info: dict[str, Any] | None = None
         if x is not None and z is not None:
+            entity_id = None
             orig_x, orig_z = float(x), float(z)
             clamped = self.geofence.clamped_move_target(orig_x, orig_z)
             if clamped is not None:
@@ -1304,8 +1318,7 @@ class McToolset:
         waypoint = None
         # Budgeted episodes return after one hop so the actor can reassess terrain.
         if (
-            self._episode_deadline_mono is not None
-            and entity_id is None and x is not None and z is not None
+            budgeted and x is not None and z is not None
             and isinstance(origin_pos, (list, tuple)) and len(origin_pos) >= 3
             and all(isinstance(origin_pos[i], (int, float)) and math.isfinite(origin_pos[i]) for i in (0, 2))
         ):
@@ -1318,6 +1331,25 @@ class McToolset:
                     return self._record_geofence_block(blocked)
                 payload["x"], payload["z"] = waypoint
                 payload.pop("y", None)
+
+        failed = self._last_failed_waypoint
+        if (
+            budgeted and waypoint is None and failed is not None and x is not None and z is not None
+            and "y" not in payload and isinstance(origin_pos, (list, tuple))
+            and tuple(origin_pos[:3]) == failed.origin and self._last_dimension == failed.dimension
+            and time.monotonic() < failed.expires_at
+            and math.hypot(float(x) - failed.x, float(z) - failed.z) + range <= failed.range_m
+            and math.floor(float(x)) == math.floor(failed.x) and math.floor(float(z)) == math.floor(failed.z)
+        ):
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {
+                    "code": "move_route_cooldown",
+                    "message": "当前站位刚尝试过这个航点，缩小范围仍在同一失败目标内。请先换方向或换站位。",
+                },
+                **(geofence_clamped_info or {}),
+            }, ensure_ascii=False)
 
         raw = self._call_json("move_to", payload, timeout_s=eff_move_timeout)
         try:
@@ -1335,7 +1367,10 @@ class McToolset:
         except (ValueError, ApiError, httpx.HTTPError):
             pass
         if waypoint is not None:
-            return self._move_waypoint_receipt(raw, waypoint, [float(x), float(z)], geofence_clamped_info)
+            return self._move_waypoint_receipt(
+                raw, waypoint, [float(x), float(z)], geofence_clamped_info,
+                origin=tuple(origin_pos[:3]), range_m=range,
+            )
         if x is not None and z is not None:
             try:
                 parsed = json.loads(raw)
@@ -1354,11 +1389,12 @@ class McToolset:
                         parsed.update(geofence_clamped_info)
                     return json.dumps(parsed, ensure_ascii=False)
                 st_mv: dict[str, Any] | None = None
-                try:
-                    st_mv = self.bot.status()
-                    self._update_status_cache(st_mv)
-                except Exception:
-                    pass
+                if not (budgeted and err_code == "move_timeout"):
+                    try:
+                        st_mv = self.bot.call("status", method="GET", timeout_s=1.0) if budgeted else self.bot.status()
+                        self._update_status_cache(st_mv)
+                    except Exception:
+                        pass
                 if err_code == "movement_not_confirmed":
                     pos_now = st_mv.get("pos") if isinstance(st_mv, dict) else None
                     err_msg = str(err_obj.get("message") or "")
@@ -1394,9 +1430,9 @@ class McToolset:
                             },
                             ensure_ascii=False,
                         )
-                dim_m, cur_p, _ = self._cached_env(fetch_if_missing=True)
+                dim_m, cur_p, _ = self._cached_env(fetch_if_missing=not budgeted)
                 dist_m = math.hypot(float(x) - cur_p[0], float(z) - cur_p[2]) if cur_p is not None else 0.0
-                if dist_m > 36.0 and err_code in {"path_not_found", "no_path", "timeout", "action_timeout", "stalled"}:
+                if not budgeted and dist_m > 36.0 and err_code in {"path_not_found", "no_path", "timeout", "action_timeout", "stalled"}:
                     try:
                         seg_res = self.skills.navigate_segmented(
                             float(x),
@@ -1420,13 +1456,7 @@ class McToolset:
                         if edim == dim_m and abs(ex - tx_i) <= 1 and abs(ez - tz_i) <= 1 and (y is None or abs(ey - math.floor(float(y))) <= 2):
                             self.world_memory.mark_unreachable((ex, ey, ez), dim=dim_m, reason=err_code, cooldown_s=300.0)
                     # BUG-058: guide short-range dig_toward and escalate repeated path_not_found to requires_replan
-                    with self._state_lock:
-                        near_hits = 1 + sum(
-                            1 for (px_f, pz_f) in self._path_not_found_targets
-                            if math.hypot(tx_f - px_f, tz_f - pz_f) <= 8.0
-                        )
-                        self._path_not_found_targets.append((tx_f, tz_f))
-                        total_hits = len(self._path_not_found_targets)
+                    total_hits, near_hits = self._record_move_path_failure(tx_f, tz_f)
                     parsed["path_not_found_count"] = total_hits
                     if cur_p is not None and dist_m <= 12.0:
                         parsed["suggested"] = {
@@ -1484,9 +1514,21 @@ class McToolset:
                 pass
         return out_raw
 
+    def _record_move_path_failure(self, x: float, z: float) -> tuple[int, int]:
+        with self._state_lock:
+            near_hits = 1 + sum(
+                math.hypot(x - previous_x, z - previous_z) <= 8.0
+                for previous_x, previous_z in self._path_not_found_targets
+            )
+            self._path_not_found_targets.append((x, z))
+            return len(self._path_not_found_targets), near_hits
+
     def _move_waypoint_receipt(
-        self, raw: str, waypoint: list[float], target: list[float], geofence_info: dict[str, Any] | None
+        self, raw: str, waypoint: list[float], target: list[float], geofence_info: dict[str, Any] | None,
+        *, origin: tuple[float, ...], range_m: float,
     ) -> str:
+        dimension = self._last_dimension
+        self._last_failed_waypoint = None
         receipt = json.loads(raw)
         result = receipt.get("result") or {}
         error = receipt.get("error") or {}
@@ -1503,6 +1545,18 @@ class McToolset:
         remaining = None
         if isinstance(pos, (list, tuple)) and len(pos) >= 3:
             remaining = round(math.hypot(target[0] - float(pos[0]), target[1] - float(pos[2])), 1)
+        hint = "本次执行途中航点。请根据当前位置和剩余距离继续分段移动或换方向。"
+        if receipt.get("ok") is False and error.get("code") in {"path_not_found", "no_path"}:
+            if isinstance(pos, (list, tuple)) and tuple(pos[:3]) == origin and self._last_dimension == dimension:
+                self._last_failed_waypoint = _FailedMoveWaypoint(
+                    dimension, origin, waypoint[0], waypoint[1], range_m, time.monotonic() + 5.0,
+                )
+            total_hits, near_hits = self._record_move_path_failure(*target)
+            receipt["path_not_found_count"] = total_hits
+            hint = (
+                f"途中航点无可达路径，本集已遇到 {total_hits} 次无路（近邻目标重复 {near_hits} 次）。"
+                "请根据当前位置选择其他方向的可达落脚点，再接近最终目标。"
+            )
         receipt["result"] = {
             **result,
             "partial_move": True,
@@ -1510,7 +1564,7 @@ class McToolset:
             "target_xz": target,
             "pos": pos,
             "remaining_dist": remaining,
-            "hint": "本次执行途中航点。请根据当前位置和剩余距离继续分段移动或换方向。",
+            "hint": hint,
         }
         if geofence_info:
             receipt.update(geofence_info)
@@ -2622,9 +2676,17 @@ class McToolset:
     def mc_skill_harvest_logs(self, target_logs: int = 4, radius: int = 32) -> str:
         target_logs = max(1, min(32, int(target_logs)))
         radius = max(4, min(64, int(radius)))
+        budget_s, deadline_imminent = self._clamp_tool_budget(45.0, max_s=45.0)
+        if deadline_imminent:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "stop_reason": "episode_deadline_imminent",
+                "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过采木。"},
+            }, ensure_ascii=False)
         return self._run_skill(
-            lambda: self._cleanup_inventory_after(
-                self.skills.harvest_logs(target_logs=target_logs, radius=radius)
+            lambda: self.skills.harvest_logs(
+                target_logs=target_logs, radius=radius, max_duration_s=budget_s, cleanup_inventory=True,
             )
         )
 
