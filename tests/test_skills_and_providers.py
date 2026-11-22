@@ -3038,6 +3038,78 @@ def test_window_view_allows_near_entity() -> None:
     assert result["ok"] is True
 
 
+@pytest.mark.parametrize("entry,input_item,output_item", [
+    ("tool", "coal", None), ("tool", "minecraft:coal", None), ("start", "coal", None),
+    ("tool", "raw_iron", "iron_ingot"), ("tool", "coal_ore", "coal"),
+])
+def test_smelt_coal_is_fuel_and_valid_recipes_still_transfer(entry, input_item, output_item) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    furnace = [1, 64, 0]
+    before = {"coal": 16, "raw_iron": 2, "coal_ore": 2}
+    bag = dict(before)
+    ready = 0
+    calls = []
+    operations = []
+
+    def handler(request):
+        nonlocal ready
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        if route == "inventory":
+            result = {"items": [{"name": name, "count": count} for name, count in bag.items() if count > 0]}
+        elif route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1.0}]}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace
+            result = {"sections": {"input": [], "output": [{"name": output_item, "count": ready}] if ready else []}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            operations.extend(body["ops"])
+            if body["ops"][0]["op"] == "put":
+                material, fuel = body["ops"]
+                assert material["to"] == "input" and fuel["to"] == "fuel" and fuel["item"] == "coal"
+                bag["coal"] -= fuel["count"]
+                if output_item:
+                    bag[material["item"]] -= material["count"]
+                    ready = material["count"]
+                result = {}
+            else:
+                assert body["ops"] == [{"op": "take", "from": "output", "count": ready}]
+                bag[output_item] = bag.get(output_item, 0) + ready
+                result = {"done": [{"took": {output_item: ready}}]}
+                ready = 0
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        if entry == "start":
+            result = tools.skills.smelt_start(input_item, count=10, fuel_item="coal")
+        else:
+            result = json.loads(tools.mc_skill_smelt(input_item, count=2 if output_item else 10, fuel_item="coal"))
+
+    if output_item is None:
+        assert result["ok"] is False and result["error"] == "not_smeltable"
+        assert "coal" in result["message"] and "fuel_item" in result["message"]
+        assert bag == before and not calls
+    else:
+        assert result["ok"] is True and result["collected"] == [{"name": output_item, "count": 2}]
+        assert operations == [
+            {"op": "put", "item": input_item, "count": 2, "to": "input"},
+            {"op": "put", "item": "coal", "count": 1, "to": "fuel"},
+            {"op": "take", "from": "output", "count": 2},
+        ]
+        assert bag[input_item] == 0 and ready == 0
+        assert bag["coal"] == (17 if output_item == "coal" else 15)
+        if output_item != "coal":
+            assert bag[output_item] == 2
+
+
 def test_smelt_missing_fuel_gives_harvest_next_action() -> None:
     """P2-28/r20_long: bare 'no fuel' left ds_1_bare stuck in bootstrap_iron_age."""
 

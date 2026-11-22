@@ -1079,6 +1079,19 @@ SMELT_OUTPUTS: dict[str, str] = {
 }
 
 
+def _validate_smelt_input(raw: str) -> tuple[str, dict[str, Any] | None]:
+    item = str(raw or "").strip().lower().removeprefix("minecraft:")
+    if item == "coal":
+        return item, {
+            "ok": False,
+            "error": "not_smeltable",
+            "input_item": item,
+            "requires_replan": True,
+            "message": "coal 已是煤炭，只能用作 fuel_item。input_item 请填写背包中的可烧制原料，例如 raw_iron 或 coal_ore。",
+        }
+    return item, None
+
+
 def _merge_counts(target: dict[str, int], extra: dict[str, int]) -> dict[str, int]:
     for name, cnt in extra.items():
         target[name] = target.get(name, 0) + int(cnt)
@@ -5314,7 +5327,9 @@ class MacroSkills:
         per_item_s: float = 10.0,
     ) -> dict[str, Any]:
         """Non-blocking furnace start: split the batch across 2-3 parallel furnaces and return at once."""
-        clean_input = str(input_item or "").removeprefix("minecraft:").strip().lower()
+        clean_input, error = _validate_smelt_input(input_item)
+        if error is not None:
+            return error
         if not clean_input:
             return {"ok": False, "error": "bad_args", "message": "input_item 不能为空。"}
         output_item = SMELT_OUTPUTS.get(clean_input, clean_input)
@@ -5886,6 +5901,9 @@ class MacroSkills:
         wait_timeout_s: float = 95.0,
     ) -> dict[str, Any]:
         """Load, poll and collect from a furnace within one budget."""
+        input_item, error = _validate_smelt_input(input_item)
+        if error is not None:
+            return error
         session = _SkillBudgetSession(self.bot, wait_timeout_s)
         scoped = copy(self)
         scoped.bot = session
