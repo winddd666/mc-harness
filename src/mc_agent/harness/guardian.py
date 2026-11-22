@@ -1346,9 +1346,10 @@ class GenerationGuard:
         pos = list(nh["pos"]) if isinstance(nh.get("pos"), (list, tuple)) and len(nh["pos"]) >= 3 else None
         return name, dist, eid, pos
 
-    def _find_hostile_position(
-        self, entity_id: int | None, entity_name: str, *, session: _GuardSession | None = None, timeout_s: float | None = None,
-    ) -> list[float] | None:
+    def _find_hostile(
+        self, entity_id: int | None, entity_name: str, *, session: _GuardSession | None = None,
+        timeout_s: float | None = None, require_position: bool = False,
+    ) -> dict[str, Any] | None:
         # Live status identifies the nearest hostile without always including coordinates.
         try:
             response = (session or self.bot).call("get_entities", {"radius": 16}, timeout_s=timeout_s)
@@ -1364,9 +1365,15 @@ class GenerationGuard:
             name = str(entity.get("name") or "").removeprefix("minecraft:").strip().lower()
             if (entity_id is not None and entity.get("id") == entity_id) or (entity_id is None and name == entity_name):
                 pos = entity.get("pos")
-                if isinstance(pos, (list, tuple)) and len(pos) >= 3:
-                    return list(pos)
+                if not require_position or (isinstance(pos, (list, tuple)) and len(pos) >= 3):
+                    return entity
         return None
+
+    def _find_hostile_position(
+        self, entity_id: int | None, entity_name: str, *, session: _GuardSession | None = None, timeout_s: float | None = None,
+    ) -> list[float] | None:
+        hostile = self._find_hostile(entity_id, entity_name, session=session, timeout_s=timeout_s, require_position=True)
+        return list(hostile["pos"]) if hostile is not None else None
 
     @staticmethod
     def _parse_inventory_summary(inv: dict[str, Any]) -> tuple[dict[str, int], bool, bool]:
@@ -1707,6 +1714,8 @@ class GenerationGuard:
         is_ranged = nh_name in RANGED_MOBS and nh_dist <= 13.5
         if not (is_creeper or is_melee or is_ranged):
             return None
+        if not is_creeper and status["nearest_hostile"].get("blocked_by_wall") is True:
+            return None
         if (
             is_ranged
             and not is_creeper
@@ -1733,7 +1742,17 @@ class GenerationGuard:
                 return None
 
         if nh_pos is None:
-            nh_pos = self._find_hostile_position(nh_id, nh_name)
+            # A name-only match may refer to another mob. Only use its position as before.
+            if nh_id is None or is_creeper:
+                nh_pos = self._find_hostile_position(nh_id, nh_name, timeout_s=0.6)
+            else:
+                hostile = self._find_hostile(nh_id, nh_name, timeout_s=0.6)
+                if hostile is not None:
+                    if hostile.get("blocked_by_wall") is True:
+                        return None
+                    candidate_pos = hostile.get("pos")
+                    if isinstance(candidate_pos, (list, tuple)) and len(candidate_pos) >= 3:
+                        nh_pos = list(candidate_pos)
 
         # Never fire `pre_hurt_*` through solid bunker walls! Real damage still triggers `guard_poll_hurt` unconditionally.
         if isinstance(pos, (list, tuple)) and len(pos) >= 3 and isinstance(nh_pos, (list, tuple)) and len(nh_pos) >= 3:

@@ -2585,6 +2585,59 @@ def test_bug_009_resolved_melee_warning_keeps_generation_only_when_stable(monkey
     assert incident["requires_replan"] is (after_kill not in {"stable", "shield_released"})
 
 
+@pytest.mark.parametrize(("mob", "observation"), [
+    ("zombie", "status_wall"), ("zombie", "scan_wall"), ("skeleton", "scan_wall"),
+    ("zombie", "visible"), ("creeper", "check_blast"), ("zombie", "fresh_hit"),
+])
+def test_bug_009_occluded_snapshots_keep_generation_but_fresh_hurt_still_reacts(monkeypatch, mob, observation):
+    target = {"id": 41, "name": mob, "dist": 2.5}
+    if observation in {"status_wall", "check_blast", "fresh_hit"}:
+        target["blocked_by_wall"] = True
+    status = {"pos": [0.5, 64, 0.5], "health": 18, "food": 20, "on_ground": True,
+              "ready": True, "alive": True, "dimension": "overworld", "nearest_hostile": target}
+    scans = []
+    reflexes = []
+
+    class TunnelBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                if observation == "fresh_hit" and not kwargs["params"]["since"]:
+                    return {"events": [{"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": target}]}
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                scans.append(kwargs.get("timeout_s"))
+                entity = {**target, "blocked_by_wall": observation in {"scan_wall", "check_blast"}}
+                if observation != "scan_wall" or mob == "skeleton":
+                    entity["pos"] = [3.0, 64, 0.5]
+                return {"entities": [entity]}
+            if action == "get_block":
+                return {"name": "air"}
+            pytest.fail(f"Unexpected action: {action}")
+
+    def react(trigger):
+        reflexes.append(trigger["source"])
+        return {"ok": True, "mode": "cover_or_flee", "status_after": status, "actions": []}
+
+    guard = GenerationGuard(TunnelBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", react)
+    monkeypatch.setattr(guard, "_defend_or_flee", lambda *_a, **_kw: {"ok": True, "mode": "flee"})
+    incident = guard.poll()
+
+    if observation in {"status_wall", "scan_wall"}:
+        assert incident is None and reflexes == []
+    elif observation == "fresh_hit":
+        assert incident["requires_replan"] and incident["reasons"] == ["fresh_hurt"]
+        assert [action["action"] for action in incident["actions"]] == ["combat_or_flee"]
+    else:
+        assert incident["requires_replan"]
+        assert reflexes == ["pre_hurt_creeper" if mob == "creeper" else "pre_hurt_melee"]
+    assert scans == ([] if observation in {"status_wall", "fresh_hit"} else [0.6])
+
+
 def test_bug_009_pre_hurt_same_target_debounce_cancels_once(monkeypatch):
     """BUG-009: Consecutive pre_hurt_* triggers from the same target within 3s must cancel only once."""
     clock = [500.0]
