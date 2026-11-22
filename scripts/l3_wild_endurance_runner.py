@@ -2091,7 +2091,8 @@ def _install_bare_iron_guidance() -> None:
     key = "bootstrap_iron_age"
     playbook = cur.CURRICULUM_PLAYBOOKS[key]
     task = (
-        "第 1 晚留在 Y=16 铁层安全发育。下井前在地表备 8~10 根原木等量木材、2 把石镐。"
+        "第 1 晚留在 Y=16 铁层安全发育，夜里无甲时先留在井下。"
+        "仍在地表（Y>=55）时，下井前备足 12 根原木等量木材与 2 把石镐。"
         "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
         "已有安全可用的熔炉时，先查看炉内产物和进度，取出已炼铁锭，等同批铁料烧完再算缺口。"
@@ -2103,7 +2104,7 @@ def _install_bare_iron_guidance() -> None:
         "铁原料齐后为取货和制镐留足本集时间。铁锭还不足时，先找安全站位并核对燃料。"
         "缺燃料先补燃料，再调用 mc_skill_smelt，input_item 填 raw_iron，count 填所缺铁锭数。"
         "实包到 3 锭后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，查询手持物确认铁镐。"
-        "剩余时间和铁料充足时，再用余铁做盾与铁甲。站位不安全或剩余时间不足时保留已有材料，下集优先制镐。"
+        "剩余时间和铁料充足时，就地用余铁做盾与铁甲。站位不安全或剩余时间不足时保留已有材料，下集优先制镐。"
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
         playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task, post_ensure_task=task,
