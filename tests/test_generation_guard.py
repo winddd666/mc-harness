@@ -593,6 +593,66 @@ def test_water_recovery_history_clears_only_after_grounded_dry_observation(monke
     assert calls == ([("generic", False)] if landed else [("shore", True)])
 
 
+@pytest.mark.parametrize("entry, risk, oxygen", [
+    ("poll", None, 20), ("boundary", None, 20), ("boundary", None, 400),
+    ("preemption", None, 20), ("boundary", "drowned", 400), ("poll", "drown", 20),
+    ("poll", "creeper", 400), ("boundary", "creeper", 400),
+])
+def test_bug009_shallow_water_uses_live_danger_outside_the_watcher(monkeypatch, entry, risk, oxygen):
+    status = {
+        "pos": [10.5, 63, 20.5], "health": 20, "food": 20, "oxygen": oxygen, "dimension": "overworld",
+        "in_water": True, "submerged": False, "on_ground": True, "ready": True, "alive": True,
+    }
+    if risk in {"drowned", "creeper"}:
+        distance = 5.0 if risk == "drowned" else 3.0
+        status["nearest_hostile"] = {"name": risk, "id": 64, "dist": distance, "pos": [10.5 + distance, 63, 20.5]}
+    hits = [{"seq": 1, "type": "hurt", "source": "drown"}] if risk == "drown" else []
+    water_actions = []
+    combat_calls = []
+
+    class WadingBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(WadingBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def recover(method, **kwargs):
+        water_actions.append(method)
+        status.update(in_water=False)
+        return {"ok": True, "in_water": False}
+
+    def combat(trigger):
+        combat_calls.append(trigger["primary_entity_id"])
+        return {"ok": True, "handled": True, "mode": "cover_or_flee"}
+
+    monkeypatch.setattr(guard, "_escape_water", lambda *_, **kw: recover("generic", **kw))
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", lambda *_, **kw: recover("shore", **kw))
+    monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
+    if entry == "poll":
+        result = guard.poll()
+    elif entry == "boundary":
+        result = guard.stabilize_after_tools(['{"ok": true, "dug_count": 1, "in_water": true}'])
+    else:
+        result = guard.handle_preemption(
+            {"source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": 42, "distance": 3.0},
+            interrupted_name="mc_skill_mine_blocks",
+        )
+    if risk:
+        assert result is not None and water_actions == ["shore"]
+    else:
+        assert water_actions == []
+        if entry == "preemption":
+            assert result["reflex_mode"] == "cover_or_flee" and combat_calls == [42]
+        else:
+            assert result is None
+
+
 def test_hurt_while_standing_in_shallow_water_still_escapes(monkeypatch):
     """Live: in_water + hurt produced actions=[] (melee branch needs dry land, needs_float false)."""
     clock = [100.0]

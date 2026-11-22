@@ -789,6 +789,15 @@ class GenerationGuard:
             and (status.get("on_ground") is False or bool(status.get("submerged")))
         )
 
+    @staticmethod
+    def _water_oxygen_below(status: dict[str, Any], threshold: float) -> bool:
+        oxygen = status.get("oxygen")
+        # Positive low readings can reflect a different scale or lag an exposed head.
+        return (
+            isinstance(oxygen, (int, float)) and oxygen < threshold
+            and (status.get("submerged") is not False or oxygen <= 0)
+        )
+
     def _has_close_melee_in_water(self, status: dict[str, Any], *, include_wading: bool = False) -> bool:
         if not status.get("in_water") or not (
             include_wading or status.get("on_ground") is False or status.get("submerged")
@@ -798,6 +807,22 @@ class GenerationGuard:
         return (
             name in PRE_HURT_MELEE_MOBS and 0 <= distance <= 4.5
             and not status["nearest_hostile"].get("blocked_by_wall")
+        )
+
+    @staticmethod
+    def _is_grounded_wading(status: dict[str, Any]) -> bool:
+        return bool(status.get("in_water")) and status.get("submerged") is False and status.get("on_ground") is True
+
+    def _has_close_water_threat(self, status: dict[str, Any]) -> bool:
+        if self._has_close_melee_in_water(status):
+            return True
+        if not self._is_grounded_wading(status):
+            return False
+        name, distance, _, _ = self._extract_hostile_info(status)
+        if name == "drowned" and 0 <= distance <= 6.0:
+            return status["nearest_hostile"].get("blocked_by_wall") is not True
+        return name == "creeper" and 0 <= distance <= 4.5 and (
+            distance <= 2.3 or status["nearest_hostile"].get("blocked_by_wall") is not True
         )
 
     def _urgent_water_melee(
@@ -1949,8 +1974,8 @@ class GenerationGuard:
             and self._needs_hot_floor_stance(status, now)
         )
         oxygen = status.get("oxygen")
-        low_oxygen = isinstance(oxygen, (int, float)) and oxygen < 240
-        critical_drowning = isinstance(oxygen, (int, float)) and oxygen < 150
+        low_oxygen = self._water_oxygen_below(status, 240)
+        critical_drowning = self._water_oxygen_below(status, 150)
         drowning = in_water and (
             (isinstance(oxygen, (int, float)) and oxygen <= 0)
             or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
@@ -1965,12 +1990,12 @@ class GenerationGuard:
             and no_water_active
             and (now - self._last_water_escape_at >= water_retry_gap)
         )
-        nearby_water_melee = self._has_close_melee_in_water(status)
+        nearby_water_threat = self._has_close_water_threat(status)
         needs_float = (
             in_water
             and (
                 drowning
-                or (nearby_water_melee and now - self._last_water_escape_at >= water_retry_gap)
+                or (nearby_water_threat and now - self._last_water_escape_at >= water_retry_gap)
                 or (
                     not status.get("jumping")
                     and (bool(status.get("submerged")) or low_oxygen)
@@ -2237,7 +2262,7 @@ class GenerationGuard:
             try:
                 needs_inventory = (
                     (hurt and not hot_floor_only) or should_eat or in_lava or no_water_reentry
-                    or exposed_in_water or (needs_float and nearby_water_melee) or pre_trigger is not None
+                    or exposed_in_water or (needs_float and nearby_water_threat) or pre_trigger is not None
                 )
                 inv = self.bot.inventory() if needs_inventory else {}
             except (ApiError, httpx.HTTPError):
@@ -2265,7 +2290,7 @@ class GenerationGuard:
             nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
 
             if (needs_float or no_water_reentry) and not in_lava and not hurt:
-                if (no_water_reentry or exposed_in_water or nearby_water_melee) and nh_name and has_shield:
+                if (no_water_reentry or exposed_in_water or nearby_water_threat) and nh_name and has_shield:
                     self._equip_and_raise_shield_for_water(
                         status,
                         actions,
@@ -2275,11 +2300,11 @@ class GenerationGuard:
                 submerged = bool(status.get("submerged"))
                 continuing_water_escape = recent_water_escape_failed and (submerged or status.get("on_ground") is False)
                 if (
-                    no_water_reentry or exposed_in_water or nearby_water_melee
+                    no_water_reentry or exposed_in_water or nearby_water_threat
                     or drowning or self._swimming_at_low_health(status)
                     or continuing_water_escape
                 ):
-                    if (exposed_in_water or nearby_water_melee) and nh_pos is None:
+                    if (exposed_in_water or nearby_water_threat) and nh_pos is None:
                         nh_pos = self._find_hostile_position(nh_id, nh_name, timeout_s=0.6)
                     shore_act = self._action(
                         "escape_to_shore",
@@ -2288,7 +2313,7 @@ class GenerationGuard:
                             keep_shield=has_shield or bool(status.get("blocking")),
                             shield_target_id=nh_id,
                             **({"surface_first": True} if drowning or (continuing_water_escape and submerged) else {}),
-                            **({"avoid_close_threat": True} if nearby_water_melee and nh_pos else {}),
+                            **({"avoid_close_threat": True} if nearby_water_threat and nh_pos else {}),
                         ),
                     )
                     actions.append(shore_act)
@@ -2359,7 +2384,7 @@ class GenerationGuard:
                 att_w_dict = att_w if isinstance(att_w, dict) else None
                 att_pos_w = att_w_dict.get("pos") if att_w_dict else nh_pos
                 close_drowned_hit = nh_name == "drowned" and nh_dist <= 6.0 and hurt_src_w in MELEE_HURT_SOURCES
-                close_water_melee_hit = nearby_water_melee and hurt_src_w in MELEE_HURT_SOURCES
+                close_water_melee_hit = nearby_water_threat and nh_name in PRE_HURT_MELEE_MOBS and hurt_src_w in MELEE_HURT_SOURCES
                 urgent_water_melee = self._urgent_water_melee(status, hurts)
                 melee_shore = close_water_melee_hit or urgent_water_melee
                 swimming = status.get("on_ground") is False or bool(status.get("submerged"))
@@ -4654,7 +4679,7 @@ class GenerationGuard:
                 )
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
-                    or (isinstance(oxy_pre, (int, float)) and oxy_pre < 180)
+                    or self._water_oxygen_below(st_pre, 180)
                     or drowning_pre
                     or trigger.get("primary_type") == "drowned"
                     or tool_water_threat
@@ -4883,7 +4908,7 @@ class GenerationGuard:
                             and (self._custom_combat_registered or outcome.get("mode") not in {"water_surface", "water_surface_abort"})
                             and (
                                 close_drowned_after_reflex or st_after.get("submerged")
-                                or (isinstance(st_after.get("oxygen"), (int, float)) and st_after["oxygen"] < 180)
+                                or self._water_oxygen_below(st_after, 180)
                                 or time.monotonic() < self._no_water_until
                             )
                         ):
@@ -5226,6 +5251,7 @@ class GenerationGuard:
 
         no_water_reentry_b = in_water and now_b < self._no_water_until
         ended_wet_in_payload = any('"in_water": true' in str(r or "").lower() for r in (tool_results or []))
+        tool_stopped_in_water = False
         handled_water_in_tool = False
         unstick_still_wet = False
         tool_returned_in_water = False
@@ -5247,7 +5273,7 @@ class GenerationGuard:
                     if isinstance(target, list) and len(target) == 3 and all(type(coord) is int for coord in target):
                         flowing_lava_target = target
                 tool_returned_in_water = in_water
-                ended_wet_in_payload |= last_tool_result.get("stop_reason") == "in_water"
+                tool_stopped_in_water = last_tool_result.get("stop_reason") == "in_water"
                 tool_status = last_tool_result.get("status_after")
                 if (
                     last_tool_result.get("preempted_by_reflex") is True
@@ -5294,13 +5320,18 @@ class GenerationGuard:
                     )
                 )
         retry_water_escape = not handled_water_in_tool or drowning or bool(hurts) or bool(status.get("submerged"))
+        nearby_water_threat = self._has_close_water_threat(status)
         needs_water_escape = in_water and retry_water_escape and (
             not status.get("on_ground")
             or status.get("submerged")
-            or ended_wet_in_payload
+            or (ended_wet_in_payload and not self._is_grounded_wading(status))
+            or tool_stopped_in_water
+            or unstick_still_wet
             or no_water_reentry_b
+            or drowning
+            or nearby_water_threat
             or bool(hurts)
-            or (isinstance(oxygen, (int, float)) and oxygen < 270)
+            or self._water_oxygen_below(status, 270)
         )
 
         boundary_trigger: ThreatTrigger | None = None
@@ -5452,14 +5483,13 @@ class GenerationGuard:
                     and (bool(status.get("submerged")) or status.get("on_ground") is False)
                 )
                 surface_first = drowning or (continuing_water_escape and bool(status.get("submerged")))
-                nearby_water_melee = self._has_close_melee_in_water(status)
                 urgent_water_melee = self._urgent_water_melee(status, hurts) and not any(
                     e.get("type") in {"death", "death_loop", "disconnected", "spawn"} for e in fresh
                 )
                 forced_shore_b = (
                     self._water_hurt_streak >= 3 or no_water_reentry_b or drowning
                     or handled_water_in_tool or unstick_still_wet or self._swimming_at_low_health(status)
-                    or continuing_water_escape or underwater_hot_floor or nearby_water_melee or urgent_water_melee
+                    or continuing_water_escape or underwater_hot_floor or nearby_water_threat or urgent_water_melee
                     or (shore_threat_name == "creeper" and nh_dist <= 6.0)
                 )
                 esc_b_ok = False
@@ -5492,7 +5522,7 @@ class GenerationGuard:
                 elif not esc_b_respawned:
                     if shore_threat_pos is None and nh_dist <= 16.0 and (shield_target_b is not None or shore_threat_name):
                         shore_threat_pos = self._find_hostile_position(shield_target_b, shore_threat_name, timeout_s=0.6)
-                    avoid_water_attacker = shore_threat_name == "creeper" or nearby_water_melee or (
+                    avoid_water_attacker = shore_threat_name == "creeper" or nearby_water_threat or (
                         urgent_water_melee and shore_threat_pos is not None
                     )
                     shore_b = self._action(
