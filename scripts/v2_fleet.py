@@ -859,12 +859,14 @@ def _write_markdown(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n_done = sum(1 for r in rows if r.status in ("done", "completed"))
     n_crash = sum(1 for r in rows if r.status == "crash")
+    n_network_error = sum(1 for r in rows if r.status == "network_error")
     n_incomplete = sum(1 for r in rows if r.status == "incomplete")
     lines: list[str] = [
         f"# FLEET TRIAGE — `{wave}`",
         "",
         f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} · "
-        f"bot 目录 `{len(rows)}` · completed `{n_done}` · crash `{n_crash}` · incomplete `{n_incomplete}`",
+        f"bot 目录 `{len(rows)}` · completed `{n_done}` · crash `{n_crash}` · "
+        f"network_error `{n_network_error}` · incomplete `{n_incomplete}`",
         "",
         "## 1. 各路成绩总览（baseline = 场景 loadout 预授分，earned = 实机净增分）",
         "",
@@ -1000,6 +1002,16 @@ def _write_markdown(
                     "",
                 ]
             )
+        if r.status == "network_error":
+            ticket_no += 1
+            lines.extend(
+                [
+                    f"### FLEET-{ticket_no:03d} | P1 | 运行期间连接中断 | 状态: OPEN",
+                    f"- `{r.name}` 已保存 {r.episodes_done} 集，错误为 `{r.error or 'network_error'}`。",
+                    "- 同场景复验短暂断线后续跑，以及持续断线时终版保留最后一次课程检查点。",
+                    "",
+                ]
+            )
     for key, cnt in ranked[:10]:
         if cnt < 2 and len(err_bots[key]) < 2:
             continue
@@ -1065,6 +1077,8 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             print(f"        crash: {tail[:150]}")
         if r.status == "not_ready":
             print(f"        not_ready: {(r.error or 'unknown')[:150]}")
+        if r.status == "network_error":
+            print(f"        network_error: {(r.error or 'unknown')[:150]}")
         if r.portal_crossing:
             placed = r.portal_crossing.get("placed_obsidian")
             print(f"        Nether crossing confirmed, placed_obsidian={placed}, advancement={r.portal_advancement}")

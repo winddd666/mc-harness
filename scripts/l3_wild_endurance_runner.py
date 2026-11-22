@@ -2221,6 +2221,44 @@ class TraderKeeper(threading.Thread):
                 print(f"[Trader Keeper] {self.bot_name} tick error: {exc!r}", flush=True)
 
 
+def _network_error_summary(
+    runs_dir: pathlib.Path,
+    episodes: list[dict[str, Any]],
+    *,
+    error: Exception,
+    elapsed_s: float,
+    duration_s: float,
+) -> dict[str, Any]:
+    """Preserve the last course checkpoint when a transport error aborts the supervisor."""
+    checkpoint: dict[str, Any] = {}
+    last_episode = episodes[-1] if episodes else {}
+    report_file = last_episode.get("report_file")
+    if report_file:
+        for path in sorted(runs_dir.glob("curriculum-*.json"), reverse=True):
+            try:
+                candidate = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            saved = candidate.get("episodes") if isinstance(candidate, dict) else None
+            if (
+                isinstance(saved, list) and saved and isinstance(saved[-1], dict)
+                and saved[-1].get("report_file") == report_file
+            ):
+                checkpoint = candidate
+                break
+    return {
+        "status": "network_error",
+        "error": f"{type(error).__name__}: {error}",
+        "elapsed_s": round(elapsed_s, 1),
+        "duration_s": duration_s,
+        "episodes_completed": len(episodes),
+        "final_score": checkpoint.get("current_score", last_episode.get("score_after")),
+        "completed_count": checkpoint.get("completed_count"),
+        "score_breakdown": checkpoint.get("score_breakdown") or {},
+        "episodes": episodes,
+    }
+
+
 def _write_not_ready_summary(
     out_file: pathlib.Path,
     *,
@@ -2430,6 +2468,7 @@ def main() -> int:
     os.environ["MC_WORLD_MEMORY_PATH"] = str(mem_path)
 
     import mc_agent
+    from httpx import TransportError
     from mc_agent.auth import TokenStore
     from mc_agent.bot import BotSession
     from mc_agent.config import Settings
@@ -2681,7 +2720,15 @@ def main() -> int:
                 on_episode_event=_guard_scene_anchor,
             )
             scene_state["sup"] = sup
-            summary = sup.run(max_episodes=args.max_episodes or None)
+            run_started = time.monotonic()
+            try:
+                summary = sup.run(max_episodes=args.max_episodes or None)
+            except TransportError as exc:
+                summary = _network_error_summary(
+                    runs_dir, sup.episodes, error=exc,
+                    elapsed_s=time.monotonic() - run_started, duration_s=args.duration_s,
+                )
+                print(f"[Wild Run Network Error] {bot_name} {summary['error']}", flush=True)
         finally:
             if trader_keeper is not None:
                 trader_keeper.stop()
@@ -2704,16 +2751,19 @@ def main() -> int:
                 except Exception:
                     pass
 
-        try:
-            inv_end = bot.inventory()
-            st_end = bot.status()
-        except ApiError:
+        inv_end, st_end = {}, {}
+        if summary.get("status") != "network_error":
             try:
-                st_end = ensure_bot_ready(bot, timeout_s=30.0, max_cooldown_wait_s=120.0, attempts=2)
                 inv_end = bot.inventory()
-            except Exception:
-                inv_end = {}
-                st_end = {}
+                st_end = bot.status()
+            except TransportError as exc:
+                print(f"[Final Snapshot] {bot_name} {type(exc).__name__}: {exc}", flush=True)
+            except ApiError:
+                try:
+                    st_end = ensure_bot_ready(bot, timeout_s=30.0, max_cooldown_wait_s=120.0, attempts=2)
+                    inv_end = bot.inventory()
+                except Exception:
+                    inv_end, st_end = {}, {}
         payload = {
             "bot": bot_name,
             "tag": args.tag,
