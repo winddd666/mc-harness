@@ -36,6 +36,7 @@ from ..skills.combat_env import (
     CombatControllerSlot,
     CombatEnv,
     ThreatTrigger,
+    _CombatFortificationInterrupted,
     _TerrainProbeExpired,
     aim_yaw_pitch,
     ranged_retreat_positions,
@@ -307,7 +308,8 @@ class GenerationGuard:
         self.skills = skills
         self.combat_env = CombatEnv(
             self.bot, skills=self.skills, geofence=self.geofence, water_escape=self._escape_water_for_combat,
-            run_lava_escape=self._run_lava_escape, post_combat_food=False,
+            run_lava_escape=self._run_lava_escape, run_fortification=self._run_combat_fortification,
+            post_combat_food=False,
         )
         self.combat_slot = CombatControllerSlot(combat_controller)
         self._custom_combat_registered = combat_controller is not None
@@ -468,6 +470,46 @@ class GenerationGuard:
                 budget_s=self.LAVA_ESCAPE_BUDGET_S,
             )
             return {"ok": False, "in_lava": True, "reason": "time_budget", "partial": True}
+
+    def _run_combat_fortification(
+        self, before: dict[str, Any], operation: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        combat_deadline = self.bot.active_deadline
+        if combat_deadline is None:
+            return operation()
+        now = time.monotonic()
+        # Leave time to stop a pending write, refresh status, and prepare a retreat.
+        deadline = min(now + 3.0, combat_deadline - 3.5)
+        failure = {"ok": False, "reason": "fortification_budget"}
+        if deadline - now < 0.3:
+            return failure
+        try:
+            with self.bot.limit_until(deadline):
+                return operation()
+        except (_RecoveryBudgetExceeded, httpx.TimeoutException) as error:
+            self.combat_env.invalidate_block_cache()
+            endpoint = error.args[0] if isinstance(error, _RecoveryBudgetExceeded) and error.args else None
+            self.events.emit("guardian.fortification_budget_exceeded", endpoint=endpoint)
+
+        stopped = False
+        latest = {}
+        try:
+            stopped = self.bot.call("stop", {}, timeout_s=0.5).get("ok") is not False
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+            pass
+        try:
+            latest = self.bot.call("status", method="GET", timeout_s=0.5)
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+            pass
+        life_unavailable = (
+            latest.get("ready") is False or latest.get("alive") is False
+            or bool(latest and any(latest.get(key) != before.get(key) for key in ("dimension", "last_death")))
+        )
+        if life_unavailable or not stopped or not latest.get("pos") or any(
+            latest.get(key) for key in ("busy", "in_water", "in_lava")
+        ):
+            raise _CombatFortificationInterrupted(latest, life_unavailable=life_unavailable)
+        return failure
 
     def _run_subcortical_combat(self, trigger: ThreatTrigger) -> dict[str, Any]:
         skills = self.combat_env.skills

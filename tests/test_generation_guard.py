@@ -12444,6 +12444,72 @@ def test_creeper_retreat_avoids_a_second_creeper_on_the_escape_heading(monkeypat
     assert all(math.dist(p, second["pos"]) >= min(distance, 6.0) - 1e-6 for p in path), path
 
 
+@pytest.mark.parametrize("enclosure, endpoint", [("open_cave", "dig"), ("carved_shaft", "place")])
+@pytest.mark.parametrize("post_timeout", ["ready", "busy", "respawned", "water"])
+def test_combat_fortification_timeout_leaves_time_to_retreat(monkeypatch, enclosure, endpoint, post_timeout):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    shooter = {"id": 42, "name": "skeleton", "dist": 9.0, "pos": [9.5, 24, 0.5]}
+    status = {
+        "pos": [0.5, 24, 0.5], "dimension": "overworld", "last_death": {"t": 1},
+        "health": 17, "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
+    }
+    timeline = []
+    events = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 4}]}
+            if action == "get_entities":
+                return {"entities": [shooter]}
+            if action == "stop":
+                timeline.append(action)
+            if action == endpoint:
+                timeline.append(action)
+                assert 0.0 < kwargs["timeout_s"] <= 3.0
+                clock[0] += kwargs["timeout_s"] + 0.001
+                if post_timeout == "busy":
+                    status["busy"] = endpoint
+                if post_timeout == "respawned":
+                    status.update(last_death={"t": 2}, health=20)
+                if post_timeout == "water":
+                    status["in_water"] = True
+                raise httpx.ReadTimeout("fortification timed out")
+            return {"ok": True}
+
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=MacroSkills(bot))
+
+    def build(mode, **_kwargs):
+        assert mode == ("full_seal" if enclosure == "carved_shaft" else "cover_pocket")
+        return guard.bot.call(endpoint)
+
+    def flee(*_args, **_kwargs):
+        assert guard.bot.active_deadline - clock[0] >= 3.0
+        timeline.append("flee")
+        return {"ok": True, "mode": "flee", "moved_dist": 2.3}
+
+    monkeypatch.setattr(guard.combat_env, "arena_snapshot", lambda _pos: {"enclosure": enclosure})
+    monkeypatch.setattr(guard.combat_env, "build_tactical", build)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    outcome = guard._run_subcortical_combat({
+        "source": "pre_hurt_ranged", "primary_entity_id": 42, "primary_type": "skeleton", "distance": 9.0,
+    })
+
+    assert timeline == ["stop", endpoint, "stop"] + (["flee"] if post_timeout == "ready" else [])
+    event, = [event for event in events if event["type"] == "guardian.fortification_budget_exceeded"]
+    assert event["endpoint"] == endpoint
+    if post_timeout == "ready":
+        assert outcome["actions"][0]["reason"] == "fortification_budget"
+        assert outcome["actions"][1]["action"] == "flee" and outcome["actions"][1]["ok"]
+    else:
+        assert outcome["mode"] == ("life_unavailable" if post_timeout == "respawned" else "combat_timeout")
+        assert outcome["status_after"] == status
+
+
 def test_combat_status_keeps_retry_and_http_phases_inside_remaining_budget(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])

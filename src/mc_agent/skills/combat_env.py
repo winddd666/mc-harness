@@ -368,6 +368,12 @@ class _TerrainProbeExpired(Exception):
     """An urgent terrain probe ran out of time or could not verify a block."""
 
 
+class _CombatFortificationInterrupted(Exception):
+    def __init__(self, status: dict[str, Any], *, life_unavailable: bool) -> None:
+        self.status = status
+        self.life_unavailable = life_unavailable
+
+
 class CombatEnv:
     """Two-tier spatial combat environment (`CombatEnv` spec v1)."""
 
@@ -379,6 +385,7 @@ class CombatEnv:
         geofence: Any | None = None,
         water_escape: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         run_lava_escape: Callable[[Callable[[], dict[str, Any]]], dict[str, Any]] | None = None,
+        run_fortification: Callable[[dict[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]] | None = None,
         post_combat_food: bool = True,
         block_cache_ttl: float = 3.0,
         hazard_cache_ttl: float = 3.0,
@@ -388,6 +395,7 @@ class CombatEnv:
         self.geofence = geofence
         self._water_escape = water_escape
         self._run_lava_escape = run_lava_escape
+        self._run_fortification = run_fortification
         self.post_combat_food = post_combat_food
         self.block_cache_ttl = max(0.2, float(block_cache_ttl))
         self.hazard_cache_ttl = max(0.2, float(hazard_cache_ttl))
@@ -399,6 +407,11 @@ class CombatEnv:
         self._nearby_water_bank: tuple[tuple[float, ...], tuple[Any, Any], float] | None = None
         self._last_dry_bank: tuple[tuple[float, ...], tuple[Any, Any], float] | None = None
         self._stalled_lava_notch: dict[tuple[str, tuple[int, int, int], str, str | None], float] = {}
+
+    def fortify(self, status: dict[str, Any], operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        if self._run_fortification is None:
+            return operation()
+        return self._run_fortification(status, operation)
 
     def surface_from_water(self, status: dict[str, Any]) -> dict[str, Any]:
         if self._water_escape is not None:
@@ -2017,7 +2030,7 @@ class CombatEnv:
         if allow_shaft_seal:
             snap = self.arena_snapshot(pos0)
             if snap["enclosure"] == "carved_shaft":
-                seal = self.build_tactical("full_seal", threat_pos=threat_pos)
+                seal = self.fortify(st0, lambda: self.build_tactical("full_seal", threat_pos=threat_pos))
                 if seal.get("ok"):
                     pos_s = seal.get("pos_after") or pos0
                     return {"ok": True, "mode": "sealed", "moved_dist": 0.0, "pos_after": pos_s}
@@ -3239,9 +3252,12 @@ class SubcorticalInstinctController:
             snap = env.arena_snapshot(pos)
             sealed_ok = False
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
-                seal = env.build_tactical("full_seal", threat_pos=c_pos)
+                seal = env.fortify(st, lambda: env.build_tactical("full_seal", threat_pos=c_pos))
                 sealed_ok = bool(seal.get("ok"))
-                actions.append({"action": "seal_creeper_shaft", "ok": sealed_ok})
+                actions.append({
+                    "action": "seal_creeper_shaft", "ok": sealed_ok,
+                    **({"reason": seal["reason"]} if seal.get("reason") else {}),
+                })
                 if sealed_ok:
                     st_chk_seal = env.bot.status()
                     post_creepers = [
@@ -3460,7 +3476,7 @@ class SubcorticalInstinctController:
             snap = env.arena_snapshot(pos)
             has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
-                seal = env.build_tactical("full_seal", threat_pos=mob_pos)
+                seal = env.fortify(st, lambda: env.build_tactical("full_seal", threat_pos=mob_pos))
                 actions.append({
                     "action": "seal_shaft", "ok": bool(seal.get("ok")),
                     **({"reason": seal["reason"]} if seal.get("reason") else {}),
@@ -3558,13 +3574,13 @@ class SubcorticalInstinctController:
                     and mob_name not in {"blaze", "ghast"}
                     and trigger.get("hurt_source") not in {"fireball", "small_fireball", "wither_skull"}
                 ):
-                    cov = env.build_tactical("cover_pocket")
+                    cov = env.fortify(st, lambda: env.build_tactical("cover_pocket"))
                     if cov.get("ok"):
                         covered = True
                         mode = "cover_pocket"
                         actions.append({"action": "cover_pocket", "ok": True})
-                    elif cov.get("reason") == "cover_not_entered":
-                        actions.append({"action": "cover_pocket", "ok": False, "reason": "cover_not_entered"})
+                    elif cov.get("reason") in {"cover_not_entered", "fortification_budget"}:
+                        actions.append({"action": "cover_pocket", "ok": False, "reason": cov["reason"]})
                 now_flee = time.monotonic()
                 if now_flee - self._last_flee_at > 25.0:
                     self._recent_flee_streak = 0
@@ -3593,7 +3609,7 @@ class SubcorticalInstinctController:
                 )
                 if should_bunker:
                     try:
-                        bunk = env.skills.dig_safety_bunker(urgent=True)
+                        bunk = env.fortify(st, lambda: env.skills.dig_safety_bunker(urgent=True))
                     except ApiError as err:
                         if err.code != "missing_item":
                             raise
@@ -3604,6 +3620,8 @@ class SubcorticalInstinctController:
                             mode = "bunker_sealed"
                             self._recent_flee_streak = 0
                             actions.append({"action": "emergency_bunker", "ok": True})
+                        elif bunk.get("reason") == "fortification_budget":
+                            actions.append({"action": "emergency_bunker", "ok": False, "reason": bunk["reason"]})
                 if not covered:
                     if has_shield and mob_id is not None:
                         try:
@@ -3887,6 +3905,17 @@ class CombatControllerSlot:
         }
         try:
             outcome = self.controller.on_encounter(env, trigger)
+            return outcome
+        except _CombatFortificationInterrupted as interrupted:
+            outcome = {
+                "handled": False,
+                "mode": "life_unavailable" if interrupted.life_unavailable else "combat_timeout",
+                "summary": "战斗工事超时，已尝试停止原动作，请按最新状态重新规划",
+                "actions": [],
+                "status_after": interrupted.status,
+                "requires_replan": True,
+                "latched_guard": False,
+            }
             return outcome
         finally:
             # 2. Exit rule: NEVER leave shield/sneak/jump stuck at 30% speed unless explicitly latched
