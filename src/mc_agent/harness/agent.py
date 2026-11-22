@@ -1834,7 +1834,13 @@ def main(argv: list[str] | None = None) -> int:
                     enable_pre_ensure=not args.no_pre_ensure,
                     enable_island_recon=not args.no_island_recon,
                 )
-                summary = supervisor.run()
+                if args.interactive:
+                    inbox = InputInbox()
+                    print("[课程交互模式已开启：随时输入新指令回车追加；`/now 新指令` 立即打断当前生成插队；Ctrl+D 结束输入]", flush=True)
+                    with StdinInput(inbox):
+                        summary = supervisor.run(inbox=inbox)
+                else:
+                    summary = supervisor.run()
                 if args.disconnect_after:
                     try:
                         session.disconnect()
