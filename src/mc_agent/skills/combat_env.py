@@ -761,9 +761,12 @@ class CombatEnv:
                 return False
         return False
 
-    def has_safe_footing(self, pos: Sequence[float], *, require_observation: bool = False) -> bool:
+    def has_safe_footing(
+        self, pos: Sequence[float], *, require_observation: bool = False, deadline: float | None = None,
+    ) -> bool:
+        probe_kwargs = {"deadline": deadline} if deadline is not None else {}
         for block in footing_blocks(pos):
-            floor = self._get_block_name(*block, strict=True)
+            floor = self._get_block_name(*block, strict=True, **probe_kwargs)
             if not floor and require_observation:
                 raise _TerrainProbeExpired
             if not floor or floor in HAZARD_BLOCK_TYPES or not _is_solid_ground(floor):
@@ -1314,10 +1317,14 @@ class CombatEnv:
             except (ApiError, httpx.HTTPError):
                 pass
 
-    def _safe_status(self, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _safe_status(
+        self, fallback: dict[str, Any] | None = None, *, timeout_s: float | None = None,
+    ) -> dict[str, Any]:
         """Fetch live bot status safely without letting transient ReadTimeout abort active reflexes."""
         try:
-            if callable(getattr(self.bot, "status", None)):
+            if timeout_s is not None:
+                res = self.bot.call("status", method="GET", timeout_s=timeout_s, allow_reauth=False)
+            elif callable(getattr(self.bot, "status", None)):
                 res = self.bot.status()
             else:
                 res = self.bot.call("status", method="GET")
@@ -2103,10 +2110,23 @@ class CombatEnv:
     def seek_natural_cover(
         self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,
         verify_live_shooters: bool = False, expected_life: tuple[Any, Any] | None = None,
-        trident_attacker_id: int | None = None,
+        trident_attacker_id: int | None = None, expected_shooter_id: int | None = None, deadline: float | None = None,
     ) -> dict[str, Any] | None:
         """Find a close, supported position behind existing terrain and verify the landing."""
-        before = self.bot.status()
+        probe_kwargs = {"deadline": deadline} if deadline is not None else {}
+        required_shooter_id = trident_attacker_id if trident_attacker_id is not None else expected_shooter_id
+
+        def status_refresh() -> dict[str, Any]:
+            if deadline is None:
+                return self._safe_status({"ready": False})
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _TerrainProbeExpired
+            return self._safe_status({"ready": False}, timeout_s=min(0.3, remaining))
+
+        before = self.bot.status() if deadline is None else status_refresh()
+        if deadline is not None and not before.get("pos") and before.get("ready") is False:
+            return None
         if expected_life is not None and expected_life != (before.get("dimension"), before.get("last_death")):
             return {"ok": False, "mode": "natural_cover", "reason": "life_changed", "respawned": True}
         origin = before.get("pos")
@@ -2117,27 +2137,27 @@ class CombatEnv:
         ):
             return None
         self.invalidate_block_cache()
-        if trident_attacker_id is not None and not self.has_safe_footing(origin):
+        if required_shooter_id is not None and not self.has_safe_footing(origin, **probe_kwargs):
             return None
         shooters = (threat_pos, *other_shooters)
         blocks_shot = self._blocks_shot_across_hitbox if verify_live_shooters else self._blocks_shot
         # A fresh blast at this location overrides otherwise favorable sight lines.
-        already_covered = allow_stationary and all(blocks_shot(origin, shooter) for shooter in shooters)
+        already_covered = allow_stationary and all(blocks_shot(origin, shooter, **probe_kwargs) for shooter in shooters)
         if not already_covered:
             away, _ = aim_yaw_pitch(threat_pos, origin)
             for offset in (90, -90, 45, -45):
                 yaw = away + math.radians(offset)
-                route = self.probe_retreat(origin, yaw, 2.2)
+                route = self.probe_retreat(origin, yaw, 2.2, **probe_kwargs)
                 if route is None:
                     continue
                 ux, uz = yaw_to_unit_xz(yaw)
                 target = [origin[0] + ux * 2.2, route[0], origin[2] + uz * 2.2]
-                if all(blocks_shot(target, shooter) for shooter in shooters):
+                if all(blocks_shot(target, shooter, **probe_kwargs) for shooter in shooters):
                     break
             else:
                 return None
 
-        current = self._safe_status({"ready": False})
+        current = status_refresh()
         current_pos = current.get("pos")
         if (
             not current_pos or math.dist(current_pos[:3], origin[:3]) > 0.18
@@ -2148,28 +2168,36 @@ class CombatEnv:
             or current.get("dimension") != before.get("dimension")
         ):
             return None
-        if trident_attacker_id is not None and not melee_clear_for_projectile_cover([current.get("nearest_hostile")]):
+        if required_shooter_id is not None and (
+            current.get("busy") or current.get("submerged") or current.get("on_fire")
+            or not melee_clear_for_projectile_cover([current.get("nearest_hostile")])
+        ):
             return None
+        shooter_kwargs = {
+            "trident_attacker_id": trident_attacker_id, "expected_shooter_id": expected_shooter_id, **probe_kwargs,
+        }
         if already_covered:
-            confirmed = not verify_live_shooters or self._blocks_live_shots(
-                current_pos, trident_attacker_id=trident_attacker_id,
-            )
+            confirmed = not verify_live_shooters or self._blocks_live_shots(current_pos, **shooter_kwargs)
             return {
                 "ok": confirmed, "mode": "natural_cover", "pos_after": current_pos, "moved_dist": 0.0,
                 **({"reason": "shooter_lanes_unconfirmed"} if not confirmed else {}),
             }
+        # Keep time for confirmation and for stopping a move whose reply is lost.
+        move_timeout = 1.5 if deadline is None else min(1.5, deadline - time.monotonic() - 0.6)
+        if move_timeout < 0.45:
+            return None
         try:
             self.bot.call(
                 "move_to",
                 {"x": target[0], "y": target[1], "z": target[2], "range": 0.25,
-                 "timeout": 1200, "stop_on": ["death"]},
-                timeout_s=1.5, allow_reauth=False,
+                 "timeout": min(1200, int((move_timeout - 0.25) * 1000)), "stop_on": ["death"]},
+                timeout_s=move_timeout, allow_reauth=False,
             )
         except (ApiError, httpx.HTTPError) as err:
             if isinstance(err, httpx.HTTPError):
-                self._best_effort_stop()
+                self._best_effort_stop(timeout_s=0.2 if deadline is not None else None)
 
-        after = self._safe_status({"ready": False})
+        after = status_refresh()
         final_pos = after.get("pos")
         self.invalidate_block_cache()
         respawned = after.get("alive") is False or bool(
@@ -2180,12 +2208,11 @@ class CombatEnv:
             final_pos and math.dist(final_pos[:3], target) <= 0.6 and after.get("on_ground") is True
             and after.get("ready") is not False and not respawned
             and not after.get("in_water") and not after.get("in_lava")
-            and all(blocks_shot(final_pos, shooter) for shooter in shooters)
+            and (required_shooter_id is None or not any(after.get(key) for key in ("busy", "submerged", "on_fire")))
+            and all(blocks_shot(final_pos, shooter, **probe_kwargs) for shooter in shooters)
         )
         reason = "cover_unconfirmed" if not confirmed else None
-        if confirmed and verify_live_shooters and not self._blocks_live_shots(
-            final_pos, trident_attacker_id=trident_attacker_id,
-        ):
+        if confirmed and verify_live_shooters and not self._blocks_live_shots(final_pos, **shooter_kwargs):
             confirmed = False
             reason = "shooter_lanes_unconfirmed"
         return {
@@ -2194,9 +2221,15 @@ class CombatEnv:
             **({"respawned": True} if respawned else {}),
         }
 
-    def _blocks_live_shots(self, pos: Sequence[float], *, trident_attacker_id: int | None = None) -> bool:
+    def _blocks_live_shots(
+        self, pos: Sequence[float], *, trident_attacker_id: int | None = None,
+        expected_shooter_id: int | None = None, deadline: float | None = None,
+    ) -> bool:
+        timeout = 0.4 if deadline is None else min(0.4, deadline - time.monotonic())
+        if timeout <= 0:
+            return False
         try:
-            sighting = self.bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.4, allow_reauth=False)
+            sighting = self.bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=timeout, allow_reauth=False)
         except (ApiError, httpx.HTTPError):
             return False
         entities = sighting.get("entities")
@@ -2207,16 +2240,19 @@ class CombatEnv:
         )
         # A wall checked before the entity scan may have changed while the scan was in flight.
         self.invalidate_block_cache()
-        if trident_attacker_id is not None and (
-            not any(entity_id == trident_attacker_id for entity_id, _ in shooters)
-            or not any(
-                isinstance(entity, dict) and entity.get("id") == trident_attacker_id
-                and _clean_block_name(entity.get("name")) == "drowned" for entity in entities
-            )
-            or not melee_clear_for_projectile_cover(entities) or not self.has_safe_footing(pos)
+        probe_kwargs = {"deadline": deadline} if deadline is not None else {}
+        required_shooter_id = trident_attacker_id if trident_attacker_id is not None else expected_shooter_id
+        if required_shooter_id is not None and (
+            not any(entity_id == required_shooter_id for entity_id, _ in shooters)
+            or not melee_clear_for_projectile_cover(entities) or not self.has_safe_footing(pos, **probe_kwargs)
         ):
             return False
-        return bool(shooters) and all(self._blocks_shot_across_hitbox(pos, shooter) for _, shooter in shooters)
+        if trident_attacker_id is not None and not any(
+            isinstance(entity, dict) and entity.get("id") == trident_attacker_id
+            and _clean_block_name(entity.get("name")) == "drowned" for entity in entities
+        ):
+            return False
+        return bool(shooters) and all(self._blocks_shot_across_hitbox(pos, shooter, **probe_kwargs) for _, shooter in shooters)
 
     def flee(
         self,
@@ -3629,6 +3665,35 @@ class SubcorticalInstinctController:
         except (ApiError, httpx.HTTPError):
             return False
 
+    def _cover_after_shielded_arrow_stall(
+        self, env: CombatEnv, before: dict[str, Any], shooter_id: int, *, deadline: float,
+    ) -> dict[str, Any] | None:
+        landing = env._safe_status({"ready": False}, timeout_s=0.3)
+        health = landing.get("health")
+        pos = landing.get("pos")
+        if (
+            landing.get("ready") is not True or landing.get("alive") is False or landing.get("on_ground") is not True
+            or not pos or not isinstance(health, (int, float)) or not 0 < health <= 6.0
+            or any(landing.get(key) for key in ("busy", "in_water", "in_lava", "submerged", "on_fire"))
+            or any(landing.get(key) != before.get(key) for key in ("dimension", "last_death"))
+        ):
+            return None
+        entities = self._scan_live_hostiles(env, radius=16, timeout_s=0.35)
+        if not entities or not melee_clear_for_projectile_cover(entities):
+            return None
+        shooters = ranged_retreat_positions(pos, entities, max_distance=16.0)
+        target = next((point for entity_id, point in shooters if entity_id == shooter_id), None)
+        if target is None:
+            return None
+        try:
+            return env.seek_natural_cover(
+                target, other_shooters=[point for entity_id, point in shooters if entity_id != shooter_id],
+                verify_live_shooters=True, expected_life=(landing.get("dimension"), landing.get("last_death")),
+                expected_shooter_id=shooter_id, deadline=deadline,
+            )
+        except _TerrainProbeExpired:
+            return {"ok": False, "mode": "natural_cover", "reason": "time_budget"}
+
     def _place_melee_cover(
         self, env: CombatEnv, before: dict[str, Any], target_id: int, counts: dict[str, int],
     ) -> dict[str, Any]:
@@ -3902,7 +3967,15 @@ class SubcorticalInstinctController:
         oxy_raw = st.get("oxygen")
         low_oxygen = isinstance(oxy_raw, (int, float)) and oxy_raw < 180
 
-        if (
+        shielded_arrow_interrupt = (
+            has_shield and not in_water and not st.get("on_fire")
+            and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+            and trigger.get("source") == "tool_interrupted_hurt" and trigger.get("hurt_source") == "arrow"
+            and mob_name in RANGED_MOBS and isinstance(mob_id, int) and mob_id == trig_id
+        )
+        if shielded_arrow_interrupt and hp <= 6.0:
+            actions.append({"action": "raise_shield_entry", "ok": self._latch_shield_at_threat(env, mob_id)})
+        elif (
             not in_water
             and has_shield
             and not st.get("blocking")
@@ -4458,6 +4531,18 @@ class SubcorticalInstinctController:
                         not flee_ok and fl.get("reason") == "no_safe_retreat" and hp <= 4.0
                         and trigger.get("hurt_source") == "arrow"
                     )
+                    if (
+                        shielded_arrow_interrupt and not flee_ok and not fl.get("respawned")
+                        and fl.get("reason") == "no_safe_retreat" and time.monotonic() + 2.0 < deadline
+                    ):
+                        natural_cover = self._cover_after_shielded_arrow_stall(
+                            env, st, mob_id, deadline=min(deadline - 0.7, time.monotonic() + 2.25),
+                        )
+                        if natural_cover is not None:
+                            actions.append({"action": "natural_cover", **natural_cover})
+                            if natural_cover.get("ok"):
+                                mode = "natural_cover"
+                                self._recent_flee_streak = 0
                     moved = fl.get("moved_dist")
                     short_ranged_retreat = (
                         flee_ok and not sealed and trigger.get("source") == "pre_hurt_ranged"

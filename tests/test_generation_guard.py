@@ -16892,6 +16892,99 @@ def test_combat_fortification_timeout_leaves_time_to_retreat(monkeypatch, enclos
         assert outcome["status_after"] == status
 
 
+@pytest.mark.parametrize("scene", [
+    "covered", "exposed", "close_melee", "shooter_lost", "respawned", "insufficient_time", "unsupported",
+    "late_shooter_lost", "terrain_timeout", "step_to_cover",
+])
+def test_critical_shielded_arrow_interrupt_guards_before_dig_and_checks_cover_after_stall(monkeypatch, scene):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    shooter = {"id": 930084, "name": "skeleton", "dist": 8.1, "pos": [353617.7, 74, 353661.2]}
+    status = {
+        "pos": [353609.6, 74, 353661.2], "dimension": "overworld", "last_death": {"t": 1},
+        "health": 4.2, "food": 17, "ready": True, "alive": True, "on_ground": True,
+        "blocking": False, "nearest_hostile": shooter,
+    }
+    timeline = []
+
+    class CaveBot:
+        def call(self, action, body=None, **_kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 5}], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                if "flee" in timeline:
+                    timeline.append("rescan")
+                    if scene == "shooter_lost":
+                        return {"entities": [{**shooter, "id": 93}]}
+                    if scene == "late_shooter_lost" and timeline.count("rescan") > 1:
+                        return {"entities": [{**shooter, "id": 93}]}
+                    if scene == "close_melee":
+                        zombie = {"id": 92, "name": "zombie", "dist": 2, "pos": [353607.6, 74, 353661.2]}
+                        return {"entities": [shooter, zombie]}
+                return {"entities": [shooter]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                support = y == 73 and x == 353609 and z in {353660, 353661} and scene != "unsupported"
+                wall = x == 353614 and 74 <= y <= 77 and scene != "exposed"
+                if scene == "terrain_timeout":
+                    clock[0] += 2.3
+                if scene == "step_to_cover":
+                    support = y == 73 and x == 353609 and 353658 <= z <= 353662
+                    wall = wall and z <= 353660
+                return {"name": "stone" if support or wall else "air"}
+            if action == "posture":
+                status["blocking"] = bool(body.get("shield"))
+                if status["blocking"]:
+                    timeline.append("shield")
+            if action == "move_to":
+                assert scene == "step_to_cover"
+                timeline.append("move")
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=MacroSkills(bot))
+    monkeypatch.setattr(guard.combat_env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave"})
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", lambda *_args, **_kwargs: {"ok": False})
+
+    def build(mode, **_kwargs):
+        assert mode == "cover_pocket"
+        timeline.append("dig")
+        clock[0] += 3.0
+        return {"ok": False, "reason": "fortification_budget"}
+
+    def flee(*_args, **_kwargs):
+        timeline.append("flee")
+        status["health"] = 1.747
+        if scene == "respawned":
+            status.update(last_death={"t": 2}, health=20)
+        if scene == "insufficient_time":
+            clock[0] += 3.2
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(guard.combat_env, "build_tactical", build)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    outcome = guard._run_subcortical_combat({
+        "source": "tool_interrupted_hurt", "hurt_source": "arrow", "primary_entity_id": shooter["id"],
+        "primary_type": "skeleton", "primary_pos": shooter["pos"], "distance": 8.1,
+    })
+
+    assert timeline[:2] == ["shield", "dig"]
+    if scene in {"respawned", "insufficient_time"}:
+        assert "rescan" not in timeline
+    else:
+        assert "rescan" in timeline
+    assert (outcome["mode"] == "natural_cover") is (scene in {"covered", "step_to_cover"})
+    assert ("move" in timeline) is (scene == "step_to_cover")
+    if scene == "terrain_timeout":
+        action = next(action for action in outcome["actions"] if action["action"] == "natural_cover")
+        assert action["reason"] == "time_budget"
+    if scene != "respawned":
+        assert outcome["latched_guard"] and outcome["status_after"]["blocking"]
+
+
 def test_combat_status_keeps_retry_and_http_phases_inside_remaining_budget(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
