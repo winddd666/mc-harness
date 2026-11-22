@@ -14363,6 +14363,74 @@ def test_dfs_rechecks_a_rejected_waypoint_only_when_the_observation_can_change(m
     assert len(reuses) == (0 if terrain == "unavailable" else 2)
 
 
+@pytest.mark.parametrize("terrain", ["cliff", "lava", "flat", "wall", "read_timeout", "repaired", "falling"])
+def test_dfs_checks_collar_relocation_before_dispatch_and_before_retrying_exactly(terrain):
+    origin = [354983.4, 50, 367623.5]
+    target = {"x": 354983.5, "z": 367621.5, "range": 1.2, "stop_on": ["hurt", "death"]}
+    status = {"pos": origin, "health": 20, "ready": True, "alive": True, "on_ground": terrain != "falling",
+              "dimension": "overworld", "in_water": False, "in_lava": False, "velocity": [0, -16, 0]}
+    dispatched = []
+    repaired = False
+
+    class CollarBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                x, y, z = body["pos"]
+                ahead = x == 354983 and z <= 367622
+                if ahead and terrain == "wall" and y == 51:
+                    return {"name": "stone"}
+                if ahead and y == 49 and terrain == "read_timeout":
+                    raise httpx.ReadTimeout("collar floor read timed out")
+                if ahead and y == 49 and terrain == "lava":
+                    return {"name": "lava"}
+                if ahead and 45 <= y <= 49 and terrain in {"cliff", "repaired"} and not repaired:
+                    return {"name": "air"}
+                return {"name": "stone" if y in {49, 18} else "air"}
+            if action in {"move_to", "control"}:
+                dispatched.append((action, body))
+            return {"ok": True}
+
+    bot = CollarBot()
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+
+    def attempt():
+        nonlocal repaired
+
+        def dispatch(action, body):
+            try:
+                bot.call(action, body)
+            except ApiError as err:
+                return err.code
+            return None
+
+        loose = dispatch("move_to", target)
+        if terrain == "repaired":
+            repaired = True
+        exact = dispatch("move_to", {**target, "y": 19, "range": 0.35})
+        fallback = dispatch("control", {"forward": True, "ms": 420})
+        status["on_ground"] = True
+        alternate = dispatch("move_to", {"x": 354984.5, "y": 50, "z": 367623.5, "range": 0.3})
+        return json.dumps({"loose": loose, "exact": exact, "fallback": fallback, "alternate": alternate})
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", attempt))
+    denied = {
+        "cliff": "unsafe_landing", "lava": "unsafe_landing", "repaired": "unsafe_landing",
+        "read_timeout": "mining_footing_unavailable", "falling": "unsafe_landing",
+    }.get(terrain)
+    paired_denial = None if terrain == "repaired" else denied
+    assert result == {"loose": denied, "exact": paired_denial, "fallback": paired_denial, "alternate": None}
+    assert [action for action, _ in dispatched] == (
+        ["move_to"] if paired_denial else ["move_to", "control", "move_to"] if denied
+        else ["move_to", "move_to", "control", "move_to"]
+    )
+    if denied:
+        event, = [e for e in events.events if e["type"] == "guardian.mining_collar_blocked"]
+        assert event["reason"] == denied and event["pos"] == origin
+
+
 @pytest.mark.parametrize("floor", ["air", "lava", "unavailable"])
 def test_bug116_dfs_rejects_dangerous_waypoint_and_keeps_mining(monkeypatch, tmp_path, floor):
     from mc_agent.skills.mining_dfs import MiningDFSEngine

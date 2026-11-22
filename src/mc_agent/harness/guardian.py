@@ -4500,6 +4500,7 @@ class GenerationGuard:
         mining_landing_error: _MiningLandingDenied | None = None
         mining_landing_retry_at = 0.0
         mining_support_changed = False
+        blocked_collar_approaches: set[tuple[float, float]] = set()
         watch_terrain_damage = check_support_dig or watch_mining_water
         watch_low_oxygen = watch_mining_water or check_unstick_exit
         drowned_threat_range = None
@@ -4858,6 +4859,7 @@ class GenerationGuard:
             cached_denial = mining_landing_error
             if (
                 cached_denial is None or cached_denial.code != "unsafe_landing" or cached_denial.context["target"] != target
+                or cached_denial.context.get("collar_approach")
                 or mining_support_changed or time.monotonic() >= mining_landing_retry_at
             ):
                 cached_denial = None
@@ -4865,6 +4867,10 @@ class GenerationGuard:
             try:
                 if cached_denial is not None:
                     raise _MiningLandingDenied(cached_denial.code, cached_denial.message, context=cached_denial.context)
+                xz = target[0], target[2]
+                if xz in blocked_collar_approaches:
+                    self._verify_mining_collar_approach(target)
+                    blocked_collar_approaches.discard(xz)
                 self._verify_mining_landing(target)
             except _MiningLandingDenied as error:
                 if pending_trigger:
@@ -4874,7 +4880,7 @@ class GenerationGuard:
                     mining_landing_retry_at = time.monotonic() + self.MINING_UNSAFE_FOOTING_RECHECK_S
                 self.events.emit(
                     "guardian.mining_landing_blocked", tool="mc_skill_mine_dfs", target=target, reason=error.code,
-                    **({"water_reentry_site": error.context["water_reentry_site"]} if "water_reentry_site" in error.context else {}),
+                    **{key: error.context[key] for key in ("hazard", "collar_approach", "water_reentry_site") if key in error.context},
                     **({"probe_reused": True} if cached_denial is not None else {}), **(dig_progress or {}),
                 )
                 raise
@@ -4937,10 +4943,24 @@ class GenerationGuard:
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
             if check_mining_landing and isinstance(body, dict):
-                if clean_path == "move_to" and body.get("range") in (0.3, 0.35):
+                if clean_path == "move_to":
                     target = [body.get(axis) for axis in ("x", "y", "z")]
-                    if all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target):
-                        verify_mining_approach(target)
+                    x, y, z = target
+                    if all(type(coord) in (int, float) and math.isfinite(coord) for coord in (x, z)):
+                        if body.get("range") in (0.3, 0.35) and type(y) in (int, float) and math.isfinite(y):
+                            verify_mining_approach(target)
+                        elif y is None and body.get("range") in (1.0, 1.2, 1.4):
+                            try:
+                                self._verify_mining_collar_approach(target)
+                            except _MiningLandingDenied as error:
+                                if pending_trigger:
+                                    raise ReflexPreempted(pending_trigger[0]) from None
+                                blocked_collar_approaches.add((x, z))
+                                self.events.emit("guardian.mining_collar_blocked", reason=error.code, **error.context)
+                                raise
+                            blocked_collar_approaches.discard((x, z))
+                            if pending_trigger:
+                                raise ReflexPreempted(pending_trigger[0])
                 elif clean_path == "control" and body.get("forward") and mining_landing_error is not None:
                     # DFS can fall back to a forward pulse after a failed move_to. Keep
                     # the waypoint blocked until a new approach or a repair is verified.
@@ -5682,6 +5702,52 @@ class GenerationGuard:
             return receipt
         finally:
             self._in_reflex = False
+
+    def _verify_mining_collar_approach(self, target: list[float | None]) -> None:
+        # Legacy collar moves leave Y to the pathfinder. Check the departure before it can enter a drop.
+        context = {"target": target, "collar_approach": True}
+        deadline = time.monotonic() + 1.0
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        try:
+            status = bot.call("status", method="GET", timeout_s=0.35)
+            pos = status.get("pos")
+            if (
+                status.get("ready") is False or status.get("alive") is False
+                or not isinstance(pos, (list, tuple)) or len(pos) < 3
+                or not all(type(coord) in (int, float) and math.isfinite(coord) for coord in pos[:3])
+            ):
+                raise _TerrainProbeExpired
+            context["pos"] = pos[:3]
+            hazard = None
+            if status.get("in_lava"):
+                hazard = "lava"
+            elif status.get("in_water") or status.get("submerged"):
+                return
+            elif status.get("on_ground") is False:
+                velocity = status.get("velocity")
+                if (
+                    isinstance(velocity, (list, tuple)) and len(velocity) >= 2
+                    and type(velocity[1]) in (int, float) and math.isfinite(velocity[1]) and velocity[1] <= -10.0
+                ):
+                    hazard = "falling"
+            elif status.get("on_ground") is True:
+                x, _, z = target
+                dx, dz = x - pos[0], z - pos[2]
+                distance = min(3.5, math.hypot(dx, dz))
+                if distance >= 0.9:
+                    route = CombatEnv(bot, geofence=self.geofence).probe_ray(
+                        pos, math.atan2(-dx, -dz), dist=distance, deadline=deadline,
+                    )
+                    if route["hazard"] in {"cliff", "lava", "geofence"}:
+                        hazard = route["hazard"]
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
+            raise _MiningLandingDenied(
+                "mining_footing_unavailable", "暂时无法确认前往井口的近端路面，请换一条路线。", context=context,
+            ) from None
+        if hazard:
+            raise _MiningLandingDenied(
+                "unsafe_landing", "井口方向的近端存在危险落脚，请改道。", context={**context, "hazard": hazard},
+            )
 
     def _verify_mining_landing(self, target: list[float]) -> None:
         deadline = time.monotonic() + 2.5
