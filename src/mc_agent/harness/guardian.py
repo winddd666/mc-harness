@@ -4695,12 +4695,21 @@ class GenerationGuard:
         tool_returned_in_water = False
         waiting_for_shore_landing = False
         same_threat_after_timeout = False
+        flowing_lava_target: list[int] | None = None
         if tool_results:
             try:
                 last_tool_result = json.loads(tool_results[-1])
             except (TypeError, ValueError):
                 last_tool_result = None
             if isinstance(last_tool_result, dict):
+                error = last_tool_result.get("error")
+                if (
+                    isinstance(error, dict) and error.get("code") == "interact_flowing_fluid"
+                    and error.get("block") in ("lava", "flowing_lava")
+                ):
+                    target = error.get("target")
+                    if isinstance(target, list) and len(target) == 3 and all(type(coord) is int for coord in target):
+                        flowing_lava_target = target
                 tool_returned_in_water = in_water
                 ended_wet_in_payload |= last_tool_result.get("stop_reason") == "in_water"
                 tool_status = last_tool_result.get("status_after")
@@ -4846,12 +4855,21 @@ class GenerationGuard:
             elif needs_lava_edge_guard and not in_wall_hurt:
                 edge_act = self._action(
                     "boundary_guard_lava_edge",
-                    lambda: self.combat_env.guard_lava_edge(pos_b),
+                    lambda: self.combat_env.guard_lava_edge(pos_b, flowing_lava_target=flowing_lava_target),
                     raise_on_http_error=False,
                 )
                 edge_res = edge_act.get("result") if isinstance(edge_act.get("result"), dict) else {}
                 if edge_res.get("near_lava"):
                     notes.append("岩浆边潜行封边" if edge_res.get("sealed") else "岩浆边强制潜行")
+                    landing = self.combat_env._safe_status()
+                    if (
+                        landing.get("in_lava") and landing.get("ready") is True and landing.get("alive") is not False
+                        and all(landing.get(key) == status.get(key) for key in ("last_death", "dimension"))
+                    ):
+                        self._last_lava_contact_at = time.monotonic()
+                        escape = self._action("boundary_escape_lava", self.combat_env.escape_lava)
+                        still_lava = not bool(escape.get("ok"))
+                        notes.append("封边后跌入岩浆，脱困尚未确认" if still_lava else "封边后脱离岩浆")
             elif needs_water_escape:
                 if hurts:
                     self._water_hurt_streak += 1

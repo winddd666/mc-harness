@@ -4260,6 +4260,57 @@ def test_tool_boundary_guards_an_exposed_two_block_drop_into_lava(covered):
         assert note is not None and "岩浆边潜行封边" in note
 
 
+@pytest.mark.parametrize("outcome", ["dry", "fell", "respawned", "stale_target", "distant_target"])
+def test_tool_boundary_checks_the_reported_lava_flow_above_the_ledge(monkeypatch, outcome):
+    status = {
+        "pos": [17086.5, 69, 29993.5], "dimension": "overworld", "health": 20, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "in_lava": False,
+    }
+    flow = [17087, 71, 29992] if outcome != "distant_target" else [17090, 71, 29992]
+    lower_lava = [17087, 68, 29993]
+    actions = []
+
+    class LavaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 8}]}
+            if action == "get_block":
+                pos = body["pos"]
+                lava = pos == lower_lava or (pos == flow and outcome != "stale_target")
+                return {"name": "lava" if lava else "air"}
+            if action == "place":
+                actions.append(body["pos"])
+                if body["pos"] == flow and outcome in {"fell", "respawned"}:
+                    status.update(in_lava=True, on_ground=False)
+                    if outcome == "respawned":
+                        status["last_death"] = {"t": 1}
+            return {"ok": True}
+
+    guard = GenerationGuard(LavaBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def escape():
+        actions.append("escape")
+        status.update(in_lava=False, on_ground=True)
+        return {"ok": True}
+
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+    receipt = json.dumps({
+        "ok": False, "error": {"code": "interact_flowing_fluid", "block": "lava", "target": flow, "level": 4},
+    })
+
+    note = guard.stabilize_after_tools([receipt])
+
+    assert actions == {
+        "dry": [flow, lower_lava], "fell": [flow, "escape"], "respawned": [flow],
+        "stale_target": [lower_lava], "distant_target": [lower_lava],
+    }[outcome]
+    assert ("封边后脱离岩浆" in note) is (outcome == "fell")
+
+
 def test_water_retreat_turns_inward_at_geofence():
     import math
 

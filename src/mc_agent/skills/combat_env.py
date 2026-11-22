@@ -3029,15 +3029,25 @@ class CombatEnv:
         pos: Sequence[float] | None = None,
         *,
         counts: dict[str, int] | None = None,
+        flowing_lava_target: list[int] | None = None,
     ) -> dict[str, Any]:
-        """Force sneak posture and seal exposed adjacent lava edges before falling in."""
+        """Force sneak posture and seal exposed lava around the current foothold."""
         st0 = self.bot.status()
         if bool(st0.get("in_lava")) or st0.get("on_ground") is not True or st0.get("ready") is False or st0.get("alive") is False:
             return {"ok": False, "near_lava": False, "sneak": bool(st0.get("sneaking")), "sealed": 0}
 
-        cur_pos = pos or st0.get("pos") or [0.0, 64.0, 0.0]
+        cur_pos = st0.get("pos") or pos or [0.0, 64.0, 0.0]
         bx, by, bz = math.floor(float(cur_pos[0])), math.floor(float(cur_pos[1]) + 0.05), math.floor(float(cur_pos[2]))
         exposed_lava: list[list[int]] = []
+        if flowing_lava_target is not None:
+            fx, fy, fz = flowing_lava_target
+            # A flow above an adjacent column can overrun the ledge even after plugging lower cells.
+            if 1 <= fy - by <= 2 and max(abs(fx - bx), abs(fz - bz)) == 1:
+                self.invalidate_block_cache()
+                if self._point_allowed(fx + 0.5, fz + 0.5, action="guard_lava_edge") and _is_lava_block(
+                    self._get_block_name(fx, fy, fz, strict=True)
+                ):
+                    exposed_lava.append(flowing_lava_target)
         for dx, dz in CARDINAL_VECTORS.values():
             nx, nz = bx + dx, bz + dz
             below_feet = self._get_block_name(nx, by - 1, nz, strict=True)
@@ -3075,7 +3085,15 @@ class CombatEnv:
         filler = self._pick_filler_block(counts)
         sealed = 0
         if filler is not None:
-            for lpos in exposed_lava[:2]:
+            for index, lpos in enumerate(exposed_lava[:2]):
+                if index:
+                    current = self._safe_status()
+                    if (
+                        current.get("in_lava") or current.get("on_ground") is not True
+                        or current.get("ready") is False or current.get("alive") is False
+                        or any(current.get(key) != st0.get(key) for key in ("last_death", "dimension"))
+                    ):
+                        break
                 if not self._point_allowed(lpos[0] + 0.5, lpos[2] + 0.5, action="guard_lava_edge"):
                     continue
                 try:
