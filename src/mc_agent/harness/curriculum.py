@@ -2749,7 +2749,7 @@ class CurriculumSupervisor:
             )
             transient_api_err = (not progress_made) and (_is_transient_llm_error(report) or is_world_loading_err)
             if is_world_loading_err:
-                time.sleep(min(2.5, max(0.0, deadline - time.monotonic())))
+                time.sleep(min(2.5, max(0.0, deadline_mono - time.monotonic())))
 
             if progress_made:
                 self.strikes.pop(target.key, None)
