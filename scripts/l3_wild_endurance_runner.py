@@ -100,6 +100,39 @@ NETHER_STRUCTURES = {"nether_fortress": "minecraft:fortress", "nether_bastion": 
 
 
 def rcon_batch(commands: list[str], *, timeout: int = 60) -> list[dict[str, str]]:
+    rcon_target = os.environ.get("MC_RCON_TARGET", "nju-beast").strip().lower()
+    if rcon_target == "5ease":
+        payload = json.dumps(commands, ensure_ascii=False)
+        py_script = (
+            "import json, subprocess\n"
+            f"cmds = json.loads({payload!r})\n"
+            "out = []\n"
+            "for c in cmds:\n"
+            "    p = subprocess.run([r'D:\\mc-server\\runtime\\node\\node.exe', r'D:\\mc-server\\rcon.js', c], capture_output=True, text=True)\n"
+            "    out.append({'cmd': c, 'reply': (p.stdout or p.stderr or '').strip()})\n"
+            "print(json.dumps(out, ensure_ascii=False))\n"
+        )
+        proc = subprocess.run(
+            [
+                "ssh",
+                "-T",
+                "-F",
+                "/home/xzq/.ssh/config",
+                "5ease",
+                "python",
+                "-",
+            ],
+            input=py_script,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"5ease RCON SSH failed: {proc.stderr.strip()[-600:]}")
+        raw_line = proc.stdout.strip().splitlines()[-1]
+        parsed = json.loads(raw_line)
+        return parsed if isinstance(parsed, list) else [parsed]
+
     payload = json.dumps(commands, ensure_ascii=False)
     script = (
         "import json, pathlib, sys\n"

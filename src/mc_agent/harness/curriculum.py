@@ -461,7 +461,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         # D3 根治：保底 2 把石镐（总耐久 262，覆盖从地表 Y=70 挖阶梯至 Y=16 的 ~162 格消耗，防半路爆镐软锁回石器）
         pre_ensure=(("stone_pickaxe", 2),),
         task=(
-            "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
+            "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 仅当 HUD/记忆明确列出附近已有箱子坐标且含备用铁镐/铁锭时才调 mc_skill_container(action='take', x=..., y=..., z=..., items=...) 取回（无已知箱子坐标时直接跳过，严禁盲调 mc_skill_container）；"
             "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 8 根原木，先顺手砍足 8~10 根原木（并备好 2 把 stone_pickaxe）再下井，确保从 Y=16 一气下探 Y=-54 穿钻石靴不断木不断镐；"
             "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
             "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
