@@ -13458,7 +13458,10 @@ def test_critical_unshielded_arrow_retreat_checks_cover_after_a_stalled_landing(
     )
 
 
-@pytest.mark.parametrize("situation", ["covered", "receipt_only", "knockback", "near_melee", "two_shooters", "shooter_moved"])
+@pytest.mark.parametrize("situation", [
+    "covered", "receipt_only", "knockback", "near_melee", "two_shooters", "shooter_moved",
+    "logs_only", "logs_and_one_stone", "above_critical", "no_materials",
+])
 def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exists(monkeypatch, situation):
     shooter = {"id": 41, "name": "skeleton", "dist": 8, "pos": [9824.9, 63, 7381.1]}
     status = {
@@ -13471,6 +13474,10 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
         entities.append({"id": 42, "name": "zombie", "dist": 3, "pos": [9816.9, 63, 7378.1]})
     if situation == "two_shooters":
         entities.append({"id": 43, "name": "skeleton", "dist": 8, "pos": [9816.9, 63, 7373.1]})
+    material = "oak_log" if situation in {"logs_only", "logs_and_one_stone"} else "cobblestone"
+    items = [] if situation == "no_materials" else [{"name": material, "count": 3}]
+    if situation == "logs_and_one_stone":
+        items.insert(0, {"name": "cobblestone", "count": 1})
     blocks = {}
     attempts = []
 
@@ -13482,7 +13489,7 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
                 hurt = {"seq": 1, "type": "hurt", "source": "arrow"}
                 return {"events": [] if kwargs["params"]["since"] else [hurt]}
             if action == "inventory":
-                return {"items": [{"name": "cobblestone", "count": 60}], "offhand": None}
+                return {"items": items, "offhand": None}
             if action == "get_entities":
                 return {"entities": entities}
             if action == "get_block":
@@ -13491,9 +13498,9 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
             if action == "place":
                 cell = tuple(body["pos"])
                 attempts.append(cell)
-                assert body["item"] == "cobblestone" and kwargs["timeout_s"] <= 0.65
+                assert body["item"] == material and kwargs["timeout_s"] <= 0.65
                 if situation != "receipt_only":
-                    blocks[cell] = "cobblestone"
+                    blocks[cell] = material
                 if situation == "knockback":
                     status["pos"] = [9816.4, 63, 7381.1]
                 if situation == "shooter_moved" and len(attempts) == 2:
@@ -13506,16 +13513,21 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
     def defend(_position, _attacker, _counts, *, cover_only=False, **_kwargs):
         if cover_only:
             return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
-        status.update(health=2.48, pos=[9816.9, 63, 7381.1], on_ground=True)
+        landing_hp = 6.1 if situation == "above_critical" else 4.833 if material == "oak_log" else 2.48
+        status.update(health=landing_hp, pos=[9816.9, 63, 7381.1], on_ground=True)
         return {"ok": True, "mode": "flee", "moved_dist": 2.31, "pos_after": status["pos"]}
 
     monkeypatch.setattr(guard, "_defend_or_flee", defend)
     incident = guard.poll()
 
     action = incident["actions"][-1]
+    if situation in {"above_critical", "no_materials"}:
+        assert action["action"] == ("combat_or_flee" if situation == "above_critical" else "natural_cover_after_retreat")
+        assert attempts == []
+        return
     assert action["action"] == "place_arrow_cover"
-    assert action["ok"] is (situation == "covered")
-    if situation in {"covered", "shooter_moved"}:
+    assert action["ok"] is (situation in {"covered", "logs_only", "logs_and_one_stone"})
+    if situation in {"covered", "shooter_moved", "logs_only", "logs_and_one_stone"}:
         assert attempts == [(9818, 63, 7381), (9818, 64, 7381)]
     elif situation in {"receipt_only", "knockback"}:
         assert attempts == [(9818, 63, 7381)]

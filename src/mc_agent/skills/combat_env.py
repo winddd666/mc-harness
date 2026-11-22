@@ -1931,12 +1931,21 @@ class CombatEnv:
                 return False
         return True
 
+    def arrow_cover_material(self, counts: dict[str, int]) -> str | None:
+        # Prefer a stack that can finish a two-block wall before relying on an existing partial column.
+        for minimum in (2, 1):
+            available = {name: count for name, count in counts.items() if count >= minimum}
+            material = self._pick_filler_block(available) or next((name for name in available if name.endswith("_log")), None)
+            if material is not None:
+                return material
+        return None
+
     def place_arrow_cover(
         self, before: dict[str, Any], shooter: Sequence[float], counts: dict[str, int],
     ) -> dict[str, Any]:
         """Build close cover on a supported column without leaving the current footing."""
         origin = before["pos"]
-        filler = self._pick_filler_block(counts)
+        filler = self.arrow_cover_material(counts)
         failed = {"ok": False, "mode": "placed_cover", "placed": 0}
         if filler is None or math.hypot(shooter[0] - origin[0], shooter[2] - origin[2]) <= 3.5:
             return failed

@@ -2533,6 +2533,10 @@ class GenerationGuard:
                                 except (ApiError, httpx.HTTPError):
                                     landing = {}
                                 landing_hp = landing.get("health")
+                                cover_material = (
+                                    self.combat_env.arrow_cover_material(counts) if hurt_src == "arrow" and not has_shield else None
+                                )
+                                cover_hp_limit = 6.0 if cover_material is not None and counts[cover_material] >= 2 else 4.0
                                 pocket_already_tried = (
                                     cover_block(landing.get("pos")) == self._last_dig_cover_block
                                     and now - self._last_dig_cover_at < 20.0
@@ -2543,7 +2547,7 @@ class GenerationGuard:
                                     and not any(landing.get(key) for key in ("in_water", "in_lava", "on_fire", "busy"))
                                     and bool(landing.get("blocking")) == has_shield
                                     and all(landing.get(key) == status.get(key) for key in ("last_death", "dimension"))
-                                    and isinstance(landing_hp, (int, float)) and 0 < landing_hp <= 4.0
+                                    and isinstance(landing_hp, (int, float)) and 0 < landing_hp <= cover_hp_limit
                                     and (not retry_pocket_after_knockback or pocket_already_tried)
                                 ):
                                     natural_cover = self._action(
@@ -2557,8 +2561,7 @@ class GenerationGuard:
                                     if natural_cover.get("ok"):
                                         self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                                     elif (
-                                        hurt_src == "arrow" and not has_shield
-                                        and self.combat_env._pick_filler_block(counts) is not None
+                                        cover_material is not None
                                         and not (natural_cover.get("result") or {}).get("respawned")
                                     ):
                                         placed_cover = self._action(
