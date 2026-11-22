@@ -726,6 +726,17 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
             "做工作台或木棍时，可直接计入已有的任何家族木板。"
         ),
     },
+    "iron_block_unpacking": {
+        "id": "iron_block_unpacking",
+        "category": "game_mechanic",
+        "keywords": ["铁块", "铁锭", "iron_block", "iron_ingot", "打火石", "flint_and_steel", "iron_pickaxe"],
+        "rule": (
+            "缺铁锭时先查背包。1 个 iron_block 在 2x2 背包合成可拆成 9 个 iron_ingot。"
+            "例如持有铁块且缺 1~9 锭时，调用 mc_craft(item='iron_ingot', count=9)，再用 mc_inventory 核对实际入包。"
+            "按剩余缺口补打火石或铁镐的原料。打火石还需 1 燧石，铁镐还需 2 木棍和工作台。"
+            "现有铁锭与可拆铁块不足时，再查已有 raw_iron、燃料和熔炉，最后才找矿。"
+        ),
+    },
     "place_support_rules": {
         "id": "place_support_rules",
         "category": "api_mechanic",
@@ -827,11 +838,14 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:story/smelt_iron": {
         "difficulty": "easy",
-        "how_to": "石镐挖iron_ore得raw_iron，熔炉烧成iron_ingot并取出。",
+        "how_to": (
+            "将 iron_ingot 收入背包后查进度。优先把已有 iron_block 用 mc_craft(item='iron_ingot', count=9) 拆成 9 铁锭，"
+            "或在熔炉烧已有 raw_iron 并取出。两种来源都缺时，用石镐采 iron_ore 获得粗铁。"
+        ),
     },
     "minecraft:story/iron_tools": {
         "difficulty": "easy",
-        "how_to": "3铁锭+2木棍在工作台合iron_pickaxe。",
+        "how_to": "3 铁锭和 2 木棍在工作台合 iron_pickaxe。若只缺铁锭且背包有 iron_block，先拆 1 块为 9 铁锭。",
     },
     "minecraft:story/obtain_armor": {
         "difficulty": "easy",
