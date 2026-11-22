@@ -1732,7 +1732,7 @@ class GenerationGuard:
             cur + cd,
         )
 
-    def _recover_recent_ranged_hit_for_eating(self) -> None:
+    def _recover_recent_ranged_hit_for_eating(self, ranged_window_s: float) -> None:
         self._eat_history_checked = True
         # The actor can consume a final hurt event before the next episode's guard is created.
         cursor = self.cursor
@@ -1755,7 +1755,7 @@ class GenerationGuard:
             timestamp_ms = event.get("t")
             if isinstance(timestamp_ms, (int, float)):
                 age = now_wall - timestamp_ms / 1000.0
-                if 0 <= age < self.RANGED_EAT_DEFER_S:
+                if 0 <= age < ranged_window_s:
                     self._last_ranged_hurt_at = max(self._last_ranged_hurt_at, now - age)
                 if source == "trident" and 0 <= age < self.TRIDENT_EAT_THREAT_S:
                     self._last_trident_hurt_at = max(self._last_trident_hurt_at, now - age)
@@ -1782,20 +1782,30 @@ class GenerationGuard:
             # In-flight projectiles can still reach a critical-health bot just beyond that range.
             ranged_min_dist = max(ranged_min_dist, 20.0)
         ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
+        in_nether = str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+        # Keep an active shield through the same Nether projectile window used while burning.
+        ranged_shield_window = self.NETHER_BURN_RANGED_WINDOW_S if in_nether else self.RANGED_EAT_DEFER_S
         if not self._eat_history_checked and status.get("blocking") and status.get("ready") is True:
-            self._recover_recent_ranged_hit_for_eating()
-        recent_ranged_hit = now - self._last_ranged_hurt_at < self.RANGED_EAT_DEFER_S
+            self._recover_recent_ranged_hit_for_eating(ranged_shield_window)
+        ranged_hit_age = now - self._last_ranged_hurt_at
+        recent_ranged_hit = ranged_hit_age < self.RANGED_EAT_DEFER_S
         # A melee attack can time out while arrows still arrive from outside the nearest-hostile snapshot.
         exposed_after_attack_timeout = (
             low_health and recent_ranged_hit and now - self._last_attack_read_timeout_at < self.RANGED_EAT_DEFER_S
         )
         recent_melee_hit = now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
-        in_nether = str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
-        protecting_against_recent_hit = status.get("blocking") and (recent_ranged_hit or recent_melee_hit)
+        # The melee deadline survives a mixed batch even when its last event was a projectile.
+        recent_nether_ranged_only = (
+            in_nether and ranged_hit_age < ranged_shield_window
+            and self._last_ranged_hurt_at + self.MELEE_EAT_DEFER_S > self._nether_melee_eat_defer_until
+        )
+        protecting_against_recent_hit = status.get("blocking") and (
+            recent_ranged_hit or recent_nether_ranged_only or recent_melee_hit
+        )
         # A Nether shooter can keep firing while missing from the nearest-hostile snapshot.
         recent_nether_threat = in_nether and (
             now < self._nether_melee_eat_defer_until
-            or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_RANGED_WINDOW_S)
+            or (status.get("on_fire") and ranged_hit_age < self.NETHER_BURN_RANGED_WINDOW_S)
         )
         trident_age = now - self._last_trident_hurt_at
         trident_threat = trident_age < self.RANGED_EAT_DEFER_S

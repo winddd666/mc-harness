@@ -8951,10 +8951,19 @@ def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(mo
 
 
 @pytest.mark.parametrize(
-    "health, shooter_dist, fireball_age",
-    [(5.3, 6.2, None), (17.6, None, 5.0), (14.3, None, 9.0), (2.53, 18.7, None)],
+    "health, shooter_dist, fireball_age, shield_after_fireball, defer",
+    [
+        (5.3, 6.2, None, False, True),
+        (17.6, None, 5.0, False, True),
+        (14.3, None, 9.0, False, True),
+        (2.53, 18.7, None, False, True),
+        (12.933, None, 8.214, True, True),
+        (12.933, None, 12.01, True, False),
+    ],
 )
-def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shooter_dist, fireball_age):
+def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(
+    monkeypatch, health, shooter_dist, fireball_age, shield_after_fireball, defer,
+):
     recent_nether_fireball = fireball_age is not None
     clock = [7000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
@@ -8986,9 +8995,9 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shoo
                     "on_ground": True,
                     "in_water": False,
                     "in_lava": False,
-                    "blocking": not recent_nether_fireball,
+                    "blocking": not recent_nether_fireball or shield_after_fireball,
                     "dimension": "the_nether" if recent_nether_fireball else "overworld",
-                    "on_fire": recent_nether_fireball,
+                    "on_fire": recent_nether_fireball and not shield_after_fireball,
                     "nearest_hostile": None if shooter_dist is None else {
                         "id": 612494, "name": "skeleton", "pos": [0.5 + shooter_dist, 64.0, 0.5], "dist": shooter_dist,
                     },
@@ -9011,6 +9020,12 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shoo
         clock[0] += fireball_age
     else:
         guard._mark_ranged_engagement(clock[0], attacker={"id": 612494, "name": "skeleton"})
+    if not defer:
+        incident = guard.poll()
+        assert [a["action"] for a in incident["actions"]] == ["eat"]
+        assert posture_calls == [{"shield": False}]
+        assert use_items == [{"item": "cooked_beef"}]
+        return
     assert guard.poll() is None
     assert guard.stabilize_after_tools(["ok"]) is None
     assert posture_calls == []
@@ -9025,7 +9040,9 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shoo
     assert use_items == [{"item": "cooked_beef"}]
 
 
-@pytest.mark.parametrize("history", ["fresh_arrow", "old_arrow", "respawned", "nearby_trident"])
+@pytest.mark.parametrize("history", [
+    "fresh_arrow", "old_arrow", "respawned", "nearby_trident", "nether_fireball", "nether_after_respawn",
+])
 def test_episode_start_keeps_eating_guard_for_recent_consumed_projectile(monkeypatch, history):
     clock = [1000.0]
     wall_now = 1_795_200_000.0
@@ -9034,7 +9051,7 @@ def test_episode_start_keeps_eating_guard_for_recent_consumed_projectile(monkeyp
     arrow = {"seq": 19, "type": "hurt", "source": "arrow",
              "t": (wall_now - (8.1 if history == "old_arrow" else 0.7)) * 1000}
     events = [arrow]
-    if history == "respawned":
+    if history in {"respawned", "nether_after_respawn"}:
         events.append({"seq": 20, "type": "spawn", "t": (wall_now - 0.1) * 1000})
     status = {
         "pos": [-5057.2, 71, -7715.6], "health": 13.3, "food": 16, "dimension": "overworld",
@@ -9043,6 +9060,9 @@ def test_episode_start_keeps_eating_guard_for_recent_consumed_projectile(monkeyp
     if history == "nearby_trident":
         arrow.update(source="trident", t=(wall_now - 9.0) * 1000)
         status.update(health=5.07, nearest_hostile={"id": 42, "name": "drowned", "dist": 8.5})
+    elif history in {"nether_fireball", "nether_after_respawn"}:
+        arrow.update(source="fireball", t=(wall_now - 8.214) * 1000)
+        status.update(dimension="the_nether", on_fire=False)
     commands = []
     cursors = []
 
@@ -9064,9 +9084,10 @@ def test_episode_start_keeps_eating_guard_for_recent_consumed_projectile(monkeyp
     guard = GenerationGuard(EpisodeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     incident = guard.poll()
 
-    if history in {"fresh_arrow", "nearby_trident"}:
+    retry_delay = {"fresh_arrow": 7.4, "nearby_trident": 21.1, "nether_fireball": 3.9}
+    if history in retry_delay:
         assert incident is None and commands == []
-        clock[0] += 7.4 if history == "fresh_arrow" else 21.1
+        clock[0] += retry_delay[history]
         incident = guard.poll()
 
     assert incident["reasons"] == ["needs_food"] and incident["event_seqs"] == []
