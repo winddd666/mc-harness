@@ -278,6 +278,7 @@ class GenerationGuard:
     HOT_FLOOR_RETRY_S = 5.0
     MELEE_EAT_DEFER_S = 10.0
     RANGED_EAT_DEFER_S = 8.0
+    TRIDENT_EAT_THREAT_S = 30.0
     NETHER_BURN_RANGED_WINDOW_S = 12.0
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
@@ -1220,14 +1221,16 @@ class GenerationGuard:
                 continue
             if event.get("type") in {"death", "death_loop", "disconnected", "spawn"}:
                 break
-            if event.get("type") != "hurt" or str(event.get("source") or "").strip().lower() not in RANGED_HURT_SOURCES:
+            source = str(event.get("source") or "").strip().lower()
+            if event.get("type") != "hurt" or source not in RANGED_HURT_SOURCES:
                 continue
             timestamp_ms = event.get("t")
             if isinstance(timestamp_ms, (int, float)):
                 age = now_wall - timestamp_ms / 1000.0
                 if 0 <= age < self.RANGED_EAT_DEFER_S:
                     self._last_ranged_hurt_at = max(self._last_ranged_hurt_at, now - age)
-                    break
+                if source == "trident" and 0 <= age < self.TRIDENT_EAT_THREAT_S:
+                    self._last_trident_hurt_at = max(self._last_trident_hurt_at, now - age)
 
     def _can_auto_eat_safely(
         self,
@@ -1261,7 +1264,27 @@ class GenerationGuard:
             now < self._nether_melee_eat_defer_until
             or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_RANGED_WINDOW_S)
         )
-        recent_trident_hit = now - self._last_trident_hurt_at < 8.0
+        trident_age = now - self._last_trident_hurt_at
+        trident_threat = trident_age < self.RANGED_EAT_DEFER_S
+        if (
+            not trident_threat and trident_age < self.TRIDENT_EAT_THREAT_S
+            and isinstance(health, (int, float)) and 0 < health <= LOW_HP_BUNKER_MAX
+        ):
+            trident_threat = nh_name == "drowned" and nh_dist <= ranged_min_dist
+            if not trident_threat and not ranged_in_range:
+                try:
+                    sighting = self.bot.call(
+                        "get_entities", {"radius": ranged_min_dist, "types": ["hostile"]},
+                        timeout_s=0.5, allow_reauth=False,
+                    )
+                except (ApiError, httpx.HTTPError):
+                    trident_threat = True
+                else:
+                    for entity in sighting.get("entities") or []:
+                        name, distance, _, _ = self._extract_hostile_info({"nearest_hostile": entity})
+                        if name == "drowned" and distance <= ranged_min_dist:
+                            trident_threat = True
+                            break
         pos = status.get("pos")
         recent_failed_cover = (
             recent_ranged_hit and now - self._last_dig_cover_fail_at < 8.0
@@ -1270,7 +1293,7 @@ class GenerationGuard:
             and (math.floor(pos[0]), math.floor(pos[1] + 0.05), math.floor(pos[2])) == self._last_dig_cover_block
         )
         if (
-            (ranged_in_range or protecting_against_recent_hit or recent_nether_threat or recent_trident_hit or recent_failed_cover)
+            (ranged_in_range or protecting_against_recent_hit or recent_nether_threat or trident_threat or recent_failed_cover)
             and not self._inside_own_shaft()
         ):
             return False
@@ -1642,8 +1665,10 @@ class GenerationGuard:
             needs_float and now < self._ranged_combat_stance_until
             and (nh_name0 in RANGED_MOBS or nh_name0 == "ghast") and nh_dist0 <= 16.0
         )
-        eat_safe_distance = self._can_auto_eat_safely(status, min_dist=5.5)
-        should_eat = (needs_food or pending_ready_eat) and eat_safe_distance and not (hot_floor_only or needs_hot_floor_guard)
+        should_eat = (
+            (needs_food or pending_ready_eat) and not (hot_floor_only or needs_hot_floor_guard)
+            and self._can_auto_eat_safely(status, min_dist=5.5)
+        )
         hurt = bool(hurts) or dropped
         fall_only = self._unattributed_fall_only(hurts)
         contact_fire = any(str(h.get("source") or "").strip().lower() == "in_fire" for h in hurts)

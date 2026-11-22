@@ -4587,15 +4587,21 @@ def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatc
     assert followups == ([(6.7, [5002, 39, -7591.4])] if nearby else [])
 
 
-def test_recent_trident_hit_defers_food_until_the_projectile_threat_passes(monkeypatch):
+@pytest.mark.parametrize("threat", ["clear", "nearest_drowned", "other_nearest", "scan_timeout"])
+def test_recent_trident_hit_defers_food_until_the_projectile_threat_passes(monkeypatch, threat):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     status = {
-        "pos": [9261.3, 64, -11343.7], "health": 10.5, "food": 17,
+        "pos": [9261.3, 64, -11343.7], "health": 5.07, "food": 17,
         "dimension": "overworld", "on_ground": True, "alive": True, "ready": True, "blocking": False,
     }
     hits = [{"seq": 1, "type": "hurt", "source": "trident"}]
     dishes = []
+    drowned = {"id": 5922198, "name": "drowned", "dist": 8.5}
+    if threat == "nearest_drowned":
+        status["nearest_hostile"] = drowned
+    if threat == "other_nearest":
+        status["nearest_hostile"] = {"id": 42, "name": "zombie", "dist": 7.0}
 
     class RiverBot:
         def call(self, action, body=None, **kwargs):
@@ -4605,6 +4611,11 @@ def test_recent_trident_hit_defers_food_until_the_projectile_threat_passes(monke
                 return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
             if action == "inventory":
                 return {"items": [{"name": "cooked_beef", "count": 2}]}
+            if action == "get_entities":
+                assert kwargs["timeout_s"] == 0.5
+                if threat == "scan_timeout":
+                    raise httpx.ReadTimeout("hostile scan unavailable")
+                return {"entities": [drowned] if threat == "other_nearest" else []}
             if action == "use_item":
                 dishes.append(body["item"])
             return {"ok": True}
@@ -4621,6 +4632,11 @@ def test_recent_trident_hit_defers_food_until_the_projectile_threat_passes(monke
     assert guard.poll() is None and dishes == []
 
     clock[0] += 8.1
+    if threat != "clear":
+        result = json.loads(guard.run_tool_with_reflex("mc_use_item", eat))
+        assert result["error"]["code"] == "unsafe_to_eat"
+        assert guard.poll() is None and dishes == []
+        clock[0] += 22.0
     assert guard.poll()["actions"][0]["action"] == "eat"
     assert dishes == ["cooked_beef"]
 
@@ -6254,8 +6270,8 @@ def test_poll_and_boundary_skip_eat_in_ranged_mob_fire(monkeypatch, health, shoo
     assert use_items == [{"item": "cooked_beef"}]
 
 
-@pytest.mark.parametrize("history", ["fresh_arrow", "old_arrow", "respawned"])
-def test_episode_start_keeps_eating_guard_for_recent_consumed_arrow(monkeypatch, history):
+@pytest.mark.parametrize("history", ["fresh_arrow", "old_arrow", "respawned", "nearby_trident"])
+def test_episode_start_keeps_eating_guard_for_recent_consumed_projectile(monkeypatch, history):
     clock = [1000.0]
     wall_now = 1_795_200_000.0
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
@@ -6269,6 +6285,9 @@ def test_episode_start_keeps_eating_guard_for_recent_consumed_arrow(monkeypatch,
         "pos": [-5057.2, 71, -7715.6], "health": 13.3, "food": 16, "dimension": "overworld",
         "blocking": True, "on_ground": True, "ready": True, "alive": True,
     }
+    if history == "nearby_trident":
+        arrow.update(source="trident", t=(wall_now - 9.0) * 1000)
+        status.update(health=5.07, nearest_hostile={"id": 42, "name": "drowned", "dist": 8.5})
     commands = []
     cursors = []
 
@@ -6290,9 +6309,9 @@ def test_episode_start_keeps_eating_guard_for_recent_consumed_arrow(monkeypatch,
     guard = GenerationGuard(EpisodeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     incident = guard.poll()
 
-    if history == "fresh_arrow":
+    if history in {"fresh_arrow", "nearby_trident"}:
         assert incident is None and commands == []
-        clock[0] += 7.4
+        clock[0] += 7.4 if history == "fresh_arrow" else 21.1
         incident = guard.poll()
 
     assert incident["reasons"] == ["needs_food"] and incident["event_seqs"] == []
