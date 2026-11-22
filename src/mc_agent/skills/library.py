@@ -377,9 +377,21 @@ def _window_item_entries(items: Any) -> list[dict[str, Any]]:
 
 
 def _log_to_planks_name(log_name: str) -> str:
+    log_name = log_name.removeprefix("stripped_")
     if log_name.endswith("_stem"):
         return log_name.removesuffix("_stem") + "_planks"
     return log_name.removesuffix("_log") + "_planks"
+
+
+_PLANK_LOG_SOURCES = {
+    _log_to_planks_name(log): (log, f"stripped_{log}") for log in (*LOG_TYPES, *NETHER_STEM_TYPES)
+}
+
+
+def _canonical_plank_recipe(item: str) -> str:
+    # Existing preparation callers can derive a stripped plank ID from an inventory log.
+    candidate = item.removeprefix("stripped_")
+    return candidate if candidate in _PLANK_LOG_SOURCES else item
 
 
 def _total_planks(counts: dict[str, int]) -> int:
@@ -899,6 +911,7 @@ def craft_material_shortage(item: str, count: int, counts: dict[str, int]) -> di
     if legacy is not None:
         return legacy
     recipe = RECIPES_1_21.get(item)
+    plank_logs = _PLANK_LOG_SOURCES.get(item)
     if recipe is None:
         inputs = _CRAFT_SLOT_INPUTS.get(item)
         if item == "stone_bricks":
@@ -911,6 +924,8 @@ def craft_material_shortage(item: str, count: int, counts: dict[str, int]) -> di
     required = {name: int(amount) * batches for name, amount in recipe["ingredients"].items()}
 
     def _available(name: str) -> int:
+        if plank_logs and name == plank_logs[0]:
+            return sum(counts.get(log, 0) for log in plank_logs)
         if name == "any_planks":
             return sum(v for k, v in counts.items() if k.endswith("_planks"))
         if name == "any_log":
@@ -2586,6 +2601,7 @@ class MacroSkills:
         inv_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Auto-clear clutter if full, fail fast when still un-fittable at empty_slots=0, else craft."""
+        item = _canonical_plank_recipe(item)
         inv_now, dropped = self._ensure_free_slots(min_free=2, inv_snapshot=inv_snapshot)
         if _compute_empty_slots(inv_now) == 0 and not _can_fit_item_in_inventory(inv_now, item, count):
             raise ApiError(
@@ -3048,22 +3064,23 @@ class MacroSkills:
         extra_stick_crafts = math.ceil(max(0, sticks_needed - cur_sticks) / 4)
         total_planks_needed = planks_needed + extra_stick_crafts * 2
 
-        cur_planks = _total_planks(counts)
-        if cur_planks < total_planks_needed:
-            logs_to_craft = math.ceil((total_planks_needed - cur_planks) / 4)
-            for log_name in (*LOG_TYPES, *NETHER_STEM_TYPES):
-                avail_logs = counts.get(log_name, 0)
-                if avail_logs <= 0 or logs_to_craft <= 0:
+        if _total_planks(counts) < total_planks_needed:
+            # Prefer the usual wood families with unstripped stock, then use stripped stock.
+            sources = sorted(_PLANK_LOG_SOURCES.items(), key=lambda pair: counts.get(pair[1][0], 0) <= 0)
+            for plank_name, log_names in sources:
+                logs_to_craft = math.ceil((total_planks_needed - _total_planks(counts)) / 4)
+                if logs_to_craft <= 0:
+                    break
+                use_logs = min(sum(counts.get(log, 0) for log in log_names), logs_to_craft)
+                if use_logs <= 0:
                     continue
-                use_logs = min(avail_logs, logs_to_craft)
-                plank_name = _log_to_planks_name(log_name)
                 try:
                     self._safe_craft(plank_name, use_logs * 4)
-                    logs_to_craft -= use_logs
                 except ApiError as err:
                     if err.code == "inventory_full":
                         raise
-            counts = _inventory_counts(self.bot)
+                else:
+                    counts = _inventory_counts(self.bot)
 
         if sticks_needed > counts.get("stick", 0) and _total_planks(counts) >= 2:
             need_crafts = math.ceil((sticks_needed - counts.get("stick", 0)) / 4)
@@ -4431,16 +4448,16 @@ class MacroSkills:
         return cleanup
 
     def _craft_gear(self, item: str, count: int, temporary_tables: list[list[int]]) -> dict[str, Any]:
-        item = resolve_item_alias(item)
+        item = _canonical_plank_recipe(resolve_item_alias(item))
         count = max(1, min(64, count))
         inv_raw, initial = _inventory_snapshot_and_counts(self.bot)
-        if item in {"planks", "any_planks"} or (item == "oak_planks" and initial.get("oak_log", 0) == 0):
+        if item in {"planks", "any_planks"} or (
+            item == "oak_planks" and not any(initial.get(log, 0) > 0 for log in _PLANK_LOG_SOURCES[item])
+        ):
             for k_log, v_log in initial.items():
                 if v_log > 0 and k_log.endswith(("_log", "_stem")):
-                    cand_planks = _log_to_planks_name(k_log)
-                    if cand_planks in RECIPES_1_21 or cand_planks.endswith("_planks"):
-                        item = cand_planks
-                        break
+                    item = _log_to_planks_name(k_log)
+                    break
         plan = craft_material_shortage(item, count, initial)
         if plan and plan["missing_materials"]:
             # Logs/planks and sticks can be prepared automatically, but

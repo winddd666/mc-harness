@@ -4696,6 +4696,79 @@ def test_craft_gear_clears_its_own_table_from_a_narrow_mine(monkeypatch, placeme
     assert clock[0] <= 26.0
 
 
+@pytest.mark.parametrize("mode,wood,base_log,planks", [
+    ("ensure", {"stripped_spruce_log": 2}, "spruce_log", "spruce_planks"),
+    ("ensure", {"stripped_warped_stem": 2}, "warped_stem", "warped_planks"),
+    ("ensure", {"crimson_stem": 2}, "crimson_stem", "crimson_planks"),
+    ("gear", {"stripped_spruce_log": 2}, "spruce_log", "spruce_planks"),
+    ("explicit", {"stripped_oak_log": 2}, "oak_log", "oak_planks"),
+    ("mixed", {"spruce_log": 1, "stripped_spruce_log": 1}, "spruce_log", "spruce_planks"),
+])
+def test_stripped_wood_prepares_planks_sticks_and_stone_pickaxe(mode, wood, base_log, planks) -> None:
+    bag = {**wood, "cobblestone": 7}
+    crafts = []
+    table = [1, 64, 0]
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": name, "count": n} for name, n in bag.items() if n > 0]}
+        elif route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            assert body["types"] == ["crafting_table"]
+            result = {"blocks": [{"pos": table, "dist": 1.0}]}
+        elif route == "craft":
+            item, count = body["item"], body["count"]
+            crafts.append((item, count))
+            if item == planks:
+                batches = count // 4
+                assert count == batches * 4
+                for log in (base_log, f"stripped_{base_log}"):
+                    used = min(bag.get(log, 0), batches)
+                    if used:
+                        bag[log] -= used
+                        batches -= used
+                assert batches == 0
+            elif item == "stick":
+                assert count == 4 and bag[planks] >= 2
+                bag[planks] -= 2
+            elif item == "stone_pickaxe":
+                assert count == 1 and bag["cobblestone"] >= 3 and bag["stick"] >= 2
+                bag["cobblestone"] -= 3
+                bag["stick"] -= 2
+            else:
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "bad_args", "message": f"unknown item {item}",
+                }})
+            bag[item] = bag.get(item, 0) + count
+            result = {"crafted": item, "gained": count}
+        elif route == "equip":
+            result = {"held": {"name": body["item"]}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        skills = MacroSkills(bot)
+        if mode == "ensure":
+            result = skills.ensure_items({"stone_pickaxe": 1})
+        else:
+            if mode == "explicit":
+                assert skills.craft_gear(planks, 4)["ok"] is True
+            if mode == "mixed":
+                assert skills._ensure_planks_and_sticks(6, 2)[planks] == 6
+            result = skills.craft_gear("stone_pickaxe")
+
+    expected_planks = 8 if mode == "mixed" else 4
+    assert result["ok"] is True
+    assert crafts == [(planks, expected_planks), ("stick", 4), ("stone_pickaxe", 1)]
+    assert bag[planks] == expected_planks - 2 and bag["stick"] == 2
+    assert bag["cobblestone"] == 4 and bag["stone_pickaxe"] == 1
+    assert sum(bag[log] for log in wood) == sum(wood.values()) - expected_planks // 4
+
+
 @pytest.mark.parametrize("action, op", [
     ("GET", "take"), (" withdraw ", "take"), ("store", "put"), ("deposit", "put"),
 ])
