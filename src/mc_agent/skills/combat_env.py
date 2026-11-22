@@ -2925,41 +2925,73 @@ class CombatEnv:
         if shore_target is not None:
             shore_dist = math.hypot(shore_target[0] - shore_x, shore_target[2] - shore_z)
             contested_short_crossing = (has_threat or shield_target_id is not None) and shore_dist <= 5.0
-            try:
-                syaw, _ = aim_yaw_pitch(search_pos, shore_target)
-                self.bot.call("look", {"yaw": syaw, "pitch": -10.0})
-            except (ApiError, httpx.HTTPError):
-                pass
-            try:
-                self.bot.call(
-                    "move_to",
-                    {
-                        "x": shore_target[0],
-                        "y": shore_target[1],
-                        "z": shore_target[2],
-                        "range": 0.6,
-                        "timeout": 1800 if contested_short_crossing else 4200,
-                        "stop_on": ["death"],
-                    },
-                    **({"timeout_s": 2.4, "allow_reauth": False} if contested_short_crossing else {}),
-                )
-                actions.append("move_to_shore")
-            except (ApiError, httpx.HTTPError) as err:
-                actions.append("move_to_shore_failed")
-                shore_path_unreachable = isinstance(err, ApiError) and err.code in {"path_not_found", "no_path"}
-                if isinstance(err, httpx.HTTPError):
-                    self._best_effort_stop(timeout_s=0.5 if contested_short_crossing else None)
 
-            st_mid = self._safe_status(st0)
+            def hop_to_shore(position: Sequence[float], *, ms: int, sprint: bool) -> None:
+                try:
+                    syaw, _ = aim_yaw_pitch(position, shore_target)
+                    self.bot.call("look", {"yaw": syaw, "pitch": -10.0})
+                    self.bot.call(
+                        "control",
+                        {"forward": True, "jump": True, "sprint": sprint, "ms": ms, "stop_on": ["death"]},
+                    )
+                    actions.append("shore_lip_jump")
+                except httpx.HTTPError:
+                    self._best_effort_stop()
+                except ApiError:
+                    pass
+
+            # Use the short hop before pathfinding when the bank is already within reach.
+            hop_first = (
+                not (contested_short_crossing or retrying_bank or sneak_on_magma)
+                and search_status.get("in_water") and not search_status.get("submerged")
+                and 0.6 < shore_dist <= 1.8 and 0 <= shore_target[1] - shore_y <= 1.25
+                and self._dry_bank_is_walkable(shore_target)
+            )
+            st_mid = search_status
+            if hop_first:
+                hop_to_shore(search_pos, ms=450, sprint=True)
+                st_mid = self._safe_status({**search_status, "ready": False})
+                interruption = interrupted_water_escape(st_mid)
+                if interruption is not None:
+                    return interruption
+
+            if not hop_first or st_mid.get("in_water"):
+                try:
+                    syaw, _ = aim_yaw_pitch(st_mid.get("pos") or search_pos, shore_target)
+                    self.bot.call("look", {"yaw": syaw, "pitch": -10.0})
+                except (ApiError, httpx.HTTPError):
+                    pass
+                try:
+                    self.bot.call(
+                        "move_to",
+                        {
+                            "x": shore_target[0],
+                            "y": shore_target[1],
+                            "z": shore_target[2],
+                            "range": 0.6,
+                            "timeout": 1800 if contested_short_crossing else 4200,
+                            "stop_on": ["death"],
+                        },
+                        **({"timeout_s": 2.4, "allow_reauth": False} if contested_short_crossing else {}),
+                    )
+                    actions.append("move_to_shore")
+                except (ApiError, httpx.HTTPError) as err:
+                    actions.append("move_to_shore_failed")
+                    shore_path_unreachable = isinstance(err, ApiError) and err.code in {"path_not_found", "no_path"}
+                    if isinstance(err, httpx.HTTPError):
+                        self._best_effort_stop(timeout_s=0.5 if contested_short_crossing else None)
+                st_mid = self._safe_status(st_mid)
+
             interruption = interrupted_water_escape(st_mid)
             if interruption is not None:
                 return interruption
+            mid_pos = st_mid.get("pos") or pos0
             if (
                 bool(st_mid.get("in_water"))
                 and st_mid.get("alive") is not False
                 and st_mid.get("ready", True)
+                and (not hop_first or math.dist(search_pos[:3], mid_pos[:3]) > 0.5)
             ):
-                mid_pos = st_mid.get("pos") or pos0
                 lip_height = float(shore_target[1]) - float(mid_pos[1])
                 lip_distance = math.hypot(shore_target[0] - mid_pos[0], shore_target[2] - mid_pos[2])
                 lip_ms = 1150 if lip_height > 0.05 else 850
@@ -2971,17 +3003,7 @@ class CombatEnv:
                 if shallow_lip and not sustained_climb:
                     # A full swim pulse can carry the bot across a shallow one-block bank.
                     lip_ms = 450
-                try:
-                    syaw_m, _ = aim_yaw_pitch(mid_pos, shore_target)
-                    self.bot.call("look", {"yaw": syaw_m, "pitch": -10.0})
-                    self.bot.call(
-                        "control",
-                        {"forward": True, "jump": True, "sprint": not sustained_climb, "ms": lip_ms, "stop_on": ["death"]},
-                    )
-                    actions.append("shore_lip_jump")
-                except (ApiError, httpx.HTTPError) as err:
-                    if isinstance(err, httpx.HTTPError):
-                        self._best_effort_stop()
+                hop_to_shore(mid_pos, ms=lip_ms, sprint=not sustained_climb)
         else:
             st_mid = self._safe_status(st0)
             interruption = interrupted_water_escape(st_mid)

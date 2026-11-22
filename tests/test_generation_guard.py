@@ -11798,6 +11798,51 @@ def test_failed_pathfinder_uses_a_short_hop_to_reach_a_nearby_shallow_bank(monke
     assert result["actions"] == ["move_to_shore_failed", "shore_lip_jump"]
 
 
+@pytest.mark.parametrize("hop_result", ["landed", "still_wet", "respawned"])
+def test_shore_escape_hops_onto_a_verified_adjacent_bank_before_pathing(hop_result):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    bank = [19062.5, 63.0, 41037.5]
+    floor = [19062, 62, 41037]
+    status = {
+        "pos": [19062.0, 62.0, 41038.3], "in_water": True, "on_ground": False,
+        "alive": True, "ready": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    motions = []
+
+    class BankBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": floor}]}
+            if action == "get_block":
+                return {"name": "grass_block" if body["pos"] == floor else "air"}
+            if action == "control" and body.get("forward"):
+                motions.append("jump")
+                assert body["jump"] and body["ms"] == 450
+                if hop_result == "landed":
+                    status.update(pos=bank, in_water=False, on_ground=True)
+                elif hop_result == "respawned":
+                    status.update(pos=[19105, 76, 41080], in_water=False, on_ground=True, last_death={"t": 2})
+            if action == "move_to":
+                motions.append("move_to")
+                assert [body[axis] for axis in ("x", "y", "z")] == bank
+                status.update(pos=bank, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(BankBot()).escape_deep_water_to_shore()
+
+    assert motions == (["jump", "move_to"] if hop_result == "still_wet" else ["jump"])
+    if hop_result == "respawned":
+        assert result["mode"] == "respawned" and result["ok"] is False
+    else:
+        assert result["ok"] is True and result["pos_after"] == bank
+
+
 @pytest.mark.parametrize("same_life", [True, False])
 @pytest.mark.parametrize("under_attack", [False, True])
 def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(monkeypatch, same_life, under_attack):
