@@ -198,6 +198,8 @@ def _wait_settled(bot: Any, *, timeout_s: float = 12.0, settle_delta: float = 0.
 def _spread_overworld(
     bot: Any, bot_name: str, x: int, z: int, radius: int,
 ) -> tuple[list[float] | None, dict[str, Any]]:
+    from mc_agent.kb import normalize_dimension
+
     rcon_batch(
         [
             f"execute in minecraft:overworld run tp {bot_name} {x} 120 {z}",
@@ -205,8 +207,32 @@ def _spread_overworld(
         ],
         timeout=45,
     )
-    pos = _wait_settled(bot)
-    return pos, bot.status()
+    status: dict[str, Any] = {}
+    deadline = time.monotonic() + 12.0
+    while time.monotonic() < deadline:
+        time.sleep(0.8)
+        try:
+            sample = bot.status()
+        except Exception:
+            continue
+        if not isinstance(sample, dict):
+            continue
+        status = sample
+        pos = status.get("pos")
+        if (
+            status.get("ready") is False
+            or status.get("alive") is False
+            or not status.get("dimension")
+            or normalize_dimension(status.get("dimension")) != "overworld"
+            or not isinstance(pos, (list, tuple))
+            or len(pos) < 3
+            or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in pos[:3])
+            or math.hypot(pos[0] - x, pos[2] - z) > radius * 1.5
+        ):
+            continue
+        if status.get("on_ground") is True or status.get("in_water") or status.get("in_lava"):
+            return list(map(float, pos[:3])), status
+    return None, status
 
 
 def _portal_free_landing(bot: Any) -> bool:
@@ -244,10 +270,19 @@ def select_dry_isolated_wild_site(
     )
     rejected: Counter[str] = Counter()
     for region_idx, cx, cz in candidates:
-        _, st = _spread_overworld(bot, bot_name, cx, cz, 32)
+        confirmed, st = _spread_overworld(bot, bot_name, cx, cz, 32)
+        if st.get("in_water") or st.get("in_lava"):
+            rejected["wet_landing"] += 1
+            continue
         pos = _dry_overworld_position(st)
-        if pos is None or math.hypot(pos[0] - cx, pos[2] - cz) > 48.0:
-            rejected["unsettled_or_outside"] += 1
+        if pos is None:
+            rejected["not_dry_overworld_ground"] += 1
+            continue
+        if math.hypot(pos[0] - cx, pos[2] - cz) > 48.0:
+            rejected["outside_probe_radius"] += 1
+            continue
+        if confirmed is None:
+            rejected["landing_unconfirmed"] += 1
             continue
         biome = str(st.get("biome") or "").lower()
         # Skip pure ocean spawns so we land on a true terrestrial island/continent
@@ -443,10 +478,11 @@ def select_day2_village_site(
         bearing = ((start_idx + offset) % 8) * math.tau / 8
         x = vx + round(mid * math.cos(bearing))
         z = vz + round(mid * math.sin(bearing))
-        _, st = _spread_overworld(bot, bot_name, x, z, 14)
+        confirmed, st = _spread_overworld(bot, bot_name, x, z, 14)
         pos = st.get("pos")
         if (
-            not st.get("dimension")
+            confirmed is None
+            or not st.get("dimension")
             or normalize_dimension(st["dimension"]) != "overworld"
             or not isinstance(pos, (list, tuple))
             or len(pos) < 3
@@ -561,10 +597,13 @@ def select_stronghold_village_site(
             radius = max(1, min(6, int((32 - math.hypot(dx, dz)) / math.sqrt(2))))
             probes[(vx + round(dx), vz + round(dz), radius)] = None
         for x, z, radius in probes:
-            _, status = _spread_overworld(bot, bot_name, x, z, radius)
+            confirmed, status = _spread_overworld(bot, bot_name, x, z, radius)
             pos = _dry_overworld_position(status)
             if pos is None:
                 failed_landings["not_dry_overworld_ground"] += 1
+                continue
+            if confirmed is None:
+                failed_landings["landing_unconfirmed"] += 1
                 continue
             xz = pos[0], pos[2]
             if math.dist(xz, village) > 32:
