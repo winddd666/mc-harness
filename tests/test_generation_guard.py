@@ -6930,6 +6930,53 @@ def test_magic_damage_with_visible_witch_retreats_from_the_witch(monkeypatch, wi
     assert retreats == ([(witch, True)] if witch_visible else [(None, False)])
 
 
+@pytest.mark.parametrize("hurt_source", ["magic", "poison"])
+@pytest.mark.parametrize("live_witch", ["visible", "occluded", "different", "unavailable"])
+def test_typed_magic_checks_the_nearby_witch_before_treating_it_as_environmental(monkeypatch, hurt_source, live_witch):
+    witch = {"id": 807108, "name": "witch", "dist": 11.4, "pos": [11.4, 63.0, 0.0], "blocked_by_wall": False}
+    status = {
+        "pos": [0.0, 63.0, 0.0], "dimension": "overworld", "health": 9.9, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "blocking": True,
+        "nearest_hostile": {"id": witch["id"], "name": witch["name"], "dist": witch["dist"]},
+    }
+    retreats = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "source": hurt_source}] if kwargs["params"]["since"] < 1 else []}
+            if action == "get_entities":
+                assert body == {"radius": 12, "types": ["hostile"]}
+                assert kwargs["timeout_s"] == 0.6
+                if live_witch == "unavailable":
+                    raise httpx.ReadTimeout("witch sighting unavailable")
+                if live_witch == "occluded":
+                    return {"entities": [{**witch, "blocked_by_wall": True}]}
+                if live_witch == "different":
+                    return {"entities": [{**witch, "id": 807109}]}
+                return {"entities": [witch]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            pytest.fail(f"Unexpected action during typed magic recovery: {action}")
+
+    def defend(_status, attacker, _counts, *, ranged=False):
+        retreats.append((attacker, ranged))
+        return {"ok": True, "mode": "flee"}
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_defend_or_flee", defend)
+    incident = guard.poll()
+
+    if live_witch == "visible":
+        assert [action["action"] for action in incident["actions"]] == ["combat_or_flee"]
+        assert retreats == [(witch, True)]
+    else:
+        assert incident is None
+        assert retreats == []
+
+
 @pytest.mark.parametrize("ground", ["safe", "lava_drop", "slow_probe", "slow_control"])
 def test_bunker_rejection_keeps_an_armed_witch_retreat_on_verified_ground(monkeypatch, ground):
     from mc_agent.skills.combat_env import yaw_to_unit_xz

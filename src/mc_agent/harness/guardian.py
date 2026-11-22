@@ -1413,6 +1413,22 @@ class GenerationGuard:
         pos = list(nh["pos"]) if isinstance(nh.get("pos"), (list, tuple)) and len(nh["pos"]) >= 3 else None
         return name, dist, eid, pos
 
+    def _find_visible_witch(self, entity_id: int | None = None) -> dict[str, Any] | None:
+        try:
+            sighting = self.bot.call("get_entities", {"radius": 12, "types": ["hostile"]}, timeout_s=0.6)
+        except (ApiError, httpx.HTTPError):
+            return None
+        for entity in sighting.get("entities") or []:
+            if not isinstance(entity, dict) or entity.get("blocked_by_wall") is not False or entity.get("alive") is False:
+                continue
+            name, _, observed_id, pos = self._extract_hostile_info({"nearest_hostile": entity})
+            if (
+                name == "witch" and observed_id is not None and (entity_id is None or observed_id == entity_id)
+                and pos is not None and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
+            ):
+                return entity
+        return None
+
     def _find_hostile(
         self, entity_id: int | None, entity_name: str, *, session: _GuardSession | None = None,
         timeout_s: float | None = None, require_position: bool = False,
@@ -2041,7 +2057,7 @@ class GenerationGuard:
             and (not isinstance(food, (int, float)) or food >= 20)
         ):
             self.retry_after_ready = False
-        nh_name0, nh_dist0, _, _ = self._extract_hostile_info(status)
+        nh_name0, nh_dist0, nh_id0, _ = self._extract_hostile_info(status)
         sonic_hurt = next((hit for hit in reversed(other_hurts) if hit.get("source") == "sonic_boom"), None)
         exposed_in_water = (
             needs_float and now < self._ranged_combat_stance_until
@@ -2071,12 +2087,26 @@ class GenerationGuard:
                 for h in hurts
             )
         )
+        # A typed magic tick can arrive without an attacker. Corroborate the
+        # current witch before routing the hit away from environmental damage.
+        magic_witch = None
+        if (
+            ready and status.get("alive") is not False and not (in_water or in_lava or life_transition_pending)
+            and nh_name0 == "witch" and nh_id0 is not None and 0 <= nh_dist0 <= 12.0
+            and hurts and all(
+                str(hit.get("source") or "").strip().lower() in {"magic", "poison"}
+                and not hit.get("source_entity") and not hit.get("likely_attacker")
+                for hit in hurts
+            )
+        ):
+            magic_witch = self._find_visible_witch(nh_id0)
         non_combat_only_hurt = (
             hurt
             and bool(hurts)
             and not in_lava
             and not in_water
             and not life_transition_pending
+            and magic_witch is None
             and (
                 environmental_burning or fall_only or (
                     (not nh_name0 or nh_dist0 > 8.0)
@@ -2538,25 +2568,14 @@ class GenerationGuard:
                     if other_hurts else status.get("nearest_hostile")
                 )
                 hurt_src = str(recent_hurt.get("source") or "").strip().lower()
-                indirect_magic = hurt_src == "indirect_magic"
-                if not hurt_src and not recent_hurt.get("source_entity") and any(
+                if magic_witch is None and not hurt_src and not recent_hurt.get("source_entity") and any(
                     str(hit.get("source") or "").strip().lower() in {"magic", "poison", "indirect_magic"}
                     for hit in other_hurts
                 ):
-                    try:
-                        sighting = self.bot.call("get_entities", {"radius": 12, "types": ["hostile"]}, timeout_s=0.6)
-                    except (ApiError, httpx.HTTPError):
-                        sighting = {}
-                    witch = next((
-                        entity for entity in (sighting.get("entities") or [])
-                        if isinstance(entity, dict) and str(entity.get("name") or "").removeprefix("minecraft:") == "witch"
-                        and entity.get("blocked_by_wall") is False and isinstance(entity.get("id"), int)
-                        and isinstance(entity.get("pos"), (list, tuple)) and len(entity["pos"]) >= 3
-                        and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in entity["pos"][:3])
-                    ), None)
-                    if witch is not None:
-                        attacker = witch
-                        indirect_magic = True
+                    magic_witch = self._find_visible_witch()
+                indirect_magic = hurt_src == "indirect_magic" or magic_witch is not None
+                if magic_witch is not None:
+                    attacker = magic_witch
                 ranged_defense = hurt_src in RANGED_HURT_SOURCES or (
                     nh_name in {"blaze", "ghast"}
                     and (hurt_src in FIRE_HURT_SOURCES or (not hurt_src and status.get("on_fire")))
