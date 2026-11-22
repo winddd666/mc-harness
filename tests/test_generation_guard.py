@@ -1561,6 +1561,58 @@ def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, 
     assert outcome["mode"] == ("counter_kill" if scenario == "leaves_reach" else "counter_killed")
 
 
+@pytest.mark.parametrize("outcome", ["hurt_receipt", "hurt_error", "respawned", "healthy"])
+def test_unshielded_counter_stops_on_hurt_at_borderline_health(monkeypatch, outcome):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    zombie = {"id": 193294, "name": "zombie", "dist": 2.79, "pos": [9826, 70, 7379.95]}
+    status = {
+        "pos": [9828.75, 70, 7379.45], "health": 18 if outcome == "healthy" else 11.3,
+        "ready": True, "alive": True, "on_ground": True, "dimension": "overworld",
+        "last_death": {"t": 1}, "nearest_hostile": zombie, "held": {"name": "iron_sword"},
+    }
+    actions = []
+
+    class PortalBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [zombie]}
+            if action == "attack":
+                actions.append(action)
+                if outcome == "healthy":
+                    assert body["stop_on"] == ["death"]
+                    return {"hits": 3, "killed": True}
+                assert body["stop_on"] == ["hurt", "death"]
+                status.update(health=9.3, on_ground=False)
+                if outcome == "respawned":
+                    status.update(health=20, last_death={"t": 2}, nearest_hostile=None)
+                if outcome == "hurt_error":
+                    raise ApiError("interrupted", "stopped because of hurt")
+                return {"hits": 1, "killed": False, "interrupted_by": "hurt"}
+            return {"ok": True}
+
+    def retreat(_pos, *, distance, urgent, wait_for_ground):
+        assert wait_for_ground and status["health"] == 9.3
+        actions.append("flee")
+        return {"ok": True, "mode": "flee"}
+
+    env = CombatEnv(PortalBot())
+    monkeypatch.setattr(env, "flee", retreat)
+    result = SubcorticalInstinctController().on_encounter(env, {
+        "source": "pre_hurt_melee", "primary_entity_id": zombie["id"], "primary_type": "zombie",
+    })
+
+    assert actions == (["attack", "flee"] if outcome in {"hurt_receipt", "hurt_error"} else ["attack"])
+    assert result["mode"] == {"healthy": "counter_killed", "respawned": "life_unavailable"}.get(outcome, "low_hp_disengage")
+
+
 def test_subcortical_combat_timeout_sends_stop_and_preemption_survives_without_crashing(monkeypatch):
     """Reproduces glm_glm_3_village / hy4_hy_8_nether: ReadTimeout in subcortical_combat must /stop & not crash run."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController

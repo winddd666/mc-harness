@@ -3508,10 +3508,17 @@ class SubcorticalInstinctController:
             weapon = self._equip_best_weapon_and_shield(env, counts, has_shield, held_name)
             mode = "counter_kill"
             killed = False
+            interrupted_by_hurt = False
             for _ in range(5):
                 if time.monotonic() >= deadline:
                     break
                 st_cur = env.bot.status()
+                if (
+                    st_cur.get("ready") is False or st_cur.get("alive") is False
+                    or any(st_cur.get(key) != st.get(key) for key in ("dimension", "last_death"))
+                ):
+                    mode = "life_unavailable"
+                    break
                 hp_cur = float(st_cur.get("health") or 20.0)
                 oxy_cur = st_cur.get("oxygen")
                 if st_cur.get("in_water") and (
@@ -3533,7 +3540,7 @@ class SubcorticalInstinctController:
                         latched_guard = self._latch_shield_at_threat(env, int(tid_w) if tid_w is not None else None)
                     mode = "water_surface_abort"
                     break
-                if hp_cur <= 8.0 or st_cur.get("alive") is False:
+                if hp_cur <= 8.0:
                     flee_low = env.flee(mob_pos, distance=12.0, urgent=True)
                     actions.append({"action": "low_hp_abort_flee", "ok": bool(flee_low.get("ok"))})
                     if not flee_low.get("ok") and not flee_low.get("respawned") and has_shield:
@@ -3571,7 +3578,9 @@ class SubcorticalInstinctController:
                 if remaining < 1.5:
                     break
                 attack_ms = min(2600, int((remaining - 0.9) * 1000))
-                attack_body = {"entity_id": eff_id, "timeout": attack_ms, "stop_on": ["death"]}
+                vulnerable_counter = not has_shield and hp_cur <= 12.0
+                stop_on = ["hurt", "death"] if vulnerable_counter else ["death"]
+                attack_body = {"entity_id": eff_id, "timeout": attack_ms, "stop_on": stop_on}
                 if target_ent is not None and self._entity_dist(st_cur.get("pos"), target_ent) <= 2.5:
                     # A close counter can return after two swings. Reserve the longest sword/axe
                     # interval (1250 ms) for a final server-side sleep if the target slips out of reach.
@@ -3586,6 +3595,9 @@ class SubcorticalInstinctController:
                     if atk.get("killed"):
                         killed = True
                         break
+                    if vulnerable_counter and atk.get("interrupted_by") == "hurt":
+                        interrupted_by_hurt = True
+                        break
                     if isinstance(hits, (int, float)) and hits == 0:
                         flee_uh = env.flee(mob_pos, distance=10.0, urgent=True)
                         actions.append({"action": "unreachable_flee", "ok": bool(flee_uh.get("ok"))})
@@ -3593,6 +3605,9 @@ class SubcorticalInstinctController:
                         break
                 except ApiError as err:
                     actions.append({"action": "melee_attack", "ok": False, "code": err.code})
+                    if vulnerable_counter and err.code in {"hurt", "interrupted"}:
+                        interrupted_by_hurt = True
+                        break
                     if err.code in {"entity_not_found", "invalid_entity", "target_dead"}:
                         killed = True
                         break
@@ -3604,7 +3619,18 @@ class SubcorticalInstinctController:
                 if not cur_hostiles:
                     killed = True
                     break
-            if killed:
+            if interrupted_by_hurt:
+                after_hurt = env._safe_status({})
+                mode = "low_hp_disengage"
+                if (
+                    not after_hurt.get("pos") or after_hurt.get("ready") is False or after_hurt.get("alive") is False
+                    or any(after_hurt.get(key) != st.get(key) for key in ("dimension", "last_death"))
+                ):
+                    mode = "life_unavailable"
+                elif not (after_hurt.get("in_water") or after_hurt.get("in_lava")):
+                    retreat = env.flee(mob_pos, distance=12.0, urgent=True, wait_for_ground=True)
+                    actions.append({"action": "low_hp_abort_flee", "ok": bool(retreat.get("ok"))})
+            elif killed:
                 mode = "counter_killed"
                 self._recent_flee_streak = 0
 
