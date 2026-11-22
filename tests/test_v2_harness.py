@@ -209,9 +209,9 @@ def test_bug047_mine_dfs_clamps_to_55s_and_episode_deadline(monkeypatch: pytest.
         )
         monkeypatch.setattr(ts.skills, "_ensure_free_slots", lambda min_free=3: (True, []))
 
-        # 1) Unbounded episode caps 90s request to 55s.
-        json.loads(ts.mc_skill_mine_dfs(target="ancient_debris", max_duration_s=90.0))
-        assert seen_budgets[-1] == 55.0
+        # 1) Unbounded episode caps oversized request to 90s.
+        json.loads(ts.mc_skill_mine_dfs(target="ancient_debris", max_duration_s=150.0))
+        assert seen_budgets[-1] == 90.0
 
         # 2) Tight episode deadline (20s remaining) clamps to 16s (reserve 4s).
         ts.rebind_runtime_hooks(episode_deadline_mono=1020.0)

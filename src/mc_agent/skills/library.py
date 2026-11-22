@@ -3834,6 +3834,21 @@ class MacroSkills:
                         break
         plan = craft_material_shortage(item, count, initial)
         if plan and plan["missing_materials"]:
+            _ALREADY_OWNED_GEAR = frozenset({
+                "flint_and_steel", "diamond_pickaxe", "iron_pickaxe", "stone_pickaxe",
+                "diamond_sword", "iron_sword", "shield", "bucket", "shears", "compass",
+                "lodestone", "enchanting_table", "anvil", "brewing_stand", "crafting_table",
+            })
+            if item in _ALREADY_OWNED_GEAR and int(initial.get(item, 0)) >= count:
+                return {
+                    "ok": True,
+                    "already_owned": True,
+                    "crafted": item,
+                    "gained": 0,
+                    "owned_count": int(initial.get(item, 0)),
+                    "inventory": initial,
+                    "message": f"背包中已有 {item}×{int(initial.get(item, 0))}，无需重复合成；请直接继续下一步。",
+                }
             # Logs/planks and sticks can be prepared automatically, but
             # absent stone/ingots/wool cannot be repaired by rebuilding a table.
             non_wood_missing = {k: v for k, v in plan["missing_materials"].items() if k not in {"stick", "any_planks"}}
