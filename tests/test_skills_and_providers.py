@@ -3110,6 +3110,80 @@ def test_smelt_coal_is_fuel_and_valid_recipes_still_transfer(entry, input_item, 
             assert bag[output_item] == 2
 
 
+@pytest.mark.parametrize("initial_cobble", [32, 8])
+def test_smelt_recounts_cobblestone_after_crafting_its_furnace(monkeypatch, initial_cobble) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    furnace = [1, 64, 0]
+    bag = {"cobblestone": initial_cobble, "coal": 5}
+    loaded = 0
+    output = 0
+    operations = []
+
+    def handler(request):
+        nonlocal loaded, output
+        path = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if path == "inventory":
+            result = {"items": [{"name": name, "count": n} for name, n in bag.items() if n > 0]}
+        elif path == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif path == "find_blocks":
+            table = {"pos": [0, 64, 1], "dist": 1.0}
+            result = {"blocks": [table] if body["types"] == ["crafting_table"] else []}
+        elif path == "craft":
+            assert body == {"item": "furnace", "count": 1}
+            bag["cobblestone"] -= 8
+            bag["furnace"] = 1
+            result = {"crafted": "furnace", "gained": 1}
+        elif path == "place":
+            assert body == {"item": "furnace"} and bag.pop("furnace") == 1
+            result = {"pos": furnace}
+        elif path == "act":
+            assert body["target"]["pos"] == furnace
+            operations.extend(body["ops"])
+            if body["ops"][0]["op"] == "put":
+                material, fuel = body["ops"]
+                assert 0 < material["count"] <= bag["cobblestone"]
+                bag["cobblestone"] -= material["count"]
+                bag["coal"] -= fuel["count"]
+                output = 4
+                loaded = material["count"] - output
+                result = {}
+            else:
+                bag["stone"] = output
+                result = {"done": [{"took": {"stone": output}}]}
+                output = 0
+        elif path == "view":
+            result = {"sections": {
+                "input": [{"name": "cobblestone", "count": loaded}],
+                "output": [{"name": "stone", "count": output}],
+            }, "info": {"burning": True}}
+        else:
+            raise AssertionError(path)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_smelt("cobblestone", count=initial_cobble, fuel_item="coal"))
+        pending = toolset.world_memory.get_in_conversion_counts()
+
+    if initial_cobble == 8:
+        assert result["error"] == "missing_ingredients"
+        assert not operations and not pending and bag["coal"] == 5
+    else:
+        assert result["error"] == "partial_smelt" and result["requested_count"] == 24
+        assert operations == [
+            {"op": "put", "item": "cobblestone", "count": 24, "to": "input"},
+            {"op": "put", "item": "coal", "count": 3, "to": "fuel"},
+            {"op": "take", "from": "output", "count": 4},
+        ]
+        assert pending == {"stone": 20} and loaded == 20 and bag == {"cobblestone": 0, "coal": 2, "stone": 4}
+
+
 def test_smelt_missing_fuel_gives_harvest_next_action() -> None:
     """P2-28/r20_long: bare 'no fuel' left ds_1_bare stuck in bootstrap_iron_age."""
 

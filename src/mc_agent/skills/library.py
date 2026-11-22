@@ -5936,10 +5936,8 @@ class MacroSkills:
         self, input_item: str, count: int, fuel_item: str | None, session: _SkillBudgetSession
     ) -> dict[str, Any]:
         inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
-        avail_in = counts.get(input_item, 0)
-        if avail_in < 1:
+        if counts.get(input_item, 0) < 1:
             return {"ok": False, "error": "missing_ingredients", "message": f"背包没有 {input_item}。"}
-        smelt_n = min(max(1, count), avail_in)
         inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         if pre_dropped:
             counts = _inventory_counts_from_raw(inv_raw)
@@ -6002,6 +6000,14 @@ class MacroSkills:
             return pending_batch
         target = {"pos": furnace_pos} if furnace_pos else {"block": "furnace"}
         counts = _inventory_counts(self.bot)
+        # Preparing the furnace can consume the same material the caller wants to smelt.
+        smelt_n = min(max(1, count), counts.get(input_item, 0))
+        if smelt_n < 1:
+            return {
+                "ok": False, "error": "missing_ingredients", "requires_replan": True,
+                "input": input_item, "furnace_pos": furnace_pos,
+                "message": f"准备熔炉后背包已没有 {input_item}，请补足原料再烧制。",
+            }
 
         # Pick fuel & calculate exact fuel count, reserving smelt_n items if fuel matches input_item.
         chosen_fuel = fuel_item
