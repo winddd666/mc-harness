@@ -3521,6 +3521,8 @@ class GenerationGuard:
                                 "primary_type": tp_w,
                                 "primary_pos": pos_w,
                                 "distance": dist_w,
+                                **({"observed_life": (st.get("dimension"), st.get("last_death"))}
+                                   if src_w == "tool_water_threat" else {}),
                             }
                         )
                         try:
@@ -3736,6 +3738,14 @@ class GenerationGuard:
             life_unavailable = st_pre.get("ready") is False or st_pre.get("alive") is False or (
                 observed_life is not None and observed_life != (st_pre.get("dimension"), st_pre.get("last_death"))
             )
+            tool_water_threat = trigger.get("source") == "tool_water_threat"
+            if tool_water_threat and not life_unavailable and st_pre.get("in_water") is False:
+                settled = self._settle_dry_shore(st_pre, st_pre, self.bot, deadline=time.monotonic() + 0.7)
+                life_unavailable = life_changed(settled) or (
+                    observed_life is not None
+                    and observed_life != (settled.get("dimension"), settled.get("last_death"))
+                )
+                st_pre = settled
             lava_threat = trigger.get("primary_type") == "lava" or bool(st_pre.get("in_lava"))
             distance = trigger.get("distance")
             if (
@@ -3853,6 +3863,19 @@ class GenerationGuard:
                         pass
                 summary = f"执行 {interrupted_name} 途中踩到岩浆块，已中断当前动作，当前 HP={st_after.get('health')}"
                 outcome = {"handled": bool(actions and actions[0].get("ok")), "mode": "hot_floor", "actions": actions}
+            elif tool_water_threat and not st_pre.get("in_water"):
+                st_after = st_pre
+                landed = (
+                    st_after.get("in_water") is False and not st_after.get("submerged")
+                    and st_after.get("on_ground") is True
+                )
+                self._last_water_escape_at = time.monotonic()
+                self._last_water_escape_failed = not landed
+                if landed:
+                    self._water_hurt_streak = 0
+                recovery = "已脱离水域" if landed else "尚未确认安全登岸"
+                summary = f"执行 {interrupted_name} 途中水下遇险，{recovery}，当前 HP={st_after.get('health')}"
+                outcome = {"handled": landed, "mode": "water_surface", "actions": []}
             else:
                 now_pre = time.monotonic()
                 oxy_pre = st_pre.get("oxygen")
@@ -3863,13 +3886,14 @@ class GenerationGuard:
                 mining_water_pre = interrupted_name in MINING_WATER_WATCH_TOOLS
                 surface_first_pre = (
                     (mining_water_pre or interrupted_name == "mc_skill_unstick")
-                    and trigger.get("source") == "tool_water_threat"
+                    and tool_water_threat
                 )
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
                     or (isinstance(oxy_pre, (int, float)) and oxy_pre < 180)
                     or drowning_pre
                     or trigger.get("primary_type") == "drowned"
+                    or tool_water_threat
                     or hurt_pre_water
                     or now_pre < self._no_water_until
                     or self._water_hurt_streak >= 2

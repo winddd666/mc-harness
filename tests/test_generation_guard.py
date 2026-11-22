@@ -1055,6 +1055,57 @@ def test_water_tool_preemption_reports_life_unavailable_after_respawn(monkeypatc
     assert [e["action"] for e in events if e["type"] == "guardian.action.completed"] == ["escape_to_shore"]
 
 
+@pytest.mark.parametrize("landing", ["airborne", "grounded", "back_in_water", "respawned"])
+def test_water_tool_preemption_keeps_shore_recovery_during_airborne_handoff(monkeypatch, landing):
+    status = {
+        "pos": [-7780.1, 32.2, -2845.7], "dimension": "overworld", "health": 20,
+        "ready": True, "alive": True, "in_water": False, "on_ground": False, "last_death": {"t": 1},
+    }
+    shore_calls = []
+
+    class RiverBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                if kwargs.get("timeout_s") == 0.25:
+                    if landing == "grounded":
+                        status.update(on_ground=True)
+                    elif landing == "back_in_water":
+                        status.update(in_water=True, submerged=True)
+                    elif landing == "respawned":
+                        status.update(on_ground=True, last_death={"t": 2})
+                return dict(status)
+            if endpoint == "events":
+                return {"events": []}
+            if endpoint == "inventory":
+                return {"items": []}
+            raise AssertionError(endpoint)
+
+    def shore(*args, **kwargs):
+        shore_calls.append(kwargs.get("surface_first"))
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    def combat(_trigger):
+        pytest.fail("Water recovery must not flee from a distant zombie")
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
+    receipt = guard.handle_preemption(
+        {
+            "source": "tool_water_threat", "primary_type": "zombie", "primary_entity_id": 45,
+            "distance": 20.3, "observed_life": ("overworld", {"t": 1}),
+        },
+        interrupted_name="mc_skill_unstick",
+    )
+
+    assert receipt["requires_replan"]
+    assert receipt["reflex_mode"] == ("life_unavailable" if landing == "respawned" else "water_surface")
+    assert receipt["status_after"]["on_ground"] is (landing != "airborne")
+    assert guard._last_water_escape_failed is (landing == "airborne")
+    assert shore_calls == ([True] if landing == "back_in_water" else [])
+
+
 @pytest.mark.parametrize("source, identified, expected", [
     ("mob_attack", True, "cover_or_flee"),
     ("mob_attack", False, "cover_or_flee"),
