@@ -1175,7 +1175,7 @@ def test_dual_strategy_fishbone_ignores_distant_cave_while_radar_triages_hostile
 ) -> None:
     """Compare `fishbone` vs `v5` (bug-fixed v4) vs `radar` (with hostile triage + LocC-v4 surgical parapet)."""
     monkeypatch.delenv("MC_DFS_STRATEGY", raising=False)
-    assert normalize_dfs_strategy(None) == "fishbone_scan"
+    assert normalize_dfs_strategy(None) == "radar"
     monkeypatch.setenv("MC_DFS_STRATEGY", "fishbone")
     assert normalize_dfs_strategy(None) == "fishbone"
     monkeypatch.setenv("MC_DFS_STRATEGY", "v5")

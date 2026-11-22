@@ -383,8 +383,20 @@ class _BudgetSession:
             except httpx.TimeoutException as exc:
                 if first_step_probe and attempt == 0 and self.deadline - time.monotonic() > 1.0:
                     continue
-                self.timeout_path = endpoint
                 dig_pos = (payload or {}).get("pos")
+                if (
+                    endpoint == "dig"
+                    and self.dug_count > 0
+                    and (self.deadline - time.monotonic()) > 12.0
+                    and isinstance(dig_pos, (list, tuple))
+                    and len(dig_pos) >= 3
+                ):
+                    try:
+                        self._call("stop", {}, timeout_s=1.0, allow_reauth=False)
+                    except Exception:
+                        pass
+                    raise ApiError("dig_timeout", f"dig stalled at {_floor_pos(dig_pos)}") from exc
+                self.timeout_path = endpoint
                 if endpoint == "dig" and isinstance(dig_pos, (list, tuple)) and len(dig_pos) >= 3:
                     self.timeout_dig_pos = _floor_pos(dig_pos)
                     self.timeout_dig_read_s = read_timeout
@@ -407,17 +419,17 @@ class _BudgetSession:
 
 
 def normalize_dfs_strategy(raw: str | None = None) -> str:
-    """Resolve DFS strategy (default 'fishbone_scan'; also supports 'fishbone', 'v5', 'radar')."""
-    val = str(raw if raw is not None else os.environ.get("MC_DFS_STRATEGY", "fishbone_scan")).strip().lower()
+    """Resolve DFS strategy (default 'radar'; also supports 'fishbone_scan', 'fishbone', 'v5')."""
+    val = str(raw if raw is not None else os.environ.get("MC_DFS_STRATEGY", "radar")).strip().lower()
     if val in {"fishbone", "conservative", "classic", "strip"}:
         return "fishbone"
-    if val in {"fishbone_scan", "fishbone_plus", "fbscan", "scan", ""}:
+    if val in {"fishbone_scan", "fishbone_plus", "fbscan", "scan"}:
         return "fishbone_scan"
     if val in {"v5", "v4_fixed", "patched_v4", "moderate"}:
         return "v5"
-    if val in {"radar", "aggressive", "guided", "surgical"}:
+    if val in {"radar", "aggressive", "guided", "surgical", ""}:
         return "radar"
-    return "fishbone_scan"
+    return "radar"
 
 
 @dataclasses.dataclass
@@ -1021,6 +1033,8 @@ class MiningDFSEngine:
         # Consecutive calls on this shaft that produced no target item at all.
         self.dry_calls: int = 0
         self.locked_cluster: dict[str, Any] | None = None
+        self._last_locked_rep: tuple[int, int, int] | None = None
+        self._locked_rep_dry_calls: int = 0
         self._last_radar_anchor: tuple[int, int, int] | None = None
         self.sealed_positions: set[tuple[int, int, int]] = set()
         self.catch_blocks_placed: list[list[int]] = []
@@ -2396,12 +2410,6 @@ class MiningDFSEngine:
                 or self.skills._is_block_avoided(pt)
             ):
                 continue
-            if (
-                self.strategy in {"radar", "v5"}
-                and abs(anchor[1] - self.target_y) <= 8
-                and abs(pt[1] - self.target_y) > 8
-            ):
-                continue
             if geofence is not None and geofence.check_point(pt[0] + 0.5, pt[2] + 0.5, action="ore_radar") is not None:
                 continue
             seen.add(pt)
@@ -2422,12 +2430,6 @@ class MiningDFSEngine:
                 or self.skills._is_block_avoided(pt)
             ):
                 continue
-            if (
-                self.strategy in {"radar", "v5"}
-                and abs(anchor[1] - self.target_y) <= 8
-                and abs(pt[1] - self.target_y) > 8
-            ):
-                continue
             if meta.get("block") not in target_set or int(meta.get("required_tier", 2)) > max_tier:
                 continue
             if math.dist(anchor, pt) > RADAR_SCAN_RADIUS + 4:
@@ -2446,6 +2448,15 @@ class MiningDFSEngine:
             seen.add(pt)
             self.ever_seen_radar_ores.add(pt)
             found_pts.append(pt)
+
+        if self.strategy in {"radar", "v5"} and abs(anchor[1] - self.target_y) <= 8 and found_pts:
+            in_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 8]
+            if in_band:
+                found_pts = in_band
+            else:
+                near_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 16]
+                if near_band:
+                    found_pts = near_band
 
         if not self.surgical_enabled:
             # 'v5' mode: original v4 nearest single-point radar ordering (no hostile cluster triage)
@@ -5379,7 +5390,22 @@ class MiningDFSEngine:
                                strategy=strategy, deadline=scoped.deadline)
             if act == "explore":
                 requested = max(1, min(64, int(goal_count)))
-                result["goal_met"] = int(result.get("target_gained", 0)) >= requested
+                t_gained = int(result.get("target_gained", 0))
+                result["goal_met"] = t_gained >= requested
+                if t_gained > 0:
+                    self._last_locked_rep = None
+                    self._locked_rep_dry_calls = 0
+                elif isinstance(self.locked_cluster, dict) and self.locked_cluster.get("rep"):
+                    cur_rep = tuple(int(x) for x in self.locked_cluster["rep"])
+                    if cur_rep == self._last_locked_rep:
+                        self._locked_rep_dry_calls += 1
+                        if self._locked_rep_dry_calls >= 2:
+                            self._mark_ore_unreachable(cur_rep, "stalled_locked_cluster")
+                            self._last_locked_rep = None
+                            self._locked_rep_dry_calls = 0
+                    else:
+                        self._last_locked_rep = cur_rep
+                        self._locked_rep_dry_calls = 1
                 self._report_explore_depth(result, target_y=self.target_y, budget=budget)
             return result
         except _MiningDeadline as exc:
