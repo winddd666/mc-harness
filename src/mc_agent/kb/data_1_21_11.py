@@ -45,7 +45,7 @@ RECIPES_1_21: dict[str, dict[str, Any]] = {
         "yield_count": 4,
         "ingredients": {"oak_log": 1},
         "keywords": ["木板", "planks", "木材"],
-        "notes": "任意 *_log 均可 1->4 合为对应 *_planks（2x2 即可）。",
+        "notes": "2x2 合成，1 份橡木原木或同家族去皮木材可合出 4 块橡木木板。",
     },
     "stick": {
         "id": "stick",
@@ -714,6 +714,17 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
         "category": "api_mechanic",
         "keywords": ["craft_gear", "no_recipe", "missing_ingredients", "合成", "配方", "wheat_seeds", "server_recipe_rejected"],
         "rule": "craft_gear 只适用于 RECIPES_1_21 里登记过的可合成物（工具/盾牌/石砖/床等）；wheat_seeds、皮革、线之类没有工作台配方，调用必然 no_recipe。缺料时看 error.missing/missing_ingredients 补对应原料（如石镐 3 圆石 + 2 木棍），不要同一配方连续重试超过 2 次。",
+    },
+    "wood_family_planks": {
+        "id": "wood_family_planks",
+        "category": "game_mechanic",
+        "keywords": ["去皮原木", "菌柄", "木板配方", "stripped", "stripped_spruce_planks", "wood planks"],
+        "rule": (
+            "普通和去皮的原木、木块、下界菌柄及 hyphae 都按木材家族合成，1 份原料出 4 块同家族木板，2x2 即可。"
+            "成品 ID 只用家族名加 _planks。spruce_log 和 stripped_spruce_log 都合成 spruce_planks；"
+            "crimson_stem 和 stripped_crimson_stem 都合成 crimson_planks；warped_stem 和 stripped_warped_stem 都合成 warped_planks。"
+            "做工作台或木棍时，可直接计入已有的任何家族木板。"
+        ),
     },
     "place_support_rules": {
         "id": "place_support_rules",
