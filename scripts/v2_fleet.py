@@ -508,6 +508,8 @@ class ProbeThroughput:
     end_count: int | None
     gains: list[int]
     first_threshold_s: float | None
+    inventory_peak: int | None = None
+    first_inventory_threshold_s: float | None = None
 
 
 @dataclasses.dataclass
@@ -574,6 +576,22 @@ def _trace_time(event: dict[str, Any]) -> float | None:
         return None
 
 
+def _probe_inventory_count(inventory: object, item: str) -> int | None:
+    if not isinstance(inventory, dict) or inventory.get("ok") is False:
+        return None
+    snapshot = inventory.get("result", inventory)
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("items"), list):
+        return None
+    return sum(
+        entry["count"]
+        for entry in (*snapshot["items"], snapshot.get("offhand"))
+        if isinstance(entry, dict)
+        and str(entry.get("name") or "").removeprefix("minecraft:") == item
+        and type(entry.get("count")) is int
+        and entry["count"] > 0
+    )
+
+
 def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     """Parse one fleet bot directory (summary + raw events) into a normalized row."""
     name = bd.name
@@ -605,6 +623,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     probe_total = 0
     probe_started_at = None
     first_threshold_s = None
+    inventory_peak = None
+    first_inventory_threshold_s = None
     portal_crossing = scene_meta.get("portal_crossing")
     if not isinstance(portal_crossing, dict) or not portal_crossing:
         portal_crossing = None
@@ -650,6 +670,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
             lifecycle.observe(ev)
             tp = str(ev.get("type") or "")
             el = float(ev.get("elapsed") or 0.0)
+            inventory_observation = ev.get("inventory_after") if tp == "guardian.incident" else None
             if probe_target and probe_started_at is None:
                 probe_started_at = _trace_time(ev)
             if tp in ("tool.started", "tool.ready"):
@@ -671,6 +692,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 dt = max(0.0, el - st_info[0]) if st_info else float(ev.get("duration") or 0.0)
                 tool_calls[tname] += 1
                 payload = _decode_payload(ev.get("result") if "result" in ev else ev.get("output"))
+                if tname == "mc_inventory":
+                    inventory_observation = payload
                 if probe_target and st_info and tname in {"mc_skill_mine_dfs", "mc_skill_mine_blocks"}:
                     item, threshold = probe_target
                     gained_items = payload.get("gained")
@@ -706,6 +729,15 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 http_429_retries += 1
             elif tp == "model.failed" and is_http_429_failure(ev):
                 http_429 += 1
+            if probe_target and inventory_observation is not None:
+                item, threshold = probe_target
+                observed_count = _probe_inventory_count(inventory_observation, item)
+                if observed_count is not None:
+                    inventory_peak = max(inventory_peak or 0, observed_count)
+                    if observed_count >= threshold and first_inventory_threshold_s is None:
+                        observed_at = _trace_time(ev)
+                        if observed_at is not None and probe_started_at is not None:
+                            first_inventory_threshold_s = round(max(0.0, observed_at - probe_started_at), 1)
         # Guardian emits both a dedicated event and the resulting tool receipt.
         event_preemptions += max(guardian_preemptions, preemption_receipts)
 
@@ -735,7 +767,10 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
             if isinstance(end_inventory, dict) and (end_inventory or end_status.get("pos"))
             else None
         )
-        throughput = ProbeThroughput(item, threshold, start_count, end_count, probe_gains, first_threshold_s)
+        throughput = ProbeThroughput(
+            item, threshold, start_count, end_count, probe_gains, first_threshold_s,
+            inventory_peak=inventory_peak, first_inventory_threshold_s=first_inventory_threshold_s,
+        )
     scene_anchor = ""
     if isinstance(scene_meta.get("anchor"), dict):
         a = scene_meta["anchor"]
@@ -931,10 +966,10 @@ def _write_markdown(
     if probe_rows:
         lines.extend([
             "", "### 采矿探针吞吐",
-            "", "首达时间从首集事件起算，取到达阈值的那条采集回执时间。",
+            "", "时间从首集事件起算。回执累计是采集增量，实包峰值来自运行中观测的持有量。",
             "",
-            "| Bot | 物品 | 阈值 | 初包 | 终包 | 各采集回执 | 回执累计 | 首达 |",
-            "|---|---|---:|---:|---:|---|---:|---|",
+            "| Bot | 物品 | 阈值 | 初包 | 终包 | 各采集回执 | 回执累计 | 回执首达 | 实包峰值 | 实包首见达标 |",
+            "|---|---|---:|---:|---:|---|---:|---|---:|---|",
         ])
         for r in probe_rows:
             probe = r.throughput
@@ -943,15 +978,23 @@ def _write_markdown(
             gains = ", ".join(map(str, probe.gains)) or "—"
             total = sum(probe.gains)
             if probe.first_threshold_s is not None:
-                reached = f"{probe.first_threshold_s:.1f}s，采集回执"
+                reached = f"{probe.first_threshold_s:.1f}s"
             elif total >= probe.threshold:
-                reached = "采集回执，时间未知"
-            elif probe.end_count is not None and probe.end_count - (probe.start_count or 0) >= probe.threshold:
-                reached = "终包，时间未知"
+                reached = "时间未知"
             else:
                 reached = "—"
+            peak = probe.inventory_peak if probe.inventory_peak is not None else "—"
+            if probe.first_inventory_threshold_s is not None:
+                inventory_reached = f"{probe.first_inventory_threshold_s:.1f}s"
+            elif probe.inventory_peak is not None and probe.inventory_peak >= probe.threshold:
+                inventory_reached = "时间未知"
+            elif probe.end_count is not None and probe.end_count >= probe.threshold:
+                inventory_reached = "终包，时间未知"
+            else:
+                inventory_reached = "—"
             lines.append(
-                f"| `{r.name}` | `{probe.item}` | {probe.threshold} | {start_count} | {end_count} | {gains} | {total} | {reached} |"
+                f"| `{r.name}` | `{probe.item}` | {probe.threshold} | {start_count} | {end_count} | {gains} | {total} | "
+                f"{reached} | {peak} | {inventory_reached} |"
             )
     wd_rows = [r for r in rows if r.scene_ticks is not None]
     if wd_rows:
@@ -1086,7 +1129,8 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             probe = r.throughput
             print(
                 f"        {probe.item} start={probe.start_count} end={probe.end_count} "
-                f"mined={sum(probe.gains)}/{probe.threshold} first_threshold_s={probe.first_threshold_s}"
+                f"mined={sum(probe.gains)}/{probe.threshold} first_threshold_s={probe.first_threshold_s} "
+                f"inventory_peak={probe.inventory_peak} first_inventory_threshold_s={probe.first_inventory_threshold_s}"
             )
 
     print("\n--- CROSS-MODEL AGGREGATE (per model family) ---")
