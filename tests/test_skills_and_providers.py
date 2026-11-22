@@ -853,6 +853,92 @@ def test_targeted_drop_recovery_refreshes_each_stack_and_skips_unsafe_routes(mon
         assert moves == [1, 2, 4]
 
 
+@pytest.mark.parametrize("pickup", ["collected", "partial", "unsafe", "gone", "unreleased"])
+def test_mine_dfs_checks_observed_target_drops_before_digging(monkeypatch, pickup) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    position = [0.5, 64.0, 0.5]
+    drops = [
+        {"id": 7, "item": "raw_ironx2", "pos": [0.95, 64.0, 0.5], "dist": 0.45},
+        {"id": 8, "item": "cobblestonex4", "pos": [0.5, 64.0, 1.5], "dist": 1.0},
+    ]
+    actions = []
+    owned = 0
+
+    def handler(request):
+        nonlocal owned
+        route = request.url.path.rsplit("/", 1)[-1]
+        actions.append(route)
+        body = json.loads(request.content) if request.content else {}
+        if route == "get_entities":
+            if pickup == "gone" and actions.count("get_entities") == 2:
+                clock[0] += 0.75
+            result = {"entities": drops}
+        elif route == "status":
+            result = {"pos": position, "dimension": "overworld"}
+        elif route == "get_block":
+            y = body["pos"][1]
+            result = {"name": "stone" if y < 64 else "water" if pickup == "unsafe" else "air"}
+        elif route == "move_to":
+            assert [body["x"], body["y"], body["z"]] == drops[0]["pos"]
+            if pickup == "unreleased":
+                clock[0] += sum(request.extensions["timeout"].values())
+                raise httpx.RemoteProtocolError("offline move response lost", request=request)
+            position[:] = drops[0]["pos"]
+            if pickup == "partial":
+                drops[0]["item"] = "raw_ironx1"
+                owned = 1
+            else:
+                drops.pop(0)
+                owned = 2
+            result = {"pos": position}
+        elif route == "stop":
+            clock[0] += sum(request.extensions["timeout"].values())
+            result = {"released": False}
+        elif route == "inventory":
+            result = {"items": [{"name": "raw_iron", "count": owned}] if owned else []}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def mine(**kwargs):
+        actions.append("dfs")
+        assert kwargs["max_duration_s"] == pytest.approx(31.25 if pickup == "gone" else 32)
+        return {"ok": True, "dug_count": 1}
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools.skills.mine_dfs = mine
+        tools.mc_get_entities(radius=6, types=["item"])
+        clock[0] += 3.8
+        if pickup == "gone":
+            drops.pop(0)
+        result = json.loads(tools.mc_skill_mine_dfs(target="iron", goal_count=2))
+
+    if pickup in {"collected", "partial"}:
+        expected = 2 if pickup == "collected" else 1
+        assert "dfs" not in actions
+        assert result["ok"] is True and result["goal_met"] is (expected == 2) and result["dug_count"] == 0
+        assert result["gained"] == {"raw_iron": expected} and result["target_gained"] == expected
+        attempt = result["pickup_before_mining"]["attempts"][0]
+        assert attempt["pickup_inventory_gain"] == expected
+        assert attempt["picked_up"] == (2 if pickup == "collected" else 0)
+    elif pickup == "unreleased":
+        assert "dfs" not in actions and actions.count("move_to") == 1 and actions.count("stop") == 1
+        assert result["ok"] is False and result["pickup_before_mining"]["stop_confirmed"] is False
+        assert clock[0] <= 109.8
+    else:
+        assert "dfs" in actions and "move_to" not in actions
+        assert actions.count("get_entities") == 2 and actions.index("dfs") > 1
+        skips = {row["id"]: row["reason"] for row in result["pickup_before_mining"]["skipped"]}
+        assert skips[8] == "non_target_item"
+        if pickup == "unsafe":
+            assert skips[7] == "unsafe_route"
+
+
 def test_collect_drops_honors_explicit_budget_without_item_filter(monkeypatch) -> None:
     clock = [100.0]
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])

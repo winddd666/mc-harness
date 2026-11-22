@@ -1114,6 +1114,10 @@ _HIGH_VALUE_DROPS: frozenset[str] = frozenset({
     "iron_pickaxe",
     "diamond_pickaxe",
 })
+
+_PICKUP_INTERRUPTION_CODES = frozenset({
+    "interrupted", "hurt", "death", "dead", "disconnected", "not_connected", "busy", "action_busy",
+})
 _MID_VALUE_DROPS: frozenset[str] = frozenset({
     "coal",
     "charcoal",
@@ -3515,7 +3519,8 @@ class MacroSkills:
         return {"attempts": attempts, "skipped": skipped}
 
     def _collect_target_drops(
-        self, target_items: set[str] | frozenset[str], radius: int, max_pickups: int,
+        self, target_items: set[str] | frozenset[str], radius: int, max_pickups: int, *,
+        max_duration_s: float = 6.0, single_attempt: bool = False,
     ) -> dict[str, Any]:
         """Attempt each nearby target on a verified short route and retain unresolved positions."""
         from .combat_env import CombatEnv
@@ -3524,12 +3529,13 @@ class MacroSkills:
         outer_deadline = getattr(self.bot, "_mining_deadline", started + 9.0)
         if isinstance(self.bot, _SkillBudgetSession):
             outer_deadline = self.bot.deadline
-        budget = min(6.0, outer_deadline - started - 0.5)
-        session = _SkillBudgetSession(self.bot, budget, bound_transport_retries=True)
+        budget = min(6.0, max_duration_s, outer_deadline - started - 0.5)
+        session = _SkillBudgetSession(self.bot, budget, bound_transport_retries=True, single_attempt=single_attempt)
         terrain = CombatEnv(session, geofence=self.geofence)
         attempts: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        result: dict[str, Any] = {"attempts": attempts, "skipped": skipped}
+        gained: dict[str, int] = {}
+        result: dict[str, Any] = {"attempts": attempts, "skipped": skipped, "gained": gained}
         for key, expires in list(self._drop_retry_after.items()):
             if expires <= started:
                 del self._drop_retry_after[key]
@@ -3602,7 +3608,7 @@ class MacroSkills:
                     }, timeout_s=move_s + 0.2)
                 except ApiError as err:
                     row["approach_error"] = {"code": err.code, "message": err.message}
-                    if err.code in ("interrupted", "hurt", "death", "dead", "disconnected", "not_connected"):
+                    if err.code in _PICKUP_INTERRUPTION_CODES:
                         result["error"] = row["approach_error"]
                         break
                 time.sleep(min(0.2, max(0.0, session.deadline - time.monotonic())))
@@ -3621,11 +3627,15 @@ class MacroSkills:
                 stack_count = int(suffix) if suffix.isdigit() else 1
                 row["picked_up"] = min(gain, stack_count) if visible is None else 0
                 row["pickup_inventory_gain"] = gain
+                if gain:
+                    gained[item] = gained.get(item, 0) + gain
+                    result["pos_after"] = row["pos"]
                 if not row["picked_up"]:
                     row["reason"] = "target_still_visible" if visible is not None else "pickup_unconfirmed"
                     self._drop_retry_after[key] = time.monotonic() + 20.0
         except (_SkillDeadline, httpx.TimeoutException):
-            session.stop_pending()
+            if session.pending_action:
+                result["stop_confirmed"] = session.stop_pending()
             result["error"] = {"code": "pickup_time_budget", "message": "拾取预算已用尽。"}
         except (ApiError, httpx.HTTPError) as err:
             result["error"] = {"code": getattr(err, "code", type(err).__name__), "message": str(err)}

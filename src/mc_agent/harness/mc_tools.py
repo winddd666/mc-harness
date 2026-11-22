@@ -32,6 +32,7 @@ from ..skills.library import (
     TABLE_RECIPES,
     VILLAGE_LANDMARK_BLOCKS,
     VILLAGE_SURVEY_CLUTTER,
+    _PICKUP_INTERRUPTION_CODES,
     _SkillBudgetSession,
     _SkillDeadline,
     _StairDeadline,
@@ -40,6 +41,7 @@ from ..skills.library import (
     _can_fit_item_in_inventory,
     _compute_empty_slots,
     _inventory_counts,
+    _normalize_drop_name,
     best_melee_weapon_in_inv,
     explain_material_craft_error,
     is_passable_sight_block,
@@ -2970,6 +2972,29 @@ class McToolset:
 
         return self._run_skill(tunnel)
 
+    def _collect_observed_mining_drops(self, target: str, budget_s: float) -> dict[str, Any] | None:
+        if budget_s <= 0:
+            return None
+        with self._state_lock:
+            dim = self._last_dimension
+            if (
+                self._entity_observed_mono is None or time.monotonic() - self._entity_observed_mono > 6.0
+                or self._entity_observed_dimension != dim
+            ):
+                return None
+            entities = tuple(self._entity_observations.values())
+
+        from ..skills.mining_dfs import _resolve_target_profile
+
+        wanted = frozenset(_resolve_target_profile(target, None, dimension=dim)["expected_items"])
+        if any(
+            isinstance(ent.get("dist"), (int, float)) and ent["dist"] <= 4.5
+            and _normalize_drop_name(ent.get("item")) in wanted for ent in entities
+        ):
+            # Cached entities trigger the check. The shared picker refreshes coordinates and verifies the route.
+            return self.skills._collect_target_drops(wanted, 5, 4, max_duration_s=budget_s, single_attempt=True)
+        return None
+
     def mc_skill_mine_dfs(
         self,
         target: str = "iron",
@@ -3006,10 +3031,33 @@ class McToolset:
         def _invoke() -> dict[str, Any]:
             started = time.monotonic()
             recovered = None
+            pickup = None
             duration_s = eff_duration_s
             if str(action or "").strip().lower() == "explore":
-                recovered = self.skills.collect_nearby_smelt_output(min(5.0, eff_duration_s - 6.0))
-                duration_s -= time.monotonic() - started
+                pickup = self._collect_observed_mining_drops(target, min(6.0, duration_s - 6.0))
+                if pickup is not None:
+                    gained = pickup["gained"]
+                    target_gained = sum(gained.values())
+                    error = pickup.get("error") or {}
+                    interrupted = pickup.get("stop_confirmed") is False or error.get("code") in _PICKUP_INTERRUPTION_CODES
+                    if target_gained or interrupted:
+                        requested = max(1, min(64, int(goal_count)))
+                        result = {
+                            "ok": not interrupted, "requires_replan": interrupted,
+                            "action": "explore", "target": norm_target or "iron", "goal_count": requested,
+                            "goal_met": target_gained >= requested, "dug_count": 0,
+                            "gained": gained, "target_gained": target_gained,
+                            "stop_reason": "pickup_interrupted" if interrupted else "nearby_drops_collected",
+                            "pickup_before_mining": pickup,
+                        }
+                        if interrupted:
+                            result["error"] = error
+                        elif pickup.get("pos_after"):
+                            result["pos_after"] = pickup["pos_after"]
+                        return result
+                duration_s = eff_duration_s - (time.monotonic() - started)
+                recovered = self.skills.collect_nearby_smelt_output(min(5.0, duration_s - 6.0))
+                duration_s = eff_duration_s - (time.monotonic() - started)
             res = self.skills.mine_dfs(
                 target=target,
                 goal_count=goal_count,
@@ -3023,6 +3071,8 @@ class McToolset:
             if clamped_from is not None and isinstance(res, dict):
                 res["clamped_shallow_diamond_y_from"] = clamped_from
             if isinstance(res, dict):
+                if pickup is not None:
+                    res["pickup_before_mining"] = pickup
                 # BUG-029: mine_dfs is the main long-mining path and does not
                 # call _ensure_free_slots; enforce retention caps here.
                 cleanup_budget = min(8.0, started + eff_duration_s + 3.0 - time.monotonic())
