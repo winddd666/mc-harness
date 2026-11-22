@@ -2396,6 +2396,65 @@ def test_guardian_defends_current_life_when_spawn_and_hurt_share_a_poll(monkeypa
     assert retreats == ([zombie] if state == "ready" else [])
 
 
+@pytest.mark.parametrize("recheck", ["grounded", "airborne", "changed_life", "loading", "occluded", "unknown"])
+def test_low_health_spawn_reacts_to_visible_melee_before_first_new_hit(monkeypatch, recheck):
+    origin = [6152.5, 68, 8.5]
+    zombie = {"id": 44, "name": "zombie", "pos": [6153.4, 68, 8.5], "dist": 0.9}
+    status = {
+        "pos": origin, "health": 11, "food": 16, "ready": True, "alive": True, "on_ground": True,
+        "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": zombie,
+    }
+    history = [
+        {"seq": 1, "type": "hurt", "source": "mob_attack", "health": 0},
+        {"seq": 2, "type": "death"},
+        {"seq": 3, "type": "hurt", "source": "fall", "health": 11},
+        {"seq": 4, "type": "spawn"},
+    ]
+    reads = 0
+    triggers = []
+
+    class RespawnBot:
+        def call(self, action, body=None, **kwargs):
+            nonlocal reads
+            if action == "status":
+                reads += 1
+                if reads > 1:
+                    if recheck == "airborne":
+                        return {**status, "on_ground": False}
+                    if recheck == "changed_life":
+                        return {**status, "last_death": {"t": 2}}
+                    if recheck == "loading":
+                        return {**status, "ready": False}
+                    if recheck == "unknown":
+                        return {**status, "nearest_hostile": {"id": 44, "name": "zombie", "dist": 0.9}}
+                return dict(status)
+            if action == "events":
+                return {"events": [row for row in history if row["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "bread", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": []}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(RespawnBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard.previous_health = 20.0
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": recheck != "occluded"})
+
+    def react(trigger):
+        triggers.append(trigger["primary_entity_id"])
+        return {"handled": True, "mode": "cover_or_flee", "status_after": dict(status)}
+
+    monkeypatch.setattr(guard, "_run_subcortical_combat", react)
+    incident = guard.poll()
+
+    assert triggers == ([44] if recheck == "grounded" else [])
+    assert ("pre_hurt_melee" in incident["reasons"]) is (recheck == "grounded")
+    assert "death_or_connection_changed" in incident["reasons"]
+    assert incident["event_seqs"] == [1, 2, 3, 4]
+    assert incident["requires_replan"] and guard.retry_after_ready
+    assert all(a["action"] != "eat" for a in incident["actions"])
+
+
 @pytest.mark.parametrize("path, endpoint", [("/api/attack", "attack"), ("/status", "status"), ("/unrecognized", None), (None, None)])
 def test_combat_timeout_records_only_a_known_endpoint(path, endpoint):
     events = []

@@ -1621,13 +1621,20 @@ class GenerationGuard:
         hurts = [e for e in fresh if e.get("type") == "hurt"]
         deaths = [e for e in fresh if e.get("type") in {"death", "death_loop", "disconnected", "spawn"}]
         life_transition_pending = bool(deaths)
-        if deaths and hurts and deaths[-1]["type"] == "spawn":
+        spawn_warning = None
+        if deaths and deaths[-1]["type"] == "spawn":
             # The server can deliver the last death and the new life's first hits together.
             spawn_seq = int(deaths[-1]["seq"])
             post_spawn_hurts = [e for e in hurts if int(e["seq"]) > spawn_seq]
-            if post_spawn_hurts and status.get("ready") and status.get("alive") is not False:
+            spawn_name, spawn_dist, _, _ = self._extract_hostile_info(status)
+            spawn_health = status.get("health")
+            exposed_spawn = (
+                status.get("on_ground") is True and spawn_name in PRE_HURT_MELEE_MOBS and spawn_dist <= 3.5
+                and isinstance(spawn_health, (int, float)) and 0 < spawn_health <= 12.0
+            )
+            if (post_spawn_hurts or exposed_spawn) and status.get("ready") and status.get("alive") is not False:
                 try:
-                    current = self.bot.status()
+                    current = self.bot.call("status", method="GET", timeout_s=0.6)
                 except (ApiError, httpx.HTTPError):
                     current = {}
                 if (
@@ -1635,9 +1642,17 @@ class GenerationGuard:
                     and current.get("last_death") == status.get("last_death")
                     and current.get("dimension") == status.get("dimension")
                 ):
-                    status = current
-                    hurts = post_spawn_hurts
-                    life_transition_pending = False
+                    if (
+                        not post_spawn_hurts and current.get("on_ground") is True and current.get("pos")
+                        and not any(current.get(key) for key in ("in_water", "in_lava", "submerged"))
+                    ):
+                        warning = self._detect_pre_hurt_trigger(current)
+                        if warning is not None and warning.get("primary_pos") is not None:
+                            spawn_warning = warning
+                    if post_spawn_hurts or spawn_warning is not None:
+                        status = current
+                        hurts = post_spawn_hurts
+                        life_transition_pending = False
 
         health = status.get("health")
         dropped = isinstance(health, (int, float)) and self.previous_health is not None and health < self.previous_health - 0.2
@@ -1748,9 +1763,10 @@ class GenerationGuard:
         )
         should_eat = (
             (needs_food or pending_ready_eat) and not (hot_floor_only or needs_hot_floor_guard)
+            and spawn_warning is None
             and self._can_auto_eat_safely(status, min_dist=5.5)
         )
-        hurt = bool(hurts) or dropped
+        hurt = bool(hurts) or (dropped and spawn_warning is None)
         fall_only = self._unattributed_fall_only(hurts)
         contact_fire = any(str(h.get("source") or "").strip().lower() == "in_fire" for h in hurts)
         recent_lava = now - self._last_lava_contact_at < 15.0
@@ -1789,7 +1805,7 @@ class GenerationGuard:
         fire_hurt_only = non_combat_only_hurt and (fire_hurt or environmental_burning)
         hp_cur = float(health) if isinstance(health, (int, float)) else 20.0
 
-        pre_trigger = (
+        pre_trigger = spawn_warning or (
             None
             if (
                 (hurt and not (fall_only and status.get("on_ground") is True))
@@ -1887,10 +1903,11 @@ class GenerationGuard:
         if deaths or disconnected or not ready or status.get("alive") is False:
             self._consecutive_flees = 0
             self._water_hurt_streak = 0
-        if life_transition_pending or disconnected or not ready or status.get("alive") is False:
-            if needs_food and not self.retry_after_ready:
-                self.retry_after_ready = True
-                self.events.emit("guardian.eat_deferred", reason="deaths_or_not_ready", retry_after_ready=True)
+        waiting_for_life = life_transition_pending or disconnected or not ready or status.get("alive") is False
+        if (waiting_for_life or spawn_warning is not None) and needs_food and not self.retry_after_ready:
+            self.retry_after_ready = True
+            self.events.emit("guardian.eat_deferred", reason="deaths_or_not_ready", retry_after_ready=True)
+        if waiting_for_life:
             if not (deaths or disconnected):
                 return None
             if not disconnected and status.get("busy"):
