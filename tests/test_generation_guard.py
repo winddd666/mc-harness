@@ -12285,6 +12285,60 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
     assert guard._water_hurt_streak == 0
 
 
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_lava_watcher_preempts_death_only_mining_and_waits_for_stop(monkeypatch, interrupted):
+    import threading
+    import time
+
+    stop_started = threading.Event()
+    dig_returning = threading.Event()
+    stop_finished = threading.Event()
+    status = {
+        "pos": [6391.6, 64, -6359.7], "health": 20, "ready": True, "alive": True,
+        "dimension": "overworld", "on_ground": True, "in_lava": False,
+    }
+    escapes = []
+
+    class LavaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                return {"name": "stone"}
+            if action == "events":
+                return {"events": []}
+            if action == "dig":
+                assert body["stop_on"] == ["death"]
+                status.update(pos=[6391.6, 63, -6359.7], health=4.3, on_ground=False, in_lava=True)
+                assert stop_started.wait(1.5)
+                dig_returning.set()
+                if interrupted:
+                    raise ApiError("interrupted", "stopped")
+            if action == "stop" and threading.current_thread().name == "mc-creeper-watch":
+                stop_started.set()
+                assert dig_returning.wait(1.5)
+                time.sleep(0.12)
+                stop_finished.set()
+            return {"ok": True}
+
+    bot = LavaBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def escape():
+        assert stop_finished.is_set()
+        escapes.append(status["pos"])
+        status.update(pos=[6390.5, 64, -6359.7], on_ground=True, in_lava=False)
+        return {"ok": True, "in_lava": False}
+
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_blocks", lambda: json.dumps(bot.call(
+        "dig", {"pos": [6393, 64, -6360], "stop_on": ["death"]},
+    ))))
+
+    assert escapes == [[6391.6, 63, -6359.7]]
+    assert result["reflex_mode"] == "lava_escape" and result["status_after"]["on_ground"] is True
+
+
 @pytest.mark.parametrize("retry, expected_bank", [
     ("same_life", "known"),
     ("bank_flooded", "alternate"),

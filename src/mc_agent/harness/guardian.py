@@ -3807,11 +3807,14 @@ class GenerationGuard:
                     and clean_path == "control" and isinstance(body, dict) and body.get("forward")
                 )
                 movement_emergency = moving and (
-                    trigger.get("primary_type") in {"lava", "hot_floor"}
+                    trigger.get("primary_type") == "hot_floor"
                     or trigger.get("source") in {"pre_hurt_creeper", "tool_water_threat"}
                 )
                 water_emergency = watch_low_oxygen and trigger.get("source") == "tool_water_threat"
-                if not caller_ignores_hurt or movement_emergency or water_emergency or trigger.get("primary_type") == "in_wall":
+                if (
+                    not caller_ignores_hurt or movement_emergency or water_emergency
+                    or trigger.get("primary_type") in {"in_wall", "lava"}
+                ):
                     raise ReflexPreempted(trigger) from None
 
             try:
@@ -3848,7 +3851,7 @@ class GenerationGuard:
             if watcher_thread is not None:
                 # Finish a dispatched /stop before issuing a recovery mutation.
                 wait_for_stop = pending_trigger and (
-                    watch_attack_emergency or pending_trigger[0].get("primary_type") == "in_wall"
+                    watch_attack_emergency or pending_trigger[0].get("primary_type") in {"in_wall", "lava"}
                     or pending_trigger[0].get("source") == "tool_water_threat"
                 )
                 watcher_thread.join(timeout=1.55 if wait_for_stop else 0.05)
