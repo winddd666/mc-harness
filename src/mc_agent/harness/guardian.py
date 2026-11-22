@@ -175,7 +175,7 @@ class _UnsafeCreeperAttack(BaseException):
 
 
 class _UnsafeDig(BaseException):
-    """Unwind a dig that would expose the bot to an unsafe drop or overhead fluid."""
+    """Unwind a dig that would expose the bot to an unsafe drop or fluid."""
 
 
 class _MiningLandingDenied(ApiError):
@@ -1732,7 +1732,7 @@ class GenerationGuard:
             cur + cd,
         )
 
-    def _recover_recent_ranged_hit_for_eating(self) -> None:
+    def _recover_recent_ranged_hit_for_eating(self, ranged_window_s: float) -> None:
         self._eat_history_checked = True
         # The actor can consume a final hurt event before the next episode's guard is created.
         cursor = self.cursor
@@ -1755,7 +1755,7 @@ class GenerationGuard:
             timestamp_ms = event.get("t")
             if isinstance(timestamp_ms, (int, float)):
                 age = now_wall - timestamp_ms / 1000.0
-                if 0 <= age < self.RANGED_EAT_DEFER_S:
+                if 0 <= age < ranged_window_s:
                     self._last_ranged_hurt_at = max(self._last_ranged_hurt_at, now - age)
                 if source == "trident" and 0 <= age < self.TRIDENT_EAT_THREAT_S:
                     self._last_trident_hurt_at = max(self._last_trident_hurt_at, now - age)
@@ -1782,20 +1782,30 @@ class GenerationGuard:
             # In-flight projectiles can still reach a critical-health bot just beyond that range.
             ranged_min_dist = max(ranged_min_dist, 20.0)
         ranged_in_range = (nh_name in RANGED_MOBS or nh_name == "ghast") and nh_dist <= ranged_min_dist
+        in_nether = str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+        # Keep an active shield through the same Nether projectile window used while burning.
+        ranged_shield_window = self.NETHER_BURN_RANGED_WINDOW_S if in_nether else self.RANGED_EAT_DEFER_S
         if not self._eat_history_checked and status.get("blocking") and status.get("ready") is True:
-            self._recover_recent_ranged_hit_for_eating()
-        recent_ranged_hit = now - self._last_ranged_hurt_at < self.RANGED_EAT_DEFER_S
+            self._recover_recent_ranged_hit_for_eating(ranged_shield_window)
+        ranged_hit_age = now - self._last_ranged_hurt_at
+        recent_ranged_hit = ranged_hit_age < self.RANGED_EAT_DEFER_S
         # A melee attack can time out while arrows still arrive from outside the nearest-hostile snapshot.
         exposed_after_attack_timeout = (
             low_health and recent_ranged_hit and now - self._last_attack_read_timeout_at < self.RANGED_EAT_DEFER_S
         )
         recent_melee_hit = now - self._last_melee_hurt_at < self.MELEE_EAT_DEFER_S
-        in_nether = str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
-        protecting_against_recent_hit = status.get("blocking") and (recent_ranged_hit or recent_melee_hit)
+        # The melee deadline survives a mixed batch even when its last event was a projectile.
+        recent_nether_ranged_only = (
+            in_nether and ranged_hit_age < ranged_shield_window
+            and self._last_ranged_hurt_at + self.MELEE_EAT_DEFER_S > self._nether_melee_eat_defer_until
+        )
+        protecting_against_recent_hit = status.get("blocking") and (
+            recent_ranged_hit or recent_nether_ranged_only or recent_melee_hit
+        )
         # A Nether shooter can keep firing while missing from the nearest-hostile snapshot.
         recent_nether_threat = in_nether and (
             now < self._nether_melee_eat_defer_until
-            or (status.get("on_fire") and now - self._last_ranged_hurt_at < self.NETHER_BURN_RANGED_WINDOW_S)
+            or (status.get("on_fire") and ranged_hit_age < self.NETHER_BURN_RANGED_WINDOW_S)
         )
         trident_age = now - self._last_trident_hurt_at
         trident_threat = trident_age < self.RANGED_EAT_DEFER_S
@@ -4598,6 +4608,7 @@ class GenerationGuard:
             if stop_evt.wait(0.30):
                 return
             watch_hp0: float | None = None
+            combat_life: tuple[Any, Any] | None = None
             last_terrain_health: float | None = None
             previous_water_health: tuple[tuple[Any, Any], float] | None = None
             submersion_start: tuple[tuple[Any, Any], float] | None = None
@@ -4616,6 +4627,11 @@ class GenerationGuard:
                             return
                         continue
                     cur_hp = st.get("health")
+                    observed_life = (st.get("dimension"), st.get("last_death"))
+                    available = st.get("ready") is not False and st.get("alive") is not False
+                    if check_combat_step and (observed_life != combat_life or not available):
+                        watch_hp0 = None
+                        combat_life = observed_life if available else None
                     if watch_hp0 is None and isinstance(cur_hp, (int, float)):
                         watch_hp0 = float(cur_hp)
                     nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(st)
@@ -4690,6 +4706,27 @@ class GenerationGuard:
                     ):
                         hp_dropped = False
                         watch_hp0 = float(cur_hp)
+                    fireball_source = None
+                    if (
+                        check_combat_step and not hp_dropped and st.get("ready") is True and available
+                        and not in_lava_now and not st.get("in_water")
+                        and str(st.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                        and watch_hp0 is not None and isinstance(cur_hp, (int, float))
+                        and 0 < cur_hp <= 10.0 and watch_hp0 - cur_hp >= 4.0
+                    ):
+                        # A ranged fight can keep polling outside the ordinary 16-block hurt radius.
+                        hit = self._fresh_tool_hurt_event(orig_call, ignore_burn_ticks=True) or {}
+                        source = str(hit.get("source") or "").strip().lower()
+                        if source in {"fireball", "small_fireball"}:
+                            hp_dropped = True
+                            fireball_source = source
+                            shooter_name, shooter_dist, shooter_id, shooter_pos = self._extract_hostile_info(
+                                {"nearest_hostile": hit.get("source_entity")},
+                            )
+                            if shooter_name in {"blaze", "ghast"} and shooter_id is not None:
+                                nh_name, nh_dist, nh_id, nh_pos = shooter_name, shooter_dist, shooter_id, shooter_pos
+                            elif nh_name not in {"blaze", "ghast"}:
+                                nh_name, nh_dist, nh_id, nh_pos = "hostile", 999.0, None, None
                     melee_ambush = (
                         nh_name in PRE_HURT_MELEE_MOBS
                         and nh_dist <= 3.0
@@ -4700,8 +4737,6 @@ class GenerationGuard:
                         and nh_dist <= 4.5
                         and not self._is_pre_hurt_debounced(nh_id, nh_name)
                     )
-                    observed_life = (st.get("dimension"), st.get("last_death"))
-                    available = st.get("ready") is not False and st.get("alive") is not False
                     water_hp_dropped = False
                     submerged_for_s = None
                     sustained_sinking = False
@@ -4832,6 +4867,7 @@ class GenerationGuard:
                                 "distance": dist_w,
                                 **({"observed_life": observed_life}
                                    if src_w in {"tool_water_threat", "tool_interrupted_hurt"} else {}),
+                                **({"hurt_source": fireball_source} if fireball_source and src_w == "tool_interrupted_hurt" else {}),
                                 **({"water_observation": {
                                     "reason": water_risk,
                                     "submerged_for_s": round(submerged_for_s, 3) if submerged_for_s is not None else None,
@@ -4856,18 +4892,23 @@ class GenerationGuard:
 
         def verify_mining_approach(target: list[float]) -> None:
             nonlocal mining_landing_error, mining_landing_retry_at, mining_support_changed
+            xz = target[0], target[2]
+            wet_site = self._mining_water_reentry_site
             cached_denial = mining_landing_error
             if (
-                cached_denial is None or cached_denial.code != "unsafe_landing" or cached_denial.context["target"] != target
-                or cached_denial.context.get("collar_approach")
+                cached_denial is None or cached_denial.code != "unsafe_landing"
+                or cached_denial.context.get("collar_approach") or xz in blocked_collar_approaches
                 or mining_support_changed or time.monotonic() >= mining_landing_retry_at
+                or (wet_site is not None and tuple(map(math.floor, target)) == wet_site[0])
+                or footing_blocks(cached_denial.context["target"]) != footing_blocks(target)
             ):
                 cached_denial = None
             mining_support_changed = False
             try:
                 if cached_denial is not None:
-                    raise _MiningLandingDenied(cached_denial.code, cached_denial.message, context=cached_denial.context)
-                xz = target[0], target[2]
+                    raise _MiningLandingDenied(
+                        cached_denial.code, cached_denial.message, context={**cached_denial.context, "target": target},
+                    )
                 if xz in blocked_collar_approaches:
                     self._verify_mining_collar_approach(target)
                     blocked_collar_approaches.discard(xz)
@@ -4935,13 +4976,20 @@ class GenerationGuard:
                         remaining_ms = min(remaining_ms, int(timeout_ms))
                     body = {**body, "timeout": remaining_ms}
                 return actor_call(path, body, **kwargs)
+            if pending_trigger and not self._in_reflex and (check_combat_step or not is_readonly_poll):
+                raise ReflexPreempted(pending_trigger[0])
             if is_readonly_poll:
-                observed = actor_call(path, body, **kwargs)
+                try:
+                    observed = actor_call(path, body, **kwargs)
+                except (ApiError, httpx.HTTPError):
+                    if check_combat_step and pending_trigger and not self._in_reflex:
+                        raise ReflexPreempted(pending_trigger[0]) from None
+                    raise
+                if check_combat_step and pending_trigger and not self._in_reflex:
+                    raise ReflexPreempted(pending_trigger[0])
                 if check_unstick_exit and clean_path == "status" and not unstick_start and isinstance(observed, dict):
                     unstick_start.update(observed)
                 return observed
-            if pending_trigger and not self._in_reflex:
-                raise ReflexPreempted(pending_trigger[0])
             if check_mining_landing and isinstance(body, dict):
                 if clean_path == "move_to":
                     target = [body.get(axis) for axis in ("x", "y", "z")]
@@ -5001,7 +5049,7 @@ class GenerationGuard:
                 if pending_trigger:
                     raise ReflexPreempted(pending_trigger[0])
                 if dig_hazard:
-                    raise _UnsafeDig(dig_hazard)
+                    raise _UnsafeDig(dig_hazard, list(body["pos"]))
             unstick_before = None
             if (
                 check_unstick_exit and clean_path == "control" and isinstance(body, dict)
@@ -5104,8 +5152,12 @@ class GenerationGuard:
             if watcher_thread is not None:
                 # Finish a dispatched /stop before issuing a recovery mutation.
                 watcher_thread.join(timeout=1.55 if pending_trigger else 0.05)
+        if check_combat_step and pending_trigger:
+            raise ReflexPreempted(pending_trigger[0])
 
-    def _fresh_tool_hurt_event(self, call: Callable[..., dict[str, Any]]) -> dict[str, Any] | None:
+    def _fresh_tool_hurt_event(
+        self, call: Callable[..., dict[str, Any]], *, ignore_burn_ticks: bool = False,
+    ) -> dict[str, Any] | None:
         since = self.cursor
         try:
             page = call(
@@ -5125,6 +5177,8 @@ class GenerationGuard:
             timestamp = event.get("t")
             if isinstance(timestamp, (int, float)) and time.time() - timestamp / 1000 > 3.0:
                 return None
+            if ignore_burn_ticks and str(event.get("source") or "").strip().lower() in FIRE_HURT_SOURCES:
+                continue
             return event
         return None
 
@@ -5662,6 +5716,10 @@ class GenerationGuard:
             wet_pos = (water_observation or {}).get("pos")
             preempt_pos = wet_pos or fall_start_pos or st_pre.get("pos")
             release = {"action_released": trigger["action_released"]} if "action_released" in trigger else {}
+            hurt_detail = (
+                {"hurt_source": trigger["hurt_source"]}
+                if interrupted_name == "mc_skill_combat" and trigger.get("hurt_source") else {}
+            )
             work_observation: dict[str, Any] = {}
             if (
                 interrupted_name in MINING_WATER_WATCH_TOOLS and tool_water_threat and outcome.get("mode") == "water_surface"
@@ -5705,6 +5763,7 @@ class GenerationGuard:
                 **({"pos_after": st_after["pos"]} if st_after.get("pos") is not None else {}),
                 **({"water_risk": water_observation["reason"]} if water_observation and water_observation.get("reason") else {}),
                 **release,
+                **hurt_detail,
                 **work_observation,
             }
             if outcome.get("mode") == "network_timeout":
@@ -5719,7 +5778,7 @@ class GenerationGuard:
                 lava_status["status_after"] = receipt["status_after"]
             self.events.emit(
                 "guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary,
-                stop_reason=stop_reason, **lava_status, **release, **work_observation,
+                stop_reason=stop_reason, **lava_status, **release, **hurt_detail, **work_observation,
                 **({"water_observation": water_observation} if water_observation is not None else {}),
             )
             return receipt
@@ -5840,17 +5899,29 @@ class GenerationGuard:
         ):
             return None
 
-        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 1.0)
+        deadline = time.monotonic() + 1.0
+        probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
         env = CombatEnv(probe_bot)
+        check_nether_lava = (
+            check_roof and str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+            and not any(status.get(key) for key in ("in_lava", "in_water", "submerged"))
+        )
         try:
             if check_roof and status.get("on_ground") is True:
                 fluid = env.fluid_above_headroom(pos, target)
                 if fluid == "lava" or (fluid == "water" and not status.get("in_water") and not status.get("submerged")):
                     self.events.emit(f"guardian.{fluid}_roof_dig_blocked", target=list(target), pos=pos)
                     return f"unsafe_{fluid}_roof"
+            if check_nether_lava:
+                lava = env.lava_at_unstick_opening(pos, target, deadline=deadline)
+                if lava is not None:
+                    self.events.emit("guardian.lava_dig_blocked", target=list(target), lava_pos=list(lava), pos=pos)
+                    return "unsafe_lava_dig"
             if not check_support or env.can_remove_footing(pos, target):
                 return None
-        except _RecoveryBudgetExceeded:
+        except (_RecoveryBudgetExceeded, _TerrainProbeExpired):
+            if check_nether_lava:
+                return "unstick_dig_unverified"
             if not check_support:
                 return None
         self.events.emit("guardian.support_dig_blocked", target=list(target), pos=pos)
@@ -5936,7 +6007,7 @@ class GenerationGuard:
         deadline = time.monotonic() + budget_s - 2.0 if budget_s is not None else None
         dig_progress: dict[str, Any] = {}
         last_work_action: dict[str, Any] | None = (
-            {} if tool_name in MINING_WATER_WATCH_TOOLS or tool_name == "mc_skill_harvest_logs" else None
+            {} if is_unstick or tool_name in MINING_WATER_WATCH_TOOLS or tool_name == "mc_skill_harvest_logs" else None
         )
         try:
             with self._intercept_bot_calls(
@@ -5982,12 +6053,15 @@ class GenerationGuard:
             message = {
                 "unsafe_lava_roof": "头顶待挖方块上方有岩浆，请从侧面寻找脱困路线。",
                 "unsafe_water_roof": "头顶待挖方块上方有水，请从侧面寻找脱困路线。",
+                "unsafe_lava_dig": "待挖方块旁有岩浆，请保留挡浆方块，改走已确认干燥的出口。",
+                "unstick_dig_unverified": "暂时无法确认待挖方块周围有无岩浆，请保留该方块并改走干燥出口。",
                 "unsafe_landing": "移除脚下方块后没有确认安全落点。请先退到有支撑的位置。",
             }[code]
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
-                "error": {"code": code, "message": message},
+                "error": {"code": code, "message": message, "target": error.args[1]},
+                **({"partial_progress": True, **dig_progress} if dig_progress else {}),
             }, ensure_ascii=False)
         except _MiningLandingDenied as error:
             return json.dumps({
@@ -6106,6 +6180,7 @@ class GenerationGuard:
         same_threat_after_timeout = False
         staircase_surface_exit = False
         flowing_lava_target: list[int] | None = None
+        staircase_lava_target: list[int] | None = None
         if tool_results:
             try:
                 last_tool_result = json.loads(tool_results[-1])
@@ -6134,6 +6209,25 @@ class GenerationGuard:
                     target = error.get("target")
                     if isinstance(target, list) and len(target) == 3 and all(type(coord) is int for coord in target):
                         flowing_lava_target = target
+                blocker = last_tool_result.get("blocker")
+                if (
+                    last_tool_result.get("stop_reason") == "fluid_or_bedrock"
+                    and last_tool_result.get("vertical") in {"up", "down"}
+                    and str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                    and isinstance(blocker, dict) and blocker.get("block") in {"lava", "flowing_lava"}
+                    and not any(event.get("type") in {"death", "death_loop", "disconnected", "spawn"} for event in fresh)
+                ):
+                    target = blocker.get("pos")
+                    end_pos, current_pos = last_tool_result.get("pos_after"), status.get("pos")
+                    if (
+                        isinstance(target, list) and len(target) == 3 and all(type(coord) is int for coord in target)
+                        and all(
+                            isinstance(point, (list, tuple)) and len(point) >= 3
+                            and all(type(coord) in (int, float) and math.isfinite(coord) for coord in point[:3])
+                            for point in (end_pos, current_pos)
+                        ) and math.dist(end_pos[:3], current_pos[:3]) <= 0.5
+                    ):
+                        staircase_lava_target = target
                 tool_returned_in_water = in_water
                 tool_stopped_in_water = last_tool_result.get("stop_reason") == "in_water"
                 tool_status = last_tool_result.get("status_after")
@@ -6284,7 +6378,9 @@ class GenerationGuard:
             elif needs_lava_edge_guard and not in_wall_hurt:
                 edge_act = self._action(
                     "boundary_guard_lava_edge",
-                    lambda: self.combat_env.guard_lava_edge(pos_b, flowing_lava_target=flowing_lava_target),
+                    lambda: self.combat_env.guard_lava_edge(
+                        pos_b, flowing_lava_target=flowing_lava_target, staircase_lava_target=staircase_lava_target,
+                    ),
                     raise_on_http_error=False,
                 )
                 edge_res = edge_act.get("result") if isinstance(edge_act.get("result"), dict) else {}
@@ -6427,8 +6523,10 @@ class GenerationGuard:
                     lambda: self._run_subcortical_combat(boundary_trigger),
                     raise_on_http_error=False,
                 )
-                self._mark_pre_hurt_cooldown(boundary_trigger, time.monotonic())
                 res_d = act.get("result") if isinstance(act.get("result"), dict) else {}
+                if res_d.get("mode") == "life_unavailable":
+                    return None
+                self._mark_pre_hurt_cooldown(boundary_trigger, time.monotonic())
                 if boundary_trigger.get("source") == "pre_hurt_ranged" or str(boundary_trigger.get("primary_type") or "") in RANGED_MOBS:
                     self._mark_ranged_engagement(
                         time.monotonic(),

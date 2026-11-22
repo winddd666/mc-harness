@@ -270,6 +270,24 @@ def _is_lava_block(name: str) -> bool:
     return name in {"lava", "flowing_lava"}
 
 
+def _water_requires_surface(status: dict[str, Any], *, oxygen_bubbles: float) -> bool:
+    if not status.get("in_water"):
+        return False
+    submerged = status.get("submerged")
+    if submerged:
+        return True
+    oxygen = status.get("oxygen")
+    if type(oxygen) not in (int, float) or not math.isfinite(oxygen):
+        return False
+    if oxygen <= 0:
+        return True
+    # An exposed head can keep a low positive reading until the meter refills.
+    if submerged is False:
+        return False
+    bubbles = oxygen if oxygen <= 20 else oxygen / 15
+    return bubbles < oxygen_bubbles
+
+
 def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
     """Return unique integer `(x, z)` columns overlapped by the player's 0.6x0.6 horizontal hitbox."""
     return list(
@@ -389,6 +407,7 @@ class ThreatTrigger(TypedDict, total=False):
 
 
 class CombatOutcome(TypedDict, total=False):
+    ok: bool
     handled: bool
     mode: str
     summary: str
@@ -736,6 +755,24 @@ class CombatEnv:
             return "lava"
         if block in {"water", "flowing_water"}:
             return "water"
+        return None
+
+    def lava_at_unstick_opening(
+        self, pos: Sequence[float], target: Sequence[int], *, deadline: float,
+    ) -> tuple[int, int, int] | None:
+        """Check the faces that could let lava flow into a nearby opening before digging it."""
+        x, y, z = pos[:3]
+        tx, ty, tz = target[:3]
+        feet_y = math.floor(y + 0.05)
+        if not feet_y <= ty <= feet_y + 2 or not any(
+            abs(tx - bx) + abs(tz - bz) <= 1 for bx, bz in _hitbox_columns(x, z)
+        ):
+            return None
+        neighbors = [(tx, ty + 1, tz)]
+        neighbors.extend((tx + dx, ty, tz + dz) for dx, dz in CARDINAL_VECTORS.values())
+        for cell in neighbors:
+            if _is_lava_block(self._get_block_name(*cell, strict=True, deadline=deadline)):
+                return cell
         return None
 
     def can_remove_footing(self, pos: Sequence[float], target: Sequence[int]) -> bool:
@@ -1547,6 +1584,13 @@ class CombatEnv:
                 timeout_s=ms / 1000.0 + 0.6, allow_reauth=False,
             )
 
+        def critical_in_nether(status: dict[str, Any]) -> bool:
+            health = status.get("health")
+            return (
+                "nether" in dim0 and status.get("in_lava") is True
+                and isinstance(health, (int, float)) and 0 < health <= 6.0
+            )
+
         tried_recent_bank = False
         max_ascent_pulses = 3
         for ascent in range(max_ascent_pulses + 1):
@@ -1588,7 +1632,11 @@ class CombatEnv:
             # The last sample can confirm a reachable bank without another stationary pulse.
             if ascent == max_ascent_pulses:
                 break
-            head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz))
+            head_deadline = time.monotonic() + 0.18 if critical_in_nether(st) else None
+            try:
+                head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz), deadline=head_deadline)
+            except _TerrainProbeExpired:
+                break
             if not _is_lava_block(head) or time.monotonic() >= lava_deadline:
                 break
             try:
@@ -1609,7 +1657,11 @@ class CombatEnv:
                 break
 
         try:
-            counts, _, held_name = self._inventory_counts_and_shield()
+            inv = None
+            if critical_in_nether(st):
+                observed = self.bot.call("inventory", method="GET", timeout_s=0.2, allow_reauth=False)
+                inv = observed if isinstance(observed, dict) else {}
+            counts, _, held_name = self._inventory_counts_and_shield(inv)
         except (ApiError, httpx.HTTPError):
             counts, held_name = {}, None
         if counts.get("water_bucket", 0) > 0 and "nether" not in dim0 and time.monotonic() < lava_deadline:
@@ -1637,11 +1689,16 @@ class CombatEnv:
 
         # 2. Try scanning safe non-lava exits (including 1-block step-ups, plus wide shore search) and jump-sprinting out
         terrain_started = time.monotonic()
-        terrain_deadline = min(lava_deadline - 2.0, terrain_started + 1.5)
+        health_after_ascent = st.get("health")
+        critical_nether_lava = critical_in_nether(st)
+        # With only a few lava hits left, leave time to launch a swim or lay the first block.
+        terrain_budget = 0.65 if critical_nether_lava else 1.5
+        terrain_deadline = min(lava_deadline - 2.0, terrain_started + terrain_budget)
         ray_deadline = terrain_deadline
         if st.get("in_lava"):
             # Nearby rays can all start in lava. Leave time to query and verify a reachable shore.
-            ray_deadline = max(terrain_started, terrain_deadline - 0.9)
+            shore_budget = 0.5 if critical_nether_lava else 0.9
+            ray_deadline = max(terrain_started, terrain_deadline - shore_budget)
         scan = self.scan_safe_yaws(
             pos0,
             float(st.get("yaw") or 0.0),
@@ -1739,12 +1796,19 @@ class CombatEnv:
                                 tried_yaws.append(candidate)
                                 break
                         actions.append("lava_swim_heading_stalled")
-                health_after_ascent = st.get("health")
                 # At critical health, reserve time for usable blocks before following an unverified yaw.
                 defer_blind_swim = (
                     blind_swim and bool(tried_yaws) and filler is not None
                     and isinstance(health_after_ascent, (int, float)) and health_after_ascent < 10.0
                 )
+
+        if critical_nether_lava:
+            current = self._safe_status(timeout_s=0.25)
+            if not current:
+                return {**_lava_result(st), "ok": False, "reason": "lava_status_unavailable"}
+            st = current
+            if _should_exit_lava(st):
+                return _lava_result(st)
 
         swim_ms = 1400 if (lava_shore_target is not None or len(tried_yaws) == 1) else 950
 
@@ -1847,7 +1911,8 @@ class CombatEnv:
                     raise _TerrainProbeExpired
                 return self.bot.call(action, body, timeout_s=min(timeout_s, remaining), allow_reauth=False, **kwargs)
 
-            probe_until = min(bridge_deadline - 0.8, time.monotonic() + 0.6)
+            bridge_probe_budget = 0.25 if critical_nether_lava else 0.6
+            probe_until = min(bridge_deadline - 0.8, time.monotonic() + bridge_probe_budget)
             try:
                 if st.get("on_ground") is False and _is_passable(self._get_block_name(bx, by - 1, bz, deadline=probe_until)):
                     place_targets.append([bx, by - 2, bz])
@@ -2148,6 +2213,7 @@ class CombatEnv:
             return failed
 
         placed = 0
+        placement_timed_out = False
         for cell in to_place:
             current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
             if not self._on_same_footing(before, current):
@@ -2156,18 +2222,29 @@ class CombatEnv:
                 self.bot.call("place", {"item": filler, "pos": list(cell)}, timeout_s=0.65, allow_reauth=False)
             except ApiError:
                 break
+            except httpx.ReadTimeout:
+                # The server may already have placed the block. Read it back once and stop building.
+                placement_timed_out = True
+                self._best_effort_stop(stop_control=False, timeout_s=0.2)
             self.invalidate_block_cache()
             block = self._get_block_name(*cell, strict=True)
             if block != filler:
                 break
             placed += 1
+            if placement_timed_out:
+                break
 
         after = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
         confirmed = (
             placed > 0 and (not melee or placed == len(to_place)) and self._on_same_footing(before, after)
             and self._blocks_shot(after["pos"], threat)
         )
-        return {"ok": confirmed, "mode": "placed_cover", "placed": placed, "pos_after": after.get("pos")}
+        result = {"ok": confirmed, "mode": "placed_cover", "placed": placed, "pos_after": after.get("pos")}
+        if placement_timed_out:
+            result["placement_timed_out"] = True
+            if not confirmed:
+                result["reason"] = "placement_unconfirmed"
+        return result
 
     def seek_natural_cover(
         self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,
@@ -3068,8 +3145,7 @@ class CombatEnv:
         except ApiError:
             pass
 
-        oxy0 = st0.get("oxygen")
-        if surface_first or bool(st0.get("submerged")) or (isinstance(oxy0, (int, float)) and oxy0 < 260):
+        if surface_first or _water_requires_surface(st0, oxygen_bubbles=260 / 15):
             swim_forward = (
                 not (surface_first or has_threat or keep_shield)
                 and retry_bank is None
@@ -3511,6 +3587,7 @@ class CombatEnv:
         *,
         counts: dict[str, int] | None = None,
         flowing_lava_target: list[int] | None = None,
+        staircase_lava_target: list[int] | None = None,
     ) -> dict[str, Any]:
         """Force sneak posture and seal exposed lava around the current foothold."""
         st0 = self.bot.status()
@@ -3520,15 +3597,17 @@ class CombatEnv:
         cur_pos = st0.get("pos") or pos or [0.0, 64.0, 0.0]
         bx, by, bz = math.floor(float(cur_pos[0])), math.floor(float(cur_pos[1]) + 0.05), math.floor(float(cur_pos[2]))
         exposed_lava: list[list[int]] = []
-        if flowing_lava_target is not None:
-            fx, fy, fz = flowing_lava_target
-            # A flow above an adjacent column can overrun the ledge even after plugging lower cells.
-            if 1 <= fy - by <= 2 and max(abs(fx - bx), abs(fz - bz)) == 1:
+        reported_lava = staircase_lava_target if staircase_lava_target is not None else flowing_lava_target
+        if reported_lava is not None:
+            fx, fy, fz = reported_lava
+            min_height = -1 if staircase_lava_target is not None else 1
+            # A staircase can expose a diagonal or upper cell the cardinal foothold scan misses.
+            if min_height <= fy - by <= 2 and max(abs(fx - bx), abs(fz - bz)) == 1:
                 self.invalidate_block_cache()
                 if self._point_allowed(fx + 0.5, fz + 0.5, action="guard_lava_edge") and _is_lava_block(
                     self._get_block_name(fx, fy, fz, strict=True)
                 ):
-                    exposed_lava.append(flowing_lava_target)
+                    exposed_lava.append(reported_lava)
         for dx, dz in CARDINAL_VECTORS.values():
             nx, nz = bx + dx, bz + dz
             below_feet = self._get_block_name(nx, by - 1, nz, strict=True)
@@ -3564,9 +3643,11 @@ class CombatEnv:
             except Exception:
                 counts = {}
         filler = self._pick_filler_block(counts)
-        sealed = 0
+        sealed_positions: list[list[int]] = []
         if filler is not None:
-            for index, lpos in enumerate(exposed_lava[:2]):
+            unique_lava = list(dict.fromkeys(map(tuple, exposed_lava)))
+            for index, coordinates in enumerate(unique_lava[:2]):
+                lpos = list(coordinates)
                 if index:
                     current = self._safe_status()
                     if (
@@ -3578,13 +3659,17 @@ class CombatEnv:
                 if not self._point_allowed(lpos[0] + 0.5, lpos[2] + 0.5, action="guard_lava_edge"):
                     continue
                 try:
-                    self.bot.call("place", {"item": filler, "pos": lpos})
-                    sealed += 1
+                    placed = self.bot.call("place", {"item": filler, "pos": lpos})
                 except ApiError:
                     continue
-            if sealed:
+                if isinstance(placed, dict) and placed.get("ok") is not False:
+                    sealed_positions.append(lpos)
+            if sealed_positions:
                 self.invalidate_block_cache()
-        return {"ok": True, "near_lava": True, "sneak": sneaking, "sealed": sealed}
+        return {
+            "ok": True, "near_lava": True, "sneak": sneaking,
+            "sealed": len(sealed_positions), "sealed_positions": sealed_positions,
+        }
 
 
 SUBCORTICAL_COMBAT_BUDGET_S = 7.5
@@ -3621,6 +3706,16 @@ class SubcorticalInstinctController:
             return float(ent.get("dist", 99.0))
         except (TypeError, ValueError):
             return 99.0
+
+    @staticmethod
+    def _water_recovery_lost_life(before: dict[str, Any], after: dict[str, Any], recovery: dict[str, Any]) -> bool:
+        health = after.get("health")
+        return bool(
+            recovery.get("respawned") or recovery.get("mode") in {"respawned", "not_ready"}
+            or after.get("ready") is False or after.get("alive") is False
+            or (isinstance(health, (int, float)) and health <= 0)
+            or any(after.get(key) != before.get(key) for key in ("last_death", "dimension"))
+        )
 
     @staticmethod
     def _is_falling_fast(status: dict[str, Any], origin: Sequence[float]) -> bool:
@@ -4031,9 +4126,6 @@ class SubcorticalInstinctController:
         enclosure = None
 
         in_water = bool(st.get("in_water"))
-        submerged = bool(st.get("submerged"))
-        oxy_raw = st.get("oxygen")
-        low_oxygen = isinstance(oxy_raw, (int, float)) and oxy_raw < 180
 
         shielded_arrow_interrupt = (
             has_shield and not in_water and not st.get("on_fire")
@@ -4062,7 +4154,7 @@ class SubcorticalInstinctController:
                 pass
 
         # 0) Underwater drowning emergency: surface immediately instead of burning oxygen in combat!
-        if in_water and (submerged or low_oxygen):
+        if _water_requires_surface(st, oxygen_bubbles=12):
             mode = "water_surface"
             esc = env.surface_from_water(st)
             actions.append({"action": "water_surface", **esc})
@@ -4260,19 +4352,38 @@ class SubcorticalInstinctController:
                     mode = "falling"
                     break
                 hp_cur = float(st_cur.get("health") or 20.0)
-                oxy_cur = st_cur.get("oxygen")
-                if st_cur.get("in_water") and (
-                    st_cur.get("submerged") or (isinstance(oxy_cur, (int, float)) and oxy_cur < 150)
-                ):
-                    esc_cur = env.surface_from_water(st_cur)
-                    actions.append({"action": "water_surface_abort", **esc_cur})
-                    st_w = env._safe_status(st_cur)
-                    if not esc_cur.get("respawned") and (
+                if _water_requires_surface(st_cur, oxygen_bubbles=10):
+                    nearest = st_cur.get("nearest_hostile")
+                    nearest = nearest if isinstance(nearest, dict) else {}
+                    close_melee = (
+                        hp_cur <= 12.0 and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
+                        and not nearest.get("blocked_by_wall") and self._entity_dist(st_cur.get("pos"), nearest) <= 3.5
+                    )
+                    unavailable = {**st_cur, "ready": False}
+                    if close_melee:
+                        attacker_id = nearest.get("id")
+                        attacker_pos = nearest.get("pos") or (mob_pos if attacker_id == mob_id else None)
+                        esc_cur = env.escape_deep_water_to_shore(
+                            attacker_pos, keep_shield=has_shield, shield_target_id=attacker_id,
+                            surface_first=True, avoid_close_threat=attacker_pos is not None, under_attack=True,
+                        )
+                        actions.append({"action": "water_surface_shore", **esc_cur})
+                    else:
+                        esc_cur = env.surface_from_water(st_cur)
+                        actions.append({"action": "water_surface_abort", **esc_cur})
+                    st_w = env._safe_status(unavailable)
+                    if self._water_recovery_lost_life(st_cur, st_w, esc_cur):
+                        mode = "life_unavailable"
+                        break
+                    if not close_melee and (
                         not esc_cur.get("ok") or esc_cur.get("in_water") or st_w.get("in_water")
                     ):
                         shore_w = env.escape_deep_water_to_shore(mob_pos, keep_shield=has_shield, shield_target_id=mob_id)
                         actions.append({"action": "water_surface_shore", "ok": bool(shore_w.get("ok"))})
-                        st_w = env._safe_status(st_w)
+                        st_w = env._safe_status(unavailable)
+                        if self._water_recovery_lost_life(st_cur, st_w, shore_w):
+                            mode = "life_unavailable"
+                            break
                     nh_w = st_w.get("nearest_hostile")
                     nh_w_dist = float(nh_w.get("dist", 99.0)) if isinstance(nh_w, dict) and nh_w.get("name") else 99.0
                     if has_shield and st_w.get("alive") is not False and not st_w.get("in_water") and (nh_w_dist <= 8.0 or not esc_cur.get("ok")):
@@ -4720,13 +4831,28 @@ class SubcorticalInstinctController:
                             trigger.get("source") == "pre_hurt_melee" and 0 < mob_dist <= 1.25
                             and nearest_id == mob_id and nearest.get("blocked_by_wall") is not True
                         )
+                        effects = st_fl.get("effects")
+                        offhand = st_fl.get("offhand")
+                        # A short retreat can leave the shield up while the same skeleton is still within reach.
+                        wither_pursuit = (
+                            mob_name == "wither_skeleton" and nearest_id == mob_id
+                            and _clean_block_name(nearest.get("name")) == "wither_skeleton"
+                            and nearest.get("blocked_by_wall") is not True
+                            and str(st_fl.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                            and st_fl.get("ready") is True and st_fl.get("alive") is True and st_fl.get("on_ground") is True
+                            and isinstance(health_after, (int, float)) and health_after > 0
+                            and isinstance(offhand, dict) and _clean_block_name(offhand.get("name")) == "shield"
+                            and isinstance(effects, list)
+                            and any(isinstance(effect, dict) and _clean_block_name(effect.get("name")) == "wither" for effect in effects)
+                        )
                         critical_pursuit = (
                             same_close_pursuit and isinstance(health_after, (int, float)) and 0 < health_after <= 4.0
                             and st_fl.get("on_ground") is True
                         )
                         guard_range = 5.5 if critical_pursuit else 3.5
                         melee_still_close = (
-                            check_melee_guard and (low_health_after or sealed or same_close_pursuit) and st_fl.get("blocking")
+                            check_melee_guard and st_fl.get("blocking")
+                            and (low_health_after or sealed or same_close_pursuit or wither_pursuit)
                             and isinstance(nearest_id, int) and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
                             and isinstance(nearest_dist, (int, float)) and 0 <= nearest_dist <= guard_range
                         )
@@ -4760,7 +4886,10 @@ class SubcorticalInstinctController:
 
         # 4) Check for a surviving attacker before handing back control or eating.
         has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
-        st_post = env._safe_status(st)
+        st_post = env._safe_status({"ready": False} if mode == "life_unavailable" else st)
+        if mode in {"water_surface", "water_surface_abort"} and self._water_recovery_lost_life(st, st_post, {}):
+            mode = "life_unavailable"
+            latched_guard = False
         nh_post = st_post.get("nearest_hostile")
         retreat_hp = st_post.get("health")
         retreats = [a for a in actions if a["action"] == "flee" and not a.get("respawned")]
@@ -4794,7 +4923,11 @@ class SubcorticalInstinctController:
             and trigger.get("source") == "pre_hurt_melee" and mob_name in PRE_HURT_MELEE_MOBS
             and 0 < mob_dist <= 3.5
             and isinstance(nh_post, dict) and nh_post.get("id") == mob_id
-            and any(a["ok"] and isinstance(a.get("moved"), (int, float)) and 0 < a["moved"] <= 2.0 for a in retreats)
+            and any(
+                isinstance(a.get("moved"), (int, float)) and 0 < a["moved"] <= 2.0
+                and retreat_made_progress(a["ok"], a["moved"], a.get("reason"))
+                for a in retreats
+            )
         ):
             # A short step does not disengage when the same attacker stays in melee reach.
             followup_range = min(mob_dist, 2.0)
@@ -4955,7 +5088,7 @@ class SubcorticalInstinctController:
         food_start_deadline = deadline - 2.5
         if (
             env.post_combat_food
-            and mode != "falling"
+            and mode not in {"falling", "life_unavailable"}
             and not latched_guard
             and time.monotonic() < food_start_deadline
             and st_post.get("ready", True)
@@ -4984,8 +5117,11 @@ class SubcorticalInstinctController:
         )
         if mode == "falling":
             summary = f"快速下坠期间已暂停反击，当前 HP={st_post.get('health')} pos={st_post.get('pos')}"
+        if mode == "life_unavailable":
+            summary = "交战期间角色已死亡或状态尚未就绪，等待刷新后重新规划"
         return {
-            "handled": bool(actions),
+            **({"ok": False} if mode == "life_unavailable" else {}),
+            "handled": bool(actions) and mode != "life_unavailable",
             "mode": mode,
             "summary": summary,
             "actions": actions,
@@ -5044,9 +5180,7 @@ class CombatControllerSlot:
             if outcome.get("mode") != "life_unavailable" and not outcome.get("latched_guard", False):
                 st_end = outcome.get("status_after") if isinstance(outcome, dict) else None
                 wet_submerged = isinstance(st_end, dict) and bool(st_end.get("in_water")) and (
-                    bool(st_end.get("submerged"))
-                    or st_end.get("on_ground") is False
-                    or (isinstance(st_end.get("oxygen"), (int, float)) and st_end["oxygen"] < 240)
+                    st_end.get("on_ground") is False or _water_requires_surface(st_end, oxygen_bubbles=16)
                 )
                 posture_payload: dict[str, Any] = {"shield": False, "sneak": False, "jump": True} if wet_submerged else {}
                 for reset_fn in (
