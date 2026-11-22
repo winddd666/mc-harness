@@ -271,6 +271,7 @@ class GenerationGuard:
     SURFACE_WATER_ESCAPE_BUDGET_S = 4.0
     COMBAT_WATER_ESCAPE_BUDGET_S = 4.0
     ATTACK_WATER_THREAT_RANGE = 16.0
+    MOVE_DROWNED_THREAT_RANGE = 10.0
     TOOL_WATER_ESCAPE_OXYGEN = 140.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
@@ -3399,6 +3400,7 @@ class GenerationGuard:
         watch_hot_floor: bool = False,
         watch_scout_water: bool = False,
         watch_mining_water: bool = False,
+        watch_move_water: bool = False,
         check_flee_exit: bool = False,
         watch_attack_emergency: bool = False,
         check_combat_step: bool = False,
@@ -3424,6 +3426,11 @@ class GenerationGuard:
         unstick_start: dict[str, Any] = {}
         watch_wall_damage = check_support_dig or watch_mining_water
         watch_low_oxygen = watch_mining_water or check_unstick_exit
+        drowned_threat_range = None
+        if watch_move_water:
+            drowned_threat_range = self.MOVE_DROWNED_THREAT_RANGE
+        elif watch_scout_water or watch_mining_water:
+            drowned_threat_range = 6.0
 
         def wall_damage_trigger(status: dict[str, Any], call: Callable[..., dict[str, Any]]) -> ThreatTrigger | None:
             if (
@@ -3606,7 +3613,8 @@ class GenerationGuard:
                     threatened_swimmer = (
                         st.get("in_water") and st.get("ready") is not False and st.get("alive") is not False
                         and (
-                            ((watch_scout_water or watch_mining_water) and nh_name == "drowned" and nh_dist <= 6.0
+                            (drowned_threat_range is not None and nh_name == "drowned"
+                             and nh_dist <= drowned_threat_range
                              and (st.get("on_ground") is False or st.get("submerged")))
                             or (watch_low_oxygen and isinstance(oxygen, (int, float))
                                 and oxygen <= self.TOOL_WATER_ESCAPE_OXYGEN)
@@ -4086,7 +4094,8 @@ class GenerationGuard:
                     nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
                     drowned_during_tool = nh_pre_name == "drowned" and (
                         (interrupted_name == "mc_attack" and nh_pre_dist <= self.ATTACK_WATER_THREAT_RANGE)
-                        or (interrupted_name in {"mc_move_to", "mc_skill_scout_surface"} and nh_pre_dist <= 6.0)
+                        or (interrupted_name == "mc_move_to" and nh_pre_dist <= self.MOVE_DROWNED_THREAT_RANGE)
+                        or (interrupted_name == "mc_skill_scout_surface" and nh_pre_dist <= 6.0)
                         or (mining_water_pre and surface_first_pre and nh_pre_dist <= 6.0)
                     )
                     if hurt_pre_water:
@@ -4431,6 +4440,7 @@ class GenerationGuard:
                 watch_hot_floor=tool_name in HOT_FLOOR_WATCH_TOOLS,
                 watch_scout_water=tool_name == "mc_skill_scout_surface",
                 watch_mining_water=tool_name in MINING_WATER_WATCH_TOOLS,
+                watch_move_water=tool_name == "mc_move_to",
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
                 check_combat_step=tool_name == "mc_skill_combat",

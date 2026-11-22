@@ -12553,10 +12553,17 @@ def test_unstick_water_success_requires_confirmed_same_life_landing(landing, exp
         assert result.get("respawned", False) is (landing == "respawned")
 
 
-@pytest.mark.parametrize("distance", [4.0, 8.0])
-def test_surface_scout_hands_off_water_near_drowned_before_damage(monkeypatch, distance):
+@pytest.mark.parametrize(("tool_name", "distance", "wet", "should_preempt"), [
+    ("mc_skill_scout_surface", 4.0, True, True),
+    ("mc_skill_scout_surface", 8.0, True, False),
+    ("mc_move_to", 9.0, True, True),
+    ("mc_move_to", 11.0, True, False),
+    ("mc_move_to", 9.0, False, False),
+])
+def test_movement_hands_off_water_near_drowned_before_damage(monkeypatch, tool_name, distance, wet, should_preempt):
     import threading
 
+    moving = threading.Event()
     observed = threading.Event()
     stopped = threading.Event()
     status = {
@@ -12565,18 +12572,20 @@ def test_surface_scout_hands_off_water_near_drowned_before_damage(monkeypatch, d
     }
     calls = []
 
-    class ScoutBot:
+    class MovingBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
-                observed.set()
+                if moving.is_set():
+                    observed.set()
                 return dict(status)
             if action == "inventory":
                 return {"items": []}
             if action == "move_to":
                 calls.append(action)
-                status.update(in_water=True, on_ground=False)
-                if distance <= 6:
-                    assert stopped.wait(2.0), "scouting continued near a drowned after entering water"
+                status.update(in_water=wet, on_ground=not wet)
+                moving.set()
+                if should_preempt:
+                    assert stopped.wait(2.0), "movement continued near a drowned after entering water"
                 else:
                     assert observed.wait(2.0)
             if action == "stop":
@@ -12584,7 +12593,7 @@ def test_surface_scout_hands_off_water_near_drowned_before_damage(monkeypatch, d
                 stopped.set()
             return {"ok": True}
 
-    bot = ScoutBot()
+    bot = MovingBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(guard, "_escape_water", lambda *_a, **_kw: pytest.fail("direct shore recovery expected"))
 
@@ -12595,12 +12604,13 @@ def test_surface_scout_hands_off_water_near_drowned_before_damage(monkeypatch, d
         return {"ok": True, "in_water": False}
 
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
-    result = json.loads(guard.run_tool_with_reflex("mc_skill_scout_surface", lambda: json.dumps(
+    result = json.loads(guard.run_tool_with_reflex(tool_name, lambda: json.dumps(
         bot.call("move_to", {"x": -11042, "z": 11027, "stop_on": ["death"]}),
     )))
-    if distance <= 6:
+    if should_preempt:
         assert calls == ["move_to", "stop", "shore"]
         assert result["reflex_mode"] == "water_surface" and not result["status_after"]["in_water"]
+        assert result["status_after"]["health"] == 20
         assert guard._water_hurt_streak == 0
     else:
         assert calls == ["move_to"] and result["ok"] is True
