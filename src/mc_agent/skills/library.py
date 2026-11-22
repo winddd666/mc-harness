@@ -1416,6 +1416,7 @@ class MacroSkills:
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
         self._drop_retry_after: dict[tuple[str, int, tuple[int, ...], tuple[int, ...]], float] = {}
         self._temporary_furnaces: set[tuple[str, tuple[int, ...]]] = set()
+        self._pending_furnace_takes: dict[tuple[str, tuple[int, ...], str], tuple[int, int]] = {}
         self._placed_storage: dict[tuple[str, tuple[int, ...]], str] = {}
         self._mining_dfs: Any = None
         self.world_memory: Any = None
@@ -5366,7 +5367,10 @@ class MacroSkills:
                 got.setdefault("_auto_dropped", 0)
             try:
                 res = self.bot.call("window/act", {"target": {"pos": pos}, "ops": take_ops})
-                taken = self._furnace_take_receipt(self.bot, res, got, inv_now)
+                if job is not None and job.get("kind") == "sync_furnace":
+                    taken = self._verify_sync_furnace_take(self.bot, res, got, inv_now, pos, norm_dim)
+                else:
+                    taken = self._furnace_take_receipt(self.bot, res, got, inv_now, legacy_preview=True)
             except (ApiError, httpx.HTTPError) as err:
                 failures.append({
                     "pos": pos,
@@ -5392,21 +5396,56 @@ class MacroSkills:
     @staticmethod
     def _furnace_take_receipt(
         bot: Any, result: dict[str, Any], preview: dict[str, int], inventory_before: dict[str, Any],
+        *, legacy_preview: bool = False,
     ) -> dict[str, int]:
         done = result.get("done")
-        if done == []:
-            gained = _positive_inv_delta(_inventory_counts_from_raw(inventory_before), _inventory_counts(bot))
-            return {item: min(count, gained[item]) for item, count in preview.items() if count > 0 and item in gained}
         receipts = [
             step["took"] for step in done
             if isinstance(step, dict) and isinstance(step.get("took"), dict)
         ] if isinstance(done, list) else []
         if not receipts:
-            return preview  # Older servers acknowledge the take without itemized receipts.
+            if legacy_preview and done != []:
+                return preview
+            gained = _positive_inv_delta(_inventory_counts_from_raw(inventory_before), _inventory_counts(bot))
+            return {item: min(count, gained[item]) for item, count in preview.items() if count > 0 and item in gained}
         taken: dict[str, int] = {}
         for receipt in receipts:
             _merge_counts(taken, {_clean_block(name): int(n) for name, n in receipt.items()})
         return taken
+
+    def _verify_sync_furnace_take(
+        self, bot: Any, result: dict[str, Any], preview: dict[str, int], inventory_before: dict[str, Any],
+        pos: list[int] | None, dim: str | None,
+    ) -> dict[str, int]:
+        counts_before = _inventory_counts_from_raw(inventory_before)
+        keys = []
+        if pos is not None and dim is not None:
+            for item, count in preview.items():
+                if count > 0:
+                    key = (dim, tuple(pos), item)
+                    self._pending_furnace_takes[key] = (counts_before.get(item, 0), count)
+                    keys.append(key)
+        taken = self._furnace_take_receipt(bot, result, preview, inventory_before)
+        if taken:
+            for key in keys:
+                self._pending_furnace_takes.pop(key, None)
+        return taken
+
+    def _reconcile_furnace_take(
+        self, key: tuple[str, tuple[int, ...], str], output_count: int, inventory: dict[str, Any],
+    ) -> dict[str, int] | None:
+        """Return None when a previous take is still ambiguous, or {} when it can be retried."""
+        previous_inventory, previous_output = self._pending_furnace_takes[key]
+        item = key[2]
+        inventory_gain = _inventory_counts_from_raw(inventory).get(item, 0) - previous_inventory
+        output_loss = previous_output - output_count
+        if inventory_gain > 0 and output_loss > 0:
+            del self._pending_furnace_takes[key]
+            return {item: min(inventory_gain, output_loss, previous_output)}
+        if inventory_gain == 0 and output_loss == 0:
+            del self._pending_furnace_takes[key]
+            return {}
+        return None
 
     def _settle_furnace_output(self, pos: list[int], dim: str, taken: dict[str, int]) -> None:
         mem = self._get_world_memory()
@@ -5464,6 +5503,10 @@ class MacroSkills:
     def collect_nearby_smelt_output(self, max_duration_s: float) -> dict[str, Any] | None:
         """Recover output or reclaim an empty temporary furnace without walking."""
         jobs = [j for j in self._get_world_memory().get_conversion_jobs() if j["kind"] == "sync_furnace"]
+        if self._pending_furnace_takes:
+            active_keys = {(j["dim"], tuple(j["pos"]), j["output_item"]) for j in jobs}
+            for key in self._pending_furnace_takes.keys() - active_keys:
+                del self._pending_furnace_takes[key]
         if (not jobs and not self._temporary_furnaces) or max_duration_s < 3.0:
             return None
 
@@ -5496,17 +5539,25 @@ class MacroSkills:
             item = job["output_item"]
             target = {"pos": pos}
             view = session.call("window/view", {"target": target})
-            output = (view.get("sections") or {}).get("output") or []
+            output = (view.get("sections") or {}).get("output")
+            if not isinstance(output, list):
+                return None
             count = sum(int(row.get("count") or 0) for row in output if _clean_block(row.get("name")) == item)
-            if count <= 0:
+            key = (dim, tuple(pos), item)
+            pending = key in self._pending_furnace_takes
+            if count <= 0 and not pending:
                 return None
             inventory_before = session.inventory()
-            if not _can_fit_item_in_inventory(inventory_before, item, count, check_craft_inputs=False):
+            taken = self._reconcile_furnace_take(key, count, inventory_before) if pending else {}
+            if taken is None:
                 return None
-            result = session.call("window/act", {
-                "target": target, "ops": [{"op": "take", "from": "output", "item": item, "count": count}],
-            })
-            taken = self._furnace_take_receipt(session, result, {item: count}, inventory_before)
+            if not taken:
+                if count <= 0 or not _can_fit_item_in_inventory(inventory_before, item, count, check_craft_inputs=False):
+                    return None
+                result = session.call("window/act", {
+                    "target": target, "ops": [{"op": "take", "from": "output", "item": item, "count": count}],
+                })
+                taken = self._verify_sync_furnace_take(session, result, {item: count}, inventory_before, pos, dim)
         except (_SkillDeadline, httpx.TimeoutException):
             session.stop_pending()
             return None
@@ -5784,7 +5835,9 @@ class MacroSkills:
                 "window/act",
                 {"target": target, "ops": [{"op": "take", "from": "output", "count": cnt}]},
             )
-            taken = self._furnace_take_receipt(self.bot, result, {_clean_block(out_item.get("name")): cnt}, inv_take)
+            taken = self._verify_sync_furnace_take(
+                self.bot, result, {_clean_block(out_item.get("name")): cnt}, inv_take, furnace_pos, dim,
+            )
             collected.extend({"name": item, "count": n} for item, n in taken.items())
             if furnace_pos is not None and dim is not None:
                 self._settle_furnace_output(furnace_pos, dim, taken)

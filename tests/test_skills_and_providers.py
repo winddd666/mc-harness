@@ -753,7 +753,8 @@ def test_collect_drops_smelt_charcoal_reservation_and_toolset_registration() -> 
             return httpx.Response(200, json={"ok": True, "result": {"crafted": body["item"], "gained": body.get("count", 1)}})
         if path == "/window/act":
             window_ops.append(body)
-            return httpx.Response(200, json={"ok": True, "result": {"done": True}})
+            done = [{"took": {"charcoal": 3}}] if body["ops"][0]["op"] == "take" else True
+            return httpx.Response(200, json={"ok": True, "result": {"done": done}})
         if path == "/window/view":
             return httpx.Response(
                 200,
@@ -1743,7 +1744,8 @@ def test_event_cursor_pagination_wall_los_and_dig_tier_guard() -> None:
             return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
         if path == "/window/act":
             state["window_ops"].append(body)
-            return httpx.Response(200, json={"ok": True, "result": {"done": True}})
+            done = [{"took": {"iron_ingot": 2}}] if body["ops"][0]["op"] == "take" else True
+            return httpx.Response(200, json={"ok": True, "result": {"done": done}})
         if path == "/window/view":
             return httpx.Response(
                 200,
@@ -3001,7 +3003,7 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
             }
         elif route.endswith("/window/act"):
             operations.extend(body["ops"])
-            result = {}
+            result = {"done": [{"took": {"copper_ingot": 2}}]} if body["ops"][0]["op"] == "take" else {}
         else:
             raise AssertionError(route)
         return httpx.Response(200, json={"ok": True, "result": result})
@@ -3094,19 +3096,24 @@ def test_skill_smelt_recovers_tracked_output_before_mining(monkeypatch, fuel_put
         assert toolset.world_memory.get_conversion_jobs() == []
 
 
-def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified() -> None:
+@pytest.mark.parametrize("receipt", ["empty", "absent", "no_took", "inventory_timeout"])
+def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified(receipt) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     furnace = [-12268, 31, -6065]
     phase = "load"
     owned = 0
+    fail_inventory = False
     operations = []
 
     def handler(request):
-        nonlocal owned
+        nonlocal owned, fail_inventory
         route = request.url.path.rsplit("/", 1)[-1]
         body = json.loads(request.content) if request.content else {}
         if route == "inventory":
+            if fail_inventory:
+                fail_inventory = False
+                raise httpx.ReadTimeout("offline post-take inventory read", request=request)
             result = {"items": [
                 {"name": "raw_iron", "count": 6}, {"name": "coal", "count": 1},
                 {"name": "iron_ingot", "count": owned},
@@ -3116,7 +3123,7 @@ def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified() -
         elif route == "find_blocks":
             result = {"blocks": [{"pos": furnace, "dist": 1.0}]}
         elif route == "view":
-            count = {"load": 6, "waiting": 0, "empty_receipt": 2, "confirmed": 2}[phase]
+            count = {"load": 6, "waiting": 0, "empty_receipt": 2, "confirmed": max(0, 6 - owned)}[phase]
             result = {"sections": {"output": [{"name": "iron_ingot", "count": count}] if count else []}}
         elif route == "act":
             assert body["target"]["pos"] == furnace
@@ -3130,7 +3137,11 @@ def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified() -
             else:
                 if phase == "confirmed":
                     owned += 2
-                result = {"done": []}
+                    fail_inventory = receipt == "inventory_timeout"
+                result = {
+                    "absent": {},
+                    "no_took": {"done": [{"op": "take"}]},
+                }.get(receipt, {"done": []})
         else:
             raise AssertionError(route)
         return httpx.Response(200, json={"ok": True, "result": result})
@@ -3146,6 +3157,9 @@ def test_skill_smelt_keeps_4_plus_2_job_until_empty_take_receipt_is_verified() -
         assert tools.skills.collect_nearby_smelt_output(5.0) is None
         assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
         phase = "confirmed"
+        if receipt == "inventory_timeout":
+            assert tools.skills.collect_nearby_smelt_output(5.0) is None
+            assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 2}
         assert tools.skills.collect_nearby_smelt_output(5.0) == {"pos": furnace, "took": {"iron_ingot": 2}}
         assert tools.skills.collect_nearby_smelt_output(5.0) is None
         assert tools.world_memory.get_conversion_jobs() == []
@@ -3178,7 +3192,7 @@ def test_skill_smelt_tries_a_second_nearby_furnace_only_after_open_failure(code)
                 {"pos": far, "dist": 9.1}, {"pos": alternate, "dist": 3.1}, {"pos": near, "dist": 2.2},
             ]},
             "status": {"pos": [-5283.5, 40, -7712.3], "health": 20, "food": 20},
-            "act": {},
+            "act": {"done": [{"took": {"stone": 12}}]} if operation == "act" and body["ops"][0]["op"] == "take" else {},
             "view": {"sections": {"output": [{"name": "stone", "count": 12}]}},
         }
         return httpx.Response(200, json={"ok": True, "result": responses[operation]})
