@@ -3303,9 +3303,12 @@ def test_smelt_missing_fuel_gives_harvest_next_action() -> None:
     assert result["ok"] is False
     assert result["error"] == "missing_fuel"
     assert result["requires_replan"] is True
+    assert result["input"] == "raw_iron" and result["furnace_pos"] == [1, 64, 0]
+    assert result["collected"] == []
     assert result["next_action"] == "mc_skill_harvest_logs(target_logs=2)"
     assert result["inventory"]["raw_iron"] == 3
     assert "mc_skill_harvest_logs" in result["message"]
+    assert "取出的成品为 0" in result["message"]
 
 
 @pytest.mark.parametrize("episode_budget,cap", [(None, 55.0), (14.0, 10.0)])

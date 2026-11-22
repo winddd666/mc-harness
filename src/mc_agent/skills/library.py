@@ -6108,10 +6108,13 @@ class MacroSkills:
                 "ok": False,
                 "requires_replan": True,
                 "error": "missing_fuel",
+                "input": input_item,
+                "furnace_pos": furnace_pos,
+                "collected": [],
                 "next_action": "mc_skill_harvest_logs(target_logs=2)",
                 "inventory": counts,
                 "message": (
-                    "背包没有煤炭、木炭、木板或原木燃料，熔炼无法开始（铁锭等产物仍在炉中）。"
+                    "缺少本批可用燃料。本次停在燃料预检，取出的成品为 0。"
                     "请先调 mc_skill_harvest_logs(target_logs=2, radius=32) 砍 2 个原木（自动转木板作燃料），"
                     "或用 mc_skill_mine_blocks(block_types=['coal_ore'], count=3) 采煤；"
                     "拿到燃料后再用相同 input_item 调用 mc_skill_smelt。不要无燃料重复调用。"
