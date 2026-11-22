@@ -1884,32 +1884,30 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "advancement_id": "minecraft:adventure/kill_a_mob",
     },
     "probe_iron_y16": {
-        "key": "minecraft:story/iron_tools",
-        "title": "5分：在 Y=16 地下快速挖铁、烧铁并做出铁镐",
-        "points": 5,
+        "key": "probe_iron_y16_throughput",
+        "title": "效率压测：Y=16 地下高吞吐挖铁",
+        "points": 10,
         "tier": 1,
         "budget_class": "short",
         "task": (
             "你已在 Y=16 地下安全口袋，背包有石镐、木板、煤、火把与食物，无需回地表。"
-            "直接调用 mc_skill_mine_dfs(target='iron', target_y=16, max_duration_s=150) 挖取至少 6 个粗铁，"
-            "随后用 mc_skill_craft_gear 烧铁并合成铁镐（解锁 story/smelt_iron 与 story/iron_tools）。"
+            "持续调用 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=24, max_duration_s=90) "
+            "最大化挖取粗铁，拿到足够粗铁后可用 mc_skill_craft_gear 烧铁做铁镐并继续挖铁，严禁回地表或闲逛。"
         ),
         "extra_tools": (),
-        "advancement_id": "minecraft:story/iron_tools",
     },
     "probe_diamond_y54": {
-        "key": "minecraft:story/mine_diamond",
-        "title": "15分：在 Y=-54 深层挖取钻石并回收掉落物",
+        "key": "probe_diamond_y54_throughput",
+        "title": "效率压测：Y=-54 深层高吞吐挖钻",
         "points": 15,
         "tier": 2,
         "budget_class": "short",
         "task": (
             "你已在 Y=-54 深层安全口袋，背包有铁镐、铁剑、圆石、木板、火把与食物，无需回地表。"
-            "直接调用 mc_skill_mine_dfs(target='diamond', target_y=-54, max_duration_s=180) 寻找并挖掘钻石矿，"
-            "确保拾取全部掉落钻石（解锁 story/mine_diamond）。"
+            "持续调用 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=16, max_duration_s=90) "
+            "全力最大化获取钻石数量（不要在挖到 1 颗后停手，也不要去地表探索），每次返回 time_slice_progress 立即继续调用。"
         ),
         "extra_tools": (),
-        "advancement_id": "minecraft:story/mine_diamond",
     },
 }
 
