@@ -5353,19 +5353,31 @@ def test_deep_lava_keeps_swimming_up_while_the_head_is_submerged():
     assert result["ok"] is True and result["in_lava"] is False
 
 
-@pytest.mark.parametrize("bank_state", ["dry", "flooded", "new_life", "old_bank", "healthy"])
+@pytest.mark.parametrize("bank_state", [
+    "dry", "flooded", "new_life", "old_bank", "healthy", "late", "late_flooded", "at_surface", "after_third_ascent",
+])
 def test_critical_lava_ascent_aims_for_a_recent_verified_dry_bank(monkeypatch, bank_state):
     from mc_agent.skills.combat_env import CombatEnv
 
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     bank = [-9984.5, -54, 2972.5]
+    ascent_levels = {
+        "late": [-55.3, -53.8],
+        "late_flooded": [-55.3, -53.8],
+        "at_surface": [-54.7, -53.8],
+        "after_third_ascent": [-57, -56, -55],
+    }.get(bank_state, [-53.8])
+    start_y = {"late": -57.0, "late_flooded": -57.0, "at_surface": -56.5, "after_third_ascent": -58.0}.get(
+        bank_state, -55.3,
+    )
     status = {
-        "pos": [-9986.4, -55.3, 2971.5], "health": 16 if bank_state == "healthy" else 10,
+        "pos": [-9986.4, start_y, 2971.5], "health": 16 if bank_state == "healthy" else 10,
         "dimension": "overworld", "last_death": {"t": 2}, "ready": True, "alive": True,
         "on_ground": False, "in_lava": True,
     }
     swims = []
+    headings = []
 
     class LavaBot:
         def status(self):
@@ -5376,20 +5388,24 @@ def test_critical_lava_ascent_aims_for_a_recent_verified_dry_bank(monkeypatch, b
                 return {"items": []}
             if action == "get_block":
                 x, y, z = body["pos"]
-                if (x, z) == (-9987, 2971) and y <= -54:
+                lava_top = -55 if bank_state == "at_surface" else -54
+                if (x, z) == (-9987, 2971) and y <= lava_top:
                     return {"name": "lava"}
                 if (x, y, z) == (-9985, -55, 2972):
                     return {"name": "stone"}
-                if (x, y, z) == (-9985, -54, 2972) and bank_state == "flooded":
+                if (x, y, z) == (-9985, -54, 2972) and bank_state in {"flooded", "late_flooded"}:
                     return {"name": "lava"}
                 return {"name": "air"}
+            if action == "look":
+                headings.append(body["yaw"])
             if action == "control" and body.get("jump"):
                 swims.append(body["forward"])
+                clock[0] += body["ms"] / 1000
                 if body["forward"]:
-                    destination = bank if len(swims) == 1 else [-9989.5, -53, 2971.5]
+                    destination = bank if headings[-1] != 0.0 else [-9989.5, -53, 2971.5]
                     status.update(pos=destination, on_ground=True, in_lava=False)
                 else:
-                    status.update(pos=[-9986.4, -53.8, 2971.5])
+                    status.update(pos=[-9986.4, ascent_levels[swims.count(False) - 1], 2971.5])
             return {"ok": True}
 
     env = CombatEnv(LavaBot())
@@ -5404,8 +5420,11 @@ def test_critical_lava_ascent_aims_for_a_recent_verified_dry_bank(monkeypatch, b
     result = env.escape_lava()
 
     assert result["ok"] and not result["in_lava"]
-    assert swims == ([True] if bank_state == "dry" else [False, True])
-    assert ("lava_swim_to_recent_dry_bank" in result["actions"]) is (bank_state == "dry")
+    vertical_count = {"dry": 0, "late_flooded": 2, "after_third_ascent": 3}.get(bank_state, 1)
+    assert swims == [False] * vertical_count + [True]
+    assert ("lava_swim_to_recent_dry_bank" in result["actions"]) is (bank_state in {
+        "dry", "late", "at_surface", "after_third_ascent",
+    })
 
 
 @pytest.mark.parametrize("bank", ["unsupported", "still_blocked", "clear_after_dig", "obsidian", "crying_obsidian"])
@@ -6151,14 +6170,19 @@ def test_seal_during_melee_retreat_reports_cover_and_keeps_shield_if_needed(monk
     assert status["blocking"] is hostile_still_close
 
 
-@pytest.mark.parametrize("landing", ["pursued", "different_mob", "too_far", "behind_wall", "ordinary_retreat"])
+@pytest.mark.parametrize("landing", [
+    "pursued", "different_mob", "too_far", "behind_wall", "ordinary_retreat", "critical_pursued", "critical_clear",
+    "critical_occluded", "critical_other", "critical_airborne", "critical_non_point_blank",
+])
 def test_melee_retreat_keeps_the_shield_up_when_a_point_blank_attacker_pursues(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
-    zombie = {"id": 77, "name": "zombie", "dist": 2.0 if landing == "ordinary_retreat" else 0.3}
+    critical = landing.startswith("critical_")
+    initial_distance = 2.0 if landing in {"ordinary_retreat", "critical_non_point_blank"} else 1.1 if critical else 0.3
+    zombie = {"id": 77, "name": "zombie", "dist": initial_distance}
     status = {
-        "pos": [-6996.5, 120, 5825.5], "health": 17.2, "food": 20, "ready": True, "alive": True,
-        "dimension": "overworld", "on_ground": True, "blocking": False, "nearest_hostile": zombie,
+        "pos": [-6996.5, 120, 5825.5], "health": 4.312 if critical else 17.2, "food": 20, "ready": True, "alive": True,
+        "dimension": "overworld", "on_ground": True, "blocking": critical, "nearest_hostile": zombie,
     }
     poses = []
 
@@ -6177,9 +6201,14 @@ def test_melee_retreat_keeps_the_shield_up_when_a_point_blank_attacker_pursues(m
             return {"ok": True}
 
     def retreat(*_a, **_kw):
-        after = {**zombie, "id": 78 if landing == "different_mob" else 77,
-                 "dist": 3.6 if landing == "too_far" else 3.5, "blocked_by_wall": landing == "behind_wall"}
-        status.update(pos=[-6992.6, 120, 5824.5], health=14.41, nearest_hostile=after)
+        distance = {"critical_clear": 5.6, "too_far": 3.6}.get(landing, 5.0 if critical else 3.5)
+        after = {
+            **zombie, "id": 78 if landing in {"different_mob", "critical_other"} else 77,
+            "dist": distance, "blocked_by_wall": landing in {"behind_wall", "critical_occluded"},
+        }
+        status.update(pos=[-6992.6, 120, 5824.5], health=2.248 if critical else 14.41, nearest_hostile=after)
+        if landing == "critical_airborne":
+            status["on_ground"] = False
         return {"ok": True, "mode": "flee", "moved_dist": 5.18}
 
     env = CombatEnv(VillageBot())
@@ -6187,9 +6216,10 @@ def test_melee_retreat_keeps_the_shield_up_when_a_point_blank_attacker_pursues(m
     monkeypatch.setattr(env, "flee", retreat)
     outcome = CombatControllerSlot().handle(env, {"source": "pre_hurt_melee", "primary_entity_id": 77})
 
-    assert outcome["latched_guard"] is (landing == "pursued")
-    assert status["blocking"] is (landing == "pursued")
-    if landing == "pursued":
+    should_latch = landing in {"pursued", "critical_pursued"}
+    assert outcome["latched_guard"] is should_latch
+    assert status["blocking"] is should_latch
+    if should_latch:
         assert outcome["actions"][-1] == {"action": "guard_melee_after_retreat", "ok": True, "entity_id": 77}
     else:
         assert poses[-1] == {}
@@ -6898,6 +6928,53 @@ def test_magic_damage_with_visible_witch_retreats_from_the_witch(monkeypatch, wi
     monkeypatch.setattr(guard, "_defend_or_flee", defend)
     assert guard.poll()["requires_replan"]
     assert retreats == ([(witch, True)] if witch_visible else [(None, False)])
+
+
+@pytest.mark.parametrize("hurt_source", ["magic", "poison"])
+@pytest.mark.parametrize("live_witch", ["visible", "occluded", "different", "unavailable"])
+def test_typed_magic_checks_the_nearby_witch_before_treating_it_as_environmental(monkeypatch, hurt_source, live_witch):
+    witch = {"id": 807108, "name": "witch", "dist": 11.4, "pos": [11.4, 63.0, 0.0], "blocked_by_wall": False}
+    status = {
+        "pos": [0.0, 63.0, 0.0], "dimension": "overworld", "health": 9.9, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "blocking": True,
+        "nearest_hostile": {"id": witch["id"], "name": witch["name"], "dist": witch["dist"]},
+    }
+    retreats = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "source": hurt_source}] if kwargs["params"]["since"] < 1 else []}
+            if action == "get_entities":
+                assert body == {"radius": 12, "types": ["hostile"]}
+                assert kwargs["timeout_s"] == 0.6
+                if live_witch == "unavailable":
+                    raise httpx.ReadTimeout("witch sighting unavailable")
+                if live_witch == "occluded":
+                    return {"entities": [{**witch, "blocked_by_wall": True}]}
+                if live_witch == "different":
+                    return {"entities": [{**witch, "id": 807109}]}
+                return {"entities": [witch]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            pytest.fail(f"Unexpected action during typed magic recovery: {action}")
+
+    def defend(_status, attacker, _counts, *, ranged=False):
+        retreats.append((attacker, ranged))
+        return {"ok": True, "mode": "flee"}
+
+    guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_defend_or_flee", defend)
+    incident = guard.poll()
+
+    if live_witch == "visible":
+        assert [action["action"] for action in incident["actions"]] == ["combat_or_flee"]
+        assert retreats == [(witch, True)]
+    else:
+        assert incident is None
+        assert retreats == []
 
 
 @pytest.mark.parametrize("ground", ["safe", "lava_drop", "slow_probe", "slow_control"])

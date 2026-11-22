@@ -1461,39 +1461,49 @@ class CombatEnv:
             )
 
         tried_recent_bank = False
-        for _ in range(3):
-            px, py, pz = map(float, pos0[:3])
-            head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz))
-            if not _is_lava_block(head) or time.monotonic() >= lava_deadline:
+        max_ascent_pulses = 3
+        for ascent in range(max_ascent_pulses + 1):
+            if time.monotonic() >= lava_deadline:
                 break
+            px, py, pz = map(float, pos0[:3])
             hp_now = st.get("health")
+            bank_target = None
             if (
                 not tried_recent_bank and self._last_dry_bank is not None
                 and st.get("in_lava") and isinstance(hp_now, (int, float)) and 0 < hp_now <= 12.0
             ):
-                tried_recent_bank = True
                 bank, bank_life, bank_at = self._last_dry_bank
                 distance = math.hypot(bank[0] - px, bank[2] - pz)
                 if (
                     bank_life == (st.get("dimension"), st.get("last_death")) and time.monotonic() - bank_at < 30.0
                     and 0.6 <= distance <= 3.0 and 0 <= bank[1] - py <= 1.5
                     and self._point_allowed(bank[0], bank[2], action="escape_lava")
-                    and self._dry_bank_is_walkable(bank) and time.monotonic() + 1.25 < lava_deadline
+                    and time.monotonic() + 1.25 < lava_deadline
                 ):
-                    try:
-                        yaw, _ = aim_yaw_pitch(pos0, bank)
-                        self.bot.call("look", {"yaw": yaw, "pitch": 0.0}, timeout_s=0.35, allow_reauth=False)
-                        jump_in_lava(950, advance=True)
-                        actions.append("lava_swim_to_recent_dry_bank")
-                    except (ApiError, httpx.HTTPError) as err:
-                        if isinstance(err, httpx.HTTPError):
-                            self._best_effort_stop(timeout_s=0.5)
-                    self.invalidate_block_cache()
-                    st = self._safe_status(st)
-                    if _should_exit_lava(st):
-                        return _lava_result(st)
-                    pos0 = st.get("pos") or pos0
-                    continue
+                    tried_recent_bank = True
+                    if self._dry_bank_is_walkable(bank) and time.monotonic() + 1.25 < lava_deadline:
+                        bank_target = bank
+            if bank_target is not None:
+                try:
+                    yaw, _ = aim_yaw_pitch(pos0, bank_target)
+                    self.bot.call("look", {"yaw": yaw, "pitch": 0.0}, timeout_s=0.35, allow_reauth=False)
+                    jump_in_lava(950, advance=True)
+                    actions.append("lava_swim_to_recent_dry_bank")
+                except (ApiError, httpx.HTTPError) as err:
+                    if isinstance(err, httpx.HTTPError):
+                        self._best_effort_stop(timeout_s=0.5)
+                self.invalidate_block_cache()
+                st = self._safe_status(st)
+                if _should_exit_lava(st):
+                    return _lava_result(st)
+                pos0 = st.get("pos") or pos0
+                continue
+            # The last sample can confirm a reachable bank without another stationary pulse.
+            if ascent == max_ascent_pulses:
+                break
+            head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz))
+            if not _is_lava_block(head) or time.monotonic() >= lava_deadline:
+                break
             try:
                 # The current yaw can still face the attacker that knocked us in.
                 # Preserve the horizontal position until the shore probe picks a heading.
@@ -4389,7 +4399,8 @@ class SubcorticalInstinctController:
                         nearest = nearest_raw if isinstance(nearest_raw, dict) else {}
                         nearest_id = nearest.get("id")
                         nearest_dist = nearest.get("dist")
-                        low_health_after = isinstance(st_fl.get("health"), (int, float)) and st_fl["health"] <= 10.0
+                        health_after = st_fl.get("health")
+                        low_health_after = isinstance(health_after, (int, float)) and health_after <= 10.0
                         ranged_still_exposed = (
                             isinstance(nearest_id, int)
                             and isinstance(nearest_dist, (int, float))
@@ -4406,10 +4417,15 @@ class SubcorticalInstinctController:
                             trigger.get("source") == "pre_hurt_melee" and 0 < mob_dist <= 1.25
                             and nearest_id == mob_id and nearest.get("blocked_by_wall") is not True
                         )
+                        critical_pursuit = (
+                            same_close_pursuit and isinstance(health_after, (int, float)) and 0 < health_after <= 4.0
+                            and st_fl.get("on_ground") is True
+                        )
+                        guard_range = 5.5 if critical_pursuit else 3.5
                         melee_still_close = (
                             check_melee_guard and (low_health_after or sealed or same_close_pursuit) and st_fl.get("blocking")
                             and isinstance(nearest_id, int) and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
-                            and isinstance(nearest_dist, (int, float)) and nearest_dist <= 3.5
+                            and isinstance(nearest_dist, (int, float)) and 0 <= nearest_dist <= guard_range
                         )
                         if (
                             (not flee_ok or ranged_still_exposed or melee_still_close)
