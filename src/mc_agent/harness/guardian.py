@@ -2449,6 +2449,11 @@ class GenerationGuard:
                         dimension == "overworld" and melee_retreat and already_blocking
                         and cf_result.get("ok") and hp_val > 4.0
                     )
+                    check_unraised_shield = (
+                        dimension == "overworld" and melee_retreat and has_shield and not already_blocking
+                        and cf_result.get("ok") and not cf_result.get("respawned")
+                        and now - self._last_ranged_hurt_at < 8.0
+                    )
                     shield_when_cornered = (
                         nether_melee_retreat and has_shield and not already_blocking
                         and cf_result.get("reason") == "no_safe_retreat"
@@ -2463,7 +2468,7 @@ class GenerationGuard:
                     )
                     if melee_after_retreat and (
                         face_after_melee_retreat or check_critical_surface_landing
-                        or shield_when_cornered or follow_unarmed_retreat
+                        or check_unraised_shield or shield_when_cornered or follow_unarmed_retreat
                     ):
                         try:
                             landing = self.bot.call("status", method="GET", timeout_s=0.6)
@@ -2471,6 +2476,16 @@ class GenerationGuard:
                             landing = {}
                         mob, dist, target_id, target_pos = self._extract_hostile_info(landing)
                         current_hp = landing.get("health")
+                        if (
+                            check_unraised_shield and landing.get("on_ground") is True
+                            and landing.get("blocking") is False and not landing.get("on_fire")
+                            and isinstance(current_hp, (int, float)) and 0 < current_hp <= 4.0
+                            and ((mob in PRE_HURT_MELEE_MOBS and dist <= 3.5) or (mob in RANGED_MOBS and dist <= 12.0))
+                        ):
+                            actions.append(self._action(
+                                "raise_shield_after_retreat",
+                                lambda: {"ok": self._restore_shield_near_threat(status, landing, self.bot)},
+                            ))
                         if (
                             landing.get("on_ground") is True
                             and landing.get("ready") is not False and landing.get("alive") is not False

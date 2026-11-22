@@ -4430,17 +4430,32 @@ def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypat
 
 
 @pytest.mark.parametrize(
-    "recent_arrow, hp_before, hp_after, should_face",
-    [(False, 3.34, 2.55, False), (True, 3.34, 2.55, True), (False, 8.7, 1.63, True), (False, 8.7, 6.2, False)],
+    "recent_arrow, hp_before, hp_after, blocking, shooter_dist, expected_action",
+    [
+        (False, 3.34, 2.55, True, None, None),
+        (True, 3.34, 2.55, True, None, "face_attacker_after_retreat"),
+        (False, 8.7, 1.63, True, None, "face_attacker_after_retreat"),
+        (False, 8.7, 6.2, True, None, None),
+        (True, 7.4, 1.3, False, 9.5, "raise_shield_after_retreat"),
+        (True, 7.4, 1.3, False, 14.0, None),
+        (False, 7.4, 1.3, False, 9.5, None),
+        (True, 7.4, 5.3, False, 9.5, None),
+    ],
 )
-def test_poll_refaces_melee_after_surface_retreat(monkeypatch, recent_arrow, hp_before, hp_after, should_face):
+def test_poll_checks_shield_after_surface_melee_retreat(
+    monkeypatch, recent_arrow, hp_before, hp_after, blocking, shooter_dist, expected_action,
+):
     front = {"id": 44, "name": "zombie", "dist": 2.5, "pos": [9250.0, 64, -11469.5]}
     flank = {"id": 55, "name": "zombie", "dist": 1.9, "pos": [9249.8, 64, -11469.6]}
+    if shooter_dist is not None:
+        flank = {"id": 55, "name": "skeleton", "dist": shooter_dist}
     status = {
         "pos": [9252.5, 64, -11469.5], "health": hp_before, "food": 17, "dimension": "overworld",
-        "ready": True, "alive": True, "on_ground": True, "blocking": True, "nearest_hostile": front,
+        "ready": True, "alive": True, "on_ground": True, "blocking": blocking, "nearest_hostile": front,
+        "offhand": {"name": "shield"},
     }
     looks = []
+    postures = []
 
     class SurfaceBot:
         def call(self, action, body=None, **kwargs):
@@ -4457,6 +4472,10 @@ def test_poll_refaces_melee_after_surface_retreat(monkeypatch, recent_arrow, hp_
                 return {"items": [{"name": "diamond_sword", "count": 1}], "offhand": {"name": "shield"}}
             if action == "look":
                 looks.append(body)
+            if action == "posture":
+                postures.append(body)
+                status["blocking"] = body.get("shield") is True
+                return {"blocking": status["blocking"]}
             return {"ok": True}
 
     guard = GenerationGuard(SurfaceBot(), EventSink(lambda _: None), checkpoint=lambda: None)
@@ -4468,9 +4487,12 @@ def test_poll_refaces_melee_after_surface_retreat(monkeypatch, recent_arrow, hp_
     monkeypatch.setattr(guard, "_defend_or_flee", retreat)
     incident = guard.poll()
 
-    expected = ["combat_or_flee", "face_attacker_after_retreat"] if should_face else ["combat_or_flee"]
+    expected = ["combat_or_flee", *([expected_action] if expected_action else [])]
     assert [action["action"] for action in incident["actions"]] == expected
-    assert looks == ([{"entity_id": 55}] if should_face else [])
+    assert looks == ([{"entity_id": 55}] if expected_action else [])
+    assert postures == (
+        [{"shield": True, "jump": False, "sneak": False}] if expected_action == "raise_shield_after_retreat" else []
+    )
 
 
 @pytest.mark.parametrize("distance", [2.2, 5.0])
