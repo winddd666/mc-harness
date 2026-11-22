@@ -4720,13 +4720,28 @@ class SubcorticalInstinctController:
                             trigger.get("source") == "pre_hurt_melee" and 0 < mob_dist <= 1.25
                             and nearest_id == mob_id and nearest.get("blocked_by_wall") is not True
                         )
+                        effects = st_fl.get("effects")
+                        offhand = st_fl.get("offhand")
+                        # A short retreat can leave the shield up while the same skeleton is still within reach.
+                        wither_pursuit = (
+                            mob_name == "wither_skeleton" and nearest_id == mob_id
+                            and _clean_block_name(nearest.get("name")) == "wither_skeleton"
+                            and nearest.get("blocked_by_wall") is not True
+                            and str(st_fl.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                            and st_fl.get("ready") is True and st_fl.get("alive") is True and st_fl.get("on_ground") is True
+                            and isinstance(health_after, (int, float)) and health_after > 0
+                            and isinstance(offhand, dict) and _clean_block_name(offhand.get("name")) == "shield"
+                            and isinstance(effects, list)
+                            and any(isinstance(effect, dict) and _clean_block_name(effect.get("name")) == "wither" for effect in effects)
+                        )
                         critical_pursuit = (
                             same_close_pursuit and isinstance(health_after, (int, float)) and 0 < health_after <= 4.0
                             and st_fl.get("on_ground") is True
                         )
                         guard_range = 5.5 if critical_pursuit else 3.5
                         melee_still_close = (
-                            check_melee_guard and (low_health_after or sealed or same_close_pursuit) and st_fl.get("blocking")
+                            check_melee_guard and st_fl.get("blocking")
+                            and (low_health_after or sealed or same_close_pursuit or wither_pursuit)
                             and isinstance(nearest_id, int) and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
                             and isinstance(nearest_dist, (int, float)) and 0 <= nearest_dist <= guard_range
                         )

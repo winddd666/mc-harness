@@ -6679,6 +6679,70 @@ def test_melee_retreat_keeps_the_shield_up_when_a_point_blank_attacker_pursues(m
         assert poses[-1] == {}
 
 
+@pytest.mark.parametrize("landing", [
+    "pursued", "different_target", "out_of_range", "behind_wall", "no_shield", "no_wither",
+    "new_life", "airborne", "water", "not_ready",
+])
+def test_withered_pursuit_keeps_the_shield_up_through_combat_exit(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    target = {"id": 1084245, "name": "wither_skeleton", "dist": 2.9, "pos": [-373.4, 57, 1742.6]}
+    sword = {"name": "iron_sword", "count": 1}
+    shield = {"name": "shield", "count": 1}
+    status = {
+        "pos": [-373.4, 57, 1742.45], "health": 20, "food": 20, "dimension": "the_nether",
+        "last_death": {"t": 1}, "ready": True, "alive": True, "on_ground": True,
+        "held": sword, "offhand": shield, "blocking": False, "nearest_hostile": target,
+    }
+    postures = []
+
+    class FortressBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **_kwargs):
+            if action == "inventory":
+                return {"items": [sword], "held": sword, "offhand": status["offhand"]}
+            if action == "get_entities":
+                return {"entities": [target]}
+            if action == "posture":
+                postures.append(body)
+                status["blocking"] = bool(body.get("shield"))
+            return {"ok": True}
+
+    def retreat(*_args, **_kwargs):
+        status.update(
+            pos=[-373.4, 57, 1740.2], health=16.2, blocking=True,
+            nearest_hostile={
+                **target,
+                "id": 1084246 if landing == "different_target" else target["id"],
+                "dist": 3.6 if landing == "out_of_range" else 2.6,
+                "blocked_by_wall": landing == "behind_wall",
+            },
+            effects=[] if landing == "no_wither" else [{"name": "wither", "level": 1, "duration_s": 10}],
+            offhand=None if landing == "no_shield" else shield,
+            last_death={"t": 2 if landing == "new_life" else 1},
+            ready=landing != "not_ready", on_ground=landing != "airborne", in_water=landing == "water",
+        )
+        return {"ok": True, "mode": "flee", "moved_dist": 2.25, "pos_after": status["pos"]}
+
+    env = CombatEnv(FortressBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda *_args: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", retreat)
+    outcome = CombatControllerSlot().handle(
+        env, {"source": "pre_hurt_melee", "primary_entity_id": target["id"], "primary_type": target["name"]},
+    )
+
+    should_latch = landing == "pursued"
+    assert {"action": "flee", "ok": True, "moved": 2.25} in outcome["actions"]
+    assert outcome["latched_guard"] is should_latch
+    assert status["blocking"] is should_latch
+    if should_latch:
+        assert {"action": "guard_melee_after_retreat", "ok": True, "entity_id": target["id"]} in outcome["actions"]
+    else:
+        assert postures[-1] == {}
+
+
 @pytest.mark.parametrize("landing", ["pursued", "clear", "still_airborne", "water", "respawned"])
 def test_low_health_after_a_kill_waits_for_safe_footing_and_faces_the_pursuer(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
