@@ -6157,6 +6157,7 @@ class GenerationGuard:
         same_threat_after_timeout = False
         staircase_surface_exit = False
         flowing_lava_target: list[int] | None = None
+        staircase_lava_target: list[int] | None = None
         if tool_results:
             try:
                 last_tool_result = json.loads(tool_results[-1])
@@ -6185,6 +6186,25 @@ class GenerationGuard:
                     target = error.get("target")
                     if isinstance(target, list) and len(target) == 3 and all(type(coord) is int for coord in target):
                         flowing_lava_target = target
+                blocker = last_tool_result.get("blocker")
+                if (
+                    last_tool_result.get("stop_reason") == "fluid_or_bedrock"
+                    and last_tool_result.get("vertical") in {"up", "down"}
+                    and str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                    and isinstance(blocker, dict) and blocker.get("block") in {"lava", "flowing_lava"}
+                    and not any(event.get("type") in {"death", "death_loop", "disconnected", "spawn"} for event in fresh)
+                ):
+                    target = blocker.get("pos")
+                    end_pos, current_pos = last_tool_result.get("pos_after"), status.get("pos")
+                    if (
+                        isinstance(target, list) and len(target) == 3 and all(type(coord) is int for coord in target)
+                        and all(
+                            isinstance(point, (list, tuple)) and len(point) >= 3
+                            and all(type(coord) in (int, float) and math.isfinite(coord) for coord in point[:3])
+                            for point in (end_pos, current_pos)
+                        ) and math.dist(end_pos[:3], current_pos[:3]) <= 0.5
+                    ):
+                        staircase_lava_target = target
                 tool_returned_in_water = in_water
                 tool_stopped_in_water = last_tool_result.get("stop_reason") == "in_water"
                 tool_status = last_tool_result.get("status_after")
@@ -6335,7 +6355,9 @@ class GenerationGuard:
             elif needs_lava_edge_guard and not in_wall_hurt:
                 edge_act = self._action(
                     "boundary_guard_lava_edge",
-                    lambda: self.combat_env.guard_lava_edge(pos_b, flowing_lava_target=flowing_lava_target),
+                    lambda: self.combat_env.guard_lava_edge(
+                        pos_b, flowing_lava_target=flowing_lava_target, staircase_lava_target=staircase_lava_target,
+                    ),
                     raise_on_http_error=False,
                 )
                 edge_res = edge_act.get("result") if isinstance(edge_act.get("result"), dict) else {}

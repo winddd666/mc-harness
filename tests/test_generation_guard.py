@@ -5247,14 +5247,62 @@ def test_tool_boundary_checks_the_reported_lava_flow_above_the_ledge(monkeypatch
     assert ("封边后脱离岩浆" in note) is (outcome == "fell")
 
 
-def test_water_retreat_turns_inward_at_geofence():
+@pytest.mark.parametrize("case", ["diagonal", "above", "duplicate", "stale_position", "dry", "refused"])
+def test_tool_boundary_checks_the_staircase_lava_blocker(case):
+    pos = [1503.4, 66, 1417.5]
+    lava_below = [1503, 65, 1416]
+    blocker = {
+        "diagonal": [1502, 66, 1418], "above": [1502, 68, 1417], "duplicate": lava_below,
+    }.get(case, [1502, 66, 1418])
+    status = {
+        "pos": pos, "dimension": "the_nether", "health": 20, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "in_lava": False,
+    }
+    placements = []
+
+    class LavaBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [{"name": "basalt", "count": 4}]}
+            if action == "get_block":
+                cell = body["pos"]
+                lava = cell == lava_below or (cell == blocker and case != "dry")
+                return {"name": "lava" if lava else "air"}
+            if action == "place":
+                placements.append(body["pos"])
+                return {"ok": not (body["pos"] == blocker and case == "refused")}
+            assert action == "posture"
+            return {"ok": True}
+
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(LavaBot(), events, checkpoint=lambda: None)
+    receipt = json.dumps({
+        "ok": False, "stop_reason": "fluid_or_bedrock", "direction": "south", "vertical": "down",
+        "pos_after": [1506.4, 66, 1417.5] if case == "stale_position" else pos,
+        "blocker": {"block": "lava", "pos": blocker, "relation": "in_path" if case == "above" else "adjacent_fluid"},
+    })
+
+    guard.stabilize_after_tools([receipt])
+
+    expected_placements = [blocker, lava_below] if case in {"diagonal", "above", "refused"} else [lava_below]
+    assert placements == expected_placements
+    completed = next(event for event in events.events if event["type"] == "guardian.action.completed")
+    assert completed["result"]["sealed_positions"] == (expected_placements[1:] if case == "refused" else expected_placements)
+
+
+@pytest.mark.parametrize("submerged", [True, False])
+def test_water_retreat_turns_inward_at_geofence(submerged):
     import math
 
     from mc_agent.harness.geofence import VoidGeofence
     from mc_agent.skills.combat_env import CombatEnv, yaw_to_unit_xz
 
     geofence = VoidGeofence(radius=55.0, margin=5.0)
-    status = {"pos": [49.9, 62.0, 0.0], "yaw": -math.pi / 2, "in_water": True, "submerged": True}
+    status = {"pos": [49.9, 62.0, 0.0], "yaw": -math.pi / 2, "in_water": True, "submerged": submerged, "oxygen": 20}
     motions = []
 
     class WaterBot:
@@ -5279,9 +5327,10 @@ def test_water_retreat_turns_inward_at_geofence():
             return {"ok": True}
 
     result = CombatEnv(WaterBot(), geofence=geofence).escape_deep_water_to_shore()
-    assert result["actions"] == ["water_surface_surge", "surface_retreat_move", "surface_retreat_jump"]
-    assert motions[0]["forward"] is False and motions[0]["jump"] is True
-    assert motions[1]["forward"] is True
+    surge = ["water_surface_surge"] if submerged else []
+    assert result["actions"] == surge + ["surface_retreat_move", "surface_retreat_jump"]
+    assert [motion["forward"] for motion in motions] == ([False, True] if submerged else [True])
+    assert all(motion["jump"] for motion in motions)
 
 
 def test_open_water_outside_geofence_can_swim_toward_the_safe_radius():
@@ -9638,6 +9687,66 @@ def test_r21_preempted_lava_death_reports_respawned_not_escaped():
     assert rec_close["reflex_mode"] == "lava_escape"
     assert "并脱困" not in rec_close["message"]
     assert "死亡并重生" in rec_close["message"]
+
+
+@pytest.mark.parametrize(("stage", "submerged", "oxygen", "surface_needed"), [
+    ("entry", False, 20, False), ("between_hits", False, 20, False), ("exit", False, 20, False),
+    ("entry", None, 20, False), ("entry", None, 300, False), ("entry", None, 9, True), ("entry", False, 9, False),
+    ("between_hits", None, 130, True), ("between_hits", True, 20, True),
+    ("entry", False, 0, True), ("exit", True, 20, True), ("exit", False, 0, True),
+])
+def test_combat_surfaces_only_when_water_status_indicates_danger(monkeypatch, stage, submerged, oxygen, surface_needed):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    zombie = {"id": 24, "name": "zombie", "pos": [1.5, 63.0, 0.5], "dist": 1.0}
+    status = {
+        "pos": [0.5, 63, 0.5], "health": 18, "food": 20, "alive": True, "ready": True,
+        "on_ground": True, "in_water": stage == "entry", "nearest_hostile": zombie,
+    }
+    calls = []
+
+    class WaterCombatBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "attack":
+                calls.append((action, body))
+                status["in_water"] = True
+                finished = stage != "between_hits" or sum(name == "attack" for name, _ in calls) == 2
+                return {"hits": 1, "killed": finished}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [zombie]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 63 else "air"}
+            if action == "posture":
+                calls.append((action, body))
+            return {"ok": True}
+
+    status["oxygen"] = oxygen
+    if submerged is not None:
+        status["submerged"] = submerged
+    env = CombatEnv(WaterCombatBot())
+
+    def surface(_status):
+        calls.append(("surface", {}))
+        return {"ok": True, "in_water": True}
+
+    monkeypatch.setattr(env, "surface_from_water", surface)
+    monkeypatch.setattr(env, "escape_deep_water_to_shore", lambda *_args, **_kwargs: {"ok": False})
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_melee", "primary_entity_id": zombie["id"], "primary_type": "zombie", "distance": 1.0,
+    })
+
+    surfacing = stage != "exit" and surface_needed
+    expected_attacks = 0 if stage == "entry" and surfacing else 2 if stage == "between_hits" and not surfacing else 1
+    assert sum(name == "attack" for name, _ in calls) == expected_attacks
+    assert any(name == "surface" for name, _ in calls) is surfacing
+    assert (outcome["mode"] in {"water_surface", "water_surface_abort"}) is surfacing
+    final_posture = [body for name, body in calls if name == "posture"][-1]
+    assert bool(final_posture.get("jump")) is surface_needed
 
 
 def test_r21_water_surface_abort_latches_shield_and_post_combat_eat_skips_ranged():

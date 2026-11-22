@@ -270,6 +270,24 @@ def _is_lava_block(name: str) -> bool:
     return name in {"lava", "flowing_lava"}
 
 
+def _water_requires_surface(status: dict[str, Any], *, oxygen_bubbles: float) -> bool:
+    if not status.get("in_water"):
+        return False
+    submerged = status.get("submerged")
+    if submerged:
+        return True
+    oxygen = status.get("oxygen")
+    if type(oxygen) not in (int, float) or not math.isfinite(oxygen):
+        return False
+    if oxygen <= 0:
+        return True
+    # An exposed head can keep a low positive reading until the meter refills.
+    if submerged is False:
+        return False
+    bubbles = oxygen if oxygen <= 20 else oxygen / 15
+    return bubbles < oxygen_bubbles
+
+
 def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
     """Return unique integer `(x, z)` columns overlapped by the player's 0.6x0.6 horizontal hitbox."""
     return list(
@@ -3126,8 +3144,7 @@ class CombatEnv:
         except ApiError:
             pass
 
-        oxy0 = st0.get("oxygen")
-        if surface_first or bool(st0.get("submerged")) or (isinstance(oxy0, (int, float)) and oxy0 < 260):
+        if surface_first or _water_requires_surface(st0, oxygen_bubbles=260 / 15):
             swim_forward = (
                 not (surface_first or has_threat or keep_shield)
                 and retry_bank is None
@@ -3569,6 +3586,7 @@ class CombatEnv:
         *,
         counts: dict[str, int] | None = None,
         flowing_lava_target: list[int] | None = None,
+        staircase_lava_target: list[int] | None = None,
     ) -> dict[str, Any]:
         """Force sneak posture and seal exposed lava around the current foothold."""
         st0 = self.bot.status()
@@ -3578,15 +3596,17 @@ class CombatEnv:
         cur_pos = st0.get("pos") or pos or [0.0, 64.0, 0.0]
         bx, by, bz = math.floor(float(cur_pos[0])), math.floor(float(cur_pos[1]) + 0.05), math.floor(float(cur_pos[2]))
         exposed_lava: list[list[int]] = []
-        if flowing_lava_target is not None:
-            fx, fy, fz = flowing_lava_target
-            # A flow above an adjacent column can overrun the ledge even after plugging lower cells.
-            if 1 <= fy - by <= 2 and max(abs(fx - bx), abs(fz - bz)) == 1:
+        reported_lava = staircase_lava_target if staircase_lava_target is not None else flowing_lava_target
+        if reported_lava is not None:
+            fx, fy, fz = reported_lava
+            min_height = -1 if staircase_lava_target is not None else 1
+            # A staircase can expose a diagonal or upper cell the cardinal foothold scan misses.
+            if min_height <= fy - by <= 2 and max(abs(fx - bx), abs(fz - bz)) == 1:
                 self.invalidate_block_cache()
                 if self._point_allowed(fx + 0.5, fz + 0.5, action="guard_lava_edge") and _is_lava_block(
                     self._get_block_name(fx, fy, fz, strict=True)
                 ):
-                    exposed_lava.append(flowing_lava_target)
+                    exposed_lava.append(reported_lava)
         for dx, dz in CARDINAL_VECTORS.values():
             nx, nz = bx + dx, bz + dz
             below_feet = self._get_block_name(nx, by - 1, nz, strict=True)
@@ -3622,9 +3642,11 @@ class CombatEnv:
             except Exception:
                 counts = {}
         filler = self._pick_filler_block(counts)
-        sealed = 0
+        sealed_positions: list[list[int]] = []
         if filler is not None:
-            for index, lpos in enumerate(exposed_lava[:2]):
+            unique_lava = list(dict.fromkeys(map(tuple, exposed_lava)))
+            for index, coordinates in enumerate(unique_lava[:2]):
+                lpos = list(coordinates)
                 if index:
                     current = self._safe_status()
                     if (
@@ -3636,13 +3658,17 @@ class CombatEnv:
                 if not self._point_allowed(lpos[0] + 0.5, lpos[2] + 0.5, action="guard_lava_edge"):
                     continue
                 try:
-                    self.bot.call("place", {"item": filler, "pos": lpos})
-                    sealed += 1
+                    placed = self.bot.call("place", {"item": filler, "pos": lpos})
                 except ApiError:
                     continue
-            if sealed:
+                if isinstance(placed, dict) and placed.get("ok") is not False:
+                    sealed_positions.append(lpos)
+            if sealed_positions:
                 self.invalidate_block_cache()
-        return {"ok": True, "near_lava": True, "sneak": sneaking, "sealed": sealed}
+        return {
+            "ok": True, "near_lava": True, "sneak": sneaking,
+            "sealed": len(sealed_positions), "sealed_positions": sealed_positions,
+        }
 
 
 SUBCORTICAL_COMBAT_BUDGET_S = 7.5
@@ -4089,9 +4115,6 @@ class SubcorticalInstinctController:
         enclosure = None
 
         in_water = bool(st.get("in_water"))
-        submerged = bool(st.get("submerged"))
-        oxy_raw = st.get("oxygen")
-        low_oxygen = isinstance(oxy_raw, (int, float)) and oxy_raw < 180
 
         shielded_arrow_interrupt = (
             has_shield and not in_water and not st.get("on_fire")
@@ -4120,7 +4143,7 @@ class SubcorticalInstinctController:
                 pass
 
         # 0) Underwater drowning emergency: surface immediately instead of burning oxygen in combat!
-        if in_water and (submerged or low_oxygen):
+        if _water_requires_surface(st, oxygen_bubbles=12):
             mode = "water_surface"
             esc = env.surface_from_water(st)
             actions.append({"action": "water_surface", **esc})
@@ -4318,10 +4341,7 @@ class SubcorticalInstinctController:
                     mode = "falling"
                     break
                 hp_cur = float(st_cur.get("health") or 20.0)
-                oxy_cur = st_cur.get("oxygen")
-                if st_cur.get("in_water") and (
-                    st_cur.get("submerged") or (isinstance(oxy_cur, (int, float)) and oxy_cur < 150)
-                ):
+                if _water_requires_surface(st_cur, oxygen_bubbles=10):
                     esc_cur = env.surface_from_water(st_cur)
                     actions.append({"action": "water_surface_abort", **esc_cur})
                     st_w = env._safe_status(st_cur)
@@ -5121,9 +5141,7 @@ class CombatControllerSlot:
             if outcome.get("mode") != "life_unavailable" and not outcome.get("latched_guard", False):
                 st_end = outcome.get("status_after") if isinstance(outcome, dict) else None
                 wet_submerged = isinstance(st_end, dict) and bool(st_end.get("in_water")) and (
-                    bool(st_end.get("submerged"))
-                    or st_end.get("on_ground") is False
-                    or (isinstance(st_end.get("oxygen"), (int, float)) and st_end["oxygen"] < 240)
+                    st_end.get("on_ground") is False or _water_requires_surface(st_end, oxygen_bubbles=16)
                 )
                 posture_payload: dict[str, Any] = {"shield": False, "sneak": False, "jump": True} if wet_submerged else {}
                 for reset_fn in (
