@@ -39,10 +39,10 @@ from typing import TextIO
 
 if __package__:
     from .fleet_lifecycle import LifecycleCounter
-    from .v2_triage import is_http_429_failure
+    from .v2_triage import is_http_429_failure, normalize_tool_error_code
 else:
     from fleet_lifecycle import LifecycleCounter
-    from v2_triage import is_http_429_failure
+    from v2_triage import is_http_429_failure, normalize_tool_error_code
 
 WT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN_ROOT = pathlib.Path("/home/xzq/projects/mc")
@@ -638,7 +638,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 if payload.get("preempted_by_reflex") is True:
                     preemption_receipts += 1
                 elif payload.get("ok") is False:
-                    code = _extract_error_code(payload)
+                    code = normalize_tool_error_code(tname, _extract_error_code(payload))
                     tool_fails[tname] += 1
                     err_codes[f"{tname}:{code}"] += 1
                 if dt >= SLOW_TOOL_THRESHOLD_S:
