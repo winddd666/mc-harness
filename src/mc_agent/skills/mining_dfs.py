@@ -395,7 +395,7 @@ class _BudgetSession:
                         self._call("stop", {}, timeout_s=1.0, allow_reauth=False)
                     except Exception:
                         pass
-                    raise ApiError("dig_timeout", f"dig stalled at {_floor_pos(dig_pos)}", status_code=408) from exc
+                    raise ApiError("dig_timeout", f"dig stalled at {_floor_pos(dig_pos)}") from exc
                 self.timeout_path = endpoint
                 if endpoint == "dig" and isinstance(dig_pos, (list, tuple)) and len(dig_pos) >= 3:
                     self.timeout_dig_pos = _floor_pos(dig_pos)
