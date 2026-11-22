@@ -462,14 +462,14 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("stone_pickaxe", 2),),
         task=(
             "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
-            "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 4 根原木，先顺手砍 4~6 根原木（或备好 2 把 stone_pickaxe）再下井，严防地下断镐无木软锁；"
+            "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 8 根原木，先顺手砍足 8~10 根原木（并备好 2 把 stone_pickaxe）再下井，确保从 Y=16 一气下探 Y=-54 穿钻石靴不断木不断镐；"
             "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
             "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
             "4) 优先调 mc_skill_craft_gear('iron_pickaxe')，铁锭充裕时顺手合出 shield（副手盾）与 1 件铁甲（如 iron_boots/iron_chestplate）完成安全成型即收工。"
         ),
         post_ensure_task=(
             "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=6) 采入；"
-            "若地表无暴露铁矿且包内备用原木/木板不足 4 根原木，先顺手补 4~6 根原木（防地下断镐无木被困），再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
+            "若地表无暴露铁矿且包内备用原木/木板不足 8 根原木，先顺手补足 8~10 根原木（保证一气下探铁层+深层钻石不断木不断镐），再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
         ),
         extra_tools=("mc_skill_container",),
         advancement_id="minecraft:story/iron_tools",
