@@ -3423,9 +3423,29 @@ class SubcorticalInstinctController:
                 ):
                     other_close_creepers = self._other_creeper_positions(post_h, close_creeper.get("id"))
                     followup = env.flee(
-                        close_pos, distance=3.5, urgent=True, allow_shaft_seal=False,
-                        **({"other_creepers": other_close_creepers, "keep_blast_clearance": True} if other_close_creepers else {}),
+                        close_pos, distance=6.0, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
+                        other_creepers=other_close_creepers, keep_blast_clearance=True,
                     )
+                    if followup.get("ok"):
+                        after = env._safe_status({"ready": False})
+                        if after.get("alive") is False or after.get("last_death") != st.get("last_death"):
+                            followup.update(ok=False, respawned=True)
+                        elif after.get("ready") is False or after.get("dimension") != st.get("dimension"):
+                            followup.update(ok=False, reason="blast_clearance_unconfirmed")
+                        else:
+                            scan = self._scan_live_hostiles(env, radius=8, timeout_s=0.6)
+                            threats = list(scan or [])
+                            nearest = after.get("nearest_hostile")
+                            if isinstance(nearest, dict):
+                                threats.append(nearest)
+                            creeper_distance = min((
+                                self._entity_dist(after.get("pos"), threat) for threat in threats
+                                if _clean_block_name(threat.get("name")) == "creeper"
+                            ), default=math.inf)
+                            if creeper_distance <= 5.5:
+                                followup.update(ok=False, reason="creeper_still_close", creeper_distance=creeper_distance)
+                            elif scan is None:
+                                followup.update(ok=False, reason="blast_clearance_unconfirmed")
                     actions.append({"action": "creeper_followup_retreat", **followup})
                 if (
                     (not flee_res.get("ok") or creeper_still_close)

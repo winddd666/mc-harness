@@ -8434,7 +8434,7 @@ def test_unshielded_critical_melee_knockback_rechecks_late_landing(monkeypatch, 
     assert bool(retreat["result"].get("respawned")) is (landing == "respawned")
 
 
-@pytest.mark.parametrize("after_first", ["close", "clear", "respawned"])
+@pytest.mark.parametrize("after_first", ["close", "pursued", "scan_unavailable", "clear", "respawned"])
 def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_first):
     pos = [0.5, 64.0, 0.5]
     creeper_pos = [0.5, 64.0, 4.7]
@@ -8456,6 +8456,8 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
             if action == "inventory":
                 return {"items": [], "offhand": None}
             if action == "get_entities":
+                if len(pulses) == 2 and after_first == "scan_unavailable":
+                    raise httpx.ReadTimeout("creeper scan timed out")
                 return {"entities": [creeper]}
             if action == "find_blocks":
                 return {"blocks": []}
@@ -8470,8 +8472,10 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
                 pos[0] -= math.sin(yaw) * 2.3
                 pos[2] -= math.cos(yaw) * 2.3
                 pulses.append(list(pos))
-                if len(pulses) == 1 and after_first == "close":
+                if len(pulses) == 1 and after_first in {"close", "pursued", "scan_unavailable"}:
                     creeper_pos[:] = [5.1, 64.0, -1.8]
+                elif len(pulses) == 2 and after_first == "pursued":
+                    creeper_pos[:] = [pos[0] + 4.5, pos[1], pos[2]]
                 elif after_first == "respawned":
                     last_death = {"t": 20}
             if action in {"attack", "move_to"}:
@@ -8486,9 +8490,13 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
     assert actions[0]["action"] == "retreat_from_creeper"
     assert actions[0]["ok"] is (after_first == "clear")
     assert pulses[0] == pytest.approx([0.5, 64.0, -1.8])
-    if after_first == "close":
+    if after_first in {"close", "pursued", "scan_unavailable"}:
         assert actions[0]["creeper_distance"] == pytest.approx(4.6)
-        assert actions[1]["action"] == "creeper_followup_retreat" and actions[1]["ok"] is True
+        assert actions[1]["action"] == "creeper_followup_retreat" and actions[1]["ok"] is (after_first == "close")
+        if after_first == "pursued":
+            assert actions[1]["reason"] == "creeper_still_close" and actions[1]["creeper_distance"] == pytest.approx(4.5)
+        elif after_first == "scan_unavailable":
+            assert actions[1]["reason"] == "blast_clearance_unconfirmed"
         assert pulses[1] == pytest.approx([-1.8, 64.0, -1.8])
     else:
         assert len(pulses) == len(actions) == 1
@@ -13133,7 +13141,9 @@ def test_creeper_retreat_avoids_a_second_creeper_on_the_escape_heading(monkeypat
             return {"ok": True}
 
     if short_only:
-        def probe(_env, _pos, yaw, travel):
+        def probe(_env, _pos, yaw, travel, *, allow_step_down=False):
+            if allow_step_down:
+                return None
             dx, dz = yaw_to_unit_xz(yaw)
             if travel <= 1.65 and (dx > 0.95 or (dx < -0.3 and dz > 0.8)):
                 return 66, False
