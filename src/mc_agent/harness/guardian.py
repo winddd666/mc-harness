@@ -5086,9 +5086,24 @@ class GenerationGuard:
                 pass
             stop_reason = trigger.get("source") or "guardian_preempted"
             water_observation = trigger.get("water_observation")
-            preempt_pos = (water_observation or {}).get("pos") or st_pre.get("pos")
+            wet_pos = (water_observation or {}).get("pos")
+            preempt_pos = wet_pos or st_pre.get("pos")
             release = {"action_released": trigger["action_released"]} if "action_released" in trigger else {}
             work_observation: dict[str, Any] = {}
+            if (
+                interrupted_name in MINING_WATER_WATCH_TOOLS and tool_water_threat and outcome.get("mode") == "water_surface"
+                and trigger.get("action_released") is True
+                and water_observation and water_observation.get("reason") == "sustained_submersion"
+                and water_observation.get("submerged") is True and water_observation.get("in_water") is True
+                and isinstance(wet_pos, (list, tuple)) and len(wet_pos) >= 3
+                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in wet_pos[:3])
+                and st_after.get("ready") is True and st_after.get("alive") is not False
+                and st_after.get("in_water") is False and st_after.get("on_ground") is True
+                and not (st_after.get("submerged") or st_after.get("in_lava") or life_changed(st_after))
+            ):
+                water_site = [math.floor(coord) for coord in wet_pos[:3]]
+                work_observation["water_reentry_site"] = water_site
+                summary += f"。请沿干地换一个采矿入口，避开刚才持续沉头的水坑 {water_site}。仅改采集数量仍可能回到原处"
             if last_work_action:
                 work_observation["last_work_action"] = last_work_action
                 threat_id = trigger.get("primary_entity_id")

@@ -14933,7 +14933,8 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
 
 @pytest.mark.parametrize("condition, oxygen, expected_reason, sample_count", [
     ("brief", 20, None, 2), ("brief", 140, None, 2),
-    ("continuous", 20, "sustained_submersion", 3), ("continuous", 140, "sustained_submersion", 3),
+    ("continuous", 17, "sustained_submersion", 3), ("continuous", 20, "sustained_submersion", 3),
+    ("continuous", 140, "sustained_submersion", 3),
     ("continuous", 400, "sustained_submersion", 3), ("continuous", None, "sustained_submersion", 3),
     ("health_missing", None, "sustained_submersion", 3), ("sinking", 20, "sustained_sinking", 2),
     ("new_life", 400, "sustained_submersion", 4),
@@ -15008,6 +15009,53 @@ def test_bug009_full_air_reading_uses_water_motion_and_duration(monkeypatch, con
         assert observation["reason"] == expected_reason and observation["submerged"] is True
         first_current_life_sample = 1 if condition == "new_life" else 0
         assert observation["submerged_for_s"] == pytest.approx(samples[-1] - samples[first_current_life_sample])
+        if expected_reason == "sustained_submersion":
+            assert result["water_reentry_site"] == preempted["water_reentry_site"] == [-10891, 58, 2566]
+            assert "沿干地换一个采矿入口" in result["message"]
+        else:
+            assert "water_reentry_site" not in result and "water_reentry_site" not in preempted
+
+
+@pytest.mark.parametrize("recovery", ["landed", "unreleased", "still_wet", "respawned", "missing_water_pos"])
+def test_first_mining_submersion_names_the_water_site_only_after_safe_handoff(monkeypatch, recovery):
+    wet = [309368.5, 61, 301962.5]
+    status = {
+        "pos": wet, "in_water": True, "submerged": True, "on_ground": False, "health": 20,
+        "oxygen": 17, "dimension": "overworld", "last_death": {"t": 1}, "ready": True, "alive": True,
+    }
+
+    class CoastBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            return {"ok": True, "items": []}
+
+    def shore(*_args, **_kwargs):
+        if recovery == "still_wet":
+            return {"ok": False, "in_water": True}
+        if recovery == "respawned":
+            status["last_death"] = {"t": 2}
+        status.update(pos=[309369.4, 64, 301962.5], in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False, "pos_after": status["pos"]}
+
+    guard = GenerationGuard(CoastBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    water = {**status, "reason": "sustained_submersion", "submerged_for_s": 2.05}
+    if recovery == "missing_water_pos":
+        water.pop("pos")
+    receipt = guard.handle_preemption({
+        "source": "tool_water_threat", "observed_life": ("overworld", {"t": 1}), "water_observation": water,
+        "action_released": recovery != "unreleased",
+    }, interrupted_name="mc_skill_mine_blocks")
+
+    if recovery == "landed":
+        assert receipt["water_reentry_site"] == [309368, 61, 301962]
+        assert "[309368, 61, 301962]" in receipt["message"]
+        assert "沿干地换一个采矿入口" in receipt["message"]
+    else:
+        assert "water_reentry_site" not in receipt
 
 
 @pytest.mark.parametrize("oxygen, reason", [(20, None), (400, None), (20, "drowned"), (400, "hurt")])
