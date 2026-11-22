@@ -2979,7 +2979,8 @@ def test_combat_attacks_reserve_time_for_final_status_and_release(monkeypatch, r
     assert outcome["status_after"]["health"] == 20
 
 
-def test_counterattack_stops_when_the_latest_scan_puts_the_target_behind_a_wall():
+@pytest.mark.parametrize("latest_scan", ["blocked", "empty", "different_target", "timeout"])
+def test_counterattack_uses_latest_confirmed_target_sighting(latest_scan):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
     target = {"id": 42, "name": "zombie", "pos": [3.5, 64, 0.5], "dist": 3.0}
@@ -2996,17 +2997,34 @@ def test_counterattack_stops_when_the_latest_scan_puts_the_target_behind_a_wall(
                 return {"items": [{"name": "iron_sword", "count": 1}]}
             if action == "get_entities":
                 scans += 1
-                return {"entities": [{**target, "blocked_by_wall": scans > 1}]}
+                if scans == 1:
+                    return {"entities": [target]}
+                if latest_scan == "blocked":
+                    return {"entities": [{**target, "blocked_by_wall": True}]}
+                if latest_scan == "different_target":
+                    return {"entities": [{**target, "id": 43}]}
+                if latest_scan == "timeout":
+                    raise httpx.ReadTimeout("entity scan timed out")
+                return {"entities": []}
             if action == "attack":
-                pytest.fail("Guardian attempted to chase a target behind a wall")
+                assert latest_scan == "timeout" and body["entity_id"] == target["id"]
+                raise httpx.ReadTimeout("attack reply timed out")
             return {"ok": True}
 
-    outcome = CombatControllerSlot().handle(CombatEnv(CaveBot()), {
+    trigger = {
         "source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie", "distance": 3.0,
-    })
+    }
+    env = CombatEnv(CaveBot())
+    slot = CombatControllerSlot()
+    if latest_scan == "timeout":
+        with pytest.raises(httpx.ReadTimeout, match="attack reply timed out"):
+            slot.handle(env, trigger)
+    else:
+        outcome = slot.handle(env, trigger)
+        code = "blocked_by_wall" if latest_scan == "blocked" else "target_not_visible"
+        assert {"action": "melee_attack", "entity_id": 42, "ok": False, "code": code} in outcome["actions"]
 
     assert scans == 2
-    assert {"action": "melee_attack", "entity_id": 42, "ok": False, "code": "blocked_by_wall"} in outcome["actions"]
 
 
 @pytest.mark.parametrize("scenario", ["cornered", "escaped", "second_hostile", "out_of_reach"])

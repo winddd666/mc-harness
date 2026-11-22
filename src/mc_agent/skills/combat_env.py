@@ -2984,16 +2984,24 @@ class SubcorticalInstinctController:
     def _find_live_hostiles(
         self, env: CombatEnv, radius: int = 16, *, timeout_s: float | None = None,
     ) -> list[dict[str, Any]]:
+        return self._scan_live_hostiles(env, radius, timeout_s=timeout_s) or []
+
+    def _scan_live_hostiles(
+        self, env: CombatEnv, radius: int, *, timeout_s: float | None = None,
+    ) -> list[dict[str, Any]] | None:
         try:
             transport = {"timeout_s": timeout_s, "allow_reauth": False} if timeout_s is not None else {}
             res = env.bot.call("get_entities", {"radius": radius, "types": ["hostile"]}, **transport)
-            rows = [e for e in (res or {}).get("entities") or [] if isinstance(e, dict)]
+            entities = res.get("entities") if isinstance(res, dict) else None
+            if not isinstance(entities, list):
+                return None
+            rows = [e for e in entities if isinstance(e, dict)]
             rows.sort(key=lambda e: float(e.get("dist", 999.0)))
             return rows
         except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
             raise
         except Exception:
-            return []
+            return None
 
     @staticmethod
     def _other_creeper_positions(hostiles: Sequence[dict[str, Any]], target_id: int | None) -> list[Sequence[float]]:
@@ -3413,7 +3421,8 @@ class SubcorticalInstinctController:
                             latched_guard = self._latch_shield_at_threat(env, int(mob_id) if mob_id is not None else None)
                     mode = "low_hp_disengage"
                     break
-                cur_hostiles = self._find_live_hostiles(env, radius=10)
+                sighting = self._scan_live_hostiles(env, radius=10)
+                cur_hostiles = sighting or []
                 if any(_clean_block_name(e.get("name")) == "creeper" and float(e.get("dist", 99.0)) <= 5.0 for e in cur_hostiles):
                     flee_cr = env.flee(mob_pos, distance=11.0, urgent=True)
                     actions.append({"action": "creeper_intruded_flee", "ok": bool(flee_cr.get("ok"))})
@@ -3426,6 +3435,9 @@ class SubcorticalInstinctController:
                 )
                 if target_ent is None and mob_id is None:
                     killed = True
+                    break
+                if target_ent is None and sighting is not None:
+                    actions.append({"action": "melee_attack", "entity_id": mob_id, "ok": False, "code": "target_not_visible"})
                     break
                 eff_id = int(target_ent["id"]) if isinstance(target_ent, dict) and target_ent.get("id") is not None else mob_id
                 if eff_id is None:
