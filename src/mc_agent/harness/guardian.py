@@ -4608,6 +4608,7 @@ class GenerationGuard:
             if stop_evt.wait(0.30):
                 return
             watch_hp0: float | None = None
+            combat_life: tuple[Any, Any] | None = None
             last_terrain_health: float | None = None
             previous_water_health: tuple[tuple[Any, Any], float] | None = None
             submersion_start: tuple[tuple[Any, Any], float] | None = None
@@ -4626,6 +4627,11 @@ class GenerationGuard:
                             return
                         continue
                     cur_hp = st.get("health")
+                    observed_life = (st.get("dimension"), st.get("last_death"))
+                    available = st.get("ready") is not False and st.get("alive") is not False
+                    if check_combat_step and (observed_life != combat_life or not available):
+                        watch_hp0 = None
+                        combat_life = observed_life if available else None
                     if watch_hp0 is None and isinstance(cur_hp, (int, float)):
                         watch_hp0 = float(cur_hp)
                     nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(st)
@@ -4700,6 +4706,27 @@ class GenerationGuard:
                     ):
                         hp_dropped = False
                         watch_hp0 = float(cur_hp)
+                    fireball_source = None
+                    if (
+                        check_combat_step and not hp_dropped and st.get("ready") is True and available
+                        and not in_lava_now and not st.get("in_water")
+                        and str(st.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                        and watch_hp0 is not None and isinstance(cur_hp, (int, float))
+                        and 0 < cur_hp <= 10.0 and watch_hp0 - cur_hp >= 4.0
+                    ):
+                        # A ranged fight can keep polling outside the ordinary 16-block hurt radius.
+                        hit = self._fresh_tool_hurt_event(orig_call, ignore_burn_ticks=True) or {}
+                        source = str(hit.get("source") or "").strip().lower()
+                        if source in {"fireball", "small_fireball"}:
+                            hp_dropped = True
+                            fireball_source = source
+                            shooter_name, shooter_dist, shooter_id, shooter_pos = self._extract_hostile_info(
+                                {"nearest_hostile": hit.get("source_entity")},
+                            )
+                            if shooter_name in {"blaze", "ghast"} and shooter_id is not None:
+                                nh_name, nh_dist, nh_id, nh_pos = shooter_name, shooter_dist, shooter_id, shooter_pos
+                            elif nh_name not in {"blaze", "ghast"}:
+                                nh_name, nh_dist, nh_id, nh_pos = "hostile", 999.0, None, None
                     melee_ambush = (
                         nh_name in PRE_HURT_MELEE_MOBS
                         and nh_dist <= 3.0
@@ -4710,8 +4737,6 @@ class GenerationGuard:
                         and nh_dist <= 4.5
                         and not self._is_pre_hurt_debounced(nh_id, nh_name)
                     )
-                    observed_life = (st.get("dimension"), st.get("last_death"))
-                    available = st.get("ready") is not False and st.get("alive") is not False
                     water_hp_dropped = False
                     submerged_for_s = None
                     sustained_sinking = False
@@ -4842,6 +4867,7 @@ class GenerationGuard:
                                 "distance": dist_w,
                                 **({"observed_life": observed_life}
                                    if src_w in {"tool_water_threat", "tool_interrupted_hurt"} else {}),
+                                **({"hurt_source": fireball_source} if fireball_source and src_w == "tool_interrupted_hurt" else {}),
                                 **({"water_observation": {
                                     "reason": water_risk,
                                     "submerged_for_s": round(submerged_for_s, 3) if submerged_for_s is not None else None,
@@ -4950,13 +4976,20 @@ class GenerationGuard:
                         remaining_ms = min(remaining_ms, int(timeout_ms))
                     body = {**body, "timeout": remaining_ms}
                 return actor_call(path, body, **kwargs)
+            if pending_trigger and not self._in_reflex and (check_combat_step or not is_readonly_poll):
+                raise ReflexPreempted(pending_trigger[0])
             if is_readonly_poll:
-                observed = actor_call(path, body, **kwargs)
+                try:
+                    observed = actor_call(path, body, **kwargs)
+                except (ApiError, httpx.HTTPError):
+                    if check_combat_step and pending_trigger and not self._in_reflex:
+                        raise ReflexPreempted(pending_trigger[0]) from None
+                    raise
+                if check_combat_step and pending_trigger and not self._in_reflex:
+                    raise ReflexPreempted(pending_trigger[0])
                 if check_unstick_exit and clean_path == "status" and not unstick_start and isinstance(observed, dict):
                     unstick_start.update(observed)
                 return observed
-            if pending_trigger and not self._in_reflex:
-                raise ReflexPreempted(pending_trigger[0])
             if check_mining_landing and isinstance(body, dict):
                 if clean_path == "move_to":
                     target = [body.get(axis) for axis in ("x", "y", "z")]
@@ -5119,8 +5152,12 @@ class GenerationGuard:
             if watcher_thread is not None:
                 # Finish a dispatched /stop before issuing a recovery mutation.
                 watcher_thread.join(timeout=1.55 if pending_trigger else 0.05)
+        if check_combat_step and pending_trigger:
+            raise ReflexPreempted(pending_trigger[0])
 
-    def _fresh_tool_hurt_event(self, call: Callable[..., dict[str, Any]]) -> dict[str, Any] | None:
+    def _fresh_tool_hurt_event(
+        self, call: Callable[..., dict[str, Any]], *, ignore_burn_ticks: bool = False,
+    ) -> dict[str, Any] | None:
         since = self.cursor
         try:
             page = call(
@@ -5140,6 +5177,8 @@ class GenerationGuard:
             timestamp = event.get("t")
             if isinstance(timestamp, (int, float)) and time.time() - timestamp / 1000 > 3.0:
                 return None
+            if ignore_burn_ticks and str(event.get("source") or "").strip().lower() in FIRE_HURT_SOURCES:
+                continue
             return event
         return None
 
@@ -5654,6 +5693,10 @@ class GenerationGuard:
             wet_pos = (water_observation or {}).get("pos")
             preempt_pos = wet_pos or fall_start_pos or st_pre.get("pos")
             release = {"action_released": trigger["action_released"]} if "action_released" in trigger else {}
+            hurt_detail = (
+                {"hurt_source": trigger["hurt_source"]}
+                if interrupted_name == "mc_skill_combat" and trigger.get("hurt_source") else {}
+            )
             work_observation: dict[str, Any] = {}
             if (
                 interrupted_name in MINING_WATER_WATCH_TOOLS and tool_water_threat and outcome.get("mode") == "water_surface"
@@ -5697,6 +5740,7 @@ class GenerationGuard:
                 **({"pos_after": st_after["pos"]} if st_after.get("pos") is not None else {}),
                 **({"water_risk": water_observation["reason"]} if water_observation and water_observation.get("reason") else {}),
                 **release,
+                **hurt_detail,
                 **work_observation,
             }
             if outcome.get("mode") == "network_timeout":
@@ -5711,7 +5755,7 @@ class GenerationGuard:
                 lava_status["status_after"] = receipt["status_after"]
             self.events.emit(
                 "guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary,
-                stop_reason=stop_reason, **lava_status, **release, **work_observation,
+                stop_reason=stop_reason, **lava_status, **release, **hurt_detail, **work_observation,
                 **({"water_observation": water_observation} if water_observation is not None else {}),
             )
             return receipt

@@ -16877,6 +16877,93 @@ def test_nether_combat_checks_footing_before_issuing_a_chase_pulse(terrain):
         assert result["requires_replan"] and result["error"]["code"] == "unsafe_landing"
 
 
+@pytest.mark.parametrize("case", [
+    "distant_blaze", "unlisted_blaze", "read_timeout", "minor_hit", "ambient_fire", "new_life", "stale_hit",
+])
+def test_nether_combat_unwinds_read_polls_under_sustained_fireball_damage(monkeypatch, case):
+    import threading
+    import time
+
+    from mc_agent.skills.combat_adapter import BotSessionCombatAdapter
+
+    actor = threading.get_ident()
+    observed = threading.Event()
+    stopped = threading.Event()
+    in_flight_read = case in {"unlisted_blaze", "read_timeout"}
+    should_preempt = case == "distant_blaze" or in_flight_read
+    fireball_source = "small_fireball" if case == "unlisted_blaze" else "fireball"
+    blaze = {"id": 1133882, "name": "blaze", "dist": 20.1, "pos": [20.6, 64, 0.5]}
+    status = {
+        "ready": True, "alive": True, "health": 20, "food": 20, "pos": [0.5, 64, 0.5],
+        "on_ground": True, "dimension": "the_nether", "last_death": None,
+        "nearest_hostile": None if case == "unlisted_blaze" else blaze,
+    }
+    hurt_events = []
+    actions = []
+
+    class CombatBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if threading.get_ident() != actor:
+                    snapshot = dict(status)
+                    observed.set()
+                    return snapshot
+                if not guard._in_reflex:
+                    actions.append("actor_read")
+                    if in_flight_read:
+                        stopped.wait(1.5)
+                        if case == "read_timeout":
+                            raise httpx.ReadTimeout("battle status response timed out")
+                return dict(status)
+            if action == "events":
+                return {"events": list(hurt_events)}
+            if action == "stop":
+                actions.append("stop")
+                stopped.set()
+                return {"ok": True, "released": True}
+            raise AssertionError(action)
+
+    bot = CombatBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    adapter = BotSessionCombatAdapter(bot)
+
+    def retreat(_env, trigger):
+        assert trigger["source"] == "tool_interrupted_hurt"
+        assert trigger["hurt_source"] == fireball_source
+        assert trigger["primary_entity_id"] == blaze["id"]
+        actions.append("retreat")
+        return {"handled": True, "mode": "cover_or_flee", "status_after": dict(status)}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", retreat)
+
+    def invoke():
+        assert observed.wait(2.0)
+        timestamp = (time.time() - (10.0 if case == "stale_hit" else 0.0)) * 1000
+        if case != "ambient_fire":
+            hurt = {"type": "hurt", "seq": 1, "source": fireball_source, "t": timestamp}
+            if case == "unlisted_blaze":
+                hurt["source_entity"] = blaze
+            hurt_events.append(hurt)
+        hurt_events.append({"type": "hurt", "seq": 2, "source": "on_fire", "t": time.time() * 1000})
+        status.update(health=18 if case == "minor_hit" else 7.5, on_fire=True)
+        if case == "new_life":
+            status["last_death"] = {"seq": 3}
+        if not in_flight_read:
+            stopped.wait(1.5 if should_preempt else 0.75)
+        result = adapter.call("status", method="GET")
+        actions.append("continued")
+        return json.dumps(result)
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_combat", invoke))
+    if should_preempt:
+        assert result["preempted_by_reflex"] is True
+        assert result["action_released"] is True
+        assert result["hurt_source"] == fireball_source
+        assert actions == (["actor_read"] if in_flight_read else []) + ["stop", "retreat"]
+    else:
+        assert actions == ["actor_read", "continued"]
+
+
 @pytest.mark.parametrize(("tool", "endpoint", "interrupted_error"), [
     ("mc_skill_mine_dfs", "dig", False), ("mc_skill_combat", "move_to", False),
     ("mc_move_to", "move_to", False), ("mc_move_to", "move_to", True),
