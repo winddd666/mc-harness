@@ -2456,14 +2456,13 @@ class MiningDFSEngine:
                 above_bedrock = [p for p in found_pts if p[1] >= -59]
                 if above_bedrock:
                     found_pts = above_bedrock
-            if abs(anchor[1] - self.target_y) <= 8:
-                in_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 8]
-                if in_band:
-                    found_pts = in_band
-                else:
-                    near_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 10]
-                    if near_band:
-                        found_pts = near_band
+            in_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 8]
+            if in_band:
+                found_pts = in_band
+            else:
+                near_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 10]
+                if near_band:
+                    found_pts = near_band
 
         if not self.surgical_enabled:
             # 'v5' mode: original v4 nearest single-point radar ordering (no hostile cluster triage)
