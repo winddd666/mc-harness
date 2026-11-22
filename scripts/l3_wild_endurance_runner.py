@@ -210,15 +210,18 @@ def _portal_free_landing(bot: Any) -> bool:
     return result.get("blocks") == []
 
 
+def _dry_wild_slot(start_idx: int) -> tuple[int, int]:
+    ring, slot_idx = divmod(int(start_idx), len(CANDIDATE_SITES))
+    return slot_idx, max(0, ring) * 2500
+
+
 def select_dry_isolated_wild_site(
     bot: Any, bot_name: str, start_idx: int = 0, *, day1: bool = False,
 ) -> tuple[float, float, float, str]:
     """Find a dry, wooded Overworld landing for the configured slot."""
     from mc_agent.kb import normalize_dimension
 
-    ring = max(0, int(start_idx)) // len(CANDIDATE_SITES)
-    ring_shift = ring * 2500
-    slot_idx = int(start_idx) % len(CANDIDATE_SITES)
+    slot_idx, ring_shift = _dry_wild_slot(start_idx)
     if day1:
         # r41 global fallbacks sent two bots to a shared portal area. Translate the
         # whole slot layout for backups, keeping the same separation in each region.
@@ -2243,8 +2246,15 @@ def main() -> int:
             except ValueError:
                 raise SystemExit("--plan-pos must be 'x,y,z'")
         else:
-            sites = NETHER_CANDIDATE_SITES if args.stage in NETHER_STAGES else CANDIDATE_SITES
-            ax, az = sites[args.site_index % len(sites)]
+            if args.stage in NETHER_STAGES:
+                ax, az = NETHER_CANDIDATE_SITES[args.site_index % len(NETHER_CANDIDATE_SITES)]
+            else:
+                slot_idx, ring_shift = _dry_wild_slot(args.site_index)
+                ax, az = CANDIDATE_SITES[slot_idx]
+                if not args.day1 and args.stage not in (
+                    "village", "village_trade", "deep_water", DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE,
+                ):
+                    ax, az = ax + ring_shift, az + ring_shift
             px, py, pz = float(ax) + 0.5, 64.0, float(az) + 0.5
         if args.stage in PROBE_HEIGHTS:
             px, py, pz = _fixture_position(args.stage, px, py, pz)
