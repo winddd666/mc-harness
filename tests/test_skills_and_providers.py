@@ -859,7 +859,7 @@ def test_collect_drops_honors_explicit_budget_without_item_filter(monkeypatch) -
     def handler(request):
         assert request.url.path.endswith("/inventory")
         timeout = request.extensions["timeout"]["read"]
-        assert timeout == pytest.approx(5.0)
+        assert 0 < timeout <= 5.0
         clock[0] += timeout
         raise httpx.ReadTimeout("offline slow inventory", request=request)
 
@@ -867,6 +867,31 @@ def test_collect_drops_honors_explicit_budget_without_item_filter(monkeypatch) -
         result = MacroSkills(bot).collect_drops(radius=8, max_duration_s=6.0)
 
     assert result["error"] == "pickup_time_budget"
+    assert clock[0] <= 106.0
+
+
+@pytest.mark.parametrize("item_types", [None, ["diamond"]])
+def test_collect_drops_accounts_for_the_protocol_retry_in_its_budget(monkeypatch, item_types) -> None:
+    clock = [100.0]
+    requests = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    def handler(request):
+        assert request.url.path.endswith("/inventory")
+        attempt_cost = sum(request.extensions["timeout"].values())
+        requests.append(attempt_cost)
+        clock[0] += min(4.95, attempt_cost - 0.01) if len(requests) == 1 else attempt_cost
+        if len(requests) == 1:
+            raise httpx.RemoteProtocolError("offline keepalive closed", request=request)
+        raise httpx.ReadTimeout("offline retry stalled", request=request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).collect_drops(item_types=item_types, max_duration_s=6.0)
+
+    assert result["error"] == "pickup_time_budget"
+    assert len(requests) == 2
+    assert sum(requests) + 0.15 <= 5.0 + 1e-9
     assert clock[0] <= 106.0
 
 

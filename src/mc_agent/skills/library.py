@@ -1308,8 +1308,9 @@ class _SkillBudgetSession:
     # window/view opens a GUI under the server's action lease.
     _READS = frozenset({"status", "inventory", "get_block", "find_blocks", "get_entities"})
 
-    def __init__(self, bot: BotSession, max_duration_s: float) -> None:
+    def __init__(self, bot: BotSession, max_duration_s: float, *, bound_transport_retries: bool = False) -> None:
         self.bot = bot
+        self.bound_transport_retries = bound_transport_retries
         budget = max(0.0, float(max_duration_s))
         self.finish_at = time.monotonic() + budget
         self.deadline = self.finish_at - min(1.0, budget / 4)
@@ -1326,14 +1327,39 @@ class _SkillBudgetSession:
             raise _SkillDeadline()
         return remaining
 
+    @staticmethod
+    def _retry_timeout(remaining: float, read_cap: float) -> httpx.Timeout:
+        # BotSession can retry a protocol failure once with the same timeout
+        # after a 150 ms pause. Reserve both attempts and their request phases.
+        per_attempt = (remaining - 0.15) / 2
+        if per_attempt <= 0:
+            raise _SkillDeadline()
+        phase = min(0.25, per_attempt / 4)
+        return httpx.Timeout(min(read_cap, per_attempt - 3 * phase), pool=phase, connect=phase, write=phase)
+
     def call(
-        self, path: str, body: dict[str, Any] | None = None, *, timeout_s: float | None = None, **kwargs: Any
+        self, path: str, body: dict[str, Any] | None = None, *, timeout_s: float | None = None,
+        _transport_deadline: float | None = None, **kwargs: Any,
     ) -> dict[str, Any]:
         remaining = self._remaining()
         timeout = remaining if timeout_s is None else min(remaining, timeout_s)
+        request_timeout: float | httpx.Timeout = timeout
+        if self.bound_transport_retries or _transport_deadline is not None:
+            limit = self.deadline if _transport_deadline is None else min(self.deadline, _transport_deadline)
+            if isinstance(self.bot, _SkillBudgetSession):
+                kwargs["_transport_deadline"] = limit
+            elif getattr(self.bot.call, "__func__", None) is BotSession.call:
+                request_timeout = self._retry_timeout(limit - time.monotonic(), timeout)
+                kwargs["allow_reauth"] = False
+                if path in {"move_to", "control"} and body is not None:
+                    field = "timeout" if path == "move_to" else "ms"
+                    milliseconds = int((request_timeout.read - 0.2) * 1000)
+                    if milliseconds < 50:
+                        raise _SkillDeadline()
+                    body = {**body, field: min(milliseconds, int(body.get(field, milliseconds)))}
         try:
             if self.supports_timeout:
-                return self.bot.call(path, body, timeout_s=timeout, **kwargs)
+                return self.bot.call(path, body, timeout_s=request_timeout, **kwargs)
             return self.bot.call(path, body)
         except httpx.TimeoutException:
             self.timed_out = True
@@ -1361,8 +1387,11 @@ class _SkillBudgetSession:
         if self.pending_action and remaining > 0 and self.supports_timeout:
             self.pending_action = False
             try:
-                stopped = self.bot.call("stop", {}, timeout_s=min(1.0, remaining), allow_reauth=False)
-            except (ApiError, httpx.HTTPError):
+                timeout: float | httpx.Timeout = min(1.0, remaining)
+                if self.bound_transport_retries and getattr(self.bot.call, "__func__", None) is BotSession.call:
+                    timeout = self._retry_timeout(remaining, timeout)
+                stopped = self.bot.call("stop", {}, timeout_s=timeout, allow_reauth=False)
+            except (ApiError, httpx.HTTPError, _SkillDeadline):
                 return False
             return stopped.get("released") is True or (
                 stopped.get("stopped") is True and "action" in stopped and stopped["action"] is None
@@ -3218,8 +3247,8 @@ class MacroSkills:
         outer_deadline = getattr(self.bot, "_mining_deadline", started + 9.0)
         if isinstance(self.bot, _SkillBudgetSession):
             outer_deadline = self.bot.deadline
-        budget = min(8.0, outer_deadline - started - 0.5)
-        session = _SkillBudgetSession(self.bot, budget)
+        budget = min(6.0, outer_deadline - started - 0.5)
+        session = _SkillBudgetSession(self.bot, budget, bound_transport_retries=True)
         terrain = CombatEnv(session, geofence=self.geofence)
         attempts: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
@@ -3337,7 +3366,9 @@ class MacroSkills:
             return {"ok": False, "error": "bad_args", "message": "item_types 需要至少一个物品名。"}
         if wanted is None and max_duration_s is None:
             return self._collect_drops(radius, max_pickups, wanted)
-        session = _SkillBudgetSession(self.bot, 12.0 if max_duration_s is None else max_duration_s)
+        session = _SkillBudgetSession(
+            self.bot, 12.0 if max_duration_s is None else max_duration_s, bound_transport_retries=True,
+        )
         scoped = copy(self)
         scoped.bot = session
         try:
