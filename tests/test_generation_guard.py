@@ -1155,6 +1155,86 @@ def test_tool_hurt_does_not_treat_distant_creeper_as_melee_attacker(monkeypatch,
     assert retreat_targets == [(expected_target, expected_target is not None)]
 
 
+@pytest.mark.parametrize("source, distance, preempt", [
+    ("fall", 10.3, False), ("stalagmite", 7.8, False), ("stalagmite", 3.9, True),
+    ("entity_explosion", 9.9, True), (None, 10.3, True),
+])
+def test_terrain_interruption_does_not_attribute_hurt_to_a_distant_creeper(monkeypatch, source, distance, preempt):
+    status = {
+        "pos": [-7028.9, 69, 5757.3], "health": 19, "ready": True, "alive": True, "on_ground": True,
+        "nearest_hostile": {"id": 42, "name": "creeper", "dist": distance},
+    }
+    triggers = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "move_to":
+                return {"interrupted_by": "hurt"}
+            if action == "events":
+                events = [{"seq": 1, "type": "hurt", "source": source}] if source else []
+                return {"events": events, "last_seq": len(events)}
+            return {"ok": True}
+
+    def combat(trigger):
+        triggers.append(trigger)
+        return {"handled": True, "mode": "creeper_evade", "status_after": dict(status)}
+
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
+    result = json.loads(guard.run_tool_with_reflex("mc_move_to", lambda: json.dumps(bot.call("move_to"))))
+
+    assert bool(triggers) is preempt
+    if preempt:
+        assert result["reflex_mode"] == "creeper_evade"
+    else:
+        assert result == {"interrupted_by": "hurt"}
+
+
+def test_watched_movement_ignores_confirmed_stalagmite_damage_near_a_distant_creeper(monkeypatch):
+    import threading
+
+    baseline = threading.Event()
+    damaged = threading.Event()
+    read_hurt = threading.Event()
+    status = {"pos": [0.5, 68, 0.5], "health": 20, "ready": True, "alive": True, "on_ground": True,
+              "nearest_hostile": {"id": 42, "name": "creeper", "dist": 8.8}}
+    stops = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                sample = dict(status)
+                if threading.current_thread().name == "mc-creeper-watch":
+                    baseline.set()
+                return sample
+            if action == "move_to":
+                assert baseline.wait(1.5)
+                status["health"] = 18
+                damaged.set()
+                assert read_hurt.wait(1.5)
+                return {"moved": True}
+            if action == "events" and damaged.is_set():
+                read_hurt.set()
+                return {"events": [{"seq": 1, "type": "hurt", "source": "stalagmite"}]}
+            if action == "stop":
+                stops.append(action)
+            return {"ok": True}
+
+    def unexpected_combat(_trigger):
+        raise AssertionError("terrain damage started a combat reflex")
+
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", unexpected_combat)
+    result = json.loads(guard.run_tool_with_reflex("mc_move_to", lambda: json.dumps(bot.call("move_to"))))
+
+    assert result == {"moved": True}
+    assert stops == []
+
+
 @pytest.mark.parametrize("respawned", [False, True])
 def test_interrupted_tool_reports_combat_api_failure_and_rechecks_life(monkeypatch, respawned):
     status = {

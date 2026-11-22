@@ -3439,6 +3439,12 @@ class GenerationGuard:
                 "observed_life": (status.get("dimension"), status.get("last_death")),
             }
 
+        def terrain_hit_near_distant_creeper(name: str, distance: float, call: Callable[..., dict[str, Any]]) -> bool:
+            if name != "creeper" or distance <= 4.5:
+                return False
+            event = self._fresh_tool_hurt_event(call) or {}
+            return str(event.get("source") or "").strip().lower() in {"fall", "stalagmite", "falling_stalactite"}
+
         def interrupted_action_trigger(max_enemy_distance: float, *, wall_only: bool) -> ThreatTrigger | None:
             try:
                 status = actor_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
@@ -3455,7 +3461,7 @@ class GenerationGuard:
                     "primary_pos": None, "distance": 0.0,
                 }
             name, dist, entity_id, pos = self._extract_hostile_info(status)
-            if name and dist <= max_enemy_distance:
+            if name and dist <= max_enemy_distance and not terrain_hit_near_distant_creeper(name, dist, actor_call):
                 return {
                     "source": "tool_interrupted_hurt", "primary_entity_id": entity_id, "primary_type": name,
                     "primary_pos": pos, "distance": dist,
@@ -3579,6 +3585,11 @@ class GenerationGuard:
                         and bool(nh_name)
                         and nh_dist <= 16.0
                     )
+                    if hp_dropped and not in_lava_now and not st.get("in_water") and terrain_hit_near_distant_creeper(
+                        nh_name, nh_dist, orig_call,
+                    ):
+                        hp_dropped = False
+                        watch_hp0 = float(cur_hp)
                     melee_ambush = (
                         nh_name in PRE_HURT_MELEE_MOBS
                         and nh_dist <= 3.0
