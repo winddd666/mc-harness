@@ -1463,6 +1463,7 @@ class MacroSkills:
         self._temporary_furnaces: set[tuple[str, tuple[int, ...]]] = set()
         self._pending_furnace_takes: dict[tuple[str, tuple[int, ...], str], tuple[int, int]] = {}
         self._placed_storage: dict[tuple[str, tuple[int, ...]], str] = {}
+        self._dfs_storage_reports: list[dict[str, Any]] | None = None
         self._mining_dfs: Any = None
         self.world_memory: Any = None
         self._terrain_nav: Any = None
@@ -2118,6 +2119,9 @@ class MacroSkills:
         if not isinstance(inv, dict):
             return {}, []
         empty_now = _compute_empty_slots(inv)
+        mining_deadline = getattr(self.bot, "_mining_deadline", None)
+        if empty_now < min_free and mining_deadline is not None:
+            return self._stash_native_mining_inventory(inv, min_free, mining_deadline)
         pre_counts: dict[str, int] = {}
         for row in inv.get("items") or []:
             if not isinstance(row, dict) or not row.get("name"):
@@ -2453,6 +2457,27 @@ class MacroSkills:
         elif error:
             result["reconciled_after"] = error
         return actual, result
+
+    def _stash_native_mining_inventory(
+        self, inv: dict[str, Any], min_free: int, deadline: float,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        budget = min(8.0, deadline - time.monotonic() - 0.5)
+        session = _SkillBudgetSession(self.bot, budget, bound_transport_retries=True)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            stored, result = scoped._stash_mining_clutter(inv, min_free)
+        except (_SkillDeadline, httpx.TimeoutException):
+            session.stop_pending()
+            stored, result = [], {"method": "cleanup_time_budget"}
+        except (ApiError, httpx.HTTPError) as error:
+            stored, result = [], {"method": "cleanup_failed", "error": getattr(error, "code", type(error).__name__)}
+        if self._dfs_storage_reports is not None:
+            entry = {**result, "stored": stored}
+            if not self._dfs_storage_reports or self._dfs_storage_reports[-1] != entry:
+                self._dfs_storage_reports.append(entry)
+        latest = getattr(self.bot, "_last_inventory", None) if stored else None
+        return latest if isinstance(latest, dict) else inv, stored
 
     def clean_mining_inventory(self, max_duration_s: float) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         session = _SkillBudgetSession(self.bot, max_duration_s, bound_transport_retries=True)
@@ -9291,15 +9316,24 @@ class MacroSkills:
         strategy: str | None = None,
     ) -> dict[str, Any]:
         """Run path-compressed MiningDFS underground exploration, vein harvesting, or collar backtrack."""
-        return self.mining_dfs.run(
-            target=target,
-            goal_count=goal_count,
-            target_y=target_y,
-            action=action,
-            geofence=geofence,
-            max_duration_s=max_duration_s,
-            strategy=strategy,
-        )
+        previous_reports = self._dfs_storage_reports
+        reports: list[dict[str, Any]] = []
+        self._dfs_storage_reports = reports
+        try:
+            result = self.mining_dfs.run(
+                target=target,
+                goal_count=goal_count,
+                target_y=target_y,
+                action=action,
+                geofence=geofence,
+                max_duration_s=max_duration_s,
+                strategy=strategy,
+            )
+        finally:
+            self._dfs_storage_reports = previous_reports
+        if reports:
+            result["inventory_cleanup_during_mining"] = reports
+        return result
 
     def ensure_items(
         self,

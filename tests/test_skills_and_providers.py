@@ -4791,6 +4791,70 @@ def test_mine_cleanup_skips_passage_storage_and_tries_a_backup(fault) -> None:
         assert result["inventory_cleanup"]["storage_skipped"] == [{"pos": first, "reason": "section_full"}]
 
 
+def test_native_dfs_stashes_full_inventory_before_collecting_ore(monkeypatch) -> None:
+    from mc_agent.skills.mining_dfs import _BudgetSession
+
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    side = [0, 30, 1]
+    position = [0.5, 30.0, 0.5]
+    cobble = 384
+    stored = 0
+    diamond = 0
+    actions = []
+
+    def handler(request):
+        nonlocal cobble, stored, diamond
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        actions.append(route)
+        if route == "status":
+            result = {"pos": position, "dimension": "overworld", "last_death": 0}
+        elif route == "inventory":
+            items = [{"name": "cobblestone", "count": 64}] * (cobble // 64)
+            items += [{"name": "iron_pickaxe", "count": 1}] * 30
+            if diamond:
+                items.append({"name": "diamond", "count": diamond})
+            result = {"items": items}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            name = "chest" if body["pos"] == side else ("air" if y >= 30 and z == 0 else "stone")
+            result = {"name": name}
+        elif route == "view":
+            assert body["target"]["pos"] == side
+            result = {"sections": {"container": []}}
+        elif route == "act":
+            assert body["target"]["pos"] == side
+            stored = body["ops"][0]["count"]
+            cobble -= stored
+            result = {"done": [{"to": "container", "put": "cobblestone", "count": stored}]}
+        elif route == "get_entities":
+            result = {"entities": [] if diamond else [{"id": 11, "item": "diamond", "pos": [1.5, 30.0, 0.5]}]}
+        elif route == "move_to":
+            assert cobble + stored == 384 and stored == 192
+            position[:] = [body["x"], body["y"], body["z"]]
+            diamond = 1
+            result = {"pos": position}
+        elif route == "drop":
+            cobble -= body["count"]
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        dfs = _BudgetSession(bot, deadline=time.monotonic() + 30)
+        dfs.dug_count = 1
+        skills = MacroSkills(dfs.session)
+        skills.remember_placed_storage("chest", side, "overworld")
+        confirmed = skills.mining_dfs._collect_and_verify_target_drop(
+            expected_drops={"diamond"}, before_count=0, ore_pt=(1, 30, 0), stand_y=30, cache={},
+        )
+
+    assert confirmed is True and diamond == 1
+    assert cobble == stored == 192
+    assert "drop" not in actions and actions.index("act") < actions.index("move_to")
+
+
 def test_staircase_first_step_uses_total_budget(monkeypatch) -> None:
     """BUG-037: a 20s first step must not die at the 15s per-step cap."""
     import mc_agent.skills.library as library
