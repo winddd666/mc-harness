@@ -11335,7 +11335,11 @@ def test_mining_watcher_waits_only_for_a_confirmed_occluded_creeper(monkeypatch,
         assert result["reflex_mode"] == "creeper_evade" and stopped.is_set()
 
 
-def test_mining_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch):
+@pytest.mark.parametrize("tool, action, body", [
+    ("mc_skill_mine_dfs", "dig", {"pos": [41012, 21, 11034]}),
+    ("mc_skill_unstick", "control", {"jump": True, "ms": 900, "stop_on": ["death"]}),
+])
+def test_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch, tool, action, body):
     import threading
 
     stopped = threading.Event()
@@ -11346,19 +11350,19 @@ def test_mining_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch):
     calls = []
 
     class CaveBot:
-        def call(self, action, body=None, **kwargs):
-            if action == "status":
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
                 return dict(status)
-            if action == "dig":
-                calls.append(action)
+            if endpoint == action:
+                calls.append(endpoint)
                 status.update(in_water=True, submerged=True, on_ground=False, oxygen=110)
-                stopped.wait(1.5)
-            if action == "stop":
-                calls.append(action)
+                assert stopped.wait(1.5)
+            if endpoint == "stop":
+                calls.append(endpoint)
                 stopped.set()
-            if action == "inventory":
+            if endpoint == "inventory":
                 return {"items": []}
-            if action == "events":
+            if endpoint == "events":
                 return {"events": []}
             return {"ok": True}
 
@@ -11372,11 +11376,9 @@ def test_mining_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch):
         return {"ok": True, "in_water": False}
 
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
-    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(
-        bot.call("dig", {"pos": [41012, 21, 11034]}),
-    )))
+    result = json.loads(guard.run_tool_with_reflex(tool, lambda: json.dumps(bot.call(action, body))))
     assert result["reflex_mode"] == "water_surface"
-    assert calls == ["dig", "stop", "surface"]
+    assert calls == [action, "stop", "surface"]
     assert guard._water_hurt_streak == 0
 
 

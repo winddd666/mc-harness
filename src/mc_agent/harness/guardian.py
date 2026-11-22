@@ -267,7 +267,7 @@ class GenerationGuard:
     SURFACE_WATER_ESCAPE_BUDGET_S = 4.0
     COMBAT_WATER_ESCAPE_BUDGET_S = 4.0
     ATTACK_WATER_THREAT_RANGE = 16.0
-    MINING_WATER_ESCAPE_OXYGEN = 140.0
+    TOOL_WATER_ESCAPE_OXYGEN = 140.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -3186,6 +3186,7 @@ class GenerationGuard:
         actor_thread_id = threading.get_ident()
         pending_trigger: list[ThreatTrigger] = []
         watch_wall_damage = check_support_dig or watch_mining_water
+        watch_low_oxygen = watch_mining_water or check_unstick_exit
 
         def wall_damage_trigger(status: dict[str, Any], call: Callable[..., dict[str, Any]]) -> ThreatTrigger | None:
             if (
@@ -3336,8 +3337,8 @@ class GenerationGuard:
                         and (
                             (watch_scout_water and nh_name == "drowned" and nh_dist <= 6.0
                              and (st.get("on_ground") is False or st.get("submerged")))
-                            or (watch_mining_water and isinstance(oxygen, (int, float))
-                                and oxygen <= self.MINING_WATER_ESCAPE_OXYGEN)
+                            or (watch_low_oxygen and isinstance(oxygen, (int, float))
+                                and oxygen <= self.TOOL_WATER_ESCAPE_OXYGEN)
                         )
                     )
                     if (
@@ -3528,8 +3529,8 @@ class GenerationGuard:
                     trigger.get("primary_type") in {"lava", "hot_floor"}
                     or trigger.get("source") in {"pre_hurt_creeper", "tool_water_threat"}
                 )
-                mining_oxygen = watch_mining_water and trigger.get("source") == "tool_water_threat"
-                if not caller_ignores_hurt or movement_emergency or mining_oxygen or trigger.get("primary_type") == "in_wall":
+                low_oxygen = watch_low_oxygen and trigger.get("source") == "tool_water_threat"
+                if not caller_ignores_hurt or movement_emergency or low_oxygen or trigger.get("primary_type") == "in_wall":
                     raise ReflexPreempted(trigger) from None
 
             try:
@@ -3736,7 +3737,10 @@ class GenerationGuard:
                 drowning_pre = (
                     (isinstance(oxy_pre, (int, float)) and oxy_pre <= 0) or trigger.get("hurt_source") == "drown"
                 )
-                mining_oxygen_pre = interrupted_name == "mc_skill_mine_dfs" and trigger.get("source") == "tool_water_threat"
+                low_oxygen_pre = (
+                    interrupted_name in {"mc_skill_mine_dfs", "mc_skill_unstick"}
+                    and trigger.get("source") == "tool_water_threat"
+                )
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
                     or (isinstance(oxy_pre, (int, float)) and oxy_pre < 180)
@@ -3758,7 +3762,7 @@ class GenerationGuard:
                     forced_pre_shore = (
                         self._water_hurt_streak >= 3 or now_pre < self._no_water_until
                         or self._swimming_at_low_health(st_pre) or drowned_during_tool
-                        or mining_oxygen_pre
+                        or low_oxygen_pre
                     )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
@@ -3813,7 +3817,7 @@ class GenerationGuard:
                                 shore_threat_pos,
                                 keep_shield=has_shield_pre,
                                 shield_target_id=att_pre.get("id") if isinstance(att_pre, dict) else None,
-                                **({"surface_first": True} if drowning_pre or mining_oxygen_pre else {}),
+                                **({"surface_first": True} if drowning_pre or low_oxygen_pre else {}),
                             ),
                             raise_on_http_error=False,
                         )
