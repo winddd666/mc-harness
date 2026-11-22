@@ -552,7 +552,7 @@ class GenerationGuard:
                 self._stop_after_recovery_timeout()
         return None
 
-    def _settle_dry_shore(
+    def _settle_dry_landing(
         self, before: dict[str, Any], after: dict[str, Any], bot: _GuardSession, *, deadline: float,
     ) -> dict[str, Any]:
         for _ in range(2):
@@ -617,7 +617,7 @@ class GenerationGuard:
             else:
                 after = recovery_bot.status()
             if confirm_shore:
-                after = self._settle_dry_shore(before, after, recovery_bot, deadline=deadline)
+                after = self._settle_dry_landing(before, after, recovery_bot, deadline=deadline)
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget", "partial": True, **(timeout_details or {})}
@@ -3768,7 +3768,7 @@ class GenerationGuard:
             )
             tool_water_threat = trigger.get("source") == "tool_water_threat"
             if tool_water_threat and not life_unavailable and st_pre.get("in_water") is False:
-                settled = self._settle_dry_shore(st_pre, st_pre, self.bot, deadline=time.monotonic() + 0.7)
+                settled = self._settle_dry_landing(st_pre, st_pre, self.bot, deadline=time.monotonic() + 0.7)
                 life_unavailable = life_changed(settled) or (
                     observed_life is not None
                     and observed_life != (settled.get("dimension"), settled.get("last_death"))
@@ -3827,6 +3827,9 @@ class GenerationGuard:
                     st_after = self.bot.status()
                 except (ApiError, httpx.HTTPError):
                     st_after = st_pre
+                landing_pending = act_res.get("reason") == "lava_landing_unconfirmed"
+                if landing_pending:
+                    st_after = self._settle_dry_landing(st_pre, st_after, self.bot, deadline=time.monotonic() + 0.7)
                 hp_pre_l = st_pre.get("health")
                 hp_post_l = st_after.get("health")
                 dim_pre_l = str(st_pre.get("dimension") or "").lower()
@@ -3846,7 +3849,13 @@ class GenerationGuard:
                         and (float(hp_post_l) - float(hp_pre_l)) >= 2.0
                     )
                 )
-                esc_ok = bool(act.get("ok") and not act_res.get("in_lava") and not lava_died)
+                esc_ok = bool(
+                    not lava_died and not st_after.get("in_lava") and not act_res.get("in_lava")
+                    and (
+                        (act.get("ok") and (st_after.get("on_ground") is not False or st_after.get("in_water")))
+                        or (landing_pending and st_after.get("on_ground") is True)
+                    )
+                )
                 lava_actions = [act]
                 if esc_ok:
                     douse = self._douse_after_lava(st_pre, after=st_after)
@@ -3854,7 +3863,7 @@ class GenerationGuard:
                         lava_actions.append(douse)
                         st_after = self.combat_env._safe_status(st_after)
                         lava_died = life_changed(st_after)
-                        esc_ok = not lava_died
+                        esc_ok = not lava_died and not st_after.get("in_lava")
                 if lava_died:
                     summary = f"执行 {interrupted_name} 途中滑入岩浆，抢占逃生期间已死亡并重生（装备已掉落，先重整背包再继续）"
                 elif esc_ok:
@@ -3862,7 +3871,8 @@ class GenerationGuard:
                 else:
                     summary = (
                         f"执行 {interrupted_name} 途中滑入岩浆，已中断原工具但尚未完全脱困"
-                        f"（in_lava={act_res.get('in_lava', st_after.get('in_lava'))}），当前 HP={st_after.get('health')}"
+                        f"（in_lava={st_after.get('in_lava', act_res.get('in_lava'))}"
+                        f"，on_ground={st_after.get('on_ground')}），当前 HP={st_after.get('health')}"
                     )
                 outcome = {
                     "handled": esc_ok,
@@ -4158,7 +4168,13 @@ class GenerationGuard:
                 receipt["status_after"].update({
                     key: st_after.get(key) for key in ("dimension", "last_death")
                 })
-            self.events.emit("guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary)
+            lava_status = {}
+            if outcome.get("mode") == "lava_escape":
+                receipt["status_after"].update({key: st_after.get(key) for key in ("in_lava", "on_fire")})
+                lava_status["status_after"] = receipt["status_after"]
+            self.events.emit(
+                "guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary, **lava_status,
+            )
             return receipt
         finally:
             self._in_reflex = False
@@ -4205,7 +4221,7 @@ class GenerationGuard:
         except (ApiError, httpx.HTTPError):
             after = {}
         if before.get("in_water") is True:
-            after = self._settle_dry_shore(before, after, self.bot, deadline=time.monotonic() + 0.7)
+            after = self._settle_dry_landing(before, after, self.bot, deadline=time.monotonic() + 0.7)
         respawned = after.get("alive") is False or (
             bool(before) and after.get("last_death") is not None and after["last_death"] != before.get("last_death")
         )

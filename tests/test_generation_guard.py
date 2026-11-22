@@ -6725,6 +6725,56 @@ def test_boundary_does_not_eat_while_still_taking_contact_fire_damage(monkeypatc
     assert uses == [{"item": "cooked_beef"}]
 
 
+@pytest.mark.parametrize("landing", ["grounded", "airborne", "back_in_lava", "respawned", "stale_success"])
+def test_lava_tool_preemption_uses_latest_landing_status(monkeypatch, landing):
+    status = {
+        "pos": [6571.9, 64.8, 6592.6], "in_lava": True, "on_ground": False, "on_fire": True,
+        "health": 18.1, "ready": True, "alive": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    events = []
+    douse_checks = []
+
+    class LavaBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                if kwargs.get("timeout_s") == 0.25:
+                    if landing == "grounded":
+                        status.update(on_ground=True)
+                    elif landing == "back_in_lava":
+                        status.update(in_lava=True)
+                    elif landing == "respawned":
+                        status.update(last_death={"t": 2}, health=20, on_ground=True)
+                return dict(status)
+            if endpoint == "events":
+                return {"events": []}
+            raise AssertionError(endpoint)
+
+    def escape():
+        status.update(pos=[6572.7, 65, 6592.6], in_lava=landing == "stale_success")
+        if landing == "stale_success":
+            return {"ok": True, "in_lava": False}
+        return {"ok": False, "in_lava": False, "reason": "lava_landing_unconfirmed"}
+
+    guard = GenerationGuard(LavaBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+    monkeypatch.setattr(guard, "_douse_after_lava", lambda _before, *, after: douse_checks.append(dict(after)))
+
+    receipt = guard.handle_preemption(
+        {"source": "boundary_threat", "primary_type": "lava", "distance": 0.0},
+        interrupted_name="pre_ensure",
+    )
+
+    assert receipt["requires_replan"]
+    assert ("并脱困" in receipt["message"]) is (landing == "grounded")
+    assert ("死亡并重生" in receipt["message"]) is (landing == "respawned")
+    assert bool(douse_checks) is (landing == "grounded")
+    latest = receipt["status_after"]
+    assert latest["in_lava"] is (landing in {"back_in_lava", "stale_success"})
+    assert latest["on_ground"] is (landing in {"grounded", "respawned"})
+    event, = [event for event in events if event["type"] == "guardian.preempted_tool"]
+    assert event["status_after"] == latest
+
+
 def test_r21_preempted_lava_death_reports_respawned_not_escaped():
     """Reproduces r21_short hy4_hy_8_nether: lava preemption ending in death/respawn must NOT claim '已中断原工具并脱困'."""
     dead_lava_state = {"calls": 0}
