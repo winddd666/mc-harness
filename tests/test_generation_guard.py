@@ -252,7 +252,8 @@ def test_sonic_boom_prioritizes_warden_retreat_over_blocking_or_eating(monkeypat
     def retreat(_env, target, **kwargs):
         assert target == (warden["pos"] if warden_visible else None)
         assert kwargs == {"distance": WARDEN_EVADE_DISTANCE, "urgent": True, "allow_shaft_seal": False,
-                          "wait_for_ground": True, "use_nearest_hostile": False}
+                          "wait_for_ground": True, "use_nearest_hostile": False,
+                          "min_threat_distance": WARDEN_EVADE_DISTANCE}
         assert not status["blocking"]
         retreat_calls.append(target)
         return {"ok": False, "reason": "no_safe_retreat", "moved_dist": 0.0}
@@ -267,6 +268,60 @@ def test_sonic_boom_prioritizes_warden_retreat_over_blocking_or_eating(monkeypat
     assert len(retreat_calls) == 1
     combat, = [event for event in events if event.get("type") == "guardian.action.completed" and "subcortical_combat" in event["action"]]
     assert combat["result"]["mode"] == "warden_evade"
+
+
+@pytest.mark.parametrize("route", ["flat", "cliff", "warden_chased", "scan_failed"])
+def test_warden_retreat_continues_past_ordinary_melee_clearance(route):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    status = {
+        "pos": [17245.3, 55, 29988], "health": 11, "food": 20, "dimension": "overworld",
+        "alive": True, "ready": True, "on_ground": True,
+    }
+    warden = {"id": 270255, "name": "warden", "pos": [17253.5, 55, 29988], "dist": 8.2}
+    motions = []
+    scans = []
+
+    class CaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_entities":
+                scans.append(body["radius"])
+                if route == "scan_failed" and body["radius"] == 24:
+                    raise httpx.ReadTimeout("warden scan stalled")
+                return {"entities": [warden]}
+            if action == "get_block":
+                x, y, _ = body["pos"]
+                floor = y == 54 and (route != "cliff" or x >= 17238)
+                return {"name": "stone" if floor else "air"}
+            if action == "look":
+                assert body["yaw"] == pytest.approx(math.pi / 2)
+            elif action == "control":
+                motions.append("sprint")
+                status["pos"] = [17243.3, 55, 29988]
+            elif action == "move_to":
+                motions.append(body["x"])
+                status["pos"] = [body["x"] + 0.95, body["y"], body["z"]]
+                if route == "warden_chased":
+                    warden["pos"] = [status["pos"][0] + 8.2, 55, 29988]
+            else:
+                pytest.fail(f"Unexpected {action} during sonic retreat")
+            return {"ok": True}
+
+    outcome = SubcorticalInstinctController().on_encounter(CombatEnv(CaveBot()), {
+        "source": "tool_interrupted_hurt", "primary_type": "warden", "hurt_source": "sonic_boom",
+    })
+
+    assert scans == [16, 24]
+    assert motions == ["sprint", pytest.approx(17239.8 if route == "cliff" else 17234.3)]
+    assert outcome["handled"] is (route == "flat")
+    retreat, = outcome["actions"]
+    assert retreat.get("reason") == {
+        "flat": None, "cliff": "warden_still_in_range", "warden_chased": "warden_still_in_range",
+        "scan_failed": "warden_clearance_unconfirmed",
+    }[route]
 
 
 def test_in_wall_hurt_triggers_unstick_instead_of_bunker(monkeypatch):
