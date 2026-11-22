@@ -3355,13 +3355,15 @@ class SubcorticalInstinctController:
             return None
 
     @staticmethod
-    def _other_creeper_positions(hostiles: Sequence[dict[str, Any]], target_id: int | None) -> list[Sequence[float]]:
+    def _other_creeper_positions(
+        hostiles: Sequence[dict[str, Any]], target_id: int | None, *, include_occluded: bool = False,
+    ) -> list[Sequence[float]]:
         positions = []
         for hostile in hostiles:
             point = hostile.get("pos")
             if (
                 hostile.get("id") != target_id and _clean_block_name(hostile.get("name")) == "creeper"
-                and not hostile.get("blocked_by_wall")
+                and (include_occluded or not hostile.get("blocked_by_wall"))
                 and isinstance(point, (list, tuple)) and len(point) >= 3
                 and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in point[:3])
             ):
@@ -4304,14 +4306,6 @@ class SubcorticalInstinctController:
         # 4) Check for a surviving attacker before handing back control or eating.
         has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
         st_post = env._safe_status(st)
-        if mode == "creeper_evade" and (
-            st_post.get("alive") is False
-            or st_post.get("last_death") != st.get("last_death")
-            or st_post.get("dimension") != st.get("dimension")
-        ):
-            for action in actions:
-                if action["action"] in {"retreat_from_creeper", "creeper_followup_retreat", "creeper_intruded_flee"}:
-                    action.update(ok=False, respawned=True)
         nh_post = st_post.get("nearest_hostile")
         retreat_hp = st_post.get("health")
         retreats = [a for a in actions if a["action"] == "flee" and not a.get("respawned")]
@@ -4322,9 +4316,22 @@ class SubcorticalInstinctController:
             and isinstance(retreat_hp, (int, float)) and retreat_hp > 12.0
             and any(a["ok"] and isinstance(a.get("moved"), (int, float)) and a["moved"] >= 4.0 for a in retreats)
         )
+        critical_creeper_pursuit = (
+            mode == "creeper_evade" and isinstance(retreat_hp, (int, float)) and 0 < retreat_hp <= 4.0
+            and any(
+                action["action"] in {"retreat_from_creeper", "creeper_followup_retreat"} and action["ok"]
+                for action in actions
+            )
+        )
+        ranked_followup = night_pursuit or critical_creeper_pursuit
+        followup_budget, movement_budget = (1.5, 0.8)
         followup_range = 0.0
         if night_pursuit:
             followup_range = 8.0
+            followup_budget, movement_budget = (4.1, 3.5)
+        elif critical_creeper_pursuit:
+            followup_range = 5.5
+            followup_budget, movement_budget = (2.2, 1.5)
         elif isinstance(retreat_hp, (int, float)) and 0.0 < retreat_hp <= 12.0:
             followup_range = 3.5 if retreat_hp <= 10.0 else 1.5
         elif (
@@ -4337,52 +4344,91 @@ class SubcorticalInstinctController:
             # A short step does not disengage when the same attacker stays in melee reach.
             followup_range = min(mob_dist, 2.0)
         if (
-            mode in {"cover_or_flee", "flee"} and not has_shield and not has_weapon
+            (mode in {"cover_or_flee", "flee"} or critical_creeper_pursuit) and not has_shield and not has_weapon
             and followup_range > 0
-            and any(retreat_made_progress(a["ok"], a.get("moved"), a.get("reason")) for a in retreats)
+            and (critical_creeper_pursuit or any(retreat_made_progress(a["ok"], a.get("moved"), a.get("reason")) for a in retreats))
             and isinstance(nh_post, dict) and _clean_block_name(nh_post.get("name")) in PRE_HURT_MELEE_MOBS
             and isinstance(nh_post.get("id"), int) and self._entity_dist(st_post.get("pos"), nh_post) <= followup_range
             and st_post.get("on_ground") is True and st_post.get("ready") is not False and st_post.get("alive") is not False
             and not st_post.get("in_water") and not st_post.get("in_lava")
             and st_post.get("last_death") == st.get("last_death") and st_post.get("dimension") == st.get("dimension")
-            and time.monotonic() + (4.1 if night_pursuit else 1.5) < deadline
+            and time.monotonic() + followup_budget < deadline
         ):
             target_id = nh_post["id"]
-            live_hostiles = self._find_live_hostiles(env, radius=12 if night_pursuit else 5, timeout_s=0.6)
+            live_hostiles = self._find_live_hostiles(env, radius=12 if ranked_followup else 5, timeout_s=0.6)
             target = next((entity for entity in live_hostiles if entity.get("id") == target_id), {})
             target_pos = target.get("pos")
+            renewed_blast_threat = critical_creeper_pursuit and any(
+                _clean_block_name(entity.get("name")) == "creeper" and self._entity_dist(st_post.get("pos"), entity) <= 5.5
+                for entity in live_hostiles
+            )
+            start_dist = self._entity_dist(st_post.get("pos"), target)
             if (
-                st_post.get("pos")
-                and time.monotonic() + (3.5 if night_pursuit else 0.8) < deadline
+                st_post.get("pos") and not renewed_blast_threat
+                and time.monotonic() + movement_budget < deadline
                 and isinstance(target_pos, (list, tuple)) and len(target_pos) >= 3
                 and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
                 and target.get("blocked_by_wall") is not True
-                and self._entity_dist(st_post.get("pos"), target) <= followup_range
+                and start_dist <= followup_range
             ):
-                if night_pursuit:
+                if ranked_followup:
                     exposed_hostiles = [entity for entity in live_hostiles if not entity.get("blocked_by_wall")]
-                    occluded_hostiles = [entity for entity in live_hostiles if entity.get("blocked_by_wall")]
+                    # With only a few HP left, avoid moving into close fire from any known shooter.
+                    guarded_hostiles = live_hostiles if critical_creeper_pursuit else [
+                        entity for entity in live_hostiles if entity.get("blocked_by_wall")
+                    ]
                     shooters = [
                         shooter_pos for _, shooter_pos in ranged_retreat_positions(
                             st_post["pos"], exposed_hostiles, max_distance=12.0,
                         )
                     ]
+                    creeper_constraints = {
+                        "other_creepers": self._other_creeper_positions(live_hostiles, target_id, include_occluded=True),
+                        "keep_blast_clearance": True, "allow_second_leg": False,
+                    } if critical_creeper_pursuit else {}
                     retreat = env.flee(
-                        target_pos, distance=8.5, urgent=True, wait_for_ground=True, allow_shaft_seal=False,
+                        target_pos, distance=4.5 if critical_creeper_pursuit else 8.5,
+                        urgent=True, wait_for_ground=True, allow_shaft_seal=False,
                         other_shooters=shooters, primary_melee=bool(shooters),
                         occluded_shooters=[
                             point for _, point in ranged_retreat_positions(
-                                st_post["pos"], occluded_hostiles, max_distance=12.0,
+                                st_post["pos"], guarded_hostiles, max_distance=12.0,
                             )
                         ],
                         other_melee=self._other_melee_positions(live_hostiles, target_id),
+                        **creeper_constraints,
                     )
-                    actions.append({"action": "followup_melee_retreat", "entity_id": target_id, **retreat})
+                    step = {"action": "followup_melee_retreat", "entity_id": target_id, **retreat}
                 else:
                     stepped = env.step_away_from_melee(st_post, target_pos, deadline=min(deadline, time.monotonic() + 1.5))
-                    actions.append({"action": "followup_melee_retreat", "ok": stepped, "entity_id": target_id})
+                    step = {"action": "followup_melee_retreat", "ok": stepped, "entity_id": target_id}
                 st_post = env._safe_status(st_post)
                 nh_post = st_post.get("nearest_hostile")
+                if critical_creeper_pursuit and step.get("ok"):
+                    nearest = nh_post if isinstance(nh_post, dict) else {}
+                    target_after = nearest if nearest.get("id") == target_id else target
+                    if (
+                        not st_post.get("pos") or st_post.get("on_ground") is not True
+                        or st_post.get("ready") is False or st_post.get("alive") is False
+                        or st_post.get("in_water") or st_post.get("in_lava")
+                        or any(st_post.get(key) != st.get(key) for key in ("dimension", "last_death"))
+                        or self._entity_dist(st_post["pos"], target_after) <= start_dist
+                        or (
+                            _clean_block_name(nearest.get("name")) == "creeper"
+                            and self._entity_dist(st_post["pos"], nearest) <= 5.5
+                        )
+                    ):
+                        step.update(ok=False, reason="melee_clearance_unconfirmed")
+                actions.append(step)
+        if mode == "creeper_evade" and (
+            st_post.get("alive") is False
+            or any(st_post.get(key) != st.get(key) for key in ("last_death", "dimension"))
+        ):
+            for action in actions:
+                if action["action"] in {
+                    "retreat_from_creeper", "creeper_followup_retreat", "creeper_intruded_flee", "followup_melee_retreat",
+                }:
+                    action.update(ok=False, respawned=True)
         if (
             mode == "counter_killed" and float(st_post.get("health") or 20.0) <= 8.0
             and not self._is_falling_fast(st_post, pos)

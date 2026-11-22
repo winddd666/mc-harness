@@ -9687,6 +9687,79 @@ def test_creeper_followup_uses_fresh_melee_position_to_choose_a_safe_route(monke
     assert (math.dist(moves[0], zombie["pos"]) < 3.0) is pursuer_blocked
 
 
+@pytest.mark.parametrize("landing", [
+    "critical", "sticky_pursuer", "late_respawn", "healthy", "respawned", "scan_timeout", "creeper_returns",
+])
+def test_critical_creeper_retreat_checks_for_a_surviving_melee_pursuer(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    origin = [19070.9, 64, 40967.5]
+    safe_landing = [19077.5, 64, 40967.5]
+    creeper = {"id": 40, "name": "creeper", "pos": [19066.8, 64, 40967.5]}
+    zombie = {"id": 41, "name": "zombie", "pos": [19072.9, 64, 40967.5], "dist": 4.6}
+    skeleton = {"id": 42, "name": "skeleton", "pos": [19077.5, 64, 40975.5]}
+    other_creeper = {"id": 43, "name": "creeper", "pos": [19083.7, 64, 40967.5], "blocked_by_wall": True}
+    status = {
+        "pos": origin, "health": 12.3, "food": 17, "ready": True, "alive": True, "on_ground": True,
+        "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": creeper,
+    }
+    moves = []
+
+    class NightBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                if not moves:
+                    return {"entities": [{**creeper, "dist": 4.1}]}
+                if landing == "scan_timeout":
+                    raise httpx.ReadTimeout("creeper clearance unavailable")
+                live_creeper = other_creeper
+                if landing == "creeper_returns" and body["radius"] == 12:
+                    live_creeper = {**other_creeper, "pos": [19081.5, 64, 40967.5]}
+                return {"entities": [zombie, skeleton, live_creeper]}
+            return {"ok": True}
+
+    def flee(pos, **options):
+        moves.append(pos)
+        if len(moves) == 1:
+            status.update(pos=safe_landing, health=9 if landing == "healthy" else 2.3333, nearest_hostile=zombie)
+            if landing == "respawned":
+                status["last_death"] = {"t": 2}
+            return {"ok": True, "mode": "flee", "moved_dist": 6.62}
+        assert options["other_creepers"] == [other_creeper["pos"]] and options["keep_blast_clearance"]
+        assert options["other_shooters"] == options["occluded_shooters"] == [skeleton["pos"]]
+        assert not options["allow_second_leg"] and not options["allow_shaft_seal"]
+        status["pos"] = [19078.0, 64, 40965.3]
+        if landing == "sticky_pursuer":
+            status["nearest_hostile"] = {**zombie, "pos": [19074, 64, 40965.3]}
+        if landing == "late_respawn":
+            status["last_death"] = {"t": 2}
+        return {"ok": True, "mode": "flee", "moved_dist": 2.26}
+
+    env = CombatEnv(NightBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", flee)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_melee", "primary_type": "creeper", "primary_entity_id": creeper["id"],
+    })
+
+    if landing in {"critical", "sticky_pursuer", "late_respawn"}:
+        assert moves == [creeper["pos"], zombie["pos"]]
+        followup = outcome["actions"][-1]
+        assert followup["action"] == "followup_melee_retreat" and followup["entity_id"] == zombie["id"]
+        assert followup["ok"] is (landing == "critical")
+        if landing == "sticky_pursuer":
+            assert followup["reason"] == "melee_clearance_unconfirmed"
+        if landing == "late_respawn":
+            assert all(step["respawned"] and not step["ok"] for step in outcome["actions"])
+    else:
+        assert moves == [creeper["pos"]]
+
+
 @pytest.mark.parametrize("landing", ["water", "lava", "respawn", "retreat_respawn", "new_dimension", "not_ready"])
 def test_creeper_retreat_hands_off_to_water_escape_in_the_same_life(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
