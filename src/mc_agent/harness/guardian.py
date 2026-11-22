@@ -2608,9 +2608,10 @@ class GenerationGuard:
                     dimension = str(status.get("dimension") or "").removeprefix("minecraft:")
                     melee_retreat = cf_result.get("mode") == "flee"
                     nether_melee_retreat = dimension == "the_nether" and melee_retreat
+                    recent_ranged_hurt = now - self._last_ranged_hurt_at < 8.0
                     mixed_surface_retreat = (
                         dimension == "overworld" and melee_retreat and 0.0 < hp_val <= 4.0
-                        and now - self._last_ranged_hurt_at < 8.0
+                        and recent_ranged_hurt
                     )
                     face_after_melee_retreat = (
                         already_blocking and (nether_melee_retreat or mixed_surface_retreat)
@@ -2621,9 +2622,9 @@ class GenerationGuard:
                         and cf_result.get("ok") and hp_val > 4.0
                     )
                     check_unraised_shield = (
-                        dimension == "overworld" and melee_retreat and has_shield and not already_blocking
+                        dimension == "overworld" and melee_retreat and has_shield
                         and cf_result.get("ok") and not cf_result.get("respawned")
-                        and now - self._last_ranged_hurt_at < 8.0
+                        and (hp_val <= LOW_HP_BUNKER_MAX or (not already_blocking and recent_ranged_hurt))
                     )
                     shield_when_cornered = (
                         nether_melee_retreat and has_shield and not already_blocking
@@ -2661,7 +2662,10 @@ class GenerationGuard:
                             check_unraised_shield and landing.get("on_ground") is True
                             and landing.get("blocking") is False and not landing.get("on_fire")
                             and isinstance(current_hp, (int, float)) and 0 < current_hp <= 4.0
-                            and ((mob in PRE_HURT_MELEE_MOBS and dist <= 3.5) or (mob in RANGED_MOBS and dist <= 12.0))
+                            and (
+                                (mob in PRE_HURT_MELEE_MOBS and dist <= 3.5)
+                                or (recent_ranged_hurt and mob in RANGED_MOBS and dist <= 12.0)
+                            )
                         ):
                             actions.append(self._action(
                                 "raise_shield_after_retreat",

@@ -4934,6 +4934,8 @@ def test_poll_refaces_a_close_melee_attacker_with_shield_after_retreat(monkeypat
     "recent_arrow, hp_before, hp_after, blocking, shooter_dist, expected_action",
     [
         (False, 3.34, 2.55, True, None, None),
+        (False, 3.03, 0.96, False, None, "raise_shield_after_retreat"),
+        (False, 3.03, 5.3, False, None, None),
         (True, 3.34, 2.55, True, None, "face_attacker_after_retreat"),
         (False, 8.7, 1.63, True, None, "face_attacker_after_retreat"),
         (False, 8.7, 6.2, True, None, None),
