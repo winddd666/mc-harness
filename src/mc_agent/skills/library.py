@@ -7262,49 +7262,77 @@ class MacroSkills:
             "poppy",
             "oak_sapling",
         }
-        ore_types = [
-            "iron_ore",
-            "deepslate_iron_ore",
-            "diamond_ore",
-            "deepslate_diamond_ore",
-            "gold_ore",
-            "deepslate_gold_ore",
-            "coal_ore",
-            "deepslate_coal_ore",
-            "copper_ore",
-        ]
-        stop_ore_names = {
-            "iron_ore",
-            "deepslate_iron_ore",
-            "diamond_ore",
-            "deepslate_diamond_ore",
-        }
+        stop_ore_names = ("iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore")
         surface_evidence: dict[str, Any] | None = None
+        dry_passable = PASSABLE_WALK_BLOCKS - fluids
+        unsafe_ore_neighbors = fluids | {"unknown"}
 
-        def _filter_actionable_ores(
-            blocks: list[dict[str, Any]], cur_xyz: list[float]
-        ) -> list[dict[str, Any]]:
-            cx = float(cur_xyz[0]) if len(cur_xyz) >= 3 else 0.0
-            cy = float(cur_xyz[1]) if len(cur_xyz) >= 3 else 64.0
-            cz = float(cur_xyz[2]) if len(cur_xyz) >= 3 else 0.0
-            kept: list[dict[str, Any]] = []
-            for blk in blocks:
-                if blk.get("name") not in stop_ore_names:
-                    continue
-                bpos = blk.get("pos")
-                if isinstance(bpos, list) and len(bpos) >= 3:
-                    ox, oy, oz = int(bpos[0]), int(bpos[1]), int(bpos[2])
-                    if self._is_block_avoided((ox, oy, oz)):
+        def _ore_ray_clear(
+            scan: _StairSession,
+            eye: tuple[float, float, float],
+            ore: tuple[int, int, int],
+            target: tuple[float, float, float],
+            cache: dict[tuple[int, int, int], str],
+        ) -> bool:
+            # Probe a point in every voxel crossed by the eye-to-ore ray.
+            crossings = {0.0, 1.0}
+            for start, end in zip(eye, target):
+                crossings.update(
+                    (plane - start) / (end - start)
+                    for plane in range(math.floor(min(start, end)) + 1, math.ceil(max(start, end)))
+                )
+            times = sorted(crossings)
+            for lo, hi in zip(times, times[1:]):
+                mid = (lo + hi) / 2
+                cell = tuple(math.floor(start + (end - start) * mid) for start, end in zip(eye, target))
+                if cell != ore and _cached_block_name(scan, *cell, cache) not in dry_passable:
+                    return False
+            return True
+
+        def _scan_actionable_ores(cur: list[float]) -> list[dict[str, Any]]:
+            if len(cur) < 3:
+                return []
+            # Optional ore probes share the step deadline and may be skipped under load.
+            scan = _StairSession(
+                self.bot.bot, 2.5, deadline=min(self.bot.deadline, self.bot.step_deadline),
+            )
+            cache: dict[tuple[int, int, int], str] = {}
+            nearby: list[dict[str, Any]] = []
+            cx, cy, cz = (float(v) for v in cur[:3])
+            eye = (cx, cy + 1.62, cz)
+            try:
+                found = scan.call("find_blocks", {"radius": 4, "types": list(stop_ore_names), "limit": 10})
+                for block in found.get("blocks") or []:
+                    pos = block.get("pos")
+                    name = block.get("name")
+                    if name not in stop_ore_names or not isinstance(pos, (list, tuple)) or len(pos) < 3:
                         continue
-                    forward_dot = (float(ox) - cx) * dx + (float(oz) - cz) * dz
-                    if forward_dot < -1.5:
+                    ore = ox, oy, oz = tuple(int(v) for v in pos[:3])
+                    center = (ox + 0.5, oy + 0.5, oz + 0.5)
+                    distance = math.dist((cx, cy, cz), center)
+                    if distance > 4.0 or self._is_block_avoided(ore):
                         continue
-                    if v_key == "down" and float(oy) > cy + 2.5:
+                    if (center[0] - cx) * dx + (center[2] - cz) * dz < -1.5:
                         continue
-                    if v_key == "up" and float(oy) < cy - 2.5:
+                    if (v_key == "down" and oy > cy + 2.5) or (v_key == "up" and oy < cy - 2.5):
                         continue
-                kept.append(blk)
-            return kept
+
+                    if not any(
+                        _ore_ray_clear(scan, eye, ore, (center[0], oy + height, center[2]), cache)
+                        for height in (0.5, 0.2, 0.8)
+                    ):
+                        continue
+                    if _cached_block_name(scan, *ore, cache) != name:
+                        continue
+                    if any(
+                        _cached_block_name(scan, ox + ax, oy + ay, oz + az, cache) in unsafe_ore_neighbors
+                        for ax, ay, az in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+                    ):
+                        continue
+                    nearby.append({**block, "dist": round(distance, 1)})
+            except _StairDeadline:
+                pass
+            return nearby
 
         def _block_name(pos_xyz: list[int]) -> str:
             res = self.bot.call("get_block", {"pos": pos_xyz})
@@ -7425,7 +7453,6 @@ class MacroSkills:
         dug_count = 0
         placed_count = 0
         stop_reason = "completed"
-        ores_nearby: list[dict[str, Any]] = []
         matched_ores: list[dict[str, Any]] = []
         last_error: dict[str, Any] | None = None
         blocker_info: dict[str, Any] | None = None
@@ -7811,10 +7838,8 @@ class MacroSkills:
                         stop_reason = "reached_surface"
                         break
 
-                if stop_on_ore and steps_done % 3 == 0:
-                    found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
-                    ores_nearby = found_ores.get("blocks") or []
-                    matched_ores = _filter_actionable_ores(ores_nearby, cur)
+                if stop_on_ore and steps_done % 3 == 0 and step_idx + 1 < steps:
+                    matched_ores = _scan_actionable_ores(cur)
                     if matched_ores:
                         stop_reason = "ore_detected"
                         break
@@ -7822,10 +7847,8 @@ class MacroSkills:
 
             steps_done += 1
             self.bot.progress.update(steps_done=steps_done, dug_count=dug_count)
-            if stop_on_ore and steps_done % 3 == 0:
-                found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
-                ores_nearby = found_ores.get("blocks") or []
-                matched_ores = _filter_actionable_ores(ores_nearby, cur)
+            if stop_on_ore and steps_done % 3 == 0 and step_idx + 1 < steps:
+                matched_ores = _scan_actionable_ores(cur)
                 if matched_ores:
                     stop_reason = "ore_detected"
                     break
@@ -7834,9 +7857,7 @@ class MacroSkills:
         self.bot.dig_cap = None
         st_end = self.bot.status()
         if stop_on_ore and stop_reason == "completed":
-            found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
-            ores_nearby = found_ores.get("blocks") or []
-            matched_ores = _filter_actionable_ores(ores_nearby, st_end.get("pos") or pos_before)
+            matched_ores = _scan_actionable_ores(st_end.get("pos") or pos_before)
             if matched_ores:
                 stop_reason = "ore_detected"
 
@@ -8106,7 +8127,7 @@ class MacroSkills:
             out_stair["hint"] = f"前方({d_key})遇到{stop_reason}，禁止原地继续朝{d_key}重试，请换其他方向！"
         if surface_evidence is not None:
             out_stair["surface_evidence"] = surface_evidence
-        out_stair["ores_nearby"] = ores_nearby
+        out_stair["ores_nearby"] = matched_ores
         return out_stair
 
     def _try_seal_shaft_threat(

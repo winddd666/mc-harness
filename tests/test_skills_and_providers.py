@@ -988,9 +988,18 @@ def test_dig_safety_bunker_and_registration() -> None:
         bot.close()
 
 
-def test_staircase_up_down_and_tight_table_pocket() -> None:
+@pytest.mark.parametrize("ore_layout", ["exposed_iron", "exposed_diamond", "far", "behind_wall", "adjacent_water"])
+def test_staircase_up_down_and_tight_table_pocket(ore_layout) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
+    ore_pos = {
+        "exposed_iron": [-2, 92, -6],
+        "exposed_diamond": [-2, 92, -6],
+        "far": [-3, 92, -16],
+        "behind_wall": [-1, 92, -6],
+        "adjacent_water": [-2, 92, -6],
+    }[ore_layout]
+    ore_name = "deepslate_diamond_ore" if ore_layout == "exposed_diamond" else "iron_ore"
     state: dict[str, Any] = {
         "pos": [-2.3, 95.0, -2.7],
         "items": [
@@ -1011,6 +1020,11 @@ def test_staircase_up_down_and_tight_table_pocket() -> None:
         if key in state["blocks"]:
             return state["blocks"][key]
         x, y, z = key
+        if state["mode"] == "down":
+            if key == tuple(ore_pos):
+                return ore_name
+            if ore_layout == "adjacent_water" and key == (-1, 92, -6):
+                return "water"
         if state["mode"] == "up" and (x, y, z) == (-3, 93, -4):
             return "grass_block"  # Actual floor after step two, not just a scan hint above a cave.
         if state["mode"] == "up" and x == -3 and z == -4 and y >= 94:
@@ -1067,11 +1081,12 @@ def test_staircase_up_down_and_tight_table_pocket() -> None:
                     json={"ok": True, "result": {"blocks": [{"name": "crafting_table", "pos": [-3, 100, -3], "dist": 5.0}]}},
                 )
             if "iron_ore" in types:
-                # Detect iron_ore once bot descends to y <= 92 (after 3 downward steps)
+                assert body["radius"] == 4
+                # Still return distant mock results to exercise the coordinate check.
                 if state["mode"] == "down" and state["pos"][1] <= 92.0:
                     return httpx.Response(
                         200,
-                        json={"ok": True, "result": {"blocks": [{"name": "iron_ore", "pos": [-3, 92, -7], "dist": 2.1}]}},
+                        json={"ok": True, "result": {"blocks": [{"name": ore_name, "pos": ore_pos, "dist": 2.1}]}},
                     )
                 return httpx.Response(200, json={"ok": True, "result": {"blocks": []}})
             if "grass_block" in types:
@@ -1110,11 +1125,20 @@ def test_staircase_up_down_and_tight_table_pocket() -> None:
         state["dug"].clear()
         down_res = skills.dig_staircase(direction="north", steps=8, vertical="down", stop_on_ore=True)
         assert down_res["ok"] is True
+        assert state["dug"][:3] == [[-3, 96, -4], [-3, 95, -4], [-3, 94, -4]]
+        if ore_layout not in {"exposed_iron", "exposed_diamond"}:
+            assert down_res["steps_done"] == 8
+            assert down_res["stop_reason"] == "completed"
+            assert down_res["ores_nearby"] == []
+            assert "ores_detected" not in down_res
+            return
         assert down_res["steps_done"] == 3
         assert down_res["stop_reason"] == "ore_detected"
+        assert down_res["ores_detected"][0]["pos"] == ore_pos
+        assert down_res["ores_detected"][0]["name"] == ore_name
         assert down_res["pos_after"] == [-2.5, 92.0, -5.5]
-        # First step at [-3, 95, -3] heading north -> [-3, 96, -4], [-3, 95, -4], [-3, 94, -4]
-        assert state["dug"][:3] == [[-3, 96, -4], [-3, 95, -4], [-3, 94, -4]]
+        if ore_layout == "exposed_diamond":
+            return
 
         # (b) dig_staircase up places filler cobblestone step at [-3, 92, -5] and exits on surface
         state["mode"] = "up"
