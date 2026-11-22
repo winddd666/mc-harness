@@ -7910,7 +7910,9 @@ def test_low_health_shield_faces_the_shooter_again_after_retreat(respawned):
 
 
 @pytest.mark.parametrize("landing", ["grounded", "still_airborne", "respawned"])
-@pytest.mark.parametrize("entry", ["poll_ranged", "poll_melee", "subcortical_ranged", "subcortical_melee"])
+@pytest.mark.parametrize("entry", [
+    "poll_ranged", "poll_melee", "subcortical_ranged", "subcortical_melee", "subcortical_armed_melee",
+])
 def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing, entry):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
@@ -7923,9 +7925,13 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
         "nearest_hostile": {"id": 42, "name": "skeleton", "dist": 9.0, "pos": [-5182.5, 70.0, -7616.2]},
     }
     melee = entry.endswith("_melee")
+    armed_swarm = entry == "subcortical_armed_melee"
     hurt_source = "mob_attack" if melee else "arrow"
     if melee:
         status["nearest_hostile"] = {"id": 42, "name": "zombie", "dist": 0.6, "pos": [-5191.2, 69.6, -7616.0]}
+    if armed_swarm:
+        status.update(health=11, held={"name": "stone_sword"})
+        status["nearest_hostile"].update(name="zombie_villager", dist=1.4, pos=[-5190.4, 69.6, -7616.0])
     moves = []
 
     class KnockbackBot:
@@ -7943,7 +7949,15 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
             if action == "events":
                 return {"events": [{"seq": 1, "type": "hurt", "source": hurt_source}] if kwargs["params"]["since"] < 1 else []}
             if action == "inventory":
-                return {"items": []}
+                return {"items": [{"name": "stone_sword", "count": 1}] if armed_swarm else []}
+            if action == "get_entities" and armed_swarm:
+                return {"entities": [
+                    status["nearest_hostile"],
+                    {"id": 43, "name": "zombie", "dist": 4.0, "pos": [-5187.8, 69.6, -7616.0]},
+                    {"id": 44, "name": "skeleton", "dist": 7.0, "pos": [-5184.8, 69.6, -7616.0]},
+                ]}
+            if action == "attack" and armed_swarm:
+                pytest.fail("the armed bot must disengage from the group")
             if action == "find_blocks":
                 return {"blocks": []}
             if action == "get_block":
@@ -7962,7 +7976,7 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
         outcome = CombatControllerSlot().handle(
             CombatEnv(bot), {
                 "source": "pre_hurt_melee" if melee else "pre_hurt_ranged",
-                "primary_type": "zombie" if melee else "skeleton",
+                "primary_type": status["nearest_hostile"]["name"],
                 "primary_entity_id": 42,
             },
         )
