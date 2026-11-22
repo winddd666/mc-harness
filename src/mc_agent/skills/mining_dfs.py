@@ -349,7 +349,8 @@ class _BudgetSession:
 
     def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         endpoint = path.lstrip("/")
-        timeout_limit = float(kwargs.get("timeout_s") or 45.0)
+        default_limit = 8.0 if endpoint == "dig" else 45.0
+        timeout_limit = float(kwargs.get("timeout_s") or default_limit)
         first_step_probe = endpoint in self._RETRYABLE_PROBES and not self.dug_count and len(self.positions) < 2
         kwargs["allow_reauth"] = False
         for attempt in range(2):
@@ -2395,6 +2396,12 @@ class MiningDFSEngine:
                 or self.skills._is_block_avoided(pt)
             ):
                 continue
+            if (
+                self.strategy in {"radar", "v5"}
+                and abs(anchor[1] - self.target_y) <= 8
+                and abs(pt[1] - self.target_y) > 8
+            ):
+                continue
             if geofence is not None and geofence.check_point(pt[0] + 0.5, pt[2] + 0.5, action="ore_radar") is not None:
                 continue
             seen.add(pt)
@@ -2413,6 +2420,12 @@ class MiningDFSEngine:
                 or pt in self.mined_ore_positions
                 or self._is_ore_unreachable(pt)
                 or self.skills._is_block_avoided(pt)
+            ):
+                continue
+            if (
+                self.strategy in {"radar", "v5"}
+                and abs(anchor[1] - self.target_y) <= 8
+                and abs(pt[1] - self.target_y) > 8
             ):
                 continue
             if meta.get("block") not in target_set or int(meta.get("required_tier", 2)) > max_tier:
@@ -3984,10 +3997,14 @@ class MiningDFSEngine:
         self,
         chosen_rock: dict[str, Any] | None,
         total_rem: int,
+        *,
+        in_deepslate: bool = False,
     ) -> bool:
         """Recraft a stone burner pickaxe when durability is low, only wooden remains (BUG-091), or we would burn iron/diamond on rock."""
         if total_rem <= RECRAFT_PICK_DURABILITY:
             return True
+        if in_deepslate and chosen_rock is not None and int(chosen_rock.get("tier", 1)) >= 3 and total_rem > 160:
+            return False
         if chosen_rock is not None and int(chosen_rock.get("tier", 1)) != 2:
             return True
         return False
@@ -4327,7 +4344,7 @@ class MiningDFSEngine:
                 inv_raw, _ = self.skills._ensure_free_slots(min_free=6, inv_snapshot=inv_raw)
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
             chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
-            if self._should_recraft_burner_pickaxe(chosen_rock, total_rem) and self._try_recraft_burner_pickaxe(counts_now):
+            if self._should_recraft_burner_pickaxe(chosen_rock, total_rem, in_deepslate=(by < 0)) and self._try_recraft_burner_pickaxe(counts_now):
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
                 chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
             redline = self._pickaxe_redline_threshold(by, counts_now)
@@ -4545,7 +4562,7 @@ class MiningDFSEngine:
                 inv_raw, _ = self.skills._ensure_free_slots(min_free=6, inv_snapshot=inv_raw)
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
             chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
-            if self._should_recraft_burner_pickaxe(chosen_rock, total_rem) and self._try_recraft_burner_pickaxe(counts_now):
+            if self._should_recraft_burner_pickaxe(chosen_rock, total_rem, in_deepslate=(by < 0)) and self._try_recraft_burner_pickaxe(counts_now):
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
                 chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
             if chosen_rock is None or total_rem <= self._pickaxe_redline_threshold(by, counts_now):
@@ -4690,7 +4707,7 @@ class MiningDFSEngine:
                 inv_raw, _ = self.skills._ensure_free_slots(min_free=6, inv_snapshot=inv_raw)
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
             chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
-            if self._should_recraft_burner_pickaxe(chosen_rock, total_rem) and self._try_recraft_burner_pickaxe(counts_now):
+            if self._should_recraft_burner_pickaxe(chosen_rock, total_rem, in_deepslate=(by < 0)) and self._try_recraft_burner_pickaxe(counts_now):
                 inv_raw, counts_now = _inventory_snapshot_and_counts(self.bot)
                 chosen_rock, _, _, total_rem = self._equip_for_block_tier(1, for_ore=False, inv_snapshot=inv_raw)
             redline = self._pickaxe_redline_threshold(by, counts_now)

@@ -3068,7 +3068,7 @@ class McToolset:
                 eff_target_y = -54
 
         eff_duration_s, deadline_imminent = self._clamp_tool_budget(
-            max_duration_s, max_s=55.0, min_s=20.0, reserve_s=4.0
+            max_duration_s, max_s=90.0, min_s=20.0, reserve_s=4.0
         )
         if deadline_imminent:
             return json.dumps(
