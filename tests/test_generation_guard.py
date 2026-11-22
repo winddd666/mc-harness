@@ -217,6 +217,58 @@ def test_guardian_snapshot_is_visible_before_next_tool():
     assert replay.inventory["items"] == [{"name": "dirt", "count": 16}]
 
 
+@pytest.mark.parametrize("entry, warden_visible", [("poll", True), ("boundary", True), ("boundary", False)])
+def test_sonic_boom_prioritizes_warden_retreat_over_blocking_or_eating(monkeypatch, entry, warden_visible):
+    from mc_agent.skills.combat_env import CombatEnv, WARDEN_EVADE_DISTANCE
+
+    warden = {"id": 81, "name": "warden", "pos": [-3493, -54, 18504.5], "dist": 5.5}
+    zombie = {"id": 82, "name": "zombie", "pos": [-3497, -54, 18504.5], "dist": 1.5}
+    status = {
+        "pos": [-3498.5, -54, 18504.5], "health": 3.33, "food": 14, "blocking": True,
+        "offhand": {"name": "shield"}, "nearest_hostile": zombie if warden_visible else None,
+        "dimension": "overworld", "ready": True, "alive": True, "on_ground": True,
+    }
+    retreat_calls = []
+    events = []
+
+    class DeepDarkBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hit = {"seq": 1, "type": "hurt", "source": "sonic_boom", "likely_attacker": zombie}
+                return {"events": [hit] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": [{"name": "cooked_beef", "count": 8}], "offhand": status["offhand"]}
+            if action == "get_entities":
+                return {"entities": [zombie, warden] if warden_visible else []}
+            if action == "posture":
+                assert not body.get("shield")
+                status["blocking"] = False
+            if action in {"attack", "dig", "place", "use_item"}:
+                pytest.fail(f"Unexpected {action} after a sonic boom")
+            return {"ok": True}
+
+    def retreat(_env, target, **kwargs):
+        assert target == (warden["pos"] if warden_visible else None)
+        assert kwargs == {"distance": WARDEN_EVADE_DISTANCE, "urgent": True, "allow_shaft_seal": False,
+                          "wait_for_ground": True, "use_nearest_hostile": False}
+        assert not status["blocking"]
+        retreat_calls.append(target)
+        return {"ok": False, "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "flee", retreat)
+    guard = GenerationGuard(DeepDarkBot(), EventSink(events.append), checkpoint=lambda: None)
+    if entry == "poll":
+        assert guard.poll()["requires_replan"]
+    else:
+        assert guard.stabilize_after_tools() is not None
+
+    assert len(retreat_calls) == 1
+    combat, = [event for event in events if event.get("type") == "guardian.action.completed" and "subcortical_combat" in event["action"]]
+    assert combat["result"]["mode"] == "warden_evade"
+
+
 def test_in_wall_hurt_triggers_unstick_instead_of_bunker(monkeypatch):
     """Suffocating inside a block must carve out (no pickaxe needed), never bunker (needs a pickaxe)."""
     clock = [100.0]

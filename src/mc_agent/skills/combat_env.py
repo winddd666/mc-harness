@@ -232,6 +232,7 @@ RANGED_MOBS: frozenset[str] = frozenset(
         "breeze",
     }
 )
+WARDEN_EVADE_DISTANCE = 16.0
 
 CARDINAL_VECTORS: dict[str, tuple[int, int]] = {
     "north": (0, -1),
@@ -3193,6 +3194,29 @@ class SubcorticalInstinctController:
                 "status_after": st_lava_after,
                 "requires_replan": True,
                 "latched_guard": False,
+            }
+        if not st.get("in_water") and (
+            _clean_block_name(trigger.get("primary_type")) == "warden" or trigger.get("hurt_source") == "sonic_boom"
+        ):
+            nearby = self._find_live_hostiles(env, radius=16, timeout_s=0.6)
+            warden = next((entity for entity in nearby if _clean_block_name(entity.get("name")) == "warden"), {})
+            warden_pos = warden.get("pos")
+            if warden_pos is None and _clean_block_name(trigger.get("primary_type")) == "warden":
+                warden_pos = trigger.get("primary_pos")
+            if st.get("blocking"):
+                try:
+                    env.bot.call("posture", {"shield": False}, timeout_s=0.35, allow_reauth=False)
+                except (ApiError, httpx.HTTPError):
+                    pass
+            retreat = env.flee(
+                warden_pos, distance=WARDEN_EVADE_DISTANCE, urgent=True, allow_shaft_seal=False,
+                wait_for_ground=True, use_nearest_hostile=False,
+            )
+            return {
+                "handled": bool(retreat.get("ok")), "mode": "warden_evade",
+                "summary": "监守者威胁，已尝试沿安全落脚点撤离，先远离当前位置再恢复行动",
+                "actions": [{"action": "retreat_from_warden", **retreat}], "status_after": env._safe_status(st),
+                "requires_replan": True, "latched_guard": False,
             }
         hp = float(health or 20.0)
         try:

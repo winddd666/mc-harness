@@ -32,6 +32,7 @@ from ..skills.combat_env import (
     PRE_HURT_MELEE_MOBS,
     RANGED_MOBS,
     SUBCORTICAL_COMBAT_BUDGET_S,
+    WARDEN_EVADE_DISTANCE,
     CombatController,
     CombatControllerSlot,
     CombatEnv,
@@ -1334,7 +1335,7 @@ class GenerationGuard:
         if status.get("on_fire") and now - self._last_fire_contact_at < 1.25:
             return False
         nh_name, nh_dist, _, _ = self._extract_hostile_info(status)
-        if nh_name and nh_dist <= min_dist:
+        if nh_name and nh_dist <= (WARDEN_EVADE_DISTANCE if nh_name == "warden" else min_dist):
             return False
         health = status.get("health")
         if isinstance(health, (int, float)) and health <= 4.0:
@@ -1766,13 +1767,14 @@ class GenerationGuard:
         ):
             self.retry_after_ready = False
         nh_name0, nh_dist0, _, _ = self._extract_hostile_info(status)
+        sonic_hurt = next((hit for hit in reversed(other_hurts) if hit.get("source") == "sonic_boom"), None)
         exposed_in_water = (
             needs_float and now < self._ranged_combat_stance_until
             and (nh_name0 in RANGED_MOBS or nh_name0 == "ghast") and nh_dist0 <= 16.0
         )
         should_eat = (
             (needs_food or pending_ready_eat) and not (hot_floor_only or needs_hot_floor_guard)
-            and spawn_warning is None
+            and spawn_warning is None and sonic_hurt is None
             and self._can_auto_eat_safely(status, min_dist=5.5)
         )
         hurt = bool(hurts) or (dropped and spawn_warning is None)
@@ -2207,7 +2209,7 @@ class GenerationGuard:
                     (h for h in reversed(other_hurts) if str(h.get("source") or "").strip().lower() not in NON_COMBAT_HURT_SOURCES),
                     None,
                 )
-                recent_hurt = combat_hurt or (other_hurts[-1] if other_hurts else {})
+                recent_hurt = sonic_hurt or combat_hurt or (other_hurts[-1] if other_hurts else {})
                 attacker = (
                     recent_hurt.get("source_entity") or recent_hurt.get("likely_attacker")
                     if other_hurts else status.get("nearest_hostile")
@@ -2240,7 +2242,7 @@ class GenerationGuard:
                 already_blocking = bool(status.get("blocking"))
                 if in_wall_hurt:
                     actions.append(self._action("unstick_in_wall", lambda: self._unstick_in_wall(status)))
-                elif self._custom_combat_registered:
+                elif self._custom_combat_registered or sonic_hurt is not None or nh_name == "warden":
                     att_id = attacker.get("id") if isinstance(attacker, dict) and isinstance(attacker.get("id"), int) else nh_id
                     att_type = (
                         str(attacker.get("name") or nh_name).removeprefix("minecraft:")
@@ -4632,11 +4634,15 @@ class GenerationGuard:
         )
 
         boundary_trigger: ThreatTrigger | None = None
+        sonic_hurt = any(hit.get("source") == "sonic_boom" for hit in other_hurts)
         if not (
             in_water or in_lava or hot_floor_only or waiting_for_shore_landing or same_threat_after_timeout
             or (fall_only and status.get("on_ground") is False)
         ):
-            boundary_trigger = self._detect_pre_hurt_trigger(status)
+            boundary_trigger = (
+                {"source": "boundary_threat", "hurt_source": "sonic_boom"}
+                if sonic_hurt else self._detect_pre_hurt_trigger(status)
+            )
         if boundary_trigger is None and not in_water and not in_lava and not fall_only and other_hurts and nh_name and nh_dist <= 15.0:
             boundary_trigger = {
                 "source": "boundary_threat",
@@ -4649,7 +4655,7 @@ class GenerationGuard:
         hp = float(status.get("health") or 20.0)
         food = int(status.get("food") or 20)
         needs_post_eat = (
-            not (hot_floor_only or needs_hot_floor_guard)
+            not (hot_floor_only or needs_hot_floor_guard or sonic_hurt)
             and self._can_auto_eat_safely(status, min_dist=8.0)
             and (hp <= 13.0 or food <= 13) and food < 20
         )
