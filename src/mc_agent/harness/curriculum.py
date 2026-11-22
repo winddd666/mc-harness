@@ -1489,6 +1489,49 @@ def select_next_target(
     leash_active = leash is not None
 
     if not leash_active:
+        # 尸袋安全回收：仅在白天、最近 240s 内、同维度主世界、地表/浅层(y>=48)、水平距离<=64m 且缺铁镐时，尝试 1 集快速捡回掉落装备
+        if (
+            cur_dim == "overworld"
+            and not has_iron_or_better
+            and not is_dusk_or_night
+            and world_memory is not None
+            and isinstance(world_memory.last_death, dict)
+            and origin_pos is not None
+            and not _is_cooled("recover_death_drop")
+        ):
+            ld = world_memory.last_death
+            ld_pos = ld.get("pos")
+            ld_t = ld.get("t")
+            if (
+                normalize_dimension(ld.get("dim")) == "overworld"
+                and isinstance(ld_pos, (list, tuple))
+                and len(ld_pos) >= 3
+                and isinstance(ld_t, (int, float))
+            ):
+                death_age = float(now_t) - float(ld_t)
+                dx = float(ld_pos[0]) - float(origin_pos[0])
+                dz = float(ld_pos[2]) - float(origin_pos[2])
+                horiz_dist = math.hypot(dx, dz)
+                if 0.0 <= death_age <= 240.0 and float(ld_pos[1]) >= 48.0 and horiz_dist <= 64.0:
+                    dp_i = [int(math.floor(float(ld_pos[0]))), int(math.floor(float(ld_pos[1]))), int(math.floor(float(ld_pos[2])))]
+                    return (
+                        CurriculumTarget(
+                            key="recover_death_drop",
+                            title=f"快速回收死亡掉落装备 @{dp_i}",
+                            points=0,
+                            tier=0,
+                            budget_class="micro",
+                            pre_ensure=(),
+                            task=(
+                                f"[白天安全尸袋回收：你刚在约 {int(death_age)} 秒前阵亡于 {dp_i}（距此约 {horiz_dist:.0f}m，物品 300s 内有效）。"
+                                f"请立即调 mc_move_to(x={dp_i[0]}, z={dp_i[2]}, range=2) 前往该坐标附近，并调 mc_get_entities(radius=16, types=['item']) "
+                                "走近地面掉落物捡回铁镐/护甲/盾牌/钻石等装备！若途中遇危险敌怪或抵达后已无掉落物，立即止损收工，严禁恋战送双杀！]"
+                            ),
+                            extra_tools=(),
+                            advancement_id=None,
+                        ),
+                        frontier_data,
+                    )
         if cur_dim == "overworld" and not has_stone_or_better and not _is_cooled("bootstrap_stone_age"):
             pb0, _ = _enrich_target_with_world_memory(
                 CURRICULUM_PLAYBOOKS["bootstrap_stone_age"],
@@ -1556,6 +1599,7 @@ def select_next_target(
         not leash_active
         and enable_island_recon
         and not recon_done
+        and not is_dusk_or_night
         and world_memory is not None
         and cur_dim == "overworld"
         and not _is_cooled("island_recon_sweep")
@@ -1651,12 +1695,20 @@ def select_next_target(
         "minecraft:husbandry/tame_an_animal",
         "minecraft:adventure/trade",
     })
+    _DAYTIME_SURFACE_TARGETS = frozenset({
+        "minecraft:husbandry/plant_seed",
+        "minecraft:husbandry/breed_an_animal",
+        "minecraft:husbandry/tame_an_animal",
+        "minecraft:adventure/trade",
+    })
     is_deep_underground = cur_dim == "overworld" and origin_pos is not None and float(origin_pos[1]) < 48.0
 
     for key, pb in CURRICULUM_PLAYBOOKS.items():
         if key.startswith("bootstrap_"):
             continue
         if is_deep_underground and key in _SURFACE_ONLY_TARGETS:
+            continue
+        if is_dusk_or_night and key in _DAYTIME_SURFACE_TARGETS:
             continue
         if key == "minecraft:adventure/sleep_in_bed" and is_day_now:
             continue
@@ -2618,6 +2670,11 @@ class CurriculumSupervisor:
                 if self._day2_village_eps >= 3:
                     self.cooldowns["day2_village_search"] = time.monotonic() + 1200.0
                     self._day2_village_eps = 0
+            if target.key == "recover_death_drop":
+                self.cooldowns["recover_death_drop"] = max(
+                    self.cooldowns.get("recover_death_drop", 0.0),
+                    time.monotonic() + 240.0,
+                )
 
             report["curriculum_episode"] = ep_index
             report["curriculum_target"] = target.key
