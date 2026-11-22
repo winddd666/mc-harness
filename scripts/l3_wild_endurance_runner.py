@@ -1119,6 +1119,7 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"advancement grant {bot_name} only minecraft:story/smelt_iron",
                 f"advancement grant {bot_name} only minecraft:story/iron_tools",
                 f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+                f"advancement grant {bot_name} only minecraft:story/form_obsidian",
                 f"give {bot_name} minecraft:diamond_pickaxe 1",
                 f"give {bot_name} minecraft:iron_sword 1",
                 f"give {bot_name} minecraft:flint_and_steel 1",
@@ -1966,7 +1967,7 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "task": (
             "你已在干地平台，东侧脚边有现成黑曜石片（下方有岩浆），背包已有钻石镐、打火石、水桶、圆石和 4 块黑曜石。"
             "立即用 mc_skill_mine_blocks(block_types=['obsidian'], count=6, radius=8) 再采 6 块黑曜石凑够 10 块，"
-            "随后直接调用 mc_skill_build_nether_portal 搭建、点亮并走入下界传送门（解锁 story/form_obsidian 与 story/enter_the_nether）。"
+            "随后直接调用 mc_skill_build_nether_portal 搭建、点亮并走入下界传送门（解锁 story/enter_the_nether）。"
         ),
         "extra_tools": ("mc_skill_build_nether_portal",),
         "advancement_id": "minecraft:story/enter_the_nether",

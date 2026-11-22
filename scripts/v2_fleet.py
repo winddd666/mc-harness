@@ -676,7 +676,10 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         a = scene_meta["anchor"]
         scene_anchor = f"({a.get('x')}, {a.get('y')}, {a.get('z')})"
     baseline_raw = scene_meta.get("baseline_points")
-    if isinstance(baseline_raw, int):
+    if stage == "probe_obsidian_portal" and baseline_raw == 35:
+        # The original loadout unlocked form_obsidian as soon as its four obsidian entered inventory.
+        baseline_points = baseline_points_for_stage(stage) or baseline_raw
+    elif isinstance(baseline_raw, int):
         baseline_points = baseline_raw
     elif stage == "brewing_alchemy" and summaries and summary.get("spawn") is not None:
         # Finished summaries before P2-32 predate removal of the 30-point Nether travel grant.
