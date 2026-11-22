@@ -2755,10 +2755,10 @@ class GenerationGuard:
                                 and (0 < hp_val <= 6.0 or early_arrow_cover)
                             )
                             natural_cover = None
+                            overworld_landing = str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                             if (
                                 shore is None and not cf_result.get("respawned")
-                                and (critical_landing or stalled_under_arrows)
-                                and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                                and (critical_landing or stalled_under_arrows) and overworld_landing
                             ):
                                 try:
                                     landing = self.bot.call("status", method="GET", timeout_s=0.6)
@@ -2786,20 +2786,6 @@ class GenerationGuard:
                                             verify_live_shooters=hurt_src == "arrow" and not has_shield,
                                         ),
                                     )
-                                    actions.append(natural_cover)
-                                    if natural_cover.get("ok"):
-                                        self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
-                                    elif (
-                                        cover_material is not None
-                                        and not (natural_cover.get("result") or {}).get("respawned")
-                                    ):
-                                        placed_cover = self._action(
-                                            "place_arrow_cover",
-                                            lambda: self._place_arrow_cover(landing, counts, att_id_r),
-                                        )
-                                        actions.append(placed_cover)
-                                        if placed_cover.get("ok"):
-                                            self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                             if retry_pocket_after_knockback and natural_cover is None:
                                 # The retreat waited out knockback but found no route.
                                 landing = self.combat_env._safe_status({"ready": False})
@@ -2826,9 +2812,22 @@ class GenerationGuard:
                                                 allow_stationary_cover=False, cover_only=True, verify_live_shooters=True,
                                             ),
                                         )
-                                        actions.append(natural_cover)
-                                        if natural_cover.get("ok"):
-                                            self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
+                            if natural_cover is not None:
+                                actions.append(natural_cover)
+                                landing_hp = landing.get("health")
+                                if natural_cover.get("ok"):
+                                    self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
+                                elif (
+                                    overworld_landing and cover_material is not None and not landing.get("blocking")
+                                    and isinstance(landing_hp, (int, float)) and 0 < landing_hp <= cover_hp_limit
+                                    and not (natural_cover.get("result") or {}).get("respawned")
+                                ):
+                                    placed_cover = self._action(
+                                        "place_arrow_cover", lambda: self._place_arrow_cover(landing, counts, att_id_r),
+                                    )
+                                    actions.append(placed_cover)
+                                    if placed_cover.get("ok"):
+                                        self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                             if (
                                 cf.get("ok") and has_shield and isinstance(att_id_r, int)
                                 and hp_val <= LOW_HP_BUNKER_MAX
