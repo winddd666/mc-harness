@@ -3619,12 +3619,19 @@ def test_curriculum_death_drop_recovery_and_dusk_surface_filter() -> None:
     wm.last_death = {"dim": "overworld", "pos": [30, 66, 20], "t": 100.0}
 
     with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot_c:
-        # 1) Daytime + recent (<240s) + close (<=64m) + surface (y>=48) + bare -> recover_death_drop
+        # 1) Daytime + recent (<260s) + close + high-value run -> recover_death_drop (short budget)
         t1, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
         assert t1.key == "recover_death_drop"
-        assert t1.budget_class == "micro"
+        assert t1.budget_class == "short"
 
-        # 2) Nighttime -> must NOT run naked into night to recover corpse
+        # 1b) Deep diamond-layer death (y=-54, dist<=120m) also triggers recover_death_drop with short budget
+        wm.last_death = {"dim": "overworld", "pos": [100, -54, 40], "t": 100.0}
+        t1b, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
+        assert t1b.key == "recover_death_drop"
+        assert t1b.budget_class == "short"
+
+        # 2) Nighttime surface death -> must NOT run naked into night surface to recover corpse
+        wm.last_death = {"dim": "overworld", "pos": [30, 66, 20], "t": 100.0}
         state["tod"] = 12000
         state["is_day"] = False
         t2, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)

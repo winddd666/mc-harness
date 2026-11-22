@@ -1490,11 +1490,11 @@ def select_next_target(
     leash_active = leash is not None
 
     if not leash_active:
-        # 尸袋安全回收：仅在白天、最近 240s 内、同维度主世界、地表/浅层(y>=48)、水平距离<=64m 且缺铁镐时，尝试 1 集快速捡回掉落装备
+        # 尸袋安全回收：最近 260s 内、主世界、非虚空(y>=-60)、水平距离<=120m 且当前缺铁镐时，尝试 1 集捡回掉落装备
+        # 白天全距离可触发；入夜仅允许近距(<=40m)地下矿井(y<48)快速回井捡装，避免黑夜地表长途裸奔送双杀
         if (
             cur_dim == "overworld"
             and not has_iron_or_better
-            and not is_dusk_or_night
             and world_memory is not None
             and isinstance(world_memory.last_death, dict)
             and origin_pos is not None
@@ -1513,20 +1513,40 @@ def select_next_target(
                 dx = float(ld_pos[0]) - float(origin_pos[0])
                 dz = float(ld_pos[2]) - float(origin_pos[2])
                 horiz_dist = math.hypot(dx, dz)
-                if 0.0 <= death_age <= 240.0 and float(ld_pos[1]) >= 48.0 and horiz_dist <= 64.0:
-                    dp_i = [int(math.floor(float(ld_pos[0]))), int(math.floor(float(ld_pos[1]))), int(math.floor(float(ld_pos[2])))]
+                dy_pos = float(ld_pos[1])
+                is_underground_drop = dy_pos < 48.0
+                safe_time_ok = (not is_dusk_or_night) or (is_underground_drop and horiz_dist <= 40.0)
+                if 0.0 <= death_age <= 260.0 and dy_pos >= -60.0 and horiz_dist <= 120.0 and safe_time_ok:
+                    dp_i = [int(math.floor(float(ld_pos[0]))), int(math.floor(dy_pos)), int(math.floor(float(ld_pos[2])))]
+                    high_value_run = bool(
+                        completed.intersection(
+                            {
+                                "minecraft:story/iron_tools",
+                                "minecraft:story/mine_diamond",
+                                "minecraft:story/shiny_gear",
+                                "minecraft:story/obtain_armor",
+                            }
+                        )
+                    )
+                    use_short_budget = is_underground_drop or high_value_run or horiz_dist > 64.0
+                    ug_note = (
+                        f"死亡点位于地下 y={dp_i[1]}，请优先调 mc_move_to(x={dp_i[0]}, y={dp_i[1]}, z={dp_i[2]}, range=2) "
+                        "沿既有矿井/通道前往（严禁空手硬挖石头下潜，若路径彻底不通或遇岩浆/危险敌怪立即止损放弃）！"
+                        if is_underground_drop
+                        else f"请立即调 mc_move_to(x={dp_i[0]}, z={dp_i[2]}, range=2) 前往该坐标附近，"
+                    )
                     return (
                         CurriculumTarget(
                             key="recover_death_drop",
                             title=f"快速回收死亡掉落装备 @{dp_i}",
                             points=0,
                             tier=0,
-                            budget_class="micro",
+                            budget_class="short" if use_short_budget else "micro",
                             pre_ensure=(),
                             task=(
-                                f"[白天安全尸袋回收：你刚在约 {int(death_age)} 秒前阵亡于 {dp_i}（距此约 {horiz_dist:.0f}m，物品 300s 内有效）。"
-                                f"请立即调 mc_move_to(x={dp_i[0]}, z={dp_i[2]}, range=2) 前往该坐标附近，并调 mc_get_entities(radius=16, types=['item']) "
-                                "走近地面掉落物捡回铁镐/护甲/盾牌/钻石等装备！若途中遇危险敌怪或抵达后已无掉落物，立即止损收工，严禁恋战送双杀！]"
+                                f"[尸袋回收：你刚在约 {int(death_age)} 秒前阵亡于 {dp_i}（距此约 {horiz_dist:.0f}m，加载区块内 300s 有效）。"
+                                f"{ug_note}抵达附近后调 mc_get_entities(radius=16, types=['item']) "
+                                "走近地面掉落物捡回铁镐/钻石/护甲/盾牌等装备！若途中遇危险敌怪、路径不通或抵达后已无掉落物，立即止损收工，严禁恋战送双杀！]"
                             ),
                             extra_tools=(),
                             advancement_id=None,
@@ -2674,7 +2694,7 @@ class CurriculumSupervisor:
             if target.key == "recover_death_drop":
                 self.cooldowns["recover_death_drop"] = max(
                     self.cooldowns.get("recover_death_drop", 0.0),
-                    time.monotonic() + 240.0,
+                    time.monotonic() + 260.0,
                 )
 
             report["curriculum_episode"] = ep_index
