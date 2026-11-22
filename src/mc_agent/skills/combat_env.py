@@ -3386,6 +3386,9 @@ class SubcorticalInstinctController:
                 eff_id = int(target_ent["id"]) if isinstance(target_ent, dict) and target_ent.get("id") is not None else mob_id
                 if eff_id is None:
                     break
+                if target_ent is not None and target_ent.get("blocked_by_wall") is True:
+                    actions.append({"action": "melee_attack", "entity_id": eff_id, "ok": False, "code": "blocked_by_wall"})
+                    break
                 # Keep part of the slot budget for the reply, final status and control release.
                 remaining = deadline - time.monotonic()
                 if remaining < 1.5:

@@ -1055,6 +1055,57 @@ def test_water_tool_preemption_reports_life_unavailable_after_respawn(monkeypatc
     assert [e["action"] for e in events if e["type"] == "guardian.action.completed"] == ["escape_to_shore"]
 
 
+@pytest.mark.parametrize("landing", ["airborne", "grounded", "back_in_water", "respawned"])
+def test_water_tool_preemption_keeps_shore_recovery_during_airborne_handoff(monkeypatch, landing):
+    status = {
+        "pos": [-7780.1, 32.2, -2845.7], "dimension": "overworld", "health": 20,
+        "ready": True, "alive": True, "in_water": False, "on_ground": False, "last_death": {"t": 1},
+    }
+    shore_calls = []
+
+    class RiverBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                if kwargs.get("timeout_s") == 0.25:
+                    if landing == "grounded":
+                        status.update(on_ground=True)
+                    elif landing == "back_in_water":
+                        status.update(in_water=True, submerged=True)
+                    elif landing == "respawned":
+                        status.update(on_ground=True, last_death={"t": 2})
+                return dict(status)
+            if endpoint == "events":
+                return {"events": []}
+            if endpoint == "inventory":
+                return {"items": []}
+            raise AssertionError(endpoint)
+
+    def shore(*args, **kwargs):
+        shore_calls.append(kwargs.get("surface_first"))
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    def combat(_trigger):
+        pytest.fail("Water recovery must not flee from a distant zombie")
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
+    receipt = guard.handle_preemption(
+        {
+            "source": "tool_water_threat", "primary_type": "zombie", "primary_entity_id": 45,
+            "distance": 20.3, "observed_life": ("overworld", {"t": 1}),
+        },
+        interrupted_name="mc_skill_unstick",
+    )
+
+    assert receipt["requires_replan"]
+    assert receipt["reflex_mode"] == ("life_unavailable" if landing == "respawned" else "water_surface")
+    assert receipt["status_after"]["on_ground"] is (landing != "airborne")
+    assert guard._last_water_escape_failed is (landing == "airborne")
+    assert shore_calls == ([True] if landing == "back_in_water" else [])
+
+
 @pytest.mark.parametrize("source, identified, expected", [
     ("mob_attack", True, "cover_or_flee"),
     ("mob_attack", False, "cover_or_flee"),
@@ -2926,6 +2977,36 @@ def test_combat_attacks_reserve_time_for_final_status_and_release(monkeypatch, r
     assert clock[0] < 1007.0
     assert commands[-1] == ("posture", {})
     assert outcome["status_after"]["health"] == 20
+
+
+def test_counterattack_stops_when_the_latest_scan_puts_the_target_behind_a_wall():
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    target = {"id": 42, "name": "zombie", "pos": [3.5, 64, 0.5], "dist": 3.0}
+    scans = 0
+
+    class CaveBot:
+        def status(self):
+            return {"pos": [0.5, 64, 0.5], "health": 20, "food": 20, "on_ground": True,
+                    "ready": True, "alive": True, "nearest_hostile": target}
+
+        def call(self, action, body=None, **kwargs):
+            nonlocal scans
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}]}
+            if action == "get_entities":
+                scans += 1
+                return {"entities": [{**target, "blocked_by_wall": scans > 1}]}
+            if action == "attack":
+                pytest.fail("Guardian attempted to chase a target behind a wall")
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(CombatEnv(CaveBot()), {
+        "source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie", "distance": 3.0,
+    })
+
+    assert scans == 2
+    assert {"action": "melee_attack", "entity_id": 42, "ok": False, "code": "blocked_by_wall"} in outcome["actions"]
 
 
 @pytest.mark.parametrize("scenario", ["cornered", "escaped", "second_hostile", "out_of_reach"])
@@ -10666,14 +10747,18 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
     }[cover]
 
 
-@pytest.mark.parametrize("landing", ["covered", "exposed", "new_life", "shooter_gone", "healthy"])
-def test_blocked_flee_checks_cover_after_a_critical_unshielded_landing(monkeypatch, landing):
+@pytest.mark.parametrize("blocking, landing", [
+    (False, "covered"), (False, "exposed"), (False, "new_life"), (False, "shooter_gone"), (False, "healthy"),
+    (True, "covered"), (True, "exposed"), (True, "new_life"), (True, "shooter_gone"), (True, "near_melee"),
+])
+def test_blocked_flee_checks_cover_after_a_critical_landing(monkeypatch, blocking, landing):
     from mc_agent.skills.combat_env import CombatEnv
 
     shooter = {"id": 44, "name": "skeleton", "dist": 5.5, "pos": [0.5, 77, 6.0]}
     origin = [0.5, 77, 0.5]
     landing_pos = [0.5, 77, -2.0]
-    status = {"pos": origin, "dimension": "overworld", "health": 8.5, "on_ground": True,
+    status = {"pos": origin, "dimension": "overworld", "health": 1.55 if blocking else 8.5,
+              "blocking": blocking, "on_ground": True,
               "ready": True, "alive": True, "last_death": {"t": 1}, "nearest_hostile": shooter}
     checks = []
 
@@ -10684,19 +10769,29 @@ def test_blocked_flee_checks_cover_after_a_critical_unshielded_landing(monkeypat
             if action == "get_block":
                 return {"name": "air"}
             if action == "get_entities":
-                return {"entities": [shooter]}
+                entities = [shooter]
+                if status["pos"] == landing_pos and landing == "near_melee":
+                    entities.append({"id": 45, "name": "zombie", "dist": 5.4})
+                return {"entities": entities}
+            if action == "look" and blocking:
+                return {"ok": True}
             pytest.fail(f"Unexpected action during retreat: {action}")
 
     def flee(_env, target, **_kwargs):
         assert target == shooter["pos"]
         checks.append("flee")
-        status.update(pos=landing_pos, health=8.5 if landing == "healthy" else 4.5,
-                      nearest_hostile=None if landing == "shooter_gone" else {**shooter, "dist": 8.0},
+        health_after = {"healthy": 8.5}.get(landing, 1.55 if blocking else 4.5)
+        shooter_dist = 4.5 if landing == "near_melee" else 9.4 if blocking else 8.0
+        status.update(pos=landing_pos, health=health_after,
+                      nearest_hostile=None if landing == "shooter_gone" else {**shooter, "dist": shooter_dist},
                       last_death={"t": 2 if landing == "new_life" else 1})
         return {"ok": True, "mode": "flee", "moved_dist": 2.5, "pos_after": landing_pos}
 
     def cover(_env, target, *, other_shooters, allow_stationary):
         assert target == shooter["pos"] and not other_shooters and not allow_stationary
+        if status["pos"] == origin:
+            checks.append("initial_cover")
+            return None
         checks.append("cover")
         if landing == "covered":
             return {"ok": True, "mode": "natural_cover", "pos_after": [-1.7, 77, -2.0]}
@@ -10706,13 +10801,76 @@ def test_blocked_flee_checks_cover_after_a_critical_unshielded_landing(monkeypat
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
     bot = RidgeBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    if blocking:
+        monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
+        guard._last_ranged_hurt_at = 999.0
     result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
         bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
     )))
 
-    assert checks == (["flee", "cover"] if landing in {"covered", "exposed"} else ["flee"])
+    expected_checks = ["initial_cover", "flee"] if blocking else ["flee"]
+    if landing in {"covered", "exposed"}:
+        expected_checks.append("cover")
+    assert checks == expected_checks
     assert result["mode"] == {"covered": "natural_cover", "new_life": "respawned"}.get(landing, "flee")
     assert result["ok"] is (landing != "new_life") and result["requires_replan"]
+
+
+@pytest.mark.parametrize("terrain", ["cliff", "same_column", "missing_target", "clear", "new_life", "moved", "expired"])
+def test_attack_rechecks_footing_near_a_recent_failed_retreat(monkeypatch, terrain):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    origin = [0.5, 9, 0.5]
+    hostile = {"id": 42, "name": "zombie", "pos": [5.5, 9, 0.5], "dist": 5.0}
+    status = {"pos": origin, "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": hostile,
+              "health": 8, "food": 20, "ready": True, "alive": True, "on_ground": True}
+    attacks = []
+
+    class CaveBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_entities":
+                return {"entities": []}
+            if action == "get_block":
+                x, y, _ = body["pos"]
+                return {"name": "stone" if y == 8 and (terrain == "clear" or x <= 1) else "air"}
+            if action == "attack":
+                attacks.append(body["entity_id"])
+                return {"ok": True, "hits": 1}
+            pytest.fail(f"Unexpected action during attack: {action}")
+
+    monkeypatch.setattr(CombatEnv, "probe_retreat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(CombatEnv, "flee", lambda *_args, **_kwargs: {
+        "ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0, "pos_after": origin,
+    })
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    flee = guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
+        bot.call("move_to", {"x": 5.5, "z": 0.5, "stop_on": ["death"]}),
+    ))
+    assert json.loads(flee)["error"]["code"] == "unsafe_landing"
+
+    clock[0] += 11.0 if terrain == "expired" else 4.8
+    if terrain == "same_column":
+        hostile["pos"] = [0.5, -22, 0.5]
+    elif terrain == "missing_target":
+        hostile.pop("pos")
+    elif terrain == "new_life":
+        status["last_death"] = {"t": 2}
+    elif terrain == "moved":
+        status["pos"] = [4.5, 9, 0.5]
+    attack = json.loads(guard.run_tool_with_reflex("mc_attack", lambda: json.dumps(
+        bot.call("attack", {"entity_id": 42, "max_hits": 8}),
+    )))
+
+    safe = terrain in {"clear", "new_life", "moved", "expired"}
+    assert attacks == ([42] if safe else [])
+    assert attack["ok"] is safe
+    if not safe:
+        assert attack["error"]["code"] == "unsafe_landing"
 
 
 @pytest.mark.parametrize("pressure", ["arrow", "stale_arrow", "melee_and_arrow", "exposed"])
@@ -11457,9 +11615,11 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
 
 @pytest.mark.parametrize("landing, expected_error", [
     ("shore", None),
+    ("settled", None),
     ("respawned", "respawned"),
     ("unready", "shore_landing_unconfirmed"),
     ("airborne", "shore_landing_unconfirmed"),
+    ("reentered", "water_escape_failed"),
     ("wet", "water_escape_failed"),
     ("status_timeout", "shore_landing_unconfirmed"),
 ])
@@ -11475,6 +11635,11 @@ def test_unstick_water_success_requires_confirmed_same_life_landing(landing, exp
             assert action == "status"
             if finished and landing == "status_timeout":
                 raise httpx.ReadTimeout("landing status unavailable")
+            if finished and kwargs.get("timeout_s") == 0.25:
+                if landing == "settled":
+                    status.update(pos=[-7422.5, 63.0, 2630.5], on_ground=True)
+                elif landing == "reentered":
+                    status.update(pos=[-7422.5, 62.4, 2630.5], in_water=True)
             return dict(status)
 
     bot = SwimBot()
@@ -11489,7 +11654,7 @@ def test_unstick_water_success_requires_confirmed_same_life_landing(landing, exp
             status.update(pos=[-7421.5, 64.1, 2805.5], ready=False, last_death={"t": 2})
         elif landing == "unready":
             status["ready"] = False
-        elif landing == "airborne":
+        elif landing in {"airborne", "settled", "reentered"}:
             status["on_ground"] = False
         elif landing == "wet":
             status["in_water"] = True
@@ -11500,6 +11665,8 @@ def test_unstick_water_success_requires_confirmed_same_life_landing(landing, exp
 
     assert result["ok"] is (expected_error is None)
     assert result["escaped_water"] is result["ok"]
+    if landing == "settled":
+        assert result["pos_after"] == [-7422.5, 63.0, 2630.5]
     if expected_error:
         assert result["requires_replan"] is True and result["error"]["code"] == expected_error
         assert result.get("respawned", False) is (landing == "respawned")
@@ -11789,9 +11956,12 @@ def test_critical_projectile_retreat_checks_cover_from_landing(
     from mc_agent.skills.combat_env import CombatEnv
 
     shooter = {"id": 41, "name": shooter_name, "dist": 8.0, "pos": [8.5, 102, 0.5]}
+    fresh_dig_failure = has_shield and hurt_source == "arrow" and landing == "covered"
+    origin = [0.5, 102 if fresh_dig_failure else 102.2, 0.5]
     status = {
-        "pos": [0.5, 102.2, 0.5], "dimension": "overworld", "health": 4.0, "food": 20,
-        "ready": True, "alive": True, "on_ground": False, "nearest_hostile": shooter, "blocking": has_shield,
+        "pos": origin, "dimension": "overworld", "health": 4.0, "food": 20,
+        "ready": True, "alive": True, "on_ground": fresh_dig_failure,
+        "nearest_hostile": shooter, "blocking": has_shield,
     }
     checks = []
     melee = {"id": 42, "name": "zombie", "dist": 2.0}
@@ -11831,7 +12001,7 @@ def test_critical_projectile_retreat_checks_cover_from_landing(
 
     def seek_cover(_env, pos, *, other_shooters, allow_stationary):
         assert pos == shooter["pos"] and not other_shooters and allow_stationary
-        if not status["on_ground"]:
+        if status["pos"] == origin:
             checks.append("initial_cover")
             return None
         checks.append("cover")
@@ -11839,16 +12009,26 @@ def test_critical_projectile_retreat_checks_cover_from_landing(
             return {"ok": True, "mode": "natural_cover", "pos_after": status["pos"]}
         return None
 
+    def dig_cover(_env, _skills):
+        assert fresh_dig_failure
+        checks.append("dig_cover")
+        return {"ok": False, "reason": "no_solid_wall"}
+
     monkeypatch.setattr(CombatEnv, "flee", flee)
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "dig_cover_pocket", dig_cover)
     guard = GenerationGuard(HillBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     if has_shield:
         monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
-        guard._last_dig_cover_fail_at = 999.0
+        if not fresh_dig_failure:
+            guard._last_dig_cover_fail_at = 999.0
     incident = guard.poll()
 
     expected_checks = ["flee"] if has_shield else ["initial_cover", "flee"]
     expected_actions = ["face_attacker", "combat_or_flee"] if has_shield else ["combat_or_flee"]
+    if fresh_dig_failure:
+        expected_checks[:0] = ["dig_cover", "scan", "initial_cover"]
+        expected_actions.insert(1, "dig_cover")
     if landing != "respawned":
         expected_checks.append("scan")
         expected_actions.append("natural_cover_after_retreat")
