@@ -61,6 +61,7 @@ STRONGHOLD_TRAVEL_RADIUS = 720.0
 STRONGHOLD_LOCATE_TIMEOUT_S = 60
 PROBE_HEIGHTS = {"probe_iron_y16": 16, "probe_diamond_y54": -54}
 PROBE_STAGES = (*PROBE_HEIGHTS, "probe_obsidian_portal")
+PROBE_THROUGHPUT_TARGETS = {"probe_iron_y16": ("raw_iron", 24), "probe_diamond_y54": ("diamond", 16)}
 FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
@@ -1998,7 +1999,7 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "task": (
             "你已在 Y=16 地下安全口袋，背包有石镐、木板、煤、火把与食物，无需回地表。"
             "持续调用 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=24, max_duration_s=90) "
-            "最大化挖取粗铁，拿到足够粗铁后可用 mc_skill_craft_gear 烧铁做铁镐并继续挖铁，严禁回地表或闲逛。"
+            "最大化挖取粗铁，每片根据 gained.raw_iron 核对实际入包。保留粗铁计量，本场只做采集，继续在 Y=16 附近作业。"
         ),
         "extra_tools": (),
     },
@@ -2514,6 +2515,16 @@ def main() -> int:
         if args.stage == "village_trade":
             _pin_villager_near(bot, bot_name, [sx + 2.0, sy, sz])
 
+        probe_target = PROBE_THROUGHPUT_TARGETS.get(scene.stage)
+        probe_start_count = None
+        if probe_target is not None:
+            try:
+                probe_inventory = bot.call("inventory", method="GET", timeout_s=2.0, allow_reauth=False)
+                if isinstance(probe_inventory.get("items"), list):
+                    probe_start_count = total_owned_counts(probe_inventory).get(probe_target[0], 0)
+            except Exception:
+                pass
+
         geofence = _scene_geofence_cls(VoidGeofence)(
             center_x=sx, center_z=sz, radius=scene.radius, margin=8.0
         )
@@ -2743,6 +2754,9 @@ def main() -> int:
         if portal_crossing is not None:
             payload["scene"]["portal_crossing"] = portal_crossing
             payload["scene"]["portal_advancement"] = verify_portal_advancement(bot, summary)
+        if probe_target is not None:
+            item, threshold = probe_target
+            payload["scene"]["throughput"] = {"item": item, "threshold": threshold, "start_count": probe_start_count}
         if village_xz is not None:
             vx, vz = village_xz
             payload["scene"]["village"] = {"x": vx, "z": vz, "spawn_distance_m": round(math.hypot(sx - vx, sz - vz), 2)}

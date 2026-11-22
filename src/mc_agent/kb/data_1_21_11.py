@@ -845,7 +845,11 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:story/iron_tools": {
         "difficulty": "easy",
-        "how_to": "3 铁锭和 2 木棍在工作台合 iron_pickaxe。若只缺铁锭且背包有 iron_block，先拆 1 块为 9 铁锭。",
+        "how_to": (
+            "铁镐要 3 铁锭、2 木棍和工作台。缺锭时优先把已有 iron_block 拆成 9 铁锭；只有粗铁时，"
+            "用 mc_skill_smelt(input_item='raw_iron', count=3) 按缺口熔炼，核对铁锭已从炉里取出。"
+            "材料齐后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，并查看手持物确认已装备。"
+        ),
     },
     "minecraft:story/obtain_armor": {
         "difficulty": "easy",

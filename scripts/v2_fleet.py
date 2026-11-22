@@ -35,7 +35,8 @@ import tempfile
 import time
 import zipfile
 from collections import Counter, defaultdict
-from typing import TextIO
+from datetime import datetime
+from typing import Any, TextIO
 
 if __package__:
     from .fleet_lifecycle import LifecycleCounter
@@ -500,6 +501,16 @@ def _extract_error_code(payload: dict[str, Any]) -> str:
 
 
 @dataclasses.dataclass
+class ProbeThroughput:
+    item: str
+    threshold: int
+    start_count: int | None
+    end_count: int | None
+    gains: list[int]
+    first_threshold_s: float | None
+
+
+@dataclasses.dataclass
 class BotRow:
     name: str
     squad: str
@@ -533,6 +544,7 @@ class BotRow:
     http_429_retries: int = 0
     portal_crossing: dict[str, Any] | None = None
     portal_advancement: str = ""
+    throughput: ProbeThroughput | None = None
 
     @property
     def gained_short(self) -> list[str]:
@@ -552,6 +564,14 @@ def _read_crash_tail(bd: pathlib.Path) -> str:
     tail = text[-2000:]
     lines = [ln for ln in tail.splitlines() if ln.strip()]
     return "\n".join(lines[-6:])
+
+
+def _trace_time(event: dict[str, Any]) -> float | None:
+    timestamp = event.get("time")
+    try:
+        return datetime.fromisoformat(timestamp).timestamp() if isinstance(timestamp, str) else None
+    except ValueError:
+        return None
 
 
 def triage_bot_dir(bd: pathlib.Path) -> BotRow:
@@ -580,6 +600,11 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     scene_meta = summary.get("scene") or {}
     scene_stage = str(scene_meta.get("stage") or "")
     stage = scene_stage or _stage_from_dirname(name)
+    probe_target = _load_runner_module().PROBE_THROUGHPUT_TARGETS.get(stage) if stage.startswith("probe_") else None
+    probe_gains: list[int] = []
+    probe_total = 0
+    probe_started_at = None
+    first_threshold_s = None
     portal_crossing = scene_meta.get("portal_crossing")
     if not isinstance(portal_crossing, dict) or not portal_crossing:
         portal_crossing = None
@@ -625,6 +650,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
             lifecycle.observe(ev)
             tp = str(ev.get("type") or "")
             el = float(ev.get("elapsed") or 0.0)
+            if probe_target and probe_started_at is None:
+                probe_started_at = _trace_time(ev)
             if tp in ("tool.started", "tool.ready"):
                 cid = str(ev.get("call_id") or "")
                 fn = ev.get("function") or {}
@@ -644,6 +671,17 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 dt = max(0.0, el - st_info[0]) if st_info else float(ev.get("duration") or 0.0)
                 tool_calls[tname] += 1
                 payload = _decode_payload(ev.get("result") if "result" in ev else ev.get("output"))
+                if probe_target and st_info and tname in {"mc_skill_mine_dfs", "mc_skill_mine_blocks"}:
+                    item, threshold = probe_target
+                    gained_items = payload.get("gained")
+                    gain = gained_items.get(item) if isinstance(gained_items, dict) else None
+                    if type(gain) is int and gain > 0:
+                        probe_gains.append(gain)
+                        if probe_total < threshold <= probe_total + gain:
+                            reached_at = _trace_time(ev)
+                            if reached_at is not None and probe_started_at is not None:
+                                first_threshold_s = round(max(0.0, reached_at - probe_started_at), 1)
+                        probe_total += gain
                 if (
                     tname == "mc_skill_build_portal"
                     and (portal_crossing is None or portal_crossing.get("reused_existing_portal"))
@@ -686,6 +724,18 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     portal_advancement = str((scene_meta.get("portal_advancement") or {}).get("status") or "")
     if portal_crossing and not portal_advancement:
         portal_advancement = "confirmed" if _load_runner_module().portal_advancement_confirmed(cs) else "unconfirmed"
+    throughput = None
+    if probe_target:
+        item, threshold = probe_target
+        start_count = (scene_meta.get("throughput") or {}).get("start_count")
+        end_inventory = summary.get("owned_end")
+        end_status = summary.get("end_status") or {}
+        end_count = (
+            end_inventory.get(item, 0)
+            if isinstance(end_inventory, dict) and (end_inventory or end_status.get("pos"))
+            else None
+        )
+        throughput = ProbeThroughput(item, threshold, start_count, end_count, probe_gains, first_threshold_s)
     scene_anchor = ""
     if isinstance(scene_meta.get("anchor"), dict):
         a = scene_meta["anchor"]
@@ -716,6 +766,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         http_429_retries=http_429_retries,
         portal_crossing=portal_crossing,
         portal_advancement=portal_advancement,
+        throughput=throughput,
         rate_waits=rate_waits,
         gained=sorted(set(gained)),
         top_tools=[(k, tool_calls[k], tool_fails[k]) for k in sorted(tool_calls, key=lambda t: -tool_calls[t])[:6]],
@@ -874,6 +925,32 @@ def _write_markdown(
             how = "复用既有门" if crossing.get("reused_existing_portal") else "搭建后穿门"
             placed = crossing.get("placed_obsidian")
             lines.append(f"| `{r.name}` | {how} | {placed if placed is not None else '—'} | {r.portal_advancement} |")
+    probe_rows = [r for r in rows if r.throughput is not None]
+    if probe_rows:
+        lines.extend([
+            "", "### 采矿探针吞吐",
+            "", "首达时间从首集事件起算，取到达阈值的那条采集回执时间。",
+            "",
+            "| Bot | 物品 | 阈值 | 初包 | 终包 | 各采集回执 | 回执累计 | 首达 |",
+            "|---|---|---:|---:|---:|---|---:|---|",
+        ])
+        for r in probe_rows:
+            probe = r.throughput
+            start_count = probe.start_count if probe.start_count is not None else "—"
+            end_count = probe.end_count if probe.end_count is not None else "—"
+            gains = ", ".join(map(str, probe.gains)) or "—"
+            total = sum(probe.gains)
+            if probe.first_threshold_s is not None:
+                reached = f"{probe.first_threshold_s:.1f}s，采集回执"
+            elif total >= probe.threshold:
+                reached = "采集回执，时间未知"
+            elif probe.end_count is not None and probe.end_count - (probe.start_count or 0) >= probe.threshold:
+                reached = "终包，时间未知"
+            else:
+                reached = "—"
+            lines.append(
+                f"| `{r.name}` | `{probe.item}` | {probe.threshold} | {start_count} | {end_count} | {gains} | {total} | {reached} |"
+            )
     wd_rows = [r for r in rows if r.scene_ticks is not None]
     if wd_rows:
         lines.extend(["", "| Bot | watchdog ticks | 反射抢占跳过 |", "|---|---:|---:|"])
@@ -991,6 +1068,12 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
         if r.portal_crossing:
             placed = r.portal_crossing.get("placed_obsidian")
             print(f"        Nether crossing confirmed, placed_obsidian={placed}, advancement={r.portal_advancement}")
+        if r.throughput is not None:
+            probe = r.throughput
+            print(
+                f"        {probe.item} start={probe.start_count} end={probe.end_count} "
+                f"mined={sum(probe.gains)}/{probe.threshold} first_threshold_s={probe.first_threshold_s}"
+            )
 
     print("\n--- CROSS-MODEL AGGREGATE (per model family) ---")
     for a in aggregate_by_squad(rows):
