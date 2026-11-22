@@ -3928,6 +3928,88 @@ def test_craft_gear_shares_episode_budget_and_keeps_completed_craft(monkeypatch,
         assert result["equipped_slot"] is None
 
 
+@pytest.mark.parametrize("placement", ["new", "reused", "rejected", "timed_out", "unreleased", "surface"])
+def test_craft_gear_clears_its_own_table_from_a_narrow_mine(monkeypatch, placement) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    y = 64 if placement == "surface" else -54
+    table = [1, y, 0]
+    table_present = placement == "reused"
+    calls = []
+
+    def handler(request):
+        nonlocal table_present
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        timeout = request.extensions["timeout"]["read"]
+        assert timeout <= 26.0 - clock[0] + 1e-9
+        calls.append(route)
+        if route == "inventory":
+            result = {"items": [
+                {"name": "cobbled_deepslate", "count": 3},
+                {"name": "stick", "count": 2},
+                {"name": "crafting_table", "count": int(not table_present)},
+            ]}
+        elif route == "status":
+            result = {"pos": [0.5, y, 0.5], "dimension": "overworld", "health": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": table, "dist": 1}]} if table_present else {"blocks": []}
+        elif route == "place":
+            assert not table_present
+            table_present = True
+            result = {"placed": "crafting_table", "pos": table}
+        elif route == "craft":
+            assert table_present
+            if placement in {"timed_out", "unreleased"}:
+                clock[0] += timeout
+                raise httpx.ReadTimeout("offline slow craft", request=request)
+            if placement == "rejected":
+                return httpx.Response(200, json={"ok": False, "error": {"code": "unknown_item", "message": "rejected"}})
+            result = {"crafted": "stone_pickaxe", "gained": {"stone_pickaxe": 1}}
+        elif route == "stop":
+            result = {"released": placement != "unreleased"}
+        elif route == "equip":
+            assert table_present is (placement in {"reused", "surface"})
+            result = {"equipped": "stone_pickaxe"}
+        elif route == "get_block":
+            assert body["pos"] == table
+            result = {"name": "crafting_table" if table_present else "air"}
+        elif route == "dig":
+            assert body["pos"] == table and body["collect"] is True
+            assert table_present
+            table_present = False
+            result = {"dug": "crafting_table", "gained": {"crafting_table": 1}}
+        else:
+            raise AssertionError(route)
+        clock[0] += min(0.1, timeout)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        toolset._episode_deadline_mono = 30.0
+        result = json.loads(toolset.mc_skill_craft_gear("stone_pickaxe"))
+
+    assert result["ok"] is (placement not in {"rejected", "timed_out", "unreleased"})
+    assert table_present is (placement in {"reused", "surface", "unreleased"})
+    if placement in {"reused", "surface", "unreleased"}:
+        assert "dig" not in calls
+    else:
+        assert result["crafting_table_cleanup"] == [{"pos": table, "removed": True, "recovered": 1}]
+        verify = calls.index("get_block")
+        assert calls[verify:verify + 2] == ["get_block", "dig"]
+    if placement == "timed_out":
+        assert calls[-3:] == ["stop", "get_block", "dig"]
+        assert result["stop_reason"] == "time_budget"
+    elif placement == "unreleased":
+        assert calls[-1] == "stop"
+        assert result["crafting_table_cleanup"] == [{
+            "pos": table, "removed": False, "recovered": 0, "error": "cleanup_deadline_or_pending",
+        }]
+    assert clock[0] <= 26.0
+
+
 def test_smelt_collect_survives_read_timeout() -> None:
     """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
     from mc_agent.harness.world_memory import WorldMemory

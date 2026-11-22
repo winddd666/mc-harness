@@ -2734,11 +2734,27 @@ class MacroSkills:
         }
         return bool(reqs.get(target_item, False))
 
+    def _reserve_crafting_table_cleanup(self, y: int) -> None:
+        if y < 55 and isinstance(self.bot, _SkillBudgetSession):
+            # Keep six seconds to verify, break and pick up the table before the stop reserve.
+            self.bot.deadline = min(self.bot.deadline, self.bot.finish_at - 7.0)
+
+    def _remember_crafting_table_placement(
+        self, pos: Any, temporary_tables: list[list[int]] | None
+    ) -> None:
+        if temporary_tables is not None and isinstance(pos, (list, tuple)) and len(pos) >= 3 and pos[1] < 55:
+            cell = [int(v) for v in pos[:3]]
+            if cell not in temporary_tables:
+                temporary_tables.append(cell)
+        else:
+            self._record_utility_in_ledger("crafting_table", pos)
+
     def ensure_crafting_table(
         self,
         *,
         force_recarve: bool = False,
         target_item: str | None = None,
+        temporary_tables: list[list[int]] | None = None,
     ) -> dict[str, Any]:
         """Reuse a nearby same-level crafting_table or craft & place one (carving a wall pocket if needed)."""
         st = self.bot.status()
@@ -2897,22 +2913,27 @@ class MacroSkills:
             except ApiError as err:
                 return {"ok": False, "error": err.code, "requires_replan": True, "message": err.message, **err.context}
 
-        # Place nearby using auto-placement first, then fallback open offsets, then wall-pocket carving
+        # Leave time to clear a newly placed underground table after crafting.
+        if temporary_tables is not None:
+            self._reserve_crafting_table_cleanup(py)
         try:
             placed = self.bot.call("place", {"item": "crafting_table"})
-            self._record_utility_in_ledger("crafting_table", placed.get("pos"))
+            self._remember_crafting_table_placement(placed.get("pos"), temporary_tables)
             return {"ok": True, "reused": False, **placed}
         except ApiError as err:
             for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (1, 1, 0)):
+                pos = [px + dx, py + dy, pz + dz]
                 try:
-                    placed = self.bot.call("place", {"item": "crafting_table", "pos": [px + dx, py + dy, pz + dz]})
-                    self._record_utility_in_ledger("crafting_table", placed.get("pos") or [px + dx, py + dy, pz + dz])
+                    placed = self.bot.call("place", {"item": "crafting_table", "pos": pos})
+                    self._remember_crafting_table_placement(placed.get("pos") or pos, temporary_tables)
                     return {"ok": True, "reused": False, **placed}
                 except ApiError:
                     continue
             pocket = self._carve_and_place_table(px, py, pz)
             if pocket is not None:
-                self._record_utility_in_ledger("crafting_table", pocket.get("pos") or pocket.get("carved_pocket"))
+                self._remember_crafting_table_placement(
+                    pocket.get("pos") or pocket.get("carved_pocket"), temporary_tables,
+                )
                 return pocket
             return {"ok": False, "error": err.code, "message": err.message}
 
@@ -3725,28 +3746,90 @@ class MacroSkills:
         max_duration_s: float | None = None,
     ) -> dict[str, Any]:
         """Auto-craft intermediate planks/sticks, ensure crafting_table when needed, craft item, and optionally equip."""
-        if max_duration_s is None:
-            return self._craft_gear(item, count, equip_slot)
-        session = _SkillBudgetSession(self.bot, max_duration_s)
-        scoped = copy(self)
-        scoped.bot = session
+        scoped = self
+        owns_budget = max_duration_s is not None
+        if max_duration_s is not None:
+            scoped = copy(self)
+            scoped.bot = _SkillBudgetSession(self.bot, max_duration_s)
+        session = scoped.bot if isinstance(scoped.bot, _SkillBudgetSession) else None
+        deadline = session.deadline if session else None
+        temporary_tables: list[list[int]] = []
         try:
-            result = scoped._craft_gear(item, count, equip_slot)
+            result = scoped._craft_gear(item, count, temporary_tables)
         except (_SkillDeadline, httpx.TimeoutException):
-            session.stop_pending()
-            return {
+            if not owns_budget:
+                raise
+            result = {
                 "ok": False,
                 "error": "time_budget",
                 "stop_reason": "time_budget",
                 "requires_replan": True,
                 "message": "合成预算已用尽。请核对背包中的产物和中间材料，再决定是否重试。",
             }
-        if session.timed_out:
-            session.stop_pending()
-            result["deadline_hit"] = True
+        finally:
+            if session is not None:
+                session.deadline = deadline
+
+        craft_timed_out = session is not None and session.timed_out
+        if session is not None and owns_budget and craft_timed_out:
+            pending = session.pending_action
+            released = session.stop_pending()
+            if temporary_tables and (not pending or released):
+                session.timed_out = False
+        interruptions = ("death", "hurt", "interrupted", "not_connected", "action_quarantined")
+        cleanup = []
+        if temporary_tables:
+            blocked = result.get("error") if result.get("error") in interruptions else None
+            if session is not None and session.timed_out:
+                blocked = blocked or "cleanup_deadline_or_pending"
+            if blocked:
+                cleanup = [{"pos": pos, "removed": False, "recovered": 0, "error": blocked} for pos in temporary_tables]
+            else:
+                cleanup = scoped._recover_crafting_tables(temporary_tables)
+            result["crafting_table_cleanup"] = cleanup
+
+        if result.get("ok"):
+            equip_item = resolve_item_alias(str(result.get("crafted") or item))
+            slot = equip_slot or DEFAULT_EQUIP_SLOTS.get(equip_item)
+            result["equipped_slot"] = None
+            if slot and not any(row.get("error") in interruptions for row in cleanup):
+                try:
+                    equipped = scoped.bot.call("equip", {"item": equip_item, "slot": slot})
+                except (ApiError, _SkillDeadline):
+                    equipped = None
+                if equipped:
+                    result["equipped_slot"] = slot
+        if session is not None and owns_budget:
+            if session.timed_out:
+                session.stop_pending()
+            if (craft_timed_out or session.timed_out) and result.get("stop_reason") != "time_budget":
+                result["deadline_hit"] = True
         return result
 
-    def _craft_gear(self, item: str, count: int, equip_slot: str | None) -> dict[str, Any]:
+    def _recover_crafting_tables(self, positions: list[list[int]]) -> list[dict[str, Any]]:
+        cleanup: list[dict[str, Any]] = []
+        for pos in positions:
+            row: dict[str, Any] = {"pos": pos, "removed": False, "recovered": 0}
+            cleanup.append(row)
+            try:
+                block = self.bot.call("get_block", {"pos": pos})
+                name = _clean_block(block.get("name") or block.get("block"))
+                if name != "crafting_table":
+                    row["removed"] = name in {"air", "cave_air", "void_air"}
+                    continue
+                dug = self.bot.call("dig", {"pos": pos, "collect": True, "stop_on": ["death"]})
+                row["removed"] = _clean_block(dug.get("dug")) == "crafting_table"
+                row["recovered"] = int((dug.get("gained") or {}).get("crafting_table", 0))
+            except ApiError as err:
+                row["error"] = err.code
+                if err.code in ("death", "hurt", "interrupted", "not_connected", "action_quarantined"):
+                    break
+            except (_SkillDeadline, httpx.HTTPError):
+                row["error"] = "cleanup_unconfirmed"
+                break
+        return cleanup
+
+    def _craft_gear(self, item: str, count: int, temporary_tables: list[list[int]]) -> dict[str, Any]:
         item = resolve_item_alias(item)
         count = max(1, min(64, count))
         inv_raw, initial = _inventory_snapshot_and_counts(self.bot)
@@ -3835,7 +3918,7 @@ class MacroSkills:
             )
 
         if item in TABLE_RECIPES:
-            table_res = self.ensure_crafting_table(target_item=item)
+            table_res = self.ensure_crafting_table(target_item=item, temporary_tables=temporary_tables)
             if not table_res.get("ok"):
                 return table_res
             # Re-ensure planks if crafting table consumed some
@@ -3903,7 +3986,12 @@ class MacroSkills:
                     if _inventory_counts(self.bot).get("crafting_table", 0) >= 1:
                         pos = self.bot.status()["pos"]
                         px, py, pz = math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2])
-                        self._carve_and_place_table(px, py, pz)
+                        self._reserve_crafting_table_cleanup(py)
+                        pocket = self._carve_and_place_table(px, py, pz)
+                        if pocket is not None and py < 55:
+                            self._remember_crafting_table_placement(
+                                pocket.get("pos") or pocket.get("carved_pocket"), temporary_tables,
+                            )
                     craft_res = self._safe_craft(item, count)
                 except ApiError as retry_err:
                     return {
@@ -3921,19 +4009,7 @@ class MacroSkills:
                     **{k: v for k, v in explain_craft_error(item, count, {"code": err.code, **err.context}).items() if k != "code"},
                 }
 
-        slot = equip_slot or DEFAULT_EQUIP_SLOTS.get(item)
-        equipped_res = None
-        if slot:
-            try:
-                equipped_res = self.bot.call("equip", {"item": item, "slot": slot})
-            except (ApiError, _SkillDeadline):
-                equipped_res = None
-
-        out_craft: dict[str, Any] = {
-            "ok": True,
-            **craft_res,
-            "equipped_slot": slot if equipped_res else None,
-        }
+        out_craft: dict[str, Any] = {"ok": True, **craft_res}
         if pre_dropped:
             merged_drops = list(pre_dropped)
             if isinstance(out_craft.get("auto_dropped"), list):
