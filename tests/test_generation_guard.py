@@ -8720,6 +8720,68 @@ def test_guardian_rechecks_a_creeper_after_a_short_unshielded_retreat(after_firs
         assert len(pulses) == len(actions) == 1
 
 
+@pytest.mark.parametrize("pursuer_blocked", [False, True])
+def test_creeper_followup_uses_fresh_melee_position_to_choose_a_safe_route(monkeypatch, pursuer_blocked):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    landing = [17054.4, 25, 29963.1]
+    creeper = {"id": 42, "name": "creeper", "pos": [17059.76, 25, 29963.1], "dist": 4}
+    zombie = {"id": 43, "name": "zombie", "pos": [17049.8, 25, 29963.1], "dist": 4.6,
+              "blocked_by_wall": pursuer_blocked}
+    status = {"pos": [17055.8, 25, 29963.1], "health": 20, "food": 20, "ready": True, "alive": True,
+              "on_ground": True, "dimension": "overworld", "nearest_hostile": creeper}
+    moves = []
+    first_retreat = False
+
+    class CaveBot:
+        yaw = 0.0
+
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                hostiles = [creeper, zombie] if first_retreat else [creeper]
+                return {"entities": [{**mob, "dist": math.dist(status["pos"], mob["pos"])} for mob in hostiles]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 25 else "air"}
+            if action == "look":
+                self.yaw = body["yaw"]
+            if action == "control" and body.get("forward"):
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                x, y, z = status["pos"]
+                status["pos"] = [x + dx * 2.3, y, z + dz * 2.3]
+                moves.append(status["pos"])
+            if action == "move_to":
+                status["pos"] = [body[key] for key in ("x", "y", "z")]
+                moves.append(status["pos"])
+            return {"ok": True}
+
+    env = CombatEnv(CaveBot())
+    followup = env.flee
+
+    def flee(threat_pos, **kwargs):
+        nonlocal first_retreat
+        if first_retreat:
+            return followup(threat_pos, **kwargs)
+        first_retreat = True
+        status.update(pos=landing, nearest_hostile=zombie)
+        return {"ok": True, "mode": "flee", "moved_dist": 5.2, "pos_after": landing}
+
+    monkeypatch.setattr(env, "flee", flee)
+    result = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": 42,
+    })
+
+    assert result["actions"][1]["action"] == "creeper_followup_retreat" and result["actions"][1]["ok"]
+    assert math.dist(moves[-1], creeper["pos"]) > 5.5
+    assert (math.dist(moves[0], zombie["pos"]) < 3.0) is pursuer_blocked
+
+
 @pytest.mark.parametrize("landing", ["water", "lava", "respawn", "retreat_respawn", "new_dimension", "not_ready"])
 def test_creeper_retreat_hands_off_to_water_escape_in_the_same_life(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv

@@ -2206,14 +2206,14 @@ class CombatEnv:
 
             def threat_clearance(yaw: float) -> float:
                 ux, uz = yaw_to_unit_xz(yaw)
-                if avoid_blast:
+                if require_blast_clearance:
                     dx, dy, dz = threat_offsets[0]
                     # Keep the original order unless the heading quickly clears the blast radius.
                     if dx * ux + dz * uz > 1e-6 or math.hypot(dx - ux * 3, dy, dz - uz * 3) < 5.5:
                         return -1.0
                 nearest = math.inf
                 for index, (dx, dy, dz) in enumerate(threat_offsets):
-                    if avoid_blast and index == 0:
+                    if require_blast_clearance and index == 0:
                         continue
                     # The primary melee attacker is already in reach. Compare clearance
                     # after the initial step while checking the entire route for other mobs.
@@ -2234,7 +2234,9 @@ class CombatEnv:
                 foot_y = math.floor(float(pos0[1]) + 0.05)
                 short_yaws = [pref_yaw + math.pi / 2, pref_yaw - math.pi / 2]
                 if blast_offsets:
-                    short_yaws = sorted(yaws, key=lambda yaw: blast_clearance(yaw, 1.65), reverse=True)
+                    short_yaws = yaws if other_melee and not other_creepers else sorted(
+                        yaws, key=lambda yaw: blast_clearance(yaw, 1.65), reverse=True,
+                    )
                 elif wait_for_ground:
                     short_yaws.extend(yaws[:3])
                     if threat_pos is not None and not (other_shooters or other_melee):
@@ -3161,6 +3163,19 @@ class SubcorticalInstinctController:
                 positions.append(point)
         return positions
 
+    @staticmethod
+    def _other_melee_positions(hostiles: Sequence[dict[str, Any]], target_id: int | None) -> list[Sequence[float]]:
+        positions = []
+        for hostile in hostiles:
+            pos = hostile.get("pos")
+            if (
+                hostile.get("id") != target_id and _clean_block_name(hostile.get("name")) in PRE_HURT_MELEE_MOBS
+                and not hostile.get("blocked_by_wall") and isinstance(pos, (list, tuple)) and len(pos) >= 3
+                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
+            ):
+                positions.append(pos)
+        return positions
+
     def _equip_best_weapon_and_shield(
         self,
         env: CombatEnv,
@@ -3363,17 +3378,10 @@ class SubcorticalInstinctController:
         # Count close-range engaged hostiles (<=8.5m) for swarm/solo gates so mobs outside enclosed
         # walls (`10..16m`) never trick a sword+shield bot into pure circle-fleeing inside a room.
         nearby_hostiles = [e for e in hostiles if float(e.get("dist", 99.0)) <= 8.5]
-        other_melee = []
-        if any_creeper_close or mob_name in PRE_HURT_MELEE_MOBS:
-            for hostile in nearby_hostiles:
-                hostile_pos = hostile.get("pos")
-                if (
-                    hostile is not primary and hostile.get("id") != mob_id
-                    and _clean_block_name(hostile.get("name")) in PRE_HURT_MELEE_MOBS
-                    and isinstance(hostile_pos, (list, tuple)) and len(hostile_pos) >= 3
-                    and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in hostile_pos[:3])
-                ):
-                    other_melee.append(hostile_pos)
+        other_melee = (
+            self._other_melee_positions(nearby_hostiles, mob_id)
+            if any_creeper_close or mob_name in PRE_HURT_MELEE_MOBS else []
+        )
         mode = "stabilize"
         latched_guard = False
 
@@ -3515,9 +3523,11 @@ class SubcorticalInstinctController:
                     and time.monotonic() < deadline
                 ):
                     other_close_creepers = self._other_creeper_positions(post_h, close_creeper.get("id"))
+                    pursuers = self._other_melee_positions(post_h, close_creeper.get("id"))
                     followup = env.flee(
                         close_pos, distance=6.0, urgent=True, allow_shaft_seal=False, wait_for_ground=True,
                         other_creepers=other_close_creepers, keep_blast_clearance=True,
+                        **({"other_melee": pursuers} if pursuers else {}),
                     )
                     if followup.get("ok"):
                         after = env._safe_status({"ready": False})
