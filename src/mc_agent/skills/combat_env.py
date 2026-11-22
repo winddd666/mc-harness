@@ -3723,10 +3723,18 @@ class SubcorticalInstinctController:
                         })
                         self._recent_flee_streak += 1
                         self._last_flee_at = now_flee
-                    if (
-                        not flee_ok and fl.get("reason") == "no_safe_retreat" and not fl.get("respawned")
-                        and not has_shield and hp <= 4.0 and mob_name in RANGED_MOBS
+                    stalled_under_arrows = (
+                        not flee_ok and fl.get("reason") == "no_safe_retreat" and hp <= 4.0
                         and trigger.get("hurt_source") == "arrow"
+                    )
+                    moved = fl.get("moved_dist")
+                    short_ranged_retreat = (
+                        flee_ok and not sealed and trigger.get("source") == "pre_hurt_ranged"
+                        and isinstance(moved, (int, float)) and 0 < moved < 2.0
+                    )
+                    if (
+                        (stalled_under_arrows or short_ranged_retreat) and not fl.get("respawned")
+                        and not has_shield and mob_name in RANGED_MOBS
                         and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                         and isinstance(mob_pos, (list, tuple)) and len(mob_pos) >= 3
                         and time.monotonic() + 2.0 < deadline
@@ -3736,9 +3744,27 @@ class SubcorticalInstinctController:
                             for hostile in nearby_hostiles
                         )
                     ):
-                        natural_cover = env.seek_natural_cover(
-                            mob_pos, other_shooters=other_shooters, allow_stationary=False,
-                        )
+                        cover_after_retreat = stalled_under_arrows
+                        if short_ranged_retreat:
+                            landing = env._safe_status({"ready": False})
+                            landing_hp = landing.get("health")
+                            nearest = landing.get("nearest_hostile")
+                            close_melee = (
+                                isinstance(nearest, dict) and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
+                                and self._entity_dist(landing.get("pos"), nearest) <= 3.5
+                            )
+                            cover_after_retreat = (
+                                isinstance(landing_hp, (int, float)) and 0 < landing_hp <= 7.0
+                                and landing.get("on_ground") is True and landing.get("ready") is not False
+                                and landing.get("alive") is not False and not (landing.get("in_water") or landing.get("in_lava"))
+                                and landing.get("last_death") == st.get("last_death") and landing.get("dimension") == st.get("dimension")
+                                and not close_melee and time.monotonic() + 2.0 < deadline
+                            )
+                        natural_cover = None
+                        if cover_after_retreat:
+                            natural_cover = env.seek_natural_cover(
+                                mob_pos, other_shooters=other_shooters, allow_stationary=short_ranged_retreat,
+                            )
                         if natural_cover is not None:
                             actions.append({"action": "natural_cover", **natural_cover})
                             if natural_cover.get("ok"):

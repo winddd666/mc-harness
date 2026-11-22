@@ -12638,6 +12638,53 @@ def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(m
         assert attacks == []
 
 
+@pytest.mark.parametrize("landing", ["critical", "healthy", "new_life", "airborne", "close_melee", "long_retreat"])
+def test_short_ranged_retreat_checks_cover_before_the_next_arrow(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    shooter = {"id": 41, "name": "skeleton", "dist": 2.4, "pos": [2.9, -9, 0.5]}
+    status = {
+        "pos": [0.5, -9, 0.5], "health": 15.2, "food": 19, "alive": True, "ready": True,
+        "dimension": "overworld", "on_ground": True, "nearest_hostile": shooter, "last_death": {"t": 1},
+    }
+    checks = []
+
+    class CaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "stone_sword", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [shooter]}
+            return {"ok": True}
+
+    def retreat(_pos, **_kwargs):
+        moved = 3.0 if landing == "long_retreat" else 1.41
+        status.update(pos=[0.5 - moved, -9, 0.5], health=12 if landing == "healthy" else 6.17,
+                      on_ground=landing != "airborne", last_death={"t": 2 if landing == "new_life" else 1})
+        if landing == "close_melee":
+            status["nearest_hostile"] = {"id": 42, "name": "zombie", "dist": 0.9}
+        return {"ok": True, "mode": "flee", "moved_dist": moved}
+
+    def cover(pos, *, other_shooters, allow_stationary):
+        assert pos == shooter["pos"] and not other_shooters and allow_stationary
+        checks.append(status["pos"])
+        return {"ok": True, "mode": "natural_cover"}
+
+    env = CombatEnv(CaveBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave"})
+    monkeypatch.setattr(env, "flee", retreat)
+    monkeypatch.setattr(env, "seek_natural_cover", cover)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_ranged", "primary_type": "skeleton", "primary_entity_id": 41,
+    })
+
+    assert checks == ([status["pos"]] if landing == "critical" else [])
+    assert (outcome["mode"] == "natural_cover") is (landing == "critical")
+
+
 @pytest.mark.parametrize("fallback", ["covered", "exposed", "respawned", "near_melee", "little_time"])
 def test_interrupted_arrow_tool_checks_natural_cover_after_no_safe_retreat(monkeypatch, fallback):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
