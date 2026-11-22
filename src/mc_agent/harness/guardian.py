@@ -1069,6 +1069,14 @@ class GenerationGuard:
                     "stop", "control", "posture", "look", "equip", "move_to", "dig", "place",
                 }:
                     event_details["endpoint"] = endpoint
+                if endpoint == "attack":
+                    try:
+                        attack_request = json.loads(error.request.content)
+                    except (httpx.RequestNotRead, ValueError):
+                        attack_request = None
+                    target_id = attack_request.get("entity_id") if isinstance(attack_request, dict) else None
+                    if type(target_id) is int:
+                        event_details["target_id"] = target_id
             # Always attempt to cancel a lingering server action (e.g. `attack` / `move_to`) so the bot
             # does not remain stuck in `busy='attack'` after a client-side ReadTimeout.
             try:

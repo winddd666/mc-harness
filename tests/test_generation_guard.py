@@ -2469,14 +2469,19 @@ def test_combat_timeout_records_only_a_known_endpoint(path, endpoint):
     def stalled_call():
         if path is None:
             raise httpx.ReadTimeout("request unavailable")
-        request = httpx.Request("POST", f"https://example.invalid{path}?marker=omitted")
+        request = httpx.Request(
+            "POST", f"https://example.invalid{path}?marker=omitted",
+            json={"entity_id": 6079222, "extra": "omit-payload"},
+        )
         raise httpx.ReadTimeout("request stalled", request=request)
 
     guard = GenerationGuard(RidgeBot(), EventSink(events.append), checkpoint=lambda: None)
     result = guard._action("subcortical_combat", stalled_call)
     completed, = [event for event in events if event["type"] == "guardian.action.completed"]
     assert completed.get("endpoint") == endpoint
+    assert completed.get("target_id") == (6079222 if endpoint == "attack" else None)
     assert "omitted" not in str(completed)
+    assert "omit-payload" not in str(completed)
     assert result["error"] == {"code": "network_uncertain", "message": "ReadTimeout", "timeout": True}
     assert stops == ["stop"]
 
