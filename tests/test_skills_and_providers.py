@@ -4726,6 +4726,71 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode) -> None:
     assert "drop" not in actions
 
 
+@pytest.mark.parametrize("fault", ["passage", "passage_far", "full"])
+def test_mine_cleanup_skips_passage_storage_and_tries_a_backup(fault) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    first = {"passage": [0, 30, 1], "passage_far": [0, 30, 2], "full": [1, 30, 0]}[fault]
+    backup = [-1, 30, 0]
+    cobble = 384
+    stored = 0
+    opened = []
+    transfers = []
+
+    def handler(request):
+        nonlocal cobble, stored
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": [0.5, 30.0, 0.5], "dimension": "overworld", "last_death": 0}
+        elif route == "inventory":
+            items = [{"name": "cobblestone", "count": 64}] * (cobble // 64)
+            items += [{"name": "stone_pickaxe", "count": 1}] * 30
+            result = {"items": items}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            if body["pos"] == first or (fault == "full" and body["pos"] == backup):
+                name = "chest"
+            else:
+                name = "air" if x == 0 and y in (30, 31) else "stone"
+            result = {"name": name}
+        elif route in {"view", "act"}:
+            site = body["target"]["pos"]
+            if route == "view":
+                opened.append(site)
+                result = {"sections": {"container": [{"name": "cobblestone", "count": stored}] if stored else []}}
+            else:
+                transfers.append(site)
+                if site == first:
+                    return httpx.Response(200, json={"ok": False, "error": {
+                        "code": "section_full", "message": "container is full", "done": [],
+                        "window": {"sections": {"container": []}},
+                    }})
+                amount = body["ops"][0]["count"]
+                stored += amount
+                cobble -= amount
+                result = {"done": [{"to": "container", "put": "cobblestone", "count": amount}]}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools.skills.remember_placed_storage("chest", first, "overworld")
+        if fault == "full":
+            tools.skills.remember_placed_storage("chest", backup, "overworld")
+        tools.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
+        result = json.loads(tools.mc_skill_mine_dfs(target="diamond"))
+
+    if fault != "full":
+        assert not opened and not transfers and cobble == 384
+        assert result["inventory_cleanup"]["storage_skipped"] == [{"pos": first, "reason": "blocks_passage"}]
+    else:
+        assert transfers == [first, backup] and cobble == stored == 192
+        assert result["inventory_cleanup"]["pos"] == backup
+        assert result["inventory_cleanup"]["storage_skipped"] == [{"pos": first, "reason": "section_full"}]
+
+
 def test_staircase_first_step_uses_total_budget(monkeypatch) -> None:
     """BUG-037: a 20s first step must not die at the 15s per-step cap."""
     import mc_agent.skills.library as library

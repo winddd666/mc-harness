@@ -2286,6 +2286,32 @@ class MacroSkills:
             "message": "矿道两侧没有可用侧格。请到带侧龛的拓宽处放置，保持回程通道畅通。",
         }
 
+    def _storage_blocks_passage(
+        self, origin: list[float], site: tuple[int, ...], cache: dict[tuple[int, int, int], str],
+    ) -> bool:
+        x, y, z = (math.floor(coord) for coord in origin[:3])
+        dx, dz = site[0] - x, site[2] - z
+        distance = abs(dx) + abs(dz)
+        if site[1] != y or (dx and dz) or distance not in (1, 2):
+            return False
+        dx, dz = dx // distance, dz // distance
+        air = {"air", "cave_air", "void_air"}
+        open_or_unknown = air | {"unknown"}
+
+        def block(ox: int, oy: int, oz: int) -> str:
+            return _cached_block_name(self.bot, x + ox, y + oy, z + oz, cache)
+
+        # A nearby chest in line with two open ends can occupy the return lane.
+        open_steps = (-1, *range(1, distance), distance + 1)
+        if block(distance * dx, 1, distance * dz) not in air or not all(
+            block(k * dx, dy, k * dz) in air for k in open_steps for dy in (0, 1)
+        ):
+            return False
+        return all(
+            any(block(k * dz, dy, k * dx) not in open_or_unknown for dy in (0, 1))
+            for k in (-1, 1)
+        )
+
     def _stash_mining_clutter(self, inv: dict[str, Any], min_free: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         before = _inventory_counts_from_raw(inv)
         free = _compute_empty_slots(inv)
@@ -2313,20 +2339,33 @@ class MacroSkills:
             return [], result
         dim = normalize_dimension(status.get("dimension"))
         site = None
+        cache: dict[tuple[int, int, int], str] = {}
         for (site_dim, pos), name in sorted(
             self._placed_storage.items(), key=lambda pair: math.dist(origin[:3], pair[0][1]),
         ):
             if site_dim != dim or math.dist(origin[:3], [v + 0.5 for v in pos]) > 2.5:
                 continue
-            if self._container_block_at(list(pos)) == name:
-                site = list(pos)
-                result["method"] = "owned_storage"
-                break
+            if self.geofence and self.geofence.check_point(pos[0], pos[2], action="mc_place"):
+                continue
+            candidate = list(pos)
+            if self._container_block_at(candidate) != name:
+                continue
+            if self._storage_blocks_passage(origin, pos, cache):
+                result.setdefault("storage_skipped", []).append({"pos": candidate, "reason": "blocks_passage"})
+                continue
+            actual, attempt = self._verify_mining_storage(
+                planned, candidate, dim, status, {**result, "method": "owned_storage", "pos": candidate},
+            )
+            if actual or attempt.get("error") not in {
+                "section_full", "container_full", "no_window", "not_found", "out_of_reach", "path_not_found",
+            }:
+                return actual, attempt
+            result.setdefault("storage_skipped", []).append({"pos": candidate, "reason": attempt["error"]})
 
         carried = next((name for name in ("chest", "barrel") if before.get(name, 0) >= 1), None)
         # A new stack needs an empty slot even when enough planks are in the bag.
         can_craft = _total_planks(before) >= 16 and free > 0
-        if site is None and (carried or can_craft):
+        if carried or can_craft:
             site, _ = self._corridor_side_recess(origin)
             if site is not None and not carried:
                 tables = self.bot.call("find_blocks", {"radius": 2, "types": ["crafting_table"], "limit": 1})
@@ -2362,7 +2401,10 @@ class MacroSkills:
         status: dict[str, Any], result: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         target = {"target": {"pos": site}}
-        starting = self._storage_window_counts(self.bot.call("window/view", target))
+        try:
+            starting = self._storage_window_counts(self.bot.call("window/view", target))
+        except ApiError as error:
+            return [], {**result, "error": error.code}
         if starting is None:
             return [], {**result, "error": "storage_window_unconfirmed"}
 
