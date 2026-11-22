@@ -488,6 +488,7 @@ class CombatEnv:
         *,
         src_eye: float = 1.62,
         dst_height: float = 1.0,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """Check voxel line-of-sight between `src_pos` and `dst_pos`.
 
@@ -517,6 +518,7 @@ class CombatEnv:
         start_voxel = (math.floor(sx), math.floor(sy), math.floor(sz))
         end_voxel = (math.floor(tx), math.floor(ty), math.floor(tz))
         seen_voxels: set[tuple[int, int, int]] = {start_voxel, end_voxel}
+        probe_kwargs = {"deadline": deadline} if deadline is not None else {}
 
         for i in range(1, steps):
             frac = i / steps
@@ -525,7 +527,7 @@ class CombatEnv:
             if voxel in seen_voxels:
                 continue
             seen_voxels.add(voxel)
-            bname = self._get_block_name(*voxel)
+            bname = self._get_block_name(*voxel, **probe_kwargs)
             if not _is_los_transparent(bname):
                 bdist = round(total_dist * frac, 2)
                 return {
@@ -1938,17 +1940,22 @@ class CombatEnv:
                 pass
         return _lava_result(st_end)
 
-    def _blocks_shot(self, pos: Sequence[float], threat_pos: Sequence[float]) -> bool:
+    def _blocks_shot(
+        self, pos: Sequence[float], threat_pos: Sequence[float], *, deadline: float | None = None,
+    ) -> bool:
+        probe_kwargs = {"deadline": deadline} if deadline is not None else {}
         for height in (0.75, 1.6):
-            blocker = self.has_los(threat_pos, pos, dst_height=height).get("blocker")
+            blocker = self.has_los(threat_pos, pos, dst_height=height, **probe_kwargs).get("blocker")
             if blocker is None:
                 return False
-            name = self._get_block_name(*blocker["pos"], strict=True)
+            name = self._get_block_name(*blocker["pos"], strict=True, **probe_kwargs)
             if not name or _is_los_transparent(name):
                 return False
         return True
 
-    def _blocks_shot_across_hitbox(self, pos: Sequence[float], threat_pos: Sequence[float]) -> bool:
+    def _blocks_shot_across_hitbox(
+        self, pos: Sequence[float], threat_pos: Sequence[float], *, deadline: float | None = None,
+    ) -> bool:
         dx, dz = threat_pos[0] - pos[0], threat_pos[2] - pos[2]
         horizontal = math.hypot(dx, dz)
         samples = [pos]
@@ -1959,7 +1966,8 @@ class CombatEnv:
                 [pos[0] + side_x, pos[1], pos[2] + side_z],
                 [pos[0] - side_x, pos[1], pos[2] - side_z],
             ))
-        return all(self._blocks_shot(sample, threat_pos) for sample in samples)
+        probe_kwargs = {"deadline": deadline} if deadline is not None else {}
+        return all(self._blocks_shot(sample, threat_pos, **probe_kwargs) for sample in samples)
 
     def arrow_cover_material(self, counts: dict[str, int]) -> str | None:
         # Prefer a stack that can finish a two-block wall before relying on an existing partial column.
@@ -2141,6 +2149,7 @@ class CombatEnv:
         wait_for_ground: bool = False,
         initial_landing_checks: int = 3,
         other_shooters: Sequence[Sequence[float]] = (),
+        occluded_shooters: Sequence[Sequence[float]] = (),
         other_melee: Sequence[Sequence[float]] = (),
         primary_melee: bool = False,
         other_creepers: Sequence[Sequence[float]] = (),
@@ -2229,6 +2238,32 @@ class CombatEnv:
         short_step = False
         disengage_range = min(float(distance), 8.5) if min_threat_distance is None else min_threat_distance
         yaws = [pref_yaw + math.radians(angle) for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180)]
+        covered_shooters = [(shooter, min(6.0, math.dist(pos0[:3], shooter[:3]))) for shooter in occluded_shooters]
+
+        def avoids_uncovering_close_fire(point: Sequence[float], deadline: float) -> bool:
+            try:
+                return all(
+                    math.dist(point[:3], shooter[:3]) >= clearance
+                    or self._blocks_shot_across_hitbox(point, shooter, deadline=deadline)
+                    for shooter, clearance in covered_shooters
+                )
+            except _TerrainProbeExpired:
+                return False
+
+        def probe_route(start: Sequence[float], yaw: float, length: float, **options: bool) -> tuple[int, bool] | None:
+            route = self.probe_retreat(start, yaw, length, **options)
+            if route is None or not covered_shooters:
+                return route
+            goal_y, _ = route
+            ux, uz = yaw_to_unit_xz(yaw)
+            steps = math.ceil(length)
+            for step in range(1, steps + 1):
+                travel = length * step / steps
+                point = [start[0] + ux * travel, goal_y, start[2] + uz * travel]
+                if not avoids_uncovering_close_fire(point, visibility_deadline):
+                    return None
+            return route
+
         require_blast_clearance = keep_blast_clearance or avoid_blast
         blast_offsets = [
             tuple(float(threat[axis]) - float(pos0[axis]) for axis in range(3))
@@ -2281,10 +2316,11 @@ class CombatEnv:
                 return nearest
 
             yaws.sort(key=threat_clearance, reverse=True)
+        visibility_deadline = time.monotonic() + 0.75
         for chosen_yaw in yaws:
             if require_blast_clearance and blast_clearance(chosen_yaw, blast_route_length)[0] < -1e-6:
                 continue
-            route = self.probe_retreat(pos0, chosen_yaw, 3.5)
+            route = probe_route(pos0, chosen_yaw, 3.5)
             if route is not None:
                 break
         else:
@@ -2304,7 +2340,7 @@ class CombatEnv:
                 for chosen_yaw in short_yaws:
                     if require_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
                         continue
-                    route = self.probe_retreat(pos0, chosen_yaw, 1.65)
+                    route = probe_route(pos0, chosen_yaw, 1.65)
                     if route == (foot_y, False):
                         short_step = True
                         break
@@ -2312,7 +2348,7 @@ class CombatEnv:
                     for chosen_yaw in short_yaws:
                         if require_blast_clearance and blast_clearance(chosen_yaw, 1.65)[0] < -1e-6:
                             continue
-                        route = self.probe_retreat(pos0, chosen_yaw, 1.65, allow_step_down=True)
+                        route = probe_route(pos0, chosen_yaw, 1.65, allow_step_down=True)
                         if route == (foot_y - 1, False):
                             short_step = True
                             break
@@ -2323,7 +2359,7 @@ class CombatEnv:
                         # A nearby step up can lead out of a depression even when no full retreat fits.
                         for angle in (0, 35, -35, 70, -70):
                             chosen_yaw = pref_yaw + math.radians(angle)
-                            route = self.probe_retreat(pos0, chosen_yaw, 1.65, short_climb=True)
+                            route = probe_route(pos0, chosen_yaw, 1.65, short_climb=True)
                             if route == (foot_y + 1, True):
                                 short_step = True
                                 break
@@ -2358,6 +2394,13 @@ class CombatEnv:
             unsafe = (
                 st.get("ready") is False or st.get("in_lava") or st.get("in_water") or st.get("on_ground") is False
             )
+            if covered_shooters and not respawned and not unsafe:
+                self.invalidate_block_cache()
+                if not avoids_uncovering_close_fire(pos, time.monotonic() + 0.45):
+                    return {
+                        "ok": False, "mode": "flee", "pos_after": pos, "moved_dist": round(moved, 2),
+                        "reason": "projectile_lane_unconfirmed",
+                    }
             return {
                 "ok": (
                     not respawned and not unsafe and moved >= (0.35 if short_step else 1.5)
@@ -2377,7 +2420,10 @@ class CombatEnv:
         if wait_for_ground:
             st_mid = settle_airborne(st_mid, st0)
         result = retreat_result(st_mid)
-        if not allow_second_leg or short_step or result.get("respawned") or result.get("reason") == "unsafe_landing":
+        if (
+            not allow_second_leg or short_step or result.get("respawned")
+            or result.get("reason") in {"unsafe_landing", "projectile_lane_unconfirmed"}
+        ):
             return result
 
         mid_pos = result["pos_after"]
@@ -2398,12 +2444,13 @@ class CombatEnv:
         if remaining < 1.5:
             return result
         self.invalidate_block_cache()
-        route = self.probe_retreat(mid_pos, chosen_yaw, remaining)
-        for shorter_leg in (6.0, 3.5):
-            if route is None and remaining > shorter_leg:
-                remaining = shorter_leg
-                route = self.probe_retreat(mid_pos, chosen_yaw, remaining)
-        if route is None:
+        visibility_deadline = time.monotonic() + 0.75
+        for leg in dict.fromkeys((remaining, min(remaining, 6.0), min(remaining, 3.5))):
+            route = probe_route(mid_pos, chosen_yaw, leg)
+            if route is not None:
+                remaining = leg
+                break
+        else:
             return result
         goal_y, _ = route
         try:
@@ -4241,6 +4288,7 @@ class SubcorticalInstinctController:
             ):
                 if night_pursuit:
                     exposed_hostiles = [entity for entity in live_hostiles if not entity.get("blocked_by_wall")]
+                    occluded_hostiles = [entity for entity in live_hostiles if entity.get("blocked_by_wall")]
                     shooters = [
                         shooter_pos for _, shooter_pos in ranged_retreat_positions(
                             st_post["pos"], exposed_hostiles, max_distance=12.0,
@@ -4249,6 +4297,11 @@ class SubcorticalInstinctController:
                     retreat = env.flee(
                         target_pos, distance=8.5, urgent=True, wait_for_ground=True, allow_shaft_seal=False,
                         other_shooters=shooters, primary_melee=bool(shooters),
+                        occluded_shooters=[
+                            point for _, point in ranged_retreat_positions(
+                                st_post["pos"], occluded_hostiles, max_distance=12.0,
+                            )
+                        ],
                         other_melee=self._other_melee_positions(live_hostiles, target_id),
                     )
                     actions.append({"action": "followup_melee_retreat", "entity_id": target_id, **retreat})

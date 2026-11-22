@@ -9098,7 +9098,8 @@ def test_healthy_unarmed_bot_follows_up_short_retreat_when_the_attacker_gains_gr
 
 
 @pytest.mark.parametrize("pursuit", [
-    "clear", "visible_shooter", "occluded_shooter", "blocked", "lava", "out_of_range", "respawned", "time_budget",
+    "clear", "visible_shooter", "occluded_shooter", "corner_shooter", "slow_corner_shooter", "drifted_into_fire",
+    "blocked", "lava", "out_of_range", "respawned", "time_budget",
 ])
 def test_unarmed_night_retreat_rechecks_a_surviving_melee_pursuer(monkeypatch, pursuit):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
@@ -9112,8 +9113,15 @@ def test_unarmed_night_retreat_rechecks_a_surviving_melee_pursuer(monkeypatch, p
                 "blocked_by_wall": pursuit == "blocked"}
     shooter = {
         "id": 257949, "name": "skeleton", "dist": 4.2, "pos": [landing[0] + 4.2, *landing[1:]],
-        "blocked_by_wall": pursuit == "occluded_shooter",
+        "blocked_by_wall": pursuit in {"occluded_shooter", "corner_shooter", "slow_corner_shooter", "drifted_into_fire"},
     }
+    wall = set()
+    if shooter["blocked_by_wall"]:
+        shooter["pos"] = [landing[0] + 3, landing[1], landing[2] + 2.5]
+        shooter["dist"] = math.dist(shooter["pos"], landing)
+        wall = {(23044, 9939), (23045, 9940)}
+        if pursuit == "occluded_shooter":
+            wall.update((x, 9939) for x in range(23045, 23049))
     status = {
         "pos": [23037.5, 72, 9932.5], "health": 20, "food": 20, "is_day": False,
         "on_ground": True, "ready": True, "alive": True, "nearest_hostile": zombie,
@@ -9133,15 +9141,22 @@ def test_unarmed_night_retreat_rechecks_a_surviving_melee_pursuer(monkeypatch, p
             if action == "get_entities":
                 if not plans:
                     return {"entities": [zombie]}
-                return {"entities": [survivor, shooter] if pursuit.endswith("_shooter") else [survivor]}
+                has_shooter = shooter["blocked_by_wall"] or pursuit == "visible_shooter"
+                return {"entities": [survivor, shooter] if has_shooter else [survivor]}
             if action == "get_block":
+                if pursuit == "slow_corner_shooter" and "timeout_s" in kwargs:
+                    clock[0] += min(0.4, kwargs["timeout_s"])
+                x, y, z = body["pos"]
+                if y in (72, 73) and (x, z) in wall:
+                    return {"name": "stone"}
                 support = "lava" if pursuit == "lava" else "stone"
-                return {"name": support if body["pos"][1] < 72 else "air"}
+                return {"name": support if y < 72 else "air"}
             if action == "look":
                 yaw = body["yaw"]
             if action == "control" and body.get("forward"):
                 dx, dz = yaw_to_unit_xz(yaw)
-                steps.append([landing[0] + 2 * dx, landing[1], landing[2] + 2 * dz])
+                point = [landing[0] + 2 * dx, landing[1], landing[2] + 2 * dz]
+                steps.append([landing[0] + 2, *landing[1:]] if pursuit == "drifted_into_fire" else point)
                 status.update(pos=steps[-1], nearest_hostile=None)
             if action == "move_to":
                 steps.append([body["x"], body["y"], body["z"]])
@@ -9149,6 +9164,10 @@ def test_unarmed_night_retreat_rechecks_a_surviving_melee_pursuer(monkeypatch, p
             return {"ok": True}
 
     env = CombatEnv(FieldBot())
+    if wall:
+        assert env._blocks_shot_across_hitbox(landing, shooter["pos"])
+        straight_landing = [landing[0] + 2, *landing[1:]]
+        assert env._blocks_shot_across_hitbox(straight_landing, shooter["pos"]) is (pursuit == "occluded_shooter")
     real_flee = env.flee
 
     def retreat(target, **kwargs):
@@ -9169,12 +9188,24 @@ def test_unarmed_night_retreat_rechecks_a_surviving_melee_pursuer(monkeypatch, p
     })
 
     followups = [action for action in outcome["actions"] if action["action"] == "followup_melee_retreat"]
-    can_retreat = pursuit in {"clear", "visible_shooter", "occluded_shooter"}
-    assert plans == [zombie["pos"]] + ([survivor["pos"]] if can_retreat or pursuit == "lava" else [])
-    assert [action["ok"] for action in followups] == ([can_retreat] if can_retreat or pursuit == "lava" else [])
+    can_retreat = pursuit in {"clear", "visible_shooter", "occluded_shooter", "corner_shooter", "slow_corner_shooter"}
+    attempts_followup = can_retreat or pursuit in {"lava", "drifted_into_fire"}
+    assert plans == [zombie["pos"]] + ([survivor["pos"]] if attempts_followup else [])
+    assert [action["ok"] for action in followups] == ([can_retreat] if attempts_followup else [])
     if pursuit == "visible_shooter":
         assert all(math.dist(point, shooter["pos"]) >= 4.2 for point in steps)
         assert math.dist(status["pos"], survivor["pos"]) > distance
+    elif pursuit in {"corner_shooter", "slow_corner_shooter"}:
+        assert all(
+            math.dist(point, shooter["pos"]) >= shooter["dist"] or env._blocks_shot_across_hitbox(point, shooter["pos"])
+            for point in steps
+        )
+        assert math.dist(status["pos"], survivor["pos"]) > distance
+        assert clock[0] - 1000.0 <= 1.2
+        if pursuit == "slow_corner_shooter":
+            assert clock[0] > 1000.0
+    elif pursuit == "drifted_into_fire":
+        assert len(steps) == 1 and followups[0]["reason"] == "projectile_lane_unconfirmed"
     elif can_retreat:
         assert steps == [pytest.approx([landing[0] + 2, *landing[1:]])]
     else:
