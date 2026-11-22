@@ -8939,9 +8939,11 @@ def test_healthy_unarmed_bot_follows_up_short_retreat_when_the_attacker_gains_gr
     assert any(a["action"] == "followup_melee_retreat" for a in outcome["actions"]) is expected
 
 
-@pytest.mark.parametrize("pursuit", ["clear", "blocked", "lava", "out_of_range", "respawned", "time_budget"])
+@pytest.mark.parametrize("pursuit", [
+    "clear", "visible_shooter", "occluded_shooter", "blocked", "lava", "out_of_range", "respawned", "time_budget",
+])
 def test_unarmed_night_retreat_rechecks_a_surviving_melee_pursuer(monkeypatch, pursuit):
-    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
 
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
@@ -8950,30 +8952,42 @@ def test_unarmed_night_retreat_rechecks_a_surviving_melee_pursuer(monkeypatch, p
     distance = 9.2 if pursuit == "out_of_range" else 7.4
     survivor = {**zombie, "dist": distance, "pos": [landing[0] - distance, *landing[1:]],
                 "blocked_by_wall": pursuit == "blocked"}
+    shooter = {
+        "id": 257949, "name": "skeleton", "dist": 4.2, "pos": [landing[0] + 4.2, *landing[1:]],
+        "blocked_by_wall": pursuit == "occluded_shooter",
+    }
     status = {
         "pos": [23037.5, 72, 9932.5], "health": 20, "food": 20, "is_day": False,
         "on_ground": True, "ready": True, "alive": True, "nearest_hostile": zombie,
     }
     plans = []
-    pulses = []
+    steps = []
+    yaw = 0.0
 
     class FieldBot:
         def status(self):
             return dict(status)
 
         def call(self, action, body=None, **kwargs):
+            nonlocal yaw
             if action == "inventory":
                 return {"items": [{"name": "stone_pickaxe", "count": 1}]}
             if action == "get_entities":
-                return {"entities": [survivor if plans else zombie]}
+                if not plans:
+                    return {"entities": [zombie]}
+                return {"entities": [survivor, shooter] if pursuit.endswith("_shooter") else [survivor]}
             if action == "get_block":
                 support = "lava" if pursuit == "lava" else "stone"
                 return {"name": support if body["pos"][1] < 72 else "air"}
             if action == "look":
-                assert body["yaw"] == pytest.approx(-math.pi / 2)
+                yaw = body["yaw"]
             if action == "control" and body.get("forward"):
-                pulses.append(body)
-                status.update(pos=[landing[0] + 2, *landing[1:]], nearest_hostile=None)
+                dx, dz = yaw_to_unit_xz(yaw)
+                steps.append([landing[0] + 2 * dx, landing[1], landing[2] + 2 * dz])
+                status.update(pos=steps[-1], nearest_hostile=None)
+            if action == "move_to":
+                steps.append([body["x"], body["y"], body["z"]])
+                status["pos"] = steps[-1]
             return {"ok": True}
 
     env = CombatEnv(FieldBot())
@@ -8997,9 +9011,16 @@ def test_unarmed_night_retreat_rechecks_a_surviving_melee_pursuer(monkeypatch, p
     })
 
     followups = [action for action in outcome["actions"] if action["action"] == "followup_melee_retreat"]
-    assert plans == [zombie["pos"]] + ([survivor["pos"]] if pursuit in {"clear", "lava"} else [])
-    assert [action["ok"] for action in followups] == {"clear": [True], "lava": [False]}.get(pursuit, [])
-    assert len(pulses) == (1 if pursuit == "clear" else 0)
+    can_retreat = pursuit in {"clear", "visible_shooter", "occluded_shooter"}
+    assert plans == [zombie["pos"]] + ([survivor["pos"]] if can_retreat or pursuit == "lava" else [])
+    assert [action["ok"] for action in followups] == ([can_retreat] if can_retreat or pursuit == "lava" else [])
+    if pursuit == "visible_shooter":
+        assert all(math.dist(point, shooter["pos"]) >= 4.2 for point in steps)
+        assert math.dist(status["pos"], survivor["pos"]) > distance
+    elif can_retreat:
+        assert steps == [pytest.approx([landing[0] + 2, *landing[1:]])]
+    else:
+        assert steps == []
 
 
 @pytest.mark.parametrize(

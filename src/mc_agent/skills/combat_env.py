@@ -4205,7 +4205,7 @@ class SubcorticalInstinctController:
             and time.monotonic() + (4.1 if night_pursuit else 1.5) < deadline
         ):
             target_id = nh_post["id"]
-            live_hostiles = self._find_live_hostiles(env, radius=10 if night_pursuit else 5, timeout_s=0.6)
+            live_hostiles = self._find_live_hostiles(env, radius=12 if night_pursuit else 5, timeout_s=0.6)
             target = next((entity for entity in live_hostiles if entity.get("id") == target_id), {})
             target_pos = target.get("pos")
             if (
@@ -4217,9 +4217,15 @@ class SubcorticalInstinctController:
                 and self._entity_dist(st_post.get("pos"), target) <= followup_range
             ):
                 if night_pursuit:
-                    # The first retreat used the attacker's old position. Disengage from the live one.
+                    exposed_hostiles = [entity for entity in live_hostiles if not entity.get("blocked_by_wall")]
+                    shooters = [
+                        shooter_pos for _, shooter_pos in ranged_retreat_positions(
+                            st_post["pos"], exposed_hostiles, max_distance=12.0,
+                        )
+                    ]
                     retreat = env.flee(
                         target_pos, distance=8.5, urgent=True, wait_for_ground=True, allow_shaft_seal=False,
+                        other_shooters=shooters, primary_melee=bool(shooters),
                         other_melee=self._other_melee_positions(live_hostiles, target_id),
                     )
                     actions.append({"action": "followup_melee_retreat", "entity_id": target_id, **retreat})
