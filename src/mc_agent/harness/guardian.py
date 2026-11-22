@@ -162,6 +162,10 @@ class _UnsafeDig(BaseException):
     """Unwind a dig that would expose the bot to an unsafe drop or overhead fluid."""
 
 
+class _UnsafeMiningLanding(BaseException):
+    """Unwind an approach to an unverified mining waypoint before walking there."""
+
+
 class _UnsafeFoodUse(BaseException):
     """Unwind ordinary food use while the bot is exposed to a hazard."""
 
@@ -3535,6 +3539,7 @@ class GenerationGuard:
         watch_attack_emergency: bool = False,
         check_combat_step: bool = False,
         check_support_dig: bool = False,
+        check_mining_landing: bool = False,
         check_food_use: bool = False,
     ):
         """Intercept threats during actor macros, or watch immediate survival hazards during an attack."""
@@ -3899,6 +3904,18 @@ class GenerationGuard:
                 return observed
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
+            if (
+                check_mining_landing and clean_path == "move_to" and isinstance(body, dict)
+                and body.get("range") in (0.3, 0.35)
+            ):
+                try:
+                    self._verify_mining_landing(body)
+                except _UnsafeMiningLanding:
+                    if pending_trigger:
+                        raise ReflexPreempted(pending_trigger[0]) from None
+                    raise
+                if pending_trigger:
+                    raise ReflexPreempted(pending_trigger[0])
             if (
                 check_combat_step and clean_path == "control" and isinstance(body, dict)
                 and body.get("forward") and body.get("wait") is False
@@ -4476,6 +4493,18 @@ class GenerationGuard:
         finally:
             self._in_reflex = False
 
+    def _verify_mining_landing(self, body: dict[str, Any]) -> None:
+        target = [body.get(axis) for axis in ("x", "y", "z")]
+        if not all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target):
+            return
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.7)
+        try:
+            if CombatEnv(bot).has_safe_footing(target):
+                return
+        except _RecoveryBudgetExceeded:
+            pass
+        raise _UnsafeMiningLanding(target)
+
     def _dig_hazard(self, target: Any, *, check_support: bool, check_roof: bool) -> str | None:
         if not isinstance(target, (list, tuple)) or len(target) != 3 or not all(isinstance(v, int) for v in target):
             return None
@@ -4571,6 +4600,7 @@ class GenerationGuard:
                 watch_attack_emergency=is_attack,
                 check_combat_step=tool_name == "mc_skill_combat",
                 check_support_dig=tool_name in {"mc_dig", "mc_skill_staircase", "mc_skill_mine_dfs"},
+                check_mining_landing=tool_name == "mc_skill_mine_dfs",
                 check_food_use=tool_name == "mc_use_item",
             ) as unstick_start:
                 result = invoke_fn()
@@ -4605,6 +4635,17 @@ class GenerationGuard:
                 "ok": False,
                 "requires_replan": True,
                 "error": {"code": code, "message": message},
+            }, ensure_ascii=False)
+        except _UnsafeMiningLanding as error:
+            target = error.args[0]
+            self.events.emit("guardian.mining_landing_blocked", tool=tool_name, target=target)
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {
+                    "code": "unsafe_landing", "target": target,
+                    "message": "采矿落点缺少已确认的支撑，请补齐落脚点或改走安全路线。",
+                },
             }, ensure_ascii=False)
         except _UnsafeCombatStep as error:
             if not is_attack:

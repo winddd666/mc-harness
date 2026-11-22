@@ -11805,6 +11805,54 @@ def test_dig_checks_the_landing_before_removing_support(tool, terrain):
         assert probes == ([target] if tool == "mc_dig" else [])
 
 
+@pytest.mark.parametrize("terrain", ["stone", "blocked_approach", "deep_drop", "lava", "unavailable"])
+def test_dfs_probes_fresh_support_before_moving_to_a_mining_step(terrain):
+    target = [23080.5, 34.0, 10014.5]
+    events = []
+    calls = []
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": [23081.5, 35, 10015.5], "on_ground": True, "ready": True, "alive": True, "health": 20}
+            if action == "get_block":
+                assert body["pos"] == [23080, 33, 10014]
+                calls.append(action)
+                if terrain == "unavailable":
+                    raise httpx.ReadTimeout("support block was not read")
+                return {"name": {"deep_drop": "air", "lava": "lava"}.get(terrain, "stone")}
+            if action == "move_to":
+                calls.append(action)
+                if terrain == "blocked_approach":
+                    raise ApiError("path_not_found", "terrain blocked the direct approach")
+            if action == "control":
+                calls.append(action)
+            return {"ok": True}
+
+    bot = ShaftBot()
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None)
+
+    def step():
+        try:
+            return json.dumps(bot.call("move_to", {
+                "x": target[0], "y": target[1], "z": target[2], "range": 0.35,
+                "timeout": 4500, "stop_on": ["hurt", "death"],
+            }))
+        except ApiError:
+            return json.dumps(bot.call("control", {"forward": True, "ms": 420, "stop_on": ["hurt", "death"]}))
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", step))
+
+    if terrain in {"stone", "blocked_approach"}:
+        assert result["ok"]
+        assert calls == ["get_block", "move_to"] + (["control"] if terrain == "blocked_approach" else [])
+    else:
+        assert result["requires_replan"] and result["error"]["code"] == "unsafe_landing"
+        assert calls == ["get_block"]
+        event, = [row for row in events if row["type"] == "guardian.mining_landing_blocked"]
+        assert event["target"] == result["error"]["target"] == target
+
+
 @pytest.mark.parametrize("placement", [
     "complete", "existing_wall", "partial", "receipt_only", "threat_inside",
     "already_sealed", "sealed_with_exposed_mob", "sealed_unknown_threat",

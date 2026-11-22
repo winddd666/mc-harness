@@ -723,6 +723,15 @@ class CombatEnv:
                 return False
         return False
 
+    def has_safe_footing(self, pos: Sequence[float]) -> bool:
+        x, y, z = pos[:3]
+        floor_y = math.floor(y + 0.05) - 1
+        for bx, bz in _hitbox_columns(x, z):
+            floor = self._get_block_name(bx, floor_y, bz, strict=True)
+            if not floor or floor in HAZARD_BLOCK_TYPES or not _is_solid_ground(floor):
+                return False
+        return True
+
     def probe_retreat(
         self, origin: Sequence[float], yaw: float, dist: float, *, cross_magma: bool = False,
         deadline: float | None = None, allow_step_down: bool = False, short_climb: bool = False,
