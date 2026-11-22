@@ -60,6 +60,7 @@ STRONGHOLD_DISTANCE_RANGE = (120.0, 600.0)
 STRONGHOLD_TRAVEL_RADIUS = 720.0
 STRONGHOLD_LOCATE_TIMEOUT_S = 60
 PROBE_HEIGHTS = {"probe_iron_y16": 16, "probe_diamond_y54": -54}
+PROBE_STAGES = (*PROBE_HEIGHTS, "probe_obsidian_portal")
 FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
@@ -800,6 +801,20 @@ def prepare_scene_ground(
             f"{pre} tp {bot_name} {ix + 0.5} {py:.1f} {iz + 0.5}",
             f"{pre} spawnpoint {bot_name} {ix} {py} {iz}",
         ]
+    if stage == "probe_obsidian_portal":
+        # Keep lava under the mineable sheet, with solid sides and a floor below it.
+        pre = "execute in minecraft:overworld run"
+        return [
+            f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:cobblestone",
+            f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 6} {iz + 3} minecraft:air",
+            f"{pre} fill {ix + 1} {iy - 3} {iz - 3} {ix + 6} {iy - 2} {iz + 2} minecraft:cobblestone",
+            f"{pre} fill {ix + 2} {iy - 1} {iz - 2} {ix + 5} {iy - 1} {iz + 1} minecraft:obsidian",
+            f"{pre} fill {ix + 2} {iy - 2} {iz - 2} {ix + 5} {iy - 2} {iz + 1} minecraft:lava",
+            f"{pre} fill {ix + 2} {iy} {iz - 2} {ix + 5} {iy + 4} {iz + 1} minecraft:air",
+            f"{pre} setblock {ix - 2} {iy} {iz - 2} minecraft:torch",
+            f"{pre} tp {bot_name} {ix + 0.5} {iy:.1f} {iz + 0.5}",
+            f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
+        ]
     if stage == "deep_water":
         # Re-assert the dry staging pad on death return (idempotent, only when spawned at/below sea level).
         cmds.append(
@@ -1096,6 +1111,23 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:cobblestone 32",
             ]
         )
+    elif stage == "probe_obsidian_portal":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+                f"give {bot_name} minecraft:diamond_pickaxe 1",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:flint_and_steel 1",
+                f"give {bot_name} minecraft:water_bucket 1",
+                f"give {bot_name} minecraft:cobblestone 32",
+                f"give {bot_name} minecraft:cooked_beef 16",
+                f"give {bot_name} minecraft:obsidian 4",
+            ]
+        )
     elif stage == "deep_water":
         cmds.extend(
             [
@@ -1121,7 +1153,7 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
 
 
 NETHER_STAGES = frozenset(NETHER_STRUCTURES)
-LOCAL_FIXTURE_STAGES = frozenset({"brewing_alchemy", "cave_combat", "enchant_anvil", "village_trade", *PROBE_HEIGHTS})
+LOCAL_FIXTURE_STAGES = frozenset({"brewing_alchemy", "cave_combat", "enchant_anvil", "village_trade", *PROBE_STAGES})
 
 # Surface slices where a night start is pure mob-farm noise (fleet passes --keep-time to every bot
 # except the first, so without this the village/brewing scenes would open at night).
@@ -1220,7 +1252,7 @@ def build_reset_cmds(
 ) -> list[str]:
     """Build the checkpoint reset RCON batch (dimension-aware; shared by live reset and --print-plan)."""
     dim = dim or scene_dimension(stage)
-    if stage in PROBE_HEIGHTS:
+    if stage in PROBE_STAGES:
         sx, sy, sz = _fixture_position(stage, sx, sy, sz)
     ix, iy, iz = math.floor(sx), int(round(sy)), math.floor(sz)
     cmds: list[str] = ["difficulty normal", f"gamemode survival {bot_name}", f"clear {bot_name}"]
@@ -1237,7 +1269,7 @@ def build_reset_cmds(
             ]
         )
     else:
-        prefix = "execute in minecraft:overworld run " if stage in {STRONGHOLD_STAGE, *PROBE_HEIGHTS} else ""
+        prefix = "execute in minecraft:overworld run " if stage in {STRONGHOLD_STAGE, *PROBE_STAGES} else ""
         cmds.extend(
             [
                 f"{prefix}tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
@@ -1672,7 +1704,7 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
     local_fixture = scene.stage in LOCAL_FIXTURE_STAGES
     radius = 2.0 if local_fixture else 64.0
     stronghold_start = scene.stage == STRONGHOLD_STAGE
-    probe_start = scene.stage in PROBE_HEIGHTS
+    probe_start = scene.stage in PROBE_STAGES
     sample_limit = 5 if stronghold_start else 2
     station = {"brewing_alchemy": "brewing_stand", "enchant_anvil": "enchanting_table"}.get(scene.stage)
     station_pos = [math.floor(scene.x) + 2, round(scene.y), math.floor(scene.z)]
@@ -1924,6 +1956,20 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
             "全力最大化获取钻石数量（不要在挖到 1 颗后停手，也不要去地表探索），每次返回 time_slice_progress 立即继续调用。"
         ),
         "extra_tools": (),
+    },
+    "probe_obsidian_portal": {
+        "key": "minecraft:story/enter_the_nether",
+        "title": "30分：采够 10 块黑曜石并搭建点亮下界传送门进入下界",
+        "points": 30,
+        "tier": 2,
+        "budget_class": "short",
+        "task": (
+            "你已在干地平台，东侧脚边有现成黑曜石片（下方有岩浆），背包已有钻石镐、打火石、水桶、圆石和 4 块黑曜石。"
+            "立即用 mc_skill_mine_blocks(block_types=['obsidian'], count=6, radius=8) 再采 6 块黑曜石凑够 10 块，"
+            "随后直接调用 mc_skill_build_nether_portal 搭建、点亮并走入下界传送门（解锁 story/form_obsidian 与 story/enter_the_nether）。"
+        ),
+        "extra_tools": ("mc_skill_build_nether_portal",),
+        "advancement_id": "minecraft:story/enter_the_nether",
     },
 }
 
@@ -2217,7 +2263,7 @@ def main() -> int:
             "brewing_alchemy",
             "cave_combat",
             "deep_water",
-            *PROBE_HEIGHTS,
+            *PROBE_STAGES,
         ],
         default="bare",
         help="Starting checkpoint stage for sliced testing",
@@ -2266,7 +2312,7 @@ def main() -> int:
                 ):
                     ax, az = ax + ring_shift, az + ring_shift
             px, py, pz = float(ax) + 0.5, 64.0, float(az) + 0.5
-        if args.stage in PROBE_HEIGHTS:
+        if args.stage in PROBE_STAGES:
             px, py, pz = _fixture_position(args.stage, px, py, pz)
         dim = scene_dimension(args.stage)
         plan = {
@@ -2290,7 +2336,7 @@ def main() -> int:
             }
             plan["geofence_radius"] = STRONGHOLD_TRAVEL_RADIUS
             plan["focus"] = [FOLLOW_ENDER_EYE, ENTER_END] if args.focus_episodes > 0 else []
-        elif args.stage in PROBE_HEIGHTS:
+        elif args.stage in PROBE_STAGES:
             plan["focus"] = [SCENE_FOCUS[args.stage]["key"]] if args.focus_episodes > 0 else []
         elif args.stage in NETHER_STAGES:
             plan["site_search"] = {
@@ -2340,7 +2386,7 @@ def main() -> int:
         stronghold_xz = None
         try:
             st = ensure_bot_ready(bot, timeout_s=45.0)
-            if args.day1 or args.stage in PROBE_HEIGHTS:
+            if args.day1 or args.stage in PROBE_STAGES:
                 starting_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=args.day1)
             elif args.stage == DAY2_VILLAGE_STAGE:
                 starting_site, village_xz = select_day2_village_site(bot, bot_name, args.site_index)
@@ -2388,7 +2434,7 @@ def main() -> int:
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
         entry_ok = verify_scene_entry(bot, bot_name, scene)
-        if not entry_ok and args.stage in (NETHER_STAGES | {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE, *PROBE_HEIGHTS}):
+        if not entry_ok and args.stage in (NETHER_STAGES | {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE, *PROBE_STAGES}):
             msg = f"Scene {args.stage} landing could not be verified"
             _write_not_ready_summary(
                 out_file,

@@ -328,8 +328,9 @@ class _BudgetSession:
 
     _RETRYABLE_PROBES = frozenset({"status", "inventory", "get_block", "get_entities", "find_blocks"})
 
-    def __init__(self, bot: Any, deadline: float) -> None:
+    def __init__(self, bot: Any, deadline: float, *, dig_timeout_s: float = 8.0) -> None:
         self.deadline = deadline
+        self.dig_timeout_s = float(dig_timeout_s)
         self.first_pos: list[float] | None = None
         self.last_status: dict[str, Any] = {}
         self.first_inventory: dict[str, Any] | None = None
@@ -349,7 +350,7 @@ class _BudgetSession:
 
     def call(self, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         endpoint = path.lstrip("/")
-        default_limit = 8.0 if endpoint == "dig" else 45.0
+        default_limit = self.dig_timeout_s if endpoint == "dig" else 45.0
         timeout_limit = float(kwargs.get("timeout_s") or default_limit)
         first_step_probe = endpoint in self._RETRYABLE_PROBES and not self.dug_count and len(self.positions) < 2
         kwargs["allow_reauth"] = False
@@ -5385,7 +5386,9 @@ class MiningDFSEngine:
         original_bot, original_skills = self.bot, self.skills
         previous_deadline = getattr(self, "_deadline", None)
         return_dug_before = self.dug_during_return
-        scoped = _BudgetSession(original_bot, deadline - min(0.5, budget / 10))
+        _norm_tgt = str(target or "").strip().lower().removeprefix("minecraft:")
+        _dig_cap = 16.0 if _norm_tgt in {"obsidian", "crying_obsidian"} else 8.0
+        scoped = _BudgetSession(original_bot, deadline - min(0.5, budget / 10), dig_timeout_s=_dig_cap)
         self._deadline = scoped.deadline
         self.bot = scoped.session
         self.skills = copy.copy(original_skills)

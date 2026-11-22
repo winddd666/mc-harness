@@ -3338,7 +3338,7 @@ class MacroSkills:
             # 1) plug adjacent water/lava cells with filler blocks before digging the ore;
             # 2) place a catch block directly beneath suspended ores so drops never fall into ravines/lava.
             t_name = str(target.get("name") or "").removeprefix("minecraft:")
-            if not harvesting_logs and t_name.endswith("_ore") and remaining > 4.0:
+            if not harvesting_logs and (t_name.endswith("_ore") or t_name in {"obsidian", "crying_obsidian"}) and remaining > 4.0:
                 try:
                     inv_seal = _inventory_counts(self.bot)
                     filler = next(
