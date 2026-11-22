@@ -14633,6 +14633,74 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
     assert guard._water_hurt_streak == 0
 
 
+@pytest.mark.parametrize("condition, expected_reason, sample_count", [
+    ("brief", None, 2), ("continuous", "sustained_submersion", 3), ("sinking", "sustained_sinking", 2),
+    ("depleted", "low_oxygen", 1), ("low_health", "critical_health", 1),
+])
+def test_bug009_full_air_reading_uses_water_motion_and_duration(monkeypatch, condition, expected_reason, sample_count):
+    import threading
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [-10890.5, 58, 2566.3], "in_water": True, "submerged": True, "on_ground": False,
+        "health": 5 if condition == "low_health" else 20, "oxygen": 7 if condition == "depleted" else 20,
+        "velocity": [0, -1.5 if condition == "sinking" else 0, 0], "dimension": "overworld",
+        "ready": True, "alive": True,
+    }
+    finished = threading.Event()
+    samples = []
+    calls = []
+
+    class SubmergedMiner:
+        def call(self, action, body=None, **kwargs):
+            if action == "dig":
+                calls.append(action)
+                assert finished.wait(3.0)
+                return {"dug": "stone", "gained": {"cobblestone": 1}}
+            if action == "status":
+                if threading.current_thread().name == "mc-creeper-watch" and not finished.is_set():
+                    clock[0] += 1.1
+                    samples.append(clock[0])
+                    if condition == "brief" and len(samples) == 2:
+                        status.update(submerged=False, on_ground=True)
+                        finished.set()
+                return dict(status)
+            if action == "stop":
+                calls.append(action)
+                finished.set()
+                return {"stopped": True, "released": True, "action": "dig"}
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    bot = SubmergedMiner()
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+
+    def shore(*args, **kwargs):
+        calls.append("surface")
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(bot.call(
+        "dig", {"pos": [-10890, 58, 2567], "stop_on": ["death"]},
+    ))))
+
+    assert len(samples) == sample_count
+    if expected_reason is None:
+        assert calls == ["dig"] and result["dug"] == "stone"
+    else:
+        assert calls == ["dig", "stop", "surface"] and result["water_risk"] == expected_reason
+        preempted = next(event for event in events.events if event["type"] == "guardian.preempted_tool")
+        observation = preempted["water_observation"]
+        assert observation["reason"] == expected_reason and observation["submerged"] is True
+        assert observation["submerged_for_s"] == pytest.approx((sample_count - 1) * 1.1)
+
+
 @pytest.mark.parametrize("oxygen, reason", [(20, None), (400, None), (20, "drowned"), (400, "hurt")])
 def test_bug009_mining_keeps_wading_until_there_is_a_water_threat(monkeypatch, oxygen, reason):
     import threading

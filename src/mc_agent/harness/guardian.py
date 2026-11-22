@@ -278,6 +278,9 @@ class GenerationGuard:
     ATTACK_WATER_THREAT_RANGE = 16.0
     MOVE_DROWNED_THREAT_RANGE = 10.0
     TOOL_WATER_ESCAPE_OXYGEN = 140.0
+    STATUS_FULL_OXYGEN = 20.0
+    TOOL_WATER_ESCAPE_BUBBLES = 10.0
+    TOOL_WATER_SUBMERSION_GRACE_S = 2.0
     WATER_SHORE_MAX_HP = 6.0
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
@@ -4077,6 +4080,8 @@ class GenerationGuard:
             watch_hp0: float | None = None
             last_terrain_health: float | None = None
             previous_water_health: tuple[tuple[Any, Any], float] | None = None
+            submerged_since: float | None = None
+            was_sinking = False
             previous_tile = checked_hot_floor = None
             while not stop_evt.is_set():
                 try:
@@ -4086,6 +4091,7 @@ class GenerationGuard:
                         continue
                     st = orig_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
                     if not isinstance(st, dict):
+                        submerged_since, was_sinking = None, False
                         if stop_evt.wait(0.30):
                             return
                         continue
@@ -4177,15 +4183,32 @@ class GenerationGuard:
                     observed_life = (st.get("dimension"), st.get("last_death"))
                     available = st.get("ready") is not False and st.get("alive") is not False
                     water_hp_dropped = False
+                    submerged_for_s = None
+                    sustained_sinking = False
                     if watch_low_oxygen:
+                        same_life = previous_water_health is not None and previous_water_health[0] == observed_life
                         if available and isinstance(cur_hp, (int, float)) and cur_hp > 0:
                             water_hp_dropped = (
-                                previous_water_health is not None and previous_water_health[0] == observed_life
+                                previous_water_health is not None and same_life
                                 and cur_hp < previous_water_health[1]
                             )
                             previous_water_health = (observed_life, float(cur_hp))
                         else:
                             previous_water_health = None
+                        if previous_water_health is not None and st.get("in_water") and st.get("submerged") is True:
+                            now_water = time.monotonic()
+                            if not same_life or submerged_since is None:
+                                submerged_since, was_sinking = now_water, False
+                            submerged_for_s = now_water - submerged_since
+                            velocity = st.get("velocity")
+                            sinking = (
+                                isinstance(velocity, (list, tuple)) and len(velocity) >= 2
+                                and isinstance(velocity[1], (int, float)) and velocity[1] <= -1.0
+                            )
+                            sustained_sinking = was_sinking and sinking
+                            was_sinking = sinking
+                        else:
+                            submerged_since, was_sinking = None, False
                     oxygen = st.get("oxygen")
                     water_risk = None
                     if available and st.get("in_water"):
@@ -4196,12 +4219,26 @@ class GenerationGuard:
                             water_risk = "drowned"
                         elif water_hp_dropped:
                             water_risk = "hurt"
-                        # A legacy oxygen reading alone cannot establish danger with the head above water.
                         elif (
                             watch_low_oxygen and st.get("submerged") is not False
                             and isinstance(oxygen, (int, float)) and oxygen <= self.TOOL_WATER_ESCAPE_OXYGEN
+                            and (
+                                submerged_for_s is None or oxygen <= self.TOOL_WATER_ESCAPE_BUBBLES
+                                # Keep the conservative fallback for values outside the documented scale.
+                                or oxygen > self.STATUS_FULL_OXYGEN
+                            )
                         ):
                             water_risk = "low_oxygen"
+                        elif submerged_for_s is not None:
+                            if cur_hp <= 6.0:
+                                water_risk = "critical_health"
+                            elif sustained_sinking:
+                                water_risk = "sustained_sinking"
+                            elif (
+                                isinstance(oxygen, (int, float)) and oxygen <= self.STATUS_FULL_OXYGEN
+                                and submerged_for_s >= self.TOOL_WATER_SUBMERSION_GRACE_S
+                            ):
+                                water_risk = "sustained_submersion"
                     check_creeper_cover = creeper_close and nh_dist > 2.3
                     if (
                         (check_creeper_cover or melee_ambush) and isinstance(nh_id, int)
@@ -4278,9 +4315,10 @@ class GenerationGuard:
                                    if src_w in {"tool_water_threat", "tool_interrupted_hurt"} else {}),
                                 **({"water_observation": {
                                     "reason": water_risk,
+                                    "submerged_for_s": round(submerged_for_s, 3) if submerged_for_s is not None else None,
                                     **{key: st.get(key) for key in (
                                         "pos", "health", "oxygen", "in_water", "submerged", "on_ground", "nearest_hostile",
-                                        "ready", "alive", "dimension", "last_death",
+                                        "ready", "alive", "dimension", "last_death", "velocity",
                                     )},
                                 }} if src_w == "tool_water_threat" else {}),
                             }
@@ -4288,7 +4326,7 @@ class GenerationGuard:
                         stop_watched_action(pending_trigger[0])
                         return
                 except Exception:
-                    pass
+                    submerged_since, was_sinking = None, False
                 if stop_evt.wait(0.30):
                     return
 
@@ -4979,6 +5017,7 @@ class GenerationGuard:
                 },
                 **({"pos_at_preemption": preempt_pos} if preempt_pos is not None else {}),
                 **({"pos_after": st_after["pos"]} if st_after.get("pos") is not None else {}),
+                **({"water_risk": water_observation["reason"]} if water_observation and water_observation.get("reason") else {}),
                 **release,
             }
             if outcome.get("mode") == "network_timeout":
