@@ -6270,6 +6270,54 @@ def test_lava_reflex_requires_landing_even_without_lava_under_the_hitbox(monkeyp
         assert escape["result"]["reason"] == "lava_landing_unconfirmed"
 
 
+@pytest.mark.parametrize("landing", ["lava", "dry", "respawned", "loading"])
+def test_poll_hands_a_combat_retreat_that_enters_lava_to_escape_immediately(monkeypatch, landing):
+    brute = {"id": 44, "name": "piglin_brute", "dist": 2.5, "pos": [247.2, 35.5, 195.5]}
+    status = {
+        "pos": [249.4, 35.5, 195.5], "dimension": "the_nether", "last_death": {"t": 1},
+        "health": 18, "food": 20, "ready": True, "alive": True, "on_ground": True,
+        "in_lava": False, "nearest_hostile": brute,
+    }
+    calls = []
+
+    class BastionBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                return dict(status)
+            if endpoint == "events":
+                return {"events": []}
+            if endpoint == "inventory":
+                return {"items": []}
+            raise AssertionError(endpoint)
+
+    def retreat(trigger):
+        calls.append(trigger["source"])
+        status.update(pos=[251.6, 34.2, 196], in_lava=landing != "dry", on_ground=landing == "dry")
+        if landing == "respawned":
+            status["last_death"] = {"t": 2}
+        if landing == "loading":
+            status["ready"] = False
+        return {"handled": True, "mode": "cover_or_flee", "status_after": dict(status)}
+
+    def escape():
+        calls.append("escape")
+        status.update(pos=[252.5, 35, 196.5], in_lava=False, on_ground=True)
+        return {"ok": True, "in_lava": False}
+
+    guard = GenerationGuard(BastionBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+    monkeypatch.setattr(guard, "_run_subcortical_combat", retreat)
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+
+    incident = guard.poll()
+    assert calls == ["pre_hurt_melee"] + (["escape"] if landing == "lava" else [])
+    assert ("in_lava" in incident["reasons"]) is (landing == "lava")
+    if landing == "lava":
+        assert [action["action"] for action in incident["actions"]] == ["subcortical_combat", "escape_lava"]
+        assert incident["status"]["in_lava"] is False
+        assert incident["status"]["pos"] == [252.5, 35, 196.5] and incident["requires_replan"]
+
+
 @pytest.mark.parametrize("bridge_edge", [False, True])
 def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(monkeypatch, bridge_edge):
     """Reproduces r20_short ds_ds_4_nether_fortress:
@@ -9321,6 +9369,7 @@ def test_melee_retreat_back_into_water_goes_to_shore_in_same_poll(monkeypatch, l
         "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": zombie,
     }
     shore_calls = []
+    lava_calls = []
 
     class RiverBot:
         def call(self, action, body=None, **kwargs):
@@ -9346,11 +9395,18 @@ def test_melee_retreat_back_into_water_goes_to_shore_in_same_poll(monkeypatch, l
         status.update(in_water=False, on_ground=True)
         return {"ok": True, "in_water": False}
 
+    def escape_lava():
+        lava_calls.append(status["pos"])
+        status.update(in_lava=False, in_water=False, on_ground=True)
+        return {"ok": True, "in_lava": False}
+
     guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(guard.combat_env, "flee", retreat)
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape_lava)
 
     incident = guard.poll()
+    assert lava_calls == ([[11086, 62, -11051.3]] if landing == "lava" else [])
 
     if landing == "water":
         assert [a["action"] for a in incident["actions"]] == ["combat_or_flee", "escape_to_shore"]

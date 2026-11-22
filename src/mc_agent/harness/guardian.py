@@ -2789,6 +2789,24 @@ class GenerationGuard:
             if "death_or_connection_changed" not in reasons:
                 reasons.append("death_or_connection_changed")
             replan = True
+        if (
+            not in_lava and post_status.get("in_lava")
+            and post_status.get("ready") is True and post_status.get("alive") is not False
+            and all(post_status.get(key) == status.get(key) for key in ("last_death", "dimension"))
+            and any(a["action"] in {"subcortical_combat", "combat_or_flee"} for a in actions)
+            and not any(
+                isinstance(a.get("result"), dict) and a["result"].get("mode") == "lava_escape" for a in actions
+            )
+        ):
+            self._last_lava_contact_at = time.monotonic()
+            self._in_reflex = True
+            try:
+                actions.append(self._action("escape_lava", self.combat_env.escape_lava))
+                post_status = self.combat_env._safe_status(post_status)
+            finally:
+                self._in_reflex = False
+            reasons.append("in_lava")
+            replan = True
         post_events_verified = False
         if actions:
             try:
