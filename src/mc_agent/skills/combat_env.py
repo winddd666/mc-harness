@@ -3825,6 +3825,10 @@ class SubcorticalInstinctController:
         ):
             return None
         weapon = self._equip_best_weapon_and_shield(env, counts, False, held_name)
+        return self._attack_once_in_place(env, target_id, weapon)
+
+    @staticmethod
+    def _attack_once_in_place(env: CombatEnv, target_id: int, weapon: str | None) -> dict[str, Any]:
         try:
             result = env.bot.call(
                 "attack",

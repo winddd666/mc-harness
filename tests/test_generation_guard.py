@@ -4334,6 +4334,95 @@ def test_armed_nether_bot_strikes_once_after_a_lone_piglin_blocks_retreat(monkey
     assert stop_calls == []
 
 
+@pytest.mark.parametrize("scene", [
+    "cornered", "killed", "withering_tick", "wall", "second_mob", "new_life", "no_wither",
+    "stale_tick", "retreated", "equip_unconfirmed", "shield_dropped", "attack_timeout",
+])
+def test_withered_shielded_bot_readies_sword_after_a_cornered_retreat(monkeypatch, scene):
+    import time
+
+    origin = [-384.6, 55, 1746.3]
+    target = {"id": 1060725, "name": "wither_skeleton", "dist": 1.3, "pos": [-383.3, 55, 1746.3],
+              "blocked_by_wall": scene == "wall"}
+    sword = {"name": "iron_sword", "count": 1}
+    shield = {"name": "shield", "count": 1}
+    status = {
+        "pos": origin, "ready": True, "alive": True, "on_ground": True, "blocking": True,
+        "dimension": "the_nether", "last_death": {"t": 1}, "health": 5.0, "food": 20,
+        "held": {"name": "cobblestone", "count": 44}, "offhand": shield, "nearest_hostile": target,
+        "effects": [] if scene == "no_wither" else [{"name": "wither", "level": 1, "duration_s": 10}],
+    }
+    attack_source = None if scene in {"withering_tick", "stale_tick"} else "mob_attack"
+    calls = []
+
+    class NetherBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [{"seq": 1, "type": "hurt", "source": attack_source}]
+                        if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": [sword, status["held"]], "held": status["held"], "offhand": shield}
+            if action == "get_entities":
+                return {"entities": [target, {"id": 42, "name": "blaze"}] if scene == "second_mob" else [target]}
+            if action == "equip":
+                calls.append((action, body))
+                if scene != "equip_unconfirmed":
+                    status["held"] = sword
+                if scene == "shield_dropped":
+                    status["blocking"] = False
+                if scene == "new_life":
+                    status["last_death"] = {"t": 2}
+            if action == "attack":
+                assert status["held"] == sword and status["blocking"]
+                calls.append((action, body))
+                status["blocking"] = False
+                if scene == "attack_timeout":
+                    request = httpx.Request("POST", "http://localhost/attack", json=body)
+                    raise httpx.ReadTimeout("attack reply timed out", request=request)
+                if scene == "killed":
+                    status["nearest_hostile"] = None
+                return {"hits": 1, "killed": scene == "killed"}
+            if action == "stop":
+                calls.append((action, body))
+            if action == "posture":
+                calls.append((action, body))
+                status["blocking"] = body.get("shield") is True
+                return {"blocking": status["blocking"]}
+            return {"ok": True}
+
+    def retreat(*_args, **_kwargs):
+        if scene == "retreated":
+            return {"mode": "flee", "ok": True, "moved_dist": 4.0}
+        return {"mode": "flee", "ok": False, "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_try_emergency_bunker", lambda *_args: None)
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    if scene == "withering_tick":
+        guard._last_melee_hurt_at = time.monotonic() - 0.3
+    incident = guard.poll()
+    attacks = [body for endpoint, body in calls if endpoint == "attack"]
+    if scene in {"cornered", "killed", "withering_tick", "shield_dropped", "attack_timeout"}:
+        attack, = attacks
+        assert attack["entity_id"] == target["id"] and attack["max_hits"] == 1
+        assert attack["chase"] is False and attack["feedback"] is True
+        assert calls[0] == ("equip", {"item": "iron_sword", "slot": "hand"})
+        if scene == "killed":
+            assert calls[-1][0] == "attack"
+        else:
+            assert calls[-1][0] == "posture" and status["blocking"]
+        strike = next(item for item in incident["actions"] if item["action"] == "cornered_melee_strike")
+        if scene == "attack_timeout":
+            assert strike["error"]["code"] == "network_uncertain" and strike["error"]["timeout"]
+            assert [action for action, _ in calls].count("stop") == 1
+        else:
+            assert strike["ok"] and strike["result"]["killed"] is (scene == "killed")
+    else:
+        assert attacks == []
+
+
 @pytest.mark.parametrize(("remaining_hostile", "retreat_works"), [(True, True), (True, False), (False, True)])
 def test_counter_kill_disengages_from_second_hostile_at_critical_health(monkeypatch, remaining_hostile, retreat_works):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv

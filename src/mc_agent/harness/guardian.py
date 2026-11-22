@@ -1266,6 +1266,92 @@ class GenerationGuard:
 
         return self._action("cornered_melee_strike", strike)
 
+    def _cornered_wither_skeleton_response(
+        self, before: dict[str, Any], counts: dict[str, int], target_id: int,
+    ) -> list[dict[str, Any]]:
+        controller = self.combat_slot.controller
+        weapon = best_melee_weapon_in_inv(counts)
+        if not isinstance(controller, SubcorticalInstinctController) or weapon is None:
+            return []
+
+        def has_opening(current: dict[str, Any]) -> bool:
+            name, distance, entity_id, _ = self._extract_hostile_info(current)
+            health = current.get("health")
+            effects = current.get("effects")
+            offhand = current.get("offhand")
+            nearest = current.get("nearest_hostile")
+            return (
+                self._same_life(before, current) and current.get("alive") is True and current.get("on_ground") is True
+                and current.get("blocking") is True
+                and isinstance(offhand, dict) and offhand.get("name") in {"shield", "minecraft:shield"}
+                and not any(current.get(key) for key in ("busy", "in_water", "in_lava", "on_fire"))
+                and isinstance(health, (int, float)) and 0 < health <= 6.0
+                and name == "wither_skeleton" and entity_id == target_id and 0 < distance <= 1.75
+                and isinstance(nearest, dict) and nearest.get("blocked_by_wall") is not True
+                and isinstance(effects, list)
+                and any(isinstance(effect, dict) and effect.get("name") in {"wither", "minecraft:wither"} for effect in effects)
+            )
+
+        try:
+            landing = self.bot.call("status", method="GET", timeout_s=0.35)
+            if not landing.get("pos") or not has_opening(landing):
+                return []
+            sighting = self.bot.call("get_entities", {"radius": 6, "types": ["hostile"]}, timeout_s=0.35)
+        except (ApiError, httpx.HTTPError):
+            return []
+        entities = sighting.get("entities")
+        if not isinstance(entities, list) or len(entities) != 1 or not isinstance(entities[0], dict):
+            return []
+        enemy = entities[0]
+        if (
+            enemy.get("id") != target_id or enemy.get("blocked_by_wall") is not False or enemy.get("alive") is False
+            or self._extract_hostile_info({"nearest_hostile": enemy})[0] != "wither_skeleton"
+            or not 0 < controller._entity_dist(landing["pos"], enemy) <= 1.75
+        ):
+            return []
+
+        def has_weapon_in_hand(current: dict[str, Any]) -> bool:
+            held = current.get("held")
+            return isinstance(held, dict) and str(held.get("name") or "").removeprefix("minecraft:") == weapon
+
+        def strike() -> dict[str, Any]:
+            try:
+                with self.bot.limit_until(time.monotonic() + 2.1):
+                    current = self.bot.call("status", method="GET", timeout_s=0.25)
+                    if not has_opening(current) or not self.combat_env._on_same_footing(landing, current):
+                        return {"ok": False, "reason": "opening_unconfirmed"}
+                    if not has_weapon_in_hand(current):
+                        self.bot.call("equip", {"item": weapon, "slot": "hand"}, timeout_s=0.35)
+                        current = self.bot.call("status", method="GET", timeout_s=0.25)
+                    if not self.combat_env._on_same_footing(landing, current):
+                        return {"ok": False, "reason": "opening_unconfirmed"}
+                    if (
+                        has_weapon_in_hand(current) and current.get("blocking") is False
+                        and self._restore_shield_near_threat(landing, current, self.bot)
+                    ):
+                        current = self.bot.call("status", method="GET", timeout_s=0.25)
+                    if (
+                        not has_opening(current) or not self.combat_env._on_same_footing(landing, current)
+                        or not has_weapon_in_hand(current)
+                    ):
+                        return {"ok": False, "reason": "opening_unconfirmed"}
+                    return controller._attack_once_in_place(self.combat_env, target_id, weapon)
+            except _RecoveryBudgetExceeded:
+                self._stop_after_recovery_timeout()
+                return {"ok": False, "reason": "time_budget"}
+
+        steps = [self._action("cornered_melee_strike", strike)]
+        try:
+            after = self.bot.call("status", method="GET", timeout_s=0.35)
+        except (ApiError, httpx.HTTPError):
+            return steps
+        if after.get("on_ground") is True and after.get("blocking") is False and after.get("nearest_hostile"):
+            steps.append(self._action(
+                "guard_shield_after_cornered_strike",
+                lambda: {"ok": self._restore_shield_near_threat(landing, after, self.bot)},
+            ))
+        return steps
+
     @staticmethod
     def _bunker_site(status: dict[str, Any]) -> tuple[Any, Any, tuple[int, ...] | None]:
         pos = status.get("pos")
@@ -3213,6 +3299,18 @@ class GenerationGuard:
                         strike = self._try_cornered_melee_strike(status, attacker, counts, hurt_source=hurt_src)
                         if strike is not None:
                             actions.append(strike)
+                    elif (
+                        dimension == "the_nether" and nh_name == "wither_skeleton" and nh_id is not None
+                        and already_blocking and has_melee_weapon and 0 < hp_val <= 6.0
+                        and (
+                            hurt_src == "mob_attack"
+                            or (hurt_src in {"", "wither"} and now - self._last_melee_hurt_at < 4.0)
+                        )
+                        and (not isinstance(threat.get("id"), int) or threat["id"] == nh_id)
+                        and not cf_result.get("ok") and not cf_result.get("respawned")
+                        and cf_result.get("reason") == "no_safe_retreat" and cf_result.get("moved_dist") == 0.0
+                    ):
+                        actions.extend(self._cornered_wither_skeleton_response(status, counts, nh_id))
                     melee_retreat = cf_result.get("mode") == "flee"
                     enderman_name, _, enderman_id, _ = self._extract_hostile_info({"nearest_hostile": threat})
                     if (
