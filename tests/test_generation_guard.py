@@ -11702,15 +11702,17 @@ def test_arrow_poll_without_a_diggable_pocket_checks_natural_cover_before_flee(m
 
 
 @pytest.mark.parametrize("landing", ["covered", "exposed", "respawned", "no_shooter", "near_melee"])
-def test_critical_unshielded_arrow_retreat_checks_cover_from_landing(monkeypatch, landing):
+@pytest.mark.parametrize("has_shield", [False, True])
+def test_critical_arrow_retreat_checks_cover_from_landing(monkeypatch, landing, has_shield):
     from mc_agent.skills.combat_env import CombatEnv
 
     shooter = {"id": 41, "name": "skeleton", "dist": 8.0, "pos": [8.5, 102, 0.5]}
     status = {
         "pos": [0.5, 102.2, 0.5], "dimension": "overworld", "health": 4.0, "food": 20,
-        "ready": True, "alive": True, "on_ground": False, "nearest_hostile": shooter,
+        "ready": True, "alive": True, "on_ground": False, "nearest_hostile": shooter, "blocking": has_shield,
     }
     checks = []
+    melee = {"id": 42, "name": "zombie", "dist": 2.0}
 
     class HillBot:
         def call(self, action, body=None, **kwargs):
@@ -11720,10 +11722,15 @@ def test_critical_unshielded_arrow_retreat_checks_cover_from_landing(monkeypatch
                 hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": shooter}
                 return {"events": [] if kwargs["params"]["since"] else [hurt]}
             if action == "inventory":
-                return {"items": [], "offhand": None}
+                return {"items": [], "offhand": {"name": "shield"} if has_shield else None}
             if action == "get_entities":
                 checks.append("scan")
-                return {"entities": [] if landing == "no_shooter" else [shooter]}
+                entities = [] if landing == "no_shooter" else [shooter]
+                if landing == "near_melee":
+                    entities.append(melee)
+                return {"entities": entities}
+            if action == "look" and has_shield:
+                return {"ok": True}
             pytest.fail(f"Unexpected call: {action}")
 
     def flee(_env, _pos, **_kwargs):
@@ -11733,7 +11740,7 @@ def test_critical_unshielded_arrow_retreat_checks_cover_from_landing(monkeypatch
         if landing == "respawned":
             status["last_death"] = {"t": 2}
         elif landing == "near_melee":
-            status["nearest_hostile"] = {"id": 42, "name": "zombie", "dist": 2.0}
+            status["nearest_hostile"] = melee
         return {"ok": True, "mode": "flee", "moved_dist": moved, "pos_after": status["pos"]}
 
     def seek_cover(_env, pos, *, other_shooters, allow_stationary):
@@ -11749,15 +11756,20 @@ def test_critical_unshielded_arrow_retreat_checks_cover_from_landing(monkeypatch
     monkeypatch.setattr(CombatEnv, "flee", flee)
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
     guard = GenerationGuard(HillBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    if has_shield:
+        monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
+        guard._last_dig_cover_fail_at = 999.0
     incident = guard.poll()
 
-    expected_checks = ["initial_cover", "flee"]
-    expected_actions = ["combat_or_flee"]
+    expected_checks = ["flee"] if has_shield else ["initial_cover", "flee"]
+    expected_actions = ["face_attacker", "combat_or_flee"] if has_shield else ["combat_or_flee"]
     if landing != "respawned":
         expected_checks.append("scan")
         expected_actions.append("natural_cover_after_retreat")
     if landing in {"covered", "exposed"}:
         expected_checks.append("cover")
+    if has_shield:
+        expected_actions.append("face_attacker_after_retreat")
     assert checks == expected_checks
     assert [action["action"] for action in incident["actions"]] == expected_actions
     assert (guard._ranged_cover_active_until > guard.last_reaction) is (landing == "covered")

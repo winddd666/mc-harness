@@ -775,7 +775,7 @@ class GenerationGuard:
             )
             cover_requires_melee_clearance = (
                 scan_surface_shooters and status.get("blocking")
-                and isinstance(health, (int, float)) and 4.0 < health <= 6.0
+                and (cover_only or (isinstance(health, (int, float)) and 4.0 < health <= 6.0))
             )
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
@@ -2319,7 +2319,8 @@ class GenerationGuard:
                         if cf_mode == "flee":
                             self._consecutive_flees += 1
                             if (
-                                cf.get("ok") and not cf_result.get("respawned") and not has_shield
+                                cf.get("ok") and not cf_result.get("respawned")
+                                and (not has_shield or recent_cover_fail)
                                 and hurt_src == "arrow" and 0 < hp_val <= 6.0
                                 and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                             ):
@@ -2331,7 +2332,8 @@ class GenerationGuard:
                                 if (
                                     landing.get("ready") is True and landing.get("alive") is True
                                     and landing.get("on_ground") is True and landing.get("pos")
-                                    and not any(landing.get(key) for key in ("in_water", "in_lava", "on_fire", "busy", "blocking"))
+                                    and not any(landing.get(key) for key in ("in_water", "in_lava", "on_fire", "busy"))
+                                    and bool(landing.get("blocking")) == has_shield
                                     and all(landing.get(key) == status.get(key) for key in ("last_death", "dimension"))
                                     and isinstance(landing_hp, (int, float)) and 0 < landing_hp <= 4.0
                                 ):
