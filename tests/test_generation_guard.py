@@ -11703,10 +11703,17 @@ def test_arrow_poll_without_a_diggable_pocket_checks_natural_cover_before_flee(m
 
 @pytest.mark.parametrize("landing", ["covered", "exposed", "respawned", "no_shooter", "near_melee"])
 @pytest.mark.parametrize("has_shield", [False, True])
-def test_critical_arrow_retreat_checks_cover_from_landing(monkeypatch, landing, has_shield):
+@pytest.mark.parametrize("hurt_source, shooter_name, with_attacker", [
+    ("arrow", "skeleton", True),
+    ("trident", "drowned", True),
+    ("trident", "drowned", False),
+])
+def test_critical_projectile_retreat_checks_cover_from_landing(
+    monkeypatch, landing, has_shield, hurt_source, shooter_name, with_attacker,
+):
     from mc_agent.skills.combat_env import CombatEnv
 
-    shooter = {"id": 41, "name": "skeleton", "dist": 8.0, "pos": [8.5, 102, 0.5]}
+    shooter = {"id": 41, "name": shooter_name, "dist": 8.0, "pos": [8.5, 102, 0.5]}
     status = {
         "pos": [0.5, 102.2, 0.5], "dimension": "overworld", "health": 4.0, "food": 20,
         "ready": True, "alive": True, "on_ground": False, "nearest_hostile": shooter, "blocking": has_shield,
@@ -11719,13 +11726,17 @@ def test_critical_arrow_retreat_checks_cover_from_landing(monkeypatch, landing, 
             if action == "status":
                 return dict(status)
             if action == "events":
-                hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": shooter}
+                hurt = {"seq": 1, "type": "hurt", "source": hurt_source}
+                if with_attacker:
+                    hurt["source_entity"] = shooter
                 return {"events": [] if kwargs["params"]["since"] else [hurt]}
             if action == "inventory":
                 return {"items": [], "offhand": {"name": "shield"} if has_shield else None}
             if action == "get_entities":
                 checks.append("scan")
                 entities = [] if landing == "no_shooter" else [shooter]
+                if landing == "no_shooter" and hurt_source == "trident":
+                    entities.extend([{**shooter, "id": 49}, {**shooter, "id": 50, "name": "skeleton"}])
                 if landing == "near_melee":
                     entities.append(melee)
                 return {"entities": entities}

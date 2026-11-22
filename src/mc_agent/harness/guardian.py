@@ -733,6 +733,7 @@ class GenerationGuard:
     def _defend_or_flee(
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
         *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True, cover_only: bool = False,
+        trident_attacker_id: int | None = None,
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
@@ -774,11 +775,17 @@ class GenerationGuard:
                 and (prefer_cover or (low_health and unshielded))
             )
             cover_requires_melee_clearance = (
-                scan_surface_shooters and status.get("blocking")
-                and (cover_only or (isinstance(health, (int, float)) and 4.0 < health <= 6.0))
+                scan_surface_shooters and (
+                    trident_attacker_id is not None or (
+                        status.get("blocking")
+                        and (cover_only or (isinstance(health, (int, float)) and 4.0 < health <= 6.0))
+                    )
+                )
             )
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
+            if trident_attacker_id is not None:
+                primary_id = trident_attacker_id
             surface_unarmed_retreat = (
                 dimension == "overworld" and unshielded and best_melee_weapon_in_inv(counts) is None
             )
@@ -822,7 +829,9 @@ class GenerationGuard:
                         ):
                             pos = live_pos
                             break
-                shooters = ranged_retreat_positions(retreat_pos, entities, max_distance=16.0)
+                shooters = ranged_retreat_positions(
+                    retreat_pos, entities, max_distance=16.0, trident_attacker_id=trident_attacker_id,
+                )
                 for shooter_id, shooter_pos in shooters:
                     if shooter_id is None:
                         continue
@@ -835,7 +844,10 @@ class GenerationGuard:
                     pos = other_shooters.pop(0)
                 melee_clearance_confirmed = (
                     cover_requires_melee_clearance
-                    and any(isinstance(shooter_id, int) for shooter_id, _ in shooters)
+                    and any(
+                        shooter_id == trident_attacker_id if trident_attacker_id is not None else isinstance(shooter_id, int)
+                        for shooter_id, _ in shooters
+                    )
                     and not any(
                         isinstance(entity, dict)
                         and str(entity.get("name") or "").removeprefix("minecraft:") in PRE_HURT_MELEE_MOBS | {"creeper"}
@@ -2150,7 +2162,7 @@ class GenerationGuard:
                     self._mark_ranged_engagement(now, attacker=att_obj)
                     att_pos_r = (attacker.get("pos") if isinstance(attacker, dict) else None) or nh_pos
                     att_id_r = attacker.get("id") if isinstance(attacker, dict) else None
-                    if att_id_r is None and nh_name in RANGED_MOBS:
+                    if att_id_r is None and (nh_name in RANGED_MOBS or (hurt_src == "trident" and nh_name == "drowned")):
                         att_id_r = nh_id
                     if already_blocking and hp_val <= LOW_HP_BUNKER_MAX and att_id_r is not None:
                         actions.append(self._action("face_attacker", lambda: self.bot.call("look", {"entity_id": att_id_r})))
@@ -2318,10 +2330,16 @@ class GenerationGuard:
                             self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                         if cf_mode == "flee":
                             self._consecutive_flees += 1
+                            trident_attacker_id = None
+                            if hurt_src == "trident":
+                                if att_name_r == "drowned" and isinstance(att_id_r, int):
+                                    trident_attacker_id = att_id_r
+                                elif nh_name == "drowned" and isinstance(nh_id, int):
+                                    trident_attacker_id = nh_id
                             if (
                                 cf.get("ok") and not cf_result.get("respawned")
                                 and (not has_shield or recent_cover_fail)
-                                and hurt_src == "arrow" and 0 < hp_val <= 6.0
+                                and (hurt_src == "arrow" or trident_attacker_id is not None) and 0 < hp_val <= 6.0
                                 and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                             ):
                                 try:
@@ -2341,6 +2359,7 @@ class GenerationGuard:
                                         "natural_cover_after_retreat",
                                         lambda: self._defend_or_flee(
                                             landing, None, counts, ranged=True, prefer_cover=True, cover_only=True,
+                                            trident_attacker_id=trident_attacker_id,
                                         ),
                                     )
                                     actions.append(natural_cover)
