@@ -4811,6 +4811,18 @@ class GenerationGuard:
                     notes.append(str(res_d.get("summary") or f"处置近身威胁 {nh_name}"))
                 elif isinstance(act.get("error"), dict):
                     notes.append(f"近身处置受阻({act['error'].get('code')})")
+                landing = res_d.get("status_after")
+                if (
+                    res_d.get("mode") != "lava_escape" and isinstance(landing, dict) and landing.get("in_lava")
+                    and landing.get("ready") is True and landing.get("alive") is not False
+                    and all(landing.get(key) == status.get(key) for key in ("last_death", "dimension"))
+                ):
+                    self._last_lava_contact_at = time.monotonic()
+                    escape = self._action("boundary_escape_lava", self.combat_env.escape_lava)
+                    if escape.get("ok"):
+                        notes.append("战斗后脱离岩浆")
+                    else:
+                        notes.append("战斗后落入岩浆，脱困尚未确认")
 
             if (needs_post_eat or needs_cave_prep) and boundary_trigger is None and not still_lava and not still_wet:
                 try:

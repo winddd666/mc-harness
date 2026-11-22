@@ -6271,7 +6271,8 @@ def test_lava_reflex_requires_landing_even_without_lava_under_the_hitbox(monkeyp
 
 
 @pytest.mark.parametrize("landing", ["lava", "dry", "respawned", "loading"])
-def test_poll_hands_a_combat_retreat_that_enters_lava_to_escape_immediately(monkeypatch, landing):
+@pytest.mark.parametrize("entry", ["poll", "boundary"])
+def test_combat_retreat_that_enters_lava_hands_off_to_escape_immediately(monkeypatch, landing, entry):
     brute = {"id": 44, "name": "piglin_brute", "dist": 2.5, "pos": [247.2, 35.5, 195.5]}
     status = {
         "pos": [249.4, 35.5, 195.5], "dimension": "the_nether", "last_death": {"t": 1},
@@ -6279,6 +6280,7 @@ def test_poll_hands_a_combat_retreat_that_enters_lava_to_escape_immediately(monk
         "in_lava": False, "nearest_hostile": brute,
     }
     calls = []
+    events = []
 
     class BastionBot:
         def call(self, endpoint, body=None, **kwargs):
@@ -6304,18 +6306,25 @@ def test_poll_hands_a_combat_retreat_that_enters_lava_to_escape_immediately(monk
         status.update(pos=[252.5, 35, 196.5], in_lava=False, on_ground=True)
         return {"ok": True, "in_lava": False}
 
-    guard = GenerationGuard(BastionBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard = GenerationGuard(BastionBot(), EventSink(events.append), checkpoint=lambda: None)
     monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
     monkeypatch.setattr(guard, "_run_subcortical_combat", retreat)
     monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
 
-    incident = guard.poll()
+    incident = guard.poll() if entry == "poll" else guard.stabilize_after_tools()
     assert calls == ["pre_hurt_melee"] + (["escape"] if landing == "lava" else [])
-    assert ("in_lava" in incident["reasons"]) is (landing == "lava")
-    if landing == "lava":
+    prefix = "boundary_" if entry == "boundary" else ""
+    combat, escape = prefix + "subcortical_combat", prefix + "escape_lava"
+    assert [event["action"] for event in events if event["type"] == "guardian.action.completed"
+            and event["action"] in {combat, escape}] == ([combat, escape] if landing == "lava" else [combat])
+    if entry == "poll":
+        assert ("in_lava" in incident["reasons"]) is (landing == "lava")
+    if entry == "poll" and landing == "lava":
         assert [action["action"] for action in incident["actions"]] == ["subcortical_combat", "escape_lava"]
         assert incident["status"]["in_lava"] is False
         assert incident["status"]["pos"] == [252.5, 35, 196.5] and incident["requires_replan"]
+    if entry == "boundary" and landing == "lava":
+        assert "战斗后脱离岩浆" in incident
 
 
 @pytest.mark.parametrize("bridge_edge", [False, True])
