@@ -3805,16 +3805,18 @@ class SubcorticalInstinctController:
                 if action["action"] in {"retreat_from_creeper", "creeper_followup_retreat", "creeper_intruded_flee"}:
                     action.update(ok=False, respawned=True)
         nh_post = st_post.get("nearest_hostile")
+        retreat_hp = st_post.get("health")
+        followup_range = 3.5 if isinstance(retreat_hp, (int, float)) and retreat_hp <= 10.0 else 1.5
         if (
-            mode == "cover_or_flee" and not has_shield and not has_weapon
+            mode in {"cover_or_flee", "flee"} and not has_shield and not has_weapon
             and any(
                 a["action"] == "flee" and not a.get("respawned")
                 and retreat_made_progress(a["ok"], a.get("moved"), a.get("reason"))
                 for a in actions
             )
-            and isinstance(st_post.get("health"), (int, float)) and 0.0 < st_post["health"] <= 10.0
+            and isinstance(retreat_hp, (int, float)) and 0.0 < retreat_hp <= 12.0
             and isinstance(nh_post, dict) and _clean_block_name(nh_post.get("name")) in PRE_HURT_MELEE_MOBS
-            and isinstance(nh_post.get("id"), int) and self._entity_dist(st_post.get("pos"), nh_post) <= 3.5
+            and isinstance(nh_post.get("id"), int) and self._entity_dist(st_post.get("pos"), nh_post) <= followup_range
             and st_post.get("on_ground") is True and st_post.get("ready") is not False and st_post.get("alive") is not False
             and not st_post.get("in_water") and not st_post.get("in_lava")
             and st_post.get("last_death") == st.get("last_death") and st_post.get("dimension") == st.get("dimension")
@@ -3829,7 +3831,8 @@ class SubcorticalInstinctController:
                 and time.monotonic() + 0.8 < deadline
                 and isinstance(target_pos, (list, tuple)) and len(target_pos) >= 3
                 and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
-                and self._entity_dist(st_post.get("pos"), target) <= 3.5
+                and target.get("blocked_by_wall") is not True
+                and self._entity_dist(st_post.get("pos"), target) <= followup_range
             ):
                 stepped = env.step_away_from_melee(st_post, target_pos, deadline=min(deadline, time.monotonic() + 1.5))
                 actions.append({"action": "followup_melee_retreat", "ok": stepped, "entity_id": target_id})
