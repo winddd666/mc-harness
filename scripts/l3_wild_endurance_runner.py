@@ -214,11 +214,13 @@ def select_dry_isolated_wild_site(
     """Find a dry, wooded Overworld landing for the configured slot."""
     from mc_agent.kb import normalize_dimension
 
-    start_idx %= len(CANDIDATE_SITES)
+    ring = max(0, int(start_idx)) // len(CANDIDATE_SITES)
+    ring_shift = ring * 2500
+    slot_idx = int(start_idx) % len(CANDIDATE_SITES)
     if day1:
         # r41 global fallbacks sent two bots to a shared portal area. Translate the
         # whole slot layout for backups, keeping the same separation in each region.
-        x, z = CANDIDATE_SITES[start_idx]
+        x, z = CANDIDATE_SITES[slot_idx]
         offsets = ((0, 0), (160, 0), (-160, 0), (0, 160), (0, -160),
                    (360, 0), (-360, 0), (0, 360), (0, -360))
         candidates = [
@@ -227,7 +229,8 @@ def select_dry_isolated_wild_site(
             for dx, dz in offsets
         ]
     else:
-        candidates = CANDIDATE_SITES[start_idx:] + CANDIDATE_SITES[:start_idx]
+        base_order = CANDIDATE_SITES[slot_idx:] + CANDIDATE_SITES[:slot_idx]
+        candidates = [(cx + ring_shift, cz + ring_shift) for cx, cz in base_order]
     for cx, cz in candidates:
         settled, st = _spread_overworld(bot, bot_name, cx, cz, 32)
         pos = settled or [cx, 64, cz]
