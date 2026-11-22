@@ -2318,7 +2318,33 @@ class GenerationGuard:
                             self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                         if cf_mode == "flee":
                             self._consecutive_flees += 1
-                            if cf_result.get("reason") == "unsafe_landing" and not cf_result.get("respawned"):
+                            if (
+                                cf.get("ok") and not cf_result.get("respawned") and not has_shield
+                                and hurt_src == "arrow" and 0 < hp_val <= 6.0
+                                and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                            ):
+                                try:
+                                    landing = self.bot.call("status", method="GET", timeout_s=0.6)
+                                except (ApiError, httpx.HTTPError):
+                                    landing = {}
+                                landing_hp = landing.get("health")
+                                if (
+                                    landing.get("ready") is True and landing.get("alive") is True
+                                    and landing.get("on_ground") is True and landing.get("pos")
+                                    and not any(landing.get(key) for key in ("in_water", "in_lava", "on_fire", "busy", "blocking"))
+                                    and all(landing.get(key) == status.get(key) for key in ("last_death", "dimension"))
+                                    and isinstance(landing_hp, (int, float)) and 0 < landing_hp <= 4.0
+                                ):
+                                    natural_cover = self._action(
+                                        "natural_cover_after_retreat",
+                                        lambda: self._defend_or_flee(
+                                            landing, None, counts, ranged=True, prefer_cover=True, cover_only=True,
+                                        ),
+                                    )
+                                    actions.append(natural_cover)
+                                    if natural_cover.get("ok"):
+                                        self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
+                            elif cf_result.get("reason") == "unsafe_landing" and not cf_result.get("respawned"):
                                 try:
                                     landing = self.bot.call("status", method="GET", timeout_s=0.6)
                                 except (ApiError, httpx.HTTPError):

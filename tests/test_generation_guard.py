@@ -11642,6 +11642,68 @@ def test_arrow_poll_without_a_diggable_pocket_checks_natural_cover_before_flee(m
     assert incident["actions"][-1]["result"]["mode"] == ("natural_cover" if covered else "flee")
 
 
+@pytest.mark.parametrize("landing", ["covered", "exposed", "respawned", "no_shooter", "near_melee"])
+def test_critical_unshielded_arrow_retreat_checks_cover_from_landing(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    shooter = {"id": 41, "name": "skeleton", "dist": 8.0, "pos": [8.5, 102, 0.5]}
+    status = {
+        "pos": [0.5, 102.2, 0.5], "dimension": "overworld", "health": 4.0, "food": 20,
+        "ready": True, "alive": True, "on_ground": False, "nearest_hostile": shooter,
+    }
+    checks = []
+
+    class HillBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": shooter}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [], "offhand": None}
+            if action == "get_entities":
+                checks.append("scan")
+                return {"entities": [] if landing == "no_shooter" else [shooter]}
+            pytest.fail(f"Unexpected call: {action}")
+
+    def flee(_env, _pos, **_kwargs):
+        checks.append("flee")
+        moved = 0.71 if landing == "covered" else 5.86
+        status.update(pos=[0.5 - moved, 102, 0.5], on_ground=True, nearest_hostile=None)
+        if landing == "respawned":
+            status["last_death"] = {"t": 2}
+        elif landing == "near_melee":
+            status["nearest_hostile"] = {"id": 42, "name": "zombie", "dist": 2.0}
+        return {"ok": True, "mode": "flee", "moved_dist": moved, "pos_after": status["pos"]}
+
+    def seek_cover(_env, pos, *, other_shooters, allow_stationary):
+        assert pos == shooter["pos"] and not other_shooters and allow_stationary
+        if not status["on_ground"]:
+            checks.append("initial_cover")
+            return None
+        checks.append("cover")
+        if landing == "covered":
+            return {"ok": True, "mode": "natural_cover", "pos_after": status["pos"]}
+        return None
+
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    guard = GenerationGuard(HillBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    expected_checks = ["initial_cover", "flee"]
+    expected_actions = ["combat_or_flee"]
+    if landing != "respawned":
+        expected_checks.append("scan")
+        expected_actions.append("natural_cover_after_retreat")
+    if landing in {"covered", "exposed"}:
+        expected_checks.append("cover")
+    assert checks == expected_checks
+    assert [action["action"] for action in incident["actions"]] == expected_actions
+    assert (guard._ranged_cover_active_until > guard.last_reaction) is (landing == "covered")
+
+
 @pytest.mark.parametrize("scenario", ["cornered", "second_hostile", "out_of_reach", "respawned", "blocked_by_wall"])
 def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(monkeypatch, scenario):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
