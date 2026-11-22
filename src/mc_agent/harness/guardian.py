@@ -663,6 +663,24 @@ class GenerationGuard:
                 after = recovery_bot.status()
             if confirm_shore:
                 after = self._settle_dry_landing(before, after, recovery_bot, deadline=deadline)
+        except httpx.ReadTimeout:
+            if not confirm_shore or before.get("in_water") is not True:
+                raise
+            # Movement can finish even when its reply is lost. Require a fresh, idle landing.
+            try:
+                after = recovery_bot.call("status", method="GET", timeout_s=0.6, allow_reauth=False)
+            except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+                after = {}
+            start, end = before.get("pos"), after.get("pos")
+            if not (
+                start and end and math.hypot(end[0] - start[0], end[2] - start[2]) <= 64.0
+                and after.get("on_ground") is True and after.get("in_water") is False
+                and after.get("ready") is True and after.get("alive") is True
+                and not any(after.get(key) for key in ("busy", "submerged", "in_lava", "held_controls"))
+                and all(after.get(key) == before.get(key) for key in ("last_death", "dimension"))
+            ):
+                raise
+            result = {"ok": True, "in_water": False, "pos_after": end, "confirmed_after_read_timeout": True}
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget", "partial": True, **(timeout_details or {})}

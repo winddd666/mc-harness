@@ -10348,6 +10348,49 @@ def test_water_macro_checks_that_a_dry_jump_reaches_ground(monkeypatch, landing)
         assert len(shore_calls) == 1
 
 
+@pytest.mark.parametrize("landing", ["dry", "wet", "airborne", "busy", "respawned"])
+def test_water_macro_read_timeout_requires_confirmed_same_life_shore(landing):
+    status = {
+        "pos": [5011.2, 63, 18008.8], "health": 20, "food": 20, "oxygen": 260, "dimension": "overworld",
+        "in_water": True, "submerged": True, "on_ground": False, "ready": True, "alive": True, "last_death": {"t": 1},
+    }
+    stops = []
+
+    class ShoreBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            assert action == "stop"
+            stops.append(action)
+            return {"ok": True}
+
+    class EscapeMacro:
+        def escape_water(self):
+            status.update(
+                pos=[5005.1, 63, 18015.6], in_water=landing == "wet", submerged=landing == "wet",
+                on_ground=landing not in {"wet", "airborne"}, busy="move_to" if landing == "busy" else None,
+            )
+            if landing == "respawned":
+                status["last_death"] = {"t": 2}
+            raise httpx.ReadTimeout("lost the move reply")
+
+    guard = GenerationGuard(ShoreBot(), EventSink(lambda _: None), checkpoint=lambda: None, skills=EscapeMacro())
+    escape, = guard.poll()["actions"]
+
+    assert escape["ok"] is (landing == "dry")
+    assert guard._last_water_escape_failed is (landing != "dry")
+    assert stops == ([] if landing == "dry" else ["stop"])
+    if landing == "dry":
+        assert escape["result"]["confirmed_after_read_timeout"] is True
+        assert escape["result"]["pos_after"] == [5005.1, 63, 18015.6]
+    else:
+        assert escape["error"]["code"] == "network_uncertain"
+
+
 @pytest.mark.parametrize("landing", ["threat_close", "threat_clear", "respawned"])
 def test_water_macro_restores_raised_shield_on_dry_landing(landing):
     zombie = {"name": "zombie", "id": 4748724, "dist": 1.5}
