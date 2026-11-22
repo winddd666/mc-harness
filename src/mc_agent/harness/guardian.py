@@ -2693,7 +2693,10 @@ class GenerationGuard:
                 else:
                     self._shield_only_streak = 0
                     cf = None
-                    raw_dist = (attacker or status.get("nearest_hostile") or {}).get("dist", 99.0)
+                    dimension = str(status.get("dimension") or "").removeprefix("minecraft:")
+                    nearest = status.get("nearest_hostile") or {}
+                    threat = attacker or nearest
+                    raw_dist = threat.get("dist", 99.0)
                     try:
                         eff_dist = float(raw_dist)
                     except (TypeError, ValueError):
@@ -2704,16 +2707,28 @@ class GenerationGuard:
                         or hurt_src in {"player_explosion", "entity_explosion"}
                         or (eff_dist <= 4.5)
                     )
-                    can_surface_night_bunker = (
-                        status.get("on_ground") is True
-                        and nh_name != "creeper"
+                    bunker_grounded = status.get("on_ground") is True and nh_name != "creeper"
+                    inside_shaft = bunker_grounded and hp_val <= LOW_HP_BUNKER_MAX and self._inside_own_shaft()
+                    exposed_to_lethal_melee = (
+                        dimension == "the_nether" and 0 < hp_val <= 4.0 and not inside_shaft
+                        and (hurt_src in MELEE_HURT_SOURCES or now - self._last_melee_hurt_at < 4.0)
                         and (
-                            (hp_val <= LOW_HP_BUNKER_MAX and (self._inside_own_shaft() or not has_melee_weapon or self._consecutive_flees >= 1))
+                            (nh_name in PRE_HURT_MELEE_MOBS and 0 <= nh_dist <= 3.5 and not nearest.get("blocked_by_wall"))
+                            or (
+                                0 <= eff_dist <= 3.5 and not threat.get("blocked_by_wall")
+                                and str(threat.get("name") or "").removeprefix("minecraft:") in PRE_HURT_MELEE_MOBS
+                            )
+                        )
+                    )
+                    can_surface_night_bunker = (
+                        bunker_grounded
+                        and (
+                            (hp_val <= LOW_HP_BUNKER_MAX and (inside_shaft or not has_melee_weapon or self._consecutive_flees >= 1))
                             or (not has_melee_weapon and status.get("is_day") is False and self._consecutive_flees >= 1 and hp_val <= 14.0)
                         )
                     )
                     bunker = None
-                    if not indirect_magic and (can_surface_night_bunker or not melee_or_airborne):
+                    if not indirect_magic and not exposed_to_lethal_melee and (can_surface_night_bunker or not melee_or_airborne):
                         bunker = self._try_emergency_bunker(status)
                     if bunker is not None:
                         actions.append(bunker)
@@ -2749,7 +2764,6 @@ class GenerationGuard:
                         strike = self._try_cornered_melee_strike(status, attacker, counts)
                         if strike is not None:
                             actions.append(strike)
-                    dimension = str(status.get("dimension") or "").removeprefix("minecraft:")
                     melee_retreat = cf_result.get("mode") == "flee"
                     nether_melee_retreat = dimension == "the_nether" and melee_retreat
                     recent_ranged_hurt = now - self._last_ranged_hurt_at < 8.0

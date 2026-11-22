@@ -6726,6 +6726,71 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
             assert calls == [(primary["pos"], True, [secondary["pos"]])]
 
 
+@pytest.mark.parametrize(("pressure", "bunker_first"), [
+    ("direct_melee", False), ("unattributed_followup", False), ("occluded", True),
+    ("inside_shaft", True), ("out_of_reach", True), ("stale_hit", True),
+])
+def test_nether_guard_retreats_before_digging_when_critical_melee_persists(monkeypatch, pressure, bunker_first):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    origin = [1870.3, 64, -3792.3]
+    skeleton = {"id": 310015, "name": "wither_skeleton", "dist": 2.6, "pos": [1872.9, 64, -3792.3]}
+    status = {
+        "pos": origin, "health": 6.3, "food": 20, "dimension": "the_nether",
+        "ready": True, "alive": True, "on_ground": True, "blocking": True, "nearest_hostile": skeleton,
+    }
+    hits = [{"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": skeleton}]
+    calls = []
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            if action == "look":
+                calls.append("face_attacker")
+                return {"ok": True}
+            raise AssertionError(action)
+
+    def bunker(_skills, *, urgent):
+        assert urgent
+        calls.append("emergency_bunker")
+        return {"ok": True, "inside_shaft": True, "roof_placed": True}
+
+    def retreat(*_args, **_kwargs):
+        calls.append("retreat")
+        if len(hits) == 1:
+            return {"ok": False, "mode": "flee", "reason": "no_safe_retreat"}
+        status.update(pos=[1872.3, 64, -3792.5], nearest_hostile=None)
+        return {"ok": True, "mode": "flee", "moved_dist": 2.01}
+
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", bunker)
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", retreat)
+    monkeypatch.setattr(guard, "_inside_own_shaft", lambda: len(hits) > 1 and pressure == "inside_shaft")
+    guard.poll()
+    assert calls == ["retreat", "face_attacker"]
+    calls.clear()
+
+    clock[0] += 4.1 if pressure == "stale_hit" else 1.6
+    status["health"] = 1.67
+    if pressure == "occluded":
+        status["nearest_hostile"] = {**skeleton, "blocked_by_wall": True}
+    elif pressure == "out_of_reach":
+        status["nearest_hostile"] = {**skeleton, "pos": [1875, 64, -3792.3], "dist": 4.7}
+    hit = {"seq": 2, "type": "hurt"}
+    if pressure not in {"unattributed_followup", "stale_hit"}:
+        hit.update(source="mob_attack", source_entity=status["nearest_hostile"])
+    hits.append(hit)
+
+    incident = guard.poll()
+    assert incident["requires_replan"]
+    assert calls == (["emergency_bunker"] if bunker_first else ["retreat"])
+
+
 @pytest.mark.parametrize("reason", ["unsafe_open_side", "unsafe_floor"])
 def test_repeated_melee_hurt_skips_bunker_when_the_same_block_still_blocks_it(monkeypatch, reason):
     clock = [1000.0]
