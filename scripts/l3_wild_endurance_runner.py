@@ -693,7 +693,7 @@ def prepare_scene_ground(
     ix, iy, iz = math.floor(sx), int(round(sy)), math.floor(sz)
     cmds: list[str] = []
     if dim == "the_nether":
-        # Obsidian ledge (lava-proof), 3-block headroom, charged respawn anchor for in-Nether respawns.
+        # Lava-proof ledge with a lit shelter and a charged anchor for in-Nether respawns.
         # Every command MUST be prefixed with `execute in minecraft:the_nether run` — bare RCON
         # fill/setblock/tp would otherwise act on the overworld coordinates.
         pre = "execute in minecraft:the_nether run"
@@ -703,14 +703,16 @@ def prepare_scene_ground(
                 f"{pre} fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz + 3} minecraft:air",
                 f"{pre} setblock {ix + 3} {iy - 1} {iz} minecraft:respawn_anchor[charges=4]",
-                # 4-high obsidian parapet on three sides with a 1x2 gate on the east edge: the ledge
-                # is a respawn point inside a hostile structure, so open sightlines just feed the
-                # death loop (r17 hy4_hy_6_nether_bastion: 24 deaths).
+                # A 1x2 east opening lets the bot out while excluding tall mobs such as wither
+                # skeletons. The roof protects the platform from attacks from above.
                 f"{pre} fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz + 3} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy} {iz - 2} {ix - 3} {iy + 3} {iz + 2} minecraft:obsidian",
                 f"{pre} fill {ix + 3} {iy} {iz - 3} {ix + 3} {iy + 3} {iz - 1} minecraft:obsidian",
                 f"{pre} fill {ix + 3} {iy} {iz + 1} {ix + 3} {iy + 3} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix + 3} {iy + 2} {iz} {ix + 3} {iy + 3} {iz} minecraft:obsidian",
+                f"{pre} fill {ix - 3} {iy + 4} {iz - 3} {ix + 3} {iy + 4} {iz + 3} minecraft:obsidian",
+                f"{pre} setblock {ix} {iy + 3} {iz} minecraft:shroomlight",
                 f"{pre} tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
