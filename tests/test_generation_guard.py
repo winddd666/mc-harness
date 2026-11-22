@@ -11848,9 +11848,12 @@ def test_critical_projectile_retreat_checks_cover_from_landing(
     from mc_agent.skills.combat_env import CombatEnv
 
     shooter = {"id": 41, "name": shooter_name, "dist": 8.0, "pos": [8.5, 102, 0.5]}
+    fresh_dig_failure = has_shield and hurt_source == "arrow" and landing == "covered"
+    origin = [0.5, 102 if fresh_dig_failure else 102.2, 0.5]
     status = {
-        "pos": [0.5, 102.2, 0.5], "dimension": "overworld", "health": 4.0, "food": 20,
-        "ready": True, "alive": True, "on_ground": False, "nearest_hostile": shooter, "blocking": has_shield,
+        "pos": origin, "dimension": "overworld", "health": 4.0, "food": 20,
+        "ready": True, "alive": True, "on_ground": fresh_dig_failure,
+        "nearest_hostile": shooter, "blocking": has_shield,
     }
     checks = []
     melee = {"id": 42, "name": "zombie", "dist": 2.0}
@@ -11890,7 +11893,7 @@ def test_critical_projectile_retreat_checks_cover_from_landing(
 
     def seek_cover(_env, pos, *, other_shooters, allow_stationary):
         assert pos == shooter["pos"] and not other_shooters and allow_stationary
-        if not status["on_ground"]:
+        if status["pos"] == origin:
             checks.append("initial_cover")
             return None
         checks.append("cover")
@@ -11898,16 +11901,26 @@ def test_critical_projectile_retreat_checks_cover_from_landing(
             return {"ok": True, "mode": "natural_cover", "pos_after": status["pos"]}
         return None
 
+    def dig_cover(_env, _skills):
+        assert fresh_dig_failure
+        checks.append("dig_cover")
+        return {"ok": False, "reason": "no_solid_wall"}
+
     monkeypatch.setattr(CombatEnv, "flee", flee)
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", seek_cover)
+    monkeypatch.setattr(CombatEnv, "dig_cover_pocket", dig_cover)
     guard = GenerationGuard(HillBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     if has_shield:
         monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
-        guard._last_dig_cover_fail_at = 999.0
+        if not fresh_dig_failure:
+            guard._last_dig_cover_fail_at = 999.0
     incident = guard.poll()
 
     expected_checks = ["flee"] if has_shield else ["initial_cover", "flee"]
     expected_actions = ["face_attacker", "combat_or_flee"] if has_shield else ["combat_or_flee"]
+    if fresh_dig_failure:
+        expected_checks[:0] = ["dig_cover", "scan", "initial_cover"]
+        expected_actions.insert(1, "dig_cover")
     if landing != "respawned":
         expected_checks.append("scan")
         expected_actions.append("natural_cover_after_retreat")

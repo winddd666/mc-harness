@@ -2343,9 +2343,10 @@ class GenerationGuard:
                         trident_cover = (
                             surface_projectile_cover and trident_attacker_id is not None and 0 < hp_val <= LOW_HP_BUNKER_MAX
                         )
+                        pocket_unavailable_here = ((cover or {}).get("result") or {}).get("reason") in NO_DIG_COVER_REASONS
                         pocket_unavailable = (
                             surface_projectile_cover and not has_shield and (ranged_hurt_only or nh_name in RANGED_MOBS)
-                            and ((cover or {}).get("result") or {}).get("reason") in NO_DIG_COVER_REASONS
+                            and pocket_unavailable_here
                         )
                         if not pocket_unavailable and not has_shield and not att_pos_r and isinstance(att_id_r, int):
                             shooter_pos = self._find_hostile_position(att_id_r, att_name_r)
@@ -2370,9 +2371,14 @@ class GenerationGuard:
                             self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                         if cf_mode == "flee":
                             self._consecutive_flees += 1
+                            moved_dist = cf_result.get("moved_dist")
+                            moved_after_failed_pocket = (
+                                already_blocking and pocket_unavailable_here
+                                and isinstance(moved_dist, (int, float)) and moved_dist > 0.0
+                            )
                             if (
                                 cf.get("ok") and not cf_result.get("respawned")
-                                and (not has_shield or recent_cover_fail)
+                                and (not has_shield or recent_cover_fail or moved_after_failed_pocket)
                                 and (hurt_src == "arrow" or trident_attacker_id is not None) and 0 < hp_val <= 6.0
                                 and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                             ):
