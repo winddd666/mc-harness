@@ -385,6 +385,7 @@ class ThreatTrigger(TypedDict, total=False):
     observed_life: tuple[Any, Any]
     water_observation: dict[str, Any]
     action_released: bool
+    staircase_surface_exit: bool
 
 
 class CombatOutcome(TypedDict, total=False):
@@ -1635,13 +1636,18 @@ class CombatEnv:
                 self.invalidate_block_cache()
 
         # 2. Try scanning safe non-lava exits (including 1-block step-ups, plus wide shore search) and jump-sprinting out
-        terrain_deadline = min(lava_deadline - 2.0, time.monotonic() + 1.5)
+        terrain_started = time.monotonic()
+        terrain_deadline = min(lava_deadline - 2.0, terrain_started + 1.5)
+        ray_deadline = terrain_deadline
+        if st.get("in_lava"):
+            # Nearby rays can all start in lava. Leave time to query and verify a reachable shore.
+            ray_deadline = max(terrain_started, terrain_deadline - 0.9)
         scan = self.scan_safe_yaws(
             pos0,
             float(st.get("yaw") or 0.0),
             dist=2.8,
             angles_deg=(0, 45, -45, 90, -90, 135, -135, 180),
-            deadline=terrain_deadline,
+            deadline=ray_deadline,
         )
         tried_yaws: list[float] = []
         if scan.get("best_yaw") is not None:
@@ -3721,15 +3727,17 @@ class SubcorticalInstinctController:
         except (ApiError, httpx.HTTPError):
             return False
 
-    def _cover_after_shielded_arrow_stall(
+    def _cover_after_projectile_stall(
         self, env: CombatEnv, before: dict[str, Any], shooter_id: int, *, deadline: float,
+        max_health: float | None,
     ) -> dict[str, Any] | None:
         landing = env._safe_status({"ready": False}, timeout_s=0.3)
         health = landing.get("health")
         pos = landing.get("pos")
         if (
             landing.get("ready") is not True or landing.get("alive") is False or landing.get("on_ground") is not True
-            or not pos or not isinstance(health, (int, float)) or not 0 < health <= 6.0
+            or not pos or not isinstance(health, (int, float)) or not math.isfinite(health) or health <= 0
+            or (max_health is not None and health > max_health)
             or any(landing.get(key) for key in ("busy", "in_water", "in_lava", "submerged", "on_fire"))
             or any(landing.get(key) != before.get(key) for key in ("dimension", "last_death"))
         ):
@@ -3817,6 +3825,10 @@ class SubcorticalInstinctController:
         ):
             return None
         weapon = self._equip_best_weapon_and_shield(env, counts, False, held_name)
+        return self._attack_once_in_place(env, target_id, weapon)
+
+    @staticmethod
+    def _attack_once_in_place(env: CombatEnv, target_id: int, weapon: str | None) -> dict[str, Any]:
         try:
             result = env.bot.call(
                 "attack",
@@ -4599,12 +4611,19 @@ class SubcorticalInstinctController:
                         not flee_ok and fl.get("reason") == "no_safe_retreat" and hp <= 4.0
                         and trigger.get("hurt_source") == "arrow"
                     )
+                    close_shooter_at_exit = (
+                        trigger.get("staircase_surface_exit") is True and not has_shield
+                        and mob_name in RANGED_MOBS and isinstance(mob_id, int) and mob_id == trig_id
+                        and 0 < mob_dist <= 3.5
+                        and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                    )
                     if (
-                        shielded_arrow_interrupt and not flee_ok and not fl.get("respawned")
+                        (shielded_arrow_interrupt or close_shooter_at_exit) and not flee_ok and not fl.get("respawned")
                         and fl.get("reason") == "no_safe_retreat" and time.monotonic() + 2.0 < deadline
                     ):
-                        natural_cover = self._cover_after_shielded_arrow_stall(
+                        natural_cover = self._cover_after_projectile_stall(
                             env, st, mob_id, deadline=min(deadline - 0.7, time.monotonic() + 2.25),
+                            max_health=None if close_shooter_at_exit else 6.0,
                         )
                         if natural_cover is not None:
                             actions.append({"action": "natural_cover", **natural_cover})
