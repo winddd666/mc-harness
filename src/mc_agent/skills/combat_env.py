@@ -205,6 +205,9 @@ LONE_COUNTERKILL_MOBS: frozenset[str] = frozenset(
     }
 )
 
+CORNERED_PIGLIN_MAX_HEALTH = 12.0
+CORNERED_PIGLIN_REACH = 2.5
+
 # Ambush melee hostiles watched by Guardian pre_hurt / mid-tool watcher (excludes neutral pigman/enderman).
 PRE_HURT_MELEE_MOBS: frozenset[str] = LONE_COUNTERKILL_MOBS | frozenset(
     {
@@ -3573,18 +3576,31 @@ class SubcorticalInstinctController:
 
     def strike_cornered_hostile(
         self, env: CombatEnv, target_id: int, counts: dict[str, int], held_name: str | None,
-        *, status: dict[str, Any] | None = None,
+        *, status: dict[str, Any] | None = None, visible_piglin: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if status is None:
             status = env._safe_status({"ready": False})
         health = status.get("health")
         nearest = status.get("nearest_hostile")
+        max_health, reach = 6.0, 1.25
+        if visible_piglin is not None:
+            if (
+                str(status.get("dimension") or "").removeprefix("minecraft:") != "the_nether"
+                or status.get("ready") is not True or status.get("alive") is not True
+                or status.get("busy") or status.get("on_fire") or held_name not in MELEE_WEAPON_ORDER
+                or not isinstance(nearest, dict) or _clean_block_name(nearest.get("name")) != "piglin"
+                or nearest.get("blocked_by_wall") is True
+                or _clean_block_name(visible_piglin.get("name")) != "piglin" or visible_piglin.get("id") != target_id
+                or not 0 <= self._entity_dist(status.get("pos"), visible_piglin) <= CORNERED_PIGLIN_REACH
+            ):
+                return None
+            max_health, reach = CORNERED_PIGLIN_MAX_HEALTH, CORNERED_PIGLIN_REACH
         if (
-            not isinstance(health, (int, float)) or not 0 < health <= 6.0
+            not isinstance(health, (int, float)) or not 0 < health <= max_health
             or status.get("ready") is False or status.get("alive") is False
             or status.get("on_ground") is not True or status.get("in_water") or status.get("in_lava")
             or not isinstance(nearest, dict) or nearest.get("id") != target_id
-            or self._entity_dist(status.get("pos"), nearest) > 1.25
+            or not 0 <= self._entity_dist(status.get("pos"), nearest) <= reach
         ):
             return None
         weapon = self._equip_best_weapon_and_shield(env, counts, False, held_name)

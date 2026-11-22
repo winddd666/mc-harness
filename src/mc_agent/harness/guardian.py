@@ -27,6 +27,8 @@ from ..bot import BotSession
 from ..errors import ApiError
 from .control import RequestCancelled, RunTimedOut
 from ..skills.combat_env import (
+    CORNERED_PIGLIN_MAX_HEALTH,
+    CORNERED_PIGLIN_REACH,
     LONE_COUNTERKILL_MOBS,
     MELEE_WEAPON_ORDER,
     PRE_HURT_MELEE_MOBS,
@@ -1117,7 +1119,7 @@ class GenerationGuard:
         return shore
 
     def _try_cornered_melee_strike(
-        self, before: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
+        self, before: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int], *, hurt_source: str,
     ) -> dict[str, Any] | None:
         controller = self.combat_slot.controller
         if not isinstance(controller, SubcorticalInstinctController):
@@ -1129,10 +1131,16 @@ class GenerationGuard:
         name, distance, target_id, _ = self._extract_hostile_info(landing)
         attacker_id = (attacker or {}).get("id")
         hp = landing.get("health")
+        nether_piglin = (
+            name == "piglin" and hurt_source == "mob_attack"
+            and str(landing.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+            and target_id == self._extract_hostile_info(before)[2]
+        )
+        max_health, reach = (CORNERED_PIGLIN_MAX_HEALTH, CORNERED_PIGLIN_REACH) if nether_piglin else (6.0, 1.25)
         if (
-            name not in LONE_COUNTERKILL_MOBS or target_id is None or not 0 <= distance <= 1.25
+            (not nether_piglin and name not in LONE_COUNTERKILL_MOBS) or target_id is None or not 0 <= distance <= reach
             or (isinstance(attacker_id, int) and target_id != attacker_id)
-            or not isinstance(hp, (int, float)) or not 0 < hp <= 6.0
+            or not isinstance(hp, (int, float)) or not 0 < hp <= max_health
             or landing.get("ready") is not True or landing.get("alive") is not True or landing.get("on_ground") is not True
             or any(landing.get(key) for key in ("busy", "in_water", "in_lava", "on_fire"))
             or any(landing.get(key) != before.get(key) for key in ("last_death", "dimension"))
@@ -1146,7 +1154,7 @@ class GenerationGuard:
         if not isinstance(hostiles, list) or len(hostiles) != 1 or not isinstance(hostiles[0], dict):
             return None
         target = hostiles[0]
-        if target.get("id") != target_id or target.get("blocked_by_wall") is not False:
+        if target.get("id") != target_id or target.get("blocked_by_wall") is not False or target.get("alive") is False:
             return None
 
         def strike() -> dict[str, Any]:
@@ -1159,6 +1167,7 @@ class GenerationGuard:
                     held_name = str(held.get("name") or "").removeprefix("minecraft:") if isinstance(held, dict) else None
                     return controller.strike_cornered_hostile(
                         self.combat_env, target_id, counts, held_name, status=current,
+                        visible_piglin=target if nether_piglin else None,
                     ) or {"ok": False, "reason": "opening_unconfirmed"}
             except _RecoveryBudgetExceeded:
                 self._stop_after_recovery_timeout()
@@ -3035,12 +3044,14 @@ class GenerationGuard:
                         else:
                             self._consecutive_flees = 0
                     cf_result = (cf or {}).get("result") or {}
+                    piglin_hurt = dimension == "the_nether" and nh_name == "piglin" and hurt_src == "mob_attack"
                     if (
                         not has_shield and has_melee_weapon and hurt_src in MELEE_HURT_SOURCES
-                        and 0 < hp_val <= 8.0 and not cf_result.get("respawned")
+                        and 0 < hp_val <= (CORNERED_PIGLIN_MAX_HEALTH if piglin_hurt else 8.0)
+                        and not cf_result.get("ok") and not cf_result.get("respawned")
                         and cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
                     ):
-                        strike = self._try_cornered_melee_strike(status, attacker, counts)
+                        strike = self._try_cornered_melee_strike(status, attacker, counts, hurt_source=hurt_src)
                         if strike is not None:
                             actions.append(strike)
                     melee_retreat = cf_result.get("mode") == "flee"

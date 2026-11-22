@@ -4012,6 +4012,73 @@ def test_poll_tries_one_stationary_strike_when_an_armed_bot_cannot_retreat(monke
     assert stops == (["stop"] if situation == "timeout" else [])
 
 
+@pytest.mark.parametrize("situation", [
+    "identified", "unattributed", "other_attacker", "second_hostile", "wall",
+    "out_of_reach", "escaped", "respawned", "different_life_after_scan", "weapon_changed",
+])
+def test_armed_nether_bot_strikes_once_after_a_lone_piglin_blocks_retreat(monkeypatch, situation):
+    pos = [38023.3, 66.9, 39359.4]
+    distance = 3.0 if situation == "out_of_reach" else 2.2
+    piglin = {
+        "id": 839861, "name": "piglin", "pos": [pos[0] + distance, pos[1], pos[2]],
+        "dist": distance, "blocked_by_wall": situation == "wall",
+    }
+    sword = {"name": "iron_sword", "count": 1}
+    status = {
+        "pos": pos, "health": 7.5, "food": 20, "ready": True, "alive": True, "on_ground": True,
+        "dimension": "the_nether", "last_death": {"t": 1}, "nearest_hostile": piglin, "held": sword,
+    }
+    hit = {"seq": 1, "type": "hurt", "source": "mob_attack"}
+    if situation != "unattributed":
+        hit["source_entity"] = {**piglin, "id": piglin["id"] + int(situation == "other_attacker")}
+    attacks = []
+    stop_calls = []
+
+    class NetherBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": [sword], "held": status["held"], "offhand": None}
+            if action == "get_entities":
+                assert body == {"types": ["hostile"], "radius": 6} and kwargs["timeout_s"] == 0.35
+                if situation == "different_life_after_scan":
+                    status["last_death"] = {"t": 2}
+                if situation == "weapon_changed":
+                    status["held"] = {"name": "iron_pickaxe"}
+                return {"entities": [piglin, {"id": 839862, "name": "wither_skeleton"}] if situation == "second_hostile" else [piglin]}
+            if action == "attack":
+                attacks.append(body)
+                return {"hits": 1, "killed": False, "hit_log": [{"hit": 1, "entity_id": piglin["id"]}]}
+            if action == "stop":
+                stop_calls.append(action)
+                return {"ok": True}
+            pytest.fail(f"Unexpected mutation while cornered: {action}")
+
+    def retreat(*_args, **_kwargs):
+        if situation == "escaped":
+            return {"mode": "flee", "ok": True, "moved_dist": 4.0}
+        return {"mode": "flee", "ok": False, "reason": "no_safe_retreat", "respawned": situation == "respawned"}
+
+    guard = GenerationGuard(NetherBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_try_emergency_bunker", lambda _status: None)
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    incident = guard.poll()
+
+    if situation in {"identified", "unattributed"}:
+        attack, = attacks
+        assert attack["entity_id"] == piglin["id"] and attack["max_hits"] == 1 and attack["chase"] is False
+        assert attack["feedback"] is True and attack["timeout"] <= 350
+        strike = incident["actions"][-1]
+        assert strike["action"] == "cornered_melee_strike"
+        assert strike["result"]["ok"] is True and strike["result"]["killed"] is False
+    else:
+        assert attacks == []
+    assert stop_calls == []
+
+
 @pytest.mark.parametrize(("remaining_hostile", "retreat_works"), [(True, True), (True, False), (False, True)])
 def test_counter_kill_disengages_from_second_hostile_at_critical_health(monkeypatch, remaining_hostile, retreat_works):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
