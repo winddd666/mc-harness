@@ -2532,6 +2532,8 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
 
 @pytest.mark.parametrize("followup", [
     "unchanged", "closer", "new_target", "other_hostile", "scan_closer", "moved", "hurt", "status_timeout", "read_gap", "scan_gap",
+    "equal_range_shift", "shift_during_hold", "shift_during_timeout", "coordinate_missing", "gear_missing",
+    "dry_flag_missing", "life_sample_missing",
 ])
 def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypatch, followup):
     import httpx
@@ -2543,8 +2545,14 @@ def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypa
     spider = {"id": 637768, "name": "spider", "dist": 2.7, "pos": [34023.1, 62, 34004.7]}
     status = {
         "pos": [34020.4, 62, 34004.7], "dimension": "overworld", "health": 9.33, "food": 17,
-        "ready": True, "alive": True, "on_ground": True, "blocking": False, "nearest_hostile": spider,
+        "ready": True, "alive": True, "on_ground": True, "blocking": False,
+        "in_water": False, "submerged": False, "in_lava": False, "on_fire": False, "busy": None,
+        "held": None, "offhand": None, "held_controls": None, "last_death": None, "armor_points": 0,
     }
+    if followup == "gear_missing":
+        status.pop("held")
+    elif followup == "dry_flag_missing":
+        status.pop("in_lava")
     damage = []
     attempts = []
     hostiles = [spider]
@@ -2555,13 +2563,18 @@ def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypa
             if action == "status":
                 if read_state.pop("fail_next", False):
                     raise httpx.ReadTimeout("missing status sample")
-                return dict(status)
+                # The live /status schema only includes ID, name and distance for its nearest hostile.
+                return {**status, "nearest_hostile": {key: spider[key] for key in ("id", "name", "dist")}}
             if action == "events":
                 return {"events": [hit for hit in damage if hit["seq"] > kwargs["params"]["since"]]}
             if action == "get_entities":
-                if followup == "scan_closer":
+                if followup == "scan_closer" and body["radius"] == 8:
                     return {"entities": [{**spider, "dist": 2.0}]}
-                return {} if followup == "scan_gap" else {"entities": list(hostiles)}
+                if followup == "scan_gap" and body["radius"] == 8:
+                    return {}
+                if followup == "coordinate_missing":
+                    return {"entities": [{key: spider[key] for key in ("id", "name", "dist")}]}
+                return {"entities": list(hostiles)}
             if action == "inventory":
                 return {"items": []}
             return {"ok": True}
@@ -2571,6 +2584,8 @@ def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypa
 
     def combat(_env, trigger):
         attempts.append(trigger["primary_entity_id"])
+        if followup == "shift_during_timeout" and len(attempts) == 1:
+            spider["pos"] = [34020.4, 62, 34007.4]
         clock[0] += 7.5
         raise _RecoveryBudgetExceeded("status" if followup == "status_timeout" else "dig")
 
@@ -2584,6 +2599,12 @@ def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypa
         spider.update(dist=2.0, pos=[34022.4, 62, 34004.7])
     elif followup == "new_target":
         spider["id"] += 1
+    elif followup == "equal_range_shift":
+        spider["pos"] = [34020.4, 62, 34007.4]
+    elif followup == "shift_during_timeout":
+        spider["pos"] = [34023.1, 62, 34004.7]
+    elif followup == "life_sample_missing":
+        status.pop("last_death")
     elif followup == "moved":
         status["pos"] = [34020.8, 62, 34004.7]
     elif followup == "hurt":
@@ -2595,13 +2616,16 @@ def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypa
         clock[0] += 0.3
 
     second = guard.poll()
-    if followup in {"unchanged", "other_hostile"}:
+    if followup in {"unchanged", "other_hostile", "shift_during_hold"}:
         assert second is None and attempts == [spider["id"]]
         deferred, = [event for event in guard.events.events if event["type"] == "guardian.melee_timeout_deferred"]
         assert deferred["target_id"] == spider["id"]
         if followup == "other_hostile":
             hostiles.append({"id": 41, "name": "zombie", "dist": 3.0})
             clock[0] += 2.5
+        elif followup == "shift_during_hold":
+            spider["pos"] = [34020.4, 62, 34007.4]
+            clock[0] += 0.3
         else:
             clock[0] += 12
         assert guard.poll()["requires_replan"] and attempts == [spider["id"], spider["id"]]

@@ -362,7 +362,7 @@ class GenerationGuard:
         self._pre_hurt_suppress_until: float = float("-inf")
         self._pre_hurt_target_cooldown: dict[str, float] = {}
         self._stationary_warnings: dict[str, tuple[int, tuple[float, ...], float, float, tuple[Any, Any]]] = {}
-        self._stationary_melee_dig_timeout: tuple[float, dict[str, Any], float | None] | None = None
+        self._stationary_melee_dig_timeout: tuple[float, dict[str, Any], list[float], float | None] | None = None
         self._last_stalled_lava: tuple[tuple[float, ...], tuple[Any, ...], float] | None = None
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
@@ -2100,19 +2100,23 @@ class GenerationGuard:
             else self._detect_pre_hurt_trigger(status)
         )
         if self._stationary_melee_dig_timeout is not None:
-            retry_at, anchor, scan_at = self._stationary_melee_dig_timeout
+            retry_at, anchor, target_pos, scan_at = self._stationary_melee_dig_timeout
             if hurt or now >= retry_at or not self._same_stationary_melee_timeout_state(anchor, status):
                 self._stationary_melee_dig_timeout = None
             elif pre_trigger is not None and pre_trigger.get("source") == "pre_hurt_melee" and spawn_warning is None:
-                if scan_at is None or now >= scan_at:
+                if not self._same_observed_melee_position(target_pos, pre_trigger.get("primary_pos")):
+                    self._stationary_melee_dig_timeout = None
+                elif scan_at is None or now >= scan_at:
                     target_id = pre_trigger.get("primary_entity_id")
-                    if self._only_nearby_hostile(target_id):
+                    if self._only_stationary_melee_threat(target_id, target_pos):
                         if scan_at is None:
                             self.events.emit(
-                                "guardian.melee_timeout_deferred", target_id=target_id,
+                                "guardian.melee_timeout_deferred", target_id=target_id, target_pos=target_pos,
                                 retry_in_s=round(retry_at - now, 3),
                             )
-                        self._stationary_melee_dig_timeout = (retry_at, anchor, now + self.MELEE_DIG_TIMEOUT_RESCAN_S)
+                        self._stationary_melee_dig_timeout = (
+                            retry_at, anchor, target_pos, now + self.MELEE_DIG_TIMEOUT_RESCAN_S,
+                        )
                     else:
                         self._stationary_melee_dig_timeout = None
                 if self._stationary_melee_dig_timeout is not None:
@@ -3292,13 +3296,16 @@ class GenerationGuard:
         if pre_trigger is not None and post_events_verified and not any(e.get("type") == "hurt" for e in fresh):
             if reasons == ["pre_hurt_melee"] and len(actions) == 1 and actions[0]["action"] == "subcortical_combat":
                 outcome = actions[0].get("result") or {}
+                target_id = pre_trigger.get("primary_entity_id")
+                target_pos = pre_trigger.get("primary_pos")
                 if (
                     outcome.get("mode") == "combat_timeout" and outcome.get("timeout_endpoint") == "dig"
-                    and pre_trigger.get("primary_entity_id") == self._extract_hostile_info(post_status)[2]
+                    and target_id == self._extract_hostile_info(post_status)[2] and target_pos is not None
                     and self._same_stationary_melee_timeout_state(status, post_status)
+                    and self._only_stationary_melee_threat(target_id, target_pos)
                 ):
                     self._stationary_melee_dig_timeout = (
-                        time.monotonic() + self.MELEE_DIG_TIMEOUT_RETRY_S, deepcopy(post_status), None,
+                        time.monotonic() + self.MELEE_DIG_TIMEOUT_RETRY_S, deepcopy(post_status), list(target_pos[:3]), None,
                     )
             if reasons in (["pre_hurt_creeper"], ["pre_hurt_melee"]) and self._repeat_stationary_retreat_warning(
                 pre_trigger, status, post_status, actions,
@@ -3315,7 +3322,7 @@ class GenerationGuard:
             self._last_stalled_lava = None
         return self._incident(post_status, reasons, actions, fresh, requires_replan=replan)
 
-    def _only_nearby_hostile(self, target_id: int | None) -> bool:
+    def _only_stationary_melee_threat(self, target_id: int | None, target_pos: list[float]) -> bool:
         try:
             result = self.bot.call(
                 "get_entities", {"radius": 8, "types": ["hostile"]}, timeout_s=0.3, allow_reauth=False,
@@ -3325,22 +3332,26 @@ class GenerationGuard:
         entities = result.get("entities") if isinstance(result, dict) else None
         if target_id is None or not isinstance(entities, list) or len(entities) != 1:
             return False
-        name, distance, observed_id, _ = self._extract_hostile_info({"nearest_hostile": entities[0]})
-        return observed_id == target_id and name in PRE_HURT_MELEE_MOBS and 2.3 < distance <= 3.5
+        name, distance, observed_id, observed_pos = self._extract_hostile_info({"nearest_hostile": entities[0]})
+        return (
+            observed_id == target_id and name in PRE_HURT_MELEE_MOBS and 2.3 < distance <= 3.5
+            and self._same_observed_melee_position(target_pos, observed_pos)
+        )
+
+    @staticmethod
+    def _same_observed_melee_position(start: Any, end: Any) -> bool:
+        return all(
+            isinstance(pos, (list, tuple)) and len(pos) >= 3
+            and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
+            for pos in (start, end)
+        ) and math.dist(start[:3], end[:3]) <= 0.25
 
     def _same_stationary_melee_timeout_state(self, before: dict[str, Any], after: dict[str, Any]) -> bool:
-        def same_position(start: Any, end: Any) -> bool:
-            return all(
-                isinstance(pos, (list, tuple)) and len(pos) >= 3
-                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
-                for pos in (start, end)
-            ) and math.dist(start[:3], end[:3]) <= 0.25
-
         health = after.get("health")
         if (
             not isinstance(health, (int, float)) or not 6.0 < health <= 20.0
             or str(after.get("dimension") or "").removeprefix("minecraft:") != "overworld"
-            or not same_position(before.get("pos"), after.get("pos"))
+            or not self._same_observed_melee_position(before.get("pos"), after.get("pos"))
             or any(before.get(key) != after.get(key) for key in (
                 "dimension", "last_death", "health", "food", "held", "offhand", "blocking", "sneaking", "armor_points",
             ))
@@ -3348,16 +3359,17 @@ class GenerationGuard:
             return False
         if any(
             status.get("ready") is not True or status.get("alive") is not True or status.get("on_ground") is not True
-            or any(status.get(key) for key in ("busy", "in_water", "submerged", "in_lava", "on_fire", "held_controls"))
+            or any(status.get(key) is not False for key in ("in_water", "submerged", "in_lava", "on_fire"))
+            or any(key not in status for key in ("busy", "held_controls", "held", "offhand", "armor_points", "last_death"))
+            or not isinstance(status.get("blocking"), bool) or status.get("busy") or status.get("held_controls")
             for status in (before, after)
         ):
             return False
-        old_name, old_dist, old_id, old_target = self._extract_hostile_info(before)
-        name, dist, target_id, target = self._extract_hostile_info(after)
+        old_name, old_dist, old_id, _ = self._extract_hostile_info(before)
+        name, dist, target_id, _ = self._extract_hostile_info(after)
         return (
             target_id is not None and target_id == old_id and name == old_name and name in PRE_HURT_MELEE_MOBS
             and 2.3 < old_dist <= 3.5 and 2.3 < dist <= 3.5 and abs(dist - old_dist) <= 0.25
-            and ((old_target is None and target is None) or same_position(old_target, target))
         )
 
     def _repeat_stalled_lava_escape(
