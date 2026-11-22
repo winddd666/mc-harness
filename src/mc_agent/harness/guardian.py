@@ -81,6 +81,8 @@ NON_COMBAT_HURT_SOURCES = frozenset(
     }
 )
 
+MINING_WATER_WATCH_TOOLS = frozenset({"mc_skill_mine_dfs", "mc_skill_mine_blocks"})
+
 # Tools that already manage combat/stabilization directly and must not be recursively preempted.
 NON_PREEMPTABLE_TOOLS = frozenset(
     {
@@ -3390,7 +3392,7 @@ class GenerationGuard:
                     threatened_swimmer = (
                         st.get("in_water") and st.get("ready") is not False and st.get("alive") is not False
                         and (
-                            (watch_scout_water and nh_name == "drowned" and nh_dist <= 6.0
+                            ((watch_scout_water or watch_mining_water) and nh_name == "drowned" and nh_dist <= 6.0
                              and (st.get("on_ground") is False or st.get("submerged")))
                             or (watch_low_oxygen and isinstance(oxygen, (int, float))
                                 and oxygen <= self.TOOL_WATER_ESCAPE_OXYGEN)
@@ -3587,8 +3589,8 @@ class GenerationGuard:
                     trigger.get("primary_type") in {"lava", "hot_floor"}
                     or trigger.get("source") in {"pre_hurt_creeper", "tool_water_threat"}
                 )
-                low_oxygen = watch_low_oxygen and trigger.get("source") == "tool_water_threat"
-                if not caller_ignores_hurt or movement_emergency or low_oxygen or trigger.get("primary_type") == "in_wall":
+                water_emergency = watch_low_oxygen and trigger.get("source") == "tool_water_threat"
+                if not caller_ignores_hurt or movement_emergency or water_emergency or trigger.get("primary_type") == "in_wall":
                     raise ReflexPreempted(trigger) from None
 
             try:
@@ -3798,8 +3800,9 @@ class GenerationGuard:
                 drowning_pre = (
                     (isinstance(oxy_pre, (int, float)) and oxy_pre <= 0) or trigger.get("hurt_source") == "drown"
                 )
-                low_oxygen_pre = (
-                    interrupted_name in {"mc_skill_mine_dfs", "mc_skill_unstick"}
+                mining_water_pre = interrupted_name in MINING_WATER_WATCH_TOOLS
+                surface_first_pre = (
+                    (mining_water_pre or interrupted_name == "mc_skill_unstick")
                     and trigger.get("source") == "tool_water_threat"
                 )
                 underwater_danger = bool(st_pre.get("in_water")) and (
@@ -3817,13 +3820,14 @@ class GenerationGuard:
                     drowned_during_tool = nh_pre_name == "drowned" and (
                         (interrupted_name == "mc_attack" and nh_pre_dist <= self.ATTACK_WATER_THREAT_RANGE)
                         or (interrupted_name in {"mc_move_to", "mc_skill_scout_surface"} and nh_pre_dist <= 6.0)
+                        or (mining_water_pre and surface_first_pre and nh_pre_dist <= 6.0)
                     )
                     if hurt_pre_water:
                         self._water_hurt_streak += 1
                     forced_pre_shore = (
                         self._water_hurt_streak >= 3 or now_pre < self._no_water_until
                         or self._swimming_at_low_health(st_pre) or drowned_during_tool
-                        or low_oxygen_pre
+                        or surface_first_pre
                     )
                     if self._water_hurt_streak >= 3:
                         self._no_water_until = max(self._no_water_until, now_pre + 30.0)
@@ -3878,7 +3882,7 @@ class GenerationGuard:
                                 shore_threat_pos,
                                 keep_shield=has_shield_pre,
                                 shield_target_id=att_pre.get("id") if isinstance(att_pre, dict) else None,
-                                **({"surface_first": True} if drowning_pre or low_oxygen_pre else {}),
+                                **({"surface_first": True} if drowning_pre or surface_first_pre else {}),
                             ),
                             raise_on_http_error=False,
                         )
@@ -4134,7 +4138,7 @@ class GenerationGuard:
                 check_unstick_exit=is_unstick,
                 watch_hot_floor=tool_name in HOT_FLOOR_WATCH_TOOLS,
                 watch_scout_water=tool_name == "mc_skill_scout_surface",
-                watch_mining_water=tool_name == "mc_skill_mine_dfs",
+                watch_mining_water=tool_name in MINING_WATER_WATCH_TOOLS,
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
                 check_combat_step=tool_name == "mc_skill_combat",

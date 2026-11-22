@@ -11401,11 +11401,13 @@ def test_mining_watcher_waits_only_for_a_confirmed_occluded_creeper(monkeypatch,
         assert result["reflex_mode"] == "creeper_evade" and stopped.is_set()
 
 
-@pytest.mark.parametrize("tool, action, body", [
-    ("mc_skill_mine_dfs", "dig", {"pos": [41012, 21, 11034]}),
-    ("mc_skill_unstick", "control", {"jump": True, "ms": 900, "stop_on": ["death"]}),
+@pytest.mark.parametrize("tool, action, body, oxygen", [
+    ("mc_skill_mine_dfs", "dig", {"pos": [41012, 21, 11034]}, 110),
+    ("mc_skill_mine_blocks", "dig", {"pos": [41012, 21, 11034], "stop_on": ["death"]}, 110),
+    ("mc_skill_mine_blocks", "dig", {"pos": [41012, 21, 11034], "stop_on": ["death"]}, 285),
+    ("mc_skill_unstick", "control", {"jump": True, "ms": 900, "stop_on": ["death"]}, 110),
 ])
-def test_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch, tool, action, body):
+def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, action, body, oxygen):
     import threading
 
     stopped = threading.Event()
@@ -11414,6 +11416,7 @@ def test_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch, tool, ac
         "ready": True, "alive": True, "on_ground": True, "in_water": False,
     }
     calls = []
+    drowned = {"id": 45, "name": "drowned", "dist": 4.0, "pos": [41016.5, 22, 11034.4]}
 
     class CaveBot:
         def call(self, endpoint, body=None, **kwargs):
@@ -11421,7 +11424,9 @@ def test_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch, tool, ac
                 return dict(status)
             if endpoint == action:
                 calls.append(endpoint)
-                status.update(in_water=True, submerged=True, on_ground=False, oxygen=110)
+                status.update(in_water=True, submerged=True, on_ground=False, oxygen=oxygen)
+                if oxygen == 285:
+                    status["nearest_hostile"] = drowned
                 assert stopped.wait(1.5)
             if endpoint == "stop":
                 calls.append(endpoint)
@@ -11435,8 +11440,10 @@ def test_low_oxygen_preempts_before_the_first_drowning_hit(monkeypatch, tool, ac
     bot = CaveBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
 
-    def shore(_pos, *, surface_first, **_kwargs):
+    def shore(pos, *, surface_first, shield_target_id, **_kwargs):
         assert surface_first and status["health"] == 20
+        if oxygen == 285:
+            assert pos == drowned["pos"] and shield_target_id == drowned["id"]
         calls.append("surface")
         status.update(in_water=False, on_ground=True)
         return {"ok": True, "in_water": False}
