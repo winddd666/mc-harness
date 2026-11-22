@@ -593,6 +593,66 @@ def test_water_recovery_history_clears_only_after_grounded_dry_observation(monke
     assert calls == ([("generic", False)] if landed else [("shore", True)])
 
 
+@pytest.mark.parametrize("entry, risk, oxygen", [
+    ("poll", None, 20), ("boundary", None, 20), ("boundary", None, 400),
+    ("preemption", None, 20), ("boundary", "drowned", 400), ("poll", "drown", 20),
+    ("poll", "creeper", 400), ("boundary", "creeper", 400),
+])
+def test_bug009_shallow_water_uses_live_danger_outside_the_watcher(monkeypatch, entry, risk, oxygen):
+    status = {
+        "pos": [10.5, 63, 20.5], "health": 20, "food": 20, "oxygen": oxygen, "dimension": "overworld",
+        "in_water": True, "submerged": False, "on_ground": True, "ready": True, "alive": True,
+    }
+    if risk in {"drowned", "creeper"}:
+        distance = 5.0 if risk == "drowned" else 3.0
+        status["nearest_hostile"] = {"name": risk, "id": 64, "dist": distance, "pos": [10.5 + distance, 63, 20.5]}
+    hits = [{"seq": 1, "type": "hurt", "source": "drown"}] if risk == "drown" else []
+    water_actions = []
+    combat_calls = []
+
+    class WadingBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(WadingBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def recover(method, **kwargs):
+        water_actions.append(method)
+        status.update(in_water=False)
+        return {"ok": True, "in_water": False}
+
+    def combat(trigger):
+        combat_calls.append(trigger["primary_entity_id"])
+        return {"ok": True, "handled": True, "mode": "cover_or_flee"}
+
+    monkeypatch.setattr(guard, "_escape_water", lambda *_, **kw: recover("generic", **kw))
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", lambda *_, **kw: recover("shore", **kw))
+    monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
+    if entry == "poll":
+        result = guard.poll()
+    elif entry == "boundary":
+        result = guard.stabilize_after_tools(['{"ok": true, "dug_count": 1, "in_water": true}'])
+    else:
+        result = guard.handle_preemption(
+            {"source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": 42, "distance": 3.0},
+            interrupted_name="mc_skill_mine_blocks",
+        )
+    if risk:
+        assert result is not None and water_actions == ["shore"]
+    else:
+        assert water_actions == []
+        if entry == "preemption":
+            assert result["reflex_mode"] == "cover_or_flee" and combat_calls == [42]
+        else:
+            assert result is None
+
+
 def test_hurt_while_standing_in_shallow_water_still_escapes(monkeypatch):
     """Live: in_water + hurt produced actions=[] (melee branch needs dry land, needs_float false)."""
     clock = [100.0]
@@ -2468,6 +2528,113 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
         for _ in range(3):
             clock[0] += 15.5
             assert guard.poll()["requires_replan"] is False
+
+
+@pytest.mark.parametrize("followup", [
+    "unchanged", "closer", "new_target", "other_hostile", "scan_closer", "moved", "hurt", "status_timeout", "read_gap", "scan_gap",
+    "equal_range_shift", "shift_during_hold", "shift_during_timeout", "coordinate_missing", "gear_missing",
+    "dry_flag_missing", "life_sample_missing",
+])
+def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypatch, followup):
+    import httpx
+
+    from mc_agent.harness.guardian import _RecoveryBudgetExceeded
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    spider = {"id": 637768, "name": "spider", "dist": 2.7, "pos": [34023.1, 62, 34004.7]}
+    status = {
+        "pos": [34020.4, 62, 34004.7], "dimension": "overworld", "health": 9.33, "food": 17,
+        "ready": True, "alive": True, "on_ground": True, "blocking": False,
+        "in_water": False, "submerged": False, "in_lava": False, "on_fire": False, "busy": None,
+        "held": None, "offhand": None, "held_controls": None, "last_death": None, "armor_points": 0,
+    }
+    if followup == "gear_missing":
+        status.pop("held")
+    elif followup == "dry_flag_missing":
+        status.pop("in_lava")
+    damage = []
+    attempts = []
+    hostiles = [spider]
+    read_state = {"fail_next": False}
+
+    class LedgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if read_state.pop("fail_next", False):
+                    raise httpx.ReadTimeout("missing status sample")
+                # The live /status schema only includes ID, name and distance for its nearest hostile.
+                return {**status, "nearest_hostile": {key: spider[key] for key in ("id", "name", "dist")}}
+            if action == "events":
+                return {"events": [hit for hit in damage if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "get_entities":
+                if followup == "scan_closer" and body["radius"] == 8:
+                    return {"entities": [{**spider, "dist": 2.0}]}
+                if followup == "scan_gap" and body["radius"] == 8:
+                    return {}
+                if followup == "coordinate_missing":
+                    return {"entities": [{key: spider[key] for key in ("id", "name", "dist")}]}
+                return {"entities": list(hostiles)}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(LedgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def combat(_env, trigger):
+        attempts.append(trigger["primary_entity_id"])
+        if followup == "shift_during_timeout" and len(attempts) == 1:
+            spider["pos"] = [34020.4, 62, 34007.4]
+        clock[0] += 7.5
+        raise _RecoveryBudgetExceeded("status" if followup == "status_timeout" else "dig")
+
+    monkeypatch.setattr(guard.combat_slot, "handle", combat)
+    first = guard.poll()
+    assert first["requires_replan"] and first["actions"][0]["result"]["mode"] == "combat_timeout"
+    assert attempts == [spider["id"]]
+
+    clock[0] += 13
+    if followup == "closer":
+        spider.update(dist=2.0, pos=[34022.4, 62, 34004.7])
+    elif followup == "new_target":
+        spider["id"] += 1
+    elif followup == "equal_range_shift":
+        spider["pos"] = [34020.4, 62, 34007.4]
+    elif followup == "shift_during_timeout":
+        spider["pos"] = [34023.1, 62, 34004.7]
+    elif followup == "life_sample_missing":
+        status.pop("last_death")
+    elif followup == "moved":
+        status["pos"] = [34020.8, 62, 34004.7]
+    elif followup == "hurt":
+        status["health"] = 7.33
+        damage.append({"seq": 1, "type": "hurt", "source": "mob_attack"})
+    elif followup == "read_gap":
+        read_state["fail_next"] = True
+        assert guard.poll() is None
+        clock[0] += 0.3
+
+    second = guard.poll()
+    if followup in {"unchanged", "other_hostile", "shift_during_hold"}:
+        assert second is None and attempts == [spider["id"]]
+        deferred, = [event for event in guard.events.events if event["type"] == "guardian.melee_timeout_deferred"]
+        assert deferred["target_id"] == spider["id"]
+        if followup == "other_hostile":
+            hostiles.append({"id": 41, "name": "zombie", "dist": 3.0})
+            clock[0] += 2.5
+        elif followup == "shift_during_hold":
+            spider["pos"] = [34020.4, 62, 34007.4]
+            clock[0] += 0.3
+        else:
+            clock[0] += 12
+        assert guard.poll()["requires_replan"] and attempts == [spider["id"], spider["id"]]
+    else:
+        assert second["requires_replan"]
+        if followup == "hurt":
+            assert "fresh_hurt" in second["reasons"]
+        else:
+            assert attempts[-1] == spider["id"] and len(attempts) == 2
 
 
 @pytest.mark.parametrize("landing", ["magma", "stone", "respawned", "death_event"])
@@ -14488,6 +14655,74 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
     else:
         assert "partial_progress" not in result and "dug_count" not in result and "gained" not in result
     assert guard._water_hurt_streak == 0
+
+
+@pytest.mark.parametrize("condition, expected_reason, sample_count", [
+    ("brief", None, 2), ("continuous", "sustained_submersion", 3), ("sinking", "sustained_sinking", 2),
+    ("depleted", "low_oxygen", 1), ("low_health", "critical_health", 1),
+])
+def test_bug009_full_air_reading_uses_water_motion_and_duration(monkeypatch, condition, expected_reason, sample_count):
+    import threading
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [-10890.5, 58, 2566.3], "in_water": True, "submerged": True, "on_ground": False,
+        "health": 5 if condition == "low_health" else 20, "oxygen": 7 if condition == "depleted" else 20,
+        "velocity": [0, -1.5 if condition == "sinking" else 0, 0], "dimension": "overworld",
+        "ready": True, "alive": True,
+    }
+    finished = threading.Event()
+    samples = []
+    calls = []
+
+    class SubmergedMiner:
+        def call(self, action, body=None, **kwargs):
+            if action == "dig":
+                calls.append(action)
+                assert finished.wait(3.0)
+                return {"dug": "stone", "gained": {"cobblestone": 1}}
+            if action == "status":
+                if threading.current_thread().name == "mc-creeper-watch" and not finished.is_set():
+                    clock[0] += 1.1
+                    samples.append(clock[0])
+                    if condition == "brief" and len(samples) == 2:
+                        status.update(submerged=False, on_ground=True)
+                        finished.set()
+                return dict(status)
+            if action == "stop":
+                calls.append(action)
+                finished.set()
+                return {"stopped": True, "released": True, "action": "dig"}
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    bot = SubmergedMiner()
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+
+    def shore(*args, **kwargs):
+        calls.append("surface")
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(bot.call(
+        "dig", {"pos": [-10890, 58, 2567], "stop_on": ["death"]},
+    ))))
+
+    assert len(samples) == sample_count
+    if expected_reason is None:
+        assert calls == ["dig"] and result["dug"] == "stone"
+    else:
+        assert calls == ["dig", "stop", "surface"] and result["water_risk"] == expected_reason
+        preempted = next(event for event in events.events if event["type"] == "guardian.preempted_tool")
+        observation = preempted["water_observation"]
+        assert observation["reason"] == expected_reason and observation["submerged"] is True
+        assert observation["submerged_for_s"] == pytest.approx((sample_count - 1) * 1.1)
 
 
 @pytest.mark.parametrize("oxygen, reason", [(20, None), (400, None), (20, "drowned"), (400, "hurt")])
