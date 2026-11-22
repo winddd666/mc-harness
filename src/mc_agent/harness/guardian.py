@@ -3479,8 +3479,9 @@ class GenerationGuard:
                                 and oxygen <= self.TOOL_WATER_ESCAPE_OXYGEN)
                         )
                     )
+                    check_creeper_cover = creeper_close and nh_dist > 2.3
                     if (
-                        creeper_close and nh_dist > 2.3 and isinstance(nh_id, int)
+                        (check_creeper_cover or melee_ambush) and isinstance(nh_id, int)
                         and st.get("on_ground") is True and not st.get("in_water")
                         and not in_lava_now and not hp_dropped
                     ):
@@ -3492,18 +3493,24 @@ class GenerationGuard:
                         except (ApiError, httpx.HTTPError):
                             sighting = {}
                         entities = (sighting.get("entities") or []) if isinstance(sighting, dict) else []
-                        nearby_creepers = [
+                        threat_names = {"creeper"}
+                        if melee_ambush:
+                            threat_names.update(PRE_HURT_MELEE_MOBS)
+                        nearby_threats = [
                             entity for entity in entities
                             if isinstance(entity, dict) and (
                                 entity.get("id") == nh_id
-                                or str(entity.get("name") or "").removeprefix("minecraft:") == "creeper"
+                                or str(entity.get("name") or "").removeprefix("minecraft:") in threat_names
                             )
                         ]
                         if (
-                            any(entity.get("id") == nh_id for entity in nearby_creepers)
-                            and all(entity.get("blocked_by_wall") is True for entity in nearby_creepers)
+                            any(entity.get("id") == nh_id for entity in nearby_threats)
+                            and all(entity.get("blocked_by_wall") is True for entity in nearby_threats)
                         ):
-                            creeper_close = False
+                            if check_creeper_cover:
+                                creeper_close = False
+                            else:
+                                melee_ambush = False
                     hot_floor_now = False
                     if watch_hot_floor and not (in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped):
                         tile = self._hot_floor_block(st)

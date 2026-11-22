@@ -11560,16 +11560,17 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
         assert not status.get("in_lava")
 
 
-@pytest.mark.parametrize("visibility", ["occluded", "exposed", "another_exposed", "unknown"])
-def test_mining_watcher_waits_only_for_a_confirmed_occluded_creeper(monkeypatch, visibility):
+@pytest.mark.parametrize("mob, distance", [("creeper", 4.1), ("zombie", 2.5)])
+@pytest.mark.parametrize("visibility", ["occluded", "exposed", "another_exposed", "unknown", "occluded_then_hurt"])
+def test_mining_watcher_waits_only_for_confirmed_occluded_hostiles(monkeypatch, mob, distance, visibility):
     import threading
 
     inspected = threading.Event()
     stopped = threading.Event()
-    creeper = {"id": 42, "name": "creeper", "dist": 4.1, "pos": [0.5, 58, 4.6]}
+    hostile = {"id": 42, "name": mob, "dist": distance, "pos": [0.5, 58, 0.5 + distance]}
     status = {
         "pos": [0.5, 58, 0.5], "health": 20, "on_ground": True,
-        "ready": True, "alive": True, "blocking": True, "nearest_hostile": creeper,
+        "ready": True, "alive": True, "blocking": True, "nearest_hostile": hostile,
     }
 
     class ShaftBot:
@@ -11580,12 +11581,14 @@ def test_mining_watcher_waits_only_for_a_confirmed_occluded_creeper(monkeypatch,
                 inspected.set()
                 if visibility == "unknown":
                     raise httpx.ReadTimeout("entity visibility unavailable")
-                entities = [{**creeper, "blocked_by_wall": visibility != "exposed"}]
+                entities = [{**hostile, "blocked_by_wall": visibility != "exposed"}]
                 if visibility == "another_exposed":
-                    entities.append({**creeper, "id": 43, "dist": 4.4, "blocked_by_wall": False})
+                    entities.append({**hostile, "id": 43, "dist": distance + 0.3, "blocked_by_wall": False})
                 return {"entities": entities}
             if action == "dig":
                 assert inspected.wait(1.5)
+                if visibility == "occluded_then_hurt":
+                    status["health"] = 16
                 if visibility != "occluded":
                     assert stopped.wait(1.5)
                 return {"ok": True}
@@ -11597,17 +11600,25 @@ def test_mining_watcher_waits_only_for_a_confirmed_occluded_creeper(monkeypatch,
 
     bot = ShaftBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
-    monkeypatch.setattr(guard.combat_slot, "handle", lambda *_: {
-        "mode": "creeper_evade", "handled": True, "status_after": status,
-    })
+    expected_mode = "creeper_evade" if mob == "creeper" else "cover_or_flee"
+    seen_sources = []
+
+    def react(_env, trigger):
+        seen_sources.append(trigger["source"])
+        return {"mode": expected_mode, "handled": True, "status_after": status}
+
+    monkeypatch.setattr(guard.combat_slot, "handle", react)
     result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(
         bot.call("dig", {"pos": [1, 58, 0]}),
     )))
 
     if visibility == "occluded":
         assert result == {"ok": True} and not stopped.is_set()
+        assert seen_sources == []
     else:
-        assert result["reflex_mode"] == "creeper_evade" and stopped.is_set()
+        assert result["reflex_mode"] == expected_mode and stopped.is_set()
+        if visibility == "occluded_then_hurt" and mob == "zombie":
+            assert seen_sources == ["tool_interrupted_hurt"]
 
 
 @pytest.mark.parametrize("tool, action, body, oxygen", [
