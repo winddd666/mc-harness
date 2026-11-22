@@ -797,6 +797,22 @@ def prepare_scene_ground(
             ]
         )
         return cmds
+    if stage == "probe_obsidian_portal":
+        # Dry 7x7 cobblestone staging pad with an adjacent 4x4 obsidian sheet over lava + shallow water edge.
+        cmds.extend(
+            [
+                f"fill {ix - 3} {iy - 1} {iz - 3} {ix + 3} {iy - 1} {iz + 3} minecraft:cobblestone",
+                f"fill {ix - 3} {iy} {iz - 3} {ix + 3} {iy + 6} {iz + 3} minecraft:air",
+                # Lava bed underneath + 16 obsidian blocks on top (east side, x = ix+2..ix+5)
+                f"fill {ix + 2} {iy - 2} {iz - 2} {ix + 5} {iy - 2} {iz + 1} minecraft:lava",
+                f"fill {ix + 2} {iy - 1} {iz - 2} {ix + 5} {iy - 1} {iz + 1} minecraft:obsidian",
+                f"fill {ix + 2} {iy} {iz - 2} {ix + 5} {iy + 4} {iz + 1} minecraft:air",
+                f"setblock {ix - 2} {iy} {iz - 2} minecraft:torch",
+                f"tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
+                f"spawnpoint {bot_name} {ix} {iy} {iz}",
+            ]
+        )
+        return cmds
     if stage == "deep_water":
         # Re-assert the dry staging pad on death return (idempotent, only when spawned at/below sea level).
         cmds.append(
@@ -1091,6 +1107,23 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:torch 24",
                 f"give {bot_name} minecraft:cooked_beef 16",
                 f"give {bot_name} minecraft:cobblestone 32",
+            ]
+        )
+    elif stage == "probe_obsidian_portal":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"advancement grant {bot_name} only minecraft:story/mine_diamond",
+                f"give {bot_name} minecraft:diamond_pickaxe 1",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:flint_and_steel 1",
+                f"give {bot_name} minecraft:water_bucket 1",
+                f"give {bot_name} minecraft:cobblestone 32",
+                f"give {bot_name} minecraft:cooked_beef 16",
+                f"give {bot_name} minecraft:obsidian 4",
             ]
         )
     elif stage == "deep_water":
@@ -1895,6 +1928,20 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         ),
         "extra_tools": (),
     },
+    "probe_obsidian_portal": {
+        "key": "minecraft:story/enter_the_nether",
+        "title": "30分：采够 10 块黑曜石并搭建点亮下界传送门进入下界",
+        "points": 30,
+        "tier": 2,
+        "budget_class": "short",
+        "task": (
+            "你已在干地平台，东侧脚边有现成黑曜石片（下方有岩浆），背包已有钻石镐、打火石、水桶、圆石和 4 块黑曜石。"
+            "立即用 mc_skill_mine_blocks(types=['obsidian'], count=6) 再采 6 块黑曜石凑够 10 块，"
+            "随后直接调用 mc_skill_build_nether_portal 搭建、点亮并走入下界传送门（解锁 story/form_obsidian 与 story/enter_the_nether）。"
+        ),
+        "extra_tools": ("mc_skill_build_nether_portal",),
+        "advancement_id": "minecraft:story/enter_the_nether",
+    },
 }
 
 STRONGHOLD_TOOLS = ("mc_use_item", "mc_skill_scout_surface", "mc_skill_collect_drops", "mc_status", "mc_inventory")
@@ -2173,6 +2220,7 @@ def main() -> int:
             "deep_water",
             "probe_iron_y16",
             "probe_diamond_y54",
+            "probe_obsidian_portal",
         ],
         default="bare",
         help="Starting checkpoint stage for sliced testing",
