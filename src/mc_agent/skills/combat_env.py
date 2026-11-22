@@ -17,7 +17,6 @@ from typing import Any, Callable, Collection, Literal, Protocol, Sequence, Typed
 import httpx
 
 from ..errors import ApiError
-from ..harness.control import RequestCancelled, RunTimedOut
 from .safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
 
 AIR_LIKE_BLOCKS: frozenset[str] = frozenset(
@@ -279,6 +278,15 @@ def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
     )
 
 
+def _is_control_signal(error: Exception) -> bool:
+    if not isinstance(error, RuntimeError):
+        return False
+    # Importing the harness before the skills package finishes initializing creates a cycle.
+    from ..harness.control import RequestCancelled, RunTimedOut
+
+    return isinstance(error, (RequestCancelled, RunTimedOut))
+
+
 def retreat_made_progress(ok: bool, moved: Any, reason: Any) -> bool:
     """Recognize a partial retreat with movement and no reported landing hazard."""
     return ok or (reason is None and isinstance(moved, (int, float)) and math.isfinite(moved) and moved >= 0.35)
@@ -444,9 +452,9 @@ class CombatEnv:
                 transport = {"timeout_s": min(0.35, deadline - now), "allow_reauth": False} if deadline is not None else {}
                 res = self.bot.call("get_block", {"pos": [key[0], key[1], key[2]]}, **transport)
                 name = _clean_block_name(res) if res.get("name") or res.get("type") else ""
-            except (RunTimedOut, RequestCancelled):
-                raise
-            except Exception:
+            except Exception as error:
+                if _is_control_signal(error):
+                    raise
                 name = None
             self._block_cache[key] = (name, now)
         if deadline is not None and (not name or time.monotonic() >= deadline):
@@ -3232,9 +3240,9 @@ class SubcorticalInstinctController:
             rows = [e for e in entities if isinstance(e, dict)]
             rows.sort(key=lambda e: float(e.get("dist", 999.0)))
             return rows
-        except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
-            raise
-        except Exception:
+        except Exception as error:
+            if _is_control_signal(error):
+                raise
             return None
 
     @staticmethod
@@ -3283,10 +3291,9 @@ class SubcorticalInstinctController:
                 off_nm = _clean_block_name((inv.get("offhand") or {}).get("name"))
                 if off_nm != "shield" and counts.get("shield", 0) > 0:
                     env.bot.call("equip", {"item": "shield", "slot": "off-hand"})
-            except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
-                raise
-            except Exception:
-                pass
+            except Exception as error:
+                if _is_control_signal(error):
+                    raise
         return best_weapon
 
     @staticmethod
@@ -3440,9 +3447,9 @@ class SubcorticalInstinctController:
         hp = float(health or 20.0)
         try:
             inv0 = env.bot.call("inventory", method="GET")
-        except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
-            raise
-        except Exception:
+        except Exception as error:
+            if _is_control_signal(error):
+                raise
             inv0 = {}
         counts, has_shield, held_name = env._inventory_counts_and_shield(inv0)
         equipped_gear = []
@@ -4372,10 +4379,9 @@ class CombatControllerSlot:
         ):
             try:
                 cleanup_fn()
-            except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
-                raise
-            except Exception:
-                pass
+            except Exception as error:
+                if _is_control_signal(error):
+                    raise
 
         outcome: CombatOutcome = {
             "handled": False,
@@ -4416,7 +4422,6 @@ class CombatControllerSlot:
                 ):
                     try:
                         reset_fn()
-                    except (KeyboardInterrupt, RunTimedOut, RequestCancelled):
-                        raise
-                    except Exception:
-                        pass
+                    except Exception as error:
+                        if _is_control_signal(error):
+                            raise

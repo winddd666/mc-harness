@@ -1,6 +1,9 @@
 """Generation-time damage/water response, using real harness cancellation boundaries."""
 import json
 import math
+import subprocess
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -8,11 +11,36 @@ import pytest
 from mc_agent.bot import BotSession
 from mc_agent.errors import ApiError
 from mc_agent.harness.agent import run_mc_agent
-from mc_agent.harness.control import check_control
+from mc_agent.harness.control import RequestCancelled, RunTimedOut, check_control
 from mc_agent.harness.events import EventSink
 from mc_agent.harness.guardian import GenerationGuard
 from mc_agent.skills.library import MacroSkills
 from mc_agent.live.state import ReplayIncrementer
+
+
+def test_combat_environment_imports_in_a_fresh_python_process():
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    process = subprocess.run(
+        [sys.executable, "-c", "from mc_agent.skills.combat_env import CombatEnv"],
+        cwd=source_root, capture_output=True, text=True, timeout=10,
+    )
+    assert process.returncode == 0, process.stderr
+
+
+@pytest.mark.parametrize("signal", [RequestCancelled, RunTimedOut])
+def test_combat_fallbacks_propagate_harness_control_signals(signal):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    class InterruptedBot:
+        def call(self, action, body=None, **kwargs):
+            raise signal("interrupted")
+
+    env = CombatEnv(InterruptedBot())
+    with pytest.raises(signal, match="interrupted"):
+        env.has_los([0.5, 63, 0.5], [4.5, 63, 0.5])
+    controller = SubcorticalInstinctController()
+    with pytest.raises(signal, match="interrupted"):
+        controller._scan_live_hostiles(env, radius=8)
 
 
 def test_hurt_during_model_wait_raises_shield_and_discards_stale_response(monkeypatch):
