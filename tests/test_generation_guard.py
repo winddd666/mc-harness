@@ -13988,8 +13988,12 @@ def test_critical_unshielded_arrow_retreat_checks_cover_after_a_stalled_landing(
 @pytest.mark.parametrize("situation", [
     "covered", "receipt_only", "knockback", "near_melee", "two_shooters", "shooter_moved",
     "logs_only", "logs_and_one_stone", "above_critical", "no_materials",
+    "arrow_burst_with_logs", "followup_arrow_with_logs", "single_arrow_with_logs", "stale_arrow_with_logs",
+    "arrow_burst_with_one_log",
 ])
 def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exists(monkeypatch, situation):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     shooter = {"id": 41, "name": "skeleton", "dist": 8, "pos": [9824.9, 63, 7381.1]}
     status = {
         "pos": [9816.9, 63.2, 7381.1], "dimension": "overworld", "health": 5.5, "food": 17,
@@ -14001,20 +14005,31 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
         entities.append({"id": 42, "name": "zombie", "dist": 3, "pos": [9816.9, 63, 7378.1]})
     if situation == "two_shooters":
         entities.append({"id": 43, "name": "skeleton", "dist": 8, "pos": [9816.9, 63, 7373.1]})
+    sustained_arrows = situation in {"arrow_burst_with_logs", "arrow_burst_with_one_log"}
+    previous_arrow = situation in {"followup_arrow_with_logs", "stale_arrow_with_logs"}
+    early_landing = sustained_arrows or previous_arrow or situation == "single_arrow_with_logs"
     material = "oak_log" if situation in {"logs_only", "logs_and_one_stone"} else "cobblestone"
+    if early_landing:
+        material = "dark_oak_log"
+        status["health"] = 9.7
     items = [] if situation == "no_materials" else [{"name": material, "count": 3}]
+    if early_landing:
+        items[0]["count"] = 1 if situation == "arrow_burst_with_one_log" else 4
     if situation == "logs_and_one_stone":
         items.insert(0, {"name": "cobblestone", "count": 1})
     blocks = {}
     attempts = []
+    hits = [{"seq": 1, "type": "hurt", "source": "arrow"}]
+    if sustained_arrows or previous_arrow:
+        hits.append({"seq": 2, "type": "hurt", "source": "arrow"})
+    available_events = 1
 
     class RavineBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return dict(status)
             if action == "events":
-                hurt = {"seq": 1, "type": "hurt", "source": "arrow"}
-                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+                return {"events": [hit for hit in hits[:available_events] if hit["seq"] > kwargs["params"]["since"]]}
             if action == "inventory":
                 return {"items": items, "offhand": None}
             if action == "get_entities":
@@ -14036,11 +14051,17 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
             raise AssertionError(action)
 
     guard = GenerationGuard(RavineBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    if previous_arrow:
+        guard._drain_events_pages()
+        clock[0] += 8.1 if situation == "stale_arrow_with_logs" else 5.5
+    available_events = len(hits)
 
     def defend(_position, _attacker, _counts, *, cover_only=False, **_kwargs):
         if cover_only:
             return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
         landing_hp = 6.1 if situation == "above_critical" else 4.833 if material == "oak_log" else 2.48
+        if early_landing:
+            landing_hp = 6.166667
         status.update(health=landing_hp, pos=[9816.9, 63, 7381.1], on_ground=True)
         return {"ok": True, "mode": "flee", "moved_dist": 2.31, "pos_after": status["pos"]}
 
@@ -14048,13 +14069,15 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
     incident = guard.poll()
 
     action = incident["actions"][-1]
-    if situation in {"above_critical", "no_materials"}:
-        assert action["action"] == ("combat_or_flee" if situation == "above_critical" else "natural_cover_after_retreat")
+    no_cover = {"above_critical", "single_arrow_with_logs", "stale_arrow_with_logs", "arrow_burst_with_one_log"}
+    if situation in no_cover or situation == "no_materials":
+        assert action["action"] == ("combat_or_flee" if situation in no_cover else "natural_cover_after_retreat")
         assert attempts == []
         return
     assert action["action"] == "place_arrow_cover"
-    assert action["ok"] is (situation in {"covered", "logs_only", "logs_and_one_stone"})
-    if situation in {"covered", "shooter_moved", "logs_only", "logs_and_one_stone"}:
+    cover_verified = situation in {"covered", "logs_only", "logs_and_one_stone", "arrow_burst_with_logs", "followup_arrow_with_logs"}
+    assert action["ok"] is cover_verified
+    if cover_verified or situation == "shooter_moved":
         assert attempts == [(9818, 63, 7381), (9818, 64, 7381)]
     elif situation in {"receipt_only", "knockback"}:
         assert attempts == [(9818, 63, 7381)]

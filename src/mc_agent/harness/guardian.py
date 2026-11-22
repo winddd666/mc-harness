@@ -1710,6 +1710,7 @@ class GenerationGuard:
             return None
         self.last_poll = now
         self.stats["polls"] += 1
+        previous_ranged_hurt_at = self._last_ranged_hurt_at
         try:
             status = self.bot.status()
             fresh = self._drain_events_pages()
@@ -2596,9 +2597,19 @@ class GenerationGuard:
                                 not has_shield and not skip_cover_for_blast and status.get("on_ground") is False
                                 and cf_result.get("reason") == "no_safe_retreat"
                             )
+                            cover_material = (
+                                self.combat_env.arrow_cover_material(counts) if hurt_src == "arrow" and not has_shield else None
+                            )
+                            full_cover_stack = cover_material is not None and counts[cover_material] >= 2
+                            early_arrow_cover = (
+                                full_cover_stack and ranged_hurt_only
+                                and (len(hurts) >= 2 or (not deaths and now - previous_ranged_hurt_at < 8.0))
+                            )
+                            cover_hp_limit = 7.0 if early_arrow_cover else (6.0 if full_cover_stack else 4.0)
                             critical_landing = (
                                 cf.get("ok") and (not has_shield or recent_cover_fail or moved_after_failed_pocket)
-                                and (hurt_src == "arrow" or trident_attacker_id is not None) and 0 < hp_val <= 6.0
+                                and (hurt_src == "arrow" or trident_attacker_id is not None)
+                                and (0 < hp_val <= 6.0 or early_arrow_cover)
                             )
                             natural_cover = None
                             if (
@@ -2611,10 +2622,6 @@ class GenerationGuard:
                                 except (ApiError, httpx.HTTPError):
                                     landing = {}
                                 landing_hp = landing.get("health")
-                                cover_material = (
-                                    self.combat_env.arrow_cover_material(counts) if hurt_src == "arrow" and not has_shield else None
-                                )
-                                cover_hp_limit = 6.0 if cover_material is not None and counts[cover_material] >= 2 else 4.0
                                 pocket_already_tried = (
                                     cover_block(landing.get("pos")) == self._last_dig_cover_block
                                     and now - self._last_dig_cover_at < 20.0
