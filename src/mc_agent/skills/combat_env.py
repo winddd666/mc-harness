@@ -1375,20 +1375,32 @@ class CombatEnv:
         unconfirmed = {"ok": False, "reason": "pursuit_unconfirmed"}
 
         def nearby(status: dict[str, Any]) -> bool:
-            nearest = status.get("nearest_hostile")
-            distance = nearest.get("dist") if isinstance(nearest, dict) else None
             health = status.get("health")
-            return (
+            if not (
                 status.get("ready") is True and status.get("alive") is not False
                 and isinstance(health, (int, float)) and health > 0
                 and not any(status.get(key) for key in ("in_water", "in_lava", "submerged", "busy"))
                 and all(status.get(key) == before.get(key) for key in ("last_death", "dimension"))
-                and isinstance(nearest, dict) and nearest.get("id") == target_id
+            ):
+                return False
+            nearest = status.get("nearest_hostile")
+            if nearest is None or nearest == {}:
+                # A missing nearest-hostile sample does not rule out the attributed pursuer.
+                # Only try the bounded entity scan if the landed bot can still raise its shield.
+                offhand = status.get("offhand")
+                return (
+                    health <= 4.0 and status.get("on_ground") is True and status.get("blocking") is False
+                    and isinstance(offhand, dict) and _clean_block_name(offhand.get("name")) == "shield"
+                )
+            distance = nearest.get("dist") if isinstance(nearest, dict) else None
+            return (
+                isinstance(nearest, dict) and nearest.get("id") == target_id
                 and _clean_block_name(nearest.get("name")) == "enderman" and not nearest.get("blocked_by_wall")
                 and isinstance(distance, (int, float)) and 0 <= distance <= 3.5
             )
 
-        if not nearby(self._safe_status(timeout_s=0.25)):
+        initial = self._safe_status(timeout_s=0.25)
+        if not nearby(initial):
             return unconfirmed
         try:
             entities = self.bot.call(
@@ -1419,9 +1431,11 @@ class CombatEnv:
             shield = self.bot.call(
                 "posture", {"shield": True, "sneak": False, "jump": False}, timeout_s=0.3, allow_reauth=False,
             )
+            nearest_missing = not (initial.get("nearest_hostile") and current.get("nearest_hostile"))
             return {
                 "ok": shield.get("blocking") is True, "entity_id": target_id, "distance": distance,
                 "threat_remaining": True,
+                **({"nearest_hostile_missing": True} if nearest_missing else {}),
             }
         except (ApiError, httpx.HTTPError):
             return unconfirmed

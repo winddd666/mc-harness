@@ -18292,6 +18292,8 @@ def test_critical_shielded_arrow_interrupt_guards_before_dig_and_checks_cover_af
 @pytest.mark.parametrize("entry", ["poll", "tool_combat"])
 @pytest.mark.parametrize("scene", [
     "pursuit", "airborne_stall", "different_target", "far", "missing_position", "new_life", "dead", "blocked",
+    "critical_unlisted", "critical_unlisted_far", "critical_unlisted_no_shield", "critical_unlisted_new_life",
+    "critical_other_target",
 ])
 def test_shield_turns_to_the_same_close_enderman_after_melee_retreat(monkeypatch, entry, scene):
     first = {"id": 895362, "name": "enderman", "dist": 1.8, "pos": [353689.2, 64, 353636.9]}
@@ -18300,7 +18302,7 @@ def test_shield_turns_to_the_same_close_enderman_after_melee_retreat(monkeypatch
         "ready": True, "alive": True, "blocking": True, "on_ground": True, "food": 20, "nearest_hostile": first,
     }
     aftermath = {"id": first["id"], "name": "enderman", "dist": 2.2}
-    follower_pos = [353675.5, 64.6, 353631.3]
+    follower_pos = [353675.5, 64.6, 353625.3 if scene == "critical_unlisted_far" else 353631.3]
     post_looks = []
     turns = []
     reads_after = []
@@ -18338,11 +18340,15 @@ def test_shield_turns_to_the_same_close_enderman_after_melee_retreat(monkeypatch
         turns.append("retreat")
         status.update(pos=[353675.5, 64.6, 353633.5], health=11.6, on_ground=False)
         status["nearest_hostile"] = aftermath
-        if scene == "different_target":
+        if scene.startswith("critical_"):
+            status.update(health=2.7, on_ground=True, blocking=False, nearest_hostile=None)
+            if scene != "critical_unlisted_no_shield":
+                status["offhand"] = {"name": "shield"}
+        if scene in {"different_target", "critical_other_target"}:
             status["nearest_hostile"] = {**aftermath, "id": 90}
         if scene == "far":
             status["nearest_hostile"] = {**aftermath, "dist": 8}
-        if scene == "new_life":
+        if scene in {"new_life", "critical_unlisted_new_life"}:
             status["last_death"] = {"t": 2}
         if scene == "dead":
             status["health"] = 0
@@ -18364,16 +18370,19 @@ def test_shield_turns_to_the_same_close_enderman_after_melee_retreat(monkeypatch
     guards = [action for action in outcome["actions"] if action["action"] == "guard_enderman_pursuit"]
 
     assert turns == ["retreat"]
-    if scene in {"pursuit", "airborne_stall"}:
+    if scene in {"pursuit", "airborne_stall", "critical_unlisted"}:
         turn, = post_looks
         assert "entity_id" not in turn and turn["yaw"] == pytest.approx(0) and turn["pitch"] < 0
         assert len(guards) == 1 and guards[0]["ok"] is True
+        detail = guards[0]["result"] if entry == "poll" else guards[0]
+        assert detail.get("nearest_hostile_missing", False) is (scene == "critical_unlisted")
         assert status["blocking"] is True
         if entry == "tool_combat":
             assert outcome["latched_guard"] is True
     else:
         assert not post_looks and not any(action["ok"] for action in guards)
-    assert len(reads_after) == (1 if scene in {"pursuit", "airborne_stall", "missing_position"} else 0)
+    should_rescan = scene in {"pursuit", "airborne_stall", "missing_position", "critical_unlisted", "critical_unlisted_far"}
+    assert len(reads_after) == int(should_rescan)
 
 
 def test_combat_status_keeps_retry_and_http_phases_inside_remaining_budget(monkeypatch):
