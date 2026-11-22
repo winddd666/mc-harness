@@ -10983,6 +10983,7 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
 
 @pytest.mark.parametrize("blocking, landing", [
     (False, "covered"), (False, "exposed"), (False, "new_life"), (False, "shooter_gone"), (False, "healthy"),
+    (False, "cover_moved"), (False, "cover_stationary"),
     (True, "covered"), (True, "exposed"), (True, "new_life"), (True, "shooter_gone"), (True, "near_melee"),
 ])
 def test_blocked_flee_checks_cover_after_a_critical_landing(monkeypatch, blocking, landing):
@@ -10991,6 +10992,7 @@ def test_blocked_flee_checks_cover_after_a_critical_landing(monkeypatch, blockin
     shooter = {"id": 44, "name": "skeleton", "dist": 5.5, "pos": [0.5, 77, 6.0]}
     origin = [0.5, 77, 0.5]
     landing_pos = [0.5, 77, -2.0]
+    failed_cover_pos = [-2.1, 76.2, -2.2]
     status = {"pos": origin, "dimension": "overworld", "health": 1.55 if blocking else 8.5,
               "blocking": blocking, "on_ground": True,
               "ready": True, "alive": True, "last_death": {"t": 1}, "nearest_hostile": shooter}
@@ -11029,6 +11031,9 @@ def test_blocked_flee_checks_cover_after_a_critical_landing(monkeypatch, blockin
         checks.append("cover")
         if landing == "covered":
             return {"ok": True, "mode": "natural_cover", "pos_after": [-1.7, 77, -2.0]}
+        if landing in {"cover_moved", "cover_stationary"}:
+            status["pos"] = failed_cover_pos if landing == "cover_moved" else landing_pos
+            return {"ok": False, "mode": "natural_cover", "reason": "cover_unconfirmed", "pos_after": status["pos"]}
         return None
 
     monkeypatch.setattr(CombatEnv, "flee", flee)
@@ -11043,11 +11048,15 @@ def test_blocked_flee_checks_cover_after_a_critical_landing(monkeypatch, blockin
     )))
 
     expected_checks = ["initial_cover", "flee"] if blocking else ["flee"]
-    if landing in {"covered", "exposed"}:
+    if landing in {"covered", "exposed", "cover_moved", "cover_stationary"}:
         expected_checks.append("cover")
     assert checks == expected_checks
-    assert result["mode"] == {"covered": "natural_cover", "new_life": "respawned"}.get(landing, "flee")
-    assert result["ok"] is (landing != "new_life") and result["requires_replan"]
+    assert result["mode"] == {
+        "covered": "natural_cover", "cover_moved": "natural_cover", "new_life": "respawned",
+    }.get(landing, "flee")
+    assert result["ok"] is (landing not in {"new_life", "cover_moved"}) and result["requires_replan"]
+    if landing == "cover_moved":
+        assert result["pos_after"] == failed_cover_pos and result["reason"] == "cover_unconfirmed"
 
 
 @pytest.mark.parametrize("terrain", ["cliff", "same_column", "missing_target", "clear", "new_life", "moved", "expired"])

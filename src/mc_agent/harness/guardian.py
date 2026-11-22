@@ -3132,7 +3132,7 @@ class GenerationGuard:
                     allow_stationary=not (critical_overworld_arrows or self._low_health_burning_after_ranged_hit(status, now)),
                     require_melee_clearance=critical_overworld_arrows,
                 )
-                if cover and (cover.get("ok") or cover.get("respawned")):
+                if cover is not None:
                     return {**cover, "requires_replan": True, "pos_before": status["pos"]}
                 threat_pos = live_target or threat_pos
             if threat_pos is None:
@@ -3191,7 +3191,7 @@ class GenerationGuard:
                             after["pos"], shooter_id, min(cover_deadline, time.monotonic() + 2.25), allow_stationary=False,
                             require_melee_clearance=critical_overworld_arrows,
                         )
-                        if cover and (cover.get("ok") or cover.get("respawned")):
+                        if cover is not None:
                             return {**cover, "requires_replan": True, "pos_before": status.get("pos")}
                 if (
                     ranged and entity_id is not None and status.get("blocking")
@@ -3249,7 +3249,16 @@ class GenerationGuard:
                     target, other_shooters=others, allow_stationary=allow_stationary,
                 ),
             )
-            return cover.get("result"), target, others
+            cover_result = cover.get("result")
+            if isinstance(cover_result, dict):
+                landing = cover_result.get("pos_after")
+                if (
+                    cover_result.get("ok") or cover_result.get("respawned")
+                    or (landing and math.dist(landing[:3], pos[:3]) > 0.2)
+                ):
+                    # Even an unconfirmed landing invalidates the earlier retreat position.
+                    return cover_result, target, others
+            return None, target, others
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
         except (ApiError, httpx.HTTPError):
