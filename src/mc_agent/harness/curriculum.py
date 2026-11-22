@@ -462,14 +462,14 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("stone_pickaxe", 2),),
         task=(
             "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 仅当 HUD/记忆明确列出附近已有箱子坐标且含备用铁镐/铁锭时才调 mc_skill_container(action='take', x=..., y=..., z=..., items=...) 取回（无已知箱子坐标时直接跳过，严禁盲调 mc_skill_container）；"
-            "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 8 根原木，先顺手砍足 8~10 根原木（并备好 2 把 stone_pickaxe）再下井，确保从 Y=16 一气下探 Y=-54 穿钻石靴不断木不断镐；"
-            "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
+            "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 4 根原木，先顺手砍足 4~6 根原木（已有>=4根原木或>=16块木板时立即下矿，严禁继续留在地表砍树拖到天黑）；"
+            "2) 禁止手动调 mc_skill_staircase(down) 下挖！直接调用 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=8, max_duration_s=90) 自动安全下井并雷达采铁，凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
             "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
             "4) 优先调 mc_skill_craft_gear('iron_pickaxe')，铁锭充裕时顺手合出 shield（副手盾）与 1 件铁甲（如 iron_boots/iron_chestplate）完成安全成型即收工。"
         ),
         post_ensure_task=(
             "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=6) 采入；"
-            "若地表无暴露铁矿且包内备用原木/木板不足 8 根原木，先顺手补足 8~10 根原木（保证一气下探铁层+深层钻石不断木不断镐），再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
+            "若地表无暴露铁矿且包内备用原木/木板不足 4 根原木，补足 4~6 根即刻下矿（严禁恋战地表砍树，禁止手动调 mc_skill_staircase 下挖），直接调 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=8, max_duration_s=90) 自动下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
         ),
         extra_tools=("mc_skill_container",),
         advancement_id="minecraft:story/iron_tools",
@@ -483,9 +483,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("iron_pickaxe", 1), ("stone_pickaxe", 1)),
         pre_equip=(),
         task=(
-            "执行 Y=-54 鱼骨深潜钻石套餐（目标 story/mine_diamond 15分 + story/shiny_gear 60分）："
+            "执行 Y=-54 深潜钻石套餐（目标 story/mine_diamond 15分 + story/shiny_gear 60分）："
             "1) 确认包内有 iron_pickaxe 与备用 stone_pickaxe；"
-            "2) 调 mc_skill_mine_dfs(target='diamond', target_y=-54, goal_count=4) 在深板岩层鱼骨探钻；"
+            "2) 禁止手动 staircase 下挖，直接调 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=4, max_duration_s=90) 自动下井并雷达探钻；"
             "3) 一旦包内凑满首 4 颗 diamond，**第一时间立即就地调 mc_skill_craft_gear('diamond_boots', equip_slot='feet') 先锁定 75 分**！"
             "4) 穿好钻石靴后在主控允许的 150s 顺采窗口内可在同井顺采额外至多 5 颗钻石备钻镐与附魔台。"
         ),
@@ -2388,8 +2388,8 @@ class CurriculumSupervisor:
                     wood_units = sum(v for k, v in owned_pre.items() if k.endswith(("_log", "_stem"))) * 4 + sum(
                         v for k, v in owned_pre.items() if k.endswith("_planks")
                     ) + owned_pre.get("stick", 0) // 2
-                    want_logs = 12
-                    if wood_units < 36 or owned_pre.get("crafting_table", 0) < 2:
+                    want_logs = 6
+                    if wood_units < 16 or owned_pre.get("crafting_table", 0) < 1:
                         try:
                             near_trees = self.bot.call(
                                 "find_blocks",
@@ -2411,7 +2411,7 @@ class CurriculumSupervisor:
                             if (near_trees or {}).get("blocks"):
                                 eff_pre_ensure["any_log"] = max(int(eff_pre_ensure.get("any_log", 0)), want_logs)
                                 eff_pre_ensure["any_planks"] = max(int(eff_pre_ensure.get("any_planks", 0)), 8)
-                                eff_pre_ensure["crafting_table"] = max(int(eff_pre_ensure.get("crafting_table", 0)), 2)
+                                eff_pre_ensure["crafting_table"] = max(int(eff_pre_ensure.get("crafting_table", 0)), 1)
                                 eff_pre_ensure["stone_pickaxe"] = max(int(eff_pre_ensure.get("stone_pickaxe", 0)), 2)
                         except Exception:
                             pass
