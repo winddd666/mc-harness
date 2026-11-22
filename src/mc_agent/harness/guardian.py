@@ -283,6 +283,7 @@ class GenerationGuard:
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     COMBAT_RECOVERY_BUDGET_S = 8.0
     COMBAT_COVER_BUDGET_S = 3.5
+    INTERRUPTED_BUNKER_RETRY_S = 4.0
     UNSTICK_BUDGET_S = 30.0
     FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
@@ -367,6 +368,7 @@ class GenerationGuard:
         self._last_burn_hurt_at = float("-inf")
         self._last_dig_cover_fail_at: float = float("-inf")
         self._blocked_bunker: tuple[tuple[Any, ...], list[int], str] | None = None
+        self._last_interrupted_bunker: tuple[tuple[Any, ...], float] | None = None
         self._blocked_flee_site: tuple[tuple[float, ...], tuple[Any, Any], float] | None = None
         self._last_dig_cover_block: tuple[int, int, int] | None = None
         self._last_dig_cover_at: float = float("-inf")
@@ -1144,6 +1146,16 @@ class GenerationGuard:
 
     def _try_emergency_bunker(self, status: dict[str, Any], *, budget_s: float | None = None) -> dict[str, Any] | None:
         site = self._bunker_site(status)
+        now = time.monotonic()
+        if self._last_interrupted_bunker is not None:
+            interrupted_site, interrupted_at = self._last_interrupted_bunker
+            if (
+                interrupted_site == site and now - interrupted_at < self.INTERRUPTED_BUNKER_RETRY_S
+                and now - self._last_melee_hurt_at < self.INTERRUPTED_BUNKER_RETRY_S
+            ):
+                self.events.emit("guardian.bunker_retry_deferred", pos=status.get("pos"))
+                return None
+            self._last_interrupted_bunker = None
         if self._blocked_bunker is not None and self._blocked_bunker[0] == site:
             _, block_pos, obstacle = self._blocked_bunker
             try:
@@ -1182,6 +1194,12 @@ class GenerationGuard:
             return action
         reason = result.get("reason")
         tile = site[2]
+        if (
+            tile and reason == "dig_failed" and result.get("error") == "interrupted"
+            and "hurt" in str(result.get("message") or "").lower() and result.get("dug") == []
+            and result.get("failed_pos") == [tile[0], tile[1] - 1, tile[2]]
+        ):
+            self._last_interrupted_bunker = (site, time.monotonic())
         if reason == "unsafe_floor":
             block_pos, obstacle = result.get("floor_pos"), result.get("floor_block")
         else:
@@ -1320,6 +1338,7 @@ class GenerationGuard:
                     self._water_hurt_streak = 0
                     self._last_water_escape_failed = False
                     self._blocked_bunker = None
+                    self._last_interrupted_bunker = None
                     self._blocked_flee_site = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":

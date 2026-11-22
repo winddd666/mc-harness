@@ -7200,6 +7200,63 @@ def test_repeated_melee_hurt_skips_bunker_when_the_same_block_still_blocks_it(mo
     assert retreats == [True, True]
 
 
+@pytest.mark.parametrize("retry", ["same_tile", "moved", "new_life", "expired", "partial_shaft", "stopped_without_hurt"])
+def test_emergency_bunker_defers_an_untouched_same_tile_dig_under_repeated_melee(monkeypatch, retry):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    origin = [34019.4, 63, 34003.6]
+    status = {"pos": origin, "health": 7.2, "food": 20, "dimension": "overworld", "last_death": {"t": 1},
+              "ready": True, "alive": True, "on_ground": True, "is_day": False}
+    hits = []
+    digs = []
+    retreats = []
+    events = []
+
+    class CoastBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [{"name": "dirt", "count": 8}]}
+            if action == "get_block":
+                return {"name": "dirt"}
+            if action == "dig":
+                assert body["stop_on"] == ["hurt", "death"]
+                digs.append(body["pos"])
+                if retry == "partial_shaft" and len(digs) == 1:
+                    status["pos"] = [34019.5, 62, 34003.5]
+                    return {"ok": True}
+                source = "stop" if retry == "stopped_without_hurt" else "hurt"
+                raise ApiError("interrupted", f"stopped because of {source}")
+            pytest.fail(f"Unexpected bunker command: {action}")
+
+    def retreat(current, *_args, **_kwargs):
+        retreats.append(current["pos"])
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    guard = GenerationGuard(CoastBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_defend_or_flee", retreat)
+    hits.append({"seq": 1, "type": "hurt", "source": "mob_attack"})
+    first = guard.poll()
+    assert [action["action"] for action in first["actions"]] == ["emergency_bunker", "combat_or_flee"]
+
+    status["pos"] = [34020.4, 63, 34003.6] if retry == "moved" else origin
+    if retry == "new_life":
+        status["last_death"] = {"t": 2}
+    clock[0] += 4.1 if retry == "expired" else 1.8
+    status["health"] = 2.17
+    hits.append({"seq": 2, "type": "hurt", "source": "mob_attack"})
+    second = guard.poll()
+
+    expected = ["combat_or_flee"] if retry == "same_tile" else ["emergency_bunker", "combat_or_flee"]
+    assert [action["action"] for action in second["actions"]] == expected
+    assert len(retreats) == 2
+    assert len(digs) == (1 if retry == "same_tile" else 3 if retry == "partial_shaft" else 2)
+    assert any(event["type"] == "guardian.bunker_retry_deferred" for event in events) is (retry == "same_tile")
+
+
 @pytest.mark.parametrize(("dimension", "nearest", "health"), [
     ("the_nether", "attacker", 6.1), ("the_nether", "other_mob", 6.1), ("the_nether", "scan_timeout", 6.1),
     ("overworld", "attacker", 6.1), ("overworld", "other_mob", 6.1), ("overworld", "scan_timeout", 6.1),
