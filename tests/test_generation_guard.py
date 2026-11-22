@@ -6999,6 +6999,85 @@ def test_critical_lava_escape_attempts_bridge_before_swimming_in_an_unverified_d
         assert actions[-1] == "swim"
 
 
+@pytest.mark.parametrize("destination", ["shore", "bridge", "no_blocks", "respawned", "slow_head", "slow_inventory"])
+def test_critical_nether_lava_leaves_time_for_the_first_rescue_action(monkeypatch, destination):
+    from mc_agent.skills.combat_env import CombatEnv, aim_yaw_pitch
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    start = [1498.5, 80.0, 1419.8]
+    bank = [1500.5, 81, 1419.5]
+    bank_block = [1500, 80, 1419]
+    bank_yaw = aim_yaw_pitch(start, bank)[0]
+    known_bank = destination in {"shore", "respawned"}
+    status = {
+        "pos": start, "dimension": "the_nether", "last_death": {"t": 1}, "health": 5.7,
+        "in_lava": True, "ready": True, "alive": True, "on_ground": False, "yaw": 0.0,
+    }
+    rescue_actions = []
+    head_reads = 0
+
+    class LavaBot:
+        def status(self):
+            if status["in_lava"] and clock[0] >= 1001.43:
+                status.update(health=0, alive=False, ready=False)
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            nonlocal head_reads
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                if destination == "slow_inventory":
+                    clock[0] += kwargs.get("timeout_s", 2.0)
+                    raise httpx.ReadTimeout("inventory read delayed")
+                items = [] if destination == "no_blocks" else [{"name": "cobblestone", "count": 4}]
+                return {"items": items}
+            if action == "get_block":
+                if body["pos"] == [1498, 81, 1419] and head_reads == 0:
+                    head_reads += 1
+                    if destination == "slow_head":
+                        clock[0] += kwargs.get("timeout_s", 2.0)
+                        raise httpx.ReadTimeout("head block read delayed")
+                elif "timeout_s" in kwargs:
+                    clock[0] += min(0.12, kwargs["timeout_s"])
+                if body["pos"] == bank_block and known_bank:
+                    return {"name": "netherrack"}
+                return {"name": "lava" if body["pos"][1] <= 80 else "air"}
+            if action == "find_blocks":
+                clock[0] += min(0.24, kwargs["timeout_s"]) if known_bank else kwargs["timeout_s"]
+                if destination == "respawned":
+                    status.update(pos=[-132.5, 64, 60.5], last_death={"t": 2}, in_lava=False, on_ground=True)
+                blocks = [{"name": "netherrack", "pos": bank_block}] if known_bank else []
+                return {"blocks": blocks}
+            if action in {"look", "control", "place", "posture"} and self.status()["alive"] is False:
+                raise ApiError("dead", "already died")
+            if action == "look":
+                status["yaw"] = body["yaw"]
+            if action == "control" and body.get("forward"):
+                rescue_actions.append(("swim", clock[0]))
+                if destination in {"no_blocks", "slow_inventory"} or (
+                    destination == "shore" and math.isclose(status["yaw"], bank_yaw)
+                ):
+                    status.update(pos=bank, in_lava=False, on_ground=True)
+            if action == "place":
+                rescue_actions.append(("bridge", clock[0]))
+                status.update(pos=[1498.5, 81, 1419.8], in_lava=False, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(LavaBot()).escape_lava()
+
+    if destination == "respawned":
+        assert result["respawned"] and not result["ok"]
+        assert rescue_actions == []
+    else:
+        assert result["ok"] and not result["in_lava"]
+        (action, started), = rescue_actions
+        assert action == ("bridge" if destination in {"bridge", "slow_head"} else "swim")
+        assert started < (1001.35 if destination == "slow_head" else 1001.2)
+
+
 @pytest.mark.parametrize("transport_overruns", [False, True])
 def test_lava_guard_deadline_includes_last_resort_notch_dig(monkeypatch, transport_overruns):
     clock = [1000.0]

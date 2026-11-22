@@ -1547,6 +1547,13 @@ class CombatEnv:
                 timeout_s=ms / 1000.0 + 0.6, allow_reauth=False,
             )
 
+        def critical_in_nether(status: dict[str, Any]) -> bool:
+            health = status.get("health")
+            return (
+                "nether" in dim0 and status.get("in_lava") is True
+                and isinstance(health, (int, float)) and 0 < health <= 6.0
+            )
+
         tried_recent_bank = False
         max_ascent_pulses = 3
         for ascent in range(max_ascent_pulses + 1):
@@ -1588,7 +1595,11 @@ class CombatEnv:
             # The last sample can confirm a reachable bank without another stationary pulse.
             if ascent == max_ascent_pulses:
                 break
-            head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz))
+            head_deadline = time.monotonic() + 0.18 if critical_in_nether(st) else None
+            try:
+                head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz), deadline=head_deadline)
+            except _TerrainProbeExpired:
+                break
             if not _is_lava_block(head) or time.monotonic() >= lava_deadline:
                 break
             try:
@@ -1609,7 +1620,11 @@ class CombatEnv:
                 break
 
         try:
-            counts, _, held_name = self._inventory_counts_and_shield()
+            inv = None
+            if critical_in_nether(st):
+                observed = self.bot.call("inventory", method="GET", timeout_s=0.2, allow_reauth=False)
+                inv = observed if isinstance(observed, dict) else {}
+            counts, _, held_name = self._inventory_counts_and_shield(inv)
         except (ApiError, httpx.HTTPError):
             counts, held_name = {}, None
         if counts.get("water_bucket", 0) > 0 and "nether" not in dim0 and time.monotonic() < lava_deadline:
@@ -1637,11 +1652,16 @@ class CombatEnv:
 
         # 2. Try scanning safe non-lava exits (including 1-block step-ups, plus wide shore search) and jump-sprinting out
         terrain_started = time.monotonic()
-        terrain_deadline = min(lava_deadline - 2.0, terrain_started + 1.5)
+        health_after_ascent = st.get("health")
+        critical_nether_lava = critical_in_nether(st)
+        # With only a few lava hits left, leave time to launch a swim or lay the first block.
+        terrain_budget = 0.65 if critical_nether_lava else 1.5
+        terrain_deadline = min(lava_deadline - 2.0, terrain_started + terrain_budget)
         ray_deadline = terrain_deadline
         if st.get("in_lava"):
             # Nearby rays can all start in lava. Leave time to query and verify a reachable shore.
-            ray_deadline = max(terrain_started, terrain_deadline - 0.9)
+            shore_budget = 0.5 if critical_nether_lava else 0.9
+            ray_deadline = max(terrain_started, terrain_deadline - shore_budget)
         scan = self.scan_safe_yaws(
             pos0,
             float(st.get("yaw") or 0.0),
@@ -1739,12 +1759,19 @@ class CombatEnv:
                                 tried_yaws.append(candidate)
                                 break
                         actions.append("lava_swim_heading_stalled")
-                health_after_ascent = st.get("health")
                 # At critical health, reserve time for usable blocks before following an unverified yaw.
                 defer_blind_swim = (
                     blind_swim and bool(tried_yaws) and filler is not None
                     and isinstance(health_after_ascent, (int, float)) and health_after_ascent < 10.0
                 )
+
+        if critical_nether_lava:
+            current = self._safe_status(timeout_s=0.25)
+            if not current:
+                return {**_lava_result(st), "ok": False, "reason": "lava_status_unavailable"}
+            st = current
+            if _should_exit_lava(st):
+                return _lava_result(st)
 
         swim_ms = 1400 if (lava_shore_target is not None or len(tried_yaws) == 1) else 950
 
@@ -1847,7 +1874,8 @@ class CombatEnv:
                     raise _TerrainProbeExpired
                 return self.bot.call(action, body, timeout_s=min(timeout_s, remaining), allow_reauth=False, **kwargs)
 
-            probe_until = min(bridge_deadline - 0.8, time.monotonic() + 0.6)
+            bridge_probe_budget = 0.25 if critical_nether_lava else 0.6
+            probe_until = min(bridge_deadline - 0.8, time.monotonic() + bridge_probe_budget)
             try:
                 if st.get("on_ground") is False and _is_passable(self._get_block_name(bx, by - 1, bz, deadline=probe_until)):
                     place_targets.append([bx, by - 2, bz])
