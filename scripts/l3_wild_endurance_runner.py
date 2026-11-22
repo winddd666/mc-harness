@@ -31,6 +31,8 @@ server, so scene requests can be reviewed offline before #1 triggers a live run.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from collections.abc import Iterator
 import dataclasses
 import json
 import math
@@ -225,24 +227,32 @@ def select_dry_isolated_wild_site(
     """Find a dry, wooded Overworld landing for the configured slot."""
     slot_idx, ring_shift = _dry_wild_slot(start_idx)
     x, z = CANDIDATE_SITES[slot_idx]
-    regions = (0,)
     if day1:
         # r41 global fallbacks sent two bots to a shared portal area. Translate the
         # whole slot layout for backups, keeping the same separation in each region.
-        regions = (0, 30_000, -30_000)
+        regions = ((0, 0), (30_000, 30_000), (-30_000, -30_000))
     else:
         x, z = x + ring_shift, z + ring_shift
+        # Rings advance along X=Z. The backups move in opposing directions on
+        # X and Z, keeping them separate from every primary ring and each other.
+        regions = ((0, 0), (30_000, -30_000), (-30_000, 30_000))
     offsets = ((0, 0), (160, 0), (-160, 0), (0, 160), (0, -160),
                (360, 0), (-360, 0), (0, 360), (0, -360))
-    candidates = [(x + region + dx, z + dz) for region in regions for dx, dz in offsets]
-    for cx, cz in candidates:
+    candidates = (
+        (region_idx, x + rx + dx, z + rz + dz)
+        for region_idx, (rx, rz) in enumerate(regions) for dx, dz in offsets
+    )
+    rejected: Counter[str] = Counter()
+    for region_idx, cx, cz in candidates:
         _, st = _spread_overworld(bot, bot_name, cx, cz, 32)
         pos = _dry_overworld_position(st)
         if pos is None or math.hypot(pos[0] - cx, pos[2] - cz) > 48.0:
+            rejected["unsettled_or_outside"] += 1
             continue
         biome = str(st.get("biome") or "").lower()
         # Skip pure ocean spawns so we land on a true terrestrial island/continent
         if "ocean" in biome or ("river" in biome and pos[1] <= 63.0):
+            rejected["water_biome"] += 1
             continue
         # Ensure tree logs exist within 48m so bare-hand bootstrap isn't on a barren sandbar
         fb = bot.call(
@@ -263,15 +273,24 @@ def select_dry_isolated_wild_site(
             },
         )
         if not (fb or {}).get("blocks"):
+            rejected["no_logs"] += 1
             continue
         if day1 and not _portal_free_landing(bot):
+            rejected["nearby_portal"] += 1
             print(f"[Day 1] {bot_name} skipped portal-unsafe landing near ({cx}, {cz})", flush=True)
             continue
-        print(f"[Scene] {bot_name} dry site slot={start_idx} assigned=({x},{z}) picked=({cx},{cz})", flush=True)
+        print(
+            f"[Scene] {bot_name} dry site slot={start_idx} assigned=({x},{z}) picked=({cx},{cz}) "
+            f"region={region_idx} rejected={dict(rejected)}",
+            flush=True,
+        )
         return (*pos, biome)
+    details = f"{sum(rejected.values())} candidates rejected: {dict(rejected)}"
     if day1:
-        raise RuntimeError("Could not find a wooded, portal-free Day 1 landing in the assigned regions")
-    raise RuntimeError(f"Could not find a wooded dry landing for site slot {start_idx} near ({x},{z})")
+        raise RuntimeError(f"Could not find a wooded, portal-free Day 1 landing in the assigned regions ({details})")
+    raise RuntimeError(
+        f"Could not find a wooded dry landing for site slot {start_idx} assigned near ({x},{z}) ({details})"
+    )
 
 
 def select_village_wild_site(
@@ -469,30 +488,61 @@ def select_stronghold_village_site(
         return _locate_structure(dim, x, z, structure_id, timeout_s=STRONGHOLD_LOCATE_TIMEOUT_S)
 
     anchor = CANDIDATE_SITES[start_idx % len(CANDIDATE_SITES)]
-    nearest = locate(*anchor, "minecraft:stronghold")
-    probes = [anchor]
-    if nearest is not None:
-        hx, hz = nearest
-        for radius in (320, 520):
-            for offset in range(8):
-                bearing = ((start_idx + offset) % 8) * math.tau / 8
-                probes.append((hx + round(radius * math.cos(bearing)), hz + round(radius * math.sin(bearing))))
+    bearings = [((start_idx + offset) % 8) * math.tau / 8 for offset in range(8)]
+    seen_strongholds: set[tuple[int, int]] = set()
+
+    def in_region(point: tuple[int, int]) -> bool:
+        return min(CANDIDATE_SITES, key=lambda site: math.dist(site, point)) == anchor
+
+    def ring(point: tuple[int, int], radius: int) -> Iterator[tuple[int, int]]:
+        x, z = point
+        for bearing in bearings:
+            yield x + round(radius * math.cos(bearing)), z + round(radius * math.sin(bearing))
+
+    def village_probes() -> Iterator[tuple[int, int]]:
+        yield anchor
+        nearest = locate(*anchor, "minecraft:stronghold")
+        if nearest is not None:
+            seen_strongholds.add(nearest)
+            for radius in (320, 520):
+                yield from ring(nearest, radius)
+
+        # A village search around only the first stronghold can miss another
+        # stronghold in our assigned region. Keep this fallback spatially bounded.
+        alternatives = 0
+        for probe in ring(anchor, 1_800):
+            if not in_region(probe):
+                continue
+            candidate = locate(*probe, "minecraft:stronghold")
+            if candidate is None or candidate in seen_strongholds or not in_region(candidate):
+                continue
+            seen_strongholds.add(candidate)
+            for radius in (320, 520):
+                yield from ring(candidate, radius)
+            alternatives += 1
+            if alternatives == 2:
+                break
     inner, outer = STRONGHOLD_DISTANCE_RANGE
     seen_villages = set()
+    rejected: Counter[str] = Counter()
     nearby_pairs = 0
-    for probe in probes:
+    for probe in village_probes():
         village = locate(*probe, "#minecraft:village")
         if village is None or village in seen_villages:
             continue
         seen_villages.add(village)
-        if min(CANDIDATE_SITES, key=lambda site: math.dist(site, village)) != anchor:
+        if not in_region(village):
+            rejected["village_outside_region"] += 1
             continue
         stronghold = locate(*village, "minecraft:stronghold")
-        if (
-            stronghold is None
-            or min(CANDIDATE_SITES, key=lambda site: math.dist(site, stronghold)) != anchor
-            or not inner - 32 <= math.dist(village, stronghold) <= outer + 32
-        ):
+        if stronghold is None:
+            rejected["stronghold_not_found"] += 1
+            continue
+        if not in_region(stronghold):
+            rejected["stronghold_outside_region"] += 1
+            continue
+        if not inner - 32 <= math.dist(village, stronghold) <= outer + 32:
+            rejected["pair_outside_distance"] += 1
             continue
         nearby_pairs += 1
         for _ in range(2):
@@ -508,9 +558,12 @@ def select_stronghold_village_site(
                 and locate(math.floor(xz[0]), math.floor(xz[1]), "minecraft:stronghold") == stronghold
             ):
                 return (*pos, str(status.get("biome") or "")), village, stronghold
+        rejected["no_safe_landing"] += 1
     raise RuntimeError(
         "Could not find a safe village with a stronghold 120–600m away in the assigned region "
-        f"({len(seen_villages)} distinct villages located, {nearby_pairs} pairs sent to landing checks)"
+        f"({len(seen_villages)} distinct villages located, {nearby_pairs} pairs sent to landing checks; "
+        f"site slot {start_idx}, region={anchor}, focused strongholds={len(seen_strongholds)}, "
+        f"rejected={dict(rejected)})"
     )
 
 

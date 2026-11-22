@@ -741,7 +741,13 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
         "id": "place_support_rules",
         "category": "api_mechanic",
         "keywords": ["place", "no_support", "blocked_by_self", "place_failed", "放置", "垫脚", "甘蔗"],
-        "rule": "mc_place 前先确认目标格下方有实体支撑、目标格本身为空气且不与自身碰撞箱重叠；若目标格是 sugar_cane/草丛/雪层等可替换方块，先用 mc_skill_mine_blocks 清空再放；blocked_by_self 时先侧移 1 格。",
+        "rule": (
+            "mc_place 的 x、y、z 必须是实测目标格的绝对世界坐标。没有目标坐标时，先用 mc_status 确认当前位置，"
+            "再查附近方块确定目标格；不要把 (0,0,0) 或相对偏移当占位参数。"
+            "放置前确认目标格下方有实体支撑、目标格本身为空气且不与自身碰撞箱重叠；"
+            "若目标格是 sugar_cane/草丛/雪层等可替换方块，先用 mc_skill_mine_blocks 清空再放；"
+            "blocked_by_self 时先侧移 1 格。"
+        ),
     },
     "attack_reach": {
         "id": "attack_reach",
