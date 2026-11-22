@@ -8016,6 +8016,58 @@ def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monk
     assert pulses == ([{"forward": True, "ms": 220, "stop_on": ["death"]}] if terrain == "safe" else [])
 
 
+@pytest.mark.parametrize("moved, remaining, same_target, expected", [
+    (1.97, 1.6, True, True),
+    (1.97, 2.0, True, False),
+    (3.0, 1.6, True, False),
+    (1.97, 1.6, False, False),
+])
+def test_healthy_unarmed_bot_follows_up_short_retreat_when_the_attacker_gains_ground(
+    monkeypatch, moved, remaining, same_target, expected,
+):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    origin = [-6270.3, -40, -6565.9]
+    zombie = {"id": 42, "name": "zombie", "dist": 1.9, "pos": [-6268.4, -40, -6565.9]}
+    status = {
+        "pos": origin, "health": 17, "food": 20, "alive": True, "ready": True, "on_ground": True,
+        "dimension": "overworld", "nearest_hostile": zombie,
+    }
+    steps = []
+
+    class CaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 63}]}
+            if action == "get_entities":
+                return {"entities": [status["nearest_hostile"]]}
+            return {"ok": True}
+
+    def retreat(_pos, **_kwargs):
+        landing = [origin[0] - moved, *origin[1:]]
+        survivor = {**zombie, "id": 42 if same_target else 43, "dist": remaining,
+                    "pos": [landing[0] + remaining, *landing[1:]]}
+        status.update(pos=landing, nearest_hostile=survivor)
+        return {"ok": True, "mode": "flee", "moved_dist": moved}
+
+    def verified_step(landing, threat_pos, *, deadline):
+        assert landing["pos"] == status["pos"] and threat_pos == status["nearest_hostile"]["pos"]
+        steps.append(threat_pos)
+        return True
+
+    env = CombatEnv(CaveBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave"})
+    monkeypatch.setattr(env, "flee", retreat)
+    monkeypatch.setattr(env, "step_away_from_melee", verified_step)
+    outcome = CombatControllerSlot().handle(env, {"source": "pre_hurt_melee", "primary_entity_id": 42})
+
+    assert steps == ([status["nearest_hostile"]["pos"]] if expected else [])
+    assert any(a["action"] == "followup_melee_retreat" for a in outcome["actions"]) is expected
+
+
 @pytest.mark.parametrize(
     "outcome", ["same_life", "respawned_nearby", "time_budget", "retreat_into_lava", "failed_retreat_into_lava"],
 )

@@ -3850,15 +3850,23 @@ class SubcorticalInstinctController:
                     action.update(ok=False, respawned=True)
         nh_post = st_post.get("nearest_hostile")
         retreat_hp = st_post.get("health")
-        followup_range = 3.5 if isinstance(retreat_hp, (int, float)) and retreat_hp <= 10.0 else 1.5
+        retreats = [a for a in actions if a["action"] == "flee" and not a.get("respawned")]
+        followup_range = 0.0
+        if isinstance(retreat_hp, (int, float)) and 0.0 < retreat_hp <= 12.0:
+            followup_range = 3.5 if retreat_hp <= 10.0 else 1.5
+        elif (
+            isinstance(retreat_hp, (int, float)) and retreat_hp > 12.0
+            and trigger.get("source") == "pre_hurt_melee" and mob_name in PRE_HURT_MELEE_MOBS
+            and 0 < mob_dist <= 3.5
+            and isinstance(nh_post, dict) and nh_post.get("id") == mob_id
+            and any(a["ok"] and isinstance(a.get("moved"), (int, float)) and 0 < a["moved"] <= 2.0 for a in retreats)
+        ):
+            # A short step does not disengage when the same attacker stays in melee reach.
+            followup_range = min(mob_dist, 2.0)
         if (
             mode in {"cover_or_flee", "flee"} and not has_shield and not has_weapon
-            and any(
-                a["action"] == "flee" and not a.get("respawned")
-                and retreat_made_progress(a["ok"], a.get("moved"), a.get("reason"))
-                for a in actions
-            )
-            and isinstance(retreat_hp, (int, float)) and 0.0 < retreat_hp <= 12.0
+            and followup_range > 0
+            and any(retreat_made_progress(a["ok"], a.get("moved"), a.get("reason")) for a in retreats)
             and isinstance(nh_post, dict) and _clean_block_name(nh_post.get("name")) in PRE_HURT_MELEE_MOBS
             and isinstance(nh_post.get("id"), int) and self._entity_dist(st_post.get("pos"), nh_post) <= followup_range
             and st_post.get("on_ground") is True and st_post.get("ready") is not False and st_post.get("alive") is not False
