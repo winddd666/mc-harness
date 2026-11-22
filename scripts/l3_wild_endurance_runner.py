@@ -49,7 +49,7 @@ sys.path.insert(0, str(WT_ROOT / "src"))
 
 BOT = "MapTest_01"
 TOKEN_FILE = MAIN_ROOT / ".state-maptest" / "tokens.json"
-ENV_FILE = MAIN_ROOT / ".env.beast"
+ENV_FILE = pathlib.Path(os.environ.get("MC_ENV_FILE", str(MAIN_ROOT / ".env.beast")))
 
 LIVE_STATE_DIR = WT_ROOT / ".state-l3-live"
 RUNS_DIR = WT_ROOT / "runs"
@@ -770,6 +770,30 @@ def prepare_scene_ground(
             ]
         )
         return cmds
+    if stage == "probe_iron_y16":
+        py = 16
+        cmds.extend(
+            [
+                f"fill {ix - 1} {py - 1} {iz - 1} {ix + 1} {py - 1} {iz + 1} minecraft:cobblestone",
+                f"fill {ix - 1} {py} {iz - 1} {ix + 1} {py + 2} {iz + 1} minecraft:air",
+                f"setblock {ix + 1} {py} {iz} minecraft:torch",
+                f"tp {bot_name} {ix + 0.5} {py} {iz + 0.5}",
+                f"spawnpoint {bot_name} {ix} {py} {iz}",
+            ]
+        )
+        return cmds
+    if stage == "probe_diamond_y54":
+        py = -54
+        cmds.extend(
+            [
+                f"fill {ix - 1} {py - 1} {iz - 1} {ix + 1} {py - 1} {iz + 1} minecraft:cobblestone",
+                f"fill {ix - 1} {py} {iz - 1} {ix + 1} {py + 2} {iz + 1} minecraft:air",
+                f"setblock {ix + 1} {py} {iz} minecraft:torch",
+                f"tp {bot_name} {ix + 0.5} {py} {iz + 0.5}",
+                f"spawnpoint {bot_name} {ix} {py} {iz}",
+            ]
+        )
+        return cmds
     if stage == "deep_water":
         # Re-assert the dry staging pad on death return (idempotent, only when spawned at/below sea level).
         cmds.append(
@@ -1036,6 +1060,36 @@ def stage_loadout_cmds(bot_name: str, stage: str, sx: float, sy: float, sz: floa
                 f"give {bot_name} minecraft:cooked_beef 24",
             ]
         )
+    elif stage == "probe_iron_y16":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"give {bot_name} minecraft:stone_pickaxe 2",
+                f"give {bot_name} minecraft:stone_sword 1",
+                f"give {bot_name} minecraft:oak_planks 24",
+                f"give {bot_name} minecraft:coal 12",
+                f"give {bot_name} minecraft:torch 24",
+                f"give {bot_name} minecraft:cooked_beef 12",
+                f"give {bot_name} minecraft:cobblestone 24",
+            ]
+        )
+    elif stage == "probe_diamond_y54":
+        cmds.extend(
+            [
+                f"advancement grant {bot_name} only minecraft:story/mine_stone",
+                f"advancement grant {bot_name} only minecraft:story/upgrade_tools",
+                f"advancement grant {bot_name} only minecraft:story/smelt_iron",
+                f"advancement grant {bot_name} only minecraft:story/iron_tools",
+                f"give {bot_name} minecraft:iron_pickaxe 2",
+                f"give {bot_name} minecraft:iron_sword 1",
+                f"give {bot_name} minecraft:shield 1",
+                f"give {bot_name} minecraft:oak_planks 16",
+                f"give {bot_name} minecraft:torch 24",
+                f"give {bot_name} minecraft:cooked_beef 16",
+                f"give {bot_name} minecraft:cobblestone 32",
+            ]
+        )
     elif stage == "deep_water":
         cmds.extend(
             [
@@ -1155,6 +1209,10 @@ def build_reset_cmds(
 ) -> list[str]:
     """Build the checkpoint reset RCON batch (dimension-aware; shared by live reset and --print-plan)."""
     dim = dim or scene_dimension(stage)
+    if stage == "probe_iron_y16":
+        sy = 16.0
+    elif stage == "probe_diamond_y54":
+        sy = -54.0
     ix, iy, iz = math.floor(sx), int(round(sy)), math.floor(sz)
     cmds: list[str] = ["difficulty normal", f"gamemode survival {bot_name}", f"clear {bot_name}"]
     if dim == "the_nether":
@@ -1808,6 +1866,34 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "extra_tools": ("mc_posture",),
         "advancement_id": "minecraft:adventure/kill_a_mob",
     },
+    "probe_iron_y16": {
+        "key": "minecraft:story/iron_tools",
+        "title": "10分：在 Y=16 地下快速挖铁、烧铁并做出铁镐",
+        "points": 10,
+        "tier": 1,
+        "budget_class": "short",
+        "task": (
+            "你已在 Y=16 地下安全口袋，背包有石镐、木板、煤、火把与食物，无需回地表。"
+            "直接调用 mc_skill_mine_dfs(target='iron', target_y=16, max_duration_s=150) 挖取至少 6 个粗铁，"
+            "随后用 mc_skill_craft_gear 烧铁并合成铁镐（解锁 story/smelt_iron 与 story/iron_tools）。"
+        ),
+        "extra_tools": (),
+        "advancement_id": "minecraft:story/iron_tools",
+    },
+    "probe_diamond_y54": {
+        "key": "minecraft:story/mine_diamond",
+        "title": "15分：在 Y=-54 深层挖取钻石并回收掉落物",
+        "points": 15,
+        "tier": 2,
+        "budget_class": "short",
+        "task": (
+            "你已在 Y=-54 深层安全口袋，背包有铁镐、铁剑、圆石、木板、火把与食物，无需回地表。"
+            "直接调用 mc_skill_mine_dfs(target='diamond', target_y=-54, max_duration_s=180) 寻找并挖掘钻石矿，"
+            "确保拾取全部掉落钻石（解锁 story/mine_diamond）。"
+        ),
+        "extra_tools": (),
+        "advancement_id": "minecraft:story/mine_diamond",
+    },
 }
 
 STRONGHOLD_TOOLS = ("mc_use_item", "mc_skill_scout_surface", "mc_skill_collect_drops", "mc_status", "mc_inventory")
@@ -2084,6 +2170,8 @@ def main() -> int:
             "brewing_alchemy",
             "cave_combat",
             "deep_water",
+            "probe_iron_y16",
+            "probe_diamond_y54",
         ],
         default="bare",
         help="Starting checkpoint stage for sliced testing",

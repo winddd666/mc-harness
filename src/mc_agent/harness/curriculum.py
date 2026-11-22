@@ -2362,7 +2362,7 @@ class CurriculumSupervisor:
                         + chest_i.get("iron_ingot", 0)
                         + chest_i.get("raw_iron", 0)
                     )
-                    if avail_iron < 3:
+                    if avail_iron < 3 and bag_i.get("iron_pickaxe", 0) < 1:
                         try:
                             exp_fe = self.bot.call(
                                 "find_blocks",
@@ -2414,7 +2414,53 @@ class CurriculumSupervisor:
                         except Exception:
                             pass
 
+                _pre_fast_done = False
                 if self.enable_pre_ensure and eff_pre_ensure:
+                    # BUG-101 fast-path: if live `inv_before` already satisfies every requested
+                    # item and no `pre_equip` is pending, skip `GenerationGuard.prime()` +
+                    # `PhysicalPrerequisiteResolver.ensure_items()` + redundant status/inventory polls.
+                    _owned_fast = total_owned_counts(inv_before)
+
+                    def _fast_count(req_key: str) -> int:
+                        if req_key == "any_log":
+                            return sum(v for k, v in _owned_fast.items() if k.endswith(("_log", "_stem")))
+                        if req_key == "any_planks":
+                            return sum(v for k, v in _owned_fast.items() if k.endswith("_planks"))
+                        return int(_owned_fast.get(req_key, 0))
+
+                    if (
+                        not base_playbook.pre_equip
+                        and all(_fast_count(k) >= int(v) for k, v in eff_pre_ensure.items())
+                    ):
+                        _pre_fast_done = True
+                        pre_ensure_res = {
+                            "ok": True,
+                            "stop_reason": "already_satisfied",
+                            "steps_executed": 0,
+                            "remaining_deficit": {},
+                        }
+                        if base_playbook.post_ensure_task:
+                            _fast_bag, _fast_chest, _ = _combined_available_counts(
+                                inv_before,
+                                self.toolset.world_memory,
+                                origin=cur_pos,
+                                dim=cur_dim,
+                                world_jobs=self.world_jobs,
+                            )
+                            re_enriched, _ = _enrich_target_with_world_memory(
+                                base_playbook,
+                                world_memory=self.toolset.world_memory,
+                                bag_counts=_fast_bag,
+                                chest_counts=_fast_chest,
+                                origin=cur_pos,
+                                dim=cur_dim,
+                                include_storage_hint=False,
+                                task_override=base_playbook.post_ensure_task,
+                            )
+                            eff_task = re_enriched.task
+                            eff_extra_tools = re_enriched.extra_tools
+
+                if self.enable_pre_ensure and eff_pre_ensure and not _pre_fast_done:
                     try:
                         max_pre_cap = 45.0 if base_playbook.key.startswith("bootstrap_") else 90.0
                         pre_slice_s = min(ep_timeout * 0.5, max_pre_cap)

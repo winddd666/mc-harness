@@ -8526,10 +8526,14 @@ class MacroSkills:
             except ApiError:
                 pass
             try:
-                atk_res = self.bot.call(
-                    "attack",
-                    {"entity_id": int(t_id), "timeout": 4200 if urgent else 12000},
-                )
+                atk_body: dict[str, Any] = {
+                    "entity_id": int(t_id),
+                    "timeout": 4200 if urgent else 12000,
+                    "feedback": True,
+                }
+                if t_dist <= 3.2:
+                    atk_body["chase"] = False
+                atk_res = self.bot.call("attack", atk_body)
                 st_after = self.bot.status()
                 nh_after = st_after.get("nearest_hostile")
                 nh_after_dist = float(nh_after.get("dist", 99.0)) if isinstance(nh_after, dict) else 99.0

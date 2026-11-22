@@ -3026,14 +3026,25 @@ class SubcorticalInstinctController:
         weapon = self._equip_best_weapon_and_shield(env, counts, False, held_name)
         try:
             result = env.bot.call(
-                "attack", {"entity_id": target_id, "max_hits": 1, "timeout": 300, "interval_ms": 100, "stop_on": ["death"]},
-                timeout_s=0.9, allow_reauth=False,
+                "attack",
+                {
+                    "entity_id": target_id,
+                    "max_hits": 1,
+                    "timeout": 300,
+                    "interval_ms": 100,
+                    "stop_on": ["death"],
+                    "chase": False,
+                    "feedback": True,
+                },
+                timeout_s=0.9,
+                allow_reauth=False,
             )
         except ApiError as err:
             return {"action": "cornered_melee_strike", "ok": False, "code": err.code}
         return {
             "action": "cornered_melee_strike", "entity_id": target_id, "weapon": weapon,
             "ok": bool(result.get("hits")), "killed": bool(result.get("killed")),
+            **({"hit_log": result["hit_log"]} if isinstance(result.get("hit_log"), list) else {}),
         }
 
     def on_encounter(self, env: CombatEnv, trigger: ThreatTrigger) -> CombatOutcome:
@@ -3394,13 +3405,37 @@ class SubcorticalInstinctController:
                 if remaining < 1.5:
                     break
                 attack_ms = min(2600, int((remaining - 0.9) * 1000))
+                eff_dist = (
+                    float(target_ent["dist"])
+                    if isinstance(target_ent, dict) and isinstance(target_ent.get("dist"), (int, float))
+                    else mob_dist
+                )
+                atk_payload: dict[str, Any] = {
+                    "entity_id": eff_id,
+                    "timeout": attack_ms,
+                    "stop_on": ["death"],
+                    "feedback": True,
+                }
+                if eff_dist <= 3.2:
+                    atk_payload["chase"] = False
                 try:
                     atk = env.bot.call(
-                        "attack", {"entity_id": eff_id, "timeout": attack_ms, "stop_on": ["death"]},
+                        "attack", atk_payload,
                         timeout_s=attack_ms / 1000 + 0.35, allow_reauth=False,
                     )
                     hits = atk.get("hits")
-                    actions.append({"action": "melee_attack", "weapon": weapon, "entity_id": eff_id, "ok": True, "killed": bool(atk.get("killed"))})
+                    actions.append(
+                        {
+                            "action": "melee_attack",
+                            "weapon": weapon,
+                            "entity_id": eff_id,
+                            "ok": True,
+                            "killed": bool(atk.get("killed")),
+                            **({"hits": int(hits)} if isinstance(hits, (int, float)) else {}),
+                            **({"chase": False} if eff_dist <= 3.2 else {}),
+                            **({"hit_log": atk["hit_log"]} if isinstance(atk.get("hit_log"), list) else {}),
+                        }
+                    )
                     if atk.get("killed"):
                         killed = True
                         break
