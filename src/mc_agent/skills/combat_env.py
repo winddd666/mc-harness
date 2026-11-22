@@ -1931,6 +1931,19 @@ class CombatEnv:
                 return False
         return True
 
+    def _blocks_shot_across_hitbox(self, pos: Sequence[float], threat_pos: Sequence[float]) -> bool:
+        dx, dz = threat_pos[0] - pos[0], threat_pos[2] - pos[2]
+        horizontal = math.hypot(dx, dz)
+        samples = [pos]
+        if horizontal > 0.05:
+            # Check both sides of the player's hitbox where it can extend around a corner.
+            side_x, side_z = -0.3 * dz / horizontal, 0.3 * dx / horizontal
+            samples.extend((
+                [pos[0] + side_x, pos[1], pos[2] + side_z],
+                [pos[0] - side_x, pos[1], pos[2] - side_z],
+            ))
+        return all(self._blocks_shot(sample, threat_pos) for sample in samples)
+
     def arrow_cover_material(self, counts: dict[str, int]) -> str | None:
         # Prefer a stack that can finish a two-block wall before relying on an existing partial column.
         for minimum in (2, 1):
@@ -2007,6 +2020,7 @@ class CombatEnv:
 
     def seek_natural_cover(
         self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,
+        verify_live_shooters: bool = False,
     ) -> dict[str, Any] | None:
         """Find a close, supported position behind existing terrain and verify the landing."""
         before = self.bot.status()
@@ -2019,8 +2033,9 @@ class CombatEnv:
             return None
         self.invalidate_block_cache()
         shooters = (threat_pos, *other_shooters)
+        blocks_shot = self._blocks_shot_across_hitbox if verify_live_shooters else self._blocks_shot
         # A fresh blast at this location overrides otherwise favorable sight lines.
-        already_covered = allow_stationary and all(self._blocks_shot(origin, shooter) for shooter in shooters)
+        already_covered = allow_stationary and all(blocks_shot(origin, shooter) for shooter in shooters)
         if not already_covered:
             away, _ = aim_yaw_pitch(threat_pos, origin)
             for offset in (90, -90, 45, -45):
@@ -2030,7 +2045,7 @@ class CombatEnv:
                     continue
                 ux, uz = yaw_to_unit_xz(yaw)
                 target = [origin[0] + ux * 2.2, route[0], origin[2] + uz * 2.2]
-                if all(self._blocks_shot(target, shooter) for shooter in shooters):
+                if all(blocks_shot(target, shooter) for shooter in shooters):
                     break
             else:
                 return None
@@ -2047,7 +2062,11 @@ class CombatEnv:
         ):
             return None
         if already_covered:
-            return {"ok": True, "mode": "natural_cover", "pos_after": current_pos, "moved_dist": 0.0}
+            confirmed = not verify_live_shooters or self._blocks_live_shots(current_pos)
+            return {
+                "ok": confirmed, "mode": "natural_cover", "pos_after": current_pos, "moved_dist": 0.0,
+                **({"reason": "shooter_lanes_unconfirmed"} if not confirmed else {}),
+            }
         try:
             self.bot.call(
                 "move_to",
@@ -2070,13 +2089,28 @@ class CombatEnv:
             final_pos and math.dist(final_pos[:3], target) <= 0.6 and after.get("on_ground") is True
             and after.get("ready") is not False and not respawned
             and not after.get("in_water") and not after.get("in_lava")
-            and all(self._blocks_shot(final_pos, shooter) for shooter in shooters)
+            and all(blocks_shot(final_pos, shooter) for shooter in shooters)
         )
+        reason = "cover_unconfirmed" if not confirmed else None
+        if confirmed and verify_live_shooters and not self._blocks_live_shots(final_pos):
+            confirmed = False
+            reason = "shooter_lanes_unconfirmed"
         return {
             "ok": confirmed, "mode": "natural_cover", "pos_after": final_pos,
-            **({"reason": "cover_unconfirmed"} if not confirmed else {}),
+            **({"reason": reason} if reason else {}),
             **({"respawned": True} if respawned else {}),
         }
+
+    def _blocks_live_shots(self, pos: Sequence[float]) -> bool:
+        try:
+            sighting = self.bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.4, allow_reauth=False)
+        except (ApiError, httpx.HTTPError):
+            return False
+        entities = sighting.get("entities")
+        if not isinstance(entities, list):
+            return False
+        shooters = ranged_retreat_positions(pos, entities, max_distance=16.0)
+        return bool(shooters) and all(self._blocks_shot_across_hitbox(pos, shooter) for _, shooter in shooters)
 
     def flee(
         self,

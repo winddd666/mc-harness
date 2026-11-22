@@ -807,7 +807,7 @@ class GenerationGuard:
     def _defend_or_flee(
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
         *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True, cover_only: bool = False,
-        trident_attacker_id: int | None = None,
+        trident_attacker_id: int | None = None, verify_live_shooters: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
@@ -944,11 +944,12 @@ class GenerationGuard:
                 try:
                     cover = CombatEnv(cover_bot, geofence=self.geofence).seek_natural_cover(
                         pos, other_shooters=other_shooters, allow_stationary=allow_stationary,
+                        **({"verify_live_shooters": True} if verify_live_shooters else {}),
                     )
                 except _RecoveryBudgetExceeded:
                     self._stop_after_recovery_timeout()
                     cover = None
-                if cover is not None and (cover.get("ok") or cover.get("respawned")):
+                if cover is not None and (cover_only or cover.get("ok") or cover.get("respawned")):
                     return cover
             if cover_only:
                 return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
@@ -2555,6 +2556,7 @@ class GenerationGuard:
                                         lambda: self._defend_or_flee(
                                             landing, None, counts, ranged=True, prefer_cover=True, cover_only=True,
                                             trident_attacker_id=trident_attacker_id,
+                                            verify_live_shooters=hurt_src == "arrow" and not has_shield,
                                         ),
                                     )
                                     actions.append(natural_cover)

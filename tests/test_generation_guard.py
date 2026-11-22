@@ -11749,7 +11749,10 @@ def test_flee_only_confirms_a_shaft_seal_after_both_cells_are_solid(monkeypatch,
         assert attempts[-1] == (1, 96, 0)
 
 
-@pytest.mark.parametrize("terrain", ["wall", "fire", "unknown", "drifted_during_probe", "missed_landing", "respawned"])
+@pytest.mark.parametrize("terrain", [
+    "wall", "fire", "unknown", "drifted_during_probe", "missed_landing", "respawned",
+    "live_shooter_covered", "shooter_flanked", "scan_timeout",
+])
 def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing(terrain):
     from mc_agent.skills.combat_env import CombatEnv
 
@@ -11776,7 +11779,10 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
             if action == "inventory":
                 return {"items": [], "offhand": None}
             if action == "get_entities":
-                return {"entities": [{"id": 44, "name": "pillager", "pos": shooter}]}
+                if terrain == "scan_timeout":
+                    raise httpx.ReadTimeout("shooter scan was unavailable")
+                current_shooter = [0.5, 64.0, -5.0] if terrain == "shooter_flanked" else shooter
+                return {"entities": [{"id": 44, "name": "pillager", "pos": current_shooter}]}
             if action == "get_block":
                 x, y, z = body["pos"]
                 if y in (64, 65) and 3 <= x <= 5 and 1 <= z <= 2:
@@ -11798,7 +11804,9 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
         incident = guard.poll()
         result = next(a["result"] for a in incident["actions"] if a["action"] == "combat_or_flee")
     else:
-        result = CombatEnv(bot).seek_natural_cover(shooter)
+        result = CombatEnv(bot).seek_natural_cover(
+            shooter, verify_live_shooters=terrain in {"live_shooter_covered", "shooter_flanked", "scan_timeout"},
+        )
 
     if terrain in {"fire", "unknown", "drifted_during_probe"}:
         assert result is None
@@ -11806,12 +11814,36 @@ def test_bug076_natural_cover_requires_solid_shot_blocking_and_confirmed_landing
     else:
         goal, = moves
         assert (goal["x"], goal["y"], goal["z"]) == pytest.approx((0.5, 64.0, 2.7))
-        assert result["ok"] is (terrain == "wall")
-        if terrain == "wall":
+        assert result["ok"] is (terrain in {"wall", "live_shooter_covered"})
+        if result["ok"]:
             assert result["mode"] == "natural_cover"
         else:
-            assert result["reason"] == "cover_unconfirmed"
+            assert result["reason"] == (
+                "shooter_lanes_unconfirmed" if terrain in {"shooter_flanked", "scan_timeout"} else "cover_unconfirmed"
+            )
             assert bool(result.get("respawned")) is (terrain == "respawned")
+
+
+def test_stationary_natural_cover_rejects_an_exposed_hitbox_edge(monkeypatch):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    pos = [0.5, 64, 0.08]
+    shooter = [8.5, 64, 0.08]
+
+    class CornerBot:
+        def status(self):
+            return {"pos": pos, "ready": True, "alive": True, "on_ground": True}
+
+        def call(self, action, body=None, **_kwargs):
+            assert action == "get_block"
+            x, y, z = body["pos"]
+            return {"name": "stone" if x == 2 and z == 0 and y in (64, 65) else "air"}
+
+    env = CombatEnv(CornerBot())
+    monkeypatch.setattr(env, "probe_retreat", lambda *_args: None)
+
+    assert all(not env.has_los(shooter, pos, dst_height=height)["clear"] for height in (0.75, 1.6))
+    assert env.seek_natural_cover(shooter, verify_live_shooters=True) is None
 
 
 @pytest.mark.parametrize("action", ["control", "move_to"])
@@ -13372,8 +13404,9 @@ def test_critical_projectile_retreat_checks_cover_from_landing(
             status["nearest_hostile"] = melee
         return {"ok": True, "mode": "flee", "moved_dist": moved, "pos_after": status["pos"]}
 
-    def seek_cover(_env, pos, *, other_shooters, allow_stationary):
+    def seek_cover(_env, pos, *, other_shooters, allow_stationary, verify_live_shooters=False):
         assert pos == shooter["pos"] and not other_shooters and allow_stationary
+        assert verify_live_shooters is (status["pos"] != origin and hurt_source == "arrow" and not has_shield)
         if status["pos"] == origin:
             checks.append("initial_cover")
             return None
