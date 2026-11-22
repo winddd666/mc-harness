@@ -5076,7 +5076,7 @@ class GenerationGuard:
         target = [body.get(axis) for axis in ("x", "y", "z")]
         if not all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target):
             return
-        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.7)
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.5)
         try:
             if CombatEnv(bot).has_safe_footing(target):
                 return
