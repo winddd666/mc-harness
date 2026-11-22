@@ -3834,9 +3834,11 @@ class MacroSkills:
                         break
         plan = craft_material_shortage(item, count, initial)
         if plan and plan["missing_materials"]:
+            # Only non-consumable / true singleton utility items should short-circuit as already_owned;
+            # durability tools (*_pickaxe, *_sword) and buckets must report missing_ingredients when
+            # crafting a replacement (e.g., after mine_dfs returns pickaxe_low).
             _ALREADY_OWNED_GEAR = frozenset({
-                "flint_and_steel", "diamond_pickaxe", "iron_pickaxe", "stone_pickaxe",
-                "diamond_sword", "iron_sword", "shield", "bucket", "shears", "compass",
+                "flint_and_steel", "shield", "shears", "compass",
                 "lodestone", "enchanting_table", "anvil", "brewing_stand", "crafting_table",
             })
             if item in _ALREADY_OWNED_GEAR and int(initial.get(item, 0)) >= count:

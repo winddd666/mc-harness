@@ -4944,6 +4944,10 @@ class MiningDFSEngine:
                 branch for branch in self._spine_branches(cands[0], anchor, geofence)
                 if branch.kind == "stair_up" or branch.direction in cands
             ]
+            existing_dirs = {b.direction for b in sp_branches if b.kind in {"spine_forward", "branch_leaf"}}
+            for extra_d in cands:
+                if extra_d not in existing_dirs:
+                    sp_branches.append(BranchSpec(kind="branch_leaf", direction=extra_d, steps=8))
             node = self._create_node(
                 kind="spine",
                 anchor=anchor,
@@ -4952,6 +4956,10 @@ class MiningDFSEngine:
                 branches=sp_branches,
             )
             self.collar_node_id = node.node_id
+            self.fluid_aborts = 0
+            self.fluid_abandoned_deep = False
+            if self.collar_ceiling_y is None or anchor[1] > self.collar_ceiling_y:
+                self.collar_ceiling_y = int(anchor[1])
             return node
 
         branches: list[BranchSpec] = []
