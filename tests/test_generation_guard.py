@@ -507,10 +507,11 @@ def test_water_reflex_escapes_to_dry_land_instead_of_floating_in_place(monkeypat
 
 
 @pytest.mark.parametrize("elapsed", [4.0, 31.0])
-def test_water_float_continues_shore_recovery_after_recent_failure(monkeypatch, elapsed):
+@pytest.mark.parametrize("oxygen", [120, 20, 7])
+def test_water_float_continues_shore_recovery_after_recent_failure(monkeypatch, elapsed, oxygen):
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 100.0)
     status = {
-        "pos": [7982.5, 59.9, 2869.5], "health": 20, "food": 20, "oxygen": 120,
+        "pos": [7982.5, 59.9, 2869.5], "health": 20, "food": 20, "oxygen": oxygen,
         "alive": True, "ready": True, "in_water": True, "submerged": True, "on_ground": False,
     }
     attempts = []
@@ -541,6 +542,10 @@ def test_water_float_continues_shore_recovery_after_recent_failure(monkeypatch, 
 
     incident = guard.poll()
 
+    if elapsed == 4.0 and oxygen == 20:
+        assert incident is None and attempts == []
+        assert guard._last_water_escape_failed is True
+        return
     assert "water_float" in incident["reasons"]
     assert attempts == ([("shore", True)] if elapsed == 4.0 else [("generic", False)])
     assert guard._last_water_escape_failed is False
@@ -593,16 +598,19 @@ def test_water_recovery_history_clears_only_after_grounded_dry_observation(monke
     assert calls == ([("generic", False)] if landed else [("shore", True)])
 
 
-@pytest.mark.parametrize("entry, risk, oxygen", [
-    ("poll", None, 20), ("boundary", None, 20), ("boundary", None, 400),
-    ("preemption", None, 20), ("boundary", "drowned", 400), ("poll", "drown", 20),
-    ("poll", "creeper", 400), ("boundary", "creeper", 400),
+@pytest.mark.parametrize("entry, risk, oxygen, reports_head", [
+    ("poll", None, 20, True), ("boundary", None, 20, True), ("boundary", None, 400, True),
+    ("preemption", None, 20, True), ("boundary", "drowned", 400, True), ("poll", "drown", 20, True),
+    ("poll", "creeper", 400, True), ("boundary", "creeper", 400, True),
+    ("poll", None, 20, False), ("boundary", None, 20, False), ("preemption", None, 20, False),
 ])
-def test_bug009_shallow_water_uses_live_danger_outside_the_watcher(monkeypatch, entry, risk, oxygen):
+def test_bug009_shallow_water_uses_live_danger_outside_the_watcher(monkeypatch, entry, risk, oxygen, reports_head):
     status = {
         "pos": [10.5, 63, 20.5], "health": 20, "food": 20, "oxygen": oxygen, "dimension": "overworld",
         "in_water": True, "submerged": False, "on_ground": True, "ready": True, "alive": True,
     }
+    if not reports_head:
+        status.pop("submerged")
     if risk in {"drowned", "creeper"}:
         distance = 5.0 if risk == "drowned" else 3.0
         status["nearest_hostile"] = {"name": risk, "id": 64, "dist": distance, "pos": [10.5 + distance, 63, 20.5]}
@@ -637,7 +645,10 @@ def test_bug009_shallow_water_uses_live_danger_outside_the_watcher(monkeypatch, 
     if entry == "poll":
         result = guard.poll()
     elif entry == "boundary":
-        result = guard.stabilize_after_tools(['{"ok": true, "dug_count": 1, "in_water": true}'])
+        receipt = {"ok": True, "dug_count": 1}
+        if reports_head:
+            receipt["in_water"] = True
+        result = guard.stabilize_after_tools([json.dumps(receipt)])
     else:
         result = guard.handle_preemption(
             {"source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": 42, "distance": 3.0},
@@ -651,6 +662,32 @@ def test_bug009_shallow_water_uses_live_danger_outside_the_watcher(monkeypatch, 
             assert result["reflex_mode"] == "cover_or_flee" and combat_calls == [42]
         else:
             assert result is None
+
+
+@pytest.mark.parametrize(("submerged", "grounded", "oxygen", "should_float"), [
+    (False, True, 20, False), (None, True, 20, False), (True, True, 20, True),
+    (False, True, 0, True), (False, False, 20, True),
+])
+def test_l0_water_float_distinguishes_wading_from_air_loss(submerged, grounded, oxygen, should_float):
+    from mc_agent.skills.safety import check_and_stabilize
+
+    status = {"health": 20, "food": 20, "alive": True, "in_water": True, "on_ground": grounded, "oxygen": oxygen}
+    if submerged is not None:
+        status["submerged"] = submerged
+    calls = []
+
+    class WadingBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            calls.append((action, body))
+            return {"ok": True}
+
+    result = check_and_stabilize(WadingBot())
+
+    assert result["actions"] == (["posture_water_float"] if should_float else [])
+    assert calls == ([("posture", {"sneak": False, "shield": False, "jump": True})] if should_float else [])
 
 
 def test_hurt_while_standing_in_shallow_water_still_escapes(monkeypatch):

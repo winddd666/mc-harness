@@ -50,7 +50,7 @@ from ..skills.combat_env import (
     retreat_made_progress,
 )
 from ..skills.library import MacroSkills, best_melee_weapon_in_inv, ray_wall_blocker
-from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
+from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear, water_oxygen_below
 
 # Hurt sources that mean "my body is embedded in a block", not "something is attacking me".
 IN_WALL_HURT_SOURCES = frozenset({"in_wall", "suffocation", "cramming", "inside_block"})
@@ -883,15 +883,6 @@ class GenerationGuard:
         return (
             isinstance(health, (int, float)) and health <= self.WATER_SHORE_MAX_HP
             and (status.get("on_ground") is False or bool(status.get("submerged")))
-        )
-
-    @staticmethod
-    def _water_oxygen_below(status: dict[str, Any], threshold: float) -> bool:
-        oxygen = status.get("oxygen")
-        # Positive low readings can reflect a different scale or lag an exposed head.
-        return (
-            isinstance(oxygen, (int, float)) and oxygen < threshold
-            and (status.get("submerged") is not False or oxygen <= 0)
         )
 
     def _has_close_melee_in_water(self, status: dict[str, Any], *, include_wading: bool = False) -> bool:
@@ -2209,8 +2200,8 @@ class GenerationGuard:
             and self._needs_hot_floor_stance(status, now)
         )
         oxygen = status.get("oxygen")
-        low_oxygen = self._water_oxygen_below(status, 240)
-        critical_drowning = self._water_oxygen_below(status, 150)
+        low_oxygen = water_oxygen_below(status, 16)
+        critical_drowning = water_oxygen_below(status, 10)
         drowning = in_water and (
             (isinstance(oxygen, (int, float)) and oxygen <= 0)
             or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
@@ -5392,7 +5383,7 @@ class GenerationGuard:
                 )
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
-                    or self._water_oxygen_below(st_pre, 180)
+                    or water_oxygen_below(st_pre, 12)
                     or drowning_pre
                     or trigger.get("primary_type") == "drowned"
                     or tool_water_threat
@@ -5647,7 +5638,7 @@ class GenerationGuard:
                             and (self._custom_combat_registered or outcome.get("mode") not in {"water_surface", "water_surface_abort"})
                             and (
                                 close_drowned_after_reflex or st_after.get("submerged")
-                                or self._water_oxygen_below(st_after, 180)
+                                or water_oxygen_below(st_after, 12)
                                 or time.monotonic() < self._no_water_until
                             )
                         ):
@@ -6275,7 +6266,7 @@ class GenerationGuard:
             or drowning
             or nearby_water_threat
             or bool(hurts)
-            or self._water_oxygen_below(status, 270)
+            or water_oxygen_below(status, 18)
         )
 
         boundary_trigger: ThreatTrigger | None = None

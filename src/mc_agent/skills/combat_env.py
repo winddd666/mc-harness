@@ -17,7 +17,7 @@ from typing import Any, Callable, Collection, Literal, Protocol, Sequence, Typed
 import httpx
 
 from ..errors import ApiError
-from .safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
+from .safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear, water_oxygen_below
 
 AIR_LIKE_BLOCKS: frozenset[str] = frozenset(
     {
@@ -271,21 +271,7 @@ def _is_lava_block(name: str) -> bool:
 
 
 def _water_requires_surface(status: dict[str, Any], *, oxygen_bubbles: float) -> bool:
-    if not status.get("in_water"):
-        return False
-    submerged = status.get("submerged")
-    if submerged:
-        return True
-    oxygen = status.get("oxygen")
-    if type(oxygen) not in (int, float) or not math.isfinite(oxygen):
-        return False
-    if oxygen <= 0:
-        return True
-    # An exposed head can keep a low positive reading until the meter refills.
-    if submerged is False:
-        return False
-    bubbles = oxygen if oxygen <= 20 else oxygen / 15
-    return bubbles < oxygen_bubbles
+    return bool(status.get("in_water") and (status.get("submerged") or water_oxygen_below(status, oxygen_bubbles)))
 
 
 def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
