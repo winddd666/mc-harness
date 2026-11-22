@@ -2553,6 +2553,18 @@ class GenerationGuard:
                                     actions.append(natural_cover)
                                     if natural_cover.get("ok"):
                                         self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
+                                    elif (
+                                        hurt_src == "arrow" and not has_shield
+                                        and self.combat_env._pick_filler_block(counts) is not None
+                                        and not (natural_cover.get("result") or {}).get("respawned")
+                                    ):
+                                        placed_cover = self._action(
+                                            "place_arrow_cover",
+                                            lambda: self._place_arrow_cover(landing, counts, att_id_r),
+                                        )
+                                        actions.append(placed_cover)
+                                        if placed_cover.get("ok"):
+                                            self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                             if retry_pocket_after_knockback and natural_cover is None:
                                 # The retreat waited out knockback but found no route.
                                 landing = self.combat_env._safe_status({"ready": False})
@@ -3339,6 +3351,53 @@ class GenerationGuard:
         except (ApiError, httpx.HTTPError):
             pass
         return None, target, others
+
+    def _place_arrow_cover(
+        self, landing: dict[str, Any], counts: dict[str, int], attacker_id: int | None,
+    ) -> dict[str, Any]:
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.1)
+
+        def live_shooter(pos: Sequence[float], expected_id: int | None) -> tuple[int, Sequence[float]] | None:
+            sighting = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.4)
+            entities = sighting.get("entities")
+            if not isinstance(entities, list) or not self._melee_clear_for_projectile_cover(entities):
+                return None
+            shooters = ranged_retreat_positions(pos, entities, max_distance=16.0)
+            if len(shooters) != 1 or (expected_id is not None and shooters[0][0] != expected_id):
+                return None
+            shooter_id, shooter_pos = shooters[0]
+            if isinstance(shooter_id, int) and any(
+                isinstance(entity, dict) and entity.get("id") == shooter_id
+                and str(entity.get("name") or "").removeprefix("minecraft:") in {"skeleton", "stray", "bogged", "pillager"}
+                for entity in entities
+            ):
+                return shooter_id, shooter_pos
+            return None
+
+        try:
+            current = bot.call("status", method="GET", timeout_s=0.35)
+            pos = current.get("pos")
+            if (
+                not pos or current.get("ready") is not True or current.get("alive") is not True
+                or current.get("on_ground") is not True
+                or any(current.get(key) for key in ("busy", "in_water", "in_lava", "on_fire"))
+                or any(current.get(key) != landing.get(key) for key in ("dimension", "last_death"))
+            ):
+                return {"ok": False, "reason": "landing_changed"}
+            shooter = live_shooter(pos, attacker_id)
+            if shooter is None:
+                return {"ok": False, "reason": "projectile_lane_unconfirmed"}
+            env = CombatEnv(bot, geofence=self.geofence)
+            result = env.place_arrow_cover(current, shooter[1], counts)
+            if result.get("ok"):
+                settled = result["pos_after"]
+                shooter_after = live_shooter(settled, shooter[0])
+                if shooter_after is None or not env._blocks_shot(settled, shooter_after[1]):
+                    return {**result, "ok": False, "reason": "projectile_lane_unconfirmed"}
+            return result
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return {"ok": False, "reason": "time_budget"}
 
     def _verify_combat_step(self, body: dict[str, Any]) -> dict[str, Any]:
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.6)

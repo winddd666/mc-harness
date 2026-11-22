@@ -13148,6 +13148,71 @@ def test_critical_unshielded_arrow_retreat_checks_cover_after_a_stalled_landing(
     )
 
 
+@pytest.mark.parametrize("situation", ["covered", "receipt_only", "knockback", "near_melee", "two_shooters", "shooter_moved"])
+def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exists(monkeypatch, situation):
+    shooter = {"id": 41, "name": "skeleton", "dist": 8, "pos": [9824.9, 63, 7381.1]}
+    status = {
+        "pos": [9816.9, 63.2, 7381.1], "dimension": "overworld", "health": 5.5, "food": 17,
+        "ready": True, "alive": True, "on_ground": False, "last_death": {"t": 1},
+        "nearest_hostile": {"id": 41, "name": "skeleton", "dist": 8},
+    }
+    entities = [shooter]
+    if situation == "near_melee":
+        entities.append({"id": 42, "name": "zombie", "dist": 3, "pos": [9816.9, 63, 7378.1]})
+    if situation == "two_shooters":
+        entities.append({"id": 43, "name": "skeleton", "dist": 8, "pos": [9816.9, 63, 7373.1]})
+    blocks = {}
+    attempts = []
+
+    class RavineBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "arrow"}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 60}], "offhand": None}
+            if action == "get_entities":
+                return {"entities": entities}
+            if action == "get_block":
+                cell = tuple(body["pos"])
+                return {"name": blocks.get(cell, "stone" if cell[1] < 63 else "air")}
+            if action == "place":
+                cell = tuple(body["pos"])
+                attempts.append(cell)
+                assert body["item"] == "cobblestone" and kwargs["timeout_s"] <= 0.65
+                if situation != "receipt_only":
+                    blocks[cell] = "cobblestone"
+                if situation == "knockback":
+                    status["pos"] = [9816.4, 63, 7381.1]
+                if situation == "shooter_moved" and len(attempts) == 2:
+                    shooter["pos"] = [9816.9, 63, 7373.1]
+                return {"ok": True}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(RavineBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def defend(_position, _attacker, _counts, *, cover_only=False, **_kwargs):
+        if cover_only:
+            return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
+        status.update(health=2.48, pos=[9816.9, 63, 7381.1], on_ground=True)
+        return {"ok": True, "mode": "flee", "moved_dist": 2.31, "pos_after": status["pos"]}
+
+    monkeypatch.setattr(guard, "_defend_or_flee", defend)
+    incident = guard.poll()
+
+    action = incident["actions"][-1]
+    assert action["action"] == "place_arrow_cover"
+    assert action["ok"] is (situation == "covered")
+    if situation in {"covered", "shooter_moved"}:
+        assert attempts == [(9818, 63, 7381), (9818, 64, 7381)]
+    elif situation in {"receipt_only", "knockback"}:
+        assert attempts == [(9818, 63, 7381)]
+    else:
+        assert attempts == []
+
+
 @pytest.mark.parametrize("scenario", ["cornered", "second_hostile", "out_of_reach", "respawned", "blocked_by_wall"])
 def test_cornered_shielded_bot_strikes_a_lone_reachable_zombie_and_keeps_guard(monkeypatch, scenario):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv

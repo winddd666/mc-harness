@@ -1936,6 +1936,71 @@ class CombatEnv:
                 return False
         return True
 
+    def place_arrow_cover(
+        self, before: dict[str, Any], shooter: Sequence[float], counts: dict[str, int],
+    ) -> dict[str, Any]:
+        """Build close cover on a supported column without leaving the current footing."""
+        origin = before["pos"]
+        filler = self._pick_filler_block(counts)
+        failed = {"ok": False, "mode": "placed_cover", "placed": 0}
+        if filler is None or math.hypot(shooter[0] - origin[0], shooter[2] - origin[2]) <= 3.5:
+            return failed
+
+        def on_same_footing(status: dict[str, Any]) -> bool:
+            return bool(
+                status.get("pos") and math.dist(status["pos"][:3], origin[:3]) <= 0.2
+                and status.get("ready") is True and status.get("alive") is True and status.get("on_ground") is True
+                and not any(status.get(key) for key in ("busy", "in_water", "in_lava", "on_fire"))
+                and all(status.get(key) == before.get(key) for key in ("last_death", "dimension"))
+            )
+
+        yaw, _ = aim_yaw_pitch(origin, shooter)
+        dx, dz = yaw_to_unit_xz(yaw)
+        y = math.floor(origin[1] + 0.05)
+        occupied = _hitbox_columns(origin[0], origin[2])
+        self.invalidate_block_cache()
+        columns = dict.fromkeys(
+            (math.floor(origin[0] + dx * distance), math.floor(origin[2] + dz * distance))
+            for distance in (0.65, 1.1, 1.55, 2.0)
+        )
+        for x, z in columns:
+            if (x, z) in occupied or not self._point_allowed(x + 0.5, z + 0.5, action="place_arrow_cover"):
+                continue
+            # A supported column within reach keeps the place endpoint from pathfinding.
+            floor = self._get_block_name(x, y - 1, z, strict=True)
+            if not floor or floor in HAZARD_BLOCK_TYPES or not _is_solid_ground(floor):
+                continue
+            cells = [(x, y, z), (x, y + 1, z)]
+            blocks = [self._get_block_name(*cell, strict=True) for cell in cells]
+            if any(not block or block in HAZARD_BLOCK_TYPES or (
+                block not in AIR_LIKE_BLOCKS and _is_los_transparent(block)
+            ) for block in blocks):
+                continue
+            to_place = [cell for cell, block in zip(cells, blocks) if block in AIR_LIKE_BLOCKS]
+            if to_place and len(to_place) <= counts[filler]:
+                break
+        else:
+            return failed
+
+        placed = 0
+        for cell in to_place:
+            current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+            if not on_same_footing(current):
+                break
+            try:
+                self.bot.call("place", {"item": filler, "pos": list(cell)}, timeout_s=0.65, allow_reauth=False)
+            except ApiError:
+                break
+            self.invalidate_block_cache()
+            block = self._get_block_name(*cell, strict=True)
+            if block != filler:
+                break
+            placed += 1
+
+        after = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+        confirmed = placed > 0 and on_same_footing(after) and self._blocks_shot(after["pos"], shooter)
+        return {"ok": confirmed, "mode": "placed_cover", "placed": placed, "pos_after": after.get("pos")}
+
     def seek_natural_cover(
         self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,
     ) -> dict[str, Any] | None:
