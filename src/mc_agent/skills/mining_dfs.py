@@ -3900,6 +3900,13 @@ class MiningDFSEngine:
                         queued_pts.add(nb)
 
         if mined_coords:
+            # BUG-094: high-value diamond veins must actively collect ground drops before leaving
+            # so mined diamonds are never left behind on the tunnel floor.
+            if target_set & {"diamond_ore", "deepslate_diamond_ore"}:
+                try:
+                    self.skills.collect_drops(radius=8, max_duration_s=6.0)
+                except Exception:
+                    pass
             self._move_exact(anchor)
             self._equip_for_block_tier(1, for_ore=False)
 
@@ -5931,9 +5938,12 @@ class MiningDFSEngine:
                     if (
                         self.collar_ceiling_y is not None
                         and cur_pos[1] <= int(self.collar_ceiling_y) - 20
+                        and abs(cur_pos[1] - self.target_y) > 12
                     ):
-                        # Same trap as the reset path: re-initialising here plants a fake
-                        # underground "collar", after which every deep reset looks legitimate.
+                        # Same trap as the reset path: re-initialising far above the target layer
+                        # plants a fake underground "collar". However, if we are ALREADY at the
+                        # target depth band (e.g. Y=-54 for diamond, BUG-093), re-anchor locally
+                        # instead of forcing an 80-block climb_out!
                         return {
                             "ok": False,
                             "requires_replan": True,

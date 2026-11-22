@@ -3873,6 +3873,7 @@ class MacroSkills:
                 plan["missing_materials"].keys(),
             )
 
+        table_res: dict[str, Any] | None = None
         if item in TABLE_RECIPES:
             table_res = self.ensure_crafting_table(target_item=item)
             if not table_res.get("ok"):
@@ -3967,6 +3968,23 @@ class MacroSkills:
                 equipped_res = self.bot.call("equip", {"item": item, "slot": slot})
             except (ApiError, _SkillDeadline):
                 equipped_res = None
+
+        # BUG-093: reclaim a freshly placed underground crafting_table (non-pocket) so it never
+        # blocks a 1x2 narrow mine tunnel and breaks MiningDFS backtracking.
+        if (
+            isinstance(table_res, dict)
+            and table_res.get("reused") is False
+            and not table_res.get("carved_pocket")
+        ):
+            tpos = table_res.get("pos")
+            if isinstance(tpos, (list, tuple)) and len(tpos) == 3 and float(tpos[1]) < 55:
+                try:
+                    self.bot.call(
+                        "dig",
+                        {"pos": [int(tpos[0]), int(tpos[1]), int(tpos[2])], "collect": True, "stop_on": ["death"]},
+                    )
+                except (ApiError, _SkillDeadline):
+                    pass
 
         out_craft: dict[str, Any] = {
             "ok": True,
@@ -4506,6 +4524,13 @@ class MacroSkills:
         dim: str | None = None,
     ) -> dict[str, Any]:
         """Batch `put`/`take` on the `container` section of a chest/barrel window."""
+        action_norm = str(action or "").strip().lower()
+        if action_norm in ("get", "withdraw", "take_all", "fetch", "grab"):
+            action = "take"
+        elif action_norm in ("store", "deposit", "stash", "save"):
+            action = "put"
+        else:
+            action = action_norm
         if action not in ("put", "take"):
             return {"ok": False, "error": "bad_args", "message": "action 必须是 put 或 take。"}
         entries = _window_item_entries(items)
@@ -7672,7 +7697,7 @@ class MacroSkills:
                         break
 
                 if stop_on_ore and steps_done % 3 == 0:
-                    found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
+                    found_ores = self.bot.call("find_blocks", {"radius": 5, "types": ore_types, "limit": 10})
                     ores_nearby = found_ores.get("blocks") or []
                     matched_ores = _filter_actionable_ores(ores_nearby, cur)
                     if matched_ores:
@@ -7683,7 +7708,7 @@ class MacroSkills:
             steps_done += 1
             self.bot.progress.update(steps_done=steps_done, dug_count=dug_count)
             if stop_on_ore and steps_done % 3 == 0:
-                found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
+                found_ores = self.bot.call("find_blocks", {"radius": 5, "types": ore_types, "limit": 10})
                 ores_nearby = found_ores.get("blocks") or []
                 matched_ores = _filter_actionable_ores(ores_nearby, cur)
                 if matched_ores:
@@ -7694,7 +7719,7 @@ class MacroSkills:
         self.bot.dig_cap = None
         st_end = self.bot.status()
         if stop_on_ore and stop_reason == "completed":
-            found_ores = self.bot.call("find_blocks", {"radius": 12, "types": ore_types, "limit": 10})
+            found_ores = self.bot.call("find_blocks", {"radius": 5, "types": ore_types, "limit": 10})
             ores_nearby = found_ores.get("blocks") or []
             matched_ores = _filter_actionable_ores(ores_nearby, st_end.get("pos") or pos_before)
             if matched_ores:
