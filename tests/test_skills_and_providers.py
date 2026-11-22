@@ -896,9 +896,12 @@ def test_collect_drops_accounts_for_the_protocol_retry_in_its_budget(monkeypatch
     assert clock[0] <= 106.0
 
 
-@pytest.mark.parametrize("fault_path", ["status", "move_to"])
-def test_dfs_drop_recovery_shares_short_deadline_with_native_budget(monkeypatch, fault_path) -> None:
-    from mc_agent.skills.mining_dfs import _BudgetSession
+@pytest.mark.parametrize("fault_path, protocol_twice, released", [
+    ("status", False, True), ("move_to", False, True),
+    ("move_to", True, True), ("move_to", True, False),
+])
+def test_dfs_drop_recovery_shares_short_deadline_with_native_budget(monkeypatch, fault_path, protocol_twice, released) -> None:
+    from mc_agent.skills.mining_dfs import _BudgetSession, _MiningDeadline
 
     clock = [100.0]
     faults = []
@@ -913,7 +916,7 @@ def test_dfs_drop_recovery_shares_short_deadline_with_native_budget(monkeypatch,
             timeout = request.extensions["timeout"]
             faults.append(sum(timeout.values()))
             clock[0] += min(4.95, timeout["read"] - 0.01) if len(faults) == 1 else faults[-1]
-            if len(faults) == 1:
+            if len(faults) == 1 or protocol_twice:
                 raise httpx.RemoteProtocolError("offline keepalive closed", request=request)
             raise httpx.ReadTimeout("offline retry stalled", request=request)
         if path == "get_block":
@@ -921,7 +924,7 @@ def test_dfs_drop_recovery_shares_short_deadline_with_native_budget(monkeypatch,
         elif path == "stop":
             stops.append(clock[0])
             clock[0] += sum(request.extensions["timeout"].values())
-            result = {"released": True}
+            result = {"released": released}
         else:
             result = {
                 "status": {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"},
@@ -933,15 +936,56 @@ def test_dfs_drop_recovery_shares_short_deadline_with_native_budget(monkeypatch,
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         dfs = _BudgetSession(bot, deadline=130.0)
         dfs.dug_count = 1
-        result = MacroSkills(dfs.session)._collect_nearby_items(
-            bot_y=64.0, radius=6, max_pickups=2, target_items={"diamond"},
-        )
-        assert result["error"]["code"] == "pickup_time_budget"
+        def pickup():
+            return MacroSkills(dfs.session)._collect_nearby_items(
+                bot_y=64.0, radius=6, max_pickups=2, target_items={"diamond"},
+            )
+
+        if released:
+            result = pickup()
+            assert result["error"]["code"] == "pickup_time_budget"
+            assert dfs.timeout_path is None
+            assert dfs.session.status()["pos"] == [0.5, 64.0, 0.5]
+        else:
+            with pytest.raises(_MiningDeadline):
+                pickup()
+            assert dfs.timeout_path == "move_to"
         assert len(faults) == 2 and sum(faults) + 0.15 <= 5.0 + 1e-9
         assert clock[0] <= 106.0
         assert len(stops) == int(fault_path == "move_to")
-        assert dfs.deadline == 130.0 and dfs.timeout_path is None
-        assert dfs.session.status()["pos"] == [0.5, 64.0, 0.5]
+        assert dfs.deadline == 130.0
+
+
+
+@pytest.mark.parametrize("path", ["status", "move_to"])
+def test_nested_skill_transport_and_stop_use_initiating_budget(monkeypatch, path) -> None:
+    from mc_agent.skills.library import _SkillBudgetSession, _SkillDeadline
+
+    now = [100.0]
+    requests = []
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        requests.append(route)
+        timeouts = request.extensions["timeout"]
+        now[0] += sum(timeouts.values()) - 0.01
+        if route == "stop":
+            return httpx.Response(200, json={"ok": True, "result": {"released": True}})
+        raise httpx.RemoteProtocolError("offline response lost", request=request)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        outer = _SkillBudgetSession(bot, 30.0)
+        inner = _SkillBudgetSession(outer, 6.0, bound_transport_retries=True)
+        with pytest.raises(_SkillDeadline):
+            inner.call(path, {"x": 1.5, "z": 0.5, "timeout": 2000} if path == "move_to" else None)
+        if path == "move_to":
+            assert inner.stop_pending() is True
+        assert not outer.pending_action and not outer.timed_out
+
+    assert requests == [path, path] + (["stop"] if path == "move_to" else [])
+    assert now[0] <= 106.0
 
 
 def test_unstick_uses_floor_on_negative_coords_and_clears_hitbox() -> None:

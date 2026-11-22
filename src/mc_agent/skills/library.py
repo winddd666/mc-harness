@@ -1351,24 +1351,22 @@ class _SkillBudgetSession:
         return scoped
 
     def _call_in_mining_budget(
-        self, scoped: Any, path: str, body: dict[str, Any] | None, **kwargs: Any,
+        self, scoped: Any, path: str, body: dict[str, Any] | None, *, stop_deadline: float, **kwargs: Any,
     ) -> dict[str, Any]:
         from .mining_dfs import _MiningDeadline
 
         owner = self.bot.call.__self__
         try:
             result = scoped.call(path, body, **kwargs)
-        except _MiningDeadline:
+        except (_MiningDeadline, httpx.RemoteProtocolError) as error:
             if path == "stop":
                 return {}
-            if scoped.deadline >= owner.deadline or owner.deadline - time.monotonic() <= 0.2:
-                owner.timeout_path = scoped.timeout_path
-                raise
-            self.timed_out = True
-            self.pending_action = scoped.timeout_path is not None and path not in self._READS
-            if self.pending_action and not self.stop_pending():
-                owner.timeout_path = scoped.timeout_path
-                raise
+            timeout_path = path if isinstance(error, httpx.RemoteProtocolError) else scoped.timeout_path
+            self.pending_action = timeout_path is not None and path not in self._READS
+            released = not self.pending_action or self.stop_pending(deadline=stop_deadline)
+            if not released or scoped.deadline >= owner.deadline or owner.deadline - time.monotonic() <= 0.2:
+                owner.timeout_path = timeout_path
+                raise _MiningDeadline() from error
             raise _SkillDeadline() from None
         owner.first_pos = scoped.first_pos
         owner.last_status = scoped.last_status
@@ -1378,19 +1376,29 @@ class _SkillBudgetSession:
 
     def call(
         self, path: str, body: dict[str, Any] | None = None, *, timeout_s: float | None = None,
-        _transport_deadline: float | None = None, **kwargs: Any,
+        _transport_budget: tuple[float, float] | None = None, **kwargs: Any,
     ) -> dict[str, Any]:
-        remaining = self._remaining()
+        deadline, finish_at = self.deadline, self.finish_at
+        if _transport_budget is not None:
+            finish_at = min(finish_at, _transport_budget[1])
+            deadline = finish_at if path == "stop" else min(deadline, _transport_budget[0])
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or (self.timed_out and path != "stop"):
+            if _transport_budget is None:
+                self.timed_out = True
+            raise _SkillDeadline()
         timeout = remaining if timeout_s is None else min(remaining, timeout_s)
         request_timeout: float | httpx.Timeout = timeout
-        if self.bound_transport_retries or _transport_deadline is not None:
-            limit = self.deadline if _transport_deadline is None else min(self.deadline, _transport_deadline)
+        bounded = self.bound_transport_retries or _transport_budget is not None
+        if bounded:
             if isinstance(self.bot, _SkillBudgetSession):
-                kwargs["_transport_deadline"] = limit
-            elif (mining_scope := self._mining_budget_scope(limit)) is not None:
-                return self._call_in_mining_budget(mining_scope, path, body, timeout_s=timeout, **kwargs)
+                kwargs["_transport_budget"] = (deadline, finish_at)
+            elif (mining_scope := self._mining_budget_scope(deadline)) is not None:
+                return self._call_in_mining_budget(
+                    mining_scope, path, body, stop_deadline=finish_at, timeout_s=timeout, **kwargs,
+                )
             elif getattr(self.bot.call, "__func__", None) is BotSession.call:
-                request_timeout = self._retry_timeout(limit - time.monotonic(), timeout)
+                request_timeout = self._retry_timeout(deadline - time.monotonic(), timeout)
                 kwargs["allow_reauth"] = False
                 if path in {"move_to", "control"} and body is not None:
                     field = "timeout" if path == "move_to" else "ms"
@@ -1402,10 +1410,13 @@ class _SkillBudgetSession:
             if self.supports_timeout:
                 return self.bot.call(path, body, timeout_s=request_timeout, **kwargs)
             return self.bot.call(path, body)
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, httpx.RemoteProtocolError) as error:
+            # The initiating scope owns timeout state and the stop reserve.
+            if _transport_budget is not None or (isinstance(error, httpx.RemoteProtocolError) and not bounded):
+                raise
             self.timed_out = True
             self.pending_action = path not in self._READS
-            if path == "dig":
+            if path == "dig" and isinstance(error, httpx.TimeoutException):
                 raise  # The dig loop records the target and preserves partial progress.
             raise _SkillDeadline() from None
 
@@ -1423,15 +1434,22 @@ class _SkillBudgetSession:
             return inv
         return self.bot.inventory()
 
-    def stop_pending(self) -> bool:
-        remaining = self.finish_at - time.monotonic()
+    def stop_pending(self, *, deadline: float | None = None) -> bool:
+        finish_at = self.finish_at if deadline is None else min(deadline, self.finish_at)
+        remaining = finish_at - time.monotonic()
         if self.pending_action and remaining > 0 and self.supports_timeout:
             self.pending_action = False
             try:
                 timeout: float | httpx.Timeout = min(1.0, remaining)
-                mining_scope = self._mining_budget_scope(self.finish_at) if self.bound_transport_retries else None
+                mining_scope = self._mining_budget_scope(finish_at) if self.bound_transport_retries else None
                 if mining_scope is not None:
-                    stopped = self._call_in_mining_budget(mining_scope, "stop", {}, timeout_s=timeout, allow_reauth=False)
+                    stopped = self._call_in_mining_budget(
+                        mining_scope, "stop", {}, stop_deadline=finish_at, timeout_s=timeout, allow_reauth=False,
+                    )
+                elif self.bound_transport_retries and isinstance(self.bot, _SkillBudgetSession):
+                    stopped = self.bot.call(
+                        "stop", {}, timeout_s=timeout, allow_reauth=False, _transport_budget=(finish_at, finish_at),
+                    )
                 else:
                     if self.bound_transport_retries and getattr(self.bot.call, "__func__", None) is BotSession.call:
                         timeout = self._retry_timeout(remaining, timeout)
