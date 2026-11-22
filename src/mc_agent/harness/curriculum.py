@@ -1406,7 +1406,7 @@ def _build_day2_village_search_target(
             brief_prefix
             + "执行 Day 2 白天食物补给与高速系统寻村（入夜或本集结束自动止损，绝不死磕）："
             f"{biome_note}MC 村庄仅生成在 plains/savanna/desert/taiga/snowy_plains，若进入海洋/深森林/丛林/沼泽立刻换方向。"
-            "0) 出发留底（仅当 16m 内已有据点箱且包内有富余备用物资时）：随身务必保留主力装备（1 把铁镐+盾牌+铁甲+斧+食物+8 原木+圆石），仅顺手用 mc_skill_container 把多余的备用铁镐/多余铁锭(>3)/多余原木(>8)/穿完钻石靴后多余钻石存箱留底（防路上阵亡返贫）；无近箱则直接出发，找到村庄后就地扎根，绝不跑回旧箱搬家；"
+            "0) 轻装出发（防探村阵亡爆装返贫）：若 16m 内已有据点箱（或包内木板充足可顺手合放 1 个箱），出发前务必用 mc_skill_container 把高价值物品（铁镐、钻镐、多余钻石、铁锭、多余原木）全部存箱留底，仅随身带低价值物资（石镐+盾牌+食物+少许圆石）轻装探村！找到村庄后直接绑床、收干草块、开箱、交易拿分，绝不跑回旧箱搬家；"
             + hop_clause
             + "1) 若包内食物不足 6 块且途中 24m 内有猪/牛/羊，顺手用斧收 2~3 只；"
             "2) 一旦 mc_skill_scout_surface 返回命中村庄方块(bell/dirt_path/hay_block/composter/lectern)或 villager/iron_golem，立即停止继续 scout，直接进村收割：①调 mc_find_blocks(radius=48, types=['bed','chest','hay_block','bell'])（严禁混入 dirt_path 以免挤爆 limit，且必须用通用别名 'bed' 覆盖全部 16 色村民床）；②优先找带床/箱子的村民屋调 mc_skill_bind_bed 绑重生点占为据点；③顺手采 4~8 块 hay_block 合面包、开屋里箱子拿贵重战利品；④完成后立即收工（多人服不指望睡觉跳夜，下集直接交易或转地下挖钻）。"
@@ -1649,6 +1649,7 @@ def select_next_target(
         not leash_active
         and enable_island_recon
         and has_iron_or_better
+        and ("minecraft:story/shiny_gear" in completed or _is_cooled("minecraft:story/shiny_gear"))
         and not is_dusk_or_night
         and world_memory is not None
         and cur_dim == "overworld"
@@ -1774,10 +1775,10 @@ def select_next_target(
             elif counts.get("diamond_pickaxe", 0) >= 1 or counts.get("netherite_pickaxe", 0) >= 1:
                 enriched_pb = dataclasses.replace(enriched_pb, tier=1)
                 mem_boosted = True
-        if key in {"minecraft:story/shiny_gear", "minecraft:story/mine_diamond"} and day2_village_pending and is_dusk_or_night:
-            # Defer deep Y=-54 diamond diving until after Day 2 daytime village search (stay safe in Y=16 iron layer on Night 1)
-            enriched_pb = dataclasses.replace(enriched_pb, tier=3)
-            mem_boosted = False
+        if key == "minecraft:story/shiny_gear" and cur_dim == "overworld" and has_iron_or_better and is_deep_underground:
+            # 人已在地下矿井且手握铁镐：直接顺势下探 Y=-54 凑 4 钻穿钻石靴，先把 75 分永久锁死，避免半途回地表送命爆装
+            enriched_pb = dataclasses.replace(enriched_pb, tier=0)
+            mem_boosted = True
         if cur_dim == "the_nether":
             if key in {"minecraft:nether/find_fortress", "minecraft:nether/obtain_blaze_rod"}:
                 enriched_pb = dataclasses.replace(enriched_pb, tier=0)
