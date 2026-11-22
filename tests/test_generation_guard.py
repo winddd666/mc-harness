@@ -11796,6 +11796,56 @@ def test_water_boundary_avoids_a_shore_path_that_crosses_a_creeper(monkeypatch):
     assert note is not None and "登岸" in note
 
 
+@pytest.mark.parametrize(("entry", "pressure"), [
+    ("poll", "nearby"), ("poll", "at_surface"), ("poll", "fresh_hit"), ("boundary", "nearby"),
+    ("poll", "distant"), ("poll", "occluded"),
+])
+def test_swimming_near_exposed_melee_uses_checked_shore_without_generic_float(monkeypatch, entry, pressure):
+    zombie_pos = [19981.4, 62, 32993.7]
+    distance = 7.0 if pressure == "distant" else 3.2
+    zombie = {"id": 357966, "name": "zombie", "dist": distance, "blocked_by_wall": pressure == "occluded"}
+    status = {
+        "pos": [19981.4, 62, 32990.5], "health": 18.5, "food": 20, "oxygen": 220,
+        "in_water": True, "submerged": True, "on_ground": False, "ready": True, "alive": True,
+        "nearest_hostile": zombie, "dimension": "overworld",
+    }
+    if pressure == "at_surface":
+        status.update(oxygen=300, submerged=False, jumping=True)
+    calls = []
+
+    class CreekBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hit = {"seq": 1, "type": "hurt", "source": "mob_attack"}
+                return {"events": [hit] if pressure == "fresh_hit" and not kwargs["params"]["since"] else []}
+            if action == "inventory":
+                return {"items": [], "offhand": None}
+            if action == "get_entities":
+                return {"entities": [{**zombie, "pos": zombie_pos}]}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(CreekBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+
+    def float_to_surface(*_args, **_kwargs):
+        calls.append("float")
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    def reach_shore(threat_pos, *, keep_shield, shield_target_id, avoid_close_threat):
+        assert threat_pos == zombie_pos and shield_target_id == zombie["id"]
+        assert not keep_shield and avoid_close_threat
+        calls.append("shore")
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard, "_escape_water", float_to_surface)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+    assert (guard.poll() if entry == "poll" else guard.stabilize_after_tools()) is not None
+    assert calls == (["float"] if pressure in {"distant", "occluded"} else ["shore"])
+
+
 @pytest.mark.parametrize("entry", ["poll", "mc_attack", "mc_move_to"])
 def test_nearby_drowned_sends_water_recovery_directly_to_shore(monkeypatch, entry):
     drowned = {"id": 44, "name": "drowned", "dist": 4.7}
