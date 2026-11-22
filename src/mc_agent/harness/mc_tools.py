@@ -2233,7 +2233,7 @@ class McToolset:
     def mc_skill_container(
         self,
         items: list[dict[str, Any]],
-        action: str = "put",
+        action: str | None = None,
         block: str | None = None,
         x: int | None = None,
         y: int | None = None,
@@ -3268,7 +3268,7 @@ class McToolset:
                     description="批量存取箱子或木桶的物品。需要一个容器目标和非空物品清单。查看箱内物品请用 mc_window_view。",
                     parameters={
                         "items": Parameter("要存取的物品名和数量，如[{'item':'cobblestone','count':64}]", kind="object_array"),
-                        "action": Parameter("put 存入（store/deposit），take 取出（get/withdraw），默认 put", required=False),
+                        "action": Parameter("put 存入（store/deposit），take 取出（get/withdraw）"),
                         "block": Parameter("方块名，如'chest'", required=False),
                         "x": Parameter("X", kind="integer", required=False),
                         "y": Parameter("Y", kind="integer", required=False),

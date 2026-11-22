@@ -5126,7 +5126,7 @@ class MacroSkills:
         self,
         items: Any,
         *,
-        action: str = "put",
+        action: str | None = "put",
         block: str | None = None,
         x: int | None = None,
         y: int | None = None,
@@ -5137,7 +5137,17 @@ class MacroSkills:
         action = str(action or "").strip().lower()
         action = {"get": "take", "withdraw": "take", "store": "put", "deposit": "put"}.get(action, action)
         if action not in ("put", "take"):
-            return {"ok": False, "error": "bad_args", "message": "存入用 put，取出用 take。查看箱内物品请用 mc_window_view。"}
+            return {
+                "ok": False, "error": "bad_args",
+                "message": "请填写 action，存入用 put，取出用 take。查看箱内物品请用 mc_window_view。",
+            }
+        if isinstance(items, (list, tuple)):
+            for index, row in enumerate(items):
+                if isinstance(row, dict) and "items" in row and row.get("count") is None:
+                    return {
+                        "ok": False, "error": "bad_args", "item_index": index,
+                        "message": f"items 列表第 {index + 1} 项请用 count 指定数量。",
+                    }
         entries = _window_item_entries(items)
         if not entries:
             return {"ok": False, "error": "bad_args", "message": "请在 items 填写要存取的物品名和数量。查看箱内物品请用 mc_window_view。"}
@@ -5165,7 +5175,16 @@ class MacroSkills:
         except ApiError as err:
             if pos is None:
                 pos = self._resolve_nearby_container_pos(block)
-            return self._window_api_error(err, pos=pos, block=block, dim=dim)
+            failure = self._window_api_error(err, pos=pos, block=block, dim=dim)
+            done = failure.get("done")
+            if isinstance(done, list) and any(
+                isinstance(op, dict) and (op.get("put") or op.get("took")) for op in done
+            ):
+                failure.update(
+                    action=action, partial_transfer=True, requires_replan=True,
+                    message=f"{err.message}。以 done 列出的转移为准。请复查箱内和背包，再处理剩余项目。",
+                )
+            return failure
 
         if pos is None:
             pos = self._resolve_nearby_container_pos(block)

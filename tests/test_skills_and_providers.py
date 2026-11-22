@@ -4637,9 +4637,11 @@ def test_skill_container_normalizes_action_aliases(action, op) -> None:
 
 
 @pytest.mark.parametrize("items, options, message", [
-    ([], {"block": "chest"}, "物品名和数量"),
-    ([{"item": "iron_ingot", "count": 2}], {"x": 1}, "完整坐标"),
+    ([], {"action": "take", "block": "chest"}, "物品名和数量"),
+    ([{"item": "iron_ingot", "count": 2}], {"action": "take", "x": 1}, "完整坐标"),
     ([{"item": "iron_ingot", "count": 2}], {"action": "inspect", "block": "chest"}, "mc_window_view"),
+    ([{"item": "iron_ingot", "count": 2}], {"block": "chest"}, "action"),
+    ([{"item": "wheat", "count": 1}, {"item": "coal", "items": 20}], {"action": "store", "block": "chest"}, "count"),
 ])
 def test_skill_container_explains_invalid_requests_without_opening(items, options, message) -> None:
     from mc_agent.harness.mc_tools import McToolset
@@ -4653,6 +4655,56 @@ def test_skill_container_explains_invalid_requests_without_opening(items, option
     assert result["ok"] is False
     assert result["error"] == "bad_args"
     assert message in result["message"]
+
+
+def test_skill_container_registry_requires_an_action() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        raise AssertionError(request.url.path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        registry = McToolset(bot).registry()
+        call = {"function": {"name": "mc_skill_container", "arguments": json.dumps({
+            "items": [{"item": "iron_ingot", "count": 16}], "x": -6401, "y": 67, "z": -6380,
+        })}}
+        result = registry.execute(call)
+
+    assert "必填：action, items" in result
+
+
+def test_skill_container_marks_confirmed_transfers_on_batch_failure() -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    stored = {}
+    calls = []
+
+    def handler(request):
+        assert request.url.path.endswith("/window/act")
+        ops = json.loads(request.content)["ops"]
+        calls.append(ops)
+        done = []
+        for op in ops:
+            if op["item"] == "gold_ingot":
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "missing_item", "message": "no gold_ingot in inventory", "failed_op": 2, "done": done,
+                }})
+            stored[op["item"]] = op["count"]
+            done.append({"op": "put", "put": op["item"], "count": op["count"], "to": "container"})
+        raise AssertionError("batch should fail after the first two transfers")
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_container(
+            [{"item": "diamond_pickaxe"}, {"item": "diamond", "count": 4},
+             {"item": "gold_ingot", "count": 16}, {"item": "wheat", "count": 24}],
+            action="store", x=-7032, y=123, z=5801,
+        ))
+
+    assert len(calls) == 1 and stored == {"diamond_pickaxe": 1, "diamond": 4}
+    assert result["ok"] is False and result["error"] == "missing_item"
+    assert result["partial_transfer"] is True and result["requires_replan"] is True
+    assert result["failed_op"] == 2 and {entry["put"]: entry["count"] for entry in result["done"]} == stored
+    assert "done" in result["message"] and "复查" in result["message"]
 
 
 def test_smelt_collect_survives_read_timeout() -> None:
