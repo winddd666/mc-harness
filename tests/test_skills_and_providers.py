@@ -3116,6 +3116,79 @@ def test_skill_smelt_tries_a_second_nearby_furnace_only_after_open_failure(code)
         assert result["error"]["code"] == code
 
 
+@pytest.mark.parametrize("site", ["new_empty", "new_burning", "new_lit", "new_with_fuel", "reused"])
+def test_skill_smelt_only_reclaims_its_empty_unlit_underground_furnace(site) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    furnace = [1, 27, 0]
+    present = site == "reused"
+    burning = False
+    fuel_left = False
+    output = 0
+    digs = []
+
+    def handler(request):
+        nonlocal present, burning, fuel_left, output
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [
+                {"name": "raw_iron", "count": 2}, {"name": "coal", "count": 1},
+                {"name": "furnace", "count": int(not present)}, {"name": "stone_pickaxe", "count": 1},
+            ]}
+        elif route == "status":
+            result = {"pos": [0.5, 27.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1}]} if present else {"blocks": []}
+        elif route == "place":
+            present = True
+            result = {"pos": furnace, "placed": "furnace"}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace and present
+            if body["ops"][0]["op"] == "put":
+                output = 2
+                result = {"done": [{"op": "put", "put": "raw_iron", "count": 2, "to": "input"}]}
+            else:
+                output = 0
+                burning = site == "new_burning"
+                fuel_left = site == "new_with_fuel"
+                result = {"done": [{"op": "take", "took": {"iron_ingot": 2}}]}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace and present
+            result = {
+                "window": "furnace", "info": {"burning": burning},
+                "sections": {"input": [], "fuel": [{"name": "coal", "count": 1}] if fuel_left else [],
+                             "output": [{"name": "iron_ingot", "count": output}] if output else []},
+            }
+        elif route == "get_block":
+            result = {"name": "furnace" if present else "air", "properties": {"lit": site == "new_lit"}}
+        elif route == "dig":
+            assert present and not burning and not fuel_left and not output
+            assert body["pos"] == furnace and body["collect"] is True
+            digs.append(body["pos"])
+            present = False
+            result = {"dug": "furnace", "gained": {"furnace": 1}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        result = json.loads(tools.mc_skill_smelt("raw_iron", count=2))
+        assert result["ok"] is True
+        if site == "new_empty":
+            assert result["furnace_cleanup"] == {"pos": furnace, "removed": True, "recovered": 1}
+            assert digs == [furnace]
+        elif site == "new_burning":
+            assert not digs
+            burning = False
+            recovered = tools.skills.collect_nearby_smelt_output(5.0)
+            assert recovered["furnace_cleanup"] == {"pos": furnace, "removed": True, "recovered": 1}
+            assert tools.skills.collect_nearby_smelt_output(5.0) is None
+        else:
+            assert not digs and present
+
+
 def test_skill_smelt_stops_pending_furnace_view_after_timeout(monkeypatch) -> None:
     from mc_agent.harness.mc_tools import McToolset
 

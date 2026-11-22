@@ -1369,6 +1369,7 @@ class MacroSkills:
         self._failed_scout_routes: dict[tuple[str, int], tuple[tuple[float, float, float], float, float]] = {}
         self.failed_tunnel_dirs: dict[tuple[int, int, int], dict[str, tuple[float, str]]] = {}
         self._drop_retry_after: dict[tuple[str, int, tuple[int, ...], tuple[int, ...]], float] = {}
+        self._temporary_furnaces: set[tuple[str, tuple[int, ...]]] = set()
         self._mining_dfs: Any = None
         self.world_memory: Any = None
         self._terrain_nav: Any = None
@@ -5251,28 +5252,79 @@ class MacroSkills:
                 mem.complete_conversion_job(job["id"], collected=credited)
                 unbooked[item] -= credited
 
+    def _reclaim_empty_temporary_furnace(
+        self, session: _SkillBudgetSession, pos: list[int], dim: str,
+    ) -> dict[str, Any] | None:
+        key = (dim, tuple(pos))
+        if key not in self._temporary_furnaces or any(
+            job["pos"] == pos for job in self._get_world_memory().get_conversion_jobs(dim=dim)
+        ):
+            return None
+        if session.deadline - time.monotonic() < 2.0:
+            return None
+        try:
+            block = session.call("get_block", {"pos": pos})
+            name = _clean_block(block.get("name") or block.get("block"))
+            if name != "furnace":
+                if name:
+                    self._temporary_furnaces.discard(key)
+                return None
+            if str((block.get("properties") or {}).get("lit")).lower() == "true":
+                return None
+            view = session.call("window/view", {"target": {"pos": pos}})
+            sections = view.get("sections") or {}
+            if view.get("window") != "furnace" or (view.get("info") or {}).get("burning") is not False:
+                return None
+            if any(sections.get(slot) != [] for slot in ("input", "fuel", "output")):
+                return None
+            inv = session.inventory()
+            _, pick_tier = _best_pickaxe_in_inv(_inventory_counts_from_raw(inv))
+            if pick_tier == 0 or not _can_fit_item_in_inventory(inv, "furnace", 1, check_craft_inputs=False):
+                return None
+            dug = session.call("dig", {"pos": pos, "collect": True, "stop_on": ["hurt", "death"]})
+        except (_SkillDeadline, httpx.TimeoutException):
+            session.stop_pending()
+            return {"pos": pos, "removed": False, "recovered": 0, "error": "cleanup_unconfirmed"}
+        except (ApiError, httpx.HTTPError) as error:
+            return {"pos": pos, "removed": False, "recovered": 0, "error": getattr(error, "code", type(error).__name__)}
+        removed = _clean_block(dug.get("dug")) == "furnace"
+        if removed:
+            self._temporary_furnaces.discard(key)
+            self._get_world_memory().remove_poi(pos, dim=dim)
+        return {"pos": pos, "removed": removed, "recovered": int((dug.get("gained") or {}).get("furnace", 0))}
+
     def collect_nearby_smelt_output(self, max_duration_s: float) -> dict[str, Any] | None:
-        """Recover a tracked synchronous batch without walking or changing its input/fuel."""
+        """Recover output or reclaim an empty temporary furnace without walking."""
         jobs = [j for j in self._get_world_memory().get_conversion_jobs() if j["kind"] == "sync_furnace"]
-        if not jobs or max_duration_s < 3.0:
+        if (not jobs and not self._temporary_furnaces) or max_duration_s < 3.0:
             return None
 
         session = _SkillBudgetSession(self.bot, max_duration_s)
         try:
             status = session.call("status", method="GET", timeout_s=1.0)
             origin = status.get("pos")
-            if not origin:
+            if not origin or status.get("in_water") or status.get("in_lava"):
                 return None
             dim = normalize_dimension(status.get("dimension"))
             furnace_origin = [n - 0.5 for n in origin[:3]]
-            job = min(
-                (j for j in jobs if j["dim"] == dim),
-                key=lambda j: math.dist(furnace_origin, j["pos"]),
-                default=None,
+            candidates: dict[tuple[int, ...], dict[str, Any] | None] = {}
+            for job in jobs:
+                if job["dim"] == dim and math.dist(furnace_origin, job["pos"]) <= 3.0:
+                    candidates.setdefault(tuple(job["pos"]), job)
+            for site_dim, site_pos in self._temporary_furnaces:
+                if site_dim == dim and math.dist(furnace_origin, site_pos) <= 3.0:
+                    candidates.setdefault(site_pos, None)
+            nearest = min(
+                candidates, key=lambda p: (candidates[p] is None, math.dist(furnace_origin, p)), default=None,
             )
-            if job is None or math.dist(furnace_origin, job["pos"]) > 3.0:
+            if nearest is None:
                 return None
-            pos = job["pos"]
+            pos = list(nearest)
+            job = candidates[nearest]
+            if not job:
+                cleanup = self._reclaim_empty_temporary_furnace(session, pos, dim)
+                return {"pos": pos, "furnace_cleanup": cleanup} if cleanup else None
+
             item = job["output_item"]
             target = {"pos": pos}
             view = session.call("window/view", {"target": target})
@@ -5297,7 +5349,11 @@ class MacroSkills:
         if not taken:
             return None
         self._settle_furnace_output(pos, dim, taken)
-        return {"pos": pos, "took": taken}
+        recovered = {"pos": pos, "took": taken}
+        cleanup = self._reclaim_empty_temporary_furnace(session, pos, dim)
+        if cleanup:
+            recovered["furnace_cleanup"] = cleanup
+        return recovered
 
     def _record_sync_furnace_load(
         self, pos: list[int] | None, dim: str | None, item: str, result: dict[str, Any], fallback_count: int
@@ -5378,6 +5434,12 @@ class MacroSkills:
                     self.bot.call("move_to", {"x": furnace_pos[0], "y": furnace_pos[1], "z": furnace_pos[2], "range": 2.5})
                 except ApiError:
                     furnace_pos = None
+        try:
+            furnace_status = self.bot.status()
+            dim = normalize_dimension(furnace_status.get("dimension"))
+        except ApiError:
+            furnace_status = {}
+            dim = None
         if furnace_pos is None:
             if counts.get("furnace", 0) < 1:
                 cg = self.craft_gear("furnace", 1)
@@ -5387,8 +5449,7 @@ class MacroSkills:
                 placed = self.bot.call("place", {"item": "furnace"})
                 furnace_pos = placed.get("pos")
             except ApiError as err:
-                st_f = self.bot.status()
-                fpos = st_f.get("pos") or [0, 64, 0]
+                fpos = furnace_status.get("pos") or self.bot.status().get("pos") or [0, 64, 0]
                 fx, fy, fz = math.floor(float(fpos[0])), math.floor(float(fpos[1])), math.floor(float(fpos[2]))
                 for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (1, 1, 0)):
                     try:
@@ -5403,6 +5464,8 @@ class MacroSkills:
                         furnace_pos = pocket.get("pos") or pocket.get("carved_pocket")
                     else:
                         return {"ok": False, "error": err.code, "message": err.message, **err.context}
+            if furnace_pos and dim is not None and int(furnace_pos[1]) < 55:
+                self._temporary_furnaces.add((dim, tuple(int(v) for v in furnace_pos[:3])))
 
         target = {"pos": furnace_pos} if furnace_pos else {"block": "furnace"}
         counts = _inventory_counts(self.bot)
@@ -5475,10 +5538,6 @@ class MacroSkills:
             {"op": "put", "item": input_item, "count": smelt_n, "to": "input"},
             {"op": "put", "item": chosen_fuel, "count": fuel_count, "to": "fuel"},
         ]
-        try:
-            dim = normalize_dimension(self.bot.status().get("dimension"))
-        except ApiError:
-            dim = None
         try:
             try:
                 load_result = self.bot.call("window/act", {"target": target, "ops": load_ops})
@@ -5566,6 +5625,10 @@ class MacroSkills:
         expected = SMELT_OUTPUTS.get(_clean_block(input_item))
         if sum(row["count"] for row in collected if expected is None or row["name"] == expected) < smelt_n:
             return self._partial_smelt(session.progress)
+        if furnace_pos is not None and dim is not None:
+            cleanup = self._reclaim_empty_temporary_furnace(session, furnace_pos, dim)
+            if cleanup:
+                session.progress["furnace_cleanup"] = cleanup
         return {"ok": True, **session.progress}
 
     # ---- 比赛窗口接口（window/view + window/act）无策略原子封装 ----
