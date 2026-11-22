@@ -4802,8 +4802,8 @@ def test_short_retreat_keeps_shield_facing_a_close_melee_enemy(monkeypatch, land
     )
 
     if failed_shaft_seal:
-        assert {"action": "seal_shaft", "ok": False} in outcome["actions"]
-        assert {"action": "flee", "ok": False} in outcome["actions"]
+        assert {"action": "seal_shaft", "ok": False, "reason": "no_safe_seal"} in outcome["actions"]
+        assert {"action": "flee", "ok": False, "moved": 2.18} in outcome["actions"]
     should_latch = landing == "near_melee" or (landing == "near_shooter" and encounter != "shaft_melee")
     assert outcome["latched_guard"] is should_latch
     if should_latch and landing == "near_shooter":
@@ -10313,7 +10313,7 @@ def test_dig_checks_the_landing_before_removing_support(tool, terrain):
         assert probes == ([target] if tool == "mc_dig" else [])
 
 
-@pytest.mark.parametrize("placement", ["complete", "existing_wall", "partial", "receipt_only"])
+@pytest.mark.parametrize("placement", ["complete", "existing_wall", "partial", "receipt_only", "threat_inside"])
 def test_flee_only_confirms_a_shaft_seal_after_both_cells_are_solid(monkeypatch, placement):
     from mc_agent.skills.combat_env import CombatEnv
 
@@ -10343,12 +10343,17 @@ def test_flee_only_confirms_a_shaft_seal_after_both_cells_are_solid(monkeypatch,
     env = CombatEnv(ShaftBot())
     monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "carved_shaft"})
     monkeypatch.setattr(env, "probe_retreat", lambda *_a: None)
-    result = env.flee([3.0, 95, 0.5])
+    threat = [0.9, 95, 0.5] if placement == "threat_inside" else [3.0, 95, 0.5]
+    result = env.flee(threat)
 
     complete = placement in {"complete", "existing_wall"}
     assert result["ok"] is complete
     assert result["mode"] == ("sealed" if complete else "flee")
-    assert attempts[-1] == (1, 96, 0)
+    if placement == "threat_inside":
+        assert attempts == []
+        assert result["reason"] == "no_safe_retreat"
+    else:
+        assert attempts[-1] == (1, 96, 0)
 
 
 @pytest.mark.parametrize("terrain", ["wall", "fire", "unknown", "drifted_during_probe", "missed_landing", "respawned"])

@@ -1149,6 +1149,16 @@ class CombatEnv:
             }
 
         if norm_mode in {"half_seal", "full_seal"}:
+            # A wall in an adjacent column cannot separate entities already sharing this column.
+            if (
+                norm_mode == "full_seal" and threat_pos is not None and len(threat_pos) >= 3
+                and bx <= float(threat_pos[0]) < bx + 1 and bz <= float(threat_pos[2]) < bz + 1
+                and abs(float(threat_pos[1]) - float(pos0[1])) < 1.0
+            ):
+                return {
+                    "ok": False, "mode": norm_mode, "placed": 0, "pos_after": pos0,
+                    "reason": "threat_inside_shaft",
+                }
             chosen_dir = str(direction or "").strip().lower()
             if chosen_dir not in CARDINAL_VECTORS:
                 if threat_pos is not None and len(threat_pos) >= 3:
@@ -3417,11 +3427,18 @@ class SubcorticalInstinctController:
             has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
                 seal = env.build_tactical("full_seal", threat_pos=mob_pos)
-                actions.append({"action": "seal_shaft", "ok": bool(seal.get("ok"))})
+                actions.append({
+                    "action": "seal_shaft", "ok": bool(seal.get("ok")),
+                    **({"reason": seal["reason"]} if seal.get("reason") else {}),
+                })
                 mode = "sealed_shaft" if seal.get("ok") else "flee"
                 if not seal.get("ok"):
                     fl = env.flee(mob_pos, distance=12.0, urgent=True, allow_shaft_seal=False)
-                    actions.append({"action": "flee", "ok": bool(fl.get("ok"))})
+                    actions.append({
+                        "action": "flee", "ok": bool(fl.get("ok")), "moved": fl.get("moved_dist"),
+                        **({"reason": fl["reason"]} if fl.get("reason") else {}),
+                        **({"respawned": True} if fl.get("respawned") else {}),
+                    })
                     if has_shield and not fl.get("respawned"):
                         landing = env._safe_status({"ready": False})
                         nearest = landing.get("nearest_hostile")
