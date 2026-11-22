@@ -1431,6 +1431,8 @@ class SceneWatchdog(threading.Thread):
         self.fence_repair = fence_repair
         self._stop = threading.Event()
         self._last_return = 0.0
+        self._death_handled_at = time.monotonic()
+        self._returned_while_dead = False
         self._last_total = -1
         self._inv_tick = 0
         self._ticks = 0
@@ -1528,7 +1530,7 @@ class SceneWatchdog(threading.Thread):
             else float("inf")
         )
         drifted = dim_matches and dist > self.scene.drift_limit and ready
-        suspected_death = dead_signal
+        suspected_death = dead_signal and not self._returned_while_dead
         self._ticks += 1
         if self._ticks % 15 == 0:  # ~2 min at the default 8s interval
             print(
@@ -1537,14 +1539,16 @@ class SceneWatchdog(threading.Thread):
                 f"preempt_skips={self._preempt_skips}",
                 flush=True,
             )
-        if not suspected_death:
+        if not dead_signal:
+            self._returned_while_dead = False
+            recent_deaths = getattr(self.bot, "recent_deaths_in_window", None)
+            unhandled_death = callable(recent_deaths) and any(
+                observed_at > self._death_handled_at for observed_at in recent_deaths()
+            )
             self._inv_tick += 1
-            if self._inv_tick % 3 == 1:  # sample on the very first tick, then every 3rd (~24s)
+            if unhandled_death or self._inv_tick % 3 == 1:
                 total = self._owned_total()
                 if total is not None:
-                    # Only infer death from an inventory collapse when the bot is back at the scene
-                    # anchor and not standing next to a known chest (otherwise chest deposits and
-                    # deliberate stashing would trigger free-gear restocks).
                     at_anchor = dim_matches and dist <= 48.0
                     stashing = False
                     if self.near_container is not None:
@@ -1552,14 +1556,16 @@ class SceneWatchdog(threading.Thread):
                             stashing = bool(self.near_container(dim, pos))
                         except Exception:
                             stashing = False
-                    if (
+                    collapsed_at_anchor = (
                         at_anchor
-                        and not stashing
                         and self._last_total >= 6
                         and total <= max(1, self._last_total // 4)
                         and self._last_total - total >= 6
-                    ):
-                        suspected_death = True
+                    )
+                    # An inventory collapse alone is reliable only at the anchor. A recent
+                    # recorded death can also confirm an empty inventory after a distant respawn.
+                    emptied_after_death = unhandled_death and total <= 2
+                    suspected_death = not stashing and (collapsed_at_anchor or emptied_after_death)
                     self._last_total = total
         if not (wrong_dim or drifted or suspected_death):
             return
@@ -1582,6 +1588,10 @@ class SceneWatchdog(threading.Thread):
             )
         except Exception as exc:  # never kill the watchdog thread on a transient RCON hiccup
             print(f"[Scene Restock] {self.bot_name} failed reason={reason}: {exc}", flush=True)
+        else:
+            if suspected_death:
+                self._death_handled_at = now
+                self._returned_while_dead = dead_signal
         finally:
             self._last_return = time.monotonic()
             self._last_total = -1
