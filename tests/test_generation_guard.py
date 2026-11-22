@@ -3542,6 +3542,68 @@ def test_cornered_unshielded_bot_strikes_once_only_against_a_close_lone_melee_mo
         assert attacks == []
 
 
+@pytest.mark.parametrize("situation", ["lone", "second_hostile", "wall", "water", "new_life", "timeout", "escaped"])
+def test_poll_tries_one_stationary_strike_when_an_armed_bot_cannot_retreat(monkeypatch, situation):
+    zombie = {"id": 300235, "name": "zombie", "pos": [13570.3, 75, 13635.7], "dist": 0.7, "blocked_by_wall": False}
+    sword = {"name": "iron_sword", "count": 1}
+    status = {
+        "pos": [13569.6, 75, 13635.7], "health": 5.66, "food": 20, "ready": True,
+        "alive": True, "on_ground": True, "dimension": "overworld", "last_death": {"t": 1},
+        "nearest_hostile": zombie, "held": sword,
+    }
+    attacks = []
+    stops = []
+
+    class CornerBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hit = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": zombie}
+                return {"events": [hit] if kwargs["params"]["since"] < 1 else []}
+            if action == "inventory":
+                return {"items": [sword], "held": sword}
+            if action == "get_entities":
+                assert body == {"types": ["hostile"], "radius": 6} and kwargs["timeout_s"] == 0.35
+                if situation == "new_life":
+                    status["last_death"] = {"t": 2}
+                hostiles = [{**zombie, "blocked_by_wall": situation == "wall"}]
+                if situation == "second_hostile":
+                    hostiles.append({"id": 300236, "name": "skeleton", "dist": 4.0})
+                return {"entities": hostiles}
+            if action == "attack":
+                attacks.append(body)
+                if situation == "timeout":
+                    raise httpx.ReadTimeout("strike reply went missing")
+                return {"hits": 1, "killed": True}
+            if action == "stop":
+                stops.append(action)
+                return {"ok": True}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(CornerBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_try_emergency_bunker", lambda _status: None)
+
+    def flee(*_args, **_kwargs):
+        if situation == "water":
+            status.update(in_water=True)
+        if situation == "escaped":
+            return {"ok": True, "mode": "flee", "moved_dist": 5.1}
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat"}
+
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    incident = guard.poll()
+
+    if situation in {"lone", "timeout"}:
+        attack, = attacks
+        assert attack["entity_id"] == zombie["id"] and attack["max_hits"] == 1 and attack["chase"] is False
+        assert incident["actions"][-1]["action"] == "cornered_melee_strike"
+        assert incident["actions"][-1]["ok"] is (situation == "lone")
+    else:
+        assert attacks == []
+    assert stops == (["stop"] if situation == "timeout" else [])
+
+
 @pytest.mark.parametrize(("remaining_hostile", "retreat_works"), [(True, True), (True, False), (False, True)])
 def test_counter_kill_disengages_from_second_hostile_at_critical_health(monkeypatch, remaining_hostile, retreat_works):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv

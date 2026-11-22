@@ -36,6 +36,7 @@ from ..skills.combat_env import (
     CombatController,
     CombatControllerSlot,
     CombatEnv,
+    SubcorticalInstinctController,
     ThreatTrigger,
     _CombatFortificationInterrupted,
     _TerrainProbeExpired,
@@ -1020,6 +1021,56 @@ class GenerationGuard:
         self._last_water_escape_failed = not (shore.get("ok") and (shore.get("result") or {}).get("in_water") is not True)
         return shore
 
+    def _try_cornered_melee_strike(
+        self, before: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
+    ) -> dict[str, Any] | None:
+        controller = self.combat_slot.controller
+        if not isinstance(controller, SubcorticalInstinctController):
+            return None
+        try:
+            landing = self.bot.call("status", method="GET", timeout_s=0.35)
+        except (ApiError, httpx.HTTPError):
+            return None
+        name, distance, target_id, _ = self._extract_hostile_info(landing)
+        attacker_id = (attacker or {}).get("id")
+        hp = landing.get("health")
+        if (
+            name not in LONE_COUNTERKILL_MOBS or target_id is None or not 0 <= distance <= 1.25
+            or (isinstance(attacker_id, int) and target_id != attacker_id)
+            or not isinstance(hp, (int, float)) or not 0 < hp <= 6.0
+            or landing.get("ready") is not True or landing.get("alive") is not True or landing.get("on_ground") is not True
+            or any(landing.get(key) for key in ("busy", "in_water", "in_lava", "on_fire"))
+            or any(landing.get(key) != before.get(key) for key in ("last_death", "dimension"))
+        ):
+            return None
+        try:
+            scan = self.bot.call("get_entities", {"types": ["hostile"], "radius": 6}, timeout_s=0.35)
+        except (ApiError, httpx.HTTPError):
+            return None
+        hostiles = scan.get("entities")
+        if not isinstance(hostiles, list) or len(hostiles) != 1 or not isinstance(hostiles[0], dict):
+            return None
+        target = hostiles[0]
+        if target.get("id") != target_id or target.get("blocked_by_wall") is not False:
+            return None
+
+        def strike() -> dict[str, Any]:
+            try:
+                with self.bot.limit_until(time.monotonic() + 1.25):
+                    current = self.bot.call("status", method="GET", timeout_s=0.25)
+                    if any(current.get(key) != landing.get(key) for key in ("last_death", "dimension")):
+                        return {"ok": False, "reason": "life_changed"}
+                    held = current.get("held")
+                    held_name = str(held.get("name") or "").removeprefix("minecraft:") if isinstance(held, dict) else None
+                    return controller.strike_cornered_hostile(
+                        self.combat_env, target_id, counts, held_name, status=current,
+                    ) or {"ok": False, "reason": "opening_unconfirmed"}
+            except _RecoveryBudgetExceeded:
+                self._stop_after_recovery_timeout()
+                return {"ok": False, "reason": "time_budget"}
+
+        return self._action("cornered_melee_strike", strike)
+
     @staticmethod
     def _bunker_site(status: dict[str, Any]) -> tuple[Any, Any, tuple[int, ...] | None]:
         pos = status.get("pos")
@@ -1090,7 +1141,7 @@ class GenerationGuard:
                 "error": {"code": error.code, "message": error.message, **error.context},
             }
         except httpx.TimeoutException as error:
-            if name in {"subcortical_combat", "boundary_subcortical_combat"}:
+            if name in {"subcortical_combat", "boundary_subcortical_combat", "cornered_melee_strike"}:
                 try:
                     endpoint = error.request.url.path.rsplit("/", 1)[-1]
                 except RuntimeError:
@@ -2673,6 +2724,14 @@ class GenerationGuard:
                         else:
                             self._consecutive_flees = 0
                     cf_result = (cf or {}).get("result") or {}
+                    if (
+                        not has_shield and has_melee_weapon and hurt_src in MELEE_HURT_SOURCES
+                        and 0 < hp_val <= 8.0 and not cf_result.get("respawned")
+                        and cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
+                    ):
+                        strike = self._try_cornered_melee_strike(status, attacker, counts)
+                        if strike is not None:
+                            actions.append(strike)
                     dimension = str(status.get("dimension") or "").removeprefix("minecraft:")
                     melee_retreat = cf_result.get("mode") == "flee"
                     nether_melee_retreat = dimension == "the_nether" and melee_retreat

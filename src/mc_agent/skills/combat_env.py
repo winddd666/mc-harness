@@ -3285,7 +3285,7 @@ class SubcorticalInstinctController:
         except (ApiError, httpx.HTTPError):
             return False
 
-    def _strike_cornered_hostile(
+    def strike_cornered_hostile(
         self, env: CombatEnv, target_id: int, counts: dict[str, int], held_name: str | None,
         *, status: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
@@ -4094,7 +4094,7 @@ class SubcorticalInstinctController:
                             and nearby_hostiles[0].get("id") == mob_id and not nearby_hostiles[0].get("blocked_by_wall")
                             and time.monotonic() + 1.25 < deadline
                         ):
-                            strike = self._strike_cornered_hostile(env, mob_id, counts, held_name, status=st_fl)
+                            strike = self.strike_cornered_hostile(env, mob_id, counts, held_name, status=st_fl)
                             if strike is not None:
                                 actions.append(strike)
                                 st_fl = env._safe_status({"ready": False})
@@ -4148,7 +4148,7 @@ class SubcorticalInstinctController:
                         and mob_name in LONE_COUNTERKILL_MOBS and isinstance(mob_id, int)
                         and len(nearby_hostiles) == 1 and time.monotonic() < deadline
                     ):
-                        strike = self._strike_cornered_hostile(env, mob_id, counts, held_name)
+                        strike = self.strike_cornered_hostile(env, mob_id, counts, held_name)
                         if strike is not None:
                             actions.append(strike)
 
