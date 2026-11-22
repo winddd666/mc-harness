@@ -1406,6 +1406,7 @@ def _build_day2_village_search_target(
             brief_prefix
             + "执行 Day 2 白天食物补给与高速系统寻村（入夜或本集结束自动止损，绝不死磕）："
             f"{biome_note}MC 村庄仅生成在 plains/savanna/desert/taiga/snowy_plains，若进入海洋/深森林/丛林/沼泽立刻换方向。"
+            "0) 出发留底（仅当 16m 内已有据点箱且包内有富余备用物资时）：随身务必保留主力装备（1 把铁镐+盾牌+铁甲+斧+食物+8 原木+圆石），仅顺手用 mc_skill_container 把多余的备用铁镐/多余铁锭(>3)/多余原木(>8)/穿完钻石靴后多余钻石存箱留底（防路上阵亡返贫）；无近箱则直接出发，找到村庄后就地扎根，绝不跑回旧箱搬家；"
             + hop_clause
             + "1) 若包内食物不足 6 块且途中 24m 内有猪/牛/羊，顺手用斧收 2~3 只；"
             "2) 一旦 mc_skill_scout_surface 返回命中村庄方块(bell/dirt_path/hay_block/composter/lectern)或 villager/iron_golem，立即停止继续 scout，直接进村收割：①调 mc_find_blocks(radius=48, types=['bed','chest','hay_block','bell'])（严禁混入 dirt_path 以免挤爆 limit，且必须用通用别名 'bed' 覆盖全部 16 色村民床）；②优先找带床/箱子的村民屋调 mc_skill_bind_bed 绑重生点占为据点；③顺手采 4~8 块 hay_block 合面包、开屋里箱子拿贵重战利品；④完成后立即收工（多人服不指望睡觉跳夜，下集直接交易或转地下挖钻）。"
