@@ -12534,6 +12534,49 @@ def test_grounded_retreat_can_step_down_one_verified_block_in_a_tunnel(terrain):
         assert outcome["reason"] == "no_safe_retreat"
 
 
+@pytest.mark.parametrize("terrain", ["step", "low_ceiling", "lava", "fell_short"])
+def test_cornered_melee_retreat_can_climb_a_short_supported_step(terrain):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    status = {
+        "pos": [0.65, 61, 0.5], "dimension": "overworld", "ready": True, "alive": True, "on_ground": True,
+    }
+    moves = []
+
+    class DepressionBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if z != 0 or x < 0 or x > 2:
+                    return {"name": "stone"}
+                if terrain == "low_ceiling" and x == 0 and y == 63:
+                    return {"name": "stone"}
+                if terrain == "lava" and x > 0 and y == 61:
+                    return {"name": "lava"}
+                return {"name": "stone" if y <= (60 if x == 0 else 61) else "air"}
+            if action == "control":
+                moves.append(body)
+                status["pos"] = [1.4, 62, 0.5] if terrain != "fell_short" else [1.05, 61, 0.5]
+            elif action == "move_to":
+                pytest.fail("The short climb grants only one checked movement pulse")
+            return {"ok": True}
+
+    result = CombatEnv(DepressionBot()).flee(
+        [-0.6, 61, 0.5], allow_shaft_seal=False, wait_for_ground=True,
+    )
+
+    assert result["ok"] is (terrain == "step")
+    if terrain in {"step", "fell_short"}:
+        move, = moves
+        assert move["forward"] and move["jump"] and not move["sprint"]
+    else:
+        assert moves == []
+        assert result["reason"] == "no_safe_retreat"
+
+
 @pytest.mark.parametrize("landing", ["grounded", "water", "respawned", "airborne"])
 @pytest.mark.parametrize("early_exit", [False, True])
 def test_directed_shore_rechecks_an_airborne_bot_over_the_bank(monkeypatch, landing, early_exit):

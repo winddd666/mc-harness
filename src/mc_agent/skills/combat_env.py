@@ -711,7 +711,7 @@ class CombatEnv:
 
     def probe_retreat(
         self, origin: Sequence[float], yaw: float, dist: float, *, cross_magma: bool = False,
-        deadline: float | None = None, allow_step_down: bool = False,
+        deadline: float | None = None, allow_step_down: bool = False, short_climb: bool = False,
     ) -> tuple[int, bool] | None:
         """Check support and clearance under the entire hitbox along a short retreat."""
         ox, oy, oz = map(float, origin[:3])
@@ -737,6 +737,8 @@ class CombatEnv:
                 walk_y += 1
                 needs_jump = True
             elif _is_passable(self._get_block_name(bx, walk_y - 1, bz, strict=True, **probe_kwargs)):
+                if short_climb:
+                    return None
                 walk_y -= 1
             if abs(walk_y - start_y) > 1:
                 return None
@@ -761,6 +763,15 @@ class CombatEnv:
                     floor = self._get_block_name(hx, walk_y - 2, hz, strict=True, **probe_kwargs)
                 if not floor or floor in floor_hazards or not _is_solid_ground(floor):
                     return None
+        if short_climb and needs_jump:
+            # The jump can reach above the standing headroom before landing on the step.
+            for step in range(samples + 1):
+                travel = dist * step / samples
+                for hx, hz in _hitbox_columns(ox + ux * travel, oz + uz * travel):
+                    for height in (start_y + 2, start_y + 3):
+                        head = self._get_block_name(hx, height, hz, strict=True, **probe_kwargs)
+                        if not _is_passable(head) or head in HAZARD_BLOCK_TYPES:
+                            return None
         return walk_y, needs_jump
 
     def is_on_hot_floor(self, pos: Sequence[float]) -> bool:
@@ -2103,11 +2114,25 @@ class CombatEnv:
                         if route == (foot_y - 1, False):
                             short_step = True
                             break
+                    if (
+                        not short_step and threat_pos is not None and not require_blast_clearance
+                        and not (other_melee or other_shooters)
+                    ):
+                        # A nearby step up can lead out of a depression even when no full retreat fits.
+                        for angle in (0, 35, -35, 70, -70):
+                            chosen_yaw = pref_yaw + math.radians(angle)
+                            route = self.probe_retreat(pos0, chosen_yaw, 1.65, short_climb=True)
+                            if route == (foot_y + 1, True):
+                                short_step = True
+                                break
             if not short_step:
                 return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0, "pos_after": pos0}
 
-        _, needs_jump = route
-        pulse_ms = 220 if short_step else (450 if urgent else 350)
+        landing_y, needs_jump = route
+        short_climb = short_step and needs_jump
+        pulse_ms = 450 if urgent else 350
+        if short_step:
+            pulse_ms = 300 if short_climb else 220
         try:
             self.bot.call("look", {"yaw": chosen_yaw, "pitch": 0.0})
             self.bot.call(
@@ -2132,7 +2157,10 @@ class CombatEnv:
                 st.get("ready") is False or st.get("in_lava") or st.get("in_water") or st.get("on_ground") is False
             )
             return {
-                "ok": not respawned and not unsafe and moved >= (0.35 if short_step else 1.5),
+                "ok": (
+                    not respawned and not unsafe and moved >= (0.35 if short_step else 1.5)
+                    and (not short_climb or math.floor(float(pos[1]) + 0.05) == landing_y)
+                ),
                 "mode": "respawned" if respawned else "flee",
                 "moved_dist": 0.0 if respawned else round(moved, 2),
                 "pos_after": pos,
