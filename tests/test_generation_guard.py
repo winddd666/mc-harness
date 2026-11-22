@@ -3950,6 +3950,79 @@ def test_cornered_unshielded_bot_strikes_once_only_against_a_close_lone_melee_mo
         assert attacks == []
 
 
+@pytest.mark.parametrize("terrain", [
+    "verified", "no_support", "incomplete", "second_hostile", "enemy_moved", "knockback", "retreat_ok",
+])
+def test_unarmed_bot_builds_supported_cover_when_a_close_zombie_blocks_retreat(monkeypatch, terrain):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    origin = [309346.5, 19, 301950.5]
+    zombie = {
+        "id": 854150, "name": "zombie", "dist": 2.4, "pos": [309348.9, 19, 301950.5], "blocked_by_wall": False,
+    }
+    status = {
+        "pos": origin, "dimension": "overworld", "last_death": {"t": 1}, "health": 20, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "is_day": False, "nearest_hostile": zombie,
+    }
+    blocks = {}
+    attempts = []
+    scans = 0
+
+    class CaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            nonlocal scans
+            if action == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 22}]}
+            if action == "get_entities":
+                scans += 1
+                if terrain == "second_hostile":
+                    return {"entities": [zombie, {"id": 854151, "name": "skeleton", "dist": 3.1}]}
+                if terrain == "enemy_moved" and scans >= 3:
+                    return {"entities": [{**zombie, "pos": [309346.5, 19, 301948.1]}]}
+                return {"entities": [zombie]}
+            if action == "get_block":
+                cell = tuple(body["pos"])
+                floor = cell[1] == 18 and (terrain != "no_support" or cell[0] == 309346)
+                return {"name": blocks.get(cell, "stone" if floor else "air")}
+            if action == "place":
+                target = tuple(body["pos"])
+                attempts.append(target)
+                if terrain != "incomplete" or len(attempts) == 1:
+                    blocks[target] = body["item"]
+                if terrain == "knockback":
+                    status.update(on_ground=False)
+            if action in {"move_to", "attack", "dig"} or action == "control" and body.get("forward"):
+                pytest.fail(f"Unexpected operation while cornered: {action}")
+            if action == "status":
+                return dict(status)
+            return {"ok": True}
+
+    env = CombatEnv(CaveBot())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave"})
+    monkeypatch.setattr(env, "flee", lambda *_args, **_kwargs: (
+        {"ok": True, "mode": "flee", "moved_dist": 4.0} if terrain == "retreat_ok"
+        else {"ok": False, "reason": "no_safe_retreat", "moved_dist": 0.0}
+    ))
+    result = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_melee", "primary_type": "zombie", "primary_entity_id": zombie["id"],
+    })
+
+    expected_placements = [(309347, 19, 301950), (309347, 20, 301950)]
+    if terrain in {"verified", "incomplete", "enemy_moved"}:
+        assert attempts == expected_placements
+    elif terrain == "knockback":
+        assert attempts == expected_placements[:1]
+    else:
+        assert attempts == []
+    assert (result["mode"] == "placed_cover") is (terrain == "verified")
+    if terrain == "verified":
+        assert result["actions"][-1]["action"] == "place_melee_cover"
+        assert result["actions"][-1]["placed"] == 2
+
+
 @pytest.mark.parametrize("situation", ["lone", "second_hostile", "wall", "water", "new_life", "timeout", "escaped"])
 def test_poll_tries_one_stationary_strike_when_an_armed_bot_cannot_retreat(monkeypatch, situation):
     zombie = {"id": 300235, "name": "zombie", "pos": [13570.3, 75, 13635.7], "dist": 0.7, "blocked_by_wall": False}

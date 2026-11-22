@@ -2003,32 +2003,48 @@ class CombatEnv:
     def place_arrow_cover(
         self, before: dict[str, Any], shooter: Sequence[float], counts: dict[str, int],
     ) -> dict[str, Any]:
+        return self._place_stationary_cover(before, shooter, counts)
+
+    @staticmethod
+    def _on_same_footing(before: dict[str, Any], status: dict[str, Any]) -> bool:
+        return bool(
+            before.get("pos") and status.get("pos") and math.dist(status["pos"][:3], before["pos"][:3]) <= 0.2
+            and status.get("ready") is True and status.get("alive") is True and status.get("on_ground") is True
+            and not any(status.get(key) for key in ("busy", "in_water", "in_lava", "on_fire"))
+            and all(status.get(key) == before.get(key) for key in ("last_death", "dimension"))
+        )
+
+    def _place_stationary_cover(
+        self, before: dict[str, Any], threat: Sequence[float], counts: dict[str, int], *, melee: bool = False,
+    ) -> dict[str, Any]:
         """Build close cover on a supported column without leaving the current footing."""
         origin = before["pos"]
         filler = self.arrow_cover_material(counts)
         failed = {"ok": False, "mode": "placed_cover", "placed": 0}
-        if filler is None or math.hypot(shooter[0] - origin[0], shooter[2] - origin[2]) <= 3.5:
+        distance = math.hypot(threat[0] - origin[0], threat[2] - origin[2])
+        in_range = 1.8 <= distance <= 3.5 and abs(threat[1] - origin[1]) < 0.8 if melee else distance > 3.5
+        if filler is None or not in_range:
             return failed
 
-        def on_same_footing(status: dict[str, Any]) -> bool:
-            return bool(
-                status.get("pos") and math.dist(status["pos"][:3], origin[:3]) <= 0.2
-                and status.get("ready") is True and status.get("alive") is True and status.get("on_ground") is True
-                and not any(status.get(key) for key in ("busy", "in_water", "in_lava", "on_fire"))
-                and all(status.get(key) == before.get(key) for key in ("last_death", "dimension"))
-            )
-
-        yaw, _ = aim_yaw_pitch(origin, shooter)
+        yaw, _ = aim_yaw_pitch(origin, threat)
         dx, dz = yaw_to_unit_xz(yaw)
         y = math.floor(origin[1] + 0.05)
         occupied = _hitbox_columns(origin[0], origin[2])
         self.invalidate_block_cache()
+        if melee:
+            occupied.extend(_hitbox_columns(threat[0], threat[2]))
+            try:
+                if not self.has_safe_footing(origin, require_observation=True):
+                    return failed
+            except _TerrainProbeExpired:
+                return failed
         columns = dict.fromkeys(
             (math.floor(origin[0] + dx * distance), math.floor(origin[2] + dz * distance))
             for distance in (0.65, 1.1, 1.55, 2.0)
         )
         for x, z in columns:
-            if (x, z) in occupied or not self._point_allowed(x + 0.5, z + 0.5, action="place_arrow_cover"):
+            action = "place_melee_cover" if melee else "place_arrow_cover"
+            if (x, z) in occupied or not self._point_allowed(x + 0.5, z + 0.5, action=action):
                 continue
             # A supported column within reach keeps the place endpoint from pathfinding.
             floor = self._get_block_name(x, y - 1, z, strict=True)
@@ -2049,7 +2065,7 @@ class CombatEnv:
         placed = 0
         for cell in to_place:
             current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
-            if not on_same_footing(current):
+            if not self._on_same_footing(before, current):
                 break
             try:
                 self.bot.call("place", {"item": filler, "pos": list(cell)}, timeout_s=0.65, allow_reauth=False)
@@ -2062,7 +2078,10 @@ class CombatEnv:
             placed += 1
 
         after = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
-        confirmed = placed > 0 and on_same_footing(after) and self._blocks_shot(after["pos"], shooter)
+        confirmed = (
+            placed > 0 and (not melee or placed == len(to_place)) and self._on_same_footing(before, after)
+            and self._blocks_shot(after["pos"], threat)
+        )
         return {"ok": confirmed, "mode": "placed_cover", "placed": placed, "pos_after": after.get("pos")}
 
     def seek_natural_cover(
@@ -3574,6 +3593,43 @@ class SubcorticalInstinctController:
         except (ApiError, httpx.HTTPError):
             return False
 
+    def _place_melee_cover(
+        self, env: CombatEnv, before: dict[str, Any], target_id: int, counts: dict[str, int],
+    ) -> dict[str, Any]:
+        def find_target(*, visible: bool) -> Sequence[float] | None:
+            hostiles = self._scan_live_hostiles(env, radius=6, timeout_s=0.35)
+            if not hostiles or len(hostiles) != 1:
+                return None
+            target = hostiles[0]
+            pos = target.get("pos")
+            if (
+                target.get("id") == target_id and target.get("alive") is not False
+                and (not visible or target.get("blocked_by_wall") is False)
+                and isinstance(pos, (list, tuple)) and len(pos) >= 3
+                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
+            ):
+                return pos
+            return None
+
+        current = env._safe_status({"ready": False})
+        if not env._on_same_footing(before, current):
+            return {"ok": False, "reason": "landing_changed"}
+        target_pos = find_target(visible=True)
+        if target_pos is None:
+            return {"ok": False, "reason": "melee_target_unconfirmed"}
+        result = env._place_stationary_cover(current, target_pos, counts, melee=True)
+        if not result.get("ok"):
+            return result
+        target_after = find_target(visible=False)
+        settled = env._safe_status({"ready": False})
+        env.invalidate_block_cache()
+        if (
+            target_after is None or not env._on_same_footing(current, settled)
+            or not env._blocks_shot_across_hitbox(settled["pos"], target_after)
+        ):
+            return {**result, "ok": False, "reason": "melee_cover_unconfirmed"}
+        return result
+
     def strike_cornered_hostile(
         self, env: CombatEnv, target_id: int, counts: dict[str, int], held_name: str | None,
         *, status: dict[str, Any] | None = None, visible_piglin: dict[str, Any] | None = None,
@@ -4350,6 +4406,18 @@ class SubcorticalInstinctController:
                         })
                         self._recent_flee_streak += 1
                         self._last_flee_at = now_flee
+                    if (
+                        not flee_ok and fl.get("reason") == "no_safe_retreat" and not fl.get("respawned")
+                        and fl.get("moved_dist") == 0.0 and enclosure == "open_cave" and exposed_melee
+                        and not has_shield and not has_weapon and env.arrow_cover_material(counts) is not None
+                        and mob_name in {"zombie", "zombie_villager", "husk"} and isinstance(mob_id, int)
+                        and time.monotonic() + 2.0 < deadline
+                    ):
+                        cover = env.fortify(st, lambda: self._place_melee_cover(env, st, mob_id, counts))
+                        actions.append({"action": "place_melee_cover", **cover})
+                        if cover.get("ok"):
+                            mode = "placed_cover"
+                            self._recent_flee_streak = 0
                     stalled_under_arrows = (
                         not flee_ok and fl.get("reason") == "no_safe_retreat" and hp <= 4.0
                         and trigger.get("hurt_source") == "arrow"
