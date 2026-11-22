@@ -555,7 +555,6 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     """Parse one fleet bot directory (summary + raw events) into a normalized row."""
     name = bd.name
     squad = name.split("_")[0]
-    stage = _stage_from_dirname(name)
 
     summaries = sorted(bd.glob("wild-endurance-*.json"))
     summary: dict[str, Any] = {}
@@ -669,6 +668,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
 
     slow_calls.sort(reverse=True)
     scene_meta = summary.get("scene") or {}
+    scene_stage = str(scene_meta.get("stage") or "")
+    stage = scene_stage or _stage_from_dirname(name)
     scene_anchor = ""
     if isinstance(scene_meta.get("anchor"), dict):
         a = scene_meta["anchor"]
@@ -700,7 +701,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         top_errors=err_codes.most_common(5),
         slow_calls=slow_calls[:4],
         crash_tail=crash_tail,
-        scene_stage=str(scene_meta.get("stage") or ""),
+        scene_stage=scene_stage,
         scene_ok=scene_meta.get("entry_verified") if "entry_verified" in scene_meta else None,
         scene_anchor=scene_anchor,
         scene_ticks=scene_meta.get("watchdog_ticks") if isinstance(scene_meta.get("watchdog_ticks"), int) else None,
