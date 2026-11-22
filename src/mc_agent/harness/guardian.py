@@ -2626,7 +2626,33 @@ class GenerationGuard:
                 )
                 hp_val = float(health) if isinstance(health, (int, float)) else 20.0
                 already_blocking = bool(status.get("blocking"))
-                if in_wall_hurt:
+                shooter = attacker or status.get("nearest_hostile")
+                shooter_name, _, shooter_id, _ = self._extract_hostile_info({"nearest_hostile": shooter})
+                blaze_burn_only = (
+                    not self._custom_combat_registered and shooter_name != "ghast" and nh_name != "ghast"
+                    and str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                    and status.get("on_ground") is True and self._low_health_burning_after_ranged_hit(status, now)
+                    and bool(hurts) and all(str(hit.get("source") or "").strip().lower() == "on_fire" for hit in hurts)
+                )
+
+                def hold_blaze_cover() -> dict[str, Any]:
+                    blaze_id = shooter_id if shooter_name == "blaze" else None
+                    result = self._action("hold_blaze_cover", lambda: self._hold_blaze_cover(status, blaze_id))
+                    actions.append(result)
+                    if result.get("ok"):
+                        self._consecutive_flees = 0
+                        self._mark_ranged_engagement(
+                            time.monotonic(), attacker=shooter if shooter_name == "blaze" else None, in_cover=True,
+                        )
+                    if (result.get("result") or {}).get("respawned") and "death_or_connection_changed" not in reasons:
+                        reasons.append("death_or_connection_changed")
+                    return result
+
+                held_cover = hold_blaze_cover() if blaze_burn_only and now < self._ranged_cover_active_until else None
+                cf = None
+                if held_cover and (held_cover.get("ok") or (held_cover.get("result") or {}).get("respawned")):
+                    self._shield_only_streak = 0
+                elif in_wall_hurt:
                     actions.append(self._action("unstick_in_wall", lambda: self._unstick_in_wall(status)))
                 elif self._custom_combat_registered or sonic_hurt is not None or nh_name == "warden":
                     att_id = attacker.get("id") if isinstance(attacker, dict) and isinstance(attacker.get("id"), int) else nh_id
@@ -3016,7 +3042,6 @@ class GenerationGuard:
                             self._consecutive_flees = 0
                 else:
                     self._shield_only_streak = 0
-                    cf = None
                     dimension = str(status.get("dimension") or "").removeprefix("minecraft:")
                     nearest = status.get("nearest_hostile") or {}
                     threat = attacker or nearest
@@ -3202,6 +3227,14 @@ class GenerationGuard:
                                             landing, target_pos, deadline=time.monotonic() + 1.5, target_id=target_id,
                                         ),
                                     ))
+
+                if blaze_burn_only and held_cover is None and cf and not cf.get("ok"):
+                    retreat = cf.get("result") or {}
+                    if (
+                        retreat.get("mode") == "flee" and retreat.get("reason") == "no_safe_retreat"
+                        and not retreat.get("respawned")
+                    ):
+                        hold_blaze_cover()
 
             if should_eat and (
                 not effective_combat_hurt
@@ -3831,6 +3864,78 @@ class GenerationGuard:
             )
             for entity in entities
         )
+
+    def _hold_blaze_cover(self, before: dict[str, Any], blaze_id: int | None) -> dict[str, Any]:
+        """Verify existing cover without moving while taking residual fire damage."""
+        failed = {"ok": False, "mode": "natural_cover", "reason": "blaze_cover_unconfirmed"}
+        changed_life = {**failed, "reason": "life_changed", "respawned": True}
+        deadline = time.monotonic() + 1.25
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        env = CombatEnv(bot, geofence=self.geofence)
+        other_ranged = (RANGED_MOBS - {"blaze"}) | {"drowned", "ghast", "warden", "wither"}
+
+        def life_changed(current: dict[str, Any]) -> bool:
+            return current.get("alive") is False or any(
+                current.get(key) != before.get(key) for key in ("dimension", "last_death")
+            )
+
+        def safe_position(current: dict[str, Any]) -> Sequence[float] | None:
+            pos = current.get("pos")
+            if (
+                current.get("ready") is True and current.get("alive") is True and current.get("on_ground") is True
+                and not any(current.get(key) for key in ("busy", "in_water", "in_lava", "submerged"))
+                and isinstance(pos, (list, tuple)) and len(pos) >= 3
+                and all(type(coord) in (int, float) and math.isfinite(coord) for coord in pos[:3])
+            ):
+                return pos
+            return None
+
+        try:
+            first = bot.call("status", method="GET", timeout_s=0.3, allow_reauth=False)
+            if life_changed(first):
+                return changed_life
+            pos = safe_position(first)
+            if pos is None:
+                return failed
+            entities = bot.call(
+                "get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.4, allow_reauth=False,
+            ).get("entities")
+            if not isinstance(entities, list) or not all(isinstance(entity, dict) for entity in entities):
+                return failed
+            if not self._melee_clear_for_projectile_cover(entities):
+                return failed
+            blazes = []
+            for entity in entities:
+                name = str(entity.get("name") or "").strip().lower().removeprefix("minecraft:")
+                if not name or name in other_ranged:
+                    return failed
+                if name == "blaze":
+                    blazes.append(entity)
+            shooters = ranged_retreat_positions(pos, blazes, max_distance=16.0)
+            if not shooters or len(shooters) != len(blazes):
+                return failed
+            if blaze_id is not None and not any(entity_id == blaze_id for entity_id, _ in shooters):
+                return failed
+            if not env.has_safe_footing(pos, require_observation=True) or not all(
+                env._blocks_shot_across_hitbox(pos, shooter, deadline=deadline) for _, shooter in shooters
+            ):
+                return failed
+            after = bot.call("status", method="GET", timeout_s=0.3, allow_reauth=False)
+            if life_changed(after):
+                return changed_life
+            settled = safe_position(after)
+            if settled is None or math.dist(settled[:3], pos[:3]) > 0.18 or footing_blocks(settled) != footing_blocks(pos):
+                return failed
+            nearest = after.get("nearest_hostile")
+            if isinstance(nearest, dict):
+                name = str(nearest.get("name") or "").strip().lower().removeprefix("minecraft:")
+                if name in other_ranged or not self._melee_clear_for_projectile_cover([nearest]):
+                    return failed
+                if name == "blaze" and not any(entity_id == nearest.get("id") for entity_id, _ in shooters):
+                    return failed
+            return {"ok": True, "mode": "natural_cover", "pos_after": settled, "moved_dist": 0.0}
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
+            return failed
 
     def _cover_and_shooters_after_blocked_flee(
         self, pos: list[float], target_id: int | None, deadline: float, *, allow_stationary: bool,

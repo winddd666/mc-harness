@@ -7504,6 +7504,101 @@ def test_stalled_nether_blaze_retreat_can_move_to_verified_cover(monkeypatch, sc
         assert calls == ["retreat"]
 
 
+@pytest.mark.parametrize("scene", [
+    "covered", "unattributed_burn", "exposed", "ghast", "near_melee", "no_support", "fresh_hit", "respawn_during_scan",
+    "shooter_missing",
+])
+def test_burning_nether_bot_checks_stationary_blaze_cover_after_retreat_fails(monkeypatch, scene):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    pos = [1855.1, 58, 1804.2]
+    blaze = {"id": 44, "name": "blaze", "pos": [1860.5, 59, 1805.1], "dist": 5.6}
+    distant_melee = {"id": 46, "name": "wither_skeleton", "pos": [1855.1, 58, 1811.7], "dist": 7.5}
+    status = {
+        "pos": pos, "dimension": "the_nether", "last_death": {"t": 1}, "health": 1.43, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "on_fire": True, "blocking": True,
+        "nearest_hostile": distant_melee if scene == "unattributed_burn" else blaze,
+    }
+    hits = [{"seq": 1, "type": "hurt", "source": "fireball" if scene == "fresh_hit" else "on_fire"}]
+    retreats = []
+    checked = []
+
+    class FortressBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                return dict(status)
+            if endpoint == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if endpoint == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if endpoint == "get_entities":
+                entities = [] if scene == "shooter_missing" else [blaze]
+                if scene == "ghast":
+                    entities.append({"id": 45, "name": "ghast", "pos": [1863.5, 60, 1805.1], "dist": 8.8})
+                if scene == "near_melee":
+                    entities.append({"id": 45, "name": "wither_skeleton", "pos": [1858, 58, 1804.2], "dist": 2.9})
+                if scene == "unattributed_burn":
+                    entities.append(distant_melee)
+                return {"entities": entities}
+            if endpoint == "get_block":
+                x, y, _ = body["pos"]
+                support = y == 57 and scene != "no_support"
+                wall = x == 1858 and 58 <= y <= 61 and scene != "exposed"
+                return {"name": "netherrack" if support or wall else "air"}
+            if endpoint == "look":
+                return {"ok": True}
+            pytest.fail(f"Unexpected mutation during stationary cover check: {endpoint}")
+
+    def flee(*_args, **_kwargs):
+        retreats.append(status["health"])
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    original_blocks_shot = CombatEnv._blocks_shot_across_hitbox
+
+    def blocks_shot(env, origin, threat, **kwargs):
+        checked.append((origin, threat))
+        blocked = original_blocks_shot(env, origin, threat, **kwargs)
+        if scene == "respawn_during_scan":
+            status["last_death"] = {"t": 2}
+        return blocked
+
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_ranged_hurt_at = 999.0
+    monkeypatch.setattr(guard, "_try_emergency_bunker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    monkeypatch.setattr(CombatEnv, "seek_natural_cover", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(CombatEnv, "_blocks_shot_across_hitbox", blocks_shot)
+
+    incident = guard.poll()
+    holds = [action for action in incident["actions"] if action["action"] == "hold_blaze_cover"]
+    if scene in {"covered", "unattributed_burn"}:
+        assert len(holds) == 1 and holds[0]["ok"]
+        assert holds[0]["result"]["pos_after"] == pos
+        assert holds[0]["result"]["moved_dist"] == 0.0
+        hits.append({"seq": 2, "type": "hurt", "source": "on_fire"})
+        clock[0] += 1.0
+        status["health"] = 0.57
+        next_actions = guard.poll()["actions"]
+        assert any(action["action"] == "hold_blaze_cover" and action["ok"] for action in next_actions)
+        assert all(action["action"] != "combat_or_flee" for action in next_actions)
+        assert checked == [(pos, blaze["pos"]), (pos, blaze["pos"])]
+        hits.append({"seq": 3, "type": "hurt", "source": "fireball"})
+        clock[0] += 1.0
+        next_actions = guard.poll()["actions"]
+        assert all(action["action"] != "hold_blaze_cover" for action in next_actions)
+        assert retreats == [1.43, 0.57]
+    else:
+        assert not any(action["ok"] for action in holds)
+        assert bool(holds) is (scene != "fresh_hit")
+        assert checked == ([(pos, blaze["pos"])] if scene in {"exposed", "respawn_during_scan"} else [])
+        if scene == "respawn_during_scan":
+            assert holds[0]["result"]["respawned"] is True
+            assert "death_or_connection_changed" in incident["reasons"]
+        assert retreats == [1.43]
+
+
 @pytest.mark.parametrize(("pressure", "bunker_first"), [
     ("direct_melee", False), ("unattributed_followup", False), ("occluded", True),
     ("inside_shaft", True), ("out_of_reach", True), ("stale_hit", True),
