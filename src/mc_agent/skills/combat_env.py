@@ -2475,8 +2475,13 @@ class CombatEnv:
             st_final = settle_airborne(st_final, st0)
         return retreat_result(st_final)
 
-    def step_away_from_melee(self, status: dict[str, Any], threat_pos: Sequence[float], *, deadline: float) -> bool:
+    def step_away_from_melee(
+        self, status: dict[str, Any], threat_pos: Sequence[float], *, deadline: float, target_id: int | None = None,
+    ) -> dict[str, Any]:
         """Take one short, supported step away from a still-close attacker."""
+        outcome: dict[str, Any] = {"ok": False}
+        if target_id is not None:
+            outcome["entity_id"] = target_id
         origin = status["pos"]
         foot_y = math.floor(float(origin[1]) + 0.05)
         planned_from = origin
@@ -2484,7 +2489,7 @@ class CombatEnv:
         try:
             for _ in range(2):
                 if time.monotonic() >= probe_deadline:
-                    return False
+                    return outcome
                 away, _ = aim_yaw_pitch(threat_pos, planned_from)
                 self.invalidate_block_cache()
                 yaw = None
@@ -2502,15 +2507,15 @@ class CombatEnv:
                     or current.get("last_death") != status.get("last_death") or current.get("dimension") != status.get("dimension")
                     or time.monotonic() + 0.65 >= deadline
                 ):
-                    return False
+                    return outcome
                 if math.dist(pos[:3], planned_from[:3]) <= 0.2:
                     if yaw is None:
-                        return False
+                        return outcome
                     break
                 # The first retreat can still carry the bot a short distance. Recheck the new footing once.
                 planned_from = pos
             else:
-                return False
+                return outcome
             self.bot.call("look", {"yaw": yaw, "pitch": 0.0}, timeout_s=0.15, allow_reauth=False)
             result = self.bot.call(
                 "control", {"forward": True, "ms": 220, "stop_on": ["death"]},
@@ -2518,10 +2523,10 @@ class CombatEnv:
             )
             remaining = deadline - time.monotonic()
             if not result.get("ok", True) or remaining <= 0:
-                return False
+                return outcome
             landed = self.bot.call("status", method="GET", timeout_s=min(0.2, remaining), allow_reauth=False)
         except (ApiError, httpx.HTTPError, _TerrainProbeExpired):
-            return False
+            return outcome
         end = landed.get("pos")
         if (
             not end or landed.get("on_ground") is not True or landed.get("ready") is False
@@ -2529,12 +2534,27 @@ class CombatEnv:
             or landed.get("last_death") != status.get("last_death") or landed.get("dimension") != status.get("dimension")
             or math.floor(float(end[1]) + 0.05) != foot_y
         ):
-            return False
-        return (
-            math.hypot(end[0] - pos[0], end[2] - pos[2]) >= 0.25
+            return outcome
+        moved = math.hypot(end[0] - pos[0], end[2] - pos[2])
+        outcome.update(pos_after=end, moved_dist=round(moved, 2))
+        outcome["ok"] = (
+            moved >= 0.25
             and math.hypot(end[0] - threat_pos[0], end[2] - threat_pos[2])
             > math.hypot(pos[0] - threat_pos[0], pos[2] - threat_pos[2])
         )
+        for key, snapshot in (("target_distance_before", current), ("target_distance_after", landed)):
+            hostile = snapshot.get("nearest_hostile")
+            if target_id is not None and isinstance(hostile, dict) and hostile.get("id") == target_id:
+                distance = hostile.get("dist")
+                if isinstance(distance, (int, float)) and math.isfinite(distance) and distance >= 0.0:
+                    outcome[key] = distance
+        before = outcome.get("target_distance_before")
+        after = outcome.get("target_distance_after")
+        if after is not None:
+            outcome["target_in_melee_range"] = after <= 3.5
+            if outcome["ok"] and before is not None and after <= before:
+                outcome.update(ok=False, reason="melee_clearance_unconfirmed")
+        return outcome
 
     def _point_allowed(self, x: float, z: float, *, action: str = "combat_env") -> bool:
         """Return True unless an enabled VoidGeofence rejects `(x, z)` via `check_point`."""
@@ -4415,8 +4435,10 @@ class SubcorticalInstinctController:
                     )
                     step = {"action": "followup_melee_retreat", "entity_id": target_id, **retreat}
                 else:
-                    stepped = env.step_away_from_melee(st_post, target_pos, deadline=min(deadline, time.monotonic() + 1.5))
-                    step = {"action": "followup_melee_retreat", "ok": stepped, "entity_id": target_id}
+                    retreat = env.step_away_from_melee(
+                        st_post, target_pos, deadline=min(deadline, time.monotonic() + 1.5), target_id=target_id,
+                    )
+                    step = {"action": "followup_melee_retreat", **retreat}
                 st_post = env._safe_status(st_post)
                 nh_post = st_post.get("nearest_hostile")
                 if critical_creeper_pursuit and step.get("ok"):

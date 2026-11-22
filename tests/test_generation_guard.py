@@ -5538,9 +5538,10 @@ def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatc
         })
         return {"ok": complete, "mode": "flee", "moved_dist": 5.94 if complete else 1.39}
 
-    def step(landing, target, *, deadline):
+    def step(landing, target, *, deadline, target_id):
+        assert target_id == 77
         followups.append((landing["health"], target))
-        return True
+        return {"ok": True, "moved_dist": 0.7, "target_distance_after": 3.0}
 
     guard = GenerationGuard(CaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(guard.combat_env, "flee", flee)
@@ -5550,6 +5551,8 @@ def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatc
     actions = [a["action"] for a in incident["actions"]]
     assert actions == (["combat_or_flee", "followup_melee_retreat"] if nearby else ["combat_or_flee"])
     assert followups == ([(6.7, [5002, 39, -7591.4])] if nearby else [])
+    if nearby:
+        assert incident["actions"][-1]["result"]["target_distance_after"] == 3.0
 
 
 @pytest.mark.parametrize("threat", ["clear", "nearest_drowned", "other_nearest", "scan_timeout"])
@@ -9244,6 +9247,7 @@ def test_exposed_cave_melee_retreats_before_digging_a_cover_pocket(monkeypatch, 
 @pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("terrain", [
     "safe", "drop", "target_gone", "blocked_by_wall", "stalled", "knockback", "wet_landing", "respawned_after_step",
+    "pursuer_closes", "out_of_reach", "different_nearest",
 ])
 @pytest.mark.parametrize("shaft", [False, True])
 def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monkeypatch, terrain, complete, shaft):
@@ -9284,6 +9288,12 @@ def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monk
                 if terrain != "stalled":
                     displacement = -0.7 if terrain == "knockback" else 0.7
                     status["pos"] = [-1.7 + displacement * dx, 69, 0.5 + displacement * dz]
+                    end_distance = {
+                        "pursuer_closes": distance - 0.2, "out_of_reach": 4.2, "different_nearest": 0.5,
+                    }.get(terrain, distance + displacement)
+                    status["nearest_hostile"] = {
+                        "id": 56 if terrain == "different_nearest" else 42, "name": "zombie", "dist": end_distance,
+                    }
                 if terrain == "wet_landing":
                     status["in_water"] = True
                 if terrain == "respawned_after_step":
@@ -9306,11 +9316,24 @@ def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monk
 
     followups = [a for a in outcome["actions"] if a["action"] == "followup_melee_retreat"]
     assert outcome["mode"] == ("flee" if shaft else "cover_or_flee")
-    assert followups == ([] if terrain in {"target_gone", "blocked_by_wall"} else [
-        {"action": "followup_melee_retreat", "ok": terrain == "safe", "entity_id": 42},
-    ])
-    expected_step = terrain in {"safe", "stalled", "knockback", "wet_landing", "respawned_after_step"}
+    expected_step = terrain not in {"drop", "target_gone", "blocked_by_wall"}
     assert pulses == ([{"forward": True, "ms": 220, "stop_on": ["death"]}] if expected_step else [])
+    if terrain in {"target_gone", "blocked_by_wall"}:
+        assert not followups
+        return
+    followup, = followups
+    assert followup["entity_id"] == 42
+    assert followup["ok"] is (terrain in {"safe", "out_of_reach", "different_nearest"})
+    if terrain in {"safe", "pursuer_closes", "out_of_reach", "different_nearest"}:
+        assert followup["moved_dist"] == pytest.approx(0.7)
+        if terrain == "different_nearest":
+            assert "target_distance_after" not in followup
+        else:
+            assert followup["target_distance_before"] == distance
+            assert followup["target_distance_after"] == status["nearest_hostile"]["dist"]
+            assert followup["target_in_melee_range"] is (terrain != "out_of_reach")
+        if terrain == "pursuer_closes":
+            assert followup["reason"] == "melee_clearance_unconfirmed"
 
 
 @pytest.mark.parametrize("landing", [
@@ -9361,8 +9384,9 @@ def test_short_melee_retreat_reprobes_after_a_small_same_life_slide(monkeypatch,
                 return {"ok": True}
             pytest.fail(f"Unexpected retreat action: {action}")
 
-    reached = CombatEnv(BankBot()).step_away_from_melee(dict(status), [2.1, 64, 0.5], deadline=1001.5)
+    outcome = CombatEnv(BankBot()).step_away_from_melee(dict(status), [2.1, 64, 0.5], deadline=1001.5)
 
+    reached = outcome["ok"]
     assert reached is (landing in {"stable", "settled_after_slide"})
     assert rescanned is (landing in {"settled_after_slide", "unsafe_after_slide", "still_sliding"})
     assert moves == (["look", "control"] if reached else [])
@@ -9405,10 +9429,11 @@ def test_healthy_unarmed_bot_follows_up_short_retreat_when_the_attacker_gains_gr
         status.update(pos=landing, nearest_hostile=survivor)
         return {"ok": True, "mode": "flee", "moved_dist": moved}
 
-    def verified_step(landing, threat_pos, *, deadline):
+    def verified_step(landing, threat_pos, *, deadline, target_id):
+        assert target_id == 42
         assert landing["pos"] == status["pos"] and threat_pos == status["nearest_hostile"]["pos"]
         steps.append(threat_pos)
-        return True
+        return {"ok": True}
 
     env = CombatEnv(CaveBot())
     monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave"})

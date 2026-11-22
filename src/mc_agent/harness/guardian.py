@@ -3019,9 +3019,9 @@ class GenerationGuard:
                                 ):
                                     actions.append(self._action(
                                         "followup_melee_retreat",
-                                        lambda: {"ok": self.combat_env.step_away_from_melee(
-                                            landing, target_pos, deadline=time.monotonic() + 1.5,
-                                        )},
+                                        lambda: self.combat_env.step_away_from_melee(
+                                            landing, target_pos, deadline=time.monotonic() + 1.5, target_id=target_id,
+                                        ),
                                     ))
 
             if should_eat and (
