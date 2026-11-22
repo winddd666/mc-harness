@@ -240,6 +240,25 @@ def _portal_free_landing(bot: Any) -> bool:
     return result.get("blocks") == []
 
 
+def _berry_bush_clear_landing(bot: Any, pos: tuple[float, float, float]) -> bool:
+    result = bot.call("find_blocks", {"types": ["sweet_berry_bush"], "radius": 3, "limit": 64}) or {}
+    blocks = result.get("blocks")
+    if not isinstance(blocks, list):
+        return False
+    x, y, z = map(math.floor, pos)
+    # Check the landing and its first horizontal step, allowing for a step in Y.
+    for block in blocks:
+        coords = block.get("pos") if isinstance(block, dict) else None
+        if not isinstance(coords, (list, tuple)) or len(coords) != 3 or any(
+            not isinstance(value, (int, float)) or not math.isfinite(value) for value in coords
+        ):
+            return False
+        bx, by, bz = coords
+        if abs(bx - x) <= 1 and abs(bz - z) <= 1 and y - 1 <= by <= y + 1:
+            return False
+    return True
+
+
 def _dry_wild_slot(start_idx: int) -> tuple[int, int]:
     ring, slot_idx = divmod(int(start_idx), len(CANDIDATE_SITES))
     # The layout spans 22,000 blocks per axis. Leave space for both local search areas
@@ -309,6 +328,9 @@ def select_dry_isolated_wild_site(
         )
         if not (fb or {}).get("blocks"):
             rejected["no_logs"] += 1
+            continue
+        if not _berry_bush_clear_landing(bot, pos):
+            rejected["berry_bush_clearance"] += 1
             continue
         if day1 and not _portal_free_landing(bot):
             rejected["nearby_portal"] += 1
@@ -1847,27 +1869,29 @@ def _reassert_scene_geofence(
         drift = math.hypot(float(gf.center_x) - x, float(gf.center_z) - z)
     except Exception:
         return False
-    if drift <= limit:
-        return False
-    try:
-        if hasattr(gf, "contains"):
-            rebuilt = dataclasses.replace(gf, center_x=x, center_z=z)
-        else:
-            rebuilt = _scene_geofence_cls(type(gf))(center_x=x, center_z=z, radius=gf.radius, margin=gf.margin)
-    except Exception as exc:
-        print(f"[Scene] geofence rebuild failed: {exc}", flush=True)
-        return False
-    toolset.geofence = rebuilt
-    if supervisor is not None:
+    rebuilt = gf
+    if drift > limit:
         try:
-            supervisor.geofence = rebuilt
-        except Exception:
-            pass
-    print(
-        f"[Scene] geofence drift {drift:.0f}m -> rebuilt in {dim} at ({x:.1f}, {z:.1f})",
-        flush=True,
-    )
-    return True
+            if hasattr(gf, "contains"):
+                rebuilt = dataclasses.replace(gf, center_x=x, center_z=z)
+            else:
+                rebuilt = _scene_geofence_cls(type(gf))(center_x=x, center_z=z, radius=gf.radius, margin=gf.margin)
+        except Exception as exc:
+            print(f"[Scene] geofence rebuild failed: {exc}", flush=True)
+            return False
+    updated = False
+    # McToolset and MacroSkills keep separate references. Rebinding all runtime
+    # hooks here would also reset the episode's movement and timeout state.
+    for owner in (toolset, getattr(toolset, "skills", None), supervisor):
+        if owner is not None and getattr(owner, "geofence", None) is not rebuilt:
+            owner.geofence = rebuilt
+            updated = True
+    if rebuilt is not gf:
+        print(
+            f"[Scene] geofence drift {drift:.0f}m -> rebuilt in {dim} at ({x:.1f}, {z:.1f})",
+            flush=True,
+        )
+    return updated
 
 
 def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
