@@ -1636,13 +1636,18 @@ class CombatEnv:
                 self.invalidate_block_cache()
 
         # 2. Try scanning safe non-lava exits (including 1-block step-ups, plus wide shore search) and jump-sprinting out
-        terrain_deadline = min(lava_deadline - 2.0, time.monotonic() + 1.5)
+        terrain_started = time.monotonic()
+        terrain_deadline = min(lava_deadline - 2.0, terrain_started + 1.5)
+        ray_deadline = terrain_deadline
+        if st.get("in_lava"):
+            # Nearby rays can all start in lava. Leave time to query and verify a reachable shore.
+            ray_deadline = max(terrain_started, terrain_deadline - 0.9)
         scan = self.scan_safe_yaws(
             pos0,
             float(st.get("yaw") or 0.0),
             dist=2.8,
             angles_deg=(0, 45, -45, 90, -90, 135, -135, 180),
-            deadline=terrain_deadline,
+            deadline=ray_deadline,
         )
         tried_yaws: list[float] = []
         if scan.get("best_yaw") is not None:

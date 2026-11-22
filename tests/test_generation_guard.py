@@ -6946,6 +6946,69 @@ def test_lava_escape_changes_unverified_swim_heading_after_stalling(monkeypatch,
     assert swim_headings == pytest.approx([0.0, (-1 if west_blocked else 1) * math.pi / 2])
 
 
+@pytest.mark.parametrize("shore_exists", [True, False])
+def test_lava_retreat_checks_for_a_shore_even_when_local_ray_reads_are_slow(monkeypatch, shore_exists):
+    from mc_agent.skills.combat_env import CombatEnv, aim_yaw_pitch
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    start = [1862.4, 28.0, 1809.8]
+    surface = [1862.4, 29.1, 1809.8]
+    bank = [1864.5, 30.0, 1810.5]
+    shore = [1864, 29, 1810]
+    bank_yaw = aim_yaw_pitch(surface, bank)[0]
+    status = {
+        "pos": start, "health": 14.9, "yaw": 0.0, "dimension": "the_nether",
+        "in_lava": True, "on_ground": False, "alive": True, "ready": True,
+    }
+    shore_queries = []
+    pulses = []
+
+    class LavaBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                if "timeout_s" in kwargs:
+                    allotted = kwargs["timeout_s"]
+                    clock[0] += min(allotted, 0.28)
+                    if allotted < 0.28:
+                        raise httpx.ReadTimeout("slow lava terrain probe")
+                if body["pos"] == shore and shore_exists:
+                    return {"name": "netherrack"}
+                return {"name": "lava" if body["pos"][1] <= 29 else "air"}
+            if action == "find_blocks":
+                shore_queries.append(kwargs["timeout_s"])
+                clock[0] += 0.13
+                return {"blocks": [{"name": "netherrack", "pos": shore}] if shore_exists else []}
+            if action == "look":
+                status["yaw"] = body["yaw"]
+            if action == "control":
+                clock[0] += body["ms"] / 1000
+                pulses.append((body["forward"], status["yaw"]))
+                if not body["forward"]:
+                    status["pos"] = surface
+                elif shore_exists and math.isclose(status["yaw"], bank_yaw):
+                    status.update(pos=bank, in_lava=False, on_ground=True)
+            return {"ok": True}
+
+    result = CombatEnv(LavaBot()).escape_lava()
+    assert shore_queries and 0.7 <= shore_queries[0] <= 1.5
+    assert pulses[0] == (False, 0.0)
+    assert result["ok"] is shore_exists
+    if shore_exists:
+        assert result["pos_after"] == bank
+        assert pulses[1] == (True, pytest.approx(bank_yaw))
+    else:
+        assert result["in_lava"] is True
+    assert clock[0] - 1000.0 <= 5.0
+
+
 @pytest.mark.parametrize("lands_after_jump", [False, True])
 def test_lava_shore_hop_checks_landing_before_requesting_pathfinder(monkeypatch, lands_after_jump):
     from mc_agent.skills.combat_env import CombatEnv
