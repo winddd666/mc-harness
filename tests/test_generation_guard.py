@@ -10732,13 +10732,20 @@ def test_dig_checks_the_landing_before_removing_support(tool, terrain):
         assert probes == ([target] if tool == "mc_dig" else [])
 
 
-@pytest.mark.parametrize("placement", ["complete", "existing_wall", "partial", "receipt_only", "threat_inside"])
+@pytest.mark.parametrize("placement", [
+    "complete", "existing_wall", "partial", "receipt_only", "threat_inside",
+    "already_sealed", "sealed_with_exposed_mob", "sealed_unknown_threat",
+])
 def test_flee_only_confirms_a_shaft_seal_after_both_cells_are_solid(monkeypatch, placement):
     from mc_agent.skills.combat_env import CombatEnv
 
     blocks = {(1, 95, 0): "stone"} if placement == "existing_wall" else {}
+    sealed = placement in {"already_sealed", "sealed_with_exposed_mob", "sealed_unknown_threat"}
+    if sealed:
+        blocks.update({(1, 95, 0): "tuff", (1, 96, 0): "tuff"})
     attempts = []
     status = {"pos": [0.5, 95, 0.5], "alive": True, "ready": True, "on_ground": True}
+    threat = [0.9, 95, 0.5] if placement == "threat_inside" else [3.0, 95, 0.5]
 
     class ShaftBot:
         def status(self):
@@ -10749,6 +10756,13 @@ def test_flee_only_confirms_a_shaft_seal_after_both_cells_are_solid(monkeypatch,
                 return {"items": [{"name": "cobblestone", "count": 8}]}
             if action == "get_block":
                 return {"name": blocks.get(tuple(body["pos"]), "air")}
+            if action == "get_entities":
+                if placement == "sealed_unknown_threat":
+                    raise httpx.ReadTimeout("entity scan timed out")
+                entities = [{"id": 42, "name": "zombie", "pos": threat}]
+                if placement == "sealed_with_exposed_mob":
+                    entities.append({"id": 43, "name": "spider", "pos": [0.5, 95, 2.5]})
+                return {"entities": entities}
             if action == "place":
                 cell = tuple(body["pos"])
                 attempts.append(cell)
@@ -10762,15 +10776,15 @@ def test_flee_only_confirms_a_shaft_seal_after_both_cells_are_solid(monkeypatch,
     env = CombatEnv(ShaftBot())
     monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "carved_shaft"})
     monkeypatch.setattr(env, "probe_retreat", lambda *_a: None)
-    threat = [0.9, 95, 0.5] if placement == "threat_inside" else [3.0, 95, 0.5]
     result = env.flee(threat)
 
-    complete = placement in {"complete", "existing_wall"}
+    complete = placement in {"complete", "existing_wall", "already_sealed"}
     assert result["ok"] is complete
     assert result["mode"] == ("sealed" if complete else "flee")
-    if placement == "threat_inside":
+    if sealed or placement == "threat_inside":
         assert attempts == []
-        assert result["reason"] == "no_safe_retreat"
+        if not complete:
+            assert result["reason"] == "no_safe_retreat"
     else:
         assert attempts[-1] == (1, 96, 0)
 

@@ -1212,17 +1212,42 @@ class CombatEnv:
             self.invalidate_block_cache()
             ok = placed > 0
             reason = None if ok else "place_failed"
-            if norm_mode == "full_seal" and ok:
-                verified = [self._get_block_name(*cell, strict=True) for cell in cells]
-                ok = all(block and _is_solid_ground(block) for block in verified)
-                if not ok:
-                    reason = "seal_unconfirmed"
+            verified = [self._get_block_name(*cell, strict=True) for cell in cells] if norm_mode == "full_seal" else []
+            st_end = self.bot.status()
+            if norm_mode == "full_seal":
+                wall_complete = all(block and _is_solid_ground(block) for block in verified)
+                if placed:
+                    ok = wall_complete
+                    reason = None if ok else "seal_unconfirmed"
+                elif wall_complete and threat_pos is not None and len(threat_pos) >= 3:
+                    end = st_end.get("pos")
+                    if (
+                        end and math.dist(end[:3], pos0[:3]) <= 0.2 and st_end.get("on_ground") is True
+                        and st_end.get("ready") is not False and st_end.get("alive") is not False
+                        and not any(st_end.get(key) for key in ("in_water", "in_lava"))
+                        and all(st_end.get(key) == st.get(key) for key in ("dimension", "last_death"))
+                    ):
+                        from .library import assess_hostile_occlusion, ray_wall_blocker
+
+                        block_cache = {tuple(cell): block for cell, block in zip(cells, verified)}
+                        try:
+                            blocker = ray_wall_blocker(self.bot, tuple(end[:3]), tuple(threat_pos[:3]), block_cache)
+                            if blocker is not None and blocker.get("pos") in cells:
+                                threats = assess_hostile_occlusion(
+                                    self.bot, end, radius=6, fallback_nearest=st_end.get("nearest_hostile"),
+                                    block_cache=block_cache,
+                                )
+                                ok = threats["complete"] and not threats["unoccluded"]
+                        except (ApiError, httpx.HTTPError):
+                            pass
+                        if ok:
+                            reason = "already_sealed"
             return {
                 "ok": ok,
                 "mode": norm_mode,
                 "direction": chosen_dir,
                 "placed": placed,
-                "pos_after": self.bot.status().get("pos"),
+                "pos_after": st_end.get("pos"),
                 "reason": reason,
             }
 
