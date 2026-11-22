@@ -3956,6 +3956,7 @@ class GenerationGuard:
                 return
             watch_hp0: float | None = None
             last_terrain_health: float | None = None
+            previous_water_health: tuple[tuple[Any, Any], float] | None = None
             previous_tile = checked_hot_floor = None
             while not stop_evt.is_set():
                 try:
@@ -4059,17 +4060,34 @@ class GenerationGuard:
                         and nh_dist <= 4.5
                         and not self._is_pre_hurt_debounced(nh_id, nh_name)
                     )
+                    observed_life = (st.get("dimension"), st.get("last_death"))
+                    available = st.get("ready") is not False and st.get("alive") is not False
+                    water_hp_dropped = False
+                    if watch_low_oxygen:
+                        if available and isinstance(cur_hp, (int, float)) and cur_hp > 0:
+                            water_hp_dropped = (
+                                previous_water_health is not None and previous_water_health[0] == observed_life
+                                and cur_hp < previous_water_health[1]
+                            )
+                            previous_water_health = (observed_life, float(cur_hp))
+                        else:
+                            previous_water_health = None
                     oxygen = st.get("oxygen")
-                    threatened_swimmer = (
-                        st.get("in_water") and st.get("ready") is not False and st.get("alive") is not False
-                        and (
-                            (drowned_threat_range is not None and nh_name == "drowned"
-                             and nh_dist <= drowned_threat_range
-                             and (st.get("on_ground") is False or st.get("submerged")))
-                            or (watch_low_oxygen and isinstance(oxygen, (int, float))
-                                and oxygen <= self.TOOL_WATER_ESCAPE_OXYGEN)
-                        )
-                    )
+                    water_risk = None
+                    if available and st.get("in_water"):
+                        if drowned_threat_range is not None and nh_name == "drowned" and nh_dist <= drowned_threat_range and (
+                            st.get("on_ground") is False or st.get("submerged") is True
+                            or (watch_mining_water and not st["nearest_hostile"].get("blocked_by_wall"))
+                        ):
+                            water_risk = "drowned"
+                        elif water_hp_dropped:
+                            water_risk = "hurt"
+                        # A legacy oxygen reading alone cannot establish danger with the head above water.
+                        elif (
+                            watch_low_oxygen and st.get("submerged") is not False
+                            and isinstance(oxygen, (int, float)) and oxygen <= self.TOOL_WATER_ESCAPE_OXYGEN
+                        ):
+                            water_risk = "low_oxygen"
                     check_creeper_cover = creeper_close and nh_dist > 2.3
                     if (
                         (check_creeper_cover or melee_ambush) and isinstance(nh_id, int)
@@ -4103,7 +4121,7 @@ class GenerationGuard:
                             else:
                                 melee_ambush = False
                     hot_floor_now = False
-                    if watch_hot_floor and not (in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped):
+                    if watch_hot_floor and not (in_lava_now or water_risk or creeper_close or melee_ambush or hp_dropped):
                         tile = self._hot_floor_block(st)
                         if (
                             tile is not None and tile == previous_tile and tile != checked_hot_floor
@@ -4120,10 +4138,12 @@ class GenerationGuard:
                             except (ApiError, httpx.HTTPError):
                                 pass
                         previous_tile = tile
-                    if in_lava_now or threatened_swimmer or creeper_close or melee_ambush or hp_dropped or hot_floor_now:
+                    if stop_evt.is_set():
+                        return
+                    if in_lava_now or water_risk or creeper_close or melee_ambush or hp_dropped or hot_floor_now:
                         if in_lava_now:
                             src_w, eid_w, tp_w, pos_w, dist_w = "boundary_threat", None, "lava", None, 0.0
-                        elif threatened_swimmer:
+                        elif water_risk:
                             src_w, eid_w, tp_w, pos_w, dist_w = "tool_water_threat", nh_id, nh_name, nh_pos, nh_dist
                         elif creeper_close:
                             src_w, eid_w, tp_w, pos_w, dist_w = "pre_hurt_creeper", nh_id, "creeper", nh_pos, nh_dist
@@ -4140,8 +4160,14 @@ class GenerationGuard:
                                 "primary_type": tp_w,
                                 "primary_pos": pos_w,
                                 "distance": dist_w,
-                                **({"observed_life": (st.get("dimension"), st.get("last_death"))}
+                                **({"observed_life": observed_life}
                                    if src_w in {"tool_water_threat", "tool_interrupted_hurt"} else {}),
+                                **({"water_observation": {
+                                    "reason": water_risk,
+                                    **{key: st.get(key) for key in (
+                                        "pos", "health", "oxygen", "in_water", "submerged", "on_ground", "nearest_hostile",
+                                    )},
+                                }} if src_w == "tool_water_threat" else {}),
                             }
                         )
                         try:
@@ -4837,6 +4863,7 @@ class GenerationGuard:
                 lava_status["status_after"] = receipt["status_after"]
             self.events.emit(
                 "guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary, **lava_status,
+                **({"water_observation": trigger["water_observation"]} if "water_observation" in trigger else {}),
             )
             return receipt
         finally:

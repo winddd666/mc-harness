@@ -14462,6 +14462,74 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
     assert guard._water_hurt_streak == 0
 
 
+@pytest.mark.parametrize("oxygen, reason", [(20, None), (400, None), (20, "drowned"), (400, "hurt")])
+def test_bug009_mining_keeps_wading_until_there_is_a_water_threat(monkeypatch, oxygen, reason):
+    import threading
+
+    finished = threading.Event()
+    samples = []
+    calls = []
+    status = {
+        "pos": [41012.5, 63, 11034.4], "health": 20, "oxygen": oxygen,
+        "ready": True, "alive": True, "on_ground": True, "in_water": True, "submerged": False,
+        "dimension": "overworld",
+    }
+    drowned = {"id": 45, "name": "drowned", "dist": 4.0, "pos": [41016.5, 63, 11034.4]}
+
+    class WadingMiner:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "dig":
+                calls.append(endpoint)
+                assert finished.wait(3.0)
+                return {"ok": True, "broken": 1}
+            if endpoint == "stop":
+                calls.append(endpoint)
+                finished.set()
+            if endpoint == "status":
+                if not finished.is_set():
+                    samples.append(dict(status))
+                    if len(samples) == 2:
+                        if reason == "drowned":
+                            status["nearest_hostile"] = drowned
+                        elif reason == "hurt":
+                            status["health"] = 19.33
+                        else:
+                            finished.set()
+                return dict(status)
+            if endpoint == "events":
+                return {"events": []}
+            if endpoint == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    bot = WadingMiner()
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+
+    def shore(*args, **kwargs):
+        calls.append("surface")
+        status.update(in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
+    result = json.loads(guard.run_tool_with_reflex(
+        "mc_skill_mine_blocks", lambda: json.dumps(bot.call("dig", {"pos": [41012, 63, 11035], "stop_on": ["death"]})),
+    ))
+    assert len(samples) == 2
+    if reason is None:
+        assert calls == ["dig"]
+        assert result == {"ok": True, "broken": 1}
+        assert not events.events
+    else:
+        assert calls == ["dig", "stop", "surface"]
+        assert result["reflex_mode"] == "water_surface"
+        event = next(event for event in events.events if event["type"] == "guardian.preempted_tool")
+        observed = event["water_observation"]
+        assert observed["reason"] == reason and observed["oxygen"] == oxygen
+        assert observed["in_water"] is True and observed["submerged"] is False and observed["on_ground"] is True
+        assert observed["health"] == (19.33 if reason == "hurt" else 20)
+
+
 @pytest.mark.parametrize("interrupted", [False, True])
 @pytest.mark.parametrize("contact", ["in_lava", "lava_hurt", "lava_hurt_then_heal"])
 def test_lava_watcher_preempts_death_only_mining_and_waits_for_stop(monkeypatch, interrupted, contact):

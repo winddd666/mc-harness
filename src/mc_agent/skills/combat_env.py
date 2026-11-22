@@ -348,6 +348,7 @@ class ThreatTrigger(TypedDict, total=False):
         "pre_hurt_melee",
         "pre_hurt_ranged",
         "tool_interrupted_hurt",
+        "tool_water_threat",
         "boundary_threat",
         "guard_poll_hurt",
     ]
@@ -357,6 +358,7 @@ class ThreatTrigger(TypedDict, total=False):
     distance: float | None
     hurt_source: str | None
     observed_life: tuple[Any, Any]
+    water_observation: dict[str, Any]
 
 
 class CombatOutcome(TypedDict, total=False):
