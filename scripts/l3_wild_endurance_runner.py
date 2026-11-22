@@ -1400,6 +1400,47 @@ class SceneAnchor:
     village_xz: tuple[int, int] | None = None
 
 
+def _select_bare_reserve(bot: Any, bot_name: str, scene: SceneAnchor, site_index: int) -> SceneAnchor | None:
+    offsets = ((64, 0), (0, 64), (-64, 0), (0, -64))
+    for offset in range(2):
+        dx, dz = offsets[(site_index + offset) % len(offsets)]
+        x, z = math.floor(scene.x) + dx, math.floor(scene.z) + dz
+        confirmed, status = _spread_overworld(bot, bot_name, x, z, 8)
+        pos = _dry_overworld_position(status)
+        if confirmed is None or pos is None or not _berry_bush_clear_landing(bot, pos):
+            continue
+        reserve = dataclasses.replace(scene, x=pos[0], y=pos[1], z=pos[2])
+        print(f"[Scene] {bot_name} bare reserve pos={pos}", flush=True)
+        return reserve
+    return None
+
+
+def _bare_reserve_is_clear(bot: Any, reserve: SceneAnchor, origin: list[float]) -> bool:
+    from mc_agent.skills.combat_env import HAZARD_BLOCK_TYPES, _is_solid_ground
+
+    x, y, z = (math.floor(value) for value in (reserve.x, reserve.y, reserve.z))
+    try:
+        names = [
+            bot.call("get_block", {"x": x, "y": y + dy, "z": z}, timeout_s=1.0, allow_reauth=False).get("name")
+            for dy in (-1, 0, 1)
+        ]
+        floor, feet, head = (str(name or "").removeprefix("minecraft:") for name in names)
+        if not _is_solid_ground(floor) or floor in HAZARD_BLOCK_TYPES or not {feet, head} <= {"air", "cave_air"}:
+            return False
+        target = reserve.x, reserve.y, reserve.z
+        scan_radius = math.ceil(math.dist(origin[:3], target)) + 12
+        result = bot.call("get_entities", {"types": ["hostile"], "radius": scan_radius}, timeout_s=1.0, allow_reauth=False)
+        entities = result.get("entities")
+        return isinstance(entities, list) and len(entities) < 40 and all(
+            len(pos) == 3 and all(math.isfinite(value) for value in pos) and math.dist(target, pos) > 12.0
+            for pos in (entity.get("pos") or [] for entity in entities)
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
+
+
 def _scene_geofence_cls(base_cls: Any) -> Any:
     """Build a `VoidGeofence` subclass that adds the `contains(x, y, z)` predicate.
 
@@ -1635,11 +1676,16 @@ class SceneWatchdog(threading.Thread):
         interval_s: float = 8.0,
         near_container: Any = None,
         fence_repair: Any = None,
+        bare_reserve: SceneAnchor | None = None,
     ) -> None:
         super().__init__(name=f"scene-watchdog-{bot_name}", daemon=True)
         self.bot = bot
         self.bot_name = bot_name
         self.scene = scene
+        self._return_site = scene
+        self._bare_reserve = bare_reserve
+        self._last_home_death_ms = 0.0
+        self._contested_home_until_ms = 0.0
         self.interval_s = interval_s
         self.near_container = near_container
         self.fence_repair = fence_repair
@@ -1763,6 +1809,24 @@ class SceneWatchdog(threading.Thread):
         self._outside_fence_ticks = self._outside_fence_ticks + 1 if outside_fence else 0
         outside_fence_confirmed = self._outside_fence_ticks >= 2
         suspected_death = dead_signal and (new_status_death if has_death_stamp else not self._returned_while_dead)
+        if self._bare_reserve is not None and new_status_death and dim_matches and st.get("dimension"):
+            death_pos = last_death.get("pos")
+            if (
+                death_ms > self._last_home_death_ms
+                and isinstance(death_pos, (list, tuple)) and len(death_pos) >= 3
+                and all(isinstance(value, (int, float)) and math.isfinite(value) for value in death_pos[:3])
+                and math.dist(death_pos[:3], (self.scene.x, self.scene.y, self.scene.z)) <= 20.0
+            ):
+                if death_ms - self._last_home_death_ms <= 120_000:
+                    self._contested_home_until_ms = death_ms + 60_000
+                self._last_home_death_ms = death_ms
+        nearest = st.get("nearest_hostile") or {}
+        hostile_dist = nearest.get("dist") if isinstance(nearest, dict) else None
+        contested_home = (
+            self._bare_reserve is not None and wall_ms < self._contested_home_until_ms
+            and ready and not dead_signal and dim_matches and bool(st.get("dimension")) and dist <= 20.0
+            and isinstance(hostile_dist, (int, float)) and 0 <= hostile_dist <= 8.0
+        )
         self._ticks += 1
         if self._ticks % 15 == 0:  # ~2 min at the default 8s interval
             print(
@@ -1785,7 +1849,9 @@ class SceneWatchdog(threading.Thread):
             if unhandled_death or self._inv_tick % 3 == 1:
                 total = self._owned_total()
                 if total is not None:
-                    at_anchor = dim_matches and dist <= 48.0
+                    at_anchor = dim_matches and math.isfinite(dist) and math.hypot(
+                        float(pos[0]) - self._return_site.x, float(pos[2]) - self._return_site.z,
+                    ) <= 48.0
                     stashing = False
                     if self.near_container is not None:
                         try:
@@ -1803,10 +1869,16 @@ class SceneWatchdog(threading.Thread):
                     emptied_after_death = unhandled_death and total <= 2
                     suspected_death = not stashing and (collapsed_at_anchor or emptied_after_death)
                     self._last_total = total
-        if not (wrong_dim or drifted or suspected_death or outside_fence_confirmed):
+        normal_return = wrong_dim or drifted or suspected_death or outside_fence_confirmed
+        if not (normal_return or contested_home):
             return
         now = time.monotonic()
         if now - self._last_return < 20.0:
+            return
+        return_site = self._return_site
+        if contested_home and _bare_reserve_is_clear(self.bot, self._bare_reserve, pos):
+            return_site = self._bare_reserve
+        if not normal_return and return_site is self._return_site:
             return
         if suspected_death:
             reason = "death_return"
@@ -1814,13 +1886,15 @@ class SceneWatchdog(threading.Thread):
             reason = f"wrong_dimension({dim})"
         elif outside_fence_confirmed and not drifted:
             reason = "outside_fence_return"
+        elif return_site is not self._return_site:
+            reason = "contested_spawn_return"
         else:
             reason = f"drift_{dist:.0f}m"
         near_empty = self._last_total >= 0 and self._last_total <= 2
         try:
             restock_scene(
                 self.bot_name,
-                self.scene,
+                return_site,
                 reason=reason,
                 clear_inventory=suspected_death or (wrong_dim and near_empty),
             )
@@ -1828,6 +1902,10 @@ class SceneWatchdog(threading.Thread):
             print(f"[Scene Restock] {self.bot_name} failed reason={reason}: {exc}", flush=True)
         else:
             self._outside_fence_ticks = 0
+            if return_site is not self._return_site:
+                self._return_site = return_site
+                self._bare_reserve = None
+                print(f"[Scene] {self.bot_name} switched to verified bare reserve after nearby deaths", flush=True)
             if suspected_death:
                 self._death_handled_at = now
                 self._death_handled_wall_ms = max(
@@ -2736,6 +2814,12 @@ def main() -> int:
         scene = SceneAnchor(stage=args.stage, dim=dim, x=sx, y=sy, z=sz, village_xz=village_xz)
         if args.stage == STRONGHOLD_STAGE:
             scene = dataclasses.replace(scene, radius=STRONGHOLD_TRAVEL_RADIUS, drift_limit=STRONGHOLD_TRAVEL_RADIUS + 100)
+        bare_reserve = None
+        if args.stage == "bare" and not args.day1:
+            try:
+                bare_reserve = _select_bare_reserve(bot, bot_name, scene, args.site_index)
+            except Exception as exc:
+                print(f"[Scene] {bot_name} bare reserve unavailable: {exc}", flush=True)
         baseline = compute_stage_baseline(args.stage)
         prep = prepare_scene_ground(bot_name, args.stage, sx, sy, sz, dim=dim)
         if prep:
@@ -2890,7 +2974,8 @@ def main() -> int:
                 _reassert_scene_geofence(toolset, scene, dimension=dimension, pos=pos, supervisor=scene_state["sup"])
 
         watchdog = SceneWatchdog(
-            bot, bot_name, scene, near_container=_near_known_container, fence_repair=_repair_fence
+            bot, bot_name, scene, near_container=_near_known_container, fence_repair=_repair_fence,
+            bare_reserve=bare_reserve,
         )
         watchdog.start()
         trader_keeper = TraderKeeper(bot, bot_name) if args.stage == "village_trade" else None
