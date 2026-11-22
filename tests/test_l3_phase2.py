@@ -382,7 +382,7 @@ def test_d2_d3_d4_objective_bootstrap_no_blind_dfs_and_stale_chest_self_heal(tmp
     world = _Phase2World()
     # Bot died earlier AFTER unlocking `story/iron_tools`, now only holds `stone_pickaxe`!
     world.completed_advs.add("minecraft:story/iron_tools")
-    world.add_item("stone_pickaxe", 1)
+    world.add_item("stone_pickaxe", 2)
 
     pb_iron = CURRICULUM_PLAYBOOKS["bootstrap_iron_age"]
     assert pb_iron.is_objectively_satisfied(world.completed_advs, {"stone_pickaxe": 1}) is False

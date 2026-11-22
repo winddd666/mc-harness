@@ -3513,6 +3513,61 @@ def test_v1314_control_wait_and_shoot_charge_passthrough() -> None:
     assert shoot_calls == [{"weapon": "bow", "entity_id": 1, "charge_ms": 1000}]
 
 
+def test_curriculum_two_stone_picks_and_late_grind_husbandry_demoted() -> None:
+    """bootstrap_iron_age ensures 2 stone pickaxes; rare 80m-island achievements stay at tier=3."""
+    from mc_agent.harness.curriculum import CURRICULUM_PLAYBOOKS, select_next_target
+
+    assert ("stone_pickaxe", 2) in CURRICULUM_PLAYBOOKS["bootstrap_iron_age"].pre_ensure
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"pos": [0.5, 70.0, 0.5], "dimension": "minecraft:overworld", "time_of_day": 2000, "in_water": False, "alive": True}},
+            )
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": "iron_pickaxe", "count": 1}]}})
+        if path == "/advancements":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "advancements": [
+                            {"id": "minecraft:story/root", "status": "completed"},
+                            {"id": "minecraft:story/mine_stone", "status": "completed"},
+                            {"id": "minecraft:story/upgrade_tools", "status": "completed"},
+                            {"id": "minecraft:story/smelt_iron", "status": "completed"},
+                            {"id": "minecraft:story/iron_tools", "status": "completed"},
+                            {"id": "minecraft:husbandry/root", "status": "completed"},
+                            {"id": "minecraft:husbandry/obtain_sniffer_egg", "status": "not_started"},
+                            {"id": "minecraft:husbandry/allay_deliver_item_to_player", "status": "not_started"},
+                            {"id": "minecraft:husbandry/ride_a_boat_with_a_goat", "status": "not_started"},
+                            {"id": "minecraft:husbandry/breed_an_animal", "status": "not_started"},
+                        ]
+                    },
+                },
+            )
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot_c:
+        picked, _ = select_next_target(
+            bot_c,
+            cooldowns={"minecraft:story/shiny_gear": 999999.0},
+            now=1.0,
+            enable_island_recon=False,
+        )
+    assert picked is not None
+    assert picked.key == "minecraft:husbandry/make_a_sign_glow"
+    assert picked.key not in {
+        "minecraft:husbandry/obtain_sniffer_egg",
+        "minecraft:husbandry/allay_deliver_item_to_player",
+        "minecraft:husbandry/ride_a_boat_with_a_goat",
+    }
+
+
+
 
 
 

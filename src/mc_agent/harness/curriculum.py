@@ -444,9 +444,9 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "确保完成 Day 1 早晨石器与据点箱基建：0) 若包内已有 cobblestone>=3 且有木棍/木板或工作台，直接就地调 mc_skill_craft_gear('stone_pickaxe')，切勿在地下砍树；"
             "0.5) 若身处地下(Y<55)且无可用镐且无原木/木板/木棍，严禁在地下反复扫树，立即调 mc_skill_unstick 或沿矿道向上返回地表；"
             "1) 若在水中先调 mc_skill_unstick 上岸；"
-            "2) 在地表先调 mc_skill_harvest_logs(target_logs=6) 速砍 1~2 棵树（严禁徒手硬砍 16 根，凑足 4~6 根原木立刻合工作台+wooden_pickaxe，挖 11 块圆石直出 stone_pickaxe + stone_axe + furnace；有了石斧再按需补 6~8 根原木速度快 4 倍；若 32m 内无树/出生点被砍秃/遇 dig_unconfirmed 保护区，立即调 mc_skill_scout_surface(direction='auto', target_types=['end_portal_frame'], max_duration_s=40) 强行跑出 100m+ 到新林区再砍树，或若已知远处树干坐标直接 mc_move_to 走过去，严禁在原地反复扫树或空手挖石头！）；"
-            "3) 合工作台、wooden_pickaxe（挖 11+ 圆石后立刻升级 stone_pickaxe + stone_axe/stone_sword + furnace）；"
-            "4) 挖掘至少 11 块圆石合出 stone_pickaxe、stone_axe（跳劈可高伤收猪/牛/羊且砍树极快）与 furnace；"
+            "2) 在地表先调 mc_skill_harvest_logs(target_logs=6) 速砍 1~2 棵树（严禁徒手硬砍 16 根，凑足 4~6 根原木立刻合工作台+wooden_pickaxe，挖 14 块圆石直出 2 把 stone_pickaxe + stone_axe + furnace；有了石斧再按需补 6~8 根原木速度快 4 倍；若 32m 内无树/出生点被砍秃/遇 dig_unconfirmed 保护区，立即调 mc_skill_scout_surface(direction='auto', target_types=['end_portal_frame'], max_duration_s=40) 强行跑出 100m+ 到新林区再砍树，或若已知远处树干坐标直接 mc_move_to 走过去，严禁在原地反复扫树或空手挖石头！）；"
+            "3) 合工作台、wooden_pickaxe（挖 14+ 圆石后立刻升级 2 把 stone_pickaxe + stone_axe/stone_sword + furnace）；"
+            "4) 挖掘至少 14 块圆石合出 2 把 stone_pickaxe（确保下矿 Y=16 不断镐）、stone_axe（跳劈可高伤收猪/牛/羊且砍树极快）与 furnace；"
             "5) 若在出生安全地表且木板充足，顺手合 1 个 chest 并放置为据点箱，把多余原木（随身留 6~8 块）存箱留底，防死亡爆装返贫。"
         ),
         extra_tools=("mc_skill_container", "mc_skill_scout_surface"),
@@ -458,8 +458,8 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         points=10,
         tier=0,
         budget_class="medium",
-        # D3 根治：仅客观保底石镐（若包/近箱已有铁料则由督导器动态直出铁镐，绝不在 pre_ensure 盲挖地下矿井）
-        pre_ensure=(("stone_pickaxe", 1),),
+        # D3 根治：保底 2 把石镐（总耐久 262，覆盖从地表 Y=70 挖阶梯至 Y=16 的 ~162 格消耗，防半路爆镐软锁回石器）
+        pre_ensure=(("stone_pickaxe", 2),),
         task=(
             "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
             "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 4 根原木，先顺手砍 4~6 根原木（或备好 2 把 stone_pickaxe）再下井，严防地下断镐无木软锁；"
@@ -883,6 +883,46 @@ _LATE_GRIND_FRONTIER_IDS: frozenset[str] = frozenset(
         "minecraft:adventure/totem_of_undying",
         "minecraft:adventure/voluntary_exile",
         "minecraft:adventure/whos_the_pillager_now",
+        # 80 分钟 2048x2048 空岛中极低命中率/强依赖罕见结构的冷门成就，统一压至 tier=3 防插队
+        "minecraft:adventure/hero_of_the_village",
+        "minecraft:adventure/revaulting",
+        "minecraft:adventure/trade_at_world_height",
+        "minecraft:adventure/craft_decorated_pot_using_only_sherds",
+        "minecraft:adventure/heart_transplanter",
+        "minecraft:adventure/kill_mob_near_sculk_catalyst",
+        "minecraft:adventure/play_jukebox_in_meadows",
+        "minecraft:adventure/trim_with_any_armor_pattern",
+        "minecraft:adventure/under_lock_and_key",
+        "minecraft:adventure/who_needs_rockets",
+        "minecraft:adventure/avoid_vibration",
+        "minecraft:adventure/brush_armadillo",
+        "minecraft:adventure/bullseye",
+        "minecraft:adventure/lighten_up",
+        "minecraft:adventure/minecraft_trials_edition",
+        "minecraft:adventure/read_power_of_chiseled_bookshelf",
+        "minecraft:adventure/salvage_sherd",
+        "minecraft:adventure/spyglass_at_ghast",
+        "minecraft:adventure/spyglass_at_parrot",
+        "minecraft:adventure/walk_on_powder_snow_with_leather_boots",
+        "minecraft:husbandry/feed_snifflet",
+        "minecraft:husbandry/froglights",
+        "minecraft:husbandry/leash_all_frog_variants",
+        "minecraft:husbandry/obtain_netherite_hoe",
+        "minecraft:husbandry/allay_deliver_cake_to_note_block",
+        "minecraft:husbandry/allay_deliver_item_to_player",
+        "minecraft:husbandry/axolotl_in_a_bucket",
+        "minecraft:husbandry/kill_axolotl_target",
+        "minecraft:husbandry/obtain_sniffer_egg",
+        "minecraft:husbandry/plant_any_sniffer_seed",
+        "minecraft:husbandry/remove_wolf_armor",
+        "minecraft:husbandry/repair_wolf_armor",
+        "minecraft:husbandry/ride_a_boat_with_a_goat",
+        "minecraft:husbandry/silk_touch_nest",
+        "minecraft:husbandry/tadpole_in_a_bucket",
+        "minecraft:husbandry/place_dried_ghast_in_water",
+        "minecraft:husbandry/safely_harvest_honey",
+        "minecraft:husbandry/wax_on",
+        "minecraft:husbandry/wax_off",
     }
 )
 
