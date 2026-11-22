@@ -3239,14 +3239,25 @@ class SubcorticalInstinctController:
         weapon = self._equip_best_weapon_and_shield(env, counts, False, held_name)
         try:
             result = env.bot.call(
-                "attack", {"entity_id": target_id, "max_hits": 1, "timeout": 300, "interval_ms": 100, "stop_on": ["death"]},
-                timeout_s=0.9, allow_reauth=False,
+                "attack",
+                {
+                    "entity_id": target_id,
+                    "max_hits": 1,
+                    "timeout": 300,
+                    "interval_ms": 100,
+                    "stop_on": ["death"],
+                    "chase": False,
+                    "feedback": True,
+                },
+                timeout_s=0.9,
+                allow_reauth=False,
             )
         except ApiError as err:
             return {"action": "cornered_melee_strike", "ok": False, "code": err.code}
         return {
             "action": "cornered_melee_strike", "entity_id": target_id, "weapon": weapon,
             "ok": bool(result.get("hits")), "killed": bool(result.get("killed")),
+            **({"hit_log": result["hit_log"]} if isinstance(result.get("hit_log"), list) else {}),
         }
 
     def on_encounter(self, env: CombatEnv, trigger: ThreatTrigger) -> CombatOutcome:
@@ -3664,8 +3675,13 @@ class SubcorticalInstinctController:
                 attack_ms = min(2600, int((remaining - 0.9) * 1000))
                 vulnerable_counter = not has_shield and hp_cur <= 12.0
                 stop_on = ["hurt", "death"] if vulnerable_counter else ["death"]
-                attack_body = {"entity_id": eff_id, "timeout": attack_ms, "stop_on": stop_on}
-                if target_ent is not None and self._entity_dist(st_cur.get("pos"), target_ent) <= 2.5:
+                attack_body: dict[str, Any] = {
+                    "entity_id": eff_id, "timeout": attack_ms, "stop_on": stop_on, "feedback": True,
+                }
+                target_distance = self._entity_dist(st_cur.get("pos"), target_ent) if target_ent is not None else math.inf
+                if target_distance <= 3.2:
+                    attack_body["chase"] = False
+                if target_distance <= 2.5:
                     # A close counter can return after two swings. Reserve the longest sword/axe
                     # interval (1250 ms) for a final server-side sleep if the target slips out of reach.
                     attack_body.update(timeout=max(300, attack_ms - 1250), max_hits=2)
@@ -3675,7 +3691,13 @@ class SubcorticalInstinctController:
                         timeout_s=attack_ms / 1000 + 0.35, allow_reauth=False,
                     )
                     hits = atk.get("hits")
-                    actions.append({"action": "melee_attack", "weapon": weapon, "entity_id": eff_id, "ok": True, "killed": bool(atk.get("killed"))})
+                    actions.append({
+                        "action": "melee_attack", "weapon": weapon, "entity_id": eff_id,
+                        "ok": True, "killed": bool(atk.get("killed")),
+                        **({"hits": hits} if isinstance(hits, (int, float)) and math.isfinite(hits) else {}),
+                        **({"chase": False} if attack_body.get("chase") is False else {}),
+                        **({"hit_log": atk["hit_log"]} if isinstance(atk.get("hit_log"), list) else {}),
+                    })
                     if atk.get("killed"):
                         killed = True
                         break

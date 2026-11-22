@@ -1504,13 +1504,13 @@ def test_guard_eats_at_the_next_safe_poll_after_combat(monkeypatch, combat_durat
     assert meals == ["cooked_beef"]
 
 
-@pytest.mark.parametrize("scenario", ["close", "leaves_reach", "far"])
+@pytest.mark.parametrize("scenario", ["close", "leaves_reach", "melee_edge", "far"])
 def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, scenario):
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
 
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
-    distance = 4.0 if scenario == "far" else 1.6
+    distance = {"far": 4.0, "melee_edge": 3.1}.get(scenario, 1.6)
     zombie = {"id": 42, "name": "zombie", "dist": distance}
     status = {
         "pos": [-12208.4, -53.4, -6133.5], "health": 11, "ready": True, "alive": True,
@@ -1533,7 +1533,7 @@ def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, 
                 equipped.append(body)
             if action == "attack":
                 attacks.append(body)
-                if scenario == "far":
+                if scenario in {"melee_edge", "far"}:
                     return {"hits": 2, "killed": True}
                 # The backend checks its timer between complete swing intervals.
                 ticks, hits = 0, 0
@@ -1546,7 +1546,7 @@ def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, 
                 clock[0] += ticks / 1000
                 if ticks / 1000 > kwargs["timeout_s"]:
                     raise httpx.ReadTimeout("attack reply timed out")
-                return {"hits": hits, "killed": hits == 2}
+                return {"hits": hits, "killed": hits == 2, "hit_log": [{"entity_id": 42}]}
             return {"ok": True}
 
     outcome = SubcorticalInstinctController().on_encounter(CombatEnv(MatchBot()), {
@@ -1556,8 +1556,14 @@ def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, 
 
     assert equipped == [{"item": "wooden_axe", "slot": "hand"}]
     attack, = attacks
-    assert attack["timeout"] == (2600 if scenario == "far" else 1350)
-    assert attack.get("max_hits") == (None if scenario == "far" else 2)
+    assert attack.get("chase") is (None if scenario == "far" else False)
+    assert attack["feedback"] is True
+    tight_counter = scenario in {"close", "leaves_reach"}
+    assert attack["timeout"] == (1350 if tight_counter else 2600)
+    assert attack.get("max_hits") == (2 if tight_counter else None)
+    if tight_counter:
+        melee, = [action for action in outcome["actions"] if action["action"] == "melee_attack" and action["ok"]]
+        assert melee["hit_log"] == [{"entity_id": 42}]
     assert outcome["mode"] == ("counter_kill" if scenario == "leaves_reach" else "counter_killed")
 
 
