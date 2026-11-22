@@ -361,6 +361,7 @@ class GenerationGuard:
         self._last_surface_mining_water: tuple[
             tuple[Any, Any], float, tuple[float, ...], tuple[tuple[float, float, float], ...],
         ] | None = None
+        self._mining_water_reentry_site: tuple[tuple[int, int, int], tuple[str, Any]] | None = None
         self._water_hurt_streak = 0
         self._no_water_until = float("-inf")
         self._last_pre_hurt_melee_at = float("-inf")
@@ -4775,6 +4776,7 @@ class GenerationGuard:
                     mining_landing_retry_at = time.monotonic() + self.MINING_UNSAFE_FOOTING_RECHECK_S
                 self.events.emit(
                     "guardian.mining_landing_blocked", tool="mc_skill_mine_dfs", target=target, reason=error.code,
+                    **({"water_reentry_site": error.context["water_reentry_site"]} if "water_reentry_site" in error.context else {}),
                     **({"probe_reused": True} if cached_denial is not None else {}), **(dig_progress or {}),
                 )
                 raise
@@ -5533,6 +5535,12 @@ class GenerationGuard:
             ):
                 water_site = [math.floor(coord) for coord in wet_pos[:3]]
                 work_observation["water_reentry_site"] = water_site
+                dimension, last_death = st_after.get("dimension"), st_after.get("last_death")
+                if (
+                    isinstance(dimension, str) and dimension
+                    and (water_observation.get("dimension"), water_observation.get("last_death")) == (dimension, last_death)
+                ):
+                    self._mining_water_reentry_site = (tuple(water_site), (dimension, deepcopy(last_death)))
                 summary += f"。请沿干地换一个采矿入口，避开刚才持续沉头的水坑 {water_site}。仅改采集数量仍可能回到原处"
             if last_work_action:
                 work_observation["last_work_action"] = last_work_action
@@ -5580,6 +5588,7 @@ class GenerationGuard:
     def _verify_mining_landing(self, target: list[float]) -> None:
         deadline = time.monotonic() + 2.5
         bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        self._verify_mining_water_reentry(bot, target, deadline)
         for _ in range(2):
             if time.monotonic() >= deadline:
                 break
@@ -5593,6 +5602,41 @@ class GenerationGuard:
             )
         raise _MiningLandingDenied(
             "mining_footing_unavailable", "暂时无法确认采矿落点，请从有支撑的地点改道。", context={"target": target},
+        )
+
+    def _verify_mining_water_reentry(self, bot: _GuardSession, target: list[float], deadline: float) -> None:
+        record = self._mining_water_reentry_site
+        if record is None or tuple(math.floor(coord) for coord in target) != record[0]:
+            return
+        site, life = record
+        context = {"target": target, "water_reentry_site": list(site)}
+        try:
+            current = bot.call("status", method="GET", timeout_s=0.5)
+            if not isinstance(current, dict):
+                raise _TerrainProbeExpired
+            dimension, last_death = current.get("dimension"), current.get("last_death")
+            if (
+                current.get("ready") is not True or current.get("alive") is False
+                or not isinstance(dimension, str) or not dimension
+                or (dimension == life[0] and life[1] is not None and last_death is None)
+            ):
+                raise _TerrainProbeExpired
+            if (dimension, last_death) != life:
+                return
+            x, y, z = site
+            env = CombatEnv(bot)
+            for height in (y, y + 1):
+                name = env._get_block_name(x, height, z, strict=True, deadline=deadline)
+                if name in {"water", "flowing_water"}:
+                    break
+            else:
+                return
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
+            raise _MiningLandingDenied(
+                "mining_footing_unavailable", "暂时无法确认原水坑已排干，请沿干地改道。", context=context,
+            ) from None
+        raise _MiningLandingDenied(
+            "mining_water_reentry", "这个航点仍有水，刚才曾在此持续沉头，请沿干地改道。", context=context,
         )
 
     def _dig_hazard(self, target: Any, *, check_support: bool, check_roof: bool) -> str | None:

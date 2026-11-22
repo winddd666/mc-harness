@@ -15818,6 +15818,98 @@ def test_first_mining_submersion_names_the_water_site_only_after_safe_handoff(mo
         assert "water_reentry_site" not in receipt
 
 
+@pytest.mark.parametrize("site", [
+    "water_at_feet", "water_at_head", "drained", "another_floor", "first_life",
+    "new_life", "new_dimension", "missing_death_marker", "probe_timeout",
+])
+def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypatch, tmp_path, site):
+    from mc_agent.skills.mining_dfs import MiningDFSEngine
+
+    wet = (352084, -55, 357038)
+    head = (wet[0], wet[1] + 1, wet[2])
+    wet_pos = [352084.6, -55, 357038.5]
+    bank = [352085.5, -53, 357037.5]
+    status = {
+        "pos": wet_pos, "health": 20, "oxygen": 17, "ready": True, "alive": True, "on_ground": True,
+        "in_water": True, "submerged": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    if site == "first_life":
+        status.pop("last_death")
+    dispatched = []
+    blocks_read = []
+
+    class MineBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "get_block":
+                cell = tuple(body["pos"])
+                blocks_read.append(cell)
+                if cell in {wet, head}:
+                    if site == "probe_timeout":
+                        raise httpx.ReadTimeout("water voxel probe timed out")
+                    if site == "drained":
+                        return {"name": "air"}
+                    fluid = cell == (head if site == "water_at_head" else wet)
+                    return {"name": "flowing_water" if fluid else "air"}
+                return {"name": "stone"}
+            if action in {"move_to", "control"}:
+                dispatched.append((action, body))
+                if action == "move_to":
+                    status["pos"] = [body[axis] for axis in ("x", "y", "z")]
+            return {"ok": True, "items": []}
+
+        def status(self):
+            return self.call("status", method="GET")
+
+    def escape(*_args, **_kwargs):
+        status.update(pos=bank, in_water=False, submerged=False)
+        return {"ok": True, "in_water": False, "pos_after": bank}
+
+    bot = MineBot()
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", escape)
+    receipt = guard.handle_preemption({
+        "source": "tool_water_threat", "observed_life": ("overworld", status.get("last_death")), "action_released": True,
+        "water_observation": {**status, "reason": "sustained_submersion", "submerged_for_s": 2.132},
+    }, interrupted_name="mc_skill_mine_dfs")
+    assert receipt["water_reentry_site"] == list(wet)
+
+    if site == "new_life":
+        status["last_death"] = {"t": 2}
+    if site == "new_dimension":
+        status["dimension"] = "the_nether"
+    if site == "missing_death_marker":
+        status.pop("last_death")
+    if site == "water_at_head":
+        status["pos"] = [352093.4, -53, 357037.5]
+    target = (wet[0], wet[1] + 4, wet[2]) if site == "another_floor" else wet
+    alternate = (352086, -53, 357037)
+    dfs = MiningDFSEngine(MacroSkills(bot), ledger_path=tmp_path / "ledger.json")
+
+    def attempt():
+        return json.dumps({"first": dfs._step_to(target), "alternate": dfs._step_to(alternate)})
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", attempt))
+    unconfirmed = site in {"probe_timeout", "missing_death_marker"}
+    blocked = unconfirmed or site in {"water_at_feet", "water_at_head", "first_life"}
+    assert result == {"first": not blocked, "alternate": True}
+    expected_targets = [alternate] if blocked else [target, alternate]
+    assert [(action, body.get("x"), body.get("y"), body.get("z")) for action, body in dispatched] == [
+        ("move_to", x + 0.5, y, z + 0.5) for x, y, z in expected_targets
+    ]
+    denials = [event for event in events.events if event["type"] == "guardian.mining_landing_blocked"]
+    if blocked:
+        reason = "mining_footing_unavailable" if unconfirmed else "mining_water_reentry"
+        assert denials and all(event["reason"] == reason and event["water_reentry_site"] == list(wet) for event in denials)
+    else:
+        assert denials == []
+    assert (wet in blocks_read) is (site not in {"another_floor", "new_life", "new_dimension", "missing_death_marker"})
+
+
 @pytest.mark.parametrize("oxygen, reason", [(20, None), (400, None), (20, "drowned"), (400, "hurt")])
 def test_bug009_mining_keeps_wading_until_there_is_a_water_threat(monkeypatch, oxygen, reason):
     import threading
