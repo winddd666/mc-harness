@@ -213,47 +213,35 @@ def _portal_free_landing(bot: Any) -> bool:
 
 def _dry_wild_slot(start_idx: int) -> tuple[int, int]:
     ring, slot_idx = divmod(int(start_idx), len(CANDIDATE_SITES))
-    return slot_idx, max(0, ring) * 2500
+    # The layout spans 22,000 blocks per axis. Leave space for both local search areas
+    # between successive copies of it.
+    return slot_idx, max(0, ring) * 24_000
 
 
 def select_dry_isolated_wild_site(
     bot: Any, bot_name: str, start_idx: int = 0, *, day1: bool = False,
 ) -> tuple[float, float, float, str]:
     """Find a dry, wooded Overworld landing for the configured slot."""
-    from mc_agent.kb import normalize_dimension
-
     slot_idx, ring_shift = _dry_wild_slot(start_idx)
+    x, z = CANDIDATE_SITES[slot_idx]
+    regions = (0,)
     if day1:
         # r41 global fallbacks sent two bots to a shared portal area. Translate the
         # whole slot layout for backups, keeping the same separation in each region.
-        x, z = CANDIDATE_SITES[slot_idx]
-        offsets = ((0, 0), (160, 0), (-160, 0), (0, 160), (0, -160),
-                   (360, 0), (-360, 0), (0, 360), (0, -360))
-        candidates = [
-            (x + region_dx + dx, z + dz)
-            for region_dx in (0, 30_000, -30_000)
-            for dx, dz in offsets
-        ]
+        regions = (0, 30_000, -30_000)
     else:
-        base_order = CANDIDATE_SITES[slot_idx:] + CANDIDATE_SITES[:slot_idx]
-        candidates = [(cx + ring_shift, cz + ring_shift) for cx, cz in base_order]
+        x, z = x + ring_shift, z + ring_shift
+    offsets = ((0, 0), (160, 0), (-160, 0), (0, 160), (0, -160),
+               (360, 0), (-360, 0), (0, 360), (0, -360))
+    candidates = [(x + region + dx, z + dz) for region in regions for dx, dz in offsets]
     for cx, cz in candidates:
-        settled, st = _spread_overworld(bot, bot_name, cx, cz, 32)
-        pos = settled or [cx, 64, cz]
-        if day1:
-            pos = st.get("pos")
-            if (
-                not st.get("dimension")
-                or normalize_dimension(st["dimension"]) != "overworld"
-                or not isinstance(pos, (list, tuple))
-                or len(pos) < 3
-                or math.hypot(float(pos[0]) - cx, float(pos[2]) - cz) > 48.0
-            ):
-                continue
+        _, st = _spread_overworld(bot, bot_name, cx, cz, 32)
+        pos = _dry_overworld_position(st)
+        if pos is None or math.hypot(pos[0] - cx, pos[2] - cz) > 48.0:
+            continue
         biome = str(st.get("biome") or "").lower()
-        in_water = bool(st.get("in_water"))
         # Skip pure ocean spawns so we land on a true terrestrial island/continent
-        if in_water or ("ocean" in biome) or ("river" in biome and float(pos[1]) <= 63.0):
+        if "ocean" in biome or ("river" in biome and pos[1] <= 63.0):
             continue
         # Ensure tree logs exist within 48m so bare-hand bootstrap isn't on a barren sandbar
         fb = bot.call(
@@ -278,10 +266,11 @@ def select_dry_isolated_wild_site(
         if day1 and not _portal_free_landing(bot):
             print(f"[Day 1] {bot_name} skipped portal-unsafe landing near ({cx}, {cz})", flush=True)
             continue
-        return float(pos[0]), float(pos[1]), float(pos[2]), biome
+        print(f"[Scene] {bot_name} dry site slot={start_idx} assigned=({x},{z}) picked=({cx},{cz})", flush=True)
+        return (*pos, biome)
     if day1:
         raise RuntimeError("Could not find a wooded, portal-free Day 1 landing in the assigned regions")
-    raise RuntimeError("Could not find a wooded dry wild spawn site across CANDIDATE_SITES")
+    raise RuntimeError(f"Could not find a wooded dry landing for site slot {start_idx} near ({x},{z})")
 
 
 def select_village_wild_site(
@@ -2465,14 +2454,11 @@ def main() -> int:
         base_url=settings.mc_api_base_url,
         reauth_callback=build_token_refresher(bot_name, token_file, settings),
     ) as bot:
-        starting_site = None
         village_xz = None
         stronghold_xz = None
         try:
-            st = ensure_bot_ready(bot, timeout_s=45.0)
-            if args.day1 or args.stage in PROBE_STAGES:
-                starting_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=args.day1)
-            elif args.stage == DAY2_VILLAGE_STAGE:
+            ensure_bot_ready(bot, timeout_s=45.0)
+            if args.stage == DAY2_VILLAGE_STAGE:
                 starting_site, village_xz = select_day2_village_site(bot, bot_name, args.site_index)
             elif args.stage == STRONGHOLD_STAGE:
                 starting_site, village_xz, stronghold_xz = select_stronghold_village_site(bot, bot_name, args.site_index)
@@ -2480,6 +2466,12 @@ def main() -> int:
                 starting_site = select_nether_structure_site(
                     bot, bot_name, NETHER_STRUCTURES[args.stage], start_idx=args.site_index,
                 )
+            elif args.stage in ("village", "village_trade"):
+                starting_site = select_village_wild_site(bot, bot_name, start_idx=args.site_index)
+            elif args.stage == "deep_water":
+                starting_site = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
+            else:
+                starting_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=args.day1)
         except Exception as exc:
             msg = str(exc) or exc.__class__.__name__
             print(f"[Startup] {bot_name} not ready: {msg}", flush=True)
@@ -2493,18 +2485,7 @@ def main() -> int:
                 error=msg,
             )
             return 0
-        if starting_site is not None:
-            sx, sy, sz, biome = starting_site
-        elif args.stage in ("village", "village_trade"):
-            sx, sy, sz, biome = select_village_wild_site(
-                bot,
-                bot_name,
-                start_idx=args.site_index,
-            )
-        elif args.stage == "deep_water":
-            sx, sy, sz, biome = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
-        else:
-            sx, sy, sz, biome = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index)
+        sx, sy, sz, biome = starting_site
         if args.stage in LOCAL_FIXTURE_STAGES:
             sx, sy, sz = _fixture_position(args.stage, sx, sy, sz)
         dim = scene_dimension(args.stage)
