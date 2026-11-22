@@ -8407,6 +8407,92 @@ def test_nether_fast_fall_during_tool_preemption_waits_for_contact(monkeypatch, 
     assert receipt["pos_at_preemption"] == (airborne if entry == "before_reflex" else rim)
 
 
+@pytest.mark.parametrize("entry", ["poll", "after_combat"])
+@pytest.mark.parametrize("landing", [
+    "lava", "above_lava", "dry", "still_falling", "new_life", "read_failed", "position_missing", "overworld",
+])
+def test_generation_guard_checks_nether_fall_contact_without_another_hit(monkeypatch, entry, landing):
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
+    fall = {"pos": [1856.6, 34.6, 1805.4], "on_ground": False, "velocity": [0, -38, 0]}
+    status = {
+        "pos": [1857, 82, 1804.8], "on_ground": True, "velocity": [0, 0, 0], "dimension": "the_nether",
+        "health": 18.3, "food": 20, "ready": True, "alive": True, "in_water": False, "in_lava": False,
+        "last_death": {"t": 1},
+    }
+    if entry == "poll":
+        status.update(fall)
+    if landing == "overworld":
+        status["dimension"] = "overworld"
+    calls = []
+
+    class FortressBot:
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "status":
+                if landing == "read_failed" and "wait" in calls:
+                    raise httpx.ReadTimeout("temporary status timeout")
+                return dict(status)
+            if endpoint == "events":
+                if entry == "after_combat" and kwargs["params"]["since"] == 0:
+                    return {"events": [{"seq": 1, "type": "hurt", "source": "fireball"}]}
+                return {"events": []}
+            if endpoint == "get_block":
+                lava_y = {"above_lava": 28, "read_failed": 32, "position_missing": 32}.get(landing)
+                return {"name": "lava" if body["pos"][1] == lava_y else "air"}
+            if endpoint == "inventory":
+                return {"items": []}
+            pytest.fail(f"Unexpected API action during Nether fall: {endpoint}")
+
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    if entry == "poll":
+        guard.last_reaction = 999.0
+
+    def wait(seconds):
+        assert seconds == 0.1
+        calls.append("wait")
+        if landing == "lava":
+            status.update(pos=[1856.6, 27.6, 1805.4], in_lava=True)
+        elif landing == "above_lava":
+            status.update(pos=[1856.6, 30.1, 1805.4])
+        elif landing == "dry":
+            status.update(pos=[1856.6, 29, 1805.4], on_ground=True)
+        elif landing == "new_life":
+            status.update(pos=[-135.5, 69, 73.5], dimension="overworld", last_death={"t": 2}, on_ground=True)
+        elif landing == "position_missing":
+            status.pop("pos", None)
+
+    def fight(*_args, **_kwargs):
+        calls.append("combat")
+        status.update(fall)
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    def escape(**_kwargs):
+        calls.append("escape")
+        assert status["in_lava"] or landing == "above_lava"
+        status.update(pos=[1858.5, 30, 1805.5], in_lava=False, on_ground=True)
+        return {"ok": True, "in_lava": False, "pos_after": status["pos"]}
+
+    monkeypatch.setattr("mc_agent.harness.guardian.time.sleep", wait)
+    monkeypatch.setattr(guard, "_defend_or_flee", fight)
+    monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+    incident = guard.poll()
+
+    expected = ["combat"] if entry == "after_combat" else []
+    if landing != "overworld":
+        expected += ["wait", "wait"] if landing in {"above_lava", "still_falling", "position_missing"} else ["wait"]
+    if landing in {"lava", "above_lava"}:
+        assert incident["requires_replan"] and "in_lava" in incident["reasons"]
+        assert incident["actions"][-1]["action"] == "escape_lava"
+        assert incident["status"]["pos"] == [1858.5, 30, 1805.5]
+        expected.append("escape")
+    elif landing == "new_life":
+        assert incident["requires_replan"] and "death_or_connection_changed" in incident["reasons"]
+    elif entry == "poll":
+        assert incident is None
+    else:
+        assert "in_lava" not in incident["reasons"]
+    assert calls == expected
+
+
 @pytest.mark.parametrize("bridge_edge", [False, True])
 def test_r20_lava_rim_hitbox_airborne_and_lava_hurt_trigger_escape_not_bunker(monkeypatch, bridge_edge):
     """Reproduces r20_short ds_ds_4_nether_fortress:

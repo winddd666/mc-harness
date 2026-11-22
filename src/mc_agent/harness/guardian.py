@@ -675,6 +675,38 @@ class GenerationGuard:
             and isinstance(velocity[1], (int, float)) and math.isfinite(velocity[1]) and velocity[1] <= -10.0
         )
 
+    @staticmethod
+    def _same_life(before: dict[str, Any], current: dict[str, Any]) -> bool:
+        return (
+            current.get("ready") is True and current.get("alive") is not False
+            and all(current.get(key) == before.get(key) for key in ("last_death", "dimension"))
+        )
+
+    def _observe_nether_fall(self, status: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Recheck a fast fall for contact or lava immediately below the hitbox."""
+        deadline = time.monotonic() + 0.7
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        try:
+            current = self._settle_dry_landing(status, status, bot, deadline=deadline)
+        except _RecoveryBudgetExceeded:
+            return status, False
+        if current is status or not self._same_life(status, current):
+            return current, False
+        above_lava = False
+        if current.get("on_ground") is False and current.get("pos") and not any(
+            current.get(key) for key in ("in_lava", "in_water", "submerged")
+        ):
+            try:
+                above_lava = CombatEnv(bot)._is_airborne_above_lava(current, start_pos=status["pos"])
+            except _RecoveryBudgetExceeded:
+                pass
+        if current.get("in_lava") or above_lava:
+            self.events.emit(
+                "guardian.nether_fall_lava", pos_before=status["pos"], velocity=status.get("velocity"),
+                pos=current.get("pos"), in_lava=bool(current.get("in_lava")), above_lava=above_lava,
+            )
+        return current, above_lava
+
     def _run_recovery_macro(
         self,
         before: dict[str, Any],
@@ -2000,6 +2032,13 @@ class GenerationGuard:
                     life = (status.get("dimension"), status.get("last_death"))
                     self._pending_spawn_hurts = (life, now + self.SPAWN_HURT_RESUME_S, combat_hurts)
 
+        falling_over_lava = False
+        if not life_transition_pending and self._nether_fast_fall(status):
+            landing, falling_over_lava = self._observe_nether_fall(status)
+            if not self._same_life(status, landing):
+                return self._incident(landing, ["death_or_connection_changed"], [], fresh)
+            status = landing
+
         health = status.get("health")
         ready = bool(status.get("ready", status.get("alive", True)))
         resumed_spawn_hurt = False
@@ -2024,7 +2063,7 @@ class GenerationGuard:
         if raw_in_lava and ready and status.get("alive") is not False and not life_transition_pending:
             self._last_lava_contact_at = now
         hurt_by_lava = any(str(h.get("source") or "").strip().lower() in LAVA_HURT_SOURCES for h in hurts)
-        in_lava = raw_in_lava or (
+        in_lava = raw_in_lava or falling_over_lava or (
             hurt_by_lava and not life_transition_pending and not disconnected and ready and status.get("alive") is not False
         )
         if (
@@ -3375,23 +3414,30 @@ class GenerationGuard:
                 reasons.append("death_or_connection_changed")
             replan = True
         if (
-            not in_lava and post_status.get("in_lava")
-            and post_status.get("ready") is True and post_status.get("alive") is not False
-            and all(post_status.get(key) == status.get(key) for key in ("last_death", "dimension"))
+            not in_lava and self._same_life(status, post_status)
             and any(a["action"] in {"subcortical_combat", "combat_or_flee"} for a in actions)
             and not any(
                 isinstance(a.get("result"), dict) and a["result"].get("mode") == "lava_escape" for a in actions
             )
         ):
-            self._last_lava_contact_at = time.monotonic()
-            self._in_reflex = True
-            try:
-                actions.append(self._action("escape_lava", self.combat_env.escape_lava))
-                post_status = self.combat_env._safe_status(post_status)
-            finally:
-                self._in_reflex = False
-            reasons.append("in_lava")
-            replan = True
+            falling_over_lava = False
+            if self._nether_fast_fall(post_status):
+                post_status, falling_over_lava = self._observe_nether_fall(post_status)
+            if not self._same_life(status, post_status):
+                if "death_or_connection_changed" not in reasons:
+                    reasons.append("death_or_connection_changed")
+                replan = True
+            elif post_status.get("in_lava") or falling_over_lava:
+                if post_status.get("in_lava"):
+                    self._last_lava_contact_at = time.monotonic()
+                self._in_reflex = True
+                try:
+                    actions.append(self._action("escape_lava", self.combat_env.escape_lava))
+                    post_status = self.combat_env._safe_status(post_status)
+                finally:
+                    self._in_reflex = False
+                reasons.append("in_lava")
+                replan = True
         post_events_verified = False
         if actions:
             try:
