@@ -11664,13 +11664,15 @@ def test_magma_interrupts_active_tool_before_the_boundary(tool, endpoint, interr
     ("no_solid_wall", False),
     ("cover_not_entered", False),
 ])
-def test_arrow_poll_without_a_diggable_pocket_checks_natural_cover_before_flee(monkeypatch, pocket, covered):
+@pytest.mark.parametrize("hurt_source", ["arrow", "trident"])
+def test_projectile_poll_without_a_diggable_pocket_checks_cover_before_flee(monkeypatch, pocket, covered, hurt_source):
     from mc_agent.skills.combat_env import CombatEnv
 
-    shooter = {"id": 41, "name": "skeleton", "dist": 2.0}
-    live_shooter = {**shooter, "pos": [0.5, 69, 2.5]}
+    trident = hurt_source == "trident"
+    shooter = {"id": 41, "name": "drowned" if trident else "skeleton", "dist": 8.0 if trident else 2.0}
+    live_shooter = {**shooter, "pos": [0.5, 69, 0.5 + shooter["dist"]]}
     status = {
-        "pos": [0.5, 69, 0.5], "dimension": "overworld", "health": 16.0, "food": 20,
+        "pos": [0.5, 69, 0.5], "dimension": "overworld", "health": 7.17 if trident else 16.0, "food": 20,
         "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
     }
     checks = []
@@ -11680,7 +11682,7 @@ def test_arrow_poll_without_a_diggable_pocket_checks_natural_cover_before_flee(m
             if action == "status":
                 return dict(status)
             if action == "events":
-                hurt = {"seq": 1, "type": "hurt", "source": "arrow", "source_entity": shooter}
+                hurt = {"seq": 1, "type": "hurt", "source": hurt_source, "source_entity": shooter}
                 return {"events": [] if kwargs["params"]["since"] else [hurt], "last_seq": 1}
             if action == "inventory":
                 return {"items": [{"name": "stone_pickaxe", "count": 1}]}
@@ -11696,7 +11698,7 @@ def test_arrow_poll_without_a_diggable_pocket_checks_natural_cover_before_flee(m
         checks.append("natural_cover")
         assert pos == live_shooter["pos"]
         assert other_shooters == []
-        assert allow_stationary is False
+        assert allow_stationary is (pocket == "cover_not_entered")
         if covered:
             return {"ok": True, "mode": "natural_cover", "pos_after": [2.7, 69, 0.5]}
         return None
@@ -11712,7 +11714,7 @@ def test_arrow_poll_without_a_diggable_pocket_checks_natural_cover_before_flee(m
     incident = guard.poll()
 
     expected = ["dig"]
-    if pocket in {"no_filler_block", "no_solid_wall"}:
+    if trident or pocket in {"no_filler_block", "no_solid_wall"}:
         expected.append("natural_cover")
     if not covered:
         expected.append("flee")

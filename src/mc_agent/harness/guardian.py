@@ -2223,6 +2223,12 @@ class GenerationGuard:
                                 attacker=attacker if isinstance(attacker, dict) else status.get("nearest_hostile"),
                             )
                     att_name_r = str((att_obj or {}).get("name") or nh_name or "").removeprefix("minecraft:").strip().lower()
+                    trident_attacker_id = None
+                    if hurt_src == "trident":
+                        if att_name_r == "drowned" and isinstance(att_id_r, int):
+                            trident_attacker_id = att_id_r
+                        elif nh_name == "drowned" and isinstance(nh_id, int):
+                            trident_attacker_id = nh_id
                     fresh_blast = hurt_src in {"fireball", "small_fireball", "wither_skull"}
                     skip_cover_for_blast = fresh_blast or att_name_r in {"blaze", "ghast"} or bool(status.get("on_fire"))
                     close_unshielded_shooter = (
@@ -2279,7 +2285,7 @@ class GenerationGuard:
                         and hp_val > 10.0
                         and ranged_hurt_only
                     )
-                    surface_arrow_cover = (
+                    surface_projectile_cover = (
                         not skip_cover_for_blast and status.get("on_ground") is True
                         and str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                     )
@@ -2287,7 +2293,7 @@ class GenerationGuard:
                         already_blocking and ranged_hurt_only and now - self._last_dig_cover_fail_at < 15.0
                     )
                     seek_cover_after_failed_dig = (
-                        recent_cover_fail and surface_arrow_cover and hurt_src == "arrow" and 0 < hp_val <= 10.0
+                        recent_cover_fail and surface_projectile_cover and hurt_src == "arrow" and 0 < hp_val <= 10.0
                     )
                     cover: dict[str, Any] | None = None
                     if (
@@ -2321,16 +2327,19 @@ class GenerationGuard:
                                 attacker=attacker if isinstance(attacker, dict) else None,
                             )
                         critical_shielded_arrows = (
-                            surface_arrow_cover and ranged_hurt_only and already_blocking
+                            surface_projectile_cover and ranged_hurt_only and already_blocking
                             and hurt_src == "arrow" and 4.0 < hp_val <= 6.0
                         )
                         shielded_cover = (
                             sustained_shield_damage or seek_cover_after_failed_dig or critical_shielded_arrows
-                            or (surface_arrow_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0)
+                            or (surface_projectile_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0)
                         )
                         unshielded_cover = not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX
+                        trident_cover = (
+                            surface_projectile_cover and trident_attacker_id is not None and 0 < hp_val <= LOW_HP_BUNKER_MAX
+                        )
                         pocket_unavailable = (
-                            surface_arrow_cover and not has_shield and (ranged_hurt_only or nh_name in RANGED_MOBS)
+                            surface_projectile_cover and not has_shield and (ranged_hurt_only or nh_name in RANGED_MOBS)
                             and ((cover or {}).get("result") or {}).get("reason") in NO_DIG_COVER_REASONS
                         )
                         if not pocket_unavailable and not has_shield and not att_pos_r and isinstance(att_id_r, int):
@@ -2341,11 +2350,12 @@ class GenerationGuard:
                             "combat_or_flee",
                             lambda: self._defend_or_flee(
                                 status, attacker, counts, ranged=True,
-                                prefer_cover=unshielded_cover or shielded_cover or pocket_unavailable,
+                                prefer_cover=unshielded_cover or shielded_cover or pocket_unavailable or trident_cover,
                                 allow_stationary_cover=not (
                                     fresh_blast or pocket_unavailable or sustained_shield_damage
                                     or seek_cover_after_failed_dig or critical_shielded_arrows
                                 ),
+                                **({"trident_attacker_id": trident_attacker_id} if trident_cover else {}),
                             ),
                         )
                         actions.append(cf)
@@ -2355,12 +2365,6 @@ class GenerationGuard:
                             self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                         if cf_mode == "flee":
                             self._consecutive_flees += 1
-                            trident_attacker_id = None
-                            if hurt_src == "trident":
-                                if att_name_r == "drowned" and isinstance(att_id_r, int):
-                                    trident_attacker_id = att_id_r
-                                elif nh_name == "drowned" and isinstance(nh_id, int):
-                                    trident_attacker_id = nh_id
                             if (
                                 cf.get("ok") and not cf_result.get("respawned")
                                 and (not has_shield or recent_cover_fail)
