@@ -4866,18 +4866,23 @@ class GenerationGuard:
 
         def verify_mining_approach(target: list[float]) -> None:
             nonlocal mining_landing_error, mining_landing_retry_at, mining_support_changed
+            xz = target[0], target[2]
+            wet_site = self._mining_water_reentry_site
             cached_denial = mining_landing_error
             if (
-                cached_denial is None or cached_denial.code != "unsafe_landing" or cached_denial.context["target"] != target
-                or cached_denial.context.get("collar_approach")
+                cached_denial is None or cached_denial.code != "unsafe_landing"
+                or cached_denial.context.get("collar_approach") or xz in blocked_collar_approaches
                 or mining_support_changed or time.monotonic() >= mining_landing_retry_at
+                or (wet_site is not None and tuple(map(math.floor, target)) == wet_site[0])
+                or footing_blocks(cached_denial.context["target"]) != footing_blocks(target)
             ):
                 cached_denial = None
             mining_support_changed = False
             try:
                 if cached_denial is not None:
-                    raise _MiningLandingDenied(cached_denial.code, cached_denial.message, context=cached_denial.context)
-                xz = target[0], target[2]
+                    raise _MiningLandingDenied(
+                        cached_denial.code, cached_denial.message, context={**cached_denial.context, "target": target},
+                    )
                 if xz in blocked_collar_approaches:
                     self._verify_mining_collar_approach(target)
                     blocked_collar_approaches.discard(xz)

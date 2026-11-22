@@ -14597,6 +14597,81 @@ def test_dfs_rechecks_a_rejected_waypoint_only_when_the_observation_can_change(m
     assert len(reuses) == (0 if terrain == "unavailable" else 2)
 
 
+@pytest.mark.parametrize("retry", ["same_footing", "different_footprint", "different_layer", "repaired", "expired", "wet"])
+def test_dfs_reuses_an_unsafe_landing_only_for_the_observed_support_blocks(monkeypatch, retry):
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    missing = [431712, 43 if retry == "wet" else 42, 384306]
+    x, z = 431712.9, 384306.9
+    target = [x, 43.96 if retry == "wet" else 43.1, z]
+    probes = []
+    moves = []
+    repaired = False
+
+    class MineBot:
+        def call(self, action, body=None, **kwargs):
+            nonlocal repaired
+            if action == "status":
+                return {"ready": True, "alive": True, "dimension": "overworld", "last_death": {"t": 1}}
+            if action == "get_block":
+                pos = body["pos"]
+                probes.append(pos)
+                if retry == "wet" and pos == [431712, 44, 384306]:
+                    return {"name": "water"}
+                return {"name": "air" if pos == missing and not repaired else "stone"}
+            if action == "place":
+                assert body["pos"] == missing
+                repaired = True
+            if action == "move_to":
+                moves.append([body[axis] for axis in ("x", "y", "z")])
+            return {"ok": True}
+
+    bot = MineBot()
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+    if retry == "wet":
+        guard._mining_water_reentry_site = ((431712, 44, 384306), ("overworld", {"t": 1}))
+
+    def move(pos):
+        return bot.call("move_to", dict(zip(("x", "y", "z"), pos), range=0.35))
+
+    def invoke():
+        nonlocal repaired
+        with pytest.raises(ApiError) as denied:
+            move(target)
+        assert denied.value.code == "unsafe_landing"
+        clock[0] += 0.5
+        if retry == "same_footing":
+            with pytest.raises(ApiError) as denied_same:
+                move([x, 43.2, z])
+            assert denied_same.value.context["target"] == [x, 43.2, z]
+            clock[0] += 0.5
+            return json.dumps(move([x, 43.3, z]))
+        if retry == "repaired":
+            bot.call("place", {"pos": missing, "item": "cobblestone"})
+        elif retry == "expired":
+            clock[0] += 1.51
+            repaired = True
+        destination = {
+            "different_footprint": [431713.5, 43.2, z],
+            "different_layer": [x, 44.1, z],
+            "wet": [x, 44.0, z],
+        }.get(retry, [x, 43.3, z])
+        return json.dumps(move(destination))
+
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", invoke))
+    blocked = [event for event in events.events if event["type"] == "guardian.mining_landing_blocked"]
+    if retry == "same_footing":
+        assert result["error"]["target"] == [x, 43.3, z] and not moves
+        assert [event.get("probe_reused", False) for event in blocked] == [False, True, True]
+        assert probes == [missing]
+    elif retry == "wet":
+        assert result["error"]["code"] == "mining_water_reentry" and not moves
+        assert probes == [missing, [431712, 44, 384306]]
+    else:
+        assert result["ok"] and len(moves) == 1 and len(probes) > 1
+
+
 @pytest.mark.parametrize("terrain", ["cliff", "lava", "flat", "wall", "read_timeout", "repaired", "falling"])
 def test_dfs_checks_collar_relocation_before_dispatch_and_before_retrying_exactly(terrain):
     origin = [354983.4, 50, 367623.5]
