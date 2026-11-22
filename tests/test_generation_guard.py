@@ -2573,6 +2573,86 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
 
 
 @pytest.mark.parametrize("followup", [
+    "stable", "shifted_target", "other_hostile", "closer", "gear_changed", "dropped_health",
+    "first_scan_missing", "status_missing", "hurt_after_retreat", "target_shift_during_verification",
+])
+def test_stationary_zombie_warning_at_rounded_boundary_needs_two_matching_live_samples(monkeypatch, followup):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    zombie = {"id": 899686, "name": "zombie", "dist": 2.5, "pos": [328073, 71, 333228.5]}
+    status = {
+        "pos": [328070.5, 71, 333228.5], "dimension": "overworld", "last_death": {"t": 1}, "health": 20, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "in_water": False, "in_lava": False, "on_fire": False,
+        "submerged": False, "blocking": False, "sneaking": False, "held": None, "offhand": None,
+        "armor_points": 0, "effects": [], "busy": None, "held_controls": None, "yaw": -2.36,
+        "nearest_hostile": zombie,
+    }
+    hits = []
+    nearby = [zombie]
+    events = []
+    attempts = []
+
+    class AnchorBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                if len(attempts) == 3 and followup == "target_shift_during_verification":
+                    status["nearest_hostile"] = {**zombie, "pos": [328070.5, 71, 333230.8]}
+                return {"entities": nearby}
+            return {"ok": True}
+
+    guard = GenerationGuard(AnchorBot(), EventSink(events.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def combat(_trigger):
+        attempts.append(clock[0])
+        if len(attempts) == 3 and followup == "hurt_after_retreat":
+            status["health"] = 19
+            hits.append({"seq": 1, "type": "hurt", "source": "mob_attack"})
+        return {
+            "mode": "cover_or_flee", "status_after": dict(status),
+            "actions": [{"action": "flee", "ok": False, "reason": "no_safe_retreat", "moved": 0.0}],
+        }
+
+    monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
+    assert guard.poll()["requires_replan"] is True
+    clock[0] += 15.1
+    zombie.update(dist=2.3, pos=[328072.8, 71, 333228.5])
+    if followup == "first_scan_missing":
+        nearby.clear()
+    assert guard.poll()["requires_replan"] is True
+    nearby[:] = [zombie]
+
+    clock[0] += 15.1
+    if followup == "shifted_target":
+        zombie["pos"] = [328070.5, 71, 333230.8]
+    elif followup == "other_hostile":
+        nearby.append({"id": 11, "name": "skeleton", "dist": 4, "pos": [328066.5, 71, 333228.5]})
+    elif followup == "closer":
+        zombie.update(dist=2.2, pos=[328072.7, 71, 333228.5])
+    elif followup == "gear_changed":
+        status["held"] = {"name": "wooden_axe"}
+    elif followup == "dropped_health":
+        status["health"] = 19
+        guard.previous_health = 19  # The last observation already saw the lower health.
+    elif followup == "status_missing":
+        status.pop("effects")
+
+    incident = guard.poll()
+    assert len(attempts) == 3
+    assert incident["requires_replan"] is (followup != "stable")
+    if followup == "stable":
+        assert "同一近敌仍在" in incident["note"]
+        matches = [event for event in events if event["type"] == "guardian.stationary_melee_verified"]
+        assert len(matches) == 1 and matches[0]["entity_id"] == zombie["id"]
+
+
+@pytest.mark.parametrize("followup", [
     "unchanged", "closer", "new_target", "other_hostile", "scan_closer", "moved", "hurt", "status_timeout", "read_gap", "scan_gap",
     "equal_range_shift", "shift_during_hold", "shift_during_timeout", "coordinate_missing", "gear_missing",
     "dry_flag_missing", "life_sample_missing",

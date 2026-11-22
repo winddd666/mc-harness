@@ -15,6 +15,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy, deepcopy
+from dataclasses import dataclass, replace
 import json
 import math
 import threading
@@ -183,6 +184,16 @@ class _MiningLandingDenied(ApiError):
 
 class _UnsafeFoodUse(BaseException):
     """Unwind ordinary food use while the bot is exposed to a hazard."""
+
+
+@dataclass(frozen=True)
+class _StationaryWarning:
+    entity_id: int
+    pos: tuple[float, ...]
+    distance: float
+    observed_at: float
+    life: tuple[Any, Any]
+    close_melee_observation: tuple[tuple[float, ...], tuple[Any, ...]] | None = None
 
 
 class _GuardSession:
@@ -376,7 +387,7 @@ class GenerationGuard:
         self._pre_hurt_suppress_block: tuple[int, int, int] | None = None
         self._pre_hurt_suppress_until: float = float("-inf")
         self._pre_hurt_target_cooldown: dict[str, float] = {}
-        self._stationary_warnings: dict[str, tuple[int, tuple[float, ...], float, float, tuple[Any, Any]]] = {}
+        self._stationary_warnings: dict[str, _StationaryWarning] = {}
         self._stationary_melee_dig_timeout: tuple[float, dict[str, Any], list[float], float | None] | None = None
         self._last_stalled_lava: tuple[tuple[float, ...], tuple[Any, ...], float] | None = None
         self._ranged_combat_stance_until: float = float("-inf")
@@ -3682,6 +3693,52 @@ class GenerationGuard:
             and start and end and math.dist(start[:3], end[:3]) <= 0.2
         )
 
+    def _observe_stationary_zombie(
+        self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any],
+    ) -> tuple[tuple[float, ...], tuple[Any, ...]] | None:
+        """Check a rounded 2.3-metre warning against live coordinates and unchanged bot state."""
+        state_keys = (
+            "pos", "dimension", "last_death", "health", "food", "held", "offhand", "armor_points", "effects",
+            "blocking", "sneaking", "yaw", "busy", "held_controls", "ready", "alive", "on_ground",
+            "in_water", "in_lava", "submerged", "on_fire",
+        )
+        health = after.get("health")
+        if (
+            not isinstance(health, (int, float)) or not math.isfinite(health) or health < 16.0
+            or any(k not in before or k not in after or before[k] != after[k] for k in state_keys)
+            or after.get("held_controls") or after.get("submerged") is not False
+            or after.get("in_water") is not False or after.get("in_lava") is not False or after.get("on_fire") is not False
+        ):
+            return None
+        try:
+            entities = self.bot.call(
+                "get_entities", {"radius": 8, "types": ["hostile"]}, timeout_s=0.35, allow_reauth=False,
+            ).get("entities")
+            if not isinstance(entities, list) or len(entities) != 1:
+                return None
+            target = entities[0]
+            name, distance, entity_id, point = self._extract_hostile_info({"nearest_hostile": target})
+            first_point = trigger.get("primary_pos")
+            if (
+                name != "zombie" or entity_id != trigger.get("primary_entity_id") or distance != 2.3
+                or target.get("alive") is False or target.get("blocked_by_wall")
+                or not self._same_observed_melee_position(point, first_point)
+                or tuple(point[:3]) != tuple(first_point[:3]) or round(math.dist(after["pos"][:3], point[:3]), 6) < 2.3
+            ):
+                return None
+            current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+        except (ApiError, httpx.HTTPError):
+            return None
+        nearest = current.get("nearest_hostile")
+        current_name, current_distance, current_id, current_point = self._extract_hostile_info(current)
+        if (
+            not isinstance(nearest, dict) or (current_name, current_distance, current_id) != ("zombie", 2.3, entity_id)
+            or (current_point is not None and current_point[:3] != point[:3])
+            or nearest.get("blocked_by_wall") or any(k not in current or current[k] != after[k] for k in state_keys)
+        ):
+            return None
+        return tuple(point[:3]), deepcopy(tuple(after[k] for k in state_keys))
+
     def _repeat_stationary_retreat_warning(
         self, trigger: ThreatTrigger, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],
     ) -> bool:
@@ -3728,16 +3785,31 @@ class GenerationGuard:
         previous = self._stationary_warnings.get(source)
         now = time.monotonic()
         life = (after.get("dimension"), after.get("last_death"))
+        close_melee_observation = None
+        if melee_warning and name == "zombie" and closest == warning_distance == 2.3:
+            close_melee_observation = self._observe_stationary_zombie(trigger, before, after)
         if (
-            previous is not None and previous[0] == entity_id and now - previous[3] < 45.0
-            and previous[4] == life and math.dist(pos_after[:3], previous[1]) <= 0.25
-            and closest > 2.3 and distance >= previous[2] - 0.25
+            previous is not None and previous.entity_id == entity_id and now - previous.observed_at < 45.0
+            and previous.life == life and math.dist(pos_after[:3], previous.pos) <= 0.25
         ):
-            if melee_warning:
+            same_close_melee = (
+                close_melee_observation is not None and previous.close_melee_observation == close_melee_observation
+            )
+            if same_close_melee:
+                self.events.emit(
+                    "guardian.stationary_melee_verified", entity_id=entity_id, pos=pos_after,
+                    target_pos=close_melee_observation[0], distance=closest,
+                )
+            if same_close_melee or (closest > 2.3 and distance >= previous.distance - 0.25):
                 # Refresh the observation while comparing position and distance to the initial warning.
-                self._stationary_warnings[source] = (previous[0], previous[1], previous[2], now, life)
-            return True
-        self._stationary_warnings[source] = (entity_id, tuple(pos_after[:3]), distance, now, life)
+                if melee_warning:
+                    self._stationary_warnings[source] = replace(
+                        previous, observed_at=now, close_melee_observation=close_melee_observation,
+                    )
+                return True
+        self._stationary_warnings[source] = _StationaryWarning(
+            entity_id, tuple(pos_after[:3]), distance, now, life, close_melee_observation,
+        )
         return False
 
     # ---- Layer 2: Active Macro-Tool & `pre_ensure` Preemption ----
@@ -6149,7 +6221,14 @@ class GenerationGuard:
         elif "pre_hurt_creeper" in reasons:
             note = "已复查苦力怕威胁，继续当前生成。"
         elif "pre_hurt_melee" in reasons:
-            note = "近战威胁已清除，复查无新险情，继续当前生成。"
+            still_present = any(
+                isinstance(action.get("result"), dict) and action["result"].get("mode") == "cover_or_flee"
+                for action in actions
+            )
+            note = (
+                "同一近敌仍在，站位与风险复查无变化，继续当前生成。"
+                if still_present else "近战威胁已清除，复查无新险情，继续当前生成。"
+            )
         elif "in_lava" in reasons:
             note = "仍在原处尝试脱离岩浆，未观察到新伤害，继续当前生成。"
         elif "hot_floor" in reasons:
