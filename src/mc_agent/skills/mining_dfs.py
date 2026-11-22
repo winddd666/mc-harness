@@ -2449,14 +2449,21 @@ class MiningDFSEngine:
             self.ever_seen_radar_ores.add(pt)
             found_pts.append(pt)
 
-        if self.strategy in {"radar", "v5"} and abs(anchor[1] - self.target_y) <= 8 and found_pts:
-            in_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 8]
-            if in_band:
-                found_pts = in_band
-            else:
-                near_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 16]
-                if near_band:
-                    found_pts = near_band
+        if self.strategy in {"radar", "v5"} and found_pts:
+            # Never lock onto bedrock-embedded ores (Overworld bedrock spans Y=-64..-60);
+            # diving into Y<=-60 triggers repeated `shaft_exhausted` stalls.
+            if self.target_y < 0:
+                above_bedrock = [p for p in found_pts if p[1] >= -59]
+                if above_bedrock:
+                    found_pts = above_bedrock
+            if abs(anchor[1] - self.target_y) <= 8:
+                in_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 8]
+                if in_band:
+                    found_pts = in_band
+                else:
+                    near_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 16]
+                    if near_band:
+                        found_pts = near_band
 
         if not self.surgical_enabled:
             # 'v5' mode: original v4 nearest single-point radar ordering (no hostile cluster triage)
