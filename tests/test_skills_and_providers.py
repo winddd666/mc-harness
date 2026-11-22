@@ -2888,6 +2888,51 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
     assert operations[-1] == {"op": "take", "from": "output", "count": 2}
 
 
+@pytest.mark.parametrize("code", ["no_window", "missing_item"])
+def test_skill_smelt_tries_a_second_nearby_furnace_only_after_open_failure(code) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    near = [-5284, 42, -7713]
+    alternate = [-5284, 43, -7713]
+    far = [-5284, 49, -7713]
+    actions = []
+
+    def handler(request):
+        operation = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if operation == "act":
+            actions.append(body)
+            if body["target"]["pos"] == near:
+                return httpx.Response(200, json={
+                    "ok": False, "error": {"code": code, "message": "furnace action failed"},
+                })
+        if operation == "view":
+            assert body["target"]["pos"] == alternate
+        responses = {
+            "inventory": {"items": [{"name": "cobblestone", "count": 12}, {"name": "coal", "count": 2}]},
+            "find_blocks": {"blocks": [
+                {"pos": far, "dist": 9.1}, {"pos": alternate, "dist": 3.1}, {"pos": near, "dist": 2.2},
+            ]},
+            "status": {"pos": [-5283.5, 40, -7712.3], "health": 20, "food": 20},
+            "act": {},
+            "view": {"sections": {"output": [{"name": "stone", "count": 12}]}},
+        }
+        return httpx.Response(200, json={"ok": True, "result": responses[operation]})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_smelt("cobblestone", count=12, fuel_item="coal"))
+
+    if code == "no_window":
+        assert [action["target"]["pos"] for action in actions] == [near, alternate, alternate]
+        assert actions[0]["ops"] == actions[1]["ops"]
+        assert actions[2]["ops"] == [{"op": "take", "from": "output", "count": 12}]
+        assert result["ok"] is True
+        assert result["furnace_pos"] == alternate
+    else:
+        assert [action["target"]["pos"] for action in actions] == [near]
+        assert result["error"]["code"] == code
+
+
 def test_skill_smelt_stops_pending_furnace_view_after_timeout(monkeypatch) -> None:
     from mc_agent.harness.mc_tools import McToolset
 

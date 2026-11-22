@@ -5195,16 +5195,27 @@ class MacroSkills:
 
         collected: list[dict[str, Any]] = []
         session.progress.update(furnace_pos=furnace_pos, input=input_item, requested_count=smelt_n, collected=collected)
-        self.bot.call(
-            "window/act",
-            {
-                "target": target,
-                "ops": [
-                    {"op": "put", "item": input_item, "count": smelt_n, "to": "input"},
-                    {"op": "put", "item": chosen_fuel, "count": fuel_count, "to": "fuel"},
-                ],
-            },
-        )
+        load_ops = [
+            {"op": "put", "item": input_item, "count": smelt_n, "to": "input"},
+            {"op": "put", "item": chosen_fuel, "count": fuel_count, "to": "fuel"},
+        ]
+        try:
+            self.bot.call("window/act", {"target": target, "ops": load_ops})
+        except ApiError as exc:
+            if exc.code != "no_window":
+                raise
+            # An explicit open failure occurs before any inventory operations.
+            alternate = min(
+                (row for row in furnaces if row.get("pos") and row["pos"] != furnace_pos),
+                key=lambda row: float(row.get("dist", 99)),
+                default=None,
+            )
+            if alternate is None or float(alternate.get("dist", 99)) > 4.0:
+                raise
+            furnace_pos = alternate["pos"]
+            target = {"pos": furnace_pos}
+            session.progress["furnace_pos"] = furnace_pos
+            self.bot.call("window/act", {"target": target, "ops": load_ops})
 
         session.progress["fuel"] = {"item": chosen_fuel, "count": fuel_count}
         # Reserve time to reopen the furnace and take confirmed output.
