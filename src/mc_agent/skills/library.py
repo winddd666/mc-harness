@@ -4884,7 +4884,7 @@ class MacroSkills:
         jobs = mem.get_conversion_jobs(dim=norm_dim)
         if not raw_positions:
             raw_positions = [[int(v) for v in j["pos"][:3]] for j in jobs]
-        for pos in raw_positions:
+        for pos in {tuple(p): p for p in raw_positions}.values():
             job = next(
                 (
                     j
@@ -4982,18 +4982,11 @@ class MacroSkills:
                     "got": got,
                 })
                 continue
-            taken: dict[str, int] = {}
-            for step in res.get("done") or []:
-                if isinstance(step, dict) and isinstance(step.get("took"), dict) and step["took"]:
-                    _merge_counts(taken, {k: int(v) for k, v in step["took"].items()})
+            taken = self._furnace_take_receipt(res, got)
             if not taken:
-                # some servers report the take without a `took` map; fall back to the planned amounts
-                taken = dict(got)
-            if job is not None:
-                mem.complete_conversion_job(
-                    job.get("id"),
-                    collected=sum(int(v) for k, v in taken.items() if not str(k).startswith("_")),
-                )
+                failures.append({"pos": pos, "error": "no_output_taken", "job_id": (job or {}).get("id")})
+                continue
+            self._settle_furnace_output(pos, norm_dim, taken)
             collected.append({"pos": pos, "took": taken, "job_id": (job or {}).get("id")})
 
         return {
@@ -5003,6 +4996,99 @@ class MacroSkills:
             "in_conversion_counts": mem.get_in_conversion_counts(),
             "jobs_remaining": len(mem.get_conversion_jobs(dim=norm_dim)),
         }
+
+    @staticmethod
+    def _furnace_take_receipt(result: dict[str, Any], preview: dict[str, int]) -> dict[str, int]:
+        done = result.get("done")
+        receipts = [
+            step["took"] for step in done
+            if isinstance(step, dict) and isinstance(step.get("took"), dict)
+        ] if isinstance(done, list) else []
+        if not receipts:
+            return preview  # Older servers acknowledge the take without itemized receipts.
+        taken: dict[str, int] = {}
+        for receipt in receipts:
+            _merge_counts(taken, {_clean_block(name): int(n) for name, n in receipt.items()})
+        return taken
+
+    def _settle_furnace_output(self, pos: list[int], dim: str, taken: dict[str, int]) -> None:
+        mem = self._get_world_memory()
+        unbooked = dict(taken)
+        for job in mem.get_conversion_jobs(dim=dim):
+            if job["pos"] != pos:
+                continue
+            item = job["output_item"]
+            credited = min(job["remaining"], unbooked.get(item, 0))
+            if credited > 0:
+                mem.complete_conversion_job(job["id"], collected=credited)
+                unbooked[item] -= credited
+
+    def collect_nearby_smelt_output(self, max_duration_s: float) -> dict[str, Any] | None:
+        """Recover a tracked synchronous batch without walking or changing its input/fuel."""
+        jobs = [j for j in self._get_world_memory().get_conversion_jobs() if j["kind"] == "sync_furnace"]
+        if not jobs or max_duration_s < 3.0:
+            return None
+
+        session = _SkillBudgetSession(self.bot, max_duration_s)
+        try:
+            status = session.call("status", method="GET", timeout_s=1.0)
+            origin = status.get("pos")
+            if not origin:
+                return None
+            dim = normalize_dimension(status.get("dimension"))
+            furnace_origin = [n - 0.5 for n in origin[:3]]
+            job = min(
+                (j for j in jobs if j["dim"] == dim),
+                key=lambda j: math.dist(furnace_origin, j["pos"]),
+                default=None,
+            )
+            if job is None or math.dist(furnace_origin, job["pos"]) > 3.0:
+                return None
+            pos = job["pos"]
+            item = job["output_item"]
+            target = {"pos": pos}
+            view = session.call("window/view", {"target": target})
+            output = (view.get("sections") or {}).get("output") or []
+            count = sum(int(row.get("count") or 0) for row in output if _clean_block(row.get("name")) == item)
+            if count <= 0 or not _can_fit_item_in_inventory(
+                session.inventory(), item, count, check_craft_inputs=False
+            ):
+                return None
+            result = session.call("window/act", {
+                "target": target, "ops": [{"op": "take", "from": "output", "item": item, "count": count}],
+            })
+        except (_SkillDeadline, httpx.TimeoutException):
+            session.stop_pending()
+            return None
+        except (ApiError, httpx.HTTPError) as err:
+            if isinstance(err, ApiError) and err.code in ("hurt", "death", "interrupted"):
+                raise
+            return None
+
+        taken = self._furnace_take_receipt(result, {item: count})
+        if not taken:
+            return None
+        self._settle_furnace_output(pos, dim, taken)
+        return {"pos": pos, "took": taken}
+
+    def _record_sync_furnace_load(
+        self, pos: list[int] | None, dim: str | None, item: str, result: dict[str, Any], fallback_count: int
+    ) -> None:
+        item = _clean_block(item)
+        output = SMELT_OUTPUTS.get(item)
+        if pos is None or dim is None or output is None:
+            return
+        done = result.get("done")
+        receipts = [
+            int(op["count"]) for op in done
+            if isinstance(op, dict) and op.get("to") == "input"
+            and _clean_block(op.get("put")) == item and op.get("count") is not None
+        ] if isinstance(done, list) else []
+        loaded = sum(receipts) if receipts else fallback_count
+        if loaded > 0:
+            self._get_world_memory().register_conversion_job(
+                pos=pos, input_item=item, output_item=output, count=loaded, dim=dim, kind="sync_furnace",
+            )
 
     def smelt_items(
         self,
@@ -5015,6 +5101,7 @@ class MacroSkills:
         session = _SkillBudgetSession(self.bot, wait_timeout_s)
         scoped = copy(self)
         scoped.bot = session
+        scoped.world_memory = self._get_world_memory()
         try:
             return scoped._smelt_items(input_item, count, fuel_item, session)
         except (_SkillDeadline, httpx.TimeoutException):
@@ -5036,7 +5123,7 @@ class MacroSkills:
             "ok": False,
             "error": "partial_smelt",
             "requires_replan": True,
-            "message": "只取出了已确认完成的产物。请用 mc_window_view 查看炉内剩余原料，后续用 mc_window_act 取出成品。",
+            "message": "只取出了已确认完成的产物。剩余批次可后续用 mc_window_view 核实并通过 mc_window_act 取出成品。",
         }
 
     def _smelt_items(
@@ -5161,22 +5248,32 @@ class MacroSkills:
             {"op": "put", "item": chosen_fuel, "count": fuel_count, "to": "fuel"},
         ]
         try:
-            self.bot.call("window/act", {"target": target, "ops": load_ops})
+            dim = normalize_dimension(self.bot.status().get("dimension"))
+        except ApiError:
+            dim = None
+        try:
+            try:
+                load_result = self.bot.call("window/act", {"target": target, "ops": load_ops})
+            except ApiError as exc:
+                if exc.code != "no_window":
+                    raise
+                # An explicit open failure occurs before any inventory operations.
+                alternate = min(
+                    (row for row in furnaces if row.get("pos") and row["pos"] != furnace_pos),
+                    key=lambda row: float(row.get("dist", 99)),
+                    default=None,
+                )
+                if alternate is None or float(alternate.get("dist", 99)) > 4.0:
+                    raise
+                furnace_pos = alternate["pos"]
+                target = {"pos": furnace_pos}
+                session.progress["furnace_pos"] = furnace_pos
+                load_result = self.bot.call("window/act", {"target": target, "ops": load_ops})
         except ApiError as exc:
-            if exc.code != "no_window":
-                raise
-            # An explicit open failure occurs before any inventory operations.
-            alternate = min(
-                (row for row in furnaces if row.get("pos") and row["pos"] != furnace_pos),
-                key=lambda row: float(row.get("dist", 99)),
-                default=None,
-            )
-            if alternate is None or float(alternate.get("dist", 99)) > 4.0:
-                raise
-            furnace_pos = alternate["pos"]
-            target = {"pos": furnace_pos}
-            session.progress["furnace_pos"] = furnace_pos
-            self.bot.call("window/act", {"target": target, "ops": load_ops})
+            # Fuel placement can fail after the input transfer already committed.
+            self._record_sync_furnace_load(furnace_pos, dim, input_item, exc.context, 0)
+            raise
+        self._record_sync_furnace_load(furnace_pos, dim, input_item, load_result, smelt_n)
 
         session.progress["fuel"] = {"item": chosen_fuel, "count": fuel_count}
         # Reserve time to reopen the furnace and take confirmed output.
@@ -5227,15 +5324,19 @@ class MacroSkills:
                     }
         for out_item in outputs_to_take:
             cnt = int(out_item.get("count") or 0)
-            self.bot.call(
+            result = self.bot.call(
                 "window/act",
                 {"target": target, "ops": [{"op": "take", "from": "output", "count": cnt}]},
             )
-            collected.append({"name": out_item.get("name"), "count": cnt})
+            taken = self._furnace_take_receipt(result, {_clean_block(out_item.get("name")): cnt})
+            collected.extend({"name": item, "count": n} for item, n in taken.items())
+            if furnace_pos is not None and dim is not None:
+                self._settle_furnace_output(furnace_pos, dim, taken)
 
         if pre_dropped:
             session.progress["auto_dropped"] = pre_dropped
-        if sum(item["count"] for item in collected) < smelt_n:
+        expected = SMELT_OUTPUTS.get(_clean_block(input_item))
+        if sum(row["count"] for row in collected if expected is None or row["name"] == expected) < smelt_n:
             return self._partial_smelt(session.progress)
         return {"ok": True, **session.progress}
 

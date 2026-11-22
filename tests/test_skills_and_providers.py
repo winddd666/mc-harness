@@ -2888,6 +2888,81 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
     assert operations[-1] == {"op": "take", "from": "output", "count": 2}
 
 
+@pytest.mark.parametrize("fuel_put_failed", [False, True])
+def test_skill_smelt_recovers_tracked_output_before_mining(monkeypatch, fuel_put_failed) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    now = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+    furnace = [1, 64, 0]
+    phase = "smelt"
+    takes = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "act":
+            assert body["target"]["pos"] == furnace
+            op = body["ops"][0]
+            if op["op"] == "put":
+                done = [{"op": "put", "to": "input", "put": "raw_iron", "count": 6}]
+                if fuel_put_failed:
+                    return httpx.Response(200, json={"ok": False, "error": {
+                        "code": "section_full", "message": "fuel slot occupied", "done": done,
+                    }})
+            else:
+                takes.append(phase)
+                # The take receipt is authoritative when the preview is stale.
+                done = [{"op": "take", "from": "output", "took": {"iron_ingot": 5 if phase == "smelt" else 1}}]
+            result = {"done": done}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace
+            if phase == "mine":
+                now[0] += 1.0
+            result = {"sections": {
+                "input": [{"name": "raw_iron", "count": 1}] if phase == "smelt" else [],
+                "output": [{"name": "iron_ingot", "count": 6 if phase == "smelt" else 1}],
+            }, "info": {"burning": phase == "smelt"}}
+        else:
+            result = {
+                "inventory": {"items": [{"name": "raw_iron", "count": 6}, {"name": "coal", "count": 1}]},
+                "find_blocks": {"blocks": [{"name": "furnace", "pos": furnace, "dist": 1}]},
+                "status": {
+                    "pos": [0.5, 64.0, 0.5], "health": 20, "food": 20,
+                    "dimension": "the_nether" if phase == "other_dimension" else "overworld",
+                },
+            }[route]
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_smelt("raw_iron", count=6))
+        jobs = toolset.world_memory.get_conversion_jobs()
+        assert [(j["pos"], j["dim"], j["output_item"], j["remaining"]) for j in jobs] == [
+            (furnace, "overworld", "iron_ingot", 6 if fuel_put_failed else 1),
+        ]
+        if fuel_put_failed:
+            assert result["error"]["code"] == "section_full"
+            assert takes == []
+            return
+        assert result["error"] == "partial_smelt"
+        assert result["collected"] == [{"name": "iron_ingot", "count": 5}]
+
+        def mine(**kwargs):
+            assert takes == (["smelt", "mine"] if phase == "mine" else ["smelt"])
+            assert kwargs["max_duration_s"] == (31.0 if phase == "mine" else 32.0)
+            return {"ok": True}
+
+        monkeypatch.setattr(toolset.skills, "mine_dfs", mine)
+        phase = "other_dimension"
+        assert json.loads(toolset.mc_skill_mine_dfs(target="diamond"))["ok"]
+        phase = "mine"
+        result = json.loads(toolset.mc_skill_mine_dfs(target="diamond"))
+        assert result["furnace_recovered"] == {"pos": furnace, "took": {"iron_ingot": 1}}
+        assert toolset.world_memory.get_conversion_jobs() == []
+
+
 @pytest.mark.parametrize("code", ["no_window", "missing_item"])
 def test_skill_smelt_tries_a_second_nearby_furnace_only_after_open_failure(code) -> None:
     from mc_agent.harness.mc_tools import McToolset
@@ -2920,7 +2995,9 @@ def test_skill_smelt_tries_a_second_nearby_furnace_only_after_open_failure(code)
         return httpx.Response(200, json={"ok": True, "result": responses[operation]})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = json.loads(McToolset(bot).mc_skill_smelt("cobblestone", count=12, fuel_item="coal"))
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_smelt("cobblestone", count=12, fuel_item="coal"))
+        assert toolset.world_memory.get_conversion_jobs() == []
 
     if code == "no_window":
         assert [action["target"]["pos"] for action in actions] == [near, alternate, alternate]
@@ -2961,7 +3038,9 @@ def test_skill_smelt_stops_pending_furnace_view_after_timeout(monkeypatch) -> No
         return httpx.Response(200, json={"ok": True, "result": responses[route]})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = json.loads(McToolset(bot).mc_skill_smelt("raw_iron", count=6, fuel_item="coal"))
+        toolset = McToolset(bot)
+        result = json.loads(toolset.mc_skill_smelt("raw_iron", count=6, fuel_item="coal"))
+        assert toolset.world_memory.get_in_conversion_counts() == {"iron_ingot": 6}
 
     assert now == pytest.approx(48.0)
     assert calls.count("act") == 1

@@ -2993,14 +2993,22 @@ class McToolset:
             )
 
         def _invoke() -> dict[str, Any]:
+            started = time.monotonic()
+            recovered = None
+            duration_s = eff_duration_s
+            if str(action or "").strip().lower() == "explore":
+                recovered = self.skills.collect_nearby_smelt_output(min(5.0, eff_duration_s - 6.0))
+                duration_s -= time.monotonic() - started
             res = self.skills.mine_dfs(
                 target=target,
                 goal_count=goal_count,
                 target_y=eff_target_y,
                 action=action,
                 geofence=self.geofence,
-                max_duration_s=eff_duration_s,
+                max_duration_s=duration_s,
             )
+            if recovered and isinstance(res, dict):
+                res["furnace_recovered"] = recovered
             if clamped_from is not None and isinstance(res, dict):
                 res["clamped_shallow_diamond_y_from"] = clamped_from
             if isinstance(res, dict):
