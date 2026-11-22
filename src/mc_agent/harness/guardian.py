@@ -1968,6 +1968,13 @@ class GenerationGuard:
                 if sneak.get("ok") and (sneak.get("result") or {}).get("sneaking") is not False:
                     status = {**status, "sneaking": True}
 
+            escape = None
+            if in_lava:
+                escape = self._action(
+                    "escape_lava", lambda: self.combat_env.escape_lava(force_rim_escape=hurt_by_lava and not raw_in_lava),
+                )
+                actions.append(escape)
+
             try:
                 needs_inventory = (
                     (hurt and not hot_floor_only) or should_eat or in_lava or no_water_reentry
@@ -1978,24 +1985,20 @@ class GenerationGuard:
                 inv = {}
             counts, has_shield, has_melee_weapon = self._parse_inventory_summary(inv)
             if (
-                isinstance(inv, dict)
+                not in_lava and isinstance(inv, dict)
                 and (isinstance(inv.get("armor"), dict) or "offhand" in inv)
                 and (now - self._last_gear_check_at >= 12.0)
             ):
                 auto_equip_survival_gear(self.bot, inv, allow_armor=True, allow_shield=False)
                 self._last_gear_check_at = now
 
-            if in_lava:
-                if counts.get("water_bucket", 0) > 0 and "nether" not in str(status.get("dimension") or "").lower():
-                    actions.append(self._action("douse_lava", lambda: self.combat_env.build_tactical("place_water_feet")))
-                escape = self._action(
-                    "escape_lava", lambda: self.combat_env.escape_lava(force_rim_escape=hurt_by_lava and not raw_in_lava),
-                )
-                actions.append(escape)
-                if escape.get("ok") and not counts.get("water_bucket") and "nether" not in str(status.get("dimension") or "").lower():
-                    douse = self._douse_after_lava(status)
-                    if douse is not None:
-                        actions.append(douse)
+            if (
+                escape and escape.get("ok") and not counts.get("water_bucket")
+                and "nether" not in str(status.get("dimension") or "").lower()
+            ):
+                douse = self._douse_after_lava(status)
+                if douse is not None:
+                    actions.append(douse)
 
             def _already(name: str) -> bool:
                 return any(a.get("action") == name for a in actions)

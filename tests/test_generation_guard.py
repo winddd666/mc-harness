@@ -4738,6 +4738,44 @@ def test_bug034_ranged_combat_stance_blocking_and_cover_exempt_cancels(monkeypat
     assert rep["guardian"]["cancelled_generations"] == 1
 
 
+@pytest.mark.parametrize("depth", ["deep", "shallow"])
+def test_overworld_lava_poll_uses_water_only_after_reaching_the_surface(depth):
+    status = {
+        "pos": [11105.2, 66 if depth == "deep" else 67, 11111.4], "health": 10, "food": 20,
+        "dimension": "overworld", "ready": True, "alive": True, "in_lava": True, "on_ground": False,
+    }
+    commands = []
+
+    class PoolBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [{"name": "water_bucket", "count": 1}]}
+            if action == "events":
+                return {"events": []}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                return {"name": "lava" if (x, z) == (11105, 11111) and y <= 67 else "air"}
+            if action == "control":
+                assert body["jump"] is True and body["forward"] is False
+                commands.append("swim")
+                status["pos"] = [11105.2, 67, 11111.4]
+                return {"ok": True}
+            if action == "interact":
+                commands.append("water")
+                assert body == {"pos": [11105, 66, 11111], "item": "water_bucket"}
+                status.update(in_lava=False, in_water=True, on_ground=True)
+                return {"ok": True}
+            raise AssertionError(action)
+
+    guard = GenerationGuard(PoolBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    escape, = guard.poll()["actions"]
+
+    assert commands == (["swim", "water"] if depth == "deep" else ["water"])
+    assert escape["action"] == "escape_lava" and escape["ok"]
+
+
 def test_deep_lava_keeps_swimming_up_while_the_head_is_submerged():
     from mc_agent.skills.combat_env import CombatEnv
 

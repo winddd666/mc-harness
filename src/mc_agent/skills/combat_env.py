@@ -1371,30 +1371,7 @@ class CombatEnv:
         actions: list[str] = []
         notch_dig_failures: list[dict[str, Any]] = []
         lava_deadline = time.monotonic() + 5.0
-        try:
-            counts, _, held_name = self._inventory_counts_and_shield()
-        except (ApiError, httpx.HTTPError):
-            counts, held_name = {}, None
-        dim = str(st.get("dimension") or "").lower()
-        if counts.get("water_bucket", 0) > 0 and "nether" not in dim:
-            try:
-                douse = self.build_tactical("place_water_feet")
-                actions.append("place_water_feet" if douse.get("ok") else "place_water_feet_failed")
-            except (ApiError, httpx.HTTPError):
-                actions.append("place_water_feet_failed")
-            st = self._safe_status(st)
-            if not st.get("in_lava") and not _landing_unconfirmed(st):
-                return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
-            try:
-                self.bot.call("use_item", {"item": "water_bucket"})
-                actions.append("use_water_bucket")
-            except (ApiError, httpx.HTTPError):
-                pass
-            st = self._safe_status(st)
-            if not st.get("in_lava") and not _landing_unconfirmed(st):
-                return {"ok": True, "in_lava": False, "pos_after": st.get("pos"), "actions": actions}
-
-        # 1. If submerged deep in lava, swim up first so surface bank scan can find solid footing
+        # 1. Surface before spending time on a bucket or scanning for a shore.
         self.invalidate_block_cache()
         pos0 = st.get("pos") or [0.0, 64.0, 0.0]
         dim0 = str(st.get("dimension") or "").lower()
@@ -1519,6 +1496,33 @@ class CombatEnv:
             if float(pos0[1]) - py < 0.1:
                 break
 
+        try:
+            counts, _, held_name = self._inventory_counts_and_shield()
+        except (ApiError, httpx.HTTPError):
+            counts, held_name = {}, None
+        if counts.get("water_bucket", 0) > 0 and "nether" not in dim0 and time.monotonic() < lava_deadline:
+            px, py, pz = map(float, pos0[:3])
+            head = self._get_block_name(math.floor(px), math.floor(py) + 1, math.floor(pz), strict=True)
+            if head and not _is_lava_block(head):
+                try:
+                    douse = self.build_tactical("place_water_feet")
+                    actions.append("place_water_feet" if douse.get("ok") else "place_water_feet_failed")
+                except (ApiError, httpx.HTTPError):
+                    actions.append("place_water_feet_failed")
+                st = self._safe_status(st)
+                if _should_exit_lava(st):
+                    return _lava_result(st)
+                try:
+                    self.bot.call("use_item", {"item": "water_bucket"})
+                    actions.append("use_water_bucket")
+                except (ApiError, httpx.HTTPError):
+                    pass
+                st = self._safe_status(st)
+                if _should_exit_lava(st):
+                    return _lava_result(st)
+                pos0 = st.get("pos") or pos0
+                self.invalidate_block_cache()
+
         # 2. Try scanning safe non-lava exits (including 1-block step-ups, plus wide shore search) and jump-sprinting out
         terrain_deadline = min(lava_deadline - 2.0, time.monotonic() + 1.5)
         scan = self.scan_safe_yaws(
@@ -1555,7 +1559,7 @@ class CombatEnv:
 
         if not tried_yaws and time.monotonic() < lava_deadline:
             # Wide lava lake: filter shore types by dimension to keep find_blocks fast (<1s).
-            shore_blocks = NETHER_SHORE_BLOCKS if "nether" in dim else SHORE_LAND_BLOCKS
+            shore_blocks = NETHER_SHORE_BLOCKS if "nether" in dim0 else SHORE_LAND_BLOCKS
             excluded_shores = stalled_shores_near(pos0)
             try:
                 lava_shore_target = self._find_walkable_shore_target(
