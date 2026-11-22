@@ -10587,22 +10587,29 @@ def test_short_melee_retreat_reprobes_after_a_small_same_life_slide(monkeypatch,
     assert moves == (["look", "control"] if reached else [])
 
 
-@pytest.mark.parametrize("moved, remaining, same_target, expected", [
-    (1.97, 1.6, True, True),
-    (1.97, 2.0, True, False),
-    (3.0, 1.6, True, False),
-    (1.97, 1.6, False, False),
+@pytest.mark.parametrize("moved, remaining, same_target, hazard, expected", [
+    (1.97, 1.6, True, None, True),
+    (1.97, 2.0, True, None, False),
+    (3.0, 1.6, True, None, False),
+    (1.97, 1.6, False, None, False),
+    (0.81, 1.0, True, None, True),
+    (0.81, 1.0, False, None, False),
+    (0.81, 1.0, True, "unsafe_landing", False),
+    (0.0, 1.0, True, "no_safe_retreat", False),
 ])
 def test_healthy_unarmed_bot_follows_up_short_retreat_when_the_attacker_gains_ground(
-    monkeypatch, moved, remaining, same_target, expected,
+    monkeypatch, moved, remaining, same_target, hazard, expected,
 ):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
-    origin = [-6270.3, -40, -6565.9]
-    zombie = {"id": 42, "name": "zombie", "dist": 1.9, "pos": [-6268.4, -40, -6565.9]}
+    partial = moved < 1.5
+    origin = [381015.51, 69, 374036.3] if partial else [-6270.3, -40, -6565.9]
+    distance = 2.5 if partial else 1.9
+    hostile = {"id": 42, "name": "spider" if partial else "zombie", "dist": distance,
+               "pos": [origin[0] + distance, *origin[1:]]}
     status = {
-        "pos": origin, "health": 17, "food": 20, "alive": True, "ready": True, "on_ground": True,
-        "dimension": "overworld", "nearest_hostile": zombie,
+        "pos": origin, "health": 20 if partial else 17, "food": 20, "alive": True, "ready": True,
+        "on_ground": True, "dimension": "overworld", "nearest_hostile": hostile, "is_day": partial,
     }
     steps = []
 
@@ -10619,10 +10626,13 @@ def test_healthy_unarmed_bot_follows_up_short_retreat_when_the_attacker_gains_gr
 
     def retreat(_pos, **_kwargs):
         landing = [origin[0] - moved, *origin[1:]]
-        survivor = {**zombie, "id": 42 if same_target else 43, "dist": remaining,
+        survivor = {**hostile, "id": 42 if same_target else 43, "dist": remaining,
                     "pos": [landing[0] + remaining, *landing[1:]]}
         status.update(pos=landing, nearest_hostile=survivor)
-        return {"ok": True, "mode": "flee", "moved_dist": moved}
+        if partial:
+            status["health"] = 19
+        return {"ok": not partial, "mode": "flee", "moved_dist": moved,
+                **({"reason": hazard} if hazard else {})}
 
     def verified_step(landing, threat_pos, *, deadline, target_id):
         assert target_id == 42
@@ -10631,7 +10641,7 @@ def test_healthy_unarmed_bot_follows_up_short_retreat_when_the_attacker_gains_gr
         return {"ok": True}
 
     env = CombatEnv(CaveBot())
-    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave"})
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface" if partial else "open_cave"})
     monkeypatch.setattr(env, "flee", retreat)
     monkeypatch.setattr(env, "step_away_from_melee", verified_step)
     outcome = CombatControllerSlot().handle(env, {"source": "pre_hurt_melee", "primary_entity_id": 42})

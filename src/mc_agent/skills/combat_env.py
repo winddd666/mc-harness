@@ -4809,7 +4809,11 @@ class SubcorticalInstinctController:
             and trigger.get("source") == "pre_hurt_melee" and mob_name in PRE_HURT_MELEE_MOBS
             and 0 < mob_dist <= 3.5
             and isinstance(nh_post, dict) and nh_post.get("id") == mob_id
-            and any(a["ok"] and isinstance(a.get("moved"), (int, float)) and 0 < a["moved"] <= 2.0 for a in retreats)
+            and any(
+                isinstance(a.get("moved"), (int, float)) and 0 < a["moved"] <= 2.0
+                and retreat_made_progress(a["ok"], a["moved"], a.get("reason"))
+                for a in retreats
+            )
         ):
             # A short step does not disengage when the same attacker stays in melee reach.
             followup_range = min(mob_dist, 2.0)
