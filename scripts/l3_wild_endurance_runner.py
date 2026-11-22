@@ -839,6 +839,12 @@ def prepare_scene_ground(
                 f"{pre} fill {ix + 3} {iy + 2} {iz} {ix + 3} {iy + 3} {iz} minecraft:obsidian",
                 f"{pre} fill {ix - 3} {iy + 4} {iz - 3} {ix + 3} {iy + 4} {iz + 3} minecraft:obsidian",
                 f"{pre} setblock {ix} {iy + 3} {iz} minecraft:shroomlight",
+                # A covered landing turns the exit north or south, keeping the east doorway
+                # out of a direct fireball line while leaving two walkable routes.
+                f"{pre} fill {ix + 4} {iy - 1} {iz - 3} {ix + 6} {iy - 1} {iz + 3} minecraft:obsidian",
+                f"{pre} fill {ix + 4} {iy} {iz - 3} {ix + 6} {iy + 1} {iz + 3} minecraft:air",
+                f"{pre} fill {ix + 6} {iy} {iz - 2} {ix + 6} {iy + 1} {iz + 2} minecraft:obsidian",
+                f"{pre} fill {ix + 4} {iy + 2} {iz - 2} {ix + 6} {iy + 2} {iz + 2} minecraft:obsidian",
                 f"{pre} tp {bot_name} {ix + 0.5} {iy} {iz + 0.5}",
                 f"{pre} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
