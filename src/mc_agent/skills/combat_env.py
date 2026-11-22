@@ -736,11 +736,13 @@ class CombatEnv:
                 return False
         return False
 
-    def has_safe_footing(self, pos: Sequence[float]) -> bool:
+    def has_safe_footing(self, pos: Sequence[float], *, require_observation: bool = False) -> bool:
         x, y, z = pos[:3]
         floor_y = math.floor(y + 0.05) - 1
         for bx, bz in _hitbox_columns(x, z):
             floor = self._get_block_name(bx, floor_y, bz, strict=True)
+            if not floor and require_observation:
+                raise _TerrainProbeExpired
             if not floor or floor in HAZARD_BLOCK_TYPES or not _is_solid_ground(floor):
                 return False
         return True

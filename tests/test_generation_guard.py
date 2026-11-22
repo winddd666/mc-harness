@@ -13303,52 +13303,140 @@ def test_dig_checks_the_landing_before_removing_support(tool, terrain):
         assert probes == ([target] if tool == "mc_dig" else [])
 
 
-@pytest.mark.parametrize("terrain", ["stone", "blocked_approach", "deep_drop", "lava", "unavailable"])
-def test_dfs_probes_fresh_support_before_moving_to_a_mining_step(terrain):
+@pytest.mark.parametrize("terrain", [
+    "stone", "blocked_approach", "deep_drop", "lava", "unavailable", "slow_read", "within_remote_budget",
+    "budget_exhausted", "repaired", "repair_unconfirmed", "partial_then_denied",
+])
+def test_dfs_probes_fresh_support_before_moving_to_a_mining_step(monkeypatch, terrain):
     target = [23080.5, 34.0, 10014.5]
+    support = [23080, 33, 10014]
     events = []
     calls = []
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
 
     class ShaftBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return {"pos": [23081.5, 35, 10015.5], "on_ground": True, "ready": True, "alive": True, "health": 20}
             if action == "get_block":
-                assert body["pos"] == [23080, 33, 10014]
+                assert body["pos"] == support
                 calls.append(action)
-                if terrain == "unavailable":
+                if terrain == "unavailable" or (terrain == "slow_read" and calls.count(action) == 1):
                     raise httpx.ReadTimeout("support block was not read")
+                if terrain in {"within_remote_budget", "budget_exhausted"} and calls.count(action) == 1:
+                    clock[0] += 2.4 if terrain == "within_remote_budget" else 2.6
+                if terrain in {"repair_unconfirmed", "partial_then_denied"} or (terrain == "repaired" and "place" not in calls):
+                    return {"name": "air"}
                 return {"name": {"deep_drop": "air", "lava": "lava"}.get(terrain, "stone")}
             if action == "move_to":
                 calls.append(action)
                 if terrain == "blocked_approach":
                     raise ApiError("path_not_found", "terrain blocked the direct approach")
-            if action == "control":
+            if action in {"control", "place"}:
                 calls.append(action)
+            if action == "dig":
+                calls.append(action)
+                return {"dug": "iron_ore", "gained": {"raw_iron": 1}}
             return {"ok": True}
 
     bot = ShaftBot()
     guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None)
 
     def step():
+        if terrain == "partial_then_denied":
+            bot.call("dig", {"pos": [23082, 35, 10015], "collect": True})
         try:
             return json.dumps(bot.call("move_to", {
                 "x": target[0], "y": target[1], "z": target[2], "range": 0.35,
                 "timeout": 4500, "stop_on": ["hurt", "death"],
             }))
         except ApiError:
+            if terrain in {"repaired", "repair_unconfirmed"}:
+                bot.call("place", {"pos": support, "item": "cobblestone"})
             return json.dumps(bot.call("control", {"forward": True, "ms": 420, "stop_on": ["hurt", "death"]}))
 
     result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", step))
 
-    if terrain in {"stone", "blocked_approach"}:
+    if terrain in {"stone", "blocked_approach", "slow_read", "within_remote_budget"}:
         assert result["ok"]
-        assert calls == ["get_block", "move_to"] + (["control"] if terrain == "blocked_approach" else [])
+        reads = 2 if terrain == "slow_read" else 1
+        assert calls == ["get_block"] * reads + ["move_to"] + (["control"] if terrain == "blocked_approach" else [])
+    elif terrain == "repaired":
+        assert result["ok"] and calls == ["get_block", "place", "get_block", "control"]
     else:
-        assert result["requires_replan"] and result["error"]["code"] == "unsafe_landing"
-        assert calls == ["get_block"]
-        event, = [row for row in events if row["type"] == "guardian.mining_landing_blocked"]
-        assert event["target"] == result["error"]["target"] == target
+        reason = "mining_footing_unavailable" if terrain in {"unavailable", "budget_exhausted"} else "unsafe_landing"
+        assert result["requires_replan"] and result["error"]["code"] == reason
+        if terrain == "repair_unconfirmed":
+            assert calls == ["get_block", "place", "get_block"]
+        elif terrain == "partial_then_denied":
+            assert calls == ["dig", "get_block"]
+            assert result["partial_progress"] is True and result["dug_count"] == 1
+            assert result["gained"] == {"raw_iron": 1}
+        else:
+            assert calls == ["get_block"] * (2 if terrain == "unavailable" else 1)
+        rejected_events = [row for row in events if row["type"] == "guardian.mining_landing_blocked"]
+        assert len(rejected_events) == (2 if terrain == "repair_unconfirmed" else 1)
+        assert all(event["target"] == result["error"]["target"] == target and event["reason"] == reason for event in rejected_events)
+        if terrain == "partial_then_denied":
+            assert rejected_events[0]["gained"] == {"raw_iron": 1}
+
+
+@pytest.mark.parametrize("floor", ["air", "lava", "unavailable"])
+def test_bug116_dfs_rejects_dangerous_waypoint_and_keeps_mining(monkeypatch, tmp_path, floor):
+    from mc_agent.skills.mining_dfs import MiningDFSEngine
+
+    origin = (475204, 53, 487553)
+    rejected = (475204, 53, 487554)
+    alternate = (475205, 53, 487553)
+    ore = [475206, 53, 487553]
+    status = {"pos": [origin[0] + 0.5, origin[1], origin[2] + 0.5], "health": 20,
+              "on_ground": True, "ready": True, "alive": True, "in_water": False, "in_lava": False}
+    moves = []
+    digs = []
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "get_block":
+                if body["pos"] == [rejected[0], rejected[1] - 1, rejected[2]]:
+                    if floor == "unavailable":
+                        raise httpx.ReadTimeout("short footing read expired")
+                    return {"name": floor}
+                return {"name": "stone"}
+            if action in {"move_to", "control"}:
+                moves.append((action, body))
+                if action == "move_to":
+                    status["pos"] = [body[axis] for axis in ("x", "y", "z")]
+            if action == "dig":
+                digs.append(body["pos"])
+                return {"dug": "iron_ore", "gained": {"raw_iron": 1}}
+            return {"ok": True}
+
+        def status(self):
+            return self.call("status", method="GET")
+
+    bot = ShaftBot()
+    dfs = MiningDFSEngine(MacroSkills(bot), ledger_path=tmp_path / "ledger.json")
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+
+    def explore_with_alternate(**kwargs):
+        assert not dfs._step_to(rejected, from_cell=origin)
+        assert dfs._step_to(alternate, from_cell=origin)
+        dig = dfs.bot.call("dig", {"pos": ore, "collect": True})
+        return {"ok": True, "target_gained": dig["gained"]["raw_iron"], **dig}
+
+    monkeypatch.setattr(dfs, "_run", explore_with_alternate)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(dfs.run(goal_count=1))))
+    assert result["goal_met"] and result["gained"] == {"raw_iron": 1} and digs == [ore]
+    assert [(action, body.get("x"), body.get("z")) for action, body in moves] == [
+        ("move_to", alternate[0] + 0.5, alternate[2] + 0.5),
+    ]
+    rejected_events = [event for event in events.events if event["type"] == "guardian.mining_landing_blocked"]
+    reason = "mining_footing_unavailable" if floor == "unavailable" else "unsafe_landing"
+    assert rejected_events and {event["reason"] for event in rejected_events} == {reason}
 
 
 @pytest.mark.parametrize("placement", [
@@ -14576,10 +14664,11 @@ def test_mining_watcher_waits_only_for_confirmed_occluded_hostiles(monkeypatch, 
 
 
 @pytest.mark.parametrize("tool, action, body, oxygen", [
-    ("mc_skill_mine_dfs", "dig", {"pos": [41013, 22, 11034]}, 110),
-    ("mc_skill_mine_blocks", "dig", {"pos": [41012, 21, 11034], "stop_on": ["death"]}, 110),
+    ("mc_skill_mine_dfs", "dig", {"pos": [41013, 22, 11034]}, 7),
+    ("mc_skill_mine_blocks", "dig", {"pos": [41012, 21, 11034], "stop_on": ["death"]}, 7),
     ("mc_skill_mine_blocks", "dig", {"pos": [41012, 21, 11034], "stop_on": ["death"]}, 285),
-    ("mc_skill_unstick", "control", {"jump": True, "ms": 900, "stop_on": ["death"]}, 110),
+    ("mc_skill_mine_blocks", "dig", {"pos": [41012, 21, 11034], "stop_on": ["death"]}, 110),
+    ("mc_skill_unstick", "control", {"jump": True, "ms": 900, "stop_on": ["death"]}, 7),
 ])
 def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, action, body, oxygen):
     import threading
@@ -14603,6 +14692,8 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
                     return {"dug": "stone", "gained": {"cobblestone": 1}}
                 calls.append(endpoint)
                 status.update(in_water=True, submerged=True, on_ground=False, oxygen=oxygen)
+                if oxygen == 110:
+                    status.pop("submerged")
                 if oxygen == 285:
                     status["nearest_hostile"] = drowned
                 assert stopped.wait(1.5)
@@ -14641,6 +14732,7 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
     result = json.loads(guard.run_tool_with_reflex(tool, invoke))
     assert result["error"]["code"] == "guardian_preempted"
     assert result["stop_reason"] == "tool_water_threat"
+    assert result["water_risk"] == {7: "low_oxygen", 110: "legacy_oxygen_hint", 285: "drowned"}[oxygen]
     assert result["reflex_mode"] == "water_surface"
     assert result["pos_at_preemption"] == status["pos"] == result["pos_after"]
     assert calls == (["first_dig"] if action == "dig" else []) + [action, "stop", "surface"]
@@ -14657,21 +14749,29 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
     assert guard._water_hurt_streak == 0
 
 
-@pytest.mark.parametrize("condition, expected_reason, sample_count", [
-    ("brief", None, 2), ("continuous", "sustained_submersion", 3), ("sinking", "sustained_sinking", 2),
-    ("depleted", "low_oxygen", 1), ("low_health", "critical_health", 1),
+@pytest.mark.parametrize("condition, oxygen, expected_reason, sample_count", [
+    ("brief", 20, None, 2), ("brief", 140, None, 2),
+    ("continuous", 20, "sustained_submersion", 3), ("continuous", 140, "sustained_submersion", 3),
+    ("continuous", 400, "sustained_submersion", 3), ("continuous", None, "sustained_submersion", 3),
+    ("health_missing", None, "sustained_submersion", 3), ("sinking", 20, "sustained_sinking", 2),
+    ("new_life", 400, "sustained_submersion", 4),
+    ("depleted", 7, "low_oxygen", 1), ("low_health", 20, "critical_health", 1),
 ])
-def test_bug009_full_air_reading_uses_water_motion_and_duration(monkeypatch, condition, expected_reason, sample_count):
+def test_bug009_full_air_reading_uses_water_motion_and_duration(monkeypatch, condition, oxygen, expected_reason, sample_count):
     import threading
 
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     status = {
         "pos": [-10890.5, 58, 2566.3], "in_water": True, "submerged": True, "on_ground": False,
-        "health": 5 if condition == "low_health" else 20, "oxygen": 7 if condition == "depleted" else 20,
+        "health": 5 if condition == "low_health" else 20,
         "velocity": [0, -1.5 if condition == "sinking" else 0, 0], "dimension": "overworld",
         "ready": True, "alive": True,
     }
+    if oxygen is not None:
+        status["oxygen"] = oxygen
+    if condition == "health_missing":
+        status.pop("health")
     finished = threading.Event()
     samples = []
     calls = []
@@ -14686,6 +14786,8 @@ def test_bug009_full_air_reading_uses_water_motion_and_duration(monkeypatch, con
                 if threading.current_thread().name == "mc-creeper-watch" and not finished.is_set():
                     clock[0] += 1.1
                     samples.append(clock[0])
+                    if condition == "new_life" and len(samples) == 2:
+                        status["last_death"] = {"t": 1}
                     if condition == "brief" and len(samples) == 2:
                         status.update(submerged=False, on_ground=True)
                         finished.set()
@@ -14722,7 +14824,8 @@ def test_bug009_full_air_reading_uses_water_motion_and_duration(monkeypatch, con
         preempted = next(event for event in events.events if event["type"] == "guardian.preempted_tool")
         observation = preempted["water_observation"]
         assert observation["reason"] == expected_reason and observation["submerged"] is True
-        assert observation["submerged_for_s"] == pytest.approx((sample_count - 1) * 1.1)
+        first_current_life_sample = 1 if condition == "new_life" else 0
+        assert observation["submerged_for_s"] == pytest.approx(samples[-1] - samples[first_current_life_sample])
 
 
 @pytest.mark.parametrize("oxygen, reason", [(20, None), (400, None), (20, "drowned"), (400, "hurt")])

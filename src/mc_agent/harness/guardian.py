@@ -163,8 +163,8 @@ class _UnsafeDig(BaseException):
     """Unwind a dig that would expose the bot to an unsafe drop or overhead fluid."""
 
 
-class _UnsafeMiningLanding(BaseException):
-    """Unwind an approach to an unverified mining waypoint before walking there."""
+class _MiningLandingDenied(ApiError):
+    """Reject a single DFS approach so the miner can choose another route."""
 
 
 class _UnsafeFoodUse(BaseException):
@@ -277,7 +277,7 @@ class GenerationGuard:
     COMBAT_WATER_ESCAPE_BUDGET_S = 4.0
     ATTACK_WATER_THREAT_RANGE = 16.0
     MOVE_DROWNED_THREAT_RANGE = 10.0
-    TOOL_WATER_ESCAPE_OXYGEN = 140.0
+    TOOL_LEGACY_OXYGEN_HINT_MAX = 140.0
     STATUS_FULL_OXYGEN = 20.0
     TOOL_WATER_ESCAPE_BUBBLES = 10.0
     TOOL_WATER_SUBMERSION_GRACE_S = 2.0
@@ -3989,6 +3989,8 @@ class GenerationGuard:
         actor_thread_id = threading.get_ident()
         pending_trigger: list[ThreatTrigger] = []
         unstick_start: dict[str, Any] = {}
+        mining_landing_error: _MiningLandingDenied | None = None
+        mining_support_changed = False
         watch_terrain_damage = check_support_dig or watch_mining_water
         watch_low_oxygen = watch_mining_water or check_unstick_exit
         drowned_threat_range = None
@@ -4092,7 +4094,7 @@ class GenerationGuard:
             watch_hp0: float | None = None
             last_terrain_health: float | None = None
             previous_water_health: tuple[tuple[Any, Any], float] | None = None
-            submerged_since: float | None = None
+            submersion_start: tuple[tuple[Any, Any], float] | None = None
             was_sinking = False
             previous_tile = checked_hot_floor = None
             while not stop_evt.is_set():
@@ -4103,7 +4105,7 @@ class GenerationGuard:
                         continue
                     st = orig_call("status", None, method="GET", allow_reauth=False, timeout_s=1.5)
                     if not isinstance(st, dict):
-                        submerged_since, was_sinking = None, False
+                        submersion_start, was_sinking = None, False
                         if stop_evt.wait(0.30):
                             return
                         continue
@@ -4197,21 +4199,21 @@ class GenerationGuard:
                     water_hp_dropped = False
                     submerged_for_s = None
                     sustained_sinking = False
+                    submerged = st.get("submerged")
                     if watch_low_oxygen:
-                        same_life = previous_water_health is not None and previous_water_health[0] == observed_life
                         if available and isinstance(cur_hp, (int, float)) and cur_hp > 0:
                             water_hp_dropped = (
-                                previous_water_health is not None and same_life
+                                previous_water_health is not None and previous_water_health[0] == observed_life
                                 and cur_hp < previous_water_health[1]
                             )
                             previous_water_health = (observed_life, float(cur_hp))
                         else:
                             previous_water_health = None
-                        if previous_water_health is not None and st.get("in_water") and st.get("submerged") is True:
+                        if available and st.get("in_water") and submerged is True:
                             now_water = time.monotonic()
-                            if not same_life or submerged_since is None:
-                                submerged_since, was_sinking = now_water, False
-                            submerged_for_s = now_water - submerged_since
+                            if submersion_start is None or submersion_start[0] != observed_life:
+                                submersion_start, was_sinking = (observed_life, now_water), False
+                            submerged_for_s = now_water - submersion_start[1]
                             velocity = st.get("velocity")
                             sinking = (
                                 isinstance(velocity, (list, tuple)) and len(velocity) >= 2
@@ -4220,8 +4222,9 @@ class GenerationGuard:
                             sustained_sinking = was_sinking and sinking
                             was_sinking = sinking
                         else:
-                            submerged_since, was_sinking = None, False
+                            submersion_start, was_sinking = None, False
                     oxygen = st.get("oxygen")
+                    numeric_oxygen = type(oxygen) in (int, float) and math.isfinite(oxygen)
                     water_risk = None
                     if available and st.get("in_water"):
                         if drowned_threat_range is not None and nh_name == "drowned" and nh_dist <= drowned_threat_range and (
@@ -4232,24 +4235,22 @@ class GenerationGuard:
                         elif water_hp_dropped:
                             water_risk = "hurt"
                         elif (
-                            watch_low_oxygen and st.get("submerged") is not False
-                            and isinstance(oxygen, (int, float)) and oxygen <= self.TOOL_WATER_ESCAPE_OXYGEN
-                            and (
-                                submerged_for_s is None or oxygen <= self.TOOL_WATER_ESCAPE_BUBBLES
-                                # Keep the conservative fallback for values outside the documented scale.
-                                or oxygen > self.STATUS_FULL_OXYGEN
-                            )
+                            watch_low_oxygen and submerged is not False and numeric_oxygen
+                            and oxygen <= self.TOOL_WATER_ESCAPE_BUBBLES
                         ):
                             water_risk = "low_oxygen"
+                        elif (
+                            watch_low_oxygen and submerged is None and numeric_oxygen
+                            and self.STATUS_FULL_OXYGEN < oxygen <= self.TOOL_LEGACY_OXYGEN_HINT_MAX
+                        ):
+                            # Preserve support for legacy status payloads with no head immersion field.
+                            water_risk = "legacy_oxygen_hint"
                         elif submerged_for_s is not None:
-                            if cur_hp <= 6.0:
+                            if isinstance(cur_hp, (int, float)) and 0 < cur_hp <= 6.0:
                                 water_risk = "critical_health"
                             elif sustained_sinking:
                                 water_risk = "sustained_sinking"
-                            elif (
-                                isinstance(oxygen, (int, float)) and oxygen <= self.STATUS_FULL_OXYGEN
-                                and submerged_for_s >= self.TOOL_WATER_SUBMERSION_GRACE_S
-                            ):
+                            elif submerged_for_s >= self.TOOL_WATER_SUBMERSION_GRACE_S:
                                 water_risk = "sustained_submersion"
                     check_creeper_cover = creeper_close and nh_dist > 2.3
                     if (
@@ -4338,7 +4339,7 @@ class GenerationGuard:
                         stop_watched_action(pending_trigger[0])
                         return
                 except Exception:
-                    submerged_since, was_sinking = None, False
+                    submersion_start, was_sinking = None, False
                 if stop_evt.wait(0.30):
                     return
 
@@ -4347,8 +4348,26 @@ class GenerationGuard:
             watcher_thread = threading.Thread(target=_watcher, name="mc-creeper-watch", daemon=True)
             watcher_thread.start()
 
+        def verify_mining_approach(target: list[float]) -> None:
+            nonlocal mining_landing_error, mining_support_changed
+            mining_support_changed = False
+            try:
+                self._verify_mining_landing(target)
+            except _MiningLandingDenied as error:
+                if pending_trigger:
+                    raise ReflexPreempted(pending_trigger[0]) from None
+                mining_landing_error = error
+                self.events.emit(
+                    "guardian.mining_landing_blocked", tool="mc_skill_mine_dfs", target=target, reason=error.code,
+                    **(dig_progress or {}),
+                )
+                raise
+            if pending_trigger:
+                raise ReflexPreempted(pending_trigger[0])
+            mining_landing_error = None
+
         def _wrapped_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
-            nonlocal attack_target_id
+            nonlocal attack_target_id, mining_support_changed
             clean_path = str(path or "").lstrip("/")
             is_actor_thread = threading.get_ident() == actor_thread_id
             is_readonly_poll = (
@@ -4401,18 +4420,19 @@ class GenerationGuard:
                 return observed
             if pending_trigger and not self._in_reflex:
                 raise ReflexPreempted(pending_trigger[0])
-            if (
-                check_mining_landing and clean_path == "move_to" and isinstance(body, dict)
-                and body.get("range") in (0.3, 0.35)
-            ):
-                try:
-                    self._verify_mining_landing(body)
-                except _UnsafeMiningLanding:
-                    if pending_trigger:
-                        raise ReflexPreempted(pending_trigger[0]) from None
-                    raise
-                if pending_trigger:
-                    raise ReflexPreempted(pending_trigger[0])
+            if check_mining_landing and isinstance(body, dict):
+                if clean_path == "move_to" and body.get("range") in (0.3, 0.35):
+                    target = [body.get(axis) for axis in ("x", "y", "z")]
+                    if all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target):
+                        verify_mining_approach(target)
+                elif clean_path == "control" and body.get("forward") and mining_landing_error is not None:
+                    # DFS can fall back to a forward pulse after a failed move_to. Keep
+                    # the waypoint blocked until a new approach or a repair is verified.
+                    if not mining_support_changed:
+                        raise _MiningLandingDenied(
+                            mining_landing_error.code, mining_landing_error.message, context=mining_landing_error.context,
+                        )
+                    verify_mining_approach(mining_landing_error.context["target"])
             if (
                 check_combat_step and clean_path == "control" and isinstance(body, dict)
                 and body.get("forward") and body.get("wait") is False
@@ -4504,6 +4524,11 @@ class GenerationGuard:
                             confirmed_gains = dig_progress.setdefault("gained", {})
                             confirmed_gains[name] = confirmed_gains.get(name, 0) + amount
             apply_pending_preemption()
+            if clean_path == "place" and isinstance(body, dict) and mining_landing_error is not None:
+                x, y, z = mining_landing_error.context["target"]
+                support = [math.floor(x), math.floor(y + 0.05) - 1, math.floor(z)]
+                if body.get("pos") == support and isinstance(res, dict) and res.get("ok") is not False:
+                    mining_support_changed = True
             if not self._in_reflex and (not caller_ignores_hurt or watch_terrain_damage):
                 if isinstance(res, dict) and res.get("interrupted_by") == "hurt" and clean_path in ACTION_LOCK_ENDPOINTS:
                     trigger = interrupted_action_trigger(15.0, terrain_only=caller_ignores_hurt)
@@ -5072,17 +5097,23 @@ class GenerationGuard:
         finally:
             self._in_reflex = False
 
-    def _verify_mining_landing(self, body: dict[str, Any]) -> None:
-        target = [body.get(axis) for axis in ("x", "y", "z")]
-        if not all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target):
-            return
-        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 2.5)
-        try:
-            if CombatEnv(bot).has_safe_footing(target):
-                return
-        except _RecoveryBudgetExceeded:
-            pass
-        raise _UnsafeMiningLanding(target)
+    def _verify_mining_landing(self, target: list[float]) -> None:
+        deadline = time.monotonic() + 2.5
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        for _ in range(2):
+            if time.monotonic() >= deadline:
+                break
+            try:
+                if CombatEnv(bot).has_safe_footing(target, require_observation=True):
+                    return
+            except (_RecoveryBudgetExceeded, _TerrainProbeExpired):
+                continue
+            raise _MiningLandingDenied(
+                "unsafe_landing", "采矿落点缺少安全支撑，请补齐落脚点或改道。", context={"target": target},
+            )
+        raise _MiningLandingDenied(
+            "mining_footing_unavailable", "暂时无法确认采矿落点，请从有支撑的地点改道。", context={"target": target},
+        )
 
     def _dig_hazard(self, target: Any, *, check_support: bool, check_roof: bool) -> str | None:
         if not isinstance(target, (list, tuple)) or len(target) != 3 or not all(isinstance(v, int) for v in target):
@@ -5217,16 +5248,12 @@ class GenerationGuard:
                 "requires_replan": True,
                 "error": {"code": code, "message": message},
             }, ensure_ascii=False)
-        except _UnsafeMiningLanding as error:
-            target = error.args[0]
-            self.events.emit("guardian.mining_landing_blocked", tool=tool_name, target=target)
+        except _MiningLandingDenied as error:
             return json.dumps({
                 "ok": False,
                 "requires_replan": True,
-                "error": {
-                    "code": "unsafe_landing", "target": target,
-                    "message": "采矿落点缺少已确认的支撑，请补齐落脚点或改走安全路线。",
-                },
+                "error": {"code": error.code, "message": error.message, **error.context},
+                **({"partial_progress": True, **dig_progress} if dig_progress else {}),
             }, ensure_ascii=False)
         except _UnsafeCombatStep as error:
             if not is_attack:
