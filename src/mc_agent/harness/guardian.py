@@ -3147,7 +3147,9 @@ class GenerationGuard:
                 raise_on_http_error=False,
             )
             result = recovery.get("result")
-            if isinstance(result, dict) and result.get("respawned"):
+            if isinstance(result, dict) and (
+                result.get("respawned") or (result.get("reason") == "unsafe_landing" and result.get("pos_after"))
+            ):
                 return {**result, "requires_replan": True, "pos_before": status.get("pos")}
             if (
                 allow_cover and isinstance(result, dict) and result.get("reason") == "no_safe_retreat"
@@ -4424,13 +4426,14 @@ class GenerationGuard:
         except (_UnsafeFleeExit, _UnsafeUnstickExit):
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
             recovery = self._retreat_after_unsafe_exit(deadline, allow_cover=is_flee)
-            if recovery is not None:
+            if recovery is not None and (recovery.get("respawned") or recovery.get("reason") != "unsafe_landing"):
                 return json.dumps(recovery, ensure_ascii=False)
             message = (
                 "撤退方向缺少安全落脚点，请改从有支撑的方向离开。"
                 if is_flee else "脱困出口缺少安全落脚点，请从当前位置寻找另一条路线。"
             )
             return json.dumps({
+                **(recovery or {}),
                 "ok": False,
                 "requires_replan": True,
                 "error": {"code": "unsafe_landing", "message": message},

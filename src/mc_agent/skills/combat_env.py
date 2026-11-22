@@ -2021,7 +2021,10 @@ class CombatEnv:
         if not pos0 or st0.get("alive") is False or st0.get("ready") is False:
             return {"ok": False, "mode": "flee", "reason": "not_ready", "moved_dist": 0.0, "pos_after": pos0}
         if st0.get("in_lava") or entered_water or st0.get("on_ground") is False:
-            return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0, "pos_after": pos0}
+            return {
+                "ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0, "pos_after": pos0,
+                **{key: st0.get(key) for key in ("on_ground", "in_water", "in_lava")},
+            }
         if threat_pos is None and use_nearest_hostile:
             nh = st0.get("nearest_hostile")
             if isinstance(nh, dict) and isinstance(nh.get("pos"), list):
@@ -2178,7 +2181,10 @@ class CombatEnv:
                 "moved_dist": 0.0 if respawned else round(moved, 2),
                 "pos_after": pos,
                 **({"respawned": True} if respawned else {}),
-                **({"reason": "unsafe_landing"} if unsafe else {}),
+                **({
+                    "reason": "unsafe_landing",
+                    **{key: st.get(key) for key in ("on_ground", "in_water", "in_lava")},
+                } if unsafe else {}),
             }
 
         st_mid = self._safe_status({**st0, "ready": False})

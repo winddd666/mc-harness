@@ -10878,12 +10878,14 @@ def test_explicit_flee_checks_support_before_each_motion(action, solid_exit, dim
         assert movements == []
 
 
-def test_blocked_flee_preserves_a_respawn_reported_by_the_checked_retreat(monkeypatch):
+@pytest.mark.parametrize("landing", ["respawned", "airborne", "water"])
+def test_blocked_flee_preserves_the_checked_retreat_observation(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatEnv
 
     shooter = {"id": 44, "name": "skeleton", "dist": 6.0, "pos": [0.5, 69, 6.5]}
     origin = [0.5, 69, 0.5]
     spawn = [-79.5, 63.1, 75.5]
+    fallback_pos = [2.5, 68.9, 0.7]
     status = {"pos": origin, "dimension": "overworld", "health": 0.8, "blocking": True,
               "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter}
     attempts = []
@@ -10899,8 +10901,13 @@ def test_blocked_flee_preserves_a_respawn_reported_by_the_checked_retreat(monkey
     def flee(_env, target, **_kwargs):
         assert target == shooter["pos"]
         attempts.append(target)
-        return {"ok": False, "mode": "respawned", "respawned": True, "pos_after": spawn,
-                "moved_dist": 0.0, "reason": "unsafe_landing"}
+        if landing == "respawned":
+            return {"ok": False, "mode": "respawned", "respawned": True, "pos_after": spawn,
+                    "moved_dist": 0.0, "reason": "unsafe_landing"}
+        return {
+            "ok": False, "mode": "flee", "moved_dist": 2.19, "pos_after": fallback_pos,
+            "reason": "unsafe_landing", "on_ground": False, "in_water": landing == "water", "in_lava": False,
+        }
 
     monkeypatch.setattr(CombatEnv, "flee", flee)
     bot = RidgeBot()
@@ -10911,8 +10918,14 @@ def test_blocked_flee_preserves_a_respawn_reported_by_the_checked_retreat(monkey
 
     assert attempts == [shooter["pos"]]
     assert outcome["ok"] is False and outcome["requires_replan"] is True
-    assert outcome["mode"] == "respawned" and outcome["respawned"] is True
-    assert outcome["pos_before"] == origin and outcome["pos_after"] == spawn
+    assert outcome["pos_before"] == origin
+    if landing == "respawned":
+        assert outcome["mode"] == "respawned" and outcome["respawned"] is True
+        assert outcome["pos_after"] == spawn
+    else:
+        assert outcome["error"]["code"] == "unsafe_landing" and outcome["mode"] == "flee"
+        assert outcome["pos_after"] == fallback_pos and outcome["moved_dist"] == 2.19
+        assert outcome["on_ground"] is False and outcome["in_water"] is (landing == "water")
 
 
 @pytest.mark.parametrize(
