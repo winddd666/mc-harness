@@ -4633,7 +4633,8 @@ def test_craft_gear_shares_episode_budget_and_keeps_completed_craft(monkeypatch,
 @pytest.mark.parametrize(
     "mode",
     [
-        "equip_shield", "shield_in_slot", "equip_unconfirmed", "owned", "short", "make_sticks", "with_sticks",
+        "equip_shield", "shield_in_slot", "equip_unconfirmed", "equip_shield_alias", "shield_in_slot_alias",
+        "owned", "short", "make_sticks", "with_sticks",
         "old_pick_selected", "old_pick_durability", "old_pick_damage", "old_pick_default", "fresh_default", "owned_worn",
     ],
 )
@@ -4651,11 +4652,13 @@ def test_craft_gear_reuses_only_after_shortage_and_confirms_equip(mode) -> None:
     bag = [{"name": item, "count": 1}]
     offhand = held = None
     new_pick_request = mode in {"make_sticks", "with_sticks", "fresh_default"} or mode.startswith("old_pick_")
-    if mode in {"equip_shield", "shield_in_slot", "equip_unconfirmed"}:
+    equip_shield = mode in {"equip_shield", "equip_shield_alias"}
+    shield_in_slot = mode in {"shield_in_slot", "shield_in_slot_alias"}
+    if equip_shield or shield_in_slot or mode == "equip_unconfirmed":
         item, slot = "shield", "off-hand"
         shield = {"name": item, "count": 1}
-        bag = [] if mode == "shield_in_slot" else [shield]
-        offhand = shield if mode == "shield_in_slot" else None
+        bag = [] if shield_in_slot else [shield]
+        offhand = shield if shield_in_slot else None
     elif new_pick_request:
         item, slot, held = "stone_pickaxe", "hand", worn
         wood = "oak_planks" if mode == "make_sticks" else "stick"
@@ -4693,7 +4696,7 @@ def test_craft_gear_reuses_only_after_shortage_and_confirms_equip(mode) -> None:
         elif route == "equip":
             assert body == {"item": item, "slot": slot}
             equips.append(body)
-            if mode == "equip_shield":
+            if equip_shield:
                 offhand = bag.pop()
             elif new_pick_request and not mode.startswith("old_pick_"):
                 assert bag[-1] == fresh
@@ -4706,6 +4709,8 @@ def test_craft_gear_reuses_only_after_shortage_and_confirms_equip(mode) -> None:
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         tools = McToolset(bot)
         requested_slot = None if mode.endswith("_default") else slot
+        if mode.endswith("_alias"):
+            requested_slot = "offhand"
         result = json.loads(tools.mc_skill_craft_gear(item, count=count, equip_slot=requested_slot))
 
     if mode == "short":
@@ -4721,7 +4726,7 @@ def test_craft_gear_reuses_only_after_shortage_and_confirms_equip(mode) -> None:
             assert result["equipped_slot"] == "hand" and result["equipped_item"] == fresh
     else:
         assert result["already_owned"] is True and result["owned_count"] == 1 and result["gained"] == 0 and not crafts
-        assert len(equips) == int(mode in {"equip_shield", "equip_unconfirmed"})
+        assert len(equips) == int(equip_shield or mode == "equip_unconfirmed")
         if mode == "equip_unconfirmed":
             assert result["ok"] is False and result["equip_error"]["code"] == "equip_unconfirmed"
         else:

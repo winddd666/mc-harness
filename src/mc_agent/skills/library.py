@@ -4456,7 +4456,7 @@ class MacroSkills:
         return result
 
     def _equip_crafted_gear(self, item: str, slot: str, *, already_owned: bool) -> dict[str, Any]:
-        slot = "torso" if slot == "chest" else slot
+        slot = {"chest": "torso", "offhand": "off-hand"}.get(slot, slot)
 
         def equipped_item() -> dict[str, Any]:
             inv = self.bot.inventory()
