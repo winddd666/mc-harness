@@ -773,6 +773,10 @@ class GenerationGuard:
                 dimension == "overworld" and ranged and status.get("on_ground") is True
                 and (prefer_cover or (low_health and unshielded))
             )
+            cover_requires_melee_clearance = (
+                scan_surface_shooters and status.get("blocking")
+                and isinstance(health, (int, float)) and 4.0 < health <= 6.0
+            )
             attacker_id = attacker.get("id") if isinstance(attacker, dict) else None
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
             surface_unarmed_retreat = (
@@ -797,6 +801,7 @@ class GenerationGuard:
                 pos = None
             other_shooters = []
             check_blaze_cover = False
+            melee_clearance_confirmed = False
             if (
                 (mixed_hurt or scan_surface_shooters or (burning_blaze and primary_id is not None))
                 and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
@@ -817,7 +822,8 @@ class GenerationGuard:
                         ):
                             pos = live_pos
                             break
-                for shooter_id, shooter_pos in ranged_retreat_positions(retreat_pos, entities, max_distance=16.0):
+                shooters = ranged_retreat_positions(retreat_pos, entities, max_distance=16.0)
+                for shooter_id, shooter_pos in shooters:
                     if shooter_id is None:
                         continue
                     if shooter_id == primary_id:
@@ -827,6 +833,19 @@ class GenerationGuard:
                         other_shooters.append(shooter_pos)
                 if (mixed_hurt or scan_surface_shooters) and not pos and other_shooters:
                     pos = other_shooters.pop(0)
+                melee_clearance_confirmed = (
+                    cover_requires_melee_clearance
+                    and any(isinstance(shooter_id, int) for shooter_id, _ in shooters)
+                    and not any(
+                        isinstance(entity, dict)
+                        and str(entity.get("name") or "").removeprefix("minecraft:") in PRE_HURT_MELEE_MOBS | {"creeper"}
+                        and (
+                            not isinstance(entity.get("dist"), (int, float))
+                            or not math.isfinite(entity["dist"]) or entity["dist"] <= 5.5
+                        )
+                        for entity in entities
+                    )
+                )
             close_contact = scan_surface_shooters and (
                 (nh_name == "creeper" and nh_distance <= 5.5)
                 or (nh_name in PRE_HURT_MELEE_MOBS and nh_distance <= 3.5)
@@ -837,7 +856,8 @@ class GenerationGuard:
                 and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in nh_pos[:3])
             ) else []
             # A wall that blocks projectiles cannot protect us from a melee attacker already in reach.
-            if pos and (prefer_cover or check_blaze_cover) and not (recent_melee or close_contact):
+            can_seek_cover = melee_clearance_confirmed if cover_requires_melee_clearance else not recent_melee
+            if pos and (prefer_cover or check_blaze_cover) and not close_contact and can_seek_cover:
                 cover_budget = 1.25 if check_blaze_cover else 2.25
                 allow_stationary = allow_stationary_cover and not (
                     "nether" in dimension and self._low_health_burning_after_ranged_hit(status, now)
@@ -2263,8 +2283,12 @@ class GenerationGuard:
                                 inv=inv,
                                 attacker=attacker if isinstance(attacker, dict) else None,
                             )
+                        critical_shielded_arrows = (
+                            surface_arrow_cover and ranged_hurt_only and already_blocking
+                            and hurt_src == "arrow" and 4.0 < hp_val <= 6.0
+                        )
                         shielded_cover = (
-                            sustained_shield_damage or seek_cover_after_failed_dig
+                            sustained_shield_damage or seek_cover_after_failed_dig or critical_shielded_arrows
                             or (surface_arrow_cover and ranged_hurt_only and already_blocking and 0 < hp_val <= 4.0)
                         )
                         unshielded_cover = not has_shield and not close_unshielded_shooter and hp_val <= LOW_HP_BUNKER_MAX
@@ -2282,7 +2306,8 @@ class GenerationGuard:
                                 status, attacker, counts, ranged=True,
                                 prefer_cover=unshielded_cover or shielded_cover or pocket_unavailable,
                                 allow_stationary_cover=not (
-                                    fresh_blast or pocket_unavailable or sustained_shield_damage or seek_cover_after_failed_dig
+                                    fresh_blast or pocket_unavailable or sustained_shield_damage
+                                    or seek_cover_after_failed_dig or critical_shielded_arrows
                                 ),
                             ),
                         )
