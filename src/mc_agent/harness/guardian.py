@@ -3025,15 +3025,19 @@ class GenerationGuard:
                                 self.combat_env.arrow_cover_material(counts) if hurt_src == "arrow" and not has_shield else None
                             )
                             full_cover_stack = cover_material is not None and counts[cover_material] >= 2
-                            early_arrow_cover = (
-                                full_cover_stack and ranged_hurt_only
+                            repeated_arrow_damage = (
+                                cover_material is not None and ranged_hurt_only
                                 and (len(hurts) >= 2 or (not deaths and now - previous_ranged_hurt_at < 8.0))
                             )
-                            cover_hp_limit = 7.0 if early_arrow_cover else (6.0 if full_cover_stack else 4.0)
+                            cover_hp_limit = 4.0
+                            if full_cover_stack:
+                                cover_hp_limit = 7.0 if repeated_arrow_damage else 6.0
+                            elif repeated_arrow_damage:
+                                cover_hp_limit = 6.0
                             critical_landing = (
                                 cf.get("ok") and (not has_shield or recent_cover_fail or moved_after_failed_pocket)
                                 and (hurt_src == "arrow" or trident_attacker_id is not None)
-                                and (0 < hp_val <= 6.0 or early_arrow_cover)
+                                and (0 < hp_val <= 6.0 or repeated_arrow_damage)
                             )
                             natural_cover = None
                             overworld_landing = str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"

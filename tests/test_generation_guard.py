@@ -16517,7 +16517,8 @@ def test_critical_dry_trident_hit_checks_cover_after_zero_movement_retreat(monke
     "logs_only", "logs_and_one_stone", "above_critical", "no_materials", "wall_removed_in_rescan",
     "placed_cover_exposed_edge",
     "arrow_burst_with_logs", "followup_arrow_with_logs", "single_arrow_with_logs", "stale_arrow_with_logs",
-    "arrow_burst_with_one_log", "stalled_landing", "stalled_no_materials", "stalled_two_shooters",
+    "arrow_burst_with_one_log", "critical_partial_wall", "critical_missing_wall",
+    "stalled_landing", "stalled_no_materials", "stalled_two_shooters",
     "stalled_natural_respawn", "stalled_above_limit",
 ])
 def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exists(monkeypatch, situation):
@@ -16536,18 +16537,19 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
     if situation in {"two_shooters", "stalled_two_shooters"}:
         entities.append({"id": 43, "name": "skeleton", "dist": 8, "pos": [9816.9, 63, 7373.1]})
     sustained_arrows = situation in {"arrow_burst_with_logs", "arrow_burst_with_one_log"}
-    previous_arrow = situation in {"followup_arrow_with_logs", "stale_arrow_with_logs"}
+    critical_one_log = situation in {"critical_partial_wall", "critical_missing_wall"}
+    previous_arrow = situation in {"followup_arrow_with_logs", "stale_arrow_with_logs"} or critical_one_log
     early_landing = sustained_arrows or previous_arrow or situation == "single_arrow_with_logs"
     material = "oak_log" if situation in {"logs_only", "logs_and_one_stone"} else "cobblestone"
     if early_landing:
         material = "dark_oak_log"
-        status["health"] = 9.7
+        status["health"] = 7.666667 if critical_one_log else 9.7
     items = [] if situation in {"no_materials", "stalled_no_materials"} else [{"name": material, "count": 3}]
     if early_landing:
-        items[0]["count"] = 1 if situation == "arrow_burst_with_one_log" else 4
+        items[0]["count"] = 1 if situation == "arrow_burst_with_one_log" or critical_one_log else 4
     if situation == "logs_and_one_stone":
         items.insert(0, {"name": "cobblestone", "count": 1})
-    blocks = {}
+    blocks = {(9818, 64, 7381): "stone"} if situation == "critical_partial_wall" else {}
     attempts = []
     hits = [{"seq": 1, "type": "hurt", "source": "arrow"}]
     if sustained_arrows or previous_arrow:
@@ -16595,7 +16597,7 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
             return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
         landing_hp = 6.1 if situation in {"above_critical", "stalled_above_limit"} else 4.833 if material == "oak_log" else 2.48
         if early_landing:
-            landing_hp = 6.166667
+            landing_hp = 5.666667 if critical_one_log else 6.166667
         status.update(health=landing_hp, pos=[9816.9, 63, z], on_ground=True)
         if situation.startswith("stalled_"):
             return {"ok": False, "mode": "flee", "moved_dist": 0.0, "reason": "no_safe_retreat", "pos_after": status["pos"]}
@@ -16619,13 +16621,16 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
         return
     assert action["action"] == "place_arrow_cover"
     cover_verified = situation in {
-        "covered", "logs_only", "logs_and_one_stone", "arrow_burst_with_logs", "followup_arrow_with_logs", "stalled_landing",
+        "covered", "logs_only", "logs_and_one_stone", "arrow_burst_with_logs", "followup_arrow_with_logs",
+        "critical_partial_wall", "stalled_landing",
     }
     assert action["ok"] is cover_verified
     exposed_after_placement = situation in {"shooter_moved", "wall_removed_in_rescan", "placed_cover_exposed_edge"}
     if exposed_after_placement or situation == "stalled_two_shooters":
         assert action["result"]["reason"] == "projectile_lane_unconfirmed"
-    if cover_verified or exposed_after_placement:
+    if situation == "critical_partial_wall":
+        assert attempts == [(9818, 63, 7381)] and action["result"]["placed"] == 1
+    elif cover_verified or exposed_after_placement:
         assert attempts == [(9818, 63, 7381), (9818, 64, 7381)]
     elif situation in {"receipt_only", "knockback"}:
         assert attempts == [(9818, 63, 7381)]
