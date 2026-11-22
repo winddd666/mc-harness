@@ -3546,9 +3546,15 @@ class SubcorticalInstinctController:
             else:
                 mode = "cover_or_flee"
                 covered = False
+                exposed_melee = (
+                    mob_name in PRE_HURT_MELEE_MOBS and mob_dist <= 3.5
+                    and (trigger.get("source") == "pre_hurt_melee" or confirmed_melee_hurt)
+                    and not (primary or {}).get("blocked_by_wall")
+                )
                 if (
                     snap["enclosure"] in {"open_cave", "carved_shaft"}
                     and env.skills is not None
+                    and not exposed_melee
                     and mob_name not in {"blaze", "ghast"}
                     and trigger.get("hurt_source") not in {"fireball", "small_fireball", "wither_skull"}
                 ):
@@ -3567,10 +3573,7 @@ class SubcorticalInstinctController:
                     snap["enclosure"] == "surface"
                     and hp <= 4.0
                     and not has_shield
-                    and mob_name in PRE_HURT_MELEE_MOBS
-                    and mob_dist <= 3.5
-                    and not (primary or {}).get("blocked_by_wall")
-                    and (trigger.get("source") == "pre_hurt_melee" or confirmed_melee_hurt)
+                    and exposed_melee
                 )
                 should_bunker = (
                     not covered

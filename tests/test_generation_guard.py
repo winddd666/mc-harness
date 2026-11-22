@@ -7616,6 +7616,57 @@ def test_surface_bunker_yields_to_retreat_when_lethal_melee_is_exposed(monkeypat
     assert result["mode"] == ("cover_or_flee" if retreat_first else "bunker_sealed")
 
 
+@pytest.mark.parametrize("mob, distance, blocked, retreat_first", [
+    ("zombie", 2.9, False, True),
+    ("cave_spider", 2.5, False, True),
+    ("zombie", 2.9, True, False),
+    ("zombie", 4.4, False, False),
+    ("skeleton", 2.9, False, False),
+])
+def test_exposed_cave_melee_retreats_before_digging_a_cover_pocket(monkeypatch, mob, distance, blocked, retreat_first):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    threat = {"id": 42, "name": mob, "dist": distance, "pos": [0.5 + distance, -39, 0.5],
+              "blocked_by_wall": blocked}
+    status = {
+        "pos": [0.5, -39, 0.5], "health": 17, "ready": True, "alive": True,
+        "on_ground": True, "nearest_hostile": threat, "dimension": "overworld",
+    }
+    attempts = []
+
+    class CaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, endpoint, body=None, **kwargs):
+            if endpoint == "get_entities":
+                return {"entities": [threat]}
+            if endpoint == "inventory":
+                return {"items": [{"name": "cobblestone", "count": 4}]}
+            return {"ok": True}
+
+    def build(mode):
+        attempts.append(mode)
+        return {"ok": True, "mode": "cover_pocket"}
+
+    def retreat(threat_pos, *, distance, urgent, wait_for_ground):
+        assert threat_pos == threat["pos"] and urgent and wait_for_ground
+        attempts.append("flee")
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    env = CombatEnv(CaveBot(), skills=object())
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave"})
+    monkeypatch.setattr(env, "build_tactical", build)
+    monkeypatch.setattr(env, "flee", retreat)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_ranged" if mob == "skeleton" else "pre_hurt_melee",
+        "primary_entity_id": 42, "primary_type": mob, "distance": distance,
+    })
+
+    assert attempts == (["flee"] if retreat_first else ["cover_pocket"])
+    assert outcome["mode"] == ("cover_or_flee" if retreat_first else "cover_pocket")
+
+
 @pytest.mark.parametrize("complete", [True, False])
 @pytest.mark.parametrize("terrain", ["safe", "drop", "target_gone"])
 def test_unarmed_retreat_follows_up_when_same_melee_attacker_is_still_close(monkeypatch, terrain, complete):
