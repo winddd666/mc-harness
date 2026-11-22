@@ -3569,7 +3569,7 @@ class GenerationGuard:
         if any(
             status.get("ready") is not True or status.get("alive") is not True or status.get("on_ground") is not True
             or any(status.get(key) is not False for key in ("in_water", "submerged", "in_lava", "on_fire"))
-            or any(key not in status for key in ("busy", "held_controls", "held", "offhand", "armor_points", "last_death"))
+            or any(key not in status for key in ("busy", "held_controls", "held", "offhand", "armor_points"))
             or not isinstance(status.get("blocking"), bool) or status.get("busy") or status.get("held_controls")
             for status in (before, after)
         ):
@@ -3698,13 +3698,16 @@ class GenerationGuard:
     ) -> tuple[tuple[float, ...], tuple[Any, ...]] | None:
         """Check a rounded 2.3-metre warning against live coordinates and unchanged bot state."""
         state_keys = (
-            "pos", "dimension", "last_death", "health", "food", "held", "offhand", "armor_points", "effects",
+            "pos", "dimension", "health", "food", "held", "offhand", "armor_points", "effects",
             "blocking", "sneaking", "yaw", "busy", "held_controls", "ready", "alive", "on_ground",
             "in_water", "in_lava", "submerged", "on_fire",
         )
         health = after.get("health")
+        # The status API omits last_death until the bot has died at least once.
+        last_death = before.get("last_death")
         if (
             not isinstance(health, (int, float)) or not math.isfinite(health) or health < 16.0
+            or after.get("last_death") != last_death
             or any(k not in before or k not in after or before[k] != after[k] for k in state_keys)
             or after.get("held_controls") or after.get("submerged") is not False
             or after.get("in_water") is not False or after.get("in_lava") is not False or after.get("on_fire") is not False
@@ -3734,6 +3737,7 @@ class GenerationGuard:
         if (
             not isinstance(nearest, dict) or (current_name, current_distance, current_id) != ("zombie", 2.3, entity_id)
             or (current_point is not None and current_point[:3] != point[:3])
+            or current.get("last_death") != last_death
             or nearest.get("blocked_by_wall") or any(k not in current or current[k] != after[k] for k in state_keys)
         ):
             return None

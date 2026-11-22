@@ -2575,6 +2575,8 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
 @pytest.mark.parametrize("followup", [
     "stable", "shifted_target", "other_hostile", "closer", "gear_changed", "dropped_health",
     "first_scan_missing", "status_missing", "hurt_after_retreat", "target_shift_during_verification",
+    "first_life", "first_life_with_null", "first_life_new_death", "first_life_death_during_verification",
+    "previous_death_omitted", "verification_read_failed",
 ])
 def test_stationary_zombie_warning_at_rounded_boundary_needs_two_matching_live_samples(monkeypatch, followup):
     clock = [1000.0]
@@ -2587,14 +2589,20 @@ def test_stationary_zombie_warning_at_rounded_boundary_needs_two_matching_live_s
         "armor_points": 0, "effects": [], "busy": None, "held_controls": None, "yaw": -2.36,
         "nearest_hostile": zombie,
     }
+    if followup.startswith("first_life"):
+        status.pop("last_death")
     hits = []
     nearby = [zombie]
     events = []
     attempts = []
+    verification_started = [False]
 
     class AnchorBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
+                if followup == "verification_read_failed" and verification_started[0]:
+                    verification_started[0] = False
+                    raise httpx.ReadTimeout("no full status after the scan")
                 return dict(status)
             if action == "events":
                 return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
@@ -2603,6 +2611,10 @@ def test_stationary_zombie_warning_at_rounded_boundary_needs_two_matching_live_s
             if action == "get_entities":
                 if len(attempts) == 3 and followup == "target_shift_during_verification":
                     status["nearest_hostile"] = {**zombie, "pos": [328070.5, 71, 333230.8]}
+                if len(attempts) == 3 and followup == "first_life_death_during_verification":
+                    status["last_death"] = {"t": 2}
+                if len(attempts) == 3 and followup == "verification_read_failed":
+                    verification_started[0] = True
                 return {"entities": nearby}
             return {"ok": True}
 
@@ -2642,11 +2654,18 @@ def test_stationary_zombie_warning_at_rounded_boundary_needs_two_matching_live_s
         guard.previous_health = 19  # The last observation already saw the lower health.
     elif followup == "status_missing":
         status.pop("effects")
+    elif followup == "first_life_new_death":
+        status["last_death"] = {"t": 2}
+    elif followup == "first_life_with_null":
+        status["last_death"] = None
+    elif followup == "previous_death_omitted":
+        status.pop("last_death")
 
     incident = guard.poll()
     assert len(attempts) == 3
-    assert incident["requires_replan"] is (followup != "stable")
-    if followup == "stable":
+    unchanged = followup in {"stable", "first_life", "first_life_with_null"}
+    assert incident["requires_replan"] is (not unchanged)
+    if unchanged:
         assert "同一近敌仍在" in incident["note"]
         matches = [event for event in events if event["type"] == "guardian.stationary_melee_verified"]
         assert len(matches) == 1 and matches[0]["entity_id"] == zombie["id"]
@@ -2656,6 +2675,7 @@ def test_stationary_zombie_warning_at_rounded_boundary_needs_two_matching_live_s
     "unchanged", "closer", "new_target", "other_hostile", "scan_closer", "moved", "hurt", "status_timeout", "read_gap", "scan_gap",
     "equal_range_shift", "shift_during_hold", "shift_during_timeout", "coordinate_missing", "gear_missing",
     "dry_flag_missing", "life_sample_missing",
+    "first_life", "first_life_new_death",
 ])
 def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypatch, followup):
     import httpx
@@ -2675,6 +2695,10 @@ def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypa
         status.pop("held")
     elif followup == "dry_flag_missing":
         status.pop("in_lava")
+    elif followup == "life_sample_missing":
+        status["last_death"] = {"t": 1}
+    elif followup.startswith("first_life"):
+        status.pop("last_death")
     damage = []
     attempts = []
     hostiles = [spider]
@@ -2727,6 +2751,8 @@ def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypa
         spider["pos"] = [34023.1, 62, 34004.7]
     elif followup == "life_sample_missing":
         status.pop("last_death")
+    elif followup == "first_life_new_death":
+        status["last_death"] = {"t": 2}
     elif followup == "moved":
         status["pos"] = [34020.8, 62, 34004.7]
     elif followup == "hurt":
@@ -2738,7 +2764,7 @@ def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypa
         clock[0] += 0.3
 
     second = guard.poll()
-    if followup in {"unchanged", "other_hostile", "shift_during_hold"}:
+    if followup in {"unchanged", "other_hostile", "shift_during_hold", "first_life"}:
         assert second is None and attempts == [spider["id"]]
         deferred, = [event for event in guard.events.events if event["type"] == "guardian.melee_timeout_deferred"]
         assert deferred["target_id"] == spider["id"]
