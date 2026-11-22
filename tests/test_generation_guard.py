@@ -16985,6 +16985,93 @@ def test_critical_shielded_arrow_interrupt_guards_before_dig_and_checks_cover_af
         assert outcome["latched_guard"] and outcome["status_after"]["blocking"]
 
 
+@pytest.mark.parametrize("entry", ["poll", "tool_combat"])
+@pytest.mark.parametrize("scene", [
+    "pursuit", "airborne_stall", "different_target", "far", "missing_position", "new_life", "dead", "blocked",
+])
+def test_shield_turns_to_the_same_close_enderman_after_melee_retreat(monkeypatch, entry, scene):
+    first = {"id": 895362, "name": "enderman", "dist": 1.8, "pos": [353689.2, 64, 353636.9]}
+    status = {
+        "pos": [353687.4, 64, 353636.9], "health": 13.7, "dimension": "overworld", "last_death": {"t": 1},
+        "ready": True, "alive": True, "blocking": True, "on_ground": True, "food": 20, "nearest_hostile": first,
+    }
+    aftermath = {"id": first["id"], "name": "enderman", "dist": 2.2}
+    follower_pos = [353675.5, 64.6, 353631.3]
+    post_looks = []
+    turns = []
+    reads_after = []
+
+    class PursuitBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                rows = [{"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": first}]
+                return {"events": rows if kwargs["params"]["since"] == 0 else []}
+            if action == "inventory":
+                sword = {"name": "diamond_sword", "count": 1}
+                return {"items": [sword], "held": sword, "offhand": {"name": "shield", "count": 1}}
+            if action == "get_entities":
+                if not turns:
+                    return {"entities": [first]}
+                reads_after.append(action)
+                return {"entities": [aftermath if scene == "missing_position" else {**aftermath, "pos": follower_pos}]}
+            if action == "look":
+                assert "entity_id" not in body
+                if turns:
+                    post_looks.append(body)
+            if action == "posture":
+                status["blocking"] = bool(body.get("shield"))
+                return {"ok": True, "blocking": status["blocking"]}
+            if action == "attack":
+                pytest.fail("defending against pursuit must not attack the enderman")
+            return {"ok": True}
+
+    guard = GenerationGuard(PursuitBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+
+    def flee(*_args, **_kwargs):
+        turns.append("retreat")
+        status.update(pos=[353675.5, 64.6, 353633.5], health=11.6, on_ground=False)
+        status["nearest_hostile"] = aftermath
+        if scene == "different_target":
+            status["nearest_hostile"] = {**aftermath, "id": 90}
+        if scene == "far":
+            status["nearest_hostile"] = {**aftermath, "dist": 8}
+        if scene == "new_life":
+            status["last_death"] = {"t": 2}
+        if scene == "dead":
+            status["health"] = 0
+        if scene == "blocked":
+            status["nearest_hostile"] = {**aftermath, "blocked_by_wall": True}
+        if scene == "airborne_stall":
+            return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.0}
+        return {"ok": True, "mode": "flee", "moved_dist": 11.7, "pos_after": status["pos"]}
+
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    monkeypatch.setattr(guard, "_defend_or_flee", flee)
+    if entry == "poll":
+        outcome = guard.poll()
+    else:
+        outcome = guard._run_subcortical_combat({
+            "source": "tool_interrupted_hurt", "hurt_source": "mob_attack", "primary_type": "enderman",
+            "primary_entity_id": first["id"], "primary_pos": first["pos"], "distance": 1.8,
+        })
+    guards = [action for action in outcome["actions"] if action["action"] == "guard_enderman_pursuit"]
+
+    assert turns == ["retreat"]
+    if scene in {"pursuit", "airborne_stall"}:
+        turn, = post_looks
+        assert "entity_id" not in turn and turn["yaw"] == pytest.approx(0) and turn["pitch"] < 0
+        assert len(guards) == 1 and guards[0]["ok"] is True
+        assert status["blocking"] is True
+        if entry == "tool_combat":
+            assert outcome["latched_guard"] is True
+    else:
+        assert not post_looks and not any(action["ok"] for action in guards)
+    assert len(reads_after) == (1 if scene in {"pursuit", "airborne_stall", "missing_position"} else 0)
+
+
 def test_combat_status_keeps_retry_and_http_phases_inside_remaining_budget(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])

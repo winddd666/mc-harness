@@ -3198,6 +3198,14 @@ class GenerationGuard:
                         if strike is not None:
                             actions.append(strike)
                     melee_retreat = cf_result.get("mode") == "flee"
+                    enderman_name, _, enderman_id, _ = self._extract_hostile_info({"nearest_hostile": threat})
+                    if (
+                        melee_retreat and has_shield and hurt_src == "mob_attack" and not cf_result.get("respawned")
+                        and enderman_name == "enderman" and enderman_id is not None
+                    ):
+                        actions.append(self._action(
+                            "guard_enderman_pursuit", lambda: self.combat_env.guard_enderman_pursuit(status, enderman_id),
+                        ))
                     nether_melee_retreat = dimension == "the_nether" and melee_retreat
                     recent_ranged_hurt = now - self._last_ranged_hurt_at < 8.0
                     mixed_surface_retreat = (

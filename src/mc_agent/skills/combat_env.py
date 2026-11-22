@@ -1332,6 +1332,62 @@ class CombatEnv:
         except (ApiError, httpx.HTTPError):
             return dict(fallback or {})
 
+    def guard_enderman_pursuit(self, before: dict[str, Any], target_id: int) -> dict[str, Any]:
+        """Reorient the shield if the same Enderman remains in reach after a retreat."""
+        unconfirmed = {"ok": False, "reason": "pursuit_unconfirmed"}
+
+        def nearby(status: dict[str, Any]) -> bool:
+            nearest = status.get("nearest_hostile")
+            distance = nearest.get("dist") if isinstance(nearest, dict) else None
+            health = status.get("health")
+            return (
+                status.get("ready") is True and status.get("alive") is not False
+                and isinstance(health, (int, float)) and health > 0
+                and not any(status.get(key) for key in ("in_water", "in_lava", "submerged", "busy"))
+                and all(status.get(key) == before.get(key) for key in ("last_death", "dimension"))
+                and isinstance(nearest, dict) and nearest.get("id") == target_id
+                and _clean_block_name(nearest.get("name")) == "enderman" and not nearest.get("blocked_by_wall")
+                and isinstance(distance, (int, float)) and 0 <= distance <= 3.5
+            )
+
+        if not nearby(self._safe_status(timeout_s=0.25)):
+            return unconfirmed
+        try:
+            entities = self.bot.call(
+                "get_entities", {"radius": 5, "types": ["hostile"]}, timeout_s=0.3, allow_reauth=False,
+            ).get("entities")
+            if not isinstance(entities, list):
+                return unconfirmed
+            target = next((
+                entity for entity in entities if isinstance(entity, dict) and entity.get("id") == target_id
+                and _clean_block_name(entity.get("name")) == "enderman"
+                and entity.get("alive") is not False and not entity.get("blocked_by_wall")
+            ), None)
+            if target is None:
+                return unconfirmed
+            current = self._safe_status(timeout_s=0.25)
+            pos, threat = current.get("pos"), target.get("pos")
+            if not nearby(current) or not all(
+                isinstance(point, (list, tuple)) and len(point) >= 3
+                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in point[:3])
+                for point in (pos, threat)
+            ):
+                return unconfirmed
+            distance = math.dist(pos[:3], threat[:3])
+            if distance > 3.5:
+                return unconfirmed
+            yaw, pitch = aim_yaw_pitch(pos, threat, dst_height=0.75)
+            self.bot.call("look", {"yaw": yaw, "pitch": pitch}, timeout_s=0.25, allow_reauth=False)
+            shield = self.bot.call(
+                "posture", {"shield": True, "sneak": False, "jump": False}, timeout_s=0.3, allow_reauth=False,
+            )
+            return {
+                "ok": shield.get("blocking") is True, "entity_id": target_id, "distance": distance,
+                "threat_remaining": True,
+            }
+        except (ApiError, httpx.HTTPError):
+            return unconfirmed
+
     def _is_near_or_over_lava(self, st_now: dict[str, Any]) -> bool:
         """Return True when the bot's hitbox or immediate 1-block rim touches lava."""
         if bool(st_now.get("in_lava")):
@@ -4473,9 +4529,21 @@ class SubcorticalInstinctController:
                         elif bunk.get("reason") == "fortification_budget":
                             actions.append({"action": "emergency_bunker", "ok": False, "reason": bunk["reason"]})
                 if not covered:
+                    check_enderman_guard = (
+                        mob_name == "enderman" and isinstance(mob_id, int) and mob_id == trig_id
+                        and confirmed_melee_hurt and trigger.get("hurt_source") == "mob_attack"
+                    )
                     if has_shield and mob_id is not None:
                         try:
-                            env.bot.call("look", {"entity_id": int(mob_id)})
+                            if check_enderman_guard:
+                                if (
+                                    isinstance(mob_pos, (list, tuple)) and len(mob_pos) >= 3
+                                    and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in mob_pos[:3])
+                                ):
+                                    yaw, pitch = aim_yaw_pitch(pos, mob_pos, dst_height=0.75)
+                                    env.bot.call("look", {"yaw": yaw, "pitch": pitch})
+                            else:
+                                env.bot.call("look", {"entity_id": int(mob_id)})
                             env.bot.call("posture", {"shield": True, "sneak": False, "jump": False})
                         except (ApiError, httpx.HTTPError):
                             pass
@@ -4589,6 +4657,13 @@ class SubcorticalInstinctController:
                                 self._recent_flee_streak = 0
                     check_ranged_guard = flee_ok and fl.get("mode") == "flee" and mob_name in RANGED_MOBS
                     check_melee_guard = flee_ok and (sealed or fl.get("mode") == "flee") and mob_name in PRE_HURT_MELEE_MOBS
+                    if (
+                        check_enderman_guard and has_shield and not sealed and not fl.get("respawned")
+                        and time.monotonic() + 1.8 < deadline
+                    ):
+                        pursuit = env.guard_enderman_pursuit(st, mob_id)
+                        actions.append({"action": "guard_enderman_pursuit", **pursuit})
+                        latched_guard = pursuit.get("ok") is True
                     if (not flee_ok or check_ranged_guard or check_melee_guard) and not fl.get("respawned") and has_shield:
                         st_fl = env._safe_status({"ready": False})
                         if (
@@ -4646,10 +4721,10 @@ class SubcorticalInstinctController:
                             and st_fl.get("dimension") == st.get("dimension")
                         ):
                             guard_target = nearest_id if ranged_still_exposed or melee_still_close else mob_id
-                            latched_guard = self._latch_shield_at_threat(
-                                env,
-                                int(guard_target) if guard_target is not None else None,
-                            )
+                            if not latched_guard:
+                                latched_guard = self._latch_shield_at_threat(
+                                    env, int(guard_target) if guard_target is not None and not check_enderman_guard else None,
+                                )
                             if melee_still_close:
                                 actions.append({"action": "guard_melee_after_retreat", "ok": latched_guard, "entity_id": guard_target})
                             elif check_melee_guard and ranged_still_exposed:
