@@ -1578,21 +1578,8 @@ def select_next_target(
                     ),
                 )
             return pb0, frontier_data
-        # Run 1 fast daytime surface recon right after stone_pickaxe (ONLY during safe daytime; dusk/night skips straight underground!)
-        if (
-            enable_island_recon
-            and not recon_done
-            and not is_dusk_or_night
-            and world_memory is not None
-            and cur_dim == "overworld"
-            and (origin_pos is None or float(origin_pos[1]) >= 52.0)
-            and not _is_cooled("island_recon_sweep")
-        ):
-            has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
-            has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
-            if not (has_villager_mem and has_lava_mem):
-                unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
-                return _build_island_recon_target(origin_pos, unexp, tier=0), frontier_data
+        # Go straight from stone_pickaxe -> bootstrap_iron_age (underground Y=16 iron+shield)
+        # before spending 3-5 minutes wandering the surface unarmed in `island_recon_sweep`.
         if cur_dim == "overworld" and not has_iron_or_better and not _is_cooled("bootstrap_iron_age"):
             pb1, _ = _enrich_target_with_world_memory(
                 CURRICULUM_PLAYBOOKS["bootstrap_iron_age"],
@@ -1613,6 +1600,20 @@ def select_next_target(
                     post_ensure_task=(night_banner + pb1.post_ensure_task) if pb1.post_ensure_task else None,
                 )
             return pb1, frontier_data
+        if (
+            enable_island_recon
+            and not recon_done
+            and not is_dusk_or_night
+            and world_memory is not None
+            and cur_dim == "overworld"
+            and (origin_pos is None or float(origin_pos[1]) >= 52.0)
+            and not _is_cooled("island_recon_sweep")
+        ):
+            has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
+            has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
+            if not (has_villager_mem and has_lava_mem):
+                unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
+                return _build_island_recon_target(origin_pos, unexp, tier=0), frontier_data
 
     candidates: list[tuple[tuple[int, int, int, str], CurriculumTarget]] = []
 
