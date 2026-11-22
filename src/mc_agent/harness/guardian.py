@@ -551,6 +551,25 @@ class GenerationGuard:
                 self._stop_after_recovery_timeout()
         return None
 
+    def _settle_dry_shore(
+        self, before: dict[str, Any], after: dict[str, Any], bot: _GuardSession, *, deadline: float,
+    ) -> dict[str, Any]:
+        for _ in range(2):
+            if (
+                after.get("on_ground") is not False
+                or any(after.get(key) for key in ("in_water", "in_lava", "submerged"))
+                or after.get("alive") is False or after.get("ready") is False
+                or any(after.get(key) != before.get(key) for key in ("last_death", "dimension"))
+                or deadline - time.monotonic() < 0.35
+            ):
+                break
+            time.sleep(0.1)
+            try:
+                after = bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
+            except (ApiError, httpx.HTTPError):
+                break
+        return after
+
     def _run_recovery_macro(
         self,
         before: dict[str, Any],
@@ -597,19 +616,7 @@ class GenerationGuard:
             else:
                 after = recovery_bot.status()
             if confirm_shore:
-                for _ in range(2):
-                    if (
-                        after.get("on_ground") is not False or after.get("in_water") or after.get("in_lava")
-                        or after.get("alive") is False or after.get("ready") is False
-                        or after.get("last_death") != before.get("last_death")
-                        or deadline - time.monotonic() < 0.35
-                    ):
-                        break
-                    time.sleep(0.1)
-                    try:
-                        after = recovery_bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
-                    except (ApiError, httpx.HTTPError):
-                        break
+                after = self._settle_dry_shore(before, after, recovery_bot, deadline=deadline)
         except _RecoveryBudgetExceeded:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget", "partial": True, **(timeout_details or {})}
@@ -4092,6 +4099,8 @@ class GenerationGuard:
             after = self.bot.call("status", method="GET", timeout_s=0.6, allow_reauth=False)
         except (ApiError, httpx.HTTPError):
             after = {}
+        if before.get("in_water") is True:
+            after = self._settle_dry_shore(before, after, self.bot, deadline=time.monotonic() + 0.7)
         respawned = after.get("alive") is False or (
             bool(before) and after.get("last_death") is not None and after["last_death"] != before.get("last_death")
         )
@@ -4101,7 +4110,7 @@ class GenerationGuard:
             and after.get("on_ground") is True
             and after.get("dimension") == before.get("dimension")
         ):
-            return receipt
+            return json.dumps({**result, "pos_after": after.get("pos") or result.get("pos_after")}, ensure_ascii=False)
         code = "water_escape_failed" if after.get("in_water") is True else "shore_landing_unconfirmed"
         if respawned:
             code = "respawned"

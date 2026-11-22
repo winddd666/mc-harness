@@ -11457,9 +11457,11 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
 
 @pytest.mark.parametrize("landing, expected_error", [
     ("shore", None),
+    ("settled", None),
     ("respawned", "respawned"),
     ("unready", "shore_landing_unconfirmed"),
     ("airborne", "shore_landing_unconfirmed"),
+    ("reentered", "water_escape_failed"),
     ("wet", "water_escape_failed"),
     ("status_timeout", "shore_landing_unconfirmed"),
 ])
@@ -11475,6 +11477,11 @@ def test_unstick_water_success_requires_confirmed_same_life_landing(landing, exp
             assert action == "status"
             if finished and landing == "status_timeout":
                 raise httpx.ReadTimeout("landing status unavailable")
+            if finished and kwargs.get("timeout_s") == 0.25:
+                if landing == "settled":
+                    status.update(pos=[-7422.5, 63.0, 2630.5], on_ground=True)
+                elif landing == "reentered":
+                    status.update(pos=[-7422.5, 62.4, 2630.5], in_water=True)
             return dict(status)
 
     bot = SwimBot()
@@ -11489,7 +11496,7 @@ def test_unstick_water_success_requires_confirmed_same_life_landing(landing, exp
             status.update(pos=[-7421.5, 64.1, 2805.5], ready=False, last_death={"t": 2})
         elif landing == "unready":
             status["ready"] = False
-        elif landing == "airborne":
+        elif landing in {"airborne", "settled", "reentered"}:
             status["on_ground"] = False
         elif landing == "wet":
             status["in_water"] = True
@@ -11500,6 +11507,8 @@ def test_unstick_water_success_requires_confirmed_same_life_landing(landing, exp
 
     assert result["ok"] is (expected_error is None)
     assert result["escaped_water"] is result["ok"]
+    if landing == "settled":
+        assert result["pos_after"] == [-7422.5, 63.0, 2630.5]
     if expected_error:
         assert result["requires_replan"] is True and result["error"]["code"] == expected_error
         assert result.get("respawned", False) is (landing == "respawned")
