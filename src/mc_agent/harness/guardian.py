@@ -3836,6 +3836,7 @@ class GenerationGuard:
     def _intercept_bot_calls(
         self,
         *,
+        dig_progress: dict[str, Any] | None = None,
         enable_creeper_watcher: bool = True,
         deadline: float | None = None,
         check_unstick_exit: bool = False,
@@ -3950,6 +3951,19 @@ class GenerationGuard:
                     return False
             return True
 
+        def stop_watched_action(trigger: ThreatTrigger) -> None:
+            try:
+                result = orig_call("stop", {}, allow_reauth=False, timeout_s=1.5)
+            except Exception:
+                return
+            if not isinstance(result, dict):
+                return
+            released = result.get("released")
+            if isinstance(released, bool):
+                trigger["action_released"] = released
+            elif result.get("stopped") is True and "action" in result and result["action"] is None:
+                trigger["action_released"] = True
+
         def _watcher() -> None:
             # Delay 0.30s before first poll so fast (<5ms) offline mock calls never incur background HTTP reads
             if stop_evt.wait(0.30):
@@ -4018,10 +4032,7 @@ class GenerationGuard:
                                     "distance": 0.0 if lava_danger else nh_dist,
                                 })
                         if stop_attack:
-                            try:
-                                orig_call("stop", {}, allow_reauth=False, timeout_s=1.5)
-                            except (ApiError, httpx.HTTPError):
-                                pass
+                            stop_watched_action(pending_trigger[0])
                             return
                         if stop_evt.wait(0.30):
                             return
@@ -4033,10 +4044,7 @@ class GenerationGuard:
                         last_terrain_health = float(cur_hp)
                     if terrain is not None and not stop_evt.is_set():
                         pending_trigger.append(terrain)
-                        try:
-                            orig_call("stop", {}, allow_reauth=False, timeout_s=1.5)
-                        except (ApiError, httpx.HTTPError):
-                            pass
+                        stop_watched_action(terrain)
                         return
                     hp_dropped = (
                         isinstance(watch_hp0, (int, float))
@@ -4166,14 +4174,12 @@ class GenerationGuard:
                                     "reason": water_risk,
                                     **{key: st.get(key) for key in (
                                         "pos", "health", "oxygen", "in_water", "submerged", "on_ground", "nearest_hostile",
+                                        "ready", "alive", "dimension", "last_death",
                                     )},
                                 }} if src_w == "tool_water_threat" else {}),
                             }
                         )
-                        try:
-                            orig_call("stop", {}, allow_reauth=False, timeout_s=1.5)
-                        except Exception:
-                            pass
+                        stop_watched_action(pending_trigger[0])
                         return
                 except Exception:
                     pass
@@ -4330,6 +4336,17 @@ class GenerationGuard:
                             raise ReflexPreempted(trigger) from None
                 raise
 
+            if dig_progress is not None and clean_path == "dig" and isinstance(res, dict) and res.get("ok") is not False:
+                # Record acknowledged effects before a pending stop can unwind the actor tool.
+                dug = res.get("dug")
+                if isinstance(dug, str) and dug.removeprefix("minecraft:") not in {"", "air", "cave_air", "void_air"}:
+                    dig_progress["dug_count"] = dig_progress.get("dug_count", 0) + 1
+                gained = res.get("gained")
+                if isinstance(gained, dict):
+                    for name, amount in gained.items():
+                        if type(amount) is int and amount > 0:
+                            confirmed_gains = dig_progress.setdefault("gained", {})
+                            confirmed_gains[name] = confirmed_gains.get(name, 0) + amount
             apply_pending_preemption()
             if not self._in_reflex and (not caller_ignores_hurt or watch_terrain_damage):
                 if isinstance(res, dict) and res.get("interrupted_by") == "hurt" and clean_path in ACTION_LOCK_ENDPOINTS:
@@ -4348,11 +4365,7 @@ class GenerationGuard:
             self.raw_bot.call = orig_call
             if watcher_thread is not None:
                 # Finish a dispatched /stop before issuing a recovery mutation.
-                wait_for_stop = pending_trigger and (
-                    watch_attack_emergency or pending_trigger[0].get("primary_type") in {"in_wall", "lava"}
-                    or pending_trigger[0].get("source") == "tool_water_threat"
-                )
-                watcher_thread.join(timeout=1.55 if wait_for_stop else 0.05)
+                watcher_thread.join(timeout=1.55 if pending_trigger else 0.05)
 
     def _fresh_tool_hurt_event(self, call: Callable[..., dict[str, Any]]) -> dict[str, Any] | None:
         since = self.cursor
@@ -4841,17 +4854,26 @@ class GenerationGuard:
                 raise
             except Exception:
                 pass
+            stop_reason = trigger.get("source") or "guardian_preempted"
+            water_observation = trigger.get("water_observation")
+            preempt_pos = (water_observation or {}).get("pos") or st_pre.get("pos")
+            release = {"action_released": trigger["action_released"]} if "action_released" in trigger else {}
             receipt = {
                 "ok": False,
                 "requires_replan": True,
                 "preempted_by_reflex": True,
                 "interrupted_tool": interrupted_name,
+                "error": {"code": "guardian_preempted", "message": summary},
+                "stop_reason": stop_reason,
                 "reflex_mode": outcome.get("mode"),
                 "message": f"[小脑本能抢占接管] {summary}（原工具未自动重放，请基于当前最新状态决策下一步）。",
                 "status_after": {
                     k: st_after.get(k)
                     for k in ("pos", "health", "food", "in_water", "on_ground", "is_day", "nearest_hostile")
                 },
+                **({"pos_at_preemption": preempt_pos} if preempt_pos is not None else {}),
+                **({"pos_after": st_after["pos"]} if st_after.get("pos") is not None else {}),
+                **release,
             }
             if outcome.get("mode") == "network_timeout":
                 receipt["status_after"].update({
@@ -4862,8 +4884,9 @@ class GenerationGuard:
                 receipt["status_after"].update({key: st_after.get(key) for key in ("in_lava", "on_fire")})
                 lava_status["status_after"] = receipt["status_after"]
             self.events.emit(
-                "guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary, **lava_status,
-                **({"water_observation": trigger["water_observation"]} if "water_observation" in trigger else {}),
+                "guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary,
+                stop_reason=stop_reason, **lava_status, **release,
+                **({"water_observation": water_observation} if water_observation is not None else {}),
             )
             return receipt
         finally:
@@ -4963,8 +4986,10 @@ class GenerationGuard:
             budget_s = self.UNSTICK_BUDGET_S
         # Leave time for the watcher to exit and for the final bounded stop request.
         deadline = time.monotonic() + budget_s - 2.0 if budget_s is not None else None
+        dig_progress: dict[str, Any] = {}
         try:
             with self._intercept_bot_calls(
+                dig_progress=dig_progress,
                 enable_creeper_watcher=not (is_flee or is_attack),
                 deadline=deadline,
                 check_unstick_exit=is_unstick,
@@ -5071,6 +5096,8 @@ class GenerationGuard:
             raise
         except ReflexPreempted as preempt:
             receipt = self.handle_preemption(preempt.trigger, interrupted_name=tool_name)
+            if dig_progress:
+                receipt.update(partial_progress=True, **dig_progress)
             return json.dumps(receipt, ensure_ascii=False)
 
     # ---- Layer 3: Post-Tool Synchronous Boundary Stabilization (Before `rate_wait`!) ----

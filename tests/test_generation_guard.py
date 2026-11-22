@@ -14424,20 +14424,30 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
     }
     calls = []
     drowned = {"id": 45, "name": "drowned", "dist": 4.0, "pos": [41016.5, 22, 11034.4]}
+    first_dig = [41014, 22, 11036]
 
     class CaveBot:
         def call(self, endpoint, body=None, **kwargs):
             if endpoint == "status":
                 return dict(status)
             if endpoint == action:
+                if action == "dig" and body["pos"] == first_dig:
+                    calls.append("first_dig")
+                    return {"dug": "stone", "gained": {"cobblestone": 1}}
                 calls.append(endpoint)
                 status.update(in_water=True, submerged=True, on_ground=False, oxygen=oxygen)
                 if oxygen == 285:
                     status["nearest_hostile"] = drowned
                 assert stopped.wait(1.5)
+                if action == "dig":
+                    if oxygen == 285:
+                        raise ApiError("interrupted", "no confirmed dig")
+                    return {"dug": "stone", "gained": {"cobblestone": 1}, "interrupted_by": "stop"}
             if endpoint == "stop":
                 calls.append(endpoint)
                 stopped.set()
+                if oxygen != 285:
+                    return {"stopped": True, "action": action, "released": tool != "mc_skill_unstick"}
             if endpoint == "inventory":
                 return {"items": []}
             if endpoint == "events":
@@ -14456,9 +14466,27 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
         return {"ok": True, "in_water": False}
 
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", shore)
-    result = json.loads(guard.run_tool_with_reflex(tool, lambda: json.dumps(bot.call(action, body))))
+    def invoke():
+        if action == "dig":
+            bot.call("dig", {"pos": first_dig})
+        return json.dumps(bot.call(action, body))
+
+    result = json.loads(guard.run_tool_with_reflex(tool, invoke))
+    assert result["error"]["code"] == "guardian_preempted"
+    assert result["stop_reason"] == "tool_water_threat"
     assert result["reflex_mode"] == "water_surface"
-    assert calls == [action, "stop", "surface"]
+    assert result["pos_at_preemption"] == status["pos"] == result["pos_after"]
+    assert calls == (["first_dig"] if action == "dig" else []) + [action, "stop", "surface"]
+    if oxygen == 285:
+        assert "action_released" not in result
+    else:
+        assert result["action_released"] is (tool != "mc_skill_unstick")
+    if action == "dig":
+        expected_count = 1 if oxygen == 285 else 2
+        assert result["partial_progress"] is True
+        assert result["dug_count"] == expected_count and result["gained"] == {"cobblestone": expected_count}
+    else:
+        assert "partial_progress" not in result and "dug_count" not in result and "gained" not in result
     assert guard._water_hurt_streak == 0
 
 
@@ -14528,6 +14556,7 @@ def test_bug009_mining_keeps_wading_until_there_is_a_water_threat(monkeypatch, o
         assert observed["reason"] == reason and observed["oxygen"] == oxygen
         assert observed["in_water"] is True and observed["submerged"] is False and observed["on_ground"] is True
         assert observed["health"] == (19.33 if reason == "hurt" else 20)
+        assert observed["ready"] is True and observed["alive"] is True and observed["dimension"] == "overworld"
 
 
 @pytest.mark.parametrize("interrupted", [False, True])

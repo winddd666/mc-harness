@@ -359,6 +359,7 @@ class ThreatTrigger(TypedDict, total=False):
     hurt_source: str | None
     observed_life: tuple[Any, Any]
     water_observation: dict[str, Any]
+    action_released: bool
 
 
 class CombatOutcome(TypedDict, total=False):
