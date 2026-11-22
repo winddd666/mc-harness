@@ -16168,6 +16168,99 @@ def test_critical_unshielded_arrow_retreat_checks_cover_after_a_stalled_landing(
     )
 
 
+@pytest.mark.parametrize("scene", [
+    "known", "unknown", "exposed", "close_creeper", "ambiguous", "changed_life", "still_airborne",
+    "target_missing", "creeper_during_check", "player_attributed", "grounded_origin", "step_to_cover", "unsupported",
+])
+def test_critical_dry_trident_hit_checks_cover_after_zero_movement_retreat(monkeypatch, scene):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    landed = [328069.3, 73, 333225.0]
+    drowned = {"id": 902140, "name": "drowned", "pos": [328075.1, 73, 333225.5], "dist": 5.8}
+    creeper = {"id": 42, "name": "creeper", "pos": [328068.5, 73, 333220.5], "dist": 4.6}
+    known_target = scene in {"known", "target_missing"}
+    origin = [328068.3, 73, 333225.0] if scene == "grounded_origin" else [328069.3, 73.6, 333225.0]
+    status = {
+        "pos": origin, "dimension": "overworld", "health": 1.833, "food": 17,
+        "ready": True, "alive": True, "on_ground": scene == "grounded_origin", "in_water": False, "blocking": False,
+        "last_death": {"t": 1}, "nearest_hostile": drowned if known_target else None,
+    }
+    hit = {"seq": 1, "type": "hurt", "source": "trident"}
+    if known_target:
+        hit["source_entity"] = drowned
+    if scene == "player_attributed":
+        hit["source_entity"] = {**drowned, "id": 99, "name": "player"}
+    scans = []
+    attempted = []
+
+    class ShoreBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [] if kwargs["params"]["since"] else [hit]}
+            if action == "inventory":
+                return {"items": [], "offhand": None}
+            if action == "get_entities":
+                scans.append(status["pos"])
+                entities = [{**drowned, "id": 91}] if scene == "target_missing" else [drowned]
+                if scene == "ambiguous":
+                    entities.append({**drowned, "id": 93, "pos": [328077.1, 73, 333225.5], "dist": 7.9})
+                if scene == "close_creeper" or (scene == "creeper_during_check" and len(scans) > 1):
+                    entities.append(creeper)
+                return {"entities": entities}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                support = y == 72 and x == 328069 and z in (333224, 333225) and scene != "unsupported"
+                wall = x == 328072 and 73 <= y <= 76 and scene != "exposed"
+                if scene == "step_to_cover":
+                    support = y == 72 and x in (328068, 328069) and 333221 <= z <= 333226
+                    wall = wall and z <= 333224
+                return {"name": "stone" if support or wall else "air"}
+            if action == "move_to" and scene == "step_to_cover":
+                attempted.append("move")
+                status["pos"] = [body["x"], body["y"], body["z"]]
+                return {"ok": True}
+            pytest.fail(f"Unexpected action during landing cover check: {action}")
+
+    def dig_cover(*_args, **_kwargs):
+        attempted.append("dig")
+        return {"ok": False, "reason": "no_filler_block"}
+
+    def flee(*_args, **_kwargs):
+        attempted.append("flee")
+        if scene != "still_airborne":
+            status.update(pos=landed, on_ground=True, nearest_hostile=None)
+        if scene == "changed_life":
+            status["last_death"] = {"t": 2}
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0, "pos_after": status["pos"]}
+
+    monkeypatch.setattr(CombatEnv, "dig_cover_pocket", dig_cover)
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    guard = GenerationGuard(ShoreBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    actions = guard.poll()["actions"]
+    covers = [action for action in actions if action["action"] == "natural_cover_after_retreat"]
+
+    if scene in {"changed_life", "still_airborne"}:
+        assert attempted == ["flee"]
+        assert not covers and not scans
+    elif scene == "player_attributed":
+        assert attempted == ["flee", "dig"]
+        assert not covers and not scans
+    elif scene == "step_to_cover":
+        assert attempted == ["flee", "dig", "move"]
+        assert len(covers) == 1 and covers[0]["ok"]
+        assert covers[0]["result"]["pos_after"] == status["pos"] != landed
+        assert scans == [landed, status["pos"]]
+    else:
+        assert attempted == (["dig", "flee"] if scene == "grounded_origin" else ["flee", "dig"])
+        assert len(covers) == 1 and covers[0]["ok"] is (scene in {"known", "unknown", "grounded_origin"})
+        if covers[0]["ok"]:
+            assert covers[0]["result"]["pos_after"] == landed
+        after_retreat = [landed, landed] if covers[0]["ok"] or scene == "creeper_during_check" else [landed]
+        assert scans == ([origin] + after_retreat if scene == "grounded_origin" else after_retreat)
+
+
 @pytest.mark.parametrize("situation", [
     "covered", "receipt_only", "knockback", "near_melee", "two_shooters", "shooter_moved",
     "logs_only", "logs_and_one_stone", "above_critical", "no_materials", "wall_removed_in_rescan",

@@ -303,7 +303,7 @@ def retreat_made_progress(ok: bool, moved: Any, reason: Any) -> bool:
 
 def ranged_retreat_positions(
     origin: Sequence[float], entities: Sequence[dict[str, Any]], *, max_distance: float,
-    trident_attacker_id: int | None = None,
+    trident_attacker_id: int | None = None, include_drowned: bool = False,
 ) -> list[tuple[int | None, Sequence[float]]]:
     positions = []
     for entity in entities:
@@ -313,13 +313,29 @@ def ranged_retreat_positions(
         name = _clean_block_name(entity.get("name"))
         entity_id = entity.get("id")
         if (
-            (name in RANGED_MOBS or (name == "drowned" and trident_attacker_id is not None and entity_id == trident_attacker_id))
+            (
+                name in RANGED_MOBS or (
+                    name == "drowned" and (include_drowned or (trident_attacker_id is not None and entity_id == trident_attacker_id))
+                )
+            )
             and isinstance(pos, (list, tuple)) and len(pos) >= 3
             and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
             and math.dist(origin[:3], pos[:3]) <= max_distance
         ):
             positions.append((entity_id, pos))
     return positions
+
+
+def melee_clear_for_projectile_cover(entities: Sequence[dict[str, Any]]) -> bool:
+    return not any(
+        isinstance(entity, dict)
+        and str(entity.get("name") or "").removeprefix("minecraft:") in PRE_HURT_MELEE_MOBS | {"creeper"}
+        and (
+            not isinstance(entity.get("dist"), (int, float))
+            or not math.isfinite(entity["dist"]) or entity["dist"] <= 5.5
+        )
+        for entity in entities
+    )
 
 
 def _is_solid_ground(name: str) -> bool:
@@ -2087,6 +2103,7 @@ class CombatEnv:
     def seek_natural_cover(
         self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,
         verify_live_shooters: bool = False, expected_life: tuple[Any, Any] | None = None,
+        trident_attacker_id: int | None = None,
     ) -> dict[str, Any] | None:
         """Find a close, supported position behind existing terrain and verify the landing."""
         before = self.bot.status()
@@ -2100,6 +2117,8 @@ class CombatEnv:
         ):
             return None
         self.invalidate_block_cache()
+        if trident_attacker_id is not None and not self.has_safe_footing(origin):
+            return None
         shooters = (threat_pos, *other_shooters)
         blocks_shot = self._blocks_shot_across_hitbox if verify_live_shooters else self._blocks_shot
         # A fresh blast at this location overrides otherwise favorable sight lines.
@@ -2129,8 +2148,12 @@ class CombatEnv:
             or current.get("dimension") != before.get("dimension")
         ):
             return None
+        if trident_attacker_id is not None and not melee_clear_for_projectile_cover([current.get("nearest_hostile")]):
+            return None
         if already_covered:
-            confirmed = not verify_live_shooters or self._blocks_live_shots(current_pos)
+            confirmed = not verify_live_shooters or self._blocks_live_shots(
+                current_pos, trident_attacker_id=trident_attacker_id,
+            )
             return {
                 "ok": confirmed, "mode": "natural_cover", "pos_after": current_pos, "moved_dist": 0.0,
                 **({"reason": "shooter_lanes_unconfirmed"} if not confirmed else {}),
@@ -2160,7 +2183,9 @@ class CombatEnv:
             and all(blocks_shot(final_pos, shooter) for shooter in shooters)
         )
         reason = "cover_unconfirmed" if not confirmed else None
-        if confirmed and verify_live_shooters and not self._blocks_live_shots(final_pos):
+        if confirmed and verify_live_shooters and not self._blocks_live_shots(
+            final_pos, trident_attacker_id=trident_attacker_id,
+        ):
             confirmed = False
             reason = "shooter_lanes_unconfirmed"
         return {
@@ -2169,7 +2194,7 @@ class CombatEnv:
             **({"respawned": True} if respawned else {}),
         }
 
-    def _blocks_live_shots(self, pos: Sequence[float]) -> bool:
+    def _blocks_live_shots(self, pos: Sequence[float], *, trident_attacker_id: int | None = None) -> bool:
         try:
             sighting = self.bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.4, allow_reauth=False)
         except (ApiError, httpx.HTTPError):
@@ -2177,9 +2202,20 @@ class CombatEnv:
         entities = sighting.get("entities")
         if not isinstance(entities, list):
             return False
-        shooters = ranged_retreat_positions(pos, entities, max_distance=16.0)
+        shooters = ranged_retreat_positions(
+            pos, entities, max_distance=16.0, include_drowned=trident_attacker_id is not None,
+        )
         # A wall checked before the entity scan may have changed while the scan was in flight.
         self.invalidate_block_cache()
+        if trident_attacker_id is not None and (
+            not any(entity_id == trident_attacker_id for entity_id, _ in shooters)
+            or not any(
+                isinstance(entity, dict) and entity.get("id") == trident_attacker_id
+                and _clean_block_name(entity.get("name")) == "drowned" for entity in entities
+            )
+            or not melee_clear_for_projectile_cover(entities) or not self.has_safe_footing(pos)
+        ):
+            return False
         return bool(shooters) and all(self._blocks_shot_across_hitbox(pos, shooter) for _, shooter in shooters)
 
     def flee(

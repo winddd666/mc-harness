@@ -44,6 +44,7 @@ from ..skills.combat_env import (
     _TerrainProbeExpired,
     aim_yaw_pitch,
     footing_blocks,
+    melee_clear_for_projectile_cover,
     ranged_retreat_positions,
     retreat_made_progress,
 )
@@ -918,7 +919,7 @@ class GenerationGuard:
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
         *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True, cover_only: bool = False,
         trident_attacker_id: int | None = None, verify_live_shooters: bool = False, require_safe_footing: bool = False,
-        confirmed_blaze_cover: bool = False,
+        confirmed_blaze_cover: bool = False, confirm_trident_cover: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
@@ -962,7 +963,7 @@ class GenerationGuard:
             )
             cover_requires_melee_clearance = (
                 scan_surface_shooters and (
-                    trident_attacker_id is not None or (
+                    trident_attacker_id is not None or confirm_trident_cover or (
                         status.get("blocking")
                         and (cover_only or (isinstance(health, (int, float)) and 4.0 < health <= 6.0))
                     )
@@ -1008,6 +1009,17 @@ class GenerationGuard:
                 except (ApiError, httpx.HTTPError):
                     sighting = {}
                 entities = sighting.get("entities") or []
+                if confirm_trident_cover:
+                    drowned_ids = {
+                        entity["id"] for entity in entities if isinstance(entity, dict)
+                        and type(entity.get("id")) is int
+                        and str(entity.get("name") or "").removeprefix("minecraft:") == "drowned"
+                    }
+                    if trident_attacker_id is None and len(drowned_ids) == 1:
+                        trident_attacker_id = next(iter(drowned_ids))
+                    if trident_attacker_id not in drowned_ids:
+                        return {"ok": False, "mode": "natural_cover", "reason": "trident_shooter_unconfirmed"}
+                    primary_id = trident_attacker_id
                 if mixed_hurt and not pos and primary_id is not None:
                     for entity in entities:
                         if not isinstance(entity, dict) or entity.get("id") != primary_id:
@@ -1021,6 +1033,7 @@ class GenerationGuard:
                             break
                 shooters = ranged_retreat_positions(
                     retreat_pos, entities, max_distance=16.0, trident_attacker_id=trident_attacker_id,
+                    include_drowned=confirm_trident_cover,
                 )
                 for shooter_id, shooter_pos in shooters:
                     if shooter_id is None:
@@ -1038,7 +1051,7 @@ class GenerationGuard:
                     check_blaze_cover = (
                         check_blaze_cover and (primary_id, "blaze") in names
                         and all(name != "ghast" for _, name in names)
-                        and self._melee_clear_for_projectile_cover(entities)
+                        and melee_clear_for_projectile_cover(entities)
                     )
                 if (mixed_hurt or scan_surface_shooters) and not pos and other_shooters:
                     pos = other_shooters.pop(0)
@@ -1048,7 +1061,7 @@ class GenerationGuard:
                         shooter_id == trident_attacker_id if trident_attacker_id is not None else isinstance(shooter_id, int)
                         for shooter_id, _ in shooters
                     )
-                    and self._melee_clear_for_projectile_cover(entities)
+                    and melee_clear_for_projectile_cover(entities)
                 )
             close_contact = scan_surface_shooters and (
                 (nh_name == "creeper" and nh_distance <= 5.5)
@@ -1074,7 +1087,8 @@ class GenerationGuard:
                         pos, other_shooters=other_shooters, allow_stationary=allow_stationary,
                         **({"verify_live_shooters": True} if verify_live_shooters else {}),
                         **({"expected_life": (status.get("dimension"), status.get("last_death"))}
-                           if confirmed_blaze_cover else {}),
+                           if confirmed_blaze_cover or confirm_trident_cover else {}),
+                        **({"trident_attacker_id": trident_attacker_id} if confirm_trident_cover else {}),
                     )
                 except _RecoveryBudgetExceeded:
                     self._stop_after_recovery_timeout()
@@ -2865,7 +2879,8 @@ class GenerationGuard:
                         trident_cover = (
                             surface_projectile_cover and trident_attacker_id is not None and 0 < hp_val <= LOW_HP_BUNKER_MAX
                         )
-                        pocket_unavailable_here = ((cover or {}).get("result") or {}).get("reason") in NO_DIG_COVER_REASONS
+                        pocket_reason = ((cover or {}).get("result") or {}).get("reason")
+                        pocket_unavailable_here = pocket_reason in NO_DIG_COVER_REASONS
                         pocket_unavailable = (
                             surface_projectile_cover and not has_shield and (ranged_hurt_only or nh_name in RANGED_MOBS)
                             and pocket_unavailable_here
@@ -2937,10 +2952,25 @@ class GenerationGuard:
                                 not has_shield and hurt_src == "arrow" and 0 < hp_val <= LOW_HP_BUNKER_MAX
                                 and cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
                             )
+                            stalled_under_trident = (
+                                hurt_src == "trident" and source_name in {"", "drowned"}
+                                and not cf.get("ok") and 0 < hp_val <= 6.0
+                                and cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
+                            )
                             retry_pocket_after_knockback = (
                                 not has_shield and not skip_cover_for_blast and status.get("on_ground") is False
                                 and cf_result.get("reason") == "no_safe_retreat"
+                                and not (stalled_under_trident and pocket_reason == "no_filler_block")
                             )
+
+                            def confirm_trident_landing(landing: dict[str, Any]) -> dict[str, Any]:
+                                return self._defend_or_flee(
+                                    landing, None, counts, ranged=True, prefer_cover=True, cover_only=True,
+                                    trident_attacker_id=source_id if source_name == "drowned" else None,
+                                    verify_live_shooters=True,
+                                    confirm_trident_cover=True,
+                                )
+
                             cover_material = (
                                 self.combat_env.arrow_cover_material(counts) if hurt_src == "arrow" and not has_shield else None
                             )
@@ -2959,7 +2989,7 @@ class GenerationGuard:
                             overworld_landing = str(status.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                             if (
                                 shore is None and not cf_result.get("respawned")
-                                and (critical_landing or stalled_under_arrows) and overworld_landing
+                                and (critical_landing or stalled_under_arrows or stalled_under_trident) and overworld_landing
                             ):
                                 try:
                                     landing = self.bot.call("status", method="GET", timeout_s=0.6)
@@ -2974,14 +3004,16 @@ class GenerationGuard:
                                     landing.get("ready") is True and landing.get("alive") is True
                                     and landing.get("on_ground") is True and landing.get("pos")
                                     and not any(landing.get(key) for key in ("in_water", "in_lava", "on_fire", "busy"))
+                                    and (not stalled_under_trident or not landing.get("submerged"))
                                     and bool(landing.get("blocking")) == has_shield
                                     and all(landing.get(key) == status.get(key) for key in ("last_death", "dimension"))
-                                    and isinstance(landing_hp, (int, float)) and 0 < landing_hp <= cover_hp_limit
+                                    and isinstance(landing_hp, (int, float))
+                                    and 0 < landing_hp <= (6.0 if stalled_under_trident else cover_hp_limit)
                                     and (not retry_pocket_after_knockback or pocket_already_tried)
                                 ):
                                     natural_cover = self._action(
                                         "natural_cover_after_retreat",
-                                        lambda: self._defend_or_flee(
+                                        lambda: confirm_trident_landing(landing) if stalled_under_trident else self._defend_or_flee(
                                             landing, None, counts, ranged=True, prefer_cover=True, cover_only=True,
                                             trident_attacker_id=trident_attacker_id,
                                             verify_live_shooters=hurt_src == "arrow" and not has_shield,
@@ -3013,11 +3045,25 @@ class GenerationGuard:
                                                 allow_stationary_cover=False, cover_only=True, verify_live_shooters=True,
                                             ),
                                         )
+                                    elif (
+                                        stalled_under_trident and shore is None and overworld_landing
+                                        and landing_cover.get("reason") in NO_DIG_COVER_REASONS
+                                        and not landing_cover.get("respawned")
+                                        and not landing.get("busy") and not landing.get("submerged")
+                                        and isinstance(landing.get("health"), (int, float)) and 0 < landing["health"] <= 6.0
+                                    ):
+                                        natural_cover = self._action(
+                                            "natural_cover_after_retreat", lambda: confirm_trident_landing(landing),
+                                        )
                             if natural_cover is not None:
                                 actions.append(natural_cover)
                                 landing_hp = landing.get("health")
                                 if natural_cover.get("ok"):
-                                    self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
+                                    self._mark_ranged_engagement(
+                                        time.monotonic(),
+                                        attacker=att_obj if not stalled_under_trident or source_name == "drowned" else None,
+                                        in_cover=True,
+                                    )
                                 elif (
                                     overworld_landing and cover_material is not None and not landing.get("blocking")
                                     and isinstance(landing_hp, (int, float)) and 0 < landing_hp <= cover_hp_limit
@@ -3853,18 +3899,6 @@ class GenerationGuard:
         except (ApiError, httpx.HTTPError):
             return None
 
-    @staticmethod
-    def _melee_clear_for_projectile_cover(entities: Sequence[dict[str, Any]]) -> bool:
-        return not any(
-            isinstance(entity, dict)
-            and str(entity.get("name") or "").removeprefix("minecraft:") in PRE_HURT_MELEE_MOBS | {"creeper"}
-            and (
-                not isinstance(entity.get("dist"), (int, float))
-                or not math.isfinite(entity["dist"]) or entity["dist"] <= 5.5
-            )
-            for entity in entities
-        )
-
     def _hold_blaze_cover(self, before: dict[str, Any], blaze_id: int | None) -> dict[str, Any]:
         """Verify existing cover without moving while taking residual fire damage."""
         failed = {"ok": False, "mode": "natural_cover", "reason": "blaze_cover_unconfirmed"}
@@ -3902,7 +3936,7 @@ class GenerationGuard:
             ).get("entities")
             if not isinstance(entities, list) or not all(isinstance(entity, dict) for entity in entities):
                 return failed
-            if not self._melee_clear_for_projectile_cover(entities):
+            if not melee_clear_for_projectile_cover(entities):
                 return failed
             blazes = []
             for entity in entities:
@@ -3929,7 +3963,7 @@ class GenerationGuard:
             nearest = after.get("nearest_hostile")
             if isinstance(nearest, dict):
                 name = str(nearest.get("name") or "").strip().lower().removeprefix("minecraft:")
-                if name in other_ranged or not self._melee_clear_for_projectile_cover([nearest]):
+                if name in other_ranged or not melee_clear_for_projectile_cover([nearest]):
                     return failed
                 if name == "blaze" and not any(entity_id == nearest.get("id") for entity_id, _ in shooters):
                     return failed
@@ -3950,7 +3984,7 @@ class GenerationGuard:
             shooters = ranged_retreat_positions(pos, entities, max_distance=16.0)
             target = next((point for entity_id, point in shooters if target_id is not None and entity_id == target_id), None)
             others = [point for entity_id, point in shooters if entity_id != target_id]
-            if target is None or (require_melee_clearance and not self._melee_clear_for_projectile_cover(entities)):
+            if target is None or (require_melee_clearance and not melee_clear_for_projectile_cover(entities)):
                 return None, target, others
             cover = self._action(
                 "unsafe_exit_cover",
@@ -3982,7 +4016,7 @@ class GenerationGuard:
         def live_shooter(pos: Sequence[float], expected_id: int | None) -> tuple[int, Sequence[float]] | None:
             sighting = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.4)
             entities = sighting.get("entities")
-            if not isinstance(entities, list) or not self._melee_clear_for_projectile_cover(entities):
+            if not isinstance(entities, list) or not melee_clear_for_projectile_cover(entities):
                 return None
             shooters = ranged_retreat_positions(pos, entities, max_distance=16.0)
             if len(shooters) != 1 or (expected_id is not None and shooters[0][0] != expected_id):
