@@ -896,11 +896,14 @@ class GenerationGuard:
                 dimension == "overworld" and unshielded and best_melee_weapon_in_inv(counts) is None
             )
             melee_id = attacker_id if isinstance(attacker_id, int) else None
-            if melee_id is None and surface_unarmed_retreat and nh_name in PRE_HURT_MELEE_MOBS:
+            if (
+                melee_id is None and surface_unarmed_retreat and nh_name in PRE_HURT_MELEE_MOBS
+                and (low_health or nh_distance <= 3.5)
+            ):
                 melee_id = nh_id
             resolve_melee = (
-                ("nether" in dimension or surface_unarmed_retreat)
-                and low_health and recent_melee and not ranged and not mixed_hurt and melee_id is not None
+                (surface_unarmed_retreat or ("nether" in dimension and low_health))
+                and recent_melee and not ranged and not mixed_hurt and melee_id is not None
             )
             pos = attacker.get("pos") if isinstance(attacker, dict) else None
             if not pos and (not resolve_melee or nh_id == melee_id):
