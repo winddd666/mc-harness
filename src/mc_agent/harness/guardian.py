@@ -2597,6 +2597,7 @@ class GenerationGuard:
                                     fresh_blast or pocket_unavailable or sustained_shield_damage
                                     or seek_cover_after_failed_dig or critical_shielded_arrows
                                 ),
+                                verify_live_shooters=surface_projectile_cover and hurt_src == "arrow" and not has_shield,
                                 **({"trident_attacker_id": trident_attacker_id} if trident_cover else {}),
                             ),
                         )
@@ -2711,7 +2712,7 @@ class GenerationGuard:
                                             "natural_cover",
                                             lambda: self._defend_or_flee(
                                                 landing, attacker, counts, ranged=True, prefer_cover=True,
-                                                allow_stationary_cover=False, cover_only=True,
+                                                allow_stationary_cover=False, cover_only=True, verify_live_shooters=True,
                                             ),
                                         )
                                         actions.append(natural_cover)
@@ -3555,7 +3556,8 @@ class GenerationGuard:
             if result.get("ok"):
                 settled = result["pos_after"]
                 shooter_after = live_shooter(settled, shooter[0])
-                if shooter_after is None or not env._blocks_shot(settled, shooter_after[1]):
+                env.invalidate_block_cache()
+                if shooter_after is None or not env._blocks_shot_across_hitbox(settled, shooter_after[1]):
                     return {**result, "ok": False, "reason": "projectile_lane_unconfirmed"}
             return result
         except _RecoveryBudgetExceeded:

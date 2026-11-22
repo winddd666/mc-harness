@@ -6531,8 +6531,12 @@ def test_nether_fire_ticks_do_not_replace_ranged_hit_or_start_a_bunker(monkeypat
             assert urgent
             return {"ok": True}
 
-    def retreat(status, target, counts, *, ranged=False, prefer_cover=False, allow_stationary_cover=True):
+    def retreat(
+        status, target, counts, *, ranged=False, prefer_cover=False, allow_stationary_cover=True,
+        verify_live_shooters=False,
+    ):
         assert allow_stationary_cover == (hit_source != "fireball")
+        assert not verify_live_shooters
         retreat_calls.append((target, ranged))
         return {"ok": True, "mode": "flee"}
 
@@ -7126,7 +7130,8 @@ def test_low_health_surface_retreat_accounts_for_nearby_shooters(monkeypatch, sc
                 return {"entities": [primary, secondary]}
             raise AssertionError(action)
 
-    def cover(_env, pos, *, other_shooters, allow_stationary):
+    def cover(_env, pos, *, other_shooters, allow_stationary, verify_live_shooters=False):
+        assert verify_live_shooters is (not shielded)
         if failed_cover:
             assert not allow_stationary
         plans.append(("cover", pos, list(other_shooters)))
@@ -8623,8 +8628,8 @@ def test_unshielded_arrow_knockback_retries_cover_if_landed_with_no_retreat(monk
             return {"ok": False, "reason": "no_filler_block" if landing == "no_filler" else "no_solid_wall"}
         return {"ok": True, "mode": "cover_pocket"}
 
-    def natural_cover(_env, pos, *, other_shooters, allow_stationary):
-        assert status["on_ground"] and not allow_stationary
+    def natural_cover(_env, pos, *, other_shooters, allow_stationary, verify_live_shooters):
+        assert status["on_ground"] and not allow_stationary and verify_live_shooters
         assert not other_shooters and pos == [-7911.3, 44, 2790.6]
         natural_checks.append(pos)
         if landing != "no_cover":
@@ -12549,6 +12554,65 @@ def test_stationary_natural_cover_rejects_an_exposed_hitbox_edge(monkeypatch):
     assert env.seek_natural_cover(shooter, verify_live_shooters=True) is None
 
 
+@pytest.mark.parametrize("cover", ["confirmed", "exposed_edge", "wall_removed", "second_shooter"])
+def test_arrow_poll_rechecks_natural_cover_before_remaining_in_place(monkeypatch, cover):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    z = 0.08 if cover == "exposed_edge" else 0.5
+    pos = [0.5, 71, z]
+    shooter = {"id": 41, "name": "skeleton", "dist": 8.0, "pos": [8.5, 71, z]}
+    flank = {"id": 42, "name": "skeleton", "dist": 6.0, "pos": [0.5, 71, z - 6.0]}
+    status = {
+        "pos": pos, "dimension": "overworld", "health": 5.833332, "food": 17,
+        "ready": True, "alive": True, "on_ground": True,
+        "nearest_hostile": {"id": 41, "name": "skeleton", "dist": 8.0},
+    }
+    rescans = []
+    retreats = []
+
+    class ArrowBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [
+                    {"seq": seq, "type": "hurt", "source": "arrow"}
+                    for seq in (1, 2, 3) if seq > kwargs["params"]["since"]
+                ]}
+            if action == "inventory":
+                return {"items": [{"name": "dark_oak_log", "count": 12}], "offhand": None}
+            if action == "get_entities":
+                if kwargs["timeout_s"] == 0.4:
+                    rescans.append(action)
+                    if cover == "second_shooter":
+                        return {"entities": [shooter, flank]}
+                return {"entities": [shooter]}
+            if action == "get_block":
+                x, y, block_z = body["pos"]
+                wall_removed = cover == "wall_removed" and bool(rescans)
+                if (x, block_z) == (2, 0) and y in (71, 72) and not wall_removed:
+                    return {"name": "stone"}
+                return {"name": "air"}
+            pytest.fail(f"Unexpected action: {action}")
+
+    def flee(_env, threat, **_kwargs):
+        retreats.append(threat)
+        return {"ok": False, "mode": "flee", "reason": "no_movement", "moved_dist": 0.0}
+
+    monkeypatch.setattr(CombatEnv, "dig_cover_pocket", lambda *_args: {"ok": False, "reason": "time_budget"})
+    monkeypatch.setattr(CombatEnv, "flee", flee)
+    guard = GenerationGuard(ArrowBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    incident = guard.poll()
+
+    assert [action["action"] for action in incident["actions"]] == ["dig_cover", "combat_or_flee"]
+    assert rescans == ([] if cover == "exposed_edge" else ["get_entities"])
+    assert retreats == ([] if cover == "confirmed" else [shooter["pos"]])
+    defense = incident["actions"][-1]
+    assert defense["result"]["mode"] == ("natural_cover" if cover == "confirmed" else "flee")
+    assert defense["ok"] is (cover == "confirmed")
+    assert (guard._ranged_cover_active_until > guard.last_reaction) is (cover == "confirmed")
+
+
 @pytest.mark.parametrize("action", ["control", "move_to"])
 @pytest.mark.parametrize("solid_exit", [True, False])
 @pytest.mark.parametrize("dimension", ["the_nether", "overworld"])
@@ -14039,11 +14103,12 @@ def test_projectile_poll_without_a_diggable_pocket_checks_cover_before_flee(monk
         checks.append("dig")
         return {"ok": False, "reason": pocket}
 
-    def seek_cover(_env, pos, *, other_shooters, allow_stationary):
+    def seek_cover(_env, pos, *, other_shooters, allow_stationary, verify_live_shooters=False):
         checks.append("natural_cover")
         assert pos == live_shooter["pos"]
         assert other_shooters == []
         assert allow_stationary is (pocket == "cover_not_entered")
+        assert verify_live_shooters is (not trident)
         if covered:
             return {"ok": True, "mode": "natural_cover", "pos_after": [2.7, 69, 0.5]}
         return None
@@ -14212,16 +14277,18 @@ def test_critical_unshielded_arrow_retreat_checks_cover_after_a_stalled_landing(
 
 @pytest.mark.parametrize("situation", [
     "covered", "receipt_only", "knockback", "near_melee", "two_shooters", "shooter_moved",
-    "logs_only", "logs_and_one_stone", "above_critical", "no_materials",
+    "logs_only", "logs_and_one_stone", "above_critical", "no_materials", "wall_removed_in_rescan",
+    "placed_cover_exposed_edge",
     "arrow_burst_with_logs", "followup_arrow_with_logs", "single_arrow_with_logs", "stale_arrow_with_logs",
     "arrow_burst_with_one_log",
 ])
 def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exists(monkeypatch, situation):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
-    shooter = {"id": 41, "name": "skeleton", "dist": 8, "pos": [9824.9, 63, 7381.1]}
+    z = 7381.08 if situation == "placed_cover_exposed_edge" else 7381.5
+    shooter = {"id": 41, "name": "skeleton", "dist": 8, "pos": [9824.9, 63, z]}
     status = {
-        "pos": [9816.9, 63.2, 7381.1], "dimension": "overworld", "health": 5.5, "food": 17,
+        "pos": [9816.9, 63.2, z], "dimension": "overworld", "health": 5.5, "food": 17,
         "ready": True, "alive": True, "on_ground": False, "last_death": {"t": 1},
         "nearest_hostile": {"id": 41, "name": "skeleton", "dist": 8},
     }
@@ -14258,6 +14325,8 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
             if action == "inventory":
                 return {"items": items, "offhand": None}
             if action == "get_entities":
+                if situation == "wall_removed_in_rescan" and len(attempts) == 2:
+                    blocks.clear()
                 return {"entities": entities}
             if action == "get_block":
                 cell = tuple(body["pos"])
@@ -14287,7 +14356,7 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
         landing_hp = 6.1 if situation == "above_critical" else 4.833 if material == "oak_log" else 2.48
         if early_landing:
             landing_hp = 6.166667
-        status.update(health=landing_hp, pos=[9816.9, 63, 7381.1], on_ground=True)
+        status.update(health=landing_hp, pos=[9816.9, 63, z], on_ground=True)
         return {"ok": True, "mode": "flee", "moved_dist": 2.31, "pos_after": status["pos"]}
 
     monkeypatch.setattr(guard, "_defend_or_flee", defend)
@@ -14302,7 +14371,10 @@ def test_critical_arrow_retreat_builds_verified_cover_when_no_natural_cover_exis
     assert action["action"] == "place_arrow_cover"
     cover_verified = situation in {"covered", "logs_only", "logs_and_one_stone", "arrow_burst_with_logs", "followup_arrow_with_logs"}
     assert action["ok"] is cover_verified
-    if cover_verified or situation == "shooter_moved":
+    exposed_after_placement = situation in {"shooter_moved", "wall_removed_in_rescan", "placed_cover_exposed_edge"}
+    if exposed_after_placement:
+        assert action["result"]["reason"] == "projectile_lane_unconfirmed"
+    if cover_verified or exposed_after_placement:
         assert attempts == [(9818, 63, 7381), (9818, 64, 7381)]
     elif situation in {"receipt_only", "knockback"}:
         assert attempts == [(9818, 63, 7381)]
