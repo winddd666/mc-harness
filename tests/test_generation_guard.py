@@ -8193,6 +8193,54 @@ def test_retreat_avoids_another_attacker_when_it_has_room(primary_name, primary_
             assert math.dist(forward[0], primary["pos"]) > 5.5
 
 
+@pytest.mark.parametrize("archer_blocked", [False, True])
+def test_unshielded_melee_retreat_avoids_an_exposed_archer_on_the_escape_line(archer_blocked):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    origin = [17058.2, 26, 29971.9]
+    spider = {"id": 224968, "name": "spider", "pos": [17059.9, 26, 29971.9], "dist": 1.7}
+    archer = {"id": 224969, "name": "skeleton", "pos": [17054.0, 26, 29971.9], "dist": 4.2,
+              "blocked_by_wall": archer_blocked}
+    blocked = {"id": 224970, "name": "skeleton", "pos": [17058.2, 26, 29979.9], "dist": 8,
+               "blocked_by_wall": True}
+    status = {"pos": origin, "health": 13, "food": 20, "ready": True, "alive": True, "on_ground": True,
+              "dimension": "overworld", "nearest_hostile": spider}
+    moves = []
+
+    class TunnelBot:
+        yaw = 0.0
+
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}]}
+            if action == "get_entities":
+                return {"entities": [spider, archer, blocked]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 26 else "air"}
+            if action == "look":
+                self.yaw = body["yaw"]
+            if action == "control" and body.get("forward"):
+                dx, dz = yaw_to_unit_xz(self.yaw)
+                x, y, z = status["pos"]
+                status["pos"] = [x + 2.3 * dx, y, z + 2.3 * dz]
+                moves.append(status["pos"])
+            if action == "move_to":
+                status["pos"] = [body[k] for k in ("x", "y", "z")]
+                moves.append(status["pos"])
+            return {"ok": True}
+
+    result = CombatControllerSlot().handle(CombatEnv(TunnelBot()), {
+        "source": "pre_hurt_melee", "primary_type": "spider", "primary_entity_id": spider["id"],
+    })
+
+    assert result["mode"] == "cover_or_flee" and result["actions"][0]["ok"]
+    assert math.dist(moves[0], spider["pos"]) > spider["dist"]
+    assert (math.dist(moves[0], archer["pos"]) < 3.0) is archer_blocked
+
+
 @pytest.mark.parametrize("landing", ["grounded", "still_airborne", "water", "respawned"])
 def test_unarmed_retreat_confirms_landing_after_short_pulse(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv

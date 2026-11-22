@@ -2089,6 +2089,7 @@ class CombatEnv:
         initial_landing_checks: int = 3,
         other_shooters: Sequence[Sequence[float]] = (),
         other_melee: Sequence[Sequence[float]] = (),
+        primary_melee: bool = False,
         other_creepers: Sequence[Sequence[float]] = (),
         avoid_blast: bool = False,
         keep_blast_clearance: bool = False,
@@ -2216,9 +2217,11 @@ class CombatEnv:
                     if require_blast_clearance and index == 0:
                         continue
                     # The primary melee attacker is already in reach. Compare clearance
-                    # after the initial step while checking the entire route for other mobs.
-                    start = min(1.65, disengage_range) if other_melee and index == 0 else 0.0
-                    along_route = max(start, min(disengage_range, dx * ux + dz * uz))
+                    # after the initial step away, and check the whole route when it approaches an attacker.
+                    projection = dx * ux + dz * uz
+                    stepping_away = index == 0 and (primary_melee or other_melee) and (not primary_melee or projection <= 0)
+                    start = min(1.65, disengage_range) if stepping_away else 0.0
+                    along_route = max(start, min(disengage_range, projection))
                     nearest = min(nearest, math.hypot(dx - ux * along_route, dy, dz - uz * along_route))
                 return nearest
 
@@ -2237,6 +2240,8 @@ class CombatEnv:
                     short_yaws = yaws if other_melee and not other_creepers else sorted(
                         yaws, key=lambda yaw: blast_clearance(yaw, 1.65), reverse=True,
                     )
+                elif primary_melee and other_shooters:
+                    short_yaws = yaws
                 elif wait_for_ground:
                     short_yaws.extend(yaws[:3])
                     if threat_pos is not None and not (other_shooters or other_melee):
@@ -3873,10 +3878,14 @@ class SubcorticalInstinctController:
                         except (ApiError, httpx.HTTPError):
                             pass
                     other_shooters = []
-                    if mob_name in RANGED_MOBS and not has_shield:
+                    if not has_shield and (mob_name in RANGED_MOBS or exposed_melee):
+                        shooters = [
+                            hostile for hostile in hostiles if hostile is not primary
+                            and (not exposed_melee or not hostile.get("blocked_by_wall"))
+                        ]
                         other_shooters = [
                             shooter_pos for _, shooter_pos in ranged_retreat_positions(
-                                pos, [hostile for hostile in hostiles if hostile is not primary], max_distance=12.0,
+                                pos, shooters, max_distance=12.0,
                             )
                         ]
                     unsettled_under_attack = st.get("on_ground") is False and (
@@ -3887,6 +3896,7 @@ class SubcorticalInstinctController:
                         wait_for_ground=mob_name in RANGED_MOBS or hp <= 10.0 or not has_weapon or unsettled_under_attack,
                         **({"use_nearest_hostile": False} if not trigger_is_eligible else {}),
                         **({"other_shooters": other_shooters} if other_shooters else {}),
+                        **({"primary_melee": True} if exposed_melee and other_shooters else {}),
                         **({"other_melee": other_melee} if other_melee else {}),
                     )
                     flee_ok = bool(fl.get("ok"))
