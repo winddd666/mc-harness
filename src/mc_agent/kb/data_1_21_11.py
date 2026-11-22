@@ -373,7 +373,12 @@ RECIPES_1_21: dict[str, dict[str, Any]] = {
         "yield_count": 1,
         "ingredients": {"iron_ingot": 1, "chiseled_stone_bricks": 8},
         "keywords": ["磁石", "lodestone", "use_lodestone", "天涯共此石", "指南针"],
-        "notes": "1.21.11 新配方仅需 1 iron_ingot + 8 chiseled_stone_bricks（不再需要下界合金锭）；放下后持 compass 调 mc_interact(x,y,z,item='compass') 解锁 adventure/use_lodestone(15分)。",
+        "notes": (
+            "1.21.11 配方为 1 iron_ingot + 8 chiseled_stone_bricks。做磁石前先核对 stone 和已有石砖类材料。"
+            "从头合成用 12 块 stone，库存达到 12 块就转做石砖。若熔炼只取回部分产物，先用 mc_window_view 查看原炉，"
+            "用 mc_window_act 取出剩余成品，再查背包并按实际缺口补烧圆石。已有石砖、石砖台阶或錾制石砖时用它们抵扣用量。"
+            "放下磁石后持 compass 调 mc_interact(x,y,z,item='compass') 解锁 adventure/use_lodestone（15分）。"
+        ),
     },
     "compass": {
         "id": "compass",
