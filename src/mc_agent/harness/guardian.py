@@ -837,6 +837,7 @@ class GenerationGuard:
         self, status: dict[str, Any], attacker: dict[str, Any] | None, counts: dict[str, int],
         *, ranged: bool = False, prefer_cover: bool = False, allow_stationary_cover: bool = True, cover_only: bool = False,
         trident_attacker_id: int | None = None, verify_live_shooters: bool = False, require_safe_footing: bool = False,
+        confirmed_blaze_cover: bool = False,
     ) -> dict[str, Any]:
         skills = self._skills()
         health = status.get("health")
@@ -890,6 +891,7 @@ class GenerationGuard:
             primary_id = attacker_id if isinstance(attacker_id, int) else nh_id
             if trident_attacker_id is not None:
                 primary_id = trident_attacker_id
+            scan_blaze_cover = (burning_blaze or confirmed_blaze_cover) and primary_id is not None
             surface_unarmed_retreat = (
                 dimension == "overworld" and unshielded and best_melee_weapon_in_inv(counts) is None
             )
@@ -914,7 +916,7 @@ class GenerationGuard:
             check_blaze_cover = False
             melee_clearance_confirmed = False
             if (
-                (mixed_hurt or scan_surface_shooters or (burning_blaze and primary_id is not None))
+                (mixed_hurt or scan_surface_shooters or scan_blaze_cover)
                 and isinstance(retreat_pos, (tuple, list)) and len(retreat_pos) >= 3
             ):
                 try:
@@ -941,9 +943,19 @@ class GenerationGuard:
                         continue
                     if shooter_id == primary_id:
                         pos = shooter_pos
-                        check_blaze_cover = burning_blaze
+                        check_blaze_cover = scan_blaze_cover
                     else:
                         other_shooters.append(shooter_pos)
+                if confirmed_blaze_cover:
+                    names = [
+                        (entity.get("id"), str(entity.get("name") or "").removeprefix("minecraft:"))
+                        for entity in entities if isinstance(entity, dict)
+                    ]
+                    check_blaze_cover = (
+                        check_blaze_cover and (primary_id, "blaze") in names
+                        and all(name != "ghast" for _, name in names)
+                        and self._melee_clear_for_projectile_cover(entities)
+                    )
                 if (mixed_hurt or scan_surface_shooters) and not pos and other_shooters:
                     pos = other_shooters.pop(0)
                 melee_clearance_confirmed = (
@@ -977,6 +989,8 @@ class GenerationGuard:
                     cover = CombatEnv(cover_bot, geofence=self.geofence).seek_natural_cover(
                         pos, other_shooters=other_shooters, allow_stationary=allow_stationary,
                         **({"verify_live_shooters": True} if verify_live_shooters else {}),
+                        **({"expected_life": (status.get("dimension"), status.get("last_death"))}
+                           if confirmed_blaze_cover else {}),
                     )
                 except _RecoveryBudgetExceeded:
                     self._stop_after_recovery_timeout()
@@ -2508,6 +2522,12 @@ class GenerationGuard:
                             trident_attacker_id = nh_id
                     fresh_blast = hurt_src in {"fireball", "small_fireball", "wither_skull"}
                     skip_cover_for_blast = fresh_blast or att_name_r in {"blaze", "ghast"} or bool(status.get("on_fire"))
+                    source_name, _, source_id, _ = self._extract_hostile_info({"nearest_hostile": recent_hurt.get("source_entity")})
+                    confirmed_blaze_fireball = (
+                        str(status.get("dimension") or "").removeprefix("minecraft:") == "the_nether"
+                        and att_name_r == "blaze" and isinstance(att_id_r, int)
+                        and (hurt_src == "small_fireball" or (hurt_src == "fireball" and source_name == "blaze" and source_id == att_id_r))
+                    )
                     close_unshielded_shooter = (
                         not has_shield and hp_val <= LOW_HP_BUNKER_MAX and nh_name in RANGED_MOBS and nh_dist <= 3.5
                     )
@@ -2657,6 +2677,32 @@ class GenerationGuard:
                                 )
                                 if shore is not None:
                                     actions.append(shore)
+                            if (
+                                confirmed_blaze_fireball and not cf_result.get("respawned")
+                                and cf_result.get("reason") == "no_safe_retreat"
+                            ):
+                                try:
+                                    landing = self.bot.call("status", method="GET", timeout_s=0.45)
+                                except (ApiError, httpx.HTTPError):
+                                    landing = {}
+                                if (
+                                    landing.get("ready") is True and landing.get("alive") is True
+                                    and landing.get("on_ground") is True and landing.get("pos")
+                                    and not any(landing.get(key) for key in ("busy", "in_water", "in_lava"))
+                                    and all(landing.get(key) == status.get(key) for key in ("dimension", "last_death"))
+                                ):
+                                    blaze_cover = self._action(
+                                        "natural_cover_after_retreat",
+                                        lambda: self._defend_or_flee(
+                                            landing, {"id": att_id_r, "name": "blaze"}, counts, ranged=True,
+                                            cover_only=True, allow_stationary_cover=False, verify_live_shooters=True,
+                                            confirmed_blaze_cover=True,
+                                        ),
+                                    )
+                                    actions.append(blaze_cover)
+                                    if blaze_cover.get("ok"):
+                                        self._consecutive_flees = 0
+                                        self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                             stalled_under_arrows = (
                                 not has_shield and hurt_src == "arrow" and 0 < hp_val <= LOW_HP_BUNKER_MAX
                                 and cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}

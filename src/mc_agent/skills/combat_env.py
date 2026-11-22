@@ -2045,10 +2045,12 @@ class CombatEnv:
 
     def seek_natural_cover(
         self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,
-        verify_live_shooters: bool = False,
+        verify_live_shooters: bool = False, expected_life: tuple[Any, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Find a close, supported position behind existing terrain and verify the landing."""
         before = self.bot.status()
+        if expected_life is not None and expected_life != (before.get("dimension"), before.get("last_death")):
+            return {"ok": False, "mode": "natural_cover", "reason": "life_changed", "respawned": True}
         origin = before.get("pos")
         if (
             not origin or before.get("on_ground") is not True

@@ -6818,6 +6818,79 @@ def test_burning_nether_retreat_checks_cover_against_nearby_blazes(monkeypatch, 
             assert calls == [(primary["pos"], True, [secondary["pos"]])]
 
 
+@pytest.mark.parametrize("scene", [
+    "attributed_blaze", "small_fireball", "unknown_fireball", "ghast_also_present",
+    "close_melee", "retreat_succeeded", "new_life", "respawn_during_scan",
+])
+def test_stalled_nether_blaze_retreat_can_move_to_verified_cover(monkeypatch, scene):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    blaze = {"id": 44, "name": "blaze", "pos": [-1972.3, 62, 2032.4], "dist": 8.0}
+    other_blaze = {"id": 45, "name": "blaze", "pos": [-1964.3, 61, 2042.4], "dist": 10.0}
+    status = {
+        "pos": [-1964.3, 61, 2032.4], "dimension": "the_nether", "health": 17.3, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "blocking": True,
+        "nearest_hostile": blaze, "last_death": {"t": 1},
+    }
+    hits = [{"seq": 1, "type": "hurt", "source": "small_fireball" if scene == "small_fireball" else "fireball"}]
+    if scene not in {"unknown_fireball", "small_fireball"}:
+        hits[0]["source_entity"] = blaze
+    calls = []
+
+    class FortressBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [] if kwargs["params"]["since"] else hits}
+            if action == "inventory":
+                return {"items": [], "offhand": {"name": "shield"}}
+            if action == "get_entities":
+                calls.append("scan")
+                if scene == "respawn_during_scan":
+                    status["last_death"] = {"t": 2}
+                hostiles = [blaze, other_blaze]
+                if scene == "close_melee":
+                    hostiles.append({"id": 46, "name": "wither_skeleton", "dist": 3.3, "pos": [-1961, 61, 2032]})
+                if scene == "ghast_also_present":
+                    hostiles.append({"id": 46, "name": "ghast", "dist": 11.0, "pos": [-1953.3, 61, 2032]})
+                return {"entities": hostiles}
+            pytest.fail(f"Unexpected action: {action}")
+
+    def flee(threat_pos, **_kwargs):
+        calls.append("retreat")
+        assert threat_pos == blaze["pos"]
+        if scene == "new_life":
+            status["last_death"] = {"t": 2}
+        if scene == "retreat_succeeded":
+            return {"ok": True, "mode": "flee", "moved_dist": 2.8}
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    def cover(_env, shooter, *, other_shooters, allow_stationary, verify_live_shooters, expected_life):
+        calls.append("cover")
+        assert shooter == blaze["pos"] and other_shooters == [other_blaze["pos"]]
+        assert not allow_stationary and verify_live_shooters
+        assert expected_life == ("the_nether", {"t": 1})
+        return {"ok": True, "mode": "natural_cover", "pos_after": [-1964.3, 61, 2030.2]}
+
+    guard = GenerationGuard(FortressBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", flee)
+    if scene != "respawn_during_scan":
+        monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
+    actions = guard.poll()["actions"]
+
+    if scene in {"attributed_blaze", "small_fireball"}:
+        assert calls == ["retreat", "scan", "cover"]
+        assert actions[-1]["action"] == "natural_cover_after_retreat" and actions[-1]["ok"]
+    elif scene in {"close_melee", "ghast_also_present", "respawn_during_scan"}:
+        assert calls == ["retreat", "scan"]
+        assert actions[-1]["action"] == "natural_cover_after_retreat" and not actions[-1]["ok"]
+        if scene == "respawn_during_scan":
+            assert actions[-1]["result"]["respawned"] is True
+    else:
+        assert calls == ["retreat"]
+
+
 @pytest.mark.parametrize(("pressure", "bunker_first"), [
     ("direct_melee", False), ("unattributed_followup", False), ("occluded", True),
     ("inside_shaft", True), ("out_of_reach", True), ("stale_hit", True),
