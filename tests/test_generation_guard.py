@@ -6170,14 +6170,19 @@ def test_seal_during_melee_retreat_reports_cover_and_keeps_shield_if_needed(monk
     assert status["blocking"] is hostile_still_close
 
 
-@pytest.mark.parametrize("landing", ["pursued", "different_mob", "too_far", "behind_wall", "ordinary_retreat"])
+@pytest.mark.parametrize("landing", [
+    "pursued", "different_mob", "too_far", "behind_wall", "ordinary_retreat", "critical_pursued", "critical_clear",
+    "critical_occluded", "critical_other", "critical_airborne", "critical_non_point_blank",
+])
 def test_melee_retreat_keeps_the_shield_up_when_a_point_blank_attacker_pursues(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
 
-    zombie = {"id": 77, "name": "zombie", "dist": 2.0 if landing == "ordinary_retreat" else 0.3}
+    critical = landing.startswith("critical_")
+    initial_distance = 2.0 if landing in {"ordinary_retreat", "critical_non_point_blank"} else 1.1 if critical else 0.3
+    zombie = {"id": 77, "name": "zombie", "dist": initial_distance}
     status = {
-        "pos": [-6996.5, 120, 5825.5], "health": 17.2, "food": 20, "ready": True, "alive": True,
-        "dimension": "overworld", "on_ground": True, "blocking": False, "nearest_hostile": zombie,
+        "pos": [-6996.5, 120, 5825.5], "health": 4.312 if critical else 17.2, "food": 20, "ready": True, "alive": True,
+        "dimension": "overworld", "on_ground": True, "blocking": critical, "nearest_hostile": zombie,
     }
     poses = []
 
@@ -6196,9 +6201,14 @@ def test_melee_retreat_keeps_the_shield_up_when_a_point_blank_attacker_pursues(m
             return {"ok": True}
 
     def retreat(*_a, **_kw):
-        after = {**zombie, "id": 78 if landing == "different_mob" else 77,
-                 "dist": 3.6 if landing == "too_far" else 3.5, "blocked_by_wall": landing == "behind_wall"}
-        status.update(pos=[-6992.6, 120, 5824.5], health=14.41, nearest_hostile=after)
+        distance = {"critical_clear": 5.6, "too_far": 3.6}.get(landing, 5.0 if critical else 3.5)
+        after = {
+            **zombie, "id": 78 if landing in {"different_mob", "critical_other"} else 77,
+            "dist": distance, "blocked_by_wall": landing in {"behind_wall", "critical_occluded"},
+        }
+        status.update(pos=[-6992.6, 120, 5824.5], health=2.248 if critical else 14.41, nearest_hostile=after)
+        if landing == "critical_airborne":
+            status["on_ground"] = False
         return {"ok": True, "mode": "flee", "moved_dist": 5.18}
 
     env = CombatEnv(VillageBot())
@@ -6206,9 +6216,10 @@ def test_melee_retreat_keeps_the_shield_up_when_a_point_blank_attacker_pursues(m
     monkeypatch.setattr(env, "flee", retreat)
     outcome = CombatControllerSlot().handle(env, {"source": "pre_hurt_melee", "primary_entity_id": 77})
 
-    assert outcome["latched_guard"] is (landing == "pursued")
-    assert status["blocking"] is (landing == "pursued")
-    if landing == "pursued":
+    should_latch = landing in {"pursued", "critical_pursued"}
+    assert outcome["latched_guard"] is should_latch
+    assert status["blocking"] is should_latch
+    if should_latch:
         assert outcome["actions"][-1] == {"action": "guard_melee_after_retreat", "ok": True, "entity_id": 77}
     else:
         assert poses[-1] == {}

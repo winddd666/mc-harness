@@ -4399,7 +4399,8 @@ class SubcorticalInstinctController:
                         nearest = nearest_raw if isinstance(nearest_raw, dict) else {}
                         nearest_id = nearest.get("id")
                         nearest_dist = nearest.get("dist")
-                        low_health_after = isinstance(st_fl.get("health"), (int, float)) and st_fl["health"] <= 10.0
+                        health_after = st_fl.get("health")
+                        low_health_after = isinstance(health_after, (int, float)) and health_after <= 10.0
                         ranged_still_exposed = (
                             isinstance(nearest_id, int)
                             and isinstance(nearest_dist, (int, float))
@@ -4416,10 +4417,15 @@ class SubcorticalInstinctController:
                             trigger.get("source") == "pre_hurt_melee" and 0 < mob_dist <= 1.25
                             and nearest_id == mob_id and nearest.get("blocked_by_wall") is not True
                         )
+                        critical_pursuit = (
+                            same_close_pursuit and isinstance(health_after, (int, float)) and 0 < health_after <= 4.0
+                            and st_fl.get("on_ground") is True
+                        )
+                        guard_range = 5.5 if critical_pursuit else 3.5
                         melee_still_close = (
                             check_melee_guard and (low_health_after or sealed or same_close_pursuit) and st_fl.get("blocking")
                             and isinstance(nearest_id, int) and _clean_block_name(nearest.get("name")) in PRE_HURT_MELEE_MOBS
-                            and isinstance(nearest_dist, (int, float)) and nearest_dist <= 3.5
+                            and isinstance(nearest_dist, (int, float)) and 0 <= nearest_dist <= guard_range
                         )
                         if (
                             (not flee_ok or ranged_still_exposed or melee_still_close)
