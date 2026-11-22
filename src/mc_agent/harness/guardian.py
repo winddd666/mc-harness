@@ -142,6 +142,16 @@ class _RecoveryBudgetExceeded(BaseException):
     """Unwind a recovery macro through its transport and retry handlers."""
 
 
+class _UnstickTransportInterrupted(Exception):
+    """Carry the actual failed request past the tool's generic network wrapper."""
+
+    def __init__(self, error: httpx.TransportError, endpoint: str, action_pending: bool) -> None:
+        super().__init__(endpoint)
+        self.transport_error = error
+        self.endpoint = endpoint
+        self.action_pending = action_pending
+
+
 class _WaterRecoveryEnteredLava(BaseException):
     """Unwind the water macro when status confirms lava in the same life."""
 
@@ -478,11 +488,22 @@ class GenerationGuard:
         """Live MacroSkills (with MiningDFS shaft state) when wired, else a throwaway binding."""
         return self.skills if self.skills is not None else MacroSkills(self.bot)
 
-    def _stop_after_recovery_timeout(self) -> None:
+    @staticmethod
+    def _reported_action_release(result: Any) -> bool | None:
+        if isinstance(result, dict):
+            released = result.get("released")
+            if isinstance(released, bool):
+                return released
+            if result.get("stopped") is True and "action" in result and result["action"] is None:
+                return True
+        return None
+
+    def _stop_after_recovery_timeout(self) -> bool | None:
         try:
-            self.raw_bot.call("stop", {}, timeout_s=1.5, allow_reauth=False)
+            result = self.raw_bot.call("stop", {}, timeout_s=1.5, allow_reauth=False)
         except (ApiError, httpx.HTTPError):
-            pass
+            return None
+        return self._reported_action_release(result)
 
     def _run_lava_escape(self, operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         try:
@@ -4015,6 +4036,22 @@ class GenerationGuard:
         if deadline is not None:
             actor_call = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline, call_override=orig_call).call
 
+        unstick_failure: _UnstickTransportInterrupted | None = None
+        if check_unstick_exit:
+            call_unstick = actor_call
+
+            def track_unstick_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+                nonlocal unstick_failure
+                try:
+                    return call_unstick(path, body, **kwargs)
+                except httpx.TransportError as error:
+                    endpoint = path.lstrip("/")
+                    action_pending = endpoint in ACTION_LOCK_ENDPOINTS and str(kwargs.get("method") or "").upper() != "GET"
+                    unstick_failure = _UnstickTransportInterrupted(error, endpoint, action_pending)
+                    raise
+
+            actor_call = track_unstick_call
+
         stop_evt = threading.Event()
         attack_active = threading.Event()
         attack_state_lock = threading.Lock()
@@ -4113,13 +4150,9 @@ class GenerationGuard:
                 result = orig_call("stop", {}, allow_reauth=False, timeout_s=1.5)
             except Exception:
                 return
-            if not isinstance(result, dict):
-                return
-            released = result.get("released")
-            if isinstance(released, bool):
+            released = self._reported_action_release(result)
+            if released is not None:
                 trigger["action_released"] = released
-            elif result.get("stopped") is True and "action" in result and result["action"] is None:
-                trigger["action_released"] = True
 
         def _watcher() -> None:
             # Delay 0.30s before first poll so fast (<5ms) offline mock calls never incur background HTTP reads
@@ -4599,6 +4632,13 @@ class GenerationGuard:
         try:
             self.raw_bot.call = _wrapped_call
             yield unstick_start
+        except (RuntimeError, httpx.TransportError) as error:
+            cause = error if isinstance(error, httpx.TransportError) else error.__cause__ or error.__context__
+            if unstick_failure is not None and cause is unstick_failure.transport_error:
+                if pending_trigger and not self._in_reflex:
+                    raise ReflexPreempted(pending_trigger[0]) from None
+                raise unstick_failure from None
+            raise
         finally:
             stop_evt.set()
             self.raw_bot.call = orig_call
@@ -5238,6 +5278,32 @@ class GenerationGuard:
             "error": {"code": code, "message": message},
         }, ensure_ascii=False)
 
+    def _unstick_transport_receipt(self, failure: _UnstickTransportInterrupted) -> dict[str, Any]:
+        released = self._stop_after_recovery_timeout() if failure.action_pending else None
+        try:
+            status = self.bot.call("status", method="GET", timeout_s=0.6)
+        except (ApiError, httpx.HTTPError):
+            status = {}
+        cause = failure.transport_error
+        timed_out = isinstance(cause, httpx.TimeoutException)
+        release_fields = {"action_released": released} if released is not None else {}
+        self.events.emit(
+            "guardian.unstick_transport_failed", endpoint=failure.endpoint, transport=type(cause).__name__,
+            stop_requested=failure.action_pending, **release_fields,
+        )
+        message = (
+            "脱困动作结果未确认，已请求停止。请确认当前动作已释放并核对站位，再换路线。"
+            if failure.action_pending else "脱困所需的状态读取失败。请核对当前站位，再换路线。"
+        )
+        status_fields = ("pos", "ready", "alive", "on_ground", "in_water", "in_lava", "busy")
+        return {
+            "ok": False, "requires_replan": True, "interrupted_tool": "mc_skill_unstick",
+            "stop_reason": "network_timeout" if timed_out else "network_error",
+            "error": {"code": "network_uncertain", "message": message, "endpoint": failure.endpoint, "timeout": timed_out},
+            **release_fields,
+            **({"status_after": {key: status[key] for key in status_fields if key in status}} if status else {}),
+        }
+
     def run_tool_with_reflex(self, tool_name: str, invoke_fn: Callable[[], str]) -> str:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
         is_attack = tool_name == "mc_attack"
@@ -5360,6 +5426,11 @@ class GenerationGuard:
                 "error": {"code": "time_budget", "message": message},
                 **({"interrupted_tool": tool_name} if is_unstick else {}),
             }, ensure_ascii=False)
+        except _UnstickTransportInterrupted as error:
+            receipt = self._unstick_transport_receipt(error)
+            if dig_progress:
+                receipt.update(partial_progress=True, **dig_progress)
+            return json.dumps(receipt, ensure_ascii=False)
         except RunTimedOut:
             if is_flee:
                 self._stop_after_recovery_timeout()

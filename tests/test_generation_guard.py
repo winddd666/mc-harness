@@ -3393,6 +3393,82 @@ def test_bug_011_guardian_http_error_returns_network_uncertain_without_crashing_
     )
 
 
+@pytest.mark.parametrize("failure", ["terrain_read", "dig_released", "dig_rejected", "dig_stop_timeout"])
+def test_unstick_transport_failure_keeps_the_actor_in_the_same_episode(monkeypatch, failure):
+    monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda _seconds: None)
+    events = []
+    calls = []
+    tool_receipts = []
+    y = 64
+
+    def observe(event):
+        events.append(event)
+
+    def handle(request):
+        nonlocal y
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint == "events":
+            result = {"events": [], "last_seq": 0}
+        elif endpoint == "status":
+            result = {"pos": [0.5, y, 0.5], "health": 20, "food": 20, "alive": True, "ready": True,
+                      "on_ground": True, "in_water": False, "dimension": "overworld"}
+        elif endpoint == "inventory":
+            result = {"items": []}
+        elif endpoint == "get_block":
+            body = json.loads(request.content)
+            if failure == "terrain_read":
+                calls.append("get_block")
+                raise httpx.ReadTimeout("canopy support was not read")
+            floor = body["pos"][1]
+            result = {"name": {63: "oak_leaves", 62: "oak_log"}.get(floor, "stone"), "diggable": True}
+        elif endpoint == "dig":
+            calls.append("dig")
+            if calls.count("dig") == 1:
+                y = 63
+                result = {"dug": "oak_leaves", "gained": {"oak_sapling": 1}}
+            else:
+                raise httpx.ReadTimeout("canopy dig acknowledgement was lost")
+        elif endpoint == "stop":
+            calls.append("stop")
+            assert request.extensions["timeout"]["read"] <= 1.5
+            if failure == "dig_stop_timeout":
+                raise httpx.ReadTimeout("action release is unknown")
+            result = {"stopped": True, "released": failure == "dig_released"}
+        else:
+            result = {"ok": True}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def chat(messages, tools=None, *, control=None, **kwargs):
+        receipt = next((m for m in messages if m.get("tool_call_id") == "unstick-timeout"), None)
+        if receipt is None:
+            return {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "unstick-timeout", "type": "function", "function": {"name": "mc_skill_unstick", "arguments": "{}"},
+            }]}
+        tool_receipts.append(json.loads(receipt["content"]))
+        return {"role": "assistant", "content": "已收到脱困结果，检查当前位置后换路线。"}
+
+    with BotSession("cached", transport=httpx.MockTransport(handle)) as bot:
+        report = run_mc_agent("检查脱困结果", bot, chat_fn=chat, max_calls=3, survival_guard=True,
+                              include_initial_snapshot=False, on_event=observe)
+
+    assert report["status"] == "answered"
+    receipt, = tool_receipts
+    assert receipt["ok"] is False and receipt["requires_replan"] is True
+    assert receipt["error"]["code"] == "network_uncertain" and receipt["stop_reason"] == "network_timeout"
+    assert receipt["error"]["endpoint"] == ("get_block" if failure == "terrain_read" else "dig")
+    assert receipt["status_after"]["pos"] == [0.5, y, 0.5]
+    assert calls == (["get_block"] if failure == "terrain_read" else ["dig", "dig", "stop"])
+    if failure.startswith("dig"):
+        assert receipt["partial_progress"] is True and receipt["dug_count"] == 1
+        assert receipt["gained"] == {"oak_sapling": 1}
+    if failure in {"dig_released", "dig_rejected"}:
+        assert receipt["action_released"] is (failure == "dig_released")
+    else:
+        assert "action_released" not in receipt
+    event, = [event for event in events if event["type"] == "guardian.unstick_transport_failed"]
+    assert event["endpoint"] == receipt["error"]["endpoint"]
+
+
 def test_nether_deep_lava_preemption_prioritizes_escape_over_nearby_mob(monkeypatch):
     """Reproduces glm_glm_2_nether_bastion: in_lava overrides nearby zombified_piglin during preemption & deep lava swims up first."""
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
