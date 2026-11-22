@@ -9129,6 +9129,57 @@ def test_ranged_knockback_into_water_goes_to_shore_in_same_poll(monkeypatch, res
         assert incident["status"]["in_water"] is False
 
 
+@pytest.mark.parametrize("landing", ["water", "dry", "respawned", "lava"])
+def test_melee_retreat_back_into_water_goes_to_shore_in_same_poll(monkeypatch, landing):
+    zombie = {"id": 44, "name": "zombie", "dist": 1.5, "pos": [11084, 63, -11050]}
+    status = {
+        "pos": [11085.4, 63, -11050.4], "health": 10.18, "food": 20, "oxygen": 285,
+        "in_water": False, "on_ground": True, "alive": True, "ready": True, "blocking": True,
+        "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": zombie,
+    }
+    shore_calls = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": zombie}
+                return {"events": [] if kwargs["params"]["since"] else [hurt], "last_seq": 1}
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}], "offhand": {"name": "shield"}}
+            raise AssertionError(action)
+
+    def retreat(*_args, **_kwargs):
+        status.update(
+            in_water=landing != "dry", in_lava=landing == "lava", health=4.71, pos=[11086, 62, -11051.3],
+        )
+        if landing == "respawned":
+            status.update(last_death={"t": 2}, health=20)
+        return {"ok": False, "mode": "flee", "reason": "unsafe_landing", "moved_dist": 0.45}
+
+    def reach_shore(pos, **kwargs):
+        shore_calls.append((pos, kwargs))
+        status.update(in_water=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", retreat)
+    monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
+
+    incident = guard.poll()
+
+    if landing == "water":
+        assert [a["action"] for a in incident["actions"]] == ["combat_or_flee", "escape_to_shore"]
+        assert shore_calls == [(zombie["pos"], {
+            "keep_shield": True, "shield_target_id": 44, "surface_first": False, "avoid_close_threat": True,
+        })]
+        assert incident["status"]["in_water"] is False and incident["requires_replan"]
+        assert not guard._last_water_escape_failed
+    else:
+        assert shore_calls == []
+
+
 @pytest.mark.parametrize("terrain", ["exposed_lava", "solid_cover", "already_landed"])
 @pytest.mark.parametrize(("source", "health"), [
     ("mob_attack", 2.86), ("mob_attack", 14.0), ("player_explosion", 15.87), ("fireball", 17.3),

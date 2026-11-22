@@ -920,6 +920,38 @@ class GenerationGuard:
             return {**result, "lava_recovery": recovery}
         return result
 
+    def _recover_water_landing_after_retreat(
+        self, before: dict[str, Any], retreat: dict[str, Any], *,
+        threat_pos: list[float] | None, threat_id: int | None, threat_name: str,
+        has_shield: bool, avoid_close_threat: bool = False,
+    ) -> dict[str, Any] | None:
+        if retreat.get("reason") != "unsafe_landing" or retreat.get("respawned"):
+            return None
+        try:
+            landing = self.bot.call("status", method="GET", timeout_s=0.6)
+        except (ApiError, httpx.HTTPError):
+            return None
+        if (
+            not landing.get("in_water") or landing.get("in_lava")
+            or landing.get("ready") is False or landing.get("alive") is False
+            or any(landing.get(key) != before.get(key) for key in ("last_death", "dimension"))
+        ):
+            return None
+        if threat_pos is None and isinstance(threat_id, int):
+            threat_pos = self._find_hostile_position(threat_id, threat_name, timeout_s=0.6)
+        oxygen = landing.get("oxygen")
+        shore = self._action(
+            "escape_to_shore",
+            lambda: self.combat_env.escape_deep_water_to_shore(
+                threat_pos, keep_shield=has_shield or bool(landing.get("blocking")),
+                shield_target_id=threat_id, surface_first=isinstance(oxygen, (int, float)) and oxygen <= 0,
+                **({"avoid_close_threat": True} if avoid_close_threat else {}),
+            ),
+        )
+        self._last_water_escape_at = time.monotonic()
+        self._last_water_escape_failed = not (shore.get("ok") and (shore.get("result") or {}).get("in_water") is not True)
+        return shore
+
     def _try_emergency_bunker(self, status: dict[str, Any]) -> dict[str, Any] | None:
         pos = status.get("pos")
         tile = tuple(math.floor(coord) for coord in pos[:3]) if pos else None
@@ -2407,34 +2439,13 @@ class GenerationGuard:
                                     actions.append(natural_cover)
                                     if natural_cover.get("ok"):
                                         self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
-                            elif cf_result.get("reason") == "unsafe_landing" and not cf_result.get("respawned"):
-                                try:
-                                    landing = self.bot.call("status", method="GET", timeout_s=0.6)
-                                except (ApiError, httpx.HTTPError):
-                                    landing = {"ready": False}
-                                if (
-                                    landing.get("in_water") and not landing.get("in_lava")
-                                    and landing.get("ready") is not False and landing.get("alive") is not False
-                                    and landing.get("last_death") == status.get("last_death")
-                                    and landing.get("dimension") == status.get("dimension")
-                                ):
-                                    shore_pos = (attacker.get("pos") if isinstance(attacker, dict) else None) or att_pos_r
-                                    if shore_pos is None and isinstance(att_id_r, int):
-                                        shore_pos = self._find_hostile_position(att_id_r, att_name_r)
-                                    oxygen_w = landing.get("oxygen")
-                                    shore = self._action(
-                                        "escape_to_shore",
-                                        lambda: self.combat_env.escape_deep_water_to_shore(
-                                            shore_pos, keep_shield=has_shield or bool(landing.get("blocking")),
-                                            shield_target_id=att_id_r,
-                                            surface_first=isinstance(oxygen_w, (int, float)) and oxygen_w <= 0,
-                                        ),
-                                    )
+                            elif cf_result.get("reason") == "unsafe_landing":
+                                shore = self._recover_water_landing_after_retreat(
+                                    status, cf_result, threat_pos=att_pos_r, threat_id=att_id_r,
+                                    threat_name=att_name_r, has_shield=has_shield,
+                                )
+                                if shore is not None:
                                     actions.append(shore)
-                                    self._last_water_escape_at = time.monotonic()
-                                    self._last_water_escape_failed = not (
-                                        shore.get("ok") and (shore.get("result") or {}).get("in_water") is not True
-                                    )
                             elif (
                                 not has_shield and not skip_cover_for_blast
                                 and status.get("on_ground") is False
@@ -2555,7 +2566,17 @@ class GenerationGuard:
                     melee_after_retreat = hurt_src in MELEE_HURT_SOURCES or (
                         nether_melee_retreat and not hurt_src and now - self._last_melee_hurt_at < 4.0
                     )
-                    if melee_after_retreat and (
+                    shore = None
+                    if melee_retreat and cf_result.get("reason") == "unsafe_landing":
+                        target = attacker if isinstance(attacker, dict) else {}
+                        shore = self._recover_water_landing_after_retreat(
+                            status, cf_result, threat_pos=target.get("pos") or nh_pos,
+                            threat_id=target.get("id") or nh_id, threat_name=target.get("name") or nh_name,
+                            has_shield=has_shield, avoid_close_threat=True,
+                        )
+                        if shore is not None:
+                            actions.append(shore)
+                    if shore is None and melee_after_retreat and (
                         face_after_melee_retreat or check_critical_surface_landing
                         or check_unraised_shield or shield_when_cornered or follow_unarmed_retreat
                     ):
