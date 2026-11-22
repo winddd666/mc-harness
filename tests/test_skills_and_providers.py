@@ -3279,34 +3279,38 @@ def test_smelt_recounts_cobblestone_after_crafting_its_furnace(monkeypatch, init
         assert pending == {"stone": 20} and loaded == 20 and bag == {"cobblestone": 0, "coal": 2, "stone": 4}
 
 
-def test_smelt_missing_fuel_gives_harvest_next_action() -> None:
+@pytest.mark.parametrize("requested_fuel,pending", [(None, False), ("coal", False), ("coal", True)])
+def test_smelt_checks_fuel_and_pending_batch_before_preparing_furnace(requested_fuel, pending) -> None:
     """P2-28/r20_long: bare 'no fuel' left ds_1_bare stuck in bootstrap_iron_age."""
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
-        if path == "status":
-            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "health": 20}})
-        if path == "inventory":
-            return httpx.Response(
-                200,
-                json={"ok": True, "result": {"items": [{"name": "raw_iron", "count": 3, "slot": 36}]}},
-            )
-        if path == "find_blocks":
-            return httpx.Response(
-                200,
-                json={"ok": True, "result": {"blocks": [{"name": "furnace", "pos": [1, 64, 0], "dist": 0.5}]}},
-            )
-        raise AssertionError(path)
+        if path == "status" and pending:
+            return httpx.Response(200, json={"ok": True, "result": {"pos": [0.5, 58.0, 0.5], "dimension": "overworld"}})
+        assert path == "inventory"
+        return httpx.Response(200, json={"ok": True, "result": {"items": [
+            {"name": "raw_iron", "count": 3, "slot": 36}, {"name": "cobblestone", "count": 8, "slot": 37},
+        ]}})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).smelt_items("raw_iron", count=3)
+        skills = MacroSkills(bot)
+        if pending:
+            skills._get_world_memory().register_conversion_job(
+                pos=[1, 58, 0], input_item="raw_iron", output_item="iron_ingot", count=2,
+                dim="overworld", kind="sync_furnace",
+            )
+        result = skills.smelt_items("raw_iron", count=3, fuel_item=requested_fuel)
     assert result["ok"] is False
+    if pending:
+        assert result["error"] == "pending_smelt_batch"
+        assert result["furnace_pos"] == [1, 58, 0] and result["pending_count"] == 2
+        return
     assert result["error"] == "missing_fuel"
     assert result["requires_replan"] is True
-    assert result["input"] == "raw_iron" and result["furnace_pos"] == [1, 64, 0]
+    assert result["input"] == "raw_iron" and result["furnace_pos"] is None
     assert result["collected"] == []
     assert result["next_action"] == "mc_skill_harvest_logs(target_logs=2)"
-    assert result["inventory"]["raw_iron"] == 3
+    assert result["inventory"] == {"raw_iron": 3, "cobblestone": 8}
     assert "mc_skill_harvest_logs" in result["message"]
     assert "取出的成品为 0" in result["message"]
 

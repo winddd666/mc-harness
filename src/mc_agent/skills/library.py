@@ -5921,6 +5921,26 @@ class MacroSkills:
             "message": "同一座炉的上一批还有待核对的产物。请先检查炉窗和背包，等上一批结清再补料。",
         }
 
+    def _nearby_pending_sync_smelt_batch(self, input_item: str) -> dict[str, Any] | None:
+        jobs = [
+            job for job in self._get_world_memory().get_conversion_jobs()
+            if job["kind"] == "sync_furnace" and job["input_item"] == input_item and job["remaining"] > 0
+        ]
+        if not jobs:
+            return None
+        status = self.bot.status()
+        dim = normalize_dimension(status.get("dimension"))
+        origin = status.get("pos")
+        if not origin:
+            return None
+        nearby = min(
+            ((math.dist(origin[:3], job["pos"]), job["pos"]) for job in jobs if job["dim"] == dim),
+            default=None,
+        )
+        if nearby is None or nearby[0] > 4.0:
+            return None
+        return self._pending_sync_smelt_batch(nearby[1], dim, input_item)
+
     def _record_sync_furnace_load(
         self, pos: list[int] | None, dim: str | None, item: str, result: dict[str, Any], fallback_count: int
     ) -> None:
@@ -5979,12 +5999,39 @@ class MacroSkills:
             "message": "只取出了已确认完成的产物。剩余批次可后续用 mc_window_view 核实并通过 mc_window_act 取出成品。",
         }
 
+    @staticmethod
+    def _missing_smelt_fuel(
+        input_item: str, counts: dict[str, int], furnace_pos: list[int] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "requires_replan": True,
+            "error": "missing_fuel",
+            "input": input_item,
+            "furnace_pos": furnace_pos,
+            "collected": [],
+            "next_action": "mc_skill_harvest_logs(target_logs=2)",
+            "inventory": counts,
+            "message": (
+                "缺少本批可用燃料。本次停在燃料预检，取出的成品为 0。"
+                "请先调 mc_skill_harvest_logs(target_logs=2, radius=32) 砍 2 个原木（自动转木板作燃料），"
+                "或用 mc_skill_mine_blocks(block_types=['coal_ore'], count=3) 采煤；"
+                "拿到燃料后再用相同 input_item 调用 mc_skill_smelt。不要无燃料重复调用。"
+            ),
+        }
+
     def _smelt_items(
         self, input_item: str, count: int, fuel_item: str | None, session: _SkillBudgetSession
     ) -> dict[str, Any]:
         inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
         if counts.get(input_item, 0) < 1:
             return {"ok": False, "error": "missing_ingredients", "message": f"背包没有 {input_item}。"}
+        fuel_sources = (
+            fuel_item or "", "coal", "charcoal", *LOG_TYPES,
+            *(name for name in counts if name.endswith("_planks")),
+        )
+        if not any(counts.get(name, 0) > int(name == input_item) for name in fuel_sources):
+            return self._nearby_pending_sync_smelt_batch(input_item) or self._missing_smelt_fuel(input_item, counts)
         inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         if pre_dropped:
             counts = _inventory_counts_from_raw(inv_raw)
@@ -6102,24 +6149,7 @@ class MacroSkills:
                     fuel_count = min(counts[plank], math.ceil(smelt_n / 1.5))
 
         if not chosen_fuel or fuel_count < 1:
-            # P2-28/r20_long: the bare message left the model stuck in
-            # bootstrap_iron_age with no next step.
-            return {
-                "ok": False,
-                "requires_replan": True,
-                "error": "missing_fuel",
-                "input": input_item,
-                "furnace_pos": furnace_pos,
-                "collected": [],
-                "next_action": "mc_skill_harvest_logs(target_logs=2)",
-                "inventory": counts,
-                "message": (
-                    "缺少本批可用燃料。本次停在燃料预检，取出的成品为 0。"
-                    "请先调 mc_skill_harvest_logs(target_logs=2, radius=32) 砍 2 个原木（自动转木板作燃料），"
-                    "或用 mc_skill_mine_blocks(block_types=['coal_ore'], count=3) 采煤；"
-                    "拿到燃料后再用相同 input_item 调用 mc_skill_smelt。不要无燃料重复调用。"
-                ),
-            }
+            return self._missing_smelt_fuel(input_item, counts, furnace_pos)
 
         collected: list[dict[str, Any]] = []
         session.progress.update(furnace_pos=furnace_pos, input=input_item, requested_count=smelt_n, collected=collected)
