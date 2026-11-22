@@ -2742,7 +2742,14 @@ class CurriculumSupervisor:
                 or (bool(gained_advs) and not target.advancement_id)
             )
             is_pause_yield = report.get("status") in {"paused", "paused_for_world_job"}
-            transient_api_err = (not progress_made) and _is_transient_llm_error(report)
+            err_lower = str(report.get("error") or "").lower()
+            is_world_loading_err = (
+                report.get("status") == "runtime_error"
+                and ("not_ready" in err_lower or "world is still loading" in err_lower)
+            )
+            transient_api_err = (not progress_made) and (_is_transient_llm_error(report) or is_world_loading_err)
+            if is_world_loading_err:
+                time.sleep(min(2.5, max(0.0, deadline - time.monotonic())))
 
             if progress_made:
                 self.strikes.pop(target.key, None)
