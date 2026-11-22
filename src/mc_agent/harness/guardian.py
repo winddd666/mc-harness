@@ -282,7 +282,7 @@ class GenerationGuard:
     WATER_ESCAPE_RETRY_WINDOW_S = 30.0
     IN_WALL_RECOVERY_BUDGET_S = 6.0
     COMBAT_RECOVERY_BUDGET_S = 8.0
-    RANGED_COVER_BUDGET_S = 3.5
+    COMBAT_COVER_BUDGET_S = 3.5
     UNSTICK_BUDGET_S = 30.0
     FLEE_BUDGET_S = 35.0
     HOT_FLOOR_RETRY_S = 5.0
@@ -1095,7 +1095,16 @@ class GenerationGuard:
         tile = tuple(math.floor(coord) for coord in pos[:3]) if pos else None
         return status.get("dimension"), status.get("last_death"), tile
 
-    def _try_emergency_bunker(self, status: dict[str, Any]) -> dict[str, Any] | None:
+    @staticmethod
+    def _bunker_life_unavailable(bunker: dict[str, Any] | None) -> bool:
+        result = (bunker or {}).get("result") or {}
+        error = ((bunker or {}).get("error") or {}).get("code")
+        return bool(result.get("respawned") or result.get("life_unavailable") or error in {
+            "dead", "not_ready", "not_connected", "wrong_server", "not_loaded",
+            "chunk_not_loaded", "world_not_ready", "network_uncertain",
+        })
+
+    def _try_emergency_bunker(self, status: dict[str, Any], *, budget_s: float | None = None) -> dict[str, Any] | None:
         site = self._bunker_site(status)
         if self._blocked_bunker is not None and self._blocked_bunker[0] == site:
             _, block_pos, obstacle = self._blocked_bunker
@@ -1110,7 +1119,12 @@ class GenerationGuard:
         self._blocked_bunker = None
 
         def checked_bunker() -> dict[str, Any]:
-            result = self._skills().dig_safety_bunker(urgent=True)
+            if budget_s is None:
+                result = self._skills().dig_safety_bunker(urgent=True)
+            else:
+                result = self._run_recovery_macro(
+                    status, lambda skills: skills.dig_safety_bunker(urgent=True), budget_s=budget_s,
+                )
             if result.get("respawned") or result.get("error") == "dead":
                 return {**result, "ok": False, "respawned": True}
             after = self.bot.call("status", method="GET", timeout_s=0.45)
@@ -1122,7 +1136,11 @@ class GenerationGuard:
 
         action = self._action("emergency_bunker", checked_bunker)
         result = action.get("result") or {}
-        if result.get("respawned") or result.get("life_unavailable"):
+        if self._bunker_life_unavailable(action) or action.get("ok"):
+            self._consecutive_flees = 0
+            if action.get("ok") and result.get("inside_shaft") and result.get("roof_placed"):
+                self._last_melee_hurt_at = float("-inf")
+                self._nether_melee_eat_defer_until = float("-inf")
             return action
         reason = result.get("reason")
         tile = site[2]
@@ -2482,7 +2500,7 @@ class GenerationGuard:
 
                     def checked_cover() -> dict[str, Any]:
                         result = self._run_recovery_macro(
-                            status, self.combat_env.dig_cover_pocket, budget_s=self.RANGED_COVER_BUDGET_S,
+                            status, self.combat_env.dig_cover_pocket, budget_s=self.COMBAT_COVER_BUDGET_S,
                         )
                         if result.get("ok") or result.get("respawned"):
                             return result
@@ -2772,23 +2790,9 @@ class GenerationGuard:
                     if bunker is not None:
                         actions.append(bunker)
                     bunker_result = (bunker or {}).get("result") or {}
-                    bunker_error = ((bunker or {}).get("error") or {}).get("code")
-                    bunker_life_unavailable = (
-                        bunker_result.get("respawned") or bunker_result.get("life_unavailable")
-                        or bunker_error in {
-                            "dead", "not_ready", "not_connected", "wrong_server", "not_loaded",
-                            "chunk_not_loaded", "world_not_ready", "network_uncertain",
-                        }
-                    )
-                    if bunker_life_unavailable:
-                        self._consecutive_flees = 0
+                    if self._bunker_life_unavailable(bunker):
                         reasons.append("death_or_connection_changed")
-                    elif bunker and bunker["ok"]:
-                        self._consecutive_flees = 0
-                        if bunker_result.get("inside_shaft") and bunker_result.get("roof_placed"):
-                            self._last_melee_hurt_at = float("-inf")
-                            self._nether_melee_eat_defer_until = float("-inf")
-                    else:
+                    elif not (bunker and bunker["ok"]):
                         unsafe_footing = bunker_result.get("reason") in {"unsafe_floor", "unsafe_open_side"} or (
                             self._blocked_bunker is not None and self._blocked_bunker[0] == self._bunker_site(status)
                         )
@@ -2846,6 +2850,14 @@ class GenerationGuard:
                     melee_after_retreat = hurt_src in MELEE_HURT_SOURCES or (
                         nether_melee_retreat and not hurt_src and now - self._last_melee_hurt_at < 4.0
                     )
+                    retry_bunker_after_landing = (
+                        dimension == "overworld" and melee_retreat and not (has_shield or has_melee_weapon)
+                        and cf_result.get("reason") == "no_safe_retreat" and not cf_result.get("respawned")
+                        and (
+                            bunker_result.get("reason") == "not_grounded"
+                            or (bunker is None and status.get("on_ground") is False)
+                        )
+                    )
                     shore = None
                     if melee_retreat and cf_result.get("reason") == "unsafe_landing":
                         target = attacker if isinstance(attacker, dict) else {}
@@ -2859,6 +2871,7 @@ class GenerationGuard:
                     if shore is None and melee_after_retreat and (
                         face_after_melee_retreat or check_critical_surface_landing
                         or check_unraised_shield or shield_when_cornered or follow_unarmed_retreat
+                        or retry_bunker_after_landing
                     ):
                         try:
                             landing = self.bot.call("status", method="GET", timeout_s=0.6)
@@ -2899,6 +2912,14 @@ class GenerationGuard:
                                 self._equip_and_raise_shield_for_water(
                                     landing, actions, inv=inv, attacker={"id": target_id},
                                 )
+                            elif retry_bunker_after_landing and landing.get("pos") and not (
+                                landing.get("busy") or landing.get("on_fire")
+                            ):
+                                late_bunker = self._try_emergency_bunker(landing, budget_s=self.COMBAT_COVER_BUDGET_S)
+                                if late_bunker is not None:
+                                    actions.append(late_bunker)
+                                    if self._bunker_life_unavailable(late_bunker):
+                                        reasons.append("death_or_connection_changed")
                             elif follow_unarmed_retreat and landing.get("pos"):
                                 if target_pos is None:
                                     target_pos = self._find_hostile_position(target_id, mob, timeout_s=0.6)

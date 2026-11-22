@@ -6939,6 +6939,77 @@ def test_poll_only_retreats_after_a_bunker_failure_in_the_same_life(monkeypatch,
         assert bunker["action"] == "emergency_bunker" and not bunker["ok"]
 
 
+@pytest.mark.parametrize("landing", [
+    "after_rejection", "after_airborne_start", "airborne", "new_life", "water", "unsafe_side", "time_budget",
+])
+def test_unarmed_melee_without_an_exit_checks_bunker_after_landing(monkeypatch, landing):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    drowned = {"id": 42, "name": "drowned", "dist": 2.3, "pos": [-7986.5, 63, -3019.0]}
+    status = {
+        "pos": [-7986.5, 63, -3016.7], "health": 6.5, "food": 17, "dimension": "overworld",
+        "ready": True, "alive": True, "on_ground": landing != "after_airborne_start",
+        "last_death": {"t": 1}, "nearest_hostile": drowned,
+    }
+    calls = []
+
+    class BankBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": drowned}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": [{"name": "diamond_pickaxe", "count": 1}, {"name": "cobblestone", "count": 9}]}
+            if action == "stop" and landing == "time_budget":
+                calls.append("stop")
+                assert kwargs["timeout_s"] == 1.5
+                return {"ok": True}
+            pytest.fail(f"Unexpected action: {action}")
+
+    def dig_bunker(skills, *, urgent):
+        assert urgent
+        if "retreat" not in calls:
+            calls.append("early_bunker")
+            if landing == "unsafe_side":
+                return {"ok": False, "reason": "unsafe_open_side", "block_pos": [-7987, 62, -3017], "block": "air"}
+            status["on_ground"] = False
+            return {"ok": False, "reason": "not_grounded"}
+        calls.append("grounded_bunker")
+        assert status["on_ground"] is True and not status.get("in_water") and status["last_death"] == {"t": 1}
+        if landing == "time_budget":
+            clock[0] += 3.6
+            skills.bot.status()
+            pytest.fail("Bunker exceeded the recovery deadline")
+        return {"ok": True, "inside_shaft": True, "roof_placed": True}
+
+    def retreat(*_args, **_kwargs):
+        calls.append("retreat")
+        status.update(on_ground=landing != "airborne", health=5.1973, in_water=landing == "water")
+        if landing == "new_life":
+            status["last_death"] = {"t": 2}
+        return {"ok": False, "mode": "flee", "reason": "no_safe_retreat", "moved_dist": 0.0}
+
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", dig_bunker)
+    guard = GenerationGuard(BankBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", retreat)
+    incident = guard.poll()
+
+    expected = [] if landing == "after_airborne_start" else ["early_bunker"]
+    expected.append("retreat")
+    if landing in {"after_rejection", "after_airborne_start", "time_budget"}:
+        expected.append("grounded_bunker")
+    if landing == "time_budget":
+        expected.append("stop")
+    assert calls == expected
+    if landing == "time_budget":
+        assert incident["actions"][-1]["result"]["reason"] == "time_budget"
+    elif expected[-1] == "grounded_bunker":
+        assert incident["actions"][-1]["action"] == "emergency_bunker" and incident["actions"][-1]["ok"]
+        assert guard._consecutive_flees == 0
+
+
 @pytest.mark.parametrize("reason", ["unsafe_open_side", "unsafe_floor"])
 def test_repeated_melee_hurt_skips_bunker_when_the_same_block_still_blocks_it(monkeypatch, reason):
     clock = [1000.0]
