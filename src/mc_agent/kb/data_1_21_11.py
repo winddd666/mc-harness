@@ -434,7 +434,11 @@ RECIPES_1_21: dict[str, dict[str, Any]] = {
         "yield_count": 1,
         "ingredients": {"diamond": 4},
         "keywords": ["钻石靴", "diamond_boots", "shiny_gear", "闪亮盔甲"],
-        "notes": "仅需 4 颗钻石的最省钻石护甲，合成并穿戴即可解锁 story/shiny_gear(60分)。",
+        "notes": (
+            "钻石靴用工作台和 4 颗钻石。采钻时每个时间片后查背包总量，包含开集已有和刚入包的钻石。"
+            "总量达到 4 颗就暂停挖钻，即使本次 mine_dfs 的 goal_met 仍为 false。"
+            "站位安全时调用 mc_skill_craft_gear(item='diamond_boots', equip_slot='feet')，核对合成和穿戴回执，完成 story/shiny_gear（60分）。"
+        ),
     },
     "golden_apple": {
         "id": "golden_apple",
@@ -836,7 +840,7 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:story/shiny_gear": {
         "difficulty": "medium",
-        "how_to": "获取至少 1 颗 diamond，优先打造 diamond_pickaxe/任意钻石护甲。",
+        "how_to": RECIPES_1_21["diamond_boots"]["notes"],
     },
     "minecraft:story/enchant_item": {
         "difficulty": "hard",
