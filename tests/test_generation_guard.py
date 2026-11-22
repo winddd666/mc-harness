@@ -5353,19 +5353,31 @@ def test_deep_lava_keeps_swimming_up_while_the_head_is_submerged():
     assert result["ok"] is True and result["in_lava"] is False
 
 
-@pytest.mark.parametrize("bank_state", ["dry", "flooded", "new_life", "old_bank", "healthy"])
+@pytest.mark.parametrize("bank_state", [
+    "dry", "flooded", "new_life", "old_bank", "healthy", "late", "late_flooded", "at_surface", "after_third_ascent",
+])
 def test_critical_lava_ascent_aims_for_a_recent_verified_dry_bank(monkeypatch, bank_state):
     from mc_agent.skills.combat_env import CombatEnv
 
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
     bank = [-9984.5, -54, 2972.5]
+    ascent_levels = {
+        "late": [-55.3, -53.8],
+        "late_flooded": [-55.3, -53.8],
+        "at_surface": [-54.7, -53.8],
+        "after_third_ascent": [-57, -56, -55],
+    }.get(bank_state, [-53.8])
+    start_y = {"late": -57.0, "late_flooded": -57.0, "at_surface": -56.5, "after_third_ascent": -58.0}.get(
+        bank_state, -55.3,
+    )
     status = {
-        "pos": [-9986.4, -55.3, 2971.5], "health": 16 if bank_state == "healthy" else 10,
+        "pos": [-9986.4, start_y, 2971.5], "health": 16 if bank_state == "healthy" else 10,
         "dimension": "overworld", "last_death": {"t": 2}, "ready": True, "alive": True,
         "on_ground": False, "in_lava": True,
     }
     swims = []
+    headings = []
 
     class LavaBot:
         def status(self):
@@ -5376,20 +5388,24 @@ def test_critical_lava_ascent_aims_for_a_recent_verified_dry_bank(monkeypatch, b
                 return {"items": []}
             if action == "get_block":
                 x, y, z = body["pos"]
-                if (x, z) == (-9987, 2971) and y <= -54:
+                lava_top = -55 if bank_state == "at_surface" else -54
+                if (x, z) == (-9987, 2971) and y <= lava_top:
                     return {"name": "lava"}
                 if (x, y, z) == (-9985, -55, 2972):
                     return {"name": "stone"}
-                if (x, y, z) == (-9985, -54, 2972) and bank_state == "flooded":
+                if (x, y, z) == (-9985, -54, 2972) and bank_state in {"flooded", "late_flooded"}:
                     return {"name": "lava"}
                 return {"name": "air"}
+            if action == "look":
+                headings.append(body["yaw"])
             if action == "control" and body.get("jump"):
                 swims.append(body["forward"])
+                clock[0] += body["ms"] / 1000
                 if body["forward"]:
-                    destination = bank if len(swims) == 1 else [-9989.5, -53, 2971.5]
+                    destination = bank if headings[-1] != 0.0 else [-9989.5, -53, 2971.5]
                     status.update(pos=destination, on_ground=True, in_lava=False)
                 else:
-                    status.update(pos=[-9986.4, -53.8, 2971.5])
+                    status.update(pos=[-9986.4, ascent_levels[swims.count(False) - 1], 2971.5])
             return {"ok": True}
 
     env = CombatEnv(LavaBot())
@@ -5404,8 +5420,11 @@ def test_critical_lava_ascent_aims_for_a_recent_verified_dry_bank(monkeypatch, b
     result = env.escape_lava()
 
     assert result["ok"] and not result["in_lava"]
-    assert swims == ([True] if bank_state == "dry" else [False, True])
-    assert ("lava_swim_to_recent_dry_bank" in result["actions"]) is (bank_state == "dry")
+    vertical_count = {"dry": 0, "late_flooded": 2, "after_third_ascent": 3}.get(bank_state, 1)
+    assert swims == [False] * vertical_count + [True]
+    assert ("lava_swim_to_recent_dry_bank" in result["actions"]) is (bank_state in {
+        "dry", "late", "at_surface", "after_third_ascent",
+    })
 
 
 @pytest.mark.parametrize("bank", ["unsupported", "still_blocked", "clear_after_dig", "obsidian", "crying_obsidian"])
