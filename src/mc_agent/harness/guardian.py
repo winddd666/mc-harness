@@ -42,7 +42,7 @@ from ..skills.combat_env import (
     ranged_retreat_positions,
     retreat_made_progress,
 )
-from ..skills.library import MacroSkills, best_melee_weapon_in_inv
+from ..skills.library import MacroSkills, best_melee_weapon_in_inv, ray_wall_blocker
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
 
 # Hurt sources that mean "my body is embedded in a block", not "something is attacking me".
@@ -3432,6 +3432,29 @@ class GenerationGuard:
                 }
             return None
 
+        def confirmed_wall_cover(status: dict[str, Any], threats: list[dict[str, Any]]) -> bool:
+            origin = status.get("pos")
+            terrain = _GuardSession(
+                self.raw_bot, lambda: None, deadline=time.monotonic() + 0.35, call_override=orig_call,
+            )
+            blocks: dict[tuple[int, int, int], str] = {}
+            for threat in threats:
+                if threat.get("blocked_by_wall") is True:
+                    continue
+                target = threat.get("pos")
+                if not all(
+                    isinstance(point, (list, tuple)) and len(point) >= 3
+                    and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in point[:3])
+                    for point in (origin, target)
+                ):
+                    return False
+                try:
+                    if ray_wall_blocker(terrain, tuple(origin[:3]), tuple(target[:3]), block_cache=blocks) is None:
+                        return False
+                except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded):
+                    return False
+            return True
+
         def _watcher() -> None:
             # Delay 0.30s before first poll so fast (<5ms) offline mock calls never incur background HTTP reads
             if stop_evt.wait(0.30):
@@ -3572,7 +3595,7 @@ class GenerationGuard:
                         ]
                         if (
                             any(entity.get("id") == nh_id for entity in nearby_threats)
-                            and all(entity.get("blocked_by_wall") is True for entity in nearby_threats)
+                            and confirmed_wall_cover(st, nearby_threats)
                         ):
                             if check_creeper_cover:
                                 creeper_close = False

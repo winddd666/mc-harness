@@ -11744,12 +11744,17 @@ def test_attack_hazard_requests_stop_and_preserves_read_timeout(monkeypatch, att
 
 
 @pytest.mark.parametrize("mob, distance", [("creeper", 4.1), ("zombie", 2.5)])
-@pytest.mark.parametrize("visibility", ["occluded", "exposed", "another_exposed", "unknown", "occluded_then_hurt"])
+@pytest.mark.parametrize("visibility", [
+    "occluded", "exposed", "another_exposed", "unknown", "occluded_then_hurt",
+    "rock_wall", "wall_removed", "ray_timeout",
+])
 def test_mining_watcher_waits_only_for_confirmed_occluded_hostiles(monkeypatch, mob, distance, visibility):
     import threading
 
     inspected = threading.Event()
     stopped = threading.Event()
+    ray_checked = threading.Event()
+    wall_present = [True]
     hostile = {"id": 42, "name": mob, "dist": distance, "pos": [0.5, 58, 0.5 + distance]}
     status = {
         "pos": [0.5, 58, 0.5], "health": 20, "on_ground": True,
@@ -11764,15 +11769,27 @@ def test_mining_watcher_waits_only_for_confirmed_occluded_hostiles(monkeypatch, 
                 inspected.set()
                 if visibility == "unknown":
                     raise httpx.ReadTimeout("entity visibility unavailable")
-                entities = [{**hostile, "blocked_by_wall": visibility != "exposed"}]
+                entities = [{**hostile, "blocked_by_wall": visibility in {
+                    "occluded", "another_exposed", "occluded_then_hurt",
+                }}]
                 if visibility == "another_exposed":
                     entities.append({**hostile, "id": 43, "dist": distance + 0.3, "blocked_by_wall": False})
                 return {"entities": entities}
+            if action == "get_block":
+                if visibility == "ray_timeout":
+                    raise httpx.ReadTimeout("block lookup timed out")
+                name = "tuff" if visibility in {"rock_wall", "wall_removed"} and wall_present[0] else "air"
+                ray_checked.set()
+                return {"name": name}
             if action == "dig":
                 assert inspected.wait(1.5)
                 if visibility == "occluded_then_hurt":
                     status["health"] = 16
-                if visibility != "occluded":
+                if visibility in {"rock_wall", "wall_removed"}:
+                    assert ray_checked.wait(1.5)
+                if visibility == "wall_removed":
+                    wall_present[0] = False
+                if visibility not in {"occluded", "rock_wall"}:
                     assert stopped.wait(1.5)
                 return {"ok": True}
             if action == "stop":
@@ -11795,7 +11812,7 @@ def test_mining_watcher_waits_only_for_confirmed_occluded_hostiles(monkeypatch, 
         bot.call("dig", {"pos": [1, 58, 0]}),
     )))
 
-    if visibility == "occluded":
+    if visibility in {"occluded", "rock_wall"}:
         assert result == {"ok": True} and not stopped.is_set()
         assert seen_sources == []
     else:
