@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from copy import copy
+from copy import copy, deepcopy
 import json
 import math
 import threading
@@ -295,6 +295,8 @@ class GenerationGuard:
     PRE_HURT_TARGET_COOLDOWN_S = 3.0
     PRE_HURT_RANGED_COOLDOWN_S = 30.0
     PRE_HURT_MELEE_COOLDOWN_S = 12.0
+    MELEE_DIG_TIMEOUT_RETRY_S = 24.0
+    MELEE_DIG_TIMEOUT_RESCAN_S = 2.0
     RANGED_COMBAT_STANCE_S = 35.0
 
     def __init__(
@@ -357,6 +359,7 @@ class GenerationGuard:
         self._pre_hurt_suppress_until: float = float("-inf")
         self._pre_hurt_target_cooldown: dict[str, float] = {}
         self._stationary_warnings: dict[str, tuple[int, tuple[float, ...], float, float, tuple[Any, Any]]] = {}
+        self._stationary_melee_dig_timeout: tuple[float, dict[str, Any], float | None] | None = None
         self._last_stalled_lava: tuple[tuple[float, ...], tuple[Any, ...], float] | None = None
         self._ranged_combat_stance_until: float = float("-inf")
         self._ranged_cover_active_until: float = float("-inf")
@@ -564,15 +567,17 @@ class GenerationGuard:
                         pass
             except _RecoveryBudgetExceeded:
                 pass
+            endpoint = error.args[0] if error.args else None
             self.events.emit(
                 "guardian.combat_budget_exceeded",
-                endpoint=error.args[0] if error.args else None,
+                endpoint=endpoint,
                 budget_s=SUBCORTICAL_COMBAT_BUDGET_S,
                 cleanup_s=round(time.monotonic() - cleanup_started, 3),
             )
             return {
                 "ok": False, "handled": False, "mode": "combat_timeout",
                 "reason": "time_budget", "requires_replan": True,
+                **({"timeout_endpoint": endpoint} if endpoint is not None else {}),
                 "summary": "战斗反射达到时限，已尝试停止挂起动作",
             }
         finally:
@@ -1336,6 +1341,7 @@ class GenerationGuard:
                     self._last_burn_hurt_at = float("-inf")
                     self._last_dig_cover_fail_at = float("-inf")
                     self._stationary_warnings.clear()
+                    self._stationary_melee_dig_timeout = None
                     self._last_stalled_lava = None
                     self._water_hurt_streak = 0
                     self._last_water_escape_failed = False
@@ -1346,6 +1352,7 @@ class GenerationGuard:
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
                     self._stationary_warnings.clear()
+                    self._stationary_melee_dig_timeout = None
                     self._last_stalled_lava = None
                     source = str(event.get("source") or "").strip().lower()
                     if source in RANGED_HURT_SOURCES:
@@ -1836,6 +1843,7 @@ class GenerationGuard:
             fresh = self._drain_events_pages()
             self.failures = 0
         except (ApiError, httpx.HTTPError) as error:
+            self._stationary_melee_dig_timeout = None
             if isinstance(error, ApiError) and error.code in {"not_ready", "wrong_server"}:
                 self.events.emit("guardian.observation_not_ready", code=error.code)
                 return None
@@ -2063,6 +2071,24 @@ class GenerationGuard:
             )
             else self._detect_pre_hurt_trigger(status)
         )
+        if self._stationary_melee_dig_timeout is not None:
+            retry_at, anchor, scan_at = self._stationary_melee_dig_timeout
+            if hurt or now >= retry_at or not self._same_stationary_melee_timeout_state(anchor, status):
+                self._stationary_melee_dig_timeout = None
+            elif pre_trigger is not None and pre_trigger.get("source") == "pre_hurt_melee" and spawn_warning is None:
+                if scan_at is None or now >= scan_at:
+                    target_id = pre_trigger.get("primary_entity_id")
+                    if self._only_nearby_hostile(target_id):
+                        if scan_at is None:
+                            self.events.emit(
+                                "guardian.melee_timeout_deferred", target_id=target_id,
+                                retry_in_s=round(retry_at - now, 3),
+                            )
+                        self._stationary_melee_dig_timeout = (retry_at, anchor, now + self.MELEE_DIG_TIMEOUT_RESCAN_S)
+                    else:
+                        self._stationary_melee_dig_timeout = None
+                if self._stationary_melee_dig_timeout is not None:
+                    pre_trigger = None
         effective_combat_hurt = hurt and not (non_combat_only_hurt or hot_floor_only)
         ranged_hurt_only = (
             effective_combat_hurt
@@ -3236,6 +3262,16 @@ class GenerationGuard:
             actions.append({"action": "raise_shield_after_combat_timeout", "ok": True})
             post_status = {**post_status, "blocking": True}
         if pre_trigger is not None and post_events_verified and not any(e.get("type") == "hurt" for e in fresh):
+            if reasons == ["pre_hurt_melee"] and len(actions) == 1 and actions[0]["action"] == "subcortical_combat":
+                outcome = actions[0].get("result") or {}
+                if (
+                    outcome.get("mode") == "combat_timeout" and outcome.get("timeout_endpoint") == "dig"
+                    and pre_trigger.get("primary_entity_id") == self._extract_hostile_info(post_status)[2]
+                    and self._same_stationary_melee_timeout_state(status, post_status)
+                ):
+                    self._stationary_melee_dig_timeout = (
+                        time.monotonic() + self.MELEE_DIG_TIMEOUT_RETRY_S, deepcopy(post_status), None,
+                    )
             if reasons in (["pre_hurt_creeper"], ["pre_hurt_melee"]) and self._repeat_stationary_retreat_warning(
                 pre_trigger, status, post_status, actions,
             ):
@@ -3250,6 +3286,51 @@ class GenerationGuard:
         else:
             self._last_stalled_lava = None
         return self._incident(post_status, reasons, actions, fresh, requires_replan=replan)
+
+    def _only_nearby_hostile(self, target_id: int | None) -> bool:
+        try:
+            result = self.bot.call(
+                "get_entities", {"radius": 8, "types": ["hostile"]}, timeout_s=0.3, allow_reauth=False,
+            )
+        except (ApiError, httpx.HTTPError):
+            return False
+        entities = result.get("entities") if isinstance(result, dict) else None
+        if target_id is None or not isinstance(entities, list) or len(entities) != 1:
+            return False
+        name, distance, observed_id, _ = self._extract_hostile_info({"nearest_hostile": entities[0]})
+        return observed_id == target_id and name in PRE_HURT_MELEE_MOBS and 2.3 < distance <= 3.5
+
+    def _same_stationary_melee_timeout_state(self, before: dict[str, Any], after: dict[str, Any]) -> bool:
+        def same_position(start: Any, end: Any) -> bool:
+            return all(
+                isinstance(pos, (list, tuple)) and len(pos) >= 3
+                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
+                for pos in (start, end)
+            ) and math.dist(start[:3], end[:3]) <= 0.25
+
+        health = after.get("health")
+        if (
+            not isinstance(health, (int, float)) or not 6.0 < health <= 20.0
+            or str(after.get("dimension") or "").removeprefix("minecraft:") != "overworld"
+            or not same_position(before.get("pos"), after.get("pos"))
+            or any(before.get(key) != after.get(key) for key in (
+                "dimension", "last_death", "health", "food", "held", "offhand", "blocking", "sneaking", "armor_points",
+            ))
+        ):
+            return False
+        if any(
+            status.get("ready") is not True or status.get("alive") is not True or status.get("on_ground") is not True
+            or any(status.get(key) for key in ("busy", "in_water", "submerged", "in_lava", "on_fire", "held_controls"))
+            for status in (before, after)
+        ):
+            return False
+        old_name, old_dist, old_id, old_target = self._extract_hostile_info(before)
+        name, dist, target_id, target = self._extract_hostile_info(after)
+        return (
+            target_id is not None and target_id == old_id and name == old_name and name in PRE_HURT_MELEE_MOBS
+            and 2.3 < old_dist <= 3.5 and 2.3 < dist <= 3.5 and abs(dist - old_dist) <= 0.25
+            and ((old_target is None and target is None) or same_position(old_target, target))
+        )
 
     def _repeat_stalled_lava_escape(
         self, before: dict[str, Any], after: dict[str, Any], actions: list[dict[str, Any]],

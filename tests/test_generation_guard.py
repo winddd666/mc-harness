@@ -2470,6 +2470,89 @@ def test_bug_009_stationary_melee_warning_does_not_cancel_again(monkeypatch, fol
             assert guard.poll()["requires_replan"] is False
 
 
+@pytest.mark.parametrize("followup", [
+    "unchanged", "closer", "new_target", "other_hostile", "scan_closer", "moved", "hurt", "status_timeout", "read_gap", "scan_gap",
+])
+def test_bug009_stationary_melee_dig_timeout_defers_one_verified_repeat(monkeypatch, followup):
+    import httpx
+
+    from mc_agent.harness.guardian import _RecoveryBudgetExceeded
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    spider = {"id": 637768, "name": "spider", "dist": 2.7, "pos": [34023.1, 62, 34004.7]}
+    status = {
+        "pos": [34020.4, 62, 34004.7], "dimension": "overworld", "health": 9.33, "food": 17,
+        "ready": True, "alive": True, "on_ground": True, "blocking": False, "nearest_hostile": spider,
+    }
+    damage = []
+    attempts = []
+    hostiles = [spider]
+    read_state = {"fail_next": False}
+
+    class LedgeBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if read_state.pop("fail_next", False):
+                    raise httpx.ReadTimeout("missing status sample")
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in damage if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "get_entities":
+                if followup == "scan_closer":
+                    return {"entities": [{**spider, "dist": 2.0}]}
+                return {} if followup == "scan_gap" else {"entities": list(hostiles)}
+            if action == "inventory":
+                return {"items": []}
+            return {"ok": True}
+
+    guard = GenerationGuard(LedgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "has_los", lambda *_: {"clear": True})
+
+    def combat(_env, trigger):
+        attempts.append(trigger["primary_entity_id"])
+        clock[0] += 7.5
+        raise _RecoveryBudgetExceeded("status" if followup == "status_timeout" else "dig")
+
+    monkeypatch.setattr(guard.combat_slot, "handle", combat)
+    first = guard.poll()
+    assert first["requires_replan"] and first["actions"][0]["result"]["mode"] == "combat_timeout"
+    assert attempts == [spider["id"]]
+
+    clock[0] += 13
+    if followup == "closer":
+        spider.update(dist=2.0, pos=[34022.4, 62, 34004.7])
+    elif followup == "new_target":
+        spider["id"] += 1
+    elif followup == "moved":
+        status["pos"] = [34020.8, 62, 34004.7]
+    elif followup == "hurt":
+        status["health"] = 7.33
+        damage.append({"seq": 1, "type": "hurt", "source": "mob_attack"})
+    elif followup == "read_gap":
+        read_state["fail_next"] = True
+        assert guard.poll() is None
+        clock[0] += 0.3
+
+    second = guard.poll()
+    if followup in {"unchanged", "other_hostile"}:
+        assert second is None and attempts == [spider["id"]]
+        deferred, = [event for event in guard.events.events if event["type"] == "guardian.melee_timeout_deferred"]
+        assert deferred["target_id"] == spider["id"]
+        if followup == "other_hostile":
+            hostiles.append({"id": 41, "name": "zombie", "dist": 3.0})
+            clock[0] += 2.5
+        else:
+            clock[0] += 12
+        assert guard.poll()["requires_replan"] and attempts == [spider["id"], spider["id"]]
+    else:
+        assert second["requires_replan"]
+        if followup == "hurt":
+            assert "fresh_hurt" in second["reasons"]
+        else:
+            assert attempts[-1] == spider["id"] and len(attempts) == 2
+
+
 @pytest.mark.parametrize("landing", ["magma", "stone", "respawned", "death_event"])
 def test_hot_floor_damage_during_combat_preserves_the_shield_and_crouches(monkeypatch, landing):
     spider = {"id": 42, "name": "spider", "dist": 1.4}
