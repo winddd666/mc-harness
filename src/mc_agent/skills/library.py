@@ -7839,12 +7839,14 @@ class MacroSkills:
             out_stair["fallback"] = "pillar"
         # BUG-099: prevent stone-pickaxe iron runs from sliding past Y=16 into deepslate.
         end_pos = st_end.get("pos") or pos_before
+        _stair_pick_tier = getattr(self.bot, "pickaxe_tier", None)
         if (
             v_key == "down"
             and isinstance(end_pos, (list, tuple))
             and len(end_pos) >= 2
             and float(end_pos[1]) <= 16.0
-            and int(pickaxe_tier) < 3
+            and isinstance(_stair_pick_tier, int)
+            and _stair_pick_tier < 3
             and "hint" not in out_stair
         ):
             out_stair["hint"] = (
