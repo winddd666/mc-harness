@@ -1392,6 +1392,48 @@ def test_terrain_interruption_does_not_attribute_hurt_to_a_distant_creeper(monke
         assert result == {"interrupted_by": "hurt"}
 
 
+@pytest.mark.parametrize("endpoint, body, expected", [
+    ("dig", {"pos": [11, 67, 24]}, [11, 67, 24]),
+    ("move_to", {"x": 11.5, "y": 69, "z": 24.5}, [11.5, 69, 24.5]),
+    ("move_to", {"x": 11.5, "z": 24.5}, [11.5, None, 24.5]),
+    ("dig", {"pos": [11, 24]}, None),
+])
+def test_interrupted_harvest_receipt_reports_the_dispatched_work_target(monkeypatch, endpoint, body, expected):
+    shooter = {"id": 809241, "name": "skeleton", "dist": 2.3}
+    status = {
+        "pos": [10.5, 65, 20.5], "dimension": "overworld", "health": 12.0,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": shooter,
+    }
+    emitted = []
+
+    class CaveBot:
+        def call(self, action, payload=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == endpoint:
+                assert payload == body
+                return {"interrupted_by": "hurt"}
+            return {"ok": True}
+
+    bot = CaveBot()
+    guard = GenerationGuard(bot, EventSink(emitted.append), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_run_subcortical_combat", lambda _trigger: {
+        "handled": True, "mode": "cover_or_flee", "status_after": dict(status),
+    })
+    receipt = json.loads(guard.run_tool_with_reflex("mc_skill_harvest_logs", lambda: json.dumps(bot.call(endpoint, body))))
+
+    assert receipt["error"]["code"] == "guardian_preempted"
+    assert receipt["pos_at_preemption"] == status["pos"]
+    event, = [event for event in emitted if event["type"] == "guardian.preempted_tool"]
+    if expected is None:
+        assert "last_work_action" not in receipt and "last_work_action" not in event
+    else:
+        assert receipt["last_work_action"] == event["last_work_action"] == {"endpoint": endpoint, "target": expected}
+        assert receipt["preemption_threat"] == event["preemption_threat"] == {"id": shooter["id"], "name": shooter["name"]}
+
+
 def test_watched_movement_ignores_confirmed_stalagmite_damage_near_a_distant_creeper(monkeypatch):
     import threading
 
@@ -4961,6 +5003,7 @@ def test_bug031_watchdog_thread_and_readonly_status_never_raise_reflex_preempted
         raw_receipt = guard.run_tool_with_reflex("mc_skill_harvest_logs", _actor_tool)
         receipt = json.loads(raw_receipt)
         actor_preempted["done"] = bool(receipt.get("preempted_by_reflex"))
+        assert "last_work_action" not in receipt
         # Let watchdog run a few more ticks post-preemption too
         time.sleep(0.08)
     finally:
@@ -14821,8 +14864,10 @@ def test_tool_water_threat_preempts_before_the_first_hit(monkeypatch, tool, acti
         expected_count = 1 if oxygen == 285 else 2
         assert result["partial_progress"] is True
         assert result["dug_count"] == expected_count and result["gained"] == {"cobblestone": expected_count}
+        assert result["last_work_action"] == {"endpoint": "dig", "target": body["pos"]}
     else:
         assert "partial_progress" not in result and "dug_count" not in result and "gained" not in result
+        assert "last_work_action" not in result
     assert guard._water_hurt_streak == 0
 
 

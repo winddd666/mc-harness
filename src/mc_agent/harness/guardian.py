@@ -3977,6 +3977,7 @@ class GenerationGuard:
         self,
         *,
         dig_progress: dict[str, Any] | None = None,
+        last_work_action: dict[str, Any] | None = None,
         enable_creeper_watcher: bool = True,
         deadline: float | None = None,
         check_unstick_exit: bool = False,
@@ -4516,6 +4517,18 @@ class GenerationGuard:
                 ):
                     raise ReflexPreempted(trigger) from None
 
+            if last_work_action is not None and clean_path in {"dig", "move_to"} and isinstance(body, dict):
+                target = body.get("pos") if clean_path == "dig" else [body.get(axis) for axis in ("x", "y", "z")]
+                if (
+                    isinstance(target, (list, tuple)) and len(target) == 3
+                    and all(
+                        (clean_path == "move_to" and axis == 1 and coord is None)
+                        or type(coord) is int or (type(coord) is float and math.isfinite(coord))
+                        for axis, coord in enumerate(target)
+                    )
+                ):
+                    last_work_action.update(endpoint=clean_path, target=list(target))
+
             try:
                 res = actor_call(path, body, **kwargs)
             except _RecoveryBudgetExceeded:
@@ -4590,7 +4603,9 @@ class GenerationGuard:
             return event
         return None
 
-    def handle_preemption(self, trigger: ThreatTrigger, *, interrupted_name: str) -> dict[str, Any]:
+    def handle_preemption(
+        self, trigger: ThreatTrigger, *, interrupted_name: str, last_work_action: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Execute full 0-LLM subcortical combat/evasion takeover on the main thread (no tool auto-replay)."""
         self._in_reflex = True
         try:
@@ -5058,6 +5073,12 @@ class GenerationGuard:
             water_observation = trigger.get("water_observation")
             preempt_pos = (water_observation or {}).get("pos") or st_pre.get("pos")
             release = {"action_released": trigger["action_released"]} if "action_released" in trigger else {}
+            work_observation: dict[str, Any] = {}
+            if last_work_action:
+                work_observation["last_work_action"] = last_work_action
+                threat_id = trigger.get("primary_entity_id")
+                if isinstance(threat_id, int):
+                    work_observation["preemption_threat"] = {"id": threat_id, "name": trigger.get("primary_type")}
             receipt = {
                 "ok": False,
                 "requires_replan": True,
@@ -5075,6 +5096,7 @@ class GenerationGuard:
                 **({"pos_after": st_after["pos"]} if st_after.get("pos") is not None else {}),
                 **({"water_risk": water_observation["reason"]} if water_observation and water_observation.get("reason") else {}),
                 **release,
+                **work_observation,
             }
             if outcome.get("mode") == "network_timeout":
                 receipt["status_after"].update({
@@ -5086,7 +5108,7 @@ class GenerationGuard:
                 lava_status["status_after"] = receipt["status_after"]
             self.events.emit(
                 "guardian.preempted_tool", tool=interrupted_name, mode=outcome.get("mode"), summary=summary,
-                stop_reason=stop_reason, **lava_status, **release,
+                stop_reason=stop_reason, **lava_status, **release, **work_observation,
                 **({"water_observation": water_observation} if water_observation is not None else {}),
             )
             return receipt
@@ -5194,9 +5216,13 @@ class GenerationGuard:
         # Leave time for the watcher to exit and for the final bounded stop request.
         deadline = time.monotonic() + budget_s - 2.0 if budget_s is not None else None
         dig_progress: dict[str, Any] = {}
+        last_work_action: dict[str, Any] | None = (
+            {} if tool_name in MINING_WATER_WATCH_TOOLS or tool_name == "mc_skill_harvest_logs" else None
+        )
         try:
             with self._intercept_bot_calls(
                 dig_progress=dig_progress,
+                last_work_action=last_work_action,
                 enable_creeper_watcher=not (is_flee or is_attack),
                 deadline=deadline,
                 check_unstick_exit=is_unstick,
@@ -5298,7 +5324,7 @@ class GenerationGuard:
                 self._stop_after_recovery_timeout()
             raise
         except ReflexPreempted as preempt:
-            receipt = self.handle_preemption(preempt.trigger, interrupted_name=tool_name)
+            receipt = self.handle_preemption(preempt.trigger, interrupted_name=tool_name, last_work_action=last_work_action)
             if dig_progress:
                 receipt.update(partial_progress=True, **dig_progress)
             return json.dumps(receipt, ensure_ascii=False)
