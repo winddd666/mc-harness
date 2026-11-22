@@ -1959,17 +1959,19 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
         "extra_tools": (),
     },
     "probe_obsidian_portal": {
-        "key": "minecraft:story/enter_the_nether",
+        # A dedicated key keeps the fixture instructions out of the generic portal pre-ensure playbook.
+        "key": "probe_obsidian_portal",
         "title": "30分：采够 10 块黑曜石并搭建点亮下界传送门进入下界",
         "points": 30,
         "tier": 2,
         "budget_class": "short",
         "task": (
-            "你已在干地平台，东侧脚边有现成黑曜石片（下方有岩浆），背包已有钻石镐、打火石、水桶、圆石和 4 块黑曜石。"
-            "立即用 mc_skill_mine_blocks(block_types=['obsidian'], count=6, radius=8) 再采 6 块黑曜石凑够 10 块，"
-            "随后直接调用 mc_skill_build_nether_portal 搭建、点亮并走入下界传送门（解锁 story/enter_the_nether）。"
+            "干地平台东侧脚边有现成黑曜石片，下方有岩浆。开局背包有钻石镐、打火石、水桶、圆石和 4 块黑曜石。"
+            "站在西侧圆石上，用 mc_skill_mine_blocks(block_types=['obsidian'], count=2, radius=8) 分批采，"
+            "每批根据实际入包量更新缺口。若某格超时，保留站位安全并换相邻露头，避免原地连续调用 mc_dig。"
+            "有 10 块黑曜石后，在干地调用 mc_skill_build_portal(enter=True) 建门、点火并穿门。"
         ),
-        "extra_tools": ("mc_skill_build_nether_portal",),
+        "extra_tools": ("mc_skill_build_portal",),
         "advancement_id": "minecraft:story/enter_the_nether",
     },
 }
@@ -2070,6 +2072,13 @@ def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | N
                 f"场景台面中心在 ({scene.x:.1f}, {y}, {scene.z:.1f})。若已走远，先回到台面中心。"
                 f"优先用玻璃瓶点布置好的水源 ({x - 1}, {y - 1}, {z})，备用水源在 ({x - 2}, {y - 1}, {z - 1})。"
                 f"酿造台在 ({x + 2}, {y}, {z})。查询水源时看这两个坐标和 level=0。"
+                + target_kwargs["task"]
+            )
+        elif stage == "probe_obsidian_portal" and scene is not None:
+            x, y, z = math.floor(scene.x), round(scene.y), math.floor(scene.z)
+            target_kwargs["task"] = (
+                f"场景台面中心在 ({scene.x:.1f}, {y}, {scene.z:.1f})。"
+                f"黑曜石片范围 X={x + 2}..{x + 5}、Y={y - 1}、Z={z - 2}..{z + 1}。"
                 + target_kwargs["task"]
             )
         targets = (cur.CurriculumTarget(**target_kwargs),)
@@ -2564,14 +2573,19 @@ def main() -> int:
             trader_keeper.start()
             print(f"[Scene] trader keeper started for {bot_name} (15s re-anchor)", flush=True)
 
-        class StrongholdSupervisor(CurriculumSupervisor):
+        protected_focus = {
+            STRONGHOLD_STAGE: (FOLLOW_ENDER_EYE, ENTER_END),
+            "probe_obsidian_portal": ("probe_obsidian_portal",),
+        }.get(args.stage, ())
+
+        class SceneFocusSupervisor(CurriculumSupervisor):
             def _detect_surface_preempt_opportunity(self, *, current_key: str, **kwargs: Any) -> str | None:
-                if current_key in (FOLLOW_ENDER_EYE, ENTER_END):
+                if current_key in protected_focus:
                     return None
                 return super()._detect_surface_preempt_opportunity(current_key=current_key, **kwargs)
 
         supervisor_class = (
-            StrongholdSupervisor if args.stage == STRONGHOLD_STAGE and args.focus_episodes > 0 else CurriculumSupervisor
+            SceneFocusSupervisor if protected_focus and args.focus_episodes > 0 else CurriculumSupervisor
         )
         try:
             sup = supervisor_class(
