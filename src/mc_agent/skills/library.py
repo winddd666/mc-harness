@@ -1015,9 +1015,10 @@ def _can_fit_item_in_inventory(inv: dict[str, Any] | None, item: str, count: int
         stem = norm.removesuffix("_planks")
         log_name = f"{stem}_stem" if stem in ("crimson", "warped") else f"{stem}_log"
         need_logs = max(1, math.ceil(max(1, int(count)) / 4))
-        if 0 < bag_counts.get(log_name, 0) <= need_logs:
-            return True
-        return False
+        sources = _PLANK_LOG_SOURCES.get(norm, (log_name,))
+        source_counts = [bag_counts.get(source, 0) for source in sources]
+        # The server selects a recipe variant. A singleton in just one variant cannot guarantee room.
+        return max(source_counts) == 1 or 0 < sum(source_counts) <= need_logs
 
     recipe = _CRAFT_SLOT_INPUTS.get(norm)
     if recipe is None:

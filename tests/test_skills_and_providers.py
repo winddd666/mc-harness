@@ -4778,6 +4778,40 @@ def test_stripped_wood_prepares_planks_sticks_and_stone_pickaxe(mode, wood, base
     assert sum(bag[log] for log in wood) == sum(wood.values()) - expected_planks // 4
 
 
+@pytest.mark.parametrize("wood,planks,fits", [
+    ({"spruce_log": 1}, "spruce_planks", True),
+    ({"stripped_spruce_log": 1}, "spruce_planks", True),
+    ({"stripped_warped_stem": 1}, "warped_planks", True),
+    ({"stripped_spruce_log": 2}, "spruce_planks", False),
+    ({"spruce_log": 1, "stripped_spruce_log": 2}, "spruce_planks", False),
+])
+def test_plank_craft_at_full_inventory_requires_a_consumable_input_slot(wood, planks, fits) -> None:
+    bag = dict(wood)
+    picks = [{"name": "stone_pickaxe", "count": 1}] * (36 - len(wood))
+    crafts = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "inventory":
+            result = {"items": picks + [{"name": name, "count": n} for name, n in bag.items()]}
+            return httpx.Response(200, json={"ok": True, "result": result})
+        assert route == "craft" and fits
+        body = json.loads(request.content)
+        crafts.append(body)
+        assert bag.pop(next(iter(wood))) == 1
+        bag[planks] = 4
+        return httpx.Response(200, json={"ok": True, "result": {"crafted": planks, "gained": 4}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).craft_gear(planks, 4)
+
+    assert result["ok"] is fits
+    if fits:
+        assert crafts == [{"item": planks, "count": 4}] and bag == {planks: 4}
+    else:
+        assert result["error"] == "inventory_full" and not crafts and bag == wood
+
+
 @pytest.mark.parametrize("action, op", [
     ("GET", "take"), (" withdraw ", "take"), ("store", "put"), ("deposit", "put"),
 ])
