@@ -17059,6 +17059,68 @@ def test_nether_combat_checks_footing_before_issuing_a_chase_pulse(terrain):
         assert result["requires_replan"] and result["error"]["code"] == "unsafe_landing"
 
 
+@pytest.mark.parametrize(("request_mode", "details", "timed_out_without_contact"), [
+    ("auto", {"end_reason": "timeout", "hits": 0, "swings": 0, "hits_connected": 0, "killed": False}, True),
+    ("rush", {"end_reason": "timeout", "hits": 2, "swings": 2, "hits_connected": 0, "killed": False}, True),
+    ("melee", {"end_reason": "timeout", "hits": 0, "killed": False}, True),
+    ("rush", {"end_reason": "timeout", "hits": 2, "swings": 2, "hits_connected": 1, "killed": False}, False),
+    ("melee", {"end_reason": "target_dead", "hits": 1, "killed": True}, False),
+])
+def test_combat_timeout_without_contact_reaches_repeat_guard(monkeypatch, request_mode, details, timed_out_without_contact):
+    from mc_agent.harness.agent import _RepeatFailureGuard
+    from mc_agent.harness.mc_tools import McToolset
+    from mc_agent.harness.scheduler import _is_action_failure
+    from mc_agent.harness.tool_registry import Tool
+    from mc_agent.skills import combat_v1
+
+    dispatched = []
+    cleanup = []
+
+    def run_tactics(_adapter, *, target_name, max_time_s):
+        dispatched.append((target_name, max_time_s))
+        return {**details, "target_id": 1133882, "path_retries": 33}
+
+    monkeypatch.setattr(combat_v1, "action_rush", run_tactics)
+    monkeypatch.setattr(combat_v1, "action_melee", run_tactics)
+
+    def handle(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint == "get_entities":
+            data = {"entities": [{"id": 1133882, "name": "blaze", "pos": [20.6, 64, 0.5], "dist": 20.1}]}
+        elif endpoint == "inventory":
+            data = {"items": [{"name": "shield", "count": 1}]}
+        elif endpoint in {"stop", "posture"}:
+            cleanup.append(endpoint)
+            data = {}
+        else:
+            pytest.fail(f"Unexpected combat endpoint: {endpoint}")
+        return httpx.Response(200, json={"ok": True, "result": data})
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(handle)) as bot:
+        toolset = McToolset(bot)
+        toolset.update_block_pos([0.5, 64, 0.5])
+        tool = Tool(
+            name="mc_skill_combat", description="", parameters={}, concurrency="exclusive", handler=toolset.mc_skill_combat,
+        )
+        guarded = _RepeatFailureGuard(toolset).wrap_tool(tool)
+        replies = [guarded.handler(mode=request_mode, target_name="blaze", max_time_s=20) for _ in range(3)]
+
+    first, *repeats = map(json.loads, replies)
+    assert _is_action_failure(replies[0]) is timed_out_without_contact
+    assert first["ok"] is not timed_out_without_contact
+    expected_result = {**details, "target_id": 1133882, "path_retries": 33}
+    if timed_out_without_contact:
+        expected_result["hits"] = 0
+        assert first["requires_replan"] is True and first["error"]["code"] == "time_budget"
+        assert [reply["error"]["code"] for reply in repeats] == ["repeated_identical_failure_blocked"] * 2
+        assert dispatched == [("blaze", 20.0)]
+    else:
+        assert all(reply["ok"] for reply in repeats)
+        assert dispatched == [("blaze", 20.0)] * 3
+    assert first["result"] == expected_result
+    assert cleanup == ["stop", "posture"] * len(dispatched)
+
+
 @pytest.mark.parametrize("case", [
     "distant_blaze", "unlisted_blaze", "read_timeout", "minor_hit", "ambient_fire", "new_life", "stale_hit",
 ])

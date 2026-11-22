@@ -287,14 +287,31 @@ def run_combat_skill(
         else:  # gap_head
             raw = combat_v1.action_gap_slash(adapter, mode="head", max_time_s=eff_time)  # type: ignore[arg-type]
 
-        ok = not bool(raw.get("error"))
-        return {
-            "ok": ok,
+        receipt = {
+            "ok": not bool(raw.get("error")),
             "mode": resolved_mode,
             "target_name": resolved_target,
             "elapsed_s": round(time.monotonic() - started, 2),
             "result": raw,
         }
+        connected = raw.get("hits_connected", raw.get("hits"))
+        if (
+            receipt["ok"] and resolved_mode in {"melee", "rush"} and raw.get("end_reason") == "timeout"
+            and not raw.get("killed") and type(connected) in (int, float) and connected == 0
+        ):
+            # The reactive loop also uses `hits` for swings. Keep those attempts visible
+            # without counting them as progress in the actor's repeat guard.
+            attempts = raw.get("hits")
+            if type(attempts) in (int, float) and attempts > 0:
+                receipt["result"] = {"swings": attempts, **raw, "hits": 0}
+            receipt.update(
+                ok=False, requires_replan=True,
+                error={
+                    "code": "time_budget",
+                    "message": f"战术战斗 {resolved_mode} 在时限内未命中目标。请复查敌人与落脚点，改路线、换掩体或撤退。",
+                },
+            )
+        return receipt
     except _CombatBudgetExceeded:
         _reset_combat_posture(bot)
         return {
