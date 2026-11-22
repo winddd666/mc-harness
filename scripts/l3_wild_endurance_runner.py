@@ -1847,27 +1847,29 @@ def _reassert_scene_geofence(
         drift = math.hypot(float(gf.center_x) - x, float(gf.center_z) - z)
     except Exception:
         return False
-    if drift <= limit:
-        return False
-    try:
-        if hasattr(gf, "contains"):
-            rebuilt = dataclasses.replace(gf, center_x=x, center_z=z)
-        else:
-            rebuilt = _scene_geofence_cls(type(gf))(center_x=x, center_z=z, radius=gf.radius, margin=gf.margin)
-    except Exception as exc:
-        print(f"[Scene] geofence rebuild failed: {exc}", flush=True)
-        return False
-    toolset.geofence = rebuilt
-    if supervisor is not None:
+    rebuilt = gf
+    if drift > limit:
         try:
-            supervisor.geofence = rebuilt
-        except Exception:
-            pass
-    print(
-        f"[Scene] geofence drift {drift:.0f}m -> rebuilt in {dim} at ({x:.1f}, {z:.1f})",
-        flush=True,
-    )
-    return True
+            if hasattr(gf, "contains"):
+                rebuilt = dataclasses.replace(gf, center_x=x, center_z=z)
+            else:
+                rebuilt = _scene_geofence_cls(type(gf))(center_x=x, center_z=z, radius=gf.radius, margin=gf.margin)
+        except Exception as exc:
+            print(f"[Scene] geofence rebuild failed: {exc}", flush=True)
+            return False
+    updated = False
+    # McToolset and MacroSkills keep separate references. Rebinding all runtime
+    # hooks here would also reset the episode's movement and timeout state.
+    for owner in (toolset, getattr(toolset, "skills", None), supervisor):
+        if owner is not None and getattr(owner, "geofence", None) is not rebuilt:
+            owner.geofence = rebuilt
+            updated = True
+    if rebuilt is not gf:
+        print(
+            f"[Scene] geofence drift {drift:.0f}m -> rebuilt in {dim} at ({x:.1f}, {z:.1f})",
+            flush=True,
+        )
+    return updated
 
 
 def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts: int = 2) -> bool:
