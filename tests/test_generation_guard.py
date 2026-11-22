@@ -6527,10 +6527,12 @@ def test_magic_damage_with_visible_witch_retreats_from_the_witch(monkeypatch, wi
     assert retreats == ([(witch, True)] if witch_visible else [(None, False)])
 
 
-@pytest.mark.parametrize("ground", ["safe", "lava_drop"])
+@pytest.mark.parametrize("ground", ["safe", "lava_drop", "slow_probe", "slow_control"])
 def test_bunker_rejection_keeps_an_armed_witch_retreat_on_verified_ground(monkeypatch, ground):
     from mc_agent.skills.combat_env import yaw_to_unit_xz
 
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     origin = [17029.1, 87, 29985.6]
     witch = {"id": 255310, "name": "witch", "dist": 9.1, "pos": [17022, 87, 29991.3]}
     status = {
@@ -6538,6 +6540,7 @@ def test_bunker_rejection_keeps_an_armed_witch_retreat_on_verified_ground(monkey
         "alive": True, "ready": True, "on_ground": True, "nearest_hostile": witch,
     }
     moves = []
+    stops = []
     yaw = 0.0
 
     class LedgeBot:
@@ -6554,17 +6557,26 @@ def test_bunker_rejection_keeps_an_armed_witch_retreat_on_verified_ground(monkey
             if action == "inventory":
                 return {"items": [{"name": "iron_sword", "count": 1}]}
             if action == "get_block":
+                if ground == "slow_probe":
+                    clock[0] += min(0.36, kwargs["timeout_s"])
                 x, y, z = body["pos"]
                 if y == 86:
-                    return {"name": "stone" if ground == "safe" or (x, z) == (17029, 29985) else "lava"}
+                    supported = ground in {"safe", "slow_control"} or (x, z) == (17029, 29985)
+                    return {"name": "stone" if supported else "lava"}
                 return {"name": "air"}
             if action == "look":
                 yaw = body["yaw"]
                 return {"ok": True}
             if action == "control":
                 moves.append(body)
+                if ground == "slow_control":
+                    clock[0] += kwargs["timeout_s"]
+                    raise httpx.ReadTimeout("control response exceeded the retreat deadline")
                 dx, dz = yaw_to_unit_xz(yaw)
                 status["pos"] = [origin[0] + 2.1 * dx, origin[1], origin[2] + 2.1 * dz]
+                return {"ok": True}
+            if action == "stop":
+                stops.append((clock[0], kwargs["timeout_s"]))
                 return {"ok": True}
             pytest.fail(f"Unexpected action after an unsafe bunker: {action}")
 
@@ -6580,8 +6592,14 @@ def test_bunker_rejection_keeps_an_armed_witch_retreat_on_verified_ground(monkey
     bunker, retreat = incident["actions"]
     assert bunker["result"]["reason"] == "unsafe_floor"
     assert retreat["action"] == "combat_or_flee" and retreat["ok"] is (ground == "safe")
-    assert retreat["result"].get("reason") == (None if ground == "safe" else "no_safe_retreat")
-    assert len(moves) == (1 if ground == "safe" else 0)
+    if ground.startswith("slow_"):
+        assert retreat["result"] == {"ok": False, "reason": "time_budget", "partial": True}
+        assert stops == [(1008.0, 1.5)]
+        assert clock[0] == 1008.0
+    else:
+        assert retreat["result"].get("reason") == (None if ground == "safe" else "no_safe_retreat")
+        assert stops == []
+    assert len(moves) == (1 if ground in {"safe", "slow_control"} else 0)
 
 
 @pytest.mark.parametrize("respawned", [False, True])

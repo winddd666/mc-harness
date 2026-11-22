@@ -842,6 +842,7 @@ class GenerationGuard:
         if cover_only or require_safe_footing or "nether" in dimension or (retreat_only and isinstance(skills, MacroSkills)):
             nh_name, nh_distance, nh_id, nh_pos = self._extract_hostile_info(status)
             now = time.monotonic()
+            deadline = now + self.COMBAT_RECOVERY_BUDGET_S
             recent_melee = now - self._last_melee_hurt_at < 4.0
             mixed_hurt = low_health and not ranged and recent_melee and now - self._last_ranged_hurt_at < 8.0
             burning_blaze = "nether" in dimension and ranged and status.get("on_fire") and nh_name == "blaze"
@@ -946,7 +947,9 @@ class GenerationGuard:
                 allow_stationary = allow_stationary_cover and not (
                     "nether" in dimension and self._low_health_burning_after_ranged_hit(status, now)
                 )
-                cover_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + cover_budget)
+                cover_bot = _GuardSession(
+                    self.raw_bot, self.bot.checkpoint, deadline=min(deadline, time.monotonic() + cover_budget),
+                )
                 try:
                     cover = CombatEnv(cover_bot, geofence=self.geofence).seek_natural_cover(
                         pos, other_shooters=other_shooters, allow_stationary=allow_stationary,
@@ -971,13 +974,18 @@ class GenerationGuard:
                     )
                 )
             )
-            return self.combat_env.flee(
-                pos, wait_for_ground=True,
-                **({"initial_landing_checks": 5} if critical_knockback else {}),
-                **({"other_shooters": other_shooters} if other_shooters else {}),
-                **({"other_melee": other_melee} if other_melee else {}),
-                **({"use_nearest_hostile": False} if resolve_melee and pos is None else {}),
-            )
+            try:
+                with self.bot.limit_until(deadline):
+                    return self.combat_env.flee(
+                        pos, wait_for_ground=True,
+                        **({"initial_landing_checks": 5} if critical_knockback else {}),
+                        **({"other_shooters": other_shooters} if other_shooters else {}),
+                        **({"other_melee": other_melee} if other_melee else {}),
+                        **({"use_nearest_hostile": False} if resolve_melee and pos is None else {}),
+                    )
+            except _RecoveryBudgetExceeded:
+                self._stop_after_recovery_timeout()
+                return {"ok": False, "reason": "time_budget", "partial": True}
         result = self._run_recovery_macro(
             status,
             lambda skills: skills.defend_or_flee(
