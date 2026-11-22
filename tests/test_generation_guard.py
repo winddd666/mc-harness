@@ -2928,6 +2928,36 @@ def test_combat_attacks_reserve_time_for_final_status_and_release(monkeypatch, r
     assert outcome["status_after"]["health"] == 20
 
 
+def test_counterattack_stops_when_the_latest_scan_puts_the_target_behind_a_wall():
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    target = {"id": 42, "name": "zombie", "pos": [3.5, 64, 0.5], "dist": 3.0}
+    scans = 0
+
+    class CaveBot:
+        def status(self):
+            return {"pos": [0.5, 64, 0.5], "health": 20, "food": 20, "on_ground": True,
+                    "ready": True, "alive": True, "nearest_hostile": target}
+
+        def call(self, action, body=None, **kwargs):
+            nonlocal scans
+            if action == "inventory":
+                return {"items": [{"name": "iron_sword", "count": 1}]}
+            if action == "get_entities":
+                scans += 1
+                return {"entities": [{**target, "blocked_by_wall": scans > 1}]}
+            if action == "attack":
+                pytest.fail("Guardian attempted to chase a target behind a wall")
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(CombatEnv(CaveBot()), {
+        "source": "pre_hurt_melee", "primary_entity_id": 42, "primary_type": "zombie", "distance": 3.0,
+    })
+
+    assert scans == 2
+    assert {"action": "melee_attack", "entity_id": 42, "ok": False, "code": "blocked_by_wall"} in outcome["actions"]
+
+
 @pytest.mark.parametrize("scenario", ["cornered", "escaped", "second_hostile", "out_of_reach"])
 def test_cornered_unshielded_bot_strikes_once_only_against_a_close_lone_melee_mob(monkeypatch, scenario):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
