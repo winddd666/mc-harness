@@ -407,6 +407,53 @@ def test_water_float_continues_shore_recovery_after_recent_failure(monkeypatch, 
     assert guard._last_water_escape_failed is False
 
 
+@pytest.mark.parametrize("observe", ["poll", "boundary"])
+@pytest.mark.parametrize("landed", [False, True])
+def test_water_recovery_history_clears_only_after_grounded_dry_observation(monkeypatch, observe, landed):
+    clock = [100.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    status = {
+        "pos": [7824.5, 63.5, 2843.3], "health": 20, "food": 20, "oxygen": 120,
+        "alive": True, "ready": True, "in_water": False, "submerged": False, "on_ground": landed,
+    }
+    calls = []
+
+    class RiverBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": []}
+            pytest.fail(f"Unexpected call: {action}")
+
+    guard = GenerationGuard(RiverBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    guard._last_water_escape_at = 96.0
+    guard._last_water_escape_failed = True
+    guard._water_hurt_streak = 1
+
+    def recover(method, *, surface_first=False):
+        calls.append((method, surface_first))
+        status.update(in_water=False, submerged=False, on_ground=True)
+        return {"ok": True, "in_water": False}
+
+    monkeypatch.setattr(guard, "_escape_water", lambda *_: recover("generic"))
+    monkeypatch.setattr(
+        guard.combat_env, "escape_deep_water_to_shore",
+        lambda *_, **kwargs: recover("shore", surface_first=kwargs.get("surface_first", False)),
+    )
+
+    first_observation = guard.poll if observe == "poll" else guard.stabilize_after_tools
+    assert first_observation() is None
+    assert guard._last_water_escape_failed is not landed
+    assert guard._water_hurt_streak == (0 if landed else 1)
+    status.update(in_water=True, submerged=True, on_ground=False)
+    clock[0] += 1.0
+    assert "water_float" in guard.poll()["reasons"]
+    assert calls == ([("generic", False)] if landed else [("shore", True)])
+
+
 def test_hurt_while_standing_in_shallow_water_still_escapes(monkeypatch):
     """Live: in_water + hurt produced actions=[] (melee branch needs dry land, needs_float false)."""
     clock = [100.0]

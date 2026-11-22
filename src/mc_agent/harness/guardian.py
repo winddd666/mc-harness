@@ -1060,6 +1060,8 @@ class GenerationGuard:
                     self._last_dig_cover_fail_at = float("-inf")
                     self._stationary_warnings.clear()
                     self._last_stalled_lava = None
+                    self._water_hurt_streak = 0
+                    self._last_water_escape_failed = False
                     self._blocked_bunker = None
                     self._last_hot_floor_health = None
                 elif event.get("type") == "hurt":
@@ -1630,6 +1632,8 @@ class GenerationGuard:
         if (
             not in_water
             and not in_lava
+            and not status.get("submerged")
+            and status.get("on_ground") is True
             and not deaths
             and not disconnected
             and ready
@@ -4258,7 +4262,7 @@ class GenerationGuard:
         )
         nh_name, nh_dist, nh_id, nh_pos = self._extract_hostile_info(status)
 
-        if not in_water and not in_lava:
+        if not in_water and not in_lava and not status.get("submerged") and status.get("on_ground") is True:
             self._water_hurt_streak = 0
             self._last_water_escape_failed = False
 
