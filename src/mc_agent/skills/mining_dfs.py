@@ -2461,7 +2461,7 @@ class MiningDFSEngine:
                 if in_band:
                     found_pts = in_band
                 else:
-                    near_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 16]
+                    near_band = [p for p in found_pts if abs(p[1] - self.target_y) <= 10]
                     if near_band:
                         found_pts = near_band
 
@@ -5404,7 +5404,17 @@ class MiningDFSEngine:
                     self._locked_rep_dry_calls = 0
                 elif isinstance(self.locked_cluster, dict) and self.locked_cluster.get("rep"):
                     cur_rep = tuple(int(x) for x in self.locked_cluster["rep"])
-                    if cur_rep == self._last_locked_rep:
+                    p_before = result.get("pos_before")
+                    p_after = result.get("pos_after")
+                    making_approach = (
+                        isinstance(p_before, (list, tuple)) and len(p_before) >= 3
+                        and isinstance(p_after, (list, tuple)) and len(p_after) >= 3
+                        and math.dist(p_after[:3], cur_rep) < math.dist(p_before[:3], cur_rep) - 2.0
+                    )
+                    if making_approach:
+                        self._last_locked_rep = cur_rep
+                        self._locked_rep_dry_calls = 0
+                    elif cur_rep == self._last_locked_rep:
                         self._locked_rep_dry_calls += 1
                         if self._locked_rep_dry_calls >= 2:
                             self._mark_ore_unreachable(cur_rep, "stalled_locked_cluster")
