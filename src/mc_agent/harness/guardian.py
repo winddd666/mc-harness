@@ -19,7 +19,7 @@ import json
 import math
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import httpx
 
@@ -858,15 +858,7 @@ class GenerationGuard:
                         shooter_id == trident_attacker_id if trident_attacker_id is not None else isinstance(shooter_id, int)
                         for shooter_id, _ in shooters
                     )
-                    and not any(
-                        isinstance(entity, dict)
-                        and str(entity.get("name") or "").removeprefix("minecraft:") in PRE_HURT_MELEE_MOBS | {"creeper"}
-                        and (
-                            not isinstance(entity.get("dist"), (int, float))
-                            or not math.isfinite(entity["dist"]) or entity["dist"] <= 5.5
-                        )
-                        for entity in entities
-                    )
+                    and self._melee_clear_for_projectile_cover(entities)
                 )
             close_contact = scan_surface_shooters and (
                 (nh_name == "creeper" and nh_distance <= 5.5)
@@ -3042,6 +3034,7 @@ class GenerationGuard:
                 cover, live_target, other_shooters = self._cover_and_shooters_after_blocked_flee(
                     status["pos"], entity_id, min(now + cover_budget, deadline),
                     allow_stationary=not (critical_overworld_arrows or self._low_health_burning_after_ranged_hit(status, now)),
+                    require_melee_clearance=critical_overworld_arrows,
                 )
                 if cover and (cover.get("ok") or cover.get("respawned")):
                     return {**cover, "requires_replan": True, "pos_before": status["pos"]}
@@ -3063,7 +3056,8 @@ class GenerationGuard:
             if recovery.get("ok") and isinstance(result, dict):
                 cover_deadline = min(now + 4.0, deadline)
                 if (
-                    allow_cover and ranged and dimension == "overworld" and not status.get("blocking")
+                    allow_cover and ranged and dimension == "overworld"
+                    and (not status.get("blocking") or critical_overworld_arrows)
                     and isinstance(health, (int, float)) and 0 < health <= 10.0
                     and time.monotonic() + 1.5 < cover_deadline
                 ):
@@ -3082,14 +3076,17 @@ class GenerationGuard:
                     shooter, shooter_dist, shooter_id, _ = self._extract_hostile_info(after)
                     hp = after.get("health")
                     if (
-                        shooter in RANGED_MOBS and shooter_id is not None and shooter_dist <= 8.0
-                        and isinstance(hp, (int, float)) and 0 < hp <= 6.0 and after.get("pos")
+                        shooter in RANGED_MOBS and shooter_id is not None
+                        and shooter_dist <= (16.0 if critical_overworld_arrows else 8.0)
+                        and isinstance(hp, (int, float)) and 0 < hp <= (4.0 if critical_overworld_arrows else 6.0)
+                        and after.get("pos") and bool(after.get("blocking")) == bool(status.get("blocking"))
                         and after.get("ready") is True and after.get("alive") is not False and after.get("on_ground") is True
-                        and not any(after.get(key) for key in ("blocking", "in_water", "in_lava", "on_fire"))
+                        and not any(after.get(key) for key in ("in_water", "in_lava", "on_fire", "busy"))
                         and all(after.get(key) == status.get(key) for key in ("last_death", "dimension"))
                     ):
                         cover, _, _ = self._cover_and_shooters_after_blocked_flee(
                             after["pos"], shooter_id, min(cover_deadline, time.monotonic() + 2.25), allow_stationary=False,
+                            require_melee_clearance=critical_overworld_arrows,
                         )
                         if cover and (cover.get("ok") or cover.get("respawned")):
                             return {**cover, "requires_replan": True, "pos_before": status.get("pos")}
@@ -3116,18 +3113,32 @@ class GenerationGuard:
         except (ApiError, httpx.HTTPError):
             return None
 
+    @staticmethod
+    def _melee_clear_for_projectile_cover(entities: Sequence[dict[str, Any]]) -> bool:
+        return not any(
+            isinstance(entity, dict)
+            and str(entity.get("name") or "").removeprefix("minecraft:") in PRE_HURT_MELEE_MOBS | {"creeper"}
+            and (
+                not isinstance(entity.get("dist"), (int, float))
+                or not math.isfinite(entity["dist"]) or entity["dist"] <= 5.5
+            )
+            for entity in entities
+        )
+
     def _cover_and_shooters_after_blocked_flee(
         self, pos: list[float], target_id: int | None, deadline: float, *, allow_stationary: bool,
+        require_melee_clearance: bool = False,
     ) -> tuple[dict[str, Any] | None, Sequence[float] | None, list[Sequence[float]]]:
         bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
         target = None
         others = []
         try:
-            entities = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
-            shooters = ranged_retreat_positions(pos, entities.get("entities") or [], max_distance=16.0)
+            sighting = bot.call("get_entities", {"radius": 16, "types": ["hostile"]}, timeout_s=0.6)
+            entities = sighting.get("entities") or []
+            shooters = ranged_retreat_positions(pos, entities, max_distance=16.0)
             target = next((point for entity_id, point in shooters if target_id is not None and entity_id == target_id), None)
             others = [point for entity_id, point in shooters if entity_id != target_id]
-            if target is None:
+            if target is None or (require_melee_clearance and not self._melee_clear_for_projectile_cover(entities)):
                 return None, target, others
             cover = self._action(
                 "unsafe_exit_cover",

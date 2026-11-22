@@ -10666,14 +10666,18 @@ def test_unsafe_nether_flee_rechecks_recent_cover_before_leaving(monkeypatch, co
     }[cover]
 
 
-@pytest.mark.parametrize("landing", ["covered", "exposed", "new_life", "shooter_gone", "healthy"])
-def test_blocked_flee_checks_cover_after_a_critical_unshielded_landing(monkeypatch, landing):
+@pytest.mark.parametrize("blocking, landing", [
+    (False, "covered"), (False, "exposed"), (False, "new_life"), (False, "shooter_gone"), (False, "healthy"),
+    (True, "covered"), (True, "exposed"), (True, "new_life"), (True, "shooter_gone"), (True, "near_melee"),
+])
+def test_blocked_flee_checks_cover_after_a_critical_landing(monkeypatch, blocking, landing):
     from mc_agent.skills.combat_env import CombatEnv
 
     shooter = {"id": 44, "name": "skeleton", "dist": 5.5, "pos": [0.5, 77, 6.0]}
     origin = [0.5, 77, 0.5]
     landing_pos = [0.5, 77, -2.0]
-    status = {"pos": origin, "dimension": "overworld", "health": 8.5, "on_ground": True,
+    status = {"pos": origin, "dimension": "overworld", "health": 1.55 if blocking else 8.5,
+              "blocking": blocking, "on_ground": True,
               "ready": True, "alive": True, "last_death": {"t": 1}, "nearest_hostile": shooter}
     checks = []
 
@@ -10684,19 +10688,29 @@ def test_blocked_flee_checks_cover_after_a_critical_unshielded_landing(monkeypat
             if action == "get_block":
                 return {"name": "air"}
             if action == "get_entities":
-                return {"entities": [shooter]}
+                entities = [shooter]
+                if status["pos"] == landing_pos and landing == "near_melee":
+                    entities.append({"id": 45, "name": "zombie", "dist": 5.4})
+                return {"entities": entities}
+            if action == "look" and blocking:
+                return {"ok": True}
             pytest.fail(f"Unexpected action during retreat: {action}")
 
     def flee(_env, target, **_kwargs):
         assert target == shooter["pos"]
         checks.append("flee")
-        status.update(pos=landing_pos, health=8.5 if landing == "healthy" else 4.5,
-                      nearest_hostile=None if landing == "shooter_gone" else {**shooter, "dist": 8.0},
+        health_after = {"healthy": 8.5}.get(landing, 1.55 if blocking else 4.5)
+        shooter_dist = 4.5 if landing == "near_melee" else 9.4 if blocking else 8.0
+        status.update(pos=landing_pos, health=health_after,
+                      nearest_hostile=None if landing == "shooter_gone" else {**shooter, "dist": shooter_dist},
                       last_death={"t": 2 if landing == "new_life" else 1})
         return {"ok": True, "mode": "flee", "moved_dist": 2.5, "pos_after": landing_pos}
 
     def cover(_env, target, *, other_shooters, allow_stationary):
         assert target == shooter["pos"] and not other_shooters and not allow_stationary
+        if status["pos"] == origin:
+            checks.append("initial_cover")
+            return None
         checks.append("cover")
         if landing == "covered":
             return {"ok": True, "mode": "natural_cover", "pos_after": [-1.7, 77, -2.0]}
@@ -10706,11 +10720,17 @@ def test_blocked_flee_checks_cover_after_a_critical_unshielded_landing(monkeypat
     monkeypatch.setattr(CombatEnv, "seek_natural_cover", cover)
     bot = RidgeBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    if blocking:
+        monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: 1000.0)
+        guard._last_ranged_hurt_at = 999.0
     result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(
         bot.call("move_to", {"x": 8.5, "z": 0.5, "stop_on": ["death"]}),
     )))
 
-    assert checks == (["flee", "cover"] if landing in {"covered", "exposed"} else ["flee"])
+    expected_checks = ["initial_cover", "flee"] if blocking else ["flee"]
+    if landing in {"covered", "exposed"}:
+        expected_checks.append("cover")
+    assert checks == expected_checks
     assert result["mode"] == {"covered": "natural_cover", "new_life": "respawned"}.get(landing, "flee")
     assert result["ok"] is (landing != "new_life") and result["requires_replan"]
 
