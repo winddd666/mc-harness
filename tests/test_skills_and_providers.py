@@ -4010,6 +4010,51 @@ def test_craft_gear_clears_its_own_table_from_a_narrow_mine(monkeypatch, placeme
     assert clock[0] <= 26.0
 
 
+@pytest.mark.parametrize("action, op", [
+    ("GET", "take"), (" withdraw ", "take"), ("store", "put"), ("deposit", "put"),
+])
+def test_skill_container_normalizes_action_aliases(action, op) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    sent = []
+    pos = [1, 64, 0]
+
+    def handler(request):
+        assert request.url.path.endswith("/window/act")
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {"done": []}})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_container(
+            [{"item": "iron_ingot", "count": 2}], action=action, x=pos[0], y=pos[1], z=pos[2],
+        ))
+
+    assert result["ok"] is True
+    assert result["action"] == op
+    assert sent == [{"target": {"pos": pos}, "ops": [
+        {"op": op, "item": "iron_ingot", "count": 2, "from" if op == "take" else "to": "container"},
+    ]}]
+
+
+@pytest.mark.parametrize("items, options, message", [
+    ([], {"block": "chest"}, "物品名和数量"),
+    ([{"item": "iron_ingot", "count": 2}], {"x": 1}, "完整坐标"),
+    ([{"item": "iron_ingot", "count": 2}], {"action": "inspect", "block": "chest"}, "mc_window_view"),
+])
+def test_skill_container_explains_invalid_requests_without_opening(items, options, message) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    def handler(request):
+        raise AssertionError(request.url.path)
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_container(items, **options))
+
+    assert result["ok"] is False
+    assert result["error"] == "bad_args"
+    assert message in result["message"]
+
+
 def test_smelt_collect_survives_read_timeout() -> None:
     """BUG-035: a transient ReadTimeout in world-job collection killed the run."""
     from mc_agent.harness.world_memory import WorldMemory

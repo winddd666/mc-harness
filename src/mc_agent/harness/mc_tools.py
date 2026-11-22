@@ -3255,10 +3255,10 @@ class McToolset:
                 # ---- L2 窗口原子封装（无策略；给定参数即执行） ----
                 Tool(
                     name="mc_skill_container",
-                    description="原子容器批量存取：对箱子/木桶一次 put 或 take 多组物品，并同步 WorldMemory 容器快照。",
+                    description="批量存取箱子或木桶的物品。需要一个容器目标和非空物品清单。查看箱内物品请用 mc_window_view。",
                     parameters={
-                        "items": Parameter("物品数组，如[{'item':'cobblestone','count':64}]", kind="object_array"),
-                        "action": Parameter("put 存入 / take 取出，默认put", required=False),
+                        "items": Parameter("要存取的物品名和数量，如[{'item':'cobblestone','count':64}]", kind="object_array"),
+                        "action": Parameter("put 存入（store/deposit），take 取出（get/withdraw），默认 put", required=False),
                         "block": Parameter("方块名，如'chest'", required=False),
                         "x": Parameter("X", kind="integer", required=False),
                         "y": Parameter("Y", kind="integer", required=False),

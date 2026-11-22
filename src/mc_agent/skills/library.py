@@ -4543,14 +4543,16 @@ class MacroSkills:
         dim: str | None = None,
     ) -> dict[str, Any]:
         """Batch `put`/`take` on the `container` section of a chest/barrel window."""
+        action = str(action or "").strip().lower()
+        action = {"get": "take", "withdraw": "take", "store": "put", "deposit": "put"}.get(action, action)
         if action not in ("put", "take"):
-            return {"ok": False, "error": "bad_args", "message": "action 必须是 put 或 take。"}
+            return {"ok": False, "error": "bad_args", "message": "存入用 put，取出用 take。查看箱内物品请用 mc_window_view。"}
         entries = _window_item_entries(items)
         if not entries:
-            return {"ok": False, "error": "bad_args", "message": "items 不能为空。"}
+            return {"ok": False, "error": "bad_args", "message": "请在 items 填写要存取的物品名和数量。查看箱内物品请用 mc_window_view。"}
         target = self._window_target(block=block, x=x, y=y, z=z)
         if target is None:
-            return {"ok": False, "error": "bad_args", "message": "需要 block 或 (x, y, z)。"}
+            return {"ok": False, "error": "bad_args", "message": "请提供箱子的完整坐标 x、y、z，或用 block 指定附近的容器类型。"}
 
         ops: list[dict[str, Any]] = []
         for entry in entries:
