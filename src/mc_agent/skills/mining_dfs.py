@@ -3755,7 +3755,7 @@ class MiningDFSEngine:
     ) -> dict[str, Any]:
         """Harvest exposed ores ('fishbone': strict corridor-adjacent; 'radar': 12m scan + 1x1 surgical breach)."""
         target_set = set(target_blocks)
-        inv_raw, _ = _inventory_snapshot_and_counts(self.bot)
+        inv_raw, _inv_counts = _inventory_snapshot_and_counts(self.bot)
         _, max_tier, _ = _pickaxe_inventory_summary(inv_raw)
         focus_target_only = _should_focus_target_only(
             strategy=self.strategy,
@@ -3764,7 +3764,14 @@ class MiningDFSEngine:
             anchor_y=anchor[1],
             target_y=self.target_y,
         )
-        query_types = list(target_blocks) if focus_target_only else list(TRACKED_ORES)
+        # BUG-092: when iron stock < 12, include iron ores in query_types so close exposed iron (<=2.5m) can be grabbed on the way.
+        if focus_target_only:
+            if (_inv_counts.get("iron_ingot", 0) + _inv_counts.get("raw_iron", 0)) < 12:
+                query_types = list(dict.fromkeys([*target_blocks, "iron_ore", "deepslate_iron_ore"]))
+            else:
+                query_types = list(target_blocks)
+        else:
+            query_types = list(TRACKED_ORES)
         # fishbone_scan: widen ore reach ONLY when standing in the target band (target layer),
         # keep the safe narrow corridor-adjacent behaviour on the transit layers.
         _scan_band = self.strategy == "fishbone_scan" and abs(anchor[1] - self.target_y) <= SCAN_BAND
@@ -3828,8 +3835,16 @@ class MiningDFSEngine:
                 continue
             if bname not in target_set:
                 if focus_target_only:
-                    continue
-                if bname not in {"coal_ore", "deepslate_coal_ore", "iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore"}:
+                    # BUG-092: zero-detour opportunistic iron grab (<=2.5m) when iron stock < 12
+                    if (
+                        bname in {"iron_ore", "deepslate_iron_ore"}
+                        and math.dist(anchor, pt) <= 2.5
+                        and (_inv_counts.get("iron_ingot", 0) + _inv_counts.get("raw_iron", 0)) < 12
+                    ):
+                        pass
+                    else:
+                        continue
+                elif bname not in {"coal_ore", "deepslate_coal_ore", "iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore"}:
                     continue
             prio = 0 if bname in target_set else 1
             dist = math.dist(anchor, pt)
@@ -3904,7 +3919,7 @@ class MiningDFSEngine:
             # so mined diamonds are never left behind on the tunnel floor.
             if target_set & {"diamond_ore", "deepslate_diamond_ore"}:
                 try:
-                    self.skills.collect_drops(radius=8, max_duration_s=6.0)
+                    self.skills.collect_drops(radius=8, max_pickups=6)
                 except Exception:
                     pass
             self._move_exact(anchor)
@@ -3970,10 +3985,10 @@ class MiningDFSEngine:
         chosen_rock: dict[str, Any] | None,
         total_rem: int,
     ) -> bool:
-        """Recraft a stone burner pickaxe when durability is low OR when no stone/wooden pick remains and we would burn iron/diamond on rock."""
+        """Recraft a stone burner pickaxe when durability is low, only wooden remains (BUG-091), or we would burn iron/diamond on rock."""
         if total_rem <= RECRAFT_PICK_DURABILITY:
             return True
-        if chosen_rock is not None and int(chosen_rock.get("tier", 1)) >= 3:
+        if chosen_rock is not None and int(chosen_rock.get("tier", 1)) != 2:
             return True
         return False
 

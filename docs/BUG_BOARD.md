@@ -1945,15 +1945,17 @@
 - **比赛实据**。`5Ease_Bot` EP09 对 `[-12268,31,-6065]` 请求熔炼 6 生铁，**50.017s** 后 `partial_smelt` 记录本次取出 **4 锭**。第 5 锭来自开局备料。模型再投 2 生铁报缺料，合铁镐耗 3 锭、背包剩 2，随即 `goal_satisfied`；EP10 转挖钻。本次投料对应的另外 2 份产出没有后续回收回执，炉内生铁、成品和燃料各余多少未取证。 [开局备料](../../../runs/20261121-235251-766106.json#L5245) · [本次部分出炉](../../../runs/20261121-235251-766106.events.jsonl#L382) · [再投失败](../../../runs/20261121-235251-766106.events.jsonl#L403) · [合铁镐及剩余](../../../runs/20261121-235251-766106.events.jsonl#L421) · [下集开挖](../../../runs/20261121-235709-070941.events.jsonl#L31)
 - **源码与最小修复**。同步技能在切片尾取一次可见成品，部分回执靠提示续取。复用已有 `WorldJobRegistry` 登记本次已投数量、炉坐标及待核验余量，目标提前结算时也续接炉务。在当前预算内可取则取，离区前或下集现场安全时优先收已完成品，再决定继续烧或取回残留原料、可退燃料。取货用窗口操作的实际转移回执或库存增量确认，避免重复投料或重复入账。 [同步取货](../src/mc_agent/skills/library.py#L5267) · [集间炉务](../src/mc_agent/harness/curriculum.py#L2140)
 - **验收**。以投 6、先确认取 4、立即切集为夹具，下集从同炉再取 2，新增投料为 0；重复回收不会重复入账。背包满、受袭抢占、尚在燃烧分别保留待办和可复查回执。沿用 BUG-067 的单次时限；炉务结清后交 BUG-093 回收临时炉。
+- **D1 复核 Slice C `53d15d6`**。定向夹具通过 2 例，覆盖投 6、窗口预览 6、实际取 5、下次 DFS 前取已就绪 1，以及燃料操作失败后仍登记已投原料。该版本只在 DFS 探索入口检查同维度 3 格内的炉，查看时仍没出炉就继续走。正式赛 EP10 第一次 DFS 结束距 EP09 炉约 8.25 格，第二次从同点起步。请 Integrator 对接集间炉务，并把 4+2 夹具延迟到首次查看无成品后再出炉，验证同一待办仍能续取。 [DFS 入口](../../s-skills/src/mc_agent/harness/mc_tools.py#L3000) · [近炉回收](../../s-skills/src/mc_agent/skills/library.py#L5104) · [EP10 前两片](../../../runs/20261121-235709-070941.events.jsonl#L33)
+- **`53d15d6` 的两个离线反例**。用比赛第二片的起点复现，首查出 0 或 1 锭，第二片距炉 8.25 格跳过窗口，账还欠 2 或 1 锭。另用模拟响应 `done:[]`、实际零转移，候选误按预览收 2 锭并清账。现有比赛轨迹只确认第二片站位。验收追加空回执通过背包增量或炉窗变化复核，无法核验则保留待办。提交版位置为 `skills/library.py:5001`（回执）和 `:5026`（近炉回收）。 [EP10 第二片起点](../../../runs/20261121-235709-070941.events.jsonl#L64)
 
-### BUG-091 | P1 | 挖矿引擎（`mc_skill_mine_dfs`）| 状态: OPEN（2026-11-22 正式赛现场发现）
+### BUG-091 | P1 | 挖矿引擎（`mc_skill_mine_dfs`）| 状态: FIXED（2026-11-22，木镐自动升级重铸石镐）
 - **影响**：`5Ease_Bot` 拿到 `iron_pickaxe` 切入 `shiny_gear`（`target='diamond', target_y=-54`）后，连续 3 个 60s 时间片（第 38~40 分钟）均返回 `collar_node_id=null, node_count=0`，在 `Y=20~24` 徘徊 3 分钟未能开井下潜，且石镐爆后切木镐慢挖。
 - **现象与根因**：新目标与上一阶段留下的 `exhausted_collars` 距离过近，引擎反复试图选新井口却未真正下切阶梯；同时 `mine_dfs` 内石镐耗尽后未优先就地重铸石镐。
 - **最小修复方向**：
   1. 切换 `target`（如 `iron -> diamond`）或 `abs(y - target_y) > 20` 时，若旧 `exhausted_collars` 在不同深度层，允许就地直接建新井口下潜（或自动水平偏移 12~16 格强制落井），避免连续多片 `collar_node_id=null`；
   2. 随身原木+圆石充足且 `pickaxe_tier < 2` 时，在 `mine_dfs` 下潜前自动重铸石镐再挖。
 
-### BUG-092 | P2 | 挖矿策略与收益权衡（`mine_dfs` / 课程策略）| 状态: OPEN（2026-11-22 正式赛现场发现）
+### BUG-092 | P2 | 挖矿策略与收益权衡（`mine_dfs` / 课程策略）| 状态: FIXED（2026-11-22，铁储<12时2.5m内暴露铁矿零成本顺采）
 - **影响**：正式赛实机观察到两极分化：一方面对 10m 外隔墙/带水的 `iron_ore` 容易反复拉扯耗掉十几分钟；另一方面在铁镐刚出、铁锭尚未凑齐盾牌/铁甲/铁桶时，下潜途经矿道壁上**贴脸暴露的 `iron_ore`/`deepslate_iron_ore`** 却直接路过未顺手采集。
 - **现象与根因**：缺少基于“边际时间成本 × 当前物资缺口”的顺采权衡规则——没有区分“贴脸零寻路成本（`dist <= 3m`、无相邻流体、1~2 秒可顺手敲掉）”与“需要绕路/穿岩/排水的远距矿”。
 - **最小修复方向**：
@@ -1965,37 +1967,39 @@
 - **比赛实据**。`5Ease_Bot` EP10 到 Y−54、`node_count=14`，随后因返回当前节点失败报 `needs_surface_climb`，**306.3s** 后爬到 Y−9。第三人称现场看到工作台挡住 1×2 矿道，JSONL 确认回撤失败与爬升，阻挡坐标待取证。熔炉有独立回执，官方 r77 GLM_1 EP16 在 `[6176,27,-110]` 烧铁，EP17 东向掘进在同一格返回 `blocker.block=furnace`，位移为 0。该炉归属及阻挡时各槽状态待核。 [正式赛回撤](../../../runs/20261121-235709-070941.events.jsonl#L589) · [爬到 Y−9](../../../runs/20261121-235709-070941.events.jsonl#L808) · [r77 同炉烧铁](../runs/official_r77_40m_glm1/GLM_1/20261121-203044-183312.events.jsonl#L16) · [r77 熔炉挡路](../runs/official_r77_40m_glm1/GLM_1/20261121-203159-666541.events.jsonl#L84)
 - **Slice C 最小修复**。工作台、熔炉优先放在可操作的侧格，预留通行空间；记录本次临时放置的坐标与维度。每次用完回收本次的工作台并确认入包。临时熔炉等 BUG-090 炉务结清、读回输入／输出／燃料槽为空且已熄火后再挖回；沿用或在用的站点留在原处。 [工作台摆放](../src/mc_agent/skills/library.py#L2939) · [熔炉摆放](../src/mc_agent/skills/library.py#L5093)
 - **Slice A 最小修复与验收**。在目标深度回撤失败时，先定位阻挡、尝试安全同层重连或就地重锚，再决定是否上爬。用 Y−54 的 1×2 矿道覆盖新放工作台、活跃炉、已空临时炉及沿用站点。合成后通道双向可走且工作台回包，已空临时炉回包，活跃炉材料与沿用站点完整，同层节点回返失败有具体原因和回退动作。 [同层重连](../src/mc_agent/skills/mining_dfs.py#L2242) · [回撤分支](../src/mc_agent/skills/mining_dfs.py#L5918)
+- **D1 复核 `258bdfe` 与 Slice C `5ccd3f4`**。集成版允许在目标层上下 12 格内就地重锚，成功合成后尝试挖回新放的地下非侧龛工作台，合成回执没有记录这次挖除和入包。Slice C 的独立版本有 6 个通过的定向离线用例，覆盖本次新放、沿用、合成拒绝、超时且释放、抢占未释放和地表工作台，并核对挖除与回包。请 Integrator 核对带回执版本，下一波仍须验同层通行及已熄火、各槽为空的自置炉回收。 [集成工作台处理](../src/mc_agent/skills/library.py#L3972) · [集成重锚](../src/mc_agent/skills/mining_dfs.py#L5938) · [Slice C 夹具](../../s-skills/tests/test_skills_and_providers.py#L4016)
 
 ### BUG-094 | P0 | 挖矿后未收尽可达目标掉落物 | Slice A（采矿确认）+ Slice C（共享拾取）| 状态: OPEN
 
 - **比赛实据**。`5Ease_Bot` EP11 第 61 分钟停在 `[-12202.5,-25,-6104.7]` 时确认入包 **3 钻石**、`goal_met=false`，随后继续下潜。现场观察提到两颗仍在脚边。JSONL 的 `dug_count=4` 含所有方块，下一片再次报告 3 钻石且累计确认次数没增长，掉落总数待实体回执核实。EP14 挖掉一格深层铁矿后目标增量为 0，附近扫描找到高约 **4.4 格**的 `raw_iron×1`，按建议向南爬时被相邻水格拦住。官方 r79 GLM_1 EP15 的同一堆粗铁 **3 块**在三次扫描间持续存在，五次靠近工具的位置回执无变化。水流带动掉落物的逐实体轨迹待验。 [EP11 三钻入包](../../../runs/20261122-001808-345130.events.jsonl#L91) · [EP14 高处掉落](../../../runs/20261122-002711-521374.events.jsonl#L514) · [EP14 水阻](../../../runs/20261122-002711-521374.events.jsonl#L536) · [r79 持续未取掉落](../runs/official_r79_35m_glm1/GLM_1/20261121-210952-579757.events.jsonl#L404)
 - **源码与最小修复**。现有 DFS 收到任意 1 件匹配物品就确认；补扫应按目标产物及实体当前位置核对余物。在预算内优先收当前任务需要、可安全到达的掉落，以实际库存变化或拾取回执确认。实体隔墙、从高处坠落、随水上浮时先刷新实体坐标并查落脚与短程路线，路径不通或收益不足就记原因并继续任务。对暂未拾取的可疑目标留短期记录，避免重复绕路。矿格数只用于定位，掉落数量以实体或实际包增量为准。 [DFS 确认](../src/mc_agent/skills/mining_dfs.py#L3044) · [附近拾取](../src/mc_agent/skills/library.py#L2958)
 - **验收**。同层近距掉两堆钻石，先入一堆后仍追踪另一堆；墙后无通路、高处落下、水流改变高度各有离线夹具。每次给出目标实体、最后坐标及已拾／不可达／跳过原因。限时内验证可安全捡到的高价值目标，低价值杂物不会引发绕路。正式赛同类深挖核对目标矿入包与课程验证回执。
+- **D1 离线复核 `258bdfe`，补捡未执行**。DFS 传入 `max_duration_s=6.0`，但 `MacroSkills.collect_drops` 只接收 `radius`、`max_pickups`，已在项目虚拟环境复现 `TypeError`。调用方捕获后直接返锚。单改参数也会漏掉整条矿脉零入包的情况，因为补捡以已有入包的 `mined_coords` 为入口。请 Slice A 与 Slice C 用本次已破坏的目标矿及预期产物触发补扫，沿用剩余预算和目标过滤，夹具同时覆盖零入包及已入一堆的起点。 [补捡调用](../src/mc_agent/skills/mining_dfs.py#L3902) · [矿格与掉落分别记账](../src/mc_agent/skills/mining_dfs.py#L3547) · [拾取接口](../src/mc_agent/skills/library.py#L3092) · [目标过滤](../src/mc_agent/skills/library.py#L2958)
 
-### BUG-095 | P1 | 小脑遇袭 `ReadTimeout` 后模型未优先补逃跑（`guardian.py` / `agent.py`）| 状态: OPEN（2026-11-22 正式赛现场发现）
+### BUG-095 | P1 | 小脑遇袭 `ReadTimeout` 后模型未优先补逃跑（`guardian.py` / `agent.py`）| 状态: FIXED（2026-11-22，贴脸<=4.5m超时注入紧急保命逃跑指令）
 - **影响**：第 64 分钟在 `[-12208.4, -53.4, -6133.5]` 遭遇贴脸僵尸（`dist=1.6m`），小脑抢占接管因后端 `ReadTimeout` 中止（`reflex_mode=network_timeout`, `HP=11`），模型随后未补调 `mc_skill_flee` 反而调 `mine_dfs(reset)` 导致阵亡爆装。
 - **最小修复方向**：当小脑因 `network_timeout` 中止且 `nearest_hostile.dist <= 4m` 时，向模型返回强指令要求立即优先 `mc_skill_flee` / 封堵退路，严禁继续执行 `mine_dfs` 或原地 `reset`。
 
-### BUG-096 | P2 | `--curriculum --interactive` 未将 stdin `/now` 注入单集上下文（`curriculum.py` / `agent.py`）| 状态: OPEN（2026-11-22 正式赛现场发现）
+### BUG-096 | P2 | `--curriculum --interactive` 未将 stdin `/now` 注入单集上下文（`curriculum.py` / `agent.py`）| 状态: FIXED（2026-11-22，`CurriculumSupervisor.run(inbox=...)` 透传 `StdinInput`）
 - **影响**：正式赛开启 `--curriculum --interactive` 后，向 stdin 发送的 `/now ...` 仅回显在终端日志，未真正进入当前集模型上下文，导致人工轻介入无法即时纠偏。
 - **最小修复方向**：在 `run_curriculum` 中透传交互式队列 / stdin 监听线程给每集 `run_agent`，使 `/now` 可在课程模式下实时生效。
 
-### BUG-097 | P1 | `mc_skill_container` 7/7 全部 `bad_args`（盲目查箱 + 动词别名拒绝）| 状态: OPEN（2026-11-22 正式赛 15 集全量审计）
+### BUG-097 | P1 | `mc_skill_container` 7/7 全部 `bad_args`（盲目查箱 + 动词别名拒绝）| 状态: FIXED（`258bdfe`，别名归一 + 无记忆箱禁盲调）
 - **影响**：EP05（3 次）、EP08（2 次）、EP15（2 次）累计调用 `mc_skill_container` **7 次，7/7 全部 `bad_args` 失败**，白白浪费开集轮次。
 - **日志证据**：`runs/curriculum-20261121-231923-527585.json`（EP05 L32/L63/L101、EP08 L60/L119、EP15 L33/L53）——反复传 `action="get"`、`items=[]` 或漏传坐标。
 - **根因**：① `bootstrap_iron_age` 剧本无条件写“若记忆箱已有备用铁镐/铁锭优先调 `mc_skill_container`”，即便 `WorldMemory.containers` 为空也诱导模型盲调；② `mc_skill_container` 严苛要求 `action in ("put", "take")`，拒绝常见同义词 `get`/`withdraw`/`store`/`deposit`。
 - **最小修复方向**：① 仅在 `WorldMemory.containers` 存在含对应物资的箱子时才注入取箱提示（并直接附带箱子坐标）；② 在 `mc_skill_container` 中做别名归一（`get`/`withdraw`→`take`，`store`/`deposit`→`put`）。
 
-### BUG-098 | P1 | 地下矿道遇水引发 `water_surface` 小脑连环抢占（11 次）| 状态: OPEN（2026-11-22 正式赛 15 集全量审计）
+### BUG-098 | P1 | 地下矿道遇水引发 `water_surface` 小脑连环抢占（11 次）| 状态: FIXED（2026-11-22，60s内连续>=2次地下遇水强撤离指令 + `mine_blocks` 隔墙封水）
 - **影响**：EP08（5 次）、EP09（5 次）、EP10（1 次）累计触发 **11 次 `water_surface` 抢占**，导致 `mine_dfs` / `unstick` / `mine_blocks` 连续被打断，耗掉数分钟。
 - **根因**：`water_surface` 仅在原地执行上浮，未把 Bot 带回干燥巷道或封堵水格；下一轮工具调用立刻重新踏入水流再次触发抢占。
 - **最小修复方向**：地下（`y < 55`）60s 内连续触发 `>= 2` 次 `water_surface` 时，小脑自动尝试向相邻干格后撤或用圆石封堵水格，并在抢占返回中明确给出“避开当前水格坐标，向干燥方向平推 8+ 格”的提示。
 
-### BUG-099 | P2 | 采铁阶段 `staircase(down)` 滑穿 `Y=16` 进入深板岩 | 状态: OPEN（2026-11-22 正式赛 15 集全量审计）
+### BUG-099 | P2 | 采铁阶段 `staircase(down)` 滑穿 `Y=16` 进入深板岩 | 状态: FIXED（2026-11-22，无铁镐降至 `Y<=16` 强提示切 `mine_dfs(iron, 16)`）
 - **影响**：EP14（`bootstrap_iron_age`）无铁镐状态下连续调 `mc_skill_staircase(vertical='down')` 一路滑到 `Y=-2` 深板岩层，整集 600s 超时 0 收获。
 - **最小修复方向**：在 `bootstrap_iron_age` 或无铁镐下潜到 `y <= 16` 时，返回提示改用水平 `mc_skill_mine_dfs(target='iron', target_y=16)`，禁止继续 `staircase(down)` 滑入深板岩。
 
-### BUG-100 | P0 | `mc_skill_mine_blocks` 88% 失败率（2/17）与 `bootstrap_iron_age` 耗时 33 分钟 | 状态: OPEN（2026-11-22 正式赛全量时间账审计）
+### BUG-100 | P0 | `mc_skill_mine_blocks` 88% 失败率（2/17）与 `bootstrap_iron_age` 耗时 33 分钟 | 状态: FIXED（`258bdfe` + 隔墙封流体/垫托盘，`staircase` `ore_detected` 半径收紧至 5 格）
 - **影响**：EP04~EP09 仅仅为了凑齐 6 块铁，累计消耗了 **33 分钟**（占 80 分钟赛程的 41%！），直接挤没了中后期村庄/下界/附魔的拿分窗口。
 - **数据证据**：`mc_skill_mine_blocks` 全场调用 17 次仅成功 **2 次**（失败 15 次，失败率 88%）；`mc_skill_staircase` 6 次触发 `ore_detected`，但探测到的矿大多隔着 8~12m 实心岩壁，导致模型紧接着调 `mine_blocks` 必报 `out_of_reach / no_targets_available`；同时 EP05 跑了整整 10 分钟 `mine_dfs(iron, Y=16)` 却在 `(-12261, 13, -6065)` 小范围反复回撤（`dry_calls=4`）0 块铁入包。
 - **最小修复方向**：① `staircase` 的 `ore_detected` 仅在矿石**紧贴通道 3~4 格内且无隔墙/流体**时才触发中断，隔墙远矿不打断下潜也不诱导 `mine_blocks`；② `mine_dfs` 采铁在 `Y=16` 改为长直巷道快速平推（减少短支道高频折返与 `movement_not_confirmed`）。

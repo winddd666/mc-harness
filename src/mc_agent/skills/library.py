@@ -3334,6 +3334,42 @@ class MacroSkills:
             # normal stone/log digs need >8s under fleet load). The 15s floor
             # still leaves the total bounded by mine_deadline.
             per_dig = max(15.0, min(30.0, remaining / max(1, count - dug_count)))
+            # Through-wall pre-seal & catch-pad for cave-side / pool-side ores:
+            # 1) plug adjacent water/lava cells with filler blocks before digging the ore;
+            # 2) place a catch block directly beneath suspended ores so drops never fall into ravines/lava.
+            t_name = str(target.get("name") or "").removeprefix("minecraft:")
+            if not harvesting_logs and t_name.endswith("_ore") and remaining > 4.0:
+                try:
+                    inv_seal = _inventory_counts(self.bot)
+                    filler = next(
+                        (
+                            b
+                            for b in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "granite", "diorite", "tuff", "netherrack")
+                            if inv_seal.get(b, 0) > 0
+                        ),
+                        None,
+                    )
+                    if filler is not None:
+                        bpos_now = self.bot.status().get("pos") or [pos[0], pos[1], pos[2]]
+                        bx_now, by_now, bz_now = math.floor(float(bpos_now[0])), math.floor(float(bpos_now[1])), math.floor(float(bpos_now[2]))
+                        bot_cells = {(bx_now, by_now, bz_now), (bx_now, by_now + 1, bz_now)}
+                        for dx, dy, dz in ((0, -1, 0), (0, 1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)):
+                            nb = (pos[0] + dx, pos[1] + dy, pos[2] + dz)
+                            if nb in bot_cells:
+                                continue
+                            if math.dist(bpos_now, [nb[0] + 0.5, nb[1] + 0.5, nb[2] + 0.5]) > 4.5:
+                                continue
+                            blk_r = self.bot.call("get_block", {"x": nb[0], "y": nb[1], "z": nb[2]})
+                            nb_name = str(blk_r.get("name") or blk_r.get("block") or "").removeprefix("minecraft:")
+                            is_fluid = nb_name in {"water", "lava", "flowing_water", "flowing_lava"}
+                            is_catch_air = (dx, dy, dz) == (0, -1, 0) and nb_name in {"air", "cave_air", "void_air"}
+                            if is_fluid or is_catch_air:
+                                try:
+                                    self.bot.call("place", {"item": filler, "pos": [nb[0], nb[1], nb[2]]})
+                                except ApiError:
+                                    pass
+                except (ApiError, _SkillDeadline, Exception):
+                    pass
             try:
                 dig_body = {"pos": list(pos), "collect": not trunk_queue}
                 res = (
@@ -5296,6 +5332,49 @@ class MacroSkills:
                 {"target": target, "ops": [{"op": "take", "from": "output", "count": cnt}]},
             )
             collected.append({"name": out_item.get("name"), "count": cnt})
+
+        # BUG-090: never abandon almost-finished ingots or unsmelted raw ore inside a furnace.
+        got_total = sum(item["count"] for item in collected)
+        if got_total < smelt_n:
+            rem_needed = smelt_n - got_total
+            # Grace wait up to 11.5s if only 1~2 items remain in furnace input
+            if rem_needed <= 2:
+                try:
+                    view_rem = self.bot.call("window/view", {"target": target})
+                    in_rem = [
+                        i for i in ((view_rem.get("sections") or {}).get("input") or [])
+                        if int(i.get("count") or 0) > 0
+                    ]
+                    if in_rem:
+                        time.sleep(min(11.5, 10.5 * rem_needed))
+                        view_final = self.bot.call("window/view", {"target": target})
+                        final_outs = [
+                            o for o in ((view_final.get("sections") or {}).get("output") or [])
+                            if int(o.get("count") or 0) > 0
+                        ]
+                        for out_item in final_outs:
+                            cnt = int(out_item.get("count") or 0)
+                            self.bot.call(
+                                "window/act",
+                                {"target": target, "ops": [{"op": "take", "from": "output", "count": cnt}]},
+                            )
+                            collected.append({"name": out_item.get("name"), "count": cnt})
+                except (ApiError, _SkillDeadline):
+                    pass
+            # Reclaim any still-unsmelted input ore so nothing mined is left behind
+            if sum(item["count"] for item in collected) < smelt_n:
+                try:
+                    view_left = self.bot.call("window/view", {"target": target})
+                    for in_item in ((view_left.get("sections") or {}).get("input") or []):
+                        icnt = int(in_item.get("count") or 0)
+                        if icnt > 0:
+                            self.bot.call(
+                                "window/act",
+                                {"target": target, "ops": [{"op": "take", "from": "input", "count": icnt}]},
+                            )
+                            session.progress["reclaimed_input"] = session.progress.get("reclaimed_input", 0) + icnt
+                except (ApiError, _SkillDeadline):
+                    pass
 
         if pre_dropped:
             session.progress["auto_dropped"] = pre_dropped
@@ -7758,6 +7837,20 @@ class MacroSkills:
             out_stair["last_error"] = last_error
         if stop_reason == "pillar_fallback":
             out_stair["fallback"] = "pillar"
+        # BUG-099: prevent stone-pickaxe iron runs from sliding past Y=16 into deepslate.
+        end_pos = st_end.get("pos") or pos_before
+        if (
+            v_key == "down"
+            and isinstance(end_pos, (list, tuple))
+            and len(end_pos) >= 2
+            and float(end_pos[1]) <= 16.0
+            and int(pickaxe_tier) < 3
+            and "hint" not in out_stair
+        ):
+            out_stair["hint"] = (
+                f"当前已达 Y={int(math.floor(float(end_pos[1])))}（铁层深度）且尚无铁镐；"
+                "严禁继续 staircase(down) 滑入深板岩，请立即改调 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=8) 水平鱼骨采铁。"
+            )
             if fallback_count >= 2:
                 out_stair["requires_replan"] = True
                 out_stair["hint"] = "同一站位已两次自动垫高。请用 mc_move_to 或 mc_skill_unstick 换到有支撑的站位，再规划阶梯。"

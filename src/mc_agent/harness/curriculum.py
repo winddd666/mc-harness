@@ -2046,6 +2046,7 @@ class CurriculumSupervisor:
         *,
         max_episodes: int | None = None,
         stop_check: Callable[[], bool] | None = None,
+        inbox: Any = None,
     ) -> dict[str, Any]:
         from .agent import run_mc_agent
 
@@ -2651,6 +2652,7 @@ class CurriculumSupervisor:
                         tool_output_chars=self.tool_output_chars,
                         stream=True,
                         on_event=_sink,
+                        inbox=inbox,
                         include_initial_snapshot=False,
                         stop_check=stop_check,
                         survival_guard=True,
