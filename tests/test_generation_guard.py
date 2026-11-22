@@ -2063,7 +2063,8 @@ def test_bug077_prime_ages_deaths_and_retains_recent_live_deaths(monkeypatch):
 
 
 @pytest.mark.parametrize("new_risk", ["closer", "different_target", "new_hurt"])
-def test_bug_009_stationary_failed_creeper_retreat_only_cancels_again_on_change(monkeypatch, new_risk):
+@pytest.mark.parametrize("first_warning", ["poll", "tool"])
+def test_bug_009_stationary_failed_creeper_retreat_only_cancels_again_on_change(monkeypatch, new_risk, first_warning):
     clock = [1000.0]
     monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
     creeper = {"id": 4547388, "name": "creeper", "dist": 2.9, "pos": [2975.5, 53, -10040.3]}
@@ -2090,14 +2091,24 @@ def test_bug_009_stationary_failed_creeper_retreat_only_cancels_again_on_change(
         attempts.append(trigger["primary_entity_id"])
         if len(attempts) == 3 and new_risk == "new_hurt":
             hits.append({"type": "hurt", "seq": 1, "source": "arrow"})
-        return {"handled": True, "mode": "creeper_evade", "actions": [
-            {"action": "retreat_from_creeper", "ok": False, "moved": 0.0, "reason": "no_safe_retreat"},
-        ]}
+        retreat = {"action": "retreat_from_creeper", "ok": False, "moved": 0.0, "reason": "no_safe_retreat"}
+        if first_warning == "tool" and len(attempts) == 2:
+            creeper["dist"] = 4.0
+        return {"handled": True, "mode": "creeper_evade", "actions": [retreat]}
 
     monkeypatch.setattr(guard.combat_slot, "handle", cornered)
-    assert guard.poll()["requires_replan"] is True
+    if first_warning == "tool":
+        creeper.update(dist=4.2, pos=[2975.5, 53, -10041.6])
+        receipt = guard.handle_preemption({
+            "source": "pre_hurt_creeper", "primary_entity_id": creeper["id"], "primary_type": "creeper", "distance": 4.4,
+        }, interrupted_name="mc_skill_staircase")
+        assert receipt["preempted_by_reflex"] and receipt["requires_replan"]
+        clock[0] += 3.42
+        creeper.update(dist=3.9, pos=[2975.5, 53, -10041.3])
+    else:
+        assert guard.poll()["requires_replan"] is True
+        clock[0] += 15.0
 
-    clock[0] += 15.0
     second = guard.poll()
     assert second["reasons"] == ["pre_hurt_creeper"] and second["requires_replan"] is False
 

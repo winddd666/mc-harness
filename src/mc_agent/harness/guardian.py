@@ -3015,14 +3015,19 @@ class GenerationGuard:
         ):
             return False
 
-        distance = min(distance, float(trigger.get("distance", distance)))
+        warning_distance = trigger.get("distance")
+        closest = min(distance, warning_distance) if isinstance(warning_distance, (int, float)) else distance
+        # Compare creeper readings taken after each failed retreat. An earlier reading can
+        # still flag immediate danger, but is taken before the bot and target have settled.
+        if melee_warning:
+            distance = closest
         previous = self._stationary_warnings.get(source)
         now = time.monotonic()
         life = (after.get("dimension"), after.get("last_death"))
         if (
             previous is not None and previous[0] == entity_id and now - previous[3] < 45.0
             and previous[4] == life and math.dist(pos_after[:3], previous[1]) <= 0.25
-            and distance > 2.3 and distance >= previous[2] - 0.25
+            and closest > 2.3 and distance >= previous[2] - 0.25
         ):
             if melee_warning:
                 # Refresh the observation while comparing position and distance to the initial warning.
@@ -4317,6 +4322,8 @@ class GenerationGuard:
                             summary = f"执行 {interrupted_name} 途中遇袭，战斗反射期间角色状态已变化，请按最新状态重新规划"
                         else:
                             summary = str(outcome.get("summary") or f"执行 {interrupted_name} 途中遇袭，已完成 0-LLM 本能处置")
+                            if trigger.get("source") == "pre_hurt_creeper":
+                                self._repeat_stationary_retreat_warning(trigger, st_pre, st_after, [act])
             self.last_reaction = time.monotonic()
             if not life_unavailable:
                 self._mark_pre_hurt_cooldown(trigger, self.last_reaction)
