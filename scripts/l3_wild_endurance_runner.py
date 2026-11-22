@@ -1465,6 +1465,7 @@ class SceneWatchdog(threading.Thread):
         self._stop = threading.Event()
         self._last_return = 0.0
         self._death_handled_at = time.monotonic()
+        self._death_handled_wall_ms = time.time() * 1000
         self._returned_while_dead = False
         self._last_total = -1
         self._inv_tick = 0
@@ -1540,6 +1541,11 @@ class SceneWatchdog(threading.Thread):
         # The API reports ready=false for the whole death/respawn window; do not skip it, otherwise
         # the death itself is never observed and the bot comes back with an empty inventory.
         dead_signal = health <= 0.0 or alive is False
+        wall_ms = time.time() * 1000
+        last_death = st.get("last_death")
+        death_ms = last_death.get("t") if isinstance(last_death, dict) else None
+        has_death_stamp = isinstance(death_ms, (int, float)) and 0 < death_ms <= wall_ms + 5000
+        new_status_death = has_death_stamp and death_ms > max(self._death_handled_wall_ms, wall_ms - 60000)
         if self.fence_repair is not None and ready and not dead_signal:
             try:
                 self.fence_repair(st.get("dimension"), st.get("pos"))
@@ -1563,7 +1569,7 @@ class SceneWatchdog(threading.Thread):
             else float("inf")
         )
         drifted = dim_matches and dist > self.scene.drift_limit and ready
-        suspected_death = dead_signal and not self._returned_while_dead
+        suspected_death = dead_signal and (new_status_death if has_death_stamp else not self._returned_while_dead)
         self._ticks += 1
         if self._ticks % 15 == 0:  # ~2 min at the default 8s interval
             print(
@@ -1574,10 +1580,14 @@ class SceneWatchdog(threading.Thread):
             )
         if not dead_signal:
             self._returned_while_dead = False
-            recent_deaths = getattr(self.bot, "recent_deaths_in_window", None)
-            unhandled_death = callable(recent_deaths) and any(
-                observed_at > self._death_handled_at for observed_at in recent_deaths()
-            )
+            unhandled_death = new_status_death
+            # The same event may reach the local ledger after a status-based restock.
+            # Use the server's stable timestamp when it is available.
+            if not has_death_stamp:
+                recent_deaths = getattr(self.bot, "recent_deaths_in_window", None)
+                unhandled_death = callable(recent_deaths) and any(
+                    observed_at > self._death_handled_at for observed_at in recent_deaths()
+                )
             self._inv_tick += 1
             if unhandled_death or self._inv_tick % 3 == 1:
                 total = self._owned_total()
@@ -1624,6 +1634,9 @@ class SceneWatchdog(threading.Thread):
         else:
             if suspected_death:
                 self._death_handled_at = now
+                self._death_handled_wall_ms = max(
+                    self._death_handled_wall_ms, wall_ms, death_ms if has_death_stamp else 0,
+                )
                 self._returned_while_dead = dead_signal
         finally:
             self._last_return = time.monotonic()
