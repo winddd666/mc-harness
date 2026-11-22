@@ -462,14 +462,14 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("stone_pickaxe", 2),),
         task=(
             "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
-            "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 4 根原木，先顺手砍 4~6 根原木（或备好 2 把 stone_pickaxe）再下井，严防地下断镐无木软锁；"
+            "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 8 根原木，先顺手砍足 8~10 根原木（并备好 2 把 stone_pickaxe）再下井，确保从 Y=16 一气下探 Y=-54 穿钻石靴不断木不断镐；"
             "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
             "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
             "4) 优先调 mc_skill_craft_gear('iron_pickaxe')，铁锭充裕时顺手合出 shield（副手盾）与 1 件铁甲（如 iron_boots/iron_chestplate）完成安全成型即收工。"
         ),
         post_ensure_task=(
             "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=6) 采入；"
-            "若地表无暴露铁矿且包内备用原木/木板不足 4 根原木，先顺手补 4~6 根原木（防地下断镐无木被困），再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
+            "若地表无暴露铁矿且包内备用原木/木板不足 8 根原木，先顺手补足 8~10 根原木（保证一气下探铁层+深层钻石不断木不断镐），再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
         ),
         extra_tools=("mc_skill_container",),
         advancement_id="minecraft:story/iron_tools",
@@ -1406,7 +1406,7 @@ def _build_day2_village_search_target(
             brief_prefix
             + "执行 Day 2 白天食物补给与高速系统寻村（入夜或本集结束自动止损，绝不死磕）："
             f"{biome_note}MC 村庄仅生成在 plains/savanna/desert/taiga/snowy_plains，若进入海洋/深森林/丛林/沼泽立刻换方向。"
-            "0) 出发留底（仅当 16m 内已有据点箱且包内有富余备用物资时）：随身务必保留主力装备（1 把铁镐+盾牌+铁甲+斧+食物+8 原木+圆石），仅顺手用 mc_skill_container 把多余的备用铁镐/多余铁锭(>3)/多余原木(>8)/穿完钻石靴后多余钻石存箱留底（防路上阵亡返贫）；无近箱则直接出发，找到村庄后就地扎根，绝不跑回旧箱搬家；"
+            "0) 轻装出发（防探村阵亡爆装返贫）：若 16m 内已有据点箱（或包内木板充足可顺手合放 1 个箱），出发前务必用 mc_skill_container 把高价值物品（铁镐、钻镐、多余钻石、铁锭、多余原木）全部存箱留底，仅随身带低价值物资（石镐+盾牌+食物+少许圆石）轻装探村！找到村庄后直接绑床、收干草块、开箱、交易拿分，绝不跑回旧箱搬家；"
             + hop_clause
             + "1) 若包内食物不足 6 块且途中 24m 内有猪/牛/羊，顺手用斧收 2~3 只；"
             "2) 一旦 mc_skill_scout_surface 返回命中村庄方块(bell/dirt_path/hay_block/composter/lectern)或 villager/iron_golem，立即停止继续 scout，直接进村收割：①调 mc_find_blocks(radius=48, types=['bed','chest','hay_block','bell'])（严禁混入 dirt_path 以免挤爆 limit，且必须用通用别名 'bed' 覆盖全部 16 色村民床）；②优先找带床/箱子的村民屋调 mc_skill_bind_bed 绑重生点占为据点；③顺手采 4~8 块 hay_block 合面包、开屋里箱子拿贵重战利品；④完成后立即收工（多人服不指望睡觉跳夜，下集直接交易或转地下挖钻）。"
@@ -1649,6 +1649,7 @@ def select_next_target(
         not leash_active
         and enable_island_recon
         and has_iron_or_better
+        and ("minecraft:story/shiny_gear" in completed or _is_cooled("minecraft:story/shiny_gear"))
         and not is_dusk_or_night
         and world_memory is not None
         and cur_dim == "overworld"
@@ -1774,10 +1775,10 @@ def select_next_target(
             elif counts.get("diamond_pickaxe", 0) >= 1 or counts.get("netherite_pickaxe", 0) >= 1:
                 enriched_pb = dataclasses.replace(enriched_pb, tier=1)
                 mem_boosted = True
-        if key in {"minecraft:story/shiny_gear", "minecraft:story/mine_diamond"} and day2_village_pending and is_dusk_or_night:
-            # Defer deep Y=-54 diamond diving until after Day 2 daytime village search (stay safe in Y=16 iron layer on Night 1)
-            enriched_pb = dataclasses.replace(enriched_pb, tier=3)
-            mem_boosted = False
+        if key == "minecraft:story/shiny_gear" and cur_dim == "overworld" and has_iron_or_better and is_deep_underground:
+            # 人已在地下矿井且手握铁镐：直接顺势下探 Y=-54 凑 4 钻穿钻石靴，先把 75 分永久锁死，避免半途回地表送命爆装
+            enriched_pb = dataclasses.replace(enriched_pb, tier=0)
+            mem_boosted = True
         if cur_dim == "the_nether":
             if key in {"minecraft:nether/find_fortress", "minecraft:nether/obtain_blaze_rod"}:
                 enriched_pb = dataclasses.replace(enriched_pb, tier=0)
@@ -2741,7 +2742,14 @@ class CurriculumSupervisor:
                 or (bool(gained_advs) and not target.advancement_id)
             )
             is_pause_yield = report.get("status") in {"paused", "paused_for_world_job"}
-            transient_api_err = (not progress_made) and _is_transient_llm_error(report)
+            err_lower = str(report.get("error") or "").lower()
+            is_world_loading_err = (
+                report.get("status") == "runtime_error"
+                and ("not_ready" in err_lower or "world is still loading" in err_lower)
+            )
+            transient_api_err = (not progress_made) and (_is_transient_llm_error(report) or is_world_loading_err)
+            if is_world_loading_err:
+                time.sleep(min(2.5, max(0.0, deadline_mono - time.monotonic())))
 
             if progress_made:
                 self.strikes.pop(target.key, None)
