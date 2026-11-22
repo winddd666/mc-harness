@@ -2084,6 +2084,29 @@ STRONGHOLD_FOCUS = (
 )
 
 
+def _install_bare_stone_guidance() -> None:
+    """Give a bare scene a local quarry when the surface has no exposed stone."""
+    from mc_agent.harness import curriculum as cur
+
+    key = "bootstrap_stone_age"
+    playbook = cur.CURRICULUM_PLAYBOOKS[key]
+    task = (
+        "先核对实包与当前站位。水中先找干地上岸；人在地下、缺镐又缺木时走已有安全通道返回可取木料的位置。"
+        "地表缺开局木料时用 mc_skill_harvest_logs 按缺口取 4~6 根原木，先合工作台、木棍和 wooden_pickaxe。"
+        "木镐已可用时开始找石，木料储备等有石斧再补。扫描 16 格内可达的露出 stone、cobblestone。"
+        "有可采露石时用 mc_skill_mine_blocks(block_types=['stone','cobblestone'], radius=16) 采实际入包的圆石。"
+        "16 格内无可达露石时，在当前干燥且有支撑的落脚点运行 mc_skill_staircase(vertical='down', steps=6, stop_on_ore=False)，"
+        "穿过表土后停在露石处采圆石。先核对阶梯回执；缺支撑时用有支撑面的垫块或换一个安全方向，"
+        "见水、岩浆或落差时换方向。保留可回走的阶梯。"
+        "从零备齐两把石镐和一座炉需要 14 圆石，已有的装备及圆石按实包扣除。"
+        "材料齐时先造炉，再用 mc_skill_craft_gear(item='stone_pickaxe', count=2) 合两把石镐。"
+        "多余圆石才用来合石斧。安全地表有多余木板时可留据点箱，铁器课用 mc_skill_mine_dfs 下到 Y=16。"
+    )
+    cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
+        playbook, title="Day 1 石器与石料准备", task=task,
+    )
+
+
 def _install_bare_iron_guidance() -> None:
     """Keep the bare scene's first iron pickaxe ahead of stockpiling."""
     from mc_agent.harness import curriculum as cur
@@ -2093,6 +2116,7 @@ def _install_bare_iron_guidance() -> None:
     task = (
         "第 1 晚留在 Y=16 铁层安全发育，夜里无甲时先留在井下。"
         "仍在地表（Y>=55）时，下井前备足 12 根原木等量木材与 2 把石镐。"
+        "石器课若只做了第一把石镐，先在已露出的石层补第二把，需要炉子时留 8 圆石。"
         "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
         "已有安全可用的熔炉时，先查看炉内产物和进度，取出已炼铁锭，等同批铁料烧完再算缺口。"
@@ -2647,6 +2671,7 @@ def main() -> int:
             return True
 
         if args.stage == "bare":
+            _install_bare_stone_guidance()
             _install_bare_iron_guidance()
         install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         if portal_guard is not None:
