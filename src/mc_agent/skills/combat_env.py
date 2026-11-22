@@ -285,19 +285,22 @@ def retreat_made_progress(ok: bool, moved: Any, reason: Any) -> bool:
 
 def ranged_retreat_positions(
     origin: Sequence[float], entities: Sequence[dict[str, Any]], *, max_distance: float,
+    trident_attacker_id: int | None = None,
 ) -> list[tuple[int | None, Sequence[float]]]:
     positions = []
     for entity in entities:
         if not isinstance(entity, dict):
             continue
         pos = entity.get("pos")
+        name = _clean_block_name(entity.get("name"))
+        entity_id = entity.get("id")
         if (
-            _clean_block_name(entity.get("name")) in RANGED_MOBS
+            (name in RANGED_MOBS or (name == "drowned" and trident_attacker_id is not None and entity_id == trident_attacker_id))
             and isinstance(pos, (list, tuple)) and len(pos) >= 3
             and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
             and math.dist(origin[:3], pos[:3]) <= max_distance
         ):
-            positions.append((entity.get("id"), pos))
+            positions.append((entity_id, pos))
     return positions
 
 
@@ -3506,7 +3509,7 @@ class SubcorticalInstinctController:
                                 break
                 except ApiError as err:
                     actions.append({"action": "shield_rush_attack", "ok": False, "code": err.code})
-                    if err.code not in {"entity_not_found", "invalid_entity", "target_dead"}:
+                    if err.code not in {"no_such_entity", "entity_not_found", "invalid_entity", "target_dead"}:
                         fl = env.flee(mob_pos, distance=12.0, urgent=True)
                         actions.append({"action": "fallback_flee", "ok": bool(fl.get("ok"))})
             else:
