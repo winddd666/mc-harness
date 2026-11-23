@@ -15165,7 +15165,7 @@ def test_dfs_reuses_an_unsafe_landing_only_for_the_observed_support_blocks(monke
                 pos = body["pos"]
                 probes.append(pos)
                 if retry == "wet" and pos == [431712, 44, 384306]:
-                    return {"name": "water"}
+                    return {"name": "water" if clock[0] > 100.0 else "air"}
                 return {"name": "air" if pos == missing and not repaired else "stone"}
             if action == "place":
                 assert body["pos"] == missing
@@ -15215,7 +15215,10 @@ def test_dfs_reuses_an_unsafe_landing_only_for_the_observed_support_blocks(monke
         assert probes == [missing]
     elif retry == "wet":
         assert result["error"]["code"] == "mining_water_reentry" and not moves
-        assert probes == [missing, [431712, 44, 384306]]
+        wet = [431712, 44, 384306]
+        assert probes == [missing, wet, missing, wet]
+        assert [event["reason"] for event in blocked] == ["unsafe_landing", "mining_water_reentry"]
+        assert not any(event.get("probe_reused") for event in blocked)
     else:
         assert result["ok"] and len(moves) == 1 and len(probes) > 1
 
@@ -17148,13 +17151,14 @@ def test_mine_blocks_rechecks_active_melee_at_a_recently_interrupted_dig(monkeyp
 
 @pytest.mark.parametrize("site", [
     "water_at_feet", "water_at_head", "drained", "another_floor", "first_life",
-    "new_life", "new_dimension", "missing_death_marker", "probe_timeout",
+    "new_life", "new_dimension", "missing_death_marker", "probe_timeout", "adjacent_water", "adjacent_dry",
 ])
 def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypatch, tmp_path, site):
     from mc_agent.skills.mining_dfs import MiningDFSEngine
 
     wet = (352084, -55, 357038)
     head = (wet[0], wet[1] + 1, wet[2])
+    adjacent = (wet[0], wet[1] - 1, wet[2] - 1)
     wet_pos = [352084.6, -55, 357038.5]
     bank = [352085.5, -53, 357037.5]
     status = {
@@ -17175,6 +17179,8 @@ def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypa
             if action == "get_block":
                 cell = tuple(body["pos"])
                 blocks_read.append(cell)
+                if cell == adjacent and site == "adjacent_water":
+                    return {"name": "flowing_water"}
                 if cell in {wet, head}:
                     if site == "probe_timeout":
                         raise httpx.ReadTimeout("water voxel probe timed out")
@@ -17215,6 +17221,8 @@ def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypa
     if site == "water_at_head":
         status["pos"] = [352093.4, -53, 357037.5]
     target = (wet[0], wet[1] + 4, wet[2]) if site == "another_floor" else wet
+    if site in {"adjacent_water", "adjacent_dry"}:
+        target = adjacent
     alternate = (352086, -53, 357037)
     dfs = MiningDFSEngine(MacroSkills(bot), ledger_path=tmp_path / "ledger.json")
 
@@ -17223,7 +17231,7 @@ def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypa
 
     result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", attempt))
     unconfirmed = site in {"probe_timeout", "missing_death_marker"}
-    blocked = unconfirmed or site in {"water_at_feet", "water_at_head", "first_life"}
+    blocked = unconfirmed or site in {"water_at_feet", "water_at_head", "first_life", "adjacent_water"}
     assert result == {"first": not blocked, "alternate": True}
     expected_targets = [alternate] if blocked else [target, alternate]
     assert [(action, body.get("x"), body.get("y"), body.get("z")) for action, body in dispatched] == [
@@ -17235,7 +17243,49 @@ def test_bug009_dfs_checks_a_confirmed_water_reentry_site_before_moving(monkeypa
         assert denials and all(event["reason"] == reason and event["water_reentry_site"] == list(wet) for event in denials)
     else:
         assert denials == []
-    assert (wet in blocks_read) is (site not in {"another_floor", "new_life", "new_dimension", "missing_death_marker"})
+    probe_target = adjacent if site in {"adjacent_water", "adjacent_dry"} else wet
+    assert (probe_target in blocks_read) is (site not in {"another_floor", "new_life", "new_dimension", "missing_death_marker"})
+
+
+@pytest.mark.parametrize("scene", ["flowing_water", "dry", "new_life", "remote"])
+def test_w19_dfs_preserves_a_verified_water_barrier_near_the_previous_pool(scene):
+    wet = (219030, 32, 172181)
+    target = [219030, 34, 172179] if scene != "remote" else [219030, 34, 172174]
+    adjacent_water = [target[0], target[1], target[2] + 1]
+    status = {
+        "pos": [219031.7, 35, 172181.7], "ready": True, "alive": True, "on_ground": True,
+        "dimension": "overworld", "last_death": {"t": 2 if scene == "new_life" else 1},
+    }
+    digs = []
+    reads = []
+    events = []
+
+    class MineBot:
+        def call(self, endpoint, body=None, **_kwargs):
+            if endpoint == "status":
+                return dict(status)
+            if endpoint == "get_block":
+                cell = body["pos"]
+                reads.append(cell)
+                return {"name": "stone" if scene == "dry" or cell != adjacent_water else "flowing_water"}
+            if endpoint == "dig":
+                digs.append(body["pos"])
+                return {"ok": True, "dug": "stone", "gained": {"cobblestone": 1}}
+            return {"ok": True}
+
+    bot = MineBot()
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None)
+    guard._mining_water_reentry_site = (wet, ("overworld", {"t": 1}))
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_mine_dfs", lambda: json.dumps(
+        bot.call("dig", {"pos": target, "collect": True}),
+    )))
+    if scene == "flowing_water":
+        assert digs == [] and result["error"]["code"] == "mining_water_reentry"
+        denial, = [event for event in events if event["type"] == "guardian.mining_water_dig_blocked"]
+        assert denial["target"] == target and denial["water_reentry_site"] == list(wet)
+    else:
+        assert digs == [target] and result["gained"] == {"cobblestone": 1}
+    assert (adjacent_water in reads) is (scene in {"flowing_water", "dry"})
 
 
 @pytest.mark.parametrize("oxygen, reason", [(20, None), (400, None), (20, "drowned"), (400, "hurt")])

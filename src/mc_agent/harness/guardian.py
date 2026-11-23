@@ -28,6 +28,7 @@ from ..bot import BotSession
 from ..errors import ApiError
 from .control import RequestCancelled, RunTimedOut
 from ..skills.combat_env import (
+    CARDINAL_VECTORS,
     CORNERED_PIGLIN_MAX_HEALTH,
     CORNERED_PIGLIN_REACH,
     LONE_COUNTERKILL_MOBS,
@@ -5050,13 +5051,12 @@ class GenerationGuard:
         def verify_mining_approach(target: list[float]) -> None:
             nonlocal mining_landing_error, mining_landing_retry_at, mining_support_changed
             xz = target[0], target[2]
-            wet_site = self._mining_water_reentry_site
             cached_denial = mining_landing_error
             if (
                 cached_denial is None or cached_denial.code != "unsafe_landing"
                 or cached_denial.context.get("collar_approach") or xz in blocked_collar_approaches
                 or mining_support_changed or time.monotonic() >= mining_landing_retry_at
-                or (wet_site is not None and tuple(map(math.floor, target)) == wet_site[0])
+                or self._near_mining_water_site(tuple(map(math.floor, target)))
                 or footing_blocks(cached_denial.context["target"]) != footing_blocks(target)
             ):
                 cached_denial = None
@@ -5225,7 +5225,16 @@ class GenerationGuard:
                 ):
                     raise _UnsafeFoodUse
             if (check_support_dig or check_unstick_exit) and clean_path == "dig" and isinstance(body, dict):
-                dig_hazard = self._dig_hazard(body.get("pos"), check_support=check_support_dig, check_roof=check_unstick_exit)
+                try:
+                    dig_hazard = self._dig_hazard(
+                        body.get("pos"), check_support=check_support_dig, check_roof=check_unstick_exit,
+                        check_mining_water=check_mining_landing,
+                    )
+                except _MiningLandingDenied as error:
+                    if pending_trigger:
+                        raise ReflexPreempted(pending_trigger[0]) from None
+                    self.events.emit("guardian.mining_water_dig_blocked", reason=error.code, **error.context)
+                    raise
                 if pending_trigger:
                     raise ReflexPreempted(pending_trigger[0])
                 if dig_hazard:
@@ -6100,14 +6109,24 @@ class GenerationGuard:
             return None
         return site.entity_id
 
-    def _verify_mining_water_reentry(self, bot: _GuardSession, target: list[float], deadline: float) -> None:
+    def _near_mining_water_site(self, cell: tuple[int, ...]) -> bool:
         record = self._mining_water_reentry_site
-        if record is None or tuple(math.floor(coord) for coord in target) != record[0]:
+        if record is None:
+            return False
+        x, y, z = record[0]
+        return abs(cell[0] - x) + abs(cell[2] - z) <= 2 and abs(cell[1] - y) <= 2
+
+    def _verify_mining_water_reentry(
+        self, bot: _GuardSession, target: list[float], deadline: float, *, opening_status: dict[str, Any] | None = None,
+    ) -> None:
+        record = self._mining_water_reentry_site
+        cell = tuple(map(math.floor, target))
+        if record is None or not self._near_mining_water_site(cell):
             return
         site, life = record
-        context = {"target": target, "water_reentry_site": list(site)}
+        context: dict[str, Any] = {"target": target, "water_reentry_site": list(site)}
         try:
-            current = bot.call("status", method="GET", timeout_s=0.5)
+            current = opening_status if opening_status is not None else bot.call("status", method="GET", timeout_s=0.5)
             if not isinstance(current, dict):
                 raise _TerrainProbeExpired
             dimension, last_death = current.get("dimension"), current.get("last_death")
@@ -6119,11 +6138,17 @@ class GenerationGuard:
                 raise _TerrainProbeExpired
             if (dimension, last_death) != life:
                 return
-            x, y, z = site
+            x, y, z = cell
+            if opening_status is None:
+                probes = [cell, (x, y + 1, z)]
+            else:
+                probes = [(x, y + 1, z), *((x + dx, y, z + dz) for dx, dz in CARDINAL_VECTORS.values())]
             env = CombatEnv(bot)
-            for height in (y, y + 1):
-                name = env._get_block_name(x, height, z, strict=True, deadline=deadline)
+            for probe in probes:
+                name = env._get_block_name(*probe, strict=True, deadline=deadline)
                 if name in {"water", "flowing_water"}:
+                    if opening_status is not None:
+                        context["water_pos"] = list(probe)
                     break
             else:
                 return
@@ -6131,11 +6156,13 @@ class GenerationGuard:
             raise _MiningLandingDenied(
                 "mining_footing_unavailable", "暂时无法确认原水坑已排干，请沿干地改道。", context=context,
             ) from None
-        raise _MiningLandingDenied(
-            "mining_water_reentry", "这个航点仍有水，刚才曾在此持续沉头，请沿干地改道。", context=context,
+        message = (
+            "挖开此格可能让相邻积水流入巷道，请保留挡水方块并沿干地改道。"
+            if opening_status is not None else "这个航点仍有水，附近刚发生过持续沉头，请沿干地改道。"
         )
+        raise _MiningLandingDenied("mining_water_reentry", message, context=context)
 
-    def _dig_hazard(self, target: Any, *, check_support: bool, check_roof: bool) -> str | None:
+    def _dig_hazard(self, target: Any, *, check_support: bool, check_roof: bool, check_mining_water: bool = False) -> str | None:
         if not isinstance(target, (list, tuple)) or len(target) != 3 or not all(isinstance(v, int) for v in target):
             return None
         try:
@@ -6157,6 +6184,8 @@ class GenerationGuard:
             and not any(status.get(key) for key in ("in_lava", "in_water", "submerged"))
         )
         try:
+            if check_mining_water:
+                self._verify_mining_water_reentry(probe_bot, list(target), deadline, opening_status=status)
             if check_roof and status.get("on_ground") is True:
                 fluid = env.fluid_above_headroom(pos, target)
                 if fluid == "lava" or (fluid == "water" and not status.get("in_water") and not status.get("submerged")):
