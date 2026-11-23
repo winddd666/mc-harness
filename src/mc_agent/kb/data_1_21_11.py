@@ -712,8 +712,13 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
     "move_to_precision": {
         "id": "move_to_precision",
         "category": "api_mechanic",
-        "keywords": ["range", "微调", "movement_not_confirmed", "站位", "靠近", "0.1"],
-        "rule": "微调站位/靠近交互目标时 range 传 >=0.5（如 0.8~1.2），不要传 0.1；提示『已在 0.1~2m 内』时说明已到位，直接执行交互，而不是反复 move_to。前一个动作未结束时调用 move_to 会得到 busy，先等 status.busy=null 或先 finish 当前技能。",
+        "keywords": ["range", "微调", "movement_not_confirmed", "站位", "靠近", "0.1", "allow_partial", "already_within_range"],
+        "rule": (
+            "常规微调站位或靠近交互目标可用 range=0.8~1.2。用回执的实际 pos 校验与目标的距离，明确传了 y 就同时核对高度。"
+            "使用 range=0 精确对位或 allow_partial=true 安全推进时，按实际坐标判断是否到位。"
+            "收到 partial=true 时先确认到达的落脚点及后续交互距离，再继续移动或交互。"
+            "前一动作仍 busy 时先等 status.busy=null 或 finish 当前技能。"
+        ),
     },
     "craft_gear_recipes": {
         "id": "craft_gear_recipes",
