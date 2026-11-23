@@ -356,6 +356,81 @@ def test_warden_retreat_continues_past_ordinary_melee_clearance(route):
     }[route]
 
 
+@pytest.mark.parametrize("route", ["clear", "cliff", "new_life", "side_drift", "chased", "other_mob", "lost_target"])
+def test_w20_warden_retreat_rechecks_the_same_tunnel_after_short_clearance(route):
+    from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
+
+    status = {
+        "pos": [210533.4, -46, 208314.5], "health": 16.83, "dimension": "overworld", "last_death": {"t": 1},
+        "alive": True, "ready": True, "on_ground": True,
+        "nearest_hostile": {"id": 2390683, "name": "warden", "dist": 10.6},
+    }
+    warden = {"id": 2390683, "name": "warden", "pos": [210544, -46, 208314.5], "dist": 10.6}
+    moves = []
+
+    class DeepTunnelBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "get_entities":
+                if moves and route == "lost_target":
+                    return {"entities": [{**warden, "id": 2390684}]}
+                if moves and route == "other_mob":
+                    creeper = {"id": 12, "name": "creeper", "pos": [210520.5, -46, 208314.5], "dist": 3.2}
+                    return {"entities": [warden, creeper]}
+                return {"entities": [warden]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                if moves and x < 210523 and route == "new_life":
+                    status.update(last_death={"t": 2}, pos=[210665.5, 88.1, 208399.5])
+                if moves and x < 210523 and route == "side_drift":
+                    status.update(pos=[210523.7, -46, 208315.0])
+                if z != 208314 or y >= -44:
+                    return {"name": "stone"}
+                if y == -47 and (route != "cliff" or x >= 210522):
+                    return {"name": "stone"}
+                return {"name": "air"}
+            if action == "look":
+                assert body["yaw"] == pytest.approx(math.pi / 2)
+            elif action == "control":
+                status["pos"] = [210531.4, -46, 208314.5]
+            elif action == "move_to":
+                moves.append(body)
+                if len(moves) == 1:
+                    status["pos"] = [210523.7, -46, 208314.5]
+                else:
+                    status["pos"] = [body["x"] + 0.5, body["y"], body["z"]]
+                if len(moves) == 1 or route == "chased":
+                    warden.update(pos=[status["pos"][0] + 4.9, -46, 208314.5], dist=4.9)
+                status["nearest_hostile"] = {"id": warden["id"], "name": "warden", "dist": warden["dist"]}
+            else:
+                pytest.fail(f"Unexpected {action} during Warden retreat")
+            return {"ok": True}
+
+    outcome = SubcorticalInstinctController().on_encounter(CombatEnv(DeepTunnelBot()), {
+        "source": "tool_interrupted_hurt", "primary_type": "warden", "hurt_source": "sonic_boom",
+    })
+
+    first = outcome["actions"][0]
+    assert first["moved_dist"] == pytest.approx(9.7)
+    assert first["reason"] == ("warden_clearance_unconfirmed" if route == "lost_target" else "warden_still_in_range")
+    assert outcome["handled"] is (route == "clear")
+    if route in {"clear", "chased"}:
+        assert len(moves) == 2
+        assert moves[1]["x"] < 210516 and moves[1]["y"] == -46 and moves[1]["z"] == pytest.approx(208314.5)
+        continuation = outcome["actions"][1]
+        assert continuation["action"] == "continue_warden_retreat"
+        assert continuation["ok"] is (route == "clear")
+        assert continuation.get("reason") == (None if route == "clear" else "warden_still_in_range")
+    else:
+        assert len(moves) == 1
+        if route == "new_life":
+            assert outcome["status_after"]["last_death"] == {"t": 2}
+
+
 def test_in_wall_hurt_triggers_unstick_instead_of_bunker(monkeypatch):
     """Suffocating inside a block must carve out (no pickaxe needed), never bunker (needs a pickaxe)."""
     clock = [100.0]

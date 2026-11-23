@@ -4262,36 +4262,132 @@ class SubcorticalInstinctController:
 
     def _verify_warden_clearance(
         self, env: CombatEnv, before: dict[str, Any], after: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         pos = after.get("pos")
         unconfirmed = {"ok": False, "reason": "warden_clearance_unconfirmed"}
         if not pos or after.get("ready") is not True or after.get("on_ground") is not True:
-            return unconfirmed
+            return unconfirmed, []
         if after.get("alive") is False or any(after.get(key) != before.get(key) for key in ("dimension", "last_death")):
-            return {"ok": False, "respawned": True}
+            return {"ok": False, "respawned": True}, []
         if after.get("in_lava") or after.get("in_water"):
-            return unconfirmed
+            return unconfirmed, []
 
         hostiles = self._scan_live_hostiles(env, radius=24, timeout_s=0.4)
         if hostiles is None:
-            return unconfirmed
+            return unconfirmed, []
         wardens = [entity for entity in hostiles if _clean_block_name(entity.get("name")) == "warden"]
         nearest = after.get("nearest_hostile")
         if isinstance(nearest, dict) and _clean_block_name(nearest.get("name")) == "warden":
             nearest_id = nearest.get("id")
             if nearest_id is None or not any(entity.get("id") == nearest_id for entity in wardens):
-                return unconfirmed
+                return unconfirmed, []
         positions = [entity.get("pos") for entity in wardens]
         if any(
             not isinstance(point, (list, tuple)) or len(point) < 3
             or not all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in point[:3])
             for point in positions
         ):
-            return unconfirmed
+            return unconfirmed, []
         distance = min((math.hypot(pos[0] - point[0], pos[2] - point[2]) for point in positions), default=math.inf)
         if distance < WARDEN_EVADE_DISTANCE:
-            return {"ok": False, "reason": "warden_still_in_range", "warden_distance": round(distance, 2)}
-        return {"ok": True}
+            return {"ok": False, "reason": "warden_still_in_range", "warden_distance": round(distance, 2)}, hostiles
+        return {"ok": True}, hostiles
+
+    def _continue_warden_retreat(
+        self, env: CombatEnv, before: dict[str, Any], after: dict[str, Any],
+        warden_id: int, hostiles: list[dict[str, Any]], *, deadline: float,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        origin, start = before["pos"], after["pos"]
+        nearest = after.get("nearest_hostile")
+        if (
+            start[1] >= 0 or abs(start[1] - origin[1]) > 0.1 or after.get("busy")
+            or not isinstance(nearest, dict) or nearest.get("id") != warden_id
+        ):
+            return after, None
+        target = next((entity for entity in hostiles if entity.get("id") == warden_id
+                       and _clean_block_name(entity.get("name")) == "warden" and entity.get("alive") is not False), None)
+        if target is None or abs(target["pos"][1] - start[1]) > 1.5:
+            return after, None
+        yaw, _ = aim_yaw_pitch(origin, start)
+        ux, uz = yaw_to_unit_xz(yaw)
+        dx, dz = start[0] - target["pos"][0], start[2] - target["pos"][2]
+        separation = dx * ux + dz * uz
+        if separation < max(1.0, 0.75 * math.hypot(dx, dz)):
+            return after, None
+
+        other_threats = []
+        for entity in hostiles:
+            if entity is target:
+                continue
+            point = entity.get("pos")
+            if not isinstance(point, (list, tuple)) or len(point) < 3 or not all(
+                isinstance(coord, (int, float)) and math.isfinite(coord) for coord in point[:3]
+            ):
+                return after, None
+            name = _clean_block_name(entity.get("name"))
+            radius = 16.0 if name in RANGED_MOBS or name in {"warden", "drowned"} else 6.0
+            other_threats.append((point[0] - start[0], point[1] - start[1], point[2] - start[2], radius))
+
+        def clear_of_other_hostiles(length: float) -> bool:
+            for tx, ty, tz, radius in other_threats:
+                along = min(length, max(0.0, tx * ux + tz * uz))
+                if math.hypot(tx - ux * along, ty, tz - uz * along) < radius:
+                    return False
+            return True
+
+        now = time.monotonic()
+        probe_deadline = min(now + 0.85, deadline - 2.5)
+        if now >= probe_deadline:
+            return after, None
+        env.invalidate_block_cache()
+        foot_y = math.floor(start[1] + 0.05)
+        desired = min(12.0, max(3.5, math.ceil(WARDEN_EVADE_DISTANCE + 0.9 - separation)))
+        checked_length = 0.0
+        for length in dict.fromkeys((3.5, min(7.5, desired), desired)):
+            if not clear_of_other_hostiles(length):
+                break
+            try:
+                if env.probe_retreat(start, yaw, length, deadline=probe_deadline) != (foot_y, False):
+                    break
+            except _TerrainProbeExpired:
+                break
+            checked_length = length
+        if not checked_length:
+            return after, None
+
+        current = env._safe_status({**after, "ready": False}, timeout_s=0.25)
+        pos = current.get("pos")
+        threat = current.get("nearest_hostile")
+        if (
+            current.get("ready") is not True or current.get("alive") is False or current.get("on_ground") is not True
+            or any(current.get(key) for key in ("in_water", "in_lava", "submerged", "busy"))
+            or any(current.get(key) != after.get(key) for key in ("dimension", "last_death"))
+            or not isinstance(threat, dict) or threat.get("id") != warden_id or not pos or abs(pos[1] - start[1]) > 0.1
+        ):
+            return current, None
+        dx, dz = pos[0] - start[0], pos[2] - start[2]
+        if abs(dx * uz - dz * ux) > 0.15 or not -0.1 <= dx * ux + dz * uz <= 1.25:
+            return current, None
+        # Leave time to stop a timed-out path, refresh status, and rescan for the Warden.
+        duration = min(2.5, deadline - time.monotonic() - 1.25)
+        if duration < 1.0:
+            return current, None
+        try:
+            env.bot.call("move_to", {
+                "x": start[0] + ux * checked_length, "y": foot_y, "z": start[2] + uz * checked_length,
+                "range": 0.7, "timeout": int(duration * 1000), "stop_on": ["death"],
+            }, timeout_s=duration + 0.2, allow_reauth=False)
+        except httpx.HTTPError:
+            env._best_effort_stop(timeout_s=0.18)
+        except ApiError:
+            pass
+        landed = env._safe_status({**current, "ready": False}, timeout_s=0.25)
+        verdict, _ = self._verify_warden_clearance(env, before, landed)
+        end = landed.get("pos") or pos
+        moved = 0.0 if verdict.get("respawned") else math.hypot(end[0] - pos[0], end[2] - pos[2])
+        if verdict.get("ok") and (abs(end[1] - start[1]) > 0.1 or moved > checked_length + 1.0):
+            verdict = {"ok": False, "reason": "warden_clearance_unconfirmed"}
+        return landed, {"action": "continue_warden_retreat", "pos_after": end, "moved_dist": round(moved, 2), **verdict}
 
     def on_encounter(self, env: CombatEnv, trigger: ThreatTrigger) -> CombatOutcome:
         actions: list[dict[str, Any]] = []
@@ -4346,12 +4442,23 @@ class SubcorticalInstinctController:
                 wait_for_ground=True, use_nearest_hostile=False, min_threat_distance=WARDEN_EVADE_DISTANCE,
             )
             after = env._safe_status({"ready": False})
+            continuation = None
             if retreat.get("ok"):
-                retreat = {**retreat, **self._verify_warden_clearance(env, st, after)}
+                verdict, hostiles = self._verify_warden_clearance(env, st, after)
+                retreat = {**retreat, **verdict}
+                warden_id = warden.get("id")
+                if (
+                    verdict.get("reason") == "warden_still_in_range" and retreat.get("moved_dist", 0) >= 3.5
+                    and isinstance(warden_id, int)
+                ):
+                    after, continuation = self._continue_warden_retreat(env, st, after, warden_id, hostiles, deadline=deadline)
+            actions.append({"action": "retreat_from_warden", **retreat})
+            if continuation is not None:
+                actions.append(continuation)
             return {
-                "handled": bool(retreat.get("ok")), "mode": "warden_evade",
+                "handled": bool(actions[-1].get("ok")), "mode": "warden_evade",
                 "summary": "监守者威胁，已尝试沿安全落脚点撤离，先远离当前位置再恢复行动",
-                "actions": [{"action": "retreat_from_warden", **retreat}], "status_after": after,
+                "actions": actions, "status_after": after,
                 "requires_replan": True, "latched_guard": False,
             }
         hp = float(health or 20.0)
