@@ -1238,7 +1238,7 @@ def test_zombie_counter_attack_and_knockback_immune_flee(monkeypatch: pytest.Mon
     assert atk_out["result"]["killed"] is True
     assert [a for a, _ in calls_4] == ["equip", "attack"]
     assert calls_4[0][1] == {"item": "stone_sword", "slot": "hand"}
-    assert calls_4[1][1] == {"entity_id": 77, "timeout": 20000}
+    assert calls_4[1][1] == {"entity_id": 77, "timeout": 20000, "feedback": True}
     assert "zombie#77@1.8m" in hud_txt
     assert "近敌(无遮挡!)" in hud_txt
 

@@ -2545,7 +2545,8 @@ class CurriculumSupervisor:
                             "steps_executed": 0,
                             "remaining_deficit": {},
                         }
-                        if base_playbook.post_ensure_task:
+                        fast_post = target.post_ensure_task or base_playbook.post_ensure_task
+                        if fast_post:
                             _fast_bag, _fast_chest, _ = _combined_available_counts(
                                 inv_before,
                                 self.toolset.world_memory,
@@ -2561,7 +2562,7 @@ class CurriculumSupervisor:
                                 origin=cur_pos,
                                 dim=cur_dim,
                                 include_storage_hint=False,
-                                task_override=base_playbook.post_ensure_task,
+                                task_override=fast_post,
                             )
                             eff_task = re_enriched.task
                             eff_extra_tools = re_enriched.extra_tools
@@ -2663,7 +2664,7 @@ class CurriculumSupervisor:
                             else:
                                 # D4.2 Fix: Dynamically re-render prompt AFTER `pre_ensure` using fresh WorldMemory!
                                 if pre_ensure_res.get("ok"):
-                                    post_base = base_playbook.post_ensure_task or base_playbook.task
+                                    post_base = target.post_ensure_task or base_playbook.post_ensure_task or target.task
                                     re_enriched, _ = _enrich_target_with_world_memory(
                                         base_playbook,
                                         world_memory=self.toolset.world_memory,
@@ -2910,8 +2911,14 @@ class CurriculumSupervisor:
             is_pause_yield = report.get("status") in {"paused", "paused_for_world_job"}
             err_lower = str(report.get("error") or "").lower()
             is_world_loading_err = (
-                report.get("status") == "runtime_error"
-                and ("not_ready" in err_lower or "world is still loading" in err_lower)
+                report.get("status") == "network_error"
+                or (
+                    report.get("status") == "runtime_error"
+                    and any(
+                        tok in err_lower
+                        for tok in ("not_ready", "not_loaded", "chunk_not_loaded", "world_not_ready", "world is still loading")
+                    )
+                )
             )
             transient_api_err = (not progress_made) and (_is_transient_llm_error(report) or is_world_loading_err)
             if is_world_loading_err:
