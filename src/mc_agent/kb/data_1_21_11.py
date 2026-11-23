@@ -380,7 +380,9 @@ RECIPES_1_21: dict[str, dict[str, Any]] = {
         "notes": (
             "1.21.11 配方为 1 iron_ingot + 8 chiseled_stone_bricks。做磁石前先核对 stone 和已有石砖类材料。"
             "从头合成用 12 块 stone，库存达到 12 块就转做石砖。若熔炼只取回部分产物，先用 mc_window_view 查看原炉，"
-            "用 mc_window_act 取出剩余成品，再查背包并按实际缺口补烧圆石。已有石砖、石砖台阶或錾制石砖时用它们抵扣用量。"
+            "用 mc_window_act 取出剩余成品，再查背包并按实际缺口补烧圆石。"
+            "混合库存先从 8 块扣掉已有錾制石砖，每缺 1 块要 2 块台阶。扣掉已有台阶后，每缺一批最多 6 块台阶用 3 块石砖。"
+            "现有石砖不足时，再按 4 块 stone 合 4 块石砖补足。已有 16 块台阶或 9 块石砖即可完成錾砖，无需烧圆石。"
             "放下磁石后持 compass 调 mc_interact(x,y,z,item='compass') 解锁 adventure/use_lodestone（15分）。"
         ),
     },
