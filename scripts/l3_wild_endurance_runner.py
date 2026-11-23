@@ -34,6 +34,8 @@ import argparse
 from collections import Counter
 from collections.abc import Iterator
 import dataclasses
+import fcntl
+import hashlib
 import json
 import math
 import os
@@ -43,7 +45,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, TextIO
 
 WT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN_ROOT = pathlib.Path("/home/xzq/projects/mc")
@@ -2842,6 +2844,20 @@ def build_token_refresher(bot_name: str, token_file: pathlib.Path, settings: Any
     return _refresh
 
 
+def _claim_runner_bot_lock(bot_name: str) -> TextIO:
+    """Hold one live runner per bot across worktrees and archived fleet sources."""
+    lock_dir = MAIN_ROOT / ".state-fleet" / "session-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_key = hashlib.sha256(bot_name.casefold().encode()).hexdigest()
+    lock = (lock_dir / f"{lock_key}.lock").open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        lock.close()
+        raise
+    return lock
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bot", type=str, default=BOT)
@@ -2954,6 +2970,20 @@ def main() -> int:
         print(json.dumps(plan, ensure_ascii=False, indent=2))
         return 0
 
+    try:
+        lock = _claim_runner_bot_lock(bot_name)
+    except BlockingIOError:
+        print(f"[Scene Launch] {bot_name} already has an active scene runner.", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"[Scene Launch] Could not lock {bot_name}: {exc}", file=sys.stderr)
+        return 2
+    with lock:
+        return _run_live(args)
+
+
+def _run_live(args: argparse.Namespace) -> int:
+    bot_name = args.bot
     token_file = pathlib.Path(args.token_file)
     runs_dir = (RUNS_DIR / args.runs_subdir) if args.runs_subdir else RUNS_DIR
     LIVE_STATE_DIR.mkdir(parents=True, exist_ok=True)
