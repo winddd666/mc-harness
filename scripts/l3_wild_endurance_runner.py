@@ -2550,7 +2550,7 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
             "每批根据实际入包量更新缺口。若某格超时，保留站位安全并换相邻露头，避免原地连续调用 mc_dig。"
             "有 10 块黑曜石后，在干地调用 mc_skill_build_portal(enter=True) 建门、点火并穿门。"
         ),
-        "extra_tools": ("mc_skill_build_portal", "mc_skill_cast_obsidian"),
+        "extra_tools": ("mc_skill_build_portal", "mc_skill_cast_obsidian", "mc_status", "mc_get_block", "mc_inventory"),
         "advancement_id": ENTER_NETHER,
     },
 }
