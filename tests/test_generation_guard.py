@@ -11809,6 +11809,97 @@ def test_w19_critical_melee_pursuit_uses_checked_disengagement(monkeypatch, land
         assert followup["respawned"] is True
 
 
+@pytest.mark.parametrize("landing", [
+    "cleared", "open_cave", "pursued", "unsupported", "new_life_during_probe", "too_far", "behind_wall",
+    "not_critical", "near_creeper",
+])
+def test_w20_ob2_critical_melee_pursuit_can_continue_after_a_long_retreat(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    after_first = [233459.5, 64, 246384.5]
+    zombie = {"id": 2339720, "name": "zombie", "dist": 3.2, "pos": [233449.3, 64, 246384.5]}
+    distance = 9.0 if landing == "too_far" else 6.3
+    pursuer = {**zombie, "pos": [after_first[0] - distance, *after_first[1:]], "dist": distance,
+               "blocked_by_wall": landing == "behind_wall"}
+    status = {
+        "pos": [233452.5, 64, 246384.5], "dimension": "overworld", "last_death": {"t": 1},
+        "health": 2.7, "food": 19, "ready": True, "alive": True, "on_ground": True, "is_day": False,
+        "nearest_hostile": zombie, "yaw": 0.0,
+    }
+    retreats = []
+    pulses = []
+    meals = []
+
+    class FieldBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **_kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": [{"name": "bread", "count": 1}] if landing in {"pursued", "cleared"} else []}
+            if action == "get_entities":
+                if not retreats:
+                    return {"entities": [zombie]}
+                creeper = {"id": 2340123, "name": "creeper", "pos": [233462.5, 64, 246384.5], "dist": 3.0}
+                return {"entities": [pursuer, creeper] if landing == "near_creeper" else [pursuer]}
+            if action == "get_block":
+                if landing == "new_life_during_probe":
+                    status.update(pos=[233451.5, 68.1, 246405.5], last_death={"t": 2})
+                supported = body["pos"][1] == 63 and landing != "unsupported"
+                return {"name": "stone" if supported else "air"}
+            if action == "look" and "yaw" in body:
+                status["yaw"] = body["yaw"]
+            if action == "control" and body.get("forward"):
+                pulses.append(body)
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                assert dx > 0.9 and abs(dz) < 0.1
+                status.update(pos=[233461.9, 64, 246384.5], nearest_hostile={
+                    "id": zombie["id"], "name": "zombie", "dist": 7.1 if landing == "pursued" else 8.7,
+                })
+            if action == "use_item":
+                meals.append(body["item"])
+            return {"ok": True}
+
+    env = CombatEnv(FieldBot(), post_combat_food=True)
+    checked_flee = env.flee
+
+    def flee(threat_pos, **kwargs):
+        retreats.append(threat_pos)
+        if len(retreats) == 1:
+            status.update(pos=after_first, health=2.1 if landing == "not_critical" else 1.16666555,
+                          nearest_hostile={"id": zombie["id"], "name": "zombie", "dist": 6.3})
+            return {"ok": True, "mode": "flee", "moved_dist": 7.0, "pos_after": after_first}
+        return checked_flee(threat_pos, **kwargs)
+
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "open_cave" if landing == "open_cave" else "surface"})
+    monkeypatch.setattr(env, "flee", flee)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_melee", "primary_entity_id": zombie["id"], "primary_type": "zombie", "distance": 3.2,
+    })
+
+    followups = [a for a in outcome["actions"] if a["action"] == "followup_melee_retreat"]
+    if landing in {"too_far", "behind_wall", "not_critical", "near_creeper"}:
+        assert retreats == [zombie["pos"]] and not followups and not pulses
+        return
+    followup, = followups
+    assert retreats == [zombie["pos"], pursuer["pos"]]
+    if landing in {"cleared", "open_cave", "pursued"}:
+        pulse, = pulses
+        assert pulse["sprint"] and pulse["stop_on"] == ["death"]
+        assert followup["target_distance_before"] == pytest.approx(6.3)
+        assert followup["target_distance_after"] == (7.1 if landing == "pursued" else 8.7)
+    else:
+        assert not pulses
+    assert followup["ok"] is (landing in {"cleared", "open_cave"})
+    assert meals == (["bread"] if landing == "cleared" else [])
+    if landing == "pursued":
+        assert followup["reason"] == "melee_still_close"
+    if landing == "new_life_during_probe":
+        assert followup["respawned"] is True
+
+
 @pytest.mark.parametrize("pursuit", [
     "clear", "visible_shooter", "occluded_shooter", "corner_shooter", "slow_corner_shooter", "drifted_into_fire",
     "blocked", "lava", "out_of_range", "respawned", "time_budget",

@@ -4033,6 +4033,7 @@ class SubcorticalInstinctController:
     def ranked_melee_retreat(
         self, env: CombatEnv, status: dict[str, Any], target_id: int, *,
         critical: bool, verify_melee_clearance: bool = False, live_hostiles: list[dict[str, Any]] | None = None,
+        melee_clearance: float = 3.5,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         hostiles = self._find_live_hostiles(env, radius=12, timeout_s=0.35) if live_hostiles is None else live_hostiles
         target = next((entity for entity in hostiles if entity.get("id") == target_id), {})
@@ -4045,7 +4046,7 @@ class SubcorticalInstinctController:
             return {"ok": False, "reason": "melee_pursuer_unconfirmed"}, status
         start_dist = self._entity_dist(point, target)
         if verify_melee_clearance and (
-            _clean_block_name(target.get("name")) not in PRE_HURT_MELEE_MOBS or not 0 <= start_dist <= 3.5
+            _clean_block_name(target.get("name")) not in PRE_HURT_MELEE_MOBS or not 0 <= start_dist <= melee_clearance
         ):
             return {"ok": False, "reason": "melee_pursuer_unconfirmed"}, status
         if critical and any(
@@ -4090,7 +4091,7 @@ class SubcorticalInstinctController:
                         target_distance_before=start_dist, target_distance_after=distance_after,
                         target_in_melee_range=distance_after <= 3.5,
                     )
-                    if distance_after <= 3.5:
+                    if distance_after <= melee_clearance:
                         retreat.update(ok=False, reason="melee_still_close")
                 else:
                     retreat.update(ok=False, reason="melee_clearance_unconfirmed")
@@ -5373,8 +5374,13 @@ class SubcorticalInstinctController:
                 for action in actions
             )
         )
+        longer_critical_retreat = (
+            not has_shield and not has_weapon and isinstance(retreat_hp, (int, float)) and 0 < retreat_hp <= 2.0
+            and not st_post.get("busy")
+            and any(a["ok"] and isinstance(a.get("moved"), (int, float)) and a["moved"] >= 4.0 for a in retreats)
+        )
         critical_melee_pursuit = (
-            mode == "cover_or_flee" and enclosure == "surface"
+            mode == "cover_or_flee" and (enclosure == "surface" or (enclosure == "open_cave" and longer_critical_retreat))
             and str(st_post.get("dimension") or "").removeprefix("minecraft:") == "overworld"
             and trigger.get("source") == "pre_hurt_melee" and mob_name in PRE_HURT_MELEE_MOBS
             and isinstance(mob_id, int) and mob_id == trig_id and 0 < mob_dist <= 3.5
@@ -5382,6 +5388,7 @@ class SubcorticalInstinctController:
             and isinstance(nh_post, dict) and nh_post.get("id") == mob_id
             and any(a["ok"] and isinstance(a.get("moved"), (int, float)) and a["moved"] >= 1.5 for a in retreats)
         )
+        extended_melee_pursuit = critical_melee_pursuit and longer_critical_retreat
         critical_followup = critical_creeper_pursuit or critical_melee_pursuit
         ranked_followup = night_pursuit or critical_followup
         followup_budget, movement_budget = (1.5, 0.8)
@@ -5391,6 +5398,8 @@ class SubcorticalInstinctController:
             followup_budget, movement_budget = (4.1, 3.5)
         elif critical_followup:
             followup_range = 5.5 if critical_creeper_pursuit else 3.5
+            if extended_melee_pursuit:
+                followup_range = 8.0
             followup_budget, movement_budget = (2.2, 1.5)
         elif isinstance(retreat_hp, (int, float)) and 0.0 < retreat_hp <= 12.0:
             followup_range = 3.5 if retreat_hp <= 10.0 else 1.5
@@ -5439,6 +5448,7 @@ class SubcorticalInstinctController:
                     retreat, st_post = self.ranked_melee_retreat(
                         env, st_post, target_id, critical=critical_followup,
                         verify_melee_clearance=critical_melee_pursuit, live_hostiles=live_hostiles,
+                        melee_clearance=followup_range,
                     )
                     retreat = {"entity_id": target_id, **retreat}
                 else:
@@ -5524,6 +5534,9 @@ class SubcorticalInstinctController:
             actions.append({"action": action, "ok": latched_guard, "entity_id": survivor_id})
         # Eating takes about two seconds. Leave room to confirm status and release controls.
         food_start_deadline = deadline - 2.5
+        food_melee_clearance = 6.0
+        if extended_melee_pursuit and isinstance(nh_post, dict) and nh_post.get("id") == mob_id:
+            food_melee_clearance = followup_range
         if (
             env.post_combat_food
             and mode not in {"falling", "life_unavailable"}
@@ -5534,7 +5547,7 @@ class SubcorticalInstinctController:
             and st_post.get("on_ground") is not False
             and not st_post.get("in_water")
             and not st_post.get("in_lava")
-            and nh_post_d > 6.0
+            and nh_post_d > food_melee_clearance
             and not ((nh_post_name in RANGED_MOBS or nh_post_name == "ghast") and nh_post_d <= 16.0)
             and food_post < 20
             and (hp_post < 16.0 or food_post <= 15)
