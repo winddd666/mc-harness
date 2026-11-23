@@ -6370,10 +6370,12 @@ def test_full_station_inventory_uses_excess_blocks_without_spending_reserved_inp
         assert bag["sand"] == 61
 
 
-def test_mine_dfs_triggers_retention_cleanup() -> None:
+@pytest.mark.parametrize("drop_confirmed", [True, False])
+def test_mine_dfs_triggers_retention_cleanup(drop_confirmed) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     state = {"cobblestone": 300}
+    looks = []
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
@@ -6385,8 +6387,17 @@ def test_mine_dfs_triggers_retention_cleanup() -> None:
                 rows.append({"name": "cobblestone", "count": min(64, left)})
                 left -= min(64, left)
             return httpx.Response(200, json={"ok": True, "result": {"items": rows}})
+        if path == "status":
+            return httpx.Response(200, json={"ok": True, "result": {
+                "pos": [0.5, 30.0, 0.5], "yaw": 1.0, "pitch": 0.4, "dimension": "overworld",
+            }})
+        if path == "look":
+            looks.append(body)
+            return httpx.Response(200, json={"ok": True, "result": {}})
         if path == "drop":
-            state["cobblestone"] -= int(body.get("count") or 0)
+            assert looks == [{"yaw": 1.0 + math.pi, "pitch": 0.0}]
+            if drop_confirmed:
+                state["cobblestone"] -= int(body.get("count") or 0)
             return httpx.Response(200, json={"ok": True, "result": {}})
         raise AssertionError(path)
 
@@ -6394,27 +6405,39 @@ def test_mine_dfs_triggers_retention_cleanup() -> None:
         toolset = McToolset(bot)
         toolset.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
         result = json.loads(toolset.mc_skill_mine_dfs(target="stone", goal_count=1))
-    assert result["inventory_cleaned"]
-    assert state["cobblestone"] == 192
+    assert result["inventory_cleanup"]["method"] == "drop_fallback"
+    assert looks[-1] == {"yaw": 1.0, "pitch": 0.4}
+    if drop_confirmed:
+        assert result["inventory_cleaned"] == [{"item": "cobblestone", "count": 108}]
+        assert state["cobblestone"] == 192
+    else:
+        assert "inventory_cleaned" not in result
+        assert result["inventory_cleanup"]["error"] == "cleanup_unconfirmed"
+        assert state["cobblestone"] == 300
 
 
-@pytest.mark.parametrize("mode", [
-    "owned", "carried", "crafted", "unsafe", "dead", "no_transfer", "timeout", "unconfirmed_place",
-    "late_death", "lost_put_reply", "unreleased", "action_timeout",
+@pytest.mark.parametrize("mode,spare", [
+    *[(mode, 0) for mode in (
+        "owned", "carried", "crafted", "unsafe", "dead", "no_transfer", "timeout", "unconfirmed_place",
+        "late_death", "lost_put_reply", "unreleased", "action_timeout",
+    )],
+    ("owned", 8), ("lost_put_reply", 8), ("unreleased", 8),
+    ("no_bag_debit", 8), ("no_box_credit", 8),
 ])
-def test_mine_dfs_stashes_clutter_off_the_return_lane(mode, monkeypatch) -> None:
+def test_mine_dfs_stashes_clutter_off_the_return_lane(mode, spare, monkeypatch) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     origin = [0.5, 30.0, 0.5]
     side = [1, 30, 0]
-    cobble = 384
+    cobble = 311 if spare else 384
+    excess = cobble - 192
     bag_chest = mode in {"carried", "unconfirmed_place"}
     plank_stacks = ["oak_planks", "birch_planks"] if mode == "crafted" else []
-    protected_count = 30 - int(bag_chest) - len(plank_stacks) - int(mode == "crafted")
+    protected_count = 30 - int(bag_chest) - len(plank_stacks) - int(mode == "crafted") - spare
     chest = mode not in {"carried", "crafted", "unconfirmed_place"}
     died = False
     stored = 0
-    picked = False
+    picked = bool(spare)
     actions = []
     clock = [100.0]
     if mode in {"lost_put_reply", "action_timeout"}:
@@ -6481,8 +6504,9 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode, monkeypatch) -> None
                 }})
             ops = body["ops"]
             assert all(op["op"] == "put" and op["item"] == "cobblestone" for op in ops)
-            if mode != "no_transfer":
+            if mode not in {"no_transfer", "no_box_credit"}:
                 stored += sum(op["count"] for op in ops)
+            if mode not in {"no_transfer", "no_bag_debit"}:
                 cobble -= sum(op["count"] for op in ops)
             if mode == "timeout":
                 raise httpx.ReadTimeout("offline lost storage receipt", request=request)
@@ -6496,6 +6520,8 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode, monkeypatch) -> None
             result = {"window": {"window": "generic_9x3", "sections": {
                 "container": [{"name": "cobblestone", "count": stored}],
             }}}
+            if mode in {"no_bag_debit", "no_box_credit"}:
+                result["done"] = [{"put": "cobblestone", "to": "container", "count": excess}]
         elif route in {"disconnect", "connect"} and mode == "action_timeout":
             clock[0] += 5.0
             result = {}
@@ -6514,7 +6540,7 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode, monkeypatch) -> None
             tools.skills.remember_placed_storage("chest", side, "overworld")
         tools.skills.mine_dfs = lambda **kwargs: {"ok": True, "dug_count": 1}
         outcome = json.loads(tools.mc_skill_mine_dfs(target="diamond"))
-        if mode not in {"unsafe", "dead", "no_transfer", "unconfirmed_place", "late_death", "unreleased"}:
+        if mode not in {"unsafe", "dead", "no_transfer", "unconfirmed_place", "late_death", "unreleased", "no_bag_debit", "no_box_credit"}:
             bot.call("move_to", {"x": 0.5, "y": 30, "z": -1.5})
             bot.call("move_to", {"x": 0.5, "y": 30, "z": 0.5})
             assert any(item["name"] == "diamond" for item in bot.inventory()["items"])
@@ -6534,14 +6560,18 @@ def test_mine_dfs_stashes_clutter_off_the_return_lane(mode, monkeypatch) -> None
         assert outcome["inventory_cleanup"]["error"] == "storage_life_changed"
         assert outcome["inventory_cleanup"]["empty_slots"] == 0
     elif mode == "unreleased":
-        assert not outcome.get("inventory_cleaned") and stored == 192
+        assert not outcome.get("inventory_cleaned") and stored == excess
         assert outcome["inventory_cleanup"]["error"] == "storage_action_unconfirmed"
         assert actions.count("view") == actions.count("act") == actions.count("stop") == 1
+    elif mode in {"no_bag_debit", "no_box_credit"}:
+        assert not outcome.get("inventory_cleaned") and actions.count("act") == 1
+        assert outcome["inventory_cleanup"]["error"] == "storage_transfer_unconfirmed"
+        assert "move_to" not in actions
     else:
         assert outcome["inventory_cleanup"]["method"] == ("placed_storage" if mode in {"carried", "crafted"} else "owned_storage")
         assert outcome["inventory_cleanup"]["empty_slots"] >= 3
-        assert outcome["inventory_cleaned"] == [{"item": "cobblestone", "count": 192}]
-        assert cobble == 192 and stored == 192
+        assert outcome["inventory_cleaned"] == [{"item": "cobblestone", "count": excess}]
+        assert cobble == 192 and stored == excess
         if mode == "crafted":
             assert plank_stacks == ["birch_planks"]
         if mode in {"lost_put_reply", "action_timeout"}:

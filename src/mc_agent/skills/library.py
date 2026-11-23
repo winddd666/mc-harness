@@ -2481,7 +2481,9 @@ class MacroSkills:
             for k in (-1, 1)
         )
 
-    def _stash_mining_clutter(self, inv: dict[str, Any], min_free: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def _stash_mining_clutter(
+        self, inv: dict[str, Any], min_free: int, *, status: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         before = _inventory_counts_from_raw(inv)
         free = _compute_empty_slots(inv)
         needed = min_free - free
@@ -2502,9 +2504,10 @@ class MacroSkills:
             result["method"] = "no_clutter"
             return [], result
 
-        status = self.bot.status()
+        if status is None:
+            status = self.bot.status()
         origin = status.get("pos")
-        if not origin or status.get("in_water") or status.get("in_lava"):
+        if not origin or status.get("alive") is False or status.get("in_water") or status.get("in_lava"):
             return [], result
         dim = normalize_dimension(status.get("dimension"))
         site = None
@@ -2523,7 +2526,7 @@ class MacroSkills:
                 result.setdefault("storage_skipped", []).append({"pos": candidate, "reason": "blocks_passage"})
                 continue
             actual, attempt = self._verify_mining_storage(
-                planned, candidate, dim, status, {**result, "method": "owned_storage", "pos": candidate},
+                planned, candidate, dim, status, {**result, "method": "owned_storage", "pos": candidate}, before=before,
             )
             if actual or attempt.get("error") not in {
                 "section_full", "container_full", "no_window", "not_found", "out_of_reach", "path_not_found",
@@ -2554,7 +2557,7 @@ class MacroSkills:
             return [], result
 
         result["pos"] = site
-        return self._verify_mining_storage(planned, site, dim, status, result)
+        return self._verify_mining_storage(planned, site, dim, status, result, before=before)
 
     @staticmethod
     def _storage_window_counts(view: Any) -> dict[str, int] | None:
@@ -2567,7 +2570,7 @@ class MacroSkills:
 
     def _verify_mining_storage(
         self, planned: dict[str, int], site: list[int], dim: str,
-        status: dict[str, Any], result: dict[str, Any],
+        status: dict[str, Any], result: dict[str, Any], *, before: dict[str, int],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         target = {"target": {"pos": site}}
         try:
@@ -2605,27 +2608,24 @@ class MacroSkills:
         if life_changed():
             return [], {**result, "error": "storage_life_changed"}
 
-        receipt: dict[str, int] = {}
         done = stored.get("done")
-        for op in done if isinstance(done, list) else []:
-            if isinstance(op, dict) and op.get("to") == "container" and op.get("put"):
-                name = _clean_block(op["put"])
-                receipt[name] = receipt.get(name, 0) + int(op.get("count") or 0)
-        if not receipt:
-            ending = self._storage_window_counts(stored.get("window"))
-            if ending is None:
-                ending = self._storage_window_counts(self.bot.call("window/view", target))
-            receipt = _positive_inv_delta(starting, ending) if ending is not None else {}
-        actual = [
-            {"item": name, "count": min(n, receipt[name])}
-            for name, n in planned.items() if receipt.get(name, 0) > 0
-        ]
+        reported_put = isinstance(done, list) and any(isinstance(op, dict) and op.get("put") for op in done)
+        ending = self._storage_window_counts(stored.get("window"))
+        if ending is None:
+            ending = self._storage_window_counts(self.bot.call("window/view", target))
         inventory = self.bot.inventory()
         if life_changed():
             return [], {**result, "error": "storage_life_changed"}
+        if not isinstance(inventory.get("items"), list):
+            return [], {**result, "error": "storage_transfer_unconfirmed"}
+        bag_removed = _positive_inv_delta(_inventory_counts_from_raw(inventory), before)
+        box_added = _positive_inv_delta(starting, ending) if ending is not None else {}
+        amounts = {name: min(n, bag_removed.get(name, 0), box_added.get(name, 0)) for name, n in planned.items()}
+        actual = [{"item": name, "count": n} for name, n in amounts.items() if n > 0]
         result["empty_slots"] = _compute_empty_slots(inventory)
         if not actual:
-            result["error"] = error or "storage_transfer_unconfirmed"
+            uncertain = reported_put or ending is None or any(name in bag_removed or name in box_added for name in planned)
+            result["error"] = "storage_transfer_unconfirmed" if uncertain else (error or "storage_transfer_unconfirmed")
         elif error:
             result["reconciled_after"] = error
         return actual, result
@@ -2662,13 +2662,58 @@ class MacroSkills:
             counts = _inventory_counts_from_raw(inv)
             if not any(counts.get(item, 0) > cap for item, cap in _MINING_RETENTION_CAPS.items()):
                 return [], None
-            _, dropped = scoped._ensure_free_slots(min_free=3, inv_snapshot=inv)
-            return dropped, None
+            status = session.status()
+            stored, detail = scoped._stash_mining_clutter(inv, 3, status=status)
+            if stored or detail.get("method") != "no_safe_storage" or detail.get("error"):
+                return stored, detail
+            yaw = status.get("yaw")
+            if (
+                not status.get("pos") or status.get("alive") is False or status.get("on_ground") is False
+                or status.get("in_water") or status.get("in_lava")
+                or not isinstance(yaw, (int, float)) or not math.isfinite(yaw)
+            ):
+                return [], detail
+            return scoped._drop_excess_mining_clutter(inv, counts, status, detail)
         except (_SkillDeadline, httpx.TimeoutException):
             session.stop_pending()
             return [], {"method": "cleanup_time_budget"}
         except (ApiError, httpx.HTTPError) as error:
             return [], {"method": "cleanup_failed", "error": getattr(error, "code", type(error).__name__)}
+
+    def _drop_excess_mining_clutter(
+        self, inv: dict[str, Any], before: dict[str, int], status: dict[str, Any], detail: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        yaw, pitch = float(status["yaw"]), status.get("pitch")
+        pitch = float(pitch) if isinstance(pitch, (int, float)) and math.isfinite(pitch) else 0.0
+        self.bot.call("look", {"yaw": yaw + math.pi, "pitch": 0.0})
+        try:
+            after, dropped = self._ensure_free_slots(min_free=3, inv_snapshot=inv)
+        finally:
+            if not self.bot.timed_out:
+                try:
+                    self.bot.call("look", {"yaw": yaw, "pitch": pitch})
+                except (_SkillDeadline, ApiError, httpx.HTTPError):
+                    self.bot.stop_pending()
+        receipt = {**detail, "method": "drop_fallback"}
+        live = self.bot.status()
+        if (
+            live.get("alive") is False or live.get("last_death") != status.get("last_death")
+            or normalize_dimension(live.get("dimension")) != normalize_dimension(status.get("dimension"))
+        ):
+            return [], {**receipt, "error": "cleanup_life_changed"}
+        if not isinstance(after.get("items"), list):
+            return [], {**receipt, "error": "cleanup_unconfirmed"}
+        removed = _positive_inv_delta(_inventory_counts_from_raw(after), before)
+        requested: dict[str, int] = {}
+        for row in dropped:
+            requested[row["item"]] = requested.get(row["item"], 0) + row["count"]
+        verified = [{"item": name, "count": min(count, removed[name])} for name, count in requested.items() if name in removed]
+        receipt["empty_slots"] = _compute_empty_slots(after)
+        if verified:
+            receipt.pop("message", None)
+        else:
+            receipt["error"] = "cleanup_unconfirmed"
+        return verified, receipt
 
     def _safe_craft(
         self,
