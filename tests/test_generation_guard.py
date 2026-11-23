@@ -4185,6 +4185,7 @@ def test_cornered_unshielded_bot_strikes_once_only_against_a_close_lone_melee_mo
 
 @pytest.mark.parametrize("terrain", [
     "verified", "no_support", "incomplete", "second_hostile", "enemy_moved", "knockback", "retreat_ok",
+    "missing_wall_flag_clear", "missing_wall_flag_blocked", "missing_wall_flag_unloaded", "reported_wall",
 ])
 def test_unarmed_bot_builds_supported_cover_when_a_close_zombie_blocks_retreat(monkeypatch, terrain):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
@@ -4215,9 +4216,20 @@ def test_unarmed_bot_builds_supported_cover_when_a_close_zombie_blocks_retreat(m
                     return {"entities": [zombie, {"id": 854151, "name": "skeleton", "dist": 3.1}]}
                 if terrain == "enemy_moved" and scans >= 3:
                     return {"entities": [{**zombie, "pos": [309346.5, 19, 301948.1]}]}
+                if scans == 2 and terrain.startswith("missing_wall_flag"):
+                    observed = dict(zombie)
+                    del observed["blocked_by_wall"]
+                    return {"entities": [observed]}
+                if scans == 2 and terrain == "reported_wall":
+                    return {"entities": [{**zombie, "blocked_by_wall": True}]}
                 return {"entities": [zombie]}
             if action == "get_block":
                 cell = tuple(body["pos"])
+                if cell == (309347, 20, 301950):
+                    if terrain == "missing_wall_flag_unloaded":
+                        return {}
+                    if terrain == "missing_wall_flag_blocked":
+                        return {"name": "stone"}
                 floor = cell[1] == 18 and (terrain != "no_support" or cell[0] == 309346)
                 return {"name": blocks.get(cell, "stone" if floor else "air")}
             if action == "place":
@@ -4244,14 +4256,14 @@ def test_unarmed_bot_builds_supported_cover_when_a_close_zombie_blocks_retreat(m
     })
 
     expected_placements = [(309347, 19, 301950), (309347, 20, 301950)]
-    if terrain in {"verified", "incomplete", "enemy_moved"}:
+    if terrain in {"verified", "incomplete", "enemy_moved", "missing_wall_flag_clear"}:
         assert attempts == expected_placements
     elif terrain == "knockback":
         assert attempts == expected_placements[:1]
     else:
         assert attempts == []
-    assert (result["mode"] == "placed_cover") is (terrain == "verified")
-    if terrain == "verified":
+    assert (result["mode"] == "placed_cover") is (terrain in {"verified", "missing_wall_flag_clear"})
+    if terrain in {"verified", "missing_wall_flag_clear"}:
         assert result["actions"][-1]["action"] == "place_melee_cover"
         assert result["actions"][-1]["placed"] == 2
 
@@ -6347,6 +6359,64 @@ def test_poll_follows_unarmed_retreat_when_close_melee_threat_remains(monkeypatc
     assert followups == ([(6.7, [5002, 39, -7591.4])] if nearby else [])
     if nearby:
         assert incident["actions"][-1]["result"]["target_distance_after"] == 3.0
+
+
+@pytest.mark.parametrize("landing", ["grounded", "airborne", "new_life", "new_enemy", "unsupported", "moved"])
+def test_unarmed_melee_retries_a_zero_movement_retreat_after_confirmed_landing(monkeypatch, landing):
+    air_pos = [164991.2, 102.2, 157674.4]
+    floor_pos = [164991.2, 102, 157674.5]
+    spider = {"id": 2093585, "name": "spider", "dist": 2.7, "pos": [164993.9, 102, 157674.5]}
+    status = {
+        "pos": air_pos, "health": 8.8, "food": 20, "ready": True, "alive": True,
+        "dimension": "overworld", "on_ground": False, "last_death": {"t": 1}, "nearest_hostile": spider,
+    }
+    pulses = []
+
+    class BankBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                hurt = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": spider}
+                return {"events": [] if kwargs["params"]["since"] else [hurt]}
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_block":
+                supported = landing != "unsupported" and body["pos"][1] == 101
+                return {"name": "stone" if supported else "air"}
+            if action == "look":
+                assert body["yaw"] == pytest.approx(math.pi / 2)
+                return {"ok": True}
+            if action == "control":
+                pulses.append(body)
+                status.update(pos=[164990.5, 102, 157674.5], nearest_hostile={**spider, "dist": 3.4})
+                return {"ok": True}
+            pytest.fail(f"Unexpected retreat action: {action}")
+
+    def blocked_flee(*args, **kwargs):
+        assert kwargs["wait_for_ground"] is True
+        status.update(pos=floor_pos, on_ground=landing != "airborne", health=7.333)
+        if landing == "new_life":
+            status["last_death"] = {"t": 2}
+        if landing == "new_enemy":
+            status["nearest_hostile"] = {**spider, "id": 2094000}
+        return {
+            "ok": False, "mode": "flee", "reason": "unsafe_landing", "pos_after": air_pos, "on_ground": False,
+            "moved_dist": 1.0 if landing == "moved" else 0.0, "in_water": False, "in_lava": False,
+        }
+
+    guard = GenerationGuard(BankBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "flee", blocked_flee)
+    result = guard.poll()
+
+    followups = [a for a in result["actions"] if a["action"] == "followup_melee_retreat"]
+    assert pulses == ([{"forward": True, "ms": 220, "stop_on": ["death"]}] if landing == "grounded" else [])
+    if landing in {"grounded", "unsupported"}:
+        followup, = followups
+        assert followup["ok"] is (landing == "grounded")
+        assert followup["result"]["entity_id"] == spider["id"]
+    else:
+        assert not followups
 
 
 @pytest.mark.parametrize("threat", ["clear", "nearest_drowned", "other_nearest", "scan_timeout"])
@@ -17564,6 +17634,85 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
         if scene == "wall_after_shot":
             assert reply["result"]["end_reason"] == "blocked_by_wall"
     else:
+        assert not reply["ok"] and reply["requires_replan"] and reply["error"]["code"] == expected
+
+
+@pytest.mark.parametrize(("scene", "expected"), [
+    ("clear", "shoot"), ("wall", "blocked_by_wall"), ("close_piglin", "rush"),
+    ("closing_piglin", "combat_melee_pressure"), ("shield", "shield_blocking_shot"),
+    ("no_blaze", "rush"), ("named_piglin", "rush"), ("no_ammo", "blaze_requires_ranged"),
+])
+def test_nether_auto_combat_reaches_stationary_blaze_from_a_mixed_sighting(monkeypatch, scene, expected):
+    from mc_agent.harness.mc_tools import McToolset
+    from mc_agent.skills import combat_v1
+
+    # W17b HY11 EP02 actor sighting. The terrain and later snapshots are controlled here.
+    origin = [0.5, 70, 3607.5]
+    piglin = {"id": 2080288, "name": "piglin", "pos": [-3.9, 68, 3609.4], "dist": 4.6, "blocked_by_wall": True}
+    other_piglin = {"id": 2080714, "name": "piglin", "pos": [-4.6, 68, 3610], "dist": 5.4, "blocked_by_wall": False}
+    blaze = {"id": 2095792, "name": "blaze", "pos": [5.8, 74, 3586.5], "dist": 22.6}
+    close_piglin = {**other_piglin, "pos": [2.5, 70, 3607.5], "dist": 2.0}
+    writes = []
+    rushes = []
+    status_reads = 0
+
+    def rush(_adapter, *, target_name, max_time_s):
+        rushes.append(target_name)
+        return {"killed": True}
+
+    monkeypatch.setattr(combat_v1, "action_rush", rush)
+
+    def handle(request):
+        nonlocal status_reads
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if endpoint == "status":
+            status_reads += 1
+            closes = scene == "close_piglin" or (scene == "closing_piglin" and status_reads > 1)
+            result = {
+                "dimension": "the_nether", "pos": origin, "alive": True, "ready": True, "on_ground": True,
+                "nearest_hostile": close_piglin if closes else piglin, "blocking": scene == "shield",
+            }
+        elif endpoint == "get_entities":
+            entities = [piglin, close_piglin if scene == "close_piglin" else other_piglin]
+            if scene != "no_blaze":
+                entities.append(blaze)
+            result = {"entities": entities}
+        elif endpoint == "inventory":
+            items = [{"name": "shield", "count": 1}, {"name": "bow", "count": 1}]
+            if scene != "no_ammo":
+                items.append({"name": "arrow", "count": 2})
+            result = {"items": items}
+        elif endpoint == "get_block":
+            x, y, z = body["pos"]
+            wall = scene == "wall" and z == 3604
+            result = {"name": "nether_bricks" if wall or (x, y, z) == (0, 69, 3607) else "air"}
+        elif endpoint == "shoot":
+            writes.append((endpoint, body))
+            result = {"fired": True, "used": {"arrow": 1}, "killed": True}
+        elif endpoint in {"stop", "posture"}:
+            writes.append((endpoint, body))
+            result = {}
+        else:
+            pytest.fail(f"Unexpected tactical combat endpoint: {endpoint}")
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(handle)) as bot:
+        reply = json.loads(McToolset(bot).mc_skill_combat(
+            mode="auto", target_name="piglin" if scene == "named_piglin" else None, max_time_s=15,
+        ))
+
+    if expected == "rush":
+        assert reply["ok"] and rushes == ["piglin"]
+        assert [endpoint for endpoint, _ in writes] == ["stop", "posture"]
+    elif expected == "shoot":
+        assert not rushes and reply["ok"] and reply["result"]["killed"]
+        assert reply["target_name"] == "blaze"
+        assert writes == [("shoot", {
+            "weapon": "bow", "entity_id": blaze["id"], "charge_ms": 1000, "stop_on": ["hurt", "death"],
+        })]
+    else:
+        assert not rushes and not writes
         assert not reply["ok"] and reply["requires_replan"] and reply["error"]["code"] == expected
 
 

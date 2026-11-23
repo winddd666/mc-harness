@@ -1228,16 +1228,10 @@ class GenerationGuard:
         return result
 
     def _recover_water_landing_after_retreat(
-        self, before: dict[str, Any], retreat: dict[str, Any], *,
+        self, before: dict[str, Any], landing: dict[str, Any], *,
         threat_pos: list[float] | None, threat_id: int | None, threat_name: str,
         has_shield: bool, avoid_close_threat: bool = False,
     ) -> dict[str, Any] | None:
-        if retreat.get("reason") != "unsafe_landing" or retreat.get("respawned"):
-            return None
-        try:
-            landing = self.bot.call("status", method="GET", timeout_s=0.6)
-        except (ApiError, httpx.HTTPError):
-            return None
         if (
             not landing.get("in_water") or landing.get("in_lava")
             or landing.get("ready") is False or landing.get("alive") is False
@@ -3113,9 +3107,10 @@ class GenerationGuard:
                                 and isinstance(moved_dist, (int, float)) and moved_dist > 0.0
                             )
                             shore = None
-                            if cf_result.get("reason") == "unsafe_landing":
+                            if cf_result.get("reason") == "unsafe_landing" and not cf_result.get("respawned"):
                                 shore = self._recover_water_landing_after_retreat(
-                                    status, cf_result, threat_pos=att_pos_r, threat_id=att_id_r,
+                                    status, self.combat_env._safe_status(timeout_s=0.6),
+                                    threat_pos=att_pos_r, threat_id=att_id_r,
                                     threat_name=att_name_r, has_shield=has_shield,
                                 )
                                 if shore is not None:
@@ -3421,24 +3416,33 @@ class GenerationGuard:
                         )
                     )
                     shore = None
-                    if melee_retreat and cf_result.get("reason") == "unsafe_landing":
+                    landing = None
+                    if melee_retreat and cf_result.get("reason") == "unsafe_landing" and not cf_result.get("respawned"):
+                        landing = self.combat_env._safe_status(timeout_s=0.6)
                         target = attacker if isinstance(attacker, dict) else {}
                         shore = self._recover_water_landing_after_retreat(
-                            status, cf_result, threat_pos=target.get("pos") or nh_pos,
+                            status, landing, threat_pos=target.get("pos") or nh_pos,
                             threat_id=target.get("id") or nh_id, threat_name=target.get("name") or nh_name,
                             has_shield=has_shield, avoid_close_threat=True,
                         )
                         if shore is not None:
                             actions.append(shore)
+                    retry_after_knockback = (
+                        dimension == "overworld" and not (has_shield or has_melee_weapon or recent_ranged_hurt)
+                        and landing is not None and landing.get("ready") is True
+                        and not (landing.get("busy") or landing.get("on_fire"))
+                        and cf_result.get("on_ground") is False and cf_result.get("moved_dist") == 0.0
+                        and not (cf_result.get("in_water") or cf_result.get("in_lava"))
+                        and nh_id is not None and (landing.get("nearest_hostile") or {}).get("id") == nh_id
+                        and not (landing.get("nearest_hostile") or {}).get("blocked_by_wall")
+                    )
                     if shore is None and melee_after_retreat and (
                         face_after_melee_retreat or check_critical_surface_landing
                         or check_unraised_shield or shield_when_cornered or follow_unarmed_retreat
-                        or retry_bunker_after_landing
+                        or retry_bunker_after_landing or retry_after_knockback
                     ):
-                        try:
-                            landing = self.bot.call("status", method="GET", timeout_s=0.6)
-                        except (ApiError, httpx.HTTPError):
-                            landing = {}
+                        if landing is None:
+                            landing = self.combat_env._safe_status(timeout_s=0.6)
                         mob, dist, target_id, target_pos = self._extract_hostile_info(landing)
                         current_hp = landing.get("health")
                         if (
@@ -3482,7 +3486,7 @@ class GenerationGuard:
                                     actions.append(late_bunker)
                                     if self._bunker_life_unavailable(late_bunker):
                                         reasons.append("death_or_connection_changed")
-                            elif follow_unarmed_retreat and landing.get("pos"):
+                            elif (follow_unarmed_retreat or retry_after_knockback) and landing.get("pos"):
                                 if target_pos is None:
                                     target_pos = self._find_hostile_position(target_id, mob, timeout_s=0.6)
                                 if (

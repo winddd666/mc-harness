@@ -17,7 +17,9 @@ from ..bot import BotSession
 from ..errors import ApiError as McApiError, AuthError, BotNotReadyError, DeathLoopCooldownError
 from ..harness.geofence import VoidGeofence
 from . import combat_v1
-from .combat_env import CombatEnv, _TerrainProbeExpired, attack_feedback_hits, shot_release_confirmed
+from .combat_env import (
+    CombatEnv, _TerrainProbeExpired, attack_feedback_hits, melee_clear_for_projectile_cover, shot_release_confirmed,
+)
 
 VALID_COMBAT_MODES = frozenset(
     {
@@ -38,6 +40,7 @@ VALID_COMBAT_MODES = frozenset(
 
 _RANGED_MOBS = frozenset({"skeleton", "stray", "bogged", "pillager", "blaze", "ghast"})
 _ARROWS = frozenset({"arrow", "spectral_arrow", "tipped_arrow"})
+_BLAZE_MELEE_CLEARANCE = 4.5
 
 
 class _CombatBudgetExceeded(BaseException):
@@ -326,8 +329,14 @@ def _fight_nether_blaze(
             if visible is not True:
                 result["end_reason"] = "blocked_by_wall" if visible is False else "combat_visibility_unconfirmed"
                 break
-        if not can_fight_from_here(adapter.call("status", method="GET", timeout=0.6)):
+        current = adapter.call("status", method="GET", timeout=0.6)
+        if not can_fight_from_here(current):
             return _blaze_error(result, "combat_position_changed", "射击前站位或生命已变化，请复查。")
+        nearby = [current.get("nearest_hostile"), *(entities if shot_index == 0 else [])]
+        if not melee_clear_for_projectile_cover(nearby, max_distance=_BLAZE_MELEE_CLEARANCE):
+            return _blaze_error(result, "combat_melee_pressure", "附近已有近战威胁，请先稳住站位或脱离，再对烈焰人蓄力。")
+        if current.get("blocking") is True:
+            return _blaze_error(result, "shield_blocking_shot", "仍在举盾，请先退到有实体掩护的射位，确认安全后放盾再射。")
         remaining = adapter._check_budget()
         if remaining is not None and remaining < 1.7:
             if shots:
@@ -418,12 +427,24 @@ def run_combat_skill(
             sighting = adapter.call("get_entities", {
                 "radius": 32 if resolved_mode == "rush" else 24, "types": [norm_filter or "hostile"],
             })
-            entities = [entity for entity in sighting.get("entities") or [] if isinstance(entity, dict)]
-            target = entities[0] if entities else None
+            entities = [
+                entity for entity in sighting.get("entities") or []
+                if isinstance(entity, dict) and entity.get("alive") is not False
+            ]
+            target = next((entity for entity in entities if (
+                norm_filter is None or str(entity.get("name") or "").removeprefix("minecraft:") == norm_filter
+            )), None)
             observed_name = str(target.get("name") or "").removeprefix("minecraft:") if target else norm_filter
-            if observed_name == "blaze":
+            auto_blaze = resolved_mode == "auto" and norm_filter is None and any(
+                str(entity.get("name") or "").removeprefix("minecraft:") == "blaze" and type(entity.get("id")) is int
+                for entity in entities
+            )
+            if observed_name == "blaze" or auto_blaze:
                 status = adapter.call("status", method="GET", timeout=0.6)
-                if str(status.get("dimension") or "").removeprefix("minecraft:") in {"the_nether", "nether"}:
+                nether = str(status.get("dimension") or "").removeprefix("minecraft:") in {"the_nether", "nether"}
+                if nether and (observed_name == "blaze" or melee_clear_for_projectile_cover(
+                    [*entities, status.get("nearest_hostile")], max_distance=_BLAZE_MELEE_CLEARANCE,
+                )):
                     stationary_blaze = True
                     resolved_target = "blaze"
                     raw = _fight_nether_blaze(adapter, CombatEnv(bot, geofence=geofence), status, entities)
