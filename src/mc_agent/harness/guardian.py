@@ -5525,15 +5525,20 @@ class GenerationGuard:
                             )
                         mining_forward_waypoint = mining_landing_error.context["target"]
                         verify_mining_approach(mining_forward_waypoint)
-                    if mining_forward_waypoint is not None:
+                    # On a recorded stair, DFS can jump with a supplied yaw before it tries move_to.
+                    if mining_forward_waypoint is not None or body.get("yaw") is not None:
                         hazard = self._mining_fallback_hazard(body)
                         if pending_trigger:
                             raise ReflexPreempted(pending_trigger[0])
                         if hazard:
-                            context = {"target": mining_forward_waypoint, "hazard": hazard}
+                            context = {"hazard": hazard}
+                            if mining_forward_waypoint is not None:
+                                context["target"] = mining_forward_waypoint
+                            else:
+                                context["yaw"] = body["yaw"]
                             self.events.emit("guardian.mining_fallback_blocked", **context)
                             raise _MiningLandingDenied(
-                                "unsafe_landing", "短跑可能越过采矿落点进入危险地形，请改用有支撑的路线。", context=context,
+                                "unsafe_landing", "向前移动可能越过采矿落点进入危险地形，请改用有支撑的路线。", context=context,
                             )
             if (
                 check_combat_step and clean_path == "control" and isinstance(body, dict)

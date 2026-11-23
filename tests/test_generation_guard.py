@@ -16389,6 +16389,60 @@ def test_dfs_fallback_checks_past_the_supported_first_step(tmp_path, terrain):
         assert denials == [] and position == destination
 
 
+@pytest.mark.parametrize("terrain", ["cliff", "lava", "supported", "unavailable"])
+def test_dfs_checks_actual_direction_of_a_jump_before_its_first_waypoint(tmp_path, terrain):
+    from mc_agent.skills.mining_dfs import MiningDFSEngine
+
+    origin = (112229, 14, 122771)
+    next_step = (112230, 15, 122771)
+    start = [112229.5, 14, 122771.5]
+    landing = [112230.5, 15, 122771.5]
+    pos = list(start)
+    motions = []
+    hazard = terrain in {"cliff", "lava"}
+
+    class ShaftBot:
+        def status(self):
+            return {"pos": list(pos), "on_ground": True, "ready": True, "alive": True, "yaw": 0.0}
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "get_block":
+                x, y, _ = body["pos"]
+                if x >= 112231:
+                    if terrain == "unavailable":
+                        raise httpx.ReadTimeout("terrain beyond the next step is unavailable")
+                    if hazard:
+                        return {"name": "lava" if terrain == "lava" and y == 14 else "air"}
+                support_y = 14 if x >= 112230 else 13
+                return {"name": "stone" if y <= support_y else "air"}
+            if action in {"control", "move_to"}:
+                motions.append((action, body))
+                pos[:] = landing
+            return {"ok": True}
+
+    bot = ShaftBot()
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(bot, events, checkpoint=lambda: None)
+    dfs = MiningDFSEngine(MacroSkills(bot), ledger_path=tmp_path / "ledger.json")
+    result = json.loads(guard.run_tool_with_reflex(
+        "mc_skill_mine_dfs", lambda: json.dumps({"ok": dfs._step_to(next_step, from_cell=origin)}),
+    ))
+
+    assert result["ok"] is True and pos == landing
+    action, payload = motions[0]
+    assert len(motions) == 1
+    denials = [record for record in events.events if record["type"] == "guardian.mining_fallback_blocked"]
+    if hazard:
+        assert action == "move_to"
+        assert [payload[axis] for axis in ("x", "y", "z")] == landing
+        denial, = denials
+        assert denial["hazard"] == terrain and denial["yaw"] == pytest.approx(-math.pi / 2)
+    else:
+        assert action == "control" and payload["jump"] is True and denials == []
+
+
 @pytest.mark.parametrize("terrain", ["unchanged", "repaired_edge", "repair_unconfirmed", "expiry", "unavailable"])
 def test_dfs_rechecks_a_rejected_waypoint_only_when_the_observation_can_change(monkeypatch, terrain):
     target = [304191.2, 16.0, 309200.8]
