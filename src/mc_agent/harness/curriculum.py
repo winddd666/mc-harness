@@ -2115,11 +2115,14 @@ class CurriculumSupervisor:
         def _is_stopped() -> bool:
             return bool(stop_check is not None and stop_check())
 
+        stop_reason = "deadline"
         while time.monotonic() < deadline_mono:
             if _is_stopped():
                 final_status = "interrupted"
+                stop_reason = "interrupted"
                 break
             if max_episodes is not None and ep_index >= max_episodes:
+                stop_reason = "episode_cap"
                 break
 
             ep_index += 1
@@ -2967,6 +2970,7 @@ class CurriculumSupervisor:
 
         final_summary = {
             "status": final_status,
+            "stop_reason": stop_reason,
             "elapsed_s": round(time.monotonic() - started_mono, 1),
             "duration_s": self.duration_s,
             "episodes_completed": len(self.episodes),

@@ -743,33 +743,45 @@ class _RepeatFailureGuard:
                 and float(kwargs.get("range", 1.0) or 1.0) >= 1.0
             ):
                 rng_val = float(kwargs.get("range", 1.0) or 1.0)
-                tx_kw, tz_kw = kwargs.get("x"), kwargs.get("z")
-                dist_rem = (
-                    math.hypot(float(tx_kw) - float(pos_after_blk[0]), float(tz_kw) - float(pos_after_blk[2]))
-                    if tx_kw is not None and tz_kw is not None
-                    else 0.0
-                )
-                if dist_rem > rng_val + 1.5:
+                tx_kw, ty_kw, tz_kw = kwargs.get("x"), kwargs.get("y"), kwargs.get("z")
+                if (
+                    isinstance(pos_after_raw, (list, tuple))
+                    and len(pos_after_raw) >= 3
+                    and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in pos_after_raw[:3])
+                ):
+                    px_f, py_f, pz_f = float(pos_after_raw[0]), float(pos_after_raw[1]), float(pos_after_raw[2])
+                else:
+                    px_f, py_f, pz_f = float(pos_after_blk[0]), float(pos_after_blk[1]), float(pos_after_blk[2])
+                if tx_kw is not None and tz_kw is not None:
+                    if ty_kw is not None:
+                        dist_rem = math.dist([float(tx_kw), float(ty_kw), float(tz_kw)], [px_f, py_f, pz_f])
+                    else:
+                        dist_rem = math.hypot(float(tx_kw) - px_f, float(tz_kw) - pz_f)
+                else:
+                    dist_rem = 0.0
+                if dist_rem <= rng_val + 0.05:
+                    # BUG-155: already inside requested range on real coordinates -> genuine success, not failure
+                    parsed["already_within_range"] = True
+                    parsed["dist_remaining"] = round(dist_rem, 2)
+                    raw = json.dumps(parsed, ensure_ascii=False)
+                else:
+                    tgt_lbl = f"({tx_kw}, {ty_kw}, {tz_kw})" if ty_kw is not None else f"({tx_kw}, {tz_kw})"
                     msg_nc = (
-                        f"目标({tx_kw}, {tz_kw})距当前仍有 {dist_rem:.1f}m，但寻路原地未动（可能被坑洼/水面/障碍阻挡）；"
+                        f"目标{tgt_lbl}距当前仍有 {dist_rem:.1f}m（大于 range={rng_val}m），但寻路原地未动（可能被坑洼/水面/障碍阻挡）；"
                         "请先调 mc_skill_unstick 脱困，或改用更短步长（15~25 格）与换方向绕开障碍。"
                     )
-                else:
-                    msg_nc = (
-                        f"当前站位已在目标 range={kwargs.get('range', 1.0)}m 半径内，未发生实际位移；"
-                        "若需让出脚下方块请指定 3 格以外坐标并设 range=0.5，或直接调 mc_place(item=...) 不传 x/y/z。"
-                    )
-                parsed = {
-                    "ok": False,
-                    "requires_replan": True,
-                    "pos_before": list(pos_before_blk),
-                    "pos_after": list(pos_after_blk),
-                    "error": {
-                        "code": "movement_not_confirmed",
-                        "message": msg_nc,
-                    },
-                }
-                raw = json.dumps(parsed, ensure_ascii=False)
+                    parsed = {
+                        "ok": False,
+                        "requires_replan": True,
+                        "pos_before": list(pos_before_blk),
+                        "pos_after": [round(px_f, 2), round(py_f, 2), round(pz_f, 2)],
+                        "dist_remaining": round(dist_rem, 2),
+                        "error": {
+                            "code": "movement_not_confirmed",
+                            "message": msg_nc,
+                        },
+                    }
+                    raw = json.dumps(parsed, ensure_ascii=False)
 
             def _pos_num(val: Any) -> bool:
                 return isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0
@@ -1527,9 +1539,9 @@ def run_mc_agent(
                             ),
                         })
                         continue
-                report["status"] = "answered"
+                report["status"] = "limit_reached" if force_final else "answered"
                 report["answer"] = content
-                events.emit("answer", content=content, task_version=request_version)
+                events.emit("answer", content=content, task_version=request_version, forced_final=bool(force_final))
                 return report
 
             phase("executing_tools")

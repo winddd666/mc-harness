@@ -3785,6 +3785,84 @@ def test_bug118_125_131_curriculum_dimension_bare_kill_and_night_prep() -> None:
         assert t_has_wool.key == "minecraft:adventure/sleep_in_bed"
 
 
+def test_bug155_move_to_within_range_and_bug121_forced_final_status() -> None:
+    """Regression for BUG-155 (mc_move_to within real float range stays ok=True; outside range fails truthfully)
+    and BUG-121 (force_final turn with 0 tools reports limit_reached instead of answered)."""
+    pos_now = [219427.5, 69.0, 152037.5]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/events":
+            return httpx.Response(200, json={"ok": True, "result": {"last_seq": 0, "events": []}})
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {
+                "ready": True, "alive": True, "dimension": "overworld",
+                "pos": list(pos_now), "health": 20.0, "food": 20, "on_ground": True,
+            }})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": []}})
+        if path == "/move_to":
+            return httpx.Response(200, json={"ok": True, "result": {"pos": list(pos_now)}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    seen_results: list[dict[str, Any]] = []
+    turn = 0
+
+    def chat_move(messages: list[dict[str, Any]], tools=None, **kwargs: Any) -> dict[str, Any]:
+        nonlocal turn
+        turn += 1
+        if turn == 1:
+            # Same cell / within range=2 (dist ~0.71m <= 2.0) -> must stay ok=True, already_within_range=True
+            return {
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "m1", "type": "function", "function": {
+                    "name": "mc_move_to", "arguments": '{"x":219427,"z":152037,"range":2}',
+                }}],
+            }
+        if turn == 2:
+            seen_results.append(json.loads(messages[-1]["content"].splitlines()[0]))
+            # Outside real float range=2 (219427.5, 152037.5 -> 219425, 152037 = 2.55m > 2.0) -> must fail truthfully
+            return {
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "m2", "type": "function", "function": {
+                    "name": "mc_move_to", "arguments": '{"x":219425,"z":152037,"range":2}',
+                }}],
+            }
+        if turn == 3:
+            seen_results.append(json.loads(messages[-1]["content"].splitlines()[0]))
+            # Same XZ but Y=14 (dist=55m > range=2) -> must fail with 3D distance, not claim arrived
+            return {
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "m3", "type": "function", "function": {
+                    "name": "mc_move_to", "arguments": '{"x":219427,"y":14,"z":152037,"range":2}',
+                }}],
+            }
+        last_tool_msg = next(m for m in reversed(messages) if m.get("role") == "tool")
+        seen_results.append(json.loads(last_tool_msg["content"].splitlines()[0]))
+        # Turn 4 is force_final (max_calls=4 -> tools=[]): plain text must report limit_reached
+        assert tools == [] or tools is None
+        return {"role": "assistant", "content": "预算耗尽总结"}
+
+    with BotSession("tok", bot_username="MoveBug155", transport=httpx.MockTransport(handler)) as bot_m:
+        rep = run_mc_agent(
+            "测试 move_to 范围与末轮状态",
+            bot_m,
+            chat_fn=chat_move,
+            max_calls=4,
+            survival_guard=False,
+            hud_mode="ephemeral",
+            context_mode="sliding",
+            tool_profile="compact",
+        )
+    assert rep["status"] == "limit_reached"
+    assert len(seen_results) == 3
+    assert seen_results[0]["ok"] is True and seen_results[0].get("already_within_range") is True
+    assert seen_results[1]["ok"] is False and seen_results[1]["error"]["code"] == "movement_not_confirmed"
+    assert "已在目标" not in seen_results[1]["error"]["message"]
+    assert seen_results[2]["ok"] is False and seen_results[2]["error"]["code"] == "movement_not_confirmed"
+    assert float(seen_results[2]["dist_remaining"]) > 50.0
+
+
 
 
 
