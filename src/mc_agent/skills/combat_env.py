@@ -1311,9 +1311,11 @@ class CombatEnv:
             tx, tz = bx + dx, bz + dz
             cells = [[tx, by + 1, tz]] if norm_mode == "half_seal" else [[tx, by, tz], [tx, by + 1, tz]]
             placed = 0
+            placement_attempts = 0
             for cpos in cells:
                 try:
                     if _is_passable(self._get_block_name(cpos[0], cpos[1], cpos[2])):
+                        placement_attempts += 1
                         self.bot.call("place", {"item": filler, "pos": cpos})
                         placed += 1
                 except ApiError:
@@ -1356,6 +1358,8 @@ class CombatEnv:
                 "mode": norm_mode,
                 "direction": chosen_dir,
                 "placed": placed,
+                "placement_attempts": placement_attempts,
+                "seal_cells": cells,
                 "pos_after": st_end.get("pos"),
                 "reason": reason,
             }
@@ -2513,7 +2517,7 @@ class CombatEnv:
                 seal = self.fortify(st0, lambda: self.build_tactical("full_seal", threat_pos=threat_pos))
                 if seal.get("ok"):
                     pos_s = seal.get("pos_after") or pos0
-                    return {"ok": True, "mode": "sealed", "moved_dist": 0.0, "pos_after": pos_s}
+                    return {"ok": True, "mode": "sealed", "moved_dist": 0.0, "pos_after": pos_s, "seal": seal}
 
         if threat_pos is not None and len(threat_pos) >= 3:
             away_dx = float(pos0[0]) - float(threat_pos[0])
@@ -3729,6 +3733,13 @@ class SubcorticalInstinctController:
         self._last_flee_at = float("-inf")
 
     @staticmethod
+    def _seal_action(seal: dict[str, Any], *, action: str = "seal_shaft") -> dict[str, Any]:
+        fields = ("reason", "direction", "placed", "placement_attempts", "seal_cells")
+        return {"action": action, "ok": bool(seal.get("ok")), **{
+            key: seal[key] for key in fields if seal.get(key) is not None
+        }}
+
+    @staticmethod
     def _entity_dist(bot_pos: Sequence[float] | None, ent: dict[str, Any]) -> float:
         epos = ent.get("pos")
         if isinstance(bot_pos, (list, tuple)) and len(bot_pos) >= 3 and isinstance(epos, (list, tuple)) and len(epos) >= 3:
@@ -4225,10 +4236,7 @@ class SubcorticalInstinctController:
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
                 seal = env.fortify(st, lambda: env.build_tactical("full_seal", threat_pos=c_pos))
                 sealed_ok = bool(seal.get("ok"))
-                actions.append({
-                    "action": "seal_creeper_shaft", "ok": sealed_ok,
-                    **({"reason": seal["reason"]} if seal.get("reason") else {}),
-                })
+                actions.append(self._seal_action(seal, action="seal_creeper_shaft"))
                 if sealed_ok:
                     st_chk_seal = env.bot.status()
                     post_creepers = [
@@ -4551,10 +4559,7 @@ class SubcorticalInstinctController:
             has_weapon = any(counts.get(w, 0) > 0 or held_name == w for w in MELEE_WEAPON_ORDER)
             if snap["enclosure"] == "carved_shaft" and env._pick_filler_block(counts) is not None:
                 seal = env.fortify(st, lambda: env.build_tactical("full_seal", threat_pos=mob_pos))
-                actions.append({
-                    "action": "seal_shaft", "ok": bool(seal.get("ok")),
-                    **({"reason": seal["reason"]} if seal.get("reason") else {}),
-                })
+                actions.append(self._seal_action(seal))
                 mode = "sealed_shaft" if seal.get("ok") else "flee"
                 if not seal.get("ok"):
                     fl = env.flee(mob_pos, distance=12.0, urgent=True, allow_shaft_seal=False)
@@ -4741,7 +4746,7 @@ class SubcorticalInstinctController:
                     sealed = flee_ok and fl.get("mode") == "sealed" and not fl.get("respawned")
                     if sealed:
                         mode = "sealed_shaft"
-                        actions.append({"action": "seal_shaft", "ok": True})
+                        actions.append(self._seal_action(fl.get("seal") or {"ok": True}))
                         self._recent_flee_streak = 0
                     else:
                         actions.append({

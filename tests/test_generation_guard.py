@@ -15311,6 +15311,84 @@ def test_flee_only_confirms_a_shaft_seal_after_both_cells_are_solid(monkeypatch,
         assert attempts[-1] == (1, 96, 0)
 
 
+@pytest.mark.parametrize("scene", [
+    "already_sealed", "new_wall", "uncertain_place", "hurt", "new_target", "gear", "airborne",
+    "missing_fluid_state", "no_longer_occluded",
+])
+def test_bug_009_only_keeps_generation_when_a_shaft_seal_is_confirmed_unchanged(monkeypatch, scene):
+    origin = [185773.5, 27, 198462.5]
+    zombie = {"id": 2128415, "name": "zombie", "dist": 2.5}
+    target = {**zombie, "pos": [185776, 27, 198462.5]}
+    held = {"name": "cobblestone", "count": 7, "slot": 37}
+    status = {
+        "pos": origin, "dimension": "overworld", "last_death": {"t": 1}, "health": 20, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "busy": None, "held_controls": None,
+        "in_water": False, "in_lava": False, "submerged": False, "on_fire": False,
+        "held": held, "offhand": None, "armor_points": 0, "effects": [], "blocking": False, "sneaking": False,
+        "yaw": 0.0, "nearest_hostile": zombie,
+    }
+    wall = [(185774, 27, 198462), (185774, 28, 198462)]
+    blocks = {} if scene in {"new_wall", "uncertain_place"} else dict.fromkeys(wall, "cobblestone")
+    placements = []
+    scans = 0
+    hits = []
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            nonlocal scans
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": [hit for hit in hits if hit["seq"] > kwargs["params"]["since"]]}
+            if action == "inventory":
+                return {"items": [held]}
+            if action == "get_entities":
+                scans += 1
+                if scans == 1:
+                    return {"entities": [zombie]}
+                if scans == 3:
+                    if scene == "hurt":
+                        status["health"] = 18
+                        hits.append({"seq": 1, "type": "hurt", "source": "mob_attack"})
+                    elif scene == "new_target":
+                        status["nearest_hostile"] = {"id": 2128416, "name": "zombie", "dist": 1.0}
+                    elif scene == "gear":
+                        status["held"] = {"name": "iron_axe", "slot": 39}
+                    elif scene == "airborne":
+                        status["on_ground"] = False
+                    elif scene == "missing_fluid_state":
+                        del status["submerged"]
+                    elif scene == "no_longer_occluded":
+                        status["nearest_hostile"] = {**target, "blocked_by_wall": False}
+                return {"entities": [target]}
+            if action == "get_block":
+                return {"name": blocks.get(tuple(body["pos"]), "air")}
+            if action == "place":
+                cell = tuple(body["pos"])
+                placements.append(cell)
+                blocks[cell] = body["item"]
+                if scene == "uncertain_place":
+                    raise ApiError("timeout", "placement acknowledgement missing")
+            return {"ok": True}
+
+    guard = GenerationGuard(ShaftBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard.combat_env, "arena_snapshot", lambda _pos: {"enclosure": "carved_shaft"})
+    incident = guard.poll()
+
+    outcome = incident["actions"][0]["result"]
+    seal, = outcome["actions"]
+    assert seal["action"] == "seal_shaft" and seal["ok"]
+    assert placements == (wall if scene in {"new_wall", "uncertain_place"} else [])
+    assert incident["requires_replan"] is (scene != "already_sealed")
+    assert seal["placed"] == (2 if scene == "new_wall" else 0)
+    assert seal["placement_attempts"] == len(placements) and seal["direction"] == "east"
+    assert seal["seal_cells"] == [list(cell) for cell in wall]
+    if not placements:
+        assert seal["reason"] == "already_sealed"
+    if scene == "already_sealed":
+        assert "本轮未放置方块" in incident["note"]
+
+
 @pytest.mark.parametrize("terrain", [
     "wall", "fire", "unknown", "drifted_during_probe", "missed_landing", "respawned",
     "live_shooter_covered", "shooter_flanked", "scan_timeout", "wall_removed_during_scan",

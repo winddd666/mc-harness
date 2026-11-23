@@ -3785,10 +3785,17 @@ class GenerationGuard:
         if len(actions) != 1 or actions[0]["action"] != "subcortical_combat" or not actions[0].get("ok"):
             return False
         outcome = actions[0].get("result")
-        if not isinstance(outcome, dict) or outcome.get("mode") != "counter_killed":
+        if not isinstance(outcome, dict):
             return False
         hits = outcome.get("actions")
         target = trigger.get("primary_entity_id")
+        if outcome.get("mode") == "sealed_shaft":
+            return bool(
+                not outcome.get("latched_guard") and isinstance(hits, list) and len(hits) == 1
+                and self._unchanged_melee_seal(before, after, target, hits[0])
+            )
+        if outcome.get("mode") != "counter_killed":
+            return False
         if isinstance(hits, list) and hits and isinstance(hits[0], dict) and hits[0].get("action") == "raise_shield_entry":
             # The slot releases temporary posture before poll samples the final state.
             shield_before, shield_after = before.get("offhand"), after.get("offhand")
@@ -3824,6 +3831,32 @@ class GenerationGuard:
             and isinstance(held_before, dict) and isinstance(held_after, dict)
             and (held_after.get("name"), held_after.get("slot")) == (held_before.get("name"), held_before.get("slot"))
             and pos_before and pos_after and math.dist(pos_before[:3], pos_after[:3]) <= 0.2
+        )
+
+    def _unchanged_melee_seal(self, before: dict[str, Any], after: dict[str, Any], target: Any, seal: Any) -> bool:
+        if not (
+            isinstance(seal, dict) and seal.get("action") == "seal_shaft" and seal.get("ok") is True
+            and seal.get("reason") == "already_sealed" and seal.get("placed") == seal.get("placement_attempts") == 0
+        ):
+            return False
+        stable = ("health", "food", "held", "offhand", "blocking", "sneaking", "armor_points", "effects", "yaw")
+        health = after.get("health")
+        _, old_dist, old_id, _ = self._extract_hostile_info(before)
+        _, distance, entity_id, _ = self._extract_hostile_info(after)
+        nearest = after.get("nearest_hostile")
+        return (
+            isinstance(health, (int, float)) and 16.0 <= health <= 20.0
+            and before.get("ready") is True and before.get("alive") is True
+            and before.get("on_ground") is True and self.combat_env._on_same_footing(before, after)
+            and before.get("pos") == after.get("pos")
+            and all(key in before and key in after and before[key] == after[key] for key in stable)
+            and all(
+                "held_controls" in state and not state["held_controls"] and not state.get("busy")
+                and all(state.get(key) is False for key in ("submerged", "in_water", "in_lava", "on_fire"))
+                for state in (before, after)
+            )
+            and isinstance(nearest, dict) and nearest.get("blocked_by_wall") is not False
+            and target is not None and entity_id == old_id == target and distance >= old_dist - 0.25
         )
 
     def _unchanged_ranged_warning(
@@ -6804,14 +6837,12 @@ class GenerationGuard:
         elif "pre_hurt_creeper" in reasons:
             note = "已复查苦力怕威胁，继续当前生成。"
         elif "pre_hurt_melee" in reasons:
-            still_present = any(
-                isinstance(action.get("result"), dict) and action["result"].get("mode") == "cover_or_flee"
-                for action in actions
-            )
-            note = (
-                "同一近敌仍在，站位与风险复查无变化，继续当前生成。"
-                if still_present else "近战威胁已清除，复查无新险情，继续当前生成。"
-            )
+            combat_result = actions[0].get("result") if actions else None
+            combat_mode = combat_result.get("mode") if isinstance(combat_result, dict) else None
+            note = {
+                "sealed_shaft": "井口掩体复查仍有效，本轮未放置方块，继续当前生成。",
+                "cover_or_flee": "同一近敌仍在，站位与风险复查无变化，继续当前生成。",
+            }.get(combat_mode, "近战威胁已清除，复查无新险情，继续当前生成。")
         elif "in_lava" in reasons:
             note = "仍在原处尝试脱离岩浆，未观察到新伤害，继续当前生成。"
         elif "hot_floor" in reasons:
