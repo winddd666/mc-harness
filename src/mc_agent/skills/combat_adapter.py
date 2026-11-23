@@ -379,15 +379,23 @@ def run_combat_skill(
         target = None
         norm_filter = combat_v1.normalize_mob_name(target_name) if resolved_mode in {"auto", "melee", "rush"} else None
         if resolved_mode == "auto" or (resolved_mode in {"melee", "rush"} and norm_filter in {None, "blaze"}):
-            target = combat_v1.nearest_hostile_entity(
-                adapter, radius=32 if resolved_mode == "rush" else 24, name_filter=norm_filter,
-            )  # type: ignore[arg-type]
+            sighting = adapter.call("get_entities", {
+                "radius": 32 if resolved_mode == "rush" else 24, "types": [norm_filter or "hostile"],
+            })
+            entities = [entity for entity in sighting.get("entities") or [] if isinstance(entity, dict)]
+            target = entities[0] if entities else None
             observed_name = str(target.get("name") or "").removeprefix("minecraft:") if target else norm_filter
             if observed_name == "blaze":
                 status = adapter.call("status", method="GET", timeout=0.6)
                 if str(status.get("dimension") or "").removeprefix("minecraft:") in {"the_nether", "nether"}:
                     stationary_blaze = True
                     resolved_target = "blaze"
+                    if target is not None and target.get("blocked_by_wall") is True:
+                        target = next((entity for entity in entities if (
+                            str(entity.get("name") or "").removeprefix("minecraft:") == "blaze"
+                            and type(entity.get("id")) is int and _combat_position(entity.get("pos")) is not None
+                            and entity.get("blocked_by_wall") is False
+                        )), target)
                     raw = _fight_nether_blaze(adapter, CombatEnv(bot, geofence=geofence), status, target)
                     receipt = {
                         "ok": "error" not in raw, "mode": resolved_mode, "target_name": resolved_target,

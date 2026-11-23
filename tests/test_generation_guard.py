@@ -17207,6 +17207,7 @@ def test_combat_timeout_without_contact_reaches_repeat_guard(monkeypatch, reques
     ("rush", "none", "missing_target_footing", "blaze_requires_ranged"),
     ("auto", "bow", "missing_bot_footing", "unsafe_landing"),
     ("auto", "bow", "wall", "blocked_by_wall"),
+    ("auto", "bow", "blocked_then_visible", "shoot"),
     ("auto", "bow", "target_lost", "shoot"),
     ("auto", "bow", "respawn", "combat_position_changed"),
     ("auto", "bow", "shot_unconfirmed", "shoot_unconfirmed"),
@@ -17239,6 +17240,11 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
             }
         elif endpoint == "get_entities":
             entities = [target]
+            if scene == "blocked_then_visible":
+                # Long3 H2 EP04, where the nearest blaze was behind obsidian.
+                entities.insert(0, {
+                    "id": 1136219, "name": "blaze", "pos": [3531.8, 55, -3801.8], "blocked_by_wall": True,
+                })
             if scene == "target_lost" and writes:
                 entities = [{**target, "id": 1133883}]
             data = {"entities": entities}
