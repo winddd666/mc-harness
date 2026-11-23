@@ -182,10 +182,11 @@ def case_bug002_build_and_enter_portal(bot: BotSession, bot_name: str, base_x: i
     st = bot.status() or {}
     dim = str(st.get("dimension") or "").lower()
     passed = bool(res.get("ok")) and "nether" in dim
-    # Return bot to overworld so subsequent tests stay clean
+    # Return bot to overworld and wait until ready so subsequent tests stay clean
     if "nether" in dim:
         rcon_batch([f"execute in minecraft:overworld run tp {bot_name} {base_x + 0.5} {base_y} {base_z + 0.5}"], timeout=30)
-        time.sleep(1.5)
+        time.sleep(2.5)
+        ensure_bot_ready(bot, timeout_s=25.0)
     return {
         "passed": passed,
         "skill_ok": res.get("ok"),
