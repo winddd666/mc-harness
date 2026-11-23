@@ -6554,33 +6554,39 @@ def test_full_station_inventory_uses_excess_blocks_without_spending_reserved_inp
 
 
 @pytest.mark.parametrize("drop_confirmed", [True, False])
-def test_mine_dfs_triggers_retention_cleanup(drop_confirmed) -> None:
+@pytest.mark.parametrize("empty_slots", [0, 2, 8])
+def test_mine_dfs_triggers_retention_cleanup(drop_confirmed, empty_slots) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
-    state = {"cobblestone": 300}
+    near_capacity = empty_slots < 3
+    block, original, cap, dimension = (
+        ("netherrack", 576, 128, "the_nether") if near_capacity else ("cobblestone", 300, 192, "overworld")
+    )
+    state = {block: original}
+    protected = [{"name": "diamond_pickaxe", "count": 1}] * (36 - math.ceil(original / 64) - empty_slots)
     looks = []
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
         body = json.loads(request.content) if request.content else {}
         if path == "inventory":
-            rows = []
-            left = state["cobblestone"]
-            while left > 0:
-                rows.append({"name": "cobblestone", "count": min(64, left)})
-                left -= min(64, left)
+            rows = [
+                {"name": block, "count": min(64, state[block] - offset)}
+                for offset in range(0, state[block], 64)
+            ] + protected
             return httpx.Response(200, json={"ok": True, "result": {"items": rows}})
         if path == "status":
             return httpx.Response(200, json={"ok": True, "result": {
-                "pos": [0.5, 30.0, 0.5], "yaw": 1.0, "pitch": 0.4, "dimension": "overworld",
+                "pos": [0.5, 30.0, 0.5], "yaw": 1.0, "pitch": 0.4, "dimension": dimension, "on_ground": True,
             }})
         if path == "look":
             looks.append(body)
             return httpx.Response(200, json={"ok": True, "result": {}})
         if path == "drop":
             assert looks == [{"yaw": 1.0 + math.pi, "pitch": 0.0}]
+            assert body["item"] == block
             if drop_confirmed:
-                state["cobblestone"] -= int(body.get("count") or 0)
+                state[block] -= int(body.get("count") or 0)
             return httpx.Response(200, json={"ok": True, "result": {}})
         raise AssertionError(path)
 
@@ -6591,12 +6597,12 @@ def test_mine_dfs_triggers_retention_cleanup(drop_confirmed) -> None:
     assert result["inventory_cleanup"]["method"] == "drop_fallback"
     assert looks[-1] == {"yaw": 1.0, "pitch": 0.4}
     if drop_confirmed:
-        assert result["inventory_cleaned"] == [{"item": "cobblestone", "count": 108}]
-        assert state["cobblestone"] == 192
+        assert result["inventory_cleaned"] == [{"item": block, "count": original - cap}]
+        assert state[block] == cap
     else:
         assert "inventory_cleaned" not in result
         assert result["inventory_cleanup"]["error"] == "cleanup_unconfirmed"
-        assert state["cobblestone"] == 300
+        assert state[block] == original
 
 
 @pytest.mark.parametrize("mode,spare", [
@@ -7335,14 +7341,16 @@ def test_unstick_reports_failure_when_still_in_water() -> None:
     assert "deadline_hit" not in result
 
 
-@pytest.mark.parametrize("terrain", ["layers", "deep_drop", "unknown", "lava", "no_landing", "timeout"])
+@pytest.mark.parametrize("terrain", [
+    "layers", "deep_drop", "unknown", "lava", "no_landing", "timeout", "early_read_timeout", "early_dig_timeout",
+])
 def test_unstick_descends_canopy_only_with_confirmed_support(monkeypatch, terrain) -> None:
     clock = [0.0]
     monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     standing = [0.5, 71.0, 0.5]
     blocks = {70: "spruce_leaves", 63: "dirt"}
-    if terrain in {"layers", "no_landing", "timeout"}:
+    if terrain in {"layers", "no_landing", "timeout", "early_dig_timeout"}:
         blocks.update({y: "spruce_leaves" for y in range(65, 70)})
         blocks[64] = "spruce_log"
     if terrain in {"unknown", "lava"}:
@@ -7358,6 +7366,8 @@ def test_unstick_descends_canopy_only_with_confirmed_support(monkeypatch, terrai
         if route == "status":
             result = {"pos": standing, "on_ground": True, "alive": True, "ready": True, "dimension": "overworld"}
         elif route == "get_block":
+            if terrain == "early_read_timeout":
+                raise httpx.ReadTimeout("canopy support read failed", request=request)
             x, y, z = body["pos"]
             name = blocks.get(y, "air") if (x, z) == (0, 0) else "air"
             result = {"name": name, "diggable": name.endswith(("_leaves", "_log"))}
@@ -7367,8 +7377,10 @@ def test_unstick_descends_canopy_only_with_confirmed_support(monkeypatch, terrai
             x, y, z = body["pos"]
             digs.append((x, y, z))
             assert y == int(standing[1]) - 1
+            if terrain == "early_dig_timeout":
+                raise httpx.ReadTimeout("canopy dig reply lost", request=request)
             if terrain == "timeout":
-                clock[0] += float(request.extensions["timeout"]["read"])
+                clock[0] += sum(request.extensions["timeout"].values())
                 raise httpx.ReadTimeout("slow canopy dig", request=request)
             removed = blocks.pop(y)
             if terrain != "no_landing":
@@ -7382,7 +7394,14 @@ def test_unstick_descends_canopy_only_with_confirmed_support(monkeypatch, terrai
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).unstick(max_duration_s=10)
+        skills = MacroSkills(bot)
+        if terrain in {"early_read_timeout", "early_dig_timeout"}:
+            with pytest.raises(httpx.ReadTimeout):
+                skills.unstick(max_duration_s=10)
+            assert len(digs) == (1 if terrain == "early_dig_timeout" else 0)
+            assert stops == []
+            return
+        result = skills.unstick(max_duration_s=10)
 
     if terrain == "layers":
         assert digs == [(0, y, 0) for y in range(70, 63, -1)]
