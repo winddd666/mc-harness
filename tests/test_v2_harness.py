@@ -4030,6 +4030,67 @@ def test_bug086_ssl_rotation_preserves_cancel_and_bug087_transport_error_recover
         assert summary["stop_reason"] == "episode_cap"
 
 
+def test_bug042_150_cross_process_slot_gate_and_bug088_lodestone_threshold(tmp_path: Path) -> None:
+    """Regression for BUG-042/150 (cross-process flock concurrency slot gate honors limit & cancel)
+    and BUG-088 (lodestone task stops smelting at >=12 stone and reports exact deficit below 12)."""
+    import threading
+    import mc_agent.harness.model as model_mod
+    from mc_agent.harness.control import RequestCancelled
+    from mc_agent.harness.curriculum import CURRICULUM_PLAYBOOKS, _enrich_target_with_world_memory
+    from mc_agent.harness.world_memory import WorldMemory
+
+    # 1) BUG-042/150: hy4 defaults to 2 slots; 3rd concurrent waiter blocks until release or cancel
+    res_ep = model_mod.ResolvedQwenEndpoint(
+        endpoint="https://hy4.invalid/v1/chat/completions",
+        base_url="https://hy4.invalid/v1",
+        model="hy4",
+        api_key="k",
+    )
+    grp, limit = model_mod._resolve_cross_process_concurrency(model_mod.QwenSpec(provider="hy4"), res_ep)
+    assert limit == 2
+    l1 = model_mod._CrossProcessSlotLease(grp, 2, lock_dir=tmp_path)
+    l2 = model_mod._CrossProcessSlotLease(grp, 2, lock_dir=tmp_path)
+    l3 = model_mod._CrossProcessSlotLease(grp, 2, lock_dir=tmp_path)
+    try:
+        assert l1.acquire() >= 0.0
+        assert l2.acquire() >= 0.0
+        # 3rd lease cancels immediately when cancel_event is set
+        ev = threading.Event()
+        ev.set()
+        with pytest.raises(RequestCancelled):
+            l3.acquire(cancel_event=ev)
+        # Releasing l1 lets l3 acquire cleanly
+        l1.release()
+        assert l3.acquire() >= 0.0
+    finally:
+        l1.release()
+        l2.release()
+        l3.release()
+
+    # 2) BUG-088: lodestone task injects stop-smelt banner at >=12 stone and exact deficit at <12
+    wm = WorldMemory()
+    pb_full, boosted_full = _enrich_target_with_world_memory(
+        CURRICULUM_PLAYBOOKS["minecraft:adventure/use_lodestone"],
+        world_memory=wm,
+        bag_counts={"stone": 14},
+        chest_counts={},
+        origin=[0.0, 64.0, 0.0],
+        dim="overworld",
+    )
+    assert boosted_full is True
+    assert "严禁再调 mc_skill_smelt 烧圆石" in pb_full.task
+
+    pb_part, _ = _enrich_target_with_world_memory(
+        CURRICULUM_PLAYBOOKS["minecraft:adventure/use_lodestone"],
+        world_memory=wm,
+        bag_counts={"stone": 9},
+        chest_counts={},
+        origin=[0.0, 64.0, 0.0],
+        dim="overworld",
+    )
+    assert "仅缺 3 个" in pb_part.task
+
+
 
 
 

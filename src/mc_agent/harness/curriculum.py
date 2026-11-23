@@ -519,6 +519,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "解锁 adventure/use_lodestone(15分)：在 1.21.11 中磁石(lodestone)仅需 1 铁锭 + 8 个錾制石砖(chiseled_stone_bricks)，指南针(compass)需 4 铁锭 + 1 红石；"
             "收集 12 圆石烧成 12 stone -> 12 stone_bricks -> 18 stone_brick_slab -> 8 chiseled_stone_bricks，"
             "与 5 铁锭、1 红石合出 lodestone 与 compass，放下 lodestone 后手持 compass 调 mc_interact(x,y,z,item='compass')。"
+            "【防超额投炉】累计确认背包已有 >=12 个 stone（或等效石砖/錾制石砖）时立即停炉转合成，严禁继续投炉烧圆石；不足 12 时先查并取原炉余货，仅按实际缺口补料。"
         ),
         post_ensure_task=(
             "解锁 adventure/use_lodestone(15分)：背包已备齐 lodestone×1 与 compass×1（无需再去箱子取料或烧石头！）！"
@@ -1260,6 +1261,24 @@ def _enrich_target_with_world_memory(
     elif adv_id == "minecraft:story/obtain_armor":
         if (bag_counts.get("iron_ingot", 0) + chest_counts.get("iron_ingot", 0)) >= 4:
             boosted = True
+
+    elif adv_id == "minecraft:adventure/use_lodestone":
+        stone_have = (
+            int(bag_counts.get("stone", 0))
+            + int(bag_counts.get("stone_bricks", 0))
+            + int(bag_counts.get("chiseled_stone_bricks", 0)) * 2
+        )
+        if stone_have >= 12:
+            notes.append(
+                f"[库存门槛已满足：当前已有等效石头 {stone_have}>=12，严禁再调 mc_skill_smelt 烧圆石！"
+                "请立即直接合成 stone_bricks -> stone_brick_slab -> chiseled_stone_bricks -> lodestone]"
+            )
+            boosted = True
+        elif stone_have > 0:
+            deficit = 12 - stone_have
+            notes.append(
+                f"[磁石进度：当前已有等效石头 {stone_have}/12，仅缺 {deficit} 个；先检查原炉余货再按缺口 {deficit} 补烧，勿重复投 12 个]"
+            )
 
     elif adv_id == "minecraft:story/deflect_arrow":
         skel_hits = world_memory.query_habitats(["skeleton"], origin=pos, dim=norm_dim, limit=1)

@@ -11,15 +11,23 @@ from __future__ import annotations
 import collections
 from collections.abc import Callable
 import dataclasses
+import hashlib
 import json
 import math
 import os
 import pathlib
+from pathlib import Path
 import queue
 import random
 import re
+import tempfile
 import threading
 import time
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 import httpx
 
@@ -572,6 +580,74 @@ def _retry_delay_s(attempt: int, retry_after_header: str | None = None) -> float
     return 2.0 * (attempt + 1) + jitter
 
 
+def _resolve_cross_process_concurrency(spec: QwenSpec, resolved: ResolvedQwenEndpoint) -> tuple[str, int]:
+    """Return `(slot_group_key, max_slots)` for cross-process concurrency throttling (BUG-042/BUG-150)."""
+    prov = str(spec.provider or "").strip().lower()
+    raw_env = None
+    if prov:
+        raw_env = os.environ.get(f"MC_LLM_MAX_CONCURRENCY_{prov.upper()}")
+    if raw_env is None:
+        raw_env = os.environ.get("MC_LLM_MAX_CONCURRENCY")
+    if raw_env is not None:
+        try:
+            limit = max(0, int(raw_env.strip()))
+        except ValueError:
+            limit = 0
+    elif prov == "hy4":
+        limit = 2
+    else:
+        limit = 0
+    key_src = f"{prov or 'default'}:{resolved.base_url}"
+    digest = hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"{prov or 'llm'}_{digest}", limit
+
+
+class _CrossProcessSlotLease:
+    """Non-blocking flock-based cross-process concurrency slot with immediate cancel responsiveness."""
+
+    def __init__(self, group_key: str, max_slots: int, *, lock_dir: Path | None = None) -> None:
+        self.group_key = group_key
+        self.max_slots = max(0, int(max_slots))
+        self.lock_dir = lock_dir or (Path(tempfile.gettempdir()) / "mc-agent-llm-slots")
+        self._fd: int | None = None
+
+    def acquire(self, cancel_event: threading.Event | None = None) -> float:
+        if self.max_slots <= 0 or fcntl is None:
+            return 0.0
+        self.lock_dir.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RequestCancelled("立即处理新输入，已取消本次模型请求。")
+            for slot_idx in range(self.max_slots):
+                lock_path = self.lock_dir / f"{self.group_key}_slot_{slot_idx}.lock"
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._fd = fd
+                    return time.monotonic() - started
+                except BlockingIOError:
+                    os.close(fd)
+                except OSError:
+                    os.close(fd)
+            _sleep_with_cancel(0.15, cancel_event)
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        fd = self._fd
+        self._fd = None
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def _is_concurrency_limit_429(status_code: int, detail: str) -> bool:
     if status_code != 429:
         return False
@@ -663,7 +739,12 @@ def _chat_direct(
 
     standard_max_attempts = 3
     concurrency_max_attempts = 8
+    slot_group, slot_limit = _resolve_cross_process_concurrency(spec, resolved)
+    slot_lease = _CrossProcessSlotLease(slot_group, slot_limit)
     try:
+        waited_slot = slot_lease.acquire(cancel_event)
+        if waited_slot >= 0.05 and on_event is not None:
+            on_event({"type": "concurrency_wait", "wait_s": round(waited_slot, 3), "slots": slot_limit})
         for attempt in range(concurrency_max_attempts):
             if cancel_event is not None and cancel_event.is_set():
                 raise RequestCancelled("立即处理新输入，已取消本次模型请求。")
@@ -740,6 +821,7 @@ def _chat_direct(
                     continue
                 raise RuntimeError(f"Qwen API 连接或读取失败（{type(exc).__name__}: {exc}）") from None
     finally:
+        slot_lease.release()
         if owns_client:
             http_client.close()
 
