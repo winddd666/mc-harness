@@ -2379,12 +2379,13 @@ def _install_bare_iron_guidance() -> None:
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
         "已有安全可用的熔炉时，先查看炉内产物和进度，取出已炼铁锭，等同批铁料烧完再算缺口。"
         "需要补锭且包里有铁块时，先调用 mc_craft(item='iron_ingot', count=9) 拆一块并核对入包。"
-        "仅铁锭加粗铁仍不足 3 时才继续采铁。就近优先采暴露铁矿；需要下井或找矿时调用 "
+        "仅铁锭加粗铁仍不足 3 时才继续采铁。就近优先采暴露铁矿，铁器课开新井要用 DFS，"
+        "返程需要向上撤离时走已确认安全的通道。需要下井或找矿时调用 "
         "mc_skill_mine_dfs(action='explore', target='iron', target_y=16, max_duration_s=90)，"
         "goal_count 只填 3 减去当前铁锭和粗铁后的正数缺口。每片结束重查实包，"
         "即使 ok=false 或 movement_not_confirmed 也核对 gained.raw_iron。"
         "采集若报 no_drops_collected 且 nearby_drops 有目标物，安全且可达时先调用一次 "
-        "mc_skill_collect_drops 并核对实包。未入包就换作业面。"
+        "mc_skill_collect_drops 并核对实包。低位掉落仅沿已有安全通道拾取，未入包就换作业面。"
         "铁原料齐后为取货和制镐留足本集时间。铁锭还不足时，先找安全站位并核对燃料。"
         "缺燃料先补燃料，再调用 mc_skill_smelt，input_item 填 raw_iron，count 填所缺铁锭数。"
         "实包到 3 锭后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，查询手持物确认铁镐。"
@@ -2394,6 +2395,51 @@ def _install_bare_iron_guidance() -> None:
         playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task, post_ensure_task=task,
         extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_skill_collect_drops"))),
     )
+
+
+def _install_bare_iron_descent_guard(toolset: Any) -> None:
+    """Keep the first iron-pickaxe actor on DFS for downward mining."""
+    from mc_agent.harness import agent as actor
+    from mc_agent.harness import curriculum as cur
+
+    run_agent = actor.run_mc_agent
+    iron_tools = cur.CURRICULUM_PLAYBOOKS["bootstrap_iron_age"].advancement_id
+
+    def run_with_descent_guard(*args: Any, **kwargs: Any) -> dict:
+        if kwargs.get("toolset") is not toolset or kwargs.get("target_advancement") != iron_tools:
+            return run_agent(*args, **kwargs)
+        staircase = toolset.mc_skill_staircase
+
+        def guarded_staircase(
+            direction: str | None = None,
+            steps: int = 12,
+            vertical: str = "down",
+            stop_on_ore: bool | None = None,
+        ) -> str:
+            heading = str(direction or "").strip().lower()
+            movement = str(vertical or "").strip().lower() or "down"
+            modes = {heading, movement}
+            if "down" in modes and modes.isdisjoint({"up", "pillar"}):
+                return json.dumps({
+                    "ok": False,
+                    "requires_replan": True,
+                    "steps_done": 0,
+                    "stop_reason": "iron_descent_requires_dfs",
+                    "error": {
+                        "code": "iron_descent_requires_dfs",
+                        "message": "铁器课下井请调用 mc_skill_mine_dfs(action='explore', target='iron', target_y=16)。"
+                                   "低位掉落只沿已有安全通道拾取。",
+                    },
+                }, ensure_ascii=False)
+            return staircase(direction=direction, steps=steps, vertical=vertical, stop_on_ore=stop_on_ore)
+
+        toolset.mc_skill_staircase = guarded_staircase
+        try:
+            return run_agent(*args, **kwargs)
+        finally:
+            toolset.mc_skill_staircase = staircase
+
+    actor.run_mc_agent = run_with_descent_guard
 
 
 def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | None = None) -> bool:
@@ -2940,6 +2986,7 @@ def main() -> int:
         if args.stage == "bare":
             _install_bare_stone_guidance()
             _install_bare_iron_guidance()
+            _install_bare_iron_descent_guard(toolset)
         install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         if portal_guard is not None:
             from mc_agent.harness import curriculum as cur
