@@ -2198,8 +2198,7 @@ class McToolset:
             # BUG-027: the backend's goNear can silently fail, then activate
             # from 12m away and report a misleading no_window. Pre-check here.
             try:
-                ents = self.bot.call("get_entities", {"radius": 32}, timeout_s=2.0).get("entities") or []
-                ent = next((e for e in ents if isinstance(e, dict) and e.get("id") == entity_id), None)
+                ent = self.skills._observe_window_entity(entity_id)
                 if ent is None:
                     return json.dumps(
                         {
@@ -2234,6 +2233,16 @@ class McToolset:
                         },
                         ensure_ascii=False,
                     )
+                if self.skills._is_merchant_entity(ent):
+                    def view_merchant() -> dict[str, Any]:
+                        nonlocal ent
+                        budget, imminent = self._clamp_tool_budget(14.0, max_s=14.0)
+                        if imminent:
+                            raise ApiError("episode_deadline_imminent", "本集剩余时间不足，交易窗口未打开。")
+                        observed, ent = ent, None
+                        return self.skills.merchant_window_view(entity_id, observed, max_duration_s=budget)
+
+                    return self._run_skill(view_merchant)
             except (ApiError, httpx.HTTPError, TypeError, ValueError):
                 pass
         raw = self._call_json("window/view", {"target": target})
@@ -2257,12 +2266,22 @@ class McToolset:
         target = _build_window_target(block, entity_id, x, y, z)
         if isinstance(target, str):
             return target
-        if target.get("block") in ("furnace", "minecraft:furnace"):
+        missing_source = [
+            isinstance(op, dict) and op.get("op") == "take" and op.get("from") is None
+            for op in ops
+        ] if isinstance(ops, list) else []
+        furnace = target.get("block") in ("furnace", "minecraft:furnace")
+        if any(missing_source) and "pos" in target:
+            try:
+                observed = self.bot.call("get_block", {"pos": target["pos"]}, timeout_s=1.0, allow_reauth=False)
+                name = str(observed.get("name") or observed.get("block") or "").removeprefix("minecraft:")
+                furnace = name == "furnace"
+            except (ApiError, httpx.HTTPError):
+                pass
+        if furnace and any(missing_source):
             ops = [
-                {**op, "from": "output"}
-                if isinstance(op, dict) and op.get("op") == "take" and op.get("from") is None
-                else op
-                for op in ops
+                {**op, "from": "output"} if missing else op
+                for op, missing in zip(ops, missing_source)
             ]
         raw = self._call_json("window/act", {"target": target, "ops": ops})
         if "pos" in target:
@@ -2364,9 +2383,16 @@ class McToolset:
         )
 
     def mc_skill_build_portal(self, enter: bool = True, wait_s: float = 8.0) -> str:
-        return self._run_skill(
-            lambda: self.skills.build_nether_portal(enter=bool(enter), wait_s=float(wait_s))
-        )
+        def build() -> dict[str, Any]:
+            budget, deadline_imminent = self._clamp_tool_budget(55.0)
+            if deadline_imminent:
+                return {
+                    "ok": False, "requires_replan": True,
+                    "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，建门未开始。"},
+                }
+            return self.skills.build_nether_portal(enter=bool(enter), wait_s=float(wait_s), max_duration_s=budget)
+
+        return self._run_skill(build)
 
     def mc_skill_enchant(
         self,
@@ -2482,14 +2508,15 @@ class McToolset:
         get_item: str | None = None,
         times: int = 1,
     ) -> str:
-        return self._run_skill(
-            lambda: self.skills.merchant_trade(
-                entity_id=entity_id,
-                option=option,
-                get_item=get_item,
-                times=times,
+        def trade() -> dict[str, Any]:
+            budget, imminent = self._clamp_tool_budget(20.0, max_s=20.0)
+            if imminent:
+                raise ApiError("episode_deadline_imminent", "本集剩余时间不足，交易未开始。")
+            return self.skills.merchant_trade(
+                entity_id=entity_id, option=option, get_item=get_item, times=times, max_duration_s=budget,
             )
-        )
+
+        return self._run_skill(trade)
 
     def mc_skill_brew(
         self,
@@ -2920,7 +2947,7 @@ class McToolset:
         candidates: list[str] = ["north", "east", "south", "west"]
         try:
             probed = (
-                skills._probe_viable_up_stair_dirs(bx, by, bz)
+                skills._probe_viable_up_stair_dirs(bx, by, bz, require_filler_face=True)
                 if vertical == "up"
                 else skills._probe_viable_down_stair_dirs(bx, by, bz)
             )
@@ -3393,7 +3420,7 @@ class McToolset:
                 ),
                 Tool(
                     name="mc_window_view",
-                    description="查看附近容器(furnace/chest)或村民交易界面。",
+                    description="查看附近容器或村民交易界面。已观测到的近距离村民可短程贴近后开窗。",
                     parameters={
                         "block": Parameter("方块类型名，如'furnace'", required=False),
                         "entity_id": Parameter("实体ID", kind="integer", required=False),
@@ -3435,7 +3462,7 @@ class McToolset:
                 ),
                 Tool(
                     name="mc_skill_build_portal",
-                    description="一键清地、搭建 4x5 黑曜石下界传送门、用打火石点火并走入传送门进入下界（需背包有 obsidian>=10 与 flint_and_steel>=1）。",
+                    description="搭建或补完附近已开工的黑曜石下界传送门。新框需 10 格黑曜石，续建只需补缺格，点火需打火石。",
                     parameters={
                         "enter": Parameter("点火后是否自动走入传送门进入下界，默认true", kind="boolean", required=False),
                         "wait_s": Parameter("站入传送门等待维度切换的最长秒数，默认8", kind="number", required=False),

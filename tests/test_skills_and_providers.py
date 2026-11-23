@@ -2752,8 +2752,64 @@ def test_staircase_up_falls_back_to_pillar_when_step_has_no_face(monkeypatch) ->
     assert blocked["stop_reason"] == "pillar_fallback_cooldown"
     assert blocked["steps_done"] == 0
     assert blocked["requires_replan"] is True
+    assert "120 秒" in blocked["message"] and "mc_skill_unstick" in blocked["message"]
+    assert blocked["last_error"]["message"] == blocked["message"]
     assert expired["stop_reason"] == "pillar_fallback"
     assert expired["requires_replan"] is False
+
+
+@pytest.mark.parametrize("scene", ["auto_east", "explicit_north", "horizontal_exit"])
+def test_pillar_cooldown_uses_a_probed_stair_or_safe_lateral_exit(monkeypatch, scene) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    monkeypatch.setattr(time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    position = [0.5, 30.0, 0.5]
+    blocks = {(0, 29, 0): "stone", (0, 31, -1): "stone"}
+    if scene == "horizontal_exit":
+        blocks[(1, 29, 0)] = "stone"
+    else:
+        blocks[(1, 30, 0)] = "stone"
+    writes = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": list(position), "dimension": "overworld", "on_ground": True, "health": 20}
+        elif route == "inventory":
+            result = {"items": [] if scene == "horizontal_exit" else [{"name": "cobblestone", "count": 4}]}
+        elif route == "get_block":
+            result = {"name": blocks.get(tuple(body["pos"]), "air")}
+        elif route == "move_to" and scene == "auto_east":
+            writes.append(route)
+            position[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(position)}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence(radius=10))
+        tools.skills._pillar_fallbacks[("overworld", 0, 0)] = (2, 100.0)
+        direction = "" if scene == "auto_east" else "north"
+        result = json.loads(tools.mc_skill_staircase(direction=direction, vertical="up", steps=1, stop_on_ore=False))
+
+    if scene == "auto_east":
+        assert result["ok"] and result["direction"] == "east" and result["steps_done"] == 1
+        assert writes == ["move_to"] and position == [1.5, 31, 0.5]
+    else:
+        assert not result["ok"] and result["stop_reason"] == "pillar_fallback_cooldown"
+        assert result["steps_done"] == result["dug_count"] == 0 and not writes
+        assert "100 秒" in result["message"]
+        if scene == "horizontal_exit":
+            assert result["viable_up_directions"] == []
+            assert result["recovery_move"] == {"x": 1.5, "y": 30, "z": 0.5, "range": 0.3}
+            assert "mc_move_to" in result["message"]
+        else:
+            assert result["viable_up_directions"] == ["east"]
+            assert "direction='east'" in result["message"] and "recovery_move" not in result
 
 
 def test_staircase_up_retries_transient_place_failed() -> None:
@@ -2985,6 +3041,132 @@ def test_portal_reports_construction_phase_failures(monkeypatch, place_fails, co
         assert "interact" not in calls
 
 
+@pytest.mark.parametrize("scene", ["retry", "changed", "far", "fresh", "timeout", "no_position", "late_reconnect"])
+def test_portal_recounts_the_same_frame_before_resuming_within_budget(monkeypatch, scene) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    origin = [9, 64, 22]
+    position = [10.5, 64.0, 20.5]
+    occupied = {}
+    blocked = {(12, 66, 22), (12, 67, 22), (10, 68, 22), (11, 68, 22)}
+    if scene in {"fresh", "timeout"}:
+        blocked.clear()
+    bag = {"obsidian": 10, "flint_and_steel": 1}
+    actions = []
+    lit = False
+    timeout_pending = scene == "timeout"
+
+    def handler(request):
+        nonlocal lit, timeout_pending
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        actions.append((route, body))
+        if route == "status":
+            if scene == "late_reconnect":
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_connected", "message": "offline fixture"}})
+            result = {"pos": list(position) if scene != "no_position" else None, "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": [10, 65, 22], "name": "nether_portal"}] if lit else []}
+        elif route == "get_block":
+            pt = tuple(body["pos"])
+            result = {"name": occupied.get(pt, "stone" if pt[1] == 63 else "air")}
+        elif route == "dig":
+            occupied.pop(tuple(body["pos"]), None)
+            result = {}
+        elif route == "move_to":
+            result = {"pos": list(position)}
+        elif route == "place":
+            pt = tuple(body["pos"])
+            assert body["item"] == "obsidian" and pt[2] == origin[2] and bag["obsidian"] > 0
+            if pt in blocked:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "place_failed", "message": "blocked"}})
+            assert pt not in occupied
+            occupied[pt] = "obsidian"
+            bag["obsidian"] -= 1
+            if timeout_pending:
+                timeout_pending = False
+                clock[0] += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("placement reply lost", request=request)
+            result = {"placed": "obsidian", "pos": list(pt)}
+        elif route == "stop":
+            result = {"released": True}
+        elif route == "interact":
+            assert body["item"] == "flint_and_steel" and len(occupied) == 10
+            lit = True
+            result = {}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        if scene == "late_reconnect":
+            tools._episode_deadline_mono = 9.0
+            monkeypatch.setattr(tools, "_reconnect_once", lambda **_: clock.__setitem__(0, 6.0))
+            result = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert result["error"]["code"] == "episode_deadline_imminent"
+            assert [name for name, _ in actions] == ["status"]
+            return
+        if scene == "timeout":
+            tools._episode_deadline_mono = 3.0
+            imminent = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert imminent["error"]["code"] == "episode_deadline_imminent" and actions == []
+            tools._episode_deadline_mono = 8.0
+        first = json.loads(tools.mc_skill_build_portal(enter=False))
+        if scene == "no_position":
+            assert first["error"]["code"] == "portal_position_unverified"
+            assert [name for name, _ in actions] == ["status", "find_blocks"]
+            assert bag["obsidian"] == 10
+            return
+        assert first["portal_origin"] == origin and first["existing_obsidian"] == 0
+        if scene == "fresh":
+            assert first["ok"] and first["placed_obsidian"] == first["obsidian_consumed"] == 10
+            assert bag["obsidian"] == 0
+            return
+        if scene == "timeout":
+            assert first["error"]["code"] == "portal_time_budget" and first["action_released"] is True
+            assert first["placed_obsidian"] == 0 and bag["obsidian"] == 9 and clock[0] <= 4
+            assert [name for name, _ in actions if name in {"place", "interact", "stop"}] == ["place", "stop"]
+            tools._episode_deadline_mono = None
+        else:
+            assert first["error"]["code"] == "portal_frame_incomplete"
+            assert set(map(tuple, first["failed_cells"])) == blocked
+            assert first["placed_obsidian"] == first["obsidian_consumed"] == 6 and bag["obsidian"] == 4
+        if scene == "far":
+            position[:] = [31.5, 64.0, 28.5]
+            writes_before = len([name for name, _ in actions if name in {"dig", "place", "interact"}])
+            distant = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert distant["error"] == "missing_materials" and distant["required_obsidian"] == 10
+            assert distant["unfinished_portal_origin"] == origin
+            assert len([name for name, _ in actions if name in {"dig", "place", "interact"}]) == writes_before
+
+        blocked.clear()
+        position[:] = [12.5, 64.0, 21.5]
+        if scene == "changed":
+            del occupied[(10, 64, 22)]
+        first_writes = len([name for name, _ in actions if name in {"dig", "place", "interact"}])
+        second = json.loads(tools.mc_skill_build_portal(enter=False))
+        assert second["portal_origin"] == origin
+        if scene == "changed":
+            assert second["error"] == "missing_materials" and second["required_obsidian"] == 5
+            assert second["existing_obsidian"] == 5 and bag["obsidian"] == 4
+            assert len([name for name, _ in actions if name in {"dig", "place", "interact"}]) == first_writes
+        else:
+            expected = 9 if scene == "timeout" else 4
+            assert second["ok"] and second["existing_obsidian"] == 10 - expected
+            assert second["placed_obsidian"] == second["obsidian_consumed"] == expected
+            assert bag["obsidian"] == 0 and len(occupied) == 10
+            before_reuse = len(actions)
+            reused = json.loads(tools.mc_skill_build_portal(enter=False))
+            assert reused["ok"] and reused["reused_existing_portal"]
+            assert [name for name, _ in actions[before_reuse:]] == ["status", "find_blocks"]
+
+
 @pytest.mark.parametrize("refills", [1, 100])
 def test_staircase_down_verifies_refilled_floor_before_moving(monkeypatch, refills) -> None:
     import mc_agent.skills.library as library
@@ -3193,27 +3375,145 @@ def test_window_view_allows_near_entity() -> None:
     assert result["ok"] is True
 
 
-@pytest.mark.parametrize("options,source,expected_source,item", [
-    ({"block": "furnace"}, None, "output", "iron_ingot"),
-    ({"block": "minecraft:furnace"}, None, "output", "iron_ingot"),
-    ({"block": "furnace"}, "input", "input", "raw_iron"),
-    ({"block": "furnace"}, "fuel", "fuel", "coal"),
-    ({"block": "chest"}, None, None, "iron_ingot"),
-    ({"block": "furnace", "x": 1, "y": 64, "z": 0}, None, None, "iron_ingot"),
+@pytest.mark.parametrize("scene", [
+    "view_approach", "view_moved", "view_unconfirmed", "view_far",
+    "trade_near", "trade_approach", "trade_fence", "trade_walks_after_view", "trade_open_failure",
+    "trade_offer_changed", "trade_partial", "trade_timeout",
 ])
-def test_window_act_defaults_named_furnace_take_to_output(options, source, expected_source, item) -> None:
+def test_merchant_window_rechecks_approach_and_never_replays_uncertain_trade(monkeypatch, scene) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    initial_distance = {
+        "view_approach": 3.5, "view_unconfirmed": 3.5, "view_far": 6.0, "trade_approach": 12.0, "trade_fence": 12.0,
+    }.get(scene, 2.0)
+    merchant = [initial_distance, 64.0, 0.0]
+    pos = [0.0, 64.0, 0.0]
+    bag = {"emerald": 1, "bread": 0}
+    calls = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        if route == "get_entities":
+            distance = 12.0 if scene == "trade_approach" else math.dist(merchant, pos)
+            result = {"entities": [{"id": 17, "name": "villager", "pos": merchant, "dist": distance}]}
+        elif route == "status":
+            result = {"pos": list(pos), "alive": True, "on_ground": True}
+        elif route == "move_to":
+            assert body == {
+                "x": merchant[0], "y": merchant[1], "z": merchant[2], "range": 1.5,
+                "timeout": 4200 if scene == "trade_approach" else 1800, "stop_on": ["hurt", "death"],
+            }
+            if scene != "view_unconfirmed":
+                pos[0] = merchant[0] - 1.5
+            if scene == "view_approach":
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "movement_not_confirmed", "message": "position receipt incomplete",
+                }})
+            result = {"pos": pos}
+        elif route == "view":
+            assert body == {"target": {"entity_id": 17}}
+            assert math.dist(merchant, pos) <= 2.5
+            first = calls.count("view") == 1
+            if first and scene in {"view_moved", "trade_walks_after_view"}:
+                merchant[0] = 3.5
+                if scene == "view_moved":
+                    return httpx.Response(200, json={"ok": False, "error": {"code": "out_of_reach", "message": "villager walked away"}})
+            output = "apple" if scene == "trade_offer_changed" and not first else "bread"
+            result = {"window": "merchant", "options": [
+                {"index": 0, "give": [{"name": "emerald", "count": 1}], "get": {"name": output, "count": 6}, "available": True},
+            ]}
+        elif route == "act":
+            assert body == {"target": {"entity_id": 17}, "ops": [{"op": "select", "option": 0, "times": 1}]}
+            assert math.dist(merchant, pos) <= 2.5
+            if calls.count("act") == 1 and scene in {"trade_open_failure", "trade_offer_changed"}:
+                merchant[0] = 3.5
+                return httpx.Response(200, json={"ok": False, "error": {"code": "out_of_reach", "message": "before opening"}})
+            assert bag["emerald"] == 1
+            bag.update(emerald=0, bread=6)
+            done = [{"op": "select", "times": 1}]
+            if scene == "trade_partial":
+                return httpx.Response(200, json={"ok": False, "error": {
+                    "code": "out_of_reach", "message": "after selection", "failed_op": 0, "done": done,
+                }})
+            if scene == "trade_timeout":
+                clock[0] += request.extensions["timeout"]["read"]
+                raise httpx.ReadTimeout("ambiguous selection", request=request)
+            result = {"done": done}
+        elif route == "stop":
+            result = {"released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence(radius=16 if scene == "trade_fence" else 32))
+        raw = tools.mc_window_view(entity_id=17) if scene.startswith("view") else tools.mc_skill_trade(entity_id=17, option=0)
+        result = json.loads(raw)
+
+    assert calls.count("move_to") == int(scene in {
+        "view_approach", "view_moved", "view_unconfirmed", "trade_approach",
+        "trade_walks_after_view", "trade_open_failure", "trade_offer_changed",
+    })
+    no_trade = scene.startswith("view") or scene == "trade_fence"
+    assert calls.count("act") == (0 if no_trade else 2 if scene == "trade_open_failure" else 1)
+    if scene in {"view_unconfirmed", "view_far"}:
+        assert result["error"]["code"] == "out_of_reach" and "view" not in calls
+    elif scene == "trade_fence":
+        assert result["error"] == "void_geofence_blocked" and "view" not in calls
+    elif scene == "trade_offer_changed":
+        assert result["error"] == "trade_changed" and bag == {"emerald": 1, "bread": 0}
+    elif scene == "trade_partial":
+        assert result["error"] == "out_of_reach" and result["done"] == [{"op": "select", "times": 1}]
+        assert bag == {"emerald": 0, "bread": 6}
+    elif scene == "trade_timeout":
+        assert result["error"]["code"] == "trade_time_budget" and result["error"]["action_released"] is True
+        assert calls[-2:] == ["act", "stop"] and bag == {"emerald": 0, "bread": 6}
+    else:
+        assert result["ok"]
+        if scene.startswith("view"):
+            assert result["result"]["options"][0]["get"]["name"] == "bread"
+        else:
+            assert result["done"] == [{"op": "select", "times": 1}] and bag == {"emerald": 0, "bread": 6}
+
+
+@pytest.mark.parametrize("options,observed,source,expected_source,item", [
+    ({"block": "furnace"}, None, None, "output", "iron_ingot"),
+    ({"block": "minecraft:furnace"}, None, None, "output", "iron_ingot"),
+    ({"block": "furnace"}, None, "input", "input", "raw_iron"),
+    ({"block": "furnace"}, None, "fuel", "fuel", "coal"),
+    ({"block": "chest"}, None, None, None, "iron_ingot"),
+    ({"block": "furnace", "x": 1, "y": 64, "z": 0}, "furnace", None, "output", "iron_ingot"),
+    ({"x": 1, "y": 64, "z": 0}, "minecraft:furnace", None, "output", "iron_ingot"),
+    ({"block": "furnace", "x": 1, "y": 64, "z": 0}, "chest", None, None, "iron_ingot"),
+    ({"x": 1, "y": 64, "z": 0}, "unknown", None, None, "iron_ingot"),
+    ({"x": 1, "y": 64, "z": 0}, None, "input", "input", "raw_iron"),
+    ({"x": 1, "y": 64, "z": 0}, None, "fuel", "fuel", "coal"),
+])
+def test_window_act_defaults_confirmed_furnace_take_to_output(options, observed, source, expected_source, item) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
     sections = {"input": {"raw_iron": 4}, "fuel": {"coal": 4}, "output": {"iron_ingot": 6}}
     bag = {}
+    probes = []
     take = {"op": "take", "item": item, "count": 4, "to": "player"}
     if source is not None:
         take["from"] = source
     request_op = dict(take)
 
     def handler(request):
-        assert request.url.path.endswith("/window/act")
         body = json.loads(request.content)
+        if request.url.path.endswith("/get_block"):
+            assert observed is not None and body == {"pos": [1, 64, 0]}
+            probes.append(body["pos"])
+            if observed == "unknown":
+                return httpx.Response(200, json={"ok": False, "error": {"code": "not_loaded", "message": "unknown"}})
+            return httpx.Response(200, json={"ok": True, "result": {"name": observed}})
+        assert request.url.path.endswith("/window/act")
         target = {"pos": [1, 64, 0]} if "x" in options else {"block": options["block"]}
         assert body["target"] == target
         expected_op = {**request_op, "from": expected_source} if expected_source else request_op
@@ -3229,6 +3529,7 @@ def test_window_act_defaults_named_furnace_take_to_output(options, source, expec
         result = json.loads(McToolset(bot).mc_window_act(ops=[take], **options))
 
     assert take == request_op
+    assert probes == ([[1, 64, 0]] if observed is not None else [])
     if expected_source is None:
         assert result["error"]["code"] == "bad_section" and not bag
     else:
@@ -3592,6 +3893,85 @@ def test_sync_iron_smelt_retains_first_pick_materials(stock, requested, expected
         if "iron_pickaxe" not in stock:
             pick = json.loads(tools.mc_skill_craft_gear("iron_pickaxe"))
             assert pick["ok"] and bag["iron_pickaxe"] == 1
+
+
+@pytest.mark.parametrize("stock,count,requested,expected", [
+    ({"birch_log": 1, "birch_planks": 1}, 1, None, ("reserved_materials", 0)),
+    ({"birch_log": 1, "birch_planks": 1, "coal": 1}, 1, "coal", ("reserved_materials", 0)),
+    ({"birch_log": 2, "birch_planks": 1}, 2, None, ("reserved_materials", 1)),
+    ({"birch_log": 2}, 1, "stick", ("missing_fuel", 0)),
+    ({"birch_log": 2, "birch_planks": 1}, 1, "stick", ("birch_planks", 1)),
+    ({"birch_log": 3, "birch_planks": 1}, 1, "birch_log", ("birch_log", 1)),
+    ({"birch_log": 3}, 1, None, ("birch_planks", 1)),
+    ({"birch_log": 1, "crafting_table": 1, "coal": 1}, 1, None, ("coal", 1)),
+])
+def test_charcoal_checks_both_input_and_fuel_against_first_iron_materials(stock, count, requested, expected) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    inventory = {"stone_pickaxe": 1, "stick": 2, "cobblestone": 12, **stock}
+    bag = dict(inventory)
+    furnace = [233459, 55, 246410]
+    routes = []
+    loaded = ready = 0
+
+    def handler(request):
+        nonlocal loaded, ready
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        routes.append(route)
+        if route == "inventory":
+            result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
+        elif route == "status":
+            result = {"pos": [233458.5, 55.0, 246410.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1}]}
+        elif route == "craft":
+            assert body == {"item": "birch_planks", "count": 4}
+            assert expected == ("birch_planks", 1) and bag.get("birch_planks", 0) == 0
+            bag["birch_log"] -= 1
+            bag["birch_planks"] = 4
+            result = {"crafted": "birch_planks", "gained": 4}
+        elif route == "view":
+            assert body["target"]["pos"] == furnace
+            sections = {"input": [], "output": [{"name": "charcoal", "count": ready}]}
+            result = {"sections": sections, "info": {"burning": False}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            ops = body["ops"]
+            if ops[0]["op"] == "put":
+                fuel, fuel_count = expected
+                assert ops == [
+                    {"op": "put", "item": "birch_log", "count": count, "to": "input"},
+                    {"op": "put", "item": fuel, "count": fuel_count, "to": "fuel"},
+                ]
+                assert loaded == 0
+                bag["birch_log"] -= count
+                assert bag[fuel] >= fuel_count
+                bag[fuel] -= fuel_count
+                loaded = ready = count
+                result = {}
+            else:
+                assert ops == [{"op": "take", "from": "output", "count": loaded}]
+                bag["charcoal"] = ready
+                result = {"done": [{"took": {"charcoal": ready}}]}
+                ready = 0
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_smelt("birch_log", count=count, fuel_item=requested))
+
+    status, amount = expected
+    if status in {"missing_fuel", "reserved_materials"}:
+        assert result["error"] == status and result["collected"] == []
+        if status == "reserved_materials":
+            assert result["max_charcoal_input_after_reserve"] == amount
+        assert routes == ["inventory"] and bag == inventory
+    else:
+        assert result["ok"] and result["fuel"] == {"item": status, "count": amount}
+        assert bag["charcoal"] == count and bag["stick"] == 2
+        assert bag.get("crafting_table", 0) or 4 * bag.get("birch_log", 0) + bag.get("birch_planks", 0) >= 4
 
 
 @pytest.mark.parametrize("episode_budget,cap", [(None, 55.0), (14.0, 10.0)])
