@@ -393,7 +393,7 @@ def test_shaft_exhausted_message_is_built_after_result_dict_exists() -> None:
     """Regression: s04 crashed with UnboundLocalError because out_res was written too early."""
     import pathlib as _pl
 
-    src = _pl.Path("src/mc_agent/skills/mining_dfs.py").read_text(encoding="utf-8")
+    src = _pl.Path("src/mc_agent/skills/mining/runner.py").read_text(encoding="utf-8")
     created = src.index("out_res: dict[str, Any] = {")
     used = src.index('if stop_reason == "shaft_exhausted" and self.fluid_abandoned_deep:')
     assert used > created
