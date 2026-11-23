@@ -69,6 +69,7 @@ PROBE_THROUGHPUT_TARGETS = {"probe_iron_y16": ("raw_iron", 24), "probe_diamond_y
 FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
+IRON_TOOLS = "minecraft:story/iron_tools"
 DISTRACT_PIGLIN = "minecraft:nether/distract_piglin"
 OBTAIN_BLAZE_ROD = "minecraft:nether/obtain_blaze_rod"
 OBTAIN_ANCIENT_DEBRIS = "minecraft:nether/obtain_ancient_debris"
@@ -2410,8 +2411,10 @@ def _install_bare_iron_guidance() -> None:
     key = "bootstrap_iron_age"
     playbook = cur.CURRICULUM_PLAYBOOKS[key]
     task = (
+        "先用 mc_inventory 盘点实包。"
         "第 1 晚留在 Y=16 铁层安全发育，夜里无甲时先留在井下。"
-        "仍在地表（Y>=55）时，下井前备足 12 根原木等量木材与 2 把石镐。"
+        "仍在地表（Y>=55）且准备新下井时，木材与石镐按实包、现有炉台和本次缺口准备。"
+        "木料储备以 12 根原木等量为上限，已有木板也计入。没有实际缺口就直接下井。"
         "石器课若只做了第一把石镐，先在已露出的石层补第二把，需要炉子时留 8 圆石。"
         "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
@@ -2433,11 +2436,43 @@ def _install_bare_iron_guidance() -> None:
         "剩余时间和铁料充足时，就地用余铁做盾与铁甲。站位不安全或剩余时间不足时保留已有材料，下集优先制镐。"
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
-        playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task, post_ensure_task=task,
+        playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task,
+        post_ensure_task="备料已满足的条目直接跳过。先复点实包，只有实际短缺才追加采木或制备工具。" + task,
         extra_tools=tuple(dict.fromkeys((
-            *playbook.extra_tools, "mc_craft", "mc_skill_collect_drops", "mc_window_view", "mc_window_act",
+            *playbook.extra_tools, "mc_inventory", "mc_craft", "mc_skill_collect_drops", "mc_window_view", "mc_window_act",
         ))),
     )
+
+
+def _bare_iron_dfs_budget(toolset: Any, goal_count: int) -> int | str:
+    """Measure the remaining first-pickaxe input before opening another iron slice."""
+    from mc_agent.skills import total_owned_counts
+
+    try:
+        inv = toolset.bot.inventory()
+        counts = total_owned_counts(inv) if isinstance(inv.get("items"), list) and inv.get("ready") is not False else None
+    except Exception:
+        counts = None
+    if counts is None:
+        code = "iron_bootstrap_inventory_unavailable"
+        message = "暂未读到可靠背包，先用 mc_inventory 核对铁锭与粗铁，再按首把铁镐缺口安排采掘。"
+    else:
+        deficit = 3 - counts.get("iron_ingot", 0) - counts.get("raw_iron", 0) - 9 * counts.get("iron_block", 0)
+        if counts.get("iron_pickaxe", 0):
+            code = "iron_bootstrap_pickaxe_owned"
+            message = "实包已有铁镐。核对手持与铁器进度。"
+        elif deficit > 0:
+            return max(1, min(int(goal_count), deficit))
+        else:
+            code = "iron_bootstrap_materials_ready"
+            message = (
+                "首把铁镐的铁料已齐。若站位不安全，沿已知通路撤回。"
+                "在安全位置先收已起炉的铁锭，或拆铁块/熔炼缺的铁锭；实包够三锭就合成并验证铁镐。"
+            )
+    return json.dumps({
+        "ok": False, "requires_replan": True, "gained": {}, "stop_reason": code,
+        "error": {"code": code, "message": message},
+    }, ensure_ascii=False)
 
 
 def _install_dfs_course_guard(
@@ -2461,6 +2496,7 @@ def _install_dfs_course_guard(
             return run_agent(*args, **kwargs)
         staircase = toolset.mc_skill_staircase
         tunnel = toolset.mc_skill_tunnel
+        mine_dfs = toolset.mc_skill_mine_dfs
 
         def guarded_staircase(
             direction: str | None = None,
@@ -2480,15 +2516,33 @@ def _install_dfs_course_guard(
                 return redirect("tunnel", f"需脱险或清障时才走有支撑的短横向通道，本集最多 {max_tunnel_steps} 步。")
             return tunnel(direction=direction, steps=steps, stop_on_ore=stop_on_ore)
 
+        def guarded_iron_dfs(
+            target: str = "iron", goal_count: int = 6, target_y: int | None = None,
+            action: str = "explore", max_duration_s: float = 32.0,
+        ) -> str:
+            target_name = str(target or "iron").strip().lower().removeprefix("minecraft:")
+            if str(action or "explore").strip().lower() == "explore" and target_name in {
+                "iron", "raw_iron", "iron_ingot", "iron_ore", "deepslate_iron_ore",
+            }:
+                budget = _bare_iron_dfs_budget(toolset, goal_count)
+                if isinstance(budget, str):
+                    return budget
+                goal_count = budget
+            return mine_dfs(target=target, goal_count=goal_count, target_y=target_y, action=action, max_duration_s=max_duration_s)
+
         toolset.mc_skill_staircase = guarded_staircase
         if max_tunnel_steps is not None:
             toolset.mc_skill_tunnel = guarded_tunnel
+        if advancement == IRON_TOOLS:
+            toolset.mc_skill_mine_dfs = guarded_iron_dfs
         try:
             return run_agent(*args, **kwargs)
         finally:
             toolset.mc_skill_staircase = staircase
             if max_tunnel_steps is not None:
                 toolset.mc_skill_tunnel = tunnel
+            if advancement == IRON_TOOLS:
+                toolset.mc_skill_mine_dfs = mine_dfs
 
     actor.run_mc_agent = run_with_descent_guard
 
@@ -3153,7 +3207,7 @@ def _run_live(args: argparse.Namespace) -> int:
         if args.stage == "bare":
             _install_bare_stone_guidance()
             _install_bare_iron_guidance()
-            _install_dfs_course_guard(toolset, "minecraft:story/iron_tools", "iron", 16)
+            _install_dfs_course_guard(toolset, IRON_TOOLS, "iron", 16)
         if args.stage in {"midgame", "village"}:
             _install_wild_portal_guidance()
         if args.stage in NETHER_STAGES:
