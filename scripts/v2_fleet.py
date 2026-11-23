@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Unified 22-Bot Fleet Orchestrator & Cross-Model P0/P1 Bug Aggregator for v2-integrated.
+"""Fleet Orchestrator & Cross-Model P0/P1 Bug Aggregator for v2-integrated.
 
 Squads:
   - nju  (3): NJU Qwen3.6-35B competition model (soft-oversubscribed 3-way on 2-concurrency gateway, rpm=9)
   - glm  (5): OpenCode GLM-5.3 (complex mid/late-game: fortress, bastion, village, enchant, midgame)
   - ds   (4): OpenCode DeepSeek-v4.1-flash (cost-controlled cross-validation)
   - hy4 (10): OpenCode HY4-flash-free (free high-concurrency broad terrain & edge-case sweep)
+  - lc   (4): OpenCode LongCat-2.5-free (village and midgame coverage)
 
 Usage:
   python scripts/v2_fleet.py provision
-  python scripts/v2_fleet.py launch --wave r11 --duration 1200 [--squads nju,glm,ds,hy4]
+  python scripts/v2_fleet.py launch --wave r11 --duration 1200 [--squads nju,glm,ds,hy4,lc]
   python scripts/v2_fleet.py triage --wave r11 [--markdown [PATH]] [--no-markdown]
 
 `triage` parses each bot's `wild-endurance-*.json` + `*.events.jsonl` and auto-exports
@@ -21,23 +22,29 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import errno
 import fcntl
 import glob
+import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from collections import Counter, defaultdict
-from typing import TextIO
+from datetime import datetime
+from typing import Any, TextIO
 
 if __package__:
     from .fleet_lifecycle import LifecycleCounter
-    from .v2_triage import is_http_429_failure
+    from .v2_triage import is_http_429_failure, normalize_tool_error_code
 else:
     from fleet_lifecycle import LifecycleCounter
-    from v2_triage import is_http_429_failure
+    from v2_triage import is_http_429_failure, normalize_tool_error_code
 
 WT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN_ROOT = pathlib.Path("/home/xzq/projects/mc")
@@ -47,10 +54,14 @@ ENV_FILE = MAIN_ROOT / ".env.beast"
 FLEET_TOKEN_FILE = MAIN_ROOT / ".state-fleet/tokens.json"
 RUNS_ROOT = pathlib.Path(os.environ.get("MC_FLEET_RUNS_ROOT") or (WT_ROOT / "runs"))
 LOCK_DIR = WT_ROOT / ".state-fleet" / "locks"
+SOURCE_DIR = WT_ROOT / ".state-fleet" / "sources"
 SLOW_TOOL_THRESHOLD_S = 60.0
 KNOWN_STAGES: tuple[str, ...] = (
     "village_to_stronghold_end",
     "day2_village_near",
+    "probe_obsidian_portal",
+    "probe_diamond_y54",
+    "probe_iron_y16",
     "nether_fortress",
     "brewing_alchemy",
     "nether_bastion",
@@ -67,8 +78,9 @@ KNOWN_STAGES: tuple[str, ...] = (
 
 
 def _stage_from_dirname(name: str) -> str:
+    name_without_duration = re.sub(r"_\d+[smh]$", "", name)
     for stage in KNOWN_STAGES:  # longest first so nether_fortress wins over nether
-        if name.endswith("_" + stage):
+        if name_without_duration.endswith("_" + stage):
             return stage
     return name.split("_")[-1] if name.count("_") >= 2 else "?"
 
@@ -325,6 +337,43 @@ def _release_bot_locks(locks: dict[str, TextIO]) -> None:
         lock.close()
 
 
+def _validate_wave_source(source: pathlib.Path, runner_path: pathlib.Path) -> None:
+    runner = source / runner_path
+    package = source / "src" / "mc_agent"
+    if not runner.is_file() or not (package / "__init__.py").is_file():
+        raise ValueError("source snapshot is missing the fleet runner or mc_agent package")
+    for path in (runner, *sorted(package.rglob("*.py"))):
+        compile(path.read_bytes(), str(path.relative_to(source)), "exec", dont_inherit=True)
+
+
+def _prepare_wave_source() -> tuple[str, pathlib.Path]:
+    """Publish a validated, commit-addressed source tree before starting any bot."""
+    revision = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=WT_ROOT, text=True).strip()
+    runner_path = RUNNER.relative_to(WT_ROOT)
+    source = SOURCE_DIR / revision
+    if not source.is_dir():
+        SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".prepare-", dir=SOURCE_DIR) as tmp:
+            staged = pathlib.Path(tmp) / "source"
+            payload = subprocess.check_output(
+                ["git", "archive", "--format=zip", revision, "src", runner_path.as_posix()], cwd=WT_ROOT,
+            )
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                archive.extractall(staged)
+            _validate_wave_source(staged, runner_path)
+            try:
+                staged.rename(source)
+            except OSError as exc:
+                if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                    raise
+            else:
+                return revision, source
+    # Concurrent launchers can publish the same revision. On-disk validation also
+    # catches a damaged cache before a later launch uses it.
+    _validate_wave_source(source, runner_path)
+    return revision, source
+
+
 def cmd_launch(
     wave: str,
     duration_s: float,
@@ -351,16 +400,21 @@ def cmd_launch(
         return 1
     selected = _assign_isolated_sites(selected_raw)
     try:
+        revision, source = _prepare_wave_source()
         locks = _acquire_bot_locks(selected, wave)
-    except (OSError, RuntimeError) as exc:
-        print(str(exc))
+    except (OSError, RuntimeError, SyntaxError, ValueError, subprocess.CalledProcessError, zipfile.BadZipFile) as exc:
+        print(f"[Fleet Launch] wave={wave}: {exc}", file=sys.stderr)
         return 2
     try:
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(WT_ROOT / "src")
-        procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path]] = []
+        env["PYTHONPATH"] = str(source / "src")
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["MC_FLEET_RUNS_ROOT"] = str(RUNS_ROOT.resolve())
+        env["MC_FLEET_LIVE_STATE_DIR"] = str(WT_ROOT / ".state-l3-live")
+        runner = source / RUNNER.relative_to(WT_ROOT)
+        procs: list[tuple[FleetSlot, subprocess.Popen, pathlib.Path, str]] = []
         dur_label = "per-slot" if use_slot_durations else str(duration_s)
-        print(f"[Fleet Launch] wave={wave} bots={len(selected)} duration_s={dur_label} max_eps={max_episodes or 'deadline'}")
+        print(f"[Fleet Launch] wave={wave} bots={len(selected)} revision={revision} duration_s={dur_label} max_eps={max_episodes or 'deadline'}", flush=True)
         for idx, slot in enumerate(selected):
             slot_dur = slot.duration_s if use_slot_durations else duration_s
             subdir = f"{wave}/{slot.squad}_{slot.bot.lower()}_{slot.stage}"
@@ -369,7 +423,7 @@ def cmd_launch(
             log_path = log_dir / "stdout.log"
             cmd = [
                 str(VENV_PY),
-                str(RUNNER),
+                str(runner),
                 "--bot", slot.bot,
                 "--token-file", slot.token_file,
                 "--provider", slot.provider,
@@ -387,6 +441,7 @@ def cmd_launch(
                 cmd.append("--day1")
             if idx > 0:
                 cmd.append("--keep-time")
+            started_at = time.strftime("%Y%m%d-%H%M%S")
             with log_path.open("wb") as log_file:
                 proc = subprocess.Popen(
                     cmd,
@@ -395,22 +450,36 @@ def cmd_launch(
                     stderr=subprocess.STDOUT,
                     pass_fds=(locks[slot.bot.lower()].fileno(),),
                 )
-            procs.append((slot, proc, log_path))
+            procs.append((slot, proc, log_path, started_at))
             print(f"  [{idx+1:2d}/{len(selected):2d}] started {slot.bot:12s} ({slot.squad:3s}/{slot.model or 'nju':19s}) stage={slot.stage:15s} dur={slot_dur:g}s pid={proc.pid}", flush=True)
             if idx + 1 < len(selected):
                 time.sleep(stagger_s)
 
         # Wait for all bots to finish
         failed = 0
-        for slot, proc, _ in procs:
+        startup_auth_failures: list[tuple[str, int]] = []
+        for slot, proc, log_path, started_at in procs:
             rc = proc.wait()
             if rc != 0:
                 failed += 1
             print(f"  [DONE] {slot.bot:12s} ({slot.stage:15s}) rc={rc}", flush=True)
+            try:
+                with log_path.open(encoding="utf-8", errors="replace") as log_file:
+                    for line in log_file:
+                        if line.startswith(f"[Startup] {slot.bot} not ready: "):
+                            status = _startup_auth_http_status(line.partition(" not ready: ")[2].strip())
+                            if status is not None:
+                                startup_auth_failures.append((started_at, status))
+                            break
+            except OSError as exc:
+                print(f"[Fleet Complete] Could not read {log_path}: {exc}", file=sys.stderr)
+        if startup_auth_failures:
+            print(f"[Fleet Complete] {_startup_auth_overview(startup_auth_failures, len(procs))}")
         print(f"[Fleet Complete] wave={wave} total={len(procs)} failed={failed}")
+        triage_rc = cmd_triage(wave)
+        return triage_rc or int(failed > 0 or len(startup_auth_failures) == len(procs))
     finally:
         _release_bot_locks(locks)
-    return cmd_triage(wave)
 
 
 def _decode_payload(raw: Any) -> dict[str, Any]:
@@ -449,6 +518,18 @@ def _extract_error_code(payload: dict[str, Any]) -> str:
 
 
 @dataclasses.dataclass
+class ProbeThroughput:
+    item: str
+    threshold: int
+    start_count: int | None
+    end_count: int | None
+    gains: list[int]
+    first_threshold_s: float | None
+    inventory_peak: int | None = None
+    first_inventory_threshold_s: float | None = None
+
+
+@dataclasses.dataclass
 class BotRow:
     name: str
     squad: str
@@ -456,7 +537,7 @@ class BotRow:
     status: str
     score: int | None
     episodes_done: int
-    elapsed_s: float
+    elapsed_s: float | None
     deaths: int
     guardian_incidents: int
     preemptions: int
@@ -466,6 +547,7 @@ class BotRow:
     top_tools: list[tuple[str, int, int]]
     top_errors: list[tuple[str, int]]
     slow_calls: list[tuple[float, str, str]]
+    stop_reason: str = ""
     crash_tail: str = ""
     scene_stage: str = ""
     scene_ok: bool | None = None
@@ -480,6 +562,10 @@ class BotRow:
     connection_changes: int = 0
     mixed_guardian_incidents: int = 0
     http_429_retries: int = 0
+    portal_crossing: dict[str, Any] | None = None
+    portal_advancement: str = ""
+    throughput: ProbeThroughput | None = None
+    started_at: str = ""
 
     @property
     def gained_short(self) -> list[str]:
@@ -501,34 +587,98 @@ def _read_crash_tail(bd: pathlib.Path) -> str:
     return "\n".join(lines[-6:])
 
 
+def _trace_time(event: dict[str, Any]) -> float | None:
+    timestamp = event.get("time")
+    try:
+        return datetime.fromisoformat(timestamp).timestamp() if isinstance(timestamp, str) else None
+    except ValueError:
+        return None
+
+
+def _probe_inventory_count(inventory: object, item: str) -> int | None:
+    if not isinstance(inventory, dict) or inventory.get("ok") is False:
+        return None
+    snapshot = inventory.get("result", inventory)
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("items"), list):
+        return None
+    return sum(
+        entry["count"]
+        for entry in (*snapshot["items"], snapshot.get("offhand"))
+        if isinstance(entry, dict)
+        and str(entry.get("name") or "").removeprefix("minecraft:") == item
+        and type(entry.get("count")) is int
+        and entry["count"] > 0
+    )
+
+
+def _run_artifact_stamp(path: pathlib.Path) -> str:
+    match = re.search(r"(\d{8}-\d{6})(?:-\d{6})?\.(?:events\.)?jsonl?$", path.name)
+    return match[1] if match else ""
+
+
 def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     """Parse one fleet bot directory (summary + raw events) into a normalized row."""
     name = bd.name
     squad = name.split("_")[0]
-    stage = _stage_from_dirname(name)
 
-    summaries = sorted(bd.glob("wild-endurance-*.json"))
+    terminal = max(bd.glob("wild-endurance-*.json"), key=lambda path: (_run_artifact_stamp(path), path.name), default=None)
+    progress_files = sorted(bd.glob("curriculum-*.json"))
+    event_files = sorted(bd.glob("*.events.jsonl"))
     summary: dict[str, Any] = {}
-    if summaries:
+    if terminal is not None:
         try:
-            summary = json.loads(summaries[-1].read_text(encoding="utf-8"))
-        except Exception:
-            summary = {}
-    if not summary:
-        cur = sorted(bd.glob("curriculum-*.json"))
-        if cur:
-            try:
-                summary = json.loads(cur[-1].read_text(encoding="utf-8"))
-            except Exception:
-                summary = {}
+            loaded = json.loads(terminal.read_text(encoding="utf-8"))
+            summary = loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):
+            pass
+        stamp = _run_artifact_stamp(terminal)
+        curriculum = summary.get("curriculum_summary")
+        status_from_summary = curriculum.get("status") if isinstance(curriculum, dict) else summary.get("status")
+        if stamp and status_from_summary == "not_ready":
+            # A failed startup writes a terminal summary before starting any
+            # episode. Later traces in this slot belong to a new attempt.
+            new_events = [path for path in event_files if _run_artifact_stamp(path) > stamp]
+            new_progress = [path for path in progress_files if _run_artifact_stamp(path) > stamp]
+            if new_events or new_progress:
+                terminal, summary = None, {}
+                event_files, progress_files = new_events, new_progress
+        if stamp and terminal is not None and summary:
+            # A later completed retry replaces earlier attempts in the row's
+            # lifecycle and tool totals. Untimestamped legacy logs are kept.
+            event_files = [
+                path for path in event_files
+                if not (event_stamp := _run_artifact_stamp(path)) or event_stamp >= stamp
+            ]
+        if not summary:
+            terminal = None
+    if not summary and progress_files:
+        try:
+            loaded = json.loads(progress_files[-1].read_text(encoding="utf-8"))
+            summary = loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):
+            pass
 
     cs = summary.get("curriculum_summary")
     if not isinstance(cs, dict) or not cs:
         cs = summary
+    scene_meta = summary.get("scene") or {}
+    scene_stage = str(scene_meta.get("stage") or "")
+    stage = scene_stage or _stage_from_dirname(name)
+    probe_target = _load_runner_module().PROBE_THROUGHPUT_TARGETS.get(stage) if stage.startswith("probe_") else None
+    probe_gains: list[int] = []
+    probe_total = 0
+    probe_started_at = None
+    first_threshold_s = None
+    inventory_peak = None
+    first_inventory_threshold_s = None
+    portal_crossing = scene_meta.get("portal_crossing")
+    if not isinstance(portal_crossing, dict) or not portal_crossing:
+        portal_crossing = None
     episodes = cs.get("episodes") or summary.get("episodes") or []
     recorded_scores = (cs.get("final_score"), summary.get("final_score"), cs.get("current_score"))
     score_value = next((value for value in recorded_scores if value not in (None, "")), None)
-    elapsed_s = float(cs.get("elapsed_s") or 0.0)
+    elapsed_raw = cs.get("elapsed_s")
+    elapsed_s = float(elapsed_raw) if elapsed_raw not in (None, "") else None
     gained: list[str] = []
     for ep in episodes:
         gained.extend(ep.get("gained_advancements") or [])
@@ -548,7 +698,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     event_preemptions = 0
     has_events = False
 
-    for evf in sorted(bd.glob("*.events.jsonl")):
+    for evf in event_files:
         call_start: dict[str, tuple[float, str]] = {}
         guardian_preemptions = 0
         preemption_receipts = 0
@@ -567,6 +717,9 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
             lifecycle.observe(ev)
             tp = str(ev.get("type") or "")
             el = float(ev.get("elapsed") or 0.0)
+            inventory_observation = ev.get("inventory_after") if tp == "guardian.incident" else None
+            if probe_target and probe_started_at is None:
+                probe_started_at = _trace_time(ev)
             if tp in ("tool.started", "tool.ready"):
                 cid = str(ev.get("call_id") or "")
                 fn = ev.get("function") or {}
@@ -586,10 +739,30 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 dt = max(0.0, el - st_info[0]) if st_info else float(ev.get("duration") or 0.0)
                 tool_calls[tname] += 1
                 payload = _decode_payload(ev.get("result") if "result" in ev else ev.get("output"))
+                if tname == "mc_inventory":
+                    inventory_observation = payload
+                if probe_target and st_info and tname in {"mc_skill_mine_dfs", "mc_skill_mine_blocks"}:
+                    item, threshold = probe_target
+                    gained_items = payload.get("gained")
+                    gain = gained_items.get(item) if isinstance(gained_items, dict) else None
+                    if type(gain) is int and gain > 0:
+                        probe_gains.append(gain)
+                        if probe_total < threshold <= probe_total + gain:
+                            reached_at = _trace_time(ev)
+                            if reached_at is not None and probe_started_at is not None:
+                                first_threshold_s = round(max(0.0, reached_at - probe_started_at), 1)
+                        probe_total += gain
+                if (
+                    tname == "mc_skill_build_portal"
+                    and (portal_crossing is None or portal_crossing.get("reused_existing_portal"))
+                ):
+                    receipt = _load_runner_module().portal_crossing_receipt(payload)
+                    if receipt:
+                        portal_crossing = receipt
                 if payload.get("preempted_by_reflex") is True:
                     preemption_receipts += 1
                 elif payload.get("ok") is False:
-                    code = _extract_error_code(payload)
+                    code = normalize_tool_error_code(tname, _extract_error_code(payload))
                     tool_fails[tname] += 1
                     err_codes[f"{tname}:{code}"] += 1
                 if dt >= SLOW_TOOL_THRESHOLD_S:
@@ -603,30 +776,62 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
                 http_429_retries += 1
             elif tp == "model.failed" and is_http_429_failure(ev):
                 http_429 += 1
+            if probe_target and inventory_observation is not None:
+                item, threshold = probe_target
+                observed_count = _probe_inventory_count(inventory_observation, item)
+                if observed_count is not None:
+                    inventory_peak = max(inventory_peak or 0, observed_count)
+                    if observed_count >= threshold and first_inventory_threshold_s is None:
+                        observed_at = _trace_time(ev)
+                        if observed_at is not None and probe_started_at is not None:
+                            first_inventory_threshold_s = round(max(0.0, observed_at - probe_started_at), 1)
         # Guardian emits both a dedicated event and the resulting tool receipt.
         event_preemptions += max(guardian_preemptions, preemption_receipts)
 
-    if summaries:
+    if terminal is not None:
         status = str(cs.get("status") or "done")
-    elif has_events:
+    elif has_events or summary:
         status = "incomplete"
     else:
         status = "empty"
     crash_tail = _read_crash_tail(bd)
-    if crash_tail and not summaries:
+    if crash_tail and terminal is None:
         status = "crash"
+    reason = cs.get("stop_reason")
+    stop_reasons = {"completed": ("deadline", "episode_cap"), "interrupted": ("interrupted",)}
+    stop_reason = reason if reason in stop_reasons.get(status, ()) else ""
     score = int(score_value) if score_value is not None and status != "not_ready" else None
 
     slow_calls.sort(reverse=True)
-    scene_meta = summary.get("scene") or {}
+    portal_advancement = str((scene_meta.get("portal_advancement") or {}).get("status") or "")
+    if portal_crossing and not portal_advancement:
+        portal_advancement = "confirmed" if _load_runner_module().portal_advancement_confirmed(cs) else "unconfirmed"
+    throughput = None
+    if probe_target:
+        item, threshold = probe_target
+        start_count = (scene_meta.get("throughput") or {}).get("start_count")
+        end_inventory = summary.get("owned_end")
+        end_status = summary.get("end_status") or {}
+        end_count = (
+            end_inventory.get(item, 0)
+            if isinstance(end_inventory, dict) and (end_inventory or end_status.get("pos"))
+            else None
+        )
+        throughput = ProbeThroughput(
+            item, threshold, start_count, end_count, probe_gains, first_threshold_s,
+            inventory_peak=inventory_peak, first_inventory_threshold_s=first_inventory_threshold_s,
+        )
     scene_anchor = ""
     if isinstance(scene_meta.get("anchor"), dict):
         a = scene_meta["anchor"]
         scene_anchor = f"({a.get('x')}, {a.get('y')}, {a.get('z')})"
     baseline_raw = scene_meta.get("baseline_points")
-    if isinstance(baseline_raw, int):
+    if stage == "probe_obsidian_portal" and baseline_raw == 35:
+        # The original loadout unlocked form_obsidian as soon as its four obsidian entered inventory.
+        baseline_points = baseline_points_for_stage(stage) or baseline_raw
+    elif isinstance(baseline_raw, int):
         baseline_points = baseline_raw
-    elif stage == "brewing_alchemy" and summaries and summary.get("spawn") is not None:
+    elif stage == "brewing_alchemy" and terminal is not None and summary.get("spawn") is not None:
         # Finished summaries before P2-32 predate removal of the 30-point Nether travel grant.
         baseline_points = 50
     else:
@@ -639,18 +844,23 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         score=score,
         episodes_done=len(episodes),
         elapsed_s=elapsed_s,
+        stop_reason=stop_reason,
         deaths=lifecycle.deaths,
         guardian_incidents=guardian_incidents,
         preemptions=max(preemptions, event_preemptions),
         http_429=http_429,
         http_429_retries=http_429_retries,
+        portal_crossing=portal_crossing,
+        portal_advancement=portal_advancement,
+        throughput=throughput,
         rate_waits=rate_waits,
         gained=sorted(set(gained)),
         top_tools=[(k, tool_calls[k], tool_fails[k]) for k in sorted(tool_calls, key=lambda t: -tool_calls[t])[:6]],
-        top_errors=err_codes.most_common(5),
+        # Fleet totals need every error even when it ranks low for any single bot.
+        top_errors=err_codes.most_common(),
         slow_calls=slow_calls[:4],
         crash_tail=crash_tail,
-        scene_stage=str(scene_meta.get("stage") or ""),
+        scene_stage=scene_stage,
         scene_ok=scene_meta.get("entry_verified") if "entry_verified" in scene_meta else None,
         scene_anchor=scene_anchor,
         scene_ticks=scene_meta.get("watchdog_ticks") if isinstance(scene_meta.get("watchdog_ticks"), int) else None,
@@ -666,6 +876,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         respawns=lifecycle.respawns,
         connection_changes=lifecycle.connection_changes,
         mixed_guardian_incidents=lifecycle.mixed_guardian_incidents,
+        started_at=str(summary.get("started_at") or (_run_artifact_stamp(terminal) if terminal else "")),
     )
 
 
@@ -684,6 +895,7 @@ SQUAD_LABELS: dict[str, str] = {
     "glm": "GLM-5.3",
     "ds": "DeepSeek-v4.1-flash",
     "hy4": "HY4-flash-free",
+    "lc": "LongCat-2.5-free",
 }
 
 
@@ -708,11 +920,12 @@ def aggregate_by_squad(rows: list[BotRow]) -> list[dict[str, Any]]:
                 "bots": len(group),
                 "completed": len(done),
                 "crashed": sum(1 for r in group if r.status == "crash"),
-                "avg_score": round(sum(scores) / len(scores), 1) if scores else 0.0,
+                "not_ready": sum(1 for r in group if r.status == "not_ready"),
+                "avg_score": round(sum(scores) / len(scores), 1) if scores else None,
                 "avg_baseline": round(
                     sum(int(r.baseline_points or 0) for r in done) / len(done), 1
-                ) if done else 0.0,
-                "avg_earned": round(sum(earned) / len(earned), 1) if earned else 0.0,
+                ) if done else None,
+                "avg_earned": round(sum(earned) / len(earned), 1) if earned else None,
                 "total_deaths": sum(r.deaths for r in group),
                 "avg_deaths": round(sum(r.deaths for r in group) / len(group), 2) if group else 0.0,
                 "http_429": sum(r.http_429 for r in group),
@@ -723,6 +936,22 @@ def aggregate_by_squad(rows: list[BotRow]) -> list[dict[str, Any]]:
     return out
 
 
+def _format_average(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None else "—"
+
+
+def _startup_auth_http_status(error: str) -> int | None:
+    match = re.fullmatch(r"token refresh failed for \S+: HTTP ([1-5]\d{2})", error)
+    return int(match[1]) if match else None
+
+
+def _startup_auth_overview(failures: list[tuple[str, int]], slots: int) -> str:
+    codes = Counter(status for _, status in failures)
+    counts = ", ".join(f"HTTP {status}={count}" for status, count in sorted(codes.items()))
+    first_attempt = min((stamp for stamp, _ in failures if stamp), default="—")
+    return f"startup_auth_http_failures={len(failures)}/{slots} first_attempt={first_attempt} ({counts})"
+
+
 def _write_markdown(
     wave: str,
     rows: list[BotRow],
@@ -730,29 +959,38 @@ def _write_markdown(
     err_bots: defaultdict[str, set[str]],
     slow_tools: list[tuple[float, str, str]],
     out_path: pathlib.Path,
+    startup_auth_overview: str = "",
 ) -> pathlib.Path:
     """Export a ready-to-file Markdown triage report with auto-generated work orders."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n_done = sum(1 for r in rows if r.status in ("done", "completed"))
     n_crash = sum(1 for r in rows if r.status == "crash")
+    n_not_ready = sum(1 for r in rows if r.status == "not_ready")
+    n_network_error = sum(1 for r in rows if r.status == "network_error")
     n_incomplete = sum(1 for r in rows if r.status == "incomplete")
     lines: list[str] = [
         f"# FLEET TRIAGE — `{wave}`",
         "",
         f"> 自动生成于 {time.strftime('%Y-%m-%d %H:%M:%S')} · "
-        f"bot 目录 `{len(rows)}` · completed `{n_done}` · crash `{n_crash}` · incomplete `{n_incomplete}`",
+        f"bot 目录 `{len(rows)}` · completed `{n_done}` · crash `{n_crash}` · "
+        f"not_ready `{n_not_ready}` · network_error `{n_network_error}` · incomplete `{n_incomplete}`",
         "",
+    ]
+    if startup_auth_overview:
+        lines.extend([f"> {startup_auth_overview}", ""])
+    lines.extend([
         "## 1. 各路成绩总览（baseline = 场景 loadout 预授分，earned = 实机净增分）",
         "",
-        "| Squad | Bot | Stage | Status | Score | Baseline | Earned | Eps | Deaths | ID-less deaths | Respawn/spawn | Connection changes | Mixed guardian | Guard | Preempt | 429 Failures | 429 Retries | Gained |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
-    ]
+        "| Squad | Bot | Stage | Status | Stop reason | Elapsed (s) | Score | Baseline | Earned | Eps | Deaths | ID-less deaths | Respawn/spawn | Connection changes | Mixed guardian | Guard | Preempt | 429 Failures | 429 Retries | Gained |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ])
     for r in sorted(rows, key=lambda x: (x.squad, x.name)):
         g = ", ".join(r.gained_short[:4])
         score = r.score if r.score is not None else "—"
         earned = r.earned_points if r.earned_points is not None else "—"
+        elapsed = f"{r.elapsed_s:.1f}" if r.elapsed_s is not None else "—"
         lines.append(
-            f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {score} | "
+            f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.stop_reason or '—'} | {elapsed} | {score} | "
             f"{int(r.baseline_points or 0)} | {earned} | {r.episodes_done} | "
             f"{r.deaths} | {r.death_receipts} | {r.respawns} | {r.connection_changes} | "
             f"{r.mixed_guardian_incidents} | {r.guardian_incidents} | {r.preemptions} | "
@@ -771,14 +1009,15 @@ def _write_markdown(
     agg = aggregate_by_squad(rows)
     lines.extend(
         [
-            "| 模型 | Bots | Completed | Crash | 平均分 | 平均 Baseline | 平均 Earned | 总死亡 | 场均死亡 | 429 Failures | 429 Retries | 头号错误 |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| 模型 | Bots | Completed | Crash | Not ready | 平均分 | 平均 Baseline | 平均 Earned | 总死亡 | 场均死亡 | 429 Failures | 429 Retries | 头号错误 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for a in agg:
         lines.append(
-            f"| {a['label']} | {a['bots']} | {a['completed']} | {a['crashed']} | {a['avg_score']} | "
-            f"{a['avg_baseline']} | {a['avg_earned']} | {a['total_deaths']} | {a['avg_deaths']} | "
+            f"| {a['label']} | {a['bots']} | {a['completed']} | {a['crashed']} | {a['not_ready']} | "
+            f"{_format_average(a['avg_score'])} | {_format_average(a['avg_baseline'])} | "
+            f"{_format_average(a['avg_earned'])} | {a['total_deaths']} | {a['avg_deaths']} | "
             f"{a['http_429']} | {a['http_429_retries']} | `{a['top_error']}` |"
         )
     scene_bad = [r for r in rows if r.scene_ok is False]
@@ -793,6 +1032,48 @@ def _write_markdown(
             )
     else:
         lines.append("*（所有已收官 bot 场景入口正常）*")
+    portal_rows = [r for r in rows if r.portal_crossing]
+    if portal_rows:
+        lines.extend(["", "| Bot | 穿门方式 | 回执黑曜石数 | 过门成就 |", "|---|---|---:|---|"])
+        for r in portal_rows:
+            crossing = r.portal_crossing
+            how = "复用既有门" if crossing.get("reused_existing_portal") else "搭建后穿门"
+            placed = crossing.get("placed_obsidian")
+            lines.append(f"| `{r.name}` | {how} | {placed if placed is not None else '—'} | {r.portal_advancement} |")
+    probe_rows = [r for r in rows if r.throughput is not None]
+    if probe_rows:
+        lines.extend([
+            "", "### 采矿探针吞吐",
+            "", "时间从首集事件起算。回执累计是采集增量，实包峰值来自运行中观测的持有量。",
+            "",
+            "| Bot | 物品 | 阈值 | 初包 | 终包 | 各采集回执 | 回执累计 | 回执首达 | 实包峰值 | 实包首见达标 |",
+            "|---|---|---:|---:|---:|---|---:|---|---:|---|",
+        ])
+        for r in probe_rows:
+            probe = r.throughput
+            start_count = probe.start_count if probe.start_count is not None else "—"
+            end_count = probe.end_count if probe.end_count is not None else "—"
+            gains = ", ".join(map(str, probe.gains)) or "—"
+            total = sum(probe.gains)
+            if probe.first_threshold_s is not None:
+                reached = f"{probe.first_threshold_s:.1f}s"
+            elif total >= probe.threshold:
+                reached = "时间未知"
+            else:
+                reached = "—"
+            peak = probe.inventory_peak if probe.inventory_peak is not None else "—"
+            if probe.first_inventory_threshold_s is not None:
+                inventory_reached = f"{probe.first_inventory_threshold_s:.1f}s"
+            elif probe.inventory_peak is not None and probe.inventory_peak >= probe.threshold:
+                inventory_reached = "时间未知"
+            elif probe.end_count is not None and probe.end_count >= probe.threshold:
+                inventory_reached = "终包，时间未知"
+            else:
+                inventory_reached = "—"
+            lines.append(
+                f"| `{r.name}` | `{probe.item}` | {probe.threshold} | {start_count} | {end_count} | {gains} | {total} | "
+                f"{reached} | {peak} | {inventory_reached} |"
+            )
     wd_rows = [r for r in rows if r.scene_ticks is not None]
     if wd_rows:
         lines.extend(["", "| Bot | watchdog ticks | 反射抢占跳过 |", "|---|---:|---:|"])
@@ -842,6 +1123,16 @@ def _write_markdown(
                     "",
                 ]
             )
+        if r.status == "network_error":
+            ticket_no += 1
+            lines.extend(
+                [
+                    f"### FLEET-{ticket_no:03d} | P1 | 运行期间连接中断 | 状态: OPEN",
+                    f"- `{r.name}` 已保存 {r.episodes_done} 集，错误为 `{r.error or 'network_error'}`。",
+                    "- 同场景复验短暂断线后续跑，以及持续断线时终版保留最后一次课程检查点。",
+                    "",
+                ]
+            )
     for key, cnt in ranked[:10]:
         if cnt < 2 and len(err_bots[key]) < 2:
             continue
@@ -888,6 +1179,15 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
         slow_tools.extend(row.slow_calls)
 
     print(f"\n================ FLEET TRIAGE: {wave} ({len(rows)} bots) ================")
+    startup_auth_failures = [
+        (r.started_at, status)
+        for r in rows
+        if r.status == "not_ready" and (status := _startup_auth_http_status(r.error)) is not None
+    ]
+    startup_auth_overview = ""
+    if startup_auth_failures:
+        startup_auth_overview = _startup_auth_overview(startup_auth_failures, len(rows))
+        print(f"  {startup_auth_overview}")
     for r in rows:
         score = r.score if r.score is not None else "—"
         earned = r.earned_points if r.earned_points is not None else "—"
@@ -899,7 +1199,9 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"connection_changes={r.connection_changes} guard_mixed={r.mixed_guardian_incidents} "
             f"guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
             f"429_failed={r.http_429:2d} 429_retries={r.http_429_retries:2d} gained=[{','.join(r.gained_short[:4])}]"
-            + (" scene=BAD" if r.scene_ok is False else "")
+            + (f" stop={r.stop_reason}" if r.stop_reason else "")
+            + (f" elapsed={r.elapsed_s:.1f}s" if r.elapsed_s is not None else "")
+            + (" scene=BAD" if r.scene_ok is False and r.status != "not_ready" else "")
             + (f" wd={r.scene_ticks}skips={r.scene_preempt_skips}" if r.scene_ticks is not None else "")
         )
         if r.status == "crash" and r.crash_tail:
@@ -907,13 +1209,26 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             print(f"        crash: {tail[:150]}")
         if r.status == "not_ready":
             print(f"        not_ready: {(r.error or 'unknown')[:150]}")
+        if r.status == "network_error":
+            print(f"        network_error: {(r.error or 'unknown')[:150]}")
+        if r.portal_crossing:
+            placed = r.portal_crossing.get("placed_obsidian")
+            print(f"        Nether crossing confirmed, placed_obsidian={placed}, advancement={r.portal_advancement}")
+        if r.throughput is not None:
+            probe = r.throughput
+            print(
+                f"        {probe.item} start={probe.start_count} end={probe.end_count} "
+                f"mined={sum(probe.gains)}/{probe.threshold} first_threshold_s={probe.first_threshold_s} "
+                f"inventory_peak={probe.inventory_peak} first_inventory_threshold_s={probe.first_inventory_threshold_s}"
+            )
 
     print("\n--- CROSS-MODEL AGGREGATE (per model family) ---")
     for a in aggregate_by_squad(rows):
         print(
             f"  {a['label']:22s} bots={a['bots']:2d} done={a['completed']:2d} crash={a['crashed']:d} "
-            f"avg_score={a['avg_score']:6.1f} avg_base={a['avg_baseline']:5.1f} "
-            f"avg_earned={a['avg_earned']:6.1f} deaths={a['total_deaths']:3d} "
+            f"not_ready={a['not_ready']:2d} avg_score={_format_average(a['avg_score']):>6} "
+            f"avg_base={_format_average(a['avg_baseline']):>5} "
+            f"avg_earned={_format_average(a['avg_earned']):>6} deaths={a['total_deaths']:3d} "
             f"avg_deaths={a['avg_deaths']:4.2f} 429_failed={a['http_429']:d} "
             f"429_retries={a['http_429_retries']:d} top={a['top_error']}"
         )
@@ -939,7 +1254,7 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             else wave_dir / f"triage-{wave}.md"
         )
         try:
-            written = _write_markdown(wave, rows, err_counts, err_bots, slow_tools, out_path)
+            written = _write_markdown(wave, rows, err_counts, err_bots, slow_tools, out_path, startup_auth_overview)
             print(f"\n[Markdown 工单] {written}")
         except OSError as exc:
             print(f"\n[Markdown 工单] 导出失败: {exc}")

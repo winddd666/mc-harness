@@ -11,15 +11,23 @@ from __future__ import annotations
 import collections
 from collections.abc import Callable
 import dataclasses
+import hashlib
 import json
 import math
 import os
 import pathlib
+from pathlib import Path
 import queue
 import random
 import re
+import tempfile
 import threading
 import time
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 import httpx
 
@@ -572,6 +580,77 @@ def _retry_delay_s(attempt: int, retry_after_header: str | None = None) -> float
     return 2.0 * (attempt + 1) + jitter
 
 
+def _resolve_cross_process_concurrency(spec: QwenSpec, resolved: ResolvedQwenEndpoint) -> tuple[str, int]:
+    """Return `(slot_group_key, max_slots)` for cross-process concurrency throttling (BUG-042/BUG-150)."""
+    prov = str(spec.provider or "").strip().lower()
+    raw_env = None
+    if prov:
+        raw_env = os.environ.get(f"MC_LLM_MAX_CONCURRENCY_{prov.upper()}")
+    if raw_env is None:
+        raw_env = os.environ.get("MC_LLM_MAX_CONCURRENCY")
+    if raw_env is not None:
+        try:
+            limit = max(0, int(raw_env.strip()))
+        except ValueError:
+            limit = 0
+    elif prov in ("hy4", "nju"):
+        limit = 2
+    else:
+        limit = 0
+    norm_base = str(resolved.base_url or "").strip().rstrip("/").lower()
+    prov_override = bool(prov and os.environ.get(f"MC_LLM_MAX_CONCURRENCY_{prov.upper()}") is not None)
+    key_src = f"{prov}:{norm_base}" if prov_override else (norm_base or prov or "default")
+    digest = hashlib.sha1(key_src.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    prefix = prov if prov_override else "gw"
+    return f"{prefix}_{digest}", limit
+
+
+class _CrossProcessSlotLease:
+    """Non-blocking flock-based cross-process concurrency slot with immediate cancel responsiveness."""
+
+    def __init__(self, group_key: str, max_slots: int, *, lock_dir: Path | None = None) -> None:
+        self.group_key = group_key
+        self.max_slots = max(0, int(max_slots))
+        self.lock_dir = lock_dir or (Path(tempfile.gettempdir()) / "mc-agent-llm-slots")
+        self._fd: int | None = None
+
+    def acquire(self, cancel_event: threading.Event | None = None) -> float:
+        if self.max_slots <= 0 or fcntl is None:
+            return 0.0
+        self.lock_dir.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RequestCancelled("立即处理新输入，已取消本次模型请求。")
+            for slot_idx in range(self.max_slots):
+                lock_path = self.lock_dir / f"{self.group_key}_slot_{slot_idx}.lock"
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._fd = fd
+                    return time.monotonic() - started
+                except BlockingIOError:
+                    os.close(fd)
+                except OSError:
+                    os.close(fd)
+            _sleep_with_cancel(0.15, cancel_event)
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        fd = self._fd
+        self._fd = None
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def _is_concurrency_limit_429(status_code: int, detail: str) -> bool:
     if status_code != 429:
         return False
@@ -663,7 +742,12 @@ def _chat_direct(
 
     standard_max_attempts = 3
     concurrency_max_attempts = 8
+    slot_group, slot_limit = _resolve_cross_process_concurrency(spec, resolved)
+    slot_lease = _CrossProcessSlotLease(slot_group, slot_limit)
     try:
+        waited_slot = slot_lease.acquire(cancel_event)
+        if waited_slot >= 0.05 and on_event is not None:
+            on_event({"type": "concurrency_wait", "wait_s": round(waited_slot, 3), "slots": slot_limit})
         for attempt in range(concurrency_max_attempts):
             if cancel_event is not None and cancel_event.is_set():
                 raise RequestCancelled("立即处理新输入，已取消本次模型请求。")
@@ -740,6 +824,7 @@ def _chat_direct(
                     continue
                 raise RuntimeError(f"Qwen API 连接或读取失败（{type(exc).__name__}: {exc}）") from None
     finally:
+        slot_lease.release()
         if owns_client:
             http_client.close()
 
@@ -839,7 +924,10 @@ def _process_request(
         if not finished:
             cancel_event.set()
             if on_cancel is not None:
-                on_cancel()
+                try:
+                    on_cancel()
+                except Exception:
+                    pass
 
 
 class QwenModel:
@@ -855,24 +943,34 @@ class QwenModel:
         self._client_lock = threading.Lock()
         self._client = _make_http_client(self.spec, self.base_url)
         self._cancel_cooldown_until: float = 0.0
+        self._last_rotation_error: str | None = None
 
     def _current_client(self) -> httpx.Client:
         with self._client_lock:
             return self._client
 
     def _abort_and_rotate_client(self) -> None:
+        old: httpx.Client | None = None
         with self._client_lock:
-            old = self._client
-            self._client = _make_http_client(self.spec, self.base_url)
             if self.spec.post_cancel_cooldown_s > 0:
                 self._cancel_cooldown_until = max(
                     self._cancel_cooldown_until,
                     time.monotonic() + float(self.spec.post_cancel_cooldown_s),
                 )
-        try:
-            old.close()
-        except Exception:
-            pass
+            try:
+                new_client = _make_http_client(self.spec, self.base_url)
+            except Exception as exc:
+                # BUG-086: preserve RequestCancelled and keep existing client usable when pool rotation fails (e.g. ssl.SSLError)
+                self._last_rotation_error = f"{type(exc).__name__}: {exc}"
+                return
+            old = self._client
+            self._client = new_client
+            self._last_rotation_error = None
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
 
     def close(self) -> None:
         with self._client_lock:

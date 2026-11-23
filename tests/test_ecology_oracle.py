@@ -289,12 +289,10 @@ def test_harvest_logs_pit_unreachable_hint_and_unstick_preserves_failure_guard()
     with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(pit_handler)) as pit_bot:
         h_res = MacroSkills(pit_bot).harvest_logs(target_logs=4, radius=16)
         assert h_res["ok"] is False
-        assert h_res["nearest_unreachable_target"]["pos"] == [-127, 71, -389]
-        assert h_res["nearest_unreachable_target"]["dy"] == 3.0
-        assert h_res["viable_up_directions"] == ["north"]
-        assert "mc_skill_staircase" in h_res["message"]
-        assert "mc_move_to" in h_res["message"]
-        assert "改变站位" not in h_res["message"]
+        assert h_res["error"] == "unreachable_targets"
+        assert h_res["log_approach"]["log"] == [-127, 71, -389]
+        assert h_res["log_approach"]["moved"] is False
+        assert "不可达" in h_res["message"]
 
         # 2) _RepeatFailureGuard: unstick(含 dug 与微移1格) 不清空失败签名，且 8 格半径内 harvest_logs 维持屏蔽
         ts = McToolset(pit_bot)

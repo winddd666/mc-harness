@@ -288,7 +288,7 @@ def test_v1_3_7_tools_and_campus_default_url(tmp_path) -> None:
     assert ("/posture", {"sneak": False, "shield": False, "jump": True}) in recorded
     assert ("/look", {"entity_id": 812}) in recorded
     assert ("/control", {"forward": True, "jump": True, "hit": 2, "hit_interval_ms": 500, "ms": 700, "stop_on": []}) in recorded
-    assert ("/attack", {"entity_id": 812, "max_hits": 1, "interval_ms": 300, "timeout": 20000}) in recorded
+    assert ("/attack", {"entity_id": 812, "max_hits": 1, "interval_ms": 300, "timeout": 20000, "feedback": True}) in recorded
 
 
 def test_toolset_auto_reconnects_on_not_connected() -> None:

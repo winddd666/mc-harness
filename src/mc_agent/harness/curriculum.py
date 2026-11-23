@@ -461,15 +461,15 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         # D3 根治：保底 2 把石镐（总耐久 262，覆盖从地表 Y=70 挖阶梯至 Y=16 的 ~162 格消耗，防半路爆镐软锁回石器）
         pre_ensure=(("stone_pickaxe", 2),),
         task=(
-            "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 若记忆箱已有备用铁镐/铁锭，优先调 mc_skill_container 取回；"
-            "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 8 根原木，先顺手砍足 8~10 根原木（并备好 2 把 stone_pickaxe）再下井，确保从 Y=16 一气下探 Y=-54 穿钻石靴不断木不断镐；"
-            "2) 用石镐采露头铁煤或调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 在铁/煤层凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal；"
-            "3) 调 mc_skill_smelt('raw_iron', count=6) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
-            "4) 优先调 mc_skill_craft_gear('iron_pickaxe')，铁锭充裕时顺手合出 shield（副手盾）与 1 件铁甲（如 iron_boots/iron_chestplate）完成安全成型即收工。"
+            "在 Y=16 铁/煤层安稳完成铁器发育（第 1 晚待在铁层过夜，严禁第 1 晚下 Y=-54 挖钻或半夜盲目回地表）：1) 仅当 HUD/记忆明确列出附近已有箱子坐标且含备用铁镐/铁锭时才调 mc_skill_container(action='take', x=..., y=..., z=..., items=...) 取回（无已知箱子坐标时直接跳过，严禁盲调 mc_skill_container）；"
+            "1.5) 下矿前若身处地表(Y>=55)且背包原木/木板折合不足 12 根原木，先顺手砍足 12 根原木（并备好 2 把 stone_pickaxe）再下井，确保从 Y=16 一气下探 Y=-54 穿钻石靴全程不断木、绝不半路爬回地表送命；"
+            "2) 禁止手动调 mc_skill_staircase(down) 下挖！直接调用 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=8, max_duration_s=90) 自动安全下井并雷达采铁，凑齐 6~8 块 raw_iron 与至少 8 块 coal/charcoal（严禁夜晚无甲 climb_out 爬回地表）；"
+            "3) 一旦在地下凑齐 >=3 块 raw_iron（理想 6~8 块），立即就地调 mc_skill_smelt('raw_iron', count=...) 熔炼铁锭（严禁浪费时间烧 raw_copper；包内有生肉可顺手烤熟）；"
+            "4) 优先调 mc_skill_craft_gear('iron_pickaxe') 先锁 story/iron_tools，铁锭充裕时立刻合出 shield（副手盾）与 1 件铁甲（如 iron_boots/iron_chestplate）完成安全成型即收工。"
         ),
         post_ensure_task=(
             "石镐已备妥：先看实时HUD的16m暴露列表，若已有暴露 iron_ore/deepslate_iron_ore 直接调 mc_skill_mine_blocks(['iron_ore', 'deepslate_iron_ore'], count=6) 采入；"
-            "若地表无暴露铁矿且包内备用原木/木板不足 8 根原木，先顺手补足 8~10 根原木（保证一气下探铁层+深层钻石不断木不断镐），再调 mc_skill_mine_dfs(target='iron', target_y=16, goal_count=8) 下井在铁/煤层发育；随后调 mc_skill_smelt('raw_iron', count=6)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁顺出 shield 与 1 件铁甲），成型后立即收工。"
+            "若地表无暴露铁矿且身处地表(Y>=55)且包内备用原木/木板不足 12 根原木，先顺手砍足 12 根原木（保证一气下探铁层+深层钻石不断木不断镐；禁止手动调 mc_skill_staircase 下挖，也严禁夜晚无甲 climb_out 回地表），直接调 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=8, max_duration_s=90) 自动下井在铁/煤层发育；凑齐 >=3 块 raw_iron（理想 6~8 块）立即就地 mc_skill_smelt('raw_iron', count=...)（严禁烧 raw_copper）-> mc_skill_craft_gear('iron_pickaxe')（余铁立刻出 shield 与 1 件铁甲），成型后立即收工。"
         ),
         extra_tools=("mc_skill_container",),
         advancement_id="minecraft:story/iron_tools",
@@ -483,14 +483,14 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("iron_pickaxe", 1), ("stone_pickaxe", 1)),
         pre_equip=(),
         task=(
-            "执行 Y=-54 鱼骨深潜钻石套餐（目标 story/mine_diamond 15分 + story/shiny_gear 60分）："
+            "执行 Y=-54 深潜钻石套餐（目标 story/mine_diamond 15分 + story/shiny_gear 60分）："
             "1) 确认包内有 iron_pickaxe 与备用 stone_pickaxe；"
-            "2) 调 mc_skill_mine_dfs(target='diamond', target_y=-54, goal_count=4) 在深板岩层鱼骨探钻；"
+            "2) 禁止手动 staircase 下挖，直接调 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=4, max_duration_s=90) 自动下井并雷达探钻；"
             "3) 一旦包内凑满首 4 颗 diamond，**第一时间立即就地调 mc_skill_craft_gear('diamond_boots', equip_slot='feet') 先锁定 75 分**！"
             "4) 穿好钻石靴后在主控允许的 150s 顺采窗口内可在同井顺采额外至多 5 颗钻石备钻镐与附魔台。"
         ),
         post_ensure_task=(
-            "铁镐与备用石镐已齐备：直接持续调用 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=4) 深潜采钻"
+            "铁镐与备用石镐已齐备：直接持续调用 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=4, max_duration_s=90) 深潜采钻"
             "（注意从地表/中层下探至 Y=-54 约需连续 10~12 次 explore 时间片，到达 Y=-54 后继续调 explore 会自动展开鱼骨支巷，严禁在深层调 reset 或 climb_out！）；"
             "一旦包内凑满首 4 颗 diamond，立即就地调 mc_skill_craft_gear('diamond_boots', equip_slot='feet') 穿戴锁住 75 分。"
         ),
@@ -504,7 +504,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         budget_class="deep",
         pre_ensure=(("iron_pickaxe", 1),),
         task=(
-            "持有 iron_pickaxe 调 mc_skill_mine_dfs(target='diamond', target_y=-54, goal_count=4) 寻找并挖掘 diamond_ore，确保钻石真实入包解锁 story/mine_diamond。"
+            "持有 iron_pickaxe 调 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=4, max_duration_s=90) 寻找并挖掘 diamond_ore，确保钻石真实入包解锁 story/mine_diamond。"
         ),
         advancement_id="minecraft:story/mine_diamond",
     ),
@@ -519,6 +519,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "解锁 adventure/use_lodestone(15分)：在 1.21.11 中磁石(lodestone)仅需 1 铁锭 + 8 个錾制石砖(chiseled_stone_bricks)，指南针(compass)需 4 铁锭 + 1 红石；"
             "收集 12 圆石烧成 12 stone -> 12 stone_bricks -> 18 stone_brick_slab -> 8 chiseled_stone_bricks，"
             "与 5 铁锭、1 红石合出 lodestone 与 compass，放下 lodestone 后手持 compass 调 mc_interact(x,y,z,item='compass')。"
+            "【防超额投炉】累计确认背包已有 >=12 个 stone（或等效石砖/錾制石砖）时立即停炉转合成，严禁继续投炉烧圆石；不足 12 时先查并取原炉余货，仅按实际缺口补料。"
         ),
         post_ensure_task=(
             "解锁 adventure/use_lodestone(15分)：背包已备齐 lodestone×1 与 compass×1（无需再去箱子取料或烧石头！）！"
@@ -746,6 +747,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         pre_ensure=(("obsidian", 10), ("flint_and_steel", 1)),
         task=(
             "解锁 story/enter_the_nether(30分)：准备至少 10 块 obsidian 与 flint_and_steel 后，直接调用 mc_skill_build_portal() 一键清地、搭建 4x5 黑曜石门框、点火并走入传送门进入下界。"
+            "【严禁悖论】mc_skill_mine_dfs 内置强制躲避岩浆，严禁用 mc_skill_mine_dfs 找岩浆池！若缺黑曜石/岩浆，请优先利用已知岩浆地标、mc_skill_scout_surface 找地表岩浆池或 mc_find_blocks(types=['lava','obsidian']) + 水桶浇铸。"
         ),
         post_ensure_task=(
             "背包已备齐 obsidian>=10 与 flint_and_steel！严禁再去挖矿或找铁，请立即调用 mc_skill_build_portal() 一键搭建 4x5 黑曜石传送门、点火并步入下界！"
@@ -1250,10 +1252,33 @@ def _enrich_target_with_world_memory(
             p0 = portal_hits[0]
             notes.append(f"[记忆库地标：已知 {p0['name']}@{p0['pos']}（{p0['dist']}m），优先复用]")
             boosted = True
+        lava_hits = world_memory.query_pois(["lava"], origin=pos, dim=norm_dim, limit=1)
+        if lava_hits:
+            l0 = lava_hits[0]
+            notes.append(f"[记忆库岩浆：已知 lava@{l0['pos']}（{l0['dist']}m），可直接带水桶前往浇铸黑曜石，严禁调 mc_skill_mine_dfs 找岩浆]")
+            boosted = True
 
     elif adv_id == "minecraft:story/obtain_armor":
         if (bag_counts.get("iron_ingot", 0) + chest_counts.get("iron_ingot", 0)) >= 4:
             boosted = True
+
+    elif adv_id == "minecraft:adventure/use_lodestone":
+        stone_have = (
+            int(bag_counts.get("stone", 0))
+            + int(bag_counts.get("stone_bricks", 0))
+            + int(bag_counts.get("chiseled_stone_bricks", 0)) * 2
+        )
+        if stone_have >= 12:
+            notes.append(
+                f"[库存门槛已满足：当前已有等效石头 {stone_have}>=12，严禁再调 mc_skill_smelt 烧圆石！"
+                "请立即直接合成 stone_bricks -> stone_brick_slab -> chiseled_stone_bricks -> lodestone]"
+            )
+            boosted = True
+        elif stone_have > 0:
+            deficit = 12 - stone_have
+            notes.append(
+                f"[磁石进度：当前已有等效石头 {stone_have}/12，仅缺 {deficit} 个；先检查原炉余货再按缺口 {deficit} 补烧，勿重复投 12 个]"
+            )
 
     elif adv_id == "minecraft:story/deflect_arrow":
         skel_hits = world_memory.query_habitats(["skeleton"], origin=pos, dim=norm_dim, limit=1)
@@ -1443,6 +1468,7 @@ def select_next_target(
     is_day_now = True
     time_of_day: int | None = None
     has_hostile_now = False
+    armor_points_now = 0
     try:
         st = bot.status()
         if isinstance(st.get("pos"), (list, tuple)) and len(st["pos"]) >= 3:
@@ -1455,6 +1481,9 @@ def select_next_target(
             time_of_day = int(raw_tod) % 24000
         nh_s = st.get("nearest_hostile")
         has_hostile_now = isinstance(nh_s, dict) and bool(nh_s.get("name"))
+        raw_armor = st.get("armor_points")
+        if isinstance(raw_armor, (int, float)):
+            armor_points_now = int(raw_armor)
     except Exception:
         pass
     is_dusk_or_night = (not is_day_now) or (time_of_day is not None and 11000 <= time_of_day < 23200)
@@ -1514,9 +1543,24 @@ def select_next_target(
                 dz = float(ld_pos[2]) - float(origin_pos[2])
                 horiz_dist = math.hypot(dx, dz)
                 dy_pos = float(ld_pos[1])
+                cur_y = float(origin_pos[1])
+                vert_gap = abs(cur_y - dy_pos)
                 is_underground_drop = dy_pos < 48.0
+                has_carried_stone_or_better = any(
+                    bag_counts.get(k, 0) > 0
+                    for k in ("stone_pickaxe", "iron_pickaxe", "diamond_pickaxe", "netherite_pickaxe")
+                )
+                # BUG-149: naked surface respawn (carried bag_counts only, ignoring cached chests)
+                # cannot pathfind down >=18 blocks into a deep underground shaft
+                cross_layer_unreachable = is_underground_drop and vert_gap >= 18.0 and not has_carried_stone_or_better
                 safe_time_ok = (not is_dusk_or_night) or (is_underground_drop and horiz_dist <= 40.0)
-                if 0.0 <= death_age <= 260.0 and dy_pos >= -60.0 and horiz_dist <= 120.0 and safe_time_ok:
+                if (
+                    0.0 <= death_age <= 260.0
+                    and dy_pos >= -60.0
+                    and horiz_dist <= 120.0
+                    and safe_time_ok
+                    and not cross_layer_unreachable
+                ):
                     dp_i = [int(math.floor(float(ld_pos[0]))), int(math.floor(dy_pos)), int(math.floor(float(ld_pos[2])))]
                     high_value_run = bool(
                         completed.intersection(
@@ -1578,21 +1622,8 @@ def select_next_target(
                     ),
                 )
             return pb0, frontier_data
-        # Run 1 fast daytime surface recon right after stone_pickaxe (ONLY during safe daytime; dusk/night skips straight underground!)
-        if (
-            enable_island_recon
-            and not recon_done
-            and not is_dusk_or_night
-            and world_memory is not None
-            and cur_dim == "overworld"
-            and (origin_pos is None or float(origin_pos[1]) >= 52.0)
-            and not _is_cooled("island_recon_sweep")
-        ):
-            has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
-            has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
-            if not (has_villager_mem and has_lava_mem):
-                unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
-                return _build_island_recon_target(origin_pos, unexp, tier=0), frontier_data
+        # Go straight from stone_pickaxe -> bootstrap_iron_age (underground Y=16 iron+shield)
+        # before spending 3-5 minutes wandering the surface unarmed in `island_recon_sweep`.
         if cur_dim == "overworld" and not has_iron_or_better and not _is_cooled("bootstrap_iron_age"):
             pb1, _ = _enrich_target_with_world_memory(
                 CURRICULUM_PLAYBOOKS["bootstrap_iron_age"],
@@ -1613,6 +1644,20 @@ def select_next_target(
                     post_ensure_task=(night_banner + pb1.post_ensure_task) if pb1.post_ensure_task else None,
                 )
             return pb1, frontier_data
+        if (
+            enable_island_recon
+            and not recon_done
+            and not is_dusk_or_night
+            and world_memory is not None
+            and cur_dim == "overworld"
+            and (origin_pos is None or float(origin_pos[1]) >= 62.0)
+            and not _is_cooled("island_recon_sweep")
+        ):
+            has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
+            has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
+            if not (has_villager_mem and has_lava_mem):
+                unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
+                return _build_island_recon_target(origin_pos, unexp, tier=0), frontier_data
 
     candidates: list[tuple[tuple[int, int, int, str], CurriculumTarget]] = []
 
@@ -1628,7 +1673,7 @@ def select_next_target(
         ow_chunks = sum(1 for (d, _, _) in world_memory.visited_chunks if d == "overworld")
         has_villager_mem = bool(world_memory.habitats.get(("overworld", "villager")))
         has_lava_mem = any(e.name == "lava" and e.dim == "overworld" for e in world_memory.pois.values())
-        if ow_chunks < 16 and not (has_villager_mem and has_lava_mem) and (origin_pos is None or float(origin_pos[1]) >= 52.0):
+        if ow_chunks < 16 and not (has_villager_mem and has_lava_mem) and (origin_pos is None or float(origin_pos[1]) >= 62.0):
             unexp = world_memory.unexplored_directions(origin_pos or [0.0, 64.0, 0.0], dim="overworld")
             recon_target = _build_island_recon_target(origin_pos, unexp, tier=1)
             candidates.append(((1, 0, -65, "island_recon_sweep"), recon_target))
@@ -1653,6 +1698,7 @@ def select_next_target(
         and not is_dusk_or_night
         and world_memory is not None
         and cur_dim == "overworld"
+        and (origin_pos is None or float(origin_pos[1]) >= 58.0)
         and not has_village_known
         and not _is_cooled("day2_village_search")
     ):
@@ -1703,9 +1749,10 @@ def select_next_target(
             pre_ensure=(),
             advancement_id="minecraft:story/obtain_armor" if "minecraft:story/obtain_armor" not in completed else None,
             task=(
-                "[Day 1 铁层安稳过夜：天黑且尚未经历 Day 2 白天探村，第 1 晚绝不冒险下 Y=-54 挖钻或回地表送死！"
-                "请安心在 Y=16 铁/煤层凑足铁锭与煤炭，合成 shield（副手盾）与 1 件铁甲（iron_chestplate/iron_boots）及备用铁镐，等天亮立刻出井探村！]\n"
-                + CURRICULUM_PLAYBOOKS["bootstrap_iron_age"].task
+                "[Day 1 铁层安稳过夜：天黑且尚未经历 Day 2 白天探村，第 1 晚严禁调 mc_skill_staircase(up) 或 climb_out 爬回夜晚地表砍树送死，也不急于下 Y=-54！]\n"
+                "1) 直接在当前地下调 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=6, max_duration_s=90) 凑足铁矿与沿途煤炭；\n"
+                "2) 调 mc_skill_smelt(input_item='raw_iron', count=...) 熔炼铁锭（不要强传 fuel_item='coal'，无煤时让熔炼自动使用包内木板/原木作燃料）；\n"
+                "3) 优先合出 shield（副手盾）与 1 件铁甲（iron_chestplate/iron_boots）及备用铁镐，成型后即收工等待天亮。"
             ),
         )
         candidates.append(((0, 0, -85, "day1_night_iron_prep"), pb_n1))
@@ -1724,6 +1771,14 @@ def select_next_target(
         "minecraft:adventure/trade",
     })
     is_deep_underground = cur_dim == "overworld" and origin_pos is not None and float(origin_pos[1]) < 48.0
+    has_melee_safety = (
+        counts.get("shield", 0) >= 1
+        or armor_points_now > 0
+        or any(
+            k.endswith(("_helmet", "_chestplate", "_leggings", "_boots")) and v > 0
+            for k, v in counts.items()
+        )
+    )
 
     for key, pb in CURRICULUM_PLAYBOOKS.items():
         if key.startswith("bootstrap_"):
@@ -1732,13 +1787,30 @@ def select_next_target(
             continue
         if is_dusk_or_night and key in _DAYTIME_SURFACE_TARGETS:
             continue
-        if key == "minecraft:adventure/sleep_in_bed" and is_day_now:
-            continue
+        if key == "minecraft:adventure/sleep_in_bed":
+            if is_day_now:
+                continue
+            has_bed_or_wool = (
+                any(k.endswith("_bed") and v > 0 for k, v in counts.items())
+                or any(k.endswith("_wool") and v >= 3 for k, v in counts.items())
+                or (
+                    world_memory is not None
+                    and bool(getattr(world_memory, "bed_positions", None) or getattr(world_memory, "villages", None))
+                )
+            )
+            if not has_bed_or_wool:
+                continue
         if leash_active and pb.budget_class not in {"micro", "short"}:
             continue
         if leash_active and key == "minecraft:adventure/kill_a_mob" and is_day_now and not has_hostile_now:
             continue
+        if key == "minecraft:adventure/kill_a_mob" and cur_dim == "overworld" and not has_iron_or_better and not has_melee_safety:
+            continue
         adv_id = pb.advancement_id or key
+        if adv_id.startswith("minecraft:nether/") and adv_id != "minecraft:nether/brew_potion" and cur_dim != "the_nether":
+            continue
+        if adv_id.startswith("minecraft:end/") and cur_dim != "the_end":
+            continue
         if adv_id in completed or adv_id in _UNSUPPORTED_API_ADVANCEMENTS or _is_cooled(key):
             continue
         is_unlocked = adv_id in frontier_by_id or (
@@ -1797,6 +1869,10 @@ def select_next_target(
         adv_id = str(row.get("id") or "")
         pts = RULES_ADVANCEMENT_POINTS.get(adv_id, 0)
         if pts <= 0 or adv_id in completed or adv_id in CURRICULUM_PLAYBOOKS or _is_cooled(adv_id):
+            continue
+        if adv_id.startswith("minecraft:nether/") and adv_id != "minecraft:nether/brew_potion" and cur_dim != "the_nether":
+            continue
+        if adv_id.startswith("minecraft:end/") and cur_dim != "the_end":
             continue
         if not _can_attempt_target(adv_id, counts, has_iron_or_better=has_iron_or_better):
             continue
@@ -1973,14 +2049,17 @@ class CurriculumSupervisor:
         self.cooldown_tiers: dict[str, int] = {}
         self.cooldowns: dict[str, float] = {}
         self.episodes: list[dict[str, Any]] = []
+        self._last_confirmed_completed_advs: set[str] = set()
 
     def _query_completed_advs(self) -> set[str]:
         adv = self.bot.advancements(include_recipes=False)
-        return {
+        completed_set = {
             (str(r["id"]) if ":" in str(r["id"]) else f"minecraft:{r['id']}")
             for r in (adv.get("advancements") or [])
             if isinstance(r, dict) and r.get("status") == "completed" and r.get("id")
         }
+        self._last_confirmed_completed_advs = set(completed_set)
+        return completed_set
 
     def _detect_surface_preempt_opportunity(
         self,
@@ -2016,9 +2095,11 @@ class CurriculumSupervisor:
                 return trade_id
 
         # 2) Lava pool within <= 32m + bucket/iron ready -> 15pt `story/lava_bucket`
+        # Never interrupt an active `enter_the_nether` portal build/obsidian harvest.
         lava_id = "minecraft:story/lava_bucket"
         if (
             lava_id != current_key
+            and current_key != "minecraft:story/enter_the_nether"
             and lava_id not in completed_advs
             and self.cooldowns.get(lava_id, 0.0) <= time.monotonic()
             and (has_bucket or iron_equiv >= 3)
@@ -2046,6 +2127,7 @@ class CurriculumSupervisor:
         *,
         max_episodes: int | None = None,
         stop_check: Callable[[], bool] | None = None,
+        inbox: Any = None,
     ) -> dict[str, Any]:
         from .agent import run_mc_agent
 
@@ -2062,11 +2144,14 @@ class CurriculumSupervisor:
         def _is_stopped() -> bool:
             return bool(stop_check is not None and stop_check())
 
+        stop_reason = "deadline"
         while time.monotonic() < deadline_mono:
             if _is_stopped():
                 final_status = "interrupted"
+                stop_reason = "interrupted"
                 break
             if max_episodes is not None and ep_index >= max_episodes:
+                stop_reason = "episode_cap"
                 break
 
             ep_index += 1
@@ -2167,6 +2252,19 @@ class CurriculumSupervisor:
                     except Exception:
                         pass
 
+                # BUG-050: discard queued preempt / suspended targets incompatible with current dimension
+                def _dim_compatible(tkey: str) -> bool:
+                    if tkey.startswith("minecraft:nether/") and tkey != "minecraft:nether/brew_potion" and cur_dim != "the_nether":
+                        return False
+                    if tkey.startswith("minecraft:end/") and cur_dim != "the_end":
+                        return False
+                    return True
+
+                if self._pending_preempt_key is not None and not _dim_compatible(self._pending_preempt_key):
+                    self._pending_preempt_key = None
+                if self.suspended_episode is not None and not _dim_compatible(self.suspended_episode.target.key):
+                    self.suspended_episode = None
+
                 # Priority 1: Run a 1-level preempting opportunity target if queued
                 if self._pending_preempt_key is not None and self._pending_preempt_key in CURRICULUM_PLAYBOOKS:
                     pkey = self._pending_preempt_key
@@ -2266,12 +2364,21 @@ class CurriculumSupervisor:
                 wait_cd = min(max(5.0, float(exc.cooldown_remaining_seconds or 30.0)), max(5.0, remaining_s))
                 time.sleep(wait_cd)
                 continue
-            except (ApiError, BotNotReadyError, RuntimeError, TimeoutError, OSError) as exc:
+            except (ApiError, BotNotReadyError, RuntimeError, TimeoutError, OSError, httpx.HTTPError) as exc:
                 ep_index -= 1
                 consecutive_recovery_waits += 1
                 if consecutive_recovery_waits > 12:
                     final_status = "disconnected"
-                    self.episodes.append({"episode": ep_index + 1, "status": "disconnected", "error": str(exc)})
+                    stop_reason = "transport_exhausted" if isinstance(exc, httpx.HTTPError) else "recovery_exhausted"
+                    self.episodes.append(
+                        {
+                            "episode": ep_index + 1,
+                            "status": "disconnected",
+                            "error_type": type(exc).__name__,
+                            "error_stage": "between_episode_status",
+                            "error": str(exc),
+                        }
+                    )
                     break
                 time.sleep(min(5.0, max(1.0, remaining_s)))
                 continue
@@ -2361,7 +2468,7 @@ class CurriculumSupervisor:
                         + chest_i.get("iron_ingot", 0)
                         + chest_i.get("raw_iron", 0)
                     )
-                    if avail_iron < 3:
+                    if avail_iron < 3 and bag_i.get("iron_pickaxe", 0) < 1:
                         try:
                             exp_fe = self.bot.call(
                                 "find_blocks",
@@ -2413,7 +2520,54 @@ class CurriculumSupervisor:
                         except Exception:
                             pass
 
+                _pre_fast_done = False
                 if self.enable_pre_ensure and eff_pre_ensure:
+                    # BUG-101 fast-path: if live `inv_before` already satisfies every requested
+                    # item and no `pre_equip` is pending, skip `GenerationGuard.prime()` +
+                    # `PhysicalPrerequisiteResolver.ensure_items()` + redundant status/inventory polls.
+                    _owned_fast = total_owned_counts(inv_before)
+
+                    def _fast_count(req_key: str) -> int:
+                        if req_key == "any_log":
+                            return sum(v for k, v in _owned_fast.items() if k.endswith(("_log", "_stem")))
+                        if req_key == "any_planks":
+                            return sum(v for k, v in _owned_fast.items() if k.endswith("_planks"))
+                        return int(_owned_fast.get(req_key, 0))
+
+                    if (
+                        not base_playbook.pre_equip
+                        and all(_fast_count(k) >= int(v) for k, v in eff_pre_ensure.items())
+                    ):
+                        _pre_fast_done = True
+                        pre_ensure_res = {
+                            "ok": True,
+                            "stop_reason": "already_satisfied",
+                            "steps_executed": 0,
+                            "remaining_deficit": {},
+                        }
+                        fast_post = target.post_ensure_task or base_playbook.post_ensure_task
+                        if fast_post:
+                            _fast_bag, _fast_chest, _ = _combined_available_counts(
+                                inv_before,
+                                self.toolset.world_memory,
+                                origin=cur_pos,
+                                dim=cur_dim,
+                                world_jobs=self.world_jobs,
+                            )
+                            re_enriched, _ = _enrich_target_with_world_memory(
+                                base_playbook,
+                                world_memory=self.toolset.world_memory,
+                                bag_counts=_fast_bag,
+                                chest_counts=_fast_chest,
+                                origin=cur_pos,
+                                dim=cur_dim,
+                                include_storage_hint=False,
+                                task_override=fast_post,
+                            )
+                            eff_task = re_enriched.task
+                            eff_extra_tools = re_enriched.extra_tools
+
+                if self.enable_pre_ensure and eff_pre_ensure and not _pre_fast_done:
                     try:
                         max_pre_cap = 45.0 if base_playbook.key.startswith("bootstrap_") else 90.0
                         pre_slice_s = min(ep_timeout * 0.5, max_pre_cap)
@@ -2510,7 +2664,7 @@ class CurriculumSupervisor:
                             else:
                                 # D4.2 Fix: Dynamically re-render prompt AFTER `pre_ensure` using fresh WorldMemory!
                                 if pre_ensure_res.get("ok"):
-                                    post_base = base_playbook.post_ensure_task or base_playbook.task
+                                    post_base = target.post_ensure_task or base_playbook.post_ensure_task or target.task
                                     re_enriched, _ = _enrich_target_with_world_memory(
                                         base_playbook,
                                         world_memory=self.toolset.world_memory,
@@ -2651,6 +2805,7 @@ class CurriculumSupervisor:
                         tool_output_chars=self.tool_output_chars,
                         stream=True,
                         on_event=_sink,
+                        inbox=inbox,
                         include_initial_snapshot=False,
                         stop_check=stop_check,
                         survival_guard=True,
@@ -2683,7 +2838,8 @@ class CurriculumSupervisor:
                                 preempted_by_key=pkey,
                             )
 
-            if target.key == "island_recon_sweep" and report.get("status") not in {"paused", "paused_for_world_job"}:
+            if target.key == "island_recon_sweep" and report.get("status") in {"answered", "goal_satisfied"}:
+                # BUG-102: only mark recon completed on clean completion, not on mid-sweep limit_reached/timeout
                 self.recon_completed = True
             if target.key == "day2_village_search" and report.get("status") not in {"paused", "paused_for_world_job"}:
                 # Allow full Day 2 daytime village search (up to 3 episodes across different sectors);
@@ -2727,6 +2883,17 @@ class CurriculumSupervisor:
             score_after, breakdown = score_completed_advancements(completed_after)
             bag_after_counts = total_owned_counts(inv_after) if isinstance(inv_after, dict) else {}
             objective_verified = base_playbook.is_objectively_satisfied(completed_after, bag_after_counts)
+            if not objective_verified and target.key == "day2_village_search":
+                # BUG-084: objective completion predicate for day2_village_search via WorldMemory village/bed evidence
+                wm_after = self.toolset.world_memory
+                has_villager_or_poi = bool(wm_after.habitats.get(("overworld", "villager"))) or any(
+                    e.dim == "overworld"
+                    and e.name in {"bell", "hay_block", "lectern", "composter", "fletching_table"}
+                    for e in wm_after.pois.values()
+                )
+                has_bed_mem = bool(getattr(wm_after, "bed_positions", None))
+                if has_villager_or_poi or has_bed_mem:
+                    objective_verified = True
 
             material_progress = (
                 objective_verified
@@ -2744,8 +2911,14 @@ class CurriculumSupervisor:
             is_pause_yield = report.get("status") in {"paused", "paused_for_world_job"}
             err_lower = str(report.get("error") or "").lower()
             is_world_loading_err = (
-                report.get("status") == "runtime_error"
-                and ("not_ready" in err_lower or "world is still loading" in err_lower)
+                report.get("status") == "network_error"
+                or (
+                    report.get("status") == "runtime_error"
+                    and any(
+                        tok in err_lower
+                        for tok in ("not_ready", "not_loaded", "chunk_not_loaded", "world_not_ready", "world is still loading")
+                    )
+                )
             )
             transient_api_err = (not progress_made) and (_is_transient_llm_error(report) or is_world_loading_err)
             if is_world_loading_err:
@@ -2857,22 +3030,42 @@ class CurriculumSupervisor:
         except Exception:
             pass
 
-        try:
-            final_completed = self._query_completed_advs()
+        final_advancements_confirmed = False
+        final_advancements_error: str | None = None
+        final_completed: set[str] = set()
+        for attempt_adv in range(3):
+            try:
+                final_completed = self._query_completed_advs()
+                final_advancements_confirmed = True
+                final_advancements_error = None
+                break
+            except Exception as exc_adv:
+                final_advancements_error = f"{type(exc_adv).__name__}: {exc_adv}"
+                if attempt_adv < 2:
+                    try:
+                        self.bot.wait_until_ready(timeout_s=3.0, poll_interval_s=0.5)
+                    except Exception:
+                        time.sleep(0.5)
+        if final_advancements_confirmed:
             final_score, final_bd = score_completed_advancements(final_completed)
-        except Exception:
+        elif self._last_confirmed_completed_advs:
+            final_completed = set(self._last_confirmed_completed_advs)
+            final_score, final_bd = score_completed_advancements(final_completed)
+        else:
             final_score = self.episodes[-1].get("score_after", 0) if self.episodes else 0
             final_bd = {}
-            final_completed = set()
 
         final_summary = {
             "status": final_status,
+            "stop_reason": stop_reason,
             "elapsed_s": round(time.monotonic() - started_mono, 1),
             "duration_s": self.duration_s,
             "episodes_completed": len(self.episodes),
             "final_score": final_score,
             "completed_count": len(final_completed),
             "score_breakdown": final_bd,
+            "final_advancements_confirmed": final_advancements_confirmed,
+            "final_advancements_error": final_advancements_error,
             "episodes": self.episodes,
             "summary_file": str(summary_path),
         }

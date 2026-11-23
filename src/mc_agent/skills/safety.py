@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ..bot import BotSession
@@ -114,6 +115,20 @@ def _pick_best_food(counts: dict[str, int]) -> str | None:
         if counts.get(food, 0) > 0:
             return food
     return None
+
+
+def water_oxygen_below(status: dict[str, Any], bubbles: float) -> bool:
+    """Read oxygen as bubbles, accepting legacy readings in air ticks."""
+    oxygen = status.get("oxygen")
+    if type(oxygen) not in (int, float) or not math.isfinite(oxygen):
+        return False
+    if oxygen <= 0:
+        return True
+    # A low positive reading can persist briefly after the head clears the water.
+    if status.get("submerged") is False:
+        return False
+    remaining = oxygen if oxygen <= 20 else oxygen / 15
+    return remaining < bubbles
 
 
 def prepare_water_shield(
@@ -229,7 +244,6 @@ def check_and_stabilize(
     # 1. Water buoyancy & threat shield reflex (avoid drowning or unshielded trident hits)
     in_water = bool(st.get("in_water"))
     submerged = bool(st.get("submerged"))
-    oxygen = st.get("oxygen", 300)
     jumping = bool(st.get("jumping"))
     nh = st.get("nearest_hostile")
     if in_water and isinstance(nh, dict) and nh.get("name"):
@@ -237,7 +251,7 @@ def check_and_stabilize(
     if in_water and (
         submerged
         or not bool(st.get("on_ground"))
-        or (isinstance(oxygen, (int, float)) and oxygen < 240)
+        or water_oxygen_below(st, 16)
     ):
         if not jumping and "posture_water_shield" not in actions:
             bot.call(
