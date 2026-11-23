@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mc_agent.skills.combat_env import CombatEnv
+
 from mc_agent.skills.combat_env._base import (
     math,
     time,

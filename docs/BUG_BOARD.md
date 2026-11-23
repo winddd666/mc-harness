@@ -33,7 +33,7 @@
 - **Wave 21 补跑 6/12 正式终档（正式槽共 1 死，另六槽缺终档）**：`glm_village_30m=135`、`glm_nether_fortress_30m=195`、`nju_midgame_30m=135`、`glm_bare_20m=25`、`hy4_bare_20m=15`、`nju_bare_20m=5`。三个 20m 均 0 死，NJU OB2 中期 EP04 明确箭伤 1 死。 [死亡原迹](../runs/l1_w21_v1321_20261123/nju_ob_2_midgame_30m/20261123-003325-689127.events.jsonl#L994)
 - **D1 验收范围**。BUG-155 的底层坐标微场景覆盖显式 2.0 和 0.0。当前 `e7ff425` 用完整 actor 入口仍复现默认半径误判、精确零的部分推进被误标已到、占位 Y0 被外层重复计入。整局工具回执门仍待。 [微测入口](../scripts/verify_historical_bugs_live.py#L240) · [actor 外层判断](../src/mc_agent/harness/agent.py#L738)
 - **D1 网关候选复验**。BUG-150 `88177ee` 定向 1/1，同网关 HY4 和 NJU 默认共享 2 槽。全局覆盖继续共享，单 provider 显式覆盖分组，不同网关独立。退避持锁范围未改。 [网关键](../src/mc_agent/harness/model.py#L583) · [共享槽夹具](../tests/test_v2_harness.py#L4033)
-- **历史归档**：已将 **129 条**历史/已修/实机已验工单无损归档至 [`docs/BUG_BOARD_ARCHIVE.md`](BUG_BOARD_ARCHIVE.md)；本看板仅保留 **5 条活跃 P0 + 19 条活跃 P1**。
+- **历史归档**：已将 **129 条**历史/已修/实机已验工单无损归档至 [`docs/archive/BUG_BOARD_ARCHIVE.md`](archive/BUG_BOARD_ARCHIVE.md)；本看板仅保留 **5 条活跃 P0 + 19 条活跃 P1**。
 
 ---
 

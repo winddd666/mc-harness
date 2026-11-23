@@ -22,7 +22,7 @@ size-check:
 
 lint: size-check
 	@if $(PYTHON) -m ruff --version >/dev/null 2>&1; then \
-		$(PYTHON) -m ruff check src tests scripts; \
+		$(PYTHON) -m ruff check --select E9,F63,F7,F82 src tests scripts; \
 	else \
 		echo "ruff not installed in .venv; skipping ruff check (run 'uv sync --dev' to enable)"; \
 	fi

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mc_agent.skills.library import MacroSkills
+
 from mc_agent.skills.macro._base import (
     copy,
     partial,

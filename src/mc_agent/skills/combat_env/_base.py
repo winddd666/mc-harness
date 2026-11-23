@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Callable, Collection, Literal, Protocol, Sequence, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, Collection, Literal, Protocol, Sequence, TypedDict
+
+if TYPE_CHECKING:
+    from mc_agent.skills.combat_env import CombatEnv
 
 import httpx
 

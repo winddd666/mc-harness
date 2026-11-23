@@ -45,7 +45,7 @@ LEGACY_CEILINGS: dict[str, int] = {
     "src/mc_agent/skills/combat_v1.py": 2450,
     "src/mc_agent/harness/agent.py": 2000,
     "src/mc_agent/live/server.py": 1850,
-    "scripts/l2_move_live_test.py": 1750,
+    "scripts/legacy/l2_move_live_test.py": 1750,
     "src/mc_agent/skills/movement.py": 1700,
     "src/mc_agent/harness/world_memory.py": 1700,
     "scripts/run_combat_tests.py": 1700,
@@ -57,10 +57,10 @@ LEGACY_CEILINGS: dict[str, int] = {
     "src/mc_agent/skills/inventory_manager.py": 1300,
     "tests/test_live_server.py": 1250,
     "src/mc_agent/harness/model.py": 1100,
-    "scripts/probe_micro_combat_v1314.py": 1050,
-    "scripts/l2_inv_window_live_test.py": 1000,
+    "scripts/legacy/probe_micro_combat_v1314.py": 1050,
+    "scripts/legacy/l2_inv_window_live_test.py": 1000,
     "tests/test_ecology_oracle.py": 950,
-    "scripts/l2_mining_live_test.py": 950,
+    "scripts/legacy/l2_mining_live_test.py": 950,
     "src/mc_agent/skills/tunnel.py": 950,
 }
 
