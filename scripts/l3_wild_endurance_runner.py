@@ -2442,6 +2442,52 @@ def _install_bare_iron_descent_guard(toolset: Any) -> None:
     actor.run_mc_agent = run_with_descent_guard
 
 
+def _install_wild_portal_guidance() -> None:
+    from mc_agent.harness import curriculum as cur
+
+    playbook = cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER]
+    ready_step = (
+        "用 mc_inventory 核对实包。当黑曜石至少 10 块且有打火石时，"
+        "在围栏内就近找干燥、脚下有支撑且有门框净空的位置，立即调用 mc_skill_build_portal(enter=True)。"
+        "回执确认实际穿门后，用 mc_status 核对当前维度为 the_nether。"
+    )
+    task = (
+        "目标是实际进入下界。已知附近激活的传送门时，先确认它位于围栏内且可安全到达，再复用。"
+        + ready_step
+        + "若材料不足，黑曜石只补 10 减去实包现有数量的缺口，有 9 块就只补 1 块。"
+          "先找围栏内近处已露出的黑曜石，钻石镐或下界合金镐才可采。缺现成黑曜石且有水桶时，"
+          "在当前可安全到达的实体平台附近找岩浆源，用水冷却成黑曜石并核对方块，站稳后用 mc_skill_mine_blocks 按缺口采集。"
+          "读 `gained.obsidian` 和实包判断入包。若有可安全到达的明确掉落物，调用 mc_skill_collect_drops。"
+          "缺打火石只补 1 铁锭和 1 燧石，铁锭先检查附近已知熔炉。"
+          "找矿或绕行前核对实时 X/Z 和围栏，附近路线不可用就换圈内安全位置，"
+          "找不到安全取料路径时保留材料，并报告具体缺口或地形阻断。"
+    )
+    extra_tools = (*playbook.extra_tools, "mc_window_view", "mc_window_act", "mc_skill_collect_drops")
+    cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] = dataclasses.replace(
+        playbook, task=task, post_ensure_task=ready_step, extra_tools=tuple(dict.fromkeys(extra_tools)),
+    )
+
+
+def _scene_supervisor_class(base: type, stage: str, focus_episodes: int) -> type:
+    protected = {
+        STRONGHOLD_STAGE: (FOLLOW_ENDER_EYE, ENTER_END),
+        "probe_obsidian_portal": (ENTER_NETHER,),
+    }.get(stage, ()) if focus_episodes > 0 else ()
+    protect_portal_from_trade = stage in {"midgame", "village"}
+    if not protected and not protect_portal_from_trade:
+        return base
+
+    class SceneFocusSupervisor(base):
+        def _detect_surface_preempt_opportunity(self, *, current_key: str, **kwargs: Any) -> str | None:
+            if current_key in protected:
+                return None
+            if protect_portal_from_trade and current_key == ENTER_NETHER:
+                kwargs["completed_advs"] = kwargs["completed_advs"] | {"minecraft:adventure/trade"}
+            return super()._detect_surface_preempt_opportunity(current_key=current_key, **kwargs)
+
+    return SceneFocusSupervisor
+
+
 def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | None = None) -> bool:
     """Force the first `episodes` curriculum picks to a stage-specific target (SCENE-001).
 
@@ -2987,6 +3033,8 @@ def main() -> int:
             _install_bare_stone_guidance()
             _install_bare_iron_guidance()
             _install_bare_iron_descent_guard(toolset)
+        if args.stage in {"midgame", "village"}:
+            _install_wild_portal_guidance()
         install_scene_focus(args.stage, args.focus_episodes, scene=scene)
         if portal_guard is not None:
             from mc_agent.harness import curriculum as cur
@@ -3060,20 +3108,7 @@ def main() -> int:
             trader_keeper.start()
             print(f"[Scene] trader keeper started for {bot_name} (15s re-anchor)", flush=True)
 
-        protected_focus = {
-            STRONGHOLD_STAGE: (FOLLOW_ENDER_EYE, ENTER_END),
-            "probe_obsidian_portal": (ENTER_NETHER,),
-        }.get(args.stage, ())
-
-        class SceneFocusSupervisor(CurriculumSupervisor):
-            def _detect_surface_preempt_opportunity(self, *, current_key: str, **kwargs: Any) -> str | None:
-                if current_key in protected_focus:
-                    return None
-                return super()._detect_surface_preempt_opportunity(current_key=current_key, **kwargs)
-
-        supervisor_class = (
-            SceneFocusSupervisor if protected_focus and args.focus_episodes > 0 else CurriculumSupervisor
-        )
+        supervisor_class = _scene_supervisor_class(CurriculumSupervisor, args.stage, args.focus_episodes)
         try:
             sup = supervisor_class(
                 bot,
