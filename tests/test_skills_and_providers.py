@@ -7341,14 +7341,16 @@ def test_unstick_reports_failure_when_still_in_water() -> None:
     assert "deadline_hit" not in result
 
 
-@pytest.mark.parametrize("terrain", ["layers", "deep_drop", "unknown", "lava", "no_landing", "timeout"])
+@pytest.mark.parametrize("terrain", [
+    "layers", "deep_drop", "unknown", "lava", "no_landing", "timeout", "early_read_timeout", "early_dig_timeout",
+])
 def test_unstick_descends_canopy_only_with_confirmed_support(monkeypatch, terrain) -> None:
     clock = [0.0]
     monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     standing = [0.5, 71.0, 0.5]
     blocks = {70: "spruce_leaves", 63: "dirt"}
-    if terrain in {"layers", "no_landing", "timeout"}:
+    if terrain in {"layers", "no_landing", "timeout", "early_dig_timeout"}:
         blocks.update({y: "spruce_leaves" for y in range(65, 70)})
         blocks[64] = "spruce_log"
     if terrain in {"unknown", "lava"}:
@@ -7364,6 +7366,8 @@ def test_unstick_descends_canopy_only_with_confirmed_support(monkeypatch, terrai
         if route == "status":
             result = {"pos": standing, "on_ground": True, "alive": True, "ready": True, "dimension": "overworld"}
         elif route == "get_block":
+            if terrain == "early_read_timeout":
+                raise httpx.ReadTimeout("canopy support read failed", request=request)
             x, y, z = body["pos"]
             name = blocks.get(y, "air") if (x, z) == (0, 0) else "air"
             result = {"name": name, "diggable": name.endswith(("_leaves", "_log"))}
@@ -7373,8 +7377,10 @@ def test_unstick_descends_canopy_only_with_confirmed_support(monkeypatch, terrai
             x, y, z = body["pos"]
             digs.append((x, y, z))
             assert y == int(standing[1]) - 1
+            if terrain == "early_dig_timeout":
+                raise httpx.ReadTimeout("canopy dig reply lost", request=request)
             if terrain == "timeout":
-                clock[0] += float(request.extensions["timeout"]["read"])
+                clock[0] += sum(request.extensions["timeout"].values())
                 raise httpx.ReadTimeout("slow canopy dig", request=request)
             removed = blocks.pop(y)
             if terrain != "no_landing":
@@ -7388,7 +7394,14 @@ def test_unstick_descends_canopy_only_with_confirmed_support(monkeypatch, terrai
         return httpx.Response(200, json={"ok": True, "result": result})
 
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
-        result = MacroSkills(bot).unstick(max_duration_s=10)
+        skills = MacroSkills(bot)
+        if terrain in {"early_read_timeout", "early_dig_timeout"}:
+            with pytest.raises(httpx.ReadTimeout):
+                skills.unstick(max_duration_s=10)
+            assert len(digs) == (1 if terrain == "early_dig_timeout" else 0)
+            assert stops == []
+            return
+        result = skills.unstick(max_duration_s=10)
 
     if terrain == "layers":
         assert digs == [(0, y, 0) for y in range(70, 63, -1)]

@@ -1561,7 +1561,7 @@ class _SkillBudgetSession:
             self.pending_action = path not in self._READS
             if path == "dig" and isinstance(error, httpx.TimeoutException):
                 raise  # The dig loop records the target and preserves partial progress.
-            raise _SkillDeadline() from None
+            raise _SkillDeadline() from error
 
     def status(self) -> dict[str, Any]:
         self._remaining()
@@ -7940,7 +7940,11 @@ class MacroSkills:
         scoped.bot = canopy_session
         try:
             canopy = scoped.descend_canopy()
-        except (_SkillDeadline, httpx.TimeoutException):
+        except (_SkillDeadline, httpx.TimeoutException) as error:
+            transport = error.__cause__ if isinstance(error, _SkillDeadline) else error
+            if isinstance(transport, httpx.TransportError) and time.monotonic() < canopy_session.deadline:
+                # The actor guard records the failed endpoint and any confirmed dig progress.
+                raise transport
             canopy = canopy_session.progress.get("canopy") or {}
             timed_out = True
         if timed_out or (canopy.get("on_canopy") and canopy.get("dug")):
