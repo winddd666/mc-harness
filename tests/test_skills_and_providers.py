@@ -7343,7 +7343,7 @@ def test_attack_rechecks_stale_or_distant_targets(monkeypatch, observed_distance
         elif path == "inventory":
             result = {"items": []}
         elif path == "attack":
-            result = {"hits": 1, "killed": False}
+            result = {"hits": 1, "connected_hits": 1, "killed": False}
         else:
             raise AssertionError(path)
         return httpx.Response(200, json={"ok": True, "result": result})
@@ -7361,6 +7361,57 @@ def test_attack_rechecks_stale_or_distant_targets(monkeypatch, observed_distance
         assert "inventory" not in calls
         assert result["requires_replan"] is True
         assert result["error"]["code"] == expected_error
+
+
+@pytest.mark.parametrize("feedback,error_code", [
+    ({"hits": 4, "connected_hits": 0}, "attack_zero_hits"),
+    ({"hits": 4, "hits_connected": 0}, "attack_zero_hits"),
+    ({"hits": 4, "target_hp_delta": 0}, "attack_zero_hits"),
+    ({"hits": 4, "target_health_before": 12, "target_health_after": 12}, "attack_zero_hits"),
+    ({"hits": 0}, "attack_zero_hits"),
+    ({"hits": 4}, "attack_hit_unconfirmed"),
+    ({"hits": 4, "target_hp_delta": -2}, "attack_hit_unconfirmed"),
+    ({"hits": 4, "target_hp_delta": 2}, "attack_hit_unconfirmed"),
+    ({"hits": 0, "connected_hits": 2}, None),
+    ({"hits": 0, "target_health_before": 12, "target_health_after": 10}, None),
+    ({"hits": 0, "connected_hits": 0, "killed": True}, None),
+])
+def test_attack_checks_feedback_and_stops_repeating_unverified_swings(feedback, error_code) -> None:
+    from mc_agent.harness.agent import _RepeatFailureGuard
+    from mc_agent.harness.mc_tools import McToolset
+
+    attack_calls = []
+    returned = {"killed": False, "ms": 4000, **feedback}
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": []}})
+        assert route == "attack"
+        attack_calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": returned})
+
+    args = {"entity_id": 77, "max_hits": 4, "interval_ms": 350, "timeout_ms": 4000}
+    call = {"function": {"name": "mc_attack", "arguments": json.dumps(args)}}
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot)
+        tools.update_block_pos([0.5, 64, 0.5])
+        registry = tools.registry().select("mc_attack").map_tools(_RepeatFailureGuard(tools).wrap_tool)
+        reply = json.loads(registry.execute(call))
+        assert reply["ok"] is (error_code is None)
+        if error_code is None:
+            assert reply["result"] == returned
+            assert reply["hit_confirmed"] is True
+        else:
+            assert reply["error"]["code"] == error_code
+            assert reply["requires_replan"] is True
+            assert reply["hit_confirmed"] is (False if error_code == "attack_zero_hits" else None)
+            assert reply["result"]["reported_hits"] == returned["hits"]
+            assert "hits" not in reply["result"]
+            assert all(reply["result"][key] == value for key, value in returned.items() if key != "hits")
+            blocked = json.loads(registry.execute(call))
+            assert blocked["error"]["code"] == "repeated_identical_failure_blocked"
+    assert attack_calls == [{"entity_id": 77, "max_hits": 4, "interval_ms": 350, "timeout": 4000, "feedback": True}]
 
 
 def test_attack_disappearing_entity_reuses_the_stale_id_hint() -> None:

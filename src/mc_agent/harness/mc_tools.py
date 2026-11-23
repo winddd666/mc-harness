@@ -1999,6 +1999,25 @@ class McToolset:
         )
         return json.dumps(receipt, ensure_ascii=False)
 
+    @staticmethod
+    def _attack_hit_confirmed(result: dict[str, Any]) -> bool | None:
+        """Return None when the receipt only reports swings or ambiguous feedback."""
+        if result.get("killed") is True:
+            return True
+        for key in ("connected_hits", "hits_connected"):
+            count = result.get(key)
+            if type(count) in (int, float) and count >= 0 and math.isfinite(count):
+                return count > 0
+        before, after = result.get("target_health_before"), result.get("target_health_after")
+        if all(type(value) in (int, float) and value >= 0 and math.isfinite(value) for value in (before, after)):
+            return after < before
+        delta = result.get("target_hp_delta")
+        if type(delta) in (int, float) and math.isfinite(delta):
+            # A delta alone does not establish which direction represents damage.
+            return False if delta == 0 else None
+        swings = result.get("hits")
+        return False if type(swings) in (int, float) and swings == 0 else None
+
     def mc_attack(
         self,
         entity_id: int,
@@ -2047,7 +2066,7 @@ class McToolset:
         except (ApiError, KeyError, TypeError):
             pass
         timeout_ms = max(1000, min(60000, int(timeout_ms)))
-        payload = {"entity_id": entity_id, "timeout": timeout_ms}
+        payload = {"entity_id": entity_id, "timeout": timeout_ms, "feedback": True}
         if max_hits is not None:
             payload["max_hits"] = max(1, min(100, int(max_hits)))
         if interval_ms is not None:
@@ -2057,30 +2076,27 @@ class McToolset:
             parsed = json.loads(raw)
         except ValueError:
             return raw
-        res = parsed.get("result") if isinstance(parsed, dict) else None
-        if (
-            isinstance(parsed, dict)
-            and parsed.get("ok") is True
-            and isinstance(res, dict)
-            and "hits" in res
-            and int(res.get("hits") or 0) == 0
-            and not res.get("killed")
-        ):
-            return json.dumps(
-                {
-                    "ok": False,
-                    "requires_replan": True,
-                    "error": {
-                        "code": "attack_zero_hits",
-                        "entity_id": entity_id,
-                        "ms": res.get("ms"),
-                        "message": "攻击超时且 0 次命中(hits=0)：目标可能隔墙不可达、距离过远或寻路受阻，请勿原地重复空挥。",
-                    },
-                    "result": res,
-                },
-                ensure_ascii=False,
+        if not isinstance(parsed, dict) or parsed.get("ok") is not True or not isinstance(parsed.get("result"), dict):
+            return raw
+        res = parsed["result"]
+        confirmed = self._attack_hit_confirmed(res)
+        parsed["hit_confirmed"] = confirmed
+        if confirmed is not True:
+            # The actor's repeat guard treats result.hits as confirmed material progress.
+            if "hits" in res:
+                res["reported_hits"] = res.pop("hits")
+            message = (
+                "本次攻击未取得有效命中或扣血。请重新观测目标位置，再选安全的进攻路线或更换动作。"
+                if confirmed is False else
+                "服务端回执无法确认实际命中或扣血。请先用 mc_get_entities 复核目标，再决定下一步。"
             )
-        return raw
+            parsed.update(ok=False, requires_replan=True, error={
+                "code": "attack_zero_hits" if confirmed is False else "attack_hit_unconfirmed",
+                "entity_id": entity_id,
+                "ms": res.get("ms"),
+                "message": message,
+            })
+        return json.dumps(parsed, ensure_ascii=False)
 
     def mc_shoot(
         self,
