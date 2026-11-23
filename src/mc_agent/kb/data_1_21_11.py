@@ -739,6 +739,18 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
             "xp_level 缺失时记为未知。等经验、青金石或装备有变化再重试。"
         ),
     },
+    "obsidian_cast": {
+        "id": "obsidian_cast",
+        "category": "api_mechanic",
+        "keywords": ["obsidian", "黑曜石", "静止岩浆", "mc_skill_cast_obsidian", "mine_ready"],
+        "rule": (
+            "优先采已有的安全黑曜石露头，用钻石镐或下界合金镐核对实际入包。"
+            "缺现成黑曜石时，在主世界从围栏内干燥、有支撑的侧边站位，确认有可见的下方静止岩浆源 level=0，眼睛距源表面至多 4 格。"
+            "携水桶调用 mc_skill_cast_obsidian(x=..., y=..., z=...)，坐标填岩浆源格。"
+            "浇铸回执 mine_ready=true 才采这一格。若为 false，先等残水退去、核实支撑并封住相邻岩浆，处理后再检查该格。"
+            "黑曜石方块生成只记浇铸完成，补料按实包缺口，采后核对 gained.obsidian。"
+        ),
+    },
     "wood_family_planks": {
         "id": "wood_family_planks",
         "category": "game_mechanic",
@@ -895,7 +907,7 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:story/form_obsidian": {
         "difficulty": "medium",
-        "how_to": "持铁镐/钻石镐+水桶，用水浇静止岩浆生成 obsidian 后用钻石镐挖得。",
+        "how_to": MOBS_AND_MECHANICS["obsidian_cast"]["rule"],
     },
     "minecraft:story/shiny_gear": {
         "difficulty": "medium",

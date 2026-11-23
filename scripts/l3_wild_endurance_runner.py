@@ -2550,7 +2550,7 @@ SCENE_FOCUS: dict[str, dict[str, Any]] = {
             "每批根据实际入包量更新缺口。若某格超时，保留站位安全并换相邻露头，避免原地连续调用 mc_dig。"
             "有 10 块黑曜石后，在干地调用 mc_skill_build_portal(enter=True) 建门、点火并穿门。"
         ),
-        "extra_tools": ("mc_skill_build_portal",),
+        "extra_tools": ("mc_skill_build_portal", "mc_skill_cast_obsidian"),
         "advancement_id": ENTER_NETHER,
     },
 }
@@ -2979,6 +2979,7 @@ def _install_enchant_guidance() -> None:
 
 def _install_wild_portal_guidance() -> None:
     from mc_agent.harness import curriculum as cur
+    from mc_agent.kb.data_1_21_11 import MOBS_AND_MECHANICS
 
     playbook = cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER]
     ready_step = (
@@ -2990,18 +2991,17 @@ def _install_wild_portal_guidance() -> None:
         "目标是实际进入下界。已知附近激活的传送门时，先确认它位于围栏内且可安全到达，再复用。"
         + ready_step
         + "黑曜石不足时只补 10 减去实包现有数量的缺口。先调用 mc_find_blocks(types=['obsidian','lava'], radius=32)，"
-          "核对露头黑曜石和岩浆源是否在围栏内且可从实体平台安全到达。黑曜石须用钻石镐或下界合金镐。"
-          "缺现成黑曜石且有水桶时，确认岩浆 level=0。从干燥实心位置用 mc_interact(x=..., y=..., z=..., item='water_bucket') "
-          "对准围栏内邻近实心块的顶面支点，让水流向岩浆源。"
-          "用 mc_get_block 确认生成 obsidian，站稳后用 mc_skill_mine_blocks(block_types=['obsidian'], count=<缺口>) 采集。"
+          "核对露头黑曜石和岩浆源是否在围栏内且可从实体平台安全到达。"
+        + MOBS_AND_MECHANICS["obsidian_cast"]["rule"]
+        + "用 mc_skill_mine_blocks(block_types=['obsidian'], count=<缺口>) 采集。"
           "DFS 的探矿会避开岩浆，找取料点用上述扫描。已在旧矿井内时可用 mc_skill_mine_dfs(action='return_collar') 沿已知路线撤回。"
-          "读 `gained.obsidian` 和实包判断入包。若有可安全到达的明确掉落物，调用 mc_skill_collect_drops。"
+          "有已确认且近处安全可达的 obsidian 掉落时，用 mc_skill_collect_drops(radius=6, item_types=['obsidian']) 拾取。"
           "缺打火石只补 1 铁锭和 1 燧石，铁锭先检查附近已知熔炉，用 mc_craft(item='flint_and_steel', count=1) 合成。"
           "找矿或绕行前核对实时 X/Z 和围栏，附近路线不可用就换圈内安全位置，"
           "找不到安全取料路径时保留材料，并报告具体缺口或地形阻断。"
     )
     extra_tools = (
-        *playbook.extra_tools, "mc_inventory", "mc_status", "mc_get_block", "mc_craft",
+        *playbook.extra_tools, "mc_inventory", "mc_status", "mc_get_block", "mc_craft", "mc_skill_cast_obsidian",
         "mc_window_view", "mc_window_act", "mc_skill_collect_drops",
     )
     cur.CURRICULUM_PLAYBOOKS[ENTER_NETHER] = dataclasses.replace(
@@ -3076,13 +3076,17 @@ def install_scene_focus(stage: str, episodes: int = 2, *, scene: SceneAnchor | N
                 f"酿造台在 ({x + 2}, {y}, {z})。查询水源时看这两个坐标和 level=0。"
                 + target_kwargs["task"]
             )
-        elif stage == "probe_obsidian_portal" and scene is not None:
-            x, y, z = math.floor(scene.x), round(scene.y), math.floor(scene.z)
-            target_kwargs["task"] = (
-                f"场景台面中心在 ({scene.x:.1f}, {y}, {scene.z:.1f})。"
-                f"黑曜石片范围 X={x + 2}..{x + 5}、Y={y - 1}、Z={z - 2}..{z + 1}。"
-                + target_kwargs["task"]
-            )
+        elif stage == "probe_obsidian_portal":
+            from mc_agent.kb.data_1_21_11 import MOBS_AND_MECHANICS
+
+            target_kwargs["task"] += "背包仍不足 10 块时才继续补料。" + MOBS_AND_MECHANICS["obsidian_cast"]["rule"]
+            if scene is not None:
+                x, y, z = math.floor(scene.x), round(scene.y), math.floor(scene.z)
+                target_kwargs["task"] = (
+                    f"场景台面中心在 ({scene.x:.1f}, {y}, {scene.z:.1f})。"
+                    f"黑曜石片范围 X={x + 2}..{x + 5}、Y={y - 1}、Z={z - 2}..{z + 1}。"
+                    + target_kwargs["task"]
+                )
         targets = (cur.CurriculumTarget(**target_kwargs),)
         remaining = int(spec.get("episodes", episodes))
     original = cur.select_next_target
