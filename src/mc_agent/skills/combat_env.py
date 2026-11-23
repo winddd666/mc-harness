@@ -2380,6 +2380,7 @@ class CombatEnv:
         self, threat_pos: Sequence[float], *, other_shooters: Sequence[Sequence[float]] = (), allow_stationary: bool = True,
         verify_live_shooters: bool = False, expected_life: tuple[Any, Any] | None = None,
         trident_attacker_id: int | None = None, expected_shooter_id: int | None = None, deadline: float | None = None,
+        allow_short_step: bool = False,
     ) -> dict[str, Any] | None:
         """Find a close, supported position behind existing terrain and verify the landing."""
         probe_kwargs = {"deadline": deadline} if deadline is not None else {}
@@ -2410,20 +2411,28 @@ class CombatEnv:
             return None
         shooters = (threat_pos, *other_shooters)
         blocks_shot = self._blocks_shot_across_hitbox if verify_live_shooters else self._blocks_shot
+        shooter_kwargs = {
+            "trident_attacker_id": trident_attacker_id, "expected_shooter_id": expected_shooter_id, **probe_kwargs,
+        }
         # A fresh blast at this location overrides otherwise favorable sight lines.
         already_covered = allow_stationary and all(blocks_shot(origin, shooter, **probe_kwargs) for shooter in shooters)
         if not already_covered:
             away, _ = aim_yaw_pitch(threat_pos, origin)
-            for offset in (90, -90, 45, -45):
+            distances = (1.15, 2.2) if allow_short_step else (2.2,)
+            for distance, offset in ((d, angle) for d in distances for angle in (90, -90, 45, -45)):
                 yaw = away + math.radians(offset)
-                route = self.probe_retreat(origin, yaw, 2.2, **probe_kwargs)
+                route = self.probe_retreat(origin, yaw, distance, **probe_kwargs)
                 if route is None:
                     continue
+                if distance < 2.0 and route != (math.floor(origin[1] + 0.05), False):
+                    continue
                 ux, uz = yaw_to_unit_xz(yaw)
-                target = [origin[0] + ux * 2.2, route[0], origin[2] + uz * 2.2]
+                target = [origin[0] + ux * distance, route[0], origin[2] + uz * distance]
                 if all(blocks_shot(target, shooter, **probe_kwargs) for shooter in shooters):
                     break
             else:
+                return None
+            if allow_short_step and not self._blocks_live_shots(target, **shooter_kwargs):
                 return None
 
         current = status_refresh()
@@ -2442,9 +2451,6 @@ class CombatEnv:
             or not melee_clear_for_projectile_cover([current.get("nearest_hostile")])
         ):
             return None
-        shooter_kwargs = {
-            "trident_attacker_id": trident_attacker_id, "expected_shooter_id": expected_shooter_id, **probe_kwargs,
-        }
         if already_covered:
             confirmed = not verify_live_shooters or self._blocks_live_shots(current_pos, **shooter_kwargs)
             return {
@@ -2484,6 +2490,9 @@ class CombatEnv:
         if confirmed and verify_live_shooters and not self._blocks_live_shots(final_pos, **shooter_kwargs):
             confirmed = False
             reason = "shooter_lanes_unconfirmed"
+        if confirmed and allow_short_step and not self._on_same_footing(after, status_refresh()):
+            confirmed = False
+            reason = "cover_unconfirmed"
         return {
             "ok": confirmed, "mode": "natural_cover", "pos_after": final_pos,
             **({"reason": reason} if reason else {}),
@@ -4127,7 +4136,7 @@ class SubcorticalInstinctController:
 
     def _cover_after_projectile_stall(
         self, env: CombatEnv, before: dict[str, Any], shooter_id: int, *, deadline: float,
-        max_health: float | None, landing: dict[str, Any] | None = None,
+        max_health: float | None, landing: dict[str, Any] | None = None, allow_short_step: bool = False,
     ) -> dict[str, Any] | None:
         if landing is None:
             landing = env._safe_status({"ready": False}, timeout_s=0.3)
@@ -4153,6 +4162,7 @@ class SubcorticalInstinctController:
                 target, other_shooters=[point for entity_id, point in shooters if entity_id != shooter_id],
                 verify_live_shooters=True, expected_life=(landing.get("dimension"), landing.get("last_death")),
                 expected_shooter_id=shooter_id, deadline=deadline,
+                **({"allow_short_step": True} if allow_short_step else {}),
             )
         except _TerrainProbeExpired:
             return {"ok": False, "mode": "natural_cover", "reason": "time_budget"}
@@ -5158,14 +5168,25 @@ class SubcorticalInstinctController:
                         and trigger.get("source") in {"pre_hurt_ranged", "tool_interrupted_hurt"}
                         and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
                     )
+                    close_shooter_without_cover_material = (
+                        trigger.get("source") == "pre_hurt_ranged" and not has_shield and 0 < hp <= 10.0
+                        and mob_name in {"skeleton", "stray", "bogged", "pillager"}
+                        and isinstance(mob_id, int) and mob_id == trig_id and 0 < mob_dist <= 3.5
+                        and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                        and fl.get("moved_dist") == 0.0
+                        and env.arrow_cover_material({item: count for item, count in counts.items() if count >= 2}) is None
+                    )
                     if (
-                        (shielded_arrow_interrupt or close_shooter_at_exit or close_shooter_after_pocket_timeout)
+                        (shielded_arrow_interrupt or close_shooter_at_exit or close_shooter_after_pocket_timeout
+                         or close_shooter_without_cover_material)
                         and not flee_ok and not fl.get("respawned")
                         and fl.get("reason") == "no_safe_retreat" and time.monotonic() + 2.0 < deadline
                     ):
+                        max_cover_health = 10.0 if close_shooter_without_cover_material else 6.0
                         natural_cover = self._cover_after_projectile_stall(
                             env, st, mob_id, deadline=min(deadline - 0.7, time.monotonic() + 2.25),
-                            max_health=None if close_shooter_at_exit else 6.0,
+                            max_health=None if close_shooter_at_exit else max_cover_health,
+                            allow_short_step=close_shooter_without_cover_material,
                         )
                         if natural_cover is not None:
                             actions.append({"action": "natural_cover", **natural_cover})

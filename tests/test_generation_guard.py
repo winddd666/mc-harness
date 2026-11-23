@@ -20259,6 +20259,70 @@ def test_critical_shielded_arrow_interrupt_guards_before_dig_and_checks_cover_af
         assert outcome["latched_guard"] and outcome["status_after"]["blocking"]
 
 
+@pytest.mark.parametrize("scene", [
+    "clear", "one_block", "no_support", "new_life", "replaced_shooter", "near_melee", "exposed_landing",
+])
+def test_w20_close_arrow_warning_can_step_behind_a_nearby_corner_without_blocks(scene):
+    origin = [236820.3, 40, 250032.5]
+    shooter = {"id": 2393435, "name": "skeleton", "pos": [236822.8, 40, 250032.5], "dist": 2.5}
+    status = {
+        "pos": origin, "health": 8.3333, "ready": True, "alive": True, "on_ground": True,
+        "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": shooter,
+    }
+    scans = 0
+    moves = []
+
+    class NarrowCaveBot:
+        def call(self, action, body=None, **_kwargs):
+            nonlocal scans
+            if action == "status":
+                return dict(status)
+            if action == "inventory":
+                return {"items": [{"name": "dirt", "count": 1}] if scene == "one_block" else []}
+            if action == "find_blocks":
+                return {"blocks": []}
+            if action == "get_entities":
+                scans += 1
+                if scene == "new_life" and scans == 3:
+                    status.update(last_death={"t": 2}, pos=[236821.5, 40.1, 250030.5])
+                if scene == "replaced_shooter" and scans >= 3:
+                    return {"entities": [{**shooter, "id": 2393436}]}
+                if scene == "near_melee" and scans >= 2:
+                    return {"entities": [shooter, {"id": 2393437, "name": "zombie", "dist": 2.0}]}
+                return {"entities": [shooter]}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                floor = (x, y) == (236820, 39) and (z == 250032 or (z == 250031 and scene != "no_support"))
+                corner = x == 236821 and y in (40, 41) and z == 250031 and not (scene == "exposed_landing" and moves)
+                return {"name": "stone" if floor or corner else "air"}
+            if action == "move_to":
+                moves.append(body)
+                status["pos"] = [body["x"], body["y"], body["z"]]
+                return {"ok": True}
+            if action in {"stop", "posture"} or (action == "control" and body == {"wait": False}):
+                return {"ok": True}
+            pytest.fail(f"Unexpected {action} during close arrow warning")
+
+    guard = GenerationGuard(NarrowCaveBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    outcome = guard._run_subcortical_combat({
+        "source": "pre_hurt_ranged", "primary_type": "skeleton", "primary_entity_id": shooter["id"], "distance": 2.0,
+    })
+
+    first = outcome["actions"][0]
+    assert first["action"] == "flee" and first["reason"] == "no_safe_retreat" and first["moved"] == 0.0
+    safe_corner = scene in {"clear", "one_block"}
+    assert (outcome["mode"] == "natural_cover") is safe_corner
+    if safe_corner or scene == "exposed_landing":
+        move, = moves
+        assert move["x"] == pytest.approx(origin[0]) and move["y"] == 40 and move["z"] == pytest.approx(250031.35)
+        cover = next(action for action in outcome["actions"] if action["action"] == "natural_cover")
+        assert cover["ok"] is safe_corner
+    else:
+        assert moves == []
+        if scene == "new_life":
+            assert outcome["status_after"]["last_death"] == {"t": 2}
+
+
 @pytest.mark.parametrize("entry", ["poll", "tool_combat"])
 @pytest.mark.parametrize("scene", ["clear_step", "no_support", "new_life", "second_melee"])
 def test_w19_close_shooter_checks_natural_cover_after_failed_pocket(monkeypatch, entry, scene):
