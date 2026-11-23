@@ -13,7 +13,7 @@ from mc_agent.errors import ApiError
 from mc_agent.harness.agent import run_mc_agent
 from mc_agent.harness.control import RequestCancelled, RunTimedOut, check_control
 from mc_agent.harness.events import EventSink
-from mc_agent.harness.guardian import GenerationGuard
+from mc_agent.harness.guardian import GenerationGuard, ReflexPreempted
 from mc_agent.skills.library import MacroSkills
 from mc_agent.live.state import ReplayIncrementer
 
@@ -17540,6 +17540,9 @@ def test_unstick_water_success_requires_confirmed_same_life_landing(landing, exp
     ("mc_move_to", 9.0, True, True),
     ("mc_move_to", 11.0, True, False),
     ("mc_move_to", 9.0, False, False),
+    ("pre_ensure", 9.5, True, True),
+    ("pre_ensure", 11.1, True, False),
+    ("pre_ensure", 9.5, False, False),
 ])
 def test_movement_hands_off_water_near_drowned_before_damage(monkeypatch, tool_name, distance, wet, should_preempt):
     import threading
@@ -17572,6 +17575,7 @@ def test_movement_hands_off_water_near_drowned_before_damage(monkeypatch, tool_n
             if action == "stop":
                 calls.append(action)
                 stopped.set()
+                return {"ok": True, "released": True}
             return {"ok": True}
 
     bot = MovingBot()
@@ -17585,13 +17589,22 @@ def test_movement_hands_off_water_near_drowned_before_damage(monkeypatch, tool_n
         return {"ok": True, "in_water": False}
 
     monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", reach_shore)
-    result = json.loads(guard.run_tool_with_reflex(tool_name, lambda: json.dumps(
-        bot.call("move_to", {"x": -11042, "z": 11027, "stop_on": ["death"]}),
-    )))
+    def move():
+        return json.dumps(bot.call("move_to", {"x": -11042, "z": 11027, "stop_on": ["death"]}))
+
+    if tool_name == "pre_ensure":
+        try:
+            with guard._intercept_bot_calls(enable_creeper_watcher=True):
+                result = json.loads(move())
+        except ReflexPreempted as preempt:
+            result = guard.handle_preemption(preempt.trigger, interrupted_name=tool_name)
+    else:
+        result = json.loads(guard.run_tool_with_reflex(tool_name, move))
     if should_preempt:
         assert calls == ["move_to", "stop", "shore"]
         assert result["reflex_mode"] == "water_surface" and not result["status_after"]["in_water"]
         assert result["status_after"]["health"] == 20
+        assert result["water_risk"] == "drowned" and result["action_released"] is True
         assert guard._water_hurt_streak == 0
     else:
         assert calls == ["move_to"] and result["ok"] is True

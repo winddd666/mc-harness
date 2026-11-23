@@ -4576,7 +4576,7 @@ class GenerationGuard:
         watch_hot_floor: bool = False,
         watch_scout_water: bool = False,
         watch_mining_water: bool = False,
-        watch_move_water: bool = False,
+        watch_move_water: bool = True,
         check_flee_exit: bool = False,
         watch_attack_emergency: bool = False,
         check_combat_step: bool = False,
@@ -4585,7 +4585,7 @@ class GenerationGuard:
         check_gathering_reentry: bool = False,
         check_food_use: bool = False,
     ):
-        """Intercept threats during actor macros, or watch immediate survival hazards during an attack."""
+        """Watch threats during tools and prerequisite gathering, including water travel by default."""
         orig_call = getattr(self.raw_bot, "call", None)
         if not callable(orig_call) or self._in_reflex:
             yield {}
@@ -5549,7 +5549,7 @@ class GenerationGuard:
                     nh_pre_name, nh_pre_dist, _, _ = self._extract_hostile_info(st_pre)
                     drowned_during_tool = nh_pre_name == "drowned" and (
                         (interrupted_name == "mc_attack" and nh_pre_dist <= self.ATTACK_WATER_THREAT_RANGE)
-                        or (interrupted_name == "mc_move_to" and nh_pre_dist <= self.MOVE_DROWNED_THREAT_RANGE)
+                        or (interrupted_name in {"mc_move_to", "pre_ensure"} and nh_pre_dist <= self.MOVE_DROWNED_THREAT_RANGE)
                         or (interrupted_name == "mc_skill_scout_surface" and nh_pre_dist <= 6.0)
                         or (mining_water_pre and surface_first_pre and nh_pre_dist <= 6.0)
                     )
