@@ -4769,6 +4769,7 @@ class GenerationGuard:
             actor_call = track_unstick_call
 
         stop_evt = threading.Event()
+        move_in_progress = threading.Event()
         attack_active = threading.Event()
         attack_state_lock = threading.Lock()
         attack_target_id: int | None = None
@@ -4789,27 +4790,47 @@ class GenerationGuard:
         elif watch_scout_water or watch_mining_water:
             drowned_threat_range = 6.0
 
-        def terrain_damage_trigger(status: dict[str, Any], call: Callable[..., dict[str, Any]]) -> ThreatTrigger | None:
+        def terrain_damage_trigger(
+            status: dict[str, Any], call: Callable[..., dict[str, Any]], *, movement_lava: bool = False,
+        ) -> ThreatTrigger | None:
             if (
-                not watch_terrain_damage or status.get("ready") is False or status.get("alive") is False
-                or status.get("in_water") or status.get("in_lava") or not status.get("pos")
+                not (watch_terrain_damage or movement_lava)
+                or status.get("ready") is False or status.get("alive") is False or not status.get("pos")
+                or status.get("in_water") or (status.get("in_lava") and not movement_lava)
             ):
                 return None
-            event = self._fresh_tool_hurt_event(call)
-            source = str((event or {}).get("source") or "").strip().lower()
-            if watch_mining_water and source in LAVA_HURT_SOURCES:
+            if status.get("in_lava"):
+                source = "lava"
+            else:
+                event = self._fresh_tool_hurt_event(call, ignore_burn_ticks=movement_lava)
+                source = str((event or {}).get("source") or "").strip().lower()
+            if (watch_mining_water or movement_lava) and source in LAVA_HURT_SOURCES:
                 return {
                     "source": "boundary_threat", "primary_type": "lava", "primary_pos": status["pos"],
                     "primary_entity_id": None, "distance": 0.0, "hurt_source": source,
                     "observed_life": (status.get("dimension"), status.get("last_death")),
                 }
-            if source not in IN_WALL_HURT_SOURCES:
+            if movement_lava or source not in IN_WALL_HURT_SOURCES:
                 return None
             return {
                 "source": "tool_interrupted_hurt", "primary_type": "in_wall", "primary_pos": status["pos"],
                 "primary_entity_id": None, "distance": 0.0, "hurt_source": source,
                 "observed_life": (status.get("dimension"), status.get("last_death")),
             }
+
+        def observed_move_lava(
+            before: dict[str, Any], current: dict[str, Any], call: Callable[..., dict[str, Any]],
+            previous_health: float | None = None,
+        ) -> ThreatTrigger | None:
+            if not self._same_life(before, current):
+                return None
+            starting_hp = previous_health if previous_health is not None else before.get("health")
+            health = current.get("health")
+            if current.get("in_lava") or (
+                isinstance(starting_hp, (int, float)) and isinstance(health, (int, float)) and 0 < health < starting_hp
+            ):
+                return terrain_damage_trigger(current, call, movement_lava=True)
+            return None
 
         def terrain_hit_near_distant_melee(name: str, distance: float, call: Callable[..., dict[str, Any]]) -> bool:
             if distance <= 4.5 or (name != "creeper" and name not in PRE_HURT_MELEE_MOBS):
@@ -4956,7 +4977,14 @@ class GenerationGuard:
                             return
                         continue
                     terrain = None
-                    if watch_terrain_damage and isinstance(cur_hp, (int, float)):
+                    if check_move_safety:
+                        start = move_start
+                        if start is not None and move_in_progress.is_set():
+                            terrain = observed_move_lava(start[1], st, orig_call, last_terrain_health)
+                            last_terrain_health = float(cur_hp) if isinstance(cur_hp, (int, float)) else None
+                        else:
+                            last_terrain_health = None
+                    elif watch_terrain_damage and isinstance(cur_hp, (int, float)):
                         if last_terrain_health is not None and cur_hp < last_terrain_health:
                             terrain = terrain_damage_trigger(st, orig_call)
                         last_terrain_health = float(cur_hp)
@@ -5199,6 +5227,7 @@ class GenerationGuard:
         def _wrapped_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
             nonlocal attack_target_id, mining_support_changed, mining_forward_waypoint, move_start
             clean_path = str(path or "").lstrip("/")
+            track_move = check_move_safety and clean_path == "move_to"
             is_actor_thread = threading.get_ident() == actor_thread_id
             is_readonly_poll = (
                 str(kwargs.get("method") or "").upper() == "GET"
@@ -5259,7 +5288,7 @@ class GenerationGuard:
                 if check_move_safety and clean_path == "status" and isinstance(observed, dict):
                     move_start = (time.monotonic(), observed)
                 return observed
-            if check_move_safety and clean_path == "move_to" and isinstance(body, dict) and move_start is not None:
+            if track_move and isinstance(body, dict) and move_start is not None:
                 observed_at, observed = move_start
                 if time.monotonic() - observed_at <= 1.0:
                     creeper = self._creeper_at_move_goal(body, observed, actor_call)
@@ -5402,10 +5431,32 @@ class GenerationGuard:
                     last_work_action.update(endpoint=clean_path, target=list(target))
 
             try:
-                res = actor_call(path, body, **kwargs)
+                if track_move:
+                    move_in_progress.set()
+                try:
+                    res = actor_call(path, body, **kwargs)
+                finally:
+                    if track_move:
+                        move_in_progress.clear()
             except _RecoveryBudgetExceeded:
                 if pending_trigger and not self._in_reflex:
                     raise ReflexPreempted(pending_trigger[0]) from None
+                raise
+            except httpx.ReadTimeout:
+                if track_move:
+                    apply_pending_preemption()
+                    if move_start is not None:
+                        try:
+                            after = actor_call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+                        except (ApiError, httpx.HTTPError):
+                            after = None
+                        if isinstance(after, dict):
+                            trigger = observed_move_lava(move_start[1], after, actor_call)
+                            if trigger is not None:
+                                stop_evt.set()
+                                apply_pending_preemption()
+                                stop_watched_action(trigger)
+                                raise ReflexPreempted(trigger) from None
                 raise
             except ApiError as err:
                 apply_pending_preemption()
@@ -5428,7 +5479,7 @@ class GenerationGuard:
                             confirmed_gains = dig_progress.setdefault("gained", {})
                             confirmed_gains[name] = confirmed_gains.get(name, 0) + amount
             apply_pending_preemption()
-            if check_move_safety and clean_path == "move_to":
+            if track_move:
                 after = self._underground_move_water_status(res, actor_call, move_start[1] if move_start else None)
                 if after is not None:
                     stop_evt.set()

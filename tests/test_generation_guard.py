@@ -17976,6 +17976,80 @@ def test_w19_underground_move_hands_off_drowning_before_a_followup_call(monkeypa
         assert actions == ["move_to"]
 
 
+@pytest.mark.parametrize("contact", ["brief_lava", "lava_timeout", "burn_only", "stale_lava", "new_life", "ordinary_timeout"])
+def test_w19_death_only_move_hands_off_confirmed_lava_contact(monkeypatch, contact):
+    import threading
+    import time
+    from mc_agent.harness.mc_tools import McToolset
+
+    status = {
+        "pos": [214216.5, 56, 164524.0], "health": 20, "ready": True, "alive": True, "on_ground": True,
+        "dimension": "overworld", "last_death": {"t": 1}, "in_lava": False, "on_fire": False,
+    }
+    events = []
+    actions = []
+    stopped = threading.Event()
+    observed = threading.Event()
+
+    def handle(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint == "status":
+            if threading.current_thread().name == "mc-creeper-watch" and actions:
+                observed.set()
+            result = dict(status)
+        elif endpoint == "move_to":
+            assert json.loads(request.content)["stop_on"] == ["death"]
+            actions.append("move_to")
+            status.update(pos=[214186.4, 15, 164525.6], health=7.89, on_ground=False, on_fire=True)
+            stamp = time.time() * 1000
+            if contact not in {"burn_only", "ordinary_timeout"}:
+                events.append({"seq": 1, "type": "hurt", "source": "lava", "t": stamp - (4000 if contact == "stale_lava" else 0)})
+            events.append({"seq": 2, "type": "hurt", "source": "on_fire", "t": stamp})
+            if contact == "new_life":
+                status["last_death"] = {"t": 2}
+            if contact in {"lava_timeout", "ordinary_timeout"}:
+                raise httpx.ReadTimeout("move response timed out", request=request)
+            if contact == "brief_lava":
+                assert stopped.wait(2.0), "movement continued after a confirmed lava hit"
+            else:
+                assert observed.wait(2.0)
+            result = {"pos": status["pos"]}
+        elif endpoint == "stop":
+            actions.append("stop")
+            stopped.set()
+            result = {"released": True}
+        elif endpoint == "events":
+            result = {"events": list(events)}
+        elif endpoint == "inventory":
+            result = {"items": []}
+        else:
+            pytest.fail(f"Unexpected movement endpoint: {endpoint}")
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def escape(*, force_rim_escape):
+        assert stopped.is_set() and force_rim_escape
+        actions.append("escape")
+        status.update(pos=[214186.4, 13, 164525.6], on_ground=True, on_fire=False)
+        return {"ok": True, "in_lava": False}
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(handle)) as bot:
+        toolset = McToolset(bot)
+        guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+        monkeypatch.setattr(guard.combat_env, "escape_lava", escape)
+        result = json.loads(guard.run_tool_with_reflex(
+            "mc_move_to", lambda: toolset.mc_move_to(x=214163, z=164522, range=2, ignore_hurt=True),
+        ))
+
+    if contact in {"brief_lava", "lava_timeout"}:
+        assert actions == ["move_to", "stop", "escape"]
+        assert result["reflex_mode"] == "lava_escape" and result["action_released"] is True
+        assert result["status_after"]["pos"] == [214186.4, 13, 164525.6]
+    elif contact == "ordinary_timeout":
+        assert actions == ["move_to", "stop"] and result["error"]["code"] == "move_timeout"
+    else:
+        assert actions == ["move_to"] and result["ok"] is True
+
+
 @pytest.mark.parametrize("terrain", ["netherrack", "drop", "lava"])
 def test_nether_combat_checks_footing_before_issuing_a_chase_pulse(terrain):
     moves = []
