@@ -14685,7 +14685,8 @@ def test_failed_pathfinder_uses_a_short_hop_to_reach_a_nearby_shallow_bank(monke
 
 
 @pytest.mark.parametrize("hop_result", ["landed", "still_wet", "respawned"])
-def test_shore_escape_hops_onto_a_verified_adjacent_bank_before_pathing(hop_result):
+@pytest.mark.parametrize("under_attack", [False, True])
+def test_shore_escape_hops_onto_a_verified_adjacent_bank_before_pathing(hop_result, under_attack):
     from mc_agent.skills.combat_env import CombatEnv
 
     bank = [19062.5, 63.0, 41037.5]
@@ -14720,13 +14721,57 @@ def test_shore_escape_hops_onto_a_verified_adjacent_bank_before_pathing(hop_resu
                 status.update(pos=bank, in_water=False, on_ground=True)
             return {"ok": True}
 
-    result = CombatEnv(BankBot()).escape_deep_water_to_shore()
+    result = CombatEnv(BankBot()).escape_deep_water_to_shore(under_attack=under_attack)
 
     assert motions == (["jump", "move_to"] if hop_result == "still_wet" else ["jump"])
     if hop_result == "respawned":
         assert result["mode"] == "respawned" and result["ok"] is False
     else:
         assert result["ok"] is True and result["pos_after"] == bank
+
+
+@pytest.mark.parametrize("bank_found", [True, False])
+@pytest.mark.parametrize("under_attack", [False, True])
+def test_w20_water_pursuit_bounds_pathfinder_even_without_nearby_bank(monkeypatch, bank_found, under_attack):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    bank = [233456.5, 65, 246404.5]
+    status = {
+        "pos": [233452.7, 62.2, 246400.7], "health": 2.17, "in_water": True, "submerged": False,
+        "on_ground": False, "alive": True, "ready": True, "dimension": "overworld", "last_death": {"t": 1},
+    }
+    commands = []
+
+    class PoolBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "get_block":
+                return {"name": "water"}
+            if action == "move_to":
+                commands.append(("move", body["timeout"], kwargs.get("timeout_s")))
+                raise httpx.ReadTimeout("path not confirmed before the budget")
+            if action == "stop":
+                commands.append(("stop", kwargs.get("timeout_s")))
+            if action == "control" and body.get("forward"):
+                commands.append(("swim", body["ms"]))
+            return {"ok": True}
+
+    env = CombatEnv(PoolBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_a, **_kw: bank if bank_found else None)
+    result = env.escape_deep_water_to_shore(under_attack=under_attack)
+
+    if under_attack:
+        server_ms, transport_s, stop_s = (1800, 2.4, 0.5) if bank_found else (1000, 1.5, 0.35)
+        assert commands[:2] == [("move", server_ms, transport_s), ("stop", stop_s)]
+    else:
+        assert commands[:2] == [("move", 4200 if bank_found else 2800, None), ("stop", None)]
+    assert commands[-1] == ("swim", 1150 if bank_found else 950)
+    assert result["shore_target"] == (bank if bank_found else None)
+    assert result["ok"] is False and result["in_water"] is True
 
 
 @pytest.mark.parametrize("low_bank", ["grass_block", "stone", "blocked", "scan_timeout"])
