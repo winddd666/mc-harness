@@ -841,7 +841,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         rate_waits=rate_waits,
         gained=sorted(set(gained)),
         top_tools=[(k, tool_calls[k], tool_fails[k]) for k in sorted(tool_calls, key=lambda t: -tool_calls[t])[:6]],
-        top_errors=err_codes.most_common(5),
+        # Fleet totals need every error even when it ranks low for any single bot.
+        top_errors=err_codes.most_common(),
         slow_calls=slow_calls[:4],
         crash_tail=crash_tail,
         scene_stage=scene_stage,
