@@ -6554,33 +6554,39 @@ def test_full_station_inventory_uses_excess_blocks_without_spending_reserved_inp
 
 
 @pytest.mark.parametrize("drop_confirmed", [True, False])
-def test_mine_dfs_triggers_retention_cleanup(drop_confirmed) -> None:
+@pytest.mark.parametrize("empty_slots", [0, 2, 8])
+def test_mine_dfs_triggers_retention_cleanup(drop_confirmed, empty_slots) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
-    state = {"cobblestone": 300}
+    near_capacity = empty_slots < 3
+    block, original, cap, dimension = (
+        ("netherrack", 576, 128, "the_nether") if near_capacity else ("cobblestone", 300, 192, "overworld")
+    )
+    state = {block: original}
+    protected = [{"name": "diamond_pickaxe", "count": 1}] * (36 - math.ceil(original / 64) - empty_slots)
     looks = []
 
     def handler(request):
         path = request.url.path.rsplit("/", 1)[-1]
         body = json.loads(request.content) if request.content else {}
         if path == "inventory":
-            rows = []
-            left = state["cobblestone"]
-            while left > 0:
-                rows.append({"name": "cobblestone", "count": min(64, left)})
-                left -= min(64, left)
+            rows = [
+                {"name": block, "count": min(64, state[block] - offset)}
+                for offset in range(0, state[block], 64)
+            ] + protected
             return httpx.Response(200, json={"ok": True, "result": {"items": rows}})
         if path == "status":
             return httpx.Response(200, json={"ok": True, "result": {
-                "pos": [0.5, 30.0, 0.5], "yaw": 1.0, "pitch": 0.4, "dimension": "overworld",
+                "pos": [0.5, 30.0, 0.5], "yaw": 1.0, "pitch": 0.4, "dimension": dimension, "on_ground": True,
             }})
         if path == "look":
             looks.append(body)
             return httpx.Response(200, json={"ok": True, "result": {}})
         if path == "drop":
             assert looks == [{"yaw": 1.0 + math.pi, "pitch": 0.0}]
+            assert body["item"] == block
             if drop_confirmed:
-                state["cobblestone"] -= int(body.get("count") or 0)
+                state[block] -= int(body.get("count") or 0)
             return httpx.Response(200, json={"ok": True, "result": {}})
         raise AssertionError(path)
 
@@ -6591,12 +6597,12 @@ def test_mine_dfs_triggers_retention_cleanup(drop_confirmed) -> None:
     assert result["inventory_cleanup"]["method"] == "drop_fallback"
     assert looks[-1] == {"yaw": 1.0, "pitch": 0.4}
     if drop_confirmed:
-        assert result["inventory_cleaned"] == [{"item": "cobblestone", "count": 108}]
-        assert state["cobblestone"] == 192
+        assert result["inventory_cleaned"] == [{"item": block, "count": original - cap}]
+        assert state[block] == cap
     else:
         assert "inventory_cleaned" not in result
         assert result["inventory_cleanup"]["error"] == "cleanup_unconfirmed"
-        assert state["cobblestone"] == 300
+        assert state[block] == original
 
 
 @pytest.mark.parametrize("mode,spare", [

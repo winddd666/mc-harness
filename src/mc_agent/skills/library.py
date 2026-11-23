@@ -2661,14 +2661,13 @@ class MacroSkills:
         scoped.bot = session
         try:
             inv = session.inventory()
-            if _compute_empty_slots(inv) < 3:
-                return scoped._stash_mining_clutter(inv, 3)
             counts = _inventory_counts_from_raw(inv)
-            if not any(counts.get(item, 0) > cap for item, cap in _MINING_RETENTION_CAPS.items()):
+            over_cap = any(counts.get(item, 0) > cap for item, cap in _MINING_RETENTION_CAPS.items())
+            if _compute_empty_slots(inv) >= 3 and not over_cap:
                 return [], None
             status = session.status()
             stored, detail = scoped._stash_mining_clutter(inv, 3, status=status)
-            if stored or detail.get("method") != "no_safe_storage" or detail.get("error"):
+            if not over_cap or stored or detail.get("method") != "no_safe_storage" or detail.get("error"):
                 return stored, detail
             yaw = status.get("yaw")
             if (
