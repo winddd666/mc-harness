@@ -244,6 +244,22 @@ CARDINAL_VECTORS: dict[str, tuple[int, int]] = {
 }
 
 
+def attack_feedback_hits(attack: dict[str, Any]) -> int | float | None:
+    """Prefer connected hits or target health feedback over legacy swing counts."""
+    for key in ("connected_hits", "hits_connected"):
+        count = attack.get(key)
+        if type(count) in (int, float) and math.isfinite(count) and count >= 0:
+            return count
+    before, after = attack.get("target_health_before"), attack.get("target_health_after")
+    if all(type(value) in (int, float) and math.isfinite(value) for value in (before, after)):
+        return int(after < before)
+    delta = attack.get("target_hp_delta")
+    if type(delta) in (int, float) and delta == 0:
+        return 0
+    count = attack.get("hits")
+    return count if type(count) in (int, float) and math.isfinite(count) and count >= 0 else None
+
+
 def shot_release_confirmed(shot: dict[str, Any]) -> bool:
     """Use projectile or consumption evidence when the API supplies release telemetry."""
     if shot.get("fired") is not True:
@@ -3961,7 +3977,7 @@ class SubcorticalInstinctController:
             return {"action": "cornered_melee_strike", "ok": False, "code": err.code}
         return {
             "action": "cornered_melee_strike", "entity_id": target_id, "weapon": weapon,
-            "ok": bool(result.get("hits")), "killed": bool(result.get("killed")),
+            "ok": bool(result.get("killed") or attack_feedback_hits(result)), "killed": bool(result.get("killed")),
             **({"hit_log": result["hit_log"]} if isinstance(result.get("hit_log"), list) else {}),
         }
 
@@ -4465,10 +4481,12 @@ class SubcorticalInstinctController:
                         timeout_s=attack_ms / 1000 + 0.35, allow_reauth=False,
                     )
                     hits = atk.get("hits")
+                    contacted = attack_feedback_hits(atk)
                     actions.append({
                         "action": "melee_attack", "weapon": weapon, "entity_id": eff_id,
-                        "ok": True, "killed": bool(atk.get("killed")),
+                        "ok": bool(atk.get("killed")) or contacted != 0, "killed": bool(atk.get("killed")),
                         **({"hits": hits} if isinstance(hits, (int, float)) and math.isfinite(hits) else {}),
+                        **({"connected_hits": atk["connected_hits"]} if "connected_hits" in atk else {}),
                         **({"chase": False} if attack_body.get("chase") is False else {}),
                         **({"hit_log": atk["hit_log"]} if isinstance(atk.get("hit_log"), list) else {}),
                     })
@@ -4478,7 +4496,7 @@ class SubcorticalInstinctController:
                     if vulnerable_counter and atk.get("interrupted_by") == "hurt":
                         retreat_action = "low_hp_abort_flee"
                         break
-                    if isinstance(hits, (int, float)) and hits == 0:
+                    if contacted == 0:
                         retreat_action = "unreachable_flee"
                         break
                 except ApiError as err:
@@ -4590,13 +4608,13 @@ class SubcorticalInstinctController:
                                 break
                             attack_ms = min(2400, int((remaining - 0.9) * 1000))
                             atk_r = env.bot.call(
-                                "attack", {"entity_id": int(mob_id), "timeout": attack_ms, "stop_on": ["death"]},
+                                "attack", {"entity_id": int(mob_id), "timeout": attack_ms, "stop_on": ["death"], "feedback": True},
                                 timeout_s=attack_ms / 1000 + 0.35, allow_reauth=False,
                             )
-                            hits_r = atk_r.get("hits")
+                            contacted = attack_feedback_hits(atk_r)
                             killed_r = bool(atk_r.get("killed"))
-                            actions.append({"action": "shield_rush_attack", "ok": True, "killed": killed_r})
-                            if killed_r or (isinstance(hits_r, (int, float)) and hits_r == 0):
+                            actions.append({"action": "shield_rush_attack", "ok": killed_r or contacted != 0, "killed": killed_r})
+                            if killed_r or contacted == 0:
                                 break
                             st_rk = env.bot.status()
                             if st_rk.get("alive") is False or float(st_rk.get("health") or 20.0) <= 10.0:

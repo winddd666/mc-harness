@@ -1736,7 +1736,7 @@ def test_guard_eats_at_the_next_safe_poll_after_combat(monkeypatch, combat_durat
     assert meals == ["cooked_beef"]
 
 
-@pytest.mark.parametrize("scenario", ["close", "leaves_reach", "melee_edge", "far"])
+@pytest.mark.parametrize("scenario", ["close", "leaves_reach", "melee_edge", "far", "explicit_miss"])
 def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, scenario):
     from mc_agent.skills.combat_env import CombatEnv, SubcorticalInstinctController
 
@@ -1765,6 +1765,8 @@ def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, 
                 equipped.append(body)
             if action == "attack":
                 attacks.append(body)
+                if scenario == "explicit_miss":
+                    return {"hits": 2, "connected_hits": 0, "target_hp_delta": 0, "killed": False}
                 if scenario in {"melee_edge", "far"}:
                     return {"hits": 2, "killed": True}
                 # The backend checks its timer between complete swing intervals.
@@ -1790,9 +1792,15 @@ def test_match_zombie_counter_reserves_time_for_axe_swing_interval(monkeypatch, 
     attack, = attacks
     assert attack.get("chase") is (None if scenario == "far" else False)
     assert attack["feedback"] is True
-    tight_counter = scenario in {"close", "leaves_reach"}
+    tight_counter = scenario in {"close", "leaves_reach", "explicit_miss"}
     assert attack["timeout"] == (1350 if tight_counter else 2600)
     assert attack.get("max_hits") == (2 if tight_counter else None)
+    if scenario == "explicit_miss":
+        melee, = [action for action in outcome["actions"] if action["action"] == "melee_attack"]
+        assert not melee["ok"] and melee["hits"] == 2
+        assert any(action["action"] == "unreachable_flee" for action in outcome["actions"])
+        assert outcome["mode"] == "cover_or_flee"
+        return
     if tight_counter:
         melee, = [action for action in outcome["actions"] if action["action"] == "melee_attack" and action["ok"]]
         assert melee["hit_log"] == [{"entity_id": 42}]
@@ -17397,6 +17405,9 @@ def test_combat_timeout_without_contact_reaches_repeat_guard(monkeypatch, reques
     ("auto", "empty_bow", "airborne", "blaze_requires_ranged"),
     ("melee", "none", "high_nearby", "blaze_requires_ranged"),
     ("melee", "none", "supported", "attack"),
+    ("melee", "none", "stationary_connection_miss", "attack_zero_hits"),
+    ("melee", "none", "stationary_unchanged_hp", "attack_zero_hits"),
+    ("melee", "none", "stationary_damage", "attack"),
     ("rush", "none", "missing_target_footing", "blaze_requires_ranged"),
     ("auto", "bow", "missing_bot_footing", "unsafe_landing"),
     ("auto", "bow", "wall", "blocked_by_wall"),
@@ -17419,7 +17430,7 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
     origin = [3524.5, 69, -3802.4]
     target = {
         "id": 1133882, "name": "blaze", "blocked_by_wall": scene == "wall",
-        "pos": [3526.5, 69, -3802.4] if scene in {"supported", "missing_target_footing"}
+        "pos": [3526.5, 69, -3802.4] if scene in {"supported", "missing_target_footing"} or scene.startswith("stationary_")
         else [3525.5, 70.5, -3802.4] if scene == "high_nearby" else [3543.5, 62.7, -3790.5],
     }
     if scene.startswith("unknown_") or scene == "wall_after_shot":
@@ -17475,6 +17486,12 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
                     data.update(target_health_before=4, target_health_after=0)
             else:
                 data = {"hits": 1, "killed": True}
+                if scene == "stationary_connection_miss":
+                    data = {"hits": 1, "connected_hits": 0, "target_hp_delta": 0, "killed": False}
+                elif scene == "stationary_unchanged_hp":
+                    data = {"hits": 1, "target_health_before": 12, "target_health_after": 12, "killed": False}
+                elif scene == "stationary_damage":
+                    data = {"hits": 0, "target_health_before": 12, "target_health_after": 10, "killed": False}
         else:
             pytest.fail(f"Unexpected blaze combat endpoint: {endpoint}")
         return httpx.Response(200, json={"ok": True, "result": data})
@@ -17484,6 +17501,8 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
         reply = json.loads(toolset.mc_skill_combat(mode=mode, target_name=" Minecraft:Blaze ", max_time_s=6))
 
     expected_calls = [expected] if expected in {"shoot", "attack"} else []
+    if expected == "attack_zero_hits":
+        expected_calls = ["attack"]
     if scene in {"respawn", "shot_unconfirmed", "empty_shot_receipt"}:
         expected_calls = ["shoot"]
     stopped_after_one = scene in {"target_lost", "wall_after_shot"}
@@ -17493,7 +17512,7 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
     assert all(body["entity_id"] == target["id"] for _, body in writes)
     if expected == "attack":
         assert writes[0][1]["chase"] is False and writes[0][1]["max_hits"] == 1
-        assert reply["ok"] and reply["result"]["killed"]
+        assert reply["ok"] and reply["result"]["killed"] is (scene != "stationary_damage")
     elif expected == "shoot":
         assert all(body["weapon"] == gear for _, body in writes)
         assert reply["ok"] and reply["result"]["shots"] == len(writes)

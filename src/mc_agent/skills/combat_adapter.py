@@ -17,7 +17,7 @@ from ..bot import BotSession
 from ..errors import ApiError as McApiError, AuthError, BotNotReadyError, DeathLoopCooldownError
 from ..harness.geofence import VoidGeofence
 from . import combat_v1
-from .combat_env import CombatEnv, _TerrainProbeExpired, shot_release_confirmed
+from .combat_env import CombatEnv, _TerrainProbeExpired, attack_feedback_hits, shot_release_confirmed
 
 VALID_COMBAT_MODES = frozenset(
     {
@@ -307,7 +307,7 @@ def _fight_nether_blaze(
             "timeout": 1500, "feedback": True, "stop_on": ["hurt", "death"],
         }, timeout=1.85)
         result.update(attack, strategy="stationary_melee", chase=False)
-        if not result.get("killed") and not (type(attack.get("hits")) in (int, float) and attack["hits"] > 0):
+        if not result.get("killed") and not attack_feedback_hits(attack):
             return _blaze_error(result, "attack_zero_hits", "原地挥击未确认命中，请等烈焰人进入实际击距。")
         return result
 
@@ -468,7 +468,7 @@ def run_combat_skill(
             "elapsed_s": round(time.monotonic() - started, 2),
             "result": raw,
         }
-        connected = raw.get("hits_connected", raw.get("hits"))
+        connected = attack_feedback_hits(raw)
         if (
             receipt["ok"] and resolved_mode in {"melee", "rush"} and raw.get("end_reason") == "timeout"
             and not raw.get("killed") and type(connected) in (int, float) and connected == 0
