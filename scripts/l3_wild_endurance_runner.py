@@ -70,9 +70,16 @@ FOLLOW_ENDER_EYE = "minecraft:story/follow_ender_eye"
 ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
 IRON_TOOLS = "minecraft:story/iron_tools"
+SMELT_IRON = "minecraft:story/smelt_iron"
 DISTRACT_PIGLIN = "minecraft:nether/distract_piglin"
 OBTAIN_BLAZE_ROD = "minecraft:nether/obtain_blaze_rod"
 OBTAIN_ANCIENT_DEBRIS = "minecraft:nether/obtain_ancient_debris"
+BARE_RESPAWN_SUPPORT = "bedrock"
+BARE_LANDING_BLOCKS = frozenset({
+    "andesite", "bedrock", "calcite", "coarse_dirt", "cobblestone", "deepslate", "diorite", "dirt",
+    "granite", "grass_block", "moss_block", "mycelium", "podzol", "rooted_dirt", "snow_block", "stone",
+    "terracotta", "tuff",
+})
 
 CANDIDATE_SITES: list[tuple[int, int]] = [
     # 24 spaced anchors give each slot its own site and keep bots off shared islands.
@@ -275,6 +282,32 @@ def _has_mangrove_support(bot: Any, pos: tuple[float, float, float]) -> bool:
     return name in {"mangrove_log", "stripped_mangrove_log", "mangrove_leaves", "mangrove_roots", "muddy_mangrove_roots"}
 
 
+def _bare_landing_has_stable_floor(bot: Any, pos: tuple[float, float, float]) -> bool:
+    x, y, z = pos
+    if abs(y - round(y)) > 0.05:
+        return False
+    blocks = _bare_landing_blocks(bot, math.floor(x), round(y), math.floor(z))
+    return blocks is not None and blocks[0] in BARE_LANDING_BLOCKS and blocks[1:] == ("air", "air")
+
+
+def _bare_landing_blocks(bot: Any, x: int, y: int, z: int) -> tuple[str, str, str] | None:
+    try:
+        floor, feet, head = (
+            bot.call("get_block", {"pos": [x, y + offset, z]}, timeout_s=2.0, allow_reauth=False)
+            for offset in (-1, 0, 1)
+        )
+        return tuple(str(block.get("name") or "").removeprefix("minecraft:") for block in (floor, feet, head))
+    except Exception:
+        return None
+
+
+def _bare_spawn_prefix(x: int, y: int, z: int) -> str:
+    return (
+        f"execute in minecraft:overworld if block {x} {y - 1} {z} minecraft:{BARE_RESPAWN_SUPPORT} "
+        f"if block {x} {y} {z} minecraft:air if block {x} {y + 1} {z} minecraft:air run"
+    )
+
+
 def _dry_wild_slot(start_idx: int) -> tuple[int, int]:
     ring, slot_idx = divmod(int(start_idx), len(CANDIDATE_SITES))
     # The layout spans 22,000 blocks per axis. Leave space for both local search areas
@@ -283,7 +316,7 @@ def _dry_wild_slot(start_idx: int) -> tuple[int, int]:
 
 
 def select_dry_isolated_wild_site(
-    bot: Any, bot_name: str, start_idx: int = 0, *, day1: bool = False,
+    bot: Any, bot_name: str, start_idx: int = 0, *, day1: bool = False, stable_bare_floor: bool = False,
 ) -> tuple[float, float, float, str]:
     """Find a dry, wooded Overworld landing for the configured slot."""
     slot_idx, ring_shift = _dry_wild_slot(start_idx)
@@ -327,6 +360,15 @@ def select_dry_isolated_wild_site(
         if "ocean" in biome or ("river" in biome and pos[1] <= 63.0):
             rejected["water_biome"] += 1
             continue
+        if stable_bare_floor and not _bare_landing_has_stable_floor(bot, pos):
+            rejected["unstable_bare_floor"] += 1
+            continue
+        if stable_bare_floor:
+            nearest = st.get("nearest_hostile") or {}
+            distance = nearest.get("dist") if isinstance(nearest, dict) else None
+            if isinstance(distance, (float, int)) and 0 <= distance <= 2.0:
+                rejected["occupied_bare_landing"] += 1
+                continue
         # Ensure tree logs exist within 48m so bare-hand bootstrap isn't on a barren sandbar
         fb = bot.call(
             "find_blocks",
@@ -839,6 +881,10 @@ def prepare_scene_ground(
     """
     ix, iy, iz = math.floor(sx), int(round(sy)), math.floor(sz)
     cmds: list[str] = []
+    if stage == "bare" and dim == "overworld":
+        # Protect only the verified stand cell against harvesting while the
+        # vanilla spawnpoint continues using this fixed Y for later lives.
+        return [f"execute in minecraft:overworld run setblock {ix} {iy - 1} {iz} minecraft:{BARE_RESPAWN_SUPPORT}"]
     if dim == "the_nether":
         # Lava-proof ledge with a lit shelter and a charged anchor for in-Nether respawns.
         # Every command MUST be prefixed with `execute in minecraft:the_nether run` — bare RCON
@@ -1398,14 +1444,25 @@ def compute_stage_baseline(stage: str) -> dict[str, Any]:
     if stage not in NETHER_STAGES:
         roots.append("minecraft:end/root")
     ids.extend(roots)
-    points = 0
-    breakdown: dict[str, int] = {}
     try:
         from mc_agent.harness.curriculum import score_completed_advancements
 
         points, breakdown = score_completed_advancements(set(ids))
-    except Exception:
-        pass
+    except ModuleNotFoundError:
+        # Offline plans and triage can run with system Python. Read the same
+        # literal score table without importing the harness's HTTP dependencies.
+        import ast
+
+        source = WT_ROOT / "src/mc_agent/harness/curriculum.py"
+        module = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        table_node = next(
+            node.value for node in module.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+            and node.target.id == "RULES_ADVANCEMENT_POINTS" and node.value is not None
+        )
+        table = ast.literal_eval(table_node)
+        breakdown = {adv_id: table[adv_id] for adv_id in sorted(set(ids)) if table.get(adv_id, 0) > 0}
+        points = sum(breakdown.values())
     return {
         "points": int(points),
         "advancements": sorted(set(ids)),
@@ -1434,7 +1491,7 @@ def _select_bare_reserve(bot: Any, bot_name: str, scene: SceneAnchor, site_index
         x, z = math.floor(scene.x) + dx, math.floor(scene.z) + dz
         confirmed, status = _spread_overworld(bot, bot_name, x, z, 8)
         pos = _dry_overworld_position(status)
-        if confirmed is None or pos is None or not _berry_bush_clear_landing(bot, pos):
+        if confirmed is None or pos is None or not _bare_landing_has_stable_floor(bot, pos) or not _berry_bush_clear_landing(bot, pos):
             continue
         biome = str(status.get("biome") or "").lower().removeprefix("minecraft:")
         if biome == "mangrove_swamp" or (not biome and _has_mangrove_support(bot, pos)):
@@ -1446,18 +1503,10 @@ def _select_bare_reserve(bot: Any, bot_name: str, scene: SceneAnchor, site_index
 
 
 def _bare_reserve_is_clear(bot: Any, reserve: SceneAnchor, origin: list[float]) -> bool:
-    from mc_agent.skills.combat_env import HAZARD_BLOCK_TYPES, _is_solid_ground
-
-    x, y, z = (math.floor(value) for value in (reserve.x, reserve.y, reserve.z))
     try:
-        names = [
-            bot.call("get_block", {"x": x, "y": y + dy, "z": z}, timeout_s=1.0, allow_reauth=False).get("name")
-            for dy in (-1, 0, 1)
-        ]
-        floor, feet, head = (str(name or "").removeprefix("minecraft:") for name in names)
-        if not _is_solid_ground(floor) or floor in HAZARD_BLOCK_TYPES or not {feet, head} <= {"air", "cave_air"}:
-            return False
         target = reserve.x, reserve.y, reserve.z
+        if not _bare_landing_has_stable_floor(bot, target):
+            return False
         scan_radius = math.ceil(math.dist(origin[:3], target)) + 12
         result = bot.call("get_entities", {"types": ["hostile"], "radius": scan_radius}, timeout_s=1.0, allow_reauth=False)
         entities = result.get("entities")
@@ -1554,6 +1603,8 @@ def build_reset_cmds(
         )
     else:
         prefix = "execute in minecraft:overworld run " if stage in {STRONGHOLD_STAGE, *PROBE_STAGES} else ""
+        if stage == "bare":
+            prefix = _bare_spawn_prefix(ix, iy, iz) + " "
         cmds.extend(
             [
                 f"{prefix}tp {bot_name} {sx:.1f} {sy:.1f} {sz:.1f}",
@@ -1622,6 +1673,7 @@ def restock_scene(
     ]
     if clear_inventory:
         cmds.insert(1, f"clear {bot_name}")
+    ground = prepare_scene_ground(bot_name, scene.stage, scene.x, scene.y, scene.z, dim=scene.dim)
     if scene.dim == "the_nether":
         cmds.extend(
             [
@@ -1632,13 +1684,18 @@ def restock_scene(
             ]
         )
     else:
+        prefix = "execute in minecraft:overworld run"
+        if scene.stage == "bare":
+            cmds.extend(ground)
+            ground = []
+            prefix = _bare_spawn_prefix(ix, iy, iz)
         cmds.extend(
             [
-                f"execute in minecraft:overworld run tp {bot_name} {scene.x:.1f} {scene.y:.1f} {scene.z:.1f}",
-                f"execute in minecraft:overworld run spawnpoint {bot_name} {ix} {iy} {iz}",
+                f"{prefix} tp {bot_name} {scene.x:.1f} {scene.y:.1f} {scene.z:.1f}",
+                f"{prefix} spawnpoint {bot_name} {ix} {iy} {iz}",
             ]
         )
-    cmds.extend(prepare_scene_ground(bot_name, scene.stage, scene.x, scene.y, scene.z, dim=scene.dim))
+    cmds.extend(ground)
     if scene.stage == "deep_water":
         cmds.extend(
             [
@@ -2055,12 +2112,16 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
     from mc_agent.kb import normalize_dimension
 
     local_fixture = scene.stage in LOCAL_FIXTURE_STAGES
-    radius = 2.0 if local_fixture else 64.0
+    bare_start = scene.stage == "bare"
+    radius = 2.0 if local_fixture or bare_start else 64.0
     stronghold_start = scene.stage == STRONGHOLD_STAGE
     probe_start = scene.stage in PROBE_STAGES
-    sample_limit = 5 if stronghold_start else 2
+    sample_limit = 5 if stronghold_start or bare_start else 2
     station = {"brewing_alchemy": "brewing_stand", "enchant_anvil": "enchanting_table"}.get(scene.stage)
     station_pos = [math.floor(scene.x) + 2, round(scene.y), math.floor(scene.z)]
+    if bare_start:
+        station = BARE_RESPAWN_SUPPORT
+        station_pos = [math.floor(scene.x), round(scene.y), math.floor(scene.z)]
     for i in range(attempts):
         consecutive = 0
         for sample in range(sample_limit):
@@ -2089,6 +2150,10 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
                     and not (st.get("in_water") or st.get("in_lava"))
                 )
             wait_for_ground = False
+            if bare_start:
+                near_anchor = math.hypot(dx, dz) <= radius and abs(dy) <= 1.0
+                inside = near_anchor and st.get("ready") is True and st.get("alive") is not False and _dry_overworld_position(st) is not None
+                wait_for_ground = near_anchor and not (st.get("in_water") or st.get("in_lava"))
             if inside and stronghold_start:
                 near_anchor = math.hypot(dx, dz) <= 6.0 and abs(dy) <= 2.0
                 inside = near_anchor and _dry_overworld_position(st) is not None
@@ -2104,8 +2169,12 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
                 time.sleep(1.2)
         if consecutive == 2:
             try:
-                block = bot.call("get_block", {"pos": station_pos}, timeout_s=5.0) if station else {}
-                actual = str((block or {}).get("name") or "").removeprefix("minecraft:")
+                if bare_start:
+                    blocks = _bare_landing_blocks(bot, *station_pos)
+                    actual = BARE_RESPAWN_SUPPORT if blocks == (BARE_RESPAWN_SUPPORT, "air", "air") else str(blocks)
+                else:
+                    block = bot.call("get_block", {"pos": station_pos}, timeout_s=5.0) if station else {}
+                    actual = str((block or {}).get("name") or "").removeprefix("minecraft:")
             except Exception:
                 actual = ""
             if not station or actual == station:
@@ -2118,7 +2187,7 @@ def verify_scene_entry(bot: Any, bot_name: str, scene: SceneAnchor, *, attempts:
             print(f"[Scene] expected {station} at {station_pos}, got {actual or '?'}", flush=True)
         footing = (
             f" on_ground={st.get('on_ground')} in_water={st.get('in_water')} in_lava={st.get('in_lava')}"
-            if stronghold_start or probe_start else ""
+            if stronghold_start or probe_start or bare_start else ""
         )
         print(
             f"[Scene] entry verify failed (attempt {i + 1}/{attempts}) bot={bot_name} "
@@ -2413,8 +2482,9 @@ def _install_bare_iron_guidance() -> None:
     task = (
         "先用 mc_inventory 盘点实包。"
         "第 1 晚留在 Y=16 铁层安全发育，夜里无甲时先留在井下。"
-        "仍在地表（Y>=55）且准备新下井时，木材与石镐按实包、现有炉台和本次缺口准备。"
-        "木料储备以 12 根原木等量为上限，已有木板也计入。没有实际缺口就直接下井。"
+        "在地表准备下井时，已有两把石镐、两根木棍、可用炉台与足以烧三份粗铁的燃料，就直接找铁。"
+        "备料回执里的原木、木板和多余工作台储备供后续发育，这些储备缺口不阻塞首把铁镐。"
+        "确实缺木棍、炉台或燃料才在可达处补最小缺口，已有木板可直接用。"
         "石器课若只做了第一把石镐，先在已露出的石层补第二把，需要炉子时留 8 圆石。"
         "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
@@ -2431,6 +2501,8 @@ def _install_bare_iron_guidance() -> None:
         "采集若报 no_drops_collected 且 nearby_drops 有目标物，安全且可达时先调用一次 "
         "mc_skill_collect_drops 并核对实包。低位掉落仅沿已有安全通道拾取，未入包就换作业面。"
         "铁原料齐后为取货和制镐留足本集时间。铁锭还不足时，先找安全站位并核对燃料。"
+        "背包已满时，在安全处先查空槽。有已知安全箱就存明确多余的物品；否则可用 mc_drop 处理无需留用的普通杂料。"
+        "保留镐、炉台、铁料、木料和燃料，核实已腾出整槽再继续熔炼与合成。"
         "缺燃料先补燃料，再调用 mc_skill_smelt，input_item 填 raw_iron，count 填所缺铁锭数。"
         "实包到 3 锭后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，查询手持物确认铁镐。"
         "剩余时间和铁料充足时，就地用余铁做盾与铁甲。站位不安全或剩余时间不足时保留已有材料，下集优先制镐。"
@@ -2439,7 +2511,8 @@ def _install_bare_iron_guidance() -> None:
         playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task,
         post_ensure_task="备料已满足的条目直接跳过。先复点实包，只有实际短缺才追加采木或制备工具。" + task,
         extra_tools=tuple(dict.fromkeys((
-            *playbook.extra_tools, "mc_inventory", "mc_craft", "mc_skill_collect_drops", "mc_window_view", "mc_window_act",
+            *playbook.extra_tools, "mc_inventory", "mc_craft", "mc_drop", "mc_skill_collect_drops",
+            "mc_window_view", "mc_window_act",
         ))),
     )
 
@@ -2552,16 +2625,24 @@ def _install_fortress_blaze_guidance() -> None:
 
     playbook = cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD]
     task = (
-        "核对当前维度为 the_nether，目标是让烈焰棒实际入包。先查弓、箭和副手盾，"
-        "在要塞实心地面或有护栏的拐角站稳，用 mc_get_entities 查烈焰人的最新 ID 和高度，优先选射线无遮挡的目标。"
+        "用 mc_status 核对当前维度与站位，用 mc_inventory 查弓、箭、副手盾。目标是让烈焰棒实际入包。"
+        "站在有支撑的掩体内，用 mc_get_entities 查烈焰人的最新 ID、高度和遮挡。"
+        "当前没有确认可见的目标时，先用 mc_get_block 查拟走格的脚下、脚格和头格，确认全程有支撑且无岩浆。"
+        "还在出生护棚时，从东门沿折廊走到有支撑的北侧或南侧掩体边缘，再扫描一次。"
+        "附近没有可确认的掩护射位，报告通路或视线阻断，别在原位反复扫描。缺少遮挡字段表示未知。"
+        "若 mc_status 显示 blocking=true，先保盾退到实体掩护，确认安全后才用 mc_posture(sneak=True, shield=False) 放下盾。"
         "目标浮空、站在高处或隔着窄桥时，从当前有支撑的射位用 mc_shoot(weapon='bow', entity_id=<实际ID>)，"
-        "核对出箭与命中，受火球压制时回实体掩体，确认安全才再射。不要追到桥外。"
+        "选确认无遮挡的目标。用 used.arrow 或新箭实体确认出箭，再核命中或掉落。"
+        "同一射位连续两次无法确认出箭或命中时，重新确认位置、装备和弹药，换安全射位或可见目标。"
+        "受火球压制时回实体掩体，确认安全才再射。不要追到桥外。"
         "缺箭时在掩体旁等目标落到同层并进入近战距离。仅当脚下及接触位置都有支撑才短时近战，"
         "可用 mc_skill_combat(mode='melee', target_name='blaze', max_time_s=4)；没有安全接战条件就报告缺箭或不可达。"
         "击杀后查掉落位置，只在有安全通路时靠近或用 mc_skill_collect_drops，最后核对实包的 blaze_rod。"
     )
     cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD] = dataclasses.replace(
-        playbook, task=task, extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_shoot", "mc_skill_collect_drops"))),
+        playbook, task=task, extra_tools=tuple(dict.fromkeys((
+            *playbook.extra_tools, "mc_status", "mc_inventory", "mc_get_block", "mc_shoot", "mc_skill_collect_drops",
+        ))),
     )
 
 
@@ -3090,7 +3171,9 @@ def _run_live(args: argparse.Namespace) -> int:
             elif args.stage == "deep_water":
                 starting_site = select_deep_water_site(bot, bot_name, start_idx=args.site_index)
             else:
-                starting_site = select_dry_isolated_wild_site(bot, bot_name, start_idx=args.site_index, day1=args.day1)
+                starting_site = select_dry_isolated_wild_site(
+                    bot, bot_name, start_idx=args.site_index, day1=args.day1, stable_bare_floor=args.stage == "bare",
+                )
         except Exception as exc:
             msg = str(exc) or exc.__class__.__name__
             print(f"[Startup] {bot_name} not ready: {msg}", flush=True)
@@ -3124,7 +3207,7 @@ def _run_live(args: argparse.Namespace) -> int:
         reset_wild_bot(bot_name, sx, sy, sz, set_day=not args.keep_time, stage=args.stage, dim=dim)
         time.sleep(1.5)
         entry_ok = verify_scene_entry(bot, bot_name, scene)
-        if not entry_ok and args.stage in (NETHER_STAGES | {DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE, *PROBE_STAGES}):
+        if not entry_ok and args.stage in (NETHER_STAGES | {"bare", DAY2_VILLAGE_STAGE, STRONGHOLD_STAGE, *PROBE_STAGES}):
             msg = f"Scene {args.stage} landing could not be verified"
             _write_not_ready_summary(
                 out_file,
@@ -3208,6 +3291,7 @@ def _run_live(args: argparse.Namespace) -> int:
             _install_bare_stone_guidance()
             _install_bare_iron_guidance()
             _install_dfs_course_guard(toolset, IRON_TOOLS, "iron", 16)
+            _install_dfs_course_guard(toolset, SMELT_IRON, "iron", 16)
         if args.stage in {"midgame", "village"}:
             _install_wild_portal_guidance()
         if args.stage in NETHER_STAGES:
@@ -3384,6 +3468,11 @@ def _run_live(args: argparse.Namespace) -> int:
             "guardian_totals": guardian_totals,
             "curriculum_summary": summary,
         }
+        if scene.stage == "bare":
+            payload["scene"]["respawn_support"] = {
+                "block": f"minecraft:{BARE_RESPAWN_SUPPORT}",
+                "pos": [math.floor(sx), round(sy) - 1, math.floor(sz)],
+            }
         if portal_crossing is not None:
             payload["scene"]["portal_crossing"] = portal_crossing
             payload["scene"]["portal_advancement"] = verify_portal_advancement(bot, summary)

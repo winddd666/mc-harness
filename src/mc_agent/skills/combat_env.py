@@ -244,6 +244,24 @@ CARDINAL_VECTORS: dict[str, tuple[int, int]] = {
 }
 
 
+def shot_release_confirmed(shot: dict[str, Any]) -> bool:
+    """Use projectile or consumption evidence when the API supplies release telemetry."""
+    if shot.get("fired") is not True:
+        return False
+    if "projectiles" not in shot and "used" not in shot:
+        return True
+    projectiles = shot.get("projectiles")
+    if isinstance(projectiles, list) and any(isinstance(p, dict) and type(p.get("id")) is int for p in projectiles):
+        return True
+    used = shot.get("used")
+    if isinstance(used, dict) and any(type(count) is int and count > 0 for count in used.values()):
+        return True
+    before, after = shot.get("target_health_before"), shot.get("target_health_after")
+    return shot.get("killed") is True or (
+        type(before) in (int, float) and type(after) in (int, float) and after < before
+    )
+
+
 def _clean_block_name(raw: Any) -> str:
     if isinstance(raw, dict):
         raw = raw.get("name") or raw.get("type") or ""
