@@ -2609,16 +2609,24 @@ def _install_fortress_blaze_guidance() -> None:
 
     playbook = cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD]
     task = (
-        "核对当前维度为 the_nether，目标是让烈焰棒实际入包。先查弓、箭和副手盾，"
-        "在要塞实心地面或有护栏的拐角站稳，用 mc_get_entities 查烈焰人的最新 ID 和高度，优先选射线无遮挡的目标。"
+        "用 mc_status 核对当前维度与站位，用 mc_inventory 查弓、箭、副手盾。目标是让烈焰棒实际入包。"
+        "站在有支撑的掩体内，用 mc_get_entities 查烈焰人的最新 ID、高度和遮挡。"
+        "当前没有确认可见的目标时，先用 mc_get_block 查拟走格的脚下、脚格和头格，确认全程有支撑且无岩浆。"
+        "还在出生护棚时，从东门沿折廊走到有支撑的北侧或南侧掩体边缘，再扫描一次。"
+        "附近没有可确认的掩护射位，报告通路或视线阻断，别在原位反复扫描。缺少遮挡字段表示未知。"
+        "若 mc_status 显示 blocking=true，先保盾退到实体掩护，确认安全后才用 mc_posture(sneak=True, shield=False) 放下盾。"
         "目标浮空、站在高处或隔着窄桥时，从当前有支撑的射位用 mc_shoot(weapon='bow', entity_id=<实际ID>)，"
-        "核对出箭与命中，受火球压制时回实体掩体，确认安全才再射。不要追到桥外。"
+        "选确认无遮挡的目标。用 used.arrow 或新箭实体确认出箭，再核命中或掉落。"
+        "同一射位连续两次无法确认出箭或命中时，重新确认位置、装备和弹药，换安全射位或可见目标。"
+        "受火球压制时回实体掩体，确认安全才再射。不要追到桥外。"
         "缺箭时在掩体旁等目标落到同层并进入近战距离。仅当脚下及接触位置都有支撑才短时近战，"
         "可用 mc_skill_combat(mode='melee', target_name='blaze', max_time_s=4)；没有安全接战条件就报告缺箭或不可达。"
         "击杀后查掉落位置，只在有安全通路时靠近或用 mc_skill_collect_drops，最后核对实包的 blaze_rod。"
     )
     cur.CURRICULUM_PLAYBOOKS[OBTAIN_BLAZE_ROD] = dataclasses.replace(
-        playbook, task=task, extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_shoot", "mc_skill_collect_drops"))),
+        playbook, task=task, extra_tools=tuple(dict.fromkeys((
+            *playbook.extra_tools, "mc_status", "mc_inventory", "mc_get_block", "mc_shoot", "mc_skill_collect_drops",
+        ))),
     )
 
 
