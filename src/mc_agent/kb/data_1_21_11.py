@@ -77,7 +77,11 @@ RECIPES_1_21: dict[str, dict[str, Any]] = {
         "yield_count": 1,
         "ingredients": {"any_planks": 3, "stick": 2},
         "keywords": ["木镐", "wooden_pickaxe"],
-        "notes": "仅用于挖掘最早的石头与煤矿，升级石镐后替换。",
+        "notes": (
+            "仅用于挖掘最早的石头与煤矿，升级石镐后替换。"
+            "从零备料共 9 块木板（工作台 4、木棍 2、镐头 3），仅有原木时至少需要 3 根。"
+            "已有可用工作台或足量木棍时只补缺的部分。"
+        ),
     },
     "stone_pickaxe": {
         "id": "stone_pickaxe",
