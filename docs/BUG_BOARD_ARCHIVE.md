@@ -1,0 +1,3400 @@
+# `v2-integrated` 历史/已验证归档 Bug 清单 (`BUG_BOARD_ARCHIVE.md`)
+
+> 本文件完整保存从 `docs/BUG_BOARD.md` 归档的历史工单（共 129 条），包含已关闭、已有合入修复提交、以及 2026-11-23 RCON 定向微场景实机 PASS 的条目。
+> 如在后续测试中再次复现，可直接从本文件迁回 `docs/BUG_BOARD.md` 重开。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-001 | P0 | Slice D2（#6 DeepSeek #2）| 状态: FIXED (待 r12_22bot 实机验收，提交 `249bf1e` / `92163b0` / `26c3795`)
+- **跨模型影响**：`3 bots` 启动崩溃（`glm_glm_1_nether_fortress`, `glm_glm_2_nether_bastion`, `ds_ds_4_nether_fortress`）
+- **日志证据**：`/home/xzq/projects/mc/.worktrees/v2-integrated/runs/r11_22bot/glm_glm_1_nether_fortress/stdout.log` (`NameError: name 're' is not defined` at `l3_wild_endurance_runner.py:167`)
+- **现象与根因**：`select_nether_structure_site` 使用了 `re.search` 但未导入 `re`（抛点 `scripts/l3_wild_endurance_runner.py:167`，已由 D1 在 `glm_glm_1_nether_fortress/stdout.log:11` 复核）；同时 `nether_fortress`/`nether_bastion` 缺下界死亡自动回场补装逻辑，且 `v2_fleet.py triage` 解析 `wild-endurance-*.json` 分数/错误字段未对齐 `v2_triage.py`。
+- **D1 字段对账**（`v2_fleet.py`）：`tool.finished`→应为 `tool.completed` 且 `ok` 在 `result` JSON 字符串内（:227/:243）；`final_score` 在 `curriculum_summary` 下（:208）；`episodes` 亦在 `curriculum_summary` 下（:211）。参考实现：`/home/xzq/projects/mc/.worktrees/s-triage/scripts/d1_triage.py`。
+- **验收标准**：补 `import re`、补下界死亡回场、`v2_fleet.py triage --wave r11_22bot` 能准确打印 22 路分数与 TopErr 榜单，通过 `py_compile` 与离线 `pytest`。
+- **D1 实机复核（r12 19:26 起）**：三路下界 bot 均正常启动并持续调用工具（`glm_glm_1_nether_fortress`/`glm_glm_2_nether_bastion`/`ds_ds_4_nether_fortress` 的 `stdout.log` 无 Traceback），启动崩溃已消除；分数待收官。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-002 | P0 | Slice C（#4 Codex #2）| 状态: FIXED (待 r12_22bot 实机验收，提交 `7d4a8ee` / `ef6a8ac`)
+- **跨模型影响**：`1 bot / 15 次连续失败`（比赛模型 `nju_guitest_01_nether` EP02：`mc_skill_build_portal:unknown_fail×13` + `repeated_identical_failure_blocked×2`）
+- **日志证据**：`/home/xzq/projects/mc/.worktrees/v2-integrated/runs/r11_22bot/nju_guitest_01_nether/stdout.log`
+- **现象与根因**：`build_nether_portal` 在特定地形/障碍下连续 13 次失败且未返回清晰可恢复错误码。
+- **D1 精确根因（已定位到行）**：15 次连续失败全部为 `portal_ignited:true / entered_nether:false`（4x5 门在 `[6409,65,-6382]` 已建成点燃），期间 `move_to(y=67..70,range=0.0/0.1)` 反复 `stalled dist_left=0.7/1.6/2.6`，轨迹 `y=65→70.1（爬到门框顶）→64（unstick）`，**从未进入 y=66..68 门内**。代码 `src/mc_agent/skills/library.py:6803-6854 _walk_into_portal`：只发一次 `move_to(range=0.0)` 后仅轮询 `dimension`，从不校验实体是否位于 `nether_portal` 方块内；清障（:6966-6971）只清门内+门前两格，未清门框两侧/上方接近面，寻路绕顶后永久失败；`reused_existing_portal` 分支复用同一不可达门形成 540s 死循环。对照 `hy4_hy_8_nether` 同工具 `origin y=66` 一次成功。
+- **建议最小修复**：`_walk_into_portal` 改为「走到门前 1 格 → `mc_control(forward+jump,~600ms)` 原子跨入 → 每轮校验 feet/head 所在方块为 `nether_portal`」，3 轮失败返回 `portal_enter_blocked`；清障扩展到 `bz-2` 与门框两侧各 1 格。
+- **验收标准**：定位精确失败点（放置/点火/步入/地形清障）并修复 `library.py:build_nether_portal`，补离线回归单测并跑通全量 `pytest`。
+- **D1 离线复核**：`7d4a8ee` 已按根因加入门前 3 格净空清理、`get_block` 接触判定、`control` 脉冲与 `portal_*` 结构化错误；新增 `test_portal_entry_clears_approach_and_confirms_dimension` 覆盖 r11 的"脚低一格→跳跃入门"场景。全量离线 `pytest tests` = **345 passed, 1 skipped, 3 xfailed**（xfail 为 BUG-006/007 的 TDD 复现）。r12 待实机。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-003 | P1 | Slice A（#3 Codex #1）| 状态: FIXED（`eea50d7`+`7f87334`，但引入 P0 回归 BUG-018）
+- **D1 r12 实测**：`mine_dfs` 单次中位 35.0→**7.5s**、max 174.5→85.0s，预算穿透已消除，但**过度收紧**导致 124 次 0 进展 `time_slice`（见 BUG-018）。
+- **跨模型影响**：`20 bots`；156 次 `mine_dfs` 单次耗时（start→finish 差值）中位 **35.0s**、p90 **91.7s**、max **174.5s**；显式带预算的 106 次里 **6 次 > 2× 用户预算**
+- **日志证据（D1 口径更正：旧数字误把 run 相对 `elapsed` 当单次耗时）**：`hy4_hy_9_deep_water` `climb_out max_duration_s=32` → **174.5s**（`surface_reached`），另有 131.9/115.2/107.1s 均 `climb_incomplete`；`hy4_hy_8_nether` `explore max_duration_s=80` → **127.0s**（`no_progress`）；`ds_ds_1_bare` `explore 90s` → 95.8s；`hy4_hy_4_iron` `explore 32s` → 96.0s
+- **源码定位**：`skills/mining_dfs.py:4638`（预算夹到 5~90s）、`:4559-4560`（`climb_out` 预算 `min(120,max(max_duration_s,90))`，**32s 请求被静默抬到 90s**，是差额主因）、`:2808-2818`（deadline 仅在每次 `dig_staircase` 前检查，单步可再吃 20~90s，故最坏 174.5s≈内部 90s 上限的 1.9×）、`:5198-5231`（`time_slice_progress` 被当成功返回 119 次）
+- **现象与根因**：预算是协作式的，只在下钻一层检查；`climb_out` 隐式抬升预算，与工具契约 `max_duration_s` 不一致。
+- **验收标准**：`deadline` 透传进 `dig_staircase`/`tunnel`/`_navigate_to_node` 并逐 step 检查；确需更长预算时返回 `budget_effective_s`，禁止静默抬升；`time_slice_progress` 附 `goal_met:false`；补离线回归单测并跑通全量 `pytest`。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-004 | P2（D1 复核降级，见 P2-13）| Slice C（#4 Codex #2）| 状态: FIXED (待 r12_22bot 实机验收，提交 `7d4a8ee` / `2626e4e`)
+- **跨模型影响**：`6+ bots`；`mc_skill_staircase` 66 次调用中位 **17.9s**、仅 **5 次 > 60s**、max **92.3s**
+- **D1 口径更正（重要）**：原条目里的 `376.3s / 373.9s / 298.2s` 是 **run 相对 `elapsed`**，不是单次耗时（同 BUG-003）。真实单次耗时没有"十几倍爆炸"；`steps_done=3 / time_budget` 仍说明地形边界会提前收工，但不是延迟故障。
+- **保留价值**：`dig_staircase` 增加 `deadline/per_step_timeout` 的硬化本身仍正确（防御未来回归），可继续保留该提交；后续按 P2-13 跟踪真实停止原因分布（`movement_not_confirmed 9 / missing_step_support 7 / fluid_or_bedrock 8`）。
+- **验收标准**：r12 复核 `staircase` 单次 p90/max 不优于 r11 则回滚该硬化并重定位。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-005 | P1 | Slice B（#2 子 AGY）| 状态: FIXED / 并入 BUG-026（r11 时代死亡单，后续由 BUG-026 跟踪）
+- **跨模型影响**：`4 bots` 高死亡/高频抢占（`hy4_hy_2_bare` 5 死、`hy4_hy_10_enchant_anvil` 4 死、`hy4_hy_8_nether` 3 死、`glm_glm_3_village` `guardian=19/5preempt`）
+- **日志证据**：`/home/xzq/projects/mc/.worktrees/v2-integrated/runs/r11_22bot/hy4_hy_2_bare/stdout.log`、`/home/xzq/projects/mc/.worktrees/v2-integrated/runs/r11_22bot/hy4_hy_10_enchant_anvil/stdout.log`、`/home/xzq/projects/mc/.worktrees/v2-integrated/runs/r11_22bot/glm_glm_3_village/stdout.log`
+- **现象与根因**：排查上述 4 条轨迹中的连续死亡原因与 `guardian.py` 高频反射未脱险问题。
+- **D1 r14 证据**：`hy4_hy_9_deep_water` **10 次 trident 死亡**（全部集中在 `(-6345,62,-7620)` 一带深水），`escape_water`/`raise_shield` 均未脱险；该机 r12/r13/r14 死亡 3/9/10，呈恶化趋势 → 见 BUG-023。
+- **D1 r13 证据**：全队死亡 incident **19→42**（`mc.notable_events` 去重 32 次：`mob_attack 11 / trident 9 / arrow 5 / lava 4 / fireball 2 / player_explosion 1`）。其中 **9 次 trident 全在 `hy4_hy_9_deep_water`**：`escape_water` 返回 ok=true 后仍被 burst（health 15.5→2.9 连击）打死，无水下反击/上浮冲刺。
+- **D1 证据补强（r11）**：死亡归因 `hy4_hy_2_bare` = `falling_stalactite`×1 + `mob_attack`×2 + 复活后被围；`hy4_hy_10_enchant_anvil` = `player_explosion`/`spear`（舰队共岛互伤，见 P2-8）+ 复活瞬间进食失败；`hy4_hy_8_nether` = `player_explosion`×2。全舰队 128 次 `model.failed(cancelled)` 中 114 次紧邻 `guardian.incident`（`pre_hurt_melee 30 / pre_hurt_ranged 16 / pre_hurt_creeper 15`），另付 80×~4s≈290s 强制冷却（见 BUG-009）。
+- **验收标准**：修复对应 `guardian.py` / `combat/` / `safety.py` 生存反射硬漏洞，补离线单测并跑通全量 `pytest`。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-006 | P1 | Slice C（#4 Codex #2）| 状态: FIXED（`c34a895`，D1 已离线验证；待 r13 实机）
+- **跨模型影响**：**22 次 / 9 bots / 4 模型**（`hy4_hy_2_bare`、`hy4_hy_5_midgame`、`hy4_hy_7_village`、`hy4_hy_8_nether`、`nju_guitest_01_nether`、`ds_ds_3_village`…）
+- **日志证据**：`find_blocks(types:["log","planks","bed","wool"])` → `bad_args: unknown block log`；`["shield"]`、`["flowing_water"]`、`["nether_rack"]`、`["cave"]`、`["leather"]`、`["sheep"]` 同类整批失败（22 次）
+- **源码定位**：`harness/mc_tools.py:48-59 _normalize_find_block_types` 仅处理 `bed`，其余原样下发；`experiments/20261115-until-1900/backend_patched/src/session.js:1773` 任一未知名 `fail('bad_args')`
+- **现象与根因**：别名表过窄 + 后端 fail-fast，模型把实体/物品名混入方块查询时整次调用归零（高频别名 `log` 都缺失）。
+- **验收标准**：补别名（`log→*_log`、`planks→*_planks`、`grass→short/tall_grass`、`portal→nether_portal`、`nether_rack→netherrack`、`cave→cave_air`）；无法识别者剔除并继续，返回 `ignored_types`；全部失败才报错并给可执行示例；补离线单测。
+- **D1 离线复核**：`_normalize_find_block_types(["log","shield","oak_log"])` → `['oak_log','birch_log',…]`（`log` 展开、`shield` 剔除）；全量 `pytest tests` = 393 passed / 1 skipped / **2 xpassed**（即 BUG-006 的两条 TDD 复现已转绿），仅剩 BUG-007 的 1 条 xfail。
+
+---
+
+<!-- Archived: 2026-11-23 RCON 微场景实机 PASS -->
+### BUG-007 | P1 | Slice C（#4 Codex #2）| 状态: OPEN
+- **W19 GLM HY6 EP03 材料齐仍报缺料。** 木镐实挖新增一圆石后调用首石镐合成，18.63s 返回 `missing_ingredients`、`server placed no result`，错误回执当时有 4 圆石、2 棍、3 板。紧接转为制板、砍木和找台，无首镐。该批回执缺服务器实际选用的台和槽位，不能把失败归到石或棍短缺。用同样包分别复验已可用工作台和台窗不可用两组，保留真实材料缺口与服务配方拒绝的不同结果。 [采石](../runs/l1_w19_20261122/glm_hy_5e_6_bare_30m/20261122-213455-607116.events.jsonl#L54) · [失败实包](../runs/l1_w19_20261122/glm_hy_5e_6_bare_30m/20261122-213455-607116.events.jsonl#L70) · [合成入口](../src/mc_agent/skills/library.py#L3794)
+- **跨模型影响**：**17 次 / 10 bots**（`hy4_hy_2_bare`、`hy4_hy_6_midgame`、`nju_guitest_01_nether`、`hy4_hy_7_village`…）
+- **日志证据**：`craft_gear(stone_pickaxe)` 包内 `cobblestone:1` → `{"error":"missing_ingredients","message":"could not craft stone_pickaxe: server placed no result","example_recipe_needs":{"cobbled_deepslate":3,"stick":2}}`；`hy4_hy_6_midgame` 同一必失败合成连续等待 236.9s / 497.4s
+- **源码定位**：`skills/crafting.py:10-22` 预检仅 7 个配方（无 stone_*/shield/石砖）；`skills/library.py:2826-2837` 未命中即放行；`experiments/.../backend_patched/src/session.js:2215-2219` 服务端把配方拒绝包装成 `missing_ingredients: ... server placed no result`
+- **现象与根因**：预检表是手写子集，未覆盖配方把"缺料"伪装成"服务器异常"，模型无法换目标只能重试。
+- **验收标准**：预检改为读真实配方或覆盖常用工具/盾牌/石砖；错误码区分 `missing_ingredients(missing={...})` 与 `server_recipe_rejected`；补离线单测。
+- **D1 r24 复核（预检已够用，剩“无 message”）**：8 次 craft 失败全部是真实缺料（`iron_pickaxe` 缺 iron_ingot+stick ×3、`diamond_pickaxe` 缺 diamond ×2、`stone_pickaxe` 缺 cobble+stick ×2、`oak_sign` 缺 planks ×1），**均已正确返回 `missing_materials`**；但其中 7 次 `message=None`，模型只能靠解析 map 自行推断。
+  → 剩余只需在 `missing_ingredients` 时生成一句标准提示（如“缺 iron_ingot×3、stick×2：先 smelt raw_iron / 砍 1 棵树”）。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-008 | P1 | Slice C（#4 Codex #2）| 状态: FIXED（`ef6a8ac`；仅 changed=false 且无 used/gained 才判失败）
+- **跨模型影响**：4 bots / 10 次，关键 1 条实际已成功
+- **日志证据**：`hy4_hy_7_village` `mc_interact(item=bucket, lava)` → `{"ok":false,"result":{"before":"lava","after":"lava","changed":false,"used":{"bucket":1},"gained":{"lava_bucket":1}},"error":{"code":"interact_no_effect"}}`
+- **源码定位**：`harness/mc_tools.py:1158-1171`——只要 `changed is False` 就强改 `ok=false`，忽略 `used`/`gained`
+- **现象与根因**：以"方块是否变化"为唯一判据；桶装流体时方块可能被同 tick 回填/读到旧快照。
+- **验收标准**：仅当 `changed is False` 且无 `used` 且无 `gained` 才判失败；补离线单测覆盖 `gained=lava_bucket`。
+- **D1 复核**：`ef6a8ac` 的条件与建议完全一致；r12 前半段 `interact_no_effect` 10→2，剩余 2 次均无 `used/gained`，属真实无效交互。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-010 | P1 | Slice B（#2 子 AGY）| 状态: FIXED（`dd274ba`；`retry_after_ready` + `eat_deferred`）
+- **Long3 两次复活进食延后均有回执。** H2 EP04 L363、OB1 EP09 L317 都为 `deaths_or_not_ready/retry_after_ready=true`。随后各自重新就绪时饥饿值实际为 20，重新派发了工具，两集均无后续自动进食动作收据。与新命满饥饿时无需补吃的源码分支相符。另复跑原离线用例，重新就绪仍缺食时继续验证一次补吃。 [H2 延后](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-125124-939872.events.jsonl#L363) · [H2 复活满饥饿](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-125124-939872.events.jsonl#L372) · [OB1 延后](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-130917-018464.events.jsonl#L317) · [OB1 复活满饥饿](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-130917-018464.events.jsonl#L326) · [待补门](../src/mc_agent/harness/guardian.py#L2245)
+- **B `a3e7266` 补下界短暂无火焰标志时的持盾进食门。** H2 EP03 L939 实举盾，L946 约 8.2s 后进食中仍受伤，之后跌落过程死亡。进食前真实格挡、站姿及落脚材质缺证。候选对同命、仍持盾格挡且近期单纯远伤沿既有下界 12s 防护窗处理，混合近远维持近战门。D1 独立 **12 项通过**，Long3 未载。 [举盾](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-124126-040839.events.jsonl#L939) · [进食回执](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-124126-040839.events.jsonl#L946) · [候选窗口](../../s-combat/src/mc_agent/harness/guardian.py#L1787) · [定向用例](../../s-combat/tests/test_generation_guard.py#L8964)
+- **跨模型影响**：`hy4_hy_10_enchant_anvil`（同一死亡链）
+- **日志证据**：复活后 `guardian.action.completed eat` → `not_ready: world is still loading (after login, respawn or dimension change)`（94.8s），紧接着 `wrong_server`（111.2s），随后 `player_explosion` 死亡
+- **源码定位**：`harness/guardian.py:573-581 _do_eat` 直接 `use_item`，未检查 `status.ready` 或刚发生 `death_or_connection_changed`
+- **现象与根因**：复活/换维度窗口内进食必然失败，且被计为动作失败，不重试。
+- **验收标准**：`deaths or not status.ready` 时跳过进食并标记 `retry_after_ready`；`ready` 后补一次，不把 `not_ready` 计失败；补离线单测。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-011 | P1 | Slice B（#2 子 AGY）| 状态: FIXED（`dd274ba`；guardian 不再把 httpx 包成 RuntimeError，返回 network_uncertain）
+- **Long3 两次内置战斗读超时保留传输分类。** H4 L185 为 `network_uncertain/ReadTimeout`，7.246s 后重新执行工具，最终 answered。H1 L182 同码，集在约 0.85s 后以总预算 104.947s 的正常 timeout 结束。两次均未变成 `runtime_error`。D1 原离线契约通过。 [H4 读超时](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-125431-806458.events.jsonl#L185) · [H4 下一工具](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-125431-806458.events.jsonl#L225) · [H1 读超时](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131302-033642.events.jsonl#L182) · [H1 总预算](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131302-033642.events.jsonl#L193) · [传输错误映射](../src/mc_agent/harness/guardian.py#L1499)
+- **跨模型影响**：`glm_glm_3_village` EP5、`hy4_hy_8_nether` EP7 直接整集 `runtime_error`；全队 5 次 `ReadTimeout`/`ReadError`
+- **日志证据**：episode report `error = "生存响应 subcortical_combat 的网络结果不确定：ReadTimeout"`，`status = runtime_error`，该集 `score_delta=0`
+- **源码定位**：`harness/guardian.py:195-196` 把 `httpx.HTTPError` 重新包成 `RuntimeError`；`harness/agent.py:1614-1620` 中**原生** `httpx.HTTPError` 会被判为可继续的 `network_error`，但被包装后的 `RuntimeError` 落入 `runtime_error` 分支**终止整集**
+- **现象与根因**：一次瞬态网络抖动发生在生存反射里，就把整个 episode 打死；`guardian` 的包装绕过了 agent 的传输层异常分类。
+- **验收标准**：`_action` 捕获 `httpx.HTTPError` 后返回 `ok:false, error:{code:"network_uncertain"}` 或带退避重试，不再抛 `RuntimeError`；补离线单测（mock 抛 ReadTimeout 必须不终止 episode）。
+- **D1 r12 实测**：仍未修复，`hy4_hy_10_enchant_anvil` EP3 再次整集 `runtime_error`。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-012 | P1 | Slice Integrator（#1）/ 归属待定 | 状态: FIXED（`26f7213`；`_API_RETRYABLE_CODES` 已含 not_loaded/chunk_not_loaded/world_not_ready）
+- **跨模型影响**：`hy4_hy_2_bare` EP5 `bootstrap_iron_age` 整集 `runtime_error`（`actor_requests=20`，`score_delta=0`）
+- **日志证据**：episode report `error = "[not_loaded] chunk not loaded"`
+- **源码定位**：`harness/agent.py:209 _API_RETRYABLE_CODES` 不含 `not_loaded`；`agent.py:1618-1620` 把 `ApiError` 一律判 `runtime_error` 终止；`experiments/.../backend_patched/src/session.js:1367/1866/1917` 在区块未加载时返回 `not_loaded`
+- **现象与根因**：`not_loaded` 是毫秒级可恢复状态（区块加载完成即可），却按致命的 `runtime_error` 结算，直接报废整集。
+- **验收标准**：把 `not_loaded`/`chunk_not_loaded`/`world_not_ready` 纳入可重试集合（短退避 0.5~2s，最多 2~3 次），仍失败再降级为 `network_error` 而非 `runtime_error`；补离线单测。
+- **D1 r12 实测**：**未修复且放大**——`hy4_hy_9_deep_water` 单机 4 集（EP2/4/5/7）均因 `[not_loaded] chunk not loaded` 报废；已并入 BUG-020 统一处理。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-013 | P1 | Slice A（#3 Codex #1）| 状态: FIXED（`fbd9548`，r13 已实测拦截）
+- **跨模型影响**：r12 前 3 分钟即出现 `3 bots / 5 次 repeated_identical_failure_blocked + 2 次 time_slice`：`glm_glm_1_nether_fortress`、`glm_glm_2_nether_bastion`、`ds_ds_4_nether_fortress`（BUG-001 修复后才首次跑起来的三路下界 bot）
+- **日志证据**：`mine_dfs(action="explore", target="diamond", target_y=15, max_duration_s=60)` 在下界坐标 `[0.5,52,795.3]` / `[6.4,43,-810.6]` / `[800.5,60,796.5]` 反复 `time_slice` → 触发防卡死拦截（`repeat_count` 2/3）
+- **源码定位**：`skills/mining_dfs.py:186-260 ORE_DFS_PROFILES` 仅编码主世界矿种；`_resolve_target_profile`（:668-703）**不检查维度**；runner 返回的 `diamond_ore/deepslate_diamond_ore` 在下界根本不存在，引擎只能空挖 netherrack 到 `time_slice`
+- **现象与根因**：模型在 `nether_fortress`/`nether_bastion` 场景把"挖钻石"当成通用目标，`mine_dfs` 无维度可行性校验，导致 3 路各自空转 2~3 次、每次 60~90s。触发提示原文（r12 `run.started.task`）："钻石镐在下界Y8-22挖ancient_debris；床或TNT炸开更快。"——模型把"钻石镐"误读成"挖钻石"，且工具未兜底。
+- **最小修复**：`run()` 入口读取 `status.dimension`；当下界/末地时，若 profile 的 `target_blocks` 不属于该维度，立即返回 `bad_target_for_dimension` + 该维度可用目标（下界：`ancient_debris`/`quartz`/`gold`）与建议 `target_y`，不要开挖；补离线单测（mock 维度=the_nether + target=diamond）
+- **验收标准**：r13 下界三路不再出现"下界挖钻石"，且 `mine_dfs` 对不可能目标 0 次实际挖掘。
+- **D1 r13 复核**：r13 出现 5 次 `stop_reason=bad_target_for_dimension`，提示「当前位于下界(the_nether)，钻石矿石仅存在于主世界(overworld)…DFS 可改采 ancient_debris (Y=15)、quartz (Y=48)、gold (Y=64)」，且不再实际空挖。通过。
+- **D1 r12 收官实测**：`glm_glm_1_nether_fortress` 6 次调用中 3 次 `diamond@15`（4 次被拦）、`glm_glm_2_nether_bastion` 4 次 diamond、`ds_ds_4_nether_fortress` 7 次 diamond（12/15/20 层）、`hy4_hy_8_nether` 3 次 diamond——5 路下界 bot 全部中招。`fbd9548 fix(mining): reject ore targets unavailable in the current dimension` 已实现修复，待 r13 验收。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-018 | **P0 回归** | Slice A（#3 Codex #1）| 状态: FIXED（`/2` 已合入 `fb3b7a4`，r15 实测通过）
+
+- **W3 的 `time_slice_progress` 仍会连续走同一段零产路。** OB2 EP13 L678/L711/L744/L777/L810 五片 **59.960s**，均零破格、零净增、活动节点 3、`dry_calls=0`。每片从近 `[19085,66–67,41145]` 出发，又回到 `[19079.5,59,41147.7]`，片间只有模型和下一工具事件，缺少回高处的独立动作或位置来源。旧 `ok=false/time_slice` 门仍过，新增验收看相邻片的首尾位置和入包，避免将反复同一路程算作有用推进。 [首片](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-074555-610341.events.jsonl#L678) · [末片](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-074555-610341.events.jsonl#L810)
+
+- **5Ease V7 零片回升并再次超门**。相同四钻四铁角色的 V6 **4/48** → V7 **7/51（13.7%）**，超 10%；涉及 4→5 槽。V7 池地、对战与路线不同。H7 两集可见至少两片 0 施工、0 目标：首集 L245 无可归的超时方块，次集 L61 为 dig 时间门。候选过滤后下钻失败从井耗尽转到了其他路径，需继续从逐片结果验收。 [H7 首集零片](../runs/5ease_virgin_eff_v7_20261122/hy_5e_7_probe_iron_y16/20261122-031828-750454.events.jsonl#L245) · [次集 dig 时间门](../runs/5ease_virgin_eff_v7_20261122/hy_5e_7_probe_iron_y16/20261122-032328-829799.events.jsonl#L61)
+
+- **5Ease 采矿 V2 零进展门失败**。A/B **5/70（7.1%）→ V2 14/60（23.3%）**，涉及 3→7 槽。14 片一律 `timeout_path=dig`、0 挖掘、空物品增量，六片约 8.1–8.4s。HY_5E_4 跨两集反复试同站位周边四个相邻候选。固定 `6fde093` 的离线 MockTransport 显示默认读上限 **8s**，显式 20s 会覆写，集尾还能进一步压短。请核对候选阻挡判定和连续零进展后的换位，复验 <10%。原 r15 的 `/2` 修复记录保留。 [EP01 同站](../runs/5ease_mine_eff_v2_20261122/hy_5e_4_fishbone_scan/20261122-022707-830910.events.jsonl#L121) · [EP02 重复](../runs/5ease_mine_eff_v2_20261122/hy_5e_4_fishbone_scan/20261122-023207-914540.events.jsonl#L62) · [读取预算](../src/mc_agent/skills/mining_dfs.py#L350)
+
+- **r78 门户极小分母复核**：零进展比例 **1/2**，两条都来自 NJU_3 EP12 的槽末 45.422s 集。第一条战斗抢占，第二条开始时集余 **7.282s**，外层预留 4s，实耗 **1.331s** 后 `time_slice/timeout_path=place`。原始比例超门，轨迹定位到槽末剩余预算与单次放置。 [槽末集限](../runs/r78_midgame_portal_40m/nju_nju_3_midgame/20261121-145942-648679.events.jsonl#L1) · [短切片](../runs/r78_midgame_portal_40m/nju_nju_3_midgame/20261121-145942-648679.events.jsonl#L152) · [外层夹限](../src/mc_agent/harness/mc_tools.py#L3070)
+- **触发提交**：`eea50d7 fix(mining): bound DFS slices and resume underground escape routes`（为修 BUG-003 引入 `_BudgetSession`）
+- **跨模型影响**：**18 bots / 154 次 `mine_dfs:unknown`**（`hy4` 82、`deepseek` 31、`nju` 22、`glm` 19），其中 124 次消息为"本轮时间预算已用尽"；`mine_dfs` 单次中位 **35.0s→7.5s**，调用数 161→241
+- **分数回归（r11→r12）**：`ds_ds_2_iron` **95→20（-75）**、`hy4_hy_4_iron` **95→20（-75）**；两路都把 55~62 个 actor 请求耗在 `shiny_gear` 的反复 4s `time_slice` 上（r11 同目标 6~9 请求即完成）
+- **精确根因**：`src/mc_agent/skills/mining_dfs.py:344`
+  `request_timeout = min(float(kwargs.get("timeout_s") or 45.0), (remaining - 0.15) / 8)`
+  —— 把剩余切片除以 8 当作"还要做 8 次调用"，导致默认 32s 切片下**每次子调用上限仅 3.92s**，短于 r12 `move_to` 中位 5.1s / p90 25.7s；第一次 move/dig 就超时 → `_MiningDeadline` → `stop_reason=time_slice`，0 进展返回
+- **D1 离线复现**：`scripts/d1_budget_check.py`（本 worktree，只读 v2 源码）
+  ```
+  slice_budget  move_to_timeout  dig_timeout  verdict
+         31.5s            3.92s         3.92s  STARVED
+         59.5s            7.42s         7.42s  STARVED
+         89.5s           11.17s        11.17s  OK
+  ```
+- **最小修复**：不要除以 8（deadline 已在每次调用前后检查）。建议
+  `request_timeout = min(timeout_s or 45.0, max(6.0, remaining - 0.5))`；
+  另给 `dig/move_to` 单项下限 6~8s。修后重跑 `d1_budget_check.py` 必须 exit 0。
+- **验收标准**：r13 `mine_dfs` 单次中位回到 25~40s、`time_slice` 0 进展率 <10%、`ds_ds_2_iron`/`hy4_hy_4_iron` 分数不低于 r11 的 95。
+- **D1 r15 复核（通过）**：`mine_dfs` n=284，**中位 27.9s / p90 58.8s / max 86.3s**；0 进展 `time_slice` 仅 **15/284（5.3%）**，`time_slice_progress` 190 次。预算回归已消除。
+- **r51→r53 下界同八槽**：`ok=false, stop_reason=time_slice` 从 **7/49→9/35**，均超 10%。失败片中位约 **25.84s**，r53 范围 **25.83–28.27s**。HY4_7 EP01 两片均停在同一 Y64 站位，HY4_10 占 5 片。实测未重现历史约 4s 预算饥饿，原修复状态保留，另核对当前平台上的矿道入口。 [零位移首片](../runs/r53_nether_fortress_9bot/hy4_hy_7_nether_fortress/20261120-215410-391904.events.jsonl#L173) · [次片](../runs/r53_nether_fortress_9bot/hy4_hy_7_nether_fortress/20261120-215410-391904.events.jsonl#L198)
+- **r54 下界小样本复核**：`time_slice` 失败 **2/6**，超 10%。全波仅六条矿道回执，保持原来预算优化与该比例失败的区别。 [实测波次](../runs/r54_nether_fortress_6bot/triage-r54_nether_fortress_6bot.md#L3)
+- **r55 下界**：`time_slice` 失败 **2/18**（11.1%），仍略高于目标。HY4_7 EP02 的 18.4s 失败片是平台 reset。 [失败片](../runs/r55_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261120-235224-139051.events.jsonl#L352)
+- **D1 r14 复核**：r14（含 `/2` 的本地树）`mine_dfs` n=196，**中位 18.9s / p90 54.2s / max 78.6s**，0 进展 `time_slice` **19/196（9.7%）**，已接近验收线；但 v2-integrated **HEAD 仍是 `/8`**，请 Codex #1 尽快提交 `/2` 并 rebase，避免下一波换树后又退回。
+- **D1 r13 复核**：s-mining 未提交改动已把 `/8` 改为 `/2`（`attempt_budget = (remaining - 0.15) / 2`）。r13 实测 `mine_dfs` n=265，**中位 20.5s / p90 51.8s / max 84.7s**，0 进展 `time_slice` **44/265（16.6%）**——较 r12（124/241）大幅收敛，但**仍未达标**；且 `/2` 为未提交状态，需 Codex #1 提交后再验收。
+
+- **r59 下界零进展门禁失守**：同五槽，失败片 **0/27→2/10**。两片均为 HY4_9 EP03，actor 申请 60s，实耗 **25.909／26.025s**，目标先 Y15 后 Y18，均挖 0 块且原地。旧回归的约 4s 子调用饥饿未复现，应从当前矿口、深度策略和子动作截止诊断。 [首片](../runs/r59_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-015327-959696.events.jsonl#L161) · [次片](../runs/r59_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-015327-959696.events.jsonl#L604) · [切片进度确认](../src/mc_agent/skills/mining_dfs.py#L6549)
+- **r60 同五槽加重**：探矿失败 time_slice **2/10→7/17**，涉及 HY4_5／9 两个 EP03，18.311–26.209s。六条无可测位移，一条约 0.8m，五条明确挖 0，另两条缺挖掘计数字段。门槛继续失败，需核对当前阶段如何耗尽切片。 [HY4_5 原地失败](../runs/r60_nether_fortress_5bot/hy4_hy_5_nether_fortress/20261121-023638-409410.events.jsonl#L185) · [HY4_9 首次](../runs/r60_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-022459-216493.events.jsonl#L412)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-019 | P1 | Slice A（#3 Codex #1）/ Slice C（#4）| 状态: FIXED（r13 验证：56→11）
+- **跨模型影响**：**17 bots / 56 次** `mine_dfs:repeated_identical_failure_blocked`（r11 仅 1 次），另有 `staircase:repeated_identical_failure_blocked` 8 次
+- **日志证据**：工具返回 `time_slice` 且消息为"本轮时间预算已用尽，已保留矿井与回撤路径；**可用相同 action 继续**"，模型照做后立刻被防卡死拦截（`repeat_count=2/3`），0.0s 返回
+- **源码定位**：防卡死拦截在 `harness/agent.py` 的重复失败检测；`time_slice` 文案（`mining_dfs.py` 的 slice-timeout 分支，`7f87334`）却邀请相同参数重试
+- **现象与根因**：工具契约与 Harness 防循环规则自相矛盾；17 路各浪费 2~4 个 actor 请求
+- **最小修复**：`time_slice` 返回 `suggested_next`（如加大 `max_duration_s`、先 `mc_move_to` 换 16 格外、或 `action='climb_out'`），文案禁止"相同 action 继续"；或在防卡死判定中豁免 `time_slice` 同参续跑 1 次
+- **验收标准**：r13 `mine_dfs:repeated_identical_failure_blocked` ≤ 5 次且 0 次由 `time_slice` 文案直接触发
+- **D1 r13 复核**：`mine_dfs:repeated_identical_failure_blocked` **56→11（17→4 bots）**；`time_slice` 文案已改为「本轮在时间限制内未确认进展，请检查当前位置和障碍后再选择下一步。」，不再诱导同参重试。通过。
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-020 | P1 | Slice Integrator（#1）| 状态: OPEN（r34 NJU 5xx 重试耗尽复现）
+
+- **W21 08:56:40 UTC 后验。** 其余六个槽已有 3 份 20m 和 3 份 30m 补跑正式终档，确定无 W21 在线 runner。原先停写的六槽仍缺补跑终档和退出原因，W21 只记 6/12 部分终档，未用首轮 not_ready 污染补跑统计。 [短槽终档](../runs/l1_w21_v1321_20261123/glm_hy_5e_1_bare_20m/wild-endurance-wild-20261123-002407.json) · [中期终档](../runs/l1_w21_v1321_20261123/nju_ob_2_midgame_30m/wild-endurance-wild-20261123-002409.json)
+
+- **W21 补跑中六个 runner 已退出且无本次终档。** 08:37:38 UTC 核对 actor 记录 PID 和当前启动进程，GLM HY7/HY8、HY9/HY10、NJU OB1 五个 60m 及 HY3 30m 均无活进程和本次终档，只有首轮鉴权 `not_ready`。六槽最后落盘分布 08:29:45–08:30:38 UTC，均无 Traceback。其余六槽继续写。HY7 EP02 停在已派的熔炼，HY3/HY9 停在模型退避。外层退出原因待编排记录，保留各槽的原迹与已证实装备事件。 [HY7 最后一笔实派](../runs/l1_w21_v1321_20261123/glm_hy_5e_7_bare_60m/20261123-002554-468952.events.jsonl#L158) · [HY3 末退避](../runs/l1_w21_v1321_20261123/hy_5e_3_bare_30m/20261123-002610-662188.events.jsonl#L14)
+
+- **三路线断网三槽同停，0/3 Fleet。** 北京 22:40:13.790–15.444，三个 `run.finished` 记 `disconnected`。stdout 且各以 `httpx.ConnectError: [Errno 101] Network is unreachable` 从课程 `run` 的下一轮 `status` 退出。跑后门禁确证 3 个 runner 丢终版。下游正例 OB2 已实制铁镐，最后一片粗铁 +2、锭 +6、炉 +1，仅保留原件和阶段账。修复优先保证断网也写可识别的部分终版。真实连接何时恢复不由 D1 侧推断。 [OB3 掉线](../runs/5ease_ob_w2_20261122/nju_ob_3_village/20261122-063930-610366.events.jsonl#L202) · [OB2 掉线](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-063841-683390.events.jsonl#L112) · [OB1 掉线](../runs/5ease_ob_w2_20261122/nju_ob_1_bare/20261122-063948-265169.events.jsonl#L35) · [runner 异常](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/stdout.log#L462) · [终版入口](../scripts/l3_wild_endurance_runner.py#L2526)
+
+- **r79 官方 GLM_1 终版 8 集 `not_ready`**。新版保住终版，前八集均在明确死亡后 **0.2–0.4ms** 结束，actor 请求 0。石器七集免罚，第九集执行 14 请求并正常 `answered`。另两官方槽均 0 `not_ready`。BUG-020 的整集门仍超。 [第八集](../runs/official_r79_35m_glm1/GLM_1/20261121-205313-860321.events.jsonl#L5) · [第九集](../runs/official_r79_35m_glm1/GLM_1/20261121-205329-538873.events.jsonl#L320) · [官方终版](../runs/official_r79_35m_glm1/GLM_1/official-official_r79_35m_glm1-GLM_1-20261121-205140.json#L7)
+
+- **r77 日出四槽三条 `runtime_error`**。HY4_3 EP10 与 HY4_4 EP18 均为 `not_connected`，HY4_3 EP13 为模型输出截断；另三条 `disconnected` 与一条 `network_error/chunk_not_loaded` 单列。四槽均写终版。 [未连接 EP10](../runs/r77_day12_real_drop_60m/hy4_hy_3_bare/20261121-204449-178532.events.jsonl#L95) · [未连接 EP18](../runs/r77_day12_real_drop_60m/hy4_hy_4_bare/20261121-210416-172785.events.jsonl#L9) · [截断](../runs/r77_day12_real_drop_60m/hy4_hy_3_bare/20261121-205705-956016.events.jsonl#L499)
+
+- **r77 官方 GLM_1 仍有 7 集死后 `not_ready`**。加载版 `6263077`，早于课程免罚补丁。七集最后明确死亡到终态相隔 **0.2–185.9ms**，期间未见重生，四集 actor 请求为 0。MoveTest 和 5Ease 同波均无 `not_ready`，5Ease EP03 另有一条 MC API SSL `ReadError`，落 `network_error` 后 wrapper 继续并写终版。 [GLM_1 EP07](../runs/official_r77_40m_glm1/GLM_1/20261121-200955-882480.events.jsonl#L5) · [最长间隔 EP11](../runs/official_r77_40m_glm1/GLM_1/20261121-201257-948412.events.jsonl#L157) · [5Ease 网络终态](../runs/official_r77_40m_5ease/5Ease_Bot/20261121-200839-027237.events.jsonl#L9) · [actor 网络分类](../src/mc_agent/harness/agent.py#L1643)
+
+- **`8df2f2a` 的等待分支由 `317a6c7` 修复**（BUG-089）。官方 r79 GLM_1 已记录同类 `not_ready` 集并继续开课。报废计数仍超门，程序续课和单集未就绪需各自验收。 [旧版 r82 加载指纹](../runs/r82_midgame_portal_30m/hy4_hy_9_midgame/20261121-203249-644593.events.jsonl#L1) · [新版实际又开课](../runs/official_r79_35m_glm1/GLM_1/20261121-205246-956282.events.jsonl#L3) · [课程分类](../src/mc_agent/harness/curriculum.py#L2746)
+
+- **12:01 官方 r76 三槽缺终版**。GLM_1、5Ease、MoveTest 末条 actor 时间 **12:01:12–12:01:40**，当时为工具发起或限速等待。到 **12:03** 旧 PID 已退出，官方终版 **0/3**；四个同时运行的 Fleet 波仍有原 PID 与新事件。官方 r77 三个新进程在约 12:02 开课，时长改为 40 分钟。旧进程退出原因待外层回执。 [GLM_1 末条](../runs/official_r76_80m_glm1/GLM_1/20261121-195901-529871.events.jsonl#L81) · [5Ease 末条](../runs/official_r76_80m_5ease/5Ease_Bot/20261121-200041-544018.events.jsonl#L79) · [MoveTest 末条](../runs/official_r76_80m_movetest/MoveTest_01/20261121-195854-934878.events.jsonl#L187) · [新版开课](../runs/official_r77_40m_movetest/MoveTest_01/20261121-200217-673376.events.jsonl#L1)
+
+- **11:05 六目录共 13 槽停写**：官方 r75 三槽、r76 裸装三槽、r75 日出四槽、r80 中期三槽，末条 actor 时间集中于 11:05:07–11:05:48。到 11:10 时旧 runner PID 均已退出，0/13 有终版，末条只有等待、工具开始或预准备。门禁未检出 runner traceback，停止原因待证。同期 r80 门户仍持续写盘。 [官方](../runs/official_r75_80m_movetest/MoveTest_01/20261121-190227-877950.events.jsonl#L203) · [裸装](../runs/r76_bare_real_drop_60m/nju_movetest_01_bare/20261121-190313-471279.events.jsonl#L488) · [日出](../runs/r75_day12_real_drop_60m/hy4_hy_4_bare/20261121-190518-883825.events.jsonl#L130) · [中期](../runs/r80_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-190546-648555.events.jsonl#L14) · [现有门禁](../../s-triage/scripts/d1_acceptance.py#L93)
+
+- **07:05 北京时间跨波传输中断**：UTC **23:05:08.169–08.227**，r79 门户三槽、r75 裸装 MoveTest 和 r74 日出三槽共七条 Guardian `ReadTimeout`，首尾 **57.869ms**；七个 actor 在 **19.489–19.742** 落断连。同窗官方 MoveTest／GLM_1 有 `ConnectError` 并收尾当前 actor，5Ease 在 13.065s 见同码。邻档另有 `not_connected`。四波已结算的 11 个相关 episode 报告使用同一个配置 API 地址。Guardian 的首次失败记录包住状态与事件拉取，两者任一失败可进入三次失败门。源端故障未在本批日志暴露。 [r74 日出](../runs/r74_day12_real_drop_60m/hy4_hy_3_bare/20261121-150243-092978.events.jsonl#L134) · [r75 裸装](../runs/r75_bare_real_drop_60m/nju_movetest_01_bare/20261121-150300-413111.events.jsonl#L264) · [r79 门户](../runs/r79_midgame_portal_40m/nju_nju_3_midgame/20261121-150405-511034.events.jsonl#L358) · [官方 MoveTest](../runs/official_r74_80m_movetest/MoveTest_01/20261121-150346-042893.events.jsonl#L102) · [Guard 观察](../src/mc_agent/harness/guardian.py#L1472)
+
+- **r73 官方 GLM_1 再超门**：三条 `not_ready`，EP08／09 各末死后 **0.330／0.355ms**；EP03 课前战斗抢占，actor 启动后约 **0.18s** 便失败，0 请求、无同集死亡回执。5Ease 同加载版 0 条。 [EP03 课前动作](../runs/official_r73_80m_glm1/GLM_1/20261121-132323-719387.events.jsonl#L3) · [EP03 终态](../runs/official_r73_80m_glm1/GLM_1/20261121-132323-719387.events.jsonl#L10) · [EP09 终态](../runs/official_r73_80m_glm1/GLM_1/20261121-133217-408311.events.jsonl#L10) · [口径](../src/mc_agent/harness/agent.py#L1646)
+
+- **r72 两官方同槽改善**：r71→r72 的死后 `not_ready` 为 **9→1（5Ease）／7→1（GLM_1）**，本轮均低于 ≤2，外层重连 0。仅存两条末死至终态 **179.950／183.189ms**，期间无重生。r72 MoveTest 同时仍有四条，保留 OPEN。 [5Ease](../runs/official_r72_80m_5ease/5Ease_Bot/20261121-130700-873913.events.jsonl#L84) · [GLM_1](../runs/official_r72_80m_glm1/GLM_1/20261121-124847-254900.events.jsonl#L152)
+- **r72 官方 MoveTest 终版**：EP07／08／19／23 共四条 `runtime_error/not_ready`，各自最后一次死亡回执至终态间隔 **0.382／0.362／213.960／0.282ms**，期间无重生。EP08 actor 请求 0。官方跑满 80 分钟、重连 0，超出单槽 ≤2 门槛。 [EP08 终态](../runs/official_r72_80m_movetest/MoveTest_01/20261121-114752-382255.events.jsonl#L10) · [EP19 终态](../runs/official_r72_80m_movetest/MoveTest_01/20261121-122358-838903.events.jsonl#L185) · [错误分类](../src/mc_agent/harness/agent.py#L1645)
+- **r70 官方 5Ease 临时世界未就绪导致 10 集报废**：全部终态 `[not_ready]`，且每条均在同集明确死亡后 **0.2–188ms** 内结束、未记录重生。EP14／15／30／32／33 五集 actor 请求为 0。同官方 wrapper 最终 `completed`、重连 0，排除了整槽启动失败的解释。当前 actor `ApiError` 临时清单含 `world_not_ready`，此处回执为 `not_ready`。合并该错误口径并在重生未就绪期间走有界等待或课程重排，验收整集报废 ≤2。 [EP14 死亡](../runs/official_r70_80m_5ease/5Ease_Bot/20261121-094356-917731.events.jsonl#L3) · [EP14 终态](../runs/official_r70_80m_5ease/5Ease_Bot/20261121-094356-917731.events.jsonl#L5) · [EP31 活跃 actor 路径](../runs/official_r70_80m_5ease/5Ease_Bot/20261121-103112-711817.events.jsonl#L150) · [错误分类](../src/mc_agent/harness/agent.py#L1645) · [官方终版](../runs/official_r70_80m_5ease/5Ease_Bot/official-official_r70_80m_5ease-5Ease_Bot-20261121-091803.json#L7)
+- **r71 官方新版过程仍复现**：GLM_1 EP07 加载 `3d1a19c`，工具被护航抢占后出现明确死亡，转 `preparing`，**0.190s** 内落 `runtime_error/[not_ready]`。e3c349a 的战斗重生回执与 actor 尚未就绪的终态分类应分别复验。 [死亡](../runs/official_r71_80m_glm1/GLM_1/20261121-105118-741619.events.jsonl#L238) · [终态](../runs/official_r71_80m_glm1/GLM_1/20261121-105118-741619.events.jsonl#L241) · [actor 异常分类](../src/mc_agent/harness/agent.py#L1645)
+- **r71 两官方终版**：同 r70 角色的 `not_ready` **10→9（5Ease）／2→7（GLM_1）**。r71 的16条都紧跟同集明确死亡，最后死亡到落盘 **0.171–190.073ms**，期间无重生回执。GLM_1 另有一集 ReadTimeout。两槽官方 `completed`、重连 0。 [5Ease 终态](../runs/official_r71_80m_5ease/5Ease_Bot/20261121-112419-977675.events.jsonl#L117) · [GLM_1 终态](../runs/official_r71_80m_glm1/GLM_1/20261121-113948-745566.events.jsonl#L312) · [分类](../src/mc_agent/harness/agent.py#L1645)
+- **跨模型影响**：r12 **12 个 episode 直接报废**（`runtime_error` 10 + `disconnected` 2），其中 9 个是瞬时故障
+- **日志证据**：
+  - `[not_loaded] chunk not loaded` ×4（全部在 `hy4_hy_9_deep_water` EP2/4/5/7）
+  - Qwen/Cloudflare `HTTP 520/522/525` ×4（`nju_movetest_01_bare` EP3、`nju_nju_3_village` EP2/3、`nju_guitest_01_nether` EP2）——**525 既不在 `RETRYABLE_HTTP_STATUSES` 也不在 `is_transient_llm_error_text`**
+  - `[not_connected] bot not connected` ×1、`生存响应 subcortical_combat … ReadTimeout` ×1（= BUG-011）
+- **源码定位**：`harness/model.py:36`（缺 525/526）、`model.py:653`（`standard_max_attempts=3`，NJU 网关 5xx 连续 >10s 即耗尽）、`harness/agent.py:209/1618-1620`（`not_loaded`/`not_connected` 未纳入可重试，直接 `runtime_error`）
+- **现象与根因**：瞬时 provider/连接故障被按"整集失败"结算，浪费该集全部剩余预算（r12 共 12 集；r11 仅 3 集）
+- **最小修复**：① 525/526 加入两份清单；② `not_loaded`/`not_connected` 短退避重试后再判定；③ 重试耗尽时该集标 `paused/transient` 并允许重新排队，不写 `runtime_error`
+- **验收标准**：r13 瞬时故障导致的整集报废 ≤ 2，且无 `525` 直接落 `runtime_error`
+- **D1 r14 复核**：`runtime_error` 4、`disconnected` 2，均为 `not_loaded`/`not_connected`（r14 进程早于 `26f7213`，未含修复）。待 r15 验证 `not_loaded` 重试是否生效。
+- **D1 r13 复核**：整集 `runtime_error` **10→2**、`disconnected` **2→0**，Qwen/CF 5xx 不再打死整集；剩余 2 集均为 `[not_loaded] chunk not loaded`（`hy4_hy_9_deep_water` EP1/EP3）。**保留 OPEN**：仅剩 BUG-012 的 `not_loaded` 分支。
+- **D1 r34 复现**：NJU 四路在波头共 **7/83 集**以 5xx `runtime_error` 收尾，终端 JSONL 为 **502×5、503×1、500×1**；GLM 和 HY4 无同类集。NJU_3 EP01 两次 502 退避各 20s，第三次 502 仍按整集失败，DS_2 EP02 的第三次为 503 `Loading model`。保持已有 5xx 重试清单，验证耗尽后进入可重排 `paused/transient`，原门槛整集报废 ≤2。 [NJU_3 EP01](../runs/r34_short/nju_nju_3_village_trade/20261119-230802-518258.events.jsonl#L7) · [DS_2 EP02](../runs/r34_short/nju_ds_2_cave_combat/20261119-230908-867093.events.jsonl#L25) · [模型重试](../src/mc_agent/harness/model.py#L674)
+
+---
+- **r46**：14/14 写出终版，actor `runtime_error` 与进程退出缺终版均为 0。Day 2 HY4_8 在 6 次明确死亡集中出现的最后三集，两次 `disconnected` 紧跟致死回执，另一集 `not_loaded` 归为 `network_error`。末次冷却 60s 大于所余 58s。 [死亡后断开](../runs/r46_day2_wild_scout_9bot/hy4_hy_8_iron/20261120-090654-015616.events.jsonl#L289) · [区块错误](../runs/r46_day2_wild_scout_9bot/hy4_hy_8_iron/20261120-091722-147672.events.jsonl#L158) · [再恢复预算](../runs/r46_day2_wild_scout_9bot/hy4_hy_8_iron/stdout.log#L300)
+
+- **r57 裸装断连样本**：HY4_4 EP08 取岩浆桶遇三次明确死亡，最后一次箭伤后以直接 `ApiError(not_connected)` 结束。波末剩约 58s，重新连接需等 60s 死亡冷却，最终仍写汇总。加载版 `agent.py:1638–1650` 单列 watchdog 的 `RunDisconnected`，直接 `ApiError(not_connected)` 归 `runtime_error`；本案缺具体发出请求的 API 位置。复验直接断连与可恢复冷却的分类。 [末次死亡](../runs/r57_day1_day2_fast_4bot/hy4_hy_4_bare/20261121-012022-831993.events.jsonl#L143) · [集尾](../runs/r57_day1_day2_fast_4bot/hy4_hy_4_bare/20261121-012022-831993.events.jsonl#L145) · [波尾冷却](../runs/r57_day1_day2_fast_4bot/hy4_hy_4_bare/stdout.log#L466) · [异常分支](../src/mc_agent/harness/agent.py#L1638)
+
+- **r60 裸装 MC API 个案**：HY4_4 EP05 铁器课尝试从箱中取 11 小麦，调用约 45s 后 `ReadTimeout`，记 runtime_error。该槽继续执行并写出终版，区别于要塞的整路 BUG-083。 [取箱起始](../runs/r60_day12_full_45m/hy4_hy_4_bare/20261121-024511-342493.events.jsonl#L24) · [集尾结果](../runs/r60_day12_full_45m/hy4_hy_4_bare/20261121-024511-342493.events.jsonl#L27)
+
+- **r66 Day1/Day2 终版**：HY4_10 EP10／11 都有明确死亡后 `not_loaded`，按 `network_error` 收尾。EP12 再次在死亡后收直接 `not_connected`，仍归 `runtime_error`。HY4_3 EP04 一次脱困 20.9s 后无结构化回执并以 `MC API ReadTimeout` 报废。四槽均终版，无 provider 硬 429／502。 [HY4_10 EP10](../runs/r66_day12_full_45m/hy4_hy_10_bare/20261121-080355-501560.events.jsonl#L114) · [EP11](../runs/r66_day12_full_45m/hy4_hy_10_bare/20261121-080449-066529.events.jsonl#L150) · [EP12](../runs/r66_day12_full_45m/hy4_hy_10_bare/20261121-080605-969715.events.jsonl#L199) · [HY4_3 脱困](../runs/r66_day12_full_45m/hy4_hy_3_bare/20261121-073837-649621.events.jsonl#L416) · [错误归类](../src/mc_agent/harness/agent.py#L1645)
+- **r68 裸装复现脱困传输异常**：HY4_5 EP01 首次石器集，最后一次 `mc_skill_unstick` 约 **9.4s** 后工具中止并抛 `MC API ReadTimeout`，12 次 actor 请求、0 分。下一集实际做出石器、+10，槽最终 2700.1s。与 r66 HY4_3 的脱困同一错误形态，具体哪一次内部 API 缺结构化记录。 [工具中止](../runs/r68_bare_real_drop_3bot/hy4_hy_5_bare/20261121-073250-294642.events.jsonl#L236) · [集尾](../runs/r68_bare_real_drop_3bot/hy4_hy_5_bare/20261121-073250-294642.events.jsonl#L239) · [复跑终版](../runs/r68_bare_real_drop_3bot/hy4_hy_5_bare/wild-endurance-r68_bare_real_drop_3bot_hy_5_bare-20261121-073241.json)
+
+- **r61c／r62 运行停写，原因未证**：北京时间 20:03 前后，r61c 日出仍 0/4 终版，r62 要塞只有 HY4_1 的未就绪终版。六个无终版槽的本地 runner 已无匹配。多路原件停在工具开始或模型等待，缺 Python traceback。验收脚本依赖 traceback 的 runner abort 项为 0，本情况仍按缺终版记录。 [DS_2 最后工具开始](../runs/r61c_day12_full_45m/nju_ds_2_bare/20261121-035742-189492.events.jsonl#L534) · [r62 HY4_2 最后阶梯](../runs/r62_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-035647-174443.events.jsonl#L527)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-021 | P1 | Slice D2（#6 DeepSeek #2）| 状态: FIXED（`26f7213`；残余启动冷却超时单独立为 BUG-039）
+- **影响**：`nju_guitest_01_nether` 在 r13 **整路 0 事件、0 分数**（22 路只剩 21 路）
+- **日志证据**：`runs/r13_22bot/nju_guitest_01_nether/stdout.log`
+  `DeathLoopCooldownError: [death_loop_cooldown] bot is in death loop cooldown, 129s remaining`
+  抛点 `scripts/l3_wild_endurance_runner.py:797 bot.connect(respect_reconnect_interval=False)` → `bot.py:192-204`
+- **现象与根因**：上一波该 bot 死亡进入 129s 冷却，runner 启动时强制忽略重连间隔，异常直接终止进程，且没有等待重试
+- **最小修复**：捕获 `DeathLoopCooldownError`，按 remaining 睡眠后重试（最多 2~3 次）；或启动探测到冷却时先等待并打印 ETA
+- **验收标准**：r14 起 22/22 路均有 `*.events.jsonl` 与 summary；冷却场景下单路最多延迟 130s 启动而非丢失
+- **D1 r14 复核**：`ds_ds_4_nether_fortress` 再次因 `DeathLoopCooldownError: 120s remaining` 整路丢失。修复提交 `26f7213` **已包含** try/except 睡眠重试，但 r14 的 runner 进程加载于 20:14（早于该提交 20:18），跑的是旧代码。
+- **附加要求（发布纪律）**：`launch` 前打印 `git rev-parse HEAD` 并与运行树比对；或在 runner 启动日志写入 commit，避免"修复已合但实机仍跑旧码"。
+
+- **r61 启动准备超时**：r61 要塞 3 路和日出 4 路均为 not_ready，r61b 要塞重跑再 3 路未就绪。要塞报该 SSH 调用等待 30s，日出报 45s，均无 actor 轨迹。记录只定位启动准备步骤，不推断远端故障具体位置。 [要塞重试终版](../runs/r61b_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/wild-endurance-r61b_stronghold_end_40m_movetest_01_village_to_stronghold_end-20261121-031745.json#L13) · [日出终版](../runs/r61_day12_full_45m/nju_ds_2_bare/wild-endurance-r61_day12_full_45m_ds_2_bare-20261121-031650.json#L13) · [启动异常写汇总](../scripts/l3_wild_endurance_runner.py#L2175)
+
+- **W17b 两次拒绝入场，第三次在同目录实跑。** 04:19:43Z、04:20:03Z 两轮各 10/10 槽写 `not_ready`，每份 0 秒、0 集，`entry_verified=false` 且报 `Connection refused`。其中裸装各 7 槽。04:21Z 后第三轮 10/10 进场，旧报告会遮住正在生成的第三轮原迹。根因证据止于入场失败，D1 已修复本地验收和监听的终档选择。验收按尝试区分，确认实入场前不授予零集通过。同目录实跑时应显示本轮正式终档 0/10，收齐第三轮后再验收。 [第一轮](../runs/l1_w17b_20261122/nju_ob_1_bare/wild-endurance-wild-20261122-201943.json#L11) · [第二轮](../runs/l1_w17b_20261122/nju_ob_1_bare/wild-endurance-wild-20261122-202003.json#L11) · [第三轮入场](../runs/l1_w17b_20261122/nju_ob_1_bare/stdout.log#L3) · [Runner 拒绝入场终档](../scripts/l3_wild_endurance_runner.py#L2894)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-022 | P1 | Slice A（#3 Codex #1）| 状态: FIXED（r15 验证：铁阶段 100 分）
+- **跨模型影响**：`ds_ds_2_iron`（95→20→25）、`hy4_hy_4_iron`（95→20→20）；两路把 25~40 个 actor 请求耗在 `shiny_gear`
+- **日志证据（r13 `ds_ds_2_iron`）**：`explore` 每次 17~27s 稳定下潜 y=129→55（12 次 `time_slice_progress`，属正常），到 **y=47 触发 `shaft_exhausted`**，随后 `return_collar → no_collar_recorded`、`reset → nothing_to_reset`、`explore → needs_surface_climb`，再由 `climb_out` 从 y=56 爬到 101 反复 `time_slice`，直到 episode 超时
+- **源码定位**：`skills/mining_dfs.py:5132-5162`（深处无法回撤时强制 `needs_surface_climb`）、`mining_dfs.py:5214-5230`（回撤失败同样强制爬升）；`shaft_exhausted` 在目标层上方 ~100 格（y=47 vs target -54）提前判定
+- **现象与根因**：下潜切片 × episode 调用预算不足以到达目标层；`shaft_exhausted` 后引擎拒绝在深处续挖，要求回地表，而 `climb_out` 又需多次调用——形成「下潜→耗尽→爬升→超时」死循环
+- **最小修复**：① `shaft_exhausted` 时若当前 y 距 target_y >10 且镐可用，允许就地开新分支（`offset/reopen`）而非强制回地表；② `climb_out` 支持跨调用续爬（保存进度）并返回 `next_action="climb_out"`；③ 提示模型为深目标使用 60~90s 切片
+- **验收标准**：r14 `ds_ds_2_iron`/`hy4_hy_4_iron` 至少一路拿到 `mine_diamond`，分数 ≥60；`needs_surface_climb` 导致的 0 进展调用 ≤2/路
+- **D1 r14 复核**：`ds_ds_2_iron` 20、`hy4_hy_4_iron` 20，未改善。
+- **D1 r15 复核（通过）**：同一 iron 场景由 `hy4_hy_2_iron` 承接，拿到 **100 分**（此前 iron 槽 20~25），diamond 链路恢复；说明 BUG-018 的预算修复即 BUG-022 的主要解。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-023 | P1 | Slice B（#2 子 AGY）+ D2（场景）| 状态: FIXED（`e680b1f`；`escape_deep_water_to_shore` + 30s 不再下水；r16/r17 trident 死亡 0）
+- **Long3 七槽没有 `deep_water` 角色暴露。** 全波末伤及 `mc.notable_events` 均未见三叉戟，保留同类深水波实机复验，不用当前零条更新验收。 [角色门](../../s-triage/scripts/d1_acceptance.py#L37)
+- **影响**：`hy4_hy_9_deep_water` 在 r12/r13/r14 死亡 **3/9/10**，10 次全部为 `trident`，分数长期 25~40
+- **日志证据**：死亡坐标集中在 `(-6345.3,62.9,-7614.5)` ~ `(-6368.5,62.6,-7648.5)`；每次事故 `escape_water ok=true` 但仍在 2~3 秒内被 5+ 次 trident 连击（health 15.5→2.9）打死；`raise_shield` 仅出现 2 次
+- **源码定位**：`harness/guardian.py` 深水分支只做 `escape_water` 位移，没有"脱离水域到岸/上浮换气 + 盾挡 + 反击 drowned"的组合；`skills/safety.py` 水下脱困优先级低于持续受击
+- **最小修复**：① 深水受击时优先 `mc_move_to` 最近干燥陆地/向上冲出水面（而非原地小幅闪避）；② 连续 3 次受击且仍在水中 → 强制上岸并设 30s 不再下水；③ 有盾时先 `equip_shield`+`raise_shield` 再退
+- **场景侧（D2）**：`deep_water` 出生点距岸 ≤8 格，或保证 20 格内有可站立浅滩，避免刷新即被 drowned 围杀
+- **验收标准**：r15 该路 trident 死亡 ≤2，分数 ≥80
+- **发布状态（r16 前核对）**：修复 `e680b1f`（盾优先上岸 + 30s 不再下水）**已在 HEAD**，r16 可直接验收。
+- **D1 r16 早段复核（正向）**：`hy4_hy_9_deep_water` 已执行 **12 次 `escape_water`、0 死亡**；`hy4_hy_10` 6 次、0 死亡（r15 该路 1 次 trident 死、r14 为 10 次）。门禁 `BUG-023 deep_water trident deaths ≤2` 当前 PASS，待收官确认。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-024 | P1 | Slice C（#4 Codex #2）| 状态: FIXED（`7dbcdb1` + `_dig_pillar_up` no_support 重试；r16 实测 46→1）
+
+- **r78 门户 `no_support` 再超门**：严格口径 **8**。HY4_8 EP03 四个方向均在同一格 `[7811,75,2783]` 失败，NJU_3 EP05 三方向在另一固定格 `[-9984,81,3011]` 失败，另一条为 NJU_3 EP03。另有三条柱式 `place_failed/no_support`，未进这项门。 [四方向首条](../runs/r78_midgame_portal_40m/hy4_hy_8_midgame/20261121-142345-893612.events.jsonl#L161) · [同格末条](../runs/r78_midgame_portal_40m/hy4_hy_8_midgame/20261121-142345-893612.events.jsonl#L210) · [NJU_3 同格](../runs/r78_midgame_portal_40m/nju_nju_3_midgame/20261121-143844-150033.events.jsonl#L703) · [放置失败收口](../src/mc_agent/skills/library.py#L7647)
+- **跨模型影响**：**45 次 / 6 bots**（`glm_3`、`hy4_4`、`hy4_6`、`nju_guitest`、`hy4_2`、`hy4_9`），占 r15 `staircase` 失败的首位（55 次 `missing_step_support` 中 45 次是 `no_support`）
+- **日志证据**：`mc_skill_staircase(direction=*, vertical="up", steps=6)` → `stop_reason=missing_step_support`，`last_error={"code":"no_support","message":"no solid neighbour block to place against"}`；四个方向均发生
+- **源码定位**：`src/mc_agent/skills/library.py:5688-5698` 在跳跃中对 `[bx,by,bz]` 执行 `place`；异常处理只对 `place_failed` 重试（`:5681-5688`），遇到 `no_support` 立即 `break`，随后 `:5696-5698` 归为 `missing_step_support`
+- **现象与根因**：上阶梯在自挖竖井里垫脚，目标格四周已被挖空，没有可附着面 → 服务端拒绝放置；换 filler 材质无用（错误码不是 `missing_item`），于是整次 staircase 失败
+- **后端契约（已核对）**：`session.js:1964-1981` 的 `place` 会自动从 6 个邻面找实心参考块；`no_support` = 6 邻面全空。未传 `x/y/z` 时会走 `autoPlaceSite()`（3 格内找有实心地面的空格，`session.js:1966-1969`）。
+- **最小修复（按可行性排序）**：① `no_support` 时改用 **无坐标 `place(item=filler)`** 走 `autoPlaceSite`，成功后再 `mc_move_to` 站上去；② 或在目标格旁 `dig` 1 格侧袋制造附着面后重放；③ 仍失败再返回 `missing_step_support`，并给 `next_action="staircase(direction=..., vertical='down')"` 等替代
+- **D1 趋势**：`no_support` 按波次 16(r12)→3(r13)→9(r14)→**46(r15)**，不是单次提交回归，而是新场景/竖井上阶梯使用量放大了既有缺陷
+- **D1 代码复核（HEAD，已定位到函数）**：新增的 `no_place_face → _dig_pillar_up` 兜底位于 `_dig_staircase` 的 `v_key=="up"` 分支（`library.py:6310-6332`）。但 r15 的 46 次报错来自 **`_dig_pillar_up` 自身**（定义 `library.py:5492`，jump-place 在 `:5673` `place(item=filler,pos=[bx,by,bz])`，只重试 `blocked_by_self`，无 6 面实心检查）。
+  → 修复点应是：在 `_dig_pillar_up` 的 `place` 之前做同样的 `has_place_face` 判定；无面时改为"向侧面 dig 1 格（制造附着面）"或"无坐标 place 走 autoPlaceSite"，而不是直接判 `missing_step_support`。
+- **D1 成本量化（r15）**：46 次 no_support 直接墙钟仅 **122.7s**（avg 2.7s，失败很快），但每次都要模型重新规划 → **消耗 46 个 actor 轮次**；受影响排序：`nju_guitest_01_nether 51.7s`、`glm_3_village_trade 25.1s`、`hy4_4_cave_combat 21.7s`、`hy4_6_nether_bastion 17.2s`。
+- **验收标准**：r16 `staircase:missing_step_support`（no_support）≤5 次；上阶梯成功率 ≥80%
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-025 | P1 | Slice A（#3 Codex #1）| 状态: FIXED（`3d4ac1e`，D1 复现脚本已转绿；待 r16 实机）
+- **跨模型影响（r15 收官）**：**39 次 / 10 bots**（`ds_ds_1_bare 16`、`hy4_hy_7_village 6`、`ds_ds_4 4`、`nju_guitest 3`、`nju_movetest 2`…）；`ds_ds_1_bare` 最终仅 **20 分 / 9 集**，`mine_dfs` 消耗 1265s
+- **日志证据（ds_ds_1_bare）**：
+  - `mine_dfs` → `stop_reason=pickaxe_low`，提示"当前材料可立刻合 1 把石镐（现有石料 **391**、木棍折算 **2**）"
+  - 实际背包：`cobblestone 169 + cobbled_deepslate 223`，`acacia_planks **1**`，`stick **0**`，**无任何原木**
+  - `craft_gear(stone_pickaxe)` → `missing_ingredients`（`missing_materials={"stick":4}`）；`craft_gear(stick,4)` → "需要至少 2 块木板，当前仅 1" —— 死循环 4 轮
+- **源码定位**：`src/mc_agent/skills/mining_dfs.py:848-853`
+  `sticks_available = sticks + 2 * (planks + 4 * logs)`
+  —— 把 **1 块木板折算成 2 根木棍**，但原版配方是 **2 木板 → 4 木棍**，单块木板实际产出 0 木棍
+- **现象与根因**：`pickaxe_low` 的"可立刻合成"判断高估木棍，诱导模型反复调用注定失败的 `craft_gear`；同时缺"没木头时先 `harvest_logs`"的兜底
+- **最小修复**：`sticks_available = sticks + 4 * (planks // 2) + 8 * logs`；当 `n == 0 and stone >= 3` 时，提示改为"先去砍 1 棵树补木板（`mc_skill_harvest_logs(target_logs=1)`）再合成"
+- **D1 离线复现**：`/home/xzq/projects/mc/.worktrees/s-triage/scripts/d1_stick_check.py`（exit 1）
+  ```
+  1 plank / 0 stick / 391 stone (r15 ds_ds_1_bare)      got 1  want 0  sticks_available 2  WRONG
+  2 planks -> 4 sticks (enough for 1)                   got 1  want 1  OK
+  4 planks -> 8 sticks (enough for 2)                   got 2  want 2  OK
+  1 log -> 4 planks -> 8 sticks                         got 2  want 2  OK
+  ```
+  改成 `4 * (planks // 2) + 8 * logs` 后 5/5 通过；另建议给 `craft_gear` 的 `missing_ingredients` 补 `message`（当前为 `None`，模型看不到下一步）。
+- **D1 运行中 bot 复核（r15 未收官 4 路）**：`ds_ds_1_bare` 命中 **9 次**完整死循环：`stone_pickaxe{missing stick:2/4}` → `stick{planks_or_log:1, 仅 1 木板}` → 再 `stone_pickaxe`；`nju_movetest_01_bare` 另有 2 次（`wooden_pickaxe` 缺 `any_planks:3`）。`no_support` 在 4 路中 **0 次**，说明 BUG-024 主要出现在竖井内上阶梯。
+- **验收标准**：r16 `pickaxe_low → craft_gear(missing stick)` 连续循环 0 次；bare 三路 20 分钟内达到石器基建（≥10 分）
+- **D1 离线复核（通过）**：HEAD 已改为 `sticks + 4*(planks//2) + 8*logs`（`3d4ac1e`）；`scripts/d1_stick_check.py` **5/5 OK，exit 0**（r15 的 1 木板 case 由 1→0）。r15 实机仍有 39 次旧行为，属修复前数据。
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-026 | P1 | Slice B（#2 子 AGY）+ Slice D2（场景）| 状态: OPEN（r22 回潮：29 死 / 258s）
+
+- **W20 HY8 EP20 上岸后仍有近敌。** 已落干地并从 6.17 掉至 3.17 HP，之后同槽复扫见溺尸 2.7m、无安全退路，稍后明确爆炸死。与 B `36a3b26` 的近战短撤分别核对近敌、地形和实际伤亡，候选已合 `7f84599`，D1 定向 8/8、待实载。 [近敌无安全退路](../runs/l1_w20_20261122/glm_hy_5e_8_bare_60m/20261122-233302-996317.events.jsonl#L261) · [明确死亡](../runs/l1_w20_20261122/glm_hy_5e_8_bare_60m/20261122-233302-996317.events.jsonl#L292) · [候选实现](../src/mc_agent/harness/guardian.py#L1356)
+
+- **W20 正式回归。** W19→W20 明确死亡 77→106，取消冷却申报 738.3→926.3s。W20 五个 60m 槽死 78；HY9 一槽死 39、26 集零客观验证、终包空。D2 的锚点近距再迁候选 `e524cdb` 和 B 的续撤 `54b58ee` 均合入 `4cf38d0`，晚于 W20 实载。 [HY9 终档](../runs/l1_w20_20261122/hy_5e_9_bare_60m/wild-endurance-wild-20261122-224252.json) · [末次受伤及重生](../runs/l1_w20_20261122/hy_5e_9_bare_60m/20261122-234059-428499.events.jsonl#L178)
+
+- **HY7 音波第二段撤退候选 `54b58ee`。** 同命、同高度有支撑、同一监守者处于身后且路段无额外近敌时，首撤 9.70m 后仍距 4.90m 的模拟情形允许再尝试一次。复扫仍近则继续报未脱险。D1 独立复跑同巷和水柱两组共 13 项通过，W20 实载早于候选，原迹缺全段安全巷道证据。 [同巷夹具](../../s-combat/tests/test_generation_guard.py#L360)
+
+- **W20 HY7 60m 三钻链在 Y−46 遇监守者音波中断。** EP04 两片确认共三钻，EP05 L16 `warden_evade` 实退 9.70m，复扫同监守者距离 4.90m、准确报 `warden_still_in_range`。约 7.54s 后音波死亡。其间 actor 逃跑被出口门挡，下一集独立包只有一木、四棍、两板，没有前集矿物。验收保留短撤未脱险的真实回执，继续核危险同距的受控第二次撤退或改走已经核实的出口。 [三钻第二笔](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-230440-134232.events.jsonl#L248) · [撤离与复扫](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-232240-823719.events.jsonl#L16) · [出口拦截](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-232240-823719.events.jsonl#L39) · [近锚重生](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-232240-823719.events.jsonl#L41) · [脱险复验](../src/mc_agent/skills/combat_env.py#L4191)
+
+- **W20 HY8 实机先切候补，再切回主锚。** EP07 主点旁遭袭，从 `(240965.5,65,193590.5)` 区域迁候补 `(240900.5,63,193586.5)`；候补周边后来又有死亡，EP10 启动后场景日志确认切回原锚，后续工具实读位置距原锚约 6m。这次双向转移均有位置，与同波 HY9 的无切换分账。 [首次迁移](../runs/l1_w20_20261122/glm_hy_5e_8_bare_60m/stdout.log#L372) · [再次迁移](../runs/l1_w20_20261122/glm_hy_5e_8_bare_60m/stdout.log#L602) · [后验站位](../runs/l1_w20_20261122/glm_hy_5e_8_bare_60m/20261122-225949-024634.events.jsonl#L172) · [互换锚点](../scripts/l3_wild_endurance_runner.py#L2040)
+
+- **W20 HY9 有候补仍反复回主锚。** 前六集明确 8 死，均距主锚 20m 内，逐次重生仍为 Y40.1。stdout 前六集在原点返场，未见候补切换。运行码已有第二次近锚死亡后试切；由于未记录就绪、近敌、目标读回与拒因的逐次分项，当前无法判是活窗口未触发还是备点校验拒绝。验收记录每次被护栏限制的跳转原因和新坐标，保留 W19 已成功切换正例。 [EP04 两次死](../runs/l1_w20_20261122/hy_5e_9_bare_60m/20261122-224818-989239.events.jsonl#L316) · [EP06 第八死](../runs/l1_w20_20261122/hy_5e_9_bare_60m/20261122-225248-638232.events.jsonl#L96) · [原点返场](../runs/l1_w20_20261122/hy_5e_9_bare_60m/stdout.log#L299) · [触发门](../scripts/l3_wild_endurance_runner.py#L1945)
+
+- **B 候选 `eb3af95` 复验。** D1 独立通过六个定向条件。移动中同一生命确认实在岩浆，或掉血且有新鲜明确岩浆伤时，交已有逃生逻辑。覆盖长移动超时后的有界复读，保留普通持续燃烧、旧岩浆事件、换命及一般超时对照。原迹缺第一处入浆时刻和落脚，候选待匹配实载。 [离线夹具](../../s-combat/tests/test_generation_guard.py#L17980) · [W19 实机伤害](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-220708-698515.events.jsonl#L201)
+
+- **W19 OB1 候补回场后再次受敌。** 首次原锚附近连续死亡后，runner 记录成功切到 `214125.5,72,164636.5`。此后四次确证死亡，至少三次在候补锚 20m 内，最近约 3.7m；连续几集仍回同一候补。当前候补在首个成功切换后删除。验收需覆盖初次迁移后短期仍干地安全，以及原候补后来被占据时的有界接续；保持同波空间隔离。 [候补已切](../runs/l1_w19_20261122/nju_ob_1_bare_60m/stdout.log#L848) · [就近近战死](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-221645-748841.events.jsonl#L254) · [又从候补重生](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-221930-069322.events.jsonl#L104) · [切换后清候补](../scripts/l3_wild_endurance_runner.py#L2025)
+
+- **W19 OB1 60m 成装后烧死。** L196 追向地下箱的 XZ 路径标 `ignore_hurt=true`，移动 25.08s 超时后守卫立即处置。已离开液面但落脚未确认，随后灭火没找到安全浅水，直到燃烧死亡。伤害批次无确切首次接触时刻，无法量化能提前多少秒打断。验收保留真实急救的主动位移，同时覆盖长距离移动在入浆或确认坠落时打断，以及离开液面后持续燃烧时暂停探索。 [移动](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-220708-698515.events.jsonl#L196) · [离浆但落脚未确认](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-220708-698515.events.jsonl#L199) · [灭火失败](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-220708-698515.events.jsonl#L208) · [确证死因](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-220708-698515.events.jsonl#L221) · [移动停止条件](../src/mc_agent/harness/mc_tools.py#L1272)
+
+- **W19 60m 候补回场有首次正例和未覆盖反例。** HY10 三次箭死分别距主锚 7.94、12.86、13.97m，runner 确认改用候补 `236268.5,104,189001.5` 回场，EP03 后段在其附近真收五原木并制出台。HY8 六次死均在原锚 20m 内，HY3 后三次死也均在 20m 内，初始日志未见候补通过，归位仍在各自原点。现有选点只试两个偏移，两点都拒绝时没有拒绝分因记录。维持地面、干燥、净高和近敌窗口，实测应覆盖已选候补成功与两个偏移都不合格时的有界补选及失败回执。 [HY10 回场切换](../runs/l1_w19_20261122/hy_5e_10_bare_60m/stdout.log#L194) · [实收五木](../runs/l1_w19_20261122/hy_5e_10_bare_60m/20261122-213635-720831.events.jsonl#L205) · [HY8 主锚](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/stdout.log#L2) · [HY8 第六死](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/20261122-213636-032936.events.jsonl#L177) · [候补选择](../scripts/l3_wild_endurance_runner.py#L1488)
+
+- **W19 裸装铁器课两条保命断点。** GLM HY6 EP02 查到 9.7m 外无遮挡苦力怕 2197772 后，把该 ID 和该实体坐标同时传给 `mc_move_to(range=2.5)`。坐标优先分支清除了 ID。启动约 0.97s 后才接管，两次撤退均未拉开，接管结束 HP1.67、同敌 3.8m。6.05s 后原迹明确爆炸死亡，随后独立包空。原迹缺最终爆炸实体 ID。复验已确认的近敌坐标与同 ID 混传应在发送移动前拒绝危险方向，给安全撤退/绕行；离敌更远、仅坐标的安全路线、到非敌实体仍可派发。GLM HY8 EP03 两次远程应急掩体分别在挖和放阶段超限，后续撤退零位移，同一骷髅 1.1→1.6m，HP5.5→1.5，随后箭伤死亡；继续核部分施工和保命预算。 [HY6 识敌](../runs/l1_w19_20261122/glm_hy_5e_6_bare_30m/20261122-213242-412098.events.jsonl#L241) · [移动与接管](../runs/l1_w19_20261122/glm_hy_5e_6_bare_30m/20261122-213242-412098.events.jsonl#L252) · [死亡](../runs/l1_w19_20261122/glm_hy_5e_6_bare_30m/20261122-213242-412098.events.jsonl#L265) · [坐标优先](../src/mc_agent/harness/mc_tools.py#L1225) · [HY8 两次掩体](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/20261122-213325-799761.events.jsonl#L13)
+
+- **W17b HY2 回锚后还有近敌实伤。** EP04、05 两次分别同批记录重生后又掉至 HP17、11.3，无坠落收据。EP05 先撤因悬空无位移，同条守卫下一读已着地、HP7.33，旧分支未继续走干地短撤。B 候选 `86fe780` 用该现场结构做离线回放，仅在同命、主世界短距、无盾无武器、干地和支撑实证时补一次短撤。W18 早于该候选。另 HY9 的钻石回尸传 Y−11 但移动报成功在 Y77，复扫无掉落；尸袋验收需要三轴实位置和目标物品入包。 [HY2 EP04](../runs/l1_w17b_20261122/hy_5e_2_bare/20261122-203621-363162.events.jsonl#L84) · [HY2 EP05](../runs/l1_w17b_20261122/hy_5e_2_bare/20261122-203712-793990.events.jsonl#L42) · [HY9 错层移动](../runs/l1_w17b_20261122/hy_5e_9_bare/20261122-204414-623442.events.jsonl#L36)
+
+- **W17 裸装睡眠课跨集死伤。** HY1 EP04 已有一次杀羊回执；与未穿甲盾、手持羊毛的状态同读。蜘蛛从 EP04 持续追到 EP05，EP05 L21 近战真死，重生后 L52 又带 `ignore_hurt=true` 走向同一实体，L137 再真死。本段课目标始终是睡眠，需另外验自主贴近敌人的动作。后续版本核临敌时允许回避但不应为取材强贴敌。 [动物确认击杀](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-200836-816522.events.jsonl#L87) · [重生后贴回同蜘蛛](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-200940-099623.events.jsonl#L52) · [第二次真死](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-200940-099623.events.jsonl#L137)
+- **保护提示已影响实际派发。** Long3 OB2 EP09 掩体未成、驻留 0。模型明确引用保护提示的向下掘进要求，第一次楼梯实走 1 步、破 2 格，下一次仍向下并受击中断，仅保住泥 1。10 次防循环动作均短撤 5.0–15.1m，最近敌仍在 5.5–23m，应如实提示撤离结果与剩余威胁。 [模型解释](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125254-507775.events.jsonl#L196) · [下梯结果](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125254-507775.events.jsonl#L200) · [二次受击](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125254-507775.events.jsonl#L341)
+- **Long3 OB2 的防循环保护回执错误。** 15 次明确死亡，11 次距裸装回场锚 ≤20m。10 次实际防死亡循环动作均 `sheltered=false, held_s=0`，末次掩体拒绝有 7 条 `not_grounded`、3 条 `no_roof_block`。actor 仍统一收到「已执行就地掩体保护并等待安全窗口」。`c57749e` 已合入备用锚并待实载，可先验重生后真正离开旧锚威胁。提示按实证区分已入掩体、只移动、保护失败；未着地仅在同命且无近敌时允许有界复查，保留临危即时接管。 [EP11 未成掩体](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125648-072609.events.jsonl#L126) · [提示入口](../src/mc_agent/harness/agent.py#L1288) · [驻留条件](../src/mc_agent/skills/library.py#L8616) · [备用锚](../scripts/l3_wild_endurance_runner.py#L1908)
+- **B `9499a0f` 给低血末影人追击补有界查证。** Long3 H1 EP04 L270 未确认，L271 证实已着地、HP2.725、格挡关；原迹未记录追击复读前的最近敌和副手，因此该死链仍属待复验。候选仅在同命、干地着地、HP≤4、格挡明确关闭、副手有盾、最近敌栏为空时允许补短扫，须同一有归因 ID 的末影人实际在 3.5m 内并复查现态，再转盾。D1 **36 项定向通过**，覆盖原抬盾、追击和负对照。等待实机 `nearest_hostile_missing`、读到的敌距、真格挡及脱险；`b04a430` 未含候选。 [现场复核失败](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-125202-191391.events.jsonl#L270) · [候选追击](../../s-combat/src/mc_agent/skills/combat_env.py#L1386) · [定向夹具](../../s-combat/tests/test_generation_guard.py#L18298)
+- **B `2b913bc` 给低血水中接管留靠岸时间。** Long3 H1 EP04 L52 的 **11.376s 是整段近战及上浮接管**，前三次近战记录 HP8.1，随后通用上浮跨命，L56 确认末伤为箭。现场无上浮子步骤起止。候选只在已有战斗时限、在水且 0<HP≤10 时沿 4s 短预算，并保留 2s 给随后动作，余量不足跳过通用上浮。D1 定向 **19 项通过**，包含 20s 原请求缩成 2.5s 仍进定向靠岸，及晚段直接定向。候选未合入。 [接管全程](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-125202-191391.events.jsonl#L52) · [最后箭伤与死亡](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-125202-191391.events.jsonl#L56) · [候选时限](../../s-combat/src/mc_agent/harness/guardian.py#L851) · [离线夹具](../../s-combat/tests/test_generation_guard.py#L15708)
+- **同集另有末影人追击复核失败。** L257 攻击 5 次、未击杀，L259 退 7.1m 后仍格挡且当时末影人 4.3m。L268 再退 2.8m，L270 回 `pursuit_unconfirmed`，L271 已落地、HP2.725、格挡关闭，L283 确认生物攻击死亡。原件缺 L270 首份状态与实体扫描的原值，B 正复验同一攻击者在近处但最近敌字段缺失的分支。 [第一撤](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-125202-191391.events.jsonl#L259) · [追击复核](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-125202-191391.events.jsonl#L270) · [末伤](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-125202-191391.events.jsonl#L283) · [源码复查条件](../src/mc_agent/skills/combat_env.py#L1373)
+- **D2 `c96a364` 在下界东门外加有顶折角。** 以 Long3 要塞、堡垒实际锚点离线复演生成计划。东向直接路径被两格高实墙挡住，南、北各有连续 6 步的地板与两格净高，原四充重生锚保留，重复重建一致。候选尚未合入 `b04a430`。实机需验同位置火球射线、出生后确实走出折角和下界回场后锚位仍正确。 [旧波门外死亡](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-125124-939872.events.jsonl#L358) · [折角计划](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L842)
+- **`b04a430` 已合入 B `49f702c` 和 D2 裸装备点，Long3 全部仍跑旧指纹。** B 在反击中持续观测到水险、HP≤12 及无遮挡近战敌≤3.5m 时先带盾撤向岸，保留战斗时限；跨命回 `life_unavailable`，禁止对新命补旧动作。D1 含浅水和预算回归 **17 项通过**。实机验首个救生动作、同命站稳、后续敌距；裸装另验近敌条件触发的备点与实际离场。 [候选路线](../src/mc_agent/skills/combat_env.py#L4355) · [定向夹具](../tests/test_generation_guard.py#L9753) · [备点派发](../scripts/l3_wild_endurance_runner.py#L1879) · [旧波触发链](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131504-018043.events.jsonl#L86)
+- **Long3 七槽正式收官，死亡与冷却两线均超。** **34 死／41 重生／0 连接变化／54 混合提示**，冷却申报 **513.8s**。主要死亡为 OB2 15、H3 7、OB1 5，真实死亡门 ≤25、冷却门 ≤200s。两裸装终包都无铁和铁器。 [OB2 正式终档](../runs/l2_long3_20261122/nju_ob_2_bare/wild-endurance-wild-20261122-123932.json) · [H3 正式终档](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/wild-endurance-wild-20261122-123932.json) · [OB1 正式终档](../runs/l2_long3_20261122/nju_ob_1_bare/wild-endurance-wild-20261122-123929.json)
+- **B `ad26985` 补楼梯拒绝浆格复核。** Long3 H3 EP04 两次原始拒格分别 `[1502,68,1417]`（高 2）和 `[1502,66,1418]`（斜邻）。候选只在下界、未换命、仍距楼梯回执落点 ≤0.5m 时复读并优先封已知浆格；去重并回报 `sealed_positions` 放置回执。D1 同批 21 项通过，覆盖两种位置、已干、移动过远、重复和写入拒绝。实载后还需验证封格读回、稳定落脚、是否继续入浆。 [高位拒格](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-130837-508657.events.jsonl#L1011) · [斜邻拒格](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-130837-508657.events.jsonl#L1037) · [近位条件](../../s-combat/src/mc_agent/harness/guardian.py#L6189) · [封格回执](../../s-combat/src/mc_agent/skills/combat_env.py#L3645) · [用例](../../s-combat/tests/test_generation_guard.py#L5251)
+- **B `fa7e768` 补干地下界远距火球持续掉血时中止战斗宏。** Long3 H2 EP04 在约 20m 对烈焰人执行 rush **20.179s**，33 次寻路重试、0 步和 0 命中，观察到 18 个新投射物；外层 `ok:true`、内层 `timeout`，随后原件确认火球和燃烧连伤至死亡。候选仅下界干地战斗宏、同命、HP 在 (0,10] 且净掉至少 4、近 3s 有确证火球时让远距或空近敌栏也可抢占，挂起接管可打断只读轮询，保留 `hurt_source`。D1 独立 **10 项定向通过**，Long3 未实载。下一波验 HP0 前退出、原动作释放、发生真实脱险。 [宏回执](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-125124-939872.events.jsonl#L357) · [明确死亡](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-125124-939872.events.jsonl#L358) · [候选条件](../../s-combat/src/mc_agent/harness/guardian.py#L4709) · [夹具](../../s-combat/tests/test_generation_guard.py#L16883)
+- **Long3 H3 EP04 封边回执后 0.349s 即启动逃浆。** 西楼梯实走 1、零破，南楼梯侧浆拒绝、零走零破。封边报潜行并补 1 格后未派 actor 工具，逃浆两次上浮后跨命，原件确证岩浆死亡。两次边缘处置只记录补格数，缺具体封格及接触前足格、头格。现有边缘守卫已回读状态，仍需识别确认干地到下一次读之间的位移。 [南楼梯](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-130837-508657.events.jsonl#L1037) · [封边计数](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-130837-508657.events.jsonl#L1039) · [跨命和死亡](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-130837-508657.events.jsonl#L1050) · [封格回执](../src/mc_agent/skills/combat_env.py#L3581) · [封后状态检查](../src/mc_agent/harness/guardian.py#L6293)
+- **Long3 第四槽终档，OB1 回尸只到水平点。** EP11 死亡 Y63.9，EP12 原任务的 `move_to` 成功到 Y76，附近扫到下层木料。首次向下挖掘被僵尸中断，后续实从水中上岸，独立包仍空，折返再被僵尸中断。12 集中两集石器验证、铁器课 0 验证，10 分、终包空。此切点全波原迹 **34 死／41 重生／0 连接变化、509.8s 冷却申报**。 [上一集死亡](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-131700-717876.events.jsonl#L369) · [水平抵达](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-132119-974596.events.jsonl#L32) · [下层掉落](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-132119-974596.events.jsonl#L53) · [折返被打断](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-132119-974596.events.jsonl#L146) · [OB1 终档](../runs/l2_long3_20261122/nju_ob_1_bare/wild-endurance-wild-20261122-123929.json)
+- **Long3 3/7 终档时原迹已见 32 死、38 重生、0 连接变化，冷却申报 492.9s。** 超现有 ≤25 死、≤200s 两门。H1 EP05 砾石片实入 2 燧石，死前实包 4，明确 `mob_attack` 死亡重生后合成打火石查到燧石 0，铁锭 16、黑曜石 4 仍在。保留跨命实际包差及其对门户配方的影响。 [挖砾实收](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-130153-153530.events.jsonl#L997) · [死亡](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-130153-153530.events.jsonl#L1199) · [重生后合成缺燧石](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-130153-153530.events.jsonl#L1221)
+- **D2 `c57749e` 补非 Day 1 裸装死亡密集回场。** 同槽原锚 20m 内两次不同原生死亡时间且相隔不超过 120s，回场时仍有 ≤8m 的近敌才考虑约 64m 的预选干地。切换前重读实体地面、脚头空气及 12m 内近敌，缺证留原锚。保留主围栏及原开局，仅调整之后的回场点。候选未实载，Long3 1/7 终档切点全波已见 26 死，越 25 门。 [死亡和近敌门](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L1812) · [备点读证](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L1418) · [OB2 正式终档](../runs/l2_long3_20261122/nju_ob_2_bare/wild-endurance-wild-20261122-123932.json)
+- **B `10a8abb` 补 H3 EP03 脱困挖格侧浆保护。** L519 拒绝楼梯的目标格旁明示侧浆，L537 随后的解卡实破 1 格、释放真；L540 才报首个岩浆伤。具体解卡挖格未记录，无法坐实打开哪格。候选对下界干燥站位的开口查侧浆及读取不明，补记实际派发挖格；D1 定向 **11 项通过**。 [侧浆拒绝](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-125712-082665.events.jsonl#L519) · [解卡实破](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-125712-082665.events.jsonl#L537) · [首个浆伤](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-125712-082665.events.jsonl#L540) · [候选夹具](../../s-combat/tests/test_generation_guard.py#L14348)
+- **B `3b50293` 为下界临界血量时保留自救动作时间。** 确认仍在浆且 HP≤6 后，缩短读头格、库存、近岸及桥位预算，派发前再验证生命。D1 附近 11 项定向通过。Long3 运行的 `dc58897` 未载。另 H3 EP03 L547 两次上浮加冲游共 6.057s 仍在浆，L561 为该槽第四次明确岩浆死，缺分项预算，不作为该候选已实载证据。 [第四次未脱险](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-125712-082665.events.jsonl#L547) · [真实死亡](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-125712-082665.events.jsonl#L561) · [候选预算](../../s-combat/src/mc_agent/skills/combat_env.py#L1656) · [临界夹具](../../s-combat/tests/test_generation_guard.py#L7003)
+- **Long3 H3 EP02 第三次岩浆死亡。** L1084 实退 0、落点附近 Y90，L1086 跌伤后 5.8HP。L1093 随坠复读证实入浆。L1095 逃生 1.434s 后已跨命，回执动作列表空；L1099 证实 Y80.5 岩浆死亡。该回执缺各动作预算和原始派发，仍待区分探针耗尽和缺可用路线。 [跌伤](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-124907-198187.events.jsonl#L1086) · [确证接触](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-124907-198187.events.jsonl#L1093) · [确证死亡](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-124907-198187.events.jsonl#L1099)
+- **Long3 OB2 正式收官确认危险锚点复发。** 12 集、1250.7s、0 验证、15 分，原件 15 死、16 重生、20 混合提示，终包仅 4 深橡、1 腐肉、1 工作台。Long2 同名槽 12 集、1370.2s、3 验证、10 分，3 死，终包两把石镐和 2 粗铁。新波 11/15 死亡在共同回场锚点 20m 内，已同步 D2 检查近敌和回场。 [Long2 终档](../runs/l2_long2_20261122/nju_ob_2_bare/wild-endurance-wild-20261122-113623.json) · [Long3 终档](../runs/l2_long3_20261122/nju_ob_2_bare/wild-endurance-wild-20261122-123932.json) · [末集再次缺镐材料](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125756-687580.events.jsonl#L393)
+- **Long3 OB2 反复回同一危险锚点。** 早段原迹 15 次死亡，11 次距裸装回场锚点不超过 20m，最近 2.42m、中位 16.52m。EP10 L147 与 EP11 L10 连续见同一僵尸 1139622，EP11 无 actor 工具实派仍两死。stdout 多次明确 `death_return restock=True` 到同一坐标。应按实际近敌、回场后离开支撑区的物理进展及首个有效工具来验场景救济。 [回场串](../runs/l2_long3_20261122/nju_ob_2_bare/stdout.log#L461) · [上集同敌](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125525-009370.events.jsonl#L147) · [下集同敌](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125648-072609.events.jsonl#L10) · [最近死亡](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125525-009370.events.jsonl#L22) · [场景返回](../scripts/l3_wild_endurance_runner.py#L1807)
+- **Long3 下界实载 `253ae7f` 后仍有落浆失败。** 堡垒 H3 EP02 从火球后的空中 Y71.3 进入 Y26 附近岩浆；L319 逃生 3.180s 回仍在浆，L333 明确岩浆死。后段另一次 L655 搭桥实离浆成功，L713 再次入浆已在逃生中重生，L716 明确第二次岩浆死。缺岸候选与阶段预算记录，保留短冲后安全落脚的独立复验。 [入浆前](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-124907-198187.events.jsonl#L309) · [首次未脱险](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-124907-198187.events.jsonl#L320) · [搭桥成功](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-124907-198187.events.jsonl#L656) · [再次岩浆死](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-124907-198187.events.jsonl#L716)
+- **Long3 OB2 EP03→04 箭伤与掩体写入不确定。** EP03 实退 2.18m、未找到天然遮挡，L152 掩体放置 `ReadTimeout`，独立包深橡 2→1，只确认材料变化。L153 剩 0.294 HP，下一集同区 L13 箭死。目标格与末箭实体缺证。B `2d8b753` 在超时后读回确切方块和同一生命站位，并再扫同一射手复核射线，未确认时不重派放置。D1 含换命和预算相关用例 **9 项通过**，Long3 当前未载。 [带 2 原木的包](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124340-223368.events.jsonl#L136) · [超时和事后包](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124340-223368.events.jsonl#L153) · [次集箭死](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124445-695184.events.jsonl#L13) · [候选读回](../../s-combat/src/mc_agent/skills/combat_env.py#L2160) · [同一射手](../../s-combat/src/mc_agent/harness/guardian.py#L4337)
+- **Long3 OB2 EP06 新制石镐和炉俱丢。** EP04 实制炉，EP05 预备实制 2 石镐，EP06 L173 生前独立包 2 石镐、炉 1、12 圆石；L187 近战死亡，L196 重生后三项均 0。L291 又一次近战死亡。此后 L372 有炉 1 和圆石 12，石镐仍 0；炉和圆石重新入包的实体来源待证。 [炉具](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124445-695184.events.jsonl#L280) · [生前实包](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124839-825401.events.jsonl#L173) · [重生后](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124839-825401.events.jsonl#L196) · [部分物料再现](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124839-825401.events.jsonl#L372)
+- **B `2296759` 补真实短撤后仍被贴近。** D1 独立重跑短退、同命补退及近敌重验共 **27 项通过**。对照 OB2 EP01 的 0.81m、同蛛 1m，即使首撤回执为失败，只要已实移且没有落脚风险，允许再核同敌与安全落点；换敌、无支撑、零位移例继续保留。Long3 `dc58897` 尚未实载此候选。 [实机短撤](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-123942-938337.events.jsonl#L332) · [候选补退](../../s-combat/src/mc_agent/skills/combat_env.py#L4810) · [定向夹具](../../s-combat/tests/test_generation_guard.py#L10600)
+- **Long3 OB2 跨集追击与两次近战死亡。** EP01 采石受蜘蛛 1114590 打断，首撤 0.81m 回失败，收尾仍在 1m 内；后几次短撤后的血量依次 17.49、13.49、6.66、2.66。EP02 新集开头还是同蛛，撤退 0，L22 死亡。L9 生前木镐 1、圆石 4、原木 5，L27 重生包三项均 0。L151 是第二次死亡，之前见僵尸，末敌 ID 仍缺证。B 已复现初次不足一步且 `ok=false` 时补退分支没进，待候选复验。 [第一次短退](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-123942-938337.events.jsonl#L332) · [首死前实包](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124209-388804.events.jsonl#L9) · [重生包](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124209-388804.events.jsonl#L27) · [第二死](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124209-388804.events.jsonl#L151) · [补退分支](../src/mc_agent/skills/combat_env.py#L4856)
+- **B `b002833` 核 H2 EP10 第二次近战前的护盾交接。** L563 同命落地、16.2HP、凋零、真撤 2.25m 后，凋零骷髅 1084245 仍距 2.6m，副手盾与格挡真、`latched_guard=false`。L564 实读盾仍在而格挡已关，L575/L586 仍关，L600 死亡。候选只在下界同命、同近敌仍无遮挡、站稳、盾与格挡真实、凋零仍在时把格挡续过交接。D1 定向 10 项通过。Long3 当前实载早于该提交，和同集首次丢盾链分别实测。 [动作末态](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-122701-121727.events.jsonl#L563) · [格挡已关闭](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-122701-121727.events.jsonl#L564) · [候选判断](../../s-combat/src/mc_agent/skills/combat_env.py#L4726) · [定向用例](../../s-combat/tests/test_generation_guard.py#L6686)
+- **Long2 终档真死亡 27→9，H2 EP10 两次近战死亡。** L145 首次死亡后，L564 已在新命持盾，遇凋零骷髅。实撤 2.25、7.55、2.31m 后仍收到伤害，L597 回撤读到重生，L600 第二次 `mob_attack` 死亡。末次伤源实体仍未证。两次均记真死亡，L605 随后的混合提示不另加死亡数。全波 9 死、9 重生、0 连接变化、10 混合事件，冷却申报 131.037s。 [首次死亡](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-122701-121727.events.jsonl#L145) · [持盾及凋零](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-122701-121727.events.jsonl#L564) · [第二次死亡](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-122701-121727.events.jsonl#L600)
+- **B `26d3251` 增加选井靠近的防坠候选。** H4 EP12 前置未改世界，首个变更工具是铁 DFS。回执已是重生位置，紧接记录 Y19 跌死、Y77.1 重生。实际触发端点缺证。候选在无 Y 井口靠近及同 XZ 补位前复查近端，已知悬崖、入浆、急坠走局部拒绝，D1 定向 **7 项通过**。另见 BUG-116 与 P2-1 的前集移动回执。 [首个 DFS](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-121321-519125.events.jsonl#L124) · [死亡](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-121321-519125.events.jsonl#L125) · [候选实现](../../s-combat/src/mc_agent/harness/guardian.py#L5706)
+- **Long2 H2 EP10 盾在副手到空副手之间缺动作证据。** L119 明确举盾、15.26 HP，铁剑在主手；L130 挖掩体受伤中止、零破格，L132 撤退零位移并未落地。L133 为 1.82 HP、主手钻镐，副手和主背包都无盾；L145 明确 `mob_attack` 死亡，末敌 ID 及盾怎样消失待证。与 `2fd39a6` 的落地持盾凋零分支分开验。 [举盾实包](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-122701-121727.events.jsonl#L119) · [盾已缺失](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-122701-121727.events.jsonl#L133) · [死亡](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-122701-121727.events.jsonl#L145)
+- **B `2fd39a6` 补举盾且无处退的凋零骷髅遭遇。** Long2 H2 EP05 L591 退 0，L613 封缝失败且再退 0，仍举盾、带凋零、1.53 HP，L639 同处实死，末伤来源缺证。候选在同命、HP≤6、盾与武器复查通过、实扫只见同一近身凋零骷髅时尝试一次原地反击，保留实际 `hits/killed`；攻击超时保留不确定状态并复查格挡。D1 独立重跑 **12 项通过**，候选未实载。 [退路与状态](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-120510-573199.events.jsonl#L613) · [死亡](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-120510-573199.events.jsonl#L639) · [候选实现](../../s-combat/src/mc_agent/harness/guardian.py#L1269) · [定向用例](../../s-combat/tests/test_generation_guard.py#L4341)
+- **B `253ae7f` 为逃浆岸读保留时间。** D1 重跑慢方块、可达岸及无岸等定向 **17 项通过**。Long1 H2 EP01/04 原件只确认冲游后仍在浆，缺岸地形和分段预算耗尽证据。当前候选待同类实载验实际落脚。 [原冲游](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L692) · [备选夹具](../../s-combat/tests/test_generation_guard.py#L6950)
+- **B `c920cb3` 补刚出井的近射手遮挡候选。** OB1 EP05 L337 刚到地表，L339 骷髅距 1.3m、实际退 0。候选仅在可信出井站位 0.5m 内、近射手仍同一且无安全撤退时复查天然掩体。D1 含短退与箭伤的独立定向 22 项通过；现场能否找到掩体、末爆来源仍待证。Long2 进程未载。 [出井与零退](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L339) · [候选夹具](../../s-combat/tests/test_generation_guard.py#L11486)
+- **B `3a3b3e6` 核短退后的爆区清除。** D1 在候选分支重跑相关 14 项通过。只在读回同命实际落脚且扫不到 5.5m 内苦力怕时确认脱险，仍近、有另一个、读超时、换命等均不报成功。Long2 当前 `1c579b9` 是旧回执基线，候选留待同风险实机。 [候选夹具](../../s-combat/tests/test_generation_guard.py#L14572) · [现网实载](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-113700-374535.events.jsonl#L3)
+- **Long2 OB2 EP08 短退成功回执后同敌再次贴近。** 守卫先记录苦力怕 1024313 仍距 4.37m；请求撤 20m 的 `unsafe_exit_retreat` 回 `ok:true`，实移 0.85m，回执未复验敌距。随后转砍木，同敌再触发抢占，释放后仍距 2.8m，木料实收 1。L67 记 `player_explosion` 死，缺爆源实体 ID。B 核撤退后是否真出危险范围。 [初次近敌](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-115057-909171.events.jsonl#L13) · [退步成功回执](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-115057-909171.events.jsonl#L36) · [再抢占](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-115057-909171.events.jsonl#L57) · [爆炸死亡](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-115057-909171.events.jsonl#L67) · [短退恢复分支](../src/mc_agent/harness/guardian.py#L3876)
+- **Long2 OB2 次集裸装箭死。** EP06 开场仍无盾，追踪到骷髅 1019157。L93 缺填料，L107 实退 2.42m 但天然掩体未确认、造遮挡 0，随后 HP1.7 并明确箭死。末箭实体缺证，本案不满足持盾低血箭候选的装备前提。 [砍木中断](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114900-281455.events.jsonl#L38) · [撤退与掩体](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114900-281455.events.jsonl#L107) · [箭死](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114900-281455.events.jsonl#L119)
+- **Long2 裸装首死，短退仍在追击内。** OB2 EP05 僵尸 1015484 被打五次但未杀，早段撤退后仍遭追。L269 二次退 0.71m，敌距 1.4→1.9m，回执明确仍在近战范围，下一次短退 2.33m 后第二步失败，L293 明确近战死。死前最近包读有石镐 2、炉 1；重生后同集独立包两项均为 0。致死伤缺实体 ID。本槽无盾，作为裸装撤退与保有的独立对照。 [攻击结果](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114740-448213.events.jsonl#L173) · [退后仍贴近](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114740-448213.events.jsonl#L269) · [死亡](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114740-448213.events.jsonl#L293) · [重生后空包](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114740-448213.events.jsonl#L374)
+- **B `28a326c` 低血持盾箭伤候选，D1 定向独立 26 项通过。** H3 附魔 EP10 L839 从掩体挖掘预算退回后仍持盾格挡、HP1.747、最近骷髅 930084、撤退 0，后段 L854 确认箭死。候选在确认近时同目标箭威胁后先格挡再尝试掩体，撤退失败仍需同命、落脚、显式射手及真实支撑与遮挡。预算不足保留格挡。L2 未载，末箭身份和现场遮挡仍无实测。 [低血状态](../runs/l2_long1_20261122/hy_5e_3_enchant_anvil/20261122-105751-518144.events.jsonl#L839) · [明确箭死](../runs/l2_long1_20261122/hy_5e_3_enchant_anvil/20261122-105751-518144.events.jsonl#L854) · [候选夹具](../../s-combat/tests/test_generation_guard.py#L16899)
+- **L2 OB1 末集跌落后只返回同 XZ，掉落层未到。** 死亡 Y30，重生后从地表前往死亡 XZ，L217 结束在 Y79.9，离死亡层约 50 格；半径 16 空扫，L250 对死亡点挖掘回空气。该段未核实掉落实体或可达路径，随后砍木重做台，终包仍无石镐及铁器。另 B `e65149c` 生成期已知急坠才复查脚下岩浆，D1 离线 41 项通过，L2 未载，新波按 `guardian.nether_fall_lava`→脱浆→同命站稳跟踪。 [跌落死亡](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-111109-099775.events.jsonl#L127) · [同 XZ 但高度不同](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-111109-099775.events.jsonl#L217) · [空扫](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-111109-099775.events.jsonl#L312) · [B 夹具](../../s-combat/tests/test_generation_guard.py#L8414)
+- **B `0e56046` 干地三叉戟候选，D1 25 项定向通过。** OB2 EP07 真实出现缺填料、撤退 0、HP1.83，并明确死于三叉戟。候选仅在同命落脚确认后复扫现成掩体，验证支撑和已观测射线；危险近敌及缺证继续走原应急。L2 未载，致命投掷者 ID 与存活站位仍待实机。 [四项末态](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-105045-737313.events.jsonl#L224) · [真实夹具](../../s-combat/tests/test_generation_guard.py#L16175)
+- **B `f409639`，D1 复跑 37 项通过。** L2 H2 EP02 后段已见续烧、撤退 0 和末次火球死，缺烈焰人及遮挡读回。候选只在下界同命、已落脚、仍续烧且退路失败时复扫；确认可见烈焰人、脚下支撑和全部已见射线遮挡才留位，近期新火球、其他远射或近敌仍瓦解该判断。实载验 `hold_blaze_cover` 与后续 HP、位置和继续工作，L2 本波未载。 [原地未退](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-104141-395722.events.jsonl#L361) · [候选现场读回](../../s-combat/src/mc_agent/harness/guardian.py#L3868) · [定向夹具](../../s-combat/tests/test_generation_guard.py#L7511)
+- **L2 OB1 初次离锚与死后回场均受甜浆果丛。** EP01 L118/L154 两个起步移动回执都是受伤中断，末测分别离锚约 2.51／3.23m，后续 L119/L155 同批明确是浆果丛伤。EP05 首死后 L27 已见同类伤；L36/L45/L55 的站位仍为锚，且期间实见抵抗效果。D2 `5089c2c` 给新林地落点增加 X/Z ±1、Y ±1 的浆果丛核对；D1 独立 12 个离线场景通过。伤源方块未记录，实机要另核首次离锚接触伤与同敌是否仍堵近场。L2 未载此候选。 [首移受伤](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-103256-396840.events.jsonl#L118) · [起步伤类型](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-103256-396840.events.jsonl#L119) · [重生批次伤](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-104654-128229.events.jsonl#L27) · [抵抗末次读回](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-104654-128229.events.jsonl#L55) · [D2 候选校验](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L243)
+- **L2 OB1 重生点旁连续近战死亡。** EP05 L44 重生后最近僵尸 896551 距 3m、撤退 0，L130 近战死在锚旁约 0.2m。EP06 L3 同一敌人距 1.7m、撤退 0，L87 又死在锚旁约 0.3m。三次跑回原锚均有回场回执。保持末伤近战及近敌 ID 分账，B/D2 此后按现场威胁、离场位移、摆掩体可用支撑核。OB2 EP07 另有一次干地三叉戟死，L221 缺填料、L223 撤退 0，L236 重生后还见续伤，攻击者 ID 未核。 [OB1 重生后同一敌](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-104654-128229.events.jsonl#L44) · [OB1 再集重入](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-104806-682586.events.jsonl#L3) · [OB1 回场](../runs/l2_long1_20261122/nju_ob_1_bare/stdout.log#L435) · [OB2 三叉戟死](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-105045-737313.events.jsonl#L236)
+- **L2 H2 次集火球与 OB2 近战损货。** 要塞 H2 EP02 L316 柱升到 Y76，L327 空中举盾，L342 摔伤证实，终在 Y58 原地 L375 明确火球死，攻击者实体缺失。裸装 OB2 EP05 L219 同一僵尸近距、现有石镐 2，安全撤退未移动；L249 仍中断实派砍木，L297 石镐 2、圆石 36，L309 明确近战死，L314 复活已空包。B `49df843` 接触岩浆分支和 `9eefe10` 原地掩护皆晚于 L2 加载。D1 针对前者与关联释放、脱困共 20 项通过。 [H2 火球死](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-104141-395722.events.jsonl#L375) · [OB2 死前包](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-104456-422594.events.jsonl#L297) · [OB2 死后包](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-104456-422594.events.jsonl#L314) · [B 夹具](../../s-combat/tests/test_generation_guard.py#L8239)
+- **L2 H2 要塞 EP01，岩浆接触前已经急坠。** L662 撤退落点 Y69；L684 的柱式楼梯抢占起点 Y59.7，回执确认释放，但 L682 复查已经到 Y34.6、`vy=-38.118`、未落脚、尚未触浆，撤退位移 0。随后 L691 开始岩浆脱险，3.154s 后仍在岩浆，L705 明确岩浆死。指纹含 `669fce4`，日志未暴露可达干岸坐标，需分开验空中读到岩浆风险、接触后的实际路线，以及无路的回执。 [抢占前一次撤退](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L662) · [急坠快照](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L682) · [明确死亡](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L705)
+- **W15 铁探死前实包 26 粗铁。** H2 EP02 L71 近战接管离开后 HP18，回执保留 3 粗铁。L109 再撤后 HP8.5，L118 降至 2.5、独立包 26 粗铁、0 锭、0 铁镐，L130 明确箭死。末箭实体缺失。W15 已加载 `4021c3f`，本例未装备盾，继续单验有盾同敌追击。 [矿片部分产出](../runs/l1_w15_20261122/hy_5e_2_probe_iron_y16/20261122-101557-797140.events.jsonl#L71) · [死前库存](../runs/l1_w15_20261122/hy_5e_2_probe_iron_y16/20261122-101557-797140.events.jsonl#L118) · [明确箭死](../runs/l1_w15_20261122/hy_5e_2_probe_iron_y16/20261122-101557-797140.events.jsonl#L130)
+- **W15 H2 终包粗铁 0。** 两个挖铁探针逐片已确认 +14、+8，另有 4 未能逐项归因，死前实包 26。死后第三集铁路线实收 0，终包粗铁、铁锭、铁镐均 0，缺掉落回收的闭环。探针前两集明确要求保留粗铁，熔炼表现另按真实炉务验证。 [H2 终包](../runs/l1_w15_20261122/hy_5e_2_probe_iron_y16/wild-endurance-wild-20261122-101047.json#L49) · [探针指令](../scripts/l3_wild_endurance_runner.py#L2113)
+- **W13 OB3 极低血退后收盾样本。** EP03 L260 敌人初近至 1.1 格，撤退后 HP2.248，最近仍为僵尸 801152、距 5 格。L260 原动作仍格挡，L261 生成边界格挡关闭，L275 明确近战死亡。末次攻击 ID 缺失。B 的 `4021c3f` 针对低血同敌追击延长留盾范围，D1 定向 18 项过，W13 未实载。 [撤退动作](../runs/l1_w13_20261122/nju_ob_3_village/20261122-095148-061728.events.jsonl#L260) · [生成边界](../runs/l1_w13_20261122/nju_ob_3_village/20261122-095148-061728.events.jsonl#L261) · [明确死亡](../runs/l1_w13_20261122/nju_ob_3_village/20261122-095148-061728.events.jsonl#L275) · [留盾候选](../../s-combat/src/mc_agent/skills/combat_env.py#L4420)
+
+- **W11 裸装 H2 首镐在铁器交接丢失。** EP02 零 actor 备料实制石镐。EP03 L3 已持石镐，0.7m 僵尸接近。L46 `no_safe_retreat`、位移 0，L58 在 Y62 死亡、Y75.1 重生。重生后 L284 独立合成回包缺圆石和木棍，旧石镐也不在包。第二个槽 H3 在新石镐后的首个铁器集因骷髅箭亡。验收取死亡前最近实际手持、重生后第一包和能否复建同级装备。 [H2 实制](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-081907-726954.events.jsonl#L2) · [遇敌仍持石镐](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-081931-897586.events.jsonl#L3) · [无法退开](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-081931-897586.events.jsonl#L46) · [死亡重生](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-081931-897586.events.jsonl#L58) · [重生后包](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-081931-897586.events.jsonl#L284) · [H3 箭死](../runs/l1_hy4_bare_w11_20261122/hy_5e_3_bare/20261122-082126-754610.events.jsonl#L57)
+- **H2 EP04 回到掉落上方仍捡不回镐。** 水平到达 `[34042.5,65.2,34001.4]`，L51 实见石镐、木镐、圆石和木棍在 Y62，距 3.4–3.5m；L81 对掉落点的空气用挖掘，随后敌怪打断，L124 再死。恢复课地表路线只传 XZ、compact `extra_tools=()`，没有带拾取的安全接近路线。以可达的拾取落脚点及物品实际入包作为完成，并保留涉敌止损。 [水平到达](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-082235-841499.events.jsonl#L31) · [掉落](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-082235-841499.events.jsonl#L51) · [挖到空气](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-082235-841499.events.jsonl#L81) · [再次死亡](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-082235-841499.events.jsonl#L124) · [恢复课实参](../src/mc_agent/harness/curriculum.py#L1536) · [小工具集](../src/mc_agent/harness/mc_tools.py#L110)
+- **W3 终版 37 死、请求取消退避 248.9s，两门失败。** 三槽显式死亡分布 14/18/5，重生另计 37，混合回执 48。OB1 EP07 先熔得 2 锭、再入 7 粗铁，下一次回撤跌死，重生后粗铁、铁锭、铁镐均为 0；EP08–11 又有 11 条明确近战死亡。OB2 死前持上一集 1 锭，重生到旧岸边后再读包为 0，随后被溺尸近战继续打断。复验重生落脚、近期敌情、成功换位和真正恢复首镐链。 [OB1 跌死](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-074913-340724.events.jsonl#L500) · [空包读回](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-074913-340724.events.jsonl#L517) · [同锚战斗死亡](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-080023-744927.events.jsonl#L207) · [OB2 持锭遇敌](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-075538-216880.events.jsonl#L78) · [OB2 重生](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-075538-216880.events.jsonl#L91)
+
+- **`c69222b` 快速下坠停止反击，父子 2/7→7/7。** 裸装冲刺 V2 H8 EP01 L61 的旧 Guardian 回执未着地，Y−29.3、竖直速度 −31.698，记录一次有效近击、一次零命中和失败的 `unreachable_flee`，后续 Y−35 跌死。回执没有逐击站位，不能认定每一击均发生在下坠时。新候选覆盖开局已坠、挥砍之间下坠、零命中或超时后下坠，普通短击退与较低的已落脚仍按旧逻辑。实载复验同步保存动作前后的竖直速度、落脚和实际死亡率。 [旧动作](../runs/5ease_bare_sprint_v2_20261122/hy_5e_8_probe_iron_y16/20261122-061821-222590.events.jsonl#L61) · [死亡](../runs/5ease_bare_sprint_v2_20261122/hy_5e_8_probe_iron_y16/20261122-061821-222590.events.jsonl#L73) · [速度和高度门](../../s-combat/src/mc_agent/skills/combat_env.py#L3274) · [七例夹具](../../s-combat/tests/test_generation_guard.py#L1661)
+
+- **`9df61f1` 转角射手离线复验。** 同一六例父子 **3/6→6/6**，新增通过转角后见射手、慢方块读和实际落点偏离遮挡。已暴露射手、仍遮挡射手、全岩浆保持。相关测试 **42 通过**。候选在规划经过点及实落点检查原遮挡射手，可拿 §4kd 的 3.905→2.693m 旧例继续实载。 [路径射线](../../s-combat/src/mc_agent/skills/combat_env.py#L2243) · [落脚复查](../../s-combat/src/mc_agent/skills/combat_env.py#L2399) · [六例夹具](../../s-combat/tests/test_generation_guard.py#L9104)
+
+- **裸装冲刺 V2 Fleet 终版，43 条死亡与 43 重生。** 8/8 收官，194 次模型取消、请求取消退避 295.9s，BUG-026 两门超限。 H1–H8 首切分别 3/4/8/7/12/4/0/5，均为无 ID 显式死亡。原因批次可分近战 30、箭 8、`player_explosion` 3、跌落 2。59 条混合 Guardian 回执单列。H5 的三集 3/4/5 死，终包空、只见一次 `death_return`。H8 先由 Y10 掘进后在 Y−35 跌死，重返 Y16，再被近战杀四次。后 3 次死亡落点在 Y16 锚点 2 格内。源码铁层口袋为 3×3 清空、火把和地板，缺侧壁校验和敌情记录。先按两类沿锚复验。要看死亡原位置、重生就绪时间、敌对实体、重装真实背包及回场后是否仍存活。Wave V1 终版 4 死，V2 锚点不同且 2 个门户槽换成铁探针，死亡总数差不单归选课。 [H5 四死一集](../runs/5ease_bare_sprint_v2_20261122/hy_5e_5_bare/20261122-061946-085708.events.jsonl#L195) · [H5 五死一集](../runs/5ease_bare_sprint_v2_20261122/hy_5e_5_bare/20261122-062129-598889.events.jsonl#L287) · [H8 跌死](../runs/5ease_bare_sprint_v2_20261122/hy_5e_8_probe_iron_y16/20261122-061821-222590.events.jsonl#L73) · [H8 锚内连死](../runs/5ease_bare_sprint_v2_20261122/hy_5e_8_probe_iron_y16/20261122-062321-931541.events.jsonl#L78) · [铁层重生口袋](../scripts/l3_wild_endurance_runner.py#L776)
+
+- **三路线 OB2 EP04 石锥死亡。** L166 铁 DFS 首片实下 Y90→64，通用破 77 格、实入圆石 62、铁 0。第二片在 Y25 遭 `falling_stalactite` 致死，回场 Y82 后石镐和圆石均无，原件只证明致死来源。r11 已记录同类一次。这次缺正上方方块、受击前路线和石锥来源，补同地形夹具观察上方支撑与实际下潜落点。 [首段](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-061430-219888.events.jsonl#L166) · [致死回执](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-061430-219888.events.jsonl#L218) · [回场](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/stdout.log#L172) · [既有伤害枚举](../src/mc_agent/harness/guardian.py#L79)
+
+- **`3350212` 提前确认重复箭伤掩体，父子定向 3/5→5/5。** 6.166667 HP 落地，两次同批箭伤、或相隔 5.5s 的两波且持足量木料时均实放两块。单箭、隔 8.1s 的旧箭、只有一原木维持原处理。现场需观察真放置、落脚后所挡射线及后续伤停。 [阈值入口](../../s-combat/src/mc_agent/harness/guardian.py#L2618) · [五例夹具](../../s-combat/tests/test_generation_guard.py#L14050)
+
+- **`cfe7cd0`、`2f99ee8`、`13f6b3e` 候选离线对照。** 固定各自方法的父子版本，8s 探路和慢控制两门从 2/4 到 4/4，候选达预算发一次止动，收敛以前的 43.2s 反例。第二撤有可见射手时从 3/4 到 4/4，但两列真实模拟墙格的拐角，预扫 `blocked_by_wall` 为真即把该射手滤掉，落点却露射线、距其 **3.905→2.693m**，仍报撤退成功。无该墙的正对照纳入同一射手，末距 **10.021m**。下界 HP 1.67 的露头近战场景从 4/6 到 6/6，直接伤害和同敌无来源续伤先退，遮挡、已有井、远敌、久伤保留掩体。下一轮验收二撤尽可能在已选落点复核起初遮挡射手，并保留有界退出。 [8s 截止](../../s-combat/src/mc_agent/harness/guardian.py#L978) · [二撤射手过滤](../../s-combat/src/mc_agent/skills/combat_env.py#L4220) · [下界低血入口](../../s-combat/src/mc_agent/harness/guardian.py#L2712)
+
+- **`970a7cc` 下界重生平台，Wave11 原位复验。** H7 在锚点 `[1872.5,64,-3791.5]` 水平 **1.077–2.256m** 内共 5 次死亡，五个格均在旧 7×7 布场覆盖内。首集曾遇 1.7m 的 `wither_skeleton`，安全撤离失败，稍后 5 击无击杀。新候选离线回放真实布场与模拟死亡看门狗恢复命令，要塞、猪灵堡垒的东门都 **4→2 格净高**，顶层黑曜石 **0→49 格**，照明边及带四次充能的锚点同时确认。模拟只验方块和恢复批次；旧轨迹无敌对实体进门的路径，现有命令也不移走已在平台内的实体。实机验证同锚点成功离台与回台、锚内敌对实体、死亡时间和 `not_loaded`，保留旧 43.2s 掩体撤离反例。 [初遇](../runs/5ease_l1_wave11_20261122/hy_5e_7_nether_fortress/20261122-054212-258527.events.jsonl#L137) · [锚内三死](../runs/5ease_l1_wave11_20261122/hy_5e_7_nether_fortress/20261122-054212-258527.events.jsonl#L228) · [次集死亡](../runs/5ease_l1_wave11_20261122/hy_5e_7_nether_fortress/20261122-054334-310335.events.jsonl#L3) · [布场](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L706) · [恢复](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L1413)
+
+- **`7399f4e` 两条已知反例离线通过。** 用同一版 `CombatEnv` 单独换回父方法，复扫漏掉状态报告的近 Warden、以及复扫途中掩体被拆均从误报达标变为待确认，改进 **0/2→2/2**。候选相关套件 **34 通过**。仍需加载后看真实撤离位置、复扫实体 ID、掩体和后续伤害。 [掩体复看](../../s-combat/src/mc_agent/skills/combat_env.py#L2113) · [Warden 实体对账](../../s-combat/src/mc_agent/skills/combat_env.py#L3330) · [墙体夹具](../../s-combat/tests/test_generation_guard.py#L12152) · [实体夹具](../../s-combat/tests/test_generation_guard.py#L274)
+
+- **`a291253` 不安全地形撤离候选，局部限时漏接。** Showcase OB2 EP11 L217 地堡因岩浆支撑拒绝，L221 一次撤退 Y87→78 且明确入浆，L225 岩浆致死。EP13 L51 地堡因敞开拒绝，L53 首撤一度报成功，L64 随后脱浆失败并重生，L68 为混合魔法和岩浆伤，末次致死未分类。固定候选真 Guardian，安全石地发一次移动，全危险零移动；但每次模拟方块读耗 0.36s 时，父版 8.000s 止动，子版新探路读 120 次、43.200s 才回，绕过恢复预算且未止动。新分支应复用同一恢复截止，验安全撤、全危险和余量耗尽。两条实机为液态岩浆，未暴露 BUG-057 热地板。 [EP11 撤入岩浆](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051524-841924.events.jsonl#L221) · [EP13 后续失败](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051700-525771.events.jsonl#L64) · [候选预算分支](../../s-combat/src/mc_agent/harness/guardian.py#L968)
+
+- **音波撤离 `8ddf9d5` 与掩体 `ec92a50` 复验。** 固定父子相关用例 53/53→57/57。平地音波夹具从离敌 8.2m 开始，父版退 2.0m、终距 10.2m 即报过，子版实际退 10.05m、终距 18.25m，24m 复扫确认。落脚仍近、位置缺失、复扫超时均应待核；移动或复扫达到 7.5s 的真实 Guard 夹具止动。剩余反例是状态最近 Warden 仍在 8.2m，复扫只返回另一只 19m 的 Warden，误报通过。按实体 ID 对账或保留未知。角落天然掩体已能发现体缘暴露；射手复扫中墙被拆的离线反例仍复用 3s 方块缓存，需复扫后刷新射线方块。Showcase 仍实载旧版。 [旧 Warden 撤 0](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L598) · [距离及重扫](../../s-combat/src/mc_agent/skills/combat_env.py#L3318) · [方块缓存](../../s-combat/src/mc_agent/skills/combat_env.py#L432)
+
+- **音波仍走封顶，Showcase OB2 失去实包。** EP08 L624–626 紧急地堡确认进入井和盖顶。L629 仍收到 `sonic_boom` 伤，L638 明确音波致死，L643 空包，L626 原有 15 粗铁。固定 `0731a37` 的真实 Guardian 判断，模拟 HP8.5、干地、敌人未定位，只换伤害源，`sonic_boom` 选择封顶，`indirect_magic` 转有校验撤离，近战仍走原近战分支。原件缺动作启动前的伤害实体明细。建议在已确认音波时优先找可安全远离的路径，动作成功回执保留可观察结果，后续同源伤仍继续升级。验收分别覆盖音波、普通箭与近战，明确安全路线为空时怎样保命。 [封顶实据](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L626) · [后续音波](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L629) · [音波死亡](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L638) · [伤害分流](../src/mc_agent/harness/guardian.py#L2115) · [封顶分支](../src/mc_agent/harness/guardian.py#L2505)
+
+- **`12983a0` 原木箭伤掩体候选。** Showcase OB1 EP05 L192 在干地落脚、HP4.833、独立包只有橡木 3 且无盾，2.181s 后下一次反射已启动。L205 血量 0.833，L218 中箭死亡。固定父→候选真实 Guardian 同一组定向用例 **8/10→10/10**。现可用两块原木确认遮线，三木加一圆石能选完整木料栈，HP6.0 可启动而 6.1 不启动。单木无支撑、湿脚、熔岩、双箭手与近战组拒绝。首格已落时碰 2.1s 截止或读超时各发一次止动，不续放、不标遮蔽。现场单射手、支撑格和来得及搭墙的证据仍缺。 [第一次落脚](../runs/5ease_ob_showcase_20261122/nju_ob_1_bare/20261122-045733-906507.events.jsonl#L192) · [死亡](../runs/5ease_ob_showcase_20261122/nju_ob_1_bare/20261122-045733-906507.events.jsonl#L218) · [触发](../../s-combat/src/mc_agent/harness/guardian.py#L2534) · [限时](../../s-combat/src/mc_agent/harness/guardian.py#L3361)
+
+- **夜间第二撤候选 `8efa922`。** 定向 27 项通过，父版原有 21 项皆通过。增量覆盖二撤正例及落差、隔墙、超距、换生命、余量不足。用同一夹具加入正前方有射线的骷髅，第一撤后距它 4.2m，第二撤仍直进 2.0m 并报成功，末距 2.2m。普通撤退传射手约束，第二撤只传近战。Showcase OB1 EP05 旧实载先从一只 3.4m 僵尸撤 8.49m，同名实体仍距 7.4m，之后有近战伤和死亡，缺伤害实体 ID 或射手现场。二撤要继承周边射手约束。 [二撤路径](../../s-combat/src/mc_agent/skills/combat_env.py#L4127) · [旧现场首次撤离](../runs/5ease_ob_showcase_20261122/nju_ob_1_bare/20261122-045733-906507.events.jsonl#L44) · [近战死亡](../runs/5ease_ob_showcase_20261122/nju_ob_1_bare/20261122-045733-906507.events.jsonl#L81)
+
+- **Combat `f0c246b`／`83cbf89` 离线复验**。固定 `f0c246b` 的 36 个定向用例通过。真第二段撤退的单苦力怕加无遮挡僵尸场景，首步距僵尸 5.143m；墙挡僵尸时 2.300m。加第二苦力怕后即使僵尸无遮挡，也选 2.300m 路线，爆炸排序仍覆盖近战避让。旧 Portal V2 H4 确有双撤后近战死，缺两段交接的追敌坐标。危急箭伤放掩体已覆盖真实方块、落脚和射线读回，拒绝近敌、双射手与移位；旧 Obs Fixed V2 H3 干地 HP2.485、持圆石 60，自然遮蔽失败到复活期只有 1.579s，完整前置和能否赶在箭前仍缺实机录。 [H4 双撤](../runs/5ease_portal_v2_20261122/hy_5e_4_probe_obsidian_portal/20261122-042029-272814.events.jsonl#L197) · [H3 箭伤](../runs/5ease_obs_fixed_v2_20261122/hy_5e_3_probe_obsidian_portal/20261122-035832-681679.events.jsonl#L469) · [遮蔽触发](../../s-combat/src/mc_agent/harness/guardian.py#L2540)
+
+- **V2 H3 脆弱反击候选复验**。第二次死亡前持铁剑、未装备盾，反击回执 11.3 HP；后续僵尸伤害连续下降至死。Combat `6cf46d1` 用真实控制器与模拟传输，11.3 HP 无盾把攻击改成 `stop_on=['hurt','death']`，收到伤害只发 1 次攻击，重读 HP9.3 后请求等落地撤退；父版在同输入仍只以死亡中止。8 个定向测试候选全过，父版三条脆弱攻击门失败。H3 第一次苦力怕爆炸、第三次远程箭伤属于不同路径。候选把包里有盾也算作有盾，未装备且装备失败时仍按旧停止条件；撤退是否落地需实测。保留集成已有的逐击证据，再用收到新伤触发止击和实际落地验收。 [近战动作](../runs/5ease_obs_fixed_v2_20261122/hy_5e_3_probe_obsidian_portal/20261122-035832-681679.events.jsonl#L191) · [第二次死亡](../runs/5ease_obs_fixed_v2_20261122/hy_5e_3_probe_obsidian_portal/20261122-035832-681679.events.jsonl#L195) · [候选攻击与撤退](../../s-combat/src/mc_agent/skills/combat_env.py#L3581)
+
+- **5Ease V6 四次死亡集中在 HY_5E_7 EP02**。全波 7 死、7 重生、源 ID 缺失。该集在四个不同死亡坐标分别有实际死亡和回相同重生点的回执，类型为近战两次、箭、爆炸。一次庇护成功，后一次无屋顶，终包空。由于 V6 有两对铁槽落点很近，跨槽攻击源仍需事件证明。 [四次中的首条](../runs/5ease_virgin_eff_v6_20261122/hy_5e_7_probe_iron_y16/20261122-031208-558818.events.jsonl#L53) · [庇护成功](../runs/5ease_virgin_eff_v6_20261122/hy_5e_7_probe_iron_y16/20261122-031208-558818.events.jsonl#L76) · [后续无屋顶](../runs/5ease_virgin_eff_v6_20261122/hy_5e_7_probe_iron_y16/20261122-031208-558818.events.jsonl#L192)
+
+- **r76→r77 日出同四槽回潮**。明确死亡 **9→32**，HY4_3／4／10 各 **13／12／7**，DS_2 0。模型取消 **35→138**，日志计划的取消冷却 **55.0→206.1s**。整波分别超死亡与取消冷却门。 [r77 终版榜单](../runs/r77_day12_real_drop_60m/triage-r77_day12_real_drop_60m.md#L7) · [D1 门禁](../../s-triage/scripts/d1_acceptance.py#L213)
+
+- **r79 门户开波三路同步断连候选**：三槽均为 EP01，Guardian `ReadTimeout` 在 UTC **23:05:08.197–08.227** 内出现，间差 **29.784ms**；actor 在 **23:05:19.489–19.742** 各自落断连。结算补读 **5／4／39** 条明确死亡，**4／3／38** 重生，未见独立连接变化回执。NJU_3 同时有模型传输 `ConnectError` 重试。死亡聚合无事件 ID，源端事件实际发生时刻不可由补读时刻反推。继续核对同时间窗其他运行及本波终版。 [HY4_8](../runs/r79_midgame_portal_40m/hy4_hy_8_midgame/20261121-150400-367510.events.jsonl#L135) · [HY4_9](../runs/r79_midgame_portal_40m/hy4_hy_9_midgame/20261121-150410-298003.events.jsonl#L151) · [NJU_3](../runs/r79_midgame_portal_40m/nju_nju_3_midgame/20261121-150405-511034.events.jsonl#L358) · [断连判定](../src/mc_agent/harness/agent.py#L1126)
+
+- **r72 日出同四槽回潮**：r71→r72 明确死亡回执 **23→45**、重生 **21→42**，请求取消冷却 **178.9→242.1s**，两门超限。HY4_3／10 合计 **32** 条死亡，HY4_10 EP06 的 `not_connected` 随后补读死亡并断连结算，缺独立连接变化回执。 [死亡与断连](../runs/r72_day12_real_drop_60m/hy4_hy_10_bare/20261121-131136-097546.events.jsonl#L42) · [HY4_10 EP13](../runs/r72_day12_real_drop_60m/hy4_hy_10_bare/20261121-133438-063447.events.jsonl#L185) · [取消冷却](../src/mc_agent/harness/model.py#L899)
+
+- **r72 官方两角色复验**：r71→r72 明确死亡 **47→43（5Ease）／69→11（GLM_1）**，r72 重生 **43／10**，官方均 80 分钟。5Ease 仍超 ≤25，GLM_1 通过。5Ease EP06 有 12 条热地板伤害和一例热地板致死。 [5Ease 终版](../runs/official_r72_80m_5ease/5Ease_Bot/official-official_r72_80m_5ease-5Ease_Bot-20261121-115855.json#L6) · [GLM_1 终版](../runs/official_r72_80m_glm1/GLM_1/official-official_r72_80m_glm1-GLM_1-20261121-115906.json#L6) · [致死](../runs/official_r72_80m_5ease/5Ease_Bot/20261121-121740-255689.events.jsonl#L268)
+- **r71→r72 官方 MoveTest**：明确死亡 **6→42**、重生 **6→38**，本轮取消冷却请求等待 **117.5s**、外层重连 0。EP23 四死，最后一次前守护回复 `no_safe_retreat`、位移 0，随后同集先重生再死亡。 [零位移撤退](../runs/official_r72_80m_movetest/MoveTest_01/20261121-123159-214577.events.jsonl#L110) · [最后死亡](../runs/official_r72_80m_movetest/MoveTest_01/20261121-123159-214577.events.jsonl#L124) · [撤退判定](../src/mc_agent/skills/combat_env.py#L2028) · [官方终版](../runs/official_r72_80m_movetest/MoveTest_01/official-official_r72_80m_movetest-MoveTest_01-20261121-112252.json#L6)
+- **r70→r71 同官方双角色**：5Ease **49→47** 明确死，GLM_1 **46→69**，r71 明确重生 **38／60**。新槽的计划取消冷却 **193.9／266.2s**，重连均 0。属于两份官方单槽。 [5Ease 终版](../runs/official_r71_80m_5ease/5Ease_Bot/official-official_r71_80m_5ease-5Ease_Bot-20261121-103837.json#L6) · [GLM_1 终版](../runs/official_r71_80m_glm1/GLM_1/official-official_r71_80m_glm1-GLM_1-20261121-103850.json#L6)
+- **r70 日出四槽回潮**：同 r69 的一小时配置，明确死亡 **21→35**，r70 为近战 27／箭伤 6／玩家爆炸 2，31 条重生。两条 `disconnected` 分别为 HY4_4 EP09 的第四死和 HY4_10 EP11 的第三死，明确死亡回执至断连终态仅 **0.1–0.2ms**。终态前两槽均先记录 `ApiError/not_connected`，事件落盘最后补读死亡，两槽后来各以约 329／316 秒的间隔重新开集并写终版。请求取消的冷却开始合计约 **201.0s**，墙钟仍需结束回执。 [HY4_4 接口失败](../runs/r70_day12_real_drop_60m/hy4_hy_4_bare/20261121-111927-804548.events.jsonl#L383) · [HY4_10 接口失败](../runs/r70_day12_real_drop_60m/hy4_hy_10_bare/20261121-112703-876626.events.jsonl#L132) · [HY4_4 零位移](../runs/r70_day12_real_drop_60m/hy4_hy_4_bare/20261121-111927-804548.events.jsonl#L374) · [HY4_4 断连](../runs/r70_day12_real_drop_60m/hy4_hy_4_bare/20261121-111927-804548.events.jsonl#L386) · [HY4_10 断连](../runs/r70_day12_real_drop_60m/hy4_hy_10_bare/20261121-112703-876626.events.jsonl#L135) · [断连终态](../src/mc_agent/harness/agent.py#L1127)
+- **r70→r71 官方 MoveTest 同 80 分钟**：明确死亡 **41→6**，r71 为近战 4、箭伤 1、摔落 1。EP04 占三死，六死各有重生回执；官方重连仍 0。两版与课程构成都变化，作为同角色终版对照。 [r71 官方终版](../runs/official_r71_80m_movetest/MoveTest_01/official-official_r71_80m_movetest-MoveTest_01-20261121-100121.json#L6) · [EP04 末次死亡与重生](../runs/official_r71_80m_movetest/MoveTest_01/20261121-101043-978900.events.jsonl#L148) · [重生控制](../src/mc_agent/harness/guardian.py#L1384)
+- **r70 官方双槽死亡复验**：5Ease／GLM_1 各 **49／46** 明确死亡，分别 38／44 重生。5Ease EP31 有四次近战死，最终死后 `not_ready`。GLM_1 EP26 六死，14 个 actor 请求全部取消。两槽实际均为 `hy4-flash-free`。 [5Ease EP31 最后一死](../runs/official_r70_80m_5ease/5Ease_Bot/20261121-103112-711817.events.jsonl#L147) · [GLM_1 EP26 末次](../runs/official_r70_80m_glm1/GLM_1/20261121-102915-075206.events.jsonl#L154) · [Guardian 断连观察](../src/mc_agent/harness/guardian.py#L1384)
+- **r70 官方 MoveTest 再失败**：41 死，近战 32／箭伤 8／玩家爆炸 1，**35/41** 落在 EP10–24。EP23 六次近战死亡，前五次同位重生，末次从 12.33 血到 0.8 血期间撤退零位移并报无屋顶，随后死亡。59 次冷却的请求等待合计 **189.366s**。r71 官方 MoveTest 已加载 `0d8d3da`，待真正暴露时复验。 [撤退零位移](../runs/official_r70_80m_movetest/MoveTest_01/20261121-093429-678378.events.jsonl#L172) · [无屋顶](../runs/official_r70_80m_movetest/MoveTest_01/20261121-093429-678378.events.jsonl#L185) · [末次死亡](../runs/official_r70_80m_movetest/MoveTest_01/20261121-093429-678378.events.jsonl#L198) · [撤退判定](../src/mc_agent/skills/combat_env.py#L2028)
+- **r69 官方 GLM_1 复验未过死亡门**：实跑模型 `hy4-flash-free`。43 条显式死亡，近战 32、箭伤 10、出世界 1。42 条集中于 EP15–28。EP18 在 146.761s 内六次近战死亡，22 个 actor 请求中 21 个取消。64 条取消冷却开始事件请求等待合计 **223.930s**，该等待可被抢占，实耗门缺结束回执。EP18 首死前无盾、掩体失败、撤退零位移，前五次重生同坐标。集内已触发提前反射且成功撤过 1.8m，随后重新陷入无安全退路。 [首次拒绝](../runs/official_r69_80m_glm1/GLM_1/20261121-085638-697822.events.jsonl#L13) · [提前反射](../runs/official_r69_80m_glm1/GLM_1/20261121-085638-697822.events.jsonl#L97) · [撤退拒绝分支](../src/mc_agent/skills/combat_env.py#L2028) · [EP18 首次死亡](../runs/official_r69_80m_glm1/GLM_1/20261121-085638-697822.events.jsonl#L26) · [EP18 末次死亡](../runs/official_r69_80m_glm1/GLM_1/20261121-085638-697822.events.jsonl#L224) · [EP25 冷却被抢占](../runs/official_r69_80m_glm1/GLM_1/20261121-090734-161037.events.jsonl#L60) · [可取消等待](../src/mc_agent/harness/model.py#L899)
+- **r72／r69 日出加载版**：`0d8d3da` 含 `e160e7f`，危急箭压与撤退失败重查掩体的专测通过。待实际带箭压的零位移撤退、掩体结果及死亡回执。 [掩体检查](../src/mc_agent/harness/guardian.py#L2718) · [专测](../tests/test_generation_guard.py#L9405) · [r72 新版](../runs/r72_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-094530-854837.events.jsonl#L1)
+- **跨模型影响（r15 收官 21 路）**：死亡 **51 次**（`notable` 去重；incident 口径 57），r14 为 28；`model.failed(cancelled)` **141→247**，`cancel_cooldown_wait` **286.3s→454.2s**
+- **D1 过夜主轨（`overnight_12bot`，4h/12 路）**：**110 次 notable 死亡**（incident 144）：`ds_4_nether_fortress` **41**、`ds_3_enchant_anvil` 23、`ds_1_bare` 13；死因 `mob_attack 38 / lava 22 / arrow 15 / hot_floor 13（岩浆块）/ fall 7`。
+  → 下界堡垒（ds_4）是重灾区：4h 41 死 ≈ 每 6 分钟 1 次；`hot_floor` 为新暴露原因。
+- **过夜 hy4 审计轨（`hy4_audit_r26`，配置 2 小时）**有 **38 条明确死亡回执**。`hy4_6_nether_bastion` 的 **20 条分布在 11/20 集**，其中 11 条前一条可归因为岩浆伤害。`hy4_2_iron` 有 13 条。旧记录的 45 次 `in_lava` 反射与死亡回执没有一一对应，不能据此计算逃生成功率。 [堡垒课程汇总](../runs/hy4_audit_r26/hy4_hy_6_nether_bastion/curriculum-20261119-094409-012939.json)
+- **D1 r18 收官（22 路）**：死亡 incident **37**（notable 去重 28：`mob_attack 12 / lava 6 / on_fire 4 / arrow 3 / trident 1 / drown 1 / wither 1`），**全部集中在 3 路下界 bot**（`ds_4` 7、`hy4_6` 6、`hy4_8` 4 = 17/28）；r19_short 13 死、冷却 205.6s。→ 当前主因已从"地表箭伤"转为**下界岩浆/着火**。
+- **D1 r16 复核（`d2ac1ab`+`b920f24` 已合入）**：死亡 incident **57→14**、`cancel_cooldown_wait` **454.2s→148.3s**、`cancelled` 247→约 80；门禁 PASS。待 r17 22/22 复核后关闭。
+- **死因分布**：`mob_attack 23 / arrow 13 / fall 5 / player_explosion 3 / lava 3 / trident 1`
+- **集中点**：`hy4_hy_8_nether 8`（arrow 3 + mob 4 + 爆炸 1）、`ds_ds_3_enchant_anvil 5`、`hy4_hy_6_nether_bastion 5`（fall 2 + lava 3）、`hy4_hy_1_bare 4`、`hy4_hy_4_cave_combat 4`、`hy4_hy_9_deep_water 4`
+- **现象与根因**：新增 `cave_combat` / `brewing_alchemy` / `village_trade` 场景没有任何生存节奏适配（洞穴刷怪、远程骷髅、岩浆），`pre_hurt_ranged` 覆盖不足；死亡后重开又消耗 episode
+- **D1 深度归因（r15 全量 49 死）**：
+  - 按层级：**地表 42 死**（mob_attack 23 / arrow 13 / explosion 4 / fall 2 / in_fire 1 / trident 1），地下 7 死（fall 3 / lava 3 / mob 1）
+  - **10/49 死前没有任何 `guardian.incident`**（反射未触发，`fresh_hurt` 时才记录到 `death_or_connection_changed`）
+  - **0/49 死时手持盾牌**，`raise_shield` 全程仅 1 次；但 **17 路结束时背包仍有 shield+iron_sword**
+  → 结论：不是没资源，而是"受击前不举盾、远程来箭不切掩体"；pre-hurt 覆盖率与举盾时机是主因
+- **最小修复**：① 表面 `pre_hurt_ranged`/`pre_hurt_melee` 命中即 `equip_shield`+`raise_shield`（当前只在部分分支）；② 箭矢来源方向已知时先横移 2 格再举盾（盾只挡正面）；③ `cave_combat` 进入前检查火把/甲；④ 岩浆边强制 sneak+封边；⑤ 场景侧（D2）提供光照/安全出生区
+- **发布状态（r16 前核对）**：修复提交 `b920f24` 在 `fix/s-combat` 分支（含 arrow→lateral_sidestep+盾、auto_equip_armor、lava edge guard、pre_hurt 去抖），但 **`8e8d7a` 级别合并后仍未进 `feat/v2-integrated` HEAD（3fb883e）**。因此 r16 预计 BUG-026 指标不改善；请 #1 在下一波前合入。
+- **D1 运行中 bot 复核（r15 未收官 4 路）**：`hy4_hy_1_bare` 5 死（`mob_attack 4 + arrow 1`，死亡点 `y=6` 地下，无甲无火把）；`nju_movetest_01_bare` 2 死（`arrow 2`，地表 `y=62`）；`glm_glm_5_midgame` 1 死。
+- **验收标准**：r16 单波死亡 ≤ 25；`arrow` 死亡 ≤ 4；`cancel_cooldown_wait` ≤ 200s
+- **r41 Day 1 复验未过**：15 路 20 分钟有 **26** 条明确死亡回执，**39** 条混合 Guardian 事件。可由致命受伤回执关联的死因为近战 **13**、箭伤 **6**、玩家爆炸 **2**、火伤 **2**、摔落 **1**，另 **2** 条无明确死因。冷却 **140.4s** 达标。HY4_1 EP02 从 11 血到 4 血三次撤退被安全落脚判定拒绝，最终死于箭伤。GUITest EP04 也在受压时找不到安全撤退点。保留落脚检查，复验撤退被拒后的掩体或备选路径。 [HY4_1 EP02 最后拒绝](../runs/r41_day1_15bot/hy4_hy_1_bare/20261120-060611-164914.events.jsonl#L230) · [箭伤死亡](../runs/r41_day1_15bot/hy4_hy_1_bare/20261120-060611-164914.events.jsonl#L242) · [GUITest EP04](../runs/r41_day1_15bot/nju_guitest_01_bare/20261120-060912-316930.events.jsonl#L429)
+- **r43 Day 1**：4 路进入课程，8 条显式死亡全在 HY4_1，均为箭伤。11 条 Guardian 混合事件、54.2s 取消冷却。HY4_1 EP04 连死两次，EP07 又两次，保持裸装弓箭退路验收。 [EP04 第一次](../runs/r43_day1_5bot/hy4_hy_1_bare/20261120-072235-246493.events.jsonl#L35) · [EP04 第二次](../runs/r43_day1_5bot/hy4_hy_1_bare/20261120-072235-246493.events.jsonl#L174)
+
+- **r57 下界死亡门禁复核**：终版轨迹有 12 次明确死亡、18 次重生、0 条带类型连接变化、26 条 Guardian 混合告警。验收脚本已按本票标准以明确死亡核对 ≤25，取消冷却 153.2s 也在 200s 内。r41 仍有 26 次明确死亡，保持该波失败。 [r57 死亡样本](../runs/r57_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-010528-021498.events.jsonl#L122) · [验收脚本](../../s-triage/scripts/d1_acceptance.py)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-027 | P1 | Slice C（#4）/ backend（#1 合入）| 状态: FIXED（`e65356d` 前置校验；残留寻路 → P2-24）
+- **影响**：`glm_glm_3_village_trade` 在 r16 前 4 分钟内 **6 次 `mc_window_view → no_window`**（entity 81197/81539/81333 重复 2 轮），直接阻断交易目标；同期 `nju_nju_3_village_trade` 已成功交易
+- **日志证据**：实体距离 **12.2m / 12.5m / 16.1m**（`mc_get_entities`），窗口调用耗时 2.5~30.2s 后返回 `{"code":"no_window","message":"villager did not open a GUI"}`
+- **源码定位**：`experiments/20261115-until-1900/backend_patched/src/session.js:1352-1372 openTarget()`：`await goNear(s, e.position, 2.5)` **不检查返回值**，随后直接 `activateEntity(e)`；`:1396-1397` 只等 **2500ms** windowOpen。站在 12m 外右键村民不会开窗
+- **现象与根因**：`goNear` 失败（被地形/其他村民碰撞箱卡住）后仍在超距位置激活实体 → 必然 `no_window`，且错误码误导为"村民不开口"
+- **最小修复**：① `goNear` 后校验 `distanceTo(entity) <= 4`，否则返回 `out_of_reach`（带距离）并重试一次绕行；② 让 `openTarget` 对 entity 使用 `goNear(..., 2.5)` 的失败结果，必要时改走侧面/背后；③ 窗口等待 2500→4000ms
+- **D1 r17 复核（通过）**：`e65356d` 已在 `mc_window_view` 前置距离校验。r17 首 10 分钟：`out_of_reach` **10 次**（带距离与建议）、`no_window` 降至 **3 次**、`mc_window_view ok` 6 次；模型收到 `out_of_reach` 后会补 `mc_move_to`，`nju_3` 已成功开窗并交易。残留是"走到村民身边仍被碰撞箱卡住"→ 归 P2-24。
+- **D1 现状升级（r16，11 次 / 全部 glm_3）**：该 bot 在 12~16m 处连续调 `mc_window_view`，**期间没有任何 `mc_move_to`**，说明 `goNear` 静默失败后直接激活。建议同时加 Python 侧（`harness/mc_tools.py:mc_window_view`）前置校验：若实体距离 >4 或 `mc_get_entities` 拿不到，直接返回 `out_of_reach + 建议 mc_move_to(x,z)`，不必等后端修复；这样 Slice C 可先止血。
+- **验收标准**：r17 `village_trade` 路 `no_window` ≤ 1，且首笔 `mc_skill_trade` 在 3 分钟内完成
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-028 | **P0 崩溃** | Slice B（#2 子 AGY）| 状态: FIXED（`52b0d3f`；r17 已实测 0 复现）
+- **影响**：`hy4_hy_6_nether_bastion` 在 r16 **整路进程退出**（`stdout.log` Traceback，无 summary）；触发条件=下界踩到岩浆
+- **日志证据**：
+  ```
+  [受伤 health=12 by mob_attack] → guardian escape_lava 启动（run 85.0s）
+  combat_env.py:1206 AttributeError: 'VoidGeofence' object has no attribute 'contains'
+  run.finished（进程结束，整路丢失）
+  ```
+- **源码定位（HEAD）**：`src/mc_agent/skills/combat_env.py` **4 处**调用不存在的 API：
+  `:1206`、`:1293`、`:1354`、`:1360` 的 `self.geofence.contains(...)`；`VoidGeofence`（`harness/geofence.py`）只有 `check_point` / `check_ray` / `distance_from_center` / `margin_remaining`
+- **引入提交**：`e680b1f`（BUG-023 修复，新增 `_find_walkable_shore_target`）与 `3210e7c`（escape_lava 找岸边）——r15 未触发是因为当时没有"岸候选"路径
+- **最小修复**：4 处统一改为
+  `self.geofence is not None and self.geofence.check_point(cx + 0.5, cz + 0.5, action="lava_shore") is not None` → 跳过；
+  或 `hasattr(self.geofence, "check_point")` 保护。补一个用真实 `VoidGeofence` 的离线单测（mock 世界含岩浆+岸边），确保 `escape_lava` 不再抛 `AttributeError`。
+- **r16 实际战损（已确认 4/22 整路丢失）**：
+  - `hy4_hy_6_nether_bastion` → `escape_lava` → `:1206`
+  - `ds_ds_1_bare`、`glm_glm_5_midgame`、`nju_guitest_01_nether` → `escape_deep_water_to_shore` → `:1293`
+  → 不只是"下界 5 路"，**任何落水/踩岩浆的 bot 都会崩**；r16 因此只有 18 路有 summary。
+- **修复落地**：`52b0d3f` 用 `_point_allowed()` + `check_point` 替换全部 `.contains`，`d1_geofence_check.py` 已 **exit 0**。
+- **D1 r17 实机复核（通过）**：r17 前 10 分钟 **878 次工具调用、0 Traceback**；`escape_water`/`escape_lava` 正常返回结构化结果；门禁 `startup crash == 0` PASS。
+- **D1 一键回归门禁**：`/home/xzq/projects/mc/.worktrees/s-triage/scripts/d1_geofence_check.py`（当前 exit 1，精确列出 4 行）
+  ```
+  FAIL: combat_env calls non-existent geofence API: ['contains']
+    combat_env.py:1206 / :1293 / :1354 / :1360
+  ```
+- **验收标准**：`grep -r "geofence.contains" src/` 为 0；`d1_geofence_check.py` exit 0；r17 下界 lava 事故 0 崩溃、`escape_lava` 全部返回结构化结果
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-029 | P1 | Slice C（#4 Codex #2）| 状态: 部分修复（短波达标；4h 长程 8/12 超限，根因已定位）
+
+- **W20 正式终包两槽超保留线。** W19→W20 超限槽 1→2，HY6 圆石 383，OB1 圆石 308、深板岩圆石 353；门槛为每类 220.8。OB1 同时保住铁镐、两钻及九粗铁。 [HY6 终档](../runs/l1_w20_20261122/glm_hy_5e_6_bare_30m/wild-endurance-wild-20261122-224251.json) · [OB1 终档](../runs/l1_w20_20261122/nju_ob_1_bare_60m/wild-endurance-wild-20261122-224252.json)
+
+- **W20 OB1 60m 圆石清理与入包数量完全对上。** EP10 前三片 `inventory_cleaned` 每次圆石 `64＋55`；第四片实际只破 16 格，却净增普通圆石 **119**，随后又报清理 `64＋55`。同期还实入深板岩圆石和红石。`inventory_cleanup` 没有存箱记录；清理实现只有空格少于三才进存箱，否则超保留上限仍走丢弃。数字支持复拾，逐物 IDs 和确切落点未记。验收补“还有空格，但圆石超上限”的存箱路径或避免复拾，并以清理前后实包和箱格核对。 [第三次丢弃](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-232732-283976.events.jsonl#L92) · [净增及再丢 119](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-232732-283976.events.jsonl#L121) · [存箱入口条件](../src/mc_agent/skills/library.py#L2674)
+
+- **W20 30m GLM HY6 的终包已超线。** 正式终包圆石 **383**，高于 192 的 15% 容差 220.8，另有深板岩圆石 145 和粗铁 7，铁镐仍在、钻石 0。EP07 从 Y59 探钻至 Y−17，EP08 继续向深层却派铁器，均有施工产物。验收用各片实际入包及前后库存确认弃料节流，全程保留首镐和有价值掉落。 [正式终包](../runs/l1_w20_20261122/glm_hy_5e_6_bare_30m/wild-endurance-wild-20261122-224251.json) · [末部继续挖深](../runs/l1_w20_20261122/glm_hy_5e_6_bare_30m/20261122-231047-962092.events.jsonl#L35)
+
+- **W19 正式终包超量一槽。** HY9 60m 末包 367 深板岩圆石，超过 192 的 15% 容差门。末钻集前两片分别破 14、13 格，深板岩圆石却净增 101、114，铁镐和铁甲保住、钻石 0。逐格产出与沿路回收需有物品位置或 ID 对账。 [首片净增 101](../runs/l1_w19_20261122/hy_5e_9_bare_60m/20261122-222554-478325.events.jsonl#L30) · [次片 114](../runs/l1_w19_20261122/hy_5e_9_bare_60m/20261122-222554-478325.events.jsonl#L59) · [终包](../runs/l1_w19_20261122/hy_5e_9_bare_60m/wild-endurance-wild-20261122-212857.json)
+
+- **W19 OB1 60m 二次下井有大额圆石回增。** 首两个铁 DFS 的清理回执报 223、276 圆石。第三片只破 67 格、无目标铁，`gained.cobblestone=320`。第四片清理又报告五整组加三块，后续独立包确认 515 圆石。挖破量、实际丢弃量和沿途拾取不能用这三种回执互相代替。核清理后与折返后的实包，留实体 ID 或箱内转移，复验拾取物和仓储是否消除了回增。 [第二片清理](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-215847-309172.events.jsonl#L137) · [第三片 320](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-215847-309172.events.jsonl#L203) · [第四片清理](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-215847-309172.events.jsonl#L268) · [独立包 515](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-215847-309172.events.jsonl#L728) · [清理阶段](../src/mc_agent/harness/mc_tools.py#L3097)
+
+- **W18 HY1 清掉的 84 圆石数量重新出现。** EP06 独立包 276，造石镐失败回执 192。EP07 开包又为 276，造镐失败回执再变 192。下一次上梯只破 1 格，工具记录圆石净增恰为 84，末包回到 276。原迹缺丢弃、拾取的相同实体 ID，可确认反复回增及单格回执不可当作采矿产量。HY7 末包 256 也超 220.8 门。验收用可达安全箱实存，再沿原路核无归包，保留执行后空格和净量。 [前集清理](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-210159-473254.events.jsonl#L273) · [重新入包](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-210923-656030.events.jsonl#L81) · [终包](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/wild-endurance-wild-20261122-204046.json#L40) · [丢弃源码](../src/mc_agent/skills/library.py#L2153)
+
+- **W17b 裸装终档超量 1 槽。** HY3 末包圆石 257，超过 192 加 15% 容差的 220.8 门，同包只有 1 石镐和 2 铁镐。此例与旧版石镐膨胀分账。 [HY3 末包](../runs/l1_w17b_20261122/hy_5e_3_bare/wild-endurance-wild-20261122-202108.json#L60) · [包差采样](../runs/l1_w17b_20261122/hy_5e_3_bare/20261122-204430-192323.events.jsonl#L339)
+
+- **D2 候选 9e55a62 的腾位回退是课内提示。** D1 使用真 compact 与模拟传输，普通石料和铁镐都能通过参数校验、下发同一模拟丢弃接口。裸装联验加上核心装备拦截、确实腾整格和后续路线不重吸，优先查已知安全箱。 [候选课文](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L2503) · [通用入口](../src/mc_agent/harness/mc_tools.py#L2577)
+
+- **W16 首镐被 36 格满包阻断，即使每种石料低于淘汰上限。** GLM HY1 EP04 实包 22 石镐、3 粗铁、11 煤、61 圆石。熔炼被炉合成前置 `inventory_full` 拒，空格 0。调用容器 `drop` 无效，尝试制箱时实包只有 5 板，制箱失败。D1 真实熔炼＋合成离线重放，原包零写，安全工作台旁只少一把备用石镐就实取 3 锭并装备铁镐。C `2735fe3` 旧包存箱计划仍报 `no_clutter`。复验可持续保留至少一个实际空位，以及旧包安全移走冗余备镐。 [实包](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-194708-068971.events.jsonl#L36) · [炉前满包](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-194708-068971.events.jsonl#L54) · [制箱失败](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-194708-068971.events.jsonl#L258) · [存箱计划](../../s-skills/src/mc_agent/skills/library.py#L2413)
+- **Long2 OB3 沿原通道走 8 步、破格 0，却净入 128 深板岩圆石。** EP09 L284 报清深板岩圆石 128 和其他石料。EP10 L142 复走同一条 Y47 通道，`dug=[]`，入包深板岩圆石 128、闪长岩 25、安山岩 3、花岗岩 6，四项都与前集末段及本次清理申报吻合；另入凝灰岩 28，旧 EP08 曾报清同量。终版该槽圆石 383＋深板岩圆石 256＝639，全波单材超门 3/7 槽。证据支持清理物随路径再次回包，来源身份需掉落实体贯穿确认。`gained` 统计包净差，清理在隧道结果读包之后追加。 [旧路末段](../runs/l2_long2_20261122/nju_ob_3_village/20261122-123004-431481.events.jsonl#L284) · [零破格后入包](../runs/l2_long2_20261122/nju_ob_3_village/20261122-123328-338625.events.jsonl#L142) · [终版库存](../runs/l2_long2_20261122/nju_ob_3_village/wild-endurance-wild-20261122-113623.json#L48) · [包差源码](../src/mc_agent/skills/tunnel.py#L265) · [后置清理](../src/mc_agent/harness/mc_tools.py#L2662)
+- **C／D1 补 H3 EP12 清理后独立背包。** L19 报清 64＋63 圆石，19.699s 后 L37 实包仍为 319，恰为 192＋127。同段无新 actor 工具，Guardian 脱水实破 4 安山岩，没有记录新增圆石。该笔未见圆石数量持续净减，仍待掉落实体和即时包差区分未扣与拾回。 [清理回执](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-122356-714709.events.jsonl#L19) · [脱水施工](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-122356-714709.events.jsonl#L36) · [独立包](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-122356-714709.events.jsonl#L37)
+- **Long2 4 份终档已有 2 槽超单材门。** 附魔槽圆石 397、深板岩圆石 11（合 408），裸装 OB1 深板岩圆石 227、圆石 126（合 353）。两者均越过单材 192×1.15；合计 384 门仅附魔槽越线。H3 EP12 L122 回报清理 204 圆石，终档仍超，现有回执缺丢弃实体和即时净扣证据。 [H3 清理](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-122356-714709.events.jsonl#L122) · [H3 终包](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/wild-endurance-wild-20261122-113623.json#L67) · [OB1 终档](../runs/l2_long2_20261122/nju_ob_1_bare/wild-endurance-wild-20261122-113620.json) · [单材容差](../../s-triage/scripts/d1_acceptance.py#L203)
+- **L2 终档 2/7 超限。** H1 末包圆石 303、深板岩圆石 181，合计 484。EP06 末几片仍连续报清圆石，L1162 声明的两个数量是 64 和 47，实际终包过单材质和两材质验收线。OB3 终包为 385 圆石。 [H1 最终清理回执](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-111921-990526.events.jsonl#L1162) · [H1 终包](../runs/l2_long1_20261122/hy_5e_1_midgame/wild-endurance-wild-20261122-103254.json#L68) · [OB3 终包](../runs/l2_long1_20261122/nju_ob_3_village/wild-endurance-wild-20261122-103254.json#L59)
+- **L2 OB3 村庄终档确认清理在场，但圆石持续净增。** 末集九次隧道回执的当次包读 **277→289→290→305→321→337→353→369→385**，实际新增合计 124；清理声明 85、97、98、113、129、145、161、177、193，合计 **1198**，每次恰为当次包读超出常规 192 的部分。Fleet 终包仍 **385**，超过 220.8 验收门。现有账证清理请求未造成持续扣包，需实体或紧邻抛出读取区分未成功落地和抛后自动拾回。C 已收到。 [首清](../runs/l2_long1_20261122/nju_ob_3_village/20261122-111056-644697.events.jsonl#L189) · [末清](../runs/l2_long1_20261122/nju_ob_3_village/20261122-111056-644697.events.jsonl#L397) · [终包](../runs/l2_long1_20261122/nju_ob_3_village/wild-endurance-wild-20261122-103254.json#L59)
+- **W15 H1 无确认新挖仍报同数量清理。** 钻探 EP02 L64 清 62 深板岩圆石，紧接 L94 `reset` 再报清 62。EP03 L137 换铁层即时被拒仍清 `64+58`，中间熔炉缺料、同工具被防重，L238 井道回程仅步行又报同样 `64+58`。当前清理按 `/drop` 请求数量入回执，回包不含逐次实转移或掉落实体 ID。验收需加动作后独立包差与同实体拾回证据。 [EP02 重复清理](../runs/l1_w15_20261122/hy_5e_1_probe_diamond_y54/20261122-101557-807371.events.jsonl#L94) · [换层拒绝](../runs/l1_w15_20261122/hy_5e_1_probe_diamond_y54/20261122-102057-885669.events.jsonl#L137) · [回程同量](../runs/l1_w15_20261122/hy_5e_1_probe_diamond_y54/20261122-102057-885669.events.jsonl#L238) · [清理记账](../src/mc_agent/skills/library.py#L2159)
+- **C 离线区分回执和实存。** 固定 C 分支 `2735fe3`，实际清理入口，初始 254 深板岩圆石。`/drop` 后库存及独立读包均仍 254 时，发送两笔 62 且回报两笔清理。实扣 254→192 时只发送并回报一笔。W15 尚缺真实实体和包快照，可继续区分未扣库存、部分掉落及地上物品拾回。 [C 超限清理](../../s-skills/src/mc_agent/skills/library.py#L2306)
+- **W15 H1 短槽终包仍有 434 深板岩圆石。** 900.5s 末态超 220.8 容差门，已存在清理回执与超限终包并存。收更多铁或钻的统计继续用实际入包量。 [H1 终包](../runs/l1_w15_20261122/hy_5e_1_probe_diamond_y54/wild-endurance-wild-20261122-101047.json#L56)
+- **W14a OB2 终包圆石 267。** 短槽 720.1s，超过 D1 圆石 192 加 15% 容差的 220.8 门槛，本波 1 槽超限。该例尚未证明抛弃后被重新拾回，实物入包和回收分别核验。 [OB2 终包](../runs/l1_w14a_20261122/nju_ob_2_bare/wild-endurance-wild-20261122-095633.json#L50) · [D1 门槛](../../s-triage/scripts/d1_acceptance.py#L203)
+
+- **W11 四槽基础尺寸门通过，但 H4 的单次满包实阻断。** EP05 L112 `empty_slots=0`、25 把石镐，想做石镐时先因工作台产物无位失败，L130 重试被重复门拦。本波另有 H1 终包 27 把石镐。先修 BUG-091 避免真实制造堆叠，再用独立包容量和必要物品制造的成功率验收。 [H4 满包](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-083426-232705.events.jsonl#L112) · [H4 重试](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-083426-232705.events.jsonl#L130) · [H1 终包](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/wild-endurance-wild-20261122-081434.json#L46)
+- **W3 采铁被前置拒绝仍触发圆石清理。** OB1 EP05 L305 以 `insufficient_pickaxe_tier` 返回，零开挖且报 `inventory_cleaned` 圆石 31。L392 仍能用现有物料实制石镐。此次没有清理前空格、箱内转移或同一批掉落实体回执，暂不能判满包或复拾。DFS 包装在返回字典后继续执行 `_ensure_free_slots`，不区分开挖与前置拒绝。验收用铁课木镐不足且圆石超上限的原状态，核对是否真正需要腾位、是否保存首镐圆石及存箱量。 [拒绝却有清理](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-070749-923461.events.jsonl#L305) · [后续实制石镐](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-070749-923461.events.jsonl#L392) · [清理调用顺序](../src/mc_agent/harness/mc_tools.py#L3097)
+
+- **Showcase 终版 1/3 槽超包。** OB2 终包圆石 **319**，超过门禁 192×1.15。EP18 早包圆石 66，逐笔可配七次工具增量共 +118；末包余差 135 未配，期间还有只报破格的阶梯。按实际终包判超限。 [合成时包](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-053234-804299.events.jsonl#L304) · [终包](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/wild-endurance-5ease_ob_nju_ob_2_midgame-20261122-044432.json#L59)
+
+- **Showcase 清包后下一次原子挖报圆石 +86。** OB3 EP08 L569 工具记录主动丢圆石 **64+21=85**，同一回执又列圆石 +85。紧接着 L603 用钻镐只破一格普通石头，仍报圆石 **+86**。数量吻合旧 85 加新 1，缺丢弃与拾取的实体 ID，逐件来源保持未知。验收按安全放箱后背包、容器实转移和后续包差核对。暂时只能丢弃时保留实体／短期位置，避免将复吸计作当前产出。 [清包和二次包差](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L569) · [单石回执](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L603)
+
+- **5Ease 黑曜石门户 V2 H8**。EP02 L32 施工 35 格、深板岩圆石正差 33、报清 30；L62 同一终站位，零挖、零正差，又报清 30。两集合计片内正差 219，扣已报外层清理应归账 159，终包 **222**，超 220.8 行为门。缺独立丢前丢后库存与该堆实体，差值 63 尚不能区分回收、迟到或清理回执。H6 终包 197，超原保留 192 但在本波门容差之内。保持存箱、撤回与核包三步的验收。 [第一次清理](../runs/5ease_obs_fixed_v2_20261122/hy_5e_8_probe_diamond_y54/20261122-040400-627714.events.jsonl#L32) · [同站点第二次](../runs/5ease_obs_fixed_v2_20261122/hy_5e_8_probe_diamond_y54/20261122-040400-627714.events.jsonl#L62) · [终包](../runs/5ease_obs_fixed_v2_20261122/hy_5e_8_probe_diamond_y54/wild-endurance-5ease_obs_v2_hy_5e_8_probe_diamond_y54-20261122-035827.json#L47) · [清理申报](../src/mc_agent/skills/library.py#L2161)
+
+- **W2 OB3 槽终包轻微超线**。40 分钟终版实有 **221 圆石**，超过单品 220.8 容差 0.2；2/3 已终版目录中只有此槽超包。末 17 格阶梯无材料回执，不能把这一段破块数当作圆石增量。 [终包](../runs/5ease_w2_40m_20261122/nju_ob_3_village/wild-endurance-5ease_w2_nju_ob_3_village-20261122-024709.json#L48) · [最后阶梯](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-032635-307417.events.jsonl#L62)
+
+- **5Ease 采矿 V4 仍有 1/8 超限**。HY_5E_3 终包深板岩圆石 **229**，比单品容差多 8.2。HY_5E_2 EP02 一片有施工、一片零破块，连续都报清 15 深板岩圆石。暂缺两次清理间的掉落实体和连续库存，能确认清理回执重复。 [H3 终包](../runs/5ease_mine_eff_v4_20261122/hy_5e_3_probe_diamond_y54/wild-endurance-5ease_eff_v4_hy_5e_3_probe_diamond_y54-20261122-024705.json#L47) · [H2 首次清理](../runs/5ease_mine_eff_v4_20261122/hy_5e_2_probe_diamond_y54/20261122-025210-262656.events.jsonl#L31) · [H2 零片再清](../runs/5ease_mine_eff_v4_20261122/hy_5e_2_probe_diamond_y54/20261122-025210-262656.events.jsonl#L154)
+
+- **W1 OB3 正式终包**。EP15 熔 1 粗铁的回执同时报丢 323 圆石。随后独立背包仍有 **350 圆石**，终包 **364**，超过脚本单材料容差 220.8，低于早期混合 384 门。缺清理前的完整背包与实体拾取回执，丢弃数量无法证明腾位持续。当前只有这个槽出 Fleet 终版。 [清理回执](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-023410-076580.events.jsonl#L243) · [再读包](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-023410-076580.events.jsonl#L263) · [终包](../runs/5ease_w1_20261122/nju_ob_3_village/wild-endurance-5ease_w1_20261122_nju_ob_3_village-20261122-014016.json#L60)
+
+- **5Ease 采矿 V2 终包门失败**。A/B **0/8→2/8**。HY_5E_1、HY_5E_2 终包分别 **237／221 深板岩圆石**，超 220.8 门线，两个槽的钻石终包均为 0。这是 `6fde093` 实测，候选存箱修复需单独实机验收。 [HY_5E_1 终包](../runs/5ease_mine_eff_v2_20261122/hy_5e_1_fishbone_scan/wild-endurance-5ease_eff_v2_hy_5e_1_fishbone_scan-20261122-022655.json#L48) · [HY_5E_2 终包](../runs/5ease_mine_eff_v2_20261122/hy_5e_2_fishbone_scan/wild-endurance-5ease_eff_v2_hy_5e_2_fishbone_scan-20261122-022655.json#L47) · [门线](../../s-triage/scripts/d1_acceptance.py#L202)
+
+- **正式赛补证，清掉的杂物沿原路又被捡起**。现场观察为满包后朝面前丢杂物，后续移动把杂物吸回。`5Ease_Bot` EP07 第一次回执报丢 36 圆石，沿原巷道折返期间 `dug=[]`、`gained={}`，下一次清理前的圆石仍为 228，随后再报丢 36。EP10 另有连续三条回执各报丢 110 圆石和 123 深板岩圆石，末两次站位相同。JSONL 没有这批实体的拾取 ID，重复清理已确认，实体复拾来自现场观察。`_ensure_free_slots` 只有调用方提供朝向才转头，常用清理入口未传方向；它以 `drop` 调用未抛错记录拟丢数量。 [EP07 首次](../../../runs/20261121-234628-872325.events.jsonl#L157) · [同巷折返](../../../runs/20261121-234628-872325.events.jsonl#L177) · [EP10 同站位](../../../runs/20261121-235709-070941.events.jsonl#L845) · [丢弃与复查](../src/mc_agent/skills/library.py#L2153) · [清理入口](../src/mc_agent/harness/mc_tools.py#L2662)
+- **Slice C 接手，正式赛追加验收**。优先把低价值杂物存入附近可达的自有箱。没有箱时，在不挡回程的安全位置放随身箱，或用富余材料合箱后放置。放置与存入受当前动作预算限制，保留木材、装备、燃料和任务物品的现有保留量。无安全箱位时明确反馈，允许安全地把杂物丢在后续路线之外。用 36 格满包的 1×2 矿道复现，核对箱转移和腾位，再往返、拾矿，确认空位仍在且目标掉落能入包。报告存入数量、空位和触发的回退分支。容器调用兼容性见 BUG-097。 [存箱入口](../src/mc_agent/skills/library.py#L4553)
+- **D1 复测 Slice C `ae01b45`**。4 个定向夹具覆盖沿用自有箱、随身箱、合箱和无安全箱位。前三例把圆石 384→192，存 192，清理后至少 3 个空位，模拟折返仍能入包钻石。第四例保留物品并报告无安全箱位。采矿调用尾部在不足 3 空位时切到存箱；DFS 挖矿途中的腾位和有 3 空位时的超上限清理仍走原丢弃。请验收实际 DFS 中满包后拾矿的整段及往返安全。 [清理入口](../../s-skills/src/mc_agent/harness/mc_tools.py#L3025) · [4 个定向夹具](../../s-skills/tests/test_skills_and_providers.py#L4443) · [挖矿中的腾位](../../s-skills/src/mc_agent/skills/mining_dfs.py#L3454)
+- **同提交的离线恢复反例**。复用箱仅校验坐标、维度和箱型，仍会选择唯一回程格上的已登记箱。最近箱满时只试一次，旁边已知备用箱未用。受保护位置放箱失败会明确报错、保留杂物。模拟放置成功但空回执且未产生箱，仍登记并尝试存入。模拟存入成功却无背包变化，返回 0 空位但无错误；模拟实存 192 后传输超时，返回超时且未复核数量。请复验箱位、备用箱、未完成或不确定的转移，再以实际包变化和可持续空位记账。 [选箱与放箱](../../s-skills/src/mc_agent/skills/library.py#L2215) · [回执与空位](../../s-skills/src/mc_agent/skills/library.py#L2247)
+- **死亡导致虚报存箱**。模拟 `window/act` 返 `dead` 且 `done=[]`，箱内转移 0，重生后背包为空。候选把物品丢失当成存箱，回报清理了 **192 圆石**并有 36 空位。验收要求有箱内实际转移或同一生命内的容器增量证据，死亡后的背包变化单独记录。 [出入包对账](../../s-skills/src/mc_agent/skills/library.py#L2247)
+- **`ee5f875` 离线复验**。8 个定向夹具通过。死亡清包和零转移空回执已不虚报，同一生命已存入 192、回执超时后收到释放确认时能从箱增量复核。补测表明最后一次生命检查之后死亡仍可报 36 空位，连续协议重试可把同次 `put` 执行两遍（模拟箱入 384、回报 192），服务端 `action_timeout` 后的隐式重连也可越过 8s 清理预算。验收加入二次生命核对和成功执行却丢响应的写操作。 [传输重试](../../s-skills/src/mc_agent/bot.py#L133)
+- **W1 NJU_OB_3 EP11 同一清理量复现**。`75feb68` 的黑曜石 DFS 返 `movement_not_confirmed` 后报告清理圆石 64+5。下一次 `reset` 返回 `reset_needs_surface`，没有新挖掘回执，却再报相同 64+5。此对账证明腾位结果没有持续得到确认，拾取实体仍未单独记录。之后 `climb_out` 继续报丢圆石，下一波验收应核对返走后空位和实际入包。 [DFS 与清理](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-015751-816518.events.jsonl#L148) · [reset 再清理](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-015751-816518.events.jsonl#L176) · [爬出片](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-015751-816518.events.jsonl#L206)
+
+- **r78 裸装终包超门 1→2**。HY4_7 圆石 **222**；MoveTest 圆石 **247**、深板岩圆石 **261**；门为各 220.8。 [HY4_7 终包](../runs/r78_bare_real_drop_60m/hy4_hy_7_bare/wild-endurance-r78_bare_real_drop_60m_hy_7_bare-20261121-200837.json) · [MoveTest 终包](../runs/r78_bare_real_drop_60m/nju_movetest_01_bare/wild-endurance-r78_bare_real_drop_60m_movetest_01_bare-20261121-200817.json)
+
+- **r77 日出 DS_2 终包超门**。四槽唯一，**576 深板岩圆石／269 圆石**，两项均超各 220.8 容差。 [DS_2 终包](../runs/r77_day12_real_drop_60m/nju_ds_2_bare/wild-endurance-r77_day12_real_drop_60m_ds_2_bare-20261121-201001.json)
+
+- **r77 裸装同三槽终包超限 2→1**。唯一超限为 HY4_5 **345 深板岩圆石**，同槽另有 180 圆石。 [HY4_5 终包](../runs/r77_bare_real_drop_60m/hy4_hy_5_bare/wild-endurance-r77_bare_real_drop_60m_hy_5_bare-20261121-190727.json#L53) · [门禁](../../s-triage/scripts/d1_acceptance.py#L202)
+
+- **r74 裸装两槽终包超限**：HY4_7 **384 深板岩圆石、176 圆石**，MoveTest **300 圆石**。 [HY4_7](../runs/r74_bare_real_drop_60m/hy4_hy_7_bare/wild-endurance-r74_bare_real_drop_60m_hy_7_bare-20261121-132014.json) · [MoveTest](../runs/r74_bare_real_drop_60m/nju_movetest_01_bare/wild-endurance-r74_bare_real_drop_60m_movetest_01_bare-20261121-131954.json)
+
+- **r77 中期终包两槽超限**：HY4_1 **320 圆石、192 深板岩圆石**，HY4_2 **281 深板岩圆石、160 圆石**。 [HY4_1](../runs/r77_midgame_real_drop_3bot/hy4_hy_1_midgame/wild-endurance-r77_midgame_real_drop_3bot_hy_1_midgame-20261121-131847.json) · [HY4_2](../runs/r77_midgame_real_drop_3bot/hy4_hy_2_midgame/wild-endurance-r77_midgame_real_drop_3bot_hy_2_midgame-20261121-131857.json)
+
+- **r76 门户库存复验**：三槽一槽超限，NJU_3 终包 **307 圆石、191 深板岩圆石**。 [终包](../runs/r76_midgame_portal_40m/nju_nju_3_midgame/wild-endurance-r76_midgame_portal_40m_nju_3_midgame-20261121-125543.json)
+- **r76 中期库存复验**：一槽超过库存门，HY4_1 终包 **349 深板岩圆石、294 圆石**。 [终包](../runs/r76_midgame_real_drop_3bot/hy4_hy_1_midgame/wild-endurance-r76_midgame_real_drop_3bot_hy_1_midgame-20261121-123652.json)
+- **r75 门户库存复验**：三槽有一槽超限，NJU_3 终包 **404 深板岩圆石、169 圆石**。过门任务 EP04 长段循环探矿无黑曜石产出，确认计数与终包需要分别读。 [尾段探矿](../runs/r75_midgame_portal_40m/nju_nju_3_midgame/20261121-122230-392784.events.jsonl#L1522) · [终包](../runs/r75_midgame_portal_40m/nju_nju_3_midgame/wild-endurance-r75_midgame_portal_40m_nju_3_midgame-20261121-121405.json)
+
+- **r74 门户**：HY4_8 终版地狱岩 **328**，超过 147.2 容差门，三槽中唯一超限。 [终包](../runs/r74_midgame_portal_40m/hy4_hy_8_midgame/wild-endurance-r74_midgame_portal_40m_hy_8_midgame-20261121-113154.json#L64) · [清包源码](../src/mc_agent/skills/library.py#L2052)
+
+- **r71 裸装 60 分钟**：HY4_7 终包圆石 **260**，三槽中唯一超限。 [终包](../runs/r71_bare_real_drop_60m/hy4_hy_7_bare/wild-endurance-r71_bare_real_drop_60m_hy_7_bare-20261121-101003.json#L54) · [清包入口](../src/mc_agent/skills/library.py#L2052)
+
+- **r69 日出 60 分钟**：HY4_10／HY4_4 终版圆石 **344／273**，**2/4** 槽超限。 [HY4_10 终包](../runs/r69_day12_real_drop_60m/hy4_hy_10_bare/wild-endurance-r69_day12_real_drop_60m_hy_10_bare-20261121-094915.json#L51) · [HY4_4 终包](../runs/r69_day12_real_drop_60m/hy4_hy_4_bare/wild-endurance-r69_day12_real_drop_60m_hy_4_bare-20261121-094905.json#L53) · [清包入口](../src/mc_agent/skills/library.py#L2052)
+
+- **r72 门户延续超限**：HY4_8／NJU_3 终版深板岩 **320／352**，HY4_8 另有 228 圆石。**2/3** 槽超门。 [HY4_8 终包](../runs/r72_midgame_portal_40m/hy4_hy_8_midgame/wild-endurance-r72_midgame_portal_40m_hy_8_midgame-20261121-100821.json#L65) · [NJU_3 终包](../runs/r72_midgame_portal_40m/nju_nju_3_midgame/wild-endurance-r72_midgame_portal_40m_nju_3_midgame-20261121-100811.json#L62) · [清包入口](../src/mc_agent/skills/library.py#L2052)
+
+- **r72 中期**：1/3 超限。HY4_1 终包深板岩 **256**，超过 220.8；EP05 末段以 DFS 找钻石同时持续回执深板岩。 [终包](../runs/r72_midgame_real_drop_3bot/hy4_hy_1_midgame/wild-endurance-r72_midgame_real_drop_3bot_hy_1_midgame-20261121-094524.json#L58) · [EP05 增量](../runs/r72_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-095957-754719.events.jsonl#L985) · [清包源码](../src/mc_agent/skills/library.py#L2052)
+
+- **r71 门户**：深板岩终版 NJU_3 **303**、HY4_9 **235**，均超 220.8。NJU_3 另有圆石 235。NJU_3 EP04 的 34 个探矿切片累报产出 603 深板岩，按每次增量加总，终包以 `owned_end` 为准。 [NJU_3 终包](../runs/r71_midgame_portal_40m/nju_nju_3_midgame/wild-endurance-r71_midgame_portal_40m_nju_3_midgame-20261121-092607.json#L59) · [HY4_9 终包](../runs/r71_midgame_portal_40m/hy4_hy_9_midgame/wild-endurance-r71_midgame_portal_40m_hy_9_midgame-20261121-092627.json#L65) · [清包入口](../src/mc_agent/skills/library.py#L2052)
+
+- **r68 日出四槽**：HY4_3 终版圆石 **469**、DS_2 **311**，均超 220.8 门，**2/4** 超限。HY4_3 EP10 的铁器探索多次产圆石，末段找不到粗铁且回程耗尽余量。 [HY4_3 终包](../runs/r68_day12_real_drop_45m/hy4_hy_3_bare/wild-endurance-r68_day12_real_drop_45m_hy_3_bare-20261121-090238.json#L51) · [DS_2 终包](../runs/r68_day12_real_drop_45m/nju_ds_2_bare/wild-endurance-r68_day12_real_drop_45m_ds_2_bare-20261121-090228.json#L55) · [HY4_3 采块](../runs/r68_day12_real_drop_45m/hy4_hy_3_bare/20261121-092852-151315.events.jsonl#L329) · [清包入口](../src/mc_agent/skills/library.py#L2052)
+
+- **r64→r65 Day1/Day2 同四槽**：圆石门禁超限槽 **1→3**，r65 的 HY4_3／HY4_4／HY4_10 终版圆石分别 **497／345／388**，均超 220.8 门槛。HY4_4 夜间做盾时背包圆石 192，终版再次累积到 345。 [HY4_3 终包](../runs/r65_day12_full_45m/hy4_hy_3_bare/wild-endurance-r65_day12_full_45m_hy_3_bare-20261121-063742.json#L58) · [HY4_4 当时背包](../runs/r65_day12_full_45m/hy4_hy_4_bare/20261121-070237-818958.events.jsonl#L310) · [HY4_4 终包](../runs/r65_day12_full_45m/hy4_hy_4_bare/wild-endurance-r65_day12_full_45m_hy_4_bare-20261121-063752.json#L56) · [HY4_10 终包](../runs/r65_day12_full_45m/hy4_hy_10_bare/wild-endurance-r65_day12_full_45m_hy_10_bare-20261121-063802.json#L46)
+- **现象**：背包被圆石/深板岩/凝灰岩/安山岩/地狱岩长期塞满，挤占 10~14 个槽位（约 30~39%）
+- **r18 早期影响**：`inventory_full` **0 次**、`no_drops_collected` 7 次（`ds_2`/`ds_4`/`hy4_5`）、`partial_collection` 1 次；暂未造成硬失败，但槽位压力随挖矿持续累积（待收官用 `owned_end` 复核）
+- **r17 收官数据（`owned_end`，cap=192/种）**：
+  | bot | 石料家族 | 地狱岩 | 泥土 |
+  |---|---|---|---|
+  | `hy4_hy_2_iron` | **450**（cobble 287 + deepslate 163） | 0 | 42 |
+  | `nju_nju_3_village_trade` | 309 | 0 | 77 |
+  | `hy4_hy_9_deep_water` | 274 | 0 | 0 |
+  | `ds_ds_2_cave_combat` | 220 | 0 | 16 |
+  | `glm_glm_2_nether_bastion` | 52 | **783** | 0 |
+  | `glm_glm_1_nether_fortress` | 55 | 218 | 0 |
+- **源码根因（逻辑 Bug，非策略）**：`skills/library.py:1465-1467`
+  ```python
+  empty_now = _compute_empty_slots(inv)
+  if empty_now >= min_free:
+      return inv, []          # ← 提前返回
+  ...
+  cobble_over_cap = any(per_item_counts.get(n, 0) > 192 for n in _TRASH_TIER4_COBBLE)  # :1478，永远走不到
+  ```
+  "超过保留上限就清理"的判断被放在"空槽不足"的提前返回**之后**，所以只要还有 `min_free` 个空槽，超量圆石/地狱岩永远不会被丢。
+- **次要问题**：清理只在 `craft/harvest` 路径调用（`_ensure_free_slots`），`mine_dfs`/`mine_blocks` 连续采集后没有触发点；r17 全程 **0 个 `dropped` 结果**。
+- **最小修复**：
+  1. 把 `cobble_over_cap`/per-item cap 判断移到提前返回之前：
+     `if empty_now >= min_free and not over_cap: return inv, []`
+  2. 增加"采集后软清理"：`mine_dfs`/`mine_blocks` 结束若 `cobble>192` 或 `netherrack>128` 或 `dirt>64`，静默 drop 到 cap（一次最多 12 个 drop op）
+  3. 下界把 `netherrack` 的保留量降到 0~32（无建筑价值）
+  4. 返回/事件里回报 `inventory_cleaned:{item,count}`，便于 D1 验收
+- **验收标准**：r18 起 `owned_end` 中 cobble+deepslate ≤ 384、netherrack ≤ 128、dirt ≤ 64 的路 ≥ 20/22；`dropped` 事件 > 0；无 `inventory_full`
+- **D1 r22 终验（短波通过）**：18/18 路 `owned_end` 检查（容差 15%）**gross-over-cap = 0**；`inventory_cleaned` 事件正常。
+- **D1 过夜 4h 长程复核（未达标）**：`overnight_12bot` **8/12 路**超限：`ds_1` cobble **571**、`glm_2` netherrack **551**、`ds_2` 382+301、`nju_3` 320+256、`ds_3` 320、`glm_3` 300、`nju_movetest` 256、`glm_4` deepslate 247。
+- **根因（精确）**：`_ensure_free_slots` 的 `pre_over_cap` 只决定"是否进入"；真正丢弃由 `plan_garbage_drops` 的 `need = max(0, min_free - empty_before)` 控制——**只要还有 ≥3 个空槽，need=0，一个都不丢**。所以"超 cap 但有空槽"的情况仍然完全不清理（4h 里 145 次 `inventory_cleaned` 只是空槽不足时的偶发清理）。
+- **最小修复**：超 cap 时把 `need` 提升为"至少清到 cap"的槽数（如 `need = max(need, ceil((count-cap)/64))`），或给 `plan_garbage_drops` 增加 `enforce_caps=True` 参数。
+- **D1 r20 复核（补丁已实机生效）**：`53835cf` 补上 `mine_dfs` 返回后的 `_ensure_free_slots(min_free=3)`；r20_short **已观测到 `inventory_cleaned` 事件（cobblestone 25）**。
+- **D1 门禁口径**：`owned_end` 检查允许 **15% 堆叠粒度容差**（cobble 192→220、netherrack 128→147）。
+- **r52 Day 2**：八个开跑槽有一路超过门禁，HY4_5 终版持有 **235** 深板岩圆石。EP05 同一 Y−54 站位两次各报告清理 43 个，后一次回执同时为 `gained={}`、`backtrack_blocked`。数量与原地复拾相容，现场缺少拾取事件来确定。 [首次清理](../runs/r52_day2_wild_scout_9bot/hy4_hy_5_iron/20261120-214805-417222.events.jsonl#L161) · [第二次清理](../runs/r52_day2_wild_scout_9bot/hy4_hy_5_iron/20261120-214805-417222.events.jsonl#L184) · [终版库存](../runs/r52_day2_wild_scout_9bot/hy4_hy_5_iron/wild-endurance-r52_day2_wild_scout_9bot_hy_5_iron-20261120-213213.json#L58)
+- **r53 Day 1**：3 槽中 HY4_3 终版圆石 **267**，超容差门槛。EP06 三片先后报告清理 45、68、75 个圆石，配对净采集 38、21、7 个，最终高于限额。须核对清理后的实测库存及贴身丢弃后的拾取，回执目前仅证明清理操作和库存超限同时出现。 [末片清理](../runs/r53_day1_bare_3bot/hy4_hy_3_bare/20261120-221019-438185.events.jsonl#L151) · [终版圆石](../runs/r53_day1_bare_3bot/hy4_hy_3_bare/wild-endurance-r53_day1_bare_3bot_hy_3_bare-20261120-215401.json#L47)
+- **r53 下界**：两路超过地狱岩容差 147，HY4_10 **253**、NJU_3 **592**，均从各自终版 `owned_end` 读取。 [HY4_10 终版](../runs/r53_nether_fortress_9bot/hy4_hy_10_nether_fortress/wild-endurance-r53_nether_fortress_9bot_hy_10_nether_fortress-20261120-215408.json#L59) · [NJU_3 终版](../runs/r53_nether_fortress_9bot/nju_nju_3_nether_fortress/wild-endurance-r53_nether_fortress_9bot_nju_3_nether_fortress-20261120-215352.json#L61)
+- **r56 要塞波**：HY4_1 EP04 起始深板岩圆石 **193**，14 条隧道回执合计报告新获 169 且均有清理回执，终版仍 **385**，另有圆石 178。该版本的隧道已接入清理，需确认丢弃后的实际库存与重新拾取。 [起始库存](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-002551-640618.events.jsonl#L46) · [采集清理回执](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-002551-640618.events.jsonl#L528) · [终版库存](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/wild-endurance-r56_stronghold_triangulate_3bot_hy_1_village_to_stronghold_end-20261121-000244.json#L66)
+- **D1 r20_short 收官（17/18）**：仍有 **2 路**超限：`glm_3_village_trade` cobble **242**、`hy4_8_nether` netherrack **182**。
+  → `53835cf` 只在 `mine_dfs` 返回后清；这两路的剩余石料来自 `mine_blocks`/`tunnel`/地形收集，没有触发点。
+  → 剩余修复：把同一清理挂到 `mine_blocks`/`tunnel`/`harvest_logs` 返回路径，或在 episode 收尾统一清一次；并断言返回的 `dropped` 非空时才计为生效。
+  → **已合入（23:47 `e60a8d5`）**：`989d757` 现为 HEAD 祖先，`grep _cleanup_inventory_after` = **4 处**；r22 进程加载于 23:48，**包含该修复**，可用 `owned_end` 验收。
+- **D1 r20_long 实测（修复前）**：`hy4_hy_1_bare` cobbled_deepslate **493**、`ds_1_bare` cobble 228 —— 长任务堆料更严重，正是本补丁的目标场景。
+- **D1 r19 实测（当时未达标）**：18 路中仍有 **3 路**超限：`nju_guitest 234 cobble`、`ds_2 261 cobble`、`glm_2 138 netherrack`（阈值 192/128）。
+  → 说明 cap 判断已可达，但**清理仍只在 craft/harvest 时触发**；最后一次挖矿后没有调用点，残留无法清。
+  → 剩余修复：`mine_dfs`/`mine_blocks` 结束（或 episode 收尾）加一次 `_ensure_free_slots(min_free=5)` 软清理；或把 `pre_over_cap` 检查挂到 `mine_dfs` 返回路径。
+- **D1 代码复核（通过）**：`4161d8f` 已在 `_ensure_free_slots` 的提前 return **之前**计算 `pre_over_cap`（cobble/deepslate >192、netherrack >128、dirt >64），并改为 `if empty_now >= min_free and not pre_over_cap: return`——与建议一致。r19_short 起用 `owned_end` 与 `dropped` 事件验收。
+- **r43 短波再现**：Day 2 终版 3/9 路超出 192/种上限及 15% 容忍，均为圆石深板岩，HY4_10 **293**、HY4_8 **296**、HY4_9 **332**。 [HY4_10](../runs/r43_day2_village_near_9bot/hy4_hy_10_day2_village_near/wild-endurance-r43_day2_village_near_9bot_hy_10_day2_village_near-20261120-071631.json#L52) · [HY4_8](../runs/r43_day2_village_near_9bot/hy4_hy_8_day2_village_near/wild-endurance-r43_day2_village_near_9bot_hy_8_day2_village_near-20261120-071627.json#L59) · [HY4_9](../runs/r43_day2_village_near_9bot/hy4_hy_9_day2_village_near/wild-endurance-r43_day2_village_near_9bot_hy_9_day2_village_near-20261120-071629.json#L63)
+- **r44 Day 1**：HY4_2 和 HY4_3 终版分别仍有 **242／276** 圆石，两路超过上限与宽限。 [HY4_2](../runs/r44_day1_5bot/hy4_hy_2_bare/wild-endurance-r44_day1_5bot_hy_2_bare-20261120-074020.json#L52) · [HY4_3](../runs/r44_day1_5bot/hy4_hy_3_bare/wild-endurance-r44_day1_5bot_hy_3_bare-20261120-074022.json#L53)
+- **r47 收官**：单项 192 加 15% 容差门禁超标 **Day 1 1/5、Day 2 4/9**。GuiTest 圆石 258；Day 2 HY4_4、HY4_6 圆石 257/420，HY4_9、NJU_3 深板岩圆石 267/344。GuiTest EP05 连续两条回执清理 66 圆石，第二条零挖掘、零收益、同位置，终版仍为 192+66。回收附近掉落是待直接拾取回执验证的分支。 [GuiTest 终版](../runs/r47_day1_5bot/nju_guitest_01_bare/wild-endurance-r47_day1_5bot_guitest_01_bare-20261120-095707.json#L48) · [同位置再次清理](../runs/r47_day1_5bot/nju_guitest_01_bare/20261120-101126-256146.events.jsonl#L360) · [HY4_6 终版](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/wild-endurance-r47_day2_full_day_scout_9bot_hy_6_iron-20261120-095717.json#L62)
+
+- **r57 同四路裸装终版**：HY4_10 圆石 264，HY4_3 圆石 250＋深板岩圆石 239，DS_2 圆石 386。脚本按独立栈上限判 3 路超标；按看板合计 ≤384 也有 HY4_3 和 DS_2 两路明确超限。HY4_4 末次状态断连，`owned_end` 为空，末包库存未知。 [HY4_10 末包](../runs/r57_day1_day2_fast_4bot/hy4_hy_10_bare/wild-endurance-r57_day1_day2_fast_4bot_hy_10_bare-20261121-005215.json#L53) · [HY4_3 末包](../runs/r57_day1_day2_fast_4bot/hy4_hy_3_bare/wild-endurance-r57_day1_day2_fast_4bot_hy_3_bare-20261121-005205.json#L56) · [DS_2 末包](../runs/r57_day1_day2_fast_4bot/nju_ds_2_bare/wild-endurance-r57_day1_day2_fast_4bot_ds_2_bare-20261121-005200.json#L51)
+
+- **L1 `0d45d74` 终版门禁 FAIL**。HY_5E_6 和 HY_5E_7 钻槽终包深板岩圆石 **222 / 230**，均超 192×1.15=220.8，8 槽有 2 槽超限。运行指纹没有后续 Slice C 存箱候选。 [HY_5E_6 终包](../runs/5ease_l1_probes_20261122/hy_5e_6_probe_diamond_y54/wild-endurance-5ease_l1_hy_5e_6_probe_diamond_y54-20261122-020509.json#L49) · [HY_5E_7 终包](../runs/5ease_l1_probes_20261122/hy_5e_7_probe_diamond_y54/wild-endurance-5ease_l1_hy_5e_7_probe_diamond_y54-20261122-020510.json#L48)
+
+- **独立 A/B 波 `ca61ddb`**。终包超限 **0/8**，L1 为 **2/8**。两波任务配方、开挖坐标和部分时长不同，策略波也未加载存箱候选。该批过门，保留后续同场往返和入包核验。 [终版深板岩 209](../runs/5ease_mine_eff_ab_20261122/hy_5e_5_probe_diamond_y54_v5/wild-endurance-5ease_eff_hy_5e_5_v5-20261122-021549.json#L47)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-030 | P1 | Slice A（#3 Codex #1）| 状态: OPEN（r17/r18 实测；HEAD 仍未改）
+
+- **W20 60m OB1 同一目标跨集从 90s 切回 32s。** EP09 六个 90s 请求实干 516.12s、破 376 格、到 Y−35，钻零，另实入九粗铁。EP10 续作头四片均显式请求 32s，配对 109.83s，Y−35→Y−51，仍无钻。W20 实载早于 `6756791`，后续核新提示有没有真正发出 90s，以及首次到层和首次目标入包。 [90s 末片](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-230929-833398.events.jsonl#L214) · [32s 首片](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-232732-283976.events.jsonl#L32) · [四片到层](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-232732-283976.events.jsonl#L121)
+
+- **集成 `af15bce` 铁钻深挖提示的真实入口。** 铁器课渲染 90s DFS，钻靴课备料成功后的 actor 文案仍省略 `max_duration_s`，工具默认为 **32s**。两课的 compact 工具均仍注册 `mc_skill_staircase`，提示里禁手动下阶梯，入口尚可执行。若要低模型歧义，令三种起步分支统一带 90s，保留紧急可控的脱困阶梯，以发出的工具参数和实际下潜轨迹验收。旧 Wave11 H1 为下好层后又退浅，脚本修复收益须留下一波确认。 [钻靴备料后任务](../src/mc_agent/harness/curriculum.py#L487) · [默认时长](../src/mc_agent/harness/mc_tools.py#L3059) · [工具注册](../src/mc_agent/harness/mc_tools.py#L120)
+
+- **Wave11 H1 在目标层开局仍付出回浅成本。** EP01 先从 Y−54 到 Y−35，85.8346s、75 通用破格、钻 0。随后三个阶梯共 109.3606s、66 格才下到 Y−57，下一片又从矿簇 32.27m 退到 63.53m，整集零钻。对同井口的候选验收优先核安全同层选路，记录上抬必须消除的具体障碍、额外步数、首个实收钻石耗时。保留近矿立体通路，避免把合法的少量爬升一并禁掉。 [离开目标层](../runs/5ease_l1_wave11_20261122/hy_5e_1_probe_diamond_y54/20261122-054206-592903.events.jsonl#L34) · [第三次阶梯](../runs/5ease_l1_wave11_20261122/hy_5e_1_probe_diamond_y54/20261122-054206-592903.events.jsonl#L103) · [重返旧井](../runs/5ease_l1_wave11_20261122/hy_5e_1_probe_diamond_y54/20261122-054206-592903.events.jsonl#L133) · [深度失退门](../src/mc_agent/skills/mining_dfs.py#L5564)
+- **影响**：`hy4_hy_2_iron` 100（r15）→ **20**（r17）；两集 `shiny_gear` 共 37 个 actor 请求、~1000s，全部耗在下潜
+- **证据（逐调用 y 轨迹）**：
+  - EP2：64→57→49→40→31，随后 `backtrack_blocked@11024,64,-10977`，`pos_after` **y=64（+37，回到地表）**，整段下潜作废；重启后 64→28→45→45→34→30，18 次调用结束仍在 y=30
+  - EP3：30→21→12→1→-12→-23→-36→-47→**-54（第 17 次调用）**，随后 episode 超时——**只差 1~2 次调用就能开始找钻石**
+- **源码定位**：
+  - `skills/mining_dfs.py:4750-4760`（`budget = min(90, max_duration_s)`，默认 32s）；32s 切片 + `_BudgetSession` 的实际动作预算只能下潜 ~8 格/次，100+ 格需 14~18 次调用
+  - `skills/mining_dfs.py` 的 `backtrack_blocked` 恢复会走 `_climb_out`/回井口，导致 `pos_after y` 大幅上升（本次 +37），且最终仍以 `time_slice_progress`（ok=true）返回，上层无法感知"深度进度丢失"
+- **现象与根因**：深目标（diamond@-54）所需下潜被 episode 调用预算吃光；一次 backtrack 失败还会把已下潜的 37 格清零。**与背包/BUG-029 无关**（该 bot 无 `inventory_full`、无 `no_drops_collected`，gained 全部正常入包）
+- **最小修复**：① `run()` 按 `|current_y - target_y|` 自动抬升切片（如 `min(90, 30 + 0.4*gap)`）并返回 `budget_effective_s`；② `backtrack_blocked` 时优先在当前深度开分支/侧移，不要回地表；③ 若恢复导致净上升 >8 格，返回 `progress_lost:true` 或独立 `stop_reason="depth_reset"`，让模型能换策略
+- **验收标准**：r18 起 `shiny_gear` 集内 `mine_dfs` 首次到达 `target_y±3` 的调用数 ≤10；`depth_reset` 0 次；`hy4_hy_2_iron`（或 iron 槽）≥80 分
+- **D1 状态（22:50）**：`mining_dfs.py:4818` 仍是 `budget = max(0.0, min(90.0, max_duration_s))`，未修；r19_short 的 `mine_dfs` 零进展 10.8%，仍受影响。
+- **D1 HEAD 核对（23:15）**：`mining_dfs.py:4818` 仍为 `min(90, max_duration_s)`，**未修**。
+- **D1 r20 深度轨迹定量（口径更正，避免误导）**：
+  - 统计：**11 个含深挖的 episode → 11 次首调用 + 39 次续调用**；续调用中只有 **1 次**在净上升 >15 格后重开（真"重启"极少）
+  - 每片平均下潜 **11.5 格**、中位耗时 ~30s；从 y≈64 到 -54 需 **10~11 次调用（约 5 分钟）**，但 episode 还要分配给备料/战斗/其它目标，常在到达前超时
+  - `hy4_hy_2_iron` 文件 2：`-17 → hurt → 67` —— **一次受伤/死亡把整段下潜清零**（唯一的重置样本）
+  → 修复优先级：① **跨 episode 复用竖井**（新集/复活后先 restore shaft 并走到最深节点，不要重挖）；② 深目标给更长的单集时间或更少的中间目标；③ 单次预算自适应（原建议）只减少轮次开销，不改变总挖掘时间
+- **D1 竖井树追踪（修正结论：树通常是保留的，归零是偶发）**：
+  - `hy4_hy_1_bare`（r20_long）：`node_count 1→3→4→5→…→15`，**跨 episode 稳定保留**，中途 `surface_reached` 后仍继续下潜到 **y=-27** → 这是期望行为
+  - `hy4_hy_2_iron`（r20_short）：树原本 1→7，但某次 `action=explore` 返回 `node_count=0`、位置 **y=64**；该调用参数里**没有 reset** → 树在两次调用之间被清（疑与死亡/复位有关），随后从地表重建
+  - `hy4_hy_4_cave_combat`：树保留 19，但 `active_node_id` 回退到 16/9/5、位置在 y=39/51 → 有记忆却不回最深节点
+  → 修复点：① 在清空 `nodes` 的所有分支发 `mine_dfs.tree_reset{reason}` 事件，先定位是谁清的；② `run()` 入口优先导航到 `active_node`/最深节点（而非 collar）；③ 不必假设"受伤必清树"
+- **D1 r24 复核（埋点已落地）**：新增 `stop_reason="depth_reset"` 已生效，r24_short 出现 **3 次**并带净上升数据：
+  | bot | pos_before → pos_after | 净上升 |
+  |---|---|---|
+  | `ds_2_cave_combat` | 106 → 125 | **+19** |
+  | `hy4_2_iron` | -25 → -5 | **+20** |
+  | `ds_4_nether_fortress` | 44 → 54 | **+10** |
+  → 可量化"深度被清零"的代价；下一步仍需让 `explore` 在复位后**导航回 deepest node**，而不是从 collar 重挖。
+- **D1 r20_short 复核（仍 0 命中）**：9 路共 **45 次** `target_y<=-40` 深挖，**0 次到达**；最深仅 `-22`（`hy4_4`），多路最深仍在 **y=60~74**。
+  stop_reason 分布：`time_slice_progress 32`（有进展但太慢）、`None/False 7`、`shaft_exhausted 3`、`needs_surface_climb 2`、`bad_target_for_dimension 2`、`pickaxe_low 1`、`hurt 1`。
+  → 主因是"每片只下潜几格 + 耗尽后回地表"，不是单次预算；"深度清零/无法续潜"比预算更致命。
+- **D1 r18 扩大复核（问题比单机更广）**：8 路发起 `target_y<=-40` 的深挖，**0 路在任一调用中到达 target_y±3**：
+  | bot | deep calls | 最深 y | 现象 |
+  |---|---|---|---|
+  | `hy4_hy_2_iron` | 23 | **-28** | 中途 48→41→**48** 回退；3 次 `time_slice` 0 收益 |
+  | `nju_nju_3_village_trade` | 19 | 55 | 94→58 后 `shaft_exhausted`，被迫 `needs_surface_climb`→`surface_reached`，再从 97 重开 |
+  | `hy4_hy_9_deep_water` | 17 | -28 | 在 **y=2 / y=-6 已挖到 diamond ×2**，仍被 `target_y=-54` 牵着继续下潜 |
+  | `hy4_hy_10_deep_water` | 11 | 18 | 未有效下潜 |
+  合计 ~82 次深挖调用 ≈ **38 分钟**，0 次到达目标层。
+- **D1 过夜两波复核**：`overnight_12bot` **16 次**（`nju_guitest` 4、`ds_1` 4、`ds_2` 2、`glm_5` 2…）；`overnight_12bot_part2` **17 次**（`ds_1` 6、`nju_3` 5、`nju_movetest`/`nju_guitest`/`glm_2`/`glm_3`/`glm_5`/`ds_2` 各 1）。
+  → 频次稳定在 **~4 次/小时/12 路**，instrumentation 正常；**行为修复（导航到最深已挖节点而不是从浅层重开）仍未实现**，`nju_3` 单路 5 次最严重。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-031 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: FIXED（待 r19 长程实测验证）
+- **影响**：`glm_glm_5_midgame` 45 分钟长程中连续 **8 集 `objective_verified=False`**（EP08~EP15），后半程 ~20 分钟基本空转；`scripts/long_run_diag.py` 命中 `LONG-002:stalled_streak(8_eps)`
+- **证据（`r15_22bot/glm_glm_5_midgame` 逐集自述）**：
+  - EP10：`story/lava_bucket` 扫 352 格无静止岩浆 → 失败；**EP11 立刻又派同一个 `story/lava_bucket`**（扫 640 格仍无岩浆）
+  - EP12：`husbandry/make_a_sign_glow` 地表无发光鱿鱼 → 失败
+  - EP13：找羊扫 40m 无羊 → 失败；**EP14 立刻又派找羊**（扫 224m 确认无羊）
+- **根因**：`CurriculumSupervisor` 对环境稀缺/资源缺失导致 `objective_verified=False` 的目标冷却太短（或未区分“当地无资源”与一般执行失败），导致同一目标在连续两集里被反复派发
+- **最小修复**：① 连续 `objective_verified=False`（尤其模型汇报“未找到/半径内无目标”）后对该目标施加 ≥3~4 集的退避冷却；② `r18` 起用 `scripts/long_run_diag.py --wave <wave>` 自动巡检长程停滞链
+- **验收标准**：45m 长程 `max_unverified_streak <= 4`，且不出现连续两集派发同一个无资源目标
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-032 | P1 | Slice A（#3）+ Integrator（#1）| 状态: OPEN（r15 45m 长程诊断）
+- **影响**：`ds_ds_1_bare` 45 分钟长程中 EP05~EP08 连续 **4 集卡在地底断木断镐循环**（总计 ~20 分钟停在铁器前）
+- **证据（`r15_22bot/ds_ds_1_bare`）**：
+  - EP05 位于 `y=-53` 地下深处，背包无原木、无木棍、无工作台、无镐，空耗 14 轮；EP06 爬到 `y=32` 仍缺木棍；EP07 已烧出 7 块铁锭仍因缺木棍做不出铁镐；EP08 爬回地表 `y=47` 才开始补木
+- **根因**：深层挖矿前缺少“至少携带备用原木/木棍”的前置检查，且 `mine_dfs` 检测到 `y < 20` 且无木料+无可用镐时未尽早引导返回地表补木
+- **最小修复**：① `curriculum.py` 下矿前保底要求背包留足备用木料（或 `pre_ensure` 补木）；② `mining_dfs` 检测到无可用镐且无合成木料时在返回里显式建议 `action="climb_out"` 回地表砍树
+- **D1 关系说明（r24）**：该单的“地底断木断镐循环”与 **BUG-038（climb 慢）/BUG-041（木镐硬岩）** 是同一现象的不同层面；本单负责**下矿前的木料保底**（curriculum 层），038/041 负责恢复路径（skills 层）。
+- **验收标准**：45m `bare` 长程不再出现 `y < 0` 断木断镐跨 2 集以上停滞；配合 `BUG-029`（`r15` 长程 `nju_movetest_01_bare` 31/36 格 903 垃圾、`glm_glm_5_midgame` 36/36 格、`hy4_hy_1_bare` 34/36 格 950 垃圾，且 4 路全部 `containers=0`）一起在 `r18`/`r19` 验收
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-033 | P1 | Slice D2（#6）+ Slice B（#2）| 状态: FIXED（`2bfe3c7`；r19 实测 0 线程异常）
+- **影响**：`ds_ds_4_nether_fortress` 的 **scene-watchdog 线程直接死亡**（主进程继续跑）；该 bot 的场景回场/死亡环校验从此刻起静默失效
+- **日志证据**：
+  ```
+  Exception in thread scene-watchdog-DS_4:
+    l3_wild_endurance_runner.py:1155 run → :1075 _tick → bot.status()
+    bot.py:256 status → guardian.py:1232 _wrapped_call
+    raise ReflexPreempted(pending_trigger[0])   # Reflex preempted by tool_interrupted_hurt: blaze
+  ```
+- **源码定位**：
+  - `harness/guardian.py:111` `class ReflexPreempted(BaseException)` —— **不是 Exception**
+  - `scripts/l3_wild_endurance_runner.py:1150-1155` 与 `:1072-1075` 的 `except Exception` 都**捕获不到**它，线程直接退出
+  - `guardian.py:1229-1232` 对任何 `call`（含只读 `status`/`method="GET"`）在 pending_trigger 时都抛抢占
+- **现象与根因**：反射抢占信号只该打断"动作调用"，不应打断 watchdog 的只读状态轮询；且 `BaseException` 绕过了所有 `except Exception` 保护
+- **最小修复**：① `_wrapped_call` 对 `method="GET"`/`status`/`inventory`/`events` **永不抛** ReflexPreempted；② 或仅在 actor 线程抛（`threading.current_thread()` 判定）；③ runner 侧 watcher 捕获 `BaseException`（至少显式 catch `ReflexPreempted`）并记录 `thread_health`，不要静默死
+- **验收标准**：r19 `d1_acceptance` 的 `BUG-033 thread exceptions == 0`；watchdog 每 tick 有 heartbeat 日志
+- **D1 r19 复核（通过）**：`2bfe3c7` 已在 `_wrapped_call` 中判定 `is_actor_thread` 与 `is_readonly_poll`（GET/READ_ONLY 直接放行），runner 侧也补了 `except BaseException`；r19_short **thread exceptions=0**。注：该提交信息写作 `BUG-031`，实际对应本单 BUG-033。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-034 | P1 | Slice B（#2 子 AGY）| 状态: FIXED（`PRE_HURT_RANGED_COOLDOWN_S 10→30`；r20 早期 70.4s）
+- **影响**：r18 前 18 分钟共 **186 次取消 / 393.4s 冷却**，其中 `hy4_hy_4_cave_combat` **113 次 / 259.7s**（该路 66% 的取消、66% 的冷却）
+- **日志证据**：`guardian.incident` 的 `pre_hurt_ranged` **74 次**（melee 仅 11、creeper 5）；cave_combat 竞技场里骷髅持续射击，每 ~10s 触发一次抢占 → 取消在途生成 → 强制冷却 → 模型重发
+- **源码定位**：`harness/guardian.py:142` `PRE_HURT_RANGED_COOLDOWN_S = 10.0`；`_mark_pre_hurt_cooldown`（:391-414）只按"目标 id/类型"做 10s 去抖；持续火力下每 10s 仍取消一次
+- **现象与根因**：去抖窗口对"持续远程压制"太短；且已举盾/已掩体时仍会取消生成（`status.blocking=True` 未作为豁免）
+- **最小修复**：① 远程触发后进入 **30~45s combat stance**（举盾/掩体），期间**不再取消**已在途生成；② `status.blocking=True` 或已在 `dig_cover` 时豁免取消；③ 同目标冷却 10→30s
+- **验收标准**：r19 `cancel_cooldown_wait` ≤200s；`pre_hurt_ranged` ≤25；cave_combat 路取消 ≤20
+- **D1 r20_short 收官（通过）**：`cancelled 76 / wait 157.7s`（r19 205.6s、r18 653.2s），门禁 ≤200s PASS；`PRE_HURT_RANGED_COOLDOWN_S=30` 生效。
+- **D1 r18 收官（22 路）**：`cancelled` **311 次**、`cancel_cooldown_wait` **653.2s**（门禁 200s），其中 `hy4_hy_4_cave_combat` **117 次**；r19_short 仍 205.6s。
+- **D1 r18 分集证据（`hy4_hy_4`）**：
+  | episode file | pre_hurt | cancels |
+  |---|---|---|
+  | `...061732` | 22 | **40** |
+  | `...062244` | 23 | **40** |
+  其余 3 集各 3~4 次；两次病态集里 `pre_hurt` 间隔中位 **12.1s**（≈ 10s 冷却 + 检测），骷髅距离 3.5~8.4m，`subcortical_combat` 每次都只是短打，未击杀/未换掩体。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-035 | **P0 崩溃** | Slice C（#4）+ Integrator（#1）| 状态: FIXED（`3aea714`，D1 离线复现已转绿；r21 待实机）
+- **Long2 集间实际覆盖异步取货正常路径。** H1 EP08 登记两炉的 `fjob-1`，EP10 续做下游石砖配方并完成磁石，整波 0 Traceback。actor 轨迹没有 `smelt_collect` 工具名；集间内调走 `collect_job` 至 `skills.smelt_collect`。该样本覆盖正常收取，传输超时分支待实机。 [登记](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-122622-309091.events.jsonl#L2) · [下游完成](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-122833-002755.events.jsonl#L55) · [集间调用](../src/mc_agent/harness/curriculum.py#L2201) · [实际取货入口](../src/mc_agent/skills/ensure.py#L443)
+- **影响**：`hy4_hy_3_midgame` 在 r20_short **整路进程退出**（无 summary）；触发点=异步熔炼 world job 的收取阶段遇到网络抖动
+- **日志证据**（`runs/r20_short/hy4_hy_3_midgame/stdout.log`）：
+  ```
+  curriculum.py:1813 run → world_jobs.collect_job(...)
+  curriculum.py:384  collect_job → collect_smelt_batch
+  ensure.py:443      → skills.smelt_collect
+  library.py:4121    bot.call("window/view")  →  httpcore.ReadTimeout: timed out
+  → 未捕获 → main:1603 退出（SystemExit）
+  ```
+- **源码定位**：`skills/library.py:4120-4122` 的 `window/view` 只 `except ApiError`，**没有捕获 `httpx.HTTPError`**；`harness/curriculum.py:384`、`:1813` 也没有兜底
+- **现象与根因**：熔炼产物留在炉里不会消失，读取超时本应是"下次再收"；现在一次 ReadTimeout 就把整个 episode/进程打死
+- **最小修复**：① `smelt_collect` 捕获 `httpx.HTTPError` → 返回 `{"ok": False, "deferred": True, "still_burning": True}`；② `collect_job` 对异常返回 `deferred` 并保留 job；③ `curriculum.run:1813` 把 `collect_job` 包在 `try/except (ApiError, httpx.HTTPError)` 里，失败不阻断恢复流程
+- **D1 离线复现（最小单测）**：`/home/xzq/projects/mc/.worktrees/s-triage/scripts/d1_smelt_timeout_check.py`（当前 exit 1）
+  ```
+  FAIL: ReadTimeout escaped collect_job -> would kill the run
+  ```
+  用真实 `WorldJobRegistry` + 注入了 `{"pos":[0,64,0]}` 的 job，fake `skills.smelt_collect` 抛 `httpx.ReadTimeout`；修好后应返回 `deferred/still_burning` 并保留 job，脚本 exit 0。
+- **验收标准**：r21 `d1_acceptance` 无 startup crash；`d1_smelt_timeout_check.py` exit 0；`smelt_collect` 的 ReadTimeout 0 进程退出；同 bot 下一集能回收炉内产物
+- **D1 r21_short 实机复核（通过）**：17/18 路，**0 次 `smelt_collect` Traceback**；上一波因此丢掉的 `hy4_hy_3_midgame` 本波恢复到 **130 分**。
+- **D1 r21 早期实机复核（正向）**：r21_short 全波 stdout **0 次 `smelt_collect` 报错**（唯一 Traceback 是 glm_1 的 `ensure_bot_ready` 超时，见 BUG-039）；说明 `collect_job` 的 deferred 兜底在真实运行中生效或至少未再触发同类崩溃。待 r21 收官确认。
+- **D1 修复核对（23:27，通过）**：`3aea714` 在 `WorldJobRegistry.collect_job` 捕获 `(httpx.HTTPError, ApiError, TimeoutError, OSError)`，返回 `deferred/still_burning` 并把 `job.ready_at` 推后 10s；`d1_smelt_timeout_check.py` 现 **exit 0**：
+  ```
+  collect_job returned: {'ok': False, 'deferred': True, 'still_burning': True, ...}
+  OK: timeout is deferred and the job is preserved
+  ```
+  待 r21 实机确认同类 Traceback 归零。
+- **D1 触发链证据（r20_short）**：`hy4_hy_3_midgame/curriculum-*.json` 里 `active_world_jobs: 1` 且第 2 集 `use_lodestone` 状态为 `paused_for_world_job`；下一集 resuming 时 `collect_job` → `smelt_collect` 撞上 ReadTimeout。r20_short 全波仅这 1 个 active job（即命中率≈1/18 但有 job 的 bot 必中）。
+- **触发面比想象更广（r20 实测）**：r20_short 全波 **0 次 `mc_skill_smelt` 调用**，崩溃的 job 来自 `pre_ensure`（0-LLM ensure）注册的熔炼任务；崩溃集 target 为 `minecraft:adventure/use_lodestone` / `minecraft:story/lava_bucket`（都需要烧铁）。→ 任何走 `pre_ensure → furnace job → 下一集 resume` 的 bot 都可能被打死。
+- **D1 r20_short 复核（连续第 2 波复现）**：`hy4_hy_3_midgame` 再次在 `library.py:4121 smelt_collect` 因 `ReadTimeout` 整路退出；同一 bot、同一行，证明该 P0 稳定复现，不是偶发。
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-036 | P1 | Slice D2（#6）+ Integrator（#1）| 状态: OPEN（r20_long 实测）
+
+- **D2 候选 `54c2ceb`。** 共享 runner 锁已提交到场景分支，离线跨进程同名拒绝、异名允许、退出后释放；需要由加载该提交的新进程实测。现有旧会话状态仍以原轨迹为准。 [候选 runner](../../s-scenarios/scripts/l3_wild_endurance_runner.py)
+
+- **W16 同名双槽，后端关联待确认。** 两个目录共出现 4 对同名角色。P0 与 GLM 都有 `HY_5E_1`，P0 内的 `HY_5E_2/3/4` 各有原场景和新增 bare。D2 分别核到独立 PID 的三对为 `309136/311516`、`309142/312541`、`309145/312544`。D1 随后核到三条旧 PID 均已退出、对应槽无终档，八个重复相关槽当前无 `auth_error`／`invalid_token` 回执。Fleet 锁按工作树，直接运行 runner 不经 Fleet 锁。确认实际后端后，对比同后端同名的两个入口应在第二次在线会话前拒绝，保持不同角色可并行。 [P0 HY1](../runs/l1_w16_p0_verify_20261122/hy_5e_1_bare/stdout.log#L1) · [GLM HY1](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/stdout.log#L1) · [Fleet 锁](../scripts/v2_fleet.py#L294)
+- **影响**：`nju_movetest_01_bare` 的 45 分钟长任务在 **425.7s** 就整体结束（`status=auth_error`），损失约 38 分钟预算
+- **日志证据**：`runs/r20_long/nju_movetest_01_bare/wild-endurance-*.json`
+  `"error": "[invalid_token] token not found or expired"`；`curriculum-*.json` 第 3 集 `target=None, status=auth_error`
+- **现象与根因**：运行中 MC API token 被吊销（单 Token 互斥：另一处对同一 bot `login` 会立刻使旧 token 失效）。curriculum 在**开局边界**遇到 401 直接终止整轮，没有"用 TokenStore 重新登录并续跑"的恢复路径
+- **最小修复**：① 每集开始前做一次轻量 `status` 探活；遇 `invalid_token` 用 `TokenStore` 里的凭据 `login` 刷新一次，再重试该集（失败才终止）；② `TokenStore` 缺失/过期时给出"需人工 login"的明确提示
+- **附加（防呆）**：`v2_fleet.py launch` 启动前断言"同一 bot 名不得同时出现在两个运行中的 wave"（当前 r20_long 与其它 wave 共用 `MoveTest_01` 的 token 文件，一旦并发就会互相吊销）
+- **验收标准**：r21 起 `auth_error` 导致的整轮中止 ≤1 且能自动续跑；`v2_fleet launch` 检测到并发同名 bot 时拒绝启动
+- **r51 两波同时异常**：北京时间 13:31:10.262–11.093，9 路在 **0.831s** 内报 `invalid_token`。另一已跑槽 HY4_7 收 `wrong_server`／`not_connected`，全体 10 路受影响。8 个断连集、1 个 `runtime_error`、1 个超时；8 路断连均再次开集，10 路均有 completed 终版。r52 最早 stdout 创建于 13:32:03，晚于故障约 53s，现有证据无法定为下一波登录覆盖或服务器重启。 [首个鉴权失败](../runs/r51_nether_fortress_9bot/nju_nju_3_nether_fortress/20261120-212645-030849.events.jsonl#L911) · [HY4_7 异常](../runs/r51_nether_fortress_9bot/hy4_hy_7_nether_fortress/20261120-213009-977723.events.jsonl#L126) · [恢复动作](../runs/r51_nether_fortress_9bot/hy4_hy_4_nether_fortress/20261120-213116-023603.events.jsonl#L8)
+
+- **r67 村庄波 MoveTest_01**：EP05 第三次 actor 请求期间获 `invalid_token`，该集 `runtime_error`、0 分。EP06 再次开集并成功调用隧道，整路有 1500.1s 终版。保留鉴权失效原因待查，已有恢复执行的回执。 [鉴权失败](../runs/r67_village_trade_4bot/nju_movetest_01_village_trade/20261121-071950-773584.events.jsonl#L195) · [后续工具](../runs/r67_village_trade_4bot/nju_movetest_01_village_trade/20261121-072128-723236.events.jsonl#L210) · [终版](../runs/r67_village_trade_4bot/nju_movetest_01_village_trade/wild-endurance-r67_village_trade_4bot_movetest_01_village_trade-20261121-070623.json#L348)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-037 | P1 | Slice C（#4 Codex #2）| 状态: OPEN（r20_short 实测）
+- **影响**：r20_short 的 `staircase:time_budget` **28 次 / 7 bots**，其中 **21 次 `steps_done=0`**（75% 完全无进展），单次中位 **15.3s**（≈ `per_step_timeout=15s`）
+- **日志证据**：`glm_glm_1_nether_fortress 8 次`、`ds_ds_4 5 次`、`glm_glm_2 4 次`、`hy4_hy_7 4 次`；参数多为 `steps=12~20`，说明模型想走长阶梯，但**第一步**就超时
+- **源码定位**：`skills/library.py:5887-5889` `dig_staircase(..., per_step_timeout: float = 15.0)`；`_StairSession.call` 在 `step_deadline` 耗尽时抛 `_StairDeadline` → 返回 `time_budget`（`library.py:1161-1205`），第 0 步没有豁免
+- **现象与根因**：爬升/下探的第一步常需要"走到位 + 清 1~3 格 + 确认落点"，15s 在卡顿时不够；一旦超时就整次失败、模型再发一次，形成 0 进展循环
+- **最小修复**：① 第 0 步使用总预算 45s（不套 per-step）；② 或 `per_step_timeout` 提到 20~25s；③ 返回里带 `steps_done=0` 的 `time_budget` 时给不同提示（换方向/unstick），避免模型原样重试
+- **验收标准**：r21 `staircase:time_budget` 中 `steps_done=0` ≤5 次/波；`staircase` 调用总数下降 ≥20%
+- **D1 r20_long 复核（不是首步问题，是总预算打长请求）**：`ds_ds_1_bare` 的 `bootstrap_iron_age` 集 13 次调用里 **6 次 `staircase:time_budget`**，但 `steps_done` 都是 **7~9**（不是 0）；模型请求 `steps` 中位 **40**，45s 总预算永远做不完。
+- **D1 两波对比（两种模式必须分开修）**：
+  | 波次 | `steps_done=0`（per-step 15s 饿死） | `steps_done>0`（45s 总预算打长请求） | 请求 steps 中位 |
+  |---|---|---|---|
+  | r20_short | **24** | 12 | 12 |
+  | r20_long | **0** | 8（done 中位 8） | **40** |
+  → 本单负责 0 步模式（per-step 15→20~25s 或第 0 步豁免）；>0 步模式见 P2-20（请求步数 clamp + 预算按 steps 缩放）。
+- **D1 r24 复核（首步 starvation 与镐等级无关）**：`r24_short` 仍有 **9 次 `timeout_path=dig`**（其中 **5 次 `steps_done=0`**），但**没有出现"木镐"新文案** → 这些 bot 镐等级 ≥2，说明首步 15s 超时在**正常镐 + 硬方块（黑曜石/堡垒砖）**下同样发生。BUG-041 的"命名低镐"只覆盖 tier<2 子集，**第 0 步豁免仍是必须的**。
+- **D1 r23 新证据（下界 ancient_debris/gold 0 进展）**：`nju_guitest` 在下界 y=54 连续 `explore(target=gold/ancient_debris, target_y=15)` 返回 `time_slice`，**pos_before == pos_after**、耗时 28~50s（预算 60~75s）；tree 里 `active_node 5` 挂着 `pending: stair_down south, steps=35` 且无 pruned 分支 → 内部 `dig_staircase` 在第一步就超时退出，分支未执行。r23 的 zero-slice 17.5%（10 次）全部是这一类。
+  → 说明 BUG-037 的 per-step 15s 不只影响独立 `mc_skill_staircase`，也卡住 `mine_dfs` 内部阶梯；修复时需同时覆盖内部调用，并把"0 进展 + 分支 pending"归为 `branch_failed`（触发 relocate），而不是 `time_slice`。
+- **D1 r22_long 死锁链（P1 实证，裸开卡铁器）**：`hy4_hy_1_bare` 在 y=39 地下：
+  1. `craft_gear(stone_pickaxe)` → `missing {"stick":2}`（无木头）
+  2. `harvest_logs` → "y=39 低于树木带，请先 staircase(up)"
+  3. `staircase(north, up, steps=20/30)` → **time_budget ×11**（每片只 done 部分，模式二）
+  4. `mine_dfs(iron)` → `insufficient_pickaxe_tier`（只有木镐）
+  → 三步互为前置，整轮 24 分钟停在 10 分。**修好模式二即可直接解锁**：入口 clamp `steps<=10` 或预算 `min(90, 8+steps*5)`。
+- **D1 过夜两波复核**：`overnight_12bot` **351 次** time_budget（342 `timeout_path=dig`、135 低镐文案、`steps_done` 中位 **1**）；`overnight_12bot_part2` **241 次**（225 dig、79 低镐、`steps_done` 中位 **2**、`dig_cell_avoided` 101）。
+  → `steps_done` 中位 1→2 说明快速失败路径有效，但**仍无"软方块方向优先"**；`pillar_fallback` 在 part2 升到 **140**（r28 hy4 更高：73），已成为与 time_budget 并列的主要失败路径。
+- **D1 r21 第三种模式（首步 movement_not_confirmed）**：`ds_ds_4_nether_fortress` 在下界 `[705,66,640]` 连续 `north/south` 都返回 `steps_done=0, dug_count=0, stop_reason=movement_not_confirmed`，但返回体里已有 `viable_directions=[south/east/west]`；模型却在对向反复试。
+  → 建议：`steps_done==0 && dug_count==0` 时不返回泛化失败，而是自动 `unstick` 或改用 `viable_directions[0]`；同时把 `steps` 被 clamp 的事实显式回传（r22 已见 `steps_capped_from:20 / steps_clamped:true`，此项已满足）。
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-038 | P1 | Slice A（#3 Codex #1）| 状态: OPEN（r20_long 实测，卡死裸开铁器）
+
+- **裸装冲刺 V2 的石器退化与铁课派发。** `e4c5d4c` 实载六裸装槽终版石器 **3/6→0/6**，铁器仍 0/6。H2–H6 EP02 连续失败后处石器冷却，EP03 均进入铁器、`pre_ensure` 都仍缺 **2 石镐**并被抢占。用真实选择器离线同库存比对：白天有石镐旧先侦察、新先铁器；白天无镐且石器冷却旧先侦察、新也派铁器；夜晚此反例两版皆派铁器。铁器启动条件应核可用石镐或能在受保护时确定补出，缺料的失败冷却不得跳过装备依赖。 [H2 预备](../runs/5ease_bare_sprint_v2_20261122/hy_5e_2_bare/20261122-062303-086499.events.jsonl#L5) · [H5 预备](../runs/5ease_bare_sprint_v2_20261122/hy_5e_5_bare/20261122-062129-598889.events.jsonl#L5) · [跳过冷却的石器](../src/mc_agent/harness/curriculum.py#L1556) · [铁课优先级](../src/mc_agent/harness/curriculum.py#L1583)
+
+- **三路线 OB2 首集铁器已带两把石镐。** `af15bce` 实载，L136 同包有两木镐两石镐、6 圆石。90s 片后 Y64、圆石 +62、粗铁 0。第二片石锥死后，L278 核实圆石和木棍都 0，失败请求一次补两把石镐；即使重制木板，L536 再试 DFS 仍 `pickaxe_low`。恢复优先让工具与石料链闭合，重入铁课前领到或重制可用镐。 [开挖前实包](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-061430-219888.events.jsonl#L136) · [失去补料](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-061430-219888.events.jsonl#L278) · [再挖仍缺镐](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-061430-219888.events.jsonl#L536)
+
+- **裸装冲刺 `af15bce` 终版，石器只成 3/6，铁器 0/6。** H1 是唯一真正启动铁器课的裸装槽，两条 90s 工具因近战在 16.3252s／7.4473s 抢占，随后 Y51 近战死，重装回到 Y78。补镐缺石、后续 36.6s 阶梯至多走 7 步。六槽终包无粗铁、铁锭和铁镐。优先验相同裸装锚的真实石料入包、木载具使用和低损耗石镐接续，再计首铁、取锭和装备。P2-50 补记错误的深板岩引导。 [H1 死亡](../runs/5ease_bare_sprint_20261122/hy_5e_1_bare/20261122-061049-433600.events.jsonl#L198) · [官方终包](../runs/5ease_bare_sprint_20261122/hy_5e_1_bare/wild-endurance-5ease_bare_sp_hy_5e_1_bare-20261122-060442.json#L45) · [采石回退](../runs/5ease_bare_sprint_20261122/hy_5e_1_bare/20261122-061049-433600.events.jsonl#L363)
+- **影响**：`ds_ds_1_bare` 在 y=17 断镐后，**~250s 只爬升 10 格**（17→27）且仍无法补料；`bootstrap_iron_age` 因此超时，整轮停在 15 分
+- **逐调用证据（r20_long `ds_ds_1_bare/20261119-071842`）**：
+  ```
+  pickaxe_low  y=20→17
+  climb_out 53.0s 17→20 (climb_progress)
+  climb_out 27.7s 20→20 (time_slice, 0 进展)
+  climb_out 40.9s 20→20 (time_slice, 0 进展)
+  climb_out 43.3s 20→25 (climb_progress)
+  climb_out 25.6s 25→26 (climb_progress)
+  staircase 25.8s 26→27 (time_budget)
+  unstick   25.7s
+  staircase 16.2s 27→27 (time_budget, 0 进展)
+  → 下一集：craft_gear missing_ingredients + harvest_logs no_targets_available
+  ```
+- **源码定位**：`mining_dfs._climb_out`（`:2728+`）每片预算只够 3~5 格，且两次 `time_slice` 0 进展说明"沿自建巷道走"未生效、退化为重新开阶梯；`library.dig_staircase` 又叠加 BUG-037（首步/per-step）
+- **最小修复**：① `_climb_out` 优先沿已建 corridor 的 waypoints 直达（walk 模式），不要在巷道里重新 dig；② 单次 climb 至少保证 **8~10 格/片**；③ `pickaxe_low` + 无木头时直接给"climb_out 到 y>=目标地表"的量化建议（当前 P2-30 只给了文字）
+- **验收标准**：r21 地下断镐到回地表的调用数 ≤3、总耗时 ≤120s；`climb_out` 0 进展 `time_slice` 为 0
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-039 | P1 | Slice D2（#6 DeepSeek #2）| 状态: OPEN（r21_short 实测）
+- **W21 故障落盘路径覆盖。** 12/12 以 `not_ready` 留终档、零 Traceback；这次是入场鉴权 502，死亡冷却 420s 门无暴露。见 BUG-158。 [HY9 入场终档](../runs/l1_w21_v1321_20261123/hy_5e_9_bare_60m/wild-endurance-wild-20261123-002244.json#L13)
+- **影响**：`glm_glm_1_nether_fortress` 在 r21_short **启动即整路丢失**（0 summary）
+- **日志证据**：
+  ```
+  l3_wild_endurance_runner.py:1572 st = ensure_bot_ready(bot, timeout_s=45.0)
+  l3:1327 RuntimeError: bot did not become ready after 3 attempts (cooldown waited 186s)
+  ```
+- **源码定位**：`scripts/l3_wild_endurance_runner.py::ensure_bot_ready` —— `attempts=3` 是硬上限，**186s 就放弃**，而签名里的 `max_cooldown_wait_s=420.0` 并未真正用于循环条件
+- **现象与根因**：bot 处于 >186s 的死亡冷却中（连续死亡/服务端未恢复）；函数在第 3 次尝试后直接 `raise`，把"可等待"变成整路崩溃
+- **最小修复**：① 循环条件改为 `while waited < max_cooldown_wait_s`（attempts 只作为日志/软阈值）；② 仍失败时不要 `raise`，写一份 `status="not_ready"` 的 summary 并正常退出该 bot（保留其它 17 路）；③ 打印剩余冷却 ETA
+- **验收标准**：r22 起 `ensure_bot_ready` 失败 0 进程 Traceback；单路最长等待 ≤420s，且等待失败只影响该路
+- **D1 r21 早期复核**：`r21_short` 0/18 summary、1 Traceback（即本单）；其余 17 路正常写入 events，`thread exceptions=0`。
+- **r51／r52 连续复现（同 HY4_6）**：两波均累计等待 **558s**、下一轮 60s 大于剩余 42s 时结算 `not_ready`，0 actor、0 进程崩溃。当前缺省预算 600s，超过本票验收写的 420s。日志每轮都写 60s，但源码把 API 缺 ETA 时的回退也写成 60s。先区分 `connect` 的服务端剩余、`status` 剩余与本地回退，并记录剩余量是否减少，才能裁定服务端冷却重置。 [r51 终版](../runs/r51_nether_fortress_9bot/hy4_hy_6_nether_fortress/wild-endurance-r51_nether_fortress_9bot_hy_6_nether_fortress-20261120-210116.json#L13) · [r52 启动日志](../runs/r52_day2_wild_scout_9bot/hy4_hy_6_iron/stdout.log#L11) · [r52 终版](../runs/r52_day2_wild_scout_9bot/hy4_hy_6_iron/wild-endurance-r52_day2_wild_scout_9bot_hy_6_iron-20261120-213215.json#L13) · [ETA 回退](../scripts/l3_wild_endurance_runner.py#L1674)
+- **r53 第三次复现**：同一 HY4_6 再次累计等待 **558s**，以 `not_ready` 终结、0 集。其余八路正常落盘。 [冷却耗尽](../runs/r53_nether_fortress_9bot/hy4_hy_6_nether_fortress/stdout.log#L10) · [终版状态](../runs/r53_nether_fortress_9bot/hy4_hy_6_nether_fortress/wild-endurance-r53_nether_fortress_9bot_hy_6_nether_fortress-20261120-215400.json#L11)
+- **r54 第四次复现**：同一 HY4_6 再次因下一次 60s 大于余量 42s，在累计 **558s** 后以 `not_ready` 收尾。4 个开跑槽正常落盘。 [冷却回执](../runs/r54_nether_fortress_6bot/hy4_hy_6_nether_fortress/stdout.log#L10) · [终版状态](../runs/r54_nether_fortress_6bot/hy4_hy_6_nether_fortress/wild-endurance-r54_nether_fortress_6bot_hy_6_nether_fortress-20261120-231204.json#L11)
+- **r56 裸装第五次复现**：同一 HY4_6 改为主世界裸装，仍累计 558s 后 `not_ready`，终版开局集数 0。该问题已在两个不同阶段重复。 [冷却回执](../runs/r56_day1_day2_bare_5bot/hy4_hy_6_bare/stdout.log#L10) · [裸装终版状态](../runs/r56_day1_day2_bare_5bot/hy4_hy_6_bare/wild-endurance-r56_day1_day2_bare_5bot_hy_6_bare-20261121-001919.json#L11)
+
+### r20_long / r21_short 终验摘要（D1，23:57）
+
+- **r20_long 4/4**（0 Traceback）：`glm_5` 180（12 集）、`hy4_1` 40、`ds_1` 15、`nju_movetest` **0（auth_error，BUG-036）**；门禁仅 `BUG-029 over-cap 2` 失败（`hy4_1` cobbled_deepslate **493**、`ds_1` cobble 228）。
+- **r21_short 17/18**：仅 `startup crash 1`（BUG-039 `glm_1`）；BUG-035 实机 0 复发；`over-cap 0`；deaths 9、冷却 111.7s、mine 0.90/6.6%。
+- 分数：r20_short 1680 → r21_short 1690（17 vs 17）；若 `glm_1` 不丢（上波 160 分），本波约 **1850**。
+
+- **r66 探索铁器槽**：`r66_expl_mem_hy6` 再次记录 HY4_6 等待 **558s／600s**，下一轮估计 60s 超出剩余 42s，终版 `not_ready`、0 集、0 actor。600s 循环中的 60s 仍可能是源码缺 ETA 时的回退值。 [等待日志](../runs/r66_expl_mem_hy6/hy4_hy_6_iron/stdout.log#L10) · [终版](../runs/r66_expl_mem_hy6/hy4_hy_6_iron/wild-endurance-r66_expl_mem_hy6_hy_6_iron-20261121-061609.json#L11) · [回退值](../scripts/l3_wild_endurance_runner.py#L1670)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-040 | P1 | Integrator（#1）+ Slice D2（#6）| 状态: 部分修复（`165e652` 已大幅收敛；仍有死亡回城残留）
+- **D2 `5789247` 补确认已出硬圈后的回锚。** Long2 H1 终版楼梯和隧道各 23 次 `void_geofence_blocked`，另挖掘 5、移动 3、DFS 1。候选需两次连续就绪、明示同维度且已在外圈外才按 `outside_fence_return` 回锚；D2 以 Long2 现场坐标复现第二次才回、背包保持，并验死亡处理及跨维度。该 runner 提交未合入 Long3，后续要同时核回锚时位置和实包。 [原出圈回执](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-120444-109474.events.jsonl#L88) · [再次拒绝](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-122642-455424.events.jsonl#L100) · [候选连续证据](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L1756)
+- **Long2 H1 在正确中心下回升出圈。** EP05 开始距中心 199.6m，L88 的 `climb_out` 由 208.6→221.5m 穿过 212m 安全线，L109 又到 234.0m。下一集 runner 以原中心重建相同围栏，朝内短东阶的端点 234.4m 仍被拒，中心长距离也无路。D1 用 `1c579b9` 真实工具围栏离线复现：同中心下东向 5 阶距离下降仍被拒，端点已回到半径内的请求能通过静态门。`climb_out` 直接调用楼梯技能，避开原子工具的方向门。验收需分别看回程是否把 Bot 带出安全圈，以及越界后是否有符合安全约束的真实返回路径。 [出圈](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-120444-109474.events.jsonl#L88) · [更远](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-120444-109474.events.jsonl#L109) · [重建相同中心](../runs/l2_long2_20261122/hy_5e_1_midgame/stdout.log#L582) · [短阶拒绝](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-120946-061906.events.jsonl#L288) · [回升调用](../src/mc_agent/skills/mining_dfs.py#L3350) · [方向门](../src/mc_agent/harness/mc_tools.py#L2866)
+- **影响**：NJU 两路被虚空围栏误判为"离岛"，`staircase`/`tunnel`/`move_to` 连续被拦截。r22_short 累计：`nju_3` **19 次**（分数跌到 **25**，r21 为 40）、`nju_guitest` **9 次**（本波 180）、`ds_3` 1 次（真实贴边）
+- **证据**：
+  ```
+  nju_guitest: spawn=(6381.5, 66, -6415.5)   围栏 center=(797.6, -814.5)   target dist 7913m
+  nju_nju_3  : spawn=(-5703.2, 63, 5728.0)  围栏 center=(-153.5, -385.5)   target dist 8257m
+  ds_ds_3    : spawn=(-2974.5, 69, 9974.5)  围栏 center=同 spawn           正常（213.9m 属真实贴边）
+  ```
+- **源码定位**：runner 在 `l3_wild_endurance_runner.py:1663` 用 `center_x=sx, center_z=sz` 建围栏；但 `harness/agent.py:1234-1250` 的 ephemeral-HUD 自动回中逻辑会在 `dimension == overworld` 且 `dist(bot, center) > 400` 时**把中心改成 bot 当前坐标**。若此时场景 teleport 尚未生效（bot 还停在旧位置），围栏就被永久钉在旧坐标
+- **现象与根因**：场景 teleport 与 HUD 自动回中竞态；NJU 网关较慢，teleport 未落地时被回中 → 之后场景内所有方向检查都判越界
+- **最小修复**：① runner 显式传入的围栏加 `pinned=True`（或子类标记），`agent.py` 跳过自动回中；② 或仅当 `center == .env 默认值` 时才允许回中；③ `verify_scene_entry` 后断言 `dist(bot, geofence.center) < safe_radius`，不满足则按场景锚点重建
+- **D1 r23 早期复核（大幅收敛）**：`165e652` 在每集开始时若 bot 已在 `geofence.radius` 外则重新锚定；r23 加载于 00:14（修复后），NJU 两路 **0 次拦截**（r22 为 9/19 次），移动 4/4、4/6 正常。
+- **D1 r23 残留 1 例（死亡回城）**：`hy4_hy_8_nether` 第 3 集 **elapsed 238s**（非集首）出现一次 `void_geofence_blocked`：center=(972.4,350.5)、目标 (7795.5,2806)、距离 7251m。
+  → 推断：bot 死亡后回世界出生点 (972,350)，HUD 自动回中把围栏钉在出生点；随后返回场景 (7795,2806) 时被拦。集首重锚救不了"集中死亡"。
+  → 追加修复：① 死亡/重生时把围栏重锚到**场景锚点**而非重生点；② 或在 `_check_direction_geofence`/`mc_move_to` 检查前做惰性重锚（`dist(bot,center)>radius` 时以 bot 当前位置重锚）。
+- **验收标准**：r23 起 NJU 两路 `void_geofence_blocked` = 0；`verify_scene_entry` 增加围栏一致性检查
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-041 | P1 | Slice C（#4 Codex #2）| 状态: FIXED（`7b6e64d` 已合入；r24 加载于合并之后）
+- **影响**：`hy4_hy_1_bare` 在 y=33~39 用 **木镐** 向上开阶梯，`staircase` 变成 **~30s/格**（8 次调用只前进 1~2 格），导致无法回到地表补木/补镐
+- **日志证据**：
+  ```json
+  {"stop_reason":"time_budget","steps_done":1,"dug_count":4,"timeout_path":"dig",
+   "dig_target":[-11054,36,-11051],"steps_capped_from":20,"steps_clamped":true,
+   "error":{"code":"time_budget","message":"单步挖掘未在预算内确认…"}}
+  ```
+  同波 8 次：`north/east/south/west` 全部 `steps_done=1`，耗时 24~32s
+- **源码定位**：`skills/library.py` 的 `dig_staircase` 每步 `dig` 走统一超时；未按"当前镐等级 vs 目标方块硬度"选择路径/软方块，也未在超时后提示"镐太低级"
+- **现象与根因**：木镐挖 stone/deepslate 单块就要 ~25s；上爬阶梯全是硬岩 → 每步超时。这是 BUG-037（阶梯）与裸开死锁链的**真正瓶颈**
+- **最小修复**：① 当 `highest_pickaxe_tier < 2` 时，上/下阶梯优先选择 `dirt/gravel/sand/netherrack` 等软方块方向（`_probe_viable_*_dirs` 增加 hardness 排序）；② `timeout_path=="dig"` 且 tier<2 时，错误信息直接给 `mc_skill_craft_gear(stone_pickaxe)` 或"换软土方向"；③ 同一格连续 2 次 dig 超时就标记 30s 避开
+- **D1 成本量化（r22_long `hy4_hy_1`）**：整轮 **426s（7.1 分钟）** 耗在 `staircase`，其中两个 episode 分别 **282s / 144s**（约占该集 59% / 94%），只换来 y 33→43；同期 `mine_dfs` 654s。**7 个 episode / 32 分钟仍停在 10 分**（对照：同波 `glm_5` 在同一时长内拿到 195 分、13 个成就，含 `shiny_gear 60`）。
+- **D1 代码复核（23:22 提交，符合建议）**：
+  - `1bbeb4f`：dig 超时时读取 `session.pickaxe_tier`，tier<2 时明确报"当前镐等级 1（木镐）挖 X 约需 25s/格"，并给出 `craft_gear(stone_pickaxe)` / 走软方块 / `harvest_logs` / `unstick` 四条出路
+  - `0264145`：同一 dig 格超时后加入 `_avoid_temporarily(..., "dig_timeout", 30s)`，并在下一次调用**快速失败**，避免连续烧 15~45s
+  - 未包含"软方块方向优先"（建议项②），但错误文案已引导模型自行换向，可接受
+  - **合并状态（已合入）**：`7b6e64d`（00:35）合并后 `grep low_tier_slow_dig` = 3；r24 进程加载于 00:37 → **r24 可实机复验**
+- **D1 过夜实机复核（部分达成）**：`overnight_12bot` 中 **146 次** `staircase:time_budget`，其中 **143 次 `timeout_path=dig`**、**64 次触发"木镐/镐等级"新文案**、`dig_cell_avoided` 64 次 → **命名与快速失败已生效**；但 **`steps_done` 中位仍为 1**（请求中位 20 步），说明缺少"软方块方向优先"，仍每步超时。
+  → 剩余修复即建议项②：`_probe_viable_*_dirs` 增加方块硬度排序，tier<2 时优先 dirt/gravel/sand/netherrack。
+- **验收标准**：r23 裸开 `staircase` 单片 `steps_done` ≥3（木镐场景）；`timeout_path=dig` 的 1 步调用 ≤2/波
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-042 | P1（P0 级影响）| Integrator（#1，`harness/model.py`）| 状态: OPEN（r22/r23 实测，单波丢 21 集）
+
+- **W21 首批三个短槽已出终档，第四集组限终败。** NJU OB3 EP04 最终错误仍是组上限 2。四个持续案例都达八次尝试，其余九槽尚无本次终档。 [第四次终败](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-003906-182533.events.jsonl#L399)
+
+- **W21 补跑在途三集硬 429。** HY10 60m EP01、HY2 20m EP02、NJU OB3 20m EP01 各七次退避，第八次失败，末次正文明确组限 2。使用正式终档的长槽和整波门仍待样本；启动鉴权 502 见 BUG-158，实际两槽排队及本地锁别名见 BUG-150。 [HY10 尾端](../runs/l1_w21_v1321_20261123/hy_5e_10_bare_60m/20261123-002516-255658.events.jsonl#L228) · [OB3 尾端](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-002557-069299.events.jsonl#L294)
+
+- **W20 正式五长槽。** 硬 429／502 损失为零，六条持续请求最低六次尝试。12 路四小时与同型 HY4 长槽评分仍缺，W20 未加载后续 `abe58d4` 的直连 HY4 组门。 [HY10 持续请求](../runs/l1_w20_20261122/hy_5e_10_bare_60m/20261122-233908-000275.events.jsonl#L14)
+
+- **W20 OB1 无硬 429 仍有整集预算损耗。** 60m 槽、NJU 通道，EP09 六个钻 DFS 实干 516.12s，七次模型请求到结束合 563.69s。24 个 429、一个 524；429 回执的计划等候合 410.09s，末请求在第七次 429 后被 1080s 时限切掉，其最后 29.41s 计划退避未完整实现。终状态是 `timeout`，截止 Y−35、零钻。与 HY4 的跨进程门控分通道对账。 [通道](../runs/l1_w20_20261122/nju_ob_1_bare_60m/stdout.log#L4) · [重试链](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-230929-833398.events.jsonl#L220) · [超时](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-230929-833398.events.jsonl#L229)
+
+- **W17b HY10 裸装钻石课硬 429。** EP04 四次实际挖掘至 Y−27、钻石未入包。末次 actor 请求连续七次 429 延后，时间安排合计 137.18s，直到第八次仍被原样拒绝，报 `Harness group concurrency limit: 2 simultaneous requests`，整集 400.06s 以运行错误结束。原迹定位到通道并发门；此波非 12 路 4h 验收。 [首轮延后](../runs/l1_w17b_20261122/hy_5e_10_bare/20261122-204142-460126.events.jsonl#L127) · [耗尽失败](../runs/l1_w17b_20261122/hy_5e_10_bare/20261122-204142-460126.events.jsonl#L136)
+- **晨报「三轮 L2 全程 0 次 429」需更正。** 三轮 actor 原迹分别 **358／316／459 条** HTTP 429 重试，按文件／scope／request 去重 **237／215／306 个请求**，全部为并发限制。两类 bot 槽均出现重试。Long1、Long2 无硬 429 报废，Long3 OB1 EP01 **1 集**重试耗尽而 `runtime_error`。报表分别列重试、硬失败和 Guardian 取消。 [晨报首屏](overnight-report-20261123.md#L5) · [硬失败请求](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-123942-877936.events.jsonl#L165) · [集尾](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-123942-877936.events.jsonl#L167) · [并发重试预算](../src/mc_agent/harness/model.py#L665)
+- **Long3 七槽终档复验。** 持续失败重试至少 6 次（3 个样本），长槽 429/502 报废 1 集，两项通过。缺 12 路约 4h 和同款 HY4 裸装长槽，主验收仍待。 [唯一硬 429](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-123942-877936.events.jsonl#L165) · [六次重试样本](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-124638-586473.events.jsonl#L272)
+- **Long3 OB1 EP01 首例硬 429。** request 5 实际 8 次尝试，七笔退避申报合 **140.140s**，从请求到失败 **142.610s**。限流事件已返回、等待约 0s，服务端给组并发上限 2。L167 石器集以 `runtime_error` 结束。持续重试次数达标，硬损失仍是一集；此时 0/7 正式终档。 [请求](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-123942-877936.events.jsonl#L155) · [最后重试](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-123942-877936.events.jsonl#L164) · [集尾](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-123942-877936.events.jsonl#L167) · [并发重试预算](../src/mc_agent/harness/model.py#L665)
+- **Long2 要塞槽首个六连 429 恢复。** H2 EP03 request 18 六次 429 申报退避 **106.185s**，同请求从启动到成功结束 **110.422s**，第七次尝试恢复流式输出。这条样本未硬丢集，耗时很高。12 路四小时及指定 HY4 裸装队形另测。 [请求起点](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-113825-278596.events.jsonl#L432) · [最后 429](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-113825-278596.events.jsonl#L439) · [同请求结束](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-113825-278596.events.jsonl#L451)
+- **L2 OB2 首终档的末集有可恢复 429。** EP12 request 8 在 L273–277 五次响应为 429，计划退避总 **79.728s**，L271→L297 的完整请求跨度 **85.212s**，之后工具继续，该集结束原因是总时限。按 1h、最大 12 集的 L2 配置记录。 [首条退避](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-110259-191669.events.jsonl#L273) · [同请求恢复](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-110259-191669.events.jsonl#L297) · [集尾](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-110259-191669.events.jsonl#L368)
+
+- **裸装冲刺 V2 H7 真实硬 429。** 铁槽 EP01 首片实获 1 粗铁后，连续 7 条 `model.http_retry`，第 8 次尝试仍收到 `Harness group concurrency limit: 2 simultaneous requests`，整集 `runtime_error`。EP02 实入另 5，终包 6。该现场是 HY4 的并发门，记录同行波的请求时窗再划分通道和模型容量。槽配 360s，不能填长测验收。 [最后重试](../runs/5ease_bare_sprint_v2_20261122/hy_5e_7_probe_iron_y16/20261122-061803-254747.events.jsonl#L43) · [硬 429](../runs/5ease_bare_sprint_v2_20261122/hy_5e_7_probe_iron_y16/20261122-061803-254747.events.jsonl#L47) · [次集另获 5](../runs/5ease_bare_sprint_v2_20261122/hy_5e_7_probe_iron_y16/20261122-062206-455675.events.jsonl#L32) H6 EP03 同样 8 次尝试后中止。整波 **136 重试、2 硬 429、0 502**。 [H6 硬 429](../runs/5ease_bare_sprint_v2_20261122/hy_5e_6_bare/20261122-062316-749046.events.jsonl#L169)
+
+- **W2 40 分钟三槽见一次持续 429 恢复**。OB3 EP15 同请求 5 次重试、共 6 次尝试，退避合 **80.770s**，随后继续执行。3/3 终版无硬 429 或 502。长程、12 槽和 HY4 bare 分数验收继续待对口波次。 [第 5 条重试](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-031849-204129.events.jsonl#L552) · [后续调用](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-031849-204129.events.jsonl#L575)
+
+- **r63–r70 新增长槽复核**：在有数值墙钟的 73 个终版槽中，19 个计划 2700s，分别来自 r63／64／65／66 日出及 r68 裸装。19 槽的终版 `runtime_error` 回执里，硬 429／502 导致的丢集为 **0**。仍缺 12 路约 4 小时配置。 [r66 HY4_10 终版](../runs/r66_day12_full_45m/hy4_hy_10_bare/wild-endurance-r66_day12_full_45m_hy_10_bare-20261121-072420.json) · [r68 HY4_5 终版](../runs/r68_bare_real_drop_3bot/hy4_hy_5_bare/wild-endurance-r68_bare_real_drop_3bot_hy_5_bare-20261121-073241.json)
+
+- **r67 村庄 LC 双槽复现**：各 6 RPM，LC1／LC2 有 **4／5** 个硬 429，同请求均第八次失败。83 条 429 延后均 35s，79 条能跟下一实际尝试配对，确认退避 **2765 Bot·s／3000.2 Bot·s = 92.2%**，其余四条结束证据不足。四次试图交易均在 actor 首请求失败，未下发交易工具；同波 HY4_7、MoveTest 各真实交易一笔。全波 9 个硬 429 均来自 LC，MoveTest 9 次 429 延后均有后续响应。 [LC2 八次尝试](../runs/r67_village_trade_4bot/lc_lc_2_village_trade/20261121-071856-821092.events.jsonl#L17) · [LC1 首集](../runs/r67_village_trade_4bot/lc_lc_1_village_trade/20261121-070653-569155.events.jsonl#L14) · [MoveTest 交易](../runs/r67_village_trade_4bot/nju_movetest_01_village_trade/20261121-070633-745290.events.jsonl#L107)
+- **影响**：`hy4_hy_1_bare` 的 11 个 episode 中 **5 个**因 provider 过载直接 `runtime_error`（EP5/6/9/10 = 429、EP8 = 502），整轮只剩 10 分
+- **日志证据**：
+  ```
+  Qwen API 返回 HTTP 429：{"type":"server_error","message":"The inference service is overloaded. Please try again later."}  ×4
+  流式 API 返回错误：{'type':'server_error','message':'Streaming response failed: [502]'}  ×1
+  ```
+- **源码定位**：`harness/model.py:574-578 _is_concurrency_limit_429` 只匹配 `concurrency` / `simultaneous`；Qwen 的 "inference service is overloaded" **不被识别** → 走 `standard_max_attempts=3` + 1~2s 退避，很快耗尽 → `RuntimeError` → 整集结束
+- **现象与根因**：过载型 429 应等价于并发限流（更长退避、更多尝试），或至少在 curriculum 层把该集"暂停并重排"，而不是整集报废
+- **最小修复**：① `_is_concurrency_limit_429` 增加 `overloaded` / `try again later` / `server_error` 关键词（复用 8 次 + 6~28s 退避）；② `curriculum` 对 `transient_api_error` 的集改为 `paused` 并重新入队（保留剩余预算）
+- **D1 r23_short 扩大复核（严重）**：全波 **21 个 episode** 因 provider 过载报废 —— **18× 429 "inference service is overloaded"** + **3× 502**，波及 8 路（`hy4_7` 5、`hy4_6` 4、`hy4_2` 3、`hy4_9` 3…）。r23 总分 1765（r22 1845），`runtime_error` 门禁 21/2。
+- **D1 r24 实时观察（严重：hy4 已丢 46% 集）**：`r24_short` 当前 **72 个 episode 中 33 个 `runtime_error`（46%）**，全部在 `hy4-flash-free`：`hy4_3` 7、`hy4_7` 7、`hy4_6` 4、`hy4_9` 4、`hy4_8` 3、`hy4_10` 3…；`http_retry` 100+、失败 429 18+。`r24_long` 仍 0（长任务请求频率低）。
+  → **强烈建议 #1 立即暂停 hy4 squad 或切 provider**；同时修 `_is_concurrency_limit_429`。
+- **D1 r24_short 分 bot 报废率（00:50，hy4 通道基本不可用）**：
+  | bot | 总集 | runtime | 成功 |
+  |---|---|---|---|
+  | `hy4_6_nether_bastion` | 4 | **4（100%）** | 0 |
+  | `hy4_7_village` | 9 | **8（89%）** | 0 |
+  | `hy4_3_midgame` | 12 | **8（67%）** | 1 |
+  | `hy4_10_deep_water` | 4 | 3（75%） | 0 |
+  | `hy4_9_deep_water` | 5 | 4（80%） | 1 |
+  | `hy4_8_nether` | 6 | 4（67%） | 2 |
+  | `hy4_2_iron` | 3 | 2（67%） | 0 |
+  对照 `glm_* / ds_* / nju_*`：**0 次** runtime_error，全部正常。
+  → hy4 这 10 路当前贡献接近 0，继续跑只会消耗配额与时间。
+- **D1 r24_short 最新（00:54）**：93 个 episode 中 **40 个 runtime_error（43%）**，4 分钟内又新增 7 个；`r24_long` 仅 `hy4_1` 1 个（长任务频率低）。**过载仍未缓解。**
+- **D1 诊断（排除"长上下文导致过载"）**：失败集的 `actor_requests` 中位 **3**（max 30），成功集中位 **6**（max 45）→ 失败发生在 episode **开头**，不是上下文膨胀触发；按分钟统计 429/retry 从 16:37 持续到 16:51（峰值 16:48 共 10 次），属**通道级持续饱和**。
+  → 结论：缩小上下文/减少历史不会缓解；只有暂停 hy4 或换通道有效。
+- **D1 缓解方案已验证（`hy4_audit_r25`，01:44）**：**4 路 hy4 + rpm=6 + 20 分钟** → `retries 0 / failed429 0 / 502 0 / tracebacks 0`，全门禁 PASS。对照 r24_short 的 **10 路无 rpm 限制 → 40 集报废**。
+  → 运维结论：**hy4 的安全并发是 4 路 + rpm=6**；`v2_fleet.py launch` 应把 hy4 squad 默认限制在该配置，或对 429 率做熔断。
+- **D1 04:30 主轨复核（又一种 429 body）**：`overnight_12bot` 3 小时累计 612 次 retry、**6 次失败 429**，错误体为
+  `{"type":"rate_limit_error","message":"Rate limit exceeded. Please try again."}` —— **既不含 `concurrency` 也不含 `overloaded`**，同样不被 `_is_concurrency_limit_429` 识别。
+  → 修复关键词必须覆盖：`concurrency` / `simultaneous` / `overloaded` / `rate limit` / `rate_limit` / `try again later` / `server_error`。
+- **D1 hy4 审计轨对照（决定性证据）**：
+  - `hy4_audit_r25`（20min）：**0 retries / 0 429 / 0 502**
+  - `hy4_audit_r26`（配置 2 小时）：0 429、1 502
+  - `hy4_audit_r27`（**3 小时**、4 路、rpm=6、收官 **127 集**）：**0 retries / 0 429 / 0 502 / 0 Traceback**，`mine_dfs` 零进展 2.2%，明确死亡回执 22 条，cooldown 约 128s。 [收官报告](../runs/hy4_audit_r27/triage-hy4_audit_r27.md)
+  → **结论定稿：hy4 的 429 与模型无关，纯粹是并发数；4 路 + rpm=6 在 3 小时长程下完全稳定。**
+- **D1 06:52 精确定位（`overnight_12bot_part2`，Qwen 429 硬失败率 6×）**：
+  - 失败率对照：第一波 `9/1079` = **0.08%**；第二波 `17/3488` = **0.49%**；重试率两波接近（8.0% vs 9.0%）→ **不是总量问题，是突发窗口**。
+  - 时间分布：第一波 9 次散布在 19:33–20:53（UTC）；第二波 **15/17 集中在 22:23–22:33（10 分钟）**，期间主轨 12 路 + hy4 审计轨 4 路 = **16 并发**。
+  - **每次硬失败的调用序列完全一致**：
+    ```
+    model.request → http_retry(attempt=1, wait=15.0, concurrency_limit=false)
+                  → http_retry(attempt=2, wait=15.0, concurrency_limit=false)
+                  → model.failed  Qwen API 返回 HTTP 429：{"type":"rate_limit_error",...}
+                  → run.finished  runtime_error
+    ```
+    即 **2 次重试、共 30 秒退避后放弃**。
+  - **源码根因（`model.py:652-653`）**：`standard_max_attempts = 3` / `concurrency_max_attempts = 8`。Qwen 的 `rate_limit_error` body 不含 `concurrency`/`simultaneous` → 落到 `standard` 分支 → **只有 3 次尝试**；并发分支有 8 次 + 6/10/15/20/22/25/28s 退避（约 126s）。Qwen 的限流窗口 ≥60s，30s 必然不够。
+  - **最小修复（二选一即可，建议都做）**：① `_is_concurrency_limit_429` 增补 `rate_limit` / `rate limit` / `overloaded` / `try again later` / `server_error`；② 对**任意 429** 直接使用 `concurrency_max_attempts`（429 语义上就是"稍后重试"）。
+  - **验收标准**：12 路 × 4h 波次中，`model.failed` 含 429 的集数 ≤2；单次 429 连续尝试 ≥6 次。
+- **D1 07:37 追加：天然 A/B 对照证明"8 次尝试预算"就是解药**
+  | provider | retry 事件 | `concurrency_limit` | 硬失败 429 |
+  |---|---|---|---|
+  | NJU（`nju_*`） | 16 | **true**（走 8 次 + 6~28s） | **0** |
+  | Qwen（`glm_*`） | 527 | **false**（走 3 次 + 2~4s） | **26** |
+  | DeepSeek（`ds_*`） | 0 | — | **0** |
+
+  同一波次、同一时段、同样的 429 压力下：**被识别为并发限流的 NJU 一次都没死，未被识别的 Qwen 死了 26 次**。修复②（任意 429 用 8 次预算）即可直接消除这 26 次报废。
+- **D1 07:37 追加：`Retry-After` 无抖动导致惊群（thundering herd）**
+  - `overnight_12bot_part2` 545 次 retry 中 **259 次 `wait_s=15.0`**（服务端 `Retry-After: 15` 被原样采用）。
+  - **51 个"惊群簇"**：≥3 个不同 bot 在 **2 秒内**同时重试（例：`21:50:40` glm_1/glm_3/glm_5 同秒；`21:53:55` glm_1/glm_4/glm_5 同秒）。
+  - 对照：`overnight_12bot` 77 簇；hy4 4 路波次 **0 簇**（`hy4_audit_r26` 4 次 retry、`r27` 0 次）。
+  - → **所有 bot 在同一秒醒来 → 再次撞限流 → 再次同秒重试**，形成自持的碰撞循环。修复：`_retry_delay_s` / `_concurrency_retry_delay_s` 对 `Retry-After` 结果加 **0.5~1.5× 抖动**（或每 bot 固定随机相位）。（`hy4_7` 4、`hy4_3/6/9` 各 3、`hy4_5/8` 各 2、`hy4_2/10` 各 1）；**glm / ds / nju 全部 0 次**。
+  → 结论：过载是 **hy4 免费通道专属**，不是全局。**运维建议：暂停或降并发 hy4 squad（10 路），保留 glm/ds/nju**；同时尽快修 `_is_concurrency_limit_429`。
+  → **运维建议：暂停新波次或切 provider，否则 r24 的分数会被 429 严重稀释**。
+- **建议（运维）**：① 立即按上述修 `_is_concurrency_limit_429` 关键词；② `v2_fleet.py launch` 增加熔断：连续 429 率 >20% 时暂停新波次或降并发/换 provider；③ curriculum 对 `transient_api_error` 的集暂停重排而不是报废
+- **验收标准**：r24 起长任务因 429/502 报废的集数 ≤1；`hy4_1`（或同类长任务）分数 ≥60
+- **r31_long 复核**：3 路 2700s，429/502 报废 **0**。HY4_1 终版 **20/60**，EP01 唯一验证成交，后续多次重派铁器，EP03 为区块未加载，两个超时均无硬 429。12 路 4h 和持续重试仍待暴露。 [终版](../runs/r31_long/hy4_hy_1_bare/wild-endurance-r31_long_hy_1_bare-20261119-221907.json) · [EP10 终止](../runs/r31_long/hy4_hy_1_bare/20261119-230411-792716.events.jsonl#L10)
+- **持续重试实证**：r36 DS_2 EP01 同一请求连续 5 次 429 退避，合计 **83.897s**，第 6 次完成。r33/r34 长波 429/502 报废均为 **0**，HY4_1 仍各 **20/60**。12 路 4h 样本仍缺。 [r36 DS_2 EP01](../runs/r36_short/nju_ds_2_cave_combat/20261119-235444-144417.events.jsonl#L293) · [r34 长波终版榜单](../runs/r34_long/triage-r34_long.md)
+
+- **P2-40** 课程应按**实测 ROI** 动态加权：`shiny_gear`（61 分/100 请求）、`brew_potion`（87.2）、`use_lodestone`（74.9）应优先；`obtain_ancient_debris`（11.6）、`find_fortress`（5.9）应降权。建议在 `curriculum.py` 里用每波实测的 `score_delta / actor_requests` 更新 target 权重（滑动平均），而不是固定分数。
+- **P2-37** `mine_dfs` 的 `bad_target_for_dimension` **80 次**（`diamond` **63**、`iron` 16、`coal` 1）：模型在**下界**要求挖钻石/铁。工具已返回错误但模型反复重试。修复：`bad_target_for_dimension` 时返回该维度可用矿种清单（下界：quartz/ancient_debris/gold/netherite_scrap）。
+- **P2-38** `mc_skill_craft_gear` 的 `missing_ingredients` **652 次**（占 craft 调用 43%，成功仅 380）：`ds_4` 112、`glm_1` 107、`hy4_6` 88、`nju_3` 80；高频物品 `stone_pickaxe` 132、`wooden_pickaxe` 125、`diamond_pickaxe` 90、`oak_sign` 46。返回体已含 `required_materials`/`available_materials`/`missing_materials`，但模型仍重复调用。修复：返回 `suggested_next`（`smelt`/`gather`/`bootstrap_*`），同一 item 连续 2 次失败后加 90s 冷却。另有 `need_crafting_table` 185、`inventory_full` 69、`server_recipe_rejected` 26。
+- **P2-39** `mc_move_to` 的 `stalled`（8s 无位移）**103 次**（move_to 87、dig 13、bind_bed 2、interact 1）：现有 `unstick` 提示有效，但缺少"stall 2 次自动 unstick"的自动兜底。
+- **P2-36** `staircase:pillar_fallback` **自锁**：`no_place_face` → `_dig_pillar_up(1)` → 返回 `ok=True, requires_replan=False` + hint"从新高度重试" → 模型原地再调一次 → 再 `no_place_face`。
+  - 实测：`overnight_12bot_part2` 140 次 pillar_fallback，**14 段连续 ≥3 次**，累计 **723s**；最长 `nju_guitest_01_nether` **连续 29 次**（188s，其间无任何其他工具调用）；`glm_2` 18 次（132s）。
+  - `hy4_audit_r28`：73 次，**10 段 ≥3 次**，累计 **437s**；`hy4_6` 最长 10 次（134s）。
+  - 修复（约 5 行）：同一 episode 内连续 `pillar_fallback` ≥2 时，返回 `requires_replan=True` 并建议 `mc_skill_unstick` / 水平换向；≥3 时直接给该 target 加 120s 冷却。
+- **P2-35** `agent.py:1617-1621` 新增的 `network_error` 状态（`not_loaded`/`chunk_not_loaded`/`world_not_ready` 等）未被 `curriculum._is_transient_llm_error`（`:887` 仅接受 `status=="runtime_error"`）识别 → **纯传输抖动会累计 strike**。实测 1 例：`ds_1` EP13 `sleep_in_bed`，`[not_loaded] chunk not loaded`，9 次请求后 `status=network_error`。修复：`_is_transient_llm_error` 接受 `network_error`（或 `status in {"runtime_error","network_error"}`）。
+- **P2-34** `overnight_12bot_part2 / ds_4_nether_fortress` EP9（`nether/get_wither_skull`）在 **连续两次死亡**（`mob_attack`，182s 内 health 20→0→重生→0）后以 `[not_connected] bot not connected` 结束，`status=runtime_error`，白烧 28 次 actor 请求。`not_connected` 本属 `agent.py:206 _TRANSIENT_CODES`，但该错误是在 run 循环收尾阶段抛出的，未被当作 transient → 整集报废。建议：run 循环对"死亡/掉线导致的 not_connected"执行一次 `mc_status` + 重连，再决定是否暂停该集。
+- **P2-33** `max_tokens` 截断：过夜双轨共 **65 次** `finish_reason=length` 事件，其中 **64 次被 `_filter_complete_prefix_calls` 救回**（`length_recovered`），仅 `hy4_audit_r27` **1 次**因无完整工具调用而报废整集。分布：`nju_guitest_01_nether` 27、`nju_3_village_trade` 13、`hy4_2_iron` 9。
+  → 影响已很小，建议仅对"零完整工具调用"的截断做一次自动重试（或该 slot 提高 max_tokens），优先级维持 P2。
+- **P2-32**（评分口径，影响跨模型对比）场景 loadout **预授予成就会被计入 final_score**：`midgame` 在 setup 里 `advancement grant` 了 `mine_stone/upgrade_tools/smelt_iron/iron_tools/mine_diamond/shiny_gear`，合计 **95 分**。r24_long 的 `glm_5` 在 **elapsed=180s、EP1 仍 timeout** 时已显示 **115 分**（其中 95 分来自预授予）。
+  建议：① episode 开始时做 advancement 基线快照，`final_score` 只计增量；或 ② 报告里单列 `baseline_points` 与 `earned_points`。否则"midgame 195 vs bare 10"不能直接当作能力差异。
+
+- **r66 LC 新通道过程证据**：`longcat-2.5-free` 四槽各 6 RPM。22:55 点验时已记录 9 条硬 429 废集，四槽均有。LC1 EP03、LC2 EP04、LC3 EP03、LC4 EP04 均找到单一请求的七次 HTTP 429 延后，每次 35s，第八次仍 429 后 `runtime_error`。本地初始限速等待为 0；单请求历时约 251–256s。LC1 另有连续 429 后撞集时限的样本。源码当前把所有 429 放进最多八次的预算，耗尽后仍按运行错误收尾。复验需按 LC 通道调度并区分硬 429 与带 429 前因的集超时。整波数字等终版。 [LC1 七次延后](../runs/r66_lc_village_midgame_4bot/lc_lc_1_day2_village_near/20261121-064125-325784.events.jsonl#L8) · [LC2 耗尽](../runs/r66_lc_village_midgame_4bot/lc_lc_2_day2_village_near/20261121-064608-815971.events.jsonl#L105) · [LC3 耗尽](../runs/r66_lc_village_midgame_4bot/lc_lc_3_midgame/20261121-064016-656650.events.jsonl#L34) · [LC4 耗尽](../runs/r66_lc_village_midgame_4bot/lc_lc_4_midgame/20261121-063532-899055.events.jsonl#L37) · [重试预算](../src/mc_agent/harness/model.py#L664)
+
+- **r66 LC 终版**：四槽各 6 RPM，**4/4、30 集、0 验证、13 硬 429**。LC1／2／3／4 分别 **3／3／2／5** 集硬失败，最后请求全部走满八次，前七次各 35s。另 12 个超时集都记录过 429。总 184 次 429 延后与 2 次其他重试，计划等待 6440 Bot·s，未扣取消或集截止中断。服务端具体配额规则未落盘。此波是 LC 通道，不影响过去五路 GLM 的实机验收。 [LC1 终版](../runs/r66_lc_village_midgame_4bot/lc_lc_1_day2_village_near/wild-endurance-r66_lc_village_midgame_4bot_lc_1_day2_village_near-20261121-063318.json) · [LC4 终版](../runs/r66_lc_village_midgame_4bot/lc_lc_4_midgame/wild-endurance-r66_lc_village_midgame_4bot_lc_4_midgame-20261121-063348.json) · [通道配置](../scripts/v2_fleet.py#L128)
+
+- **LC 退避实耗下界**：据当集同请求的下一次重试、完成或 HTTP 失败回执，160 条 429 退避确定已等完且集内无重叠，共 **5600 Bot·s／7200.6 Bot·s（77.8%）**。另有 24 条已安排的退避缺完整结束证据。 [计时样本](../runs/r66_lc_village_midgame_4bot/lc_lc_1_day2_village_near/20261121-064125-325784.events.jsonl#L8) · [客户端等待](../src/mc_agent/harness/model.py#L703)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-043 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（overnight_12bot 实测）
+- **影响**：`ds_ds_2_cave_combat` 的 EP4/EP7/EP8 全部 `status=aborted, gate_reason=lost_iron_pickaxe`，其中 EP4 已消耗 **33 个 actor 请求**才发现无镐，EP7/EP8 各 1 次；三集零产出
+- **日志证据**：`overnight_12bot/ds_ds_2_cave_combat/curriculum-*.json` 三集 `aborted`；report 内 `gate_reason=lost_iron_pickaxe`
+- **源码定位**：`harness/curriculum.py:2235-2237` —— `shiny_gear/mine_diamond` 在 `highest_pickaxe_tier < 3` 且 `iron_ingot+raw_iron < 3` 时 `abort`。但：
+  1. 判定发生在 episode **运行中**，EP4 白烧 33 次请求才触发；
+  2. abort 后没有给该 target 加冷却/换目标，EP7/EP8 又被选中并立即 abort（strike 到 2 才冷却）
+- **最小修复**：① 在 episode **开始时**（下矿前）做同样的镐/铁料检查，不满足直接跳过该目标；② `lost_iron_pickaxe` abort 后立即 `cooldowns[target]=+300s`，并把 `bootstrap_iron_age`/`smelt_iron` 提升为候选
+- **D1 04:30 追加证据**：`ds_ds_1_bare` EP19 也出现一次 `lost_iron_pickaxe` abort（累计 4 次 abort，2 路）。
+- **D1 06:51 追加证据**：`hy4_hy_9_deep_water` EP7（shiny_gear）同样 `lost_iron_pickaxe` abort → 已扩散到 3 路（`ds_2`、`ds_1`、`hy4_9`）。
+- **验收标准**：r25 起 `lost_iron_pickaxe` abort ≤1 次/波；无"abort 后再选同一目标"的重复
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-044 | P1 | Integrator（#1，`harness/agent.py` + `mc_tools`）| 状态: OPEN（过夜双轨实测）
+- **B `00c6057`，D1 独立 9 项通过。** 真实 actor 夹具的树冠读块超时给出端点及后验状态并继续原集。挖掘结果未确认时一次有界止动，明确放行、拒绝及缺证分别报告，保留前一次已确认的破格和材料。定向也覆盖攻击超时依旧透传。L2 `37d4751ac92f5b0d` 启动早于候选；以实载后的同类超时及下一动作验收。 [B 夹具](../../s-combat/tests/test_generation_guard.py#L3397) · [回执生成](../../s-combat/src/mc_agent/harness/guardian.py#L5281)
+- **L2 OB2 EP01 脱困读超时复现。** L107 发起 `mc_skill_unstick`，10.6488s 后 L108 仅返回工具中止，L110 以 `MC API ReadTimeout` 结束石器集，2 请求、0 分。该槽再次开集。同类已见 BUG-020 的 r66 HY4_3 与 r68 HY4_5。当前 `unstick` 的首读状态在片内超时处理外，`_run_skill` 会将漏出的 HTTP 错误转为 `RuntimeError`；实机内部端点未录。B 在离线复现。验收覆盖首读及动作回包超时，保留已确认进度，写操作结果不明时先确认释放与现态，再决定下一步。 [工具启动](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-103312-057012.events.jsonl#L107) · [集尾](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-103312-057012.events.jsonl#L110) · [再次开集](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-103413-597215.events.jsonl#L1) · [脱困入口](../src/mc_agent/harness/mc_tools.py#L2807) · [宏技能异常包装](../src/mc_agent/harness/mc_tools.py#L732)
+- **影响**：过夜主轨 2 集 + hy4 审计轨 1 集因 **MC API（bot 后端）ReadTimeout** 整集报废
+- **日志证据**：
+  - `ds_ds_4_nether_fortress` EP11/EP12（`nether/ride_strider`）：`MC API 网络请求异常（ReadTimeout）：timed out`
+  - `hy4_hy_2_iron` EP15（`make_a_sign_glow`）：同上
+- **源码定位**：`harness/mc_tools.py:_call_json` 在 `httpx.HTTPError` 重试一次后仍失败时 `raise RuntimeError("MC API 网络请求异常…")`；`agent.py` 的 run 循环把 `RuntimeError` 归为 `runtime_error` 并终止该集（与 BUG-011 同类，但发生在 MC 后端而非 LLM）
+- **最小修复**：① `_call_json` 对 `status/inventory/events` 等只读请求做 2~3 次短退避；② run 循环把"MC API 网络请求异常"识别为 `transient_api_error`（暂停重排该集），不要当致命错误
+- **验收标准**：r25 起 MC API ReadTimeout 导致的整集报废 ≤1；只读请求 0 次直接抛 RuntimeError
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-045 | P1 | Integrator（#1，`v2_fleet.py` / 调度层）| 状态: REOPENED（W17 GLM 重试和退避超线）
+
+- **W20 GLM 五槽齐全。** W19→W20 重试占比 1.98%→2.21%（17／770），均过 5%；整波硬 429 保持零。五槽正式墙钟 11446.1s，已确认退避与完整请求区间得到 1.68–7.71%，跨过 5% 门，保留待验。 [GLM 重试证据](../runs/l1_w20_20261122/glm_hy_5e_1_bare_20m/20261122-224543-875602.events.jsonl#L36)
+
+- **W18→W19 正式对照。** GLM HTTP 重试占比 14.12%→1.98%，W19 为 13 次重试／644 次请求加 13 次重试，硬 429 仍 0。W19 有 4 个实际 GLM 槽，HY7 未入场，正式退避墙钟门因缺有效时长保持待验。 [已实跑对照](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/wild-endurance-wild-20261122-212856.json) · [未入场终档](../runs/l1_w19_20261122/glm_hy_5e_7_bare_60m/wild-endurance-wild-20261122-212857.json#L17)
+
+- **W18 GLM 五槽正式复验。** 96 次 HTTP 重试／584 次请求，门禁重试率 14.12%。已确认等待到请求上界占全轮正式 9000.5 Bot·s 的 19.60%–24.41%，两项超 5%。硬 429 集数 0。用 `d1_compare` 对照 W17 GLM 三槽的 11.82% 和 16.59%–25.58%，连续超线，波次并发与槽数有异。 [裸装重试样本](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-204110-294588.events.jsonl#L30)
+
+- **W17 GLM 三槽终档复验。** 63 次 HTTP 重试／470 次请求，门禁口径 11.82%（上限 5%）。按三槽正式时长 5403.9s，确认退避及请求上界为 16.59%–25.58%（上限 5%），硬 429 集数 0。裸装 HY1 首个石镐成功集也经历两次 429 重试。需分别验重试、已确认等待和硬失败。 [裸装首次重试](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-195723-632338.events.jsonl#L28) · [裸装终档](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/wild-endurance-wild-20261122-195714.json#L68)
+- **Long3 七槽终档无可比 GLM 槽。** 全波原迹 1 次硬 429，GLM 重试分母和退避墙钟分母无匹配样本。保留 r29–31 的同通道验收。 [硬 429](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-123942-877936.events.jsonl#L165)
+
+- **D1 退避墙钟复算**。已进入下一次尝试的计划等待计入下界。上界按含已记录或可能未送达 429 重试的完整请求窗口计，每个请求最多一次。r29 GLM 为 **0.13–1.62%**，r30 短波/长波为 **2.21–3.81% / 1.42–3.14%**，r31 短波/长波为 **1.15–3.84% / 0.00–1.62%**，五波上界均 ≤5%。r29 DS_2 计划等 7.770s，重试转发与取消日志相隔 2.266s，实际等待无法从该间隔确定。 [r29 GLM 重试](../runs/r29_newmix/glm_glm_2_nether_bastion/20261119-210114-477304.events.jsonl#L43) · [取消示例](../runs/r29_newmix/nju_ds_2_cave_combat/20261119-210255-905851.events.jsonl#L152) · [复算表](../../s-triage/docs/D1-r11-triage.md#4hy-bug-045-将上界改为可能含退避的完整请求窗口)
+
+- **r69 官方波归组复核**：`official_r69_80m_glm1` 使用 Bot 名 `GLM_1`，启动记录的模型为 `hy4-flash-free`。D1 优先读取逐集 `run.started.model`，早期没有模型字段才用目录名归组。复跑 r29 的 GLM 重试率 **0.44%**、退避占比 **0.13–1.62%**、全波硬 429 **0**。官方波仍缺终版。 [官方启动记录](../runs/official_r69_80m_glm1/GLM_1/20261121-075743-738230.events.jsonl#L3) · [D1 门禁](../../s-triage/scripts/d1_ticket_gates.py#L511)
+- **影响**：`overnight_12bot_part2` 中 5 路 Qwen（`glm_*`）**retry 率 17~25%**，合计 **18.1% 墙钟**（glm_1 24.4%、glm_5 22.7%）耗在 429 退避上；对照 NJU **1.2~2.1%**、DeepSeek **0~0.2%**。
+- **证据（2h50m 波，同一时段）**：
+  | bot | 集 | 请求 | retry | retry% | 硬失败 429 | 退避墙钟占比 |
+  |---|---|---|---|---|---|---|
+  | `glm_1_nether_fortress` | 63 | 1018 | 213 | **17.3%** | 15 | **24.4%** |
+  | `glm_5_midgame` | 79 | 950 | 201 | **17.5%** | 15 | **22.7%** |
+  | `glm_2_nether_bastion` | 24 | 702 | 169 | 19.4% | 9 | 18.4% |
+  | `glm_4_brewing_alchemy` | 34 | 516 | 135 | 20.7% | 8 | 14.7% |
+  | `glm_3_village_trade` | 19 | 313 | 105 | 25.1% | 2 | 10.5% |
+  | `nju_*`（3 路） | 81 | 1475 | 22 | **1.2~2.1%** | 0 | ≤0.5% |
+  | `ds_*`（4 路） | 139 | 2627 | 1 | **0~0.2%** | 0 | 0% |
+- **判读**：5 路 Qwen 的 retry 率**成比例一致**（与各 bot 请求量无关）→ **是共享 key/通道的配额饱和**，不是某个 bot 行为异常。`hy4`（另一通道，4 路 + rpm=6）同时段 **0 次 429**。
+- **最小修复**：给 Qwen squad 加**每通道 RPM 上限**（参照 hy4 已验证的 `rpm=6`），或把 `glm` 并发从 5 降到 3；`v2_fleet.py launch` 应按 provider 配置 `rpm` 而不是全局 default。
+- **验收标准**：Qwen 通道 retry 率 ≤5%、退避墙钟 ≤5%；单波 429 硬失败 ≤3。
+- **实测验收**：`r29_newmix` 五路 GLM，各 10 RPM，按终版 Bot 墙钟重算的过夜第二波→r29 为 **16.87%→0.44%** 重试、**15.38%→0.13%** 退避、**52→0** 整波硬 429。r30_short/long 分别为 2.67%/2.21%/0、2.28%/2.15%/0，r31_short 为 2.30%/1.30%/0。 [频道 RPM](../scripts/v2_fleet.py#L101) · [r29 GLM2 EP01 重试](../runs/r29_newmix/glm_glm_2_nether_bastion/20261119-210114-477304.events.jsonl#L43) · [r31 GLM1 EP01 重试](../runs/r31_short/glm_glm_1_nether_fortress/20261119-215952-195509.events.jsonl#L303)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-046 | P1 | Integrator（#1，`scripts/l3_wild_endurance_runner.py` / 波次配置）| 状态: OPEN（过夜主轨实测）
+
+- **W20 十二槽实际入场并均跑足，五个 60m 均 3600.1s。** W19 为 11／12 入场。四小时配置的门仍缺，20m HY1 备料额外占用见 BUG-047。 [60m HY7 终档](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/wild-endurance-wild-20261122-224251.json)
+- **Long3 七槽终档均配置 3600s。** 最短 OB2 正式收官 1250.7s，比例 .3474，经营模式为最多 12 集，缺本票约 4h 主轨的可比长槽。 [最短槽正式终档](../runs/l2_long3_20261122/nju_ob_2_bare/wild-endurance-wild-20261122-123932.json)
+
+- **r63–r70 终版增量**：计划时长有数值的 **73 槽**均为 1500–2700s。其中 2700s 的 **19/19** 槽启动均记录 `max_episodes=0`，实际 **2700.0–2715.8s**。与 r29–r62 的 18 槽合计 **37** 条 45 分钟达标证据。四小时验收仍缺终版。 [最短槽启动](../runs/r66_day12_full_45m/hy4_hy_10_bare/stdout.log#L3) · [最长槽终版](../runs/r63_day12_full_45m/hy4_hy_3_bare/wild-endurance-r63_day12_full_45m_hy_3_bare-20261121-050448.json)
+- **影响**：`max_episodes=80` 是与 `duration_s` **独立的硬上限**，跑得快的 bot 会在**墙钟未到**时提前退出，剩余时间全部空转。
+- **实测（`overnight_12bot_part2`，`duration_s=14100` / `max_episodes=80`）**：
+  | bot | 用满集数 | 实际墙钟 | 剩余墙钟 | 结束时状态 |
+  |---|---|---|---|---|
+  | `glm_5_midgame` | 80/80 | **10355s（2h53m）** | **3745s（1h02m）空转** | `completed` |
+  | `glm_1_nether_fortress` | 80/80 | **12433s（3h27m）** | 1667s（28m）空转 | `completed` |
+  | 其余 10 路 | 28~56 | 12214~12939s | — | 正常跑到 deadline |
+- **放大因素**：429 报废的集**同样消耗集数配额** —— `glm_1` 80 集中 **16 集**是 429 `runtime_error`（20%），`glm_5` **15/80**（19%）。即 Qwen 通道既浪费墙钟（18% 退避）又浪费集数槽位。
+- **r28 无 429 的对照**：短预算目标让 `hy4_2_iron`、`hy4_5_brewing_alchemy` 分别在 8640s、7911s 达到 `50/50` 集，距 9000s 目标还有 360s、1089s。集数上限在通道无硬失败时依然会提前收尾。 [铁器收官](../runs/hy4_audit_r28/hy4_hy_2_iron/curriculum-20261119-145210-146844.json) · [酿造收官](../runs/hy4_audit_r28/hy4_hy_5_brewing_alchemy/curriculum-20261119-145213-868815.json)
+- **副作用（评测口径）**：快 bot 被截断、慢 bot 跑满 → **跨 bot/跨波次分数不可比**（`glm_5` 名义 4h 实际只跑了 2h53m）。
+- **最小修复**：① 波次按 `max_episodes = ceil(duration_s / 60)` 或直接 `None`（只靠 deadline）；② 429/502 等 `transient` 集**不占用**集数配额（或 `max_episodes` 只统计非 transient 集）。
+- **验收标准**：4h 波次所有 bot 实际墙钟 ≥ 0.95 × `duration_s`；`elapsed_s/duration_s` 比值分布 ≥0.95。
+- **D1 配置复核**：`165e792` 让 Fleet 默认传 `max_episodes=0`，runner 映射为无集数上限。r30_long→r31_long 同三路从上限 45 集切到 0，最短实跑仍为 2700.1s。r29 至 r62 有终版墙钟的 446 槽中，实际用 0 上限的 18 个 2700s 槽全部跑满，范围 2700.1–2747.3s。终版最大计划时长为 2700s，四小时验收待补。 [Fleet 默认值](../scripts/v2_fleet.py#L955) · [runner 映射](../scripts/l3_wild_endurance_runner.py#L2356) · [r30 GLM5 开局](../runs/r30_long/glm_glm_5_midgame/stdout.log#L2) · [r31 GLM5 开局](../runs/r31_long/glm_glm_5_midgame/stdout.log#L2) · [r31 GLM5 终版](../runs/r31_long/glm_glm_5_midgame/wild-endurance-r31_long_glm_5_midgame-20261119-221905.json#L90)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-047 | P1 | Integrator（#1，`harness/mc_tools.py` + `bot.py`）| 状态: OPEN（实体占位坐标单航点已实测，尾集与忙锁待复验）
+
+- **W19→W20 裸装慢尾归因。** 1292→1270 笔已配对调用中，>60s 从 56→65。W19 是 52 笔 DFS 加 4 笔熔炼，W20 的 65 笔全是 DFS，其中 60m 槽 39 笔。W20 有 49 次目标矿确认零增，累计各 bot 工具时间 4094.880s，46 次仍接近请求层。另有 13 次确认入目标矿，其中两次抢占仅在 `gained.raw_iron` 记录各 +3，另 3 次是回井或爬升。若样本数不变，单缩短 49 笔零增仍有 16 笔超限，超过 p99 容许的 12 笔。复验要同时核井段续接和目标矿真实入包。确证反向施工见 BUG-157。 [60m 实收铁的长片](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-225627-467230.events.jsonl#L136) · [短片钻石入包](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-232732-283976.events.jsonl#L184) · [DFS 工具上限](../src/mc_agent/harness/mc_tools.py#L3222)
+
+- **W20 正式 actor 工具对照。** W19→W20 p99 86.002→86.073s（1270 次），仍超 60s；unstick 最大 25.847→18.036s，actor 超预算最大 4.112→0.151s。忙锁 move、末 10s 台阶和隧道没有命中时序夹具，HY1 的墙钟超限由另记的备料段主导。 [p99 附近样本](../runs/l1_w20_20261122/glm_hy_5e_5_bare_20m/20261122-225505-816820.events.jsonl#L21) · [actor 尾差](../runs/l1_w20_20261122/hy_5e_10_bare_60m/20261122-232826-205700.events.jsonl#L476)
+
+- **W20 20m GLM HY1 的超时发生在 actor 前。** 正式终档 `elapsed_s=1245.7`, `duration_s=1200.0`。EP09 的 `pre_ensure` 终档记四步 **46.11s**，最后是上阶取石，actor 随后获 **0.5s**、实跑 **0.5569s**。仅配对 actor 工具会漏掉这笔墙钟超限。课程取循环开头的余量生成 `ep_timeout`，备料有 10s 下限且未传波次绝对截止，actor 入场才重新扣墙钟。验收在剩余约一秒时备料与 actor 共用绝对截止，不启动容不下的动作。正常备料仍须保留已入包物品和零 actor 成就。 [正式终档](../runs/l1_w20_20261122/glm_hy_5e_1_bare_20m/wild-endurance-wild-20261122-224252.json) · [末集备料与 actor](../runs/l1_w20_20261122/glm_hy_5e_1_bare_20m/20261122-230430-608316.events.jsonl#L11) · [循环余量](../src/mc_agent/harness/curriculum.py#L2138) · [备料期限](../src/mc_agent/harness/curriculum.py#L2583) · [actor 余量](../src/mc_agent/harness/curriculum.py#L2776)
+
+- **W18 GLM 五槽正式复验。** 561 笔工具的 p99 86.389s，仍超 60s。脱困最大 28.037s、集超时最大 0.071s 均过。末 10s 启动的两笔阶梯最大超窗 −0.078s，本波该项过。忙锁移动和末段隧道没有匹配样本。 [p99 样本](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-205730-820508.events.jsonl#L52) · [末段阶梯](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-210923-656030.events.jsonl#L129)
+
+- **W17 GLM 三槽终档复验。** 396 个计时调用的 p99 为 85.773s（上限 60s），对应裸装 HY1 EP12 首铁 DFS，实际破 45 格、铁 0。脱困最大 13.326s、集超限最大 3.616s，分别通过现有上限。未观测到忙锁 move 或最后 10s 发出的楼梯／隧道。 [DFS 回执](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-202135-792552.events.jsonl#L279) · [脱困回执](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-202135-792552.events.jsonl#L164)
+
+- **W16 P0 HY10 的超长槽与短 actor 尾要分账。** 正式用 1829.4s/1800s，上集 `run.finished` 到末集 actor `run.started` 有 37.189s，末一段包含无内耗记录的抢占备料。末 actor 预算 0.5s、实耗4.37s，+3.87s，在本票 10s 阈值内。波级 P99 当前 85.796s、10/14 终档，待确认四条无终档槽的终止状态。 [前集收尾](../runs/l1_w16_p0_verify_20261122/hy_5e_10_bare/20261122-200719-347238.events.jsonl#L62) · [末 actor](../runs/l1_w16_p0_verify_20261122/hy_5e_10_bare/20261122-200841-894039.events.jsonl#L6) · [终档](../runs/l1_w16_p0_verify_20261122/hy_5e_10_bare/wild-endurance-wild-20261122-193820.json#L60)
+- **Long3 七槽终档。** 工具 p99 **47.219s**（1127 配对），解卡最大 12.864s；集尾最多超 0.065s，尾 10 秒两个楼梯样本的最大超限为 −2.509s。已观测四项通过，忙锁寻路及尾窗隧道缺样本。 [p99 样本](../runs/l2_long3_20261122/nju_ob_3_village/20261122-130904-314592.events.jsonl#L120) · [最长解卡](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-132135-340435.events.jsonl#L483) · [尾窗实派](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-133153-534528.events.jsonl#L597)
+- **Long1→Long2 两波终档工具 p99 68.054→68.358s，仍超 60s。** Long2 阈值点 OB3 EP08 同调用 **406.9636−338.6054=68.3582s**，DFS 破 58、下到 Y−7，目标矿没有入包。解卡最大 15.598→28.033s，仍在 30s 内；尾 10s 内的楼梯和隧道各一条，实际分别提前 2.607s、8.567s 完成。整集最大越界 0.054s，忙锁缺暴露。 [p99 样本](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L315) · [尾楼梯](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L1159) · [尾隧道](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-122642-455424.events.jsonl#L242)
+- **L2 终档 p99 仍超线。** W15→L2 为 86.207→68.054s（293→1063 配对调用，队形和暴露不同），L2 尾阶梯提前 5.951s 收尾、整集超额峰 0.059s、脱困峰 15.598s。忙锁及集尾隧道没有新增样本。 [p99 定位](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L836) · [尾阶梯](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-103611-745603.events.jsonl#L572) · [集尾](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-113221-827715.events.jsonl#L40)
+- **W15 终档工具门仍超。** 293 个配对工具的 p99 **86.207s**，H3 门户 EP03 的 DFS 超 60s 门。可比的脱困峰 4.352s，集超额峰 0.086s，末 10s 隧道 1 次且提前 9.466s 收尾。 [p99 原件](../runs/l1_w15_20261122/hy_5e_3_probe_obsidian_portal/20261122-102117-262639.events.jsonl#L29) · [脱困峰](../runs/l1_w15_20261122/hy_5e_3_probe_obsidian_portal/20261122-101355-582584.events.jsonl#L565)
+
+- **W14a 两活槽终档。** 63 工具 p99 **85.842s**，超 60s，来自 OB2 第二铁片破格 85、铁入包 0。 [慢片](../runs/l1_w14a_20261122/nju_ob_2_bare/20261122-100146-167860.events.jsonl#L254)
+
+- **W13 三活槽终档。** 222 次工具 p99 **85.846s**，仍超 60s。5 次脱困最大 19.272s，集超额最大 0.139s，末 10s 阶梯 1 次在集限前 1.978s 返回。无 busy 和集尾隧道暴露。 [p99 片](../runs/l1_w13_20261122/hy_5e_3_deep_water/20261122-094248-941556.events.jsonl#L119) · [脱困峰](../runs/l1_w13_20261122/nju_ob_1_bare/20261122-095833-119006.events.jsonl#L367) · [尾阶梯](../runs/l1_w13_20261122/nju_ob_1_bare/20261122-100412-270069.events.jsonl#L358)
+
+- **Guardian W12 7/7 终档。** 331 次工具 p99 **85.885s**，仍超 60s。8 次脱困最大 1.193s，集超额最大 0.047s，末 10s 发起的 1 次阶梯、3 次隧道全部在集限内返回。无 busy 暴露。 [p99](../runs/l1_w12_guardian_full_20261122/hy_5e_2_cave_combat/20261122-092313-084227.events.jsonl#L114) · [尾阶梯](../runs/l1_w12_guardian_full_20261122/nju_ob_1_bare/20261122-093557-744204.events.jsonl#L194) · [尾隧道](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/20261122-093513-721494.events.jsonl#L426)
+
+- **W11 裸装 4×1200s 终版，p99 86.365s 仍失败。** 232 条配对工具，越线样本为 H4 EP04 第一段下探后的第 2 次 DFS，持续 86.365s、石镐 +13、粗铁 0；该集另有最长 88.677s。脱困 12.234s、集限超额峰 0.106s 均过，忙锁和尾隧道、尾阶梯样本未出现。 [p99 回执](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-082407-115581.events.jsonl#L78) · [最大工具回执](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-082407-115581.events.jsonl#L106)
+- **W3 三个 1h 槽终版。** 实载 `e4c5d4c`，工具 p99 **86.021s**（551 个），单独的 60s 门仍失败。脱困峰 7.764s、集超额峰 0.063s、末 10s 隧道峰提前 0.888s 收，均通过。busy 和集末阶梯仍无对应样本。共用的 UTC 时间跳差排除在配对单调耗时外。 [p99 实件](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-064629-553712.events.jsonl#L314) · [脱困峰](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-065746-583603.events.jsonl#L178) · [尾隧道](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-075616-474243.events.jsonl#L1147)
+
+- **HY4 W10 终版对 W9。** 实载 `a20ec5e`，四槽 360s 全为铁钻探针，工具 p99 **86.315→87.179s**，仍超 60s。两个波次 DFS p90 都为 85.9s。W10 集超额峰 **0.063s** 过门；无 `unstick`、busy、集末阶梯或隧道暴露。W9 另含门户、要塞且每槽 480s，整体 p99 用于门线复核。 [W10 峰片](../runs/l1_hy4_w10_20261122/hy_5e_2_probe_diamond_y54/20261122-075206-077170.events.jsonl#L31) · [W10 集截止](../runs/l1_hy4_w10_20261122/hy_5e_4_probe_iron_y16/20261122-075710-622999.events.jsonl#L43)
+- **HY4 W9 4/4 终版，工具 p99 86.315s 未过 60s**。峰为 H2 首集主动申请 90s 铁片，实际进 6 粗铁。集超额峰 0.055s、`unstick` 峰 1.861s、末 10s 阶梯实际提前 3.730s 收，三个指标过。没有 busy 或集末 tunnel 样本。四槽 480s 非长测。 [p99 与入包](../runs/l1_hy4_w9_20261122/hy_5e_2_probe_iron_y16/20261122-073654-399107.events.jsonl#L30) · [集截止](../runs/l1_hy4_w9_20261122/hy_5e_2_probe_iron_y16/20261122-073654-399107.events.jsonl#L126) · [末段阶梯](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073930-374154.events.jsonl#L694)
+
+- **冲刺 V2 终版 p99 44.043→86.552s**，首次暴露较完整的铁层长片。单集超额峰 6.134s 仍过 10s 门。V1 的三次 DFS 没有完整片，V2 的 5 次来自 H7/H8 专用铁槽。下一轮同锚专测限时和成功产出。 [p99 原件](../runs/5ease_bare_sprint_v2_20261122/hy_5e_8_probe_iron_y16/20261122-061821-222590.events.jsonl#L30) · [集尾](../runs/5ease_bare_sprint_v2_20261122/hy_5e_2_bare/20261122-062303-086499.events.jsonl#L211)
+
+- **裸装冲刺终版，p99 44.043s（143 对），最大整集超额 0.062s，`unstick` 7.065s，三门通过。** 煤铁暴露只有 H1 的两片抢占和一片无镐早退。`move_to:busy`、尾段阶梯和隧道未曝光，由各自同条件后波验收。Wave10→冲刺 DFS p90 86.2→16.3s，课程构成从钻矿等混合变为裸装且冲刺该工具全为短退，不能归因时限修复。 [p99 采木](../runs/5ease_bare_sprint_20261122/hy_5e_6_bare/20261122-061159-242923.events.jsonl#L219) · [脱困](../runs/5ease_bare_sprint_20261122/hy_5e_2_bare/20261122-061146-013584.events.jsonl#L65)
+
+- **Wave11 终版 p99 86.633s，仍超过 60s。** n=48。H6 EP02 的 DFS 配对耗时 86.6332s，铁增 0、煤增 14，下一片又耗 61.3183s、铁仍 0。最大整集超额 0.062s 通过。请用同一矿簇的无铁预算片验出早停，继续核实有效产矿片的工具账与全局门。 [最慢调用](../runs/5ease_l1_wave11_20261122/hy_5e_6_probe_iron_y16/20261122-054434-600140.events.jsonl#L60) · [下一片](../runs/5ease_l1_wave11_20261122/hy_5e_6_probe_iron_y16/20261122-054434-600140.events.jsonl#L89) · [最大集超额](../runs/5ease_l1_wave11_20261122/hy_5e_5_probe_iron_y16/20261122-054213-664253.events.jsonl#L103)
+
+- **Wave10 终版，工具 p99 超门而集尾可控。** 8 槽 12 集终版，106 对调用，p99 **85.749s**，H7 EP01 钻 DFS；全波最长为 H8 **86.188s**。同波 `unstick` 最大 1.918s、集超额最大 0.045s、最后 10s 内启动的阶梯 1 例提前 2.955s 返回，三门通过。忙锁和集尾 tunnel 无暴露。 [p99 回执](../runs/5ease_l1_wave10_20261122/hy_5e_7_probe_diamond_y54/20261122-053505-549340.events.jsonl#L65) · [最长工具](../runs/5ease_l1_wave10_20261122/hy_5e_8_probe_diamond_y54/20261122-053515-084265.events.jsonl#L61) · [末段阶梯](../runs/5ease_l1_wave10_20261122/hy_5e_6_nether_fortress/20261122-053442-631134.events.jsonl#L428)
+
+- **Portal V2 H2 建门工具尾段穿透**。EP01 L1320 开始时只剩 **18.140s**，L1321 实物建门及入下界成功耗 **26.807s**，返回越限 **8.667s**，整集 **+8.671s**。入口未传集截止，`wait_s=8` 仅用于入门环节，不能限建造和点火。验收补集尾预算不足的拒绝或保留已建框，足量预算的三阶段回执，以及临界回执后的成就核查（BUG-110）。全波 p99 **60.621s** 超 60s，来自 H4 找铁长切片。 [发起](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-042018-066420.events.jsonl#L1320) · [完成](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-042018-066420.events.jsonl#L1321) · [入口](../src/mc_agent/harness/mc_tools.py#L2343) · [入门局部预算](../src/mc_agent/skills/library.py#L8708)
+
+- **Portal 100 门禁过样本**。78 工具 p99 **57.028s**，5 集超额峰 0.100s，在本波门内。V2 比较 p99 87.460s，角色与 DFS 工具占比有变化；两波忙锁、尾段阶梯及隧道均按有曝光的口径分别记。 [本波最长工具](../runs/5ease_portal_100_20261122/hy_5e_3_probe_obsidian_portal/20261122-041156-999366.events.jsonl#L330) · [本波集尾](../runs/5ease_portal_100_20261122/hy_5e_4_probe_obsidian_portal/20261122-041157-768433.events.jsonl#L728)
+
+- **5Ease 黑曜石门户 V2**。89 工具 p99 **87.460s**，超 60s。解卡最大 **4.976s**、集最大超限 **0.113s**。H6 EP02 唯一尾 10s 楼梯调用在截止前 **1.155s** 返回，无目标层通过；尾段隧道和忙锁未暴露。 [最长工具](../runs/5ease_obs_fixed_v2_20261122/hy_5e_7_probe_diamond_y54/20261122-035900-616715.events.jsonl#L62) · [尾楼梯](../runs/5ease_obs_fixed_v2_20261122/hy_5e_6_probe_diamond_y54/20261122-040342-890144.events.jsonl#L90)
+
+- **5Ease 黑曜石门户 V1**。82 对工具 p99 **86.037s**，全波超 60s 门。解卡 5 次最大 **10.093s**；12 集最大超额 **0.049s**。最后 10s 内没有楼梯或掘进调用样本，忙锁依旧待验。 [最慢工具](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_7_probe_diamond_y54/20261122-034959-972452.events.jsonl#L33) · [最长解卡](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_4_probe_obsidian_portal/20261122-034935-424354.events.jsonl#L485)
+
+- **W2 终版 p99 仍超门**。完整 3/3 槽工具 p99 **69.206s / 350**。集超限最大 **0.063s**，11 次脱困最长 **10.833s**，晚发楼梯那一次通过（上条）。busy 与最后 10 秒隧道仍无实测。 [p99 对应工具](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-024956-442964.events.jsonl#L678) · [最多超限](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-032635-307417.events.jsonl#L70)
+
+- **W2 OB1 命中末 10s 楼梯护栏**。EP07 下梯在集限余 **6.733s** 开始，实耗 **3.742s**，从 Y63 到 Y57、5 步、0 破块，`time_budget` 且 `action_released=true`，距集限仍 **2.992s**。这是终尾楼梯 1 个直接样本，移动 busy 和末段隧道仍无暴露。 [开始与回执](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-032407-234731.events.jsonl#L308) · [结束](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-032407-234731.events.jsonl#L309) · [预算入口](../src/mc_agent/harness/mc_tools.py#L2907)
+
+- **5Ease V7**。全波工具 p99 **86.827s / 76**，集超限最大 **0.054s**。busy、末段楼梯/矿道仍未暴露。 [峰值](../runs/5ease_virgin_eff_v7_20261122/hy_5e_8_probe_iron_y16/20261122-031826-659531.events.jsonl#L89) · [集尾](../runs/5ease_virgin_eff_v7_20261122/hy_5e_1_probe_diamond_y54/20261122-032242-333132.events.jsonl#L181)
+
+- **5Ease V6 短波工具 p99 仍失败**。**85.951s / 74**，最大集超限 **0.064s**；三次脱困最大 **4.390s**。无 busy 移动及末 10s 阶梯/矿道样本。 [最长工具](../runs/5ease_virgin_eff_v6_20261122/hy_5e_3_probe_diamond_y54/20261122-030936-247543.events.jsonl#L96) · [集超限](../runs/5ease_virgin_eff_v6_20261122/hy_5e_8_probe_iron_y16/20261122-030945-943593.events.jsonl#L277)
+
+- **5Ease 采矿 V5 耗时门仍失败**。p99 **86.267s / 59**，对比 V4 86.205s / 53。集超限最大 **0.225s**，短波集限仍守住，busy 和最后 10s 楼梯/隧道没暴露。 [峰值](../runs/5ease_mine_eff_v5_20261122/hy_5e_7_probe_diamond_y54/20261122-025801-854221.events.jsonl#L111) · [集尾](../runs/5ease_mine_eff_v5_20261122/hy_5e_4_probe_diamond_y54/20261122-030302-299302.events.jsonl#L73)
+
+- **5Ease 采矿 V4 工具耗时仍超门**。工具 p99 **86.205s / 53**，使用 90s DFS 外层预算；最大集超限 **0.056s**。全波已收 8 份终版，尾段 busy 与最后 10s 阶梯/矿道仍未暴露。 [长工具](../runs/5ease_mine_eff_v4_20261122/hy_5e_3_probe_diamond_y54/20261122-024717-616704.events.jsonl#L32) · [最大集超限](../runs/5ease_mine_eff_v4_20261122/hy_5e_7_probe_iron_y16/20261122-025217-235734.events.jsonl#L40)
+
+- **5Ease 采矿 V2 尾部门失败**。A/B→V2 工具 p99 **51.254→87.589s**，样本 82→71。实载 `6fde093` 把 DFS 单工具外层预算 **55→90s**，最长是 HY_5E_7 EP01 的 DFS。集超限最多 **2.030s**，无末 10s 楼梯/矿道或 busy 样本。请分开验收主动放宽的 DFS 耗时门和集截止/动作释放。 [峰值](../runs/5ease_mine_eff_v2_20261122/hy_5e_7_radar/20261122-022705-486878.events.jsonl#L32) · [集终态](../runs/5ease_mine_eff_v2_20261122/hy_5e_4_fishbone_scan/20261122-023207-914540.events.jsonl#L178) · [外层预算](../src/mc_agent/harness/mc_tools.py#L3070)
+
+- **同裸装三槽 r73→r74**：移动最大 **24.8→11.8s**，样本 **116→52**；集限峰 **0.049→0.077s**。新版混参三次均一跳，最长 **11.787s**。后端忙锁和 44 秒余量失败档无匹配样本。 [最长混参](../runs/r74_bare_real_drop_60m/hy4_hy_5_bare/20261121-132039-660332.events.jsonl#L74) · [新版集限峰](../runs/r74_bare_real_drop_60m/hy4_hy_7_bare/20261121-142018-399633.events.jsonl#L11)
+
+- **坐标补丁真实失败分支通过**：r74 裸装 HY4_5 EP02 加载 `28a9838`，同 180s 环岛任务三次长距都带 `entity_id=0`，单航点移动 **6.586／11.787s**；最终 `path_not_found` 在 **0.0724s** 返回 `partial_move=true` 与重规划，整集 **67.814s** 收尾。该次失败发起仍余 145.971s，44s 档集尾和原后端忙锁继续验。 [加载和集限](../runs/r74_bare_real_drop_60m/hy4_hy_5_bare/20261121-132039-660332.events.jsonl#L1) · [长距失败回执](../runs/r74_bare_real_drop_60m/hy4_hy_5_bare/20261121-132039-660332.events.jsonl#L118) · [整集结束](../runs/r74_bare_real_drop_60m/hy4_hy_5_bare/20261121-132039-660332.events.jsonl#L310)
+
+- **坐标预算补丁已合入**：`3fbdf12` 优先坐标，带集限时跳过旧多跳，失败状态读限为 1s。D1 的虚拟时钟回放和集成有／无起点位置夹具均通过。等待加载该版的同参数长距失败及集尾，原忙锁和护航 `status` 子门继续跟踪。 [坐标选型](../src/mc_agent/harness/mc_tools.py#L1214) · [状态读](../src/mc_agent/harness/mc_tools.py#L1356) · [集成夹具](../tests/test_skills_and_providers.py#L1834) · [D1 回放](../../s-triage/tests/test_d1_repro.py#L110)
+
+- **r71 日出坐标移动越限 53.227s**：DS_2 EP02 加载 `ceba3a8`，两条环岛坐标移动都随模型参数带 `entity_id=0,y=0`，耗 **126.371／97.353s**，终态均 `path_not_found`。第二条发起时余 **44.133s**，180s 集限在 **233.227s** 才结束。坐标参数优先组成请求，但单航点检查另外要求 `entity_id is None`，模型占位值会绕过这道门。直达失败后状态读默认 45s，满足距离条件时启用未继承集截止的分段回退。模拟传输实测多发一跳，越限 13.588s。实机子请求时延待加回执。统一按坐标模式判断航点，状态读和回退共用余量，复验整集超量 ≤10s。 [离线夹具](../../s-triage/tests/test_d1_repro.py#L121) [加载和集限](../runs/r71_day12_real_drop_60m/nju_ds_2_bare/20261121-115440-072602.events.jsonl#L1) · [第二条工具开始](../runs/r71_day12_real_drop_60m/nju_ds_2_bare/20261121-115440-072602.events.jsonl#L66) · [整集终态](../runs/r71_day12_real_drop_60m/nju_ds_2_bare/20261121-115440-072602.events.jsonl#L69) · [单航点门](../src/mc_agent/harness/mc_tools.py#L1304) · [分段回退](../src/mc_agent/harness/mc_tools.py#L1397) · [内部跳点循环](../src/mc_agent/skills/library.py#L1934)
+
+- **新传输和熔炉修复已合入**：`102fea5` 含 `f514f19`，Guard 的 `status` 把 HTTP 分阶段及一次套接字重试纳入共同余量。`e6f2a72` 停止超时挂起的熔炉交互再重试。两个离线入口均通过。等待加载新版后的 `combat_timeout endpoint=status` 和熔炉抛时对照。 [传输预算](../src/mc_agent/harness/guardian.py#L205) · [熔炉超时夹具](../tests/test_skills_and_providers.py#L2794)
+- **`f514f19` 首条实机状态截止回执**：新版官方 r72 MoveTest EP06 `endpoint=status`，护航配对 **9.035s**，清理 **0.094s**，前段 **8.941s**，仍比核心声明 7.5s 多 **1.441s**。旧版同角色裸装 r72 EP05 **10.498s**（课前），r70 日出 DS_2 EP05 **15.428s**（actor）。已见新版截断结构化回执。场景和执行阶段不同，重试／水中暂停缺子计时，保留核心长尾门。 [新版全对](../runs/official_r72_80m_movetest/MoveTest_01/20261121-114456-299783.events.jsonl#L12) · [旧版 MoveTest](../runs/r72_bare_real_drop_60m/nju_movetest_01_bare/20261121-112732-013568.events.jsonl#L3) · [旧版 DS_2](../runs/r70_day12_real_drop_60m/nju_ds_2_bare/20261121-110655-738829.events.jsonl#L233) · [预算分段](../src/mc_agent/harness/guardian.py#L210)
+- **战斗控制器和恢复宏共享预算已合入**：`ceba3a8` 含 `c3b0136`、`ff28f1a`。控制器取更紧外层期限，普通战斗恢复宏用同一 Guard 会话。r75 中期与 r72 官方双槽加载 `5b7fd9d62eca34fc`，恢复宏、进食、浅岸复查、窒息及传输定向夹具共 15 通过，待实机。 [控制器截止](../src/mc_agent/skills/combat_env.py#L2982) · [恢复宏夹具](../tests/test_generation_guard.py#L11098)
+- **r75 中期两项实机接触**：HY4_2 EP04 新版 `use_item` 截止，总 **7.933s**、兜底 **0.427s**、清理前 **7.506s**。EP05 的隧道在余 **0.459s** 时调用，**0.0017s** 内返回 `episode_deadline_imminent`、零步，整集只超 **0.0485s**。末秒隧道入口通过，仍缺相同模式的 `status` 长尾对照和移动忙锁。 [护航诊断](../runs/r75_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-120541-223755.events.jsonl#L143) · [隧道拒绝](../runs/r75_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-123027-022488.events.jsonl#L427) · [隧道预算源码](../src/mc_agent/harness/mc_tools.py#L2966)
+
+- **r71 裸装采木钳制分支实机通过**：HY4_5 EP18 加载 `bea8ba8`，含 `e6aff12`。实际 actor 余 **25.5644s** 启动采木，工具限额约 21.564s，配对 **20.5994s** 后返回 `time_budget`，集尾仅超 **0.0727s**。旧版官方 5Ease 剩 29.604s 执行 43.369s、超 13.775s。Bot、地块不同，此对照实证共享预算截断。极短入口拒绝、移动忙锁与末秒隧道仍待实机。 [新版采木配对](../runs/r71_bare_real_drop_60m/hy4_hy_5_bare/20261121-110659-020341.events.jsonl#L181) · [新版集尾](../runs/r71_bare_real_drop_60m/hy4_hy_5_bare/20261121-110659-020341.events.jsonl#L211) · [旧版](../runs/official_r70_80m_5ease/5Ease_Bot/20261121-103642-535444.events.jsonl#L111) · [钳制源码](../src/mc_agent/harness/mc_tools.py#L2622)
+- **r72 裸装短余量采木遭战斗抢占**：HY4_7 EP12 余 **9.863s** 发起采木，**3.899s** 后战斗反射开始，无该动作完成回执。外层工具 **10.068s** 返回通用中止文本，整集仅超 **0.210s**，过 ≤10s 门。该例仍待隔离采木内部和反射阶段的剩余预算。 [采木与抢占](../runs/r72_bare_real_drop_60m/hy4_hy_7_bare/20261121-121030-666805.events.jsonl#L37) · [集尾](../runs/r72_bare_real_drop_60m/hy4_hy_7_bare/20261121-121030-666805.events.jsonl#L42) · [采木入口](../src/mc_agent/harness/mc_tools.py#L2622)
+
+- **r70 官方旧版采木尾集对照**：两路均加载 `494b133`，早于 `e6aff12`。5Ease EP36 剩 **29.604s** 起采木，耗 **43.369s**，集尾超 **13.775s**。GLM_1 EP30 剩 **35.071s** 起采木，耗 **43.049s**，集尾超 **7.988s**。两条都返回部分入包和技能时限，可用作新版剩余 30–35 秒档的对照。 [5Ease 配对](../runs/official_r70_80m_5ease/5Ease_Bot/20261121-103642-535444.events.jsonl#L111) · [GLM_1 配对](../runs/official_r70_80m_glm1/GLM_1/20261121-103720-547105.events.jsonl#L86) · [当前入口](../src/mc_agent/harness/mc_tools.py#L2622)
+
+- **r70 门户中期重现采木越限**：HY4_9 EP10 加载 `db680f5`，预算 **92.8769s**。余 **8.5219s** 启动 `harvest_logs`，运行 **44.0378s**，技能自身 `time_budget` 回执含 `partial_error=mine_timeout`、真得 2 原木。集尾 **128.3997s**，超 **35.5228s**，该槽整波超计划 **35.6s**。和 5Ease EP03 一起覆盖入口余量低于 6 秒及仍可发起但必须钳制的两条路径。复验采木及清包共享集截止后集尾超量 ≤10s。 [版本和集限](../runs/r70_midgame_portal_40m/hy4_hy_9_midgame/20261121-092232-005556.events.jsonl#L1) · [工具配对](../runs/r70_midgame_portal_40m/hy4_hy_9_midgame/20261121-092232-005556.events.jsonl#L217) · [集尾](../runs/r70_midgame_portal_40m/hy4_hy_9_midgame/20261121-092232-005556.events.jsonl#L220) · [采木入口](../src/mc_agent/harness/mc_tools.py#L2622)
+- **采木截止修复已合入**：`4c18a3c` 含 `e6aff12`。集成 9 条采木测试和 D1 两条实机余量夹具通过。r71 门户三槽加载 `c036413f85c8ad6b=4c18a3c`，待集尾真实采木和终版对照。移动忙锁及末秒隧道专项门仍待。 [D1 两个余量夹具](../../s-triage/tests/test_d1_repro.py#L110) · [新入口](../src/mc_agent/harness/mc_tools.py#L2622) · [r71 加载指纹](../runs/r71_midgame_portal_40m/hy4_hy_9_midgame/20261121-092634-275938.events.jsonl#L1)
+- **r70→r71 门户终版对照**：同三角色 actor 集限最大超 **35.523→0.081s**，r71 三槽均 2400.1s 跑满。新版五条采木开跑时至少剩 **184.397s**，其中最长 **47.577s**。末秒采木本波无实际暴露，保持专项待验。 [新版集限峰](../runs/r71_midgame_portal_40m/hy4_hy_8_midgame/20261121-100134-423114.events.jsonl#L411) · [最少余量的采木](../runs/r71_midgame_portal_40m/hy4_hy_8_midgame/20261121-095749-845877.events.jsonl#L96) · [预算钳制](../src/mc_agent/harness/mc_tools.py#L269)
+- **护航截止补丁已合入**：`0d8d3da` 含 `39eaca5`，主操作和常规退出共用 7.5 秒截止，超时兜底清理四个阶段另共用 1.5 秒。离线专测通过，r72 中期与 r69 日出 60 分钟均加载 `afd53dc361091229`。待可配对的真实 `combat_timeout` 回执。 [慢清理专测](../tests/test_generation_guard.py#L940) · [r69 日出加载版](../runs/r69_day12_real_drop_60m/nju_ds_2_bare/20261121-094851-381801.events.jsonl#L3)
+- **r69 日出回执定位到清理之前**：HY4_3 EP06 加载新版，护航 `combat_timeout` 配对 **12.055s**，异常检测端点 `status`、核心预算 7.5s、清理实耗 **0.073s**。清理之前约 **11.982s**，轨迹缺内层逐调用计时。复验应量化主操作、允许单独计时的水中恢复和传输阶段。 [开始](../runs/r69_day12_real_drop_60m/hy4_hy_3_bare/20261121-100747-526928.events.jsonl#L7) · [截止诊断](../runs/r69_day12_real_drop_60m/hy4_hy_3_bare/20261121-100747-526928.events.jsonl#L8) · [清理边界](../src/mc_agent/harness/guardian.py#L455) · [独立水恢复](../src/mc_agent/harness/guardian.py#L649)
+
+- **r69 官方另一条集尾路径**：5Ease_Bot EP03 加载 `f22bfc9`。`harvest_logs` 在余 **5.8975s** 时开跑，配对 **20.1520s** 后只返回中止文本，整集 **614.2655s／600s**。当时和当前入口均用独立 45 秒预算，工具后清包在采木的预算作用域外。日志只给出外层完成，具体阻塞内层未定位。采木和清包共享本集余量，复验相同余量的拒绝或截断，以及集限最大超 ≤10 秒。D1 离线夹具在旧入口复现 **614.2545s**。 [工具起止](../runs/official_r69_80m_5ease/5Ease_Bot/20261121-080156-112922.events.jsonl#L431) · [集尾](../runs/official_r69_80m_5ease/5Ease_Bot/20261121-080156-112922.events.jsonl#L434) · [采木入口](../src/mc_agent/harness/mc_tools.py#L2622) · [独立预算](../src/mc_agent/skills/library.py#L3562) · [离线夹具](../../s-triage/tests/test_d1_repro.py#L110)
+
+- **r70 战斗传输截止暴露**：`2b422eb` 内 `08f3364` 实际返回两次 `mode=combat_timeout,reason=time_budget,requires_replan=true`，均 HY4_2，配对耗时 **7.929s／7.933s**。同三角色 r69→r70 `subcortical_combat` 普通护航样本 **20→47**，最大 **7.534→8.284s**，新版新增可见的有界故障回执。actor 移动忙锁和末秒隧道门仍缺暴露。 [首次截止](../runs/r70_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-083214-025673.events.jsonl#L461) · [再次截止](../runs/r70_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-085902-864680.events.jsonl#L208) · [护航截止源码](../src/mc_agent/harness/guardian.py#L455)
+
+- **隧道候选 `637b18e` 已上后续波次**：围栏检查、原生隧道、探测和清理共用集截止。`r65_day12_full_45m` 与 `r67_expl_mem_3bot` 启动早于此补丁。`r66_day12_full_45m`、`r68_expl_mem_iron_3bot` 启动指纹 `328d1430f7830c51=b328836` 包含此提交，待有集尾隧道样本核对以及原票 busy／末十秒楼梯门槛。 [r68 启动](../runs/r68_expl_mem_iron_3bot/nju_ds_1_iron/20261121-072056-284230.events.jsonl#L1) · [r66 Day1 启动](../runs/r66_day12_full_45m/nju_ds_2_bare/20261121-072356-368358.events.jsonl#L3)
+- **D1 末十秒隧道子门**：用同集调用完成时间减预算，复跑 r66 HY4_1 EP06 报工具超 **33.289s**、集尾超 **33.295s**。`637b18e` 的临界拒绝、挖掘中断、清理中断和底层探测 **4 条离线夹具通过**。后续须有终版末十秒隧道才能关闭此分支。 [工具回执](../runs/r66_expl_mem_hy1/hy4_hy_1_iron/20261121-065115-374234.events.jsonl#L168) · [actor 夹具](../tests/test_skills_and_providers.py#L2977) · [原生隧道夹具](../tests/test_mining_dfs.py#L4381)
+- **移动 `busy` 的剩余根因**：以 `b328836` 的 `McToolset` 和 `BotSession` 离线复现短距坐标移动。预检 0.1s 认为空闲，随后首个 `/move_to` 立即报 `busy`，`/stop` 报未释放。逻辑已格式化 `busy` 再进入通用失败观察，额外走一次使用 **45s** 默认读超时的 `GET /status`。模拟该 GET 卡住时，最终仍返回 `busy`，总耗 **45.3s**。收尾剩余仅 6s 也同耗，超 **39.3s**。当前实机基线仍是 r34 HY4_6 EP03 的长 `busy`。最小修复是在租约未释放的坐标分支格式化后立即返回；复验已知 `busy` ≤20s、集尾超限 ≤10s，预检和已确认释放后的重试各保留原用途。 [实机旧忙锁](../runs/r34_short/hy4_hy_6_nether_bastion/20261119-232351-607318.events.jsonl#L251) · [额外状态读取](../src/mc_agent/harness/mc_tools.py#L1347) · [默认超时](../src/mc_agent/bot.py#L35)
+- **候选 `aa6c2d5` 已随 `0a68fc8` 合入**：最终忙锁立即返回，保留已确认的租约释放重试与围栏元数据。D1 两条再现加集成三条租约夹具 **5 项通过**。r68 中期两个已启动槽加载早于合入，忙锁实机仍须等待新指纹。 [修复返回](../src/mc_agent/harness/mc_tools.py#L1347) · [D1 临界夹具](../../s-triage/tests/test_d1_repro.py#L74)
+- **r56 的末秒采矿穿透**：HY4_4 裸装 EP05 在 600s 集限只余 **0.904s** 时启动 `mc_skill_mine_blocks(coal_ore)`，单次回执 `dig_timeout_s=15.0`、0 产出，调用实耗 **15.498s**，终态超限 **14.600s**。加载版 `mc_skill_mine_blocks` 直接调用带默认 45s 的技能，没有 `_clamp_tool_budget`；相邻熔炼入口已有护栏。最小修复是在这个入口拒绝极短余量，并把余量贯穿扫描、单次挖掘和清理。验收复用余约 0.9s 的调用，确认不发生 dig、集尾不超门槛。 [调用开始](../runs/r56_day1_day2_bare_5bot/hy4_hy_4_bare/20261121-003259-118933.events.jsonl#L431) · [单次挖掘超时](../runs/r56_day1_day2_bare_5bot/hy4_hy_4_bare/20261121-003259-118933.events.jsonl#L432) · [终态](../runs/r56_day1_day2_bare_5bot/hy4_hy_4_bare/20261121-003259-118933.events.jsonl#L434) · [工具入口](../src/mc_agent/harness/mc_tools.py#L2683) · [默认预算](../src/mc_agent/skills/library.py#L3890)
+- **影响**：**阻塞型工具调用不受 episode 预算约束**，单次可超出集时限 100s 以上；`move_to` 的 `busy` 预检对"僵尸租约"无效，33 次各白等 ~102s。
+- **证据 1（unstick 超预算）**：`ds_ds_1_bare` 一次 `mc_skill_unstick` **404.4s**，结果 `错误：工具执行中止，未取得正常结果。`，随后 `run.finished 运行总时限已到（300.0s）` → **超出集预算 104s**。
+- **证据 2（move_to busy 白等）**：`overnight_12bot_part2` 中 **33 次** `mc_move_to` 耗时 **102.2~103.1s**，全部返回
+  ```
+  {'code': 'busy', 'message': '动作锁仍被 其他动作 占用，move_to 未执行；请先脱困或等待 1~2 秒后重试'}
+  ```
+  涉及 `ds_3`、`glm_2`、`glm_5` 等多路。
+- **源码定位**：
+  - `mc_tools.py:1004-1024` 已有 `status` 预检（r12 修复），但当 `/status.busy` 为空、服务端租约仍被占时**预检通过**，随后 `_call_json("move_to")` 阻塞。
+  - `bot.py:34 timeout: float = 45.0` + `bot.py:120 for attempt in range(2)` → 单次 `call` 最长 ~90s；`unstick`/`stop`/`status` 等控制类调用沿用该默认值。
+  - episode 时限只在**调用之间**检查，工具内部阻塞期间不会被打断。
+- **最小修复**：① 控制类工具（`unstick`/`stop`/`status`/`move_to` 预检）显式传 `timeout_s=min(15, remaining_budget)`；② `move_to` 遇到 `busy` 时先 `/stop` 再重试一次，仍 busy 立即返回（不要等 90s）；③ `unstick` 内部总时长上限 30s，超时即返回 `ok=False, requires_replan=True`。
+- **验收标准**：单工具调用 p99 ≤ 60s；`unstick` 单次 ≤ 30s；`move_to` 返回 `busy` 的耗时 ≤ 20s；`elapsed_s` 不超过 `budget_timeout_s + 10`。
+- **r29–r31 残余**：r29 HY4_5 EP05 的 actor `unstick` 在 45s 自报预算下阻塞 **622.934s**，未离开水中。r30 HY4_8 EP06 的 `move_to:busy` 仍达 **102.079s**。r31 的 `unstick` max **45.031s**，且 GUITest EP04 在集预算只剩约 21s 时进入同步采木，耗时 **80.558s**，整集超预算 **59.539s**。检查新版本是否把 actor 剩余预算贯穿采木的扫描和破块分支。 [r29 HY4_5 EP05](../runs/r29_newmix/hy4_hy_5_brewing_alchemy/20261119-210552-217591.events.jsonl#L110) · [r30 HY4_8 EP06](../runs/r30_short/hy4_hy_8_nether/20261119-214925-046294.events.jsonl#L190) · [r31 GUITest EP04](../runs/r31_short/nju_guitest_01_nether/20261119-221356-261049.events.jsonl#L747) · [采木入口](../src/mc_agent/harness/mc_tools.py#L2172) · [调度完成后检查集时限](../src/mc_agent/harness/agent.py#L1522)
+- **r32_short 复核**：`unstick` max **45.031→28.036s**（r31→r32），该子门禁通过。GLM2 EP01 在 1200s 集预算还剩 **27.57s** 时启动 90s `mine_dfs(explore)`，实耗 **87.16s**，整集超出 **59.603s**。保持 OPEN，采矿入口同样需要贯穿外层剩余时间。 [GLM1 EP01 unstick](../runs/r32_short/glm_glm_1_nether_fortress/20261119-222148-738485.events.jsonl#L429) · [GLM2 EP01 最后调用](../runs/r32_short/glm_glm_2_nether_bastion/20261119-222150-480408.events.jsonl#L310) · [采矿入口](../src/mc_agent/harness/mc_tools.py#L2381)
+- **r31_long/r33_short 复核**：脱困上限分别为 **12.102s、28.041s**，而全工具仍有采矿长尾。r31 MoveTest EP09 的最后一次 `mine_dfs(explore)` 耗时 **85.974s**，整集超出分配预算 **43.362s**。r33 NJU_3 EP04 在 540s 预算将尽时启动 85s 探矿，耗时 81.1s，整集超出 **54.930s**。`9ebf316` 的采矿 55s 和外层剩余预算钳制已合入，待加载它的新波次复验。 [r31 MoveTest EP09](../runs/r31_long/nju_movetest_01_bare/20261119-225100-136198.events.jsonl#L478) · [r33 NJU_3 EP04](../runs/r33_short/nju_nju_3_village_trade/20261119-224635-843085.events.jsonl#L267) · [钳制实现](../src/mc_agent/harness/mc_tools.py#L2502)
+- **r34_short 复验**：已加载 `9ebf316`，工具 p99 **86.285→59.223s**、`unstick` max **29.396s**，两项达标。HY4_6 EP03 两次 `move_to:busy` 仍阻塞 **102.606s、约101.8s**，第二次在集预算只剩约 6s 时启动，最终超预算 **95.916s**。需验证动作租约预检与后端请求的短预算。 [HY4_6 首次 busy](../runs/r34_short/hy4_hy_6_nether_bastion/20261119-232351-607318.events.jsonl#L251) · [第二次与超时](../runs/r34_short/hy4_hy_6_nether_bastion/20261119-232351-607318.events.jsonl#L294) · [busy 预检](../src/mc_agent/harness/mc_tools.py#L1159)
+- **r32_long/r35_short 复验**：新采矿钳制之外仍有独立长调用。r32 HY4_1 EP01 在 300s 预算下采石 14 个耗时 **74.430s**，全工具 p99 超限，整集超 **40.361s**。r35 HY4_10 EP09 约余 7s 时发起采木，耗时 **90.4s**，整集超 **83.504s**。r35 早于移动时限修复 `7f3da7c`。 [r32 采石](../runs/r32_long/hy4_hy_1_bare/20261119-230752-142336.events.jsonl#L208) · [r35 采木](../runs/r35_short/hy4_hy_10_enchant_anvil/20261119-234654-160737.events.jsonl#L69) · [采木／采石入口](../src/mc_agent/harness/mc_tools.py#L2333)
+- **r36–r39 复验**：r36/r37 多个直接移动在约 **25.1s** 受控停止，分段移动仍出现 **85.900s／68.483s** 长尾。分段路径没有共享外层截止。r38/r39 工具 p99 **52.164s／52.129s**，r38 整集最大超 **2.097s**，r39 仍有一次 `mc_attack` 在只余约 0.2s 时启动并运行 **13.3s**，整集超 **13.057s**。最近两短波无 `busy` 回执，20s 该项待专门暴露。 [短移动止损](../runs/r36_short/hy4_hy_10_enchant_anvil/20261120-000316-533427.events.jsonl#L197) · [r36 分段长尾](../runs/r36_short/hy4_hy_6_nether_bastion/20261120-000416-692883.events.jsonl#L40) · [r39 攻击超时](../runs/r39_short/hy4_hy_10_enchant_anvil/20261120-011658-949353.events.jsonl#L147) · [分段调用](../src/mc_agent/harness/mc_tools.py#L1298)
+- **r40 复验**：工具 p99 **51.450s**，脱困最大 **15.113s**，两项通过。HY4_3 EP07 在 540s 集预算只剩 **3.579s** 时启动 `mc_skill_mine_blocks`，运行 **59.979s**，整集超 **56.406s**。同集此前 `mine_dfs` 已收缩到约 1s。采块入口仍使用独立时限，需接入整集截止。移动 `busy` 仍缺暴露。 [采块开始](../runs/r40_hy4_combat/hy4_hy_3_midgame/20261120-052644-245586.events.jsonl#L359) · [整集收尾](../runs/r40_hy4_combat/hy4_hy_3_midgame/20261120-052644-245586.events.jsonl#L362) · [采块入口](../src/mc_agent/harness/mc_tools.py#L2362) · [独立时限](../src/mc_agent/skills/library.py#L2580)
+- **r41 复验**：工具 p99 **90.071s**，23 个超过 60s 的配对调用中，**20** 个是采木。HY4_9 EP04 回到地表后，集预算仅余 **4.829s** 时启动熔炼，执行 **94.349s**，整集超 **89.529s**。入口沿用熔炼默认 95s 等待时限，继续跟踪，将采木和熔炼都接入整集截止。 [采木 p99 样本](../runs/r41_day1_15bot/hy4_hy_8_bare/20261120-060119-277958.events.jsonl#L133) · [HY4_9 启动熔炼](../runs/r41_day1_15bot/hy4_hy_9_bare/20261120-060915-293692.events.jsonl#L309) · [熔炼入口](../src/mc_agent/harness/mc_tools.py#L2371) · [默认等待时限](../src/mc_agent/skills/library.py#L4247)
+- **r43 实测仍有超集时限**：Day 1/2 工具 p99 **51.305/51.889s**，脱困最大 **11.883/15.301s**。Day 2 HY4_9 EP04 在 **8.927s** 余量下启动正北六步上楼梯，单次 **27.269s**，整集超 **18.287s**。actor 的 `mc_skill_staircase` 没有把本集截止传到已有 `dig_staircase(deadline=...)`。最小改动是正向、pillar 和自动重试共享同一个集截止，验收覆盖本次 8.9s 余量。另有 DS_1 EP03 矿道封堵式撤退 **79.655s**，走 BUG-072。移动 `busy` 仍无样本。 [楼梯启动](../runs/r43_day2_village_near_9bot/hy4_hy_9_day2_village_near/20261120-073353-791901.events.jsonl#L306) · [集尾](../runs/r43_day2_village_near_9bot/hy4_hy_9_day2_village_near/20261120-073353-791901.events.jsonl#L309) · [actor 楼梯入口](../src/mc_agent/harness/mc_tools.py#L2604) · [已有技能截止](../src/mc_agent/skills/library.py#L6554)
+- **r44 Day 1 再现楼梯越界**：GuiTest EP05 在 `budget_timeout_s=310.300`、只剩 **2.753s** 时启动 `steps=50`，已钳为 10 步但实际运行 **36.090s**。集尾 **343.643s**、超 **33.343s**，与 r43 近村为同一外层截止传递缺口。 [楼梯开始](../runs/r44_day1_5bot/nju_guitest_01_bare/20261120-075635-392125.events.jsonl#L450) · [集尾](../runs/r44_day1_5bot/nju_guitest_01_bare/20261120-075635-392125.events.jsonl#L453) · [集预算原件](../runs/r44_day1_5bot/nju_guitest_01_bare/20261120-075635-392125.json)
+- **r44 Day 2**：工具 p99 **51.588s**、脱困 max **28.037s**。HY4_10 EP03 在 540s 集限剩 **8.222s** 时启动矿道撤退，实际 **18.929s**，整集超 **10.713s**。楼梯 `76020c6` 和撤退 `fa4cd15`、`cfde702` 均在 r44 进程启动之后合入。 [撤退起点](../runs/r44_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-074538-967229.events.jsonl#L289) · [集尾](../runs/r44_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-074538-967229.events.jsonl#L292)
+- **r46 终版**：Day 1／2 p99 **51.911／51.554s**，整集最大超额 **3.572／0.229s**，通用门槛通过。末 10s 启动楼梯和移动 `busy` 缺样本，保持待验。 [Day 1 最大值](../runs/r46_day1_5bot/nju_movetest_01_bare/20261120-090001-392391.events.jsonl#L226) · [Day 2 最大值](../runs/r46_day2_wild_scout_9bot/hy4_hy_9_iron/20261120-092014-538120.events.jsonl#L10)
+- **r47 终版**：Day 1/2 工具 p99 **51.435/51.342s**，脱困最大 **7.914/9.884s**，集超预算最大 **0.032/0.145s**。三次在最后 10s 发起楼梯均在预算内返回，最大超额 **−2.510/−5.910s**。移动 `busy` 没有暴露，整票继续 OPEN。 [MoveTest 集尾](../runs/r47_day1_5bot/nju_movetest_01_bare/20261120-101654-485630.events.jsonl#L130) · [HY4_6 集尾](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-100313-044535.events.jsonl#L310)
+- **r48→r49**：r48 附魔、下界分别超集预算 **10.967／10.293s**。HY4_3 EP07 仅余约 13.1s 仍启动 24.098s 的 `mc_dig`；HY4_6 EP04 余约 11.7s 发起约 22s 的金靴合成。r49 裸装/要塞门禁最大 **2.105／−0.001s**，但这四波均早于 `b926a47` 的 actor 挖掘和制作预算修复。待同路径加载复验，`move_to:busy` 仍无暴露。 [挖掘](../runs/r48_enchant_5bot/hy4_hy_3_enchant_anvil/20261120-103730-952225.events.jsonl#L416) · [合成](../runs/r48_nether_fortress_9bot/hy4_hy_6_nether_fortress/20261120-103850-267446.events.jsonl#L98)
+- **r50 加载 `b926a47`**：同九槽下界集尾超额 **10.293→0.065s**，工具 p99 **51.452s**、脱困最大 **22.817s**；末地集尾 **0.112s**。下界配对 47 次挖掘、43 次制作，最小开工余量 **80.518／167.610s**，r48 的余十余秒长操作条件没有重现。`move_to:busy` 仍待验。 [下界集尾](../runs/r50_nether_fortress_9bot/hy4_hy_8_nether_fortress/20261120-205702-433214.events.jsonl#L85) · [末地集尾](../runs/r50_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-205013-814729.events.jsonl#L916)
+
+- **r57 裸装及 r58 上线**：同四槽集尾超额 **14.600→0.091s**。r57 最接近集尾的 `mine_blocks` 仍有 **96.992s**，另有阶梯在约余 1.57s 时直接拒绝施工。r58 日出和下界实机指纹 `815fe6b7f2bca974=fb73751`，含 `f645655` 的采块余量钳制；D1 离线重跑 3 条通过。保留 OPEN，待 r58 实测末秒采块及 busy。 [r57 最近采块](../runs/r57_day1_day2_fast_4bot/hy4_hy_3_bare/20261121-005211-755066.events.jsonl#L264) · [阶梯拒绝](../runs/r57_day1_day2_fast_4bot/hy4_hy_10_bare/20261121-010436-698952.events.jsonl#L341) · [r58 加载版](../runs/r58_day12_sunrise_village_4bot/nju_ds_2_bare/20261121-012426-316026.events.jsonl#L3) · [预算入口](../src/mc_agent/harness/mc_tools.py#L2683) · [夹具](../tests/test_skills_and_providers.py#L564)
+
+- **r59 日出新版首次压缩采块**：DS_2 EP01 开工只余 **29.746s**，采块实耗 **24.778s**、入包 1 圆石，返回时仍余 **4.968s**。加载版在采块入口保留 4s，实际短于默认 45s 的预算已暴露。r56 的余 0.904s 拒绝路径及移动 busy 仍缺实机。 [开工余量](../runs/r59_day12_sunrise_village_4bot/nju_ds_2_bare/20261121-015914-761595.events.jsonl#L322) · [采块结果](../runs/r59_day12_sunrise_village_4bot/nju_ds_2_bare/20261121-015914-761595.events.jsonl#L323) · [入口钳制](../src/mc_agent/harness/mc_tools.py#L2687)
+
+- **r66 HY4_1 末秒隧道**：`r66_expl_mem_hy1` EP06 集预算约 73.6s，`mc_skill_tunnel` 在集内 67.495s 启动，剩约 6.0s。工具自身耗 **39.394s**，回 `time_slice`、6 步，集尾 **106.895s**，门禁超 **33.295s**。actor 入口只限步数，库包装未传可选 `deadline`，底层因此使用自身 35s 期限。为 actor 传集的绝对截止，单次调用也按余量约束，接近截止时核对 6s 的夹具与整集最多超 10s。 [启动](../runs/r66_expl_mem_hy1/hy4_hy_1_iron/20261121-065115-374234.events.jsonl#L167) · [工具完成](../runs/r66_expl_mem_hy1/hy4_hy_1_iron/20261121-065115-374234.events.jsonl#L168) · [集尾](../runs/r66_expl_mem_hy1/hy4_hy_1_iron/20261121-065115-374234.events.jsonl#L170) · [入口](../src/mc_agent/harness/mc_tools.py#L2945) · [底层期限](../src/mc_agent/skills/tunnel.py#L35)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-048 | P1 | Integrator（#1，`harness/geofence.py` + 工具层）| 状态: OPEN（过夜两波实测）
+
+- **r68 中期 NJU_3**：主世界传送门课 EP07／08 近同一岛边站位，累计 **25 条围栏拒绝**（14／11），全槽 **30 条**。两集朝内楼梯还有 10 次 `fluid_or_bedrock`，EP07 能采 10 圆石但外侧搭桥仍被拒，预准备一直差 6 黑曜石与打火石。围栏约束有效，失败反复进入模型，仍缺可达的向内撤离路线。 [首次拒绝](../runs/r68_midgame_portal_3bot/nju_nju_3_midgame/20261121-075627-454701.events.jsonl#L132) · [内侧阻塞](../runs/r68_midgame_portal_3bot/nju_nju_3_midgame/20261121-075627-454701.events.jsonl#L783) · [EP08 末条](../runs/r68_midgame_portal_3bot/nju_nju_3_midgame/20261121-080439-892102.events.jsonl#L903)
+- **影响**：`void_geofence_blocked` **不触发**"重复失败保护"，因为模型每次换一个略有差异的坐标 → 单 bot 连续被拦 **129~154 次**，每次都是一轮完整 LLM 往返。
+- **实测（两波）**：
+  | 波次 | bot | 被拦次数 | 不同坐标数 | 距离范围 | safe_radius |
+  |---|---|---|---|---|---|
+  | `overnight_12bot` | `nju_guitest_01_nether` | **154** | **118** | 554.5m ~ **12927.4m** | 212.0m |
+  | `overnight_12bot_part2` | `glm_4_brewing_alchemy` | **129** | **110** | 212.2m ~ 254.4m | 212.0m |
+  | `overnight_12bot_part2` | 其余 5 路 | 17 | — | — | — |
+  | `hy4_audit_r28` | `hy4_9_deep_water` | 5 | — | — | — |
+  | `hy4_audit_r27` | `hy4_hy_2_iron` | **126，集中在 EP02–12** | — | — | — |
+- **两种形态**：
+  1. **"差一点"型（`glm_4`）**：目标 212.2~254.4m，仅超出 0~42m —— 意图合理（去挖看见的矿），但围栏只拒绝不引导；`glm_4` 本波 **145 分（-50 vs wave1）**，129 次被拦 ≈ 8~12 分钟。
+  2. **"离谱坐标"型（`nju_guitest`）**：目标 554m~**12.9km**（最远 12927m），同一坐标重复 14 次 —— 明显是幻觉坐标/未换算的绝对坐标，工具层未做"距离明显异常"识别。
+- **源码定位**：`geofence.py:88-106 check_point` 已返回 `distance` / `safe_radius` / `center` / 中文提示，但：① 只**拒绝**不**钳制**；② 无按 target 的累计计数（`repeated_identical_failure_blocked` 按"完全相同的参数"匹配，坐标差 0.5 格就绕过了）。
+- **最小修复**：
+  1. `distance <= safe_radius * 1.25` 时**自动钳制**到安全边界内（把目标投影到半径 212m 上）并继续执行；
+  2. 距离 > `safe_radius * 3` 时直接返回 `requires_replan=True` + "坐标疑似错误，请用 mc_status 的 pos 重新定位"；
+  3. 每 episode 对 `void_geofence_blocked` 累计 ≥3 次 → 强制 `requires_replan=True` 并给该 target 加 120s 冷却。
+- **验收标准**：单 bot 单波 `void_geofence_blocked` ≤5；`glm_4` 类场景分数回到 ≥195。
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-049 | **P0（规划锁死）** | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（16 路过夜轨迹全量复盘）
+
+ **影响**：Bot 身处下界（`the_nether`）死亡丢镐后，规划器不看当前维度，把主世界 `bootstrap_stone_age` / `bootstrap_iron_age` 锁死在最高优先级，导致整局后半程几乎 100% 空转。
+- **轨迹实据**：`overnight_12bot_part2/glm_glm_1_nether_fortress`（80 集）中 **`bootstrap_stone_age` 0/52 + `bootstrap_iron_age` 0/23 = 75/80 集（94% 集数全废）**；下界不存在主世界橡木、圆石与铁矿石。
+- **源码定位**：`harness/curriculum.py` 选目标逻辑未按 `cur_dim == "the_nether"` 过滤主世界 `bootstrap_*` 剧本。
+- **最小修复**：当 `cur_dim == "the_nether"` 时，禁止派发主世界 `bootstrap_stone_age` / `bootstrap_iron_age`（或仅在存在黑石/下界木时走下界自救分支，或先回主世界门）。
+- **验收标准**：下界场景（`nether_fortress` / `nether_bastion`）4 小时长测中主世界 `bootstrap_stone/iron` 派发次数为 `0`。
+- **r48 维度切换样本**：HY4_9 EP01 以 `not_connected` 结束，runner 捕捉 `wrong_dimension(overworld)` 并开始拉回下界。EP02 在这个时段选中 `bootstrap_stone_age`，预准备随后因目标区块未加载而终止，0 actor 请求。终版共 1 次对应派发，证据指向回程维度交接窗口；主世界 bootstrap 直接在稳定下界重复派发未观察到，4h/丢镐门禁仍待实测。 [主世界拉回](../runs/r48_nether_fortress_9bot/hy4_hy_9_nether_fortress/stdout.log#L49) · [派发与失败](../runs/r48_nether_fortress_9bot/hy4_hy_9_nether_fortress/20261120-103735-195754.events.jsonl#L1)
+- **r54 维度交接复现**：HY4_8 EP04 岩浆死亡后回主世界，日志有 `wrong_dimension(overworld)` 拉回。EP05 仍派 Day 1 石器，预准备报 `not_ready`，14 次生成全部被下界岩浆逃生取消。终版背包验证为真、加分 0；属于已有装备验收。模型开始执行时任务已过时，日志缺选中当刻的维度，故无法确认稳定下界错误派单。现有选择逻辑只在主世界或状态缺省时启用该目标；先把恢复后的维度与装备快照用于派单，再按原标准验收。 [死亡与重生](../runs/r54_nether_fortress_6bot/hy4_hy_8_nether_fortress/20261120-233420-211102.events.jsonl#L738) · [维度拉回](../runs/r54_nether_fortress_6bot/hy4_hy_8_nether_fortress/stdout.log#L1027) · [派单原件](../runs/r54_nether_fortress_6bot/hy4_hy_8_nether_fortress/20261120-234117-609756.events.jsonl#L3) · [终版验证](../runs/r54_nether_fortress_6bot/hy4_hy_8_nether_fortress/wild-endurance-r54_nether_fortress_6bot_hy_8_nether_fortress-20261120-231214.json#L229) · [石器目标判定](../src/mc_agent/harness/curriculum.py#L1381)
+
+- **r58 运行中复现维度交接**：HY4_8 EP01 过程中捕捉主世界重生，集尾恢复入下界。EP02 仍派 `bootstrap_stone_age`，第一批护航动作在下界反复救岩浆，集尾验证为真、加分 0。源码候选仍要求 `cur_dim == "overworld"`，选中当刻的状态未留在回执，归入维度交接证据。 [拉回下界](../runs/r58_nether_fortress_5bot/hy4_hy_8_nether_fortress/stdout.log#L207) · [EP02 实际派单](../runs/r58_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-012759-392518.events.jsonl#L1) · [下界脱岩浆失败](../runs/r58_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-012759-392518.events.jsonl#L85) · [选择器维度条件](../src/mc_agent/harness/curriculum.py#L1449)
+
+- **r58 终版两次交接**：另有 HY4_8 EP06，前一集已验证烈焰棒，但死亡回主世界，又在下界跑了石器，预准备被反射抢占。再次恢复物资后按已有镐验收，0 增分。r57 下界石器派发 1 次、验证 0，r58 两次均被验收，均加 0。 [EP05 死亡](../runs/r58_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-013745-338680.events.jsonl#L402) · [EP06 派单](../runs/r58_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-014120-043634.events.jsonl#L1) · [EP06 终版](../runs/r58_nether_fortress_5bot/hy4_hy_8_nether_fortress/wild-endurance-r58_nether_fortress_5bot_hy_8_nether_fortress-20261121-012119.json#L255)
+
+- **r59 终版一处交接**：同 HY4_8 EP01 已验证要塞，后死亡回主世界。恢复入下界后仍派 EP02 石器，14 次 actor 请求消耗在反复液态岩浆救援，`limit_reached` 且验证为假。 [死亡后拉回](../runs/r59_nether_fortress_5bot/hy4_hy_8_nether_fortress/stdout.log#L27) · [派单](../runs/r59_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-015400-066825.events.jsonl#L1) · [集尾](../runs/r59_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-015400-066825.events.jsonl#L142)
+
+- **r61 交接再现**：HY4_8 EP03／05／07 与 HY4_9 EP06 共 3 次石器、1 次铁器，另有 HY4_8 EP06 侦察。两条石器／铁器机验为真、加分皆 0。HY4_8 反复有主世界重生，恢复阶段有解码错误、60s 子进程超时，也有成功恢复。选中时的状态未写入日志，待同一 trace 关联派单与实际维度。 [石器任务](../runs/r61_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-031624-901704.events.jsonl#L1) · [恢复超时](../runs/r61_nether_fortress_5bot/hy4_hy_8_nether_fortress/stdout.log#L761) · [终版课程](../runs/r61_nether_fortress_5bot/hy4_hy_8_nether_fortress/wild-endurance-r61_nether_fortress_5bot_hy_8_nether_fortress-20261121-025615.json#L82)
+
+- **r63 下界维度交接复验**：HY4_8 EP05 的 `bootstrap_stone_age` 预准备被岩浆救援抢占，终版 `objective_verified=true`、0 actor、0 增分。中断回执里的「5 原木、1 石镐」来自原备料请求。紧邻的 EP04 末段空包，EP06 首次 Guardian 库存已持钻石镐并有整套下界补给。源码刷新库存后按镐阶短路，离线回放证明空包加旧进度不能验收，钻石镐可以。现有证据支持场景补装造成的零操作镐阶验收，派单维度和 EP05 集尾实际镐种缺快照。复验时记录派单维度和集尾镐阶，并为场景补装标记来源。 [EP05 中断](../runs/r63_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-050403-056945.events.jsonl#L5) · [EP06 补给快照](../runs/r63_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-050423-644174.events.jsonl#L8) · [缺口回执](../src/mc_agent/harness/curriculum.py#L2318) · [刷新库存并短路](../src/mc_agent/harness/curriculum.py#L2365)
+
+- **r64 同型复现**：HY4_9 EP05 的石器预准备被岩浆抢占，0 次 actor、0 分、机器验证为真；下一集第一份 Guardian 库存已持钻石镐。派单当时的维度仍缺直接记录。 [EP05 中断](../runs/r64_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-053858-337030.events.jsonl#L5) · [EP05 终版](../runs/r64_nether_fortress_5bot/hy4_hy_9_nether_fortress/wild-endurance-r64_nether_fortress_5bot_hy_9_nether_fortress-20261121-052442.json#L224) · [EP06 钻石镐](../runs/r64_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-053919-147104.events.jsonl#L8)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-050 | **P0（后 3h 停滞主因）** | Integrator（#1，`harness/curriculum.py`）| 状态: FIXED（已补 `suspended_episode`/`_pending_preempt_key` 跨维剔除，待实机复验）
+- **Long3 H4 终档再次错派下界要塞。** EP11、EP12 均提示已在下界，两集合计 **554.169s**、0 验证、0 分差。EP12 首次斥候时 Guardian 的玩家状态明确为 `overworld`，末包终档同维度。按当集实际维度重新选课，主世界仍可明确派门户前置。 [EP11 误派](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-130840-402190.events.jsonl#L1) · [EP12 误派](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-130940-437937.events.jsonl#L1) · [主世界状态](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-130940-437937.events.jsonl#L55) · [终档](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/wild-endurance-wild-20261122-123932.json) · [任务提示](../src/mc_agent/harness/curriculum.py#L776)
+- **L2 H3 附魔终档，EP12 再现主世界派下界要塞。** L1 任务写当前已在下界，L442/L844 独立生态回执都为主世界。期间八次向下施工 **272.705s、74 阶、220 格**，结尾仍主世界、要塞未验。固定 `9ba372a` 的真实 `select_next_target`，给同一 `find_fortress` frontier 和先前过门成就，换独立状态维度，主世界与下界均派要塞。验主世界保留可执行的门户路线，下界仍可正常派要塞。 [派单原文](../runs/l2_long1_20261122/hy_5e_3_enchant_anvil/20261122-111036-506483.events.jsonl#L1) · [首个主世界证据](../runs/l2_long1_20261122/hy_5e_3_enchant_anvil/20261122-111036-506483.events.jsonl#L442) · [末个主世界证据](../runs/l2_long1_20261122/hy_5e_3_enchant_anvil/20261122-111036-506483.events.jsonl#L844) · [正向选课入口](../src/mc_agent/harness/curriculum.py#L1731)
+
+- **W3 又在主世界派下界要塞，约 537s 被消耗。** OB3 EP19 开局明确申称「当前已身处下界」，同集 L215 的生态校验明确是 `overworld`，终版同维度，原件无实际入门。先从 Y14 爬到 Y61 的局部门高，再用主世界梯道推进到 Y81，仍继续查下界砖与烈焰人，6 个 `path_not_found`，最终隧道被时间门拦截。以独立当前维度挡住该候选，要求过门后才派要塞，或明确恢复至过门任务。 [错派原文](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-075616-474243.events.jsonl#L1) · [当集生态回执](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-075616-474243.events.jsonl#L215) · [集限](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-075616-474243.events.jsonl#L1155) · [终版维度](../runs/5ease_ob_w3_20261122/nju_ob_3_village/wild-endurance-5ease_ob_w3_nju_ob_3_village-20261122-064201.json#L43) · [候选维度排序](../src/mc_agent/harness/curriculum.py#L1783)
+- **Showcase 再见主世界派下界要塞。** OB3 终段 EP16/18/20 的要塞提示明确写「当前已身处下界」，实际 EP20 L584 守卫状态为主世界，同一村庄坐标附近，终版也为主世界，无穿门调用。三次均未验证；中间分别被睡觉和岩浆桶切走。继续在选课入口用独立当前维度约束成就候选。 [错派原文](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-054137-174599.events.jsonl#L1) · [同集主世界](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-054137-174599.events.jsonl#L584) · [终维度](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/wild-endurance-5ease_ob_nju_ob_3_village-20261122-044433.json#L43) 固定 `0731a37` 的真实选课入口，Overworld 持包且只完成 `nether/root`、未过门时仍派要塞并写已在下界。移除 root 后不派，切到真实下界后正常派。原档未记录授予 root 的来源。 [候选筛选](../src/mc_agent/harness/curriculum.py#L1728)
+
+- **Showcase 门户仍被睡觉、交易两次打断。** OB3 EP03 的 45 次请求在睡觉插派时剩 4，恢复至 EP05 两次请求后又被交易插派。睡觉集未绑定，交易集无交易调用。EP07 恢复只有 2 次请求，虽剩 1,267.167s，扫描和一次铁 DFS 后就 `limit_reached`，下一集重新起 45 次。固定 `0731a37` 的门户保护只覆盖岩浆桶，睡觉与交易各独立返回。建议按真实可成交条件和原目标恢复成本判断，覆盖只知床／村民但到不了的情况，并测连续支线后主线剩余请求。 [首次暂停](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-044839-054406.events.jsonl#L1263) · [二次暂停](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050026-425020.events.jsonl#L77) · [余两次](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050210-798252.events.jsonl#L3) · [插派源码](../src/mc_agent/harness/curriculum.py#L2006) · [恢复额度](../src/mc_agent/harness/curriculum.py#L2282)
+
+- **`5f685aa` 门户子门实机通过**。V2 四门户槽有 3 次岩浆桶暂停，`5ease_portal_100` 同类四槽在 5 集内 **0** 次暂停，所有派发仍为过门。H1 多类型扫描确有距 1.7m 的熔岩，守卫封边后继续门户集。该过门保护子项已验证，其他课程的水桶误判继续开放。地形、坐标及其余槽构成有变化。 [近熔岩](../runs/5ease_portal_100_20261122/hy_5e_1_probe_obsidian_portal/20261122-041158-006480.events.jsonl#L56) · [门户终集](../runs/5ease_portal_100_20261122/hy_5e_1_probe_obsidian_portal/20261122-041158-006480.events.jsonl#L677)
+
+- **`5f685aa` 已进集成，窄门复验为 6/6**。固定前后真实机会函数，当前目标为过门时，水桶、空桶及 3 粗铁三种近岩浆场景均由派岩浆桶变为不派；其他目标只有水桶或空桶时仍允许派，过门遇可交易村民也保留交易选项。此版保护正在跑的门户课，其他课程的空桶前置仍需复验。新归档 `5ease_portal_100` 已确认实载指纹 `f52dcc9f7dc43dc2`。 [集成保护](../src/mc_agent/harness/curriculum.py#L2018) · [新波实载](../runs/5ease_portal_100_20261122/hy_5e_4_probe_obsidian_portal/20261122-041157-768433.events.jsonl#L3)
+
+- **5Ease 黑曜石门户 V2，快速插队的实物前置不一致**。H1/H2 EP01 备料后各已有 8 黑曜石，就近扫描岩浆后被暂停并派 `lava_bucket`。EP02 独立包只见载水桶，空桶交互、无铁的合成都失败。H4 同样真实插队，另采两粗铁，熔炼时缺燃料。固定 `cea55e4` 的真实 `_detect_surface_preempt_opportunity`，只有水桶或只有 3 粗铁时会立即派该目标；空桶加近岩浆也会派，无材料、远于 32m 或同任务均跳过。检测器把载水桶当作现成桶，子课前置只认 `bucket`；合铁也未核对炉和燃料。用场景的剩余集数和真实可用材料验收，只有水桶时需验证可安全倒空且不阻断原门户任务，空桶正例要实收岩浆并恢复原任务。 [H1 暂停](../runs/5ease_obs_fixed_v2_20261122/hy_5e_1_probe_obsidian_portal/20261122-035832-027985.json#L759) · [H1 次集实包](../runs/5ease_obs_fixed_v2_20261122/hy_5e_1_probe_obsidian_portal/20261122-035920-537566.events.jsonl#L127) · [H2 次集实包](../runs/5ease_obs_fixed_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-035945-266846.events.jsonl#L129) · [插队判定](../src/mc_agent/harness/curriculum.py#L2003) · [空桶前置](../src/mc_agent/harness/curriculum.py#L531)
+- **影响**：缺少硬前置道具/群系门控 + 固定 20 分钟冷却（`cooldown_s = 1200s`）导致 4 小时内冷却反复到期（最多 12 次），波及全部 16 路长程，吃掉后半程 50%~75% 集数。
+- **轨迹实据**：
+  - 无鞍却派 `nether/ride_strider`：`ds_4` **0/13**、`glm_2` **0/6**、`hy4_6` **0/4**；
+  - 无钻石镐却派 `obtain_ancient_debris` / `obtain_crying_obsidian`：`ds_4` **0/12 + 0/10**、`nju_guitest` EP03；
+  - 无苍白花园/深暗之域/村庄/烈焰棒却反复强派：`glm_5`（手握 10 颗钻石+钻镐钻剑）被派 `lava_bucket` **0/14**、`make_a_sign_glow` **0/8**、`heart_transplanter` **0/7**；`hy4_9` `kill_mob_near_sculk_catalyst` **0/4** + `heart_transplanter` **0/4**；`glm_4`/`hy4_5` `cure_zombie_villager` 0/3~0/4、`follow_ender_eye` 0/3；
+  - 模型在 `final_answer` 中已多次明确输出“已扫描 8k~32k 格确认本岛无苍白橡木/无村民/无鞍，不可达，建议切换”，Harness 完全未感知。
+- **最小修复**：
+  1. 硬前置门控：`ride_strider` 需背包有 `saddle`；`obtain_ancient_debris` / `obtain_crying_obsidian` 需有 `diamond_pickaxe`/`netherite_pickaxe`；`follow_ender_eye` 需有 `ender_eye` 或（`blaze_rod`/`blaze_powder` + `ender_pearl`）；`heart_transplanter` / `kill_mob_near_sculk_catalyst` / `cure_zombie_villager` 未在 WorldMemory 观测到对应结构/实体前禁止盲派；
+  2. 冷却改为指数退避：第 1 次失败 20m → 第 2 次 60m → 第 3 次 ≥3h（10800s），若模型明确回报环境阻断/无目标则直接跳级至长冷却。
+- **验收标准**：4 小时长测中单个无进展非主线目标重复派发次数 ≤3；后 2 小时不再出现 `0/14`、`0/8`、`0/7` 式空转。
+- **D1 全量 ROI 复核（6 波 1,581 集，逐 target 统计）**：**18 个 target 成功率 0%，合计 494 集（31.2% 集数）/ 8,078 请求 / 0 分**：
+  | target | 集数 | 请求 |
+  |---|---|---|
+  | `husbandry/make_a_sign_glow` | **116** | 2,402 |
+  | `nether/ride_strider` | 57 | 1,581 |
+  | `husbandry/breed_an_animal` | 51 | 665 |
+  | `adventure/heart_transplanter` | 47 | 448 |
+  | `nether/obtain_crying_obsidian` | 34 | 826 |
+  | `island_recon_sweep` | 30 | 229 |
+  | `adventure/kill_mob_near_sculk_catalyst` | 28 | 270 |
+  | `nether/distract_piglin` | 25 | 344 |
+  | `husbandry/tame_an_animal` / `fishy_business` | 18 / 18 | 149 / 233 |
+  | `husbandry/allay_deliver_item_to_player` | 17 | 116 |
+  | `nether/get_wither_skull` | 10 | 409 |
+  | 其余 6 个（sniffer_egg / cure_zombie_villager / ride_a_boat_with_a_goat / trade_at_world_height / silk_touch_nest / find_bastion） | 53 | 406 |
+- **ROI 排名（分/100 请求）**：`brew_potion` **87.2**（78% 成功）、`use_lodestone` **74.9**、`shiny_gear` **61.0**（1,245 分，占全部得分 61%）、`kill_a_mob` 46.2；而 `obtain_ancient_debris` 仅 **11.6**（91 集 / 3,237 请求 / 375 分）、`find_fortress` **5.9**。
+  → **`shiny_gear` + `brew_potion` + `use_lodestone` 三项贡献了绝大部分分数，而 18 个 0% 目标吃掉了 1/3 集数**。
+- **D1 离线复现（r48 实际版本 `198c32a`）**：缺少其他可派候选时，选择器移除最早到期的冷却再递归。下界有钻镐、已完成 `shiny_gear`、只剩堡垒目标的夹具中，`now=1` 仍会派发冷却截止 1200 或 10800 的 `find_fortress`。显式排除该目标后，现有空闲探索回退正常选中。应在无可用目标时保留未到期冷却，并在阶段有可做任务时继续派发已就绪目标。实机冷却被提前解除须同时核对累计冷却和再次派发两个事件。 [到期判断](../src/mc_agent/harness/curriculum.py#L1343) · [回退移除冷却](../src/mc_agent/harness/curriculum.py#L1638) · [指数写入](../src/mc_agent/harness/curriculum.py#L2538) · [离线夹具](../../s-triage/tests/test_d1_repro.py#L165)
+- **r49 SCENE-003 另一路冷却绕过**：HY4_1 EP02 的终版记录 `cooled_down=true`，仅余 133s 的 EP03 重新派同一 `follow_ender_eye`。场景覆盖选择器直接返回首个未完成成就，未走常规候选和冷却判断；这是常规无候选回退夹具之外的另一分支。 [EP02 冷却／EP03 派发](../runs/r49_stronghold_end_5bot/hy4_hy_1_village_to_stronghold_end/curriculum-20261120-104503-004529.json#L57) · [场景覆盖](../scripts/l3_wild_endurance_runner.py#L1866)
+
+- **r60 维度前置仍缺**：HY4_8 EP08 在下界实际接到获取三叉戟、找溺尸的主世界目标，返回空扫描。通用候选池仍为非下界目标保留 tier 3，只降优先级。末集只分到约 9.6s，样本证明实际派单，不足以推算长期损失。 [任务](../runs/r60_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-025429-850084.events.jsonl#L1) · [实际下界状态](../runs/r60_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-025429-850084.events.jsonl#L33) · [通用维度降权](../src/mc_agent/harness/curriculum.py#L1678)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-051 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: FIXED（已加 `Y >= 58` 门限阻断地下派寻村，待实机复验）
+- **W19 60m OB1 成钻靴后，在地下切寻村导致失装。** EP09 从 Y10 派 Day 2 寻村，任务要求 Y≥60 再探村。爬到 Y59 后斥候已运行，回执在 Y56、`path_not_found`，并列出 Y41 的地下箱和 Y62 的岩浆。下一笔 `mc_move_to` 只给该箱 XZ、`ignore_hurt=true`，25.08s 超时在 Y15，随后证实岩浆伤、持续燃烧和死亡。死前快照有钻靴、副手铁镐、四钻、六锭。验收用实际出洞和可达的同层目标打开斥候，低层箱、下落路径及确认的岩浆不得当作地表目标；保留成功爬升路径。 [派单](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-220708-698515.events.jsonl#L1) · [低处箱与岩浆](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-220708-698515.events.jsonl#L164) · [移动和岩浆伤](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-220708-698515.events.jsonl#L197) · [死前装备](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-220708-698515.events.jsonl#L209) · [寻村接力](../src/mc_agent/harness/curriculum.py#L1689)
+- **Guardian W12 H2 再现封闭竞技场错派地表环岛。** EP01 实杀僵尸后验证，EP02 仍在 Y76 封闭场，任务要求 60–80 格远行，四次无路、骷髅持续箭伤、零环岛验证。后续派钻石课，箭伤打断采钻与砍木，后验血量降至 7.04。采掘和战斗抢占数据需结合这一场景交接。 [场景课首行](../runs/l1_w12_guardian_full_20261122/hy_5e_2_cave_combat/20261122-091726-840091.events.jsonl#L1) · [环岛课首行](../runs/l1_w12_guardian_full_20261122/hy_5e_2_cave_combat/20261122-091736-964011.events.jsonl#L1) · [第四次无路](../runs/l1_w12_guardian_full_20261122/hy_5e_2_cave_combat/20261122-091736-964011.events.jsonl#L152) · [后续箭伤](../runs/l1_w12_guardian_full_20261122/hy_5e_2_cave_combat/20261122-091838-584089.events.jsonl#L192)
+
+- **高 Y 的封闭区派发补例**。黑曜石门户 V1 队里的 H5/H6 两个战斗槽首集均击杀成就验证+20，次集各在原封闭竞技场派地表摸底。H5 四次、H6 三次寻路失败，H6 继续受同一骷髅 7 次明确箭伤、终版 HP3.127。两集零摸底验证。场景完成后交回通用选择器，只检查日夜、高度及记忆的分支可误认封闭高台为地表。验收补 Y≥52 且有顶无出口的场景，需明示可出场或保留本场景有效动作。 [H5 摸底末](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_5_cave_combat/20261122-035018-322065.events.jsonl#L385) · [H6 末箭伤](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_6_cave_combat/20261122-035009-645003.events.jsonl#L176) · [场景交接](../scripts/l3_wild_endurance_runner.py#L2033) · [摸底派发](../src/mc_agent/harness/curriculum.py#L1620)
+- **影响**：规划器高度/位置失明——Bot 挖矿留在地下 `y < 45` 时，连续派发 8 轮短预算的地表任务，导致每集全用来爬楼梯、连地表都见不到就超时。
+- **轨迹实据**：`overnight_12bot/glm_glm_4_brewing_alchemy` EP08 挖钻后停在 `y=23`，EP15~EP30 连续 17 集被派 `sleep_in_bed` / `breed_an_animal` / `plant_seed`（8 轮预算），EP19 光从 `y=23` 爬到 `y=29` 就耗光全集；`hy4_2` 在 `y=38` 被派 `make_a_sign_glow`。
+- **最小修复**：选定地表专属目标（`plant_seed`、`breed_an_animal`、`sleep_in_bed`、`tame_an_animal`、`trade`、`island_recon_sweep`）前检查 `cur_pos[1] < 50 and cur_dim == "overworld"`，先执行独立返地表步（或 `mine_dfs(climb_out)`）再开地表集。
+- **验收标准**：`y < 45` 状态下不再直接开启 8 轮地表短任务；地表任务开局时 Bot 位于地表或已带足够爬升前置。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-052 | P1 | Slice C（#4）+ Integrator（#1）| 状态: OPEN（16 路过夜轨迹全量复盘）
+
+- **W20 HY10 自动熔炼保住首镐材料，随后手动补炉又耗掉。** EP02 三粗铁、两棍和两台带回 Y61。同步炉烧一板取一锭后停火，actor 用窗口投两棍和一工作台，最终取余二锭。EP03 独立包三锭一台、零棍，立即制镐缺两棍。GLM HY6 同波一炉实取三锭并装备铁镐，是自动路径成功对照。复验从自动炉交接到显式操作时，补炉仍保住两棍且保留生产成品所需的材料。 [炉前包](../runs/l1_w20_20261122/hy_5e_10_bare_60m/20261122-224754-901803.events.jsonl#L248) · [投两棍](../runs/l1_w20_20261122/hy_5e_10_bare_60m/20261122-224754-901803.events.jsonl#L509) · [投一台](../runs/l1_w20_20261122/hy_5e_10_bare_60m/20261122-224754-901803.events.jsonl#L733) · [下集缺棍](../runs/l1_w20_20261122/hy_5e_10_bare_60m/20261122-225646-761663.events.jsonl#L34) · [HY6 成品](../runs/l1_w20_20261122/glm_hy_5e_6_bare_30m/20261122-225321-276695.events.jsonl#L197) · [保料的同步入口](../src/mc_agent/skills/library.py#L5622)
+
+- **W20 OB2 首次烧的是木炭，备料仍可耗尽。** EP02 Y55 实包一原木、两棍、一板、十二圆石、无随身台。用两棍烧最后一木，确实出并实取一木炭，独立包证实木／棍归零；随后做台缺三板，补木零入。首镐燃料保护在 `input_item` 产物为铁锭时才启用，现象属于首次烧铁之前。验收从备煤或木炭开始对账，确认有可达工作台及两棍来源，保留有多余木料时的正常木炭分支。 [炉前包](../runs/l1_w20_20261122/nju_ob_2_bare_30m/20261122-224700-509152.events.jsonl#L16) · [实取木炭](../runs/l1_w20_20261122/nju_ob_2_bare_30m/20261122-224700-509152.events.jsonl#L80) · [炉后包](../runs/l1_w20_20261122/nju_ob_2_bare_30m/20261122-224700-509152.events.jsonl#L94) · [缺台](../runs/l1_w20_20261122/nju_ob_2_bare_30m/20261122-224700-509152.events.jsonl#L124) · [保护入口](../src/mc_agent/skills/library.py#L5604)
+
+- **W19 HY10 首镐断在燃料和木棍。** 60m EP08 实初包两棍、三木、一板、两台。第一次用一根原木实烧一锭；后续 DFS 回执石镐净增 1、实入三粗铁。Y34 又将最后两原木投入炉并实取三锭。合成时实有四锭、两台，木棍和原木均 0、仅一板，同样库存延续到 EP09。出井找木途中箭死，候补回场后空包。木棍具体消耗动作无逐笔证据。验收在进入最后一炉前重盘，保留首铁镐两棍或可转换的木料，覆盖 DFS 已用掉备料的路径。 [首个铁锭后库存](../runs/l1_w19_20261122/hy_5e_10_bare_60m/20261122-215159-430678.events.jsonl#L234) · [第三片实增](../runs/l1_w19_20261122/hy_5e_10_bare_60m/20261122-215159-430678.events.jsonl#L344) · [末炉用两原木](../runs/l1_w19_20261122/hy_5e_10_bare_60m/20261122-215159-430678.events.jsonl#L369) · [四锭缺棍](../runs/l1_w19_20261122/hy_5e_10_bare_60m/20261122-215159-430678.events.jsonl#L390) · [箭死](../runs/l1_w19_20261122/hy_5e_10_bare_60m/20261122-220216-803314.events.jsonl#L405)
+
+- **W19 HY8 复验造炉后的携台变化。** 60m EP11 在 Y48 段独立包台 1、煤 17、一板；造炉回执是炉 1、台 0。随后补棍回执重新见台 1、炉 1、四棍和煤 17，才进入采铁。没有携台重新取得的逐笔动作记录。OB2 EP10 另在 Y26 实取三锭、制并装备铁镐，成镐回执同时确认台 1、炉 1。实际备料和同层成品均有新版正例，继续覆盖造炉后未回台的缺料分支。 [HY8 造炉前包](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/20261122-215219-576790.events.jsonl#L88) · [造炉回执](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/20261122-215219-576790.events.jsonl#L100) · [进井前又见台](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/20261122-215219-576790.events.jsonl#L118) · [OB2 成品包](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-214708-216171.events.jsonl#L309)
+
+- **W19 铁器正例。** GLM HY1 EP02 带 8 原木、9 板、2 棍、两石镐，初次独立盘点无台炉。Y44 铁 DFS 实收 7 粗铁，随后同层炉实耗 2 橡木板、实取 3 锭，5.74s 制并装备首铁镐，末回执实包 4 粗铁、3 木板、铁镐 1，`used_table=true`。记录确认同层完成首镐，炉前后未单独读台位和携台，备料提示的行为影响待核。对照 OB2 石器 EP02 在 Y57 有 10 圆石、2 棍、3 板、无台，面对上方旧台仍缺材料。 [HY1 开包](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-213238-601813.events.jsonl#L19) · [取锭](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-213238-601813.events.jsonl#L64) · [成镐](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-213238-601813.events.jsonl#L81) · [OB2 缺台](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-213328-546698.events.jsonl#L46) · [炉位回退](../src/mc_agent/skills/library.py#L5172)
+
+- **D1 复验便携木料与燃料会用同一包。** 固定已有炉、粗铁 3、棍 4、无台，集成 `90f0164` 和 C `2735fe3` 都走真同步炉与制镐入口。无煤只有四板时，实耗两板、实取三锭，余两板仍缺台。六板或四板加一煤的两组都实制并装备铁镐。新井备料按预计燃料扣除后的四板核对，另验已持便携台的路径。这个边界来自模拟传输，W18 HY8 实机是用煤后缺台。 [同步燃料选择](../src/mc_agent/skills/library.py#L5212) · [新井提示候选](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L2492)
+
+- **D1 两段合成离线复验。** 集成 `90f0164` 与 Slice C `2735fe3` 都用真实 compact 造炉和制镐入口，模拟 W18 HY8 的 Y81 造炉后去 Y23，初包只有一台和一板。放台、造炉均成功，地表台保留，进井时随身台为 0。模拟已取三锭后，真制铁镐入口返回 `need_crafting_table`，三锭仍在。对照新台在 Y23 时成功挖回 1 台，到下一点能用三锭制并装备铁镐。沿用预先摆好的旧台时，两版均无挖台动作。按此验造炉后的随身余量，并保留已沿用工作台。 [现场造炉](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-204747-556952.events.jsonl#L88) · [现场缺台](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-204747-556952.events.jsonl#L190) · [集成台回收条件](../src/mc_agent/skills/library.py#L4025) · [C 临时台登记](../../s-skills/src/mc_agent/skills/library.py#L3202)
+
+- **W18 收官与场景候选。** HY8 自三锭入包到末集结束 1039.84s，终包仍留三锭和七粗铁，铁镐 0。D2 候选 `3721a3d` 在安全地表引导就地补四板做台，新开铁井前核对便携台或四板、炉和燃料。候选只更新任务提示。需验首轮挖铁结束时的真实台、板和成品，并核对旧台不可达时是否继续空走。 [HY8 首取三锭](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-204747-556952.events.jsonl#L171) · [终包](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/wild-endurance-wild-20261122-204046.json#L49) · [候选炉台提示](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L2489)
+
+- **W18 两槽实取三锭，均因台掉链。** HY8 EP03 在 Y81 临下井前有 1 张新台，造炉实包即少该台。到 Y23 收 10 粗铁、煤足并实取 3 锭，制镐缺台；实包仅 1 板、4 棍，下一次制台缺 3 板。HY7 EP03 进 DFS 时带 1 台，续片净增一石镐后，Y13 出炉 3 锭；制镐回执知道附近 Y23 有台，仍没有可用手台或四板。首轮实际爬 129.25s 至 Y82，未做成铁镐。下井物资门和使用后回收应分别验工作台实际回包、并未占通道、到采面仍能配方。HY7 台从包里消失的单笔内部调用尚未记录。 [HY8 台](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-204747-556952.events.jsonl#L57) · [造炉后台已不在](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-204747-556952.events.jsonl#L88) · [实取三锭却缺台](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-204747-556952.events.jsonl#L190) · [HY7 地下旧台](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-204902-652972.events.jsonl#L187) · [台回收条件](../src/mc_agent/skills/library.py#L4025)
+
+- **W18 实取锭到成品的后续。** HY7 下一集实制并装备首铁镐，距前集取三锭 **317.998s**，按两条绝对时间戳相减。HY8 的两后续集仍有三锭，却重新派石器。到 Y63 与 Y65 都先收到 `surface_reached`，去旧台仍无实际位移，Y65 的回执明确爬升 0 格。 [HY7 三锭](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-204902-652972.events.jsonl#L171) · [HY7 首镐](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-205620-523249.events.jsonl#L108) · [HY8 三锭仍在](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-210008-494919.events.jsonl#L21) · [Y65 原地](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-210008-494919.events.jsonl#L60)
+
+- **W11 备料成功造木板后又消耗于工作台，净缺口未消。** H1 EP03 与 H4 EP04 都依次造木板 8、工作台 2，最后仍缺木板 7。H1 结算时 12 原木门已满足，actor 接着仍三次请求再收 12 原木，其中一次被重复门放弃。请同时预留消费型配方要用的木材和下井携带量，优先核当前可用原木和成品的净缺量。 [H1 备料步](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/wild-endurance-wild-20261122-081434.json#L296) · [H1 净缺](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-082139-177378.events.jsonl#L2) · [H1 续砍](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-082139-177378.events.jsonl#L253) · [H4 终版备料](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/wild-endurance-wild-20261122-081437.json#L273) · [携带量](../src/mc_agent/harness/curriculum.py#L2413) · [逐项备料](../src/mc_agent/skills/ensure.py#L648)
+- **W2 OB1 EP05 满包卡住石镐的工作台前置**。L42 实包 **22 把石镐**，另有煤 4、无粗铁和铁锭。随后三次要求做石镐，先返回 `inventory_full` 及占用 36/36，失败物料字段为工作台。另扫到 1 把石镐掉落实体。结合上一找铁集的包差，已有工具仍无法被正确重用或腾位，22 把的逐件制造来源待核。 [实包](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-031114-089455.events.jsonl#L42) · [前置满包](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-031114-089455.events.jsonl#L121) · [另一个石镐实体](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-031114-089455.events.jsonl#L159)
+- **影响**：地底“缺 1 块木板/工作台”或“36 格杂物满包”导致高进展 Bot 硬卡 5~9 集（30~60 分钟）。
+- **轨迹实据**：
+  - `ds_ds_1_bare` EP25~33 手握 192 圆石 + 3 木板 + 4 木棍，只差 1 块木板合工作台，在 `y=40` 徒手挖石（25s/格）硬爬 9 集；
+  - `nju_nju_3_village_trade` EP11 已挖齐 4 颗钻石，却因缺 3 块木板卡在 `y=6` 合不出钻石靴；
+  - `glm_glm_4_brewing_alchemy` EP43~45 已挖 13 粗铁、烧出 4 铁锭，却因 36 格塞满杂物导致 `craft_gear` 连续报 `inventory_full`，模型只能逐格放圆石腾位，连卡 5 集。
+- **最小修复**：
+  1. `curriculum.py` 下矿（`shiny_gear`/`mine_diamond`/`bootstrap_iron_age`）前 `pre_ensure` 硬保底：`crafting_table >= 1` 且 `any_log >= 4`（或等效木板 ≥16）；
+  2. `library.py:craft_gear` 遇到 `inventory_full` 时自动按优先级丢弃 1~2 格低价值杂物（`rotten_flesh`、`seeds`、`granite`、`diorite`、`andesite`、`tuff`、`dirt`、超量 `cobblestone`）腾出空位后再合成。
+- **验收标准**：4 小时长测中 `craft_gear:inventory_full` 归零；不再出现“已有 4 钻石/4 铁锭却因缺工作台或满包卡 ≥2 集”。
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-053 | P1 | Integrator（#1）+ Slice D2（#6）| 状态: OPEN（16 路过夜轨迹全量复盘）
+- **L2 H1 EP04 续账至 L796。** 11 片共 732.840s、实破 639、黑曜石 0，副产实入 2 钻、4 粗铁。钻来自 L676 到达 Y−55 的片，该片 `target_gained=0` 指门户料。仍缺独立包、炉取和造门。 [两钻及黑曜石零增](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L676) · [第十一片](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L796)
+- **L2 H1 EP04 续账至 L640。** 前三片之后新四片还是只取得副产。七片合计 **460.914s、377 格**，实际 Y74→−44、黑曜石 0、粗铁 3。暂缺独立包和这些铁的炉务；用 `target_gained` 和实际建门核有效推进。 [追加两铁](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L558) · [第七片](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L640)
+- **L2 H1 中程门户 EP04，死亡后 151 格施工仍无门料。** 箭死前露头黑曜石宏在尚未到目标时被抢占；回场后连续三片 `target=obsidian,target_y=-50` 实耗 **192.189s、151 格**，Y74→31，实入目标黑曜石 0，首片有 1 粗铁副产。后续以真实可到达目标矿、入包、够料和建门分段验收。 [露头路径抢占](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L349) · [首片含铁副料](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L416) · [第三片目标零收](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L481)
+
+- **场景候选 `eb8e33e` 的材料续航**。固定 Git 树走真实课程入口的 7 组通过。两集黑曜石 4→8→12 各自计为物料进展、消除旧 strike、仍为 0 分。12→8→8 各无进展并触发冷却。专用短稿与采挖／建门工具均保留，备料和岩浆桶暂停为 0。模拟实际到下界并见进度才验收 +30，仅真实状态下界与扣料仍待核。两次派发之后通用目标恢复，但保护以同一 canonical key 生效，第三集通用门户课面对可交易村民仍禁止队列切入。指定双集探针未暴露这个边界。 [候选切回](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L2166) · [材料判定](../../s-scenarios/src/mc_agent/harness/curriculum.py#L2781)
+
+- **Portal V2 完整实物正例 H2**。EP01 L798/L899 两次黑曜石 +1，L1304 独立包有 10 黑曜石和 1 打火石，L1321 同一调用放 10 格、点燃、穿门到下界 `[1701.5,86,3297.5]`。终包黑曜石由 10→0，打火石仍 1，末态独立确认下界。Portal 100→V2 的四门户槽，建门调用及实际入下界均 **0→1**，课程验收仍 **0→0**，成就查账见 BUG-110。H3 终包 11 和打火石仍未调用建门，料齐触发问题继续待验。 [备料](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-042018-066420.events.jsonl#L1304) · [建门](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-042018-066420.events.jsonl#L1321) · [下界终态和包](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/wild-endurance-5ease_portal_v2_hy_5e_2-20261122-042006.json#L42)
+
+- **Portal 100，三槽料齐，建门工具 0**。H1/H3/H4 首达可用 10 黑曜石时，分别还余 **177.900 / 172.696 / 133.064s**。三终包分别 14/10/10，均有打火石。H3 的 L246 当时实际读出黑曜石 10、打火石 1，却试图重做打火石，随后三片 DFS 约 **138.456s** 只入圆石、泥土、闪长岩。请在实际包达门槛且落脚安全时调建门，记录消耗和二维度切换。H2 终包 9，保留真实未达料对照。 [H1 首达](../runs/5ease_portal_100_20261122/hy_5e_1_probe_obsidian_portal/20261122-041158-006480.events.jsonl#L185) · [H3 实包](../runs/5ease_portal_100_20261122/hy_5e_3_probe_obsidian_portal/20261122-041156-999366.events.jsonl#L246) · [H4 首达](../runs/5ease_portal_100_20261122/hy_5e_4_probe_obsidian_portal/20261122-041157-768433.events.jsonl#L352) · [注册建门](../src/mc_agent/harness/mc_tools.py#L2343)
+
+- **场景候选 `1220d54` 的真实课程入口**。固定全提交，模拟已见近岩浆、只有水桶及两集限额。专用短目标两集都保留 2 件一批的实际工具参数、门工具注册名及场景矿片坐标，零备料覆写、零岩浆桶暂停。普通中目标持空桶仍实际暂停；场景成就已给后仍可退回通用课程。模拟真实过门成就时核算 +30。新键仍不在材料进度白名单，单集背包 4→8 会记 `material_progress=false` 和一次失败，8→12 未穿门同类。请在保持过门必须实证的同时，按实包将采料进展计入续集，实机比对集成的旧键和该候选。 [候选场景](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L1961) · [保护入口](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L2576) · [进度白名单](../src/mc_agent/harness/curriculum.py#L2786)
+
+- **黑曜石门户 V2 的采入和建门分别对账**。同实载 `cea55e4`。H1/H2 EP01 各需 6，备料 44.08s 后缺口降为 2，次集独立包证实各有 8，延续目标被岩浆桶子课占用。H3 同样备料后缺 3，首次复扫见 16 格矿片余 13；L402/L456 独立包曾见 11 黑曜石、1 打火石，L481 死亡后 L515 才调用注册建门工具，因两项均 0 立即拒绝，终版仅补装 4。H4 终包 5，新增 1 的动作缺记录。四槽均无门框放置或穿门。验收将备料每格回执纳入轨迹，在已具备材料且站位安全时及时触发建门，按实消耗和维度切换确认。 [H1 备料](../runs/5ease_obs_fixed_v2_20261122/hy_5e_1_probe_obsidian_portal/20261122-035832-027985.json#L782) · [H3 13 格](../runs/5ease_obs_fixed_v2_20261122/hy_5e_3_probe_obsidian_portal/20261122-035832-681679.events.jsonl#L54) · [H3 足料](../runs/5ease_obs_fixed_v2_20261122/hy_5e_3_probe_obsidian_portal/20261122-035832-681679.events.jsonl#L402) · [死亡后拒建](../runs/5ease_obs_fixed_v2_20261122/hy_5e_3_probe_obsidian_portal/20261122-035832-681679.events.jsonl#L515) · [备矿回执](../src/mc_agent/skills/ensure.py#L1431)
+
+- **黑曜石门户 V1 `cea55e4`，现成矿片仍没转成门**。四槽各有原配黑曜石 4，四集 9 次原子挖约 30s 超时、3 次黑曜石批量挖在单格 15s 超时。H3/H4 事后复扫各自 16 格矿片，包含原试挖坐标。四终包均 4 黑曜石、1 打火石，建门和切维度 0。没有 `target=obsidian` 的 DFS 调用，16s 新分支未暴露。已安装的场景指引使用通用进下界任务 key，缺 6 料时被备料支路改回通用提示；场景原文还写 `mc_skill_build_nether_portal`，注册名是 `mc_skill_build_portal`。请保留缺料时的场景指引和真实工具名，按实际开挖入口记录站位、局部补封、破格、取料与穿门。先用单格干地与带流体对照，再验场景从 4→10 并建门。 [缺料与实际指引](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_1_probe_obsidian_portal/20261122-034927-644838.events.jsonl#L2) · [H4 末扫](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_4_probe_obsidian_portal/20261122-034935-424354.events.jsonl#L511) · [场景指引](../scripts/l3_wild_endurance_runner.py#L1931) · [覆写入口](../src/mc_agent/harness/curriculum.py#L2573) · [建门注册](../src/mc_agent/harness/mc_tools.py#L3354)
+
+- **W2 OB2 实测黑曜石扫描、挖掘和持有断开**。EP01 同一点 `[6357,-55,-6491]` 的 3 个挖掘回执分别约 37.8、30.3、30.0s 超时，现场两次复扫仍列 47 黑曜石。水中抢占后，能确认的一次挖矿只破旁边深板岩，黑曜石增量为 0。EP02 岩浆死亡并回补后，在 Y63 按矿点 XZ 重复走，记忆仍推荐横向靠近地下 Y−55 的点，半径 5 内是 0，单次下梯被邻水拦。未出现矿格成功破坏、入包或建门。 [选点与首挖](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-025802-874263.events.jsonl#L866) · [实采旁产](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-025802-874263.events.jsonl#L1327) · [竖距误用](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-032122-881739.events.jsonl#L318) · [下梯被拦](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-032122-881739.events.jsonl#L360)
+- **r77 门户确认一次入下界**：HY4_8 EP04 先靠近主世界黑曜石区，随后收到重生位置，护航状态明确为下界，课目标 +30 已验证。过程未调用建门，缺明确切维度的移动回执，现成入口的具体跨越动作待核。六次过门派发中一条验证。 [主世界移动](../runs/r77_midgame_portal_40m/hy4_hy_8_midgame/20261121-134543-530372.events.jsonl#L183) · [下界状态](../runs/r77_midgame_portal_40m/hy4_hy_8_midgame/20261121-134543-530372.events.jsonl#L197) · [验证](../runs/r77_midgame_portal_40m/hy4_hy_8_midgame/20261121-134543-530372.events.jsonl#L221)
+- **r75 门户见既有门复用工具回执**：HY4_8 EP06 工具发现并复用已点亮门，靠近超时、仍在主世界。EP07 随后获得 +30 过门验证，末次坐标来源为重生回执，终局下界；缺明确的移动切维度回执。NJU_3 EP04 仍缺六黑曜石，34 次探井配对 **1593.320s**，没有黑曜石入包，1800s 集限。 [复用尝试](../runs/r75_midgame_portal_40m/hy4_hy_8_midgame/20261121-122700-174958.events.jsonl#L829) · [EP07 重生与验证](../runs/r75_midgame_portal_40m/hy4_hy_8_midgame/20261121-123552-409796.events.jsonl#L661) · [NJU_3 缺料门](../runs/r75_midgame_portal_40m/nju_nju_3_midgame/20261121-122230-392784.events.jsonl#L285) · [工具入口](../src/mc_agent/harness/mc_tools.py#L2300)
+
+- **r74 门户再次真实穿门**：HY4_8 EP05 缺六黑曜石，`move_to` 明示 `dimension_changed`，随后进度验证 +30 分，终局 `the_nether`。没有建门或点火调用，符合利用既有门。五次过门派发只有这一活体验证，另两个角色仍在主世界。 [缺料](../runs/r74_midgame_portal_40m/hy4_hy_8_midgame/20261121-114024-897912.events.jsonl#L2) · [跨维度](../runs/r74_midgame_portal_40m/hy4_hy_8_midgame/20261121-114024-897912.events.jsonl#L187) · [验证](../runs/r74_midgame_portal_40m/hy4_hy_8_midgame/20261121-114024-897912.events.jsonl#L223)
+
+- **r73 门户同三角色实机跨维度 0→1**：HY4_8 EP04 开集仍缺六黑曜石，之后移动到 `[7795.5,67,2806.5]`，相邻挖掘被抢占后实坐标 `[971.5,56,350.5]`，集尾 `goal_satisfied`、进度与 +30 分均确认，整槽终版 `the_nether`。操作序列没有放置、点火或建门调用，符合走入既有门。另两槽仍在主世界，4 小时长程门待验。 [缺料](../runs/r73_midgame_portal_40m/hy4_hy_8_midgame/20261121-105733-217864.events.jsonl#L2) · [最后主世界移动](../runs/r73_midgame_portal_40m/hy4_hy_8_midgame/20261121-105733-217864.events.jsonl#L348) · [位置突变](../runs/r73_midgame_portal_40m/hy4_hy_8_midgame/20261121-105733-217864.events.jsonl#L370) · [整槽维度](../runs/r73_midgame_portal_40m/hy4_hy_8_midgame/wild-endurance-r73_midgame_portal_40m_hy_8_midgame-20261121-105005.json#L43) · [课程验证入口](../src/mc_agent/harness/curriculum.py#L2500)
+
+- **r71 同三门户角色**：派发 **7→6**，仍无建门与切维度。三个终包均有 4 黑曜石。NJU_3 EP04 预准备缺 6 黑曜石和打火石后，实际 34 次 DFS 探矿配对 **1540.933s**，新增 9 粗铁和 5 钻石，无黑曜石入包；目标集 1800s 超时。 [前置缺口](../runs/r71_midgame_portal_40m/nju_nju_3_midgame/20261121-093550-660037.events.jsonl#L2) · [后段探矿](../runs/r71_midgame_portal_40m/nju_nju_3_midgame/20261121-093550-660037.events.jsonl#L2448) · [课程材料门](../src/mc_agent/harness/curriculum.py#L746)
+
+- **r70 门户 40 分钟三槽**：七条过门课实际建门和跨维度均为 0，三槽终版均在主世界。HY4_9 EP05 有一次明确的制作打火石入包，报告仍为四黑曜石。对照 r69 两个可比终版角色，过门派发 **4→5**、实际跨维度 **0→0**，运行时长 30→40 分钟。 [打火石合成](../runs/r70_midgame_portal_40m/hy4_hy_9_midgame/20261121-090257-037167.events.jsonl#L877) · [该集报告](../runs/r70_midgame_portal_40m/hy4_hy_9_midgame/20261121-090257-037167.json) · [课程前置](../src/mc_agent/harness/curriculum.py#L746)
+
+- **r66→r67 中期同三槽**：加载 `32a6bff` 后，过门课 **0→5 集**、获入下界验证 **0→2 槽**。HY4_8 EP05 和 HY4_9 EP04 均 +30，watchdog 确认 `the_nether`。五条课无搭建／点火工具回执，HY4_9 后续看到已点亮的门并再次进入。NJU_3 两集预备阶段均缺 6 黑曜石与打火石、90 个 actor 请求仍未建门。三条后续堡垒课均未验，4 小时 250 分门槛仍缺。 [HY4_8 下界](../runs/r67_midgame_portal_3bot/hy4_hy_8_midgame/stdout.log#L650) · [HY4_9 下界](../runs/r67_midgame_portal_3bot/hy4_hy_9_midgame/stdout.log#L223) · [NJU_3 缺料](../runs/r67_midgame_portal_3bot/nju_nju_3_midgame/20261121-072736-309950.events.jsonl#L2) · [课程提权](../src/mc_agent/harness/curriculum.py#L1657)
+- **r67 找门前的空转**：HY4_8 EP04／05 与 HY4_9 EP04，12 次点挖超时合计 **361.765s**。每次所挖坐标均有此前黑曜石扫描，七条复合挖矿又耗约 **105.5s**，确认挖掘或入包均 0。现课程优先让缺料者凑黑曜石、后备材料具备才提示建门，任务文案缺先搜索可使用传送门的分支。复验应区分已有可用门与确需建门的落点。 [HY4_8 重试](../runs/r67_midgame_portal_3bot/hy4_hy_8_midgame/20261121-072013-481973.events.jsonl#L905) · [HY4_9 采块零产出](../runs/r67_midgame_portal_3bot/hy4_hy_9_midgame/20261121-071710-307864.events.jsonl#L199) · [过门剧本](../src/mc_agent/harness/curriculum.py#L740)
+- **r68 可对照两槽**：HY4_8／NJU_3 同 `midgame`、1800s，过门派发 **4→5**、真实切维度 **1→0**。HY4_8 两集六次实际黑曜石复合采块仍零入包，NJU_3 在岛边反复被围栏与流体阻隔，合计五条均缺建门点火。第三槽 HY4_9 启动崩溃，见 BUG-085。 [HY4_8 采块](../runs/r68_midgame_portal_3bot/hy4_hy_8_midgame/20261121-080403-617415.events.jsonl#L664) · [NJU_3 缺料](../runs/r68_midgame_portal_3bot/nju_nju_3_midgame/20261121-075627-454701.events.jsonl#L2)
+- **r69 `midgame_real_drop` 三槽**：八次过门派发、零入下界，DS_1 EP04 和 HY4_1 EP06 各调一次建门工具，均因当前 **4 黑曜石、1 打火石** 被材料门立即拒绝。需要增加能取得余 6 黑曜石或找到可用门的路线证据。 [DS_1 建门材料门](../runs/r69_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-080259-101154.events.jsonl#L366) · [HY4_1 建门材料门](../runs/r69_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-080458-735914.events.jsonl#L988) · [工具校验](../src/mc_agent/harness/mc_tools.py#L2289)
+- **影响**：开局现成场景资源未被优先收割，且预授成就与物理维度脱节，锁死主世界满装 Bot 的下界高分主线。
+- **轨迹实据**：
+  - `ds_ds_3_enchant_anvil` 出生在附魔台 + 书架 + 30 级经验平台，EP01 却先被派 `island_recon_sweep` 跑出平台掉水被溺尸击杀，30 级经验瞬间清零，后续 `enchant_item` 0/7；
+  - `glm_glm_4_brewing_alchemy` / `hy4_hy_5_brewing_alchemy` 开局预授 `story/enter_the_nether`，但 Bot 站在主世界；1 小时穿满钻甲到 195 分后，规划器误以为去过下界，后 3 小时再也不派建门进下界（`195→195→195→195`）。
+- **最小修复**：
+  1. `enchant_anvil` 切片同 `brewing_alchemy`/`village_trade` 一样加开局专属目标（优先附魔，不先跑 `island_recon_sweep`）；
+  2. 规划器判断“能否走下界高分线”看 `cur_dim == "the_nether"` 或已知传送门，而非仅看 `enter_the_nether` 成就位；主世界满钻装后若尚未在下界，主动派建门进下界。
+- **验收标准**：`enchant_anvil` 开局 2 集内完成首次附魔；主世界满钻装 4h 长测能主动进入下界继续推进至 ≥250 分。
+- **r48 开局分支实测**：附魔场景五槽 EP01 全部 `goal_satisfied`，工具核对钻石剑重新入包、实际附魔为锋利 I，等级 30→29。首集均无环岛派发。满钻装主世界主动进下界与 4h ≥250 分仍需同条件实机。 [HY4_1 附魔回执](../runs/r48_enchant_5bot/hy4_hy_1_enchant_anvil/20261120-102002-047133.events.jsonl#L24) · [MoveTest 附魔回执](../runs/r48_enchant_5bot/nju_movetest_01_enchant_anvil/20261120-101957-760568.events.jsonl#L47)
+- **r52 同三槽**：HY4_1／2／3 均在 EP01 取回附魔钻石剑并验证，锋利 I 两把、亡灵杀手 I 一把。HY4_2 EP06 确认举盾弹反再得 15 分。同组三路从 **3→4** 集验证，7 集寻村均未验证。主世界无建门派单或跨维度；20 分钟波未覆盖满钻主动进下界与长测门槛。 [HY4_1 附魔](../runs/r52_enchant_3bot/hy4_hy_1_enchant_anvil/20261120-213215-641448.events.jsonl#L15) · [HY4_2 举盾](../runs/r52_enchant_3bot/hy4_hy_2_enchant_anvil/20261120-214606-252651.events.jsonl#L204) · [终版验证](../runs/r52_enchant_3bot/hy4_hy_2_enchant_anvil/wild-endurance-r52_enchant_3bot_hy_2_enchant_anvil-20261120-213205.json#L242)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-054 | P1 | Integrator（#1）+ Slice C（#4）| 状态: OPEN（16 路过夜轨迹全量复盘）
+- **影响**：`husbandry/plant_seed` 与 `adventure/sleep_in_bed` 看似简单却长期接近 0% 成交，白烧大量集数。
+- **轨迹实据**：
+  - `plant_seed` 全场 16 路约 **0/39**（`glm_4` 0/6、`glm_5` 0/8、`glm_3` 0/8、`ds_2` 0/8、`hy4_2` 0/6、`hy4_9` 0/5、`hy4_5` 0/4）：预算仅 8 轮，打不到高差草丛拿种子、没来得及找水边耕地即结束；
+  - `sleep_in_bed` 全场仅 **2/25**（`glm_5` 1/6、`glm_4` 0/6、`ds_2` 0/6、`nju_guitest` 0/6）：模型已成功绑定床位，但**白天点床只设重生点、不触发睡觉成就**，导致反复重派。
+- **最小修复**：
+  1. `sleep_in_bed` 增加时间门控：仅在傍晚/夜晚（`not is_day` 或 `time_of_day >= 12000`）派发，白天跳过；
+  2. `plant_seed` 提高预算至 `medium`（14 轮）或仅在背包已有 `wheat_seeds`/`carrot`/`potato`/`beetroot_seeds` 或地表近距有 `short_grass`/`wheat` 时派发。
+- **验收标准**：`sleep_in_bed` 白天派发次数为 `0`、夜间成功率 ≥60%；`plant_seed` 成交率从 0% 提升至 ≥50%。
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-055 | P1 | Integrator（#1，`harness/curriculum.py`）| 状态: OPEN（16 路过夜轨迹全量复盘，关联 P2-36）
+- **Long2 H4 EP10 给出实机防重对照。** Y43 第一次真调 DFS 无井；原点同参第二次被拦。随后显式垫柱 5 格至同列 Y48，完全同参又真调 DFS、仍无井。EP07/09/10 同列已确认至少 10 次实际无井，0 铁。 [首调](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-120641-231726.events.jsonl#L114) · [原点拦截](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-120641-231726.events.jsonl#L178) · [显式垫柱](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-120641-231726.events.jsonl#L270) · [同列再失](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-120641-231726.events.jsonl#L319)
+- **Long2 炼药槽跨集柱位自锁。** H4 EP07 同一 XZ `[354983,367623]` 原地垫高 Y38→45，Y38/39/40/41 四次同参挖铁均 `no_viable_collar_direction` 且矿树为 0；下梯和横移未能离开该列。EP09 L98 在同 XZ 的 Y45 再发并仍失败。用实载 `_RepeatFailureGuard` 离线重放同参零进展，固定 Y 只派发 1/5，按实机更改 Y 则派发 5/5，跨集与否均出现。验收需检查真实水平脱离或可施工的新高度，保留有通路的正常垫升。 [初次无井](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-115628-317382.events.jsonl#L88) · [垫升到 Y45](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-115628-317382.events.jsonl#L458) · [跨集仍无井](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-120243-600452.events.jsonl#L98) · [三维防重键](../src/mc_agent/harness/agent.py#L500)
+
+- **三路线村庄柱顶确证跨课自锁。** 门户 EP06 两次垫升后仍在窄柱，后续岩浆桶集的东、北、西隧道均 `unsafe_or_unknown_floor` 零施工，同点 `[−11618.5,81,11242.5]`。原地拆回 1 木板也未恢复通路。下一发光牌课仍在邻近层，无板不能造牌且临近树料 `unreachable_targets`。验收真实脱离自置高柱并安全换位置，再恢复目标。 [柱升末段](../runs/5ease_ob_w2_20261122/nju_ob_3_village/20261122-061225-580671.events.jsonl#L1121) · [拆回木板](../runs/5ease_ob_w2_20261122/nju_ob_3_village/20261122-062604-937439.events.jsonl#L228) · [落脚仍卡](../runs/5ease_ob_w2_20261122/nju_ob_3_village/20261122-062604-937439.events.jsonl#L285) · [发光牌缺料](../runs/5ease_ob_w2_20261122/nju_ob_3_village/20261122-062749-098067.events.jsonl#L84) · [隧道落脚门](../src/mc_agent/skills/tunnel.py#L129)
+- **影响**：`mc_skill_staircase` 成功率仅 17.2% 且 `pillar_fallback` 返回 `ok=True, requires_replan=False` 形成同工具自锁（`nju_guitest_01` 29 连击白烧 188s，`part2` 累计白烧 723s），叠加 `bootstrap_stone_age` 反复回档，严重拖慢长程推进。
+- **轨迹实据**：`overnight_12bot_part2` 1180 次 `staircase` 仅 203 次 `completed`（17.2%），`pillar_fallback` 140 次；`ds_1`/`nju_3` 各耗 23~24 集重打 `bootstrap_stone/iron`。
+- **最小修复**：`pillar_fallback` 连续 ≥2 次返回 `requires_replan=True` 并建议水平换向/`unstick`；≥3 次给当前方向/target 加 120s 冷却（详见 `D1-r11-triage.md` 4bw 节）。
+- **验收标准**：`pillar_fallback` 连续 ≥3 段降至 0；单次 `bootstrap_stone_age` 平均 ≤2 集完成。
+- **r47 Day 2 已完成集复核**：`hy4_hy_4_iron` EP03 寻村时东向斥候原地 `stalled`，随后三次东向 `staircase(up)` 连续 `pillar_fallback`，均 `requires_replan=false`，XZ `(-7823.5,-2780.5)` 不变、Y127→130；下一次下楼梯因 `cave_or_drop_ahead` 拒绝。属于同一防自锁门禁，后续复验增加高柱起点。 [第一次](../runs/r47_day2_full_day_scout_9bot/hy4_hy_4_iron/20261120-100127-264626.events.jsonl#L80) · [第二次](../runs/r47_day2_full_day_scout_9bot/hy4_hy_4_iron/20261120-100127-264626.events.jsonl#L98) · [第三次](../runs/r47_day2_full_day_scout_9bot/hy4_hy_4_iron/20261120-100127-264626.events.jsonl#L119) · [下楼梯失败](../runs/r47_day2_full_day_scout_9bot/hy4_hy_4_iron/20261120-100127-264626.events.jsonl#L141)
+
+- **r57 要塞起点复现**：MoveTest_01 EP01 在无法水平前进后连续 **33 次** `pillar_fallback`，均 `requires_replan=false`。从 Y141 垫到 Y175，XZ 只变约 1m，下一集垫到 Y205 后出现缺施工材料与落脚失败。全波 14 次斥候 0 位移、0 估点。 [首条垫高](../runs/r57_stronghold_end_3bot/nju_movetest_01_village_to_stronghold_end/20261121-003457-597348.events.jsonl#L281) · [第 33 条](../runs/r57_stronghold_end_3bot/nju_movetest_01_village_to_stronghold_end/20261121-003457-597348.events.jsonl#L1205) · [末包地形困顿](../runs/r57_stronghold_end_3bot/nju_movetest_01_village_to_stronghold_end/20261121-005057-518776.events.jsonl#L772) · [回执分支](../src/mc_agent/skills/library.py#L7568)
+- **r59 冷却分支实测**：HY4_1 EP01 在连续垫柱后返回 pillar_fallback_cooldown、requires_replan=true。随后尝试三次水平移动和脱困，仍在近原点；又显式发起 vertical=pillar，稍后恢复自动垫柱。分支已触发，仍需终版比较原受影响 MoveTest 槽的重复峰值和离开卡点。 [冷却回执](../runs/r59_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-015338-434449.events.jsonl#L336) · [显式垫柱](../runs/r59_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-015338-434449.events.jsonl#L428) · [冷却实现](../src/mc_agent/skills/library.py#L7513)
+- **r59 终版对照**：同名 MoveTest 的自动垫柱 **39→0**、移动斥候 **0/14→12/12**，出生点仍有约 8.06m 水平和 5 格高度变化。全波 16 次自动垫柱仍全在 HY4_1。按楼梯调用序列仍有一段 5 次；计入中间其他完成工具后最长 2。冷却能迫使换招，显式垫柱和换列仍可能延续卡点，保持 OPEN 观察同柱压力。 [冷却及换招](../runs/r59_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-015338-434449.events.jsonl#L336) · [MoveTest 启动](../runs/r59_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/stdout.log#L2)
+- **`75feb68` 离线回归**。上楼梯原位第二次 `pillar_fallback` 又返回 `requires_replan=false`，同一既有夹具在 `258bdfe` 通过。铁层下行提示的分支包进了上行垫柱的换招回执。请 Integrator 把两个回执条件恢复为独立判断，再过现有夹具和三连击门。 [回执分支](../src/mc_agent/skills/library.py#L7837) · [二次垫高夹具](../tests/test_skills_and_providers.py#L2323)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-056 | P0 | Integrator（#1，`harness/guardian.py` + `skills/library.py`）| 状态: FIXED（Guardian 浮水门禁 r29/r31 达标）
+
+- **W20 正式边界水逃 14 次，p99 和最大均 5.504s。** W19 六次均为 5.505s。指定目标槽单请求超时仍缺样本。HY8 的地下反复溺水走另一条处理链，见 BUG-009。 [边界水逃样本](../runs/l1_w20_20261122/glm_hy_5e_6_bare_30m/20261122-225321-276695.events.jsonl#L199)
+- **Long3 七槽终档的边界出水 26 笔。** p99 和最大均为 **4.285s**，两项通过；指定单请求 timeout 槽缺匹配。H1 另有实际出水仍未站稳的岸边近战样本。 [最慢边界出水](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-130346-716318.events.jsonl#L277) · [岸边未着地](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131504-018043.events.jsonl#L86)
+- **Long3 H1 EP08 出水后未确认安全登岸。** 两次 `shore_landing_unconfirmed` 后回执显示干态、未着地、僵尸 2.6m，约 6.94s 后跨命；箭伤后的最终连续伤害均为 `mob_attack`。验收继续同时核出水、同命稳定着地和岸边近敌，独立于溺水及水中工具耗时。 [首次落岸未确认](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131504-018043.events.jsonl#L82) · [出水未着地](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131504-018043.events.jsonl#L86) · [死因](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131504-018043.events.jsonl#L90) · [落岸确认](../src/mc_agent/harness/guardian.py#L810)
+
+- **`2efbd05` 近敌定向上岸离线。** 对照旧新 `poll` 与 `stabilize_after_tools`，同样 3.2m 可见近敌的水下、水面、刚受近战及工具边界 **0/4→4/4** 走定向岸线。7m 敌和隔墙近敌两例原有浮水保持，总 **2/6→6/6**。战斗树该轮水岸相关 **232 项通过**。当作近敌分流验证，p99／最大和单请求超时仍按对应实载波。 [近敌范围](../../s-combat/src/mc_agent/harness/guardian.py#L780) · [六例夹具](../../s-combat/tests/test_generation_guard.py#L11863)
+
+- **三路线 OB2 石器恢复的两条采石抢占。** EP05 两个批量采普通石片分别 **41.5673s** 和 **8.0906s**，护卫上浮回执分别 `in_water=True` 与 `False`。后来近距四个单格实破各 +1 圆石。当前只能验水边恢复形状，待 Fleet 后计专门逃水动作时长和目标角色覆盖。 [上浮仍在水](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-062256-280551.events.jsonl#L163) · [上浮离水](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-062256-280551.events.jsonl#L209) · [第四块实入](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-062256-280551.events.jsonl#L352)
+
+- **裸装冲刺终版五条浮水执行。** p99 和最大都为 **3.283s**，两耗时门通过，未出现指定 bot 的单请求超时场景，第三子门待复验。 [最慢回执](../runs/5ease_bare_sprint_20261122/hy_5e_6_bare/20261122-060521-330657.events.jsonl#L452)
+
+- **Portal 100 H3 正例**。L271 先离岩浆；L275 单次 `boundary_escape_water` **1.623s**，回执 `in_water=false`，确认脱水且时限子门过。本波没有指定角色单请求超时暴露。 [回岸](../runs/5ease_portal_100_20261122/hy_5e_3_probe_obsidian_portal/20261122-041156-999366.events.jsonl#L275)
+
+- **黑曜石门户 V2 深矿水域**。H7 EP01 先触发开挖抢占 `escape_to_shore`（6.322s），紧接 `boundary_escape_to_shore`（6.310s），两次都停同坐标且仍湿。之后隧道两次 `not_grounded`，楼梯升至 Y−50 后耗尽。动作名与本票的 `boundary_escape_water` 口径不同，需以接入的具体入口验湿终态。 [两条返岸](../runs/5ease_obs_fixed_v2_20261122/hy_5e_7_probe_diamond_y54/20261122-035900-616715.events.jsonl#L93) · [楼梯耗尽](../runs/5ease_obs_fixed_v2_20261122/hy_5e_7_probe_diamond_y54/20261122-035900-616715.events.jsonl#L187)
+
+- **黑曜石门户 V1 H4 的读超时补证**。EP01 `escape_water` 9.2925s 后报告 `network_uncertain`，0.2232s 后的状态已是干地、落脚、就绪空闲。现态可证，缺同一动作的完整落地回执。Slice B `7df71f3` 定向离线 5/5，同一读超时下确认干地才算成功，仍湿、滞空、动作忙和死亡标志变化均保留错误并止动。候选仍待后续波加载，需另验预算耗尽及本票指定角色。 [超时](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_4_probe_obsidian_portal/20261122-034935-424354.events.jsonl#L289) · [干地读回](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_4_probe_obsidian_portal/20261122-034935-424354.events.jsonl#L290) · [候选复核](../../s-combat/src/mc_agent/harness/guardian.py#L665) · [离线夹具](../../s-combat/tests/test_generation_guard.py#L10352)
+
+- **W2 收官边界出水耗时通过，结果仍有三次湿终态**。OB2 四次原始 `boundary_escape_water` 用 **4.034 / 2.739 / 0.272 / 0.188s**，耗时 p99/max 均过门，只有一条返干。最后一次走岸仍在水。单请求超时分支没有同类曝光。 [最长仍湿](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-025802-874263.events.jsonl#L833) · [明确干地](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-032122-881739.events.jsonl#L113) · [后段两次](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-032122-881739.events.jsonl#L1013)
+
+- **r82 门户实机见水域抢占与腾空交接**。HY4_9 EP07 的采矿和解卡各被 `water_surface` 抢占，均 `in_water=false, on_ground=false`，护航仍保留未确认。边界浮水之后另一次返岸回执 `already_dry`。本波指定槽 11 集有浮水、0 单请求超时，浮水两条峰 5.328s。 [采矿被抢占](../runs/r82_midgame_portal_30m/hy4_hy_9_midgame/20261121-205053-977883.events.jsonl#L125) · [解卡被抢占](../runs/r82_midgame_portal_30m/hy4_hy_9_midgame/20261121-205053-977883.events.jsonl#L161) · [随后干岸](../runs/r82_midgame_portal_30m/hy4_hy_9_midgame/20261121-205053-977883.events.jsonl#L190) · [空中交接](../src/mc_agent/harness/guardian.py#L4405)
+
+- **r82 中期三次干岸复试，两次出水回执、一条仍湿**。HY4_2 EP04 首次仍湿，`shore_bank_retry` 复试 **2.658s** 后干；EP13 先报仍湿，复试 **1.672s** 返回 `shore_landing` 和 `in_water=false`；EP12 仍湿后下一轮成功落脚。浮水 12 条峰 4.054s。 [EP04 复试](../runs/r82_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-200011-245584.events.jsonl#L676) · [EP12 仍湿](../runs/r82_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-202544-451893.events.jsonl#L141) · [EP13 落脚](../runs/r82_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-202828-907501.events.jsonl#L409) · [复试分支](../src/mc_agent/skills/combat_env.py#L2560)
+
+- **r81 门户登岸复核实机确认**。加载 `b39ac26` 的 HY4_8 在两个 episode 返回三条 `shore_landing_unconfirmed` 与两条 `water_escape_failed`。EP02 解卡拒绝确认后，另一次护航返岸记录 `shore_landing` 与 `in_water=false`。全波 `boundary_escape_water` 共 10 条，峰 **4.031s**。危险水域抢占采掘及指定槽浮水仍待同类样本。 [解卡拒绝](../runs/r81_midgame_portal_40m/hy4_hy_8_midgame/20261121-195158-480460.events.jsonl#L171) · [后续确认](../runs/r81_midgame_portal_40m/hy4_hy_8_midgame/20261121-195158-480460.events.jsonl#L264) · [落脚复核](../src/mc_agent/harness/guardian.py#L4168)
+
+- **r73 日出实机干岸落脚**：HY4_4 承担 73 条浮水中的 72 条，波峰 **8.076s** 为 `network_uncertain/ReadTimeout`。同角色六条 `return_to_dry_bank` 已配对，EP02 **6.7741s** 确认离水，另五条仍湿。该波加载 `e7b9b74`，含岸沿落脚及浅岸复试补丁。浮水时长门通过，岸边重复失败继续跟踪。 [成功落脚](../runs/r73_day12_real_drop_60m/hy4_hy_4_bare/20261121-140357-991822.events.jsonl#L143) · [仍湿样本](../runs/r73_day12_real_drop_60m/hy4_hy_4_bare/20261121-142302-430745.events.jsonl#L318) · [浮水峰](../runs/r73_day12_real_drop_60m/hy4_hy_4_bare/20261121-142302-430745.events.jsonl#L356) · [落脚确认](../src/mc_agent/skills/combat_env.py#L2763)
+
+- **r78 浮水有一条末秒右截尾**：HY4_2 EP13 在 +83.516s 开始，+87.137s 整集超时，无同调用结束回执，观察窗 **3.621s**。已配对的 15 条最大 **5.505s**，该波完整时长门保留待定。 [开始](../runs/r78_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-144032-418758.events.jsonl#L154) · [终态](../runs/r78_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-144032-418758.events.jsonl#L156)
+
+- **r73 官方 MoveTest 单请求原始门有一条槽末预算样本**：EP26 实载 **1.651930s**，单请求，无工具或护航动作，**1.743s** 结束。机械计数 1 超出零门，轨迹定位为整槽截止削减最后一课预算。四条实际浮水的峰值 **2.834s**。 [起跑预算](../runs/official_r73_80m_movetest/MoveTest_01/20261121-140401-919828.events.jsonl#L1) · [终态](../runs/official_r73_80m_movetest/MoveTest_01/20261121-140401-919828.events.jsonl#L9) · [槽末预算](../src/mc_agent/harness/curriculum.py#L2529)
+
+- **r69 官方波角色兼容**：D1 识别单跑目录 `MoveTest_01` 与 Fleet 的 `nju_movetest_…`。官方波已出现同名角色的 `boundary_escape_water` 回执，终版仍待。 [边界浮水回执](../runs/official_r69_40m_movetest/MoveTest_01/20261121-082139-424652.events.jsonl#L194) · [D1 门禁](../../s-triage/scripts/d1_ticket_gates.py#L485)
+- **r70 近岸复试过程回执**：加载 `2b422eb` 的 DS_1 EP03，前一条移动未确认，`boundary_escape_to_shore` 走 `shore_bank_retry → move_to_shore → shore_landing`，配对耗时 **2.513s**，最终 `ok=true,in_water=false`。浮水三项仍用各自命名的事件作终版验收。 [动作起点](../runs/r70_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-082728-331195.events.jsonl#L280) · [干岸回执](../runs/r70_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-082728-331195.events.jsonl#L281) · [复试源码](../src/mc_agent/skills/combat_env.py#L2390)
+- **r67 日出确认浮水耗时和出水结果**：53 条 `boundary_escape_water` 最大 **12.558s**，11 条确认出水、40 条仍湿、2 条未确认落脚。HY4_4 EP09 有八条浮水全仍湿、九条寻岸五次成功，actor 多次重新目标到同段水下。最新 `dc6674a` 的三条干岸回撤夹具通过，r68 日出与 r71 中期已加载 `494b133`，待真实 `return_to_dry_bank`。 [EP01 最慢干岸](../runs/r67_day12_real_drop_45m/hy4_hy_4_bare/20261121-081607-708375.events.jsonl#L117) · [EP09 水下动作](../runs/r67_day12_real_drop_45m/hy4_hy_4_bare/20261121-084604-411190.events.jsonl#L273) · [新夹具](../tests/test_generation_guard.py#L8496)
+- **r70 门户目标角色门通过**：HY4_9 的 10 集包含实际浮水，没有单请求超时。整波 17 次浮水最大 **4.554s**。HY4_8 EP05 两条已带 `shore_bank_retry`，分别耗 **5.535s／6.312s**，两次仍湿。等待加载后续干岸和浅滩补丁的同类回执。 [复试一](../runs/r70_midgame_portal_40m/hy4_hy_8_midgame/20261121-090337-616529.events.jsonl#L144) · [复试二](../runs/r70_midgame_portal_40m/hy4_hy_8_midgame/20261121-090337-616529.events.jsonl#L253) · [浮水上限样本](../runs/r70_midgame_portal_40m/hy4_hy_8_midgame/20261121-090705-517663.events.jsonl#L260)
+- **r70 裸装近岸复试成功**：HY4_5 EP08 浮水 **4.030s** 后仍湿，稍后找岸复查以 **1.575s** 确认出水。r71 门户同三角色浮水 **17→8**、最大 **4.554→4.030s**，HY4_9 目标角色门通过，仍无 `return_to_dry_bank` 回执。 [裸装成功](../runs/r70_bare_real_drop_60m/hy4_hy_5_bare/20261121-093442-038671.events.jsonl#L65) · [r71 最大浮水](../runs/r71_midgame_portal_40m/hy4_hy_9_midgame/20261121-093241-377066.events.jsonl#L327) · [复试实现](../src/mc_agent/skills/combat_env.py#L2390)
+- **r72 中期干岸回撤首次确认**：HY4_2 EP05 加载 `0d8d3da`，浮水 **4.027s** 尚湿，后续寻岸 **3.848s** 实际走入 `return_to_dry_bank`。寻路未确认后跳上岸沿，最终 `shore_landing`，`ok=true,in_water=false`。 [浮水](../runs/r72_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-095717-213409.events.jsonl#L274) · [干岸落脚](../runs/r72_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-095717-213409.events.jsonl#L276) · [缓存干岸判定](../src/mc_agent/skills/combat_env.py#L2463)
+- **r73 中期新版两次干岸回撤未成功**：加载 `3d1a19c`，HY4_1 EP04 经两次浮水后分别选中两个缓存岸点。寻岸配对 **5.760／6.331s**，均返回 `move_to_shore_failed → shore_lip_jump` 后仍湿，末位置分别距目标约 **6.3／24.8m**。缓存岸点有效性门通过，尚需确认实际可回到该岸。 [第一次岸点](../runs/r73_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-103250-915321.events.jsonl#L134) · [第二次岸点](../runs/r73_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-103250-915321.events.jsonl#L218) · [缓存岸点校验](../src/mc_agent/skills/combat_env.py#L2482)
+- **停滞岸点记忆已合入**：r74 门户加载 `ceafbfd` 含 `ccf10a4`，会记下仍湿、没有接近或卡在唇沿的岸点，后一次在同命和附近站位另选候选。离线重选回归通过，待两个连续寻岸及真实出水。 [停滞条件](../src/mc_agent/skills/combat_env.py#L2748) · [重选夹具](../tests/test_generation_guard.py#L10886) · [新版加载](../runs/r74_midgame_portal_40m/hy4_hy_9_midgame/20261121-113210-275282.events.jsonl#L1)
+- **一句话**：`guardian._escape_water` → `skills.escape_water()` **没有任何时间预算**，找不到岸时会连续跑 **499~561 秒**，直接吃穿整个 episode 预算（300~600s）。
+- **影响（最严重的一条）**：**19 个 episode 被单个 reflex 动作整集打死**，每集 0 产出：
+  | bot | 波次 | 集 | 每次阻塞 | 占该 bot 总集数 |
+  |---|---|---|---|---|
+  | `nju_movetest_01_bare` | `overnight_12bot` | **EP11–EP20（连续 10 集）** | **499.0~499.3s** | **10/21 = 48%** |
+  | `hy4_hy_9_deep_water` | `hy4_audit_r27` | **EP11–EP19（连续 9 集）** | **560.4~560.6s** | 9/19 = 47% |
+- **逐集复核**：两段共 19 集。`r27` EP13/EP16 各出现两次约 560.6s 的浮水失败，即 19 集里共 21 条≥300s 的这类回执。 [NJU EP11](../runs/overnight_12bot/nju_movetest_01_bare/20261119-104250-680466.events.jsonl#L23) · [HY4 EP13](../runs/hy4_audit_r27/hy4_hy_9_deep_water/20261119-132625-966581.events.jsonl#L42) · [HY4 EP16](../runs/hy4_audit_r27/hy4_hy_9_deep_water/20261119-140421-425711.events.jsonl#L49)
+- **全量统计（6 波）**：`boundary_escape_water` **557 次**，合计 **16,895s = 4.69 小时**；分布：中位 1.4s，但 **>30s 113 次、>60s 35 次、>120s 24 次、>300s 22 次**，max **560.6s**。对照 `boundary_escape_to_shore` 387 次仅 1,395s（均值 3.6s）—— 说明**慢的不是"上岸"，而是"浮水"这条路径**。
+- **源码定位**：
+  - `guardian.py:1872` `self._action("boundary_escape_water", lambda: self._escape_water(status), ...)`
+  - `guardian.py:294 _escape_water()` → 直接 `self._skills().escape_water()`，**不传任何 deadline**
+  - `skills/library.py:4803 escape_water()` 内部是四层嵌套循环（`range(4)` / `range(2,16)` / `range(10)` / `range(2,9)` + `time.sleep(0.25)`），**没有 `deadline` / `max_duration_s` 参数**（对比同文件 `unstick(max_duration_s=45.0)` 已有预算机制）
+- **耗时定位**：日志确认耗时集中在一次 `boundary_escape_water`，源码中有固定次数的探测、破方块和移动回退，缺少贯穿这些步骤的墙钟预算。现有回执没有每次后端请求的耗时，499s/560.6s 的分项还需埋点确认。
+- **最小修复**：
+  1. `escape_water(*, max_duration_s: float = 20.0)`，内部所有循环共享一个 `deadline`，超时返回 `{"ok": False, "partial": True, "in_water": true, "next": "pillar_or_dig_up"}`；
+  2. `_escape_water` 传 `max_duration_s=min(20, remaining_episode_budget)`；
+  3. 连续 2 次"浮水失败"→ 改走**垂直脱困**（`pillar up` / 向上挖 2 格）而不是继续沿岸搜索。
+- **验收标准**：`boundary_escape_water` p99 ≤ 25s、max ≤ 40s；`nju_movetest` / `hy4_9` 的 `req=1 且 timeout` 集数为 **0**。
+- **实测验收**：`hy4_audit_r27→r29_newmix` 的 `boundary_escape_water` p99/max **560.644s→20.053s**（51→76 次），指定 Bot 单请求超时 **7→0**。r31_short 24 次 p99/max **20.029s**，指定 Bot 单请求超时 **0**，HY4_9 EP01 在 **5.8s** 内浮水成功。独立的 actor `unstick` 墙钟残余继续跟踪 BUG-047。 [r29 超时回执](../runs/r29_newmix/hy4_hy_10_enchant_anvil/20261119-210319-676548.events.jsonl#L147) · [r31 HY4_5 EP04 max](../runs/r31_short/hy4_hy_5_brewing_alchemy/20261119-220436-415275.events.jsonl#L178) · [r31 HY4_9 EP01 成功](../runs/r31_short/hy4_hy_9_deep_water/20261119-220016-062292.events.jsonl#L74)
+- **r35 单请求例外**：指定 Bot 单请求超时原始门禁计 1。HY4_9 EP04 在全波余 **1.424s** 时开集，仅模型超时，整集无工具及 Guardian 浮水动作。该波配对浮水最大 **15.826s**，另有 HY4_9 EP01 一个浮水动作距收尾约 2.21s 开始，缺结束回执，时长暂不可判定。 [EP04 全部事件](../runs/r35_short/hy4_hy_9_deep_water/20261119-234719-299605.events.jsonl#L9) · [EP01 浮水开始](../runs/r35_short/hy4_hy_9_deep_water/20261119-233220-885224.events.jsonl#L114)
+- **r44 Day 2 复验**：21 条 Guardian 浮水配对，p99/max **8.370s**。指定槽 HY4_9 有真实浮水暴露，4 集中没有仅一请求的超时。该子门槛本波通过。 [指定槽浮水](../runs/r44_day2_wild_scout_9bot/hy4_hy_9_iron/20261120-074226-462662.events.jsonl#L89)
+- **r46**：Day 2 浮水 p99/max **20.275s**，仍过 25/40s。HY4_9 EP05 原始单请求超时门禁数 1，实际只有集末 **2.512s** 预算，无涉水或工具调度。保留此计数作门禁失败，轨迹不支持浮水导致超时。 [最慢浮水](../runs/r46_day2_wild_scout_9bot/hy4_hy_4_iron/20261120-090012-090783.events.jsonl#L137) · [HY4_9 集尾](../runs/r46_day2_wild_scout_9bot/hy4_hy_9_iron/20261120-092014-538120.events.jsonl#L10)
+- **r49**：裸装边界浮水最长 9.059s，末地场景最长 13.896s。裸装 HY4_9 EP06 仅分到 1.290s 后模型超时，门禁原样记 1，原始回执无工具或 Guardian 浮水动作。末地场景有指定槽浮水暴露且 0 单请求超时。 [波末请求](../runs/r49_day1_bare_9bot/hy4_hy_9_bare/20261120-110502-382891.events.jsonl#L11) · [末地场景最长浮水](../runs/r49_stronghold_end_5bot/nju_movetest_01_village_to_stronghold_end/20261120-104400-405972.events.jsonl#L1845)
+- **r59 要塞三项实测通过**：14 条浮水 p99／最大 **17.532s**。MoveTest 真实涉水并有浮水回执，三集中单请求超时 0。EP02 读到暂离水但悬空时正确返回落脚未确认，EP03 配对一条 9.063s。状态保持 FIXED。 [MoveTest 出水未着地](../runs/r59_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-021350-128742.events.jsonl#L634) · [另一次浮水](../runs/r59_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-022657-635248.events.jsonl#L62) · [全波峰值](../runs/r59_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-015348-145054.events.jsonl#L671)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-057 | P1 | Integrator（#1，`harness/guardian.py`）| 状态: OPEN（r78 单集 16 伤，门槛 10）
+
+- **W20 确认无热地板暴露。** 149 条正式原迹零 `hot_floor` 伤害回执，两门待同型暴露。W19 HY5 的 17 条热伤仍是上次有效超线样本。 [W19 暴露](../runs/l1_w19_20261122/glm_hy_5e_5_bare_20m/20261122-214652-686749.events.jsonl#L90)
+
+- **W19 裸装再超线。** GLM HY5 EP07 单集 17 次热地板伤，>10。首次带热伤的批次还含溺水伤，明确致死回执为 `drown`，W19 归因热地板死亡 0。 [两类伤害](../runs/l1_w19_20261122/glm_hy_5e_5_bare_20m/20261122-214652-686749.events.jsonl#L90) · [溺死](../runs/l1_w19_20261122/glm_hy_5e_5_bare_20m/20261122-214652-686749.events.jsonl#L160)
+- **Long3 七槽终档未命中岩浆块热地板暴露。** 热地板伤害和死亡均为 0 条匹配收据，门待实机暴露。已明确的液态岩浆死亡另计 BUG-026。 [液浆死亡原件](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-130837-508657.events.jsonl#L1050)
+- **Long2 七槽终档单集最高 12 次热伤，超 ≤10，归因死亡 0。** Y35 附近四次 `hot_floor_sneak` 都读回真，四次中断均确认释放动作。Bot 继续在同一窄路多次派南北楼梯，最低记录到约 18.6 HP。南向上十阶才从 Y34 实到 Y44，最后两条热伤随该步回报，后至集尾无新热伤，无热地板归因死亡。源码同格续伤需要净 HP 下降，现场缺逐次读回血量，尚无法判定是否漏了离格分支；复验应关联足下方块、距离及后续新伤序号。 [首次潜行](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-121914-185237.events.jsonl#L338) · [同路批量伤](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-121914-185237.events.jsonl#L451) · [真正爬升](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-121914-185237.events.jsonl#L526) · [净血量分支](../src/mc_agent/harness/guardian.py#L1752)
+
+- **热伤与出格实证。** r78 中期 DS_1 EP10 L496 另记同集 13 次热地板伤，L507 最后一死注明近战。r82 中期 DS_1 三个暴露集分别 **4/5/4** 次伤、热地板死亡 0。EP07 下蹲后仍同格、血量持平及连续续伤，两次移动因受伤中断。actor 从 Y71 垫高至 Y92，最后一批热伤发生在第一次垫高，后续无新热伤。Guardian 未给安全离格回执，低血和水下两反例仍待。 [r78 EP10](../runs/r78_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-143705-865024.events.jsonl#L496) · [r82 下蹲](../runs/r82_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-200845-110599.events.jsonl#L352) · [首段垫高](../runs/r82_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-200845-110599.events.jsonl#L637)
+
+- **r78 已含后续热地板补丁**：同 DS_1 EP07 单集 **24→16**，边界过后再接近黑曜石仍受伤，最后一条工具前护航明确 `stepped_off`。新旧均超 ≤10，归因死保持 0。 [首次热伤](../runs/r78_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-142204-327526.events.jsonl#L75) · [边界尝试](../runs/r78_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-142204-327526.events.jsonl#L388) · [离格](../runs/r78_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-142204-327526.events.jsonl#L782)
+
+- **r73 官方旧版 MoveTest 水下热地板死亡**：EP11 先三段回撤到 Y33，两次找岸返回仍湿，第一条热伤后再进水恢复，累计 22 条热伤并在 Y37 致死。该槽加载 `8964fee`，早于 `0f1e23c` 的水下热地板下蹲。 [首次热伤之前上岸失败](../runs/official_r73_80m_movetest/MoveTest_01/20261121-132126-098686.events.jsonl#L146) · [明确死亡](../runs/official_r73_80m_movetest/MoveTest_01/20261121-132126-098686.events.jsonl#L159) · [新版水下站姿夹具](../tests/test_generation_guard.py#L8931)
+
+- **r77 同 DS_1 新版仍单集 24 条**：EP07 加载 `28a9838`，已包含课前 `45c3418`。本次是 actor 反复接近黑曜石区域，边界下蹲成功后仍有热伤，两次楼梯零位移，最后东向上两阶。最低热伤 HP 17.4，归因死亡 0。课前临界血量致死与本次移动／挖掘复入需分别复验。 [首批伤](../runs/r77_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-133224-439233.events.jsonl#L132) · [下蹲](../runs/r77_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-133224-439233.events.jsonl#L603) · [后段最低热伤](../runs/r77_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-133224-439233.events.jsonl#L968) · [最后楼梯](../runs/r77_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-133224-439233.events.jsonl#L1014)
+
+- **r72 官方 5Ease 明确未离热地板**：EP06 首伤至致死回执间约 **60.246s**，同集 12 条。至少两次已下蹲仍 `no_safe_hot_floor_exit`，三向楼梯缺支撑，末次移动因死亡结束。与 r76 课前低血入口、DS_1 离格后复入分开验收。 [首伤](../runs/official_r72_80m_5ease/5Ease_Bot/20261121-121740-255689.events.jsonl#L84) · [离格失败](../runs/official_r72_80m_5ease/5Ease_Bot/20261121-121740-255689.events.jsonl#L200) · [致死](../runs/official_r72_80m_5ease/5Ease_Bot/20261121-121740-255689.events.jsonl#L268)
+
+- **r76 同 DS_1 复验**：EP07 热地板 **11** 条，确认离格后继续受伤；EP11 是另一生命，课前被抢占触发撤退，0.301 血、零位移，开集后 3.852s 记录明确 `hot_floor` 死亡。三槽加载 `4913e9e`。之后合入的 `45c3418` 将关键主世界课前阶段纳入岩浆落脚检查，四条离线测试通过，等待实机。 [EP07 离格](../runs/r76_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-125723-434183.events.jsonl#L560) · [再次受伤](../runs/r76_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-125723-434183.events.jsonl#L702) · [EP11 课前](../runs/r76_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-130927-981104.events.jsonl#L3) · [致死](../runs/r76_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-130927-981104.events.jsonl#L15) · [补丁入口](../src/mc_agent/harness/guardian.py#L3426)
+
+- **r75 同角色热地板回潮到 14**：DS_1 EP07 三次 `stepped_off`，其中两次同一落点，另一次撤退落点未确认。后续采集/移动仍会触发热地板，归因死亡 0。 [第一次离格](../runs/r75_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-120750-309638.events.jsonl#L365) · [落点不安全](../runs/r75_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-120750-309638.events.jsonl#L422) · [第二次同落点](../runs/r75_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-120750-309638.events.jsonl#L754) · [末次离格](../runs/r75_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-120750-309638.events.jsonl#L938) · [落地验证](../src/mc_agent/skills/combat_env.py#L847)
+
+- **r74 同角色主世界继续复现**：DS_1 EP02 **11** 条热地板伤害，无归因死亡。两次潜行回执后续伤仍出现，11 条报告 HP 均为 **19.3**，均没有 `stepped_off`。现有同格净 HP 判定不能识别这种续伤，轨迹没有已缓存 HP，离线同格夹具另可复现。 [首次潜行](../runs/r74_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-111121-472224.events.jsonl#L119) · [后续批量伤害](../runs/r74_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-111121-472224.events.jsonl#L133) · [再次潜行](../runs/r74_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-111121-472224.events.jsonl#L299) · [续伤源码](../src/mc_agent/harness/guardian.py#L1177)
+
+- **r73 主世界不同续伤路径**：DS_1 EP08 **17** 伤、0 归因死亡。攻击前安全离格实证一次，普通护航随后三次也返回 `stepped_off`，前两次落回近同一安全格。离格之间重新就近找圆石和移动，后续又收到热地板伤害。此前 r72 的净血量门仍需复验。本集另需在离格后识别相同岩浆路径并改变采块目标。 [攻击前离格](../runs/r73_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-105438-261391.events.jsonl#L121) · [再次采块](../runs/r73_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-105438-261391.events.jsonl#L232) · [再次离格](../runs/r73_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-105438-261391.events.jsonl#L243) · [最后离格](../runs/r73_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-105438-261391.events.jsonl#L416) · [落脚验证](../src/mc_agent/skills/combat_env.py#L847)
+
+- **r72 主世界重新暴露**：DS_1 EP07 有 **14** 条 `hot_floor` 伤害，超过单集 ≤10，归因死亡 **0**。一次边界潜行成功，首批 8 条随后批量读出，后来仍有 6 条。两次移动被续伤阻断，`unstick` 无安全落点，三向楼梯零步，最后向西下六步才实际离开。轨迹确认落地、无水和液态岩浆，未直接记录脚下方块名。同格续伤当前仅看净 HP 降幅，回血会掩盖新事件，D1 离线夹具复现。将同格的新结构化伤害纳入续伤判定，先复查脚下，再沿用安全落脚验证。另核对 `mine_blocks` 的实时监控未开启。 [潜行](../runs/r72_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-100706-951120.events.jsonl#L207) · [四次脱困前的拒绝](../runs/r72_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-100706-951120.events.jsonl#L285) · [实际离开](../runs/r72_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-100706-951120.events.jsonl#L372) · [续伤判定](../src/mc_agent/harness/guardian.py#L1177) · [工具监控范围](../src/mc_agent/harness/guardian.py#L120) · [落脚验证](../src/mc_agent/skills/combat_env.py#L847) · [D1 夹具](../../s-triage/tests/test_d1_repro.py#L136)
+- **一句话**：站在**岩浆块（hot_floor）**上持续掉血时，guardian 把 `hot_floor` 归入 `NON_COMBAT_HURT_SOURCES` **压制了 `fresh_hurt`**，只有 HP ≤ 6 才升级，且升级后的 `emergency_bunker` / `flee` 在下界岩浆区**必然失败**（`unsafe_open_side` / `no_safe_retreat`）。
+- **实测（6 波）**：
+  - `hot_floor` 伤害事件 **2,129 次**，涉及 **58 个 episode**
+  - **因 hot_floor 死亡 34 次**：`ds_4_nether_fortress` **25**、`glm_2_nether_bastion` **7**、`hy4_6_nether_bastion` 2
+  - 典型片段（`glm_2` EP1）：`[受伤 health=19 by hot_floor]×10` → HP 20→13.3，同一 tick 内 `emergency_bunker=unsafe_open_side`、`flee=no_safe_retreat`，然后继续掉血
+- **源码定位**：`guardian.py:52-72 NON_COMBAT_HURT_SOURCES` 含 `hot_floor`；`guardian.py:744-755` 用它算出 `non_combat_only_hurt` → `fresh_hurt` 不加；`guardian.py:790` 只有 `critical_non_combat = non_combat_only_hurt and hp_cur <= 6.0` 才触发动作。**全程没有"离开该方块 1~2 格"这个最直接的反射**。
+- **分支复核**：近处有敌人时，`hot_floor` 仍可能成为 `fresh_hurt`。这会走通用对敌反射；两种分支都缺少针对脚下岩浆块的脱离动作。不能把近敌样本也归因于 HP ≤6 的门槛。 [Guardian 受伤分类](../src/mc_agent/harness/guardian.py)
+- **最小修复**：新增 `hot_floor` 专属反射：检测到 `hurt.source == "hot_floor"` → `mc_move_to` 到相邻**非岩浆块**（1~3 格）或 `posture jump` 跳出；给该方块坐标加 60s `block_avoid`；不必等 HP ≤6。
+- **验收标准**：单集 `hot_floor` 伤害 ≤10 次；`hot_floor` 死亡 ≤3 次/波。
+- **r31 残余**：已加载下蹲修复的 GLM2 EP02 受伤 **50** 次。连续 **42** 次 `hot_floor_sneak` 读回 `sneaking=false`，每次触发重规划并取消生成，坐标未变。EP03 首批回执在同一坐标记录 `health=0 by hot_floor`、空原因死亡和复活，自动原因计数 0 漏掉此例。最小追加修复是在下蹲回执失败后限次，切换到验证脚下已离开岩浆块的短移路径。 [EP02 首次失败](../runs/r31_short/glm_glm_2_nether_bastion/20261119-221753-374008.events.jsonl#L72) · [EP02 收尾](../runs/r31_short/glm_glm_2_nether_bastion/20261119-221753-374008.events.jsonl#L529) · [EP03 死亡回执](../runs/r31_short/glm_glm_2_nether_bastion/20261119-221849-499250.events.jsonl#L11) · [下蹲反射](../src/mc_agent/harness/guardian.py#L588)
+- **r33_short 复验失败**：GLM2 EP01 已加载 `e2144d7`，5 次下蹲都读回成功，故未进入只在下蹲失败时启用的短移。末段 20s 攻击零命中后收到同批 **33/52** 次岩浆块伤害，`mc_attack` 在工具执行期间免反射抢占。检查在连续掉血或下蹲被后续动作解除时的脱离门槛。 [首次下蹲](../runs/r33_short/glm_glm_2_nether_bastion/20261119-224439-075002.events.jsonl#L144) · [末段伤害](../runs/r33_short/glm_glm_2_nether_bastion/20261119-224439-075002.events.jsonl#L329) · [下蹲回执分支](../src/mc_agent/harness/guardian.py#L615)
+- **r39_short 实测验收**：已加载驻足岩浆检测，单集伤害峰值从 r33 的 52 降至 **4**，整波 **0** 起岩浆块死亡。GUITest EP03 的 `hot_floor_exit_before_attack` 在 0.4s 内返回 `ok=true`，同次攻击因岩浆地板被拒绝。此前 r38 无对应暴露。 [r39 伤害](../runs/r39_short/nju_guitest_01_nether/20261120-010509-472786.events.jsonl#L938) · [攻击前脱离](../runs/r39_short/nju_guitest_01_nether/20261120-010509-472786.events.jsonl#L1118) · [代码入口](../src/mc_agent/harness/guardian.py#L666)
+- **r48 回归**：下界堡垒 5 集共 62 条岩浆块伤害，HY4_6 EP01 **33**、HY4_5 EP02 **11**，0 死亡可归因岩浆块。HY4_6 的长攻击后同批到账 10 次；恢复潜行但站位不变，末段再到 6 次。攻击前离开岩浆块因无安全出口失败，攻击执行中免 Guardian 中断，应复验安全退路被拒后禁止持续站在伤害块展开长攻击。 [长攻击、潜行与伤害](../runs/r48_nether_fortress_9bot/hy4_hy_6_nether_fortress/20261120-102011-565234.events.jsonl#L807) · [无法安全离开](../runs/r48_nether_fortress_9bot/hy4_hy_6_nether_fortress/20261120-102011-565234.events.jsonl#L957) · [集末伤害](../runs/r48_nether_fortress_9bot/hy4_hy_6_nether_fortress/20261120-102011-565234.events.jsonl#L1072) · [潜行逻辑](../src/mc_agent/harness/guardian.py#L692)
+- **r50 门禁通过**：与 r48 同九槽，单集伤害峰 **33→3**，岩浆块归因死亡 **0→0**。r50 延长到 30 分钟，出生点布局也重新隔离；本条按门槛通过更新状态，仍用 r48 原件保留贴地高压回归锚点。 [r50 伤害回执](../runs/r50_nether_fortress_9bot/hy4_hy_9_nether_fortress/20261120-205722-925188.events.jsonl#L31)
+- **r51 再现**：DS_1 EP04 收 16 条伤害。楼梯首次触发潜行成功后，数次撤退仍被拒；末段在 Y75、XZ 约 `(2017.4,1883.6)` 附近四次楼梯无实际确认并持续掉血，最后才爬到 Y79。原来的攻击前搬离分支覆盖不到这条施工链。另在 DS_1 EP03，同一事件串明确 `health=0 by hot_floor` 紧邻死亡及重生。门禁旧版只读死亡文本原因漏记，本波应归因 1 死，仍在 ≤3 的死亡门槛内。 [潜行成功](../runs/r51_nether_fortress_9bot/nju_ds_1_nether_fortress/20261120-211448-535160.events.jsonl#L618) · [重复楼梯伤害](../runs/r51_nether_fortress_9bot/nju_ds_1_nether_fortress/20261120-211448-535160.events.jsonl#L1054) · [致死三联回执](../runs/r51_nether_fortress_9bot/nju_ds_1_nether_fortress/20261120-210756-123043.events.jsonl#L931)
+- **r52 Day 2**：DS_1 EP03 峰值 3 条、全波 0 起岩浆块归因死亡，均在门槛内。r51 的下界施工站位和新版本防护仍待 r53 下界同位置复验。 [伤害回执](../runs/r52_day2_wild_scout_9bot/nju_ds_1_iron/20261120-213833-041153.events.jsonl#L83)
+- **r53 下界仍失败**：同 r51 八个开跑槽、同出生点。单集岩浆块伤害峰 **16→22**，全波 **28→51**，归因死亡 **1→0**。NJU_3 EP03 三次楼梯被抢占改为成功潜行，结束仍在同一坐标，持续掉血。一次尝试移动时已在 range=5 内，完全无位移。潜行成功即返回，当前脱离只在潜行失败或特定攻击前成立。复验施工、移动时潜行是否持续，并核对连续掉血后是否离开足下方块。 [首次伤害](../runs/r53_nether_fortress_9bot/nju_nju_3_nether_fortress/20261120-221749-264411.events.jsonl#L879) · [无位移](../runs/r53_nether_fortress_9bot/nju_nju_3_nether_fortress/20261120-221749-264411.events.jsonl#L938) · [同坐标楼梯被抢占](../runs/r53_nether_fortress_9bot/nju_nju_3_nether_fortress/20261120-221749-264411.events.jsonl#L968) · [潜行短路](../src/mc_agent/harness/guardian.py#L702)
+- **r54 候选已加载**：`8792469` 含 `c8b45fb` 和 `8ffdc0d`，增加长战斗宏岩浆块监听，同一脚下方块已潜行却继续掉血时尝试验证落脚后短移。D1 离线复跑新增两组夹具通过。r54 首批为主世界要塞／末地场景，下一次下界施工实机仍须核对持续掉血后是否离开接触格。 [实机版本](../runs/r54_stronghold_end_4bot/hy4_hy_1_village_to_stronghold_end/20261120-231022-523804.events.jsonl#L1) · [持续伤害分支](../src/mc_agent/harness/guardian.py#L758) · [短移夹具](../tests/test_generation_guard.py#L6213) · [长工具抢占夹具](../tests/test_generation_guard.py#L6457)
+- **r54 同四个下界锚点终版**：r53 总岩浆块伤害中有 22 条来自这四路，r54 为 **0**，也无潜行或持续掉血防护动作，门禁记 PENDING。HY4_8 EP01 同锚点证实一次液态岩浆逃生确认着地，属于另一条恢复分支。 [r53 同组暴露](../runs/r53_nether_fortress_9bot/nju_nju_3_nether_fortress/20261120-221749-264411.events.jsonl#L879) · [r54 液态岩浆着地](../runs/r54_nether_fortress_6bot/hy4_hy_8_nether_fortress/20261120-231222-082716.events.jsonl#L18)
+- **r56 持续伤害分支首次真实暴露**：NJU_3 EP01 两次阶梯始终停在 `(-418,51,-1883.8)`，首次边界潜行成功，第二次仍返回 `sneaking=true` 但续伤触发后的脱离因 `no_safe_hot_floor_exit` 失败，随后 HP 19.5→19.1。确认新版候选已命中，仍需终版计数与有安全落点时离格的正例。 [潜行成功](../runs/r56_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-001742-397963.events.jsonl#L546) · [脱离与续伤](../runs/r56_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-001742-397963.events.jsonl#L571) · [安全落点检查](../src/mc_agent/skills/combat_env.py#L724)
+- **r56 终版双门槛通过**：岩浆块伤害峰 **8≤10**，归因死亡 **0≤3**，两集共 11 条。参照同一 NJU_3 槽 r53 EP03 的 22 条伤害，两波出生点一致，实际施工站位有别。r56 EP01 短移拒绝后，actor 约 102s 后主动垫圆石，再用阶梯从 `(-418,51,-1883.8)` 到 `(-416.5,54,-1883.6)`，首次可证离格。EP02 也拒绝短移，随后滑入液态岩浆，逃出后死于燃烧。保留安全出口缺失的残余，FIXED 依据两项数值门槛和新分支实测。 [r53 对照](../runs/r53_nether_fortress_9bot/nju_nju_3_nether_fortress/20261120-221749-264411.events.jsonl#L879) · [actor 放圆石](../runs/r56_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-001742-397963.events.jsonl#L730) · [离格](../runs/r56_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-001742-397963.events.jsonl#L751) · [EP02 后续伤亡](../runs/r56_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-002424-340910.events.jsonl#L703)
+
+- **r57 主世界复验**：HY4_2 EP03 有 6 条岩浆块伤害，0 岩浆块归因死亡。两次潜行成功，攻击前脱离因 `unsafe_landing` 失败。保持双阈值通过与无落脚点的残余。 [首次伤害](../runs/r57_stronghold_end_3bot/hy4_hy_2_village_to_stronghold_end/20261121-005134-587629.events.jsonl#L282) · [攻击前脱离拒绝](../runs/r57_stronghold_end_3bot/hy4_hy_2_village_to_stronghold_end/20261121-005134-587629.events.jsonl#L340)
+
+- **r57 下界回归**：同五槽峰值 **8→14**、伤害总量 **11→27**、岩浆块归因死亡 **0→0**，重开单集门禁。NJU_3 EP02 攻击前短移 1.41m 且返回成功。EP04 两次续伤短移均返回 `unsafe_landing`，紧接着均读取 `on_ground=false`，最后由 actor 楼梯确认上升。复验短移着地确认和未着地后换安全退路，单集仍按 ≤10、全波归因死亡 ≤3 验收。 [攻击前短移](../runs/r57_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-005432-799248.events.jsonl#L706) · [EP04 首次伤害](../runs/r57_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-010225-714536.events.jsonl#L141) · [二次落脚未确认](../runs/r57_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-010225-714536.events.jsonl#L392) · [楼梯上升](../runs/r57_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-010225-714536.events.jsonl#L419) · [续伤短移](../src/mc_agent/harness/guardian.py#L867)
+
+- **r58 下界重新通过双门槛**：同五个名义锚点，峰 **14→7**、总 **27→8**、归因死亡 **0→0**。NJU_3 EP01 两次潜行读回成功，波内缺续伤后尝试短移的实机回执。此前回归的未着地短移链仍待复验，保持 OPEN。 [潜行](../runs/r58_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-012112-089498.events.jsonl#L1183) · [成批岩浆块伤害](../runs/r58_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-012112-089498.events.jsonl#L1263)
+
+- **r59 同五槽再过数值门槛**：岩浆块峰 **7→5**、总 **8→5**，归因死亡 0。NJU_3 EP01 两次下蹲，仍缺实际短移离格样本。另有液态岩浆救援 **59→44**、确认着地 **3→2**、超预算 **23→9**、落脚未确认 **2→10**。HY4_8 EP07 实测跨桥后仍在空中，正确返回失败。 [岩浆块受伤](../runs/r59_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-015758-386899.events.jsonl#L87) · [跨桥后仍腾空](../runs/r59_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-021429-192469.events.jsonl#L725) · [桥面落脚保护](../src/mc_agent/skills/combat_env.py#L1551)
+- **r60 数值门槛通过**：岩浆块峰 **5→7**、总 **5→9**、明确归因死亡 0。五次潜行依旧缺确认离格。液态岩浆救援含边界 **46→37**、确认着地 **2→8**、落脚未确认 **11→5**，其中三条跨桥后下蹲确认已着地。7 条新预算事件全部记录终点 dig，加载版只在最后的岸缺口施工直接调用 dig。已合入 1a41f83 给开槽单次挖掘分时并保留跳跃时间，待新波。 [岩浆块伤害](../runs/r60_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-023634-859374.events.jsonl#L699) · [实际跨桥](../runs/r60_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-023926-594219.events.jsonl#L297) · [预算终点](../runs/r60_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-022439-449941.events.jsonl#L25) · [挖后预留](../src/mc_agent/skills/combat_env.py#L1620)
+- **r61 运行中开槽样本**：HY4_9 EP03 16 次岩浆救援带开槽单次挖掘超时标记，共 53.419s，16 次均还在岩浆。当前已真实暴露 1a41f83 的分段挖掘限时，后续要核对失败岸的换向与是否完成跳岸。 [首条](../runs/r61_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-025954-778263.events.jsonl#L544) · [末条](../runs/r61_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-025954-778263.events.jsonl#L679)
+
+- **r61 终版**：岩浆块峰 **7→9**、归因死仍 0。液态岩浆含边界 **37→103** 次，整段 6.5s 触顶 **7→0**；新单次开槽超时 **48 个标记、42 条救援**，均 HY4_9、均未确认成功。落脚未确认 **5→11**，明确岩浆死 **5→7**。EP03 重生后只有黑曜石、缺镐和可搭桥方块，16 次开槽失败跨集续发；EP04 补装后实际搭桥着地。复验同一岸向开槽失败后跳过该路径，以及无合适材料时的恢复。 [开槽重复](../runs/r61_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-025954-778263.events.jsonl#L544) · [岩浆块峰](../runs/r61_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-030507-451289.events.jsonl#L388) · [单次预算](../src/mc_agent/skills/combat_env.py#L1620)
+
+- **r62 下界回归**：峰 **9→29**、总 **13→43**、明确归因死亡仍 0。NJU_3 EP03 两次续伤后，潜行读回为真，横向脱离都返回 `no_safe_hot_floor_exit`。二次拒绝之间，进食被续伤打断。本案实际走到了离格兜底，所有候选未通过安全探测。补此分支的安全垂直离格或保留平台的回退，并用落地且脚下非岩浆块的状态验收。液态岩浆另计，含边界回调 **103→33**、确认离浆 **6→11**、落脚未确认 **11→9**，开槽超时 **48→4**。r62 四条均在 HY4_8，回调最终返回已离浆。延后开槽和换泳向仍缺实机回执。 [NJU_3 岩浆块伤害](../runs/r62_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-042822-090404.events.jsonl#L1458) · [第二次无安全出口](../runs/r62_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-042822-090404.events.jsonl#L1465) · [安全出口探测](../src/mc_agent/skills/combat_env.py#L770) · [HY4_8 开槽超时后离浆](../runs/r62_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-042149-339253.events.jsonl#L118)
+
+- **r63 下界**：岩浆块峰 **29→14**，归因死亡 0，NJU_3 EP01 有续伤后短移落脚失败，后来攻击前护航验证离格。液态岩浆开槽延后 **48**、泳向滞留 **2** 条标记，均首次在实机出现。HY4_8 EP04 同一水平站位三次开槽超时后的延后回调由 4.637s 降至 0.295s，仍未离浆。该波加载 `7165713`，后续 `d4ccb4f`／`63106a7`／`b83ba71` 的跳过黑曜石、读取结果细分及岸向排除需新波复验。 [落脚失败](../runs/r63_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-045226-551022.events.jsonl#L855) · [攻击前离格](../runs/r63_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-045226-551022.events.jsonl#L924) · [开槽超时](../runs/r63_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-050120-399129.events.jsonl#L8) · [延后回执](../runs/r63_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-050120-399129.events.jsonl#L17) · [泳向滞留](../runs/r63_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-045537-584987.events.jsonl#L521)
+
+- **r64 下界**：岩浆块峰／总 **14／14→29／55**，归因死亡 0。液态岩浆开槽超时 **35→0**，`lava_notch_hard_block` **181** 次，均 HY4_9，同槽 171 次救援只确认 2 次离浆。全波确认离浆 **4→4**，落脚未确认 **17→83**。EP09 单集 42 次救援、22 次落脚未确认、0 次确认脱离，岸边数个相邻落点反复落回。r64 加载 `fcd634f`，已覆盖黑曜石跳过，仍需验证上岸落脚及连续未移动时的取消抑制。 [岩浆块首条](../runs/r64_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-052418-034391.events.jsonl#L530) · [落脚未确认](../runs/r64_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-055226-450350.events.jsonl#L7) · [末次岸边尝试](../runs/r64_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-055226-450350.events.jsonl#L424) · [硬块跳过](../src/mc_agent/skills/combat_env.py#L1748)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-058 | P1 | Integrator（#1，`harness/mc_tools.py` + 模型提示）| 状态: OPEN（航点统一登记及连续裸装达标，跨场景复验待）
+
+- **W20 裸装两门继续通过。** W18／W19／W20 单集峰值 3／2／3，整波 17／16／9。W20 峰值出现在 HY6 EP03 侦察，三个无路目标后换南向有实际推进。此前 Long3 非裸装压力仍出现 5 次，另验新版本相应路径。 [W20 峰值首笔](../runs/l1_w20_20261122/glm_hy_5e_6_bare_30m/20261122-224857-047509.events.jsonl#L17) · [换向推进](../runs/l1_w20_20261122/glm_hy_5e_6_bare_30m/20261122-224857-047509.events.jsonl#L79)
+
+- **W19 全裸装正式终档通过两门。** W18→W19 峰值 3→2、整波 17→16。HY8 EP20 两次无路线后第三个近点被 `move_route_cooldown` 当场拦。全波另有 39 条 `movement_not_confirmed`，参见 BUG-155 的范围内误报以及真实范围外对照。 [同路径冷却](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/20261122-222316-812981.events.jsonl#L65)
+
+- **W16 GLM 五个裸装槽终档复验。** 全波 31 次仍过总量门；HY8 EP04 一集 7 次，未过单集 3 次门。先后换梯及不同树向后仍 `path_not_found`，结果可在逐集轨迹追到原始回执。随后 W17 GLM 三槽本波为单集最大 3、全波 8，终端场景不同，继续按裸装单集观测。 [W16 HY8](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_8_bare_3600s/20261122-194352-451093.events.jsonl#L126) · [W17 HY1](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-200040-213621.events.jsonl#L94)
+- **Long3 七槽终档峰值 5／全波 30。** OB3 EP10 单集 5 次无路超 ≤3，整波 30 低于 300。 [单集样本](../runs/l2_long3_20261122/nju_ob_3_village/20261122-130736-575655.events.jsonl#L69) · [该槽终档](../runs/l2_long3_20261122/nju_ob_3_village/wild-endurance-wild-20261122-123932.json)
+- **Long1→Long2 终档无路峰值 4→7，总数 29→45；峰值为 H3 EP10 斥候。** 七次均零完成路段，六次 `auto` 最终又选向西南，另一次尝试北向曾走 11.7m。L805 近点冷却确实拦了一次，随后位移约 4.6m 后 L899 又选原西南，L1111 回到近同站位再次失败。源实现按维度/方向、离原点 ≤2m 与时间窗限次；验收需看脱离该片失败区域后，后续任务是否还有可行推进。 [首次](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-121056-985448.events.jsonl#L53) · [冷却](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-121056-985448.events.jsonl#L805) · [再次派发](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-121056-985448.events.jsonl#L899) · [末次](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-121056-985448.events.jsonl#L1111) · [冷却判定](../src/mc_agent/skills/library.py#L1576)
+- **Long2 H2 EP03 再次超单集阈值。** 前两次在同站位对同一 `[-368,1753]` 只改 range 2→3，另两次追同一实体 994581，四次均匹配 `path_not_found`，仍处在同一要塞附近平台。 [第一次坐标失败](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-113825-278596.events.jsonl#L69) · [实体目标第二拒](../runs/l2_long2_20261122/hy_5e_2_nether_fortress/20261122-113825-278596.events.jsonl#L368)
+- **L2 终档单集峰 4、全波 29。** 要塞 H2 EP01 报四次 `path_not_found`。首两次是同一目的地，之后换坐标仍回同一平台。全波阈值通过，单集阈值失败。 [首报](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L83) · [第四次](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L900)
+- **L2 H2 要塞 EP01 的单集计数已至 4，越过 3 的门槛。** L83/L154 同一 XZ 两次，L232/L900 改不同目标，服务回执计数依序 1–4，第二次起明确 `requires_replan`。四次失败站位仍是同平台锚点，切换的水平矿道还触发 BUG-080。以回到锚点后的真实离场核对行为门，正式波总账待齐。 [首个失败](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L83) · [同目标第二次](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L154) · [第四次](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L900)
+- **W13 两门数值通过。** 三活槽单集峰 2、全波 6。峰值 OB3 EP04 出井后为补点火器连续导航同侧砾石，最终仍 `timeout`。本波四槽在选址退出，保持同场景行为门复验。 [峰值集](../runs/l1_w13_20261122/nju_ob_3_village/20261122-100406-608222.events.jsonl#L586)
+- **Guardian W12 终档单集峰 4 FAIL、全波 12 PASS。** H2 EP02 四条都在封闭竞技场错派地表摸底，含两次同一个北向坐标，本案联看 BUG-051。另有 OB3 EP03 在工具报 `surface_reached` 后以同一 Y53 站位连续三次无路。 [H2 首条](../runs/l1_w12_guardian_full_20261122/hy_5e_2_cave_combat/20261122-091736-964011.events.jsonl#L39) · [H2 第四条](../runs/l1_w12_guardian_full_20261122/hy_5e_2_cave_combat/20261122-091736-964011.events.jsonl#L152) · [OB3 第三次无路](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/20261122-093513-721494.events.jsonl#L351)
+
+- **W3 Fleet 单集峰 6 FAIL、全波 10 PASS。** OB3 EP19 六条包含五次斥候和一次移动。最初三次在不同高度及站位用同样参数找下界要塞，后两次 L853/L990 坐标相同。实际主世界错派另见 BUG-050。验收保持无路单集门，再分清实际换位与同点重算。 [第一次](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-075616-474243.events.jsonl#L495) · [同点再次无路](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-075616-474243.events.jsonl#L990) · [末次移动](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-075616-474243.events.jsonl#L1030)
+
+- **三路线村庄 EP06 已有单集峰值反例。** 正式 `path_not_found` 至少 L528/L623/L816/L1010 四次，此外 L1171 是范围内原地未动，另账。该波仍待 Fleet。复验先改实际地形路线，验证相同位置两次失败后的真实换点及成功移动。 [第一次](../runs/5ease_ob_w2_20261122/nju_ob_3_village/20261122-061225-580671.events.jsonl#L528) · [第四次](../runs/5ease_ob_w2_20261122/nju_ob_3_village/20261122-061225-580671.events.jsonl#L1010)
+
+- **裸装冲刺终版正式 `path_not_found` 峰／总 0/0。** 仍有 5 个 `movement_not_confirmed`，含 H1 EP02 同坐标大段寻路不动。三路线独立跑的村庄槽 EP05 另实有三次连续 `path_not_found`，该波尚无 Fleet 终版。 [冲刺原地回执](../runs/5ease_bare_sprint_20261122/hy_5e_1_bare/20261122-060900-547326.events.jsonl#L224) · [三路线第三次无路](../runs/5ease_ob_w2_20261122/nju_ob_3_village/20261122-061125-219858.events.jsonl#L94)
+
+- **Showcase 终版峰／总 7/48。** OB2 EP18 单集 7 条，OB1 EP13 同坐标六次另有独立曝光，门限 ≤3 仍失败。Wave10 同版短波 3/3 不足以关闭。 [单集峰原件](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-053234-804299.events.jsonl#L379) · [OB1 第六次直达](../runs/5ease_ob_showcase_20261122/nju_ob_1_bare/20261122-051907-889208.events.jsonl#L642)
+
+- **Wave10 终版本波峰／总 3/3。** 三条正式 `path_not_found` 均在 H6 要塞 EP01，两个指标本波通过。另有 10 条 `movement_not_confirmed`，按错误类别分别记。与 Showcase 同集成的六次短直达对照，尚不能关闭罔顾同目标重试的问题。 [H6 首条](../runs/5ease_l1_wave10_20261122/hy_5e_6_nether_fortress/20261122-053442-631134.events.jsonl#L98) · [H5 原地返回](../runs/5ease_l1_wave10_20261122/hy_5e_5_nether_fortress/20261122-053501-595104.events.jsonl#L178)
+
+- **Showcase OB1 EP13 同一 XZ 六次短直达无路。** `[23042,9989]` 换取 1／2 格半径，L258/284/339/471/586/642 均报 `path_not_found`，从第二次起每次均提示重规划，计数继续到 6。固定集成、原参数与脚下坐标重放，也发出 6 次直接移动请求。站位始终在约半格的局部，期间确实有原子破格，部分重试具备地形变化。适合扩展复验同落脚、同目标的直接移动冷却，以及安全通路被实质改动后允许提交。单集门 ≤3，Fleet 待终版。 [首条](../runs/5ease_ob_showcase_20261122/nju_ob_1_bare/20261122-051907-889208.events.jsonl#L258) · [第二条重规划](../runs/5ease_ob_showcase_20261122/nju_ob_1_bare/20261122-051907-889208.events.jsonl#L284) · [第六条](../runs/5ease_ob_showcase_20261122/nju_ob_1_bare/20261122-051907-889208.events.jsonl#L642) · [现有航点冷却](../src/mc_agent/harness/mc_tools.py#L1335)
+
+- **5Ease 黑曜石门户 V2**。H5 EP02 对同一矿点分别带 Y 和省略 Y，两次均 `path_not_found`。全波和单集峰均 **2**，本波过门。V1 的 7 次来自本波已换场景的竞技场槽，不能据此归因修复。 [带 Y](../runs/5ease_obs_fixed_v2_20261122/hy_5e_5_probe_diamond_y54/20261122-040333-485386.events.jsonl#L65) · [省略 Y](../runs/5ease_obs_fixed_v2_20261122/hy_5e_5_probe_diamond_y54/20261122-040333-485386.events.jsonl#L94)
+
+- **5Ease 黑曜石门户 V1 全波 7、单集峰 4**，分别是 H5/H6 封闭竞技场收到地表任务的 4 和 3。单集上限仍未过，全部 7 条沿 BUG-051 的派发环境复验。 [H5 首次失败](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_5_cave_combat/20261122-035018-322065.events.jsonl#L32)
+
+- **W2 终版单集无路门失败**。OB3 EP04 长段有 **4** 条 `path_not_found`，全波 13。L27/L66 同一 XZ 缩范围仍无路，L151/L222 换临近航点仍失败。本集看到了村民但没到交易窗口的可用距离。 [同一目标第一次](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-025050-649550.events.jsonl#L27) · [同一目标第二次](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-025050-649550.events.jsonl#L66) · [第四条](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-025050-649550.events.jsonl#L222)
+
+- **r82 门户 30 分钟波无路峰／总 6/21**。HY4_8 EP04 六次均为直达。第一次显式 Y，第二次同 XZ 去掉 Y，之后换目标仍失败，统一计数未能阻止本集超门。HY4_8 EP02 另有两次地表 `scout_route_cooldown` 实机回执。 [首条](../runs/r82_midgame_portal_30m/hy4_hy_8_midgame/20261121-203846-280036.events.jsonl#L181) · [第六条](../runs/r82_midgame_portal_30m/hy4_hy_8_midgame/20261121-203846-280036.events.jsonl#L529) · [探索冷却](../runs/r82_midgame_portal_30m/hy4_hy_8_midgame/20261121-203400-931965.events.jsonl#L70)
+
+- **r81 门户单集 4，移动计数止于 3**。HY4_9 EP06 三次移动和一次提桶 `mc_interact` 均为 `path_not_found`，后三条瞄同一水源 XZ。动作内的交互无路未进入移动计数，第三次移动才得到 `requires_replan`，整集原门为 4、波总 9。 [交互无路](../runs/r81_midgame_portal_40m/hy4_hy_9_midgame/20261121-195836-061369.events.jsonl#L864) · [第三次移动](../runs/r81_midgame_portal_40m/hy4_hy_9_midgame/20261121-195836-061369.events.jsonl#L934) · [移动登记](../src/mc_agent/harness/mc_tools.py#L1458)
+
+- **r76 日出峰／总 9/44**。HY4_10 EP12 八次失败航点集中在约 **2.2×5.2 格** 的同一片区域，虽轮换远目标，Bot 只在两处邻近站位。第八次返回后 **5.049s**，对邻格发一直达并记为第九次。该直达已过 5s 且整格索引相异，故不命中现有航点转直达保护。下一步复验短段失败区域和朝岛心可用落点，单集门仍为 ≤3。 [首航点](../runs/r76_day12_real_drop_60m/hy4_hy_10_bare/20261121-200142-666715.events.jsonl#L60) · [末航点](../runs/r76_day12_real_drop_60m/hy4_hy_10_bare/20261121-200142-666715.events.jsonl#L809) · [直达入场](../runs/r76_day12_real_drop_60m/hy4_hy_10_bare/20261121-200142-666715.events.jsonl#L847) · [冷却条件](../src/mc_agent/harness/mc_tools.py#L1335)
+
+- **r78→r80 门户同组无路峰／总 8/70→4/7**。NJU_3 EP08 在 Y4 尝试直达骷髅附近。第二条即收到 `requires_replan`，之后两次向西各掘 8 步，南侧目标 XZ 仍然相同，两次直达再次无路。回执计数推进至 4，单集超门 1。换站位和开挖已经发生，后续路径仍未对准目标，继续保留单集行为门。 [第二条](../runs/r80_midgame_portal_40m/nju_nju_3_midgame/20261121-194109-074676.events.jsonl#L142) · [第二次隧道](../runs/r80_midgame_portal_40m/nju_nju_3_midgame/20261121-194109-074676.events.jsonl#L211) · [第四条](../runs/r80_midgame_portal_40m/nju_nju_3_midgame/20261121-194109-074676.events.jsonl#L242) · [重规划回执](../src/mc_agent/harness/mc_tools.py#L1458)
+
+- **r77→r78 门户同组无路峰／总 2/4→8/70**：HY4_8 EP04 八次无路全是直达，计数 1→8，最大样本不触及航点转直达冷却条件。r78 加载 `935a579`，全波无 `move_route_cooldown` 回执。 [第一条](../runs/r78_midgame_portal_40m/hy4_hy_8_midgame/20261121-142602-446031.events.jsonl#L19) · [第八条](../runs/r78_midgame_portal_40m/hy4_hy_8_midgame/20261121-142602-446031.events.jsonl#L662) · [冷却适用条件](../src/mc_agent/harness/mc_tools.py#L1335)
+
+- **r78 中期已加载冷却，峰仍 5**：HY4_1 EP07 首个失败航点距最终目标 **5.43m**，随后一直达带 Y，另一直达瞄原目标，二者都不属于同格更窄子集；同局部还有两条换位后的无路。整波未产出 `move_route_cooldown` 实机回执。 [首条航点](../runs/r78_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-142054-525097.events.jsonl#L385) · [直达再次无路](../runs/r78_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-142054-525097.events.jsonl#L444) · [冷却条件](../src/mc_agent/harness/mc_tools.py#L1335)
+
+- **航点转直达冷却已合入**：`ce80857` 对同维度、同起点、失败半径子集的直接重试拦截 5s，返回 `move_route_cooldown`。放宽半径、位置变化及到期均可重新提交。r73 日出和 r78 中期加载 `3c9771e42238a690=e7b9b74`，待目标行为曝光。r73 官方 MoveTest 仍早于该补丁，EP18 八条坐标寻路失败。 [冷却判断](../src/mc_agent/harness/mc_tools.py#L1335) · [离线夹具](../tests/test_skills_and_providers.py#L1917) · [EP18 末次无路](../runs/official_r73_80m_movetest/MoveTest_01/20261121-133842-075095.events.jsonl#L267)
+
+- **r76 门户峰／总 3/3→4/18**：HY4_9 EP04 同一航点重复两条，改直达得第 3 条，约 419 秒后另一落点航点记第 4 条。统一登记与重规划工作，单集行为门仍超 1。 [重复航点](../runs/r76_midgame_portal_40m/hy4_hy_9_midgame/20261121-130413-750233.events.jsonl#L53) · [直达第 3 条](../runs/r76_midgame_portal_40m/hy4_hy_9_midgame/20261121-130413-750233.events.jsonl#L72) · [后续第 4 条](../runs/r76_midgame_portal_40m/hy4_hy_9_midgame/20261121-130413-750233.events.jsonl#L701)
+
+- **r73 裸装验证探索路线冷却**：HY4_5 EP12、EP13 两次 `scout_route_cooldown` 分别 **0.428／0.323s**。同角色 EP10 仍有三条坐标无路和三个同站位探索无路，峰 6，波总 104。坐标计数仅三条，探索路径另记；冷却命中已有实机证据，整集门未过。 [EP12 冷却](../runs/r73_bare_real_drop_60m/hy4_hy_5_bare/20261121-124420-563209.events.jsonl#L173) · [EP13 冷却](../runs/r73_bare_real_drop_60m/hy4_hy_5_bare/20261121-124644-482972.events.jsonl#L122) · [EP10 第三条探索无路](../runs/r73_bare_real_drop_60m/hy4_hy_5_bare/20261121-123759-633318.events.jsonl#L242) · [冷却键](../src/mc_agent/skills/library.py#L1575)
+- **r74→r75 同三门户角色达门**：无路峰／总 **4/12→3/3**。HY4_8 EP07 两航点和一直达共用计数 **1→2→3**，第三条给重规划。另一个日出配置 r71 同样包含统一登记，HY4_3 EP04 仍峰 **4**。 [航点 1](../runs/r75_midgame_portal_40m/hy4_hy_8_midgame/20261121-123552-409796.events.jsonl#L21) · [航点 2](../runs/r75_midgame_portal_40m/hy4_hy_8_midgame/20261121-123552-409796.events.jsonl#L58) · [直达 3](../runs/r75_midgame_portal_40m/hy4_hy_8_midgame/20261121-123552-409796.events.jsonl#L88) · [日出峰值集首条](../runs/r71_day12_real_drop_60m/hy4_hy_3_bare/20261121-120416-069807.events.jsonl#L50) · [航点登记](../src/mc_agent/harness/mc_tools.py#L1490)
+
+- **r73 门户旧版分段对照**：峰／总 **3/3→4/13**。进入下界后的 HY4_8 EP06 四条坐标无路，末两条同 XZ 修改 range 3→5，仍无路。该波加载 `b8d06fd`，早于 `e84272c`。 [首条](../runs/r73_midgame_portal_40m/hy4_hy_8_midgame/20261121-110929-304625.events.jsonl#L109) · [同点重试](../runs/r73_midgame_portal_40m/hy4_hy_8_midgame/20261121-110929-304625.events.jsonl#L917)
+
+- **分段航点登记修复已合入**：`102fea5` 含 `e84272c`。离线真实入口将 32m 航点和直达失败写入同一集历史，夹具通过。待实际航点失败、历史计数与单集峰 ≤3 同时验收。 [集成夹具](../tests/test_skills_and_providers.py#L1832)
+- **r74 门户通过航点登记专项，行为门仍失败**：HY4_8 EP09 前三条直达依次 **1／2／3**，后一次航点回执明示 **4**，含同集换路提示。HY4_9 EP07 另一条航点正确从 **1** 开始。峰／总 **4/13→4/12**，单集 ≤3 仍未通过。 [第三条直达](../runs/r74_midgame_portal_40m/hy4_hy_8_midgame/20261121-120909-584794.events.jsonl#L289) · [航点登记为第四](../runs/r74_midgame_portal_40m/hy4_hy_8_midgame/20261121-120909-584794.events.jsonl#L351) · [另集从一开始](../runs/r74_midgame_portal_40m/hy4_hy_9_midgame/20261121-115318-010531.events.jsonl#L22) · [新登记](../src/mc_agent/harness/mc_tools.py#L1481)
+
+- **r73 中期单集峰 8**：同 r72 三角色峰／总 **3/8→8/33**。HY4_2 EP04 八条全为坐标移动，含两条 32m 航点失败，之后仍回到相近目标邻域。斥候冷却无直接回执，复验直达与分段失败统一登记和换路。 [首条](../runs/r73_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-103331-383913.events.jsonl#L47) · [航点](../runs/r73_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-103331-383913.events.jsonl#L281) · [末条](../runs/r73_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-103331-383913.events.jsonl#L790) · [坐标失败登记](../src/mc_agent/harness/mc_tools.py#L1415)
+
+- **r69 日出单集门回退**：同 r68 四角色无路峰／总 **3/33→6/36**。HY4_3 EP04 有三次 `move_to` 和一次 `dig` 指向同一 XZ，其中两次不传 Y，另有一次换邻近坐标和一次 `craft_gear` 无路。新斥候冷却无回执。复验同位置的跨工具重试是否触发换路。 [首条](../runs/r69_day12_real_drop_60m/hy4_hy_3_bare/20261121-100029-466314.events.jsonl#L61) · [同点挖掘](../runs/r69_day12_real_drop_60m/hy4_hy_3_bare/20261121-100029-466314.events.jsonl#L134) · [末次回执](../runs/r69_day12_real_drop_60m/hy4_hy_3_bare/20261121-100029-466314.events.jsonl#L258) · [坐标失败登记](../src/mc_agent/harness/mc_tools.py#L1415)
+
+- **r67 中期过门三槽**：无路峰／总 **7／8**。HY4_9 EP06 七条无路全部在下界，首两条对同一 XZ 换填 Y，后续五条换目的地仍无路。近邻失败统计逐条见回执。进入下界后需要以可落脚通路规划替代轮换远点。 [首条](../runs/r67_midgame_portal_3bot/hy4_hy_9_midgame/20261121-072808-164375.events.jsonl#L132) · [末条](../runs/r67_midgame_portal_3bot/hy4_hy_9_midgame/20261121-072808-164375.events.jsonl#L431)
+- **斥候候选 `80a3dab` 已随 `0a68fc8` 合入**：给原地无路的方向加 180s 冷却，按维度、站位 2m、步长 0.5m 匹配，保留未试方向。r67 的七次下界坐标 `mc_move_to` 为另一入口，复验分别看斥候真实请求和全票单集失败阈值。 [斥候冷却](../src/mc_agent/skills/library.py#L1574) · [近邻与换位夹具](../tests/test_skills_and_providers.py#L3198)
+- **r69 加载后的实机残余**：中期实掉三槽无路峰／总 **4/9**，HY4_2 EP05 的四条为两次点挖、两次坐标移动，均在新斥候冷却之外。终版三槽未记录 `scout_route_cooldown` 的实机回执。 [首个点挖](../runs/r69_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-080654-479764.events.jsonl#L56) · [首个坐标移动](../runs/r69_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-080654-479764.events.jsonl#L608)
+- **r70 同三个中期角色**：单集峰／总 **4/9→5/22**。HY4_1 EP10 五条全为坐标移动，第二和第三条同一 XZ 改传 Y，第四和第五条在同一目标邻域。新斥候冷却无实机回执。 [同一 XZ 首次](../runs/r70_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-084511-435312.events.jsonl#L407) · [同一 XZ 再试](../runs/r70_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-084511-435312.events.jsonl#L426) · [末次无路](../runs/r70_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-084511-435312.events.jsonl#L887)
+
+- **r67 探索三槽**：无路峰／总 **4／15**。HY4_2 EP02 三次斥候各试正向及两条窄角，随后一次步行也失败。EP03 同站位附近再出现三次斥候无路。一次保护应覆盖相同受阻邻域内曾尝试的路线，留独立机动手段脱离该站位。 [EP02 首条](../runs/r67_expl_mem_3bot/hy4_hy_2_iron/20261121-065531-768950.events.jsonl#L18) · [步行无路](../runs/r67_expl_mem_3bot/hy4_hy_2_iron/20261121-065531-768950.events.jsonl#L168) · [EP03 首条](../runs/r67_expl_mem_3bot/hy4_hy_2_iron/20261121-065750-378055.events.jsonl#L19)
+
+- **r65 Day1/Day2**：无路峰／总 **6／14**。DS_2 EP06 三次在 Y59–60 斥候无路，向上施工后再试，北向一次实际走 29.68m 才失败；原位再试北向被保护门拦一次，末次无路发生在另一站位。峰值混有换过位置后的失败，保护门已有触发证据。 [初始无路](../runs/r65_day12_full_45m/nju_ds_2_bare/20261121-065753-250126.events.jsonl#L55) · [进展后失败](../runs/r65_day12_full_45m/nju_ds_2_bare/20261121-065753-250126.events.jsonl#L359) · [重复拦截](../runs/r65_day12_full_45m/nju_ds_2_bare/20261121-065753-250126.events.jsonl#L440)
+- **一句话**：`mc_move_to` 的 `path_not_found` 是**全量最大的错误码**，且模型会在"可达中转点"和"不可达目标"之间反复横跳。
+- **实测（6 波）**：**1,137 次**（其中 `mc_move_to` **1,099**、`mc_dig` 31、`mc_place` 4），分布在 **446 个 episode**（占 1,581 集的 28%）；**50 个 episode ≥5 次**，最多 13 次。按 bot：`hy4_6_nether_bastion` **237**、`glm_1_nether_fortress` **151**、`glm_4_brewing_alchemy` 88、`nju_3` 73、`glm_2` 73。
+- **典型片段（`hy4_6` r28 EP1，45 请求 0 分）**：
+  ```
+  move_to(228,205,range=4) -> ok
+  move_to(232,205,range=4) -> path_not_found   # 目标就在 4 格外
+  move_to(228,205,range=4) -> ok               # 退回中转点
+  move_to(232,205,range=4) -> path_not_found   # 再撞
+  ```
+  目标 `ancient_debris` 在墙内/岩浆后，`find_blocks radius=96` 每次都返回"total 2"，模型知道位置但到不了。
+- **根因**：`path_not_found` 只说明"没路"，**不告诉模型"该怎么改"**（换中间点？挖过去？放弃？）；`repeated_identical_failure_blocked` 只拦完全相同的参数，坐标差 1~4 格就绕过。
+- **最小修复**：① `path_not_found` 连续 2 次且目标距离 <8m → 自动改 `mc_skill_mine_blocks` / `mc_dig` 朝目标掘进；② 同一目标累计 3 次失败 → `requires_replan=True` + 该坐标 120s 冷却；③ 返回 `suggested: {"mode":"dig_toward","target":[x,y,z]}`。
+- **验收标准**：单 episode `path_not_found` ≤3；单波总量 ≤300。
+- **r33_short 复验**：已加载 `090ad3d`，单集峰值 **7→4**（r32→r33），整波 **19→28**，仍未过单集门槛。GLM1 EP01 第三次 `move_to` 正确触发重规划，第四条失败来自 `mc_dig`。HY4_3 EP06 则连续收到四次 `dig_toward` 提示，前两次后挖掘和楼梯仍把模型带回同一片区域，第四次失败后才通过隧道离开。 [GLM1 第三次](../runs/r33_short/glm_glm_1_nether_fortress/20261119-224438-456095.events.jsonl#L184) · [GLM1 第四次](../runs/r33_short/glm_glm_1_nether_fortress/20261119-224438-456095.events.jsonl#L566) · [HY4_3 隧道](../runs/r33_short/hy4_hy_3_midgame/20261119-225345-169801.events.jsonl#L410) · [保护分支](../src/mc_agent/harness/mc_tools.py#L1261)
+- **r35_short 下界复验**：HY4_8 EP03 共 **10** 次寻路失败，9 次收到重规划提示，三次尝试的隧道全部在首步把下方实测 `netherrack` 拒为 `unsafe_or_unknown_floor`。整波 11 条同类拒绝中，5 条下方为空气，另 6 条来自四个 Bot 的 `netherrack` 或 `basalt`，均落在 `tunnel.GROUND` 的缺口。最小修复应让确认坚实的下界方块通过地板集合，继续运行流体、坠落和未知地形检查。 [HY4_8 拒绝](../runs/r35_short/hy4_hy_8_nether/20261119-233433-043228.events.jsonl#L334) · [HY4_6 玄武岩拒绝](../runs/r35_short/hy4_hy_6_nether_bastion/20261119-233212-680176.events.jsonl#L455) · [地板集合](../src/mc_agent/skills/tunnel.py#L11) · [地板判定](../src/mc_agent/skills/tunnel.py#L131)
+- **r43 短波门禁**：Day 1 单集峰值 **2**、全波 **3**，Day 2 **3／5**，均通过本波阈值。仍等同类下界路径压力验收。 [Day 2 峰值 EP03](../runs/r43_day2_village_near_9bot/hy4_hy_9_day2_village_near/20261120-072726-669575.events.jsonl#L47)
+- **r44 Day 2 回潮**：全波 **10**，HY4_5 EP02 单集 **4** 超门槛，三条来自 `mc_skill_scout_surface`，一条来自 `mc_move_to`。重规划需跨斥候和直接坐标移动保留失败上下文。 [首条斥候失败](../runs/r44_day2_wild_scout_9bot/hy4_hy_5_iron/20261120-074143-250000.events.jsonl#L19) · [直接移动失败](../runs/r44_day2_wild_scout_9bot/hy4_hy_5_iron/20261120-074143-250000.events.jsonl#L163)
+- **r46**：Day 1 峰 **4／全波 7**，HY4_3 EP03 中两个近目标先后反复失败，第二个目标经过挖隧道和脱困后仍 `path_not_found`。Day 2 峰 **2／全波 4**。 [第一个近目标](../runs/r46_day1_5bot/hy4_hy_3_bare/20261120-090237-438331.events.jsonl#L78) · [第二个目标末次重试](../runs/r46_day1_5bot/hy4_hy_3_bare/20261120-090237-438331.events.jsonl#L314)
+- **r47**：Day 1 单集峰 **4／全波 13**，Day 2 **3／6**。GuiTest EP03 从 Y55 起点尝试远距离 XZ 航点，脱困拒绝和浅爬后仍重复相同西向目标 `[6310,-6535]`。32m 分段回执提前返回，跳过路径失败历史与定向掘进提示；复验覆盖该分支。单集目标继续未过。 [分段提前返回](../src/mc_agent/harness/mc_tools.py#L1320) · [失败历史](../src/mc_agent/harness/mc_tools.py#L1403) [首次西向失败](../runs/r47_day1_5bot/nju_guitest_01_bare/20261120-100322-253643.events.jsonl#L79) · [重复西向失败](../runs/r47_day1_5bot/nju_guitest_01_bare/20261120-100322-253643.events.jsonl#L139)
+- **r48／r49**：r48 下界 **8/34**，HY4_7 EP05 两次重试 `(-346,-292)`、两次重试 `(-333,-235)`，调整范围或去掉 Y 仍指向相同分段航点。r49 裸装 **2/9**，末地场景 **0/0**，场景不同且两波均未加载 `643f2f1` 的下界斥候。 [反复分段](../runs/r48_nether_fortress_9bot/hy4_hy_7_nether_fortress/20261120-102911-540461.events.jsonl#L639)
+- **r50**：下界单集峰／全波 **8／34→7／82**。HY4_9 EP03 同一 XZ `(3556,1790)` 返回三次 `path_not_found`，先传 XYZ 后去掉 Y 仍反复。末地峰／整波 **2／3**。 [同目标重试](../runs/r50_nether_fortress_9bot/hy4_hy_9_nether_fortress/20261120-204428-525944.events.jsonl#L737)
+- **r51**：同名下界波单集峰／总量 **7／82→8／86**。仅 HY4_7 EP02 就有 5 次对 `(1512,3141)` 的失败，改变 Y 和 range 仍多次返回相近中间航点。 [连续失败](../runs/r51_nether_fortress_9bot/hy4_hy_7_nether_fortress/20261120-210358-106863.events.jsonl#L106) · [集后段重试](../runs/r51_nether_fortress_9bot/hy4_hy_7_nether_fortress/20261120-210358-106863.events.jsonl#L696)
+
+- **r53 下界**：路径错误峰／总 **8／86→7／83**，峰值仍超 3。HY4_7 EP01 七次失败中三次目标同为 `(1512,3141)`；分段移动在报错回执处直接返回，未进入普通寻路失败累计与定向掘进提示。四个隧道方向另外均因黑曜石地板受阻。复验分段和普通寻路能否共用同目标失败保护。 [首个分段失败](../runs/r53_nether_fortress_9bot/hy4_hy_7_nether_fortress/20261120-215410-391904.events.jsonl#L288) · [第三个同目标失败](../runs/r53_nether_fortress_9bot/hy4_hy_7_nether_fortress/20261120-215410-391904.events.jsonl#L649) · [分段提前返回](../src/mc_agent/harness/mc_tools.py#L1329) · [失败累计](../src/mc_agent/harness/mc_tools.py#L1412)
+- **r54 下界同四锚点**：失败峰／总 **7／45→8／58**，仍超过单集阈值。HY4_5 EP03 失败后改过坐标和工具，随后仍返回同片堡垒平台多次无路。需按原点／目的地对照是否真正离开失败邻域。 [首次失败](../runs/r54_nether_fortress_6bot/hy4_hy_5_nether_fortress/20261120-232043-545240.events.jsonl#L40) · [末段再次无路](../runs/r54_nether_fortress_6bot/hy4_hy_5_nether_fortress/20261120-232043-545240.events.jsonl#L880)
+- **r55 同四锚点**：失败全组 **58→47**，单集峰 **8→10**，仍超 3。HY4_8 烈焰棒 EP03 对 Y24 的堡垒砖无路，第二次已有重规划，随后隧道地板拒绝、楼梯遇岩浆，十次失败全部进入失败历史，集尾战斗报无目标。加上新槽 HY4_9，全波 62 条。 [首次高差失败](../runs/r55_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-000100-494729.events.jsonl#L71) · [岩浆阻断](../runs/r55_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-000100-494729.events.jsonl#L292) · [末次无路](../runs/r55_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-000100-494729.events.jsonl#L953) · [战斗无目标](../runs/r55_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-000100-494729.events.jsonl#L1021)
+- **r56 同五锚点**：无路峰／总 **10／62→7／52**，峰值门槛仍失败。移动未确认 21→42，需同时看重新定位和 Y 轴可达性。HY4_9 EP06 首个无路后继续多次失败。 [HY4_9 首次](../runs/r56_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-003615-260986.events.jsonl#L68)
+
+- **r57 要塞波**：无路峰／总 **6／21**。HY4_1 EP04 门框房 Y−15，首个站位也在 Y−15。首两次直走失败，后续在走廊水平改路，整集 6 条无路、0 挖通尝试或填眼。末段另有两条字符串坐标调用未取得有效位移回执。 [第一条直达失败](../runs/r57_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261121-010200-251477.events.jsonl#L72) · [第六条无路](../runs/r57_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261121-010200-251477.events.jsonl#L342)
+
+- **r57 下界同五槽**：无路峰／总 **7／52→7／58**。HY4_9 EP05 首次隔 9 格高差找目标，随后收到重规划。集末失败历史仍到 7，近邻重复 5。 [首个无路](../runs/r57_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-010311-573592.events.jsonl#L345) · [重规划](../runs/r57_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-010311-573592.events.jsonl#L572) · [历史计数](../runs/r57_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-010311-573592.events.jsonl#L913)
+
+- **r58 下界再验**：无路峰／总 **7／58→6／66**。HY4_5 EP03 六次无路，其中两次对同一矿点 XZ 分别带 Y 和省略 Y 重试，随后隧道地板和下行楼梯均拒绝。 [首个无路](../runs/r58_nether_fortress_5bot/hy4_hy_5_nether_fortress/20261121-012831-363597.events.jsonl#L104) · [末段再次无路](../runs/r58_nether_fortress_5bot/hy4_hy_5_nether_fortress/20261121-012831-363597.events.jsonl#L798)
+
+- **r59 下界**：无路峰／总 **6／66→7／53**。HY4_5 EP02 对 `(-2272,3930)` 失败三次，对 `(-2260,3944)` 失败两次，改 Y 或范围后又在原平台报无路。 [第一轮失败](../runs/r59_nether_fortress_5bot/hy4_hy_5_nether_fortress/20261121-020034-576283.events.jsonl#L40) · [两组反复](../runs/r59_nether_fortress_5bot/hy4_hy_5_nether_fortress/20261121-020034-576283.events.jsonl#L354) · [最后无路](../runs/r59_nether_fortress_5bot/hy4_hy_5_nether_fortress/20261121-020034-576283.events.jsonl#L899)
+
+- **r59 要塞**：峰／总 **8／30**，HY4_1 EP03 含两次对同一远位坐标的分段无路，以及一次斥候无路。 [首条失败](../runs/r59_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-020828-570948.events.jsonl#L138) · [第二次分段](../runs/r59_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-020828-570948.events.jsonl#L487)
+
+- **r60 下界**：无路峰／总 **7／53→9／76**，最差 HY4_9 EP03。地板类隧道失败 **24/28→35/37**，同时过去的楼梯缺支撑 **30→11**。 [最差集首条无路](../runs/r60_nether_fortress_5bot/hy4_hy_9_nether_fortress/20261121-022459-216493.events.jsonl#L88)
+
+- **r61 下界**：无路峰／总 **9／76→7／56**，单集仍失败。 [最差集首条](../runs/r61_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261121-031245-993166.events.jsonl#L54)
+
+- **r62 下界**：无路峰／总 **7／56→6／55**，单集仍超标。HY4_7 EP06 先后尝试两段路线，集尾超时。6 次无路中有 2 次为 32m 航点失败，带 `requires_replan` 但缺失败计数，末次回执显示 4。`mc_move_to` 先返回航点回执，绕过后面的失败历史登记。让航点和直达失败经同一处登记，保留航点位置，复验六条是否连续记满，以及单集 ≤3 的行为门槛。 [首个航点失败](../runs/r62_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261121-044040-323035.events.jsonl#L215) · [末次失败](../runs/r62_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261121-044040-323035.events.jsonl#L717) · [航点提前返回](../src/mc_agent/harness/mc_tools.py#L1333) · [失败历史登记](../src/mc_agent/harness/mc_tools.py#L1415)
+
+- **r63 要塞**：峰／总 **10／25**。HY4_2 EP02 有多个失败段。按日志，尝试直达、楼梯与斥候，仍有原地重复失败保护和一批战斗抢占。须按原门槛复验单集 ≤3。 [首条失败](../runs/r63_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-042946-659807.events.jsonl#L246) · [重复拦截](../runs/r63_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-042946-659807.events.jsonl#L705)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-059 | P1 | Integrator（#1，`skills/mining_dfs.py`）| 状态: OPEN（深回程仍失败，井口局部达标与实际出洞需分别确认）
+
+- **W20 正式回程。** W19 `13/4`→W20 `20/9`，仍高于 1∶1；连续三次推进的集数 2→3，实测回升 29 次零净下降，三次深层上行无符合门定义的尾部超时。保留 HY7 中途换井和 OB1 同层绕路两个真实正例，不把未退出深层的进展回执当作已出洞。 [W20 深层回程样本](../runs/l1_w20_20261122/glm_hy_5e_6_bare_30m/20261122-230149-781732.events.jsonl#L33)
+
+- **W20 HY7 同集随后在 Y36 直接重开新井。** 上回执仍要求到 Y70。下一次同目标 `explore` 从 Y36 发起，树从 21 节缩为 2，新井口明确在 `[210530,36,208325]`。连续三片再下至 Y−33，第三片实入两钻，此集累计三钻。验收给出安全的本地重接或换井条件，并核对“需要回地面”和实际可重开的高度为何不同。保留真实走不通或落脚危险时的出井要求。 [原出井要求](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-230440-134232.events.jsonl#L77) · [Y36 新井](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-230440-134232.events.jsonl#L212) · [后采两钻](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-230440-134232.events.jsonl#L248) · [中途重接与换井](../src/mc_agent/skills/mining_dfs.py#L6022)
+
+- **W20 GLM HY7 的实得一钻样本仍长时间回程。** EP04 在 Y−24、第四探片移动未确认时已实收一钻，下一片要求回地面。切至 07:16:37 UTC 已九片 `climb_progress`，Y−24→36，距目标 Y70 仍 34 格。不能把出钻和回程成功合并。 [首钻](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-230440-134232.events.jsonl#L60) · [第九段](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-230440-134232.events.jsonl#L193)
+
+- **W20 同阶段有成功与卡点。** HY10 60m EP02 有三粗铁后沿既有路线 Y26→61，66.55s 真实回升。OB3 20m EP02 实收三粗铁，回井在 Y67 同一 Y68 踏点两次报 `backtrack_blocked`，墙面脚头为空气，缺有效落脚回执。保留 HY10 回升路径，复验 OB3 在同片可重建边或安全换出口。 [HY10](../runs/l1_w20_20261122/hy_5e_10_bare_60m/20261122-224754-901803.events.jsonl#L220) · [OB3 首拒](../runs/l1_w20_20261122/nju_ob_3_bare_20m/20261122-224733-708174.events.jsonl#L225) · [原位复现](../runs/l1_w20_20261122/nju_ob_3_bare_20m/20261122-224733-708174.events.jsonl#L263) · [阻塞回执](../src/mc_agent/skills/mining_dfs.py#L2014)
+
+- **W19 正式结论。** 进展／局部到达 W18 的 6/4 升至 13/4，仍超 1:1。确认净降 1/10→0/17，达到末站不低于起点的门。两段匹配深回程未见该门定义的超时，连续三次进展的集数为 2。 [W19 三段持续爬升](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-214053-551737.events.jsonl#L328) · [W19 第二个深回程](../runs/l1_w19_20261122/hy_5e_9_bare_60m/20261122-220843-389344.events.jsonl#L800)
+
+- **W19 HY9 钻探路径拦住后手动下井耗时。** 首个探钻 DFS 在 Y8 回 `cannot_reach_nearest_node`，同参重试被拦。随后至 06:23:51 UTC 十七次手动下降累计 495.05s，三次向上 40.29s；中途即使到 Y−50 仍没有钻入包。一次 DFS 回撤只升两格，接新方向的两片真正钻 DFS 合计约 101.4s，末站 Y−59，仍无目标钻。验收需要回到可达节点或受控换入口时能直接恢复 DFS，并保留空洞、缺地板的拒绝。 [初次钻探节点拒绝](../runs/l1_w19_20261122/hy_5e_9_bare_60m/20261122-220843-389344.events.jsonl#L30) · [Y−50 下降耗尽](../runs/l1_w19_20261122/hy_5e_9_bare_60m/20261122-220843-389344.events.jsonl#L659) · [恢复 DFS](../runs/l1_w19_20261122/hy_5e_9_bare_60m/20261122-220843-389344.events.jsonl#L838) · [爬升入口](../src/mc_agent/skills/mining_dfs.py#L3251)
+
+- **W19 OB1 后续回程完成高度推进，装备仍在。** EP05 再四个进展回执后，`surface_reached` 报到 Y77（目标 Y79），后续手动三阶确到 Y80。EP06 独立读包有铁镐、脚穿钻靴、散钻 4。EP04 成靴后的散钻是 2，回程工具未逐笔报那 2 钻的入包来源。验收按成功保装、九笔续爬时间、落在已确认地表分项。 [Y77 回执](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-214932-804727.events.jsonl#L104) · [Y80 实位](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-214932-804727.events.jsonl#L349) · [独立读包](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-215432-884702.events.jsonl#L15)
+
+- **W19 60m OB1 成靴后的深回程。** EP04 真收六钻并装备钻靴，随后续钻收到 `needs_surface_climb`。连续四次 `climb_progress` 共 140.21s，Y−19→−14→−1→4→26，目标 Y79。EP04 客观验证时仍在地下，下一集继续回撤；波次门需分别验收已实证的爬高、最终到达地表与设备保留。 [成靴](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-214053-551737.events.jsonl#L191) · [首次回撤](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-214053-551737.events.jsonl#L274) · [第四次](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-214053-551737.events.jsonl#L354) · [爬升判定](../src/mc_agent/skills/mining_dfs.py#L3242)
+
+- **W18 GLM 五槽正式复验。** 进展／局部到达 6/4，排除已经满足目标高度的 9 笔。净下降 1/10，HY8 EP07 的 `surface_reached` 实为 Y68→67。HY1 EP06 三笔进展共 243.05s、Y22→46，第 4 笔受伤停于 Y48，终没出井。门禁不能把已过高度的原地回执加到有效出井数，深回程超时专项仍缺匹配深度。 [HY8 净下降](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-210528-438534.events.jsonl#L58) · [HY1 第三段](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-210159-473254.events.jsonl#L151) · [HY1 停手](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-210159-473254.events.jsonl#L166)
+
+- **W17b 10/10 正式验收。** `climb_progress / surface_reached` 为 **7/3**，净下行 **1/11**，两项失败；连续三次进展停滞集 0。HY3 EP05 五次爬升共耗约 152s，单次倒退 8 格，最后有局部到达，仍超时。深回程超时保留一个候选，实际时限由走位、查询和挖掘共同消耗。 [倒退](../runs/l1_w17b_20261122/hy_5e_3_bare/20261122-204430-192323.events.jsonl#L93) · [局部到达](../runs/l1_w17b_20261122/hy_5e_3_bare/20261122-204430-192323.events.jsonl#L254) · [超时](../runs/l1_w17b_20261122/hy_5e_3_bare/20261122-204430-192323.events.jsonl#L381)
+
+- **W17b 成品后的深回程。** OB1 钻靴已穿、实包散钻 7，EP05 从 Y−30 开爬，前片上 17 格，后两片在 Y−7.9 与 Y−4 被近敌打断，最终在 Y−8 近战死亡。HY3 EP05 钻石目标因旧井需先爬，第二次 `climb_out` 5.51s 后从 Y25 倒退到 Y17。失败时需给实用的改线或有支撑落脚点，不能将局部上行当成装备已带回。 [OB1 死亡](../runs/l1_w17b_20261122/nju_ob_1_bare/20261122-204407-147309.events.jsonl#L205) · [HY3 下降](../runs/l1_w17b_20261122/hy_5e_3_bare/20261122-204430-192323.events.jsonl#L93)
+
+- **W17 GLM 三槽终档复验。** `climb_progress / surface_reached` 为 4/1，超 1:1 门。裸装 HY1 EP12 从 Y50 真走至 Y64，起点已高于回执目标 Y48，按门禁排除在深回程成功数外。另两次深回程未超时，五笔高度齐备的爬升均未净下降。 [裸装局部高度回执](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-202135-792552.events.jsonl#L303) · [村庄槽深回程](../runs/l1_w17_glm_20261122/glm_hy_5e_5_village/20261122-200626-412594.events.jsonl#L118)
+
+- **W16 GLM 裸装和 W17b 对照。** W16 终档 6 笔带高程回撤里，HY8 EP13 一笔净下降 Y51→49，29.38s 后报 `time_slice`，下一笔实上到 Y53。W17b OB2 EP02 三段实上 Y16→35→47→51，耗 196.9s，回执 `surface_reached` 的局部目标 Y53，已有井口锚 Y69。新版算 0/3 净下降，2/1 仍超回程比例，等该轮终档再结论。 [旧版净下降](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_8_bare_3600s/20261122-202336-757068.events.jsonl#L299) · [新版局部爬升](../runs/l1_w17b_20261122/nju_ob_2_bare/20261122-202216-558385.events.jsonl#L321) · [局部回执源码](../src/mc_agent/skills/mining_dfs.py#L5691)
+
+- **W16 GLM HY1 EP03 回撤回执与地表分账。** `climb_out` 66.648s，Y35→50、目标 Y52、原井口 Y68；`surface_reached/reached=true` 后紧接再派铁 `explore`。这笔确认爬升 15 格；暂无独立地表确认，不能只按 stop_reason 验地表。 [爬升回执](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-193704-169391.events.jsonl#L198) · [下一次下探](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-193704-169391.events.jsonl#L212)
+- **Long3 七槽终档推进／真达标 6/0，仍超 1:1。** 一集连续 ≥3、0/6 回升终点低于起点；另排除 1 笔开跑已在目标高度，deep/expedition 专项无匹配。 [开跑已达标](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-125828-754489.events.jsonl#L115) · [实际重复回升](../runs/l2_long3_20261122/nju_ob_3_village/20261122-130904-314592.events.jsonl#L143)
+- **Long3 OB3 EP11 五片挖掘确认超时，197.858s 仅升 9 格。** Y61→70，内部目标 Y113，尚无安全侧路的实读。第五片实际升 Y68→70，仍被附近失败历史记为 `climb_progress`，后续一笔集尾预算拒绝、一笔零进展防重拒绝，300s 超时。课级为 `short`，物理回程单列。验收应让已确认回升清除零进展历史，同时继续拦截真正的同点无进展。 [首片](../runs/l2_long3_20261122/nju_ob_3_village/20261122-130904-314592.events.jsonl#L98) · [第五片](../runs/l2_long3_20261122/nju_ob_3_village/20261122-130904-314592.events.jsonl#L185) · [附近失败记录](../runs/l2_long3_20261122/nju_ob_3_village/20261122-130904-314592.events.jsonl#L228) · [部分回升回执](../src/mc_agent/skills/mining_dfs.py#L5505) · [防重拦截](../src/mc_agent/harness/agent.py#L605)
+- **Long2 终档推进／达标 21/5，OB3 EP08 回升到 Y45 后又下潜。** 七片回程耗 **431.501s**，从 Y−39 达到工具内部 Y47 的两格容差。找砾零收后再次下钻，L1057 在 Y29 的独立包仍有 17 钻，最后位于 Y22，门户集 1800s 超时。另 H3 EP12 局部 Y49 报达标后，后续三次实际斥候／寻路无路或停滞。现场只验到局部目标，需区分可安全打通的地表与从洞内向矿材改向。 [OB3 局部达标](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L829) · [Y29 实包](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L1057) · [Y22](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L1159) · [超时](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L1168) · [H3 局部门](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-122356-714709.events.jsonl#L122)
+- **Long2 OB1 EP11 六次回程推进后仍困在 Y8。** 先定点挖得 1 粗铁，普通楼梯后 DFS 报 `needs_surface_climb`，六片回程 **249.266s** 从 Y−18 到 8，内部目标 Y47。第七片零爬升，下一次被集尾门拒绝，本集 600s 超时。整槽终包 5 粗铁、炉 1、锭和铁镐均 0，末集只补了一把石镐。复验要同时记录实际高度、终包和首个可安全开炉的位置。 [已入粗铁](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-121506-840006.events.jsonl#L193) · [第六片](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-121506-840006.events.jsonl#L435) · [集尾](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-121506-840006.events.jsonl#L510) · [野外终档](../runs/l2_long2_20261122/nju_ob_1_bare/wild-endurance-wild-20261122-113620.json)
+- **Long2 H1 EP05 深处回升六片，局部达标仍在洞内。** 寻村任务要求先到 Y60，六次 `climb_out` 共 **253.962s**，Y−43→23。`surface_reached` 使用内部目标 Y25 的两格容差，剩约 8.2s，后续斥候被集尾预算拦、集超时，下一集仍在地下。课程标签为 `short`，脚本的 deep／expedition 专项不计此例；实际物理回程单列。 [派单要求](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-120444-109474.events.jsonl#L1) · [局部达标](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-120444-109474.events.jsonl#L130) · [斥候拒绝](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-120444-109474.events.jsonl#L204) · [集尾](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-120444-109474.events.jsonl#L266) · [局部成功条件](../src/mc_agent/skills/mining_dfs.py#L3231)
+- **Long2 H3 EP07 实返旧井口样本。** 三片 **118.806s**，Y−5→10→38→63，最后实际到井口，随后派地表斥候。第一、二片是 `climb_progress`，第二片遇同站落脚新拒及复用各 1。课程是 `day2_village_search`，脚本的 deep／expedition 超时专项仍缺匹配暴露。 [第一片](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-115750-722344.events.jsonl#L20) · [第二片](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-115750-722344.events.jsonl#L43) · [实到井口](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-115750-722344.events.jsonl#L68) · [后续地表斥候](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-115750-722344.events.jsonl#L143)
+- **L2 终档 14 推进／8 达标，两集三连击，0/23 可测回程净下降。** H4 EP02 派发回程时剩 64.047s，实爬 Y5.1→13、目标 Y47，9.249s 后总时限结束。另一自动候选 H1 EP06 回程已从 Y35 真走到 Y63，随后开炉、做镐并另行下矿，约 450s 后的集末超时发生在后续推进。 [H4 回程](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-103527-155405.events.jsonl#L928) · [H4 超时](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-103527-155405.events.jsonl#L941) · [H1 到达](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-111921-990526.events.jsonl#L530) · [H1 末集](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-111921-990526.events.jsonl#L1199)
+- **L2 H1 EP04 退役井跨片返程后仍会被当采掘井。** L920 已以 `shaft_exhausted` 标原井枯竭、清当前树。四次返程实耗 185.588s，从 Y−55→68，L1009 仍挂 26 个旧节点。L1053 同参数开采回同井 Y−48，69.250s 仅破 1、目标 0。固定 `9ba372a` 的真实 `_climb_out` 离线对照，一片回退役井会清图；第一片回撤达到片限，次片经普通回井口成功后仍留旧图。应保留可走的返程地图，实测回撤完成后不把退役图选回采掘；BUG-053 按目标入包验。另 H4 第二次返程三进一阻合 140.087s 由 Y−2→3，再九段柱升 84.002s 到 Y49，下一片仍无钻。 [退役](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L920) · [返程仍挂旧图](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L1009) · [回旧井](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-104511-782540.events.jsonl#L1053) · [返程分支](../src/mc_agent/skills/mining_dfs.py#L3299) · [下一次采掘续图](../src/mc_agent/skills/mining_dfs.py#L5995) · [H4 第九次柱升](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-105403-366482.events.jsonl#L1026)
+- **L2 H4 深水 EP02/03，跨集返程实耗 251.533s，只到局部高度门。** EP02 剩 64.047s 时发起返程，工具 54.846s 将 Y5.1 抬到 13，约 9.2 秒后整集到限。次集四次续爬和一次完成共 196.687s，Y13.4→45。L216 的 `target_y=47` 按两格容差给 `surface_reached`，历史井口 Y63；下一片直接从 Y45 继续下钻，实破 39、圆石等副料入包、钻 0。已完成 EP02 计一条深返程超时候选，活 EP03 单列；验实际地表、退回同层新边与整集调度损耗。 [EP02 初次回程](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-103527-155405.events.jsonl#L928) · [EP02 到限](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-103527-155405.events.jsonl#L941) · [EP03 局部达标](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-105403-366482.events.jsonl#L216) · [Y45 续钻](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-105403-366482.events.jsonl#L265) · [高度容差](../src/mc_agent/skills/mining_dfs.py#L3231)
+
+- **W13 井口门 1/1，尾段超时来自后续找砾。** OB3 EP04 从 Y54 到 Y62，工具目标 Y64，25.717s 完成井口回执，距集限仍 107.8s。随后挖砾超距、同目标零移动 2 次和无路 2 次，最后阶梯耗尽。这是唯一深回程超时候选，回程工具已经结束，实际地表通行仍待证。OB1 一次 Y43→43、尝试 0 已从比例剔除。 [回程回执](../runs/l1_w13_20261122/nju_ob_3_village/20261122-100406-608222.events.jsonl#L132) · [砾石超距](../runs/l1_w13_20261122/nju_ob_3_village/20261122-100406-608222.events.jsonl#L471) · [集尾](../runs/l1_w13_20261122/nju_ob_3_village/20261122-100406-608222.events.jsonl#L687)
+
+- **W12 井口局部两片完成，地表未证。** OB3 EP03 两片共 **72.977s**，Y32→39→53，内部目标 Y55，在 2 格容差内报 `surface_reached`。随后尚有 30.4s，三条不同坐标的路径在同一 Y53 站位全失败，最后隧道截止。终档推进/到达为 1/1，净下退 0/2。该超时候选尾段已结束 `climb_out`，出洞和回程总用时仍需分开验。 [首段](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/20261122-093513-721494.events.jsonl#L121) · [达到回执](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/20261122-093513-721494.events.jsonl#L150) · [第三次无路](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/20261122-093513-721494.events.jsonl#L351)
+
+- **W3 回程高度跨死亡，Y26→69 实为重生。** OB1 EP07 L476 先确实由 Y21 上到 Y26。L499 后一片却报 `climb_progress`、`method=walk`、`climbed=43`、零阶梯尝试。L500 同 `scope+call_id` 明示在 Y−3 跌死、于 Y69.1 重生。请让回程读包和高度计数区分同一生命与重生，保留死亡和重生记录，返回可续动作也应以重生后的实包重定向。D1 将这次跨生命工具的高度从回程门剔除，工具耗时继续计入 p99。 [真实首段](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-074913-340724.events.jsonl#L476) · [后一段虚高](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-074913-340724.events.jsonl#L499) · [同调用死亡重生](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-074913-340724.events.jsonl#L500) · [动作事件关联合约](../src/mc_agent/harness/agent.py#L1174)
+- **W3 两条裸装铁路线都只验到局部高度。** OB1 EP05 的回撤提示称最高井口 Y68，实际 `climb_out` 从 Y39 到 Y50，工具目标 Y52。OB2 EP11 最高井口 Y67，从 Y39 到 Y49，目标 Y51。两条都踩在内部目标减 2 的容差上并报 `surface_reached`，与最高井口均仍差 18 格，无独立地表通行证据。OB2 回撤前有一格铁的实际包差 +1，即使该片报 `cannot_reach_nearest_node`。请在同样地形中分别验到局部复采高度、旧井口可达和独立地表，保留已有矿的实包与是否安全就地熔炼。 [OB1 井口高度](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-070749-923461.events.jsonl#L130) · [OB1 局部高度](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-070749-923461.events.jsonl#L159) · [OB2 实收铁](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-070441-299056.events.jsonl#L278) · [OB2 井口高度](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-070441-299056.events.jsonl#L319) · [OB2 局部高度](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-070441-299056.events.jsonl#L348) · [容差和目标](../src/mc_agent/skills/mining_dfs.py#L3231) · [回执映射](../src/mc_agent/skills/mining_dfs.py#L5670)
+- **Wave11 H5 EP02 达到内部井口高度后仍在地下。** `climb_out` 11.3668s，Y7→15、目标 Y7，报 `surface_reached`；下一片仍从 Y15 起步。该样本按起点已满足工具目标排除，真实地表验收仍待覆盖。回执应显示局部回退目标和站位，只有独立地表证据才提示已到地表。 [高度回执](../runs/5ease_l1_wave11_20261122/hy_5e_5_probe_iron_y16/20261122-054713-765046.events.jsonl#L61) · [下一片起点](../runs/5ease_l1_wave11_20261122/hy_5e_5_probe_iron_y16/20261122-054713-765046.events.jsonl#L105) · [回执分支](../src/mc_agent/skills/mining_dfs.py#L5668)
+
+- **Showcase 真实高度推进，仍需独立出洞证据。** OB2 EP08 持矿从 Y3 回撤，L189 回井口卡在 Y26。两次实际爬升 26→42→58，第二次以目标 Y60 的容差回 `surface_reached`，两次 105.840s。后续行动仍沿矿区，独立包确认 15 粗铁，尚未熔炼便死于监守者音波。OB3 EP08 另有 Y16→47、目标 Y49 的实升。两条原件可验登高，需另证安全井口与回到可交接物资的站点。 [OB2 卡点](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L189) · [OB2 达到高度](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L277) · [独立矿包](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L626) · [OB3 实升](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L736)
+
+- **D1 去掉已满足高度的回执。** r78 中期 HY4_2 两集三次 `start=end=target=12`、尝试 0，排除后整波比例 **0/4→0/1**，深回程由 **0/2 PASS→0/0 PENDING**。r81 中期比例 **2/2→2/0 FAIL**，另有一条实际下退回执。V9 H5 EP02 Y8→16、目标 Y0、尝试 0 可作为地下回撤后熔炼的实据，深回程保持待验。实际地表须另取环境回执。 [r78 零位移](../runs/r78_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-140852-398189.events.jsonl#L586) · [r81 下退](../runs/r81_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-191657-103991.events.jsonl#L816) · [V9 回撤](../runs/5ease_virgin_eff_v9_20261122/hy_5e_5_probe_iron_y16/20261122-033623-815449.events.jsonl#L114)
+
+- **5Ease V9 井口判据**。HY_5E_5 EP02 `surface_reached` 从 **Y8→16**、目标 Y0，随即在 Y16 开炉。确有升高及局部站稳，没独立到地表。 [回撤动作](../runs/5ease_virgin_eff_v9_20261122/hy_5e_5_probe_iron_y16/20261122-033623-815449.events.jsonl#L114) · [同层炉位](../runs/5ease_virgin_eff_v9_20261122/hy_5e_5_probe_iron_y16/20261122-033623-815449.events.jsonl#L157)
+
+- **W2 收官部分通过，爬出比例仍超线**。3/2 `climb_progress/surface_reached`，第三种 `climb_blocked` 1 条，6 条实测没有终点低于起点。OB1 EP06 自 Y17 原地 9 次尝试后，经 Y33→37、Y36→44、Y44→49 达到 Y51 的容差。OB2 EP01 Y23→38→55 达到同高度门。两次达到只确认实爬和门线，缺地表可通行的独立验证。 [原地失败](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-031346-414530.events.jsonl#L216) · [49 的回执](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-031346-414530.events.jsonl#L417) · [55 的回执](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-025802-874263.events.jsonl#L317)
+
+- **5Ease V6 再报地下回到地表**。HY_5E_3 EP01 从 Y−60 走到 Y−54，目标 Y−70、阶梯尝试 0，`surface_reached` 对应地下井口。8/8 终版仅这一次爬出回执，没有地表确认。 [地下返回](../runs/5ease_virgin_eff_v6_20261122/hy_5e_3_probe_diamond_y54/20261122-030936-247543.events.jsonl#L66)
+
+- **5Ease 采矿 V5 再证两次地下井口**。HY_5E_7 EP01 两次均为 Y−60→−54，目标 Y−70，尝试数 0，均报 `surface_reached`。粗筛 0/2，实际仅证 2 次地下回程、0 次独立地表。 [第一条](../runs/5ease_mine_eff_v5_20261122/hy_5e_7_probe_diamond_y54/20261122-025801-854221.events.jsonl#L70) · [第二条](../runs/5ease_mine_eff_v5_20261122/hy_5e_7_probe_diamond_y54/20261122-025801-854221.events.jsonl#L164)
+
+- **5Ease 采矿 V3 原地被判地表**。HY_5E_4 EP02 的 `climb_out` 回 `start_y=end_y=-54`、`climbed=0`、`attempts=0`、`target_y=-67`，照常报 `surface_reached`，槽终站仍 Y−54。工具回执里的地表措辞需要独立地表判据，局部锚点达标应单独回报。 [零高度回执](../runs/5ease_mine_eff_v3_20261122/hy_5e_4_probe_diamond_y54/20261122-023931-035146.events.jsonl#L329) · [高度门](../src/mc_agent/skills/mining_dfs.py#L3213) · [对外回执](../src/mc_agent/skills/mining_dfs.py#L5620)
+
+- **5Ease 采矿 V2 的 `surface_reached` 仍在地下**。HY_5E_7 EP01 从 Y−60 到 Y−54 就报到达，`target_y=-70`，随后 DFS 又到 Y−58。现行高度门可从矿道锚点推导，命中该门只确认局部井口。此波深回程粗筛为 0/1，人工核对是 **1 次井口、0 次独立地表确认**。 [局部回程](../runs/5ease_mine_eff_v2_20261122/hy_5e_7_radar/20261122-022705-486878.events.jsonl#L113) · [再次下探](../runs/5ease_mine_eff_v2_20261122/hy_5e_7_radar/20261122-022705-486878.events.jsonl#L158) · [目标高度](../src/mc_agent/skills/mining_dfs.py#L3213) · [回执映射](../src/mc_agent/skills/mining_dfs.py#L5620)
+
+- **D1 集尾切片门禁更新**。回程 `time_slice` 落在剩余预算夹限窗口、回执显示距井口目标超 2 格且同一 actor 到总集限时，末段仍未完成可直接判 FAIL。后续工具、护航动作或生命周期变化出现时保留人工复核。回放 **39** 个终版波，只有 r77 日出从候选变为 **1 个确认失败**。r78 裸装仍按候选处理，轨迹已证实此前到达井口。 [r77 末片](../runs/r77_day12_real_drop_60m/nju_ds_2_bare/20261121-205838-706786.events.jsonl#L452) · [r78 井口到达](../runs/r78_bare_real_drop_60m/hy4_hy_7_bare/20261121-205741-909353.events.jsonl#L546) · [夹限](../src/mc_agent/harness/mc_tools.py#L3070) · [D1 门禁](../../s-triage/scripts/d1_ticket_gates.py#L344)
+
+- **r78 裸装排除一条深回程超时归因**。HY4_7 EP14 三次 `surface_reached` 到 Y60／68／68。末次到达后重置矿树，做四次移动，最后一次因集限被拒。该集是取材和反复下探后的超时，深回程归因 **0/1**。整波推进／到达仍为 **6/3**。 [末次到达](../runs/r78_bare_real_drop_60m/hy4_hy_7_bare/20261121-205741-909353.events.jsonl#L546) · [重置](../runs/r78_bare_real_drop_60m/hy4_hy_7_bare/20261121-205741-909353.events.jsonl#L569) · [末次移动](../runs/r78_bare_real_drop_60m/hy4_hy_7_bare/20261121-205741-909353.events.jsonl#L674)
+
+- **r77 日出确认深回程超时 1/1**。DS_2 EP09 共 15 次 `climb_out` 合 **625.085s**，前 14 次推进 Y−41→50，目标 Y98，最后一段零进展。距集限余 **6.21s** 开始的最后一段耗 **0.106s**，回 `time_slice`，随后 688.507s 超时，仍差 48 格。波内推进／到达 **14/1**，净降 0/16。 [首段](../runs/r77_day12_real_drop_60m/nju_ds_2_bare/20261121-205838-706786.events.jsonl#L60) · [最后推进](../runs/r77_day12_real_drop_60m/nju_ds_2_bare/20261121-205838-706786.events.jsonl#L424) · [末片](../runs/r77_day12_real_drop_60m/nju_ds_2_bare/20261121-205838-706786.events.jsonl#L452) · [终态](../runs/r77_day12_real_drop_60m/nju_ds_2_bare/20261121-205838-706786.events.jsonl#L460)
+
+- **r76 日出回程 14/10、净降 1/28**。HY4_3 EP05 从 Y20 上到 25，下一片 `time_slice/timeout_path=dig` 结束在 Y22，目标 Y50。改北向楼梯时遇流体，再换隧道遇落脚不安全，以 `answered` 未验证收尾。深回程超时候选 0／4。 [首段](../runs/r76_day12_real_drop_60m/hy4_hy_3_bare/20261121-192614-801283.events.jsonl#L296) · [净降](../runs/r76_day12_real_drop_60m/hy4_hy_3_bare/20261121-192614-801283.events.jsonl#L315) · [流体](../runs/r76_day12_real_drop_60m/hy4_hy_3_bare/20261121-192614-801283.events.jsonl#L357) · [中断回执](../src/mc_agent/skills/mining_dfs.py#L5422)
+
+- **r77 裸装回程 16/2**。八条推进来自 HY4_5 与 MoveTest 两集 Day 2 寻村的地下回程，出洞均未确认。HY4_5 EP06 四段 Y14→42，井口目标 Y49，后续朝北的台阶被围栏拦截，换南和东也耗时，300s 集超时。MoveTest EP06 四段 Y16→48，目标 Y62，下一片和次集开头均 `climb_blocked`。关联既有 BUG-051，后续需区分派单是否改进与回程本身的可达性。 [HY4_5 末次推进](../runs/r77_bare_real_drop_60m/hy4_hy_5_bare/20261121-193209-147212.events.jsonl#L61) · [围栏拒绝](../runs/r77_bare_real_drop_60m/hy4_hy_5_bare/20261121-193209-147212.events.jsonl#L81) · [MoveTest 同集回程阻断](../runs/r77_bare_real_drop_60m/nju_movetest_01_bare/20261121-193236-516465.events.jsonl#L105)
+
+- **r81 中期净降 1/5**。HY4_2 EP04 三段回程 Y−55→−46→−48→−35，目标 Y24，配对共约 **149.4s**。第二段 `time_slice/timeout_path=dig`，目标挖掘点为 `[10956,-46,-10884]`。两条 `surface_reached` 均其他集就地到本井目标，汇总进度／到达 **2/2** 掩盖该深回程未完成。EP04 为 `answered` 且未验证，深回程超时门本波没有触发。 [首段](../runs/r81_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-191657-103991.events.jsonl#L799) · [净降](../runs/r81_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-191657-103991.events.jsonl#L816) · [末段](../runs/r81_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-191657-103991.events.jsonl#L832) · [中断回执](../src/mc_agent/skills/mining_dfs.py#L5422)
+
+- **r73 官方 5Ease 又见下降却回执达标**：EP01 开始 Y21、目标 Y21，工具 **41.1s** 结束于 Y19，`surface_reached`。源码容忍目标下 2 格。后续采木不可达，终态未验证，回程净降门 **1/4**。 [净降回执](../runs/official_r73_80m_5ease/5Ease_Bot/20261121-131907-753366.events.jsonl#L259) · [局部判定](../src/mc_agent/skills/mining_dfs.py#L3200)
+
+- **r74 裸装回程净降 1/16**：HY4_7 EP03 中等铁课 Y26→25，`time_slice`，目标 Y52；余 3.123s 的最后回程被拒。深课 EP08 回到 Y61、目标 Y54，随后继续下探，最后被拒的是 `explore`，1080s 的粗筛候选归为采矿尾部。回程进度／到达 **9/6** 仍超门。 [净降](../runs/r74_bare_real_drop_60m/hy4_hy_7_bare/20261121-132424-527442.events.jsonl#L396) · [深课到达](../runs/r74_bare_real_drop_60m/hy4_hy_7_bare/20261121-135547-504568.events.jsonl#L490) · [再下探](../runs/r74_bare_real_drop_60m/hy4_hy_7_bare/20261121-135547-504568.events.jsonl#L515) · [末次采矿余量门](../runs/r74_bare_real_drop_60m/hy4_hy_7_bare/20261121-135547-504568.events.jsonl#L779)
+
+- **r77 同波回程切片 8/1**：HY4_1 EP04 在 Y−32 开始，四段到 Y63，目标 Y56。重开探井后再从 Y15 三段到 Y49，仍低于目标，下一次课程机会使集尾进入 `paused`。需要把深课超时门和切片耗用分别验收。 [首次井口到达](../runs/r77_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-132552-213004.events.jsonl#L349) · [第二次末段](../runs/r77_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-132552-213004.events.jsonl#L567) · [暂停终态](../runs/r77_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-132552-213004.events.jsonl#L570)
+
+- **r72 日出铁课回程失败**：DS_2 EP05 先挖到 Y16，五段回撤到 Y63，目标 Y103，回撤配对 **122.9893s**。余 **2.108s** 的最后调用拒绝，600s 结束。一般回程进度／到达 **11/1**，正式深课筛选本轮无样本。 [首段](../runs/r72_day12_real_drop_60m/nju_ds_2_bare/20261121-130754-465144.events.jsonl#L453) · [末段](../runs/r72_day12_real_drop_60m/nju_ds_2_bare/20261121-130754-465144.events.jsonl#L525) · [余量门](../runs/r72_day12_real_drop_60m/nju_ds_2_bare/20261121-130754-465144.events.jsonl#L543) · [集尾](../runs/r72_day12_real_drop_60m/nju_ds_2_bare/20261121-130754-465144.events.jsonl#L551)
+
+- **r73 裸装深课回到井口后集限**：HY4_7 EP02 三段 Y−54→−21→11→49，工具目标 Y35，配对合计 **155.8075s**，回井口时余 **12.541s**。随后采木无目标，最后楼梯入门拒绝，集限 1080s。粗筛候选的本次井口回程已完成，开阔地表仍未确认。 [深井首段](../runs/r73_bare_real_drop_60m/hy4_hy_7_bare/20261121-122112-596487.events.jsonl#L551) · [局部到达](../runs/r73_bare_real_drop_60m/hy4_hy_7_bare/20261121-122112-596487.events.jsonl#L591) · [末秒楼梯](../runs/r73_bare_real_drop_60m/hy4_hy_7_bare/20261121-122112-596487.events.jsonl#L629) · [井口目标](../src/mc_agent/skills/mining_dfs.py#L3220)
+- **r75 门户一条深课超时候选已排除回程归因**：NJU_3 EP04 的 `climb_out` 在 **42.478s** 从 Y56 到 Y60，收到 `surface_reached`。随后重开下探，最后一个 `explore` 在 Y−20，1800s 结束。末段耗时来自重复探井，深回程行为仍缺另一次有效暴露。 [回到目标高度](../runs/r75_midgame_portal_40m/nju_nju_3_midgame/20261121-122230-392784.events.jsonl#L158) · [末次探井](../runs/r75_midgame_portal_40m/nju_nju_3_midgame/20261121-122230-392784.events.jsonl#L1522) · [终态](../runs/r75_midgame_portal_40m/nju_nju_3_midgame/20261121-122230-392784.events.jsonl#L1530)
+
+- **r74 门户深课确认回程失败 1/2**：HY4_9 EP12 附魔课九个探井切片后 reset 要求回地表，两次回撤 Y−53→−26，目标 Y55。余 **1.879s** 的第三次回撤被拒，集尾 **599.211s** 超时。全波进度／到达 **5/1**，净降 **0/6**。 [reset](../runs/r74_midgame_portal_40m/hy4_hy_9_midgame/20261121-120211-036329.events.jsonl#L294) · [末段](../runs/r74_midgame_portal_40m/hy4_hy_9_midgame/20261121-120211-036329.events.jsonl#L335) · [余量门](../runs/r74_midgame_portal_40m/hy4_hy_9_midgame/20261121-120211-036329.events.jsonl#L370) · [深井入口](../src/mc_agent/skills/mining_dfs.py#L3209)
+
+- **r72 裸装深课回程遭水顶截断**：MoveTest EP16 两段 Y14→32，第三段 `climb_blocked`，目标 Y66。两次解卡报 `unsafe_water_roof`，换楼梯后多次遇流体，最后 Y22 被近战击杀，Y80 仅重生回执。+188.277s 以集限退出，回程本身未达。 [阻断](../runs/r72_bare_real_drop_60m/nju_movetest_01_bare/20261121-120757-945636.events.jsonl#L95) · [水顶](../runs/r72_bare_real_drop_60m/nju_movetest_01_bare/20261121-120757-945636.events.jsonl#L109) · [死亡与重生](../runs/r72_bare_real_drop_60m/nju_movetest_01_bare/20261121-120757-945636.events.jsonl#L351) · [回程源码](../src/mc_agent/skills/mining_dfs.py#L3209)
+
+- **r74 `surface_reached` 实为本井口高度门**：DS_1 EP07 从 Y−39 回到 −20，距本次目标 Y−18 两格，工具给 `surface_reached`。随后仍在负高度找材料和继续楼梯，最后已知 Y−16，394.925s 超时。源码把井口上界减 16 当目标。深回撤超时候选按工具门已到，真实地表可达性需地形或开阔落点实证。 [首次推进](../runs/r74_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-114312-400750.events.jsonl#L338) · [工具达标](../runs/r74_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-114312-400750.events.jsonl#L380) · [末次 Y−16](../runs/r74_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-114312-400750.events.jsonl#L600) · [井口基准](../src/mc_agent/skills/mining_dfs.py#L3218)
+
+- **r71 裸装二次回程停于门槛外**：HY4_7 EP09 初次在 Y52 达标，二次回程 13 段配对 **549.417s**，先有 `timeout_path=dig` 导致 Y27→26，最后 Y51，目标 Y54，仍差一格才进容差。末次余量门拒绝，`answered` 且验证为假。全波进度／到达 **27/6**、净降 **1/35**。 [第一次达标](../runs/r71_bare_real_drop_60m/hy4_hy_7_bare/20261121-104728-302383.events.jsonl#L170) · [净降](../runs/r71_bare_real_drop_60m/hy4_hy_7_bare/20261121-104728-302383.events.jsonl#L302) · [末次位置](../runs/r71_bare_real_drop_60m/hy4_hy_7_bare/20261121-104728-302383.events.jsonl#L514) · [集尾](../runs/r71_bare_real_drop_60m/hy4_hy_7_bare/20261121-104728-302383.events.jsonl#L568) · [到达口径](../src/mc_agent/skills/mining_dfs.py#L3200)
+
+- **r72 门户净降并耗尽回程**：HY4_8 EP05 五段 `climb_out` 内，先从 Y−31 到 −23，后一次挖掘 `time_slice` 从 Y−23→−25。改用楼梯与隧道，绕过两次流体判定，最终到 Y24，目标 Y42。末次楼梯因余量拒绝，+507.443s 超时。全波进度／到达 **3/0**，净降 **1/5**，人工核定唯一深课回程耗尽集限。复验超时出口净降及回撤换路能否达地表。 [首次](../runs/r72_midgame_portal_40m/hy4_hy_8_midgame/20261121-103932-286640.events.jsonl#L33) · [回撤净降](../runs/r72_midgame_portal_40m/hy4_hy_8_midgame/20261121-103932-286640.events.jsonl#L111) · [末次实际爬升](../runs/r72_midgame_portal_40m/hy4_hy_8_midgame/20261121-103932-286640.events.jsonl#L305) · [集尾](../runs/r72_midgame_portal_40m/hy4_hy_8_midgame/20261121-103932-286640.events.jsonl#L336) · [回程逻辑](../src/mc_agent/skills/mining_dfs.py#L3209)
+
+- **r71 门户深课人工核验**：NJU_3 EP04 回程要求在 +1736.365s 首现，末次实际回撤 **27.523s**，Y−50→−44，目标 Y82。之后只有同一次模型请求的三条 429 重试，+1800.024s 集限，直到收尾均无第二次回撤。回程未完成与退避同时发生。全波进度／到达 **2/0**，两条深课中一条回程未完成即到集限。 [回撤提示](../runs/r71_midgame_portal_40m/nju_nju_3_midgame/20261121-093550-660037.events.jsonl#L2713) · [末次回撤](../runs/r71_midgame_portal_40m/nju_nju_3_midgame/20261121-093550-660037.events.jsonl#L2756) · [三次重试](../runs/r71_midgame_portal_40m/nju_nju_3_midgame/20261121-093550-660037.events.jsonl#L2762) · [集尾](../runs/r71_midgame_portal_40m/nju_nju_3_midgame/20261121-093550-660037.events.jsonl#L2767) · [回程源码](../src/mc_agent/skills/mining_dfs.py#L3209)
+
+- **r68 日出普通铁器回程**：对照 r67 同四角色，进度／到达 **3/0→10/2**、三连击 **1→2**、净降 **0/12**。HY4_3 EP10 三段 **104.720s**，Y16→37／目标81。DS_2 EP09 四段 **171.179s**，Y25→66／目标108，随后一次 429 退避消耗余量。两集均超时且欠目标高度，深课专项无实际暴露。 [HY4_3 末段](../runs/r68_day12_real_drop_45m/hy4_hy_3_bare/20261121-092852-151315.events.jsonl#L432) · [DS_2 末段](../runs/r68_day12_real_drop_45m/nju_ds_2_bare/20261121-094037-366066.events.jsonl#L541) · [DS_2 集尾退避](../runs/r68_day12_real_drop_45m/nju_ds_2_bare/20261121-094037-366066.events.jsonl#L547) · [到达判定](../src/mc_agent/skills/mining_dfs.py#L3200)
+
+- **r71 中期深集实败 1/2**：HY4_1 EP13 入口只剩 **55.7858s**。+15.9635s 的探矿回执要求回撤，+23.1228s 开始，耗 **24.3570s**，Y6→13，目标 Y34。末次只余 **3.1660s** 被拒，+55.9338s 超时。全波进度／到达 **3/3**、净降 **0/6**，深回程门仍失败。复验波尾深集派发时的回撤余量。 [真实集限](../runs/r71_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-094246-048172.events.jsonl#L1) · [推进](../runs/r71_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-094246-048172.events.jsonl#L121) · [拒绝](../runs/r71_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-094246-048172.events.jsonl#L138) · [波尾预算钳制](../src/mc_agent/harness/curriculum.py#L2529)
+
+- **r69 官方普通铁器回程**：GLM_1 实际模型 `hy4-flash-free`，进度／到达 **16/0**，三连击 **3 集**。EP06 Y15→26→34→35，目标 Y58，末次 `climb_out` 被余量门拒绝，599.640s 时 `answered`，目标验证为假。普通铁器课缺深课暴露，该现象按未完成回程记录。 [首段](../runs/official_r69_80m_glm1/GLM_1/20261121-081411-496473.events.jsonl#L281) · [末段](../runs/official_r69_80m_glm1/GLM_1/20261121-081411-496473.events.jsonl#L326) · [余量拒绝](../runs/official_r69_80m_glm1/GLM_1/20261121-081411-496473.events.jsonl#L349) · [集尾](../runs/official_r69_80m_glm1/GLM_1/20261121-081411-496473.events.jsonl#L361) · [DFS 余量门](../src/mc_agent/harness/mc_tools.py#L2991)
+
+- **r68 探索同三槽**：`climb_progress/surface_reached` **5/1→1/2**。HY4_2 EP05 首次回撤 Y29→23，`time_slice`、`method=interrupted`，随后 Y23→55 达标。再次下探后受敌怪抢占，第二次回程最终也到 Y59，随后进井、受击、撤退和浮水，最后超时。该深挖候选确认回程完成，净降门 **1/4** 仍失败。 [净降回执](../runs/r68_expl_mem_iron_3bot/hy4_hy_2_iron/20261121-073645-791746.events.jsonl#L51) · [首次到达](../runs/r68_expl_mem_iron_3bot/hy4_hy_2_iron/20261121-073645-791746.events.jsonl#L73) · [第二次到达](../runs/r68_expl_mem_iron_3bot/hy4_hy_2_iron/20261121-073645-791746.events.jsonl#L380) · [优先旧路](../src/mc_agent/skills/mining_dfs.py#L3228)
+- **r69 中期三槽**：进度／到达 **3/2**，三连击一集，净降 0/5。深回程候选 HY4_1 EP07、DS_1 EP08 均先到地表门槛再下探，人工核定回程遇集限 **0/2**。 [HY4_1 到达](../runs/r69_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-081556-310680.events.jsonl#L163) · [HY4_1 再下钻石井](../runs/r69_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-081556-310680.events.jsonl#L196) · [DS_1 到达](../runs/r69_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-081519-478615.events.jsonl#L76)
+- **r67 日出普通铁器集**：DS_2 EP10 先用六段 DFS 采到煤、零新增粗铁。找不到最近树节点且 reset 要求回地表，三次回撤共 **154.293s**，Y31→43→55→70，最后位置回执 Y71，目标 Y89，随后遇战斗并在原集超时。全波进度／到达 **3/0**，净降 **0/3**，深课样本缺失。 [找不到节点](../runs/r67_day12_real_drop_45m/nju_ds_2_bare/20261121-084620-188339.events.jsonl#L288) · [第一段回撤](../runs/r67_day12_real_drop_45m/nju_ds_2_bare/20261121-084620-188339.events.jsonl#L344) · [末段回撤](../runs/r67_day12_real_drop_45m/nju_ds_2_bare/20261121-084620-188339.events.jsonl#L402) · [集尾](../runs/r67_day12_real_drop_45m/nju_ds_2_bare/20261121-084620-188339.events.jsonl#L421)
+- **r69 裸装深回程实败 1/2**：HY4_7 EP08 首次回到 Y50（目标 Y52 的容差内），后续十次 DFS 零钻石，再从 Y−46 触发回撤，剩约 28 秒。最后一次实跑 Y−46→−33，目标 Y48，下一次因剩余不足 6 秒被余量门拒绝，整集超时。另一深课 HY4_5 EP08 回程三段 Y−26→15，目标 Y19，因 `lost_iron_pickaxe` 中止。全波进度／到达 **13/3**，净降 **0/18**。在真实深回撤已打开时复验末次目标是否到达，避免同集早期到达掩盖末段失败。 [首次到达](../runs/r69_bare_real_drop_3bot/hy4_hy_7_bare/20261121-085446-662461.events.jsonl#L66) · [第二次回撤触发](../runs/r69_bare_real_drop_3bot/hy4_hy_7_bare/20261121-085446-662461.events.jsonl#L309) · [余量门](../runs/r69_bare_real_drop_3bot/hy4_hy_7_bare/20261121-085446-662461.events.jsonl#L345) · [丢镐集尾](../runs/r69_bare_real_drop_3bot/hy4_hy_5_bare/20261121-085334-928547.events.jsonl#L88) · [到达判定](../src/mc_agent/skills/mining_dfs.py#L3200)
+
+- **r67 探索三槽**：五条进度全部在 DS_1 EP05，**228.865s** 的回程从 Y−53 到 Y69，末次报告 `method=interrupted,reached=false`，高度已超过 Y56。中断处理仅在未标为入水／岩浆时发 `climb_progress`，候选阻断字段缩至落地、存活、就绪，回执缺这三个终态值。最后一次调用因余量不足 6s 跳过，整集 420.064s 超时。 [第一段](../runs/r67_expl_mem_3bot/nju_ds_1_iron/20261121-071202-802321.events.jsonl#L179) · [最后一段](../runs/r67_expl_mem_3bot/nju_ds_1_iron/20261121-071202-802321.events.jsonl#L299) · [末次拒绝](../runs/r67_expl_mem_3bot/nju_ds_1_iron/20261121-071202-802321.events.jsonl#L335) · [到达判定](../src/mc_agent/skills/mining_dfs.py#L3200) · [中断分支](../src/mc_agent/skills/mining_dfs.py#L5429)
+
+- **r65 Day1/Day2**：回程进度／到达 **23/6→6/1**、三连击 **3→2**、净降 **0/7**。HY4_4 EP08 从 Y16 四段至 Y52，抵达目标 Y54 的两格容差后开始斥候。EP10 三段约 142.836s 从 Y12 到 Y45，未到目标 Y54；末次被余量门阻止，集尾 `answered` 且验证假。深回程超时门本波为 0，该集另记为回程未完成。 [EP08 到达](../runs/r65_day12_full_45m/hy4_hy_4_bare/20261121-070853-205065.events.jsonl#L67) · [EP10 末段](../runs/r65_day12_full_45m/hy4_hy_4_bare/20261121-071720-647314.events.jsonl#L180) · [EP10 集尾](../runs/r65_day12_full_45m/hy4_hy_4_bare/20261121-071720-647314.events.jsonl#L280)
+- **一句话**：`mine_dfs(action="climb_out")` **回不到地表**：单集内连续 `climb_progress` 最多 16 次，深挖后必然在回程超时。
+- **实测（6 波）**：
+  - `climb_progress` **400 次** + `climb_blocked` 40 次，而 `surface_reached` 仅 **102 次**（成功率 ~20%）
+  - **58 个 episode 出现 ≥3 次连续 climb_progress**，累计 **13,113s = 3.6 小时**
+  - 最长：`glm_4` 一段 **10 连击 839s**、`nju_guitest` **16 连击 424s**、`nju_movetest` 8 连击 431s
+- **为什么爬不出来（量化）**：331 个 `climb_progress` 样本 → **每次中位 +5 格 / 29.3s ≈ 7 秒/格**。`nju_guitest` EP37 从 **y=-48** 开始，16 次调用 458s 只到 **y=1**，仍未到地表（collar-16≈48）→ 需要 ~96 格 × 7s ≈ **672s > 600s 集预算**。**数学上不可能完成**。
+- **源码定位**：`mining_dfs.py:3022 _climb_out(deadline, max_attempts=40)`，每次 `staircase(up,1)` 都要 `get_block + dig + place + 位置确认` 3~4 次 HTTP（≈7s/格）。
+- **最小修复**：① `explore` 下潜深度按 episode 剩余预算**上限钳制**（`max_depth = min(target_y, start_y - remaining_s/7*0.6)`）；② `climb_out` 用"垂直垫高"（每格 1 次 place，≈1~2s/格）替代阶梯；③ 集预算剩余 <35% 时**强制回程**（在 `mine_dfs` 内部触发，不等模型）。
+- **验收标准**：`climb_progress`/`surface_reached` ≤ 1:1；`≥3 连击` 的 episode ≤5/波；深挖集不再因回程超时。
+- **r31_short 残余**：`climb_progress/surface_reached` 为 **9/7**。HY4_2 EP03 的采矿树从 29 节点归零，后续四次回程共 **107.74s**，Y 从 −54 到 −40，仍距目标 Y36 甚远。四集超时初筛里另有两集启动回程太晚且未完成，一集已到地表但越过预算。 [HY4_2 EP03 树归零](../runs/r31_short/hy4_hy_2_iron/20261119-221109-705383.events.jsonl#L269) · [第四次回程](../runs/r31_short/hy4_hy_2_iron/20261119-221109-705383.events.jsonl#L368) · [回程实现](../src/mc_agent/skills/mining_dfs.py#L3069)
+- **r32_short 复核**：回程比 **0/3**，三条深挖超时候选均在集时限前进入 `surface_reached`。HY4_2 EP02/03 随后再次下探，GUITest EP03 在地表开始下一次生成后超时。仍待加载新回程修复的对照。 [HY4_2 EP02](../runs/r32_short/hy4_hy_2_iron/20261119-222315-781768.events.jsonl#L90) · [HY4_2 EP03](../runs/r32_short/hy4_hy_2_iron/20261119-223301-232412.events.jsonl#L332) · [GUITest EP03](../runs/r32_short/nju_guitest_01_nether/20261119-222430-023563.events.jsonl#L1329)
+- **r31_long/r33_short 复验失败**：回程比分别 **13/3、11/6**。r31 GLM5 EP08 三次回程耗时 164.929s，从 Y−55 到 −31，目标 Y−12，最终超时。r33 GLM3 EP04 在约 44s 余量下执行 83.776s 回程，到 Y49/59，越过集时限。r33 四条候选中有两条带未完成回程，另两条已返回地表后再下探。 [r31 GLM5 EP08](../runs/r31_long/glm_glm_5_midgame/20261119-223935-867850.events.jsonl#L176) · [r33 GLM3 EP04](../runs/r33_short/glm_glm_3_village_trade/20261119-224742-727958.events.jsonl#L141) · [r33 DS2 EP04](../runs/r33_short/nju_ds_2_cave_combat/20261119-225515-225063.events.jsonl#L217)
+- **r38→r39**：回程比 **11/5→4/6**。r38 HY4_2 EP02 从 Y−12 连续六次到 Y31，仍距目标 Y51，随后超时。r39 三个深挖超时初筛全部已到地表后再下探，≥3 连击集为 **1**。r39 短波过门槛，更深的 r38 型回程暴露待新版本长波。 [r38 第六次回程](../runs/r38_short/hy4_hy_2_iron/20261120-004253-882042.events.jsonl#L411) · [r39 HY4_9 EP03 归地表](../runs/r39_short/hy4_hy_9_deep_water/20261120-011527-319926.events.jsonl#L114) · [回程入口](../src/mc_agent/skills/mining_dfs.py#L3137)
+- **r40 复验**：回程比 **3/1**，超过门槛。HY4_2 EP02 已走到 Y52 后再次探矿才超时。HY4_3 EP08 在波末仅分到 **92.32s**，战斗抢占了首次爬升，后续只到 Y23，最后一次回程因余量不足被拒，收尾时未完成回程。 [HY4_2 回到地表](../runs/r40_hy4_combat/hy4_hy_2_iron/20261120-051923-764129.events.jsonl#L564) · [HY4_3 末次拒绝](../runs/r40_hy4_combat/hy4_hy_3_midgame/20261120-053640-739752.events.jsonl#L184)
+- **r42 Day 2 复验**：回程比 **8/3**。DS_1 EP03 连续 5 次回程共约 120s，从 Y−26 到 Y4，距目标 Y21 仍差 17 格。下一集延续矿道并到达回程阈值，随后再下探。其余两条深挖超时候选均已回到地表后继续采矿。 [首次回程超时](../runs/r42_day2_village_9bot/nju_ds_1_iron/20261120-063526-419884.events.jsonl#L361) · [下一集完成回程](../runs/r42_day2_village_9bot/nju_ds_1_iron/20261120-064426-706446.events.jsonl#L102)
+- **r43 Day 2 复验**：回程比 **8/3→2/2**，≥3 连击集 **2→0**。唯一的深挖回程超时候选 NJU_3 EP04 在 +87.1s 已 `surface_reached`，随后继续五片单独的 `explore` 才到时限。实测两集有深挖回程，未见回程致超时。 [回到地表](../runs/r43_day2_village_near_9bot/nju_nju_3_day2_village_near/20261120-073021-002663.events.jsonl#L89) · [再次开井](../runs/r43_day2_village_near_9bot/nju_nju_3_day2_village_near/20261120-073021-002663.events.jsonl#L132) · [集尾](../runs/r43_day2_village_near_9bot/nju_nju_3_day2_village_near/20261120-073021-002663.events.jsonl#L376)
+- **r44 Day 2**：回程 **1/1**、连续三次集 **0**。唯一深挖回程候选 HY4_6 EP03 在 +389.3s 已 `surface_reached`，随后开井三片，末次不足 6s 被拒后才到集限。 [回程完成](../runs/r44_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-074558-153223.events.jsonl#L178) · [末次拒绝](../runs/r44_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-074558-153223.events.jsonl#L267)
+- **r45 回程回潮**：有终版的 Day 2 轨迹回程比 **4/2**，DS_1 EP04 先两次探矿失败和一次地下 reset 被拒，随后自 Y−28 开始，三片只达 Y9／目标 Y47，还差 **38 格**。末次在只余约 3s 时被拒，确属回程未完成。其他两个带回程的超时集（HY4_8、NJU_3）均先返回地表再继续。 [DS_1 末次推进](../runs/r45_day2_wild_scout_9bot/nju_ds_1_iron/20261120-085117-337871.events.jsonl#L218) · [到集限](../runs/r45_day2_wild_scout_9bot/nju_ds_1_iron/20261120-085117-337871.events.jsonl#L256)
+- **r46**：Day 2 比 **6/1**，三条深挖候选有两条真实未回地面。HY4_7 EP04 连同参数 `climb_out` 先 Y−9→21，接着 **21→15→−3**、损失 24 格且分别报 `time_slice`，目标 Y61。首次与第一次倒退仍是同一单节点树，次次倒退后才出现 24 个节点。优先定位回程重入为何接受下行路径，给连续调用保留已验证高度和可继续回程的状态。DS_1 EP04 到 Y30／目标48 停滞。HY4_10 EP03 四片推进后已回到目标容差内，再下井时超时。 [首次上升](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L293) · [倒退回执](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L340) · [回程候选](../src/mc_agent/skills/mining_dfs.py#L3167)
+- **候选修复与验收**：集成 `16df57e` 在回程时跳过低于当前站位的现役矿口与低位归档矿口。`50adb01` 在初次推进小于剩余爬升且预算低于 55s 时建议下一片 55s。现役、归档两条防倒退夹具及继续预算夹具均过。D1 新门禁回放 r46 Day 2 为 **2/12** 条 `climb_out` 净降高，第一条失败在 HY4_7 EP04 L314。首次爬到 Y21 的回执和第一次退回 Y15 的回执均保留同一个现役矿口 `(-7877,-9,2666)`，低于重入站位 30 格。旧版入口有该 ID 即尝试走回矿口，现场具备修复所拦条件。新版实机还需出现低位矿口分支，并核对净降、回程比、真实回程超时。 [现役及归档夹具](../tests/test_mining_dfs.py#L2443) · [继续预算夹具](../tests/test_mining_dfs.py#L2548) · [r46 倒退](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-091401-945732.events.jsonl#L314)
+- **r47 已加载 `16df57e`、`50adb01`**：Day 1/2 净降高 **0/3、0/12**，Day 2 回程比 **6/1→9/2** 仍超门槛。三个深挖超时候选中，一条确为回程未完。HY4_6 EP03 四片共 **114.576s**，Y−2→7→9→10→10，距目标 Y59 仍差 49 格，实际收到 55s 提示后第四片因集尾只执行约 2.5s。EP04 延续自 Y10 出地表容差至 Y57。实机三次重入时同一现役矿口为 Y15，起始 Y16、28、39，分别继续升至 Y28、39、50。HY4_6 和 HY4_10 的 EP04 都在已回地面后另开探矿才超时。 [低位现役矿口与连续爬升](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-101213-237538.events.jsonl#L76) [提示](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-100313-044535.events.jsonl#L263) · [末次回程](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-100313-044535.events.jsonl#L287) · [下一集回地表](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-101213-237538.events.jsonl#L125) · [HY4_10 回地表](../runs/r47_day2_full_day_scout_9bot/hy4_hy_10_iron/20261120-100512-901208.events.jsonl#L98)
+- **r48／r49**：r48 下界回程比 **1/0**、净降 **0/2**，DS_1 EP02 到 Y17 后目标 Y57，反复被流体或基岩挡住至超时。r49 裸装回程比 **9/4**、净降 **0/16**，唯一深挖候选 NJU_3 EP04 七片从 Y15 升到 Y40／目标 Y44，后两片无推进，最终在同一站位被重复失败保护判停。两轮都有真实未完成回程。 [DS_1 阻断](../runs/r48_nether_fortress_9bot/nju_ds_1_nether_fortress/20261120-102706-380097.events.jsonl#L1104) · [NJU_3 第七片](../runs/r49_day1_bare_9bot/nju_nju_3_bare/20261120-105731-751977.events.jsonl#L329) · [重复失败保护](../runs/r49_day1_bare_9bot/nju_nju_3_bare/20261120-105731-751977.events.jsonl#L419)
+- **r50**：下界回程比 **1/0→1/1**，净降 **0/3**。NJU_3 EP02 从 Y15 爬到 Y21、目标 Y48，后续爬升同高 `climb_blocked`，本集仍确认为未返回而超时，保持 OPEN。 [阻断回执](../runs/r50_nether_fortress_9bot/nju_nju_3_nether_fortress/20261120-205332-322572.events.jsonl#L286)
+- **r51 同槽实机通过**：回程比 **1/1→2/4**、≥3 连续进度集 **0**、净降 **0/6**、深挖回程超时 **1/2→0/3**。NJU_3 与 r50 同从 Y15 向目标 Y48，r50 停 Y21，r51 两片 **15→32→53**，回执到达。HY4_8 同波也从 Y15 回到目标 Y37 容差。 [NJU_3 回到地表](../runs/r51_nether_fortress_9bot/nju_nju_3_nether_fortress/20261120-211130-521338.events.jsonl#L147) · [HY4_8 回程](../runs/r51_nether_fortress_9bot/hy4_hy_8_nether_fortress/20261120-210128-432821.events.jsonl#L662)
+- **r52 Day 2 回程比失守**：HY4_10 EP05 在 Y−54 探矿遇 `shaft_exhausted`，距 277.850s 集限仅 **16.961s** 才首次发起回程。8.801s 内升至 Y−53，目标 Y78。下一次仅余 **5.811s**，被 6s 的开工门槛拒绝。终态 `answered`，所以状态门禁报 0 个回程超时，但原始证据确认未完成回程。该集仍保持净升高；下一轮复验需要在预算尚够时触发回程，并逐条核对深挖集的终止时站位。 [集预算](../runs/r52_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-214756-483939.events.jsonl#L3) · [首次回程](../runs/r52_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-214756-483939.events.jsonl#L203) · [重试拒绝](../runs/r52_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-214756-483939.events.jsonl#L228) · [终态](../runs/r52_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-214756-483939.events.jsonl#L262) · [回程实现](../src/mc_agent/skills/mining_dfs.py#L3171)
+- **r53 Day 1**：回程比 **6/2** 仍失败，净降 **0/8**。HY4_3 EP04 四片爬升 Y24→100，在 +593.026s 已 `surface_reached`，之后再次探矿被集尾护栏拒绝，超时发生在回地表后。HY4_2 EP03 仅返回 Y18，EP04 延续后到达地表，再下挖时近战死亡。两条起始高度都未进入深挖超时门槛的样本范围。 [HY4_3 回地表](../runs/r53_day1_bare_3bot/hy4_hy_3_bare/20261120-220016-573157.events.jsonl#L370) · [HY4_2 跨集续爬](../runs/r53_day1_bare_3bot/hy4_hy_2_bare/20261120-220642-668999.events.jsonl#L109)
+- **r53 下界**：四项通过，回程比 **0/1**，三连击集 0、净降 0/1、深挖回程超时 0/1。仅一条完整回执，HY4_8 EP01 用 **16.228s** 从 Y44 升到 Y48，进入目标 Y50 的容差。HY4_4 EP01 另有两次回程被实际岩浆救援抢占，第二次死亡，未计入具备起终坐标的回程。主世界状态仍 OPEN。 [完整回程](../runs/r53_nether_fortress_9bot/hy4_hy_8_nether_fortress/20261120-215412-442389.events.jsonl#L567) · [岩浆抢占与死亡](../runs/r53_nether_fortress_9bot/hy4_hy_4_nether_fortress/20261120-215404-309252.events.jsonl#L230)
+
+- **r55 下界通过四项**：回程比 **0/3**、三连击 0、净降 **0/3**、深回程超时 **0/2**。HY4_8 EP01 两次分别从 Y41→45、Y30→42，目标 Y40；第二条由目标下方起步。HY4_7 EP02 早已在回程门槛上方，原地返回 `surface_reached`。主世界长回程仍待复验。 [HY4_8 第一条](../runs/r55_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261120-234425-383810.events.jsonl#L301) · [HY4_8 第二条](../runs/r55_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261120-234425-383810.events.jsonl#L482) · [HY4_7 已在阈值上方](../runs/r55_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261120-235224-139051.events.jsonl#L112)
+- **r56 裸装**：回程比 **6/6**、三连击集 1、净降 **0/13**。深回程超时无样本，仍缺 r52 Y−54 的同条件复验；同轮下界无 `climb_out`。 [裸装三连击样本](../runs/r56_day1_day2_bare_5bot/hy4_hy_3_bare/20261121-003435-071379.events.jsonl#L220) · [下界无井口返程](../runs/r56_nether_fortress_5bot/hy4_hy_5_nether_fortress/20261121-003405-365963.events.jsonl#L86)
+
+- **r57 裸装回归**：回程比 **6/6→5/1**，净降 **0/7**，三连击 0，深回程未暴露。HY4_10 EP06 已花 481s 挖矿，首条回程约余 116s，从 Y16 两片到 Y27，随后一片几乎无余量，集尾 Y27 超时。需在选矿井与退出时机上留正向爬升预算。 [首次进度](../runs/r57_day1_day2_fast_4bot/hy4_hy_10_bare/20261121-010436-698952.events.jsonl#L280) · [第二片](../runs/r57_day1_day2_fast_4bot/hy4_hy_10_bare/20261121-010436-698952.events.jsonl#L301) · [集尾](../runs/r57_day1_day2_fast_4bot/hy4_hy_10_bare/20261121-010436-698952.events.jsonl#L349) · [回程判定](../src/mc_agent/skills/mining_dfs.py#L3162)
+
+- **r58 下界四门槛通过**：回程进度／达到 **2/4**，三连击 0，净降 0/6，深回程超时 0/1。NJU_3 EP03 三片 Y15→25→58→60，最后回执确认超过目标 Y48。主世界 r57 同票仍未过。 [首次上升](../runs/r58_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-012740-971475.events.jsonl#L832) · [实际到达](../runs/r58_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-012740-971475.events.jsonl#L881)
+
+- **r59 主世界回程比再失败**：进度／达到 **3/3→3/2**，三连击 0，净降 0/5，深回程缺。 [HY4_10 EP05 回程](../runs/r59_day12_sunrise_village_4bot/hy4_hy_10_bare/20261121-021027-777971.events.jsonl#L182)
+
+- **r60 主世界回程比仍失败**：三次进度／零次到达，净降 0/4。DS_2 EP07 首次真实在 Y16 接到日出任务，回程 Y16→20→33 后阻塞，改用楼梯仍卡支撑。EP09 从 Y26→35 后受波末截止。 [首次派单](../runs/r60_day12_full_45m/nju_ds_2_bare/20261121-030135-415499.events.jsonl#L1) · [卡住回执](../runs/r60_day12_full_45m/nju_ds_2_bare/20261121-030135-415499.events.jsonl#L61) · [末次回程](../runs/r60_day12_full_45m/nju_ds_2_bare/20261121-031515-000911.events.jsonl#L19)
+
+- **r62 主世界深回程实证**：进度／到达 **14/2**，三连击 2 集，净降 **0/19**。HY4_10 EP09 余 **159.827s** 才从 Y−54 开始回撤，入口目标 Y48。三片实际共 **127.335s**，分别到 Y−27、−24、−23。第四片零进展，换阶梯命中刚记录挖掘超时的避让格，末段仍在 Y−23，810s 到期。需在深挖阶段给按剩余高差估计的撤离留时，并在重复卡格时切换回原矿道或安全退路。验收保留回程比 ≤1:1、深回程致超时 0。 [首片](../runs/r62_day12_full_45m/hy4_hy_10_bare/20261121-044646-438094.events.jsonl#L316) · [第三片](../runs/r62_day12_full_45m/hy4_hy_10_bare/20261121-044646-438094.events.jsonl#L357) · [避让挖掘格](../runs/r62_day12_full_45m/hy4_hy_10_bare/20261121-044646-438094.events.jsonl#L398) · [回程部分进度](../src/mc_agent/skills/mining_dfs.py#L5322)
+
+- **r63 主世界**：进度／到达 **14/2→7/4**，三连击 **1 集**，净降 **0/11**，深回程超时 **1→0**。唯一深回程 HY4_3 EP09 的目标 Y80，五片均为进度。先 Y36→64，后一次回到 Y35 再爬，最后一片到 Y71；集尾 808.8s 为 `answered`，缺该集的 `surface_reached` 回执。保持原门槛开放。 [首片](../runs/r63_day12_full_45m/hy4_hy_3_bare/20261121-053411-758050.events.jsonl#L149) · [再次爬升](../runs/r63_day12_full_45m/hy4_hy_3_bare/20261121-053411-758050.events.jsonl#L331) · [最后进度](../runs/r63_day12_full_45m/hy4_hy_3_bare/20261121-053411-758050.events.jsonl#L375)
+
+- **r65 下界回程失败**：HY4_8 EP03 的 `climb_out` 步行从 Y17 到 Y44，目标 Y33，却为 `reached=false`，下一片同站位 `climb_blocked`，随后独立阶梯到 Y50。本波进度／到达 **1/0**、净下降 0/2，深回程超时 0。高度以外还需要就绪、落脚及避开流体，前两条回执缺这些判据的实际值。 [回程进度](../runs/r65_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-061150-917834.events.jsonl#L713) · [回程阻塞](../runs/r65_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-061150-917834.events.jsonl#L734) · [判定源码](../src/mc_agent/skills/mining_dfs.py#L3162)
+
+- **r64 主世界回程**：进度／到达 **7/4→23/6**，净降 0/30，深回程超时 0。DS_2 EP06 的普通铁器课 11 次回程调用共 **435.127s**，从 Y27 到 Y151，回程终态已达，仍挤占 600s 集的大部分时间。本集超时不属于深回程超时门槛。HY4_3 EP09 的深回程两段到 Y85，正常达标。 [DS_2 首段](../runs/r64_day12_full_45m/nju_ds_2_bare/20261121-061531-010755.events.jsonl#L122) · [到达](../runs/r64_day12_full_45m/nju_ds_2_bare/20261121-061531-010755.events.jsonl#L335) · [深回程到达](../runs/r64_day12_full_45m/hy4_hy_3_bare/20261121-062202-963594.events.jsonl#L497)
+
+- **r66 DS_1 石层据点回程目标不一致**：寻村 EP03 任务要求到 Y≥60，`climb_out` 的井口目标为 Y22，在 Y22、零爬升直接返回 `surface_reached`。随后三次地表斥候合计只走 0.30m。全波 059 数值为 0/1，接受的是井口回程，未证实从地下出地表。复验 Day 2 地表逃出时以该任务给定的地表要求核对。 [派单目标](../runs/r66_expl_mem_ds1/nju_ds_1_iron/20261121-062107-503924.events.jsonl#L1) · [零爬升达标](../runs/r66_expl_mem_ds1/nju_ds_1_iron/20261121-062107-503924.events.jsonl#L19) · [第三次斥候](../runs/r66_expl_mem_ds1/nju_ds_1_iron/20261121-062107-503924.events.jsonl#L180) · [井口目标](../src/mc_agent/skills/mining_dfs.py#L3182)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-060 | P2 | Integrator（#1，`harness/mc_tools.py`）| 状态: FIXED（r65 下界实测攻击预检，过期 0、超大扫描 0）
+
+- **W20 两门通过。** W19→W20 `no_such_entity` 1→2，大半径扫描仍零。W20 有 15 次攻击，实体 ID 导航仍零。 [实际失效目标](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-225627-467230.events.jsonl#L89)
+- **Long3 七槽终档两门复核通过。** `no_such_entity` 1，半径 ≥4096 的扫描 0，观察到实体移动 1、攻击 12。 [唯一失效实体](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-125043-567501.events.jsonl#L265)
+- **一句话**：实体类目标（发光鱿鱼/动物）会陷入"实体 id 失效 → 重新扫描 → 再失效"的循环。
+- **实测**：`no_such_entity` **43 次**（`nju_guitest` 12、`glm_5` 10、`glm_3` 8、`glm_4` 5）；`mc_get_entities` 共 3,493 次，其中 **118 次 radius ≥ 4096**（最大 65,536）。典型（`glm_5` EP39 `make_a_sign_glow`）：radius 256→512→…→65,536 连发 9 次，然后 `move_to(entity_id)` 两次 `no_such_entity`，最后摔死，集满 22 请求 0 分。
+- **最小修复**：① `mc_get_entities` 对 `radius>512` 直接拒绝并提示"实体不在渲染距离内，请换目标"；② `move_to(entity_id)` 失败时返回"该实体已消失，请改用坐标或换目标"，并对该类型加 60s 冷却。
+- **验收标准**：`no_such_entity` ≤5/波；`radius≥4096` 的 get_entities 为 0。
+- **L1 开波补样本 `0d45d74`**。HY_5E_2 EP01 地下钻探遭骷髅抢占，同集两次 `mc_attack` 均报 `no_such_entity`，目标 ID 不同。第二次重新扫描明确返回该 ID，约 2.26s 后仍失效。当前只计已读轨迹 2 次，整波验收按终版。 [挖矿抢占](../runs/5ease_l1_probes_20261122/hy_5e_2_probe_diamond_y54/20261122-020516-284338.events.jsonl#L43) · [重新扫描](../runs/5ease_l1_probes_20261122/hy_5e_2_probe_diamond_y54/20261122-020516-284338.events.jsonl#L136) · [再次失效](../runs/5ease_l1_probes_20261122/hy_5e_2_probe_diamond_y54/20261122-020516-284338.events.jsonl#L168)
+- **长波仍失败**：`r30_long→r31_long` 过期 ID **1→1**，超大扫描 **5→5**。r31 GLM5 EP06 从 64 倍增到 65536，超大半径段仍反复拿到同一批近处实体。r33 短波为 0/0。集成树 `a896f86` 已补扫描上限回执和半径倍增中断，需加载它的长波验证。 [r31 GLM5 EP06](../runs/r31_long/glm_glm_5_midgame/20261119-223015-242650.events.jsonl#L89) · [扫描上限](../src/mc_agent/harness/mc_tools.py#L200)
+- **同场景验收**：加载 `a896f86` 的 `r32_long` 过期 ID **1**、超大扫描 **0**（r31 长波为 **1/5**），最大请求半径降到 256。GLM5 EP06 同为发光告示牌，出现两次 64m 空扫描后返回换区提示，此后扫描半径最高 96。r35 短波为 **3/0**，也过门槛。 [r32 GLM5 EP06 换区提示](../runs/r32_long/glm_glm_5_midgame/20261119-231713-963826.events.jsonl#L176) · [过期 ID](../runs/r32_long/glm_glm_5_midgame/20261119-231713-963826.events.jsonl#L247)
+
+- **r64 要塞实测**：同三槽 `no_such_entity` **4→7**，超过阈值 5。七次均为 `mc_attack` 且 ID 各异，超大扫描为 0。MoveTest EP01 与 EP04 分别在扫描后的 24.5s、19.6s 请求攻击。HY4_1 EP03 则在一次状态回执的 4.7s 后攻击失败。`mc_attack` 的预检只覆盖近期已观测且 >32m 的实体，已有过期目标重规划仍需覆盖攻击入口。复验保留 ≤5 条和 0 次半径 ≥4096。 [MoveTest EP01 扫描](../runs/r64_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-050406-518549.events.jsonl#L122) · [攻击失败](../runs/r64_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-050406-518549.events.jsonl#L209) · [HY4_1 EP03 攻击失败](../runs/r64_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-052028-300275.events.jsonl#L298) · [攻击预检](../src/mc_agent/harness/mc_tools.py#L2008)
+
+- **修复候选**：`9ba4658` 已合入，补查过时的攻击目标，并为目标在复核后消失复用旧 ID 提示。相关离线测试 **7 项通过**，r64 要塞启动早于此提交，待后续波次加载后复验。 [攻击复核](../src/mc_agent/harness/mc_tools.py#L2008) · [离线夹具](../tests/test_skills_and_providers.py)
+
+- **r65 下界实测**：5/5 终版均加载 `ef66856`，11 次攻击、1 次实体移动，后端 `no_such_entity=0`，超大扫描 0。NJU_3 EP05 的攻击返回新预检 `target_not_visible` 与 `requires_replan=true`，要求重新查询实体。`d1_compare.py r64_nether_fortress_5bot r65_nether_fortress_5bot` 已跑，同下界前后两条原始门槛均为 0，新增分支实际触发一次。r64 要塞的同场对照缺加载补丁的终版。 [新预检回执](../runs/r65_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-061700-582549.events.jsonl#L917) · [预检源码](../src/mc_agent/harness/mc_tools.py#L2020)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-061 | P1 | Integrator（课程工具授权）+ Slice C（交互回执）| 状态: OPEN（过夜 6 波复核）
+
+- `fishy_business` 共 **0/18 集验证通过**，分布在 4 条轨迹。18 集中 `mc_use_item` 调用为 **0**。`part2/ds_ds_1_bare` EP14 已合成鱼竿，对 `level=0` 水格调用 `mc_interact` 返回 `ok=true, changed=false`，空目标调用还返回 `bad_args`。EP37 在开阔水边复现，四次交互均无抛竿/钓获回执。 [EP14](../runs/overnight_12bot_part2/ds_ds_1_bare/20261119-150646-372249.events.jsonl#L99) · [EP37](../runs/overnight_12bot_part2/ds_ds_1_bare/20261119-171154-936339.events.jsonl#L131)
+- 同一代码指纹离线复现：`_infer_extra_tools_for_advancement("minecraft:husbandry/fishy_business", "持fishing_rod对开阔水域使用，钓上1条鱼。")` 只返回 `mc_interact`，`COMPACT_CORE_TOOLS` 没有 `mc_use_item`。实际抛竿、等待和收竿由后端的 `use_item(fishing_rod)` 执行。 [课程分配](../src/mc_agent/harness/curriculum.py#L792) · [工具集](../src/mc_agent/harness/mc_tools.py#L98) · [后端钓鱼分支](../experiments/20261115-until-1900/backend_patched/src/session.js#L2348)
+- `follow_ender_eye` 也触发同一授权缺口。对实际 KB 文案调用推断器返回 `()`；`r28/hy4_5` EP26 明确报缺投掷入口，EP25/50 又有独立的合成材料缺口。持眼时能否观测飞行方向仍待验证。 [EP26](../runs/hy4_audit_r28/hy4_hy_5_brewing_alchemy/20261119-163706-486842.events.jsonl) · [KB 文案](../src/mc_agent/kb/data_1_21_11.py#L900)
+- 验收时为适用目标公开对应工具并给到准确工具名。对鱼竿走错入口给可执行的改用提示。用持竿、岸边、静水的回归检查真实抛竿回执与目标验证，再用持眼夹具检查投掷和可观测结果。钓鱼轨迹中的缺工作台、积水矿井问题继续关联 BUG-032/052/056。
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-062 | P1 | Slice C（交互）+ Slice D2（酿造水源）| 状态: OPEN（过夜主轨第二波）
+
+- `part2/glm_glm_4_brewing_alchemy` EP01/02 对 `level=1` 或 `level=8` 的水位 **共 13 次**使用玻璃瓶。回执均为 `ok=true, changed=false`，没有 `used/gained`，酿造台瓶槽仍空，随后 `missing_item`。EP03 是独立的 429。第一波同 Bot 的对照回执明确 `used.glass_bottle=1`、`gained.potion=1`，再把 `potion` 放进瓶槽后成功。 [第二波 EP01](../runs/overnight_12bot_part2/glm_glm_4_brewing_alchemy/20261119-133151-986552.events.jsonl#L30) · [第二波 EP02](../runs/overnight_12bot_part2/glm_glm_4_brewing_alchemy/20261119-133259-566434.events.jsonl#L32) · [第一波成功对照](../runs/overnight_12bot/glm_glm_4_brewing_alchemy/20261119-092305-340302.events.jsonl#L35)
+- BUG-008 的库存变化判定只覆盖桶类。玻璃瓶仍会把无效交互报成功，目标没得到换水格提示。回执应确认玻璃瓶消耗与水药瓶入包，或明确提示改找可达水源。场景侧核查出生点给出的水格是否可交互。P2-27 继续跟踪 `mc_skill_brew` 的参数说明。 [交互判定](../src/mc_agent/harness/mc_tools.py#L1353)
+- 验收覆盖无变化且无物品增减、方块不变但确实装水两路。真实酿造开局可在前两集得到水药瓶并将其投进酿造台。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-063 | P2 | Slice D1 + Integrator（评测口径）| 状态: FIXED（已合入，r31 Fleet 采用新口径）
+
+- Fleet 的 `Deaths` 同时为 `guardian.incident/death_or_connection_changed` 和含 `死亡` 的 `mc.notable_events` 各加一。连接变化可以进入前者，真实死亡也可能两处都出现。同一消息里的多条死亡只会在后者加一。`r26/hy4_hy_6_nether_bastion` 榜单为 **51**，JSONL 有 **20 条明确死亡回执**，分布在 11 集。 [计数代码](../scripts/v2_fleet.py#L569) · [收官榜单](../runs/hy4_audit_r26/triage-hy4_audit_r26.md)
+- 验收时区分死亡、重生和连接变化。有事件 ID 时按 Bot 与 ID 去重，缺 ID 时展示回执口径。离线夹具覆盖单次死亡同时出现在两个事件、仅掉线、同一消息两次死亡。
+- D1 用只读回放复现 `hy4_audit_r26/hy4_hy_6_nether_bastion` 的 **51 = 31 条混合 Guardian 事件 + 20 条含死亡的消息**。新 Fleet 输出为 **20 次明确死亡（全部无源 ID）**、**22 次重生或出生回执**、**0 条显式连接变化**、**31 条混合事件**。旧日志的连接变化总数未知。离线夹具通过双发、掉线、同批两死、`×N` 和跨 Bot 去重。 [EP02 混合事件](../runs/hy4_audit_r26/hy4_hy_6_nether_bastion/20261119-094622-266718.events.jsonl#L1017) · [EP02 死亡与重生回执](../runs/hy4_audit_r26/hy4_hy_6_nether_bastion/20261119-094622-266718.events.jsonl#L1020) · [D1 报告](../../s-triage/docs/D1-r11-triage.md#4ca-bug-063-fleet-死亡口径与-r26-对账)
+- `r31_short` 的真实 Fleet 导出已显示对应列。GUITest 分别计 **5** 条无 ID 死亡、**7** 条重生或出生、**8** 条混合 Guardian 事件。 [r31 榜单](../runs/r31_short/triage-r31_short.md#L24)
+
+- **r67 跨维度复验**：中期过门波明确死亡 **2**、重生或出生文本 **5**。其中 HY4_8 首次过门、HY4_9 首次及第二次入下界的三条 `[已重生]` 都关联已确认维度切换，死亡计数保持 2。明确死亡为 HY4_9 岩浆和 NJU_3 跌落。`mc_tools.py` 将 `respawn`／`spawn` 渲染为同一文案，该列按原始回执读。 [HY4_8 跨维度](../runs/r67_midgame_portal_3bot/hy4_hy_8_midgame/20261121-073118-159591.events.jsonl#L226) · [HY4_9 入下界](../runs/r67_midgame_portal_3bot/hy4_hy_9_midgame/20261121-071710-307864.events.jsonl#L259) · [实际岩浆死亡](../runs/r67_midgame_portal_3bot/hy4_hy_9_midgame/20261121-072808-164375.events.jsonl#L489) · [回执渲染](../src/mc_agent/harness/mc_tools.py#L1167)
+- **r68 裸装补给回执**：三槽明确死亡 **3**，stdout 有 **4** 条 watchdog `death_return/restock=True`。watchdog 可由出生点附近包量骤降推断死亡，清包和恢复按场景执行。回执用于确认干预发生，和明确死亡分开记，HY4_5 多出的一次补给缺对应明确死亡回执。 [HY4_5 补给回执](../runs/r68_bare_real_drop_3bot/hy4_hy_5_bare/stdout.log#L706) · [Watchdog 推断](../scripts/l3_wild_endurance_runner.py#L1445) · [场景清包](../scripts/l3_wild_endurance_runner.py#L1207)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-064 | **P1（Day 1 砍树效率与 `BUG-047` 残余慢调用）** | Slice C（#4，`skills/library.py`）+ Integrator（`harness/mc_tools.py`）| 状态: FIXED（`28052f1` 已合入，r43 开集四路 31 次采木均 <60s，待 15 路门禁）
+
+- **一句话**：`mc_skill_harvest_logs`（底层 `_dig_target_blocks`）在树林/地形遮挡下会反复撞同一批不可达原木空转 **90 秒（0 块入包）**，且单次 deadline 高达 90s，既直接拖垮 Day 1 砍树效率（`MoveTest_01` 连撞 4 次耗时 6 分钟+），又是全队 `>=60s` 慢调用榜与 `BUG-047` 集超时最后的残余源头。
+- **实测（`r41_day1_15bot`，5 NJU + 10 HY4 = 15 并发 `bare` 20m）**：
+  - `mc_skill_harvest_logs:time_budget` 居全波第 1：**8 bots / 26 次**，10 条慢调用中 **8 条为 90.1–107.7s 的 `mc_skill_harvest_logs`**。
+  - 典型空转：`hy4_hy_1_bare` 连续 2 次 **90.1s**、`dug_count=0, gained={}`；`nju_movetest_01_bare` 全波调 10 次砍树仅入包 **1 块原木**；`hy4_hy_3_bare` 耗时 **87.8s** 挖了 9 块仅入包 2 块（平均 44s/块）。 [r41 榜单](../runs/r41_day1_15bot/triage-r41_day1_15bot.md)
+- **源码定位**：[library.py](../src/mc_agent/skills/library.py#L2580-L2734) `_dig_target_blocks`：
+  1. **无连续失败熔断 + 避让仅 15s**：循环 `for _ in range(count * 3)`（`target_logs=16` 为 48 轮），遇 `path_not_found`/`out_of_reach` 仅避让 **15s**（L2690），单次服务端寻路失败耗 5–10s，15s 后同一批不可达原木解除避让被反复重选，直到耗尽 90s。
+  2. **木头 deadline 过大且未受单集剩余预算钳制**：L2580 `mine_deadline = max(45.0, min(90.0, count * 12.0))` 允许单次 `harvest_logs` / `mine_blocks` 吃满 90s，击穿 `BUG-047 <= 60s` 与集尾余量保护。
+  3. **未优先砍脚平齐低处树干**：排序未强化低处树干优先，先够高处原木导致掉落物卡在树叶/树顶捡不到。
+- **最小修复**：
+  1. `_dig_target_blocks` 增加 **`consecutive_failures >= 4` 立即早停**（返回 `requires_replan=True` 换树/换位），并将 `path_not_found`/`no_path`/`out_of_reach` 避让时长从 `15s` 提至 **`60s`**；
+  2. 下调木头/采块 `mine_deadline` 上限至 **`40–45s`**，并新增可选 `max_duration_s` 参数由 [mc_tools.py](../src/mc_agent/harness/mc_tools.py) 接入 `_clamp_tool_budget` 受 `episode_deadline_mono` 钳制；
+  3. 砍树候选排序优先脚平齐的低处树干（`y` 贴近 `bot_y`），提高单次入包率。
+- **验收标准**：`mc_skill_harvest_logs` 离线单测覆盖“连续 4 次不可达 12s 内早停”与“低处树干优先”；实机 15 并发 Day 1 波次中 `harvest_logs >= 60s` 慢调用为 **0**，0 产出 90s 空转为 **0**，`BUG-047 episode elapsed - budget max <= 10s`。
+- **发布与复验**：r42 Day 1 仍在旧 Python 指纹，工具 p99 **91.048s**，HY4_3 EP01 的第二次采木耗时约 91s、整集超 **57.027s**。`28052f1` 后续已合入，待新版本 Day 1 复验。 [r42 采木](../runs/r42_day1_5bot/hy4_hy_3_bare/20261120-063104-637104.events.jsonl#L77)
+- **r42→r43 Day 1**：配对采木 **16→31**、最长 **91.048→45.027s**、≥60s **8→0**、90s 零原木保持 **0**。r43 四路实际开集且按时结束，另 1 路 `not_ready`。外层工具 p99 **51.305s**，19 条完整 actor 时限回执最大余量仍有 **0.399s**。 [最慢采木](../runs/r43_day1_5bot/nju_movetest_01_bare/20261120-071622-437822.events.jsonl#L20) · [最贴集限](../runs/r43_day1_5bot/hy4_hy_3_bare/20261120-073403-369568.events.jsonl#L240)
+- **r44 Day 1**：5 路正常入场、27 条采木最大 **45.013s**，≥60s 与 90s 空转均 0。33.343s 整集越界源于楼梯，BUG-047 仍开。等待 15 路。 [采木峰值](../runs/r44_day1_5bot/hy4_hy_2_bare/20261120-074027-502156.events.jsonl#L39)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-066 | P1（Day 1 场景跑偏）| Slice D2（场景）+ Integrator（runner）| 状态: FIXED（`5e871e6` 已启用，r43 四路无提前派下界，待原 15 路与合法过门）
+
+- **影响**：`r41_day1_15bot` 的 HY4_6、HY4_7 以 `bare/overworld` 通过入口。两路 EP01 都获得 `enter_the_nether`，随后 **5 集**被派下界堡垒或遗迹，**0/5** 验证，消耗 **2006.324 Bot·s**（按各集 UTC 起止计，约占两路计划时长 **83.6%**）。两路均未验证石器或铁器，进下界各得 30 分。 [HY4_6 终版](../runs/r41_day1_15bot/hy4_hy_6_bare/wild-endurance-r41_day1_15bot_hy_6_bare-20261120-060107.json) · [HY4_7 终版](../runs/r41_day1_15bot/hy4_hy_7_bare/wild-endurance-r41_day1_15bot_hy_7_bare-20261120-060109.json)
+- **实据**：两路首个 actor 工具之前已出现相邻的出场坐标回执（约 `[972,56,350.5]`），随后 watchdog 心跳确认 `the_nether`。HY4_6 曾短暂回到主世界，后续心跳又回到下界。日志未记录触发跨维度的具体传送门或指令。 [HY4_6 EP01](../runs/r41_day1_15bot/hy4_hy_6_bare/20261120-060123-062890.events.jsonl#L12) · [HY4_7 EP01](../runs/r41_day1_15bot/hy4_hy_7_bare/20261120-060119-514673.events.jsonl#L15) · [HY4_6 心跳](../runs/r41_day1_15bot/hy4_hy_6_bare/stdout.log#L38) · [HY4_7 心跳](../runs/r41_day1_15bot/hy4_hy_7_bare/stdout.log#L47)
+- **源码与最小修复**：watchdog 和集入口只把下界场景离开下界视为维度偏离。主世界场景向下界发展原本用于合法传送门进度。为 Day 1 裸装基准配置无传送门干扰的开局，且在预准备后、派题前校验维度。识别通过明确传送门目标进入下界的正常晋级。 [看门狗](../scripts/l3_wild_endurance_runner.py#L1180) · [集入口](../scripts/l3_wild_endurance_runner.py#L1902)
+- **验收标准**：同一 15 路 Day 1 配置下，明确传送门晋级前无裸装 Bot 因维度偏离获派下界目标。复测显式传送门目标仍能完成合法跨维度链。
+- **r43 五槽启动观察**：三路 HY4 和 MoveTest 通过主世界入口。GuiTest 在 `(6400,-6400)` 与 `(6400,-6560)` 两处候选未通过传送门安全检查，最终 `not_ready`、0 集。拒绝回执未区分真的扫到门与无法确认扫描结果，也没有记录其他被过滤候选的原因。15 路配置、HY4_6/7 和显式传送门均待实机复验。 [GuiTest 启动](../runs/r43_day1_5bot/nju_guitest_01_bare/stdout.log#L1) · [GuiTest 终版](../runs/r43_day1_5bot/nju_guitest_01_bare/wild-endurance-r43_day1_5bot_guitest_01_bare-20261120-071614.json#L17) · [MoveTest 选到替代点](../runs/r43_day1_5bot/nju_movetest_01_bare/stdout.log#L1) · [扫描判定](../scripts/l3_wild_endurance_runner.py#L160)
+- **r44 备用落点实测**：GuiTest 再次拒绝 r43 的两个原候选，通过 `c1ba4c3` 新增的独立西侧备用区，在 `(-23597.5,71,-6400.5)` 验证主世界并进入课程。5/5 均通过入口。原 15 路、HY4_6/7 和合法过门仍待验收。 [槽位日志](../runs/r44_day1_5bot/nju_guitest_01_bare/stdout.log#L1) · [区域生成](../scripts/l3_wild_endurance_runner.py#L172)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-067 | P1（`mc_skill_smelt` 93.6s 超时穿透 + 地表长距 `mc_move_to:move_timeout` 22x）| Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: FIXED（r43 熔炼与航点限时已复验，实测探索半径未达 180m，续验 BUG-071）
+
+- **一句话**：① `mc_skill_smelt` 默认 `wait_timeout_s=95.0` 未受 `BUG-047` 单次 `<=55s` 与 `episode_deadline_mono` 钳制，单次熔炼 7 粗铜吃满 **93.6s**；② 地表寻村/探索时模型直接传 60–140m 远坐标给 `mc_move_to`，撞满 25s 预算触发 **9/9 bots、22 次 `move_timeout`**，把 10 分钟白天的有效推进半径锁死在 94–155m。
+- **实测证据**：
+  - `r42_day1_5bot`：`nju_guitest_01_bare` `mc_skill_smelt(raw_copper, count=7)` 耗时 **93.6s**（[r42_day1 榜单](../runs/r42_day1_5bot/triage-r42_day1_5bot.md)）。
+  - `r42_day2_village_9bot`：`mc_move_to:move_timeout` 居全波第 1（**9 bots / 22 次**），例如 `hy4_hy_10_iron` 连续 5 次长距 `mc_move_to` 全部超时（[r42_day2 榜单](../runs/r42_day2_village_9bot/triage-r42_day2_village_9bot.md)）。
+- **源码定位**：
+  - [library.py](../src/mc_agent/skills/library.py#L4382-L4388)：`smelt_items(..., wait_timeout_s: float = 95.0)` 未在 `mc_tools.py` 经 `_clamp_tool_budget` 钳制。
+  - [mc_tools.py](../src/mc_agent/harness/mc_tools.py#L1209-L1225)：`mc_move_to` 只钳制了 `eff_move_timeout <= 25s`，未对水平目标距离 `> 36m` 的地表长距寻路做分段步长截断（25s 内根本走不完 80–140m 复杂地形）。
+- **最小修复**：
+  1. `mc_tools.py` 调用 `smelt_items` 前用 `_clamp_tool_budget(..., hard_cap_s=55.0)` 钳制 `wait_timeout_s`（且 `smelt_items` 到点前自动取出炉内已烧出成品并返回 `partial_smelt`），确保任何 `mc_skill_smelt <= 55s`；
+  2. `mc_move_to` 在水平距离 `> 36m` 且未指定 `entity_id` 时，自动按方向截断为 `<= 32m` 中途航点并在成功/超时后返回当前坐标与 `remaining_dist`，避免 100m 直连必撞 25s 超时；
+  3. 顺手收尾 `P2-41`（`library.py:5325` `unstick` 四向安全出口）。
+- **验收标准**：补离线单测覆盖 `smelt_items` 受集预算钳制（`<=55s`）与 `mc_move_to` 超 36m 自动截断航点；实机 `mc_skill_smelt >= 60s` 为 0，`day2_village` 探索 `move_timeout` 显著下降且单集推进半径 `>= 180m`。
+- **r43 终版对照**：Day 1 熔炼最长 **93.626→49.975s**，五次调用中 `>=60s` 为 0，HY4_2 EP04 部分取出 **4+1** 铁锭。独立按同集配对，Day 2 整波 `move_timeout` **22/109→5/130**，寻村子集 **20/81→2/65**，有 **38** 条部分航点回执。近村首集已记录的最大水平推进 **139.621m**，未达票据 180m 目标。 [部分熔炼](../runs/r43_day1_5bot/hy4_hy_2_bare/20261120-073158-377280.events.jsonl#L367) · [最大部分航点](../runs/r43_day2_village_near_9bot/hy4_hy_6_day2_village_near/20261120-071636-357863.events.jsonl#L300)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-068 | P1（`mine_dfs` 地下 `climb_progress` 8 连切片 + `unknown_fail` 6x）| Slice A（#3 Codex #1，`skills/mining_dfs.py`）| 状态: FIXED（r43 回程子门禁通过，报表中的未分类抢占见 BUG-073）
+
+- **一句话**：地下回地表时 `mc_skill_mine_dfs(action="climb_out")` 每爬 1–5 格就提前退出报 `climb_progress`（单机连刷 **8 次**），且 `mine_dfs` 在 `r42` 两波中出现 **6 次 `unknown_fail`** 未暴露结构化原因。
+- **实测证据**：
+  - `r42_day2_village_9bot`：`nju_ds_1_iron` 连续 8 次 `climb_progress`（`y=-26→-6→-3→-2→3→4`），并夹杂 2 次 `needs_surface_climb`；`hy4_hy_7/9_iron`、`nju_ds_1_iron` 合计 4 次 `mc_skill_mine_dfs:unknown_fail`（[r42_day2 榜单](../runs/r42_day2_village_9bot/triage-r42_day2_village_9bot.md)）。
+  - `r42_day1_5bot`：`nju_guitest_01_bare` 2 次 `mc_skill_mine_dfs:unknown_fail`（[r42_day1 榜单](../runs/r42_day1_5bot/triage-r42_day1_5bot.md)）。
+- **最小修复**：
+  1. 在 `mining_dfs.py` `climb_out` 循环内遇到小幅阻挡/单步 `staircase` 部分进展时，只要剩余时间预算 `>= 10s` 且有垂直进展（`dy >= 1`），继续在同一调用内推进而非立刻退出报 `climb_progress`；
+  2. 审计 `mine_dfs` 所有 `ok=False` 返回分支，补齐结构化 `error.code` / `stop_reason`，消除 `unknown_fail`。
+- **验收标准**：离线单测覆盖“多步连续爬升合并为单次调用”和“异常分支无 `unknown_fail`”；实机单集 `climb_progress <= 2`、`unknown_fail = 0`。
+- **r43 原始回执**：Day 2 两条 `climb_progress` 分属两集，之后均有地表完成，总回程比 **2/2**。原榜单的 11 条 `unknown_fail` 均有 Guardian 抢占标记，终版轨迹另两个 Bot 有同类回执；按 BUG-073 核对标签。 [NJU_3 回程成功](../runs/r43_day2_village_near_9bot/nju_nju_3_day2_village_near/20261120-073021-002663.events.jsonl#L89)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-069 | P1（地表涉水 `y=62` 与坡地撤退 `unsafe_landing` 致 4 台铁装 Bot 各 2 死）| Slice B（#2 子 AGY，`harness/guardian.py` + `skills/combat_env.py`）| 状态: VERIFIED（`r43_day2` 死亡 8→2，`water_escape_failed` 3→0）
+
+- **一句话**：r42 四路铁装各 2 死（5 箭伤、2 爆炸、1 近战）。五次箭伤前均有撤退失败。另有 3 次 `water_escape_failed`（`y=62`），均发生在无显式死亡的寻村集。保留浮水和不安全撤退两个验收项。
+- **实测证据**：`r42_day2_village_9bot` 中 `hy4_hy_4/6/8/9_iron` 各 2 死；`hy4_hy_6/8_iron` 报 `mc_skill_unstick:water_escape_failed`（`y=62.2..62.8`），`hy4_hy_5/6/9_iron` 多次报 `unsafe_landing`（[r42_day2 榜单](../runs/r42_day2_village_9bot/triage-r42_day2_village_9bot.md)）。
+- **最小修复**：
+  1. 核验刚合入的 `cf89eb0` 5 连提交是否已覆盖 `y=62` 地表开阔河流脱困；
+  2. 当撤退方向全部被 `unsafe_landing` 拦截且受到远程/近战持续伤害时，优先触发 `raise_shield` / 反击或短距横向避障，严禁原地反复报 `unsafe_landing` 挨打致死。
+- **验收标准**：离线单测覆盖“地表 `y=62` 涉水遇骷髅”与“撤退全被 `unsafe_landing` 拦截时切举盾/反击”；实机地表铁装波次死亡率明显下降、`water_escape_failed = 0`。
+- **r43 同九槽、不同场景**：整波显式死 **8→2**，浮水失败 **3→0**，11 次浮水动作最大 **3.784s**。两条致命伤均为 `mob_attack`，HY4_6 在地表、HY4_7 在地下。HY4_7 EP01 先短时浮水，后转上岸成功。 [上岸](../runs/r43_day2_village_near_9bot/hy4_hy_7_day2_village_near/20261120-071642-835969.events.jsonl#L171) · [HY4_6 死亡](../runs/r43_day2_village_near_9bot/hy4_hy_6_day2_village_near/20261120-072048-411226.events.jsonl#L241) · [HY4_7 死亡](../runs/r43_day2_village_near_9bot/hy4_hy_7_day2_village_near/20261120-072929-890490.events.jsonl#L140)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-070 | P1（`r42_day1_5bot` & `r42_day2_village_9bot` 闭环深度取证）| Slice D1（#5 DeepSeek #1，只读 `runs/r42_*`）| 状态: FIXED（`5e0a750` + `1e4469a` 已合入）
+
+- **核查清单**：
+  1. `r42_day2_village_9bot`：`hy4_hy_7_iron` 命中 `dirt_path` 后为何未继续找到村庄主体（坐标/时间/工具链）？
+  2. `r42_day2_village_9bot`：`hy4_hy_4/6/8/9_iron` 共 8 次死亡的精确伤害源与 `guard_mixed` 时间线；
+  3. `r42_day1_5bot`：`nju_movetest_01_bare` 3 次死亡原因，以及 NJU 2 台下矿仅采到 1 块 `raw_iron`、却采了 7–20 块 `raw_copper` 的矿层/耗时账本。
+- **交付**：把精确行号、时间线和必要的新工单/修订写回本看板与 `docs/D1-r11-triage.md`。
+- **D1 已补取证**（审计报告 §4cl）：HY4_7 EP02 在土路后已到村庄建筑、从箱中取出物品并完成床交互。三次实体查询均缺 `villager`，无村民回执，终版验证字段仍为 false。四路铁装的 8 死为 5 箭伤、2 爆炸、1 近战。9 条混合事件中 1 条是重生后的连接恢复，3 次浮水失败均在无显式死亡的其他集。MoveTest 三死为两次箭伤与一次近战。两台 NJU 的 `raw_iron=1`、`raw_copper=7/20` 都有同期库存回执，逐次采矿、熔炼和死亡账见报告。 [土路](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L24) · [取箱](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L170) · [实体过滤](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L286) · [连接恢复](../runs/r42_day2_village_9bot/hy4_hy_4_iron/20261120-064217-563301.events.jsonl#L131) · [MoveTest 库存](../runs/r42_day1_5bot/nju_movetest_01_bare/20261120-064425-812878.events.jsonl#L98) · [GUITest 库存](../runs/r42_day1_5bot/nju_guitest_01_bare/20261120-063800-887294.events.jsonl#L88)
+- **SCENE-002 复验补充**：命中村庄方块后直接查 `villager` 并核对仍可见的床、箱和交易对象。HY4_5 EP03 跨过黄昏阈值后仍开始移动与扫描，记录在 §4cl，场景需覆盖派发时为白天、执行中跨黄昏的路径。 [黄昏](../runs/r42_day2_village_9bot/hy4_hy_5_iron/20261120-063759-468845.events.jsonl#L244) · [后续移动](../runs/r42_day2_village_9bot/hy4_hy_5_iron/20261120-063759-468845.events.jsonl#L266) · [只在派发时的黄昏门禁](../src/mc_agent/harness/curriculum.py#L1487)
+- **发布与复验**：`5e871e6` 已合入集成树。r42 的五个裸装槽没有重跑 HY4_6/7，且启动早于该补丁，0 次偏离是这五槽的观察。复验核对带保护的实际 runner 与受影响槽。 [r42 五槽终版](../runs/r42_day1_5bot/triage-r42_day1_5bot.md)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-071 | **P1（地表移动与搜寻效率极低：10 分钟仅推进 94–155m，缺少零 LLM 往返高速斥候技能）** | Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: 部分修复（r67 实机确认窄角修复，280m 半径待验）
+
+- **一句话**：目前地表探索/寻村完全依赖 LLM 手动循环调用 `mc_move_to` + `mc_find_blocks` + `mc_get_entities`，每推进 ~30m 就要付 3 次 LLM 往返（15–30s），导致 10 分钟白天有效推进半径仅 **94–155m**（均速 **~0.25 格/秒**，比正常玩家疾跑慢 20 倍），远低于原版村庄 300–500m 的平均间距。
+- **实测证据**：`r42_day2_village_9bot` 9 台 Bot 跑满整个白天，最大位移仅 `33–155m`，全波 22 次 `move_timeout`；且 `library.py` 当前无任何地表高速推进/巡航复合技能。
+- **最小修复（新增 `mc_skill_scout_surface` 复合技能并暴露为工具）**：
+  1. **零 LLM 往返多段连续推进**：在 `library.py` 新增 `scout_surface(direction="auto", target_types=None, max_duration_s=45.0, step_dist=28.0)`，受 `mc_tools.py:_clamp_tool_budget(..., hard_cap_s=50.0)` 与 `episode_deadline_mono` 严格钳制；单次调用内自动沿选定/未探索方向连续推进 **3–5 段 × 28–32m**（目标单次调用推进 **100–150m**，1 集即可覆盖 **350–500m**）。
+  2. **每段落地零开销自动扫描 + 命中即早停**：每完成一段自动执行 `find_blocks(radius=64)` 搜村庄特征（`bell`, `hay_block`, `dirt_path`, `composter`, `lectern`）+ `get_entities(radius=64)` 搜 `villager`/`iron_golem`（同时把途经 `lava`/`obsidian` 记入结果），**一旦命中目标立刻早停并返回精确坐标、距离与群系**。
+  3. **自动避水/避围栏/遇险早停**：每步出发前检查 `VoidGeofence`；若某段 `move_timeout` / `path_not_found` / 落入水格，自动向 ±45° 偏航绕行而非原地死磕或下河游泳；检测到近距敌怪或受击立即早停交还控制权。
+  4. **单集推进效率可量化**：返回值包含 `distance_traveled`、`segments_completed`、`final_pos`、`detected_pois`、`detected_entities`、`stop_reason`。
+- **验收标准**：补离线单测覆盖“多段零 LLM 连续推进 + 中途命中 `bell`/`villager` 立即早停 + 遇围栏/超时偏航绕开 + 严守 `<=50s` 预算”；实机纯随机空降（非 `day2_village_near`）1 集（~4–5 分钟）有效探索半径从 94–155m 提升至 **`>= 280m`**。
+- **r44 读数口径**：runner 在落点建 `radius=220, margin=8` 围栏，斥候每个航点受 **212m** 安全半径约束。若按落点计算探索半径，当前固定场景无法验出 280m；若按集开始位置计算，应同时记录集起点距锚点、最大水平位移和围栏触发。单次或多次路径累计 `distance_traveled` 另计。复验 280m 需要保持出生区域隔离的相容测试场景。 [围栏参数](../scripts/l3_wild_endurance_runner.py#L2056) · [安全半径](../src/mc_agent/harness/geofence.py#L35) · [斥候航点检查](../src/mc_agent/skills/library.py#L1464)
+- **r44 终版对账**：9 路各一集寻村，43 次斥候配对中 41 条结构化技能回执，最大 **42.151s**。90 段、30 次有位移、路径累计 **3059.56m**。同九路首轮寻村直接移动超时 **10/42→0/12**，整波 **22/109→1/75**；两类直接扫描 **32/24→7/5**。HY4_10 EP02 **606.15m** 是四次斥候的累计曲线路程，距已核对的集起点最远 **175.33m**。NJU_3 EP02 可核对的起点最大位移 **206.89m**，锚点最远斥候回执 **208.82m**。原记录的 `6/9 ≥280m` 口径为累计路程，280m 位移门槛未验证。9 集寻村均无客观验证。 [最长斥候](../runs/r44_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-074208-367761.events.jsonl#L16) · [HY4_10 第四段回执](../runs/r44_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-074208-367761.events.jsonl#L90) · [NJU_3 最大位移](../runs/r44_day2_wild_scout_9bot/nju_nju_3_iron/20261120-074200-755033.events.jsonl#L219)
+
+- **r66 探索记忆版本的绕行回归**：`e2f4e0c` 下，离线草地场景只有正东第一次移动返回 `path_not_found`，后续方向可达。空白记忆得到 **6 次移动请求、5 段、140.01m**，预置两条探索记录时只发 **1 次请求、0m**。`scout_surface` 按记忆分数重排，90° 候选提到 ±45° 前，普通无路分支遇宽角直接退出。最小修复是先排允许的 ±45°，出现围栏或液体时可扩宽，组内保留记忆优先级。验收要求同地形两种记忆都实际尝试合法偏航，普通无路仍不放开宽角。真实出现频次等 r66 的斥候回执。 [记忆排序](../src/mc_agent/skills/library.py#L1695) · [提前退出](../src/mc_agent/skills/library.py#L1716)
+
+- **候选修复 `4391434`** 已合入 `d4f2e30`，先排窄角可用候选再按记忆排序。D1 空记忆和有历史夹具 **2 项通过**，集成树窄角、围栏、水岸绕行等 **4 项通过**。r67 首批 actor 指纹 `bee6986cfb92c26f` 匹配合入版本。 [修复排序](../src/mc_agent/skills/library.py#L1702) · [集成夹具](../tests/test_skills_and_providers.py#L3114)
+
+- **r67 实机复验**：HY4_2 EP02／03 的 **6/6** 条普通无路回执都列出原方向和两条 ±45°，各 0m。HY4_1 的两集寻村累计路程 1070.32m，最远斥候终点距落点 209.54m。实机确认窄角分支，整票仍待可容许 280m 的同口径场景。 [HY4_2 EP02](../runs/r67_expl_mem_3bot/hy4_hy_2_iron/20261121-065531-768950.events.jsonl#L18) · [HY4_2 EP03](../runs/r67_expl_mem_3bot/hy4_hy_2_iron/20261121-065750-378055.events.jsonl#L19) · [HY4_1 最远终点](../runs/r67_expl_mem_3bot/hy4_hy_1_iron/20261121-065732-821435.events.jsonl#L196)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-072 | P1（`mc_skill_flee` 79.7s 残余慢调用穿透 `BUG-047 <=60s`）| Slice B（#2 子 AGY）+ Slice C（#4 Codex #2，`mc_tools.py`）| 状态: FIXED（r68 井道回撤 20.952s，门限 35s）
+
+- **r68 探索覆盖井道**：actor 撤退 **11** 次最大 **26.944s**；HY4_2 EP05 一次 `mode=retreat_shaft` 耗 **20.952s**，报告确封 6 格、站位上升 1 格，随后边界护航浮水 **14.719s**，回执 `in_water=false,on_ground=true`。两项本波均过 35s 门槛。 [撤退](../runs/r68_expl_mem_iron_3bot/hy4_hy_2_iron/20261121-073645-791746.events.jsonl#L493) · [随后浮水](../runs/r68_expl_mem_iron_3bot/hy4_hy_2_iron/20261121-073645-791746.events.jsonl#L495)
+
+- **一句话**：`r43_day2_village_near_9bot` 全场唯一一条 `>=60s` 慢调用为 `nju_ds_1_day2_village_near` 的 `mc_skill_flee`（**79.7s**），说明 `flee` 未受 `episode_deadline_mono` 与 `<=35s` 硬预算钳制。
+- **最小修复**：给 `mc_skill_flee` 接入 `_clamp_tool_budget(..., max_s=35.0)` 并在内部循环/单次 `move_to` 严格尊重剩余预算，确保任何撤退动作 `<=35s`。
+- **D1 定位**：DS_1 EP03 L224→225 执行 **79.655s**，回执 `mode=retreat_shaft,hops=3,sealed=9`，从 Y−17 退到 Y−3。检查 actor 入口到矿道回撤、逐路点和封堵的共同截止。以该分支同场验收，不能只测地表奔逃。 [配对回执](../runs/r43_day2_village_near_9bot/nju_ds_1_day2_village_near/20261120-072028-965473.events.jsonl#L224) · [actor 入口](../src/mc_agent/harness/mc_tools.py#L2485) · [矿道分支](../src/mc_agent/skills/library.py#L7694) · [三次回撤和封堵](../src/mc_agent/skills/mining_dfs.py#L3987)
+- **r44 旧版本基线**：DS_1 EP03 的 `retreat_shaft` **93.012s**，仍是 3 路点、封 9 格（Y15→39）。HY4_10 EP03 同分支在只余 **8.222s** 时启动。r44 两波加载 `d1d572c`，下一波验收同时核对硬上限与本集剩余。 [DS_1 93s](../runs/r44_day2_wild_scout_9bot/nju_ds_1_iron/20261120-074936-839471.events.jsonl#L168) · [HY4_10 集尾撤退](../runs/r44_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-074538-967229.events.jsonl#L290)
+- **r45 实机回归**：指纹 `4415809c8c8cdb72` 对应 `eb4a736`，包含 `fa4cd15` 与 `cfde702`。Day 1 HY4_3 EP01（+12.923s）、Day 2 HY4_7 EP01（+23.241s）因 `TypeError: '<' not supported between instances of 'float' and 'Timeout'` 收尾，首报时两路均无 Bot 终版。矿道会话给 status 传逐相位 `httpx.Timeout`，再进入共享 `_GuardSession.call`，在标量 `min(timeout_s, remaining)` 抛错。最小修复兼容 float 和 `httpx.Timeout`，保留请求各相位已设的紧限，继续共享集截止。验收新增真实类型的嵌套夹具，并要求同实机分支至少完整返回一次、无 `runtime_error`。 [Day 1 集尾](../runs/r45_day1_5bot/hy4_hy_3_bare/20261120-083549-772628.events.jsonl#L24) · [Day 2 集尾](../runs/r45_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-083557-171764.events.jsonl#L89) · [嵌套回溯](../runs/r45_day2_wild_scout_9bot/hy4_hy_7_iron/stdout.log#L82) · [Timeout 构建](../src/mc_agent/skills/mining_dfs.py#L376) · [类型冲突](../src/mc_agent/harness/guardian.py#L162)
+- **r45 结算**：两波 Fleet 均已退出。Day 1 HY4_1 EP04、HY4_2 EP05、HY4_3 EP01，Day 2 HY4_4 EP03、HY4_6 EP03、HY4_7 EP01，共 **6/14** 个槽依次撞同一撤退异常，均无终版。全都是 actor 已启动后退出。后合入的相位修正 `3d00b90` 未被 r45 加载。 [HY4_1](../runs/r45_day1_5bot/hy4_hy_1_bare/20261120-084446-500156.events.jsonl#L299) · [HY4_2](../runs/r45_day1_5bot/hy4_hy_2_bare/20261120-084904-311884.events.jsonl#L191) · [HY4_4](../runs/r45_day2_wild_scout_9bot/hy4_hy_4_iron/20261120-083925-644268.events.jsonl#L57) · [HY4_6](../runs/r45_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-084026-929245.events.jsonl#L226)
+- **r46 实测**：确认运行 `b0882ad`。发出 7 次 actor 撤退并有正常工具终态，Day 1/2 最大 **1.815／3.169s**，0 相位类型异常、0 缺终版；`retreat_shaft` 仍 0 暴露。 [铁装撤退](../runs/r46_day2_wild_scout_9bot/hy4_hy_8_iron/20261120-091722-147672.events.jsonl#L117)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-073 | P1（`mc_skill_mine_dfs:unknown_fail` 11x / 3 bots 未结构化）| Slice A（#3 Codex #1，`skills/mining_dfs.py`）| 状态: FIXED（r46 榜单无真实探矿 unknown_fail，D1 回放区分 15 条结构化抢占）
+
+- **一句话**：`r43_day2_village_near_9bot` 中 `mc_skill_mine_dfs:unknown_fail` 仍出现 **11 次 / 3 bots**（`hy4_hy_6/7`、`nju_nju_3`），虽 `climb_progress` 已从 8→2，但仍有未带结构化 `error.code` 的失败返回路径。
+- **最小修复**：排查 `r43_day2_village_near_9bot` 中这 11 条 `mine_dfs` 返回体，补齐所有 `ok=False` 分支的 `error.code` 与可操作恢复建议，使 `unknown_fail = 0`。
+- **D1 确认是抢占分类缺口**：原榜单这三路的 **11/11** 均为 `preempted_by_reflex=true`，Day 2 终版按同集真实调用复核共 **13 条／5 路**，其余两条在 DS_1、HY4_9。它们来自 Guardian 生成的结构化抢占回执，分类器忽略该字段，落入 `unknown_fail`。建议把抢占单独计入 `reflex_preempted`（或给 Guardian 回执补对应 code），保留 `mine_dfs` 真失败的独立门槛。 [三路样本](../runs/r43_day2_village_near_9bot/hy4_hy_6_day2_village_near/20261120-072048-411226.events.jsonl#L174) · [DS_1](../runs/r43_day2_village_near_9bot/nju_ds_1_day2_village_near/20261120-072028-965473.events.jsonl#L209) · [HY4_9](../runs/r43_day2_village_near_9bot/hy4_hy_9_day2_village_near/20261120-071926-878155.events.jsonl#L143) · [回执生成](../src/mc_agent/harness/guardian.py#L2060) · [榜单分类](../scripts/v2_fleet.py#L422)
+- **r44 对照**：D1 对照器 `cd99106` 已读结构化字段，Day 2 实际 **16** 条采矿抢占、未分类真实采矿结束回执 **0**。Fleet 的 `d8bb2fa` 已在 r44 后并入，待新进程实机。 [D1 分类](../../s-triage/scripts/d1_compare.py#L93)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-074 | **P1（`mc_skill_scout_surface` 40% 调用被 `in_water`/`liquid_ahead`/`void_geofence_blocked` 早停 + 字符串数字参数崩溃）** | Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: FIXED（r45 围栏早停归零，零位移因 BUG-078 反升，待组合复验）
+
+- **一句话**：`r44` 全波 43 次 `mc_skill_scout_surface` 中，**17 次（40%）**因 `in_water`（9x）、`void_geofence_blocked`（5x）、`liquid_ahead`（3x）早停（大量返回 `0.0m`），且 `direction="auto"` 在围栏边缘仍反复选出撞墙方向；另有模型传字符串 `"45"`/`"30"` 触发类型报错。
+- **实测证据**：
+  - `nju_ds_1_iron`、`nju_nju_3_iron` 连续调 `direction="auto"` 共 4 次撞 `void_geofence_blocked`（`dist=0.0m`/`28.7m`）；
+  - `hy4_hy_6_iron` 连续 `north`/`south`/`west` 三次全返回 `0.0m liquid_ahead`；`hy4_hy_5_iron` 传 `max_duration_s="45"` 直接失败；5 台 Bot 共触发 9 次 `in_water` 早停。
+- **最小修复**：
+  1. `scout_surface(direction="auto")` 选向时**必须预检 `VoidGeofence` 剩余安全距离**，排除距边界 `< 40m` 的方向；行进中撞 `void_geofence_blocked` 时自动向场内偏转 `±90°/135°` 继续推进，不直接返 `0.0m`；
+  2. 遇 `liquid_ahead` 或浅水 `in_water` 时，先尝试 `±90°` 干地绕行（或 1 步短距上岸）再继续，仅全向被水围死才早停；
+  3. `mc_tools.py:mc_skill_scout_surface` 对 `max_duration_s`/`step_dist` 兼容字符串数字强制转换 `float(...)`；
+  4. 返回体附带当前 `biome`（从 `status()` 读取，不要恒为 `null`），遇到海洋/深林/丛林提示模型立即换向。
+- **验收标准**：离线单测覆盖“贴近围栏 `auto` 自动向内折返”、“单侧水域自动 90° 绕行”、“字符串数字参数兼容”；实机 `scout_surface` `0m` 空转率大幅下降、`void_geofence_blocked` 归零。
+- **r45 同六个有终版槽**：围栏／涉水／前方液体早停由 **8/26→3/37**，围栏 **5→0**。HY4_9 接近围栏时改向后完成 5 段。零位移反而 **7/26→16/37**，16 条全是 BUG-078 的普通箱触发。本波无模型传字符串数字，所有 47 条可确认技能回执群系字段为空。 [近围栏改向](../runs/r45_day2_wild_scout_9bot/hy4_hy_9_iron/20261120-083711-098504.events.jsonl#L254)
+- **r46**：27 条含 11 条落水、0 围栏、0 前方液体。匹配两波均有终版且寻村的三路，落水 **2/13→8/16**。零位移主要由 BUG-078 改善，仍需复验绕水；字符串数字无实机暴露、27 条群系均为空。 [落水样本](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-090127-093178.events.jsonl#L73)
+- **r47→r52 同八槽**：有停止原因的完整回执中，零位移 **9→2**、围栏与前方液体均 **0→0**，落水则 **9/60→28/74**。排除起点迁移 15km 以上的 HY4_7、NJU_3 后仍为 **9/50→16/53**。斥候内成功上岸 **3→7** 次，独立 Guardian 出水 **3→13** 次。HY4_7 一次调用先上岸后仍卡在水中，HY4_8 两次上岸后完成 146.34m。零位移和围栏门槛通过，持续绕水仍有缺口。 [先上岸后停水](../runs/r52_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-213720-045295.events.jsonl#L256) · [两次上岸](../runs/r52_day2_wild_scout_9bot/hy4_hy_8_iron/20261120-213822-434393.events.jsonl#L84) · [斥候上岸实现](../src/mc_agent/skills/library.py#L1542)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-075 | **P1（`mc_find_blocks` 多类型查询被高频 `dirt_path`/`farmland` 挤爆 `limit`，淹没床/箱子/干草/钟）** | Slice C（#4 Codex #2，`harness/mc_tools.py` + `skills/library.py`）| 状态: FIXED（r46 有村庄床与箱回执，稀有混扫和取物转化仍待验）
+
+- **一句话**：Bot 进村后调 `mc_find_blocks(types=["bell","dirt_path","hay_block","composter","lectern","bed","chest"], limit=20)`，返回 `total=833` 但前 20 条**100% 全是 `dirt_path`**，把近在咫尺的 `hay_block`/`bed`/`chest`/`bell` 彻底挤掉，导致 `DS_1` 站在村中心还误判“没找到干草块和床”。
+- **实测证据**：`r43_day2_village_near_9bot/nju_ds_1_day2_village_near` 调 `mc_find_blocks(limit=20, radius=64, types=[...])` 返回 `total: 833`，前 20 条全为 `dirt_path`；随后模型误判“未找到 hay_block”，而下一集扫描发现 `hay_block` 距脚边仅 2.1m。
+- **最小修复**：
+  1. 在 `scout_surface` 内部扫村时，**优先扫稀有地标**（`bell`, `hay_block`, `composter`, `lectern`, `fletching_table`, `chest`, `*_bed`），仅作为补充再扫 `dirt_path`，并将命中村庄坐标直接写入 `WorldMemory`；
+  2. 在 `mc_tools.py:mc_find_blocks` 当 `len(types) >= 2` 且单类方块霸占返回列表导致其他稀有目标被截断时，对结果做按类型保底或提示高计数方块（或在 `scout_surface` 中分两批小查询），确保 `bell`/`hay_block`/`bed`/`chest` 绝不被 `dirt_path` 淹没。
+- **验收标准**：离线单测覆盖“200 个 `dirt_path` + 1 个 `hay_block` + 1 个 `yellow_bed` 时，进村扫描必返回 `hay_block` 与 `bed`”；实机进村后绑床/薅干草/开箱转化率显著提升。
+- **r46**：HY4_6 EP02 真正进村，扫出白床与 `(-7796,78,2862)` 的箱，床交互返回成功。随后两次去箱只传 XZ，实际到 Y35.9/Y39.9，接着在 Y40 的三个开箱调用均失败。未见拥挤混扫标志或采干草、取物、交易回执。 [白床和正确箱高](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L100) · [第一处错误楼层](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L165) · [失败回执](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L295)
+- **r47 Day 2 已完成集复核**：`hy4_hy_7_iron` EP02 再扫到同一 `(-7796,78,2862)` 的箱，于白床旁 Y71 起步，随后只传 XZ 和 `range=3`。调用 `ok=true`，落在 `(-7793.5,38,2863.5)`，离箱 40 格垂直距离。`unstick` 原地失败，18 级楼梯回到 Y56，本集无开箱回执。寻村收割提示应要求对已知箱/床用完整坐标接近并核对垂直差，验收用该村箱位置做同锚点对照，确认实际取物。 [箱坐标](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L119) · [床旁站位](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L157) · [XZ 参数](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L199) · [错误楼层](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L200) · [末次爬升](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L261) · [寻村收割提示](../src/mc_agent/harness/curriculum.py#L1318) · [移动工具入参](../src/mc_agent/harness/mc_tools.py#L1184)
+- **r47 第二个同箱复现与床位正例**：HY4_6 EP02 同样甩到 Y37.9、离箱 40.1 格，三片楼梯才回到 Y65。HY4_6 和 HY4_7 均与 `(-7778,72,2879)` 白床交互成功，HY4_7 EP04 实际死亡后重生在 `(-7778.5,72,2878.5)`，距床 0.71 格。Day 2 终版 16 集寻村无取箱、干草、交易回执。 [HY4_6 错层](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-095905-635192.events.jsonl#L157) · [HY4_6 最后爬升](../runs/r47_day2_full_day_scout_9bot/hy4_hy_6_iron/20261120-095905-635192.events.jsonl#L239) · [HY4_7 床交互](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100027-077186.events.jsonl#L178) · [HY4_7 实际重生](../runs/r47_day2_full_day_scout_9bot/hy4_hy_7_iron/20261120-100828-101734.events.jsonl#L296)
+- **r52**：16 集寻村，0 集验证，未记录绑床、干草、交易或取物。DS_1 EP03 对独立箱 `(-2896,71,-10094)` 传入完整 XYZ，仍返回 `no_window`。上一集试走同坐标时受伤中断。原 Y78 村箱未暴露，稀有混扫和同箱转化验收仍待覆盖。 [完整坐标开箱](../runs/r52_day2_wild_scout_9bot/nju_ds_1_iron/20261120-213833-041153.events.jsonl#L379) · [上一集走向该箱](../runs/r52_day2_wild_scout_9bot/nju_ds_1_iron/20261120-213332-943524.events.jsonl#L621)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-076 | P1（`r43`/`r44` 裸装 Day 1 `hy4_hy_1_bare` 连续两波 7–8 死异常回路）| Slice D1（#5 DeepSeek #1 取证）+ Slice B（#2 子 AGY 修复）| 状态: FIXED（r46 实测两次换安全退路，HY4_1 仍有 3 次箭伤，掩体与低血上岸待验）
+
+- **一句话**：`r43_day1_5bot`（8 死，`guard=37`）与 `r44_day1_5bot`（7 死，`guard=41`）其余 Bot 几乎全 0 死，唯独 `hy4_hy_1_bare` 连续两波陷入高频死亡循环（伴随 `mc_skill_flee:unsafe_landing` / `mc_skill_unstick:unsafe_landing`）。
+- **分工**：
+  - `#5 D1`：审计 `runs/r44_day1_5bot/hy4_hy_1_bare` 7 次死亡的精确伤害源、坐标、`unsafe_landing` 时间线写入本看板；
+  - `#2 子 AGY`：针对裸装开局在地形陡坡/夜怪围堵下 `flee:unsafe_landing` 连续触发致死的缺口补齐兜底动作。
+- **D1 实测**：r44 七条显式死亡为 **3 箭伤、4 近战**。同一命中回执的 HP=0 伤害用于归因。五次在本集该次死亡前见过 `unsafe_landing`，末 20s 内有字面拒绝的仅两次。七次均回到 `(-10988.5,69.1,-11017.5)`。r43 八死均箭伤，全部回同一原锚点。r44 EP01、EP06 首死距 r43 两处箭伤点分别约 **11.0／3.3 格**，反复经过锚点附近河岸。日间样本已有掠夺者与近战。
+
+  | r44 EP / 单集相对秒 | 致命伤与坐标 | 死前退路证据 |
+  |---|---|---|
+  | EP01 +194.436 | [箭伤 `(-10933,62,-10981.9)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074025-497605.events.jsonl#L268) | [L236 见掠夺者，未着甲无副手](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074025-497605.events.jsonl#L236)，[L245/L255 两次 `unsafe_landing` 且位移 0](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074025-497605.events.jsonl#L255) |
+  | EP04 +157.478 | [近战 `(-11052.3,70,-11087.6)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074629-758857.events.jsonl#L171) | [L78 actor 撤退拒绝](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074629-758857.events.jsonl#L78) 已早 126.7s。后在 [L166–170 挖矿被抢占](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074629-758857.events.jsonl#L166)，Guard 回执 `not_ready`、HP0 |
+  | EP05 +47.611 | [近战 `(-11019.8,79.2,-11066)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L67) | [L10 `unsafe_landing`，近僵尸](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L10)，[L52 已移动 12.6 格](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L52)，仍被追上 |
+  | EP05 +134.917 | [箭伤 `(-10968.5,75,-10975.4)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L223) | [L114 actor 撤退拒绝](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L114)，[L199/209 后两次撤退成功](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075217-648091.events.jsonl#L209)，终点仍中箭 |
+  | EP06 +28.617 | [箭伤 `(-10955.9,64.2,-10979.5)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L48) | [L12 近掠夺者、无安全退路](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L12)，[L44 水中退避失败](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L44) |
+  | EP06 +73.004 | [近战 `(-10964.7,71,-11006.9)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L104) | [L75 近僵尸、落脚拒绝](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L75)，[L85/L98 无屋顶](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075432-956708.events.jsonl#L98)，两次分别只撤 1.75／2.02 格 |
+  | EP07 +42.825 | [近战 `(-10932.3,62.4,-11016.7)`](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075653-135717.events.jsonl#L55) | [L9 近僵尸，HP3.86](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075653-135717.events.jsonl#L9)，[L19–20 撤 13.1 格后入水、HP0.86](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075653-135717.events.jsonl#L20)，[L30／L32 浮水及上岸失败](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-075653-135717.events.jsonl#L32) |
+
+- **源码与验收补充**：核对 `_defend_or_flee` 在裸装无法格挡时的实际退路，`flee` 失败时保留安全落脚拒绝，增加可验证的掩体或干岸落点。撤退的 `ok=true` 只说明位移，验收再查脱离射线或取得地形遮挡。实机用原 HY4_1 区域及替代点对照，按显式死、伤害源和回出生点后的再遭遇分别计数。EP04 另覆盖长挖矿被近敌接管时，死亡前能否及时停工具。 [Guardian 防守入口](../src/mc_agent/harness/guardian.py#L391) · [撤退落脚检查](../src/mc_agent/skills/combat_env.py#L1458)
+- **r45 取证结论**：HY4_1 只产生 4 个 actor 轨迹，第 4 集崩溃前有 1 条近战死亡，距 r44 落点约 39m 且高 12 格。本波 Day 1 无 `guardian.flee_exit_blocked`、`guardian.unstick_exit_blocked`、`unsafe_exit_retreat`，也未观测到 GUITest HP≤6 涉水。保留原地形、低血量涉水与真落脚拒绝的复验。 [近战回执](../runs/r45_day1_5bot/hy4_hy_1_bare/20261120-084446-500156.events.jsonl#L244) · [随后异常](../runs/r45_day1_5bot/hy4_hy_1_bare/20261120-084446-500156.events.jsonl#L299)
+- **r46 实机子项**：HY4_1 与 r44 落点平距 **4.24m**，7 集有 3 次箭伤。两条原退路拒绝后的替代退路，均实际移动约 2.2m。EP02 从替代落点再过 **5.215s** 即被箭伤致死，死点距 r43 同河岸旧点 **4.58m**。MoveTest 湿地低血有一次尝试直接上岸却以重生收尾，未单独记录触发谓词。 [首条换路](../runs/r46_day1_5bot/hy4_hy_1_bare/20261120-090007-333544.events.jsonl#L67) · [后来致死](../runs/r46_day1_5bot/hy4_hy_1_bare/20261120-090239-082942.events.jsonl#L69) · [低血上岸](../runs/r46_day1_5bot/nju_movetest_01_bare/20261120-090715-754576.events.jsonl#L266)
+- **下一波发布**：`4757c8a` 已合入，只在退路被拦、无盾、近身单个近战威胁时走一次近击。现有四个参数化夹具均过，实机需实际退路拒绝和近敌反击回执。 [离线夹具](../tests/test_generation_guard.py#L1714)
+- **r53 Day 1 终版**：新版本 `d41a8d0` 下，HY4_1 EP01 两次箭死回同一重生点。第一死距 r44 EP01 死点约 9m，缺安全脱困落点与实墙。重生后第一次通用出水 5.46s 后又入水，第二次出水后确认落脚，仍因未摆脱射手死在干地。HY4_1 EP03 边界向岸六次仅一次成功。HY4_2 EP04 通用浮水失败后走向岸兜底，出水未确认落脚，随后箭死。同三槽 r47→r53 死亡 **4→4**，HY4_1 **2→2**；近地形历史 r44 HY4_1 有 7 死，保留原高频循环改善与向岸失败两项实测。 [初次箭死](../runs/r53_day1_bare_3bot/hy4_hy_1_bare/20261120-215403-191849.events.jsonl#L116) · [干地落脚](../runs/r53_day1_bare_3bot/hy4_hy_1_bare/20261120-215403-191849.events.jsonl#L166) · [再次箭死](../runs/r53_day1_bare_3bot/hy4_hy_1_bare/20261120-215403-191849.events.jsonl#L192) · [向岸未落脚](../runs/r53_day1_bare_3bot/hy4_hy_2_bare/20261120-220642-668999.events.jsonl#L267) · [确认脚下支撑](../src/mc_agent/skills/combat_env.py#L2073)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-077 | P1（启动预准备回放把历史死亡计入最近 60 秒，误触发避难）| Integrator（`harness/guardian.py` + `bot.py`）| 状态: OPEN（实机与 D1 离线复现）
+
+- **影响**：课程首集可在 actor 作出首个决策前报告 8–9 次“近期死亡”，提前执行紧急掩体或撤退。若掩体建成，当前入口还会等待由虚假时间戳计算的冷却窗口。此问题影响实机控制，Fleet 的 BUG-063 对账仍单独计算显式死亡。
+- **实据**：r43 HY4_1 EP01 +1.510s 报 `recent_deaths=8`，掩体 `not_grounded`，接着实际撤退 5.5 格。L13 的后端 `last_death.t` 为 **14:36:43.709 UTC**，距告警 **2416.537s**。本集第一条显式死亡在 +33.981s。r44 同槽 EP01 +1.474s 又报 9，并实际撤 6.2 格。离线用真实 `GenerationGuard.prime()` 回放八个带不同事件 ID、约 40 分钟前的死亡，现版错误地计为 **8**。 [r43 告警](../runs/r43_day1_5bot/hy4_hy_1_bare/20261120-071624-552133.events.jsonl#L8) · [后端时间戳](../runs/r43_day1_5bot/hy4_hy_1_bare/20261120-071624-552133.events.jsonl#L13) · [首条本集死亡](../runs/r43_day1_5bot/hy4_hy_1_bare/20261120-071624-552133.events.jsonl#L84) · [r44 告警](../runs/r44_day1_5bot/hy4_hy_1_bare/20261120-074025-497605.events.jsonl#L5)
+- **源码与最小修复**：`prime` 推进历史游标时复用读取函数。后者在关闭战斗观察时仍将死亡 ID 送给计数器，未携带原始事件时间。计数器用当前单调时间补值，actor 到 2 条即触发避难。保留游标和去重，在登记到 60 秒窗前按事件时间定龄。启动历史事件缺可校验时间时不得用观测到达时刻当作新死亡。 [启动预准备](../src/mc_agent/harness/curriculum.py#L2194) · [初始化](../src/mc_agent/harness/guardian.py#L321) · [读取时登记](../src/mc_agent/harness/guardian.py#L465) · [历史时间被覆盖](../src/mc_agent/bot.py#L52) · [避难门槛](../src/mc_agent/harness/agent.py#L1288)
+- **验收标准**：挂载旧轨迹启动时，历史游标推进到最新且 `recent_deaths=0`。再发入窗的两条不同 ID 的真实新死亡，重复回放同一个 ID 后仍只计两条，保护照常触发。实机用之前跑过的同槽，启动前 60 秒无真实死亡时不得出现历史误避难。 [D1 离线夹具](../../s-triage/tests/test_d1_repro.py)
+- **r45 同口径复现**：Day 1 HY4_3 EP01 L3 的后端最近死亡本地换算为 16:12:24.634 UTC，L8 在 16:36:17.746 UTC 误报近期 2 死，间隔 **1433.112s**。掩体失败后实际撤了 **4.6 格**，仍发生在首个 actor 决策前。 [旧时间](../runs/r45_day1_5bot/hy4_hy_3_bare/20261120-083549-772628.events.jsonl#L3) · [避难告警](../runs/r45_day1_5bot/hy4_hy_3_bare/20261120-083549-772628.events.jsonl#L8)
+- **r45 启动范围**：五个 Day 1 槽中，HY4_1、HY4_3、GuiTest、MoveTest 在首个模型前各有 **17／2／3／4** 条所谓近期死亡，仅 HY4_2 未打印此类启动告警。HY4_1 的避难在 actor +61.392s 返回，已凿并封顶三格掩体，`held_s=0`，首个模型于 +61.467s 才启动。旧时间直接证据在 HY4_3，该槽以外不据计数反推后端实际历史。 [HY4_1 避难与首请求](../runs/r45_day1_5bot/hy4_hy_1_bare/20261120-083545-758409.events.jsonl#L5)
+- **r46 观测口径**：3/5 个 Day 1 槽首个模型前出现告警（HY4_1 12，HY4_2 7，MoveTest 2）。HY4_1、HY4_2 各自最新后端死亡在告警前 **33.243／43.834s**，其余计入记录缺原始时间。历史误算的确定实据仍用 r43、r45 和离线夹具。 [HY4_1 起始后端时间](../runs/r46_day1_5bot/hy4_hy_1_bare/20261120-090007-333544.events.jsonl#L3) · [实际告警](../runs/r46_day1_5bot/hy4_hy_1_bare/20261120-090007-333544.events.jsonl#L8)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-078 | P1（地表寻村斥候把普通地下箱当作命中，反复零位移早停）| Slice C（`skills/library.py`）| 状态: FIXED（r46 24 次默认斥候 0 地下箱误停，同一地下箱已现场复验）
+
+- **影响**：默认寻村在半径 64 的方块扫描中把孤立 `chest` 当作村庄线索。常驻旧箱会令多个方向的重复调用在起点就返回 `target_found`，同时跳过独立的土路扫描，实际寻村无法推进。保留 BUG-075 的箱子分组回传覆盖。
+- **实据**：r45 的 HY4_9 EP02 6 条默认斥候均以 Y15 的同一组箱结束。首条在 Y64 看到 Y15 的箱，另外五条移动 0m。HY4_6 EP02 4 条均为 0m，从 Y80–81 看见 Y33 同一个箱。进行中的 5 路至少 29 条 `target_found` 只有普通箱可作为触发，无村民、床、钟等佐证。该数待终版重算。 [HY4_9 首次](../runs/r45_day2_wild_scout_9bot/hy4_hy_9_iron/20261120-083711-098504.events.jsonl#L23) · [HY4_9 重复零位移](../runs/r45_day2_wild_scout_9bot/hy4_hy_9_iron/20261120-083711-098504.events.jsonl#L46) · [HY4_6 原地](../runs/r45_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-083808-891436.events.jsonl#L18)
+- **源码与最小修复**：`76a5d5a` 将 `VILLAGE_LANDMARK_BLOCKS` 直接用作默认肯定命中集合，集合含 `chest`；`found |= name in targets` 不要求同高程或村庄佐证，置位后还短路独立土路查询。默认寻村应把普通箱作为伴随观察，要求地表可及的村庄证据后才结束航段。显式找箱调用保留独立语义。 [默认目标](../src/mc_agent/skills/library.py#L1407) · [跳过土路查询](../src/mc_agent/skills/library.py#L1454) · [命中条件](../src/mc_agent/skills/library.py#L1501)
+- **验收标准**：离线复现地表观察者与正下方 47–49 格的孤立箱，只返回伴随观察，默认寻村继续并仍可扫到地表土路。真实村庄地表标志仍提前停。实机相同地图核对默认寻村的地下箱独占 `target_found=0`，重复零位移消失，再核对实际地表位移和后续补给回执。
+- **同位置对照**：HY4_9 EP02 L224→225 从 `(-5006.6,63,-7671.5)` 默认向东，仍命中 Y15 箱、0m。L253→254 显式只找村民与铁傀儡，箱仍作为观察回传，同位置完成 5 段 **134.84m**，最终 `segment_limit`。 [默认](../runs/r45_day2_wild_scout_9bot/hy4_hy_9_iron/20261120-083711-098504.events.jsonl#L225) · [仅实体目标](../runs/r45_day2_wild_scout_9bot/hy4_hy_9_iron/20261120-083711-098504.events.jsonl#L254)
+- **r45 收官核查**：六个有终版的寻村集另两条仅原始轨迹有完整首趟，共 47 条技能回执。**29** 次 `target_found` 全是孤立普通箱，覆盖 **5** 路，其中 **24** 次 0m。HY4_10 追向 Y46 的箱坐标被围栏钳制，后续未开箱。新语义修正未被 r45 加载。 [追箱航点](../runs/r45_day2_wild_scout_9bot/hy4_hy_10_iron/20261120-083723-524840.events.jsonl#L177)
+- **r46 终版验收**：r45 的确认默认调用（两路仅原始轨迹）为 **29/33** 孤立箱触发，r46 **0/24**。六个实际派发寻村，默认遇箱且继续实移 **5** 次。HY4_7 看到与 r45 HY4_6 完全相同的 Y33 箱，仍推进 **72.66m**；真实堆肥桶和讲台可立即停。 [相同地下箱继续走](../runs/r46_day2_wild_scout_9bot/hy4_hy_7_iron/20261120-090127-093178.events.jsonl#L73) · [真实地标命中](../runs/r46_day2_wild_scout_9bot/hy4_hy_6_iron/20261120-090131-903705.events.jsonl#L20)
+- **r52 持续通过**：同八槽与 r47 相比，只有箱子的斥候回执 **23→16**，严格 `target_found` **0→0**，零位移 **9→2**。普通箱未触发提前停止，真实地标分支沿用 r46 正例。 [r52 有箱仍推进](../runs/r52_day2_wild_scout_9bot/hy4_hy_8_iron/20261120-213822-434393.events.jsonl#L84)
+
+---
+
+<!-- Archived: 历史早期工单（r11–r34），已被后续架构与 W20/W21 实测覆盖 -->
+### BUG-079 | **P1（Day 1 `harvest_logs` 29/29 报失败均 11s/木 + `mine_blocks` 混镐级整拒 + `scout_surface:in_water` 11x）** | Slice C（#4 Codex #2，`skills/library.py`）| 状态: OPEN（`8ec11f9` 已合入，r47 采木门槛未通过）
+
+- **一句话**：`r46_day1_5bot` 中 `mc_skill_harvest_logs` **29 次调用 100% 报 `ok=False`**（耗 827s 占 Day 1 总耗时 22.1%，单根原木平均 **11s**，44s 仅砍 4 根）；`mc_skill_mine_blocks` 混入 `iron_ore` 时木镐被整次拒绝；`r46_day2` 中 `scout_surface` 剩余 15 次失败里 **11 次是 `in_water`**。
+- **实测证据（`r46_day1_5bot` / `r46_day2_wild_scout_9bot`）**：
+  - `harvest_logs`：`time_budget` 15 次、`unreachable_targets` 6 次、`no_drops_collected` 4 次；多条 `(44.1s, dug=4, gained={'oak_log': 4})`、`44.0s, dug=5`——每砍 1 块原木都要重新寻路换树，而非站在同一棵树干下原地竖砍 `y..y+3`。
+  - `mine_blocks`：木镐调用 `["stone", "coal_ore", "iron_ore"]` 直接 0s 返回 `tool_tier_insufficient` 整批拒绝，未跳过 `iron_ore` 去挖 `stone`/`coal_ore`。
+  - `scout_surface`：`r46_day2` 30 次调用中 11 次因 `in_water` 提前中断。
+- **最小修复**：
+  1. **同树干原地竖砍（提速 4–5x）**：`_dig_target_blocks` 在砍原木时，到达某树干 `(x, y, z)` 后，优先连续原地砍完同一垂直柱 `(x, y..y+3, z)`（无需重新 `move_to`），再统一拾取掉落物；达到 `time_budget` 时若已入包 `>= 4` 块原木，返回 `ok=True, partial_progress=True`（附明确数量）避免模型误判失败反复重砍；
+  2. **`mine_blocks` 混合镐级容错**：当 `block_types` 同时包含可挖方块（如 `stone`/`coal_ore`）和当前镐级挖不动的方块（如 `iron_ore`）时，仅剔除不可挖项（在返回体附 `skipped_unmineable`）并继续挖剩余合法目标；仅全部不可挖才返回 `tool_tier_insufficient`；
+  3. **`scout_surface:in_water` 绕岸兜底**：遇到 `in_water` 时先尝试 1 次短距回干岸 + `±90°` 偏航再决定是否终止，减少水边早停。
+- **验收标准**：离线单测覆盖“同树干原地连砍 4 根原木不重寻路”、“木镐混传 `stone+iron_ore` 自动跳过 `iron_ore` 挖 `stone`”、“`scout_surface` 遇水先绕干岸”；实机 Day 1 `harvest_logs` 失败率从 100% 降至 `< 20%`，单次 15–20s 稳拿 6+ 根原木。
+- **D1 r47 终版复验**：r46→r47 已配对采木 **29→25**，排除反射后失败 **27/27→12/21（57.1%）**，仍高于 **20%**。技能耗时中位 **44.039→20.583s**，3 次净收至少 6 根，最快 **24.308s**，20s 内 **0/21**。按失败回执计 `time_budget` **15→4**、`unreachable_targets` **6→2**，另有一次 44.046s 收 6 根的超时部分成功。两条 r47 的 `tool_tier_insufficient` 均报告角色无镐，木镐混传暴露仍待新样本。Day 2 斥候有效回执 `in_water` **11/27→9/61**，新增 3 次 `shore_recoveries`，HY4_8 仍有 6 次涉水早停。 [最快六根](../runs/r47_day1_5bot/hy4_hy_1_bare/20261120-095716-917129.events.jsonl#L62) · [超时部分成功](../runs/r47_day1_5bot/hy4_hy_1_bare/20261120-100243-715803.events.jsonl#L71) · [无镐拒绝](../runs/r47_day1_5bot/hy4_hy_2_bare/20261120-101249-037804.events.jsonl#L116) · [上岸续跑](../runs/r47_day2_full_day_scout_9bot/nju_ds_1_iron/20261120-100224-945668.events.jsonl#L164)
+- **r49 拾取核验补丁实测**：实际为 `852b6c9`（包含 `f2f84d8`）。裸装 8 路开跑，采木 31 配对、2 次反射，技能失败 **18/29（62.1%）**、中位 **30.831s**。5 次证实净收 ≥6 根，20 秒内 0 次，两项仍未达标。r47 裸装与本波槽位不同，记录门槛变化。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-080 | **P1（下界要塞 `mc_skill_tunnel:unsafe_or_unknown_floor` 29x + 下界高速斥候外推）** | Slice C（#4 Codex #2，`skills/library.py` + `harness/mc_tools.py`）| 状态: OPEN（r51 要塞斥候已接入，导航和烈焰棒剧本入口待验）
+- **晨报的两槽 205 分需带期初及验证口径。** Long3 H2 期初 160，EP02 现场验证要塞 +30，计分终版 205。H3 期初已 190，堡垒在期初分项，10 集唯一新增分为挡箭 +15，整槽目标验证 0。两槽期末榜分相同，集内目标成果不同。 [晨报](overnight-report-20261123.md#L31) · [H2 终档](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/wild-endurance-wild-20261122-123932.json) · [H3 终档](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/wild-endurance-wild-20261122-123932.json)
+- **B `f646097` 已补零接触超时回执。** 近战／冲锋超时以实连接命中为准，旧回执缺字段才用 `hits`。挥击而无命中时保留 `swings` 并将进展用 `hits` 归零，外层返回 `time_budget` 和需重规划。D1 定向 **15 项通过**，包含真实调度／防重的同站同参只派 1/3、挥 2 中 0、命中或击杀仍保留。C 另将 H2 EP08 八份实机底层回执逐条重放，8/8 首次报 `time_budget`、保留原结果，每份只实派 1/3。候选未合入 `b04a430`，与课内缺射击入口及失去安全落脚分别验。 [真实超时](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-132153-573347.events.jsonl#L517) · [适配改动](../../s-combat/src/mc_agent/skills/combat_adapter.py#L297) · [真实防重夹具](../../s-combat/tests/test_generation_guard.py#L17069)
+- **Long3 H2 EP08 烈焰棒课再陷零命中战斗与失去路线。** 13 次战斗宏中 5 次落脚拒绝，另 7 次 rush、1 次 melee 均为外层成功、内层超时、零命中，共 **161.345s**。C 用 L517 真实回执在原防重与调度回放，同站同参实际派发 3/3；仅结构化为零命中超时后为 1/3。把同回执改为挥击 2、实连接 0，调度仍认失败，防重又放行 3/3。防重优先读 `hits_connected`，仅旧版缺字段时回退 `hits`。保留原始战斗细节，验无成果能触发改路、实际命中与击杀仍如实呈现。L687 解卡破 7 下界砖但位置不变，后续短柱 Y53→58 真走；后段仍无安全突进路径，无烈焰棒验证。H3 EP07 从前集柱顶附近接课，整集 448.075s 后仍在 Y124 附近，横移两方向各一格，取回两块圆石后仍无回退路线。 [适配层成功判据](../src/mc_agent/skills/combat_adapter.py#L290) · [防重命中判据](../src/mc_agent/harness/agent.py#L802) · [H2 melee 超时](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-132153-573347.events.jsonl#L357) · [H2 rush 超时](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-132153-573347.events.jsonl#L517) · [H2 解卡位置](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-132153-573347.events.jsonl#L687) · [H3 柱顶复访](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-132615-199228.events.jsonl#L808)
+- **Long3 H3 EP06 找要塞，两次直柱共放 100 格。** 第一柱 Y64→104 后被火球命中、最终坠死。回场后第二柱 Y64→124，遇真实基岩，南向下梯零步、三次隧道无支撑、两次因缺桥失败。十次成功柱升共 119.600s，任务 484.5s 结束未验证。后续按真实目标高度和可下撤路径验，避免把柱升进度算成找到要塞。 [首柱端点](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-131810-618352.events.jsonl#L481) · [坠死](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-131810-618352.events.jsonl#L513) · [第二柱基岩](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-131810-618352.events.jsonl#L830) · [缺桥](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-131810-618352.events.jsonl#L1221)
+- **Long3 H2 EP03 烈焰棒课有弓箭但缺射击接口。** L337 独立包弓 1、箭 32。课程文字的 `mc_skill_combat(action='attack',entity_id=...)` 无法按真实 schema 准备；可用调用 `mode='auto',target_name='blaze'` 三次被 Guardian 判追击落脚不安全。C 在 `dc58897` 的真实 compact registry 复现 17 项不含 `mc_shoot`，仅向该课附加它即变为 18 项且规范请求能准备。待整合方修正示例与白名单，再用同类站位核安全远攻、实际击杀和烈焰棒入包。 [当前课程](../src/mc_agent/harness/curriculum.py#L789) · [三次拒绝之一](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-124126-040839.events.jsonl#L239) · [实包](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-124126-040839.events.jsonl#L337) · [末次拒绝](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-124126-040839.events.jsonl#L459)
+- **Long3 H3 堡垒 EP01 重现整块支撑被拒。** L206 目标脚下读到 `polished_blackstone_bricks`，回 `unsafe_or_unknown_floor`、零步零破。另向北上行由 Y76 实到 Y83，与同集无落脚撤退分开。A 已复现材质判定，实载后验真支撑正常通过和空气仍拒。 [支持方块](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-123947-876102.events.jsonl#L206) · [实走的分岔](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-123947-876102.events.jsonl#L229)
+- **L2 H2 要塞 EP01，黑曜石支撑拒绝 10 次、实际破格 0。** 首生从 `(1856.5,64,1808.5)` 东、北探路，各报实心黑曜石。岩浆死后明确回原锚，相同东、北支撑格再拒。十条耗时合计不足 1s，损失体现在下一轮选路；其中一条退回平台，其余九条首尾位置相同。C/A 已收到。实机验预置平台离场成功，并保留空洞、流体和相邻危险块拒绝。 [首生东向](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L104) · [死亡回锚](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/stdout.log#L151) · [回锚东向](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L812) · [支撑判定](../src/mc_agent/skills/tunnel.py#L131)
+
+- **HY4 W9 过门正例之后卡在出口。** H3 EP01 确实进下界并验收。EP02 在 `[5648.5,88,4051.5]` 南北隧道均点名相邻黑曜石支撑，因 `nether_tunnel_floor_unsupported` 零位移；拆下一块黑曜石实入包后，同一 XZ 的 Y87 南北改报 `bridge_gap_ahead`、仍零位移，集尾 320.800s 超时。四向楼梯也都零施工。南北这两格已见实体，其他方向仍缺完整支撑读回。验收用新生成下界出口，保留已验证过门，同时验证首段安全离门实际位移以及第一次可行斥候；另保留真实空洞拒绝。 [进下界](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073651-176424.events.jsonl#L213) · [未动首证](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073930-374154.events.jsonl#L227) · [拆后仍未动](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073930-374154.events.jsonl#L595) · [集尾](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073930-374154.events.jsonl#L702) · [两类落脚回执](../src/mc_agent/skills/library.py#L6645)
+
+- **Wave10 要塞平台的实心支撑仍被拒。** H6 EP01 起步地面是场景预置黑曜石。L119/L140 东、南两向均在 Y63 实体黑曜石回 `nether_tunnel_floor_unsupported`，零移动和破格。固定集成真实 actor 用原坐标模拟，空头脚格与同一足下点仅换支撑：黑曜石拒绝、石头移动一格、空气与岩浆仍拒绝，四例不挖地面。建议给可核的实心黑曜石通路独立验收，保留洞口及流体拒绝。H5 EP01 扫见砖和烈焰人但只在 Y64 横移 2.236m，未验；EP02 实升 Y64→65→68，随后正式验证，可作「扫到」与「实际进入」的现场对照。 [H6 黑曜石支撑](../runs/5ease_l1_wave10_20261122/hy_5e_6_nether_fortress/20261122-053442-631134.events.jsonl#L119) · [场景平台](../scripts/l3_wild_endurance_runner.py#L685) · [隧道支撑门](../src/mc_agent/skills/tunnel.py#L129) · [H5 第二集实际升高](../runs/5ease_l1_wave10_20261122/hy_5e_5_nether_fortress/20261122-053501-595104.events.jsonl#L310) · [要塞实际验证](../runs/5ease_l1_wave10_20261122/hy_5e_5_nether_fortress/20261122-053501-595104.events.jsonl#L369)
+
+- **r82 门户实际过门后再次集中拒绝**。HY4_8 EP05 验证入下界，EP06／07 均未验证要塞，累计 **17** 次 `unsafe_nether_route`（6／11），终版留在下界。拒绝落在斥候的安全地形探测阶段，仍缺新可走方向的实机证据。 [过门终版](../runs/r82_midgame_portal_30m/hy4_hy_8_midgame/wild-endurance-r82_midgame_portal_30m_hy_8_midgame-20261121-203233.json#L251) · [EP07 首条](../runs/r82_midgame_portal_30m/hy4_hy_8_midgame/20261121-205557-121952.events.jsonl#L18) · [EP07 末条](../runs/r82_midgame_portal_30m/hy4_hy_8_midgame/20261121-205557-121952.events.jsonl#L674) · [安全探测](../src/mc_agent/skills/library.py#L1564)
+
+- **r67 真实入下界后的新锚点**：HY4_8 EP06、HY4_9 EP05／06 合计 **19** 次 `unsafe_nether_route`（7／9／3）。三条堡垒集均未验证。首次各在门边 Y56，单次 0m、已有多方向拒绝回执；HY4_9 EP06 在稍后探索中死于岩浆，回主世界后找到已亮传送门并再次进入。 [HY4_8 首次拒绝](../runs/r67_midgame_portal_3bot/hy4_hy_8_midgame/20261121-073408-443583.events.jsonl#L20) · [HY4_9 首次拒绝](../runs/r67_midgame_portal_3bot/hy4_hy_9_midgame/20261121-072051-436801.events.jsonl#L20) · [回程后已亮门](../runs/r67_midgame_portal_3bot/hy4_hy_9_midgame/20261121-072808-164375.events.jsonl#L659)
+
+- **一句话**：`r48_nether_fortress_9bot` 6/9 找到要塞，但导航阶段出现 **29 次 `mc_skill_tunnel:unsafe_or_unknown_floor`**（5 bots）、**33 次 `movement_not_confirmed`**（7 bots）、**28 次 `path_not_found`**（4 bots），且 `mc_skill_scout_surface` 尚未支持 `the_nether` 维度（导致下界仍靠手动短步寻路）。
+- **实测证据**：[r48_nether_fortress 榜单](../runs/r48_nether_fortress_9bot/triage-r48_nether_fortress_9bot.md)（9/9 完成，0 崩溃，0 慢调用，但 90 次导航失败）。
+- **最小修复**：
+  1. `mc_skill_tunnel` 在下界桥面/要塞走廊遇 `unsafe_or_unknown_floor` 时，若包内有 `cobblestone`/`netherrack`/`blackstone` 且脚下 1 格为空气（非岩浆），自动垫 1 格安全方块再继续，或返回明确的 `bridge_gap_ahead` 建议改向，不再盲目重复触发 29 次；
+  2. 将 `mc_skill_scout_surface` 外推支持 `the_nether`（或放宽维度检查）：下界沿安全实心下界岩/地狱砖分段推进（步长 16–20m），自动避开 `lava`/`magma_block`/悬崖，每段优先扫 `nether_bricks`/`spawner`/`nether_wart`/`blaze`/`wither_skeleton`，绝不被 `netherrack` 淹没。
+- **验收标准**：离线单测覆盖“下界 `scout_surface` 避岩浆/岩浆块并命中 `nether_bricks`/`blaze` 早停”和“`tunnel` 空隙提示/垫脚”；实机 `nether_fortress` 导航失败大幅下降、`obtain_blaze_rod` 破零。
+- **D1 原始基线**：配对同一集工具起止，r48 下界 `tunnel:unsafe_or_unknown_floor` **30 次/6 路**，其中 **13** 条空气、**17** 条为已识别固体；`move_to:movement_not_confirmed` 33、`move_to:path_not_found` 32。另有挖掘和交互各一次寻路失败，整波 34。r48 指纹 `dcf003d816873b36` 和 r49 指纹 `0de7d140b4d3343e` 都早于 `643f2f1`。下界斥候与烈焰棒仍待新版本实机。 [空气间隙](../runs/r48_nether_fortress_9bot/nju_nju_3_nether_fortress/20261120-103419-975489.events.jsonl#L391) · [固体样本](../runs/r48_nether_fortress_9bot/hy4_hy_10_nether_fortress/20261120-103658-952025.events.jsonl#L103) · [榜单差异补漏](../runs/r48_nether_fortress_9bot/hy4_hy_5_nether_fortress/20261120-102651-372216.events.jsonl#L960)
+- **r50 接线未完成**：两个下界正式剧本 `find_fortress` 和 `obtain_blaze_rod` 的 compact 工具注册表都没有 `mc_skill_scout_surface`。离线直接构造剧本工具表，得到 16／17 项且无斥候；同一注册器的 `follow_ender_eye` 有斥候。最小修复是给两个下界剧本加该工具并在任务中明确用它搜要塞和烈焰人，保留已合入的下界地形检查。r50 有新版空气空隙分类回执，斥候仍需入口修复后现场验收。 [剧本工具](../src/mc_agent/harness/curriculum.py#L767) · [compact 注册](../src/mc_agent/harness/mc_tools.py#L3473) · [空气间隙](../runs/r50_nether_fortress_9bot/hy4_hy_8_nether_fortress/20261120-203803-299692.events.jsonl#L504) · [离线工具表夹具](../../s-triage/tests/test_d1_repro.py#L203)
+- **r50 终版**：同九槽、20→30 分钟，位置已重新布置。空气缺口 **9** 次、不支持实心地板 **45** 次，通用错误 **5** 次均是重生锚。隧道地板失败 **30/30→59/60**，直接移动无路及未确认合计 **65/130→148/201**；两波均无下界斥候。烈焰棒派发 **0→9**，验证 **0→1**。HY4_10 EP02 在烈焰人受击后见烈焰棒实体，接近坐标后触发成就。 [当前实心地板](../runs/r50_nether_fortress_9bot/hy4_hy_10_nether_fortress/20261120-204226-511973.events.jsonl#L211) · [烈焰棒实体](../runs/r50_nether_fortress_9bot/hy4_hy_10_nether_fortress/20261120-203725-588843.events.jsonl#L599) · [终版成就](../runs/r50_nether_fortress_9bot/hy4_hy_10_nether_fortress/wild-endurance-r50_nether_fortress_9bot_hy_10_nether_fortress-20261120-202728.json#L150)
+- **`347c444` 接入一条路径，r51 已上机**：新版 compact 里 `find_fortress` 已有斥候，`obtain_blaze_rod` 仍缺。D1 三例夹具验证该变化；r51 下界指纹 `afc99354919f3eac`，后续以首次派要塞目标时的真实工具调用验收。 [新要塞剧本](../src/mc_agent/harness/curriculum.py#L767)
+- **r51 首次真实斥候**：HY4_5 EP02/03 已调用新工具，都从 `(-2271.1,64,3935.4)` 原地命中地狱砖和烈焰人，最近砖 Y54，回执 0 段、0m。EP02 以 `answered` 结束并马上重派，说明新工具已进正式运行入口，附近检测与抵达要塞仍需两个回执。 [EP02 斥候](../runs/r51_nether_fortress_9bot/hy4_hy_5_nether_fortress/20261120-210418-059840.events.jsonl#L21) · [集尾](../runs/r51_nether_fortress_9bot/hy4_hy_5_nether_fortress/20261120-210418-059840.events.jsonl#L51)
+- **r51 终版**：8/9 开跑，6 次要塞派发均先用斥候。17 次配对全部命中实物，均 0 段/0m，最终要塞任务 **0/6**；同 8 槽 r50 为 **2/7**。后续 24 次移动中，20 次试图接近当前扫描地标，3 成功、8 未确认、6 无路、3 中断。直接移动无路加未确认 **134/183→108/170**，隧道地板阻断 **51/52→60/62**；分支仍缺斥候推进暴露。烈焰棒验证 **1/9→2/10**，由当前战斗剧本取得。 [近 2.8m 的地标](../runs/r51_nether_fortress_9bot/hy4_hy_10_nether_fortress/20261120-211237-269729.events.jsonl#L21) · [抵近寻路失败](../runs/r51_nether_fortress_9bot/hy4_hy_10_nether_fortress/20261120-211237-269729.events.jsonl#L45) · [烈焰棒验证](../runs/r51_nether_fortress_9bot/hy4_hy_8_nether_fortress/20261120-212806-481545.events.jsonl#L198)
+
+- **r53 同八槽**：要塞任务 **0/6→1/10**，烈焰棒 **2/10→1/8**。三十条下界斥候全部原地命中（0 段、0m），无推进暴露。DS_1 EP04 第一次接近失败、施工时坠落死亡，重生再原地侦测，最后直接移动到地狱砖边才触发要塞验证。移动无路与未确认合计 **108/170→149/200**；隧道地板拒绝 **60/62→63/72**，r53 包括 49 条不支持地板、11 条空隙、3 条通用拒绝。烈焰棒亦由战斗、实物检测、接近后验证。 [零位移斥候](../runs/r53_nether_fortress_9bot/nju_ds_1_nether_fortress/20261120-220209-917406.events.jsonl#L310) · [抵达要塞](../runs/r53_nether_fortress_9bot/nju_ds_1_nether_fortress/20261120-220209-917406.events.jsonl#L346) · [烈焰棒实物](../runs/r53_nether_fortress_9bot/hy4_hy_8_nether_fortress/20261120-221958-613457.events.jsonl#L219)
+- **r54 同四锚点**：要塞目标 **0/4→1/5**，烈焰棒 **1/3→0/6**。斥候 **12→17** 条全为 0m，r54 16 条命中、1 条危险拒绝。唯一要塞目标成交来自 HY4_8 EP03，反复原地检测后，用普通移动靠近再阶梯下探，末段走到 Y57.9 的地狱砖旁才验证。 [原地斥候](../runs/r54_nether_fortress_6bot/hy4_hy_8_nether_fortress/20261120-232802-376779.events.jsonl#L624) · [阶梯推进](../runs/r54_nether_fortress_6bot/hy4_hy_8_nether_fortress/20261120-232802-376779.events.jsonl#L666) · [移动与成交](../runs/r54_nether_fortress_6bot/hy4_hy_8_nether_fortress/20261120-232802-376779.events.jsonl#L744)
+- **r55 起跑优先级仍被覆盖**：`30fda6a` 将要塞与烈焰棒课程设为 tier 2，五路已加载对应源码，首集仍全是远古残骸。目标选择在实际下界把符合前置的正式下界课程改为 tier 1，再用负分值排序；通用远古残骸也在普通下界候选进入 tier 1，且属于无条件目标，60 分排在 30 分之前。应在最终下界排序层保留目标优先级，验收同一装载、三个目标均可选时首集优先要塞。 [首集原件](../runs/r55_nether_fortress_5bot/nju_nju_3_nether_fortress/20261120-234410-247343.events.jsonl#L1) · [正式课程覆盖](../src/mc_agent/harness/curriculum.py#L1586) · [通用候选](../src/mc_agent/harness/curriculum.py#L1613) · [排序元组](../src/mc_agent/harness/curriculum.py#L1650)
+
+- **r55 同四锚点终版**：直接移动无路加未确认 **84/108→61/95**，隧道地板类拒绝 **38/43→40/45**。11 条斥候全原地命中。要塞 **1/5→0/3**、烈焰棒 **0/6→0/3**。HY4_5 EP03 从 Y64 看到 Y54 地狱砖却无法直接靠近，集末仍在同平台。唯一验证是 HY4_8 古残骸 +60，实际取物步骤缺成对成功挖掘回执。 [隔层检测](../runs/r55_nether_fortress_5bot/hy4_hy_5_nether_fortress/20261120-235341-392278.events.jsonl#L18) · [末段仍在同平台](../runs/r55_nether_fortress_5bot/hy4_hy_5_nether_fortress/20261120-235341-392278.events.jsonl#L727) · [古残骸验证](../runs/r55_nether_fortress_5bot/hy4_hy_8_nether_fortress/wild-endurance-r55_nether_fortress_5bot_hy_8_nether_fortress-20261120-234417.json#L124)
+- **r56 同五锚点首集排序通过**：`86edbe5` 在下界最终排序为要塞和烈焰棒保留 tier 0。实际指纹 `1a4ff6e724dbbb4b`，要塞首集 **0/5→5/5**。已结集的 HY4_7／9 首两集仍仅 `answered`，下一集回到残骸；同距检测与到达、棒转化继续验收。 [实际派单](../runs/r56_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261121-001752-415575.events.jsonl#L1) · [原地检测](../runs/r56_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261121-001752-415575.events.jsonl#L18) · [最终排序](../src/mc_agent/harness/curriculum.py#L1586)
+- **r56 同五槽终版**：要塞 **0/3→3/10**，烈焰棒 **0/5→1/7**，总验证 **1→4**。HY4_8 EP02 击杀烈焰人后验证烈焰棒。斥候 11→25 条依旧 0m，直接移动无路和未确认 **80/119→94/144**，隧道地板类拒绝 **54/59→21/26**。保留 OPEN 追踪斥候推进和楼层接近。 [代表要塞完成](../runs/r56_nether_fortress_5bot/nju_nju_3_nether_fortress/20261121-001742-397963.events.jsonl#L1006) · [烈焰人击杀](../runs/r56_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-002147-056166.events.jsonl#L104) · [烈焰棒验证](../runs/r56_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-002147-056166.events.jsonl#L111)
+
+- **r57 同五槽终版**：要塞 **3/10→1/10**，烈焰棒 **1/7→1/4**。22 条斥候全为 0m，直接移动无路或未确认 **94/144→82/138**，隧道地板类拒绝 **21/26→20/22**。HY4_7 EP10 经两次阶梯到地狱砖附近才验证要塞，HY4_8 EP05 在楼梯下探和战斗后实际击杀并取到棒。 [要塞斥候](../runs/r57_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261121-011150-847653.events.jsonl#L22) · [抵达验证](../runs/r57_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261121-011150-847653.events.jsonl#L328) · [击杀与物品](../runs/r57_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-011112-993776.events.jsonl#L623)
+
+- **r58 同五槽终版**：要塞 **1/10→1/12**、烈焰棒 **1/4→1/6**，两项全是 HY4_8。实走下探和直接击杀拿棒，斥候 28 次里 26 条结构化移动回执均 0m，另 2 条无可计位移。直接移动无路或未确认 **82/138→93/134**，隧道地板类拒绝 **20/22→22/25**。 [要塞下探](../runs/r58_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-012837-791102.events.jsonl#L562) · [烈焰棒入包](../runs/r58_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-013745-338680.events.jsonl#L398)
+
+- **r59 同五槽终版**：要塞 **1/12→1/11**、烈焰棒 **1/6→1/5**，仍是 HY4_8，33 次斥候全 0m。直接移动无路或未确认 **93/134→81/115**，隧道地板类拒绝 **22/25→24/28**。 [要塞集验证](../runs/r59_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-015305-124376.events.jsonl#L91) · [烈焰棒集验证](../runs/r59_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-020201-890698.events.jsonl#L322)
+- **r60 同五槽终版**：石器误派 1→0，要塞验证仍一集，烈焰棒 **1/5→0/6**。斥候 30 条没有位移。直接移动无路或未确认 **81/115→96/145**，隧道地板类 **24/28→35/37**。 [要塞验证](../runs/r60_nether_fortress_5bot/hy4_hy_8_nether_fortress/20261121-023733-295063.events.jsonl#L203) · [原地斥候](../runs/r60_nether_fortress_5bot/hy4_hy_7_nether_fortress/20261121-022434-902864.events.jsonl#L18)
+
+- **r61 同五槽转化**：正式要塞 **1/11→2/10**，烈焰棒 **0/6→0/8**。24 条斥候仍无位移，移动无路或未确认 **96/145→88/133**。 [HY4_8／NJU_3 证据汇总](../../s-triage/docs/D1-r11-triage.md)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-081 | P1（末影之眼测向正确，模型把 Minecraft 方位当罗盘方位反向追踪）| Slice C + Slice D2（工具回执与场景任务）| 状态: FIXED（r56 首调 0/9 背向或垂直，同要塞验证 1/7）
+
+- **影响**：`r49_stronghold_end_5bot` 两个实际开跑槽共 27 次成功掷眼，5 集均未进入要塞或末地。两路均有原始向量指向和下一次斥候命令反向的实据，浪费剩余寻路和探洞预算。
+- **实据**：MoveTest EP01 `eye_vector=[-0.1,+0.8], bearing_deg=6` 指南，下一调 north，最后一次斥候落在 `(-5660.6,67.2,-6409.5)`。HY4_1 EP01 `[+0.6,-0.5], bearing_deg=228` 指东北，下一调 southwest 且按该方向完成主段。 [MoveTest 向量](../runs/r49_stronghold_end_5bot/nju_movetest_01_village_to_stronghold_end/20261120-104400-405972.events.jsonl#L1234) · [MoveTest 反向](../runs/r49_stronghold_end_5bot/nju_movetest_01_village_to_stronghold_end/20261120-104400-405972.events.jsonl#L1270) · [HY4_1 向量](../runs/r49_stronghold_end_5bot/hy4_hy_1_village_to_stronghold_end/20261120-104503-073972.events.jsonl#L196) · [HY4_1 反向](../runs/r49_stronghold_end_5bot/hy4_hy_1_village_to_stronghold_end/20261120-104503-073972.events.jsonl#L240)
+- **源码与最小修复**：`mc_use_item` 将服务端的向量和角度原样透传，场景提示解释了正 X 向东和正 Z 向南，仍由 actor 换算。对有效且非零的真实末影之眼向量，按斥候八向确定性回传可直接传入的方向；到达位移后重新测向，保留围栏和水边安全检查。 [透传](../src/mc_agent/harness/mc_tools.py#L1874) · [八向枚举](../src/mc_agent/skills/library.py#L51) · [场景提示](../scripts/l3_wild_endurance_runner.py#L1783)
+- **验收标准**：离线覆盖两条已见向量及八象限、零向量和缺失向量。实机同锚点从首个有效测向启动，核对首次斥候朝向与向量一致，遇障绕行后有下一次测向，最终确认 `follow_ender_eye`。进入末地按 SCENE-003 单独验证。
+
+- **r50 已配对原件复现**：已加载 `cc133e1` 的 HY4_3 EP01 连续两次收到 `[-0.6,+0.5]`，应沿西南，下一调用传 northwest 并向西北完成五段、141.49m。HY4_1 EP01 另有合法投眼回执向量 `[0,0]`、角度 0，应提示重新取样。该波仍进行中。 [两次向量之一](../runs/r50_stronghold_end_3bot/hy4_hy_3_village_to_stronghold_end/20261120-202749-504291.events.jsonl#L83) · [错误斥候](../runs/r50_stronghold_end_3bot/hy4_hy_3_village_to_stronghold_end/20261120-202749-504291.events.jsonl#L106) · [五段回执](../runs/r50_stronghold_end_3bot/hy4_hy_3_village_to_stronghold_end/20261120-202749-504291.events.jsonl#L107) · [零向量](../runs/r50_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-202732-947451.events.jsonl#L18)
+- **r50 终版**：三路均启动，共 15 集、0 要塞验证、0 末地。50 次成功投眼，1 次零向量。有向量与后续首调可配的 43 组里，25 组首调前向（17 组是最近八方）、17 组背向、1 组垂直。HY4_2 EP01 三次把东北向量传成西南，每次完成约 142–144m；最后库存三个槽为 3／0／6 眼。 [一次完整背离](../runs/r50_stronghold_end_3bot/hy4_hy_2_village_to_stronghold_end/20261120-202748-251829.events.jsonl#L599) · [零向量](../runs/r50_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-202732-947451.events.jsonl#L18) · [终版](../runs/r50_stronghold_end_3bot/triage-r50_stronghold_end_3bot.md#L3)
+- **r51 起跑复核**：`347c444` 改了通用 `follow_ender_eye` 提示，但场景覆盖仍用 `STRONGHOLD_FOCUS`。HY4_2、HY4_3 的 r51 首集仍写初始 14 颗，提示中没有通用剧本的折半回退，工具也未增加确定性航向。应在两条入口共用回执方向及续航策略后复验。 [r51 已派发提示](../runs/r51_stronghold_end_3bot/hy4_hy_2_village_to_stronghold_end/20261120-210133-121646.events.jsonl#L1) · [覆盖入口](../scripts/l3_wild_endurance_runner.py#L1781)
+- **D1 复验门禁**：按每次有效眼向量和下一次斥候首个请求配对，排除零向量、被新向量取代和无后续首调，单列自动或未给方向。r49 **13/21** 首调背向或垂直，r50 为 **18/43**。进行中波次保留临时标签。 [采样与向量分组](../../s-triage/scripts/d1_ticket_gates.py#L98)
+- **r51 终版**：2/3 开跑、10 集、0 要塞或末地验证。38 次有效投眼形成 28 个首调用配对，**8** 背向且无垂直。HY4_2 EP02 依据 `[+0.8,-0.3]` 向东 145.83m，距真实要塞约 508→377m。EP03 把 `[+.5,-.6]` 传成西南并移动 141.42m，距要塞约 429→570m。 [前向推进](../runs/r51_stronghold_end_3bot/hy4_hy_2_village_to_stronghold_end/20261120-211037-364574.events.jsonl#L339) · [背向推进](../runs/r51_stronghold_end_3bot/hy4_hy_2_village_to_stronghold_end/20261120-211822-415551.events.jsonl#L697)
+- **r54 修复已加载，首调用实测**：`8792469` 的源摘要与首批 actor `d16997103e8aeb82` 一致，包含 `84e77ff`。HY4_1 EP01 `[+.7,-.4]` 回传 `scout_direction=northeast`，首调采用并走 **85.57m** 后遇水，随后复投回传 `east`。HY4_2 EP01 `[+.3,-.8]` 回传 `north`，首调同向。等待终版首调门禁及要塞验证。 [东北回执](../runs/r54_stronghold_end_4bot/hy4_hy_1_village_to_stronghold_end/20261120-231022-523804.events.jsonl#L34) · [遇水前位移](../runs/r54_stronghold_end_4bot/hy4_hy_1_village_to_stronghold_end/20261120-231022-523804.events.jsonl#L75) · [避障后复投](../runs/r54_stronghold_end_4bot/hy4_hy_1_village_to_stronghold_end/20261120-231022-523804.events.jsonl#L103) · [北向首调](../runs/r54_stronghold_end_4bot/hy4_hy_2_village_to_stronghold_end/20261120-231037-069823.events.jsonl#L39) · [离线夹具](../tests/test_skills_and_providers.py#L2725)
+- **r54 终版**：39 次成功投眼均给航向，34 条首调配对 **0 背向、0 垂直、32 与推荐完全相同**。固定村庄、要塞的 r50 同两槽背向／垂直 **15/29→0/34**。HY4_1／2 两路均实际调整出生坐标，均跑 1800s。34 条明确给方向并完成位移的配对回执有三条输出反半平面方向，全在 HY4_1；EP01 发向东后，工具向西南走五段 **141.42m**，距调用前最近已见锚点 ΔX=−100m、ΔZ=+100m。源码遇障允许大角度折向并用新方向跑余下段。建议在显式追眼方向遇宽绕时返回需重新测向的回执，并用同一个锚点分别核对请求、实际净位移及最终成就。全波 9 集要塞目标 0 验证。 [调用前已见位置](../runs/r54_stronghold_end_4bot/hy4_hy_1_village_to_stronghold_end/20261120-231022-523804.events.jsonl#L361) · [实际逆向](../runs/r54_stronghold_end_4bot/hy4_hy_1_village_to_stronghold_end/20261120-231022-523804.events.jsonl#L382) · [EP03 另例](../runs/r54_stronghold_end_4bot/hy4_hy_1_village_to_stronghold_end/20261120-232713-238376.events.jsonl#L810) · [宽绕选向](../src/mc_agent/skills/library.py#L1657) · [更新航段方向](../src/mc_agent/skills/library.py#L1589)
+- **r55 启动仍被场景覆盖**：三槽指纹 `023cf817bbf166f4` 确认加载 `132e530`，实际首集仍由 `STRONGHOLD_FOCUS` 构造，提示拾回眼、每段下挖八步，未包含通用课程的 100m 规则。HY4_1 首集间隔约 **38.85m** 复投，中途捡回 1 眼；DS_1 有一次约 **46.45m** 复投。通用提示还要求 `scout_heading`，实际回执字段是 `scout_direction`。优先统一真实派单入口与回执字段，再复验实际水平位移及确认翻向后的下探。 [实际提示](../runs/r55_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-234238-245897.events.jsonl#L1) · [拾眼](../runs/r55_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-234238-245897.events.jsonl#L218) · [短距复投](../runs/r55_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-234238-245897.events.jsonl#L235) · [场景覆盖](../scripts/l3_wild_endurance_runner.py#L1827) · [通用提示](../src/mc_agent/harness/curriculum.py#L804) · [字段实现](../src/mc_agent/harness/mc_tools.py#L1910)
+
+- **r55 翻向后仍继续追眼**：HY4_1 EP01 从 `[-.5,-.6]` 翻至 `[+.6,+.6]`（点积 −.66），随后依次捡物、扫描实体和向东南走 141.78m，过程中没有下行楼梯；再次投眼又翻回西北。新通用课程的转向下挖步骤未进入这条派单。 [西北向量](../runs/r55_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-234238-245897.events.jsonl#L672) · [首次翻向](../runs/r55_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-234238-245897.events.jsonl#L730) · [翻向后航段](../runs/r55_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-234238-245897.events.jsonl#L790) · [再次翻向](../runs/r55_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-234238-245897.events.jsonl#L808)
+- **候选三角定位离线复跑**：`e4cf01b` 增加侧移、双射线估算及钻地识别，`6c7a1ad` 把估算坐标写入后续要塞任务。D1 12 项离线夹具通过。用 r54 两路首两次真实向量及最近已见坐标回放，估点距各自要塞 locate 点约 **30.02m／25.50m**。只有两个历史样本，投眼瞬时 Bot 坐标未单独记录。现场验收核对估点误差、实际是否前往、近点是否下挖及跨集是否继续同一目标。 [HY4_1 第二眼](../runs/r54_stronghold_end_4bot/hy4_hy_1_village_to_stronghold_end/20261120-231022-523804.events.jsonl#L103) · [HY4_2 第二眼](../runs/r54_stronghold_end_4bot/hy4_hy_2_village_to_stronghold_end/20261120-231037-069823.events.jsonl#L83) · [交点估算](../src/mc_agent/harness/mc_tools.py#L1948) · [跨集挂入任务](../src/mc_agent/harness/curriculum.py#L2115) · [理想向量夹具](../tests/test_skills_and_providers.py#L4448)
+
+- **r55 要塞停滞**：三路无终版，三条 EP03 原始轨迹均缺 `run.finished`，最后记录在北京时间 16:02:12–23，检查本机无该波 Fleet 与 runner。快照索引的 34 组首调均前向，状态仍 PENDING。原始尾部没有统一退出信号或异常，整波未计入终版汇总。 [DS_1 尾部](../runs/r55_stronghold_end_3bot/nju_ds_1_village_to_stronghold_end/20261120-235933-978889.events.jsonl#L316) · [HY4_1 尾部](../runs/r55_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261120-235835-063949.events.jsonl#L482) · [HY4_2 尾部](../runs/r55_stronghold_end_3bot/hy4_hy_2_village_to_stronghold_end/20261121-000115-705957.events.jsonl#L147)
+- **r56 起跑实测**：`42d3d13de1076216` 确认 `6c7a1ad`。HY4_1 EP01 距第三个估点到 0.5m 后实际下挖至 Y51。HY4_2 EP01 首次估点距 r54 同槽 locate 约 18.87m，第二个约 121.08m，后续继续更新，第四个进入 EP02 提示。新回执已覆盖接近和跨集注入，仍需跟踪估点偏差、下探和成就。 [接近估点](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-000255-282666.events.jsonl#L519) · [下探](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-000255-282666.events.jsonl#L623) · [偏离估点](../runs/r56_stronghold_triangulate_3bot/hy4_hy_2_village_to_stronghold_end/20261121-000305-582807.events.jsonl#L480) · [跨集提示](../runs/r56_stronghold_triangulate_3bot/hy4_hy_2_village_to_stronghold_end/20261121-001248-637140.events.jsonl#L1)
+- **r56 终版验收**：相同要塞及村庄两槽 30 分钟，首调 **0/34→0/9** 背向或垂直，投眼 **39→10**，要塞验证 **0/9→1/7**。HY4_1 绕障后重新测向，末次估点偏离 locate 13.45m，沿同一跨集坐标下探，EP03 实际验证要塞。HY4_2 则把手上最后的 71.47m 偏差估点跨三集复用，缺少估点稳定性筛选，仍 0 验证。首调与要塞验证通过；偏差控制和末地闭环继续记 SCENE-003。 [首次正确调用](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-000255-282666.events.jsonl#L84) · [第二集已复用](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-001318-600958.events.jsonl#L1) · [要塞验证](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-002233-173459.events.jsonl#L340) · [HY4_2 第三集沿用](../runs/r56_stronghold_triangulate_3bot/hy4_hy_2_village_to_stronghold_end/20261121-001854-640770.events.jsonl#L1)
+
+- **两眼后的 D1 门禁口径**：首个斥候命令若正好采用回执的 `suggested_second_throw_direction`，独立计为侧移，不纳入前进方向分母；已有 `triangulated_direction` 则与估点航向相比。旧单眼仍按原始向量。r56 用新口径为 **0/8** 背向或垂直、1 侧移、6 组估点航向，原 BUG-081 通过判定保持。仅侧移仍为 PENDING，实际位移与要塞验证继续单独核对。 [侧移建议](../runs/r56_stronghold_triangulate_3bot/hy4_hy_2_village_to_stronghold_end/20261121-000305-582807.events.jsonl#L244) · [采取侧移](../runs/r56_stronghold_triangulate_3bot/hy4_hy_2_village_to_stronghold_end/20261121-000305-582807.events.jsonl#L289) · [门禁实现](../../s-triage/scripts/d1_ticket_gates.py#L172)
+
+- **r57 复验通过**：16 组前向首调均无背向或垂直，另有 4 组侧移、7 组按估点配对。HY4_1 再次验证要塞。MoveTest_01 四集 14 投、0 个估点，14 次斥候 0 位移，末位距出生 XZ 1m。`remeasure_after_detour` 避免走错向，但同点复投仍无法取得三角基线。 [首次原地折返停止](../runs/r57_stronghold_end_3bot/nju_movetest_01_village_to_stronghold_end/20261121-003457-597348.events.jsonl#L64) · [要塞验证](../runs/r57_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261121-005837-864818.events.jsonl#L385)
+- **r58 要塞方向继续通过，实走未成交**：两路 11 集、15 次有效投眼、9 次估点配对，前向 **0/11** 背向或垂直。对同一终版定位，HY4_2 EP01 从误差 18.79m 的估点变为 205.91m，后者跨集传递；EP04 实走进入约 12m 后死亡。r59 首批加载 c8dbfff，包含 cf247fc 的原地停滞换点提示，等待回执验证。 [较准估点](../runs/r58_stronghold_end_45m/hy4_hy_2_village_to_stronghold_end/20261121-010803-244308.events.jsonl#L271) · [估点偏移](../runs/r58_stronghold_end_45m/hy4_hy_2_village_to_stronghold_end/20261121-010803-244308.events.jsonl#L532) · [真实定位](../runs/r58_stronghold_end_45m/hy4_hy_2_village_to_stronghold_end/wild-endurance-r58_stronghold_end_45m_hy_2_village_to_stronghold_end-20261121-010750.json#L41) · [r59 加载版](../runs/r59_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-015348-145054.events.jsonl#L1)
+- **r59 换点提示实测**：HY4_1 EP02 的东北追眼斥候位移 0m，回执 needs_new_vantage=true 且要求移至可达干地再投。回执已实际传到 actor，是否取得第二个不同投点待验。 [换点回执](../runs/r59_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-020106-394604.events.jsonl#L60) · [零位移分支](../src/mc_agent/skills/library.py#L1715)
+- **r59 终版**：前向可配对 **0/13** 背向或垂直，另有 1 条自动方向无法判定，整项 PENDING。HY4_1 EP02／03 合计三次实际收到换点提示。MoveTest 真正移动斥候 12/12，未给该提示创造零位移暴露。HY4_2 EP03 已验证要塞，末地仍 0。 [换点样本](../runs/r59_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-020828-570948.events.jsonl#L325) · [要塞验证](../runs/r59_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-021541-139945.events.jsonl#L470)
+
+- **r59 提示与定位基线**：HY4_1 三次换点提示后，下一次复投水平位移约 **0.36／1.50／3.48m**，两次仍无新估点，最后估点距定位约 213m。斥候以不足 1m 判定需要换点，三角定位另要求两投点相距至少 25m。复验应同时记录真实投点位移与能否得到更好的估点。 [提醒](../runs/r59_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-020106-394604.events.jsonl#L60) · [偏离估点](../runs/r59_stronghold_end_40m/hy4_hy_1_village_to_stronghold_end/20261121-020828-570948.events.jsonl#L751) · [提醒触发](../src/mc_agent/skills/library.py#L1712) · [定位基线](../src/mc_agent/harness/mc_tools.py#L1947)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-082 | P1（夜间装备课零操作反复验收）| Integrator（`harness/curriculum.py`）| 状态: FIXED（r65 完整波实制盾与铁靴，零操作验收 0）
+
+- **影响**：主世界已有铁镐、仍缺盾或铁甲时，夜间装备任务可以每秒重复派发多次。真实装备进度停摆，课程记录产生大量零动作、零增分的已验证集，影响成交统计。
+- **实据**：`r58_day12_sunrise_village_4bot`，HY4_3 EP04 零模型烧铁并制作铁镐，+10 分。EP05–482 连续 **478** 集均为 `bootstrap_iron_age`、`answered`、`objective_verified=true`、0 actor 请求、0 增分。首尾两个报告均写明夜间应做盾和铁甲，预准备目标仍是两把镐，0 步。统计截至该快照，正在继续。 [首次真实铁镐](../runs/r58_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-013911-329808.json#L5) · [EP05 报告](../runs/r58_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-013951-601177.json#L12) · [EP482 报告](../runs/r58_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-014125-253096.json#L12) · [课程快照 EP05](../runs/r58_day12_sunrise_village_4bot/hy4_hy_3_bare/curriculum-20261121-012431-161108.json#L100)
+- **源码**：实机加载 `815fe6b7f2bca974=fb73751`。夜间候选只替换 `bootstrap_iron_age` 的任务文案和层级，继承铁器完成条件。零模型预准备在已有铁镐时直接结束，结算再以既有铁器判定进度，反复清掉同任务的失败状态。 [夜间候选](../src/mc_agent/harness/curriculum.py#L1565) · [零模型结束](../src/mc_agent/harness/curriculum.py#L2369) · [结算与失败状态](../src/mc_agent/harness/curriculum.py#L2586)
+- **最小修复**：让夜间装备任务的完成条件与派发条件一致，按实际盾与铁甲达成确认，补齐已有镐时的预准备需求。对无装备变化或缺材料的短路结果应用退避，保留正常日出候选。
+- **D1 离线复现**：以实机同指纹源码、主世界 Y18、已完成全岛侦察、空村庄记忆、包里仅一把铁镐调用选择器。18000 tick 夜间选中夜间装备任务，沿用的谓词立即为真；换成 1000 tick 白天则选中 `day2_village_search` 并明确先 `climb_out`。 [铁器完成条件](../src/mc_agent/harness/curriculum.py#L222) · [日出派单](../src/mc_agent/harness/curriculum.py#L1540)
+- **候选补丁 `d751834`，已合入 `c8dbfff`**：D1 离线以同一铁镐夹具复跑，新任务键 `day1_night_iron_prep` 清空预准备、拒绝已有镐验收、尊重新任务冷却，白天仍选寻村。验收细节仍待核对：只新解锁铁甲时谓词即真；铁甲已完成后，补齐盾牌未被谓词识别。待主世界实机验证新任务没有空验收，以及盾甲齐备怎样记账。 [独立任务定义](../src/mc_agent/harness/curriculum.py#L1576) · [通用验收条件](../src/mc_agent/harness/curriculum.py#L222)
+- **r58 终版**：HY4_3 EP05–1120 连续 **1116** 集零动作、零增分验收，占全波 1147 集的 **97.3%**、1122 条机器验收的 **99.5%**。约 222 秒后，日出触发 EP1121 寻村，证实退出条件为进入白天。r58 余 31 集、6 集验证、65 分。 [最后一次重复](../runs/r58_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-014334-052280.json#L12) · [终版重复末条](../runs/r58_day12_sunrise_village_4bot/hy4_hy_3_bare/wild-endurance-r58_day12_sunrise_village_4bot_hy_3_bare-20261121-012425.json#L34910) · [终版日出派单](../runs/r58_day12_sunrise_village_4bot/hy4_hy_3_bare/wild-endurance-r58_day12_sunrise_village_4bot_hy_3_bare-20261121-012425.json#L34941)
+- **r59 主世界已加载候选**：HY4_3、HY4_4、DS_2 首集指纹均为 df8f6650f3655bcd，待真实夜间缺盾甲派发。 [HY4_3 首集](../runs/r59_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-015919-928906.events.jsonl#L3)
+- **r59 终版实测**：HY4_3 EP07 零模型真实制出铁镐后，EP08／09 各实际派发独立夜间任务，分别 7／1 个 actor 请求，均 0 分、验证为假。EP08 挖得煤 8、粗铁 1，短预算内未做出盾甲；EP09 只剩约 1.8s 即随波次到期。全波空验收 **1116→0**，新实际任务已经触发，盾甲完成与缺料退避仍需实机。 [生产铁镐](../runs/r59_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-022700-912938.json#L5) · [夜间实际采铁](../runs/r59_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-022741-696365.events.jsonl#L111) · [首条终版](../runs/r59_day12_sunrise_village_4bot/hy4_hy_3_bare/wild-endurance-r59_day12_sunrise_village_4bot_hy_3_bare-20261121-015913.json#L511)
+- **验收标准**：离线以夜间主世界、已有铁镐、无盾甲复现，已有镐不能触发夜间装备验收。实机复用相同入场条件，连续零动作成功 **0**，实际盾甲入包或无料后进入退避，日出时仍可派发寻村。
+
+- **r61c 运行中已见盾甲正例**：HY4_4 EP07 在独立夜间任务下，实际合成盾、置入副手并合成铁胸甲，获 5 分、机器验证为真。胸甲合成回执没有装备槽，下一集状态确认有 6 点护甲且盾仍在副手。待终版复核整波零动作次数与回归门槛。 [盾和副手](../runs/r61c_day12_full_45m/hy4_hy_4_bare/20261121-034525-801667.events.jsonl#L398) · [铁胸甲](../runs/r61c_day12_full_45m/hy4_hy_4_bare/20261121-034525-801667.events.jsonl#L414) · [下一集已穿戴](../runs/r61c_day12_full_45m/hy4_hy_4_bare/20261121-035051-949219.events.jsonl#L45)
+
+- **r61c 后续停写**：三个有回执的夜间课均有 actor 操作，盾甲正例仍可逐条复核。缺四份终版，保留部分修复状态，整波门禁待完整复验。
+
+- **r62 完整波复验**：`r62_day12_full_45m` **4/4**。HY4_3、DS_2 各有一集夜间装备课，分别请求 19、22 次，均未验证盾甲或触发该课失败退避，重复空验收 **0**。HY4_3 挖出 3 粗铁，DS_2 挖出 6 粗铁并合成铁镐，保留部分修复。此前 r61c 有单集盾甲正例，后续仍需完整波内的盾甲交付与无材料退避。 [HY4_3 终版](../runs/r62_day12_full_45m/hy4_hy_3_bare/wild-endurance-r62_day12_full_45m_hy_3_bare-20261121-041820.json) · [DS_2 铁镐](../runs/r62_day12_full_45m/nju_ds_2_bare/20261121-045213-080359.events.jsonl#L301) · [夜间选择器](../src/mc_agent/harness/curriculum.py#L1573)
+
+- **r63 实机缺燃料退避**：HY4_3 EP05、EP06 均 22 actor 请求、0 分、0 验证。第二集熔炼回执为 `missing_fuel`，终版课项 `cooled_down=true`，该槽余下 5 集未重派夜间课。完整波空验收 0，r61c 的盾甲正例仍待在完整波复验。 [熔炼失败](../runs/r63_day12_full_45m/hy4_hy_3_bare/20261121-052200-713074.events.jsonl#L422) · [退避终版](../runs/r63_day12_full_45m/hy4_hy_3_bare/wild-endurance-r63_day12_full_45m_hy_3_bare-20261121-050448.json#L368) · [课程退避](../src/mc_agent/harness/curriculum.py#L2619)
+
+- **r64 完整波造盾实证**：HY4_3 EP05 夜间装备课先造第二把铁镐，随后新造一面盾，铁靴缺 3 铁锭。下一个有装备快照的 EP07 确认盾在副手、护甲值 0。完整波已见盾生产与实际使用，盾甲同时达成仍待验。 [新盾](../runs/r64_day12_full_45m/hy4_hy_3_bare/20261121-060642-853855.events.jsonl#L412) · [铁靴缺料](../runs/r64_day12_full_45m/hy4_hy_3_bare/20261121-060642-853855.events.jsonl#L428) · [副手实据](../runs/r64_day12_full_45m/hy4_hy_3_bare/20261121-061557-682634.events.jsonl#L19)
+
+- **r65 完整波门槛**：HY4_4 EP07 **16 个 actor 请求**，实制盾并装备副手、实制铁靴并装备脚部，终版验真 **+5**，下一集正常派发日出寻村。同四槽 r58→r65 零操作装备验收 **1116→0**；r65 三条夜间课均有实际请求，终包保留盾、铁靴。此前 r63 缺燃料退避已验。课程通用谓词仍按新护甲进度验收，盾牌副手以实际回执复核。 [新盾](../runs/r65_day12_full_45m/hy4_hy_4_bare/20261121-070237-818958.events.jsonl#L310) · [铁靴](../runs/r65_day12_full_45m/hy4_hy_4_bare/20261121-070237-818958.events.jsonl#L357) · [终版](../runs/r65_day12_full_45m/hy4_hy_4_bare/wild-endurance-r65_day12_full_45m_hy_4_bare-20261121-063752.json#L409)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-083 | P0（近战反击退化时读取未初始化的 `has_weapon`，整路崩溃）| Slice B／Integrator（`skills/combat_env.py`）| 状态: FIXED（r63 持剑无盾零命中回退，3/3 收官）
+
+- **影响**：`r60_stronghold_end_40m` MoveTest_01 EP04，东南斥候在蜘蛛受击后交给 Guardian。2026-11-21 北京时间 **18:58:30** 抛出 `UnboundLocalError(has_weapon)`。集尾有 `runtime_error`，异常继续越过课程 runner，整路不写 `wild-endurance` 终版。 [斥候开始](../runs/r60_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-025738-953603.events.jsonl#L91) · [集尾异常](../runs/r60_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-025738-953603.events.jsonl#L95) · [工具抢占堆栈](../runs/r60_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/stdout.log#L650) · [未初始化异常](../runs/r60_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/stdout.log#L702)
+- **加载版根因**：`3189f9e1e38747f9=a85d1ab` 的 `combat_env.py:2802` 只在非近战反击的 `else` 里赋值 `has_weapon`。正常近战反击遇攻击零命中或超时可改成 `mode=cover_or_flee`（`:2776–2789`），无盾时共同尾部 `:2996` 立即读取这个变量。读取由 `32ec8bd` 引入，当前源码同样保留条件赋值。 [近战退化](../src/mc_agent/skills/combat_env.py#L2788) · [局部赋值](../src/mc_agent/skills/combat_env.py#L2814) · [共同尾部](../src/mc_agent/skills/combat_env.py#L3008)
+- **最小修复与验收**：在分流前基于随身和手持物计算 `has_weapon`。离线覆盖无盾、有近战武器、单一蜘蛛且反击返回零命中或超时的共同尾部，保持有盾及无武器后续撤退。实机复验反击后正常返回，波末终版写齐。
+- **D1 离线定位**：同一入口用 HP19、钻石剑、无盾、单只蜘蛛，分别注入零命中和 `ApiError(timeout)`。两条都在共享尾部读 `has_weapon` 时复现同一异常。现场缺被异常截断的 combat 完成回执，无法单独确认是哪一种退化。 [现场装备](../runs/r60_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-025738-953603.events.jsonl#L14) · [离线夹具](../../s-triage/tests/test_d1_repro.py#L207)
+
+- **候选修复 `7b397d0`**：集成树已在汇合处重新按库存计算 `has_weapon`。D1 零命中和超时两例均转正常返回，已启用为回归用例。r61 两次要塞场景均在 actor 启动前超时，实机待验。 [补丁落点](../src/mc_agent/skills/combat_env.py#L3005) · [通过夹具](../../s-triage/tests/test_d1_repro.py#L207)
+
+- **r61c 日出重跑恢复 actor**：首批日志指纹 5b1818e95693bd6f 对应 7b397d0。暂未见无盾、已有武器、近战攻击失败后的回退重现。 [真实加载](../runs/r61c_day12_full_45m/hy4_hy_3_bare/20261121-032127-531071.events.jsonl#L3)
+
+- **r62 要塞两路已加载**：MoveTest／HY4_2 指纹 60d8bfad46993a2a 对应 708787c，含 7b397d0。HY4_1 场景选址未就绪，MoveTest 真正回退入口待实测。 [MoveTest 轨迹](../runs/r62_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-032742-916130.events.jsonl#L1)
+
+- **r62 结束前的两种近例**：两个持盾槽曾反击零命中后正常返回，MoveTest 末次也在持盾时击杀蜘蛛；无盾退化条件仍缺。原始日志随后在 20:03 停写，无两路终版。 [持盾零命中后回退](../runs/r62_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-032742-916130.events.jsonl#L511) · [蜘蛛击杀](../runs/r62_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-040051-463667.events.jsonl#L182)
+
+- **r63 实机验收**：`r63_stronghold_end_40m` MoveTest_01 EP05 的斥候被僵尸受击反射抢占。钻石剑反击走 `unreachable_flee`，回执显示主手钻石剑、副手空，正常返回 `cover_or_flee`，随后继续执行并完成 EP05。三路 **3/3** 写终版，runner abort 与 `runtime_error` 均为 0。服务端攻击超时兜底另有离线夹具通过。 [斥候开始](../runs/r63_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-044647-173446.events.jsonl#L786) · [无盾回退](../runs/r63_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-044647-173446.events.jsonl#L788) · [集尾](../runs/r63_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/20261121-044647-173446.events.jsonl#L1343) · [收官](../runs/r63_stronghold_end_40m/nju_movetest_01_village_to_stronghold_end/wild-endurance-r63_stronghold_end_40m_movetest_01_village_to_stronghold_end-20261121-042117.json#L97) · [共同尾部](../src/mc_agent/skills/combat_env.py#L3128)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-084 | P1（Day 2 寻村缺客观完成判据）| Integrator（`harness/curriculum.py`）| 状态: FIXED（已补 `WorldMemory` 村庄/床证据客观判据，待实机复验）
+
+- **影响与样本**：`r64_day12_full_45m` HY4_10 EP08 实际扫到村民、床、钟和堆肥桶。绑床回执 `ok=true, changed=false`，之后取箱被抢占。终版为 `limit_reached`、`objective_verified=false`，5 分来自击杀成就。当前汇总的寻村验证为 0，无法区分村庄已发现、后续动作未完成与从未找到。 [村庄回执](../runs/r64_day12_full_45m/hy4_hy_10_bare/20261121-062923-563834.events.jsonl#L55) · [绑床回执](../runs/r64_day12_full_45m/hy4_hy_10_bare/20261121-062923-563834.events.jsonl#L189) · [终版](../runs/r64_day12_full_45m/hy4_hy_10_bare/wild-endurance-r64_day12_full_45m_hy_10_bare-20261121-055131.json#L483)
+- **源码与离线实证**：`day2_village_search` 的 `advancement_id=None`，通用客观判据只特判石器／铁器并读取其余目标的成就 ID。下一次选课用村庄记忆判断是否继续派单，集内完成和终版验证仍走固定为假的判据。直接回放目标对象，即使提供睡过床、交易和补给，也返回假。 [目标定义](../src/mc_agent/harness/curriculum.py#L1359) · [通用谓词](../src/mc_agent/harness/curriculum.py#L222) · [集内完成判据](../src/mc_agent/harness/curriculum.py#L2494) · [终版判据](../src/mc_agent/harness/curriculum.py#L2606)
+- **最小修复与验收**：记录本集确认发现村庄和后续任务回执，区分 `village_found` 与任务完成。以本集可信的发现、床或补给实据核对既有课程完成条件，回执足以达成时落 `objective_verified=true`，并在运行中正确结束。回归覆盖空扫描、旧记忆、只发现、床状态不变的交互、真实完成五类。保留已有成就评分口径。
+
+- **D1 终版交叉复核**：r62–r66 的九个完整波中，43 个 `day2_village_search` 终版均为零机器验证。直接实体回执至少确认 1 集见村民，3 集有 `mc_skill_bind_bed ok=true, changed=false`，没有寻村集的成功交易回执。三条床回执分别来自 r64 HY4_10、r66 LC2、r66 HY4_7，需保持「发现」「操作回执」与「整课验证」三项可追溯。 [HY4_10](../runs/r64_day12_full_45m/hy4_hy_10_bare/20261121-062923-563834.events.jsonl#L189) · [LC2](../runs/r66_lc_village_midgame_4bot/lc_lc_2_day2_village_near/20261121-063345-417248.events.jsonl#L148) · [HY4_7](../runs/r66_village_trade_2bot/hy4_hy_7_day2_village_near/20261121-063516-265761.events.jsonl#L162)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-085 | P1（Fleet 启动可读到含合并标记的工作树，整槽无法导入）| Integrator + Slice D2（`v2_fleet.py`／运行目录）| 状态: OPEN（r68 中期 1 槽启动崩溃）
+
+- **影响与实据**：北京时间约 **23:41:24**，`r68_midgame_portal_3bot` 的 HY4_9 在 actor 创建前退出，无集和终版。traceback 从 runner 导入课程，经 `skills/__init__.py` 到 `skills/library.py:1623`，明确打印 `<<<<<<< .merge_file…`，抛出 `SyntaxError`。同波 NJU_3、HY4_8 更早完成导入，继续运行且指纹 `328d1430f7830c51` 对应 `b328836`。 [HY4_9 traceback](../runs/r68_midgame_portal_3bot/hy4_hy_9_midgame/stdout.log#L15) · [HY4_8 已加载](../runs/r68_midgame_portal_3bot/hy4_hy_8_midgame/20261121-074120-311973.events.jsonl#L1)
+- **根因定位**：runner 由集成工作树的可变 `src` 导入共有模块。崩溃日志早于 `23:41:30`、`23:41:48` 的两项合入。可确认 import 读取到冲突标记，单凭日志无法归到某一条合入命令。现 `0a68fc8` 工作树的 45 个 Python 模块均可离线解析，已退出槽缺复跑终版。 [runner 延迟导入](../scripts/l3_wild_endurance_runner.py#L2139) · [包公共导入](../src/mc_agent/skills/__init__.py#L7)
+- **最小修复与验收**：Fleet 从同一已校验提交的固定源码目录启动整波，避免槽间启动的间隔读取正在改动的树。夹具覆盖合并标记快照被拒且零子进程，正常快照三槽可导入并记录一致指纹。下一次同组三槽需均有终版，启动 `SyntaxError` 为 0。
+- **r69 同波确有两套源码**：`r69_midgame_real_drop_3bot` 的 DS_1、HY4_1 加载 `1cb0d85b7407d8e6=0a68fc8`，约晚 10s 启动的 HY4_2 加载 `07b007e5d536b6ab=f22bfc9`。期间 23:51:56 完成合入。三槽均有 actor，后续合计按场景报告，补丁复验按各槽指纹取证。 [DS_1 指纹](../runs/r69_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-075150-863009.events.jsonl#L1) · [HY4_2 指纹](../runs/r69_midgame_real_drop_3bot/hy4_hy_2_midgame/20261121-075210-667417.events.jsonl#L1)
+- **r68 已收官**：两条存活槽均 1800.1s、写出终版。HY4_9 为唯一启动崩溃，整波 **2/3**。 [HY4_8 终版](../runs/r68_midgame_portal_3bot/hy4_hy_8_midgame/wild-endurance-r68_midgame_portal_3bot_hy_8_midgame-20261121-074113.json) · [NJU_3 终版](../runs/r68_midgame_portal_3bot/nju_nju_3_midgame/wild-endurance-r68_midgame_portal_3bot_nju_3_midgame-20261121-074103.json)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-086 | P0（取消生成时重建 HTTP 客户端失败，整槽崩溃）| Integrator（`harness/model.py`）| 状态: FIXED（待实机复验）
+
+- **影响与实据**：北京时间 **00:35:33**，`r69_midgame_portal_3bot` HY4_9 EP05 已发 26 次 actor 请求。控制层先抛 `RequestCancelled`，重建 HTTP 客户端时再抛 `ssl.SSLError: [X509] PEM lib`。该异常越过课程 supervisor，HY4_9 无终版，整波 **2/3**。 [取消与清理堆栈](../runs/r69_midgame_portal_3bot/hy4_hy_9_midgame/stdout.log#L593) · [SSL 异常](../runs/r69_midgame_portal_3bot/hy4_hy_9_midgame/stdout.log#L669) · [EP05 终态](../runs/r69_midgame_portal_3bot/hy4_hy_9_midgame/20261121-083201-056436.events.jsonl#L414)
+- **源码与最小修复**：`_process_request` 在 `finally` 中直接调用 `on_cancel`。`_abort_and_rotate_client` 建立替换连接池时重读证书链，初始化异常会覆盖原取消异常，新客户端尚未赋值。取消清理应保留 `RequestCancelled`，记录轮换失败并保持可用连接池状态，由后续有界恢复处理。现有证据确认 SSL 初始化错误，文件内容或外部更新来源待查。 [取消清理](../src/mc_agent/harness/model.py#L838) · [客户端轮换](../src/mc_agent/harness/model.py#L863)
+- **验收**：离线注入同款 `ssl.SSLError`，原取消语义可见、调用方继续执行，新客户端成功时仍关闭旧池并保持冷却。下一轮加载修复版实际发生生成取消，零同类进程退出并写终版。
+- **D1 离线复现**：替换客户端构造时注入 `ssl.SSLError`，真实线程取消路径当前稳定传播 SSL 异常，用例为预期失败。内存对照仅阻止这一清理异常外溢，调用方收到 `RequestCancelled`，下一次离线请求可返回。 [D1 夹具](../../s-triage/tests/test_d1_repro.py#L110)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-087 | P1（课间就绪轮询遇到传输重置，整槽丢终版）| Integrator（`harness/curriculum.py`／`bot.py`）| 状态: OPEN（r79 中期 DS_1 已确认）
+
+- **三路线复现下一集状态读取 `ConnectError` 越过结算。** 三槽的 actor 已写 `disconnected`，阶段快照仍 `running`，下一轮 `curriculum.py:2083` 只捕获 `ApiError`。断线后的 reconnect 失败被吞掉，重新进入 loop 后的传输异常上浮，三个 runner 都没有 Fleet。夹具加刚完成一笔真实进度、持久网络不可达及只断一次，预测证据是此前分项和原件保留、单次恢复可推进、持续故障有界收尾。 [阶段写入](../src/mc_agent/harness/curriculum.py#L2892) · [课间上浮](../runs/5ease_ob_w2_20261122/nju_ob_1_bare/stdout.log#L723) · [实际传输错误](../runs/5ease_ob_w2_20261122/nju_ob_1_bare/stdout.log#L757)
+
+- **影响与实据**：`r79_midgame_real_drop_3bot` DS_1 最后一集在 UTC 23:00:25 以 `disconnected` 结算，随后课间恢复走到 `wait_until_ready`。stdout 堆栈显示 `status()` 的 `httpx.ReadError: [Errno 104] Connection reset by peer` 越过课程 supervisor，退出后无 `wild-endurance` 终版。其他同窗停写槽另按各自证据登记。关联 BUG-020 的共时传输故障。 [最后一集](../runs/r79_midgame_real_drop_3bot/nju_ds_1_midgame/20261121-145253-984910.events.jsonl#L664) · [课间堆栈](../runs/r79_midgame_real_drop_3bot/nju_ds_1_midgame/stdout.log#L373) · [终端异常](../runs/r79_midgame_real_drop_3bot/nju_ds_1_midgame/stdout.log#L423)
+- **源码与最小修复**：`wait_until_ready` 能处理 API 级状态，但 `httpx.ReadError` 属于 `httpx.TransportError`。课间捕获清单已处理 API／系统错误，缺该传输类型。将传输故障纳入现有有界恢复，受波次余量和重试上限约束；耗尽时返回可写盘结算，保留原始错误类型与失败阶段。 [课间重连](../src/mc_agent/harness/curriculum.py#L1964) · [现有恢复捕获](../src/mc_agent/harness/curriculum.py#L2155) · [状态轮询](../src/mc_agent/bot.py#L317) · [终版写入](../scripts/l3_wild_endurance_runner.py#L2433)
+- **验收**：离线在重连后的状态轮询注入单次 `ReadError`，能够进入下一集或在集槽截止前返回有效结算。持续 `ReadError` 时有界结束、保留诊断并写终版；确认认证错误仍走原有结算。新波遇到同类短暂故障后保留 runner 及终版。
+- **D1 离线夹具**：真实 `CurriculumSupervisor`、`BotSession` 和模拟传输执行 `status→connect→status`，单次与持续重置约束两例均复现未捕获 `ReadError`。只在内存中加入 `httpx.TransportError` 到现有捕获清单，两例分别恢复开课与有界结算。 [离线夹具](../../s-triage/tests/test_d1_repro.py#L43)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-088 | P1（磁石课超额重复投炉，单集额外约 250s）| Slice D2／Integrator（`harness/curriculum.py`）| 状态: FIXED（已补 12 石头停炉与精确缺口提示，待实机复验）
+
+- **Showcase 磁石有实际验收，也暴露超额炉务。** OB2 EP14 L316 实制 12 石砖后还剩 18 石头。随后制台阶 18、錾砖 8、磁石与指南针各 1，L433 实放磁石、L467 用指南针交互，集验证 +15。恢复异步工单后同步多次报合计 24 石头，成材核证至少 30，最终余 18。验收应在按配方够料时查明确炉余、停重投并尽快交接；区分炉内旧料与当前任务新投。 [石砖后的余包](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051853-296421.events.jsonl#L316) · [实际交互](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051853-296421.events.jsonl#L467) · [课程验证](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/curriculum-20261122-044439-804675.json#L287)
+
+- **影响与实据**。`r81_midgame_real_drop_3bot` HY4_1 EP09 八次对同炉请求熔炼 12 圆石，共 **399.605s**。前三次已从回执确认 **4＋5＋5=14** 石头，足够脚本要求的 12。后五次仍调用同工具同参数，配对约 **249.8s**。随后造出 12 石砖、磁石与指南针，合成 12 石砖后还有 **29** 石头。该集 579.095s 以 `answered` 结束，目标未验证。 [启动任务](../runs/r81_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-193819-486282.events.jsonl#L2) · [第三次取货](../runs/r81_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-193819-486282.events.jsonl#L152) · [第四次再次投炉](../runs/r81_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-193819-486282.events.jsonl#L170) · [合成与库存](../runs/r81_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-193819-486282.events.jsonl#L272) · [终态](../runs/r81_midgame_real_drop_3bot/hy4_hy_1_midgame/20261121-193819-486282.events.jsonl#L547)
+- **源码与最小修复**。课程文案给固定数量，`partial_smelt` 返回这次取货并建议查炉。通用防循环把取货视为材料进展，符合技能语义。给磁石任务补库存门槛，累计确认已有 12 石头后立即进入石砖；不足时先取出原炉余货，再按实际缺口添料。保留 BUG-067 的单次时限和部分取货。 [任务配方](../src/mc_agent/harness/curriculum.py#L511) · [部分取货](../src/mc_agent/skills/library.py#L5072) · [进展判定](../src/mc_agent/harness/agent.py#L798)
+- **验收**。离线回放 `4→5→5` 的三条部分取货，检查第四次决策进入合成。另测库存仍不足时可先收原炉产物并按缺口补料。实机同类磁石课累计已有 12 石头后新增投料 **0**，并记录磁石绑定的验证终态。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-089 | P1（死后世界加载等待用错截止变量，课程 supervisor 中断结算）| Integrator（`harness/curriculum.py`）| 状态: FIXED（`317a6c7`，r79 GLM_1 八次后续课并收官）
+
+- **影响与实据**。官方 r78 GLM_1／5Ease 在加载 `d893801` 后分别落 `runtime_error/[not_ready]`，其后旧进程退出。两槽的课程快照分别停在前一集，官方终版均缺。现有轨迹可对到触发输入，两个外层缺直接异常栈。同期 r78 MoveTest 末条为工具启动，同因待证。 [GLM_1 最后一集](../runs/official_r78_40m_glm1/GLM_1/20261121-205109-768232.events.jsonl#L10) · [5Ease 最后一集](../runs/official_r78_40m_5ease/5Ease_Bot/20261121-204912-886489.events.jsonl#L121) · [MoveTest 末条](../runs/official_r78_40m_movetest/MoveTest_01/20261121-204619-523145.events.jsonl#L167)
+- **根因与最小修复**。`8df2f2a` 在 `CurriculumSupervisor.run` 的世界加载后等待分支引用了未定义的 `deadline`，位置在写课程快照之前。`317a6c7` 改用本槽已计算的 `deadline_mono`。D1 用原方法离线复现 **2/2 `NameError`**，当前版 **2/2 通过**，分别验证等待 2.5s 后续课以及剩 1s 时有界结算，临时加载不增加普通失败罚次。 [等待分支](../src/mc_agent/harness/curriculum.py#L2746) · [槽截止定义](../src/mc_agent/harness/curriculum.py#L2057) · [离线夹具](../../s-triage/tests/test_d1_repro.py#L111)
+- **实机验收**。r78→r79 官方三槽终版 **0/3→3/3**。新版 GLM_1 保持原 PID，前八次 `not_ready` 后第九集有 14 请求，完整槽 **2100.1s／18 集**，外层重连 0。原条件的续课及终版门均通过。单集报废继续按 BUG-020 核验。 [r79 同 PID 后续](../runs/official_r79_35m_glm1/GLM_1/20261121-205329-538873.events.jsonl#L3) · [r79 官方终版](../runs/official_r79_35m_glm1/GLM_1/official-official_r79_35m_glm1-GLM_1-20261121-205140.json#L7) · [官方终版写入](../scripts/run_official_bot.py#L121)
+
+## P2 Backlog（不抢 P0/P1；KB/脚本类由 #6 随时消化，核心代码类由 #2/#3/#4 在各自 P0/P1 清零后顺延处理）
+
+> 来源：Slice D1 `/home/xzq/projects/mc/.worktrees/s-triage/docs/D1-r11-triage.md`（`r11_22bot` 22 路轨迹）。以下均为策略/提示/非阻塞小优化，不丢弃。
+
+- **P2-41** `unstick` 只尝试东向出口。r40 的 37 次执行中 **30** 次被 `guardian.unstick_exit_blocked` 拦截，涉及 **7 路、16 集**，中位 **1.466s**，最长 **11.777s**。出口循环设置首个东向并无条件退出，Guardian 随后只验证该朝向。最小修复是在同一预算内按方向寻找经过现有落脚判定的出口。全部不合格时保留拒绝。验收覆盖东侧悬空但另一方向安全、四向均不安全两个夹具。 [HY4_4 EP03 拒绝](../runs/r40_hy4_combat/hy4_hy_4_cave_combat/20261120-052020-665582.events.jsonl#L48) · [候选朝向](../src/mc_agent/skills/library.py#L5325) · [安全判定](../src/mc_agent/harness/guardian.py#L1563)
+- **P2-42** Day 1 黄昏提示在零模型预准备后丢失。选择器给铁器目标添加夜间封井提示，预准备后的成功与失败分支都从静态 playbook 重新生成任务。离线按同一调用顺序回放，两条路径均丢失提示。r41 的 25 次铁器派发均走预准备（7 成功、18 失败），actor 任务里均无该提示，实际选中黄昏分支的次数未记录。最小修复是保留带条件的提示，再按新库存更新材料提示。验收覆盖预准备成功、失败各一例，最终 actor 任务保留黄昏提示。 [选择器](../src/mc_agent/harness/curriculum.py#L1414) · [成功重渲染](../src/mc_agent/harness/curriculum.py#L2215) · [失败重渲染](../src/mc_agent/harness/curriculum.py#L2230) · [r41 失败样本](../runs/r41_day1_15bot/hy4_hy_10_bare/20261120-061436-382140.events.jsonl#L2)
+- **P2-43** 场景死亡补装缺清包和发放对账（Integrator）。采矿 V3 HY_5E_2 EP02 近战死亡前实有 **2 铁镐、16 木板、24 火把**，`death_return restock=True` 后为 **4／32／48**，终包一致。源码把清包命令排在发装前，批量回执未检查，无清包后或拾回的独立记录，翻倍机制待确认。记录清包结果、重装前后包及来源。验收覆盖死亡后空包、死亡保留装及清包失败，确保一套给定配给只算一次，补给和任务产出分别入账。 [死前库存](../runs/5ease_mine_eff_v3_20261122/hy_5e_2_probe_diamond_y54/20261122-024103-066830.events.jsonl#L100) · [死亡](../runs/5ease_mine_eff_v3_20261122/hy_5e_2_probe_diamond_y54/20261122-024103-066830.events.jsonl#L167) · [补装](../runs/5ease_mine_eff_v3_20261122/hy_5e_2_probe_diamond_y54/stdout.log#L129) · [死后库存](../runs/5ease_mine_eff_v3_20261122/hy_5e_2_probe_diamond_y54/20261122-024103-066830.events.jsonl#L264) · [批量操作](../scripts/l3_wild_endurance_runner.py#L1298) · [未读回执](../scripts/l3_wild_endurance_runner.py#L1328) V8 HY_5E_6 在补装后先见标准单份配给，接近前次死亡点约 2.002m 后见石镐 4、煤 24、火把 48，后又见牛排与圆石翻倍。缺掉落实体 ID，符合拾回旧装备的可能，未证明配置重复发放。 [标准配给](../runs/5ease_virgin_eff_v8_20261122/hy_5e_6_probe_iron_y16/20261122-032718-705056.events.jsonl#L64) · [接近死点后背包](../runs/5ease_virgin_eff_v8_20261122/hy_5e_6_probe_iron_y16/20261122-032718-705056.events.jsonl#L74)
+  - **V2 门户死亡结账**。H3 同集 3 条死亡，stdout 明确 2 次 `death_return restock=True`，中途同一实包见 2 钻镐、2 水桶、11 黑曜石，最后只剩新配 4。缺逐次清包和旧掉落回收归因。H2 在本地复活后约 4 秒便结束，终包为空，stdout 未见补装。此样本额外用于测试 episode 收尾与看门狗周期相交。 [H3 实包](../runs/5ease_obs_fixed_v2_20261122/hy_5e_3_probe_obsidian_portal/20261122-035832-681679.events.jsonl#L402) · [H3 后一笔补装](../runs/5ease_obs_fixed_v2_20261122/hy_5e_3_probe_obsidian_portal/stdout.log#L103) · [H2 本地重生](../runs/5ease_obs_fixed_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-035945-266846.events.jsonl#L276) · [H2 终包](../runs/5ease_obs_fixed_v2_20261122/hy_5e_2_probe_obsidian_portal/wild-endurance-5ease_obs_v2_hy_5e_2_probe_obsidian_portal-20261122-035824.json#L47)
+- **P2-44** 新圈偏移后，同波回退仍可挤到同一矿区（Integrator / 实验选址）。V6 八个入场点落在五个候选中心，三对水平距离 **40.224 / 18.868 / 19.228m**，三对均有共同矿格候选。H5/H6 一个共读铁矿格上，H6 后续实破并入包 +1；H5 同段调用也读到该坐标，缺两侧精确扫描时间与重复破块证据。固定 `3063240` 的离线选址，同圈两个索引在单一合格森林时落同一点。建议记录原始索引、已占区和最终选择，并按雷达/施工窗口验收同波隔离。多槽回退只有一个合格区时，应明确标作共享样本。 [近邻入场](../runs/5ease_virgin_eff_v6_20261122/hy_5e_5_probe_iron_y16/stdout.log#L1) · [另一入场](../runs/5ease_virgin_eff_v6_20261122/hy_5e_6_probe_iron_y16/stdout.log#L1) · [H6 破格入包](../runs/5ease_virgin_eff_v6_20261122/hy_5e_6_probe_iron_y16/20261122-030945-945791.events.jsonl#L60) · [H5 候选](../runs/5ease_virgin_eff_v6_20261122/hy_5e_5_probe_iron_y16/20261122-030946-375939.events.jsonl#L60) · [回退选择](../scripts/l3_wild_endurance_runner.py#L217) H6 L60 的明确破格回执后约 **106s**，H5 L91 才开始新片，L92 仍列该坐标为候选及延后矿。两槽共 10 个相同雷达候选块，另有 H5 候选/H6 破格的交叉点。H7/H8 共享 6 个雷达坐标及骷髅 `#126388`。这些证明采矿与战斗空间相交，死亡的具体跨槽归因未知。 [H5 后续候选](../runs/5ease_virgin_eff_v6_20261122/hy_5e_5_probe_iron_y16/20261122-030946-375939.events.jsonl#L92) V7 HY_5E_7/8 入场横距 **9.055m**，H8 L60 确破 `[4495,14,-2516]`，H7 L167 仍锁该格，两回执末站相距 **0.922m**，共同作业空间再次确认。H7 的同片在对侧破格前启动，具体扫描先后未知。 [H8 实破](../runs/5ease_virgin_eff_v7_20261122/hy_5e_8_probe_iron_y16/20261122-031826-659531.events.jsonl#L60) · [H7 同锁](../runs/5ease_virgin_eff_v7_20261122/hy_5e_7_probe_iron_y16/20261122-031828-750454.events.jsonl#L167) 终版共 **8 个雷达坐标**。H7 首集 L207 开始时已经过 H8 破格约 15.270s，返回仍锁 `[4495,14,-2516]`；H7 次集在约 142.803s 后开始还锁 H8 已破的相邻 `[4495,13,-2516]`。 [跨片同锁](../runs/5ease_virgin_eff_v7_20261122/hy_5e_7_probe_iron_y16/20261122-031828-750454.events.jsonl#L208) · [跨集同候选](../runs/5ease_virgin_eff_v7_20261122/hy_5e_7_probe_iron_y16/20261122-032328-829799.events.jsonl#L32)
+  - **黑曜石门户 V1 双钻槽**。H7/H8 入场相距 **16.279m**，四集均共读 `[9822,-57,7330]`，没有同格重复破坏或实体认领的证据。适合做排位分离的负对照。 [H7 雷达](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_7_probe_diamond_y54/20261122-034959-972452.events.jsonl#L33) · [H8 雷达](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_8_probe_diamond_y54/20261122-035000-640482.events.jsonl#L32)
+- **P2-45** 低层雷达改动仍允许锁定 Y≤−60（Slice A / Integrator）。固定 `c85227d` 的离线 `_scan_ore_radar`，混有 −59 候选时去掉 −60；全低点时（实时或磁盘）继续锁 −60，后续缓存也保留。条件检查 `target_y<0`，未核对维度。低层因为镐阶不足进入 `deferred_ores` 时，可在后续更换高阶镐后走直接挖矿派发。请明确是软偏好还是主世界硬排除，说明哪条入口要遵循，验收覆盖仅低层、混合、缓存、延迟及其他维度。 [混合候选条件](../src/mc_agent/skills/mining_dfs.py#L2452) · [过滤前延迟](../src/mc_agent/skills/mining_dfs.py#L2416) · [延迟挖掘派发](../src/mc_agent/skills/mining_dfs.py#L6092) V9 HY_5E_3 EP02 L275 仍出现 `[15516,-60,22549]` 与数个 ≥−59 候选共列。此轮去掉了离锚 ±8 条件，公开回执仍可来自缓存或不可采矿点追加，需采过滤前与刷新后的列表再判断具体旁路。 [带外候选](../runs/5ease_virgin_eff_v9_20261122/hy_5e_3_probe_diamond_y54/20261122-033840-938167.events.jsonl#L275) · [缓存返回](../src/mc_agent/skills/mining_dfs.py#L2365) · [额外候选入口](../src/mc_agent/skills/mining_dfs.py#L3923)
+  - **V7–V9 复验**。三版固定源码先新扫 `Y−53` 和 `Y−60`，只留高点。矿脉钩子在远距或局部开挖失败后回填低点，缓存不重跑深度过滤，可把 −60 选为代表并交给井口目标深度；强刷再次排除。三波前四钻槽 49 条可见雷达回执中，仅 V9 H3 EP02 看见 −60 混入，当时实际锁和超时格同为 `[15507,-53,22544]`。将选层规则放到统一候选入口和选锁处，离线同时验新扫、回填、缓存和显式退路。 [实机回执](../runs/5ease_virgin_eff_v9_20261122/hy_5e_3_probe_diamond_y54/20261122-033840-938167.events.jsonl#L275) · [矿脉回填](../src/mc_agent/skills/mining_dfs.py#L3845) · [缓存重聚类](../src/mc_agent/skills/mining_dfs.py#L2360) · [井口选层](../src/mc_agent/skills/mining_dfs.py#L4916)
+- **P2-46** 采铁探针把合成写成熔炼，且吞吐和成镐需要分开核对（Integrator / 压测入口）。`probe_iron_y16` 指定 `craft_gear` 烧铁，技能缺铁锭只会拒绝合成。V9 H5 EP02 另调炉成功，3 粗铁→3 铁锭→装备铁镐。H6 最终 8 粗铁、未见炉务。纯吞吐继续测粗铁净增；铁器发育探针明确三件即单独调熔炼，验收炉前粗铁、取货后铁锭、合成消耗及装备，分别计时。V9 H8 首两片 170.0184s 确实靠近同簇，期间粗铜 +29、粗铁 0。下轮可测近距确认和少捡非目标副产物对满包与换镐次数的影响，不能按铜入包量推断挖铜绕路。 [铁探针](../scripts/l3_wild_endurance_runner.py#L1911) · [合成入口](../src/mc_agent/skills/library.py#L3794) · [H5 取锭](../runs/5ease_virgin_eff_v9_20261122/hy_5e_5_probe_iron_y16/20261122-033623-815449.events.jsonl#L157) · [H5 装备](../runs/5ease_virgin_eff_v9_20261122/hy_5e_5_probe_iron_y16/20261122-033623-815449.events.jsonl#L178) · [H6 终包](../runs/5ease_virgin_eff_v9_20261122/hy_5e_6_probe_iron_y16/wild-endurance-5ease_virgin_v9_hy_5e_6_probe_iron_y16-20261122-033427.json#L44) · [H8 第二片](../runs/5ease_virgin_eff_v9_20261122/hy_5e_8_probe_iron_y16/20261122-033516-092007.events.jsonl#L59)
+
+- **P2-46 验收补记**。V8 H8 Fleet 终包实有 24 粗铁，两集的 `objective_verified` 和 `material_progress` 均为 false。吞吐统计另记目标阈值、首达耗时和来源，官方成就与继续采掘条件沿原口径。 [终包](../runs/5ease_virgin_eff_v8_20261122/hy_5e_8_probe_iron_y16/wild-endurance-5ease_virgin_v8_hy_5e_8_probe_iron_y16-20261122-032534.json#L45) · [进度汇总](../src/mc_agent/harness/curriculum.py#L2779)
+- **P2-46 Wave11 实包与课程进展。** H5/H6 终包 7/10 粗铁，四钻槽 0/2/5/0，12 集都未被验证，两铁槽四集与增钻集的 `material_progress` 也为 false。H6 两集各实增 5，却在第二集触发冷却。独立输出短片真实净增、起始库存、全槽累计及首次达 24 铁／16 钻时间。配套铁器目标在粗铁达到 3 且需要铁镐时切 `smelt_items`，按实取 3 锭及已装备确认。保留纯吞吐探针的目的和官方积分，补同起点的两个配对样本。 [10 粗铁终包](../runs/5ease_l1_wave11_20261122/hy_5e_6_probe_iron_y16/wild-endurance-5ease_w11_hy_5e_6_probe_iron_y16-20261122-054201.json#L45) · [实增后冷却](../runs/5ease_l1_wave11_20261122/hy_5e_6_probe_iron_y16/wild-endurance-5ease_w11_hy_5e_6_probe_iron_y16-20261122-054201.json#L123) · [钻实包](../runs/5ease_l1_wave11_20261122/hy_5e_3_probe_diamond_y54/wild-endurance-5ease_w11_hy_5e_3_probe_diamond_y54-20261122-054200.json#L50) · [材料进度白名单](../src/mc_agent/harness/curriculum.py#L2781) · [铁与钻探针](../scripts/l3_wild_endurance_runner.py#L1905)
+
+- **P2-47** 配方缺口补齐后，当前矿脉仍清候选队列（Slice A / Slice D2）。r59 HY4_3 EP06 给战斗备料，请求 3 粗铁，35.3168s 后回 4 个矿格、4 粗铁。固定 `0731a37` 经实际 actor 和 DFS，四格铁或钻夹具的请求 1/3/4 都破 4 格、入 4 件。将真实库存配额检查放在当前格拾取和安全封口之后的内存试改，三组分别破 1/3/4 格，皆回 `quota_reached`。六格钻矿在目标 4 时由破 6→4、模拟 7.50→5.00s。实机 r66 DS_1 EP04 的正例正好 4 格 4 钻、实际装备钻靴。最小修复为配方型请求启用逐格早停，按实际库存核对，允许同一格自然多掉。保留吞吐探针的整簇策略。验收各用 3 粗铁→取 3 锭→铁器和 4 钻→装备钻靴，连记首达阈值、末次破格、工序切换与实收，模拟耗时仅用于对照。 [r59 额外破格](../runs/r59_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-022200-922025.events.jsonl#L155) · [r70 真熔炼](../runs/r70_day12_real_drop_60m/hy4_hy_4_bare/20261121-114614-722928.events.jsonl#L184) · [r66 穿靴](../runs/r66_expl_mem_ds1/nju_ds_1_iron/20261121-062409-647736.events.jsonl#L215) · [矿脉队列](../src/mc_agent/skills/mining_dfs.py#L3894) · [外层配额](../src/mc_agent/skills/mining_dfs.py#L6213)
+
+- **P2-48** 隧道换镐失败会把已有钻镐报作新进包（Slice A／Slice C）。Showcase OB3 EP08 L935/L955/L998/L1041 四个隧道回执各报钻镐 +1，四份末包均只持 1 把，其中三次零破格、两次原位。固定 `0731a37` 的真实 actor 与模拟传输，库存前后各有 1 钻镐和 1 石镐。仅让钻镐装备回 `missing_item`，回退装备石镐，实际零挖、零移动，仍回钻镐 +1；钻镐正常装备的同一夹具包差为空。失败候选筛选覆盖了原始库存基线。实机缺逐次装备请求的结果，待复验现场是不是该分支。最小修复独立保留初始库存，重选镐只修改装备候选。验收零挖拒绝、换用旧镐、正常装备和确实拾得新镐。 [Showcase 第一次假增形状](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L935) · [第四次](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L1041) · [基线被重写](../src/mc_agent/skills/tunnel.py#L113) · [计算净增](../src/mc_agent/skills/tunnel.py#L269)
+  续审同集再见 5 个同形回执，累计 9 次。L1270 还报 `missing_pickaxe`，末包仍只有旧钻镐 1。L1288 才有真实新合成，钻石 3→0；L1308 全包读到钻镐 2，后续采矿包差不再重复报钻镐。 [第九次回执](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L1270) · [真实重铸](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L1288) · [后包](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L1308)
+  Long3 同形回执 **9 次**，H2 EP05 4 次、OB3 EP09/10 5 次，末包钻镐均为 1，8 次零破格、零位移，OB3 其中三次还报 `missing_pickaxe`。OB3 三集实包的铁锭仍为 4。D1 用单钻镐、装备返回缺物品的原入口夹具复现同一回执，库存前后都是 1；未采集到实机底层装备返回，按同形证据留拆因。 [H2 零破格](../runs/l2_long3_20261122/hy_5e_2_nether_fortress/20261122-130103-564917.events.jsonl#L230) · [OB3 缺镐同时报新增](../runs/l2_long3_20261122/nju_ob_3_village/20261122-130736-575655.events.jsonl#L331) · [候选回归夹具](../../s-triage/tests/test_d1_repro.py#L459)
+
+- **P2-49** 附魔选项全部不可用时仍反复开窗和挖普通石（Slice C／Slice D2）。Showcase OB2 EP18 实制并放置附魔台、已投装备和青金石。L569/L602/L669/L735 的选项均 `available:false`，最低显示经验等级 1，只见 put，无 select 或 take。中间三次采普通石报 +60 圆石、66.9468s，附魔选项未变化。实际经验值未独立落盘。请读回经验或未知态，选项条件未变时清楚返回缺口并阻止原样空转。验收覆盖经验不足、经验够且可选、可选变化后重试、普通石挖后不可用状态保持。 [附魔首拒](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-053234-804299.events.jsonl#L569) · [第四次同态](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-053234-804299.events.jsonl#L735) · [附魔技能](../src/mc_agent/skills/library.py#L5404)
+- **P2-50** 地表补石混入深板岩后，生态提示把整条补镐链导向深层（Slice C／采块技能和生态规则）。裸装冲刺 H1 EP03 近战死后回到 Y78，重造木镐，请求 `stone,cobbled_deepslate` 补石。L363 的零目标回执选了深板岩，明确提示下探 Y−16，L388 实下 7 步、36.6s，集尾仍没有石镐。真实工具离线模拟同 Y78、同木镐和空扫描，只传 `stone` 保留浅层中性建议，深板岩单选与混合都读 20 格并指向 Y−16。Y0 混合没触发。生态规则遍历略过未分类的 `stone`。修复需保留各备选项的判断，混合请求有浅层可替代对象时先推荐水平复扫或拆单，仍保留单独深板岩的层位提示。验收四个同样夹具，额外验补足圆石、木棍后装备石镐。 [实机混合提示](../runs/5ease_bare_sprint_20261122/hy_5e_1_bare/20261122-061049-433600.events.jsonl#L363) · [下一次下挖](../runs/5ease_bare_sprint_20261122/hy_5e_1_bare/20261122-061049-433600.events.jsonl#L388) · [规则聚合](../src/mc_agent/kb/ecology.py#L622) · [导向回执](../src/mc_agent/skills/library.py#L2527)
+
+- **P2-1** `mc_move_to` 微距 `range=0.1` 反复 `movement_not_confirmed`：`6f54b6f` 已把"已在 range 内"转为成功；r17 仍剩 10 次（2 次 `entity_id` 目标未覆盖、其余为 `status()` 失败或 range 被后端改写的边界）。建议转换逻辑扩展到 entity_id，并用 error 内 `pos` 兜底。 W2 OB3 EP14 反向边界：同一目标 `range=1.0` 的原地成功被二次拦截，改 `range=0.5` 后 `ok:true` 但实坐标不变、仍距箱水平约 8.5m，之后没有开窗。原地二次判定仅在 `range>=1.0` 执行。验收同时覆盖半径内零位移与半径外零位移。 [1.0 回执](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-031646-738918.events.jsonl#L153) · [0.5 回执](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-031646-738918.events.jsonl#L194) · [判定分支](../src/mc_agent/harness/agent.py#L738) **Long2 H4 EP11** 四个 `range=0.5` 目的地均回同站位 `[354983.4,50,367623.5]` 且 `ok:true`，实距分别 9.26／17.77／4.88／13.85m。次集首个 DFS 期间跌落，具体端点独立查。 [首个零移](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-121024-007461.events.jsonl#L286) · [第四个零移](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-121024-007461.events.jsonl#L441)
+  - W11 三槽再次在 `range=0.5` 收到 `ok=true` 但仍差 **4.6/3.0/9.3m**。H1 EP03 先收到 `range=1.0` 的原位成功，重砍被重复门跳过后缩到 0.5 仍返回同一坐标；H2 EP03 移向已见掉落的 XZ，之后挖该坐标的空气；H3 EP02 移完下一次砍木仍不可达。三条回执无分段标记。统一按实际位置、要求半径和中继语义验到达，离得远且未接近时回可重规划失败；补保留坐标已进半径但零位移的成功例。 [H1 初回](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-082139-177378.events.jsonl#L167) · [H1 缩半径](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-082139-177378.events.jsonl#L216) · [H2](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-081931-897586.events.jsonl#L405) · [H3](../runs/l1_hy4_bare_w11_20261122/hy_5e_3_bare/20261122-081833-199103.events.jsonl#L347) · [现有半径条件](../src/mc_agent/harness/agent.py#L743)
+- **P2-2** `mc_move_to:path_not_found` 59 次 / 11 bots，短距失败后不自动 `unstick`，其中 15 次显式硬传 `y`。KB `data_1_21_11.py:682-683` 已有规则，需在提示/上下文层加强。
+- **P2-3** `mine_dfs(action="reset")` 空间树为空时 `nothing_to_reset` 后仍建议 reset：3 次。提示冗余。
+- **P2-4** 对无合成配方物品调用 `craft_gear`（`wheat_seeds` 等）：`no_recipe` 3 次。模型策略，交由 KB 提示。
+- **P2-5** `void_geofence_blocked`：模型朝 `(0,0)` 世界原点移动：4 次 / 2 bots。围栏已正确拦截，属提示词问题。
+- **P2-6** `mc_place` 连续 `no_support` / `blocked_by_self` / `place_failed(目标仍是 sugar_cane)`：3 次。可加"先 dig 目标格"提示。
+- **P2-7** `attack_zero_hits` 对 45m 外 glow_squid 空挥 20s：3 次。不可达目标应放弃。
+- **P2-8** 舰队共岛互伤：`player_explosion`/`spear` 致死（`hy4_hy_10` 4 死、`hy4_hy_8` 3 死）。属 22 路编队间距/站点隔离问题，非 Harness Bug。
+- **P2-9** `find_blocks(water, radius=96)` 返回 `total:10000`：1 次。数据量/性能小优化（限制返回上限）。
+- **P2-10** `out_of_reach_vertical` 桶交互（y 差 6.8/9.0）：3 次。已有可执行提示，属策略层。
+- **P2-11** `mine_dfs` 未达成目标时仍返回 `ok=true`（`quota_reached`/`shaft_exhausted`/`time_slice_progress`）：约 130 次。建议 `ok` 与 `goal_met` 分离，避免模型误判进度。
+- **P2-12** `island_recon_sweep` 24 次 `objective_verified=false`：该 target 无 `advancement_id`，`curriculum.py:220-228` 必然落到 `return False`。仅影响报表字段，请勿用它做晋级门槛（进度看 `material_progress/chunks_after`）。
+  r42 的 `day2_village_search` 同样无成就验证器。HY4_7 EP02 已实际取箱，绑床工具也返回成功交互，两种报表进展字段仍为 false。重生点是否持久未验证。验收 Day 2 据点时逐项引用工具回执。 [取箱](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L170) · [床交互](../runs/r42_day2_village_9bot/hy4_hy_7_iron/20261120-063311-834631.events.jsonl#L229) · [Day 2 配置](../src/mc_agent/harness/curriculum.py#L1326)
+- **P2-13**（原 BUG-004 降级）`dig_staircase` 地形边界停止：`movement_not_confirmed 9 / missing_step_support 7 / fluid_or_bedrock 8 / cave_or_drop_ahead 4`；66 次调用中位 17.9s、仅 5 次 >60s、max 92.3s。属正常地形判定，已有可执行 hint；只需优化"换向/垫脚"提示与失败方向记忆，不占 P1。
+- **P2-14**（持续发生，建议 D2 顺手改）下界 prompt 歧义：任务文本"钻石镐在下界Y8-22挖ancient_debris"被模型读成"在下界挖钻石"。`bad_target_for_dimension` 每波稳定触发 **4~7 次**（r13 5 / r15 4 / r18 7 / r19 7 / r21 6 / r22 6 / r23 4），每次浪费一个模型轮次。建议改为"用钻石镐挖 ancient_debris（下界 Y8-22）；钻石仅存在于主世界"。
+- **P2-15** 长尾工具耗时（r12）：`mine_blocks` 单次 **300.6s**（obsidian×4，`temporarily_avoided:1/timeout`，0 产出）、`smelt` 102s（12→9）、`harvest_logs` 87~91s（部分产出）。`mine_blocks` 内部 `mine_deadline` 仅 45~90s（`library.py:2524`），但 `dig`（:2568）未传 `timeout_s`，单次服务器超时即可吃掉全预算。建议同 `_StairSession` 加硬 deadline。
+- **P2-16** `mc_move_to` 在动作租约未释放时阻塞 ~101s 才返回 `busy: running move_to`（3 bots：`glm_glm_5_midgame`、`hy4_hy_7_village`、`hy4_hy_10_enchant_anvil`）。建议 `busy` 前置探测（<2s）或直接返回 `action_busy`。
+- **P2-27** `mc_skill_brew` 参数契约（r16 早期 8 次调用）：`bottles:[{"item":"water_bottle","slot":0}]` → `bad_args`（未说明期望 schema，模型重复传）；`fuel_item=blaze_powder` → `missing_item`（未回报剩余数量）。建议 bottles 容忍 `item/slot/count` 三种写法，并在 `missing_item` 中返回库存计数。
+- **P2-31** 无界半径搜索（r20_long `glm_5_midgame` 找床）：`mc_get_entities`/`mc_find_blocks` 半径 64→128→200→300→400→600→800→1000 连发 10+ 次，全部 `ok` 但无结果；随后 `craft_gear(white_bed)` 缺羊毛。建议 KB/工具层把探索半径限制在 128，超过时改为"沿一个方向跑图 + 途中扫描"，并提示先找羊（`mc_get_entities(types=['animal'], radius=64)` 已够）。
+- **P2-30** `pickaxe_low` 发生在地下且无木头时（r20_long `ds_1_bare`：y=17 断镐，背包无原木），需要 ~5 次 `climb_out`（每片只上升 3~5 格）才能回地表补镐；期间 `craft_gear` 只能报 `missing_ingredients`。建议 `pickaxe_low` 直接给出"用剩余耐久挖 3 石→就地补镐"或"一次 climb_out 到目标 y"的量化建议。
+- **P2-29（正向确认）** `staircase` 的 `no_support` 兜底已生效：`glm_5` 的 `vertical=up, steps=20` 先 `missing_step_support`，随后自动 `pillar_fallback` 成功——BUG-024 修复在长任务中同样工作。
+- **P2-29** `mc_skill_tunnel:unsafe_or_unknown_floor` 13 次（r20_short）：多为洞穴/悬空边缘的正常拒绝，但同一站位反复尝试。建议 tunnel 失败后记忆该方向 30s 并提示换向。
+- **P2-28（升级关注）** `mc_skill_smelt:missing_fuel`：r20_long `ds_1_bare` 报"背包没有煤炭、木炭、木板或原木燃料"，直接卡住 `bootstrap_iron_age`。建议 `missing_fuel` 的 message 明确给出 `mc_skill_harvest_logs(target_logs=2)` 下一步，并在有原木时自动转换木板作燃料（`_select_safe_fuel` 未覆盖"零燃料但有原木"的组合）。
+- **P2-26** `mine_dfs` 的 `stop_reason` 被拼进整段诊断串，如 `backtrack_blocked@-11011,34,-11125(feet=air,head=air,from=-11011,33,-11126)`（r15 至少 5 次）。建议固定枚举 `stop_reason`，坐标/脚部方块放 `blocker` 字段，否则聚合统计与模型分支判断都不可靠。
+- **P2-25**（课程观察，**不改顺序/权重**）`shiny_gear` 在同一 bot 连续 2 次 `timeout`（`glm_3` 28+22 calls、`hy4_4` 40+36 calls），`strike_limit=2` 仅在 `progress_made=False` 时累计；一旦拾到 1 颗钻石/换镐就会清零 strike，导致 20 分钟内反复选中。建议 D2 评估"仅按 gained 成就清零 strike"是否更合理。
+- **P2-24（已修复）** `mc_window_view` 对村民交易：`glm_glm_5_midgame` 10 次调用 **6 stalled + 3 no_window**（66.7s）。`9ecb239` 已改为"NoAI 村民 + 4m 前置移动"；r20_short 实测 `window_view ok 2 / out_of_reach 1 / no_window 0`，`mc_skill_trade ok 2` → 通过。
+  - **L2 OB3 EP04，窗口距离与引导走位口径冲突。** 同一自然村民 869526 连续 5 次 `out_of_reach`。首拒时 Bot 在 Y109，村民 Y104.5，三维距 4.8m；回执建议 `mc_move_to(x,z,range=2)`，而水平已在 2m 内，L97 实际零位移。第二次跟提示也零位移。后段村民移动，模型在五次拒窗后走到接近坐标，仍无成功开窗或成交。单验异高度引导是否产生安全可交互点，保留 4m 限制。 [首拒](../runs/l2_long1_20261122/nju_ob_3_village/20261122-103903-170337.events.jsonl#L67) · [水平早退](../runs/l2_long1_20261122/nju_ob_3_village/20261122-103903-170337.events.jsonl#L97) · [第五次拒窗](../runs/l2_long1_20261122/nju_ob_3_village/20261122-103903-170337.events.jsonl#L296) · [距离判定](../src/mc_agent/harness/mc_tools.py#L2219)
+- **P2-21** `mc_dig:timeout` 4→15 次 / 7 bots（r15）：`dig` 单次超时后模型重试同格。建议 `dig` 返回 `timeout` 时自动标记该格 15s 避开并给替代格。
+- **P2-22** `mc_place:no_support` 6 次 / 5 bots（r15）：与 BUG-024 同源，原始 `mc_place` 也应给"先 dig 侧袋/换参考面"的可执行提示。
+- **P2-23** `staircase:time_budget` 仍 36 次 / 8 bots（r15）：45s 硬帽的 churn 仍在，随 P2-20 一起评估。
+- **P2-19** `harvest_logs` 新增 `time_budget` 早退（r14：18 次/6 bots，max 145.8→75.0s）：提示建议降 `count` 或先靠近目标 2 格，避免连续早退。
+- **P2-20**（升级，r20_long 定量）`staircase` 45s 硬帽 vs 模型请求 `steps` 中位 **40**：`ds_1_bare` 6 次 `time_budget` 每次只完成 7~9 步，等于把一个 40 步请求拆成 5~6 次调用。建议 ① 工具入口 `steps=min(steps, 10)` 并把可完成步数回传；② 或预算 `min(90, 8 + steps*5)` 让长请求真正完成。
+- **P2-18** `mc_skill_tunnel:missing_pickaxe` 15 次 / 3+bots（r13 新增）：镐子耗尽/未装备时直接失败。建议 tunnel 先自动换镐/合成石镐，再返回 `missing_pickaxe`。
+- **P2-17（已修复）** 模型参数串位：`mc_move_to {"x":-7828,"y":-2814,"z":-2744}`（y 填成了 z）。越界保护已忽略该 y，但浪费一次 90.9s `path_not_found`。建议在参数校验层对 `|y|>320` 直接 `bad_args` 并提示。 
+
+---
+
+## 2026-11-20 过夜长短轨逐条复核
+
+覆盖北京时间 01:22–09:27 的 **6 个波次、40 条 Bot 轨迹、1,581 集、667,056 条事件记录**，实际累计 124.8 Bot 小时。以最终 `curriculum-*.json` 为集目录，逐集匹配报告和原始 JSONL 并核对完成回执、失败、抢占、退避与最后一次增分。1,528 集有 `run.finished`，其余 53 集有课程收尾记录（40 次预准备短路、13 次 `paused_for_world_job`，都为零模型请求）。有运行打点的集使用同一 Python 源码指纹 `c395de55e2b26f7d`，与审查时工作树源码一致。 [全量逐集证据索引](overnight-20261120-episode-index.md)
+
+表中分数含场景预授，`最后增分` 取真实 `score_delta > 0` 的最后一集。目标的 `0/N` 用 `objective_verified`，该集仍可能靠其他成就增分。死亡按明确 `[死亡 …]` 回执计。找到候选资源与突破瓶颈分别判断，正常的波次收尾缩短预算另记在索引。
+
+六波合计，发光告示牌 **0/116**、骑炽足兽 **0/57**、种植 **1/78**、睡觉 **2/79**。这些重复派发与单次动作超时分别跟踪在 BUG-050/054/060 和 BUG-047/056。 [逐集验证状态与失败行](overnight-20261120-episode-index.md)
+
+### 主轨第一波 `overnight_12bot`（12 路 / 582 集 / 4 小时）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `ds_ds_1_bare` | 35 / 55 / EP35 | EP06 伐木 179s 超预算。EP19 丢铁镐触发门控，EP25–33 在地下反复遇到工作台与木料缺口，`need_crafting_table` 14 次。重复补石/铁 16+8 集。EP35 有旁路增分，`shiny_gear` 目标仍超时。 | BUG-032/038/043/047/052 |
+| `ds_ds_2_cave_combat` | 58 / 120 / EP21 | 先拿杀怪和钻石，EP04/07/08 因 `lost_iron_pickaxe` 中止。EP22–58 无增分。`shoot_arrow`、`plant_seed`、`heart_transplanter` 各 0/6，返地表阶梯 63 次 `time_budget`，EP44 的 `move_to:busy` 约 102s。 | BUG-037/043/047/050/051/054 |
+| `ds_ds_3_enchant_anvil` | 41 / 150 / EP12 | EP01 先侦察，遭遇水域死亡后没有利用开局经验与附魔台。`enchant_item` 0/7、`lava_bucket` 0/10，EP13–41 没有增分。EP02/28 都有约 102s 的 `move_to:busy`，整路有 23 条死亡回执。 | BUG-026/047/050/053 |
+| `ds_ds_4_nether_fortress` | 43 / 210 / EP13 | `ancient_debris` 0/12、`ride_strider` 0/12、哭泣黑曜石 0/8。EP11/12 是 MC API `ReadTimeout`。明确死亡 41 条，含岩浆 20、岩浆块 10。末集仍在退避、迫降与短程寻路失败之间循环。 | BUG-026/044/047/050/057/058 |
+| `glm_glm_1_nether_fortress` | 34 / 205 / EP03 | 找到堡垒后 31 集无增分。`ancient_debris` 0/11、`ride_strider` 0/7。死亡后反复进入补镐支线，`tunnel:missing_pickaxe` 31 次、合成满包 24 次。模型 429 硬失败 3 集，另有 1 集 MC API 超时。 | BUG-042/044/045/049/050/052 |
+| `glm_glm_2_nether_bastion` | 30 / 270 / EP25 | 残骸目标有 1/11 成功。堡垒 0/10、炽足兽 0/6；狭窄地形下阶梯 `pillar_fallback` 46 次、移动未确认 75 次。EP09 到堡垒的单次移动等了约 152s 后仍无路径。 | BUG-037/045/047/050/055/058 |
+| `glm_glm_3_village_trade` | 61 / 155 / EP58 | EP01/02 交易通过，之后并行卡在地下补装备、找地表资源。`plant_seed` 0/8，高空交易 0/4；EP55 确认地表村民在场，但无已验证的垂直搬运和高空交易链。EP08/60/61 各遇一次约 102–103s 的移动锁等待。 | BUG-047/050/051/052/054 |
+| `glm_glm_4_brewing_alchemy` | 56 / 195 / EP13 | 开局酿造成功，EP08 后继续在地下接到睡觉、繁殖、种植各 6 次且均未验证。末段合成/熔炼分别有 8/10 次 `inventory_full`。EP14–56 不涨分，堡垒线未能接上。 | BUG-029/051/052/053/054/059 |
+| `glm_glm_5_midgame` | 72 / 185 / EP56 | 早段做出磁石与附魔，后续 `lava_bucket` 0/14、发光牌 0/8、移植树脂核心 0/7。找不到资源后目标反复重派；最后两集种植也未验证。EP72 同时遇 429 退避和桶交互垂直距离拒绝。 | BUG-042/045/050/054/060 |
+| `nju_guitest_01_nether` | 75 / 180 / EP06 | 69 集未涨分。EP22 起多工具共 154 次围栏拒绝，转阶梯仍有 55 次垫高回退。附魔 0/9，炽足兽、堡垒、哭泣黑曜石各 0/4。EP66/67 钓鱼走错入口，有竿和静水时仍未见工作回执。 | BUG-048/050/055/059/061 |
+| `nju_movetest_01_bare` | 21 / 25 / EP09 | EP10 开钻石任务，在积水路径和爬升之间耗掉完整长集。EP11–20 **连续 10 集**各被 `boundary_escape_water` 约 499s 占住，最后一集仅余很短收尾预算。补石器 13 集仅 1 次验证。 | BUG-032/038/047/056 |
+| `nju_nju_3_village_trade` | 56 / 150 / EP45 | 交易拿分后，EP11 有钻石但缺可用工作台/木料；合成 `need_crafting_table` 49 次，阶梯到时限 75 次。高空交易 EP54/55 无有效搬运链，末集附魔仍在阶梯与反射抢占之间打转。 | BUG-037/050/051/052/055 |
+
+### 主轨第二波 `overnight_12bot_part2`（12 路 / 596 集 / 14,100 秒）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `ds_ds_1_bare` | 40 / 105 / EP21 | 四集下界合金锄 0/4，接目标时仍缺跨维度、镐或模板前置。钓鱼 0/8，既有岸边错入口，也有入水后缺工作台。EP24 解卡单次 **404.4s**；EP22–40 无增分。 | BUG-032/047/050/056/061 |
+| `ds_ds_2_cave_combat` | 64 / 150 / EP13 | 钻石线推进后，EP14–64 无增分；短目标射箭/种植均 0/8，睡觉 0/6。阶梯 25 次退化为垫高，`move_to` 有 43 次位移未确认；返铁器验证成功主要恢复装备，没有净新增分。 | BUG-037/050/051/054/055/059 |
+| `ds_ds_3_enchant_anvil` | 45 / 135 / EP18 | 先侦察，附魔仍 0/7；睡觉 0/8、钓鱼 0/6，EP15/25/39/40 反复以右键水格代抛竿。EP02/24/36 均卡 `busy` 约 102–103s。EP14/16 的磁石暂停是世界任务等待，EP18 恢复完成。 | BUG-047/050/053/054/061 |
+| `ds_ds_4_nether_fortress` | 57 / 210 / EP21 | 目标骑炽足兽 0/13、残骸 0/12、哭泣黑曜石 0/10、凋灵头 0/7。53 条明确死亡（岩浆 20、岩浆块 10）；EP09 连死后 `not_connected`，另 3 集 MC API 超时。EP22–57 未再涨分。 | BUG-026/044/050/057、P2-34 |
+| `glm_glm_1_nether_fortress` | 80 / 240 / EP04 | EP05 受击死亡，EP06 起下界反复补主世界石/铁，其中 **0/52 + 0/23**。EP18 等事件有 `the_nether` 实证；伐木无目标 89 次、材料缺失 95 次。16 集 429，撞 80 集限早停约 28 分钟。 | BUG-042/045/046/049 |
+| `glm_glm_2_nether_bastion` | 33 / 270 / EP25 | 残骸有 1/14 成功，堡垒 0/11，炽足兽 0/4。阶梯垫高 35 次，岩浆/掉落/岩浆块伤害拖慢移动。EP11/33 移动约 102s 后才报 `busy`，9 集 429。 | BUG-026/045/047/050/055/057/058 |
+| `glm_glm_3_village_trade` | 32 / 90 / EP24 | 开局交易有效。`shiny_gear` 0/7，37 次 `climb_progress` 反复烧在返程；EP21 磁石等世界任务后 EP24 达成。EP29 暂停来自 `preempt_opportunity`，独立于失败。末段钻石任务又因移动和抢占耗尽预算。 | BUG-026/045/050/052/059 |
+| `glm_glm_4_brewing_alchemy` | 45 / 145 / EP40 | EP01/02 瓶子装水假成功，EP03 是 429；没拿到开局酿造。EP20 起围栏拒绝累计 129 次。发光牌 0/11，另 9 集 429；EP40 磁石增分后再次困在台阶和合成。 | BUG-045/048/050/051/062 |
+| `glm_glm_5_midgame` | 80 / 180 / EP09 | EP10–80 无净增分；岩浆桶 0/14、树脂核心 0/14、种植 0/12、悦灵 0/7。15 集 429，EP19/27 的 `move_to:busy` 各约 103s，80 集提前 3745s 收尾。 | BUG-042/045/046/047/050/054 |
+| `nju_guitest_01_nether` | 41 / 200 / EP40 | EP02 进下界，残骸 0/2、附魔 0/11、发光牌 0/7。阶梯垫高 43 次，最长一段 29 次。EP38 等磁石的世界任务后 EP40 成功；EP41 回矿 692s 仍未附魔。 | BUG-044/050/053/055/059 |
+| `nju_movetest_01_bare` | 30 / 70 / EP26 | 补石/铁器花掉 13 集，三次伐木达到约 90s。EP26 桶目标成功，EP27/28 黑曜石目标困于阶梯、窒息或返矿；EP30 装备目标再次超时。 | BUG-026/032/037/038/047/052 |
+| `nju_nju_3_village_trade` | 49 / 150 / EP21 | 早段交易、钻石和磁石有效，EP22–49 死循环恢复原料和工具。补石器 1/17、补铁器 0/8，缺工作台和找不到木头各 55 次。EP24 熔炼单次约 101s，后续爬阶梯积累 83 次 `time_budget`。 | BUG-032/037/047/052/055/059 |
+
+### hy4 短轨 `hy4_audit_r25`（4 路 / 17 集 / 配置 20 分钟）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `hy4_hy_2_iron` | 3 / 20 / 无 | EP01 侦察无增分，EP02/03 钻石装备任务均超时。挖掘虽有 16 个进展切片，中间遇到 `shaft_exhausted` / `no_progress`，波次内没完成材料链。 | BUG-030/037/051 |
+| `hy4_hy_5_brewing_alchemy` | 8 / 75 / EP06 | 开局酿造已拿分，EP06 补铁时挖掘/熔炼耗光时间但有旁路增分；EP07 预准备短路，EP08 钻石线因受击停挖后超时。 | BUG-026/037/043 |
+| `hy4_hy_6_nether_bastion` | 3 / 210 / EP03 | 残骸两集未验证，期间遇到错误矿种与井重置。全程 6 次 `path_not_found`，EP03 寻堡垒时遇到岩浆块伤害和无安全撤退。4 条死亡集中在 2 集。 | BUG-026/030/050/057/058 |
+| `hy4_hy_9_deep_water` | 3 / 30 / EP02 | 侦察后两集钻石任务均卡在切片与回程。EP02 单次挖掘约 85s，有击杀增分；EP03 收尾无伤亡但仍未合成装备。 | BUG-030/037/038/059 |
+
+### hy4 审计 `hy4_audit_r26`（4 路 / 92 集 / 配置 2 小时）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `hy4_hy_2_iron` | 18 / 100 / EP04 | EP02 装备目标成功，EP05–18 停分。发光牌和弩各 0/4。EP15 已有移动失败链，随后 MC API `ReadTimeout`；整路 13 条死亡，另有 10 次移动 `stalled`。 | BUG-026/044/047/050/060 |
+| `hy4_hy_5_brewing_alchemy` | 19 / 105 / EP18 | 酿造后恢复石/铁器 13 集，中间合成满包 7 次、爬升进展切片 21 次。EP18 有钻石成就旁路增分，EP19 未做出目标装备。 | BUG-032/038/052/059 |
+| `hy4_hy_6_nether_bastion` | 20 / 210 / EP10 | 残骸 0/7、堡垒 0/6、炽足兽 0/4。EP03 有连续岩浆逃生失败，整轨 20 条死亡分布在 11 集。EP06 是 502。EP11–20 无增分，寻路无路径 60 次。 | BUG-026/050/055/057/058 |
+| `hy4_hy_9_deep_water` | 35 / 120 / EP09 | 钻石装备在 EP09 验证，之后岩浆桶、发光牌、床和多种稀有目标重派，无净增分。挖掘有 5 个同位置无掉落切片，另 2 条溺水回执。 | BUG-023/030/050/054/056/060 |
+
+### hy4 审计 `hy4_audit_r27`（4 路 / 127 集 / 配置 3 小时）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `hy4_hy_2_iron` | 27 / 100 / EP16 | **EP02–12 共 126 次围栏拒绝**，覆盖阶梯、寻路、隧道、挖矿等，钻石任务 0/4。EP16 才再涨分，之后短地表任务和稀有结构搜索仍无进展。 | BUG-047/048/050/051/054 |
+| `hy4_hy_5_brewing_alchemy` | 31 / 165 / EP14 | 开局酿造成交，补装备与回程反复。EP04/06 移动锁约 102–103s；`craft_gear:inventory_full` 17 次。EP14 后因岩浆桶距离、找不到发光物资和满包附魔支线停分。 | BUG-029/047/050/052/059 |
+| `hy4_hy_6_nether_bastion` | 50 / 195 / EP08 | EP09–50 反复派主世界石/铁器共 **42 集全零**；在下界遭遇缺原木、镐等级和挖不出掉落，找路失败 72 次。另有 1 集输出截断报废。 | BUG-026/049/055/058、P2-33 |
+| `hy4_hy_9_deep_water` | 19 / 60 / EP05 | EP05 磁石成功，EP07 装备门控中止，EP08 起多次补石/铁。EP11–19 **九集**被约 560.5s 的边界浮水占住；整路 13 集超时、无明确死亡回执，瓶颈是动作时限与脱困。 | BUG-032/043/047/056 |
+
+### hy4 审计 `hy4_audit_r28`（4 路 / 167 集 / 配置 2.5 小时）
+
+| Bot | 集数 / 终分 / 最后增分 | 逐条复核的停滞链 | 工单 |
+|---|---|---|---|
+| `hy4_hy_2_iron` | 50 / 135 / EP26 | 前段磁石、矿线有进展，之后多次搜不到目标结构。种植 0/6、树脂核心 0/4，EP50 仍在找催发体；无 429，但 50 集配额提前约 6 分钟用尽。 | BUG-046/050/051/054/060 |
+| `hy4_hy_5_brewing_alchemy` | 50 / 165 / EP13 | EP01/02 装水并酿造成功，EP14–50 无增分。治愈村民 0/4、末影之眼 0/3（EP25/50 缺料，EP26 报缺用眼入口）、钓鱼 EP43/44 再走错接口。无 429 但提前约 18 分钟触集数限。 | BUG-046/050/053/061 |
+| `hy4_hy_6_nether_bastion` | 24 / 210 / EP05 | EP06–24 无增分，残骸与堡垒均 0/8。阶梯垫高 66 次、寻路无路径 80 次；明确死亡 17 条含岩浆 8 条，EP12 两条岩浆死亡，EP23/24 仍失败。 | BUG-026/050/055/057/058 |
+| `hy4_hy_9_deep_water` | 43 / 135 / EP25 | 磁石 EP25 再得分；从 EP26 岩浆桶找路失败开始停分。种植 0/5、树脂核心和催发体各 0/4，另有 5 次围栏拒绝与 3 条溺水回执。 | BUG-023/048/050/054/056 |
+
+## 场景需求队列（Scene Requests — 由 #1~#5 提单，#6 DeepSeek #2 按单实现）
+
+### SCENE-001 | 状态: FIXED（`7d5a571`，r16 已实测交易成功）| 提单人: #5 D1 | stage: village_trade / brewing_alchemy / cave_combat
+
+- **r67 `village_trade` 实测**：HY4_7 和 MoveTest_01 EP01 各真实交付 24 张纸取得 1 颗绿宝石，商人同一交易 `uses` 0→1，均验证 `minecraft:adventure/trade`、各 +15。LC1/LC2 四条初始交易课均硬 429，未调工具。 [HY4_7 交易回执](../runs/r67_village_trade_4bot/hy4_hy_7_village_trade/20261121-070643-268665.events.jsonl#L57) · [MoveTest 交易回执](../runs/r67_village_trade_4bot/nju_movetest_01_village_trade/20261121-070633-745290.events.jsonl#L107)
+- **核心问题**：三个新 stage 目前**只换出生点与背包**，没有注入 stage 目标；6 路实机全程仍在跑通用课程（`island_recon_sweep → shiny_gear`），场景分数无法反映交易/酿造/战斗能力。
+- **证据（r15）**：`glm_3_village_trade` 40（ep3/4 均 `shiny_gear` timeout）、`nju_3_village_trade` 40、`glm_4_brewing_alchemy` 55、`hy4_5_brewing_alchemy` 70、`ds_2_cave_combat` 60、`hy4_4_cave_combat` 45；`glm_5` 的 10 次 `mc_window_view` 中 6 次 `stalled`（开村民窗被实体碰撞箱卡住）。
+- **因果链（已定位）**：工具是**按任务文本关键词动态暴露**的（`harness/agent.py:129-132`、`harness/curriculum.py:796-799`：出现 "trade/交易/村民" 才加 `mc_skill_trade`，出现 "brew/酿" 才加 `mc_skill_brew`）。r15 的 stage 只换出生点/背包，任务文本仍是通用课程 → 1593 次工具调用中 **`mc_skill_trade` 0 次、`mc_skill_brew` 0 次、`mc_window_act` 0 次**，场景能力完全没被验证。
+- **验收目标（追加）**：r16 起 `village_trade` 路至少出现 1 次 `mc_skill_trade`，`brewing_alchemy` 路至少 1 次 `mc_skill_brew`。
+- **D1 r16 实测（通过）**：`nju_nju_3_village_trade` 首次 `mc_window_view(entity_id=2071)` 返回 `merchant` 窗口，随后 `mc_skill_trade(option=0, times=12)` **成功**（paper 24→emerald 1，max_uses 12）。`glm_glm_3_village_trade` 仍有 1 次 `no_window`（villager did not open a GUI），待观察是否复现 P2-24。
+- **建议注入**（仅供参考，按 `#6` 设计为准）：
+  - `village_trade` → 首集 `minecraft:adventure/trade`（已有 emerald 32 + wheat 32 + stick 64）
+  - `brewing_alchemy` → 首集 `minecraft:nether/brew_potion`（已有 blaze_powder/nether_wart/glass_bottle）
+  - `cave_combat` → 首集 `minecraft:adventure/kill_a_mob` + 存活 ≥180s（已有铁甲/弓/盾）
+- **验收目标**：r16 起三 stage 的首集 target 与 stage 语义一致，分数可横向比较；`mc_window_view` stalled ≤1。
+
+### SCENE-002 | 状态: READY_FOR_RUN（r43 落点和床重生已验证，补给交易链待复验）| 提单人: #1 主 AGY | stage名: `day2_village_near`（Slice D2 `#6 DeepSeek #2`）
+- **地形/结构要素**：用 `locate structure #minecraft:village` 定位真实村庄，但把 Bot 出生点设在村庄外围 **120–180m** 的主世界安全地表（避免直接降落在村中心，专门考验中距发现+进村）。
+- **初始背包与成就**：同 `iron` 阶段（铁镐/铁斧/铁盾/火把/圆石/面包/木头），时间设为 **Day 2 早晨（`time set 1000`）**，确保有完整白天验证寻村与占屋。
+- **死亡拉回规则**：沿用主世界安全地表出生点，禁止误跨维度（复用 `5e871e6` 护栏）。
+- **核心验证目标**：端到端验证 `day2_village_search` 完整闭环（发现 `bell`/`dirt_path`/`hay_block` → 占领村民屋 `bind_bed` 绑重生点 → 薅干草块/箱子 → 交易或入夜切地下矿井），避免随机空降 9 台全在 300m+ 荒野测不到进村逻辑。
+- **r43 收官**：9/9 验证落点，距对应村庄中心 **135.85–164.78m**。9 路强制寻村首集全用满 14 请求，4 路找到结构线索，HY4_7 首集绑定后在 EP04 死亡实测重生在床旁 **1.58m**。全波无取箱、干草入包或交易。首集 25 次实体查询中只有 1 次含村民，随后 Day 1 侦察才实际看到村民。续验村民过滤与查到目标后的补给／交易衔接。 [范围下端](../runs/r43_day2_village_near_9bot/hy4_hy_4_day2_village_near/wild-endurance-r43_day2_village_near_9bot_hy_4_day2_village_near-20261120-071619.json#L37) · [绑床](../runs/r43_day2_village_near_9bot/hy4_hy_7_day2_village_near/20261120-071642-835969.events.jsonl#L266) · [重生](../runs/r43_day2_village_near_9bot/hy4_hy_7_day2_village_near/20261120-072929-890490.events.jsonl#L140) · [后来看到四位村民](../runs/r43_day2_village_near_9bot/nju_ds_1_day2_village_near/20261120-071902-718275.events.jsonl#L225)
+
+- **r57 随机裸装接续**：与 r56 同四路，铁器验证 **2/12→3/9**，Day 2 寻村派发 **0→1**。HY4_4 EP05 用已有铁锭自动合成铁镐，EP06 三次实走合计 364.50m，期间一次近战死亡，三次扫描没有村庄 POI 或村民。r58 日出波加载 `9e13605` 的地下派单和先回地表提示，等待该条件实机。 [零模型合成](../runs/r57_day1_day2_fast_4bot/hy4_hy_4_bare/20261121-011558-233184.json#L40) · [实际派单](../runs/r57_day1_day2_fast_4bot/hy4_hy_4_bare/20261121-011611-871769.events.jsonl#L1) · [第三次斥候](../runs/r57_day1_day2_fast_4bot/hy4_hy_4_bare/20261121-011611-871769.events.jsonl#L110) · [日出选单条件](../src/mc_agent/harness/curriculum.py#L1541)
+
+- **r58 日出终版**：HY4_3 在首条可确认站位 Y52、DS_2 在 Y101 接续寻村，各两集，均未见村庄线索。HY4_3 能完成部分斥候路段；DS_2 两集七条斥候回执均为 0m。四次任务均没有地下先回地表的提示，Y<48 实机派单仍待验证。 [HY4_3 位移](../runs/r58_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-014334-214769.events.jsonl#L21) · [日出状态](../runs/r58_day12_sunrise_village_4bot/hy4_hy_3_bare/20261121-014334-214769.events.jsonl#L67) · [DS_2 首条原地斥候](../runs/r58_day12_sunrise_village_4bot/nju_ds_2_bare/20261121-014507-509185.events.jsonl#L54)
+
+- **r59 日出终版**：HY4_10 EP07 真制铁镐，随后两次白天寻村。EP08 实走 145.13m 得土路和蓝床，EP09 再扫到蓝床。最近实走仍距床约 42m，0 绑床或交易，寻村验证 0/2。其它三路无寻村派发。 [土路与床](../runs/r59_day12_sunrise_village_4bot/hy4_hy_10_bare/20261121-022210-195645.events.jsonl#L34) · [实物扫描](../runs/r59_day12_sunrise_village_4bot/hy4_hy_10_bare/20261121-022422-378685.events.jsonl#L37) · [最近移动](../runs/r59_day12_sunrise_village_4bot/hy4_hy_10_bare/20261121-022422-378685.events.jsonl#L56)
+
+- **r60 裸装日出真实低位派单**：DS_2 EP07／09 分别在 Y16／26 收到新版“先回地表”任务。两集均实际调用回程，最终未进入地表斥候。第一集支持不足且中途转夜，次集到 Y35 随波结束。地下派单已实机复验，实地出井寻村仍待完整链。 [Y16 派单](../runs/r60_day12_full_45m/nju_ds_2_bare/20261121-030135-415499.events.jsonl#L1) · [Y26 派单](../runs/r60_day12_full_45m/nju_ds_2_bare/20261121-031515-000911.events.jsonl#L1)
+
+- **r66 补给交易复验**：`r66_village_trade_2bot` 2/2 收官，两槽落点距各自村庄 138–146m。HY4_7 EP01 实扫床与村落结构，绑床返回 `ok=true, changed=false`，两条箱子调用均未取物，一条明确要求 `put` 或 `take`。整波没有交易工具调用，故补给交易链仍待验。 [斥候命中](../runs/r66_village_trade_2bot/hy4_hy_7_day2_village_near/20261121-063516-265761.events.jsonl#L42) · [绑床](../runs/r66_village_trade_2bot/hy4_hy_7_day2_village_near/20261121-063516-265761.events.jsonl#L162) · [取箱参数](../runs/r66_village_trade_2bot/hy4_hy_7_day2_village_near/20261121-063516-265761.events.jsonl#L270)
+
+### SCENE-003 | 状态: READY_FOR_RUN（`c9e550f` 已合入，`--stage village_to_stronghold_end` 就绪）| 提单人: #1 主 AGY（用户规划阶段三）| stage名: `village_to_stronghold_end`（Slice D2 `#6 DeepSeek #2`）
+
+- **W13 H4 零集未入场。** 区域内定位到 3 个独立村庄、0 对进入落地检查，`not_ready`。校验同时限制分区及村庄到要塞距离，旧摘要未留各村候选被拒的具体条件。端到端验收本波无暴露。 [启动回执](../runs/l1_w13_20261122/hy_5e_4_village_to_stronghold_end/stdout.log#L1) · [配对筛选](../scripts/l3_wild_endurance_runner.py#L481)
+- **W14a `1a53ee7` 实机找到了进入落地检查的配对。** H4 定位村庄／受检查配对 **3/0→6/3**。三对均 `no_safe_landing`，另三村超距离范围。H4 仍零集，实际落点与同区要塞可通性继续待验。 [W14a 启动回执](../runs/l1_w14a_20261122/hy_5e_4_village_to_stronghold_end/stdout.log#L1)
+- **地形/结构要素**：定位主世界真实村庄安全地表作为起点（距离最近主世界要塞 `#minecraft:stronghold` 在合理可追范围，记录要塞坐标用于汇总但不泄露给模型）。
+- **初始背包与成就**：钻镐/钻剑/铁或钻甲/盾牌/食物/圆石/火把 + **14 颗 `ender_eye`**（或等量 `ender_pearl` + `blaze_powder`），已解锁铁/钻基础成就，早晨开局。
+- **死亡拉回规则**：绑定村庄出生点，禁止非传送门意外跨维度（进入 `the_end` 视为合法终局晋级！）。
+- **核心验证目标**：端到端验证“从村庄据点出发 → 掷末影之眼测向 → 复用高速斥候追眼定位要塞 → 下挖进传送门房 → 填眼激活进入末地（`follow_ender_eye` + `enter_the_end`）”。
+- **r49 终版**：5/5 有终版文件，仅 HY4_1 与 MoveTest 完成运行，各跑满 1200s；HY4_2/3 预准备远程命令 30s 超时、GuiTest 找不到满足 120–600m 的安全村庄。实际 5 集皆派 `follow_ender_eye`，0 集验证；测向反转追踪见 BUG-081。应把安全落点预检通过数和实际端到端通过数分别记录。 [终版](../runs/r49_stronghold_end_5bot/triage-r49_stronghold_end_5bot.md#L3) · [场景准备超时](../runs/r49_stronghold_end_5bot/hy4_hy_2_village_to_stronghold_end/wild-endurance-r49_stronghold_end_5bot_hy_2_village_to_stronghold_end-20261120-104353.json#L13) · [村庄约束未匹配](../runs/r49_stronghold_end_5bot/nju_guitest_01_village_to_stronghold_end/wild-endurance-r49_stronghold_end_5bot_guitest_01_village_to_stronghold_end-20261120-104349.json#L13)
+- **r51 落点复盘**：HY4_1 两次都在主世界，水平偏差 1.10／3.94m，高差 0.4／0.6m，都符合 6m／2m 容差。剩下的失败判定在干燥立足条件，日志缺 `on_ground`、`in_water`、`in_lava`。最后一次重置后未再次验证。实机启动复验可记录三个标志，以及最后一次重置后的采样结果。 [失败与重置](../runs/r51_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/stdout.log#L1) · [校验条件](../scripts/l3_wild_endurance_runner.py#L1592)
+- **r54 收官**：磁盘 3 个终版槽，HY4_1／2 开跑，HY4_3 未匹配距要塞 120–600m 的安全村庄。两路 9 集要塞任务 0 验证、末地进入 0/2，终包末影之眼均为 0。HY4_2 EP01 搜到石砖后走到附近，往下分别受水和岩浆阻断，在 Y53 仍能扫到石砖而无门框。端到端需继续验证安全下探、门框填眼及维度接入。 [村庄预检](../runs/r54_stronghold_end_4bot/hy4_hy_3_village_to_stronghold_end/wild-endurance-r54_stronghold_end_4bot_hy_3_village_to_stronghold_end-20261120-231028.json#L13) · [地表发现](../runs/r54_stronghold_end_4bot/hy4_hy_2_village_to_stronghold_end/20261120-231037-069823.events.jsonl#L578) · [下探遇水](../runs/r54_stronghold_end_4bot/hy4_hy_2_village_to_stronghold_end/20261120-231037-069823.events.jsonl#L651) · [下探遇岩浆](../runs/r54_stronghold_end_4bot/hy4_hy_2_village_to_stronghold_end/20261120-231037-069823.events.jsonl#L751) · [活跃槽终版](../runs/r54_stronghold_end_4bot/hy4_hy_2_village_to_stronghold_end/wild-endurance-r54_stronghold_end_4bot_hy_2_village_to_stronghold_end-20261120-231020.json#L46)
+- **r56 进入要塞，末地仍待**：HY4_1 EP03 验证要塞 +60，EP04 开场即扫到 **12 个 Y−15 的空眼门框**，最近 57.5m。两次直接寻路未位移，后续挖隧道将门框距离缩到 16.7m，向上施工两次被战斗抢占，集限内 0 次填眼。EP04 开场和终版都只有 **11 眼**，差 1 眼；两路终态均主世界，末地 0/2。HY4_2 缓存估点的误差一度由 12.04m 增至 71.47m。继续分别核对估点筛选、门框的可达路径和实际填眼。 [要塞验证](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-002233-173459.events.jsonl#L340) · [首次空门框](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-002551-640618.events.jsonl#L22) · [11 眼库存](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-002551-640618.events.jsonl#L46) · [集尾门框](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/20261121-002551-640618.events.jsonl#L692) · [终版未入末地](../runs/r56_stronghold_triangulate_3bot/hy4_hy_1_village_to_stronghold_end/wild-endurance-r56_stronghold_triangulate_3bot_hy_1_village_to_stronghold_end-20261121-000244.json#L46)
+- **r57 开跑时的末地候选**：`cb3d956` 的通用课程增加依据门框海拔开路和逐一填眼，实际首批指纹 `083edb69731c5bd6` 已加载。场景仍从 `STRONGHOLD_FOCUS` 重建两条任务，actor 使用选中任务的文本。HY4_1 首集仍为八步追眼旧场景稿，初始实际 14 眼。要塞验证后需核对真正派单内容、门框可达性、眼数量及跨维度。 [版本和首集文本](../runs/r57_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261121-003500-968952.events.jsonl#L1) · [初始眼数](../runs/r57_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261121-003500-968952.events.jsonl#L20) · [通用末地任务](../src/mc_agent/harness/curriculum.py#L814) · [实际场景任务](../scripts/l3_wild_endurance_runner.py#L1800)
+
+
+- **r57 末地派单覆盖已证实**：HY4_1 EP04 真派 `enter_the_end`，启动文本仍是场景稿，缺通用新版受阻挖通指引。门框 `eye=false` **12**，背包 **7 眼**，最近从 **35.2→20.8m**。六条无路，0 隧道／楼梯／填眼，180.7s 超时；三路末地均未验证。修复场景入口后，用同一要塞核对派单文本、持续挖通、填满所需眼和末地状态。 [实际末地稿](../runs/r57_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261121-010200-251477.events.jsonl#L1) · [7 眼](../runs/r57_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261121-010200-251477.events.jsonl#L22) · [最近框](../runs/r57_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261121-010200-251477.events.jsonl#L301) · [超时](../runs/r57_stronghold_end_3bot/hy4_hy_1_village_to_stronghold_end/20261121-010200-251477.events.jsonl#L388)
+- **r58 要塞终版**：同两个实际槽、同村庄和要塞定位，30→45 分钟，真实出生点各有变化。要塞验证 **1→0**、末地派发 **1→0**。HY4_1 EP03 近处扫描见要塞石砖，HY4_2 EP04 扫到 Y54 地标但下挖前死亡。11 集均为追眼，无找到门框、填眼或跨维度回执。 [HY4_1 地标](../runs/r58_stronghold_end_45m/hy4_hy_1_village_to_stronghold_end/20261121-012627-132142.events.jsonl#L372) · [HY4_2 地标](../runs/r58_stronghold_end_45m/hy4_hy_2_village_to_stronghold_end/20261121-013541-415229.events.jsonl#L196) · [HY4_2 随后死亡](../runs/r58_stronghold_end_45m/hy4_hy_2_village_to_stronghold_end/20261121-013541-415229.events.jsonl#L333)
+- **r59 两次实际末地派单**：HY4_2 EP03 扫到 12 框、下到 Y−17 后验证要塞。EP04 实际最近约 14.65m、EP05 约 18.91m（水平与高度合计）；两集各尝试 5 次隧道，仍无近距可填眼位。12 框始终 1 枚眼，背包 8 枚，缺 3 枚。两集均使用旧场景稿，无填眼工具请求及末地维度回执。 [要塞发现](../runs/r59_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-021541-139945.events.jsonl#L418) · [EP04 最近](../runs/r59_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-022007-633658.events.jsonl#L28) · [EP05 八眼](../runs/r59_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-022731-782008.events.jsonl#L669) · [隧道因未知地板停](../runs/r59_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-022731-782008.events.jsonl#L802)
+- **r60 要塞带一崩收官**：HY4_2 EP04 验证要塞 +60，EP05 真实末地派单，背包 10 眼、两次半径 64 门框扫描皆 0。约 323s 因发现取岩浆桶机会被暂停，末地未验证。HY4_1 未就绪、MoveTest 崩溃，后者见 BUG-083。 [要塞验证](../runs/r60_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-030645-991143.events.jsonl#L93) · [末地首扫](../runs/r60_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-030757-260278.events.jsonl#L28) · [暂停原因](../runs/r60_stronghold_end_40m/hy4_hy_2_village_to_stronghold_end/20261121-030757-260278.json#L7863)
+
+> 任何会话需要特定实机复现/验收环境时，按以下 5 行模板追加需求单；`#6` 实现为 `l3_wild_endurance_runner.py --stage <name>` 并接入 `v2_fleet.py` 后标为 `READY_FOR_RUN`，由 `#1 主 AGY` 合入上机。
+>
+> ```markdown
+> ### SCENE-XXX | 状态: OPEN | 提单人: #X | stage名: <name>
+> - **地形/结构要素**：(如 locate fortress / fill 3x3 岩浆池 / 混合有业+无业村民)
+> - **初始背包与成就**：(...)
+> - **死亡拉回规则**：(如设 spawnpoint 或下界死亡回传补装)
+> - **核心验证目标**：(验证哪个 Bug 修复或哪个成就链路)
+> ```
+
+
+
+---
+
+## 2026-11-22 正式赛（`survivaltest2` / `5Ease_Bot`）现场实测登记
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-090 | P1 | Slice C（熔炉技能）+ Integrator（集间炉务）| 状态: OPEN（2026-11-22 正式赛现场发现）
+
+- **W21 HY1 20m EP04 补齐同炉第三锭。** 备料收两锭后按 `smelt_incomplete` 结束，actor 独立包两锭。已知炉坐标 Y48 的窗口随后见一锭、无带料，显式 `from=output` 实取一锭后槽空。实耗三锭制铁镐，回执实包铁镐一并目标达成。长槽 HY7 另见先实进 11 粗铁，尾迹只见开始熔炼，未证取锭。 [短槽实取](../runs/l1_w21_v1321_20261123/glm_hy_5e_1_bare_20m/20261123-003456-088546.events.jsonl#L68) · [短槽成镐](../runs/l1_w21_v1321_20261123/glm_hy_5e_1_bare_20m/20261123-003456-088546.events.jsonl#L83) · [长槽尾迹](../runs/l1_w21_v1321_20261123/glm_hy_5e_7_bare_60m/20261123-002554-468952.events.jsonl#L158)
+
+- **W20 HY7 同炉已经有成品，旧 `no_output` 仍挡取。** 60m EP03 投 13 粗铁，自动实取 4 锭，之后同炉三次分别实取一锭。一次 `take` 在输出空、炉仍燃且进度 0.93 时失败。后续 `put coal` 的最新炉窗明确有 **2 成品、4 待烧原料**，同参 `take` 仍被 `repeated_identical_failure_blocked` 短路，未派到炉窗。这一时点 `4+3+2+4=13`，炉外独立包另有 2 粗铁，已分账。验收依据同炉最新已确认的输出解除旧取货拒绝，保留输出仍空时的限重。 [初次取四](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-225627-467230.events.jsonl#L153) · [空窗](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-225627-467230.events.jsonl#L245) · [新出二锭](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-225627-467230.events.jsonl#L291) · [短路](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-225627-467230.events.jsonl#L303) · [防重复入口](../src/mc_agent/harness/agent.py#L561)
+
+- **W20 OB1 回执已分型，补炉动作仍不兑现。** EP02 同炉实际取 1 锭，后验输入 2、燃料 0、产物 0、停火。`needs_fuel` 文案说先补料，示例仅有读窗与 `take`。actor 先发 `insert` 被参数挡，后两次各 `put` 一棍，首根只升到 0.22 后熄火、两粗铁未动，第二次的后续取货又被防卡拦。下集独立包一锭、一粗铁、一台、零棍。该例待验可执行且足量的补炉动作，保留首镐两棍，按真实进度和后验入包作收尾。 [部分回执](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-224518-983839.events.jsonl#L392) · [停火与 0.22](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-224518-983839.events.jsonl#L575) · [第二根](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-224518-983839.events.jsonl#L639) · [跨集库存](../runs/l1_w20_20261122/nju_ob_1_bare_60m/20261122-225044-484192.events.jsonl#L16) · [提示分型](../src/mc_agent/skills/library.py#L6338)
+
+- **W19 OB2 最终取回十二锭。** 新挖七粗铁后，又对放着六成品的同一 Y18 炉执行熔炼，14.33s 实取七锭。下一片 DFS 净增五锭、一炉、一粗铁，正式终包十二锭和一粗铁。两次投料共十三份最终有实物对账，无法由收取回执判定每锭归属或具体拆炉取料动作。60m OB1 同类缺 `from` 两次后改为 `from=output`，确认取回六锭，随后炉输入仍七粗铁。 [OB2 同炉续烧](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-215350-771054.events.jsonl#L456) · [额外回增](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-215350-771054.events.jsonl#L561) · [正式终档](../runs/l1_w19_20261122/nju_ob_2_bare_30m/wild-endurance-wild-20261122-212857.json) · [OB1 实取六锭](../runs/l1_w19_20261122/nju_ob_1_bare_60m/20261122-215847-309172.events.jsonl#L559)
+
+- **W19 OB2 铁器成功后六锭全留炉。** EP11 在 Y18 独立包六粗铁，熔炼 48.82s 报 `partial_smelt` 且 `collected=[]`。同炉先确有输出 4，后完成 6。actor 三次只发 `to=player`，都缺 `from=output`，首步 `bad_section` 且 `done=[]`。最终炉停火、输入空、输出 6，独立包粗铁 0、锭 0。重点复验部分熔炼引导含可执行的只取成品参数，最小回归让同炉输出实际转入包。保留明确从输入退料或燃料槽取出的正常用法。 [炉务回执](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-215350-771054.events.jsonl#L78) · [末次零转移与六锭](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-215350-771054.events.jsonl#L358) · [独立包零锭](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-215350-771054.events.jsonl#L371) · [窗口入口](../src/mc_agent/harness/mc_tools.py#L2237)
+
+- **W17b HY10 EP03 实物对账。** 同炉续烧粗铁 14，首次取 4、报退 10，第二次取 4、报退 6。停炉后重复读到输出 1 锭、燃料 9 木板。两种取货入口分别因缺 `from=output`、默认 `section=container` 而零转移。独立包为 8 锭、5 粗铁，与炉内 1 锭合计 14 份，第二次回执的退 6 比实包多 1。熔炉读输入与退料调用之间可继续出锭，当前 `reclaimed_input` 累计读取的输入数量，需按实际转移或包差确认，并在退料后复读输出。 [首炉](../runs/l1_w17b_20261122/hy_5e_10_bare/20261122-203444-696046.events.jsonl#L78) · [第二炉](../runs/l1_w17b_20261122/hy_5e_10_bare/20261122-203444-696046.events.jsonl#L152) · [退料后炉窗](../runs/l1_w17b_20261122/hy_5e_10_bare/20261122-203444-696046.events.jsonl#L492) · [独立包](../runs/l1_w17b_20261122/hy_5e_10_bare/20261122-203444-696046.events.jsonl#L591) · [退料回执](../src/mc_agent/skills/library.py#L5382)
+
+- **D1 离线复现退料读写间隔。** 固定实入口 `McToolset.mc_skill_smelt`，MockTransport 在读取 6 份待退料后、退料调用前完成 1 锭。调用响应实际转移 5，现代码仍报告退 6。模拟初始 10 最终为实包 4 锭、5 粗铁、炉留 1 锭，复现实机回执形状。线上是否正好在该间隔烧完仍无逐内部动作记录。验收同时核退料后读取输入和输出。 [实入口实现](../src/mc_agent/skills/library.py#L5362)
+
+- **W16 P0 OB1 EP07 终档闭合扣料，零实取。** 炉位 `[84825,101,106952]`。开炉前包 2 粗铁、3 煤，随后 `partial_smelt` 报一煤、申请 2、`collected=[]`。终包粗铁 0、煤 2、锭 0，验收记作原料净扣且未取锭。炉内剩料／产物需另读窗。 [炉前包](../runs/l1_w16_p0_verify_20261122/nju_ob_1_bare/20261122-200042-006039.events.jsonl#L223) · [炉末回执](../runs/l1_w16_p0_verify_20261122/nju_ob_1_bare/20261122-200042-006039.events.jsonl#L309)
+
+- **W16 GLM HY1 EP05 部分熔炼足以做首镐，余 6 份未闭账。** 新炉 `[116970,28,129973]` 请求 9 粗铁，耗 2 煤，41.8s 只实取 3 锭，下一调用制并装备铁镐 1。该回执之后及终包的粗铁为 0，缺同炉状态和续领取货证明其它 6 份去向。 [同炉实取](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-195122-605089.events.jsonl#L182) · [成镐和包](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-195122-605089.events.jsonl#L199) · [终包](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/wild-endurance-wild-20261122-193358.json#L41)
+- **D2 `19c1326` 离线验证已知炉位的续收，备料炉位传递仍待补。** D1 用真实 compact 注册器和 MockTransport，读同一炉并仅发 output take，背包实入 3 锭、炉产物清空、零重复投料。候选提示要求已有实坐标，`ensure.py` 的部分熔炼摘要和 actor 失败备料前缀仍不带炉位。下一项验收从 EP12 原样的备料交接进入 actor，要求它确知原炉位置，再取货核包。 [候选炉务提示](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L2416) · [备料步摘要](../src/mc_agent/skills/ensure.py#L1133) · [actor 接收前缀](../src/mc_agent/harness/curriculum.py#L2608)
+- **60m 裸装交接同时丢炉位和工具。** Long2 OB2 EP12 备料用 45.91s 制炉并尝试熔 3 粗铁，报告燃料热带木板 1、`collected=[]`。`ensure.py` 的 step 摘要未保留炉位，actor 先扫树、下梯、再扫树，7 请求没有读炉或取货。终档无锭，缺炉窗原迹确认实际烧成量。D1 用 `8e8a560` 真 compact 注册器核验，门户课有 `mc_window_view/act`，裸装铁器课仍缺这两项。接续时保留炉位、剩料和已产出状态，铁器课挂可实际派发的读炉与只取产物工具，离线回放短预算点火、同炉恢复、禁止重复投料。 [备料炉务](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-115750-031044.json#L3305) · [actor 下梯](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-115750-031044.events.jsonl#L173) · [步摘要](../src/mc_agent/skills/ensure.py#L1138) · [铁器工具名单](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L2396)
+- **同炉正例对 C 候选形成新回归门。** C 以 H1 同炉首轮 12 圆石重放，`2735fe3` 实取 4、炉单待收 8，背包圆石 0。D1 用实际工具和模拟运输独立重放此状态，两次后续熔炼都只读背包、报 `missing_ingredients`。即使直接调用回收逻辑，旧波站位扣坐标偏移后离炉 3.041m、超过 3m，零开窗；朝炉近一格才真取 8、石头包到 12 并清账。验收需有课内可派发的同炉续收路径，避免重复投料并从原失败站位显式恢复。 [原站位](../runs/l2_long3_20261122/hy_5e_1_midgame/stdout.log#L785) · [原实机首批](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131504-018043.events.jsonl#L374) · [先拒缺原料](../../s-skills/src/mc_agent/skills/library.py#L6089) · [三米范围](../../s-skills/src/mc_agent/skills/library.py#L5915)
+- **Long3 H1 同炉 12 圆石三批全收，随后用于磁石课。** EP08 在同炉 `[402869,63,342993]` 申请 12→8→4，分三次实际收 4＋4＋4 石头，前两次也分别退回 8、4 原料，三片共 139.124s。L443 出 12 石砖，L466 出 18 台阶。EP10 前置做成錾制石砖和磁石，放置、持指南针交互后确实得 15 分。早先异步 `fjob-1` 另缺同单取货回执。与 OB3 先前 6 粗铁只确认取 4 锭的用例成对保留。 [同炉首批](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131504-018043.events.jsonl#L374) · [同炉末批](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131504-018043.events.jsonl#L421) · [台阶包差](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131504-018043.events.jsonl#L466) · [磁石验证](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-132648-687607.events.jsonl#L56) · [异步作业](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-131252-954881.json)
+- **现有自动续收候选也缺这条回程入口。** OB3 EP07 L348→L1200 有 15 次楼梯、5 次批挖、1 次隧道、1 次移动，0 次 `mine_dfs`。C `2735fe3` 的附近取炉只在 `mine_dfs(explore)` 派发，未覆盖擦过原炉的这条路。实机复验需验证此课实际派发同炉续收，在能安全交互时记录实包差和余量。 [回程近炉](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L1118) · [候选入口](../../s-skills/src/mc_agent/harness/mc_tools.py#L3062)
+- **OB3 EP07 后段回到炉旁仍未复查。** 从 Y83 起 12 次各 3 阶上行，实挖回升 36 格，工具耗 96.892s、首起到末尾 223.912s。L1118 实站 `[-2811.5,110,10073.5]`，离 L348 炉位水平 1m、脚高一格。近点是否可交互待证。完整 EP07 没有该炉的开窗或取货回执，回升前最后一份独立包是 4 锭。 [炉位](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L348) · [最后已证四锭包](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L842) · [擦过炉位](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L1118) · [集尾](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L1798)
+- **Long3 OB3 的部分熔炼提示给了课内不可调用的工具。** L348 指向 `mc_window_view`／`mc_window_act`，该集 L6 工具数 18。C／D1 用实载 compact 注册表复验，同炉坐标上的两项都未注册；full 允许准备相同请求。后续 L842 独立包仍 4 锭、0 粗铁。验收应保证负荷下确有课内可调的同炉续收路径，能分别核实入料、余料、产物和实际取出。C `e37a850` 候选在同炉前置与待收分支保持进展，仍需单独覆盖 compact 恢复入口。 [演员工具数](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L6) · [部分熔炼提示](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L348) · [之后实包](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L842) · [门户课工具](../src/mc_agent/harness/curriculum.py#L740) · [compact 注册过滤](../src/mc_agent/harness/mc_tools.py#L3714)
+- **Long3 OB3 EP07 同炉实收 4/6，剩余两份缺证。** 17.463s 挖 6 格、实收 6 粗铁，首次熔炼实包有 20 煤但缺炉。补 9 圆石并造炉后，以 1 煤熔炼，62.114s 回 `partial_smelt`，炉位 `[-2811,109,10073]`。下一次独立包真有 4 锭、0 粗铁，未见输入归还或同炉续收。当时改去找燧石和黑曜石。按同炉读回 input/output/fuel 后核剩余两份，分开验证实际取货与下游消耗。 [铁实收](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L208) · [前置缺炉](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L231) · [部分取货](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L348) · [实包](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L370) · [炉内剩料分支](../src/mc_agent/skills/library.py#L5381)
+- **Long2 H1 异步炼石链复验。** EP08 登记 `fjob-1` 两炉转 12 圆石，先做插入任务 EP09。EP10 集前实制石砖、台阶、錾制石砖及磁石、指南针，随后两次 actor 请求完成放置与交互，+15 已验证。可证石料产物进入后续配方；逐炉余货和收取明细未归档。 [登记](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-122622-309091.events.jsonl#L2) · [成功续集](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-122833-002755.events.jsonl#L55) · [逐炉取货返回消费](../src/mc_agent/harness/curriculum.py#L2201)
+- **Long2 H3 EP08 集间熔炼收取正例。** 预备实制炉，投 3 粗铁和 1 煤，`collected` 实收 3 锭，随即合成桶 1。L208 独立包有桶 1、粗铁 7、锭 0，与合成投入对上。集终未验证装岩浆；12 集终包仍 8 粗铁、7 煤、1 炉、无铁锭。保留此链对照只有熔炼指令、没有独立产物的失败样本。 [熔炼收取及制桶](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-120245-067472.json#L4877) · [独立包](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-120245-067472.events.jsonl#L208) · [终包](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/wild-endurance-wild-20261122-113623.json#L48)
+- **Long2 OB2 首终档，四格铁矿确实拾取但成品未进终包。** EP10 原地实采 4 粗铁，制炉时包 5 粗铁，L480 真实放炉，未调用炉务。EP12 备料又造 1 炉，`smelt raw_iron count=3` 回执取出 **0**，终包粗铁 2、锭／铁镐／随身炉均 0。5→2 的包差与该请求批量一致，最后的炉槽和是否留产物无独立记录。 [四格铁](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-115410-127957.events.jsonl#L120) · [实放炉](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-115410-127957.events.jsonl#L480) · [末集备料](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-115750-031044.events.jsonl#L2) · [正式终包](../runs/l2_long2_20261122/nju_ob_2_bare/wild-endurance-wild-20261122-113623.json)
+- **Long2 OB1 EP05 找料后的库存结果。** 缺显式煤回执之后，四次向上施工合计 **168.666s、40 阶、118 格**，Y24→64。L348 的死前盘点仍有粗铁 4、锭 2、铁镐 1，铁镐在副手 45，主手空，普通背包物品数组未列副手。L360 爆炸死亡后 L393 的新包只有随后实砍的三根原木，铁料与石镐均归零。 [缺煤回执](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L164) · [出地表](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L337) · [死前包](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L348) · [死后包](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L393)
+- **Long2 OB1 EP05 显式缺煤，替代燃料就在包内。** L140 确认入包炉 1，L164 `fuel_item=coal` 报缺燃料并建议砍木，但自身包有原木 8、橡木板 2、粗铁 4，炉已不在包。沿提示砍木零入包并重复上行找料。固定 `1c579b9` 和 C `2735fe3`，同样包形走真实工具入口与 MockTransport，显式煤在两版均实派放炉、炉 1→0、零投料；省略 fuel 时两版均选择包内橡木板 2 投料。现场缺新放坐标回执，后续验同包、错误提示和失败前零放炉。 [旧炉实扫](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L82) · [炉入包](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L140) · [错误与库存](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L164) · [旧版放炉](../src/mc_agent/skills/library.py#L5183) · [旧版燃料选择](../src/mc_agent/skills/library.py#L5212)
+- **L2 两条末段炉账。** H1 EP06 请求粗铁 10，炉回执的批量 5、61.140s 后实取 4 锭。前包锭 16，新铁镐消耗 3，制作后和终包均锭 17、钻 6、铁镐 1，缺第 5 份的炉槽及入包记录。H4 EP05 炉中最后见 2 锭且无转移，余下 EP06–11 未见回炉取产，EP10 明确死亡并补装，终包铁具须据此区分。 [H1 取锭](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-111921-990526.events.jsonl#L570) · [H1 制镐包](../runs/l2_long1_20261122/hy_5e_1_midgame/20261122-111921-990526.events.jsonl#L590) · [H4 最后炉读](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-111247-345957.events.jsonl#L302) · [H4 补装](../runs/l2_long1_20261122/hy_5e_4_deep_water/stdout.log#L911)
+- **L2 H4 深水，7 粗铁的炉内、炉外实物对账。** EP03 L827 包有 7 粗铁。EP04 备料先烧 1 取 1、后烧 3 取 1，113.87s 以 `smelt_incomplete` 收尾。EP05 在 `[-4620,40,5204]` 两次开炉，L199 和 L302 实际窗口的 `output` 都有 **2 铁锭**，第二次已停止燃烧，操作 `bad_section` 且 `done=[]`。L215 包 3 粗铁、2 铁锭；EP06 L237 用包内二锭制并装备新增铁剑，炉内两锭无取回回执。按同批序列可闭合 4 入炉＝2 入包＋2 留炉；备料回执行未带烧制炉坐标。C 已收到。 [初始粗铁](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-105403-366482.events.jsonl#L827) · [三入一取](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-111047-001721.json#L1590) · [停炉余两锭](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-111247-345957.events.jsonl#L302) · [包内锭成剑](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-111716-887594.events.jsonl#L237)
+
+- **W13 OB3 完整报告确认单份闭环。** EP02 临结束实包 8 粗铁、20 煤、0 铁锭、0 点火器。EP03 备料步骤实制炉、用煤 1 熔粗铁 1、实取铁锭 1、实制点火器 1，随后独立包为 7 粗铁、19 煤、0 锭、1 点火器。完整备料仍未存炉坐标。W12 七份未收及比赛 4+2 的同炉续取门保持待验。 [EP02 实包](../runs/l1_w13_20261122/nju_ob_3_village/20261122-094215-409696.events.jsonl#L1218) · [实取一锭](../runs/l1_w13_20261122/nju_ob_3_village/20261122-095148-061728.json#L20669) · [后验实包](../runs/l1_w13_20261122/nju_ob_3_village/20261122-095148-061728.events.jsonl#L240)
+
+- **W12 OB3 EP02 本次粗铁实包 7→0，铁锭 0→0。** 炉 `[-6266,32,-6360]` 请求 7 粗铁，用煤 1，48.584s 回 `partial_smelt`、取 0。随即打火石因锭 0 失败，再熔 1 因粗铁 0 失败。后续与 Fleet 终包均未见锭或粗铁，炉里有多少已烧或未烧缺实读。旧回执只推荐 compact 未注册的窗口工具，按本炉接力验收。 [炉前实包](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/20261122-091823-339699.events.jsonl#L1207) · [炉回执](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/20261122-091823-339699.events.jsonl#L1227) · [炉后实包](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/20261122-091823-339699.events.jsonl#L1247) · [终包](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/wild-endurance-wild-20261122-091658.json#L42)
+
+- **W11 终包证实 H1 实取的一锭，H4 有亮炉但 3 粗铁余账。** H1 EP04 再挖 +7 后熔炼缺燃料，从 L127 独立包到终包均 13 粗铁、1 锭；全波工具正差 13，扣当炉 1 后与终包另差 1 份来源。H4 EP04 +4 粗铁，EP05 有备料起点无结果，L59 发现亮炉 `[39740,31,52576]`，L112 及终包仅 1 粗铁、0 锭。差额 3 的炉窗转移、炉状态和燃料待证。终版两槽均未成铁镐。 [H1 缺燃料包](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-083148-736967.events.jsonl#L127) · [H1 终包](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/wild-endurance-wild-20261122-081434.json#L47) · [H4 亮炉](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-083426-232705.events.jsonl#L59) · [H4 后验包](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-083426-232705.events.jsonl#L112) · [H4 终包](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/wild-endurance-wild-20261122-081437.json#L50)
+- **W11 H1 EP03 炉回执首次把部分批次合上。** L394 入 6 粗铁，L414 同一炉 `[47996,12,54991]` 49.446s 报取锭 1、退原料 5、用金合欢木板 1。输出加退料等于 6，仍须下集或终包确认实存。距截止只剩 7.3s，后续熔炼和制铁镐均被截止门拦截。对燃料只够一份、余时不足的例子应在投料前缩批，优先确保现有锭到首镐所缺数量，无法完成时留有炉坐标和独立包读。 [六粗铁](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-082139-177378.events.jsonl#L394) · [一取五退](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-082139-177378.events.jsonl#L414) · [制镐被门拦](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-082139-177378.events.jsonl#L452)
+- **W3 终版补齐两次实际取锭；旧炉余料仍缺对账。** OB1 EP07 在新坐标 `[41025,64,19031]` 收 2 锭，不能归回 EP05 的 9 粗铁批次。OB3 EP18 零 actor 接力报熔 3、回取 3，并实制铁镐。终版村庄持铁镐 1，两裸装槽终包无锭、无铁镐。下一次复验仍需相同炉坐标、同批原料和回取的逐项收据。 [OB1 新炉](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-074913-340724.events.jsonl#L313) · [旧炉零取出](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-070749-923461.events.jsonl#L522) · [村庄批次与制镐](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-075531-047448.json#L21)
+- **W3 续集找到两条独立库存证据及桶配方正例。** OB1 EP05 累进 10 粗铁、请求熔 9、报取 0。EP06 L202 起步距该炉约 1.6m，未见回炉调用，L729 独立盘点为粗铁 2、铁锭 0。已知包差净少 8 与请求 9 相差 1，缺炉内实读。OB2 EP12 的 1 锭到 EP13 L328 仍在包，未被当成实制铁镐。OB3 EP15 零模型备料炉步请求 3、回取 3，随即成功制桶，一批满足实际配方，可作同波正例。 [九铁取零](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-070749-923461.events.jsonl#L522) · [近炉起点](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-074055-068274.events.jsonl#L202) · [独立包差](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-074055-068274.events.jsonl#L729) · [OB2 仍持 1 锭](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-074555-610341.events.jsonl#L328) · [三锭成桶](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-074525-513119.json#L5579)
+- **HY4 W9 新增终包料耗缺账。** H2 EP01 配对粗铁 +6 与 +5，EP02 L55 独立包有 11 粗铁、0 锭。L107 在距集限约 13.7s 时请求熔 11，L108 约 9.2s 回 `smelt_timeout`，记录炉坐标 `[45224,16,32350]`、`collected=[]`，没有燃料提交字段。Fleet `owned_end` 无粗铁、铁锭或铁镐。实际原料已从实包消失，缺容器实转移和余量，不能断定已烧或确切炉内存量。请在发起投料前登记批次，预算不足时避免大批提交或留下可续收的炉记录。 [独立包 11](../runs/l1_hy4_w9_20261122/hy_5e_2_probe_iron_y16/20261122-074154-494095.events.jsonl#L55) · [熔炼回执](../runs/l1_hy4_w9_20261122/hy_5e_2_probe_iron_y16/20261122-074154-494095.events.jsonl#L108) · [终包](../runs/l1_hy4_w9_20261122/hy_5e_2_probe_iron_y16/wild-endurance-wild-20261122-073637.json#L44) · [熔炼预算入口](../src/mc_agent/harness/mc_tools.py#L2782)
+- **W3 三条铁路线的取货对照。** OB1 EP05 实入 10 粗铁，余约 60s 时在 `[41043,17,19007]` 请求 9，48.5s 回取 0，只提示未注册的窗口工具，再调原参数被重复门拦截，炉余未对。OB2 EP12 在 `[19078,48,41157]` 只处理实有的 1 粗铁，回取 1，独立包确认锭 1，缺其余 2 锭和木棍未制镐。OB3 EP13 零 actor 备料报熔 3、取 2，但随后实制铁镐且独立课程验证，下一集包读仍持铁镐 1。炉步报告的 2 锭无法覆盖配方全部 3 锭，第三锭来源待用炉和包的中间快照对账。 [九铁取零](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-070749-923461.events.jsonl#L522) · [一锭独立实包](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-073830-632959.events.jsonl#L199) · [零 actor 两锭回执](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-074116-756518.json#L21) · [实制](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-074116-756518.json#L50) · [验收](../runs/5ease_ob_w3_20261122/nju_ob_3_village/curriculum-20261122-064209-379421.json#L262) · [次集实包](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-074202-194415.events.jsonl#L59)
+- **W3 OB1 EP03 完整备料报告已落盘。** 真实 `pre_ensure` 共 38.37s，先报成功造 1 炉，再对 3 粗铁执行熔炼，报煤 1、`collected=[]`，铁镐缺口仍为 1。炉技能在投料窗口调用返回后才记录煤字段，但未存该窗实转移，备料也无炉位、退料或余料，无法认领三份原料去向。随后 actor 过完该集无炉务调用，`answered`、无验证、阶段增分 0。 [完整备料报告](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-065632-972307.json#L9691) · [投料窗口与记录顺序](../src/mc_agent/skills/library.py#L5272) · [课程判定](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/curriculum-20261122-064210-730159.json#L64)
+- **W3 暴露自动备料半炉的接力风险。** OB1 EP03 自动备料停在 `smelt_incomplete` 后，actor 先后发三次铁 DFS，第一片 86.3s 零铁，后两片被骷髅抢占，L269 箭死，L274 重生包见粗铁 0、铁锭 0、铁镐 0。回炉确认在这段未发生，缺炉内余料实读。用真实 `PhysicalPrerequisiteResolver` 和模拟背包分别给炉实取 0、2、仅实取 1 却报 3、确取 3，前 3 例正确返回 `smelt_incomplete`，第四例实成铁镐。四例的备料步骤都未保存炉技能回执原有炉坐标、退料量或错误码，actor 交接只给 `iron_pickaxe:1` 和停因。验收保留原炉标识、已入包锭和已知余料状态，允许从同炉继续取，最后按实包和成品核销。 [零铁首片](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-065632-972307.events.jsonl#L85) · [箭死](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-065632-972307.events.jsonl#L269) · [重生实包](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-065632-972307.events.jsonl#L274) · [备料步骤保留字段](../src/mc_agent/skills/ensure.py#L1138) · [交接事件](../src/mc_agent/harness/curriculum.py#L2515)
+- **W3 课程接力命中 `smelt_incomplete`。** OB1 EP02 到 600s 共见 +19 粗铁、+16 煤，无 actor 炉务调用。EP03 已将铁镐列为零模型备料目标，2 步后仍缺铁镐，原因 `smelt_incomplete`。L3 给 actor 的提示只交接目标缺口和停因，随后附采 8 铁的原剧本。待追同炉坐标、真实投料、实际取回数量和出炉等待。目前 EP03 的短备料事件不足以核炉中余额。 [上一集收尾](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-064629-553712.events.jsonl#L521) · [下一集备料回执](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-065632-972307.events.jsonl#L2) · [actor 交接](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-065632-972307.events.jsonl#L3)
+
+- **三路线 OB2 实物闭环，重投同炉的余账仍开。** EP07 L155/L183 粗铁 +4/+9，L225 同炉 `[14082,19,13952]` 用煤 1，约 51.695s 报取 3 锭、退 6 原料。L246 再投 6 粗铁配 4 金合欢木板，33.907s 报取 0，无退料值。再重投被重复门止。EP07 独立成就 `smelt_iron` +5，EP08 零 actor 一步 `craft_gear(iron_pickaxe)` 并实包目标验证 `iron_tools` +5，证明已有可用锭成了铁镐。EP09 首次 DFS 又回铁锭 +6、熔炉 +1、粗铁 +2，和第二炉规模吻合，缺逐炉取货及燃料余量。 [跨集包增](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-063841-683390.events.jsonl#L103)当前目标默认 compact 工具只暴露 `mc_skill_smelt`，同回执推荐的 `mc_window_view`／`mc_window_act` 两个均未注册。验收优先用已收的三锭合镐，再按炉 ID 收已投 6 的实物，对该课程提供实际可调用的续取或自动工单。 [第一次部分出炉](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-062814-125212.events.jsonl#L225) · [第二次空取](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-062814-125212.events.jsonl#L246) · [零 actor 实制](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-063840-958239.json#L13) · [课程铁器核验](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/curriculum-20261122-060455-001338.json#L164) · [续取提示](../src/mc_agent/skills/library.py#L5148) · [compact 注册](../src/mc_agent/harness/mc_tools.py#L3714)
+
+- **磁石收官能对成材，逐炉来源仍缺。** OB2 EP14 合成石砖实际用 12 石头、独立包剩 18，EP15 首包也为 18，合计已证 30 石头。同期同步炉多次报收 24，前一集重生后末包无石头，本集恢复的 `fjob-2` 登记 6，暂存已无活跃工单。差额与该单吻合。课程两处取货循环未向集报告保留逐炉返回，不能确认机位或炉余清空。建议按工单 ID 保存每炉的实际取货与已知余量。 [恢复工单](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051853-296421.events.jsonl#L3) · [实耗和剩余](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051853-296421.events.jsonl#L316) · [下集独立包](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-052519-061288.events.jsonl#L8) · [取货返回未存档](../src/mc_agent/harness/curriculum.py#L2142)
+
+- **Showcase 两批异步圆石炉和未核销下游。** OB2 EP10 两炉共投 12、EP12 单炉投 6，均零 actor 等待；EP13 首包只见石头 6，缺炉坐标及转移，无法核销首批。EP14 恢复第二工单后，同步在 `[17021,84,30005]` 多次投圆石，首次 48.360s 返回空，此后报取 11、2。L233 实读该炉还留 11 圆石、3 煤及 1 石头；L254 又报取 6、退入 17，余料含先前存量，不能照报表逐批相加。上游异步工单与同步炉位未独立对上。 [双炉工单](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051517-824516.json#L24) · [次炉工单](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051658-649427.json#L18) · [首见石头 6](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051700-525771.events.jsonl#L41) · [实际炉窗](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-051853-296421.events.jsonl#L233)
+- **双炉缺回执的离线对照。** 固定 `0731a37` 的真实 Registry 与炉技能。两炉各 6，第一炉实际进 6，第二炉零实转移且仍留 6。第二炉回 `done:[]` 或省略 `done` 时都虚报共取 12 并清两层待办。候选 `07fc68b` 修了明确空列表：保留 6，重试只查第二炉并实际收完才清。若省略 `done` 或只有 `done:[{"op":"take"}]`，候选仍按预览多记 6。请以实转移回执或可对账的独立包差保留待办，验收覆盖无字段、空列表、无数量项、双炉部分成功及只重试第二炉。 [集成预览回填](../src/mc_agent/skills/library.py#L5100) · [候选残口](../../s-skills/src/mc_agent/skills/library.py#L5799) · [工单结账](../src/mc_agent/harness/curriculum.py#L382)
+
+- **Slice C `2ca887b` 早检复验**。实际熔炼入口模拟 V2 H4 背包，Y58／Y27 无炉及 Y58 已有炉三例均仅盘点 1 次，零寻炉、布站、耗材料、开窗，已有炉的旧锭保留。显式缺煤但有木炭、两根待烧云杉原木同时指定为燃料、无台无炉且仅一根原木，三例仍先造台炉、耗 8 圆石，随后缺燃料且零投料。炉务余 2 在 4.0 格内仍提示，4.5 格处由先前能找见待办变为缺燃料，账仍在。原木自动合板和 4+2 的实物夹具仍能收到预期锭或炭。请早检和实际投料共用同一燃料选择及可用量，把待烧数和造台耗木一并预留，并保持已投批次的发现。 [早检](../../s-skills/src/mc_agent/skills/library.py#L6026) · [燃料后检](../../s-skills/src/mc_agent/skills/library.py#L6107) · [近炉待办](../../s-skills/src/mc_agent/skills/library.py#L5924)
+- **已有炉的旧锭会填满本批账**。在候选和父版的真实入口夹具，起始炉窗有旧铁锭 1、无未完账。新投粗铁 2 后第一颗新锭完成，实际取出 2，背包确增 2，但其中一颗是旧锭。炉里尚余本次粗铁 1，候选以实取总数核销本批，后续近炉不再查。验收补先读旧炉并区分本次转移与旧库存，两次真实收货之和才可核销本批。 [就绪判定](../../s-skills/src/mc_agent/skills/library.py#L6195) · [核销](../../s-skills/src/mc_agent/skills/library.py#L6234)
+
+- **Slice C `8d79df0` 修正缺燃料回执，定向夹具 13/13**。从 V2 H4 的材料状态走真实 actor 熔炼入口，旧版错误说产物留炉；候选写明 `missing_fuel`、`collected:[]`、本批实取 0。原料 2 留包、零投取。已有炉内夹具预放的旧锭保留；补煤后一次投二料、实收二锭。旧 4+2 路径一笔投 6、首取 4，空回执不核销，终于收余 2，仅一笔投料。仍然在燃料检查前布站，Y58 有 8 圆石消耗、台与空炉留地；Y27 可回台，空炉在下一次到近炉检查后才回。该近炉逻辑不能证明跨集主动收账。 [V2 实机缺燃料](../runs/5ease_obs_fixed_v2_20261122/hy_5e_4_probe_obsidian_portal/20261122-035933-274435.events.jsonl#L281) · [候选零取货](../../s-skills/src/mc_agent/skills/library.py#L6104) · [布站顺序](../../s-skills/src/mc_agent/skills/library.py#L5992) · [4+2 夹具](../../s-skills/tests/test_skills_and_providers.py#L3435)
+
+- **V2 H4 EP02 采铁与炉务未成交**。L127 实破两铁矿、粗铁 +2。造出工作台、准备炉后 L281 熔炼报缺燃料，后续没有再次成功启炉或取货。L580 回答称已熔出 2 铁锭，Fleet 终包仍是粗铁 2、铁锭 0。请用实际炉内转移和后验库存验证完成。 [入粗铁](../runs/5ease_obs_fixed_v2_20261122/hy_5e_4_probe_obsidian_portal/20261122-035933-274435.events.jsonl#L127) · [熔炼回执](../runs/5ease_obs_fixed_v2_20261122/hy_5e_4_probe_obsidian_portal/20261122-035933-274435.events.jsonl#L281) · [回答](../runs/5ease_obs_fixed_v2_20261122/hy_5e_4_probe_obsidian_portal/20261122-035933-274435.events.jsonl#L580) · [终包](../runs/5ease_obs_fixed_v2_20261122/hy_5e_4_probe_obsidian_portal/wild-endurance-5ease_obs_v2_hy_5e_4_probe_obsidian_portal-20261122-035825.json#L59)
+
+- **5Ease V9 采铁→炉→铁镐完整正例**。HY_5E_5 EP02 L30 入粗铁 +3，L157 在 `[1485,16,23487]` 用 **1 煤**、42.418s 报收铁锭 **3**，L178 独立合出并装备铁镐，包无粗铁/锭、煤 11。同集三件已由下游消耗验证。未暴露部分产物、炉内余料或用完回收。 [采入](../runs/5ease_virgin_eff_v9_20261122/hy_5e_5_probe_iron_y16/20261122-033623-815449.events.jsonl#L30) · [炉与取货](../runs/5ease_virgin_eff_v9_20261122/hy_5e_5_probe_iron_y16/20261122-033623-815449.events.jsonl#L157) · [下游合镐](../runs/5ease_virgin_eff_v9_20261122/hy_5e_5_probe_iron_y16/20261122-033623-815449.events.jsonl#L178)
+
+- **W2 OB2 异步炉有下游物料实证**。EP06 备料记录造炉 2、登记 `fjob-1`，任务输入圆石 12、预估 65s。EP09 复用该任务后连续成功制石砖 12、石砖台阶 18、錾制石砖 8、磁石及指南针，实际放下磁石并用指南针通过验证。逐炉 `done[].took`、剩料和燃料没有归档，轮询返回的取货报告未落轨迹。验收应把炉位、逐炉实际提取和取得后的包差和该异步任务关联。 [异步炉登记](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-033302-219043.json#L18) · [下游合成](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-033504-586842.json#L702) · [最终验证](../runs/5ease_w2_40m_20261122/nju_ob_2_midgame/20261122-033504-586842.events.jsonl#L51) · [收取回执消费](../src/mc_agent/harness/curriculum.py#L2197)
+
+- **W2 OB3 EP05 备料链**。报现采粗铁，随后用 1 煤熔炼 1 粗铁、收 1 铁锭，再成功制打火石并通过备料检查。成功分支在熔炼后会重读库存，后续合成给出第二条佐证。原始炉位、实际 `done[].took` 和独立熔后背包未入轨迹，按备料工序佐证记录。 [现采与熔炼](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-025314-381072.json#L708) · [下游打火石](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-025314-381072.json#L730) · [成功分支复核](../src/mc_agent/skills/ensure.py#L1138)
+
+- **W1 OB2 重启槽真实熔炼对账**。EP11 取前有 29 圆石，炉务遭骷髅抢占，随后独立背包圆石和石头均 0、煤 16→12，缺这笔炉内容。新挖 32 圆石后，同一炉两次各报取 4 石，终包 **8 石**，煤 12→5 与报用 4+3 相符。恢复后的首笔请求 32，报取 4、退原料 20，剩余 8 件无这个步骤的去处记录。后一笔实接收请求量 20，报退 16，终包圆石 15。复验要记录新合炉的消耗、实际入槽、被打断后的余料和终包，避免按请求量推产物。 [首次抢占](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-024650-039393.events.jsonl#L223) · [独立包](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-024650-039393.events.jsonl#L343) · [部分取出](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-024650-039393.events.jsonl#L392) · [再次取出](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-024650-039393.events.jsonl#L414) · [终包](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/wild-endurance-5ease_w1_20261122_nju_ob_2_midgame_r2-20261122-021206.json#L55)
+
+- **W1 OB3 EP15 闭合到后续库存**。L201 列矿格 `[-6990,61,5753]`、粗铁 +1，L243 用 17.116s 报收铁锭 1，L263 独立背包和终包均有 **铁锭 4**。与 EP12 报收 3 加此次 1 一致。EP12 当次缺炉窗实际转移及取货后即时读包，逐次验收仍保留。 [挖矿](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-023410-076580.events.jsonl#L201) · [收 1 锭](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-023410-076580.events.jsonl#L243) · [独立读包](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-023410-076580.events.jsonl#L263) · [终包](../runs/5ease_w1_20261122/nju_ob_3_village/wild-endurance-5ease_w1_20261122_nju_ob_3_village-20261122-014016.json#L58)
+
+- **比赛实据**。`5Ease_Bot` EP09 对 `[-12268,31,-6065]` 请求熔炼 6 生铁，**50.017s** 后 `partial_smelt` 记录本次取出 **4 锭**。第 5 锭来自开局备料。模型再投 2 生铁报缺料，合铁镐耗 3 锭、背包剩 2，随即 `goal_satisfied`；EP10 转挖钻。本次投料对应的另外 2 份产出没有后续回收回执，炉内生铁、成品和燃料各余多少未取证。 [开局备料](../../../runs/20261121-235251-766106.json#L5245) · [本次部分出炉](../../../runs/20261121-235251-766106.events.jsonl#L382) · [再投失败](../../../runs/20261121-235251-766106.events.jsonl#L403) · [合铁镐及剩余](../../../runs/20261121-235251-766106.events.jsonl#L421) · [下集开挖](../../../runs/20261121-235709-070941.events.jsonl#L31)
+- **源码与最小修复**。同步技能在切片尾取一次可见成品，部分回执靠提示续取。复用已有 `WorldJobRegistry` 登记本次已投数量、炉坐标及待核验余量，目标提前结算时也续接炉务。在当前预算内可取则取，离区前或下集现场安全时优先收已完成品，再决定继续烧或取回残留原料、可退燃料。取货用窗口操作的实际转移回执或库存增量确认，避免重复投料或重复入账。 [同步取货](../src/mc_agent/skills/library.py#L5267) · [集间炉务](../src/mc_agent/harness/curriculum.py#L2140)
+- **验收**。以投 6、先确认取 4、立即切集为夹具，下集从同炉再取 2，新增投料为 0；重复回收不会重复入账。背包满、受袭抢占、尚在燃烧分别保留待办和可复查回执。沿用 BUG-067 的单次时限；炉务结清后交 BUG-093 回收临时炉。
+- **D1 复核 Slice C `53d15d6`**。定向夹具通过 2 例，覆盖投 6、窗口预览 6、实际取 5、下次 DFS 前取已就绪 1，以及燃料操作失败后仍登记已投原料。该版本只在 DFS 探索入口检查同维度 3 格内的炉，查看时仍没出炉就继续走。正式赛 EP10 第一次 DFS 结束距 EP09 炉约 8.25 格，第二次从同点起步。请 Integrator 对接集间炉务，并把 4+2 夹具延迟到首次查看无成品后再出炉，验证同一待办仍能续取。 [DFS 入口](../../s-skills/src/mc_agent/harness/mc_tools.py#L3009) · [近炉回收](../../s-skills/src/mc_agent/skills/library.py#L5254) · [EP10 前两片](../../../runs/20261121-235709-070941.events.jsonl#L33)
+- **`53d15d6` 的两个离线反例**。用比赛第二片的起点复现，首查出 0 或 1 锭，第二片距炉 8.25 格跳过窗口，账还欠 2 或 1 锭。另用模拟响应 `done:[]`、实际零转移，候选误按预览收 2 锭并清账。现有比赛轨迹只确认第二片站位。验收追加空回执通过背包增量或炉窗变化复核，无法核验则保留待办。提交版位置为 `skills/library.py:5001`（回执）和 `:5026`（近炉回收）。 [EP10 第二片起点](../../../runs/20261121-235709-070941.events.jsonl#L64)
+- **`75feb68` 集成版仍待验**。新增尾段最多 11.5s 等候及尝试取回余下原料，课程侧没有新增续取入口。两条现有 `partial_smelt` 预算夹具在 `258bdfe` 均通过，在 `75feb68` 均失败，窗口动作在取成品后还尝试取输入。请 Integrator 用原票 4+2 口径验证迟到成品、实际窗口转移及预算内的待办保存。 [尾段处理](../src/mc_agent/skills/library.py#L5336) · [预算夹具](../tests/test_skills_and_providers.py#L2846)
+- **集成复现 `4+2`**。模拟炉第 48.0s 已转移 4 锭，尾段固定等到 59.5s，超过 55s 工具预算 **4.5s**，之后没有窗口动作，续请求 2 份报缺料。同样输入若返回 `done:[]` 且零转移，仍报告取到 4 锭。 [等候分支](../src/mc_agent/skills/library.py#L5348) · [工具预算](../src/mc_agent/harness/mc_tools.py#L2782)
+- **Slice C `c12f5fe` 增加空回执核验**。`done:[]` 后按背包净增计账。候选夹具先取 4、等 2 出炉、空回执零增量时保留 2 锭账、实取后结清。夹具始终在炉旁。仍待验缺失 `done` 的响应，以及 EP10 第二片离炉 8.25 格后怎样跨集续取，或怎样将待取状态交给下一集。 [回执核验](../../s-skills/src/mc_agent/skills/library.py#L5362) · [4+2 夹具](../../s-skills/tests/test_skills_and_providers.py#L3072)
+- **D1 复现 `c12f5fe` 的兼容路径**。显式空列表且零增量确实保留余账 2；同样的模拟炉改成缺 `done`，或动作记录没有 `took`，仍回报收到 2 并清账。取货已经入包、后置背包读取超时的夹具会保守留账，下一次炉窗已空，仍缺对账途径。首查取 0 或 1，再走到 EP10 真实第二片位置，账仍余 2 或 1。 [回执分支](../../s-skills/src/mc_agent/skills/library.py#L5362) · [第二片位置](../../../runs/20261121-235709-070941.events.jsonl#L64)
+- **D1 复验 Slice C `e6701dc`**。四种不确定回执夹具通过。缺 `done` 不再按预览入账。仍在炉旁时，后查炉中少 2、背包多 2 可对账，只有 1 次取货、0 次额外投料。已到 8.25 格处则不会查炉，即使包内有差额仍保留余账。另模拟取货已生效但 `window/act` 自身超时，未登记待核，空炉仍欠 2；actor 有额外生铁时显式重调熔炼仍可能给同炉再投 2。当前集成波 `5ease_w1_20261122` 开波加载 `75feb68`，新分支续查仍需下一版本暴露。 [候选核验入口](../../s-skills/src/mc_agent/skills/library.py#L5494) · [同炉续查](../../s-skills/src/mc_agent/skills/library.py#L5581) · [4+2 夹具](../../s-skills/tests/test_skills_and_providers.py#L3148)
+
+- **D1 复验候选 `e37a850`**。固定快照 4+2 的 5 个参数化夹具通过，覆盖取货动作先提交却丢响应、近炉后续核账、未结账同炉拒绝重复投料。候选在发起 `window/act` 前登记基线。离开 3 格后的主动跨集续查待验。 [候选夹具](../../s-skills/tests/test_skills_and_providers.py#L3192)
+- **W1 两条炉务回执的证据差异**。NJU_OB_3 EP12 投前粗铁 3、无铁锭。技能把请求 4 缩成 3并报告取 3，随后切支线，未见 `done[].took` 或取后背包。NJU_OB_1 EP11 的预备依次造炉、烧粗铁 3、合出铁镐，课程再读背包验证铁器，0 actor、+10。 [村庄槽投前背包](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-020745-187576.events.jsonl#L174) · [村庄槽取货回执](../runs/5ease_w1_20261122/nju_ob_3_village/20261122-020745-187576.events.jsonl#L224) · [裸装槽工序](../runs/5ease_w1_20261122/nju_ob_1_bare/20261122-020950-574537.json#L34) · [铁器验收](../runs/5ease_w1_20261122/nju_ob_1_bare/curriculum-20261122-014020-991026.json#L211)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-092 | P2 | 挖矿策略与收益权衡（`mine_dfs` / 课程策略）| 状态: FIXED（2026-11-22，铁储<12时2.5m内暴露铁矿零成本顺采）
+- **Long2→Long3 实际开采回执，耗时与入包分别计。** DFS explore 81→21 次、44.03→11.60 分钟，工具记录净增粗铁 **23→0**、钻 **12→0**。Long3 显式铁目标 8 次共 345.338s，有两笔缺包差字段。OB3 EP08 四片自 Y129 降至 Y51、记录破 234，进包主要为石煤等；同槽 EP07 定点矿 17.463s 实收粗铁 6。Long3 没有显式钻石 DFS 的暴露，唯一一次定点找钻在下界，由生态检查拒绝。两波槽型不同，效率按实包差和目标暴露复查。 [钻矿生态拒绝](../runs/l2_long3_20261122/hy_5e_3_nether_bastion/20261122-130837-508657.events.jsonl#L409) [长降无铁](../runs/l2_long3_20261122/nju_ob_3_village/20261122-125901-557297.events.jsonl#L143) · [定点粗铁](../runs/l2_long3_20261122/nju_ob_3_village/20261122-124520-307017.events.jsonl#L208) · [Long2 顺手入钻](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L439) · [DFS 入包差](../src/mc_agent/skills/mining_dfs.py#L6717)
+- **影响**：正式赛实机观察到两极分化：一方面对 10m 外隔墙/带水的 `iron_ore` 容易反复拉扯耗掉十几分钟；另一方面在铁镐刚出、铁锭尚未凑齐盾牌/铁甲/铁桶时，下潜途经矿道壁上**贴脸暴露的 `iron_ore`/`deepslate_iron_ore`** 却直接路过未顺手采集。
+- **现象与根因**：缺少基于“边际时间成本 × 当前物资缺口”的顺采权衡规则——没有区分“贴脸零寻路成本（`dist <= 3m`、无相邻流体、1~2 秒可顺手敲掉）”与“需要绕路/穿岩/排水的远距矿”。
+- **最小修复方向**：
+  1. 在 `mine_dfs` 下潜/掘进途中，当背包 `iron_ingot + raw_iron` 低于基建阈值（如 `< 12`，覆盖铁镐+盾+铁甲+水桶）且矿道 3 格内出现无流体遮挡的暴露铁矿时，允许 0-LLM 顺手顺采（单次最多消耗 3~5s）；
+  2. 对 `dist > 4m` 或相邻流体的次级矿坚决不绕路，保证直冲 `Y=-54` 钻石层的总时效。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-093 | P0 | 窄矿道临时工作台／熔炉挡路及误触发 `needs_surface_climb` | Slice C（临时站点）+ Slice A（矿道回返）| 状态: OPEN
+
+- **W11 裸装 H4 EP01 仍消耗一张台。** L159 实制台入包，L178 用台制木镐时包内不再有台。后续显式放台 L211 因包内没有工作台被拒，L229 消耗额外木材再做一张。该链证实重复消耗，首台放置坐标和回收动作未知。首台临时放置时应登记坐标和归属，课链仍在原地时复用，离开前拆收并读包。 [首次制台](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-081517-034950.events.jsonl#L159) · [使用](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-081517-034950.events.jsonl#L178) · [缺台](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-081517-034950.events.jsonl#L211) · [再制](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-081517-034950.events.jsonl#L229)
+- **5Ease V8 采矿内嵌造镐留下工作台包差**。HY_5E_7 首集 L88 `timeout_path=craft`，下一片 L117 回工作台 +1、石镐 +1，终包确定台 1。施工回执缺工作台的方块坐标、来源、放置或回收，无法判定是否是同一个临台。 [合成时间门](../runs/5ease_virgin_eff_v8_20261122/hy_5e_7_probe_iron_y16/20261122-032605-351942.events.jsonl#L88) · [实际包差](../runs/5ease_virgin_eff_v8_20261122/hy_5e_7_probe_iron_y16/20261122-032605-351942.events.jsonl#L117)
+
+- **W2 OB3 EP13 一张工作台用后未出现在即时包**。L242 合成工作台 1、独立包证实 +1。L302 用工作台合成石镐成功，合成时所带包已不含工作台。现有回执缺用台后的实地位置、拆除及后验包，尚无法区分留台与延后回收。 [工作台入包](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-031247-365918.events.jsonl#L242) · [使用及合成时的包](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-031247-365918.events.jsonl#L302)
+
+- **5Ease V6 工作台使用有证，回收与通行仍缺回执**。HY_5E_7 EP01 L245 用台合石镐，此时结果包未列工作台，L320 守卫随后独立读到 1 张。合成 helper 在深处新临台情形会尝试带拾取拆除，但返回预先生成的合成回执，缺坐标、租用或新放、拆后入包和通行。不能把后验工作台归给那一张，建议将四个环节分列于动作回执和离线夹具。 [使用](../runs/5ease_virgin_eff_v6_20261122/hy_5e_7_probe_iron_y16/20261122-030945-985592.events.jsonl#L245) · [后验包](../runs/5ease_virgin_eff_v6_20261122/hy_5e_7_probe_iron_y16/20261122-030945-985592.events.jsonl#L320) · [临时台回收](../src/mc_agent/skills/library.py#L4008)
+
+- **比赛实据**。`5Ease_Bot` EP10 到 Y−54、`node_count=14`，随后因返回当前节点失败报 `needs_surface_climb`，**306.3s** 后爬到 Y−9。第三人称现场看到工作台挡住 1×2 矿道，JSONL 确认回撤失败与爬升，阻挡坐标待取证。熔炉有独立回执，官方 r77 GLM_1 EP16 在 `[6176,27,-110]` 烧铁，EP17 东向掘进在同一格返回 `blocker.block=furnace`，位移为 0。该炉归属及阻挡时各槽状态待核。 [正式赛回撤](../../../runs/20261121-235709-070941.events.jsonl#L589) · [爬到 Y−9](../../../runs/20261121-235709-070941.events.jsonl#L808) · [r77 同炉烧铁](../runs/official_r77_40m_glm1/GLM_1/20261121-203044-183312.events.jsonl#L16) · [r77 熔炉挡路](../runs/official_r77_40m_glm1/GLM_1/20261121-203159-666541.events.jsonl#L84)
+- **Slice C 最小修复**。工作台、熔炉优先放在可操作的侧格，预留通行空间；记录本次临时放置的坐标与维度。每次用完回收本次的工作台并确认入包。临时熔炉等 BUG-090 炉务结清、读回输入／输出／燃料槽为空且已熄火后再挖回；沿用或在用的站点留在原处。 [工作台摆放](../src/mc_agent/skills/library.py#L2939) · [熔炉摆放](../src/mc_agent/skills/library.py#L5093)
+- **Slice A 最小修复与验收**。在目标深度回撤失败时，先定位阻挡、尝试安全同层重连或就地重锚，再决定是否上爬。用 Y−54 的 1×2 矿道覆盖新放工作台、活跃炉、已空临时炉及沿用站点。合成后通道双向可走且工作台回包，已空临时炉回包，活跃炉材料与沿用站点完整，同层节点回返失败有具体原因和回退动作。 [同层重连](../src/mc_agent/skills/mining_dfs.py#L2242) · [回撤分支](../src/mc_agent/skills/mining_dfs.py#L5918)
+- **D1 复核 `258bdfe` 与 Slice C `5ccd3f4`**。集成版允许在目标层上下 12 格内就地重锚，成功合成后尝试挖回新放的地下非侧龛工作台，合成回执没有记录这次挖除和入包。Slice C 的独立版本有 6 个通过的定向离线用例，覆盖本次新放、沿用、合成拒绝、超时且释放、抢占未释放和地表工作台，并核对挖除与回包。请 Integrator 核对带回执版本，下一波仍须验同层通行及已熄火、各槽为空的自置炉回收。 [集成工作台处理](../src/mc_agent/skills/library.py#L3972) · [集成重锚](../src/mc_agent/skills/mining_dfs.py#L5956) · [Slice C 夹具](../../s-skills/tests/test_skills_and_providers.py#L4038)
+- **D1 复测 Slice C `90dfe75`**。新增 5 个通过的炉夹具，覆盖自置已空、燃烧后重试、亮灯、有剩余燃料及沿用炉。自置空炉挖除且回包 1；熄火后重试也收回 1。候选按维度和坐标登记新放地下炉，仅在转换账结清、三个槽显式为空、已熄火且可回包时回收。当前集成仍为 `75feb68`，待同层通行和回收一起实测。 [空炉门禁](../../s-skills/src/mc_agent/skills/library.py#L5392) · [定向夹具](../../s-skills/tests/test_skills_and_providers.py#L3178)
+- **D1 补测炉归属与入包**。模拟炉窗分别缺输入、燃料、输出任一键，均保留炉且下一次读到三个空槽可回收。模拟其他活动在同维同坐标换炉，或在读取空炉与挖除之间投料，两例仍挖炉。`dug=furnace` 且无拾取增量会直接清回收登记。请 Slice C 加同坐标替换、读空后被使用和未回包三组验收，核对归属、挖前状态和收到的物品。 [登记、检查和挖除](../../s-skills/src/mc_agent/skills/library.py#L5392) · [r77 实机阻挡](../runs/official_r77_40m_glm1/GLM_1/20261121-203159-666541.events.jsonl#L84)
+- **D1 复验 `1e9903d` 矿道摆放**。工作台／炉 × 规则直 1×2 有／无侧龛 4 例通过，指定侧龛报 `no_support` 时保留双向通道并停止放置。补测在矿墙、半高缺口、直角巷和地形 `not_loaded` 时仍会调用无坐标 `place`，模拟邻格自动落点会堵主道。旧 `craft:no_window` 分支还可挖掉随后扫到的沿用工作台。验收增加不规则地形与未知方块，核对工作台和活跃炉都保留回程格。 [双向和侧龛检查](../../s-skills/src/mc_agent/skills/library.py#L2235) · [位置夹具](../../s-skills/tests/test_skills_and_providers.py#L3339)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-094 | P0 | 挖矿后未收尽可达目标掉落物 | Slice A（采矿确认）+ Slice C（共享拾取）| 状态: OPEN
+- **W17b HY9 首把石镐已成，早先圆石仍未收。** EP01 L278 木镐破 2、实入 0，报告圆石掉落低 6 格。改路线后 L346 仍见同坐标圆石，垂差已 0，净拾取仍 0，站位与目标横向差约 5m。靠阶梯施工已实收 15 圆石，再做两把石镐。验收主动拾取以安全可达 3D 落点和目标净入包为准，另验同高隔墙／横向够不着时换路线或放弃。 [首破](../runs/l1_w17b_20261122/hy_5e_9_bare/20261122-202132-314215.events.jsonl#L278) · [同高拾取](../runs/l1_w17b_20261122/hy_5e_9_bare/20261122-202132-314215.events.jsonl#L346) · [实做石镐](../runs/l1_w17b_20261122/hy_5e_9_bare/20261122-202132-314215.events.jsonl#L367)
+- **Long3 OB2 EP01 木镐破石与入包分开。** L155 木镐挖石 18.443s、破 2、`no_drops_collected`，并无圆石入包。缺当次掉落实体及落点证据。L334 同目标采石受蜘蛛抢占，已证破 1、净入 1 圆石并释放原动作；L342 独立背包有圆石 4。该样本可对照零拾取和被抢占仍保留成果。后续重生丢包另见 BUG-026。 [首片零拾取](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-123942-938337.events.jsonl#L155) · [抢占仍入包](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-123942-938337.events.jsonl#L334) · [独立包](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-123942-938337.events.jsonl#L342) · [收集回执源码](../src/mc_agent/skills/library.py#L3542)
+- **L2 OB3 铁片的挖矿坐标与目标包差要独立看。** EP10 L712 的 `mined_ores` 有四坐标， `target_gained=0`，实际煤 +6、粗铁 0。上两片铁目标另实收煤 10+23，仍无粗铁。四坐标缺与单格材质和掉落的逐笔关联，当前只能确认副产入包。 [上片煤+23](../runs/l2_long1_20261122/nju_ob_3_village/20261122-105417-022078.events.jsonl#L682) · [四坐标及包差](../runs/l2_long1_20261122/nju_ob_3_village/20261122-105417-022078.events.jsonl#L712)
+- **L2 OB2 EP04 同参采石，换施工位置后实收。** L109/L200 地表两次各破 2、入包 0；L222 向南下三阶到 Y59；L250 同参 `radius=16,count=14` 实破 14、收 14 圆石；L305 制石镐并装备。前四格未记录具体掉落实体和去向。验收保留可达面换位与实际回包，并补每格破坏和拾取关联。 [首次零入](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-104231-751711.events.jsonl#L109) · [换位置](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-104231-751711.events.jsonl#L222) · [实收 14](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-104231-751711.events.jsonl#L250) · [实制石镐](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-104231-751711.events.jsonl#L305)
+
+- **W11 H1 破 14 格实收 11，三枚圆石跨集可见。** 裸装 EP02 下到 Y58 再采石，L297 返 `ok=true`、14 破格、`target_gained.cobblestone=11`。做完石镐后的下一集 L43 查见 3 个 `cobblestonex1` 实体，距离 1.2–1.5m、高度 Y55–56。现有原件没有破格关联的掉落实体 ID，三枚属于同批待核。逐调用验收请区分破格、生成、因可达且值得而尝试收取、最终入包。 [采石](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-081821-318531.events.jsonl#L297) · [石镐包差](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-081821-318531.events.jsonl#L333) · [三枚掉落](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-082139-177378.events.jsonl#L43)
+- **W11 裸装 H3 EP01 掉落发现已生效，路线预算仍烧完了。** 木镐已装备，8.622s 破两格、圆石入包 0。L313 实见 1 枚掉落低 3 格，建议下探 4 步。L334 下探 3 步、耗 45.061s 后因木镐硬格超时。到同层仍比掉落物远约 2.2m，本集再无拾取回执。采集重规划应优先估算到掉落点的可行成本，并在达到安全拾取距离时中断下探转收取。验收同时测目标掉落可接近与昂贵而跳过两个路径。 [挖石与掉落实体](../runs/l1_hy4_bare_w11_20261122/hy_5e_3_bare/20261122-081449-674444.events.jsonl#L313) · [下探超时](../runs/l1_hy4_bare_w11_20261122/hy_5e_3_bare/20261122-081449-674444.events.jsonl#L334) · [低处提示生成](../src/mc_agent/skills/library.py#L1153)
+- **HY4 W10 终包 21 钻，逐片共可归 20。** 钻槽 H1 逐片 +5/+8，终包 13；H2 逐片 +2/+2/+3，终包 8，另有一颗无法按现有回执归源。H2 EP01 L61 确认 +2 钻，累计拾矿计数仍 0。两铁槽逐片 30/12 与终包完全相合。保留按目标物料的净包差、起包和掉落实体，忽略其他矿抬高的拾取计数。 [H1 终包](../runs/l1_hy4_w10_20261122/hy_5e_1_probe_diamond_y54/wild-endurance-wild-20261122-075150.json#L46) · [H2 两钻计数零](../runs/l1_hy4_w10_20261122/hy_5e_2_probe_diamond_y54/20261122-075206-077170.events.jsonl#L61) · [H2 末片 +3](../runs/l1_hy4_w10_20261122/hy_5e_2_probe_diamond_y54/20261122-075706-132217.events.jsonl#L33) · [H2 终包](../runs/l1_hy4_w10_20261122/hy_5e_2_probe_diamond_y54/wild-endurance-wild-20261122-075150.json#L46)
+- **HY4 W9 已再现掉落跨动作入包。** H4 EP01 载 `e4c5d4c`，四次原子下界砖破格均请求 `collect=true` 且各自净增为空。下一次挖重生锚才观察到 +1 下界砖、+1 重生锚。其后六格黑曜石只有前两格各进 1，后四格净增空。各格无实体 ID，未核四砖是否合堆以及余四黑曜石是否安全可达。验收需跟踪实体与下一动作的实包差。 [四砖首格](../runs/l1_hy4_w9_20261122/hy_5e_4_nether_fortress/20261122-073651-220294.events.jsonl#L113) · [四砖末格](../runs/l1_hy4_w9_20261122/hy_5e_4_nether_fortress/20261122-073651-220294.events.jsonl#L282) · [跨动作入包](../runs/l1_hy4_w9_20261122/hy_5e_4_nether_fortress/20261122-073651-220294.events.jsonl#L311) · [黑曜石末格](../runs/l1_hy4_w9_20261122/hy_5e_4_nether_fortress/20261122-073651-220294.events.jsonl#L485) · [原子挖回执](../src/mc_agent/harness/mc_tools.py#L1573)
+- **W3 OB2 EP09 开局石器真卡料。** 实制木镐后连续三次批采石头共报破 **14 格、净入 1 圆石**。后二片都报 `no_drops_collected`，同样的圆石堆 `[19032.1,67,41130.3]` 两次出现在扫描，工具还提示 `mc_skill_collect_drops`。随后仅挖泥土、零净增，无拾取调用或石镐，课程仍未验证。矿掉落和库存没有逐实体归属，14 格中有多少掉落实体仍未知。用此现场做低一格有障碍的收取验收，并与 W3 OB1 EP03 十格入十圆石的正例配对。 [十破一收](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-070025-339564.events.jsonl#L196) · [看见圆石](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-070025-339564.events.jsonl#L219) · [重复同堆](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-070025-339564.events.jsonl#L270) · [十破十收](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-065632-972307.events.jsonl#L477) · [采矿回执](../src/mc_agent/skills/library.py#L3530)
+- **三路线 OB1 EP07，已见低处掉落但提示的拾取工具未注册。** L64 采暗橡两格实际零入包，回执定位暗橡原木在 `[27990.7,79.0,34982.1]`、低 2m，提示先下阶梯再调 `mc_skill_collect_drops`。下一次阶梯被近战打断。真实 `McToolset` registry 的石器、铁器、钻靴 compact 三配置都返回「没有注册工具」，full 和显式 extra 两个正对照均可准备调用。该段后续实入 6 暗橡来自下一轮采木的总包差，原实体未归源。最小修复给会发此提示的课程提供可调用的有界拾取，或让提示对应已有共享入口。验收低处安全可达/危险不可达、同层可拾和实包净增，保留未收原因。 [实机掉落提示](../runs/5ease_ob_w2_20261122/nju_ob_1_bare/20261122-061708-859759.events.jsonl#L64) · [后续阶梯抢占](../runs/5ease_ob_w2_20261122/nju_ob_1_bare/20261122-061708-859759.events.jsonl#L91) · [低处提示源码](../src/mc_agent/skills/library.py#L1150) · [compact 筛选](../src/mc_agent/harness/mc_tools.py#L3714) · [actor 注册](../src/mc_agent/harness/agent.py#L1044)
+
+- **裸装冲刺 H4 六格云杉破坏后逐调用均无入包。** EP01 L210/241/274/306/336/366 挖同柱 Y74–79，均成功但 `gained={}`。L384 后续确实造出台，原件无法将该台耗材归到这一柱或已有木料。请保留高处掉落实体、落地后是否接近及实际物料增量。 [首格](../runs/5ease_bare_sprint_20261122/hy_5e_4_bare/20261122-060517-651702.events.jsonl#L210) · [末格](../runs/5ease_bare_sprint_20261122/hy_5e_4_bare/20261122-060517-651702.events.jsonl#L366) · [晚到合成](../runs/5ease_bare_sprint_20261122/hy_5e_4_bare/20261122-060517-651702.events.jsonl#L384)
+
+- **裸装冲刺两门户端点。** H7 实破 8 格黑曜石，5 次正差、3 次零增，终包 12。H8 有两格实获 2，脚下安全门两次、空格一次，终包 10。两槽由 4 黑曜石起步且均无补装日志，分别有 3 和 4 块无法从每个配对工具归源。各终包有打火石 1，槽终态仍是主世界，无建门调用。采料交接须直接查实包再决定继续采或开始建造，保留可观测入包时点。 [H7 零净增](../runs/5ease_bare_sprint_20261122/hy_5e_7_probe_obsidian_portal/20261122-060542-326684.events.jsonl#L366) · [H7 终包](../runs/5ease_bare_sprint_20261122/hy_5e_7_probe_obsidian_portal/wild-endurance-5ease_bare_sp_hy_5e_7_probe_obsidian_portal-20261122-060445.json#L50) · [H8 终包](../runs/5ease_bare_sprint_20261122/hy_5e_8_probe_obsidian_portal/wild-endurance-5ease_bare_sp_hy_5e_8_probe_obsidian_portal-20261122-060445.json#L50)
+
+- **Wave11 两种矿的终包可闭合，逐格仍缺。** 四钻槽 0/2/5/0，两个铁槽 7/10，均等于各自目标片增量。H3 EP01 L63 实入钻 3 而 `verified_ore_pickups` 持平为 3；H6 EP02 L60/L89 粗铁不动、分别多煤 14/2，计数 10→14→16。请按目标物料和来源独立输出库存净增、破矿格、掉落实体与未收原因，继续对墙后、落地与浮水三档。要塞 H8 邻近示例三格砖第一次都未进包，有可见低处掉落；随后移至 Y61 时 +2，哪一个实体未收不可从包差反推。 [三钻实增](../runs/5ease_l1_wave11_20261122/hy_5e_3_probe_diamond_y54/20261122-054210-025354.events.jsonl#L63) · [铁不变且计数增长](../runs/5ease_l1_wave11_20261122/hy_5e_6_probe_iron_y16/20261122-054434-600140.events.jsonl#L60) · [低处三份掉落](../runs/5ease_l1_wave11_20261122/hy_5e_8_nether_fortress/20261122-054244-909697.events.jsonl#L135) · [迟到的两砖](../runs/5ease_l1_wave11_20261122/hy_5e_8_nether_fortress/20261122-054244-909697.events.jsonl#L212) · [采矿确认计数](../src/mc_agent/skills/mining_dfs.py#L3089)
+
+- **Wave10 终版逐格与终包比对。** 四门户槽原子破 16 格黑曜石，有实入 11、零净增 5。H7 可配采矿片钻增 2，终包 5；H8 可配增 8，终包 9。两钻槽配给无钻石，未见补给。缺逐格或实体回执，分别未归属 3 和 1，不能从终包倒填到某格。目标包量与掉落确认需独立。 [H4 零净增](../runs/5ease_l1_wave10_20261122/hy_5e_4_probe_obsidian_portal/20261122-053456-088392.events.jsonl#L553) · [H7 终包](../runs/5ease_l1_wave10_20261122/hy_5e_7_probe_diamond_y54/wild-endurance-5ease_w10_hy_5e_7_probe_diamond_y54-20261122-053428.json#L48) · [H8 终包](../runs/5ease_l1_wave10_20261122/hy_5e_8_probe_diamond_y54/wild-endurance-5ease_w10_hy_5e_8_probe_diamond_y54-20261122-053429.json#L50)
+
+- **Showcase 定向铁矿后，同层 2 粗铁未取，候选只收显式扫描线索。** OB3 EP08 L547 扫见两铁格，L569 定向采铁报破 2、目标包差空，还列同层 `raw_ironx2`。随后 L635 挖实体所在坐标为空气，未调用拾取。固定 Skills `07fc68b` 的真实 actor 工具和拾取入口，用原 `mine_blocks` 回执与掉落坐标重放，只有工具回执线索时下一 DFS 直接施工，实体扫描 0。先补一次显式 item 扫描的干地对照则先实收 2 粗铁、零新 DFS；加水对照保持零移动。建议用同维度的近期矿后回执触发一次有界复扫，仍须实时校验安全落脚、动作释放及实际包差。现场路线是否可取待查。 [两铁格](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L547) · [同层掉落](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L569) · [空气回执](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-050334-705094.events.jsonl#L635) · [候选预取检查](../../s-skills/src/mc_agent/harness/mc_tools.py#L2982)
+
+- **铁钻近矿补位分支不可达，`0731a37` 离线双矿同型复现（Slice A）**。矿格到脚下的曼哈顿距离大于 4 才尝试补位，但枚举的候选站位必须既是矿格的六邻之一，又距原脚下至多 2，两条件合起来要求矿格距原脚下至多 3。用真实矿脉钩子与模拟传输，在 Y16 铁矿、Y−54 深板岩钻矿分别布置 5 格距离的干燥直廊。两次均无移动、无破矿、目标入包 0。显式移到同层安全邻格后，原钩子两次均破 1 并入包 1。隔墙和岩浆支撑对照共四例均保持矿格。最小修复按有界安全路径选站，刷新实测脚位再验掉落可取；无支撑、半高、积水或路径不明时保留矿格。验收在同一井口用开口干廊、隔墙和安全落脚失败各做铁钻回放，记录尝试站位、实际落脚、目标矿格、目标包差及拒绝原因。V9 H2 EP02 三次返回距同一钻矿代表点 4.53 格且零钻，可作现场回放线索。末次脚格距矿格恰为 4，档案没有低层补位记录，现场机制仍待确认。 [不可达条件](../src/mc_agent/skills/mining_dfs.py#L3457) · [补位后复用旧脚位](../src/mc_agent/skills/mining_dfs.py#L3474) · [V9 首次靠近](../runs/5ease_virgin_eff_v9_20261122/hy_5e_2_probe_diamond_y54/20261122-033946-006335.events.jsonl#L44) · [V9 原地](../runs/5ease_virgin_eff_v9_20261122/hy_5e_2_probe_diamond_y54/20261122-033946-006335.events.jsonl#L78) · [离线夹具](../../s-triage/tests/test_d1_repro.py#L404)
+
+- **Portal V2 原子挖 13 格，6 次当次目标零增**。H1 6 格仅入 1，该件在实机死亡前；补装的 4 块另计。H2 2 格都实入；H3 5 格实入 4，另 1 格零收。H4 无黑曜石破格。未见逐格掉落留场和后续拾取身份，保留不能按破块算入包的验收。 [H1 零收](../runs/5ease_portal_v2_20261122/hy_5e_1_probe_obsidian_portal/20261122-042021-185017.events.jsonl#L114) · [H2 达料](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-042018-066420.events.jsonl#L899) · [H3 零收](../runs/5ease_portal_v2_20261122/hy_5e_3_probe_obsidian_portal/20261122-042031-402868.events.jsonl#L98)
+
+- **Portal 100 黑曜石逐格对账**。28 次原子回执明确 `dug=obsidian`，每次均请求 `collect=true`，其中 **14 次目标增量为 0**（H1/H2/H3/H4 为 5/3/0/6）。H4 的 `[9703,72,20330]` 实破耗 9.440s，整个动作 18.008s，增量为空。四槽终包总 43 = 起始 16 + 备料实包差 13 + 原子实包差 14。14 格零增量的掉落实体、合堆和可取性缺据；不能仅用破格回执说已入包。 [H1 零增](../runs/5ease_portal_100_20261122/hy_5e_1_probe_obsidian_portal/20261122-041158-006480.events.jsonl#L127) · [H2 零增](../runs/5ease_portal_100_20261122/hy_5e_2_probe_obsidian_portal/20261122-041235-510525.events.jsonl#L151) · [H4 零增](../runs/5ease_portal_100_20261122/hy_5e_4_probe_obsidian_portal/20261122-041157-768433.events.jsonl#L207) · [原子挖透传](../src/mc_agent/harness/mc_tools.py#L1573)
+
+- **黑曜石门户 V1 钻槽包差对账**。H7 EP01 实入钻 1、粗铁 1，EP02 只入红石 4 等副产物，累计 `verified_ore_pickups=3`。模型在 EP02 L189 写已得钻石 3，Fleet 终包只确有钻 1；没有证据确定模型引用哪个计数。请返回目标矿独立累计和当前包量，结算用背包或成就。H8 EP02 回执先报深板岩圆石净正差 23，工具外层再报清掉 13；全波同类片内净正差 198，加已知外层清理后可对 185，终包 192，余 7 缺逐次前后库存和实体证据。 [H7 第二集包差](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_7_probe_diamond_y54/20261122-035500-061544.events.jsonl#L41) · [H7 模型回答](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_7_probe_diamond_y54/20261122-035500-061544.events.jsonl#L189) · [H7 终包](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_7_probe_diamond_y54/wild-endurance-5ease_obs_v1_hy_5e_7_probe_diamond_y54-20261122-034920.json#L46) · [H8 清包](../runs/5ease_obsidian_portal_v1_20261122/hy_5e_8_probe_diamond_y54/20261122-035500-739396.events.jsonl#L32) · [外层清包](../src/mc_agent/harness/mc_tools.py#L3097)
+
+- **D1 新增两种矿的归属夹具**。固定 `cea55e4`，铁矿及深板岩钻矿各跑巷道开格和矿脉开格，每种入口三例。新破块后旧同类实体 `#101` 入包 1，新掉落 `#202` 仍在低处，四例均增加 `verified_ore_pickups`。仅新掉落且没收到时四例都为 0；两条矿脉路径计 `lost_drops=1`，两条普通巷道路径为 0，外部快照均未导出丢失数。新实体确实入包的四个正例通过。总库存净增可以计进任务配额，逐格验收另记挖破坐标、掉落实体或合堆后的来源不明、实收量和未收原因。V6 H1 EP01 确实存在一片零挖、原地却进 1 钻，现有轨迹不提供实体归属。 [V6 实机包差](../runs/5ease_virgin_eff_v6_20261122/hy_5e_1_probe_diamond_y54/20261122-030924-457199.events.jsonl#L166) · [巷道](../src/mc_agent/skills/mining_dfs.py#L1558) · [收取与归因](../src/mc_agent/skills/mining_dfs.py#L3075) · [矿脉丢失计数](../src/mc_agent/skills/mining_dfs.py#L3605)
+- **近距粗铁候选 `65ab1c2`**。按 W2 OB1 EP04 实体 ID 和 L60 到 L87 的 3.7992s 重放，集成 `2fb1eaf` / `6db598c` 直接派 DFS。候选 `65ab1c2` / `3238fc7` 先确认同层两堆粗铁 `#115721×2`、`#116454×1` 入包，第三堆在模拟地形被判 `unsafe_route`。改为 6.001s 或在第 2s 插入一次敌对实体扫描，候选又跳过仍在原位的三堆。请对候选线索按类型保留，在过期时有界补一次近距目标扫描，并以危险路线、动作释放和真实包差作验收。 [实机扫描](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-030049-855143.events.jsonl#L60) · [实机开挖](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-030049-855143.events.jsonl#L87) · [候选缓存](../../s-skills/src/mc_agent/harness/mc_tools.py#L985) · [候选拾取](../../s-skills/src/mc_agent/harness/mc_tools.py#L2975)
+
+- **5Ease V8 HY_5E_8 铁矿工具对账短 2 件**。两集可见 +19、+3，终包 **24**。次集 L31 列一格矿坐标、该调用入 2 粗铁，不能逐件归格；还有 2 件未对应到任何片内包差，缺独立掉落实体。另 H4 得分不能反推物料，次集独立包见钻 12，死亡后终包空。 [H8 次集实破](../runs/5ease_virgin_eff_v8_20261122/hy_5e_8_probe_iron_y16/20261122-033117-086512.events.jsonl#L31) · [H8 24 粗铁终包](../runs/5ease_virgin_eff_v8_20261122/hy_5e_8_probe_iron_y16/wild-endurance-5ease_virgin_v8_hy_5e_8_probe_iron_y16-20261122-032534.json#L45) · [H4 死前钻](../runs/5ease_virgin_eff_v8_20261122/hy_5e_4_probe_diamond_y54/20261122-033050-107447.events.jsonl#L55) · [H4 死亡](../runs/5ease_virgin_eff_v8_20261122/hy_5e_4_probe_diamond_y54/20261122-033050-107447.events.jsonl#L109)
+
+- **5Ease V7 石料实破与入包有落差**。HY_5E_4 EP01 L90 `mine_blocks(deepslate)` 完成 20 格，仅见深板岩圆石 +9，逐格掉落实体缺记录。后续岩浆死并重生，L143 在重生点 5 格内查空，不能用这次查空否定原矿区剩余掉落。 [破石和入包](../runs/5ease_virgin_eff_v7_20261122/hy_5e_4_probe_diamond_y54/20261122-031809-976603.events.jsonl#L90) · [死亡](../runs/5ease_virgin_eff_v7_20261122/hy_5e_4_probe_diamond_y54/20261122-031809-976603.events.jsonl#L124) · [异处扫空](../runs/5ease_virgin_eff_v7_20261122/hy_5e_4_probe_diamond_y54/20261122-031809-976603.events.jsonl#L143)
+
+- **W2 OB1 EP04，脚边 4 粗铁已被扫描到，随后转去施工**。L60 见三堆 `raw_iron`，最近 `#115721` 两件离站位约 **0.45 格**，另两堆各 1。下一条 DFS 27.821s 走离该点，入包 15 圆石、4 木板、粗铁 **0**。到 19:10:36 的 L440，13 片全部粗铁 0，合计 69 个通用破块回执，无独立拾取。掉落实体最终去处和可达性仍需验证。验收补入「当前目标物已经出现在近距实体扫描时，先核对安全拾取与包差，再决定开新矿道」。 [三堆粗铁](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-030049-855143.events.jsonl#L60) · [离开原位及背包差](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-030049-855143.events.jsonl#L88) · [后续仍为零](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-030049-855143.events.jsonl#L434) · [预算出口的包差](../src/mc_agent/skills/mining_dfs.py#L5433)
+
+- **5Ease 采矿 V5 延后出现两钻**。HY_5E_7 EP02 最后一片施工 14 格，仅回深板岩圆石 +14、钻石 +0。集结算得 `mine_diamond`，独立终包有 **2 钻**。工具与终包之间的站位只变约 0.3 格，缺销毁矿格和实体拾取字段，不能把两件绑定到超时坐标。另 HY_5E_5 EP01 开战回执已读到 1 钻，之后采矿片 +1，终包 2。 [H7 零钻片](../runs/5ease_mine_eff_v5_20261122/hy_5e_7_probe_diamond_y54/20261122-030301-937529.events.jsonl#L33) · [H7 终包](../runs/5ease_mine_eff_v5_20261122/hy_5e_7_probe_diamond_y54/wild-endurance-5ease_eff_v5_hy_5e_7-20261122-025754.json#L49) · [H5 独立包](../runs/5ease_mine_eff_v5_20261122/hy_5e_5_probe_diamond_y54/20261122-025800-875380.events.jsonl#L147)
+
+- **W1 OB2 r2 EP10 有可定位的实体持续未取**。木镐打掉石头后，该调用只进包了 2 木棍。新圆石实体 `#96999` 在 L206、L336 重复可见。尸袋两堆钻石、黑曜石也仍在，集止于 answered；绕路、挖掉落实体所在格的动作没有目标取回。验收需看实体位置、是否安全可达及实包。 [破块与非目标入包](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-024453-199211.events.jsonl#L186) · [后续实体](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-024453-199211.events.jsonl#L336)
+
+- **5Ease 采矿 V3 重启槽仍有包增量无法归属**。HY_5E_5_r2 两集调用合计钻石 **+11**，正式终包 **12**，缺可归到某矿格的直接掉落及独立首包。HY_5E_8 已见粗铁 **+3**，终包 **4**，同样缺 1 的动作归属。持有量已确认，不能用未配到的那一件推断丢弃、延迟拾取或场景发放。 [HY_5E_5 取矿片](../runs/5ease_mine_eff_v3_20261122/hy_5e_5_probe_diamond_y54_r2/20261122-024007-480673.events.jsonl#L415) · [12 钻终包](../runs/5ease_mine_eff_v3_20261122/hy_5e_5_probe_diamond_y54_r2/wild-endurance-5ease_eff_v3_hy_5e_5_r2-20261122-024000.json#L48) · [铁矿+3](../runs/5ease_mine_eff_v3_20261122/hy_5e_8_probe_iron_y16/20261122-023707-380504.events.jsonl#L61) · [4 粗铁终包](../runs/5ease_mine_eff_v3_20261122/hy_5e_8_probe_iron_y16/wild-endurance-5ease_eff_v3_hy_5e_8_probe_iron_y16-20261122-023700.json#L53)
+
+- **W1 OB2 重启槽 EP06 手挖砂砾，入包仍空**。`collect=true` 打掉 `[6516,23,-6508]` 的砂砾，L774 回 `dug=gravel`、`gained={}`。接下来挖同柱两格石头各进 1 圆石。未见该砂砾或燧石的实体和拾取，产物最终去处未知。单格工具原样转发拾取实参，可用相邻石头作同局对照。 [砂砾回执](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-022953-277697.events.jsonl#L774) · [第一格石头](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-022953-277697.events.jsonl#L804) · [拾取实参](../src/mc_agent/harness/mc_tools.py#L1645)
+
+- **5Ease 采矿 V2 再见动作归属断点**。HY_5E_4 EP01 只记 **钻石 +1**，EP02 各实片 **+0**，终包却有 **2**。坐标 `X5195–5196 / Y−55–−54 / Z7553` 的四个矿格候选在同一站位分别挖到时间门，破块、掉落实体和当片入包均未确认。后续搜索只查普通钻石矿，无法覆盖深板岩钻矿。要把第二颗钻石归到具体动作，需候选的破块结果、目标实体及入包回执。 [第一颗](../runs/5ease_mine_eff_v2_20261122/hy_5e_4_fishbone_scan/20261122-022707-830910.events.jsonl#L91) · [EP02 零增量](../runs/5ease_mine_eff_v2_20261122/hy_5e_4_fishbone_scan/20261122-023207-914540.events.jsonl#L62) · [扫描过滤](../runs/5ease_mine_eff_v2_20261122/hy_5e_4_fishbone_scan/20261122-023207-914540.events.jsonl#L150) · [两颗终包](../runs/5ease_mine_eff_v2_20261122/hy_5e_4_fishbone_scan/wild-endurance-5ease_eff_v2_hy_5e_4_fishbone_scan-20261122-022656.json#L49) · [候选记录](../src/mc_agent/skills/mining_dfs.py#L2371) · [超时前后包](../src/mc_agent/skills/mining_dfs.py#L5405)
+
+- **比赛实据**。`5Ease_Bot` EP11 第 61 分钟停在 `[-12202.5,-25,-6104.7]` 时确认入包 **3 钻石**、`goal_met=false`，随后继续下潜。现场观察提到两颗仍在脚边。JSONL 的 `dug_count=4` 含所有方块，下一片再次报告 3 钻石且累计确认次数没增长，掉落总数待实体回执核实。EP14 挖掉一格深层铁矿后目标增量为 0，附近扫描找到高约 **4.4 格**的 `raw_iron×1`，按建议向南爬时被相邻水格拦住。官方 r79 GLM_1 EP15 的同一堆粗铁 **3 块**在三次扫描间持续存在，五次靠近工具的位置回执无变化。水流带动掉落物的逐实体轨迹待验。 [EP11 三钻入包](../../../runs/20261122-001808-345130.events.jsonl#L91) · [EP14 高处掉落](../../../runs/20261122-002711-521374.events.jsonl#L514) · [EP14 水阻](../../../runs/20261122-002711-521374.events.jsonl#L536) · [r79 持续未取掉落](../runs/official_r79_35m_glm1/GLM_1/20261121-210952-579757.events.jsonl#L404)
+- **源码与最小修复**。现有 DFS 收到任意 1 件匹配物品就确认；补扫应按目标产物及实体当前位置核对余物。在预算内优先收当前任务需要、可安全到达的掉落，以实际库存变化或拾取回执确认。实体隔墙、从高处坠落、随水上浮时先刷新实体坐标并查落脚与短程路线，路径不通或收益不足就记原因并继续任务。对暂未拾取的可疑目标留短期记录，避免重复绕路。矿格数只用于定位，掉落数量以实体或实际包增量为准。 [DFS 确认](../src/mc_agent/skills/mining_dfs.py#L3044) · [附近拾取](../src/mc_agent/skills/library.py#L2958)
+- **验收**。同层近距掉两堆钻石，先入一堆后仍追踪另一堆；墙后无通路、高处落下、水流改变高度各有离线夹具。每次给出目标实体、最后坐标及已拾／不可达／跳过原因。限时内验证可安全捡到的高价值目标，低价值杂物不会引发绕路。正式赛同类深挖核对目标矿入包与课程验证回执。
+- **D1 离线复核 `258bdfe`，补捡未执行**。DFS 传入 `max_duration_s=6.0`，但 `MacroSkills.collect_drops` 只接收 `radius`、`max_pickups`，已在项目虚拟环境复现 `TypeError`。调用方捕获后直接返锚。单改参数也会漏掉整条矿脉零入包的情况，因为补捡以已有入包的 `mined_coords` 为入口。请 Slice A 与 Slice C 用本次已破坏的目标矿及预期产物触发补扫，沿用剩余预算和目标过滤，夹具同时覆盖零入包及已入一堆的起点。 [补捡调用](../src/mc_agent/skills/mining_dfs.py#L3922) · [矿格与掉落分别记账](../src/mc_agent/skills/mining_dfs.py#L3547) · [拾取接口](../src/mc_agent/skills/library.py#L3092) · [目标过滤](../src/mc_agent/skills/library.py#L2958)
+- **`75feb68` 实际补扫已接通，零入包和过滤仍失败**。固定提交的相同夹具先入 1 钻后，补扫 1 次，库存钻石 1→3，另追了粗铁和泥土。钻石目标中只挖到顺路铁矿也触发同一套普通杂物拾取。所有目标都未入包时补扫仍为 0 次。新参数 `max_pickups=6` 限制尝试数，缺少补扫时长上限及目标过滤。 [补扫入口](../src/mc_agent/skills/mining_dfs.py#L3917) · [通用拾取转发](../src/mc_agent/skills/library.py#L3092)
+- **补扫耗时反例**。真实 DFS 总预算 30s、虚拟时钟模拟三次各 3.5s 的合法靠近动作和入包等待，补扫占 **11.25s**。验收仍按 6s 和 DFS 剩余预算的较小值。 [拾取执行](../src/mc_agent/skills/library.py#L3018)
+- **Slice C `f91701c` 已提供目标过滤和拾取时限**。D1 复跑的定向夹具覆盖墙挡跳过、移动后的坐标刷新、高处落下后重试、杂物剔除以及明确给 6s 时的超时。采矿集成版 `75feb68` 的脉尾仍不传 `item_types` 或 `max_duration_s`，且全未入包不进入该分支。请 Slice A 与 Integrator 在复验时走实际 DFS 整段入口。 [目标拾取](../../s-skills/src/mc_agent/skills/library.py#L3211) · [过滤夹具](../../s-skills/tests/test_skills_and_providers.py#L791) · [集成触发](../src/mc_agent/skills/mining_dfs.py#L3917)
+- **D1 实测 6s 入口仍受传输重试影响**。固定 `90dfe75`，以真实 `BotSession` 加模拟传输复现。第一个库存请求在 4.95s 出协议错误，0.15s 后重试仍拿同样的 5s 读超时，**10.10s** 才返回 `pickup_time_budget`，有目标过滤和无过滤均同。请按单个剩余预算约束传输重试，并在 DFS 的局部拾取与回退之间共享该预算。 [技能预算](../../s-skills/src/mc_agent/skills/library.py#L1312) · [传输重试](../../s-skills/src/mc_agent/bot.py#L120)
+- **固定 `90dfe75` 的实际 DFS actor 入口**。模拟破坏矿格后零入包，逐矿回收扫 3 次，只捡目标钻石 **0→2**，水后钻石标 `unsafe_route`，`goal_met=true`。同一夹具先自动收 1 颗后，逐矿入口提前返回，剩下两颗补扫 **0 次**。保留目标过滤，补齐已有部分入包的情况。 [逐矿早退](../../s-skills/src/mc_agent/skills/mining_dfs.py#L3015)
+- **D1 复验 `700ee48`**。固定提交后，6s 的独立回收入口在同一协议错误→重试读超时夹具内 **3.49s** 返回 `pickup_time_budget`，两个读上限各 1.675s。把同样故障放进真实 DFS 预算包装，设总预算 30s、已挖 1 格，从逐矿回收首个 `status` 进入，两个读上限仍各 5s，**10.10s** 后抛 `_MiningDeadline`。请将较早的回收截止传到 DFS 的传输重试，验收真实嵌套入口及停止动作。 [直接入口预算](../../s-skills/src/mc_agent/skills/library.py#L1331) · [DFS 请求预算](../../s-skills/src/mc_agent/skills/mining_dfs.py#L345) · [新增直接夹具](../../s-skills/tests/test_skills_and_providers.py#L874)
+- **加上连接各阶段与清理的 `700ee48` 夹具**。独立读取含连接阶段 **4.99s**，独立 `move_to` 超时再让 `stop` 重试共 **5.99s**，动作释放待确认。真实 DFS 已挖矿时组合读取 **11.60s**；两层技能包装的 `status` 委托 **10.525s**，动作待清理记在外层时总 **8.63s**。验收要让读、动作、复试和清理沿用发起层的较早截止。 [读取、动作归属及止动](../../s-skills/src/mc_agent/skills/library.py#L1360)
+- **D1 复验 `66ba1af`，原生 DFS 的 6s 组合门通过**。真实已挖格 DFS 包装的逐矿状态和显式回收库存请求，含连接阶段 **11.60→4.99s**，返回 `pickup_time_budget`，外层仍可继续。模拟移动和两次止动请求共 **5.99s**；确认释放时作为局部超时，未释放时回传 `_MiningDeadline` 停止 DFS。普通两层技能包装复现仍为读取 **10.525s** 和清理 **8.63s**。候选未出现在 W1 开波。 [DFS 预算副本](../../s-skills/src/mc_agent/skills/library.py#L1340) · [超时和释放分支](../../s-skills/src/mc_agent/skills/library.py#L1353)
+- **有动作且协议响应连续缺失仍要验**。`66ba1af` 模拟两次 `move_to` 均返回 `RemoteProtocolError`，**4.98s** 返回一般错误、没有发 `stop`、外层无超时字段，逐矿会继续尝试。模拟只证明动作响应缺失时的分支，不确定服务端是否执行。请按动作是否已释放核对继续条件。 [捕获边界](../../s-skills/src/mc_agent/skills/library.py#L1361) · [逐矿重试](../../s-skills/src/mc_agent/skills/mining_dfs.py#L3067)
+- **`5ease_micro_10m_20261122` 实机增补**。HY_5E_1 EP01 采圆石调用耗 **41.395s**，实际挖 **2 格**且正向背包增量为空。扫到圆石在 bot 下约 **4 格**，之后沿建议下阶梯碰到断层，`unstick` 无安全落脚，截取前没有取回回执。W1 铁槽的 118 格施工、0 钻石另分，轨迹仍在目标层上方，暂未证实破坏钻石矿格。 [圆石挖掘和掉落](../runs/5ease_micro_10m_20261122/hy_5e_1_bare/20261122-014501-002527.events.jsonl#L60) · [阶梯断层](../runs/5ease_micro_10m_20261122/hy_5e_1_bare/20261122-014501-002527.events.jsonl#L79) · [无安全落脚](../runs/5ease_micro_10m_20261122/hy_5e_1_bare/20261122-014501-002527.events.jsonl#L93) · [技能按增量核对](../src/mc_agent/skills/library.py#L3520)
+
+- **A/B v5 一颗钻石无法定位到动作**。HY_5E_5 终包有 **1 钻石**，EP01 已拿到 `mine_diamond` 分，各已见工具片的钻石增量却都是 0，且一次换锚只有位移回执。终包证明钻石已进入可计库存，哪一格何时挖到和掉落何时拾起仍缺证据。补扫验收须连起矿格、掉落实体和真实库存。 [零钻切片](../runs/5ease_mine_eff_ab_20261122/hy_5e_5_probe_diamond_y54_v5/20261122-021609-703708.events.jsonl#L122) · [换锚](../runs/5ease_mine_eff_ab_20261122/hy_5e_5_probe_diamond_y54_v5/20261122-021609-703708.events.jsonl#L151) · [终包](../runs/5ease_mine_eff_ab_20261122/hy_5e_5_probe_diamond_y54_v5/wild-endurance-5ease_eff_hy_5e_5_v5-20261122-021549.json)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-095 | P1 | 小脑遇袭 `ReadTimeout` 后模型未优先补逃跑（`guardian.py` / `agent.py`）| 状态: FIXED（2026-11-22，贴脸<=4.5m超时注入紧急保命逃跑指令）
+- **影响**：第 64 分钟在 `[-12208.4, -53.4, -6133.5]` 遭遇贴脸僵尸（`dist=1.6m`），小脑抢占接管因后端 `ReadTimeout` 中止（`reflex_mode=network_timeout`, `HP=11`），模型随后未补调 `mc_skill_flee` 反而调 `mine_dfs(reset)` 导致阵亡爆装。
+- **最小修复方向**：当小脑因 `network_timeout` 中止且 `nearest_hostile.dist <= 4m` 时，向模型返回强指令要求立即优先 `mc_skill_flee` / 封堵退路，严禁继续执行 `mine_dfs` 或原地 `reset`。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-096 | P2 | `--curriculum --interactive` 未将 stdin `/now` 注入单集上下文（`curriculum.py` / `agent.py`）| 状态: FIXED（2026-11-22，`CurriculumSupervisor.run(inbox=...)` 透传 `StdinInput`）
+- **影响**：正式赛开启 `--curriculum --interactive` 后，向 stdin 发送的 `/now ...` 仅回显在终端日志，未真正进入当前集模型上下文，导致人工轻介入无法即时纠偏。
+- **最小修复方向**：在 `run_curriculum` 中透传交互式队列 / stdin 监听线程给每集 `run_agent`，使 `/now` 可在课程模式下实时生效。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-097 | P1 | `mc_skill_container` 7/7 全部 `bad_args`（盲目查箱 + 动词别名拒绝）| 状态: FIXED（`258bdfe`，别名归一 + 无记忆箱禁盲调）
+- **Long3 H1 EP09 开到工作台窗，转移 0。** L52 已把 `[402869,63,342989]` 扫成工作台，随后显式填该坐标、`block=chest`、`action=store`，实际开到 `crafting`，`bad_section`、`done=[]`；下一次同参被防重拦。现有坐标分支只转发坐标，复验应在开窗前校验方块，给出有效箱坐标或提示放箱，并单独验证贵重物资实转。 [扫描](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-132135-340435.events.jsonl#L52) · [误开](../runs/l2_long3_20261122/hy_5e_1_midgame/20261122-132135-340435.events.jsonl#L147) · [坐标分支](../src/mc_agent/skills/library.py#L4450)
+- **Long2 H1 EP02 记忆箱与实际可达性脱节。** 半径 8 的实扫为 0，回执另列约 49.5m 的记忆箱。Bot 最近确认站位约 Y113，之后实制并持有新箱 1，无派发放箱。随后用同一旧记忆坐标 Y63 存放钻镐、钻、铁锭与原木，12.105s 后受近战抢占，确认释放，缺任何转移回执。以真实入口离线回放，Long2 实载会把四个内层 `items` 数量全部变为 1；C `2735fe3` 对同参回 `bad_args`、零开窗，改 `count` 后发送明确的 1/4/16/13。真实箱需分别验落地、三维可达和实存。 [实扫与记忆箱](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-113755-455034.events.jsonl#L150) · [箱子入包](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-113755-455034.events.jsonl#L235) · [原请求、实际释放](../runs/l2_long2_20261122/hy_5e_1_midgame/20261122-113755-455034.events.jsonl#L325) · [C 候选校验](../../s-skills/src/mc_agent/skills/library.py#L5242)
+- **C `4c19d2e` 现有候选独立 11 项通过。** 注册强制顶层 `action`，参数或动作缺失先拒并保留明确原因，转移失败仍单独报已确认的部分。L2 H4 两次均省 `action`，候选尚未载；C 另用真实工具和离线运输复现显式 `put`、箱型、炉坐标仍发炉窗请求，类型不吻合仍待修。 [候选回执测试](../../s-skills/tests/test_skills_and_providers.py#L4660) · [实机第一次参数](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-111247-345957.events.jsonl#L198)
+- **L2 H4 造了箱子，却重复打开同坐标炉窗。** EP05 L215 已实制箱 1，后续包仍持箱。L199 传 `block=furnace`、L302 改 `block=chest` 但传同坐标，实际都打开炉；工具默认 `put` 且固定使用 `container` 区，失败无转移。`_window_target` 有坐标时只转发坐标，显式箱型未核验。此例保留历史别名修复，补炉输出回收、真实箱验型和实转移三条用例。 [箱子入包](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-111247-345957.events.jsonl#L215) · [误开炉](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-111247-345957.events.jsonl#L302) · [显式坐标优先](../src/mc_agent/skills/library.py#L4450) · [批量箱区](../src/mc_agent/skills/library.py#L4597)
+
+- **W3 仍能因混向参数误转贵重物资，Slice C 复核动作校验**。`5ease_ob_w3_20261122` OB3 EP02 载 `e4c5d4c`，L547 独立背包有 4 钻。L630 省略顶层 `action`，物品条目写 `retrieve`，内层再写 `store`。L631 工具实际存入 1 钻，箱窗新增 1 钻。该请求自身含两个相反动词。公开入口默认 `put`，物品解析跳过条目动词。离线真实 `McToolset`、模拟箱窗初始包 4/箱 1，混向请求得包 3/箱 2，显式 `take` 得 5/0，显式 `store` 得 3/2，顶层 `retrieve` 得 `bad_args` 且保持 4/1。验收冲突、漏顶层动作的请求在打开箱窗前报参数错误，背包和箱子零变化。有效同义词继续按明确方向全数实转。 [背包](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-064348-744646.events.jsonl#L547) · [混向请求](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-064348-744646.events.jsonl#L630) · [存箱回执](../runs/5ease_ob_w3_20261122/nju_ob_3_village/20261122-064348-744646.events.jsonl#L631) · [入口默认](../src/mc_agent/harness/mc_tools.py#L2322) · [解析](../src/mc_agent/skills/library.py#L4578)
+- **Showcase 村庄槽已复现数量别名，候选未实载**。OB3 EP02 L151 起包有预置 4 钻，L346 请求用 `items:4`，L347 实际完成 1 钻，L756 独立包剩 3。EP03 L192 同箱仍为 1 钻。`4c19d2e` 离线 7 项容器定向用例通过，包含拒绝嵌套 `items` 作为数量字段和部分转移。下一波确认当前调用先提示正确的 `count`，按正确参数实存 4 件、独立包余 0。 [请求](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-044552-287845.events.jsonl#L346) · [实际存箱](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-044552-287845.events.jsonl#L347) · [余 3](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-044552-287845.events.jsonl#L756) · [次集箱窗](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-044839-054406.events.jsonl#L192)
+- **W2 场景见容器参数与部分成交断链**。OB3 EP02 存箱第四项失败，`done` 和库存仅证实已转移 1 钻、1 钻镐、1 铁剑，回答把金锭也算已存。另一箱回执只入麦 1，列表数量字段写成 `items`，解析回落到 1。OB1 EP03 查铁锭漏 `action` 后默认为 `put`，只验证自身无铁锭。请验收必填时的明确提示，并让后续动作依据已提交列表逐项复查部分转移。 [部分转移](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-024813-364865.events.jsonl#L705) · [单件默认](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-024813-364865.events.jsonl#L1011) · [错误自述](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-024813-364865.events.jsonl#L1247) · [漏动作](../runs/5ease_w2_40m_20261122/nju_ob_1_bare/20261122-024956-442964.events.jsonl#L235) · [默认动作](../src/mc_agent/harness/mc_tools.py#L2322) · [数量解析](../src/mc_agent/skills/library.py#L341)
+- **影响**：EP05（3 次）、EP08（2 次）、EP15（2 次）累计调用 `mc_skill_container` **7 次，7/7 全部 `bad_args` 失败**，白白浪费开集轮次。
+- **日志证据**：`runs/curriculum-20261121-231923-527585.json`（EP05 L32/L63/L101、EP08 L60/L119、EP15 L33/L53）——反复传 `action="get"`、`items=[]` 或漏传坐标。
+- **根因**：① `bootstrap_iron_age` 剧本无条件写“若记忆箱已有备用铁镐/铁锭优先调 `mc_skill_container`”，即便 `WorldMemory.containers` 为空也诱导模型盲调；② `mc_skill_container` 严苛要求 `action in ("put", "take")`，拒绝常见同义词 `get`/`withdraw`/`store`/`deposit`。
+- **最小修复方向**：① 仅在 `WorldMemory.containers` 存在含对应物资的箱子时才注入取箱提示（并直接附带箱子坐标）；② 在 `mc_skill_container` 中做别名归一（`get`/`withdraw`→`take`，`store`/`deposit`→`put`）。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-098 | P1 | 地下矿道遇水引发 `water_surface` 小脑连环抢占（11 次）| 状态: FIXED（2026-11-22，60s内连续>=2次地下遇水强撤离指令 + `mine_blocks` 隔墙封水）
+- **W12 H1 同集正对照。** 约 27m 换位仍回水袋，继续移到距该水袋约 56m 后下一 DFS 从新站位 Y65 起下到 Y41，后再下至 Y17、粗铁 +2。当前井口 48m 内有回入路径，放弃旧树另受活动节点和位置条件约束。复验应以确实开新井和入包衡量，水袋标记及窗口待设计。 [真新起点](../runs/l1_w12_guardian_full_20261122/hy_5e_1_deep_water/20261122-091850-204556.events.jsonl#L342) · [当前回入门](../src/mc_agent/skills/mining_dfs.py#L2194) · [放弃旧树门](../src/mc_agent/skills/mining_dfs.py#L5976)
+- **W12 H1 EP02 移开约 27m，再次 DFS 仍回原水袋。** 四条停前数据同一近 XZ/Y58、该阶段共 62.863s。L200 证实实际到新 XZ，L243 仍落回原水袋，L244 无新施工回执。场景验收应读取矿道节点与重新开井结果，验证确实换了入口，旧水道边设短时避让。 [确认移开](../runs/l1_w12_guardian_full_20261122/hy_5e_1_deep_water/20261122-091850-204556.events.jsonl#L200) · [又回水袋](../runs/l1_w12_guardian_full_20261122/hy_5e_1_deep_water/20261122-091850-204556.events.jsonl#L243)
+
+- **W11 终版 16 次采石抢占中，15 次是水域、1 次是战斗超时。** 按原件结构化原因重跑门禁，H2 EP05 的一条 `combat_timeout` 单独对账。新摘要可直接查各类型，H1 同一岸边十次水抢占的证据仍用下面原件。 [H1 水域](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-081450-522639.events.jsonl#L79) · [H2 战斗超时](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/20261122-082345-452604.events.jsonl#L186)
+- **W11 H4 EP02 验到真实干脚后的再入水。** L321 同时返回 `in_water=false,on_ground=true` 于 `[39741.4,64,52577.5]`，之后仍在同一岸边采石，L347 水抢占，回到距前点约 0.2m 的 XZ 且腾空。三次调用合计约 66.1s，无目标入包回执。复验要在恢复后换采石入口或目标方位，确保下一次采石没有沿原湿入口折返。 [落到干岸](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-081849-278937.events.jsonl#L321) · [下一次采石后再腾空](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-081849-278937.events.jsonl#L347)
+- **W11 `8cf1d18` 地表复发，首集同点十次采石被打断。** H1 EP01 的十次参数完全相同，全部 `water_surface` 抢占，相同 XZ 上浮后十次 `in_water=false`、`on_ground=false`。工具累计 39.937s，首启到末回 91.803s，本集未取到石镐。每次未证实落到可开工的干格。这个地表例与现有地下修复分开验收。 [首回](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-081450-522639.events.jsonl#L79) · [末回](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-081450-522639.events.jsonl#L313) · [指定涉水后落地条件](../src/mc_agent/harness/guardian.py#L4428)
+- **离线复核 `a20ec5e` 的新深层锚入口。** 固定父子源码，已带 3 次流体中止、深层放弃标记的状态，直接初始化 Y−54 井口，父版仍保留 3/真，集成版清为 0/假，已有 Y68 最高井口保持不变，无旧高度则登记 Y−54。新加入的反向支道让四个可行方向都进入计划。额外夹具中东向 3 格门内、8 格端点门外，旧 `_spine_branches` 会过滤该端，新补支道又列入计划，执行期逐格仍有围栏，待实机看是否无谓推进。原 `dry_calls=2` 在深层入口两版均未清。 [深层初始化](../src/mc_agent/skills/mining_dfs.py#L4940) · [常规分支围栏](../src/mc_agent/skills/mining_dfs.py#L5029)
+- **W3 在地表矿口也会反复触发，需验出水后的下一步**。`5ease_ob_w3_20261122` OB2 EP02 的铁 DFS 三次被水抢占，末两次报已脱水。EP03 从 Y63 向北上到 Y70，随后同一集采铁或脱困连续 8 次因水抢占，配对调用时长合计 59.481s，原件至集末无粗铁入包。第 5 和第 6 次先各报已出水，第 7 次又回到水中。地下特定高度修复仍待独立验收。建议在铁器任务记住当前进水入口及最后已确认干格，短期不从刚失败的入口继续下井。验收同一路线必须连续保持干脚并下潜，或明确换到另一个干燥入口，分别记录原地上浮、离水与再次入水。 [上一集回岸](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-064559-078025.events.jsonl#L456) · [上行换位](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-064922-096984.events.jsonl#L115) · [首个采铁抢占](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-064922-096984.events.jsonl#L218) · [第六次已离水](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-064922-096984.events.jsonl#L361) · [再进水](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-064922-096984.events.jsonl#L392) · [最后一次脱水](../runs/5ease_ob_w3_20261122/nju_ob_2_bare/20261122-064922-096984.events.jsonl#L408)
+- **影响**：EP08（5 次）、EP09（5 次）、EP10（1 次）累计触发 **11 次 `water_surface` 抢占**，导致 `mine_dfs` / `unstick` / `mine_blocks` 连续被打断，耗掉数分钟。
+- **根因**：`water_surface` 仅在原地执行上浮，未把 Bot 带回干燥巷道或封堵水格；下一轮工具调用立刻重新踏入水流再次触发抢占。
+- **最小修复方向**：地下（`y < 55`）60s 内连续触发 `>= 2` 次 `water_surface` 时，小脑自动尝试向相邻干格后撤或用圆石封堵水格，并在抢占返回中明确给出“避开当前水格坐标，向干燥方向平推 8+ 格”的提示。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-100 | P0 | `mc_skill_mine_blocks` 88% 失败率（2/17）与 `bootstrap_iron_age` 耗时 33 分钟 | 状态: FIXED（`258bdfe` + 隔墙封流体/垫托盘，`staircase` `ore_detected` 半径收紧至 5 格）
+
+- **Showcase 阶梯到批采的混矿接力待修。** OB3 EP03 L777 在 Y33 明确扫到下方四格铁，最近 2.1 米。下一次混采 L807 只回破 2 格、入包 0，并见高处煤掉落两堆。固定 `0731a37`、原脚位和四铁两煤原坐标，真实 actor 模拟按垂直代价先挖两煤，煤无法安全取回时，两格零入包的共享早停令四铁零尝试。只指定铁在相同模拟里第一格粗铁 +1，保留混选但让煤能收取时煤 +2、铁 +4。现场铁是否可达待证。建议阶梯回执先交接本次所需矿种或安全靠近，混采早停应列未尝试的目标矿。固定站位对照同层或小落差、煤不可取和铁也危险三种，分别核对目标破格、实际包差和停因。 [阶梯实据](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-044839-054406.events.jsonl#L777) · [混挖原回执](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-044839-054406.events.jsonl#L807) · [候选排序](../src/mc_agent/skills/library.py#L3302) · [两格零收早停](../src/mc_agent/skills/library.py#L3390)
+- **影响**：EP04~EP09 仅仅为了凑齐 6 块铁，累计消耗了 **33 分钟**（占 80 分钟赛程的 41%！），直接挤没了中后期村庄/下界/附魔的拿分窗口。
+- **数据证据**：`mc_skill_mine_blocks` 全场调用 17 次仅成功 **2 次**（失败 15 次，失败率 88%）；`mc_skill_staircase` 6 次触发 `ore_detected`，但探测到的矿大多隔着 8~12m 实心岩壁，导致模型紧接着调 `mine_blocks` 必报 `out_of_reach / no_targets_available`；同时 EP05 跑了整整 10 分钟 `mine_dfs(iron, Y=16)` 却在 `(-12261, 13, -6065)` 小范围反复回撤（`dry_calls=4`）0 块铁入包。
+- **最小修复方向**：① `staircase` 的 `ore_detected` 仅在矿石**紧贴通道 3~4 格内且无隔墙/流体**时才触发中断，隔墙远矿不打断下潜也不诱导 `mine_blocks`；② `mine_dfs` 采铁在 `Y=16` 改为长直巷道快速平推（减少短支道高频折返与 `movement_not_confirmed`）。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-101 | P1 | 集间切换与 `pre_ensure` 隐形耗时 8.9 分钟（占赛程 11%）| 状态: OPEN（2026-11-22 正式赛全量时间账审计）
+
+- **W18 裸装首镐的两条新版正例。** Runner 实载 `52be9ba` 的首镐缺口文案。HY7 EP01 独立包有 3 圆石、2 棍、旧木镐和板，第一写直接装备石镐。HY1 EP01 独立包无圆石，其后只挖 3、实入 3 且立即装备石镐。两集 actor 分别 10.05s 和 70.55s，备料时钟另计。铁器储备和回程仍需持续验。 [首镐文案](../scripts/l3_wild_endurance_runner.py#L2459) · [HY7 成镐](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-204103-447400.events.jsonl#L40) · [HY1 挖三](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-204110-294588.events.jsonl#L55)
+
+- **W17b 前两集显示备料口径和现场动作可分离。** OB1 第 2 集 `pre_ensure` 仍列 12 原木，结果缺 11，却按实际材料造台炉后直接发 DFS。HY4 第 1 集已有 6 圆石，带现成木镐仍因配方路由做出第二把木镐，随后又耗两段水域工具和一段 44s 零挖，最后才成功做石镐。按实物、棍和板的即时缺口优先完成石镐动作，达成后才决定需不需要补储。 [OB1 备料](../runs/l1_w17b_20261122/nju_ob_1_bare/20261122-202421-131109.events.jsonl#L2) · [OB1 首 DFS](../runs/l1_w17b_20261122/nju_ob_1_bare/20261122-202421-131109.events.jsonl#L164) · [HY4 第二把木镐](../runs/l1_w17b_20261122/hy_5e_4_bare/20261122-202133-121756.events.jsonl#L242)
+
+- **W17 GLM HY1 EP02 沿用固定储备缺口。** `b86e992` 的新铁课先实际盘点，独立包已有炉1、煤2、木棍2、石镐2、工作台2；仍沿备料给的缺10原木执行。四次采木宏无原木入包，三笔完成上梯，末次原子破橡木一格也无入包，约217s全程未派铁 DFS。新文案已实载；铁缺口 guard 对该集未暴露。 [真盘点](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-200040-213621.events.jsonl#L18) · [掉落零入](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-200040-213621.events.jsonl#L301) · [集尾](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-200040-213621.events.jsonl#L450)
+
+- **W16 GLM HY1 EP03，备料已达标仍继续补储。** 前集通过采木、制板、制两台补货。铁课下一集 `pre_ensure` 为 `already_satisfied`、缺口空；actor 仍先做三笔采木合 100.919s，实入 12 原木，其中第二笔虽失败仍入 2。采木前无独立盘点，原来的实包库存具体数缺证。复验达标的储备只执行一次，并按实时缺口解释 actor 的 `target_logs`。 [已达标备料](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-193704-169391.json#L3605) · [首笔采木](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-193704-169391.events.jsonl#L41) · [末笔采木](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-193704-169391.events.jsonl#L73)
+- **裸装铁器准备已完成目标还继续补储备。** 六槽 72 集有 61 笔备料起点、56 笔结束，正式回执计时合 917.16s。23 集铁器里有 21 笔作业单同时要 12 原木／8 木板／2 工作台／2 石镐，16 笔已记 280.12s、5 笔抢占无时长。21 集都进入 actor，15 集备料收尾不再缺石镐。Long3 OB1 EP09 仅为原木尝试 44.18s，收尾剩原木缺口 10。`8e8a560` 固定真实 Supervisor、resolver，Y64、3 锭、2 棍、36 板、包内 1 台且已有可用工作台，实际制并装备首铁镐后仍发补 12 木和第 2 台；改包内 2 台、Y51 或无树，照常完成铁镐并跳过多余动作。优先保留已证实成果，在铁镐实包满足时结束准备；首铁配方所需与可选深采储备独立结算。 [仅缺原木](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-130917-018464.events.jsonl#L2) · [配方与木料触发](../src/mc_agent/harness/curriculum.py#L2357) · [储备四件套](../src/mc_agent/harness/curriculum.py#L2380) · [离线世界夹具](../tests/test_l3_phase2.py#L37)
+- **备料超时与再次制木镐。** 41 笔有本段耗时，11 笔超过 45s，其中铁器 4、石器 7。最大 98.72s 同时含木、采石及下梯，不能全归木。真实 23 集铁课文案都已有「首镐 3 锭」和「12 原木等量」两项，不能用文案上线代替动态资源门验收。三波各见背包已有两石镐还新制木镐的回执。用当前有效镐、余预算和本次实际配方缺口判断下一步，备料 deadline 传至子动作，配方实证达成即退出。 [Long2 新木镐](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114259-094349.events.jsonl#L251) · [Long3 新木镐](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-130346-716318.events.jsonl#L106) · [预算传入](../src/mc_agent/harness/curriculum.py#L2468) · [循环检查](../src/mc_agent/skills/ensure.py#L638)
+
+- **W11 H4 EP05 备料有起点无结果，伴随库存变化。** L1 出现 `pre_ensure.started`，L2 直接进入 actor，终版 `pre_ensure=null`。上一集入 4 粗铁，当前炉扫描有亮炉、后验只余 1 粗铁。课程备料外层异常只置空结果，需要在失败时登记已完成步骤和当前炉务/库存回执，才能核对这 3 份及备料耗时。本例具体异常类型缺证据。 [备料起点](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-083426-232705.events.jsonl#L1) · [亮炉](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-083426-232705.events.jsonl#L59) · [后验包](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-083426-232705.events.jsonl#L112) · [异常路径](../src/mc_agent/harness/curriculum.py#L2595)
+- **集成 `af15bce` 备木阈值离线。** `0731a37`→`af15bce`，真实课程入口在铁器／钻靴各四种库存和高度对照。Y64 有 16 木板和工作台两课均跳过 40m 搜树及 resolver；12 木板时作业单从 12 原木、两台降至 6 原木、一台。仅缺工作台、16 木板已足时仍给两课各请求 6 原木和 8 木板。Y16 不触发地表树扫。建议把「可折算木料缺口」与「工作台缺口」分开传给已有 resolver，真机比较备料时间、首入铁/钻时间和缺木次数。 [阈值分支](../src/mc_agent/harness/curriculum.py#L2381) · [请求联动](../src/mc_agent/harness/curriculum.py#L2411) · [resolver 入口](../src/mc_agent/harness/curriculum.py#L2497) `f5fdb7a` 已在集成恢复 36 木板当量、12 原木与两台，保留铁课 90s 文案。裸装冲刺与三路线开波全部已见 actor 仍载 `91952c8681c5039f=af15bce`，在途波继续按实载计。 [恢复后的阈值](../src/mc_agent/harness/curriculum.py#L2391) · [裸装运行指纹](../runs/5ease_bare_sprint_20261122/hy_5e_1_bare/20261122-060900-547326.events.jsonl#L1)
+- **影响**：全场 81.0 分钟中，工具执行 58.2m + LLM 等待 13.8m = 72.0m，剩余 **8.9 分钟（537s）**全部消耗在 15 次集间切换、`pre_ensure` 和重连/状态轮询上。
+- **最小修复方向**：审计 `curriculum.py` 集间 `pre_ensure` 耗时（尤其 EP02/EP06 `actor_requests=0` 的纯 `pre_ensure` 集），合并冗余状态查询并减少不必要的跨集重切。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-102 | P1 | 侦察只走了半套，课程已关闭扫岛 | Slice D2（课程）+ Integrator | 状态: FIXED（仅正常完成时置 `recon_completed=True`，待实机复验）
+
+- **实据**。`5ease_micro_10m_20261122` HY_5E_8 EP02 向东三段到点并扫描，向北再用三段才到附近，随后用完 8 次请求，北向没有扫描或返到安全点的回执，课程以 `answered` 结算。HY_5E_5 EP01 的回程仍距原目标 43.7 格时报告收工。两条均加载 `75feb68`。 [附魔槽北向末步](../runs/5ease_micro_10m_20261122/hy_5e_8_enchant_anvil/20261122-014512-134091.events.jsonl#L151) · [附魔槽结尾](../runs/5ease_micro_10m_20261122/hy_5e_8_enchant_anvil/20261122-014512-134091.events.jsonl#L280) · [中期槽回程](../runs/5ease_micro_10m_20261122/hy_5e_5_midgame/20261122-014501-659543.events.jsonl#L157)
+- **根因与修复**。剧本要求两向走到并扫描，非暂停收尾却无条件设 `recon_completed=True`，选择器据此不再选该任务。保存已扫方向、可达落点及停止原因；白天环境允许时只补未完成方向，夜间或危险时正常止损。预算回执须区分收工、部分完成、主动跳过。 [侦察剧本](../src/mc_agent/harness/curriculum.py#L1366) · [写入旗标](../src/mc_agent/harness/curriculum.py#L2734) · [派发门](../src/mc_agent/harness/curriculum.py#L1584)
+- **验收**。同一轨迹夹具已完成东向、北向仅移动时，结算保留北向待扫描，不因 `answered` 丢进度；两向有落点和扫描回执时标准结算；超时、暂停、入水和入夜各保留明确停止原因。实际收益按落盘扫描和后续路线验，沿用 P2-12 对无 advancement 的字段口径。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-104 | P1 | 炉技能接受普通煤作为原料并消耗燃料 | Slice C（熔炼技能）| 状态: OPEN
+- **L2 H2 要塞 EP01 出现熟食误作炉料。** L1023 提交 `cooked_beef ×1`，38.7936s 后战斗抢占，未记录投料、燃料或出炉；接着 L1029 确认用熟牛肉进食 1 份。C 已复核 `860092b` 只明确拒绝普通煤，熟食仍需自己的约束。分别验普通煤和熟食早返回，核正常生牛肉、粗铁照常制取。 [炉调用](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L1023) · [抢占](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L1027) · [进食](../runs/l2_long1_20261122/hy_5e_2_nether_fortress/20261122-103307-539916.events.jsonl#L1029)
+
+- **W13 OB3 EP03 再现。** L1274 采煤实入 8，下一次炉务以普通煤 ×8 作原料、普通煤作燃料。炉 `[-5729,76,-8164]` 用 **50.364s**，报取出成品 0、退输入 8、费煤燃料 1。运行 `8ad3a56` 未含 `860092b` 候选。待同一工具入口实载，验零投料、零燃料消费、早返回。 [采煤入包](../runs/l1_w13_20261122/nju_ob_3_village/20261122-095148-061728.events.jsonl#L1274) · [炉回执](../runs/l1_w13_20261122/nju_ob_3_village/20261122-095148-061728.events.jsonl#L1295)
+
+- **Showcase EP08 再次烧普通煤，具备后包。** OB2 补给煤 16，L939 再采 17。L962 用煤作原料和燃料，50.3702s、成品空，报煤燃料 2。L1066 后包实际煤 31、铁锭 16、粗铁 0，和这三项煤变动精确吻合。次集已换目标，该重复无效炉隔离回归继续待加载候选。 [补给](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L797) · [无效炉](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L962) · [后包](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-050125-171539.events.jsonl#L1066)
+
+- **Showcase 实载 `0731a37` 复现无效煤炉。** OB2 EP07 L378–379 把普通煤既当 10 份原料又当燃料，耗 **50.3679s**，炉 `[17230,58,30051]`，回收成品空、燃料登记煤 2、技能声称退回输入 10。L427 同炉未点亮，L507 拆炉实回煤 2 和炉 1。缺投前后独立煤数，燃料永久消耗未确认。Slice C `860092b` 已在候选树前置拒绝，当前 `07fc68b` 的 5 个定向用例通过，含正常粗铁和煤矿合法转移，集成尚待实载。 [实机炉回执](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-045625-758120.events.jsonl#L379) · [拆炉实收](../runs/5ease_ob_showcase_20261122/nju_ob_2_midgame/20261122-045625-758120.events.jsonl#L507) · [旧退料计算](../src/mc_agent/skills/library.py#L5379) · [候选夹具](../../s-skills/tests/test_skills_and_providers.py#L3140)
+
+- **W1 实机**。NJU_OB_2 重启槽 EP03 先尝试 `coal_ore` 因背包缺料被拒，随后提交普通 `coal` ×10。炉位 `[6401,55,-6293]` 用 **50.376s** 返回 `partial_smelt`，记录煤燃料 2、成品空、退输入 10。前后背包煤 **16→14**、铁锭 **16→16**。没有取铁锭回执。 [投前库存](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-021721-839074.events.jsonl#L188) · [缺煤矿](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-021721-839074.events.jsonl#L212) · [烧煤与退料](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-021721-839074.events.jsonl#L301) · [后读库存](../runs/5ease_w1_20261122/nju_ob_2_midgame_r2/20261122-021721-839074.events.jsonl#L350)
+- **根因与最小修复**。同步 `smelt_items` 以原料持有量决定可投量，随后组装 `window/act`。普通煤无可用熔炼产物时应在打开炉和投燃料前返回明确错误，保留合法配方路径。 [熔炼入口](../src/mc_agent/skills/library.py#L5107) · [投料](../src/mc_agent/skills/library.py#L5259)
+- **验收**。夹具传普通煤作原料，燃料不变、零炉窗写入并给具体错误；以粗铁正例核对原料与燃料转移、成品实际入包。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-107 | P1 | 去皮原木已入包，备料生成无效木板物品名 | Slice C（木材技能）+ Slice D2（前置备料）| 状态: OPEN
+
+- **`4415388` 追加满包预判，离线 5/5**。整格输入可耗尽时，普通云杉、去皮云杉、去皮诡异菌柄均允许合法合板，输入尚有剩余时仍按无空槽拦截。此次只修改槽位预测，先前不同木种合批只选第一种的备料入口未变，仍需用两种木料各 1 根的夹具验 8 板。 [候选测试](../../s-skills/tests/test_skills_and_providers.py#L4788) · [混批入口](../../s-skills/src/mc_agent/skills/ensure.py#L997)
+
+- **Slice C `3238fc7` 定向复验**。真实备料及合成入口模拟背包，普通成品配方修正确认。2 去皮云杉或 2 去皮菌柄加 7 圆石，均得到石镐 1、木棍 2、对应木板 2，余木 1、圆石 4；现有定向用例 6/6。混合 1 去皮云杉和 1 橡木时，`ensure_items(any_planks=8)` 两次向首木种申请 8，仍失败。满包中可耗尽一整格的去皮原木仍被槽位预测拦下，相同条件的普通木通过。请覆盖按木种拆单、释放输入槽和真实配方日志。 [前置选材](../../s-skills/src/mc_agent/skills/ensure.py#L997) · [槽位预测](../../s-skills/src/mc_agent/skills/library.py#L1014)
+
+- **实测**。W2 NJU_OB_3 EP11 有去皮云杉原木 +1 的原子挖掘回执。EP12 石器前置结束为 `craft_incomplete`，随后普通采木空跑，独立包有 **7 去皮云杉原木及 1 云杉木板**，石镐仍缺。该包快照在备料之后，无法倒推备料当时已有 7 件。 [首次确认入包](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-030253-543679.events.jsonl#L756) · [前置失败](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-030830-829460.events.jsonl#L2) · [独立包](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-030830-829460.events.jsonl#L155)
+- **源码与最小修复**。`any_log` 接受所有 `_log/_stem` 结尾。造板路径把 `stripped_spruce_log` 变成 `stripped_spruce_planks`，普通技能自动备木也只枚举普通原木和菌柄。统一按可合成木材家族把去皮原木映射到普通木板，备料、工坊和木材计数使用相同来源。默认搜集范围继续遵循现有场景与建筑边界。 [木材计数](../src/mc_agent/skills/ensure.py#L185) · [前置配方构造](../src/mc_agent/skills/ensure.py#L997) · [技能木材配方](../src/mc_agent/skills/library.py#L378) · [自动备木](../src/mc_agent/skills/library.py#L2646)
+- **验收**。背包只有去皮云杉原木，且具备所需圆石，从裸装前置实做出木板、木棍和石镐并核背包。混普通原木、菌柄以及只有去皮菌柄各验一次，收藏材料和已有普通木料走原规则。现场复验用输入种类、实际消耗和产物入包闭合。
+- **现场配方回执和离线对照**。EP12 备料细报依次是采木失败、请求 `stripped_spruce_planks` 失败、`craft_incomplete`。固定 `2fb1eaf`，给真实备料入口 7 去皮云杉原木、1 云杉木板，复现 `_safe_craft` 和 `craft_gear` 两次同名失败。独立备木 helper 未发合成动作。仅把 7 件换成普通云杉原木，成功做 `spruce_planks` 以及 `stick`。现场后续仍缺圆石，造镐验收须另给足圆石。 [现场合成请求](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-030830-829460.json#L5247) · [前置收尾](../runs/5ease_w2_40m_20261122/nju_ob_3_village/20261122-030830-829460.json#L5252)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-109 | P1 | 已持物品快路径跳过装备与可完成的换镐 | Slice C（合成）+ Integrator | 状态: OPEN
+
+- **HY4 W9→W10 上线对照。** `d1_compare` 对照 `e4c5d4c` 与 `a20ec5e` 的正式终版。旧波铁探针已见两次 `pickaxe_low` 夹住「已有」动作，新波 2 铁探针共 42 粗铁，终包石镐 2/1，未触发 `pickaxe_low` 或显式 `craft_gear`。实际新镐主手验收仍待相关曝光，状态保留。 [W10 H3 终包](../runs/l1_hy4_w10_20261122/hy_5e_3_probe_iron_y16/wild-endurance-wild-20261122-075150.json#L44) · [W10 H4 终包](../runs/l1_hy4_w10_20261122/hy_5e_4_probe_iron_y16/wild-endurance-wild-20261122-075150.json#L44)
+- **`a20ec5e` 部分修复已集成，HY4 W10 实载。** 固定 W9 H2 L55 的 11 粗铁、1 石镐、24 木板和 198 圆石，对真实 actor 加模拟耐久。剩 1 耐久时，`e4c5d4c` 零合成，`a20ec5e` 实合木棍与新石镐。模拟服务选中旧镐时，集成版仍返回 `equipped_slot=hand`，独立主手仍剩 1；Slice C `2735fe3` 同输入给 `equip_unconfirmed`。集成版剥掉真实材料时给 `missing_ingredients`。W10 四槽指纹 `a7c23948d79b6bfc` 和固定 `a20ec5e` 一致，待看是否实际触发换镐及新镐主手。 [W9 实包](../runs/l1_hy4_w9_20261122/hy_5e_2_probe_iron_y16/20261122-074154-494095.events.jsonl#L55) · [集成合成快路径](../src/mc_agent/skills/library.py#L3835) · [Slice C 装备读回](../../s-skills/src/mc_agent/skills/library.py#L4458) · [W10 载版](../runs/l1_hy4_w10_20261122/hy_5e_3_probe_iron_y16/20261122-075202-102299.events.jsonl#L1)
+
+- **HY4 W9 复现石镐原地拒绝循环。** H2 EP02 L33 的采铁请求因 `pickaxe_low` 退出并明确建议合石镐。L55 背包仍有 1 石镐，所以直接返回 `already_owned`、新增 0。L84 同站位再次 `pickaxe_low`，报告「可用镐缺失或总剩余耐久过低」。原件缺可核对的逐把耐久值。验收让同一采矿/合成入口以可用耐久一致地判断，已持合格石镐时保留快路径，已持但不可用时允许补造并确认主手。 [初次缺可用镐](../runs/l1_hy4_w9_20261122/hy_5e_2_probe_iron_y16/20261122-074154-494095.events.jsonl#L33) · [已有而零增](../runs/l1_hy4_w9_20261122/hy_5e_2_probe_iron_y16/20261122-074154-494095.events.jsonl#L55) · [再次缺镐](../runs/l1_hy4_w9_20261122/hy_5e_2_probe_iron_y16/20261122-074154-494095.events.jsonl#L84)
+
+- **`2735fe3` 明确支持实机 `offhand` 写法。** 同一真实 actor 和模拟背包的 4 例按父子方法复验。标准 `off-hand` 的副手空／已装两例原本皆通过；`offhand` 两例从失败到通过。空槽实际发一次 `off-hand` 装备并验证，已装时只读回。候选当前装备和合成时间预算定向 17 项全过，Showcase 尚未实载。 [归一和槽读回](../../s-skills/src/mc_agent/skills/library.py#L4458) · [夹具](../../s-skills/tests/test_skills_and_providers.py#L4643) · [现场所用拼法](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-051638-741693.events.jsonl#L108)
+
+- **Showcase 已观测显式 offhand 请求只走短路。** OB3 EP10 L88–89 默认盾、L108–109 显式 `equip_slot="offhand"`，两个都在约 5ms 返回已有，未给装备槽位。L282 后续防御回执才确证副手已有耐久使用量 126 的盾。该快路径仍缺动作与槽位确认，原件也无法判断请求前副手是否已装。下一候选实载用副手空与副手已有两条回放分开验。 [显式请求](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-051638-741693.events.jsonl#L108) · [短路回执](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-051638-741693.events.jsonl#L109) · [实际副手](../runs/5ease_ob_showcase_20261122/nju_ob_3_village/20261122-051638-741693.events.jsonl#L282)
+
+- **Slice C `97bfde5`**。六组原夹具与 49 个定向测试通过。有盾副手不重复装备，包中盾实际装备并读回槽位，原木板两片与 3 圆石可以补棍、实做新镐。残口在同款新旧镐，服务仍选剩 1 耐久的旧镐。报 `durability_used=130` 会给 `equip_unconfirmed`，顶层 `ok:true` 此时只表示已合成；换 API 规定的 `durability:[1,131]` 或同样磨损 `damage` 字段，会报装备手槽成功。省略 `equip_slot` 也仍按接口回执而不独立读。补验旧镐确实仍在手上时不得判已装备新镐；缺料已经持有但接近损坏，需回明旧镐耐久。 [候选读回](../../s-skills/src/mc_agent/skills/library.py#L4456) · [物品耐久规格](../agent-api-spec-dist.md#L214)
+
+- **影响与背景**。Portal 100 H3 EP01 已持 1 打火石却重调合成，旧版缺料回执掩盖持有事实。集成 `0731a37` 能回 `already_owned=true`。六例真实 actor 入口离线对照证实，打火石已有时无重复合成，持有数未达请求仍报缺料。另两个输入会丢掉请求中的动作。 [实机触发背景](../runs/5ease_portal_100_20261122/hy_5e_3_probe_obsidian_portal/20261122-041156-999366.events.jsonl#L246) · [actor 入口](../src/mc_agent/harness/mc_tools.py#L2729)
+- **离线反例**。背包有盾、副手为空、原料缺失，显式 `equip_slot="off-hand"`，旧版报缺料，新版报成功已拥有，但零装备请求，副手仍空。现有石镐仅剩 1 耐久，带 3 圆石和 2 木板、缺中间木棍，请求造石镐并放手上，旧版实合 4 木棍、再做 1 石镐并发装备；新版零合成、零装备，仍只有旧石镐。把 2 木板换成现成 2 木棍，新旧均实合并发送装备。固定版本均经真实 `McToolset`、`BotSession` 及模拟库存搬移。真实轨迹尚未观测这两个装备反例。 [短路](../src/mc_agent/skills/library.py#L3835) · [自动合棍](../src/mc_agent/skills/library.py#L2646) · [正常装备](../src/mc_agent/skills/library.py#L4015)
+- **最小修复与验收**。缺料时正确报告已有数量，显式请求装备且槽位未满足时实际执行并核读；无法装备则给带原因的状态。可自动补中间件、请求换即将坏掉的镐时进入原合成流程。用上述两类反例外加已在副手的盾、缺料但已有打火石、缺数量、已备木棍的补镐验收。分别核对产物净增、目标槽和装备耐久。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-110 | P1 | 实际穿门后成就终查异常，确认状态和分项丢失 | Integrator（课程结算）+ Slice D2 | 状态: FIXED（已加 3 次终查重试 + 最后确认集保底与确认字段，待实机复验）
+- **W15 H3 有一笔正式闭环。** EP01 L201 工具确认实际入下界，L291 是 `goal_satisfied`，Fleet 对应 `enter_the_nether +30`。已确认的这一次同时具备真实进门、目标验证及正分项。 [实际穿门](../runs/l1_w15_20261122/hy_5e_3_probe_obsidian_portal/20261122-101107-042924.events.jsonl#L201) · [正式分项](../runs/l1_w15_20261122/hy_5e_3_probe_obsidian_portal/wild-endurance-wild-20261122-101047.json#L100)
+- **W12 七槽终档，两门均 PASS。** H3 85 分含 `enter_the_nether` +30。实际入门漏验证 0/1，门户正分空快照 0/1。原成就终查报错路径未暴露。 [H3 入门工具](../runs/l1_w12_guardian_full_20261122/hy_5e_3_probe_obsidian_portal/20261122-091714-523345.events.jsonl#L131) · [H3 Fleet](../runs/l1_w12_guardian_full_20261122/hy_5e_3_probe_obsidian_portal/wild-endurance-wild-20261122-091658.json#L95)
+- **W12 门户 H3 阶段正例。** 工具摆 10 格并实际进下界，随后同坐标出现 `已重生` 格式的出场事件，无明确死亡；课程索引核到 `objective_verified=true`、+30。终版待回，成就终查报错分支仍需对口暴露。 [入门工具](../runs/l1_w12_guardian_full_20261122/hy_5e_3_probe_obsidian_portal/20261122-091714-523345.events.jsonl#L131) · [阶段客观验证](../runs/l1_w12_guardian_full_20261122/hy_5e_3_probe_obsidian_portal/curriculum-20261122-091714-490512.json#L31)
+
+- **HY4 W9 新正例，正式分项仍等 Fleet。** `l1_hy4_w9_20261122` H3 EP01 载 `e4c5d4c`，背包起初 8 黑曜石，L173 实破 2、实入 2。L213 报门框 10 格、点火且 `entered_nether=true`、`dimension=the_nether`，随后独立课程确认该集 `objective_verified=true`、阶段 +30。L214 是重生回执，当前没有同批显式死亡。阶段门户漏验门 0/1，正分空快照子门仍无正式样本。 [实收两料](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073651-176424.events.jsonl#L173) · [实际过门](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073651-176424.events.jsonl#L213) · [阶段验收](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/curriculum-20261122-073651-133328.json#L28)
+- **Wave11 两次 `not_loaded` 后再次出现分项缺失形状。** H7 两集各记 160→160、190→190，均未验证；终分 190、完成数 0、分项空，集间增 30 的来源未留档。H8 则在 Y61 附近实到要塞而正常验证 +30。H7 仅补证结算需原子保存成就快照，同步不按门户丢验加例数。 [首次加载中止](../runs/5ease_l1_wave11_20261122/hy_5e_7_nether_fortress/20261122-054212-258527.events.jsonl#L232) · [次集加载中止](../runs/5ease_l1_wave11_20261122/hy_5e_7_nether_fortress/20261122-054334-310335.events.jsonl#L5) · [终分与空分项](../runs/5ease_l1_wave11_20261122/hy_5e_7_nether_fortress/wild-endurance-5ease_w11_hy_5e_7_nether_fortress-20261122-054202.json#L69) · [正常要塞验证](../runs/5ease_l1_wave11_20261122/hy_5e_8_nether_fortress/20261122-054244-909697.events.jsonl#L213) · [终查回退](../src/mc_agent/harness/curriculum.py#L2910)
+
+- **Wave10 Fleet 8/8 收官。** H3 的首次实际穿门对应集 +30、终版有 `enter_the_nether` 分项，另集击杀 +5、终分 85。两道 BUG-110 门各 **0/1 PASS**。同版 Portal V2 的旧终查失败仍需要定向复现和实载修复验证。 [H3 Fleet 终版](../runs/5ease_l1_wave10_20261122/hy_5e_3_probe_obsidian_portal/wild-endurance-5ease_w10_hy_5e_3_probe_obsidian_portal-20261122-053426.json)
+
+- **Wave10 H3 同版通路正对照。** `0731a37` 实载，首个黑曜石破格零入包，后两格各 +1，把前置后的 8 补到 10。L250 建框、点火、进入下界，L297 独立包黑曜石 0，L298–300 验目标。暂存记录新增 `enter_the_nether`、50→80。穿门后的重生样式提示未记录死亡，护卫混合事件触发一次取消；之后经历四次 429 与一次长度截断才验收。Portal V2 旧反例保持待测，Wave10 等 Fleet 对账后作为通路正例。 [实体穿门](../runs/5ease_l1_wave10_20261122/hy_5e_3_probe_obsidian_portal/20261122-053449-247334.events.jsonl#L250) · [后包和验证](../runs/5ease_l1_wave10_20261122/hy_5e_3_probe_obsidian_portal/20261122-053449-247334.events.jsonl#L297) · [课程暂存](../runs/5ease_l1_wave10_20261122/hy_5e_3_probe_obsidian_portal/curriculum-20261122-053449-218523.json#L27)
+
+- **D1 执行门已接 `d1_acceptance.py`**。只认有配对的建门工具成功回执和实际下界字段，判定该集官方验证和终版正分却空成就各一项。重跑 Portal V2 两项各 **1/1 FAIL**，Portal 100 无实物过门，两项 **PENDING**。26 项 D1 离线测试通过。 [D1 检测](../../s-triage/scripts/d1_ticket_gates.py#L746) · [H2 实机原件](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-042018-066420.events.jsonl#L1321)
+- **场景候选 `8b48e84` 部分保全**。读取历史 H2，Fleet 可从 JSONL 恢复坐标、放置数和实物下界，保持官方未确认。真实客户端模拟确认时读 1 次目标成就，2s 预算，区分已确认、成功查询缺目标及查询异常。已有正式验证不再读。课程结算未改，模拟已经验收加 30 后终查失败，终版仍可数为 0、明细空。后补的场景确认也不回填该集验证或分数。两道 D1 检查仍待实机复验。 [回执与补读](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L1168) · [Fleet 恢复](../../s-scenarios/scripts/v2_fleet.py#L646) · [课程终查](../src/mc_agent/harness/curriculum.py#L2910)
+
+- **影响与实据**。Portal V2 H2 EP01 L1321 实放 10 格、点火和进入下界，终包实耗黑曜石、终维度下界。Fleet 保留初始 **50 分**，同时写 `completed_count=0, score_breakdown={}`、该集 `objective_verified=false`。固定 `0731a37` 的计分函数，成功查询空集必得 0 分；这个组合可以定位到最终成就查询或评分异常的兜底，异常类型未留档。 [实物穿门](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-042018-066420.events.jsonl#L1321) · [终版失证](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/wild-endurance-5ease_portal_v2_hy_5e_2-20261122-042006.json#L75) · [计分函数](../src/mc_agent/harness/curriculum.py#L833)
+- **源码边界**。工具回执后先过集截止检查，超过时限错过本集 actor 验收。课程随后的两处成就查询仍会尝试。首次查询若成功但没有新增，或遇异常，均可保留原分；终查异常回退为旧分，并清空成功列表和分项。暂无法判定首次缺项是数据未刷新还是查询错误，也没有证据确定服务端实际授予时间。维度已确认，成就仍需单独核验。 [截止顺序](../src/mc_agent/harness/agent.py#L1548) · [集后查询](../src/mc_agent/harness/curriculum.py#L2759) · [终查兜底](../src/mc_agent/harness/curriculum.py#L2910) · [门户验证谓词](../src/mc_agent/harness/curriculum.py#L222)
+- **六种离线成就结算**。固定 `0731a37`，真实课程入口模拟已穿门且 actor 超时，五例都确实有集后和末次成就读取。两次异常或首空末异常均复现 50 分／0 项。两次成功空回给 0 分，可排除末查仅成功空回。首异常末查显示过门时，全局 80 分但该集增分 0、仍未验；两次均查到过门时，即使 actor 超时，该集也会验收并加 30。另固定两段结算与真实模拟传输，首查成功已验证 +30、终查异常，80 分保留却同样抹掉已有全部分项和成就数。建议明确分别保留两次实际响应状态和最后成功快照。 [集后判定](../src/mc_agent/harness/curriculum.py#L2766) · [终查兜底](../src/mc_agent/harness/curriculum.py#L2910)
+- **最小修复与验收**。穿门后短时间维度加载时，记录查询成功、明确无成就、查询异常三态，给当前会话一次有界复核机会。持续失败时保留最后一份确认过的成就与可对应的分项，并明确该门户待核。覆盖首次查询异常但次次查得目标、两次异常、服务器确实未授予、首次成功后终查失败，以及真实物理穿门与已验证成就不一致。只有成就实证入账才正式验收，始终保存物理结果。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-111 | P1 | 半截门框重试仍要求 10 块新料，回执混计旧方块 | Slice C（建门技能）+ Integrator | 状态: OPEN
+
+- **HY4 W9 真过门的实耗仍差一件账。** H3 起包黑曜石 8，批采净增 2，建框回 `placed_obsidian=10`；次集尚未拆框前的独立隧道包读仍有 1，拆 1 后终包 2。现计数把原本存在的同种框格也算成功，且没有逐格实耗。这个实物差与复用旧格相容，拾到的额外物料也尚未排除。独立穿门验收已经通过，材料验收另查每格新放、旧格和实耗。 [起包](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073651-176424.events.jsonl#L101) · [框回执](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073651-176424.events.jsonl#L213) · [拆前余 1](../runs/l1_hy4_w9_20261122/hy_5e_3_probe_obsidian_portal/20261122-073930-374154.events.jsonl#L227) · [现有同种格分支](../src/mc_agent/skills/library.py#L8919) · [门框计数](../src/mc_agent/skills/library.py#L8980)
+
+- **影响与离线实据**。固定 `0731a37` 的真实 `mc_skill_build_portal`、`BotSession` 与模拟方块和包，初持 10 黑曜石。本次 6 格实放、4 格暂时受阻，返回 `portal_frame_incomplete` 与原点、失败坐标，包余 4。原地下一次已解除阻碍，仍在材料门因少于 10 被拒，零新放。额外补 6 后确实只新放 4、包仍余 6，回执却写 `placed_obsidian=10`。另给原工具集尾剩 3s，首次建框夹具到 12.600s 才回，最后一格落在截止之后。现场 Portal V2 H2 是一次建满的正例，未暴露半框重试。 [建门入口](../src/mc_agent/harness/mc_tools.py#L2343) · [材料门](../src/mc_agent/skills/library.py#L8838) · [既有格成功](../src/mc_agent/skills/library.py#L8919) · [计数](../src/mc_agent/skills/library.py#L8980) · [H2 一次完成](../runs/5ease_portal_v2_20261122/hy_5e_2_probe_obsidian_portal/20261122-042018-066420.events.jsonl#L1321)
+- **最小修复与验收**。从可确认的未完框坐标重新读每格和站位，按剩余缺格核对材料。分列已存在的框格、新放及实耗，不要把任意附近黑曜石并作同一个门。用 6+4 夹具在两次各自预算内完成同一门，只花总计 10，不额外要 6。另覆盖换位重试、被更改的旧框、足料的新造、已点亮门复用及集尾有界止步。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-113 | P1 | 铁镐原料已齐仍按单片 8 铁继续采掘 | Slice D2（铁器任务）+ Slice A（采矿回执）| 状态: OPEN
+
+- **W18 已够三锭仍连续找炉的实例。** HY7 EP04 首次盘点即 3 锭、4 棍。L36 的 8m 扫描只找到工作台，随后又按 16/32/48/64m 查炉，最后才实制铁镐。D2 的 `b1a9d49` 已合入 `ec611ee`，把三锭后的制镐放在首动作，只有锭不足且已起炉才查一次。该改动是 Runner 的任务提示，待按实际第一写行动、工作台入包和成镐验收。 [已够三锭](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-205620-523249.events.jsonl#L22) · [最后一次扫炉](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-205620-523249.events.jsonl#L84) · [新提示](../scripts/l3_wild_endurance_runner.py#L2484)
+
+- **W17b 真取锭和装备，三槽走通动态配方。** OB1 EP02 三粗铁后直接取三锭并装备。HY9 EP02 先实得 2 粗铁，下一片实际缺口 1、再得 1，取三锭并制铁镐。HY10 EP02 先实取 2 锭，再用 1 目标开铁 DFS，实际一矿簇净入 7，之后仅追加取 1 锭、装备铁镐，实包余 7 粗铁。HY2 EP03 已得 4 粗铁、有炉与煤，接着回井口途中被骷髅抢占，尚待成品。因此还要验已齐料、有近处安全炉位时的熔炼优先。 [OB1 成镐](../runs/l1_w17b_20261122/nju_ob_1_bare/20261122-202421-131109.events.jsonl#L285) · [HY9 缺口 1](../runs/l1_w17b_20261122/hy_5e_9_bare/20261122-202539-989982.events.jsonl#L238) · [HY10 真成镐](../runs/l1_w17b_20261122/hy_5e_10_bare/20261122-202526-532616.events.jsonl#L385) · [HY2 返程遇敌](../runs/l1_w17b_20261122/hy_5e_2_bare/20261122-202843-872517.events.jsonl#L252)
+
+- **W16 GLM HY1 最终验证，首 3 粗铁入包后耗 648.869s 才装备铁镐。** EP04 的 3 粗铁、11 煤被满包拦在造炉前。EP05 又挖 +6，放出两个单件杂物后首次造炉，实取 3 锭即完成制镐。终档 1200.8s/1200s、20 分，实持铁镐入包 1、石镐 24。 [实摆石阶](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-195122-605089.events.jsonl#L137) · [实摆石墙](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-195122-605089.events.jsonl#L149) · [装备](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-195122-605089.events.jsonl#L199) · [正式摘要](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/wild-endurance-wild-20261122-193358.json#L70)
+
+- **D2 候选 `6e4129d` D1 离线复验。** 真 compact 工具注册和 runner 拦截，替身矿引擎。无铁省参下发 3，2 锭时下发 1，3 粗铁或无可靠库存都零派发；退井、煤目标、其它课保持原入口。备料后提示先复点实包。待合及实载，需直接核对取锭和装备，满包另联 BUG-029。 [候选缺口](../../s-scenarios/scripts/l3_wild_endurance_runner.py#L2447)
+
+- **W16 GLM HY1 EP03 仍未按三铁缺口停采。** 文案要求实时缺口，连续三个 `explore` 未传 `goal_count`，继承默认 6；粗铁累计包差 +3，末片另 +1 煤、+2 木板、+1 工作台。此后四个 `explore` 加一个 `climb_out` 耗 200.330s、粗铁 +0、再增 6 石镐。整集 600.1s 超时，零熔炼、零制镐、零验证。安全炉位及独立全包仍待证。覆盖省略 `goal_count`、前片失败仍净增、确实缺安全站位三种剪枝，再核实取锭和成镐。 [累计 +3](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-193704-169391.events.jsonl#L161) · [回程](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-193704-169391.events.jsonl#L198) · [回程后仍开采](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/20261122-193704-169391.events.jsonl#L212) · [工具缺省](../src/mc_agent/harness/mc_tools.py#L3053)
+
+- **W11 `8cf1d18` 把文案门槛改为 3 粗铁，H4 仍落入同一回路。** EP04 L185 虽为 `movement_not_confirmed`，实际粗铁 +4，L212 仍请求单片 `goal_count=8`，L213 又耗 **85.792s**，只入泥土 8。首片已有铸镐的原料量，安全炉位及燃料是否齐备待核。H1 EP03 改为第一次 +6 后立刻调熔炼，但先前已耗掉 320s 零铁工具时，距集限只余 57s，最终只取 1 锭。 [H4 四铁](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-082407-115581.events.jsonl#L185) · [仍请求 8 铁](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-082407-115581.events.jsonl#L212) · [再片零铁](../runs/l1_hy4_bare_w11_20261122/hy_5e_4_bare/20261122-082407-115581.events.jsonl#L213) · [H1 首次出炉](../runs/l1_hy4_bare_w11_20261122/hy_5e_1_bare/20261122-082139-177378.events.jsonl#L414)
+- **影响与实据**。`5ease_ob_w3_20261122` OB1 EP02 载 `e4c5d4c`。L370 在 Y15 实入 3 粗铁，L398 在 Y14 又入 3 粗铁和 12 煤，两片虽 `ok=false`，实包净增明确。已有本集铁器配方用量后，L426 仍传 `goal_count=8`，下一片 **84.767s** 额外 +4 铁、+4 煤。累计 10 粗铁后，L454 仍请求同样 8 铁，启动时本集只余约 119s。W2 OB2 EP07 也出现可收 13 粗铁、末段制镐因截止被拦，次集才完成的代价。 [W3 首 3 铁](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-064629-553712.events.jsonl#L370) · [6 铁与 12 煤](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-064629-553712.events.jsonl#L398) · [继续 84.767s](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-064629-553712.events.jsonl#L427) · [10 铁后再请求](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-064629-553712.events.jsonl#L454) · [W2 截止拦制镐](../runs/5ease_ob_w2_20261122/nju_ob_2_bare/20261122-062814-125212.events.jsonl#L264)
+- **W3 精确集尾**。达到 6 铁、12 煤后，三次完成的采掘又占 **171.071s**，净入 +13 铁与 +4 煤。累计 **19 粗铁、16 煤**后，第四个追加请求仅因集限被拦，本集 600s 超时，**0 次熔炼、0 次制铁镐、阶段增分 0**。EP03 的自动熔炼仅记录 `smelt_incomplete`，炉内余料另按 BUG-090 核验。 [+4 铁](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-064629-553712.events.jsonl#L455) · [+5 铁](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-064629-553712.events.jsonl#L485) · [再采受拦](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/20261122-064629-553712.events.jsonl#L513) · [阶段增分](../runs/5ease_ob_w3_20261122/nju_ob_1_bare/curriculum-20261122-064210-730159.json#L49)
+- **机制与最小改动**。课程验收是实包铁镐档位，`pre_ensure` 在集间已按 3 铁材料切换到制镐，但 actor 两份文案都把单片 `goal_count=8` 放在熔炼前。DFS 完成门以本次目标净增比较 `goal_count`。集内以实时铁锭和粗铁的合计缺口派发采掘。回执移动失败且已有实收时复核库存，以安全站位和实有燃料为前提，先给首镐留出摆炉、熔炼、取出、制镐的实测时间。余铁、盾与护甲继续由剩余时间决定。 [验收](../src/mc_agent/harness/curriculum.py#L222) · [铁课文案](../src/mc_agent/harness/curriculum.py#L463) · [集间备料](../src/mc_agent/harness/curriculum.py#L2357) · [净增完成门](../src/mc_agent/skills/mining_dfs.py#L6712)
+- **验收**。同一工具回执给 `movement_not_confirmed` 和 +3 粗铁、可供制镐的炉务材料时，在当前集转炉并读回 3 锭及实制铁镐。附已有 2 锭只欠 1 铁、达 6 铁仍缺安全站位、炉中已在转化、缺燃料及当前时间不足几例。使用同一矿层条件比较从首 3 铁入包到铁镐验证的时长，同时保留确实缺料的继续采掘分支。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-114 | P1 | bare 地表林区无暴露石头时反复砍树/找石滞留，20 分钟未下井 | Slice D2（石器课程）+ Slice C（采集）| 状态: OPEN
+
+- **W21 OB3 再两集树冠上方无石。** EP02 同 XZ 从 Y71 柱升至 Y73，五次隧道均判落脚不安全。EP03 换树冠后先拿两木造板和台，但破石一格、再破两格均零圆石，可见低位件仍未入包。C `8d25400` 用可承重叶层逐格验落脚，D1 独立 6/6，包含下树正例、未知支撑、深落差、岩浆、未着地和超时对照。W21 实载早于此提交。 [EP02 第五次隧道](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-003012-299371.events.jsonl#L375) · [EP03 两石零包差](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-003220-519324.events.jsonl#L307) · [候选夹具](../../s-skills/tests/test_skills_and_providers.py#L7339)
+
+- **W21 OB3 20m EP01 备料后卡树冠。** 选锚 Y71 有一株已核木，actor 起点距入场锚约 10.2m，独立包已持木镐但无石；16m 内扫石未见。原地两向下梯均判 `on_tree_canopy`，两次解卡为 `unsafe_landing`。采木破一格零入，最后扫描有三木在低 2 格仍不可达。距同层近点按 move 半径成功但位置保持，后续原子挖返回空气。保留危险落脚保护，验起步木成功后能否安全到暴露石面。 [锚点](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/stdout.log#L5) · [下梯拒绝](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-002557-069299.events.jsonl#L96) · [掉落仍不可达](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-002557-069299.events.jsonl#L245)
+
+- **实证（Wave 11 `8cf1d18` 4× bare 20m 白天开局）**。同批 4 机全程 0 次 429、3/4 0 死亡：`hy_5e_1_bare` 下至 `Y=15` 采出 13 粗铁并烧铁（15 分），`hy_5e_4_bare` 下至 `Y=33` 采出 4 粗铁；但 `hy_5e_2_bare`（9 集，砍 18 原木，`harvest_logs` 15 次 / 185.1s，`craft_gear:missing_ingredients` 4 次）与 `hy_5e_3_bare`（7 集，砍 23 原木，`harvest_logs` 15 次 / 271.4s，`staircase:missing_step_support` 6 次）全程 **0 次调用 `mc_skill_mine_dfs`**，20 分钟滞留地表 `Y=62~69`。 [H2 日志](../runs/l1_hy4_bare_w11_20261122/hy_5e_2_bare/stdout.log) · [H3 日志](../runs/l1_hy4_bare_w11_20261122/hy_5e_3_bare/stdout.log)
+- **根因**。林区地表多为草/泥土且无暴露 `stone`/`cobblestone`，`bootstrap_stone_age` 仅要求“挖 14 块圆石直出 2 把 stone_pickaxe”，未在木镐入包且地表 16m 无暴露石头时强制原地 `mc_skill_staircase(vertical='down', steps=6)` 穿土采石；加上 `bootstrap_iron_age` 的 `pre_ensure=(("stone_pickaxe", 2),)` 缺第 2 把石镐时反复退回石器课程，模型持续把时间耗在地表补原木与找石头上。 [石器课程](../src/mc_agent/harness/curriculum.py#L436) · [铁器前置](../src/mc_agent/harness/curriculum.py#L462)
+- **最小修复与验收**。木镐入包后若 16m 无暴露石头，直接原地向下阶梯 6 步穿表土采足 14 圆石合出 2 把石镐+炉，随后直接 `mc_skill_mine_dfs` 下井；验收为 4× `bare` 白天开局 10 分钟内 4/4 下至 `Y<50` 且 0 机反复空转地表砍树。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-116 | P0 | `_UnsafeMiningLanding` 误炸整片 `mc_skill_mine_dfs`（18 次 `unsafe_landing` 致 `bare` 0 粗铁）| Slice B（#2 子 AGY）| 状态: OPEN
+- **晨报的零次是整片失败口径。** Long3 逐片最终 `unsafe_landing` 为 0，局部落脚拒绝仍有 5 笔（4 新读、1 复用）。`ebdd7dd` 未在该波实载，后续按局部保护、实际绕行与入包验。 [晨报外层范围](overnight-report-20261123.md#L30) · [H4 局部拒绝](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-125828-754489.events.jsonl#L76) · [OB3 局部拒绝](../runs/l2_long3_20261122/nju_ob_3_village/20261122-125901-557297.events.jsonl#L141)
+- **B `ebdd7dd` 以实际支撑格复用近时拒点。** Long3 H4 EP08 的 Y43.1／43.2／43.3 同列共享 Y42 四个支撑格。B 按原坐标回放，支撑读取 3→1，危险移动派发 0，各回执仍带自己的目标。D1 独立 **13 项定向通过**，包括换层／列、支撑变更、缓存到期及湿点优先复查。Long3 `dc58897` 未实载该候选，等新版的实采入包及换支撑新读。 [实机三拒](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-125828-754489.events.jsonl#L76) · [候选](../../s-combat/src/mc_agent/harness/guardian.py#L4867) · [夹具](../../s-combat/tests/test_generation_guard.py#L14601)
+- **Long3 首批五次明确落脚拒绝。** H4 EP08 同 XZ 的 Y43.1/43.2/43.3 三个新拒点，整片 23.654s 后 `shaft_exhausted`，仍实移并净入 13 圆石＋1 花岗岩。OB3 EP08 同一 Y55 点一次新拒、一次复用，整片 62.899s 共破 58、实际包增 5 煤／95 圆石／9 安山岩，目标铁为 0。此切点 `d1_compare` 相对 Long2 正式终档，新拒 5→4、复用 5→1。五条均 `unsafe_landing`，无 Y 井口专用事件、读超时拒绝均待暴露。 [H4 三点](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-125828-754489.events.jsonl#L76) · [H4 整片](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-125828-754489.events.jsonl#L79) · [OB3 回执](../runs/l2_long3_20261122/nju_ob_3_village/20261122-125901-557297.events.jsonl#L143) · [落点检测](../src/mc_agent/harness/guardian.py#L5775)
+- **D1 已接无 Y 井口拒绝的原始事件。** 时间线显示 `guardian.mining_collar_blocked` 的站位、目标、拒因和危险类型；比较工具独立统计该事件，仍保留旧落脚新读／复用维度。判据覆盖井口拒绝后整片最终成功的场景。 [时间线](../../s-triage/scripts/d1_ep_trace.py#L260) · [波次比较](../../s-triage/scripts/d1_compare.py#L117)
+- **Long3 首轮已实载 `26d3251`。** 七槽首 actor 指纹 `ab04d59173013193=dc58897`，候选进入新版；等待实机 `guardian.mining_collar_blocked`、有效安全改道与入包。 [Long3 裸装启动](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-123942-877936.events.jsonl#L3)
+- **B `26d3251` 补无 Y 井口靠近。** D1 独立定向 **7 项通过**。首次靠近前读近端；同 XZ 之后出现精确补位时重读，仍危险则拦，路面修复后可续走。读不明返回 `mining_footing_unavailable`，与确定悬崖等分型。B 另以真实选井函数回放危险点 0 派发、干地井口正常确认。Long2 未实载，H4 EP12 的实际致跌调用端点缺证。 [候选检查](../../s-combat/src/mc_agent/harness/guardian.py#L5706) · [井口定向夹具](../../s-combat/tests/test_generation_guard.py#L14367) · [现场跌落](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/20261122-121321-519125.events.jsonl#L125)
+- **Long2 OB3 EP08 回程遇五拒后继续上升。** L685–689 涉两个航点，两次新拒、旧航点三次复用。该片随后从 Y−39 到 −34，前五片合 **343.126s** 到 Y32，片内回程目标 Y47。回程前独立实包有 **17 钻、4 粗铁、1 钻镐**；此切点全波 10 条落脚拒绝均为 `unsafe_landing`，`mining_footing_unavailable` 仍待实机。 [首个回程拒点](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L685) · [初片继续回升](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L690) · [第五片](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L783) · [回程实包](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L659)
+- **Long2 OB3 EP08 拒点后从 4 钻续增到 7。** L437/L438 同一落脚点一次新拒和一次复用，累计仍 13 格、4 钻；整片耗 63.164s 至 Y−52、破 53 格、实际包差 +7 钻，铁目标 0。证实绕过这一处现场坏点后同片仍能兑现矿物。 [新拒](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L437) · [复用](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L438) · [整片入包差](../runs/l2_long2_20261122/nju_ob_3_village/20261122-115954-440547.events.jsonl#L439)
+- **Long2 H3 EP06 实载正常拒点后仍出铁。** 钻目标第三片在 `[355064.4,24,352273.1]` 报 `unsafe_landing`，当时累计 14 格、1 粗铁；整片随后正常回 `time_slice_progress`，累计 42 格、2 粗铁、34 圆石、0 钻。该现场样本覆盖真实拒点，探针读取超时仍待实机。 [落脚拒绝](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-115250-646835.events.jsonl#L163) · [整片回执](../runs/l2_long2_20261122/hy_5e_3_enchant_anvil/20261122-115250-646835.events.jsonl#L164)
+- **B `652257c` 真实 DFS 离线绕行复验。** 不替换原矿树选路，仅截断首个目标 `[0.5,79,-0.5]` 足下支撑读。两次该点拒绝均为 `mining_footing_unavailable`、不复用、未对该点发 `move_to`，同片主动绕行并 `quota_reached`，实包 3 粗铁，与健康对照一致。D1 复跑含该用例的 4 项通过。Long2 仍缺 `mining_footing_unavailable` 实机分型。 [离线回放](../../s-combat/tests/test_generation_guard.py#L14203)
+- **L2 已实测 `86cf51d` 复用与后续继续采。** H4 EP03 对 `[-4598.7,21.3,5214.5]` 首次新读，L309–313 五次在 0.276s 内复用；相邻但不同的 `[-4598.5,21,5214.5]` 再新读。整片继续到 50 格、实入 7 粗铁，首次拒时累计 4。OB1 EP10 同点首读、复用两次，约 19s 后重新读取。W15→L2 此切点，新读 64→15，复用 0→11；槽型和时长不同，现场核机制，继续等 `mining_footing_unavailable` 暴露。 [H4 首拒](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-105403-366482.events.jsonl#L308) · [H4 相邻新点](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-105403-366482.events.jsonl#L314) · [H4 实入铁](../runs/l2_long1_20261122/hy_5e_4_deep_water/20261122-105403-366482.events.jsonl#L319) · [OB1 同点新读](../runs/l2_long1_20261122/nju_ob_1_bare/20261122-105621-187460.events.jsonl#L303)
+
+- **D1 逐条拆因。** W12 18 条 DFS `unsafe_landing` 中，**17 条**有 `guardian.mining_landing_blocked` 和明确导航目标，**1 条**为 OB1 EP03 L175 的脚下挖掘支撑保护。OB2 EP05 五次被拒均指向 `[475204.5,53,487554.5]`，回执在 L188/374/444/513/581。OB3 EP02 同一个 Y9 的目标另被拒四次，含一次回程。实件只有目标与拒绝码，远端读超时或判定无支撑各占多少待证。保留脚下挖掘保护，复验同一目标的超时、已知无支撑和改道后的真实入包。W12 源码指纹 `640b8c5` 的 `guardian.py` L4918/L5051/L5063。 [OB1 脚下保护](../runs/l1_w12_guardian_full_20261122/nju_ob_1_bare/20261122-092334-886059.events.jsonl#L175) · [OB2 第五拒](../runs/l1_w12_guardian_full_20261122/nju_ob_2_bare/20261122-093135-791491.events.jsonl#L581) · [OB3 回程同点](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/20261122-091823-339699.events.jsonl#L804)
+
+- **实证（Wave 12 `640b8c5` 合入 `fix/s-combat` 后首次爆发）**。Wave 10（`a20ec5e`）4 机 0 次 `unsafe_landing`、6 分钟挖出 20 钻 + 42 铁；合入 `fix/s-combat`（含 `bf00753`）后的 Wave 12 爆发 **18 次 `mc_skill_mine_dfs:unsafe_landing`**（`nju_ob_1_bare` ×3、`nju_ob_2_bare` ×7、`nju_ob_3_village` ×6、`hy_5e_1_deep_water` ×2），`OB1`/`OB2` 已下到 `Y=13..16` 却 0 粗铁入账。 [W12 OB2](../runs/l1_w12_guardian_full_20261122/nju_ob_2_bare/stdout.log) · [W12 OB3](../runs/l1_w12_guardian_full_20261122/nju_ob_3_village/stdout.log)
+- **源码定位与根因**。[`guardian.py#L4918-L4928`](../src/mc_agent/harness/guardian.py#L4918-L4928) `_verify_mining_landing` 在每次 `mine_dfs` 调 `move_to(range=0.3/0.35)` 时只给 `0.7s` 预算调 `CombatEnv(bot).has_safe_footing(target)`：1）远端网络抖动超过 `0.7s` 抛 `_RecoveryBudgetExceeded` 被 `pass` 吞掉后直接 `raise _UnsafeMiningLanding`，把网络抖动误判成无支撑；2）`_UnsafeMiningLanding` 继承 `BaseException` 直接炸毁整片 90s `mine_dfs`，绕过了 `mine_dfs` 自己的剪枝/搭桥/转向机制，LLM 只能原地重调撞同一格循环爆炸。
+- **最小修复与验收**。1）`_RecoveryBudgetExceeded`（网络超时）不得 fail-closed 误判为 `unsafe_landing`（或放宽预算且仅在明确读到脚下为空气/流体时才拦）；2）拦截时改为抛出 `ApiError("unsafe_landing", ...)` 交由 `mine_dfs` 内部捕获并剪枝转向，而非用 `BaseException` 强杀整片；补离线单测覆盖超时不误杀与 `mine_dfs` 内部转向继续掘进。
+
+- **W13 已实载 `8ad3a56` 暂缓方案。** 初始三个活槽指纹 `6f3d6e9b0c254613`。本提交把落点读预算从 0.7s 放宽到 2.5s，超时与确定不安全仍共用原拒绝。专用铁钻探针均未入场，按现有活槽的实暴露核对，同场景对照待补。 [活槽启动](../runs/l1_w13_20261122/hy_5e_3_deep_water/20261122-094134-368971.events.jsonl#L1) · [落脚检查](../src/mc_agent/harness/guardian.py#L5075)
+- **W13 活槽已复现两例，后验实际包有铁。** OB3 EP02 L313 铁 DFS 耗 38.212s 后导航拒绝，回执只剩错误。下一次 L349 才见矿树 `verified_ore_pickups` 从 0 到 8，L467 独立包读实有 8 粗铁、0 锭，未记录该片逐格入包。L398 回程同样拒绝，整次工具仅 0.015s。两次均无探针失效分因，放宽预算后仍出现相同中断形状。 [找铁中断](../runs/l1_w13_20261122/nju_ob_3_village/20261122-094215-409696.events.jsonl#L313) · [后续树回执](../runs/l1_w13_20261122/nju_ob_3_village/20261122-094215-409696.events.jsonl#L349) · [回程中断](../runs/l1_w13_20261122/nju_ob_3_village/20261122-094215-409696.events.jsonl#L398) · [后验实包](../runs/l1_w13_20261122/nju_ob_3_village/20261122-094215-409696.events.jsonl#L467)
+- **B 候选 `6eaa9be`，D1 定向 30 项通过。** 单点拒绝区分 `unsafe_landing` 与 `mining_footing_unavailable`，仍挡未确认的后备前进，保留已证实破格和入包。定向夹具用真实 `_step_to`，由夹具选择下一航点并收 1 粗铁，实载以后仍须验原矿树能否自主选路。D1 时间线显示有分类和无分类的落脚事件，避免只数整片失败。 [候选探针](../../s-combat/src/mc_agent/harness/guardian.py#L5077) · [备用航点夹具](../../s-combat/tests/test_generation_guard.py#L13386) · [D1 时间线](../../s-triage/scripts/d1_ep_trace.py)
+- **W14a 洞穴槽已实载正式候选。** 指纹 `9b64c907d54400f3=2c4a34e`，包含 `6eaa9be`，整合版 D1 定向也过 30 项。专用铁／钻槽均未入场，待洞穴与裸装活槽实际落点拒绝、后续改道和入包。 [W14a 首集指纹](../runs/l1_w14a_20261122/hy_5e_3_cave_combat/20261122-095808-452445.events.jsonl#L1)
+- **W15 H2 已见实机拒点后继续产出。** EP01 首片在同目标 `[304191.2,16,309200.8]` 有六条已分类 `unsafe_landing`，中段已证实破格 17→29。整片 L37 正常返回 `time_slice_progress`，共破 45、实入 **5 粗铁**。重复事件是累计施工快照，不叠加。该例验到有支撑检查拒绝后不再杀整片，待对 `mining_footing_unavailable` 独立实测及核重复候选次数。 [首条拒绝](../runs/l1_w15_20261122/hy_5e_2_probe_iron_y16/20261122-101057-741174.events.jsonl#L31) · [实际增产](../runs/l1_w15_20261122/hy_5e_2_probe_iron_y16/20261122-101057-741174.events.jsonl#L37)
+- **B 候选 `86cf51d`，D1 定向 35 项通过。** 在同工具内，2s 只复用同一精确航点的已确认不安全，支撑碰撞范围内有成功施工或到期则新读，`mining_footing_unavailable` 不复用。W15 H2 EP02 两个相差 0.1 格的目标仍独立核验，完全相同的目标实报 5 次探针拒绝。D1 比较脚本现分计新读和复用的拒绝事件，首波 W15 未含该候选。 [复验夹具](../../s-combat/tests/test_generation_guard.py#L13506) · [相近两坐标](../runs/l1_w15_20261122/hy_5e_2_probe_iron_y16/20261122-101557-797140.events.jsonl#L33) · [D1 比较](../../s-triage/scripts/d1_compare.py)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-118 | P0 | `day1_night_iron_prep` 诱骗刚出铁镐的 `bare` 夜爬地表送死爆装 | Integrator（课程）| 状态: FIXED（提交 `1baa294`，离线回归通过，待 W16 实机复测）
+
+- **实证（`L2#2 NJU_OB_1` 60m）**。EP01–EP04 仅用 **10 分钟、0 死、0 取消** 即从白板做出 `iron_pickaxe`（20 分，`goal_satisfied`）；但 EP05 切入 `day1_night_iron_prep` 后因烧铁报 `missing_fuel` 且拼接了 `bootstrap_iron_age.task`（要求凑足 12 根原木），Bot 花 **169s `mc_skill_staircase`** 爬回夜晚地表砍树，连死 2 次爆光铁镐，后续 40 分钟退回石器再未翻身。 [L2#2 OB1 课程](../runs/l2_long2_20261122/nju_ob_1_bare/curriculum-*.json) · [课程源码](../src/mc_agent/harness/curriculum.py#L1690-L1712)
+- **最小修复与验收**。1）`day1_night_iron_prep` 禁止拼接“地表凑 12 根原木”段落，明确夜里禁止 `staircase(up)` / `climb_out`，缺燃料就地用木板或顺挖煤；2）评估出铁镐后直接允许地下 `Y=-54` 走 `shiny_gear` 锁 95 分而非强制留铁层等天亮探村。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-121 | P1 | `bare` 实跑工具墙钟占 43.8%，存在未达标纯文本结集和掉落回收验收缺口 | Integrator（课程/Harness）| 状态: OPEN
+
+- **W16 HY8 有铁镐成功后，深尸袋仍不可达。** EP06 实取 3 锭、成镐，EP07 同一把铁镐随 Y−18 坠落死亡丢失。EP08 把真实目标 Y−18 传给 move_to，第一段明确是航点，第二段回 ok 但身在 Y67，纵差 85 格；再两次各约25s 超时，没取回装备，EP09 回石器。沿已有竖向通路与实际 3D 距离确认，先验证进包再判断回收完成。 [铁镐成品](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_8_bare_3600s/20261122-195009-206214.events.jsonl#L222) · [坠落](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_8_bare_3600s/20261122-195429-860116.events.jsonl#L30) · [Y67 的成功回执](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_8_bare_3600s/20261122-195736-326335.events.jsonl#L28) · [第二次超时](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_8_bare_3600s/20261122-195736-326335.events.jsonl#L109)
+
+- **按实际墙钟复算。** 六槽配置 21600s，正式合计 **12680.2s**。同集 640 对工具 start→complete 区间去重，执行 **5559.637s（43.8%）**，含失败。模型请求窗口 **5753.882s（45.4%）**，含退避、取消和 Guardian，不能再相加这些分项。actor 内其余 265.492s，actor 外 1101.189s；集前备料仅 917.160s 有时长字段，14 笔缺该字段。72 集仅 13 验证，43 个 `answered` 未验收。11 集无 actor 工具，其中 7 集零请求但已验证、1 集区块未加载、3 集有请求但未验收。 [Long3 OB2 零工具纯文本](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125648-072609.events.jsonl#L273) · [纯文本返回](../src/mc_agent/harness/agent.py#L1503)
+- **未验收的 43 个 `answered` 里有 34 个最后一轮提供 0 工具，9 个仍给工具。** Long3 OB2 EP11 已取消 13/14 请求，最后一轮 `tool_count=0`。EP05 只做两次读取，仍余 20 请求且注册了 16 个工具就交卷。前者按预算耗尽收尾并记录未达标，后者在无当前危险时给一次有界实作机会，仍失败则保留清楚的断点。 [EP11 强制文本](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-125648-072609.events.jsonl#L147) · [EP05 仍给工具](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124804-980236.events.jsonl#L105) · [末轮撤工具](../src/mc_agent/harness/agent.py#L1345)
+- **回收有入包，现行谓词无法验收该课。** 七集 actor 合计 553.634s。Long3 OB1 EP06 和 OB2 EP03 各实入 1 木镐及低阶材料，未见回收铁镐、钻石或甲盾。`recover_death_drop` 无 `advancement_id` 且无独立库存判定，`objective_verified` 因此总为 false。派发前应判断死亡前可回收的实际装备或必要低阶物资，验收以恢复所需物料并安全返回为准。 [OB1 实收](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-130143-752415.events.jsonl#L89) · [OB2 实收](../runs/l2_long3_20261122/nju_ob_2_bare/20261122-124340-223368.events.jsonl#L82) · [验证谓词](../src/mc_agent/harness/curriculum.py#L222) · [回收任务](../src/mc_agent/harness/curriculum.py#L1540)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-122 | P0 | `max_episodes=12` 截断 60m `bare`，六槽实际仅跑 21–48 分钟 | Integrator（Runner / Agent 循环）| 状态: FIXED（待实机复验）
+
+- **W19 裸装实机跨过 12 集。** HY8／HY10／OB1 分别 22／19／20 集，正式墙钟均 3600.1s。HY9 跑满 3600.1s 共 11 集，HY7 `not_ready` 且零集。四个入场长槽实际使用无集数上限，已验原截断行为。新 `stop_reason` 字段晚于 W19。`a4a030b` 中开环停机与集数上限分别赋值，内部鉴权失败、重连耗尽、actor 中断三个出口只改 `final_status`，终档可能仍写 `deadline`。验收短帽、到时、请求中断、鉴权和重连失败分别对账。 [HY8 终档](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/wild-endurance-wild-20261122-212856.json) · [HY10 终档](../runs/l1_w19_20261122/hy_5e_10_bare_60m/wild-endurance-wild-20261122-212857.json) · [OB1 终档](../runs/l1_w19_20261122/nju_ob_1_bare_60m/wild-endurance-wild-20261122-212856.json) · [原因初始化](../src/mc_agent/harness/curriculum.py#L2127) · [连接失败出口](../src/mc_agent/harness/curriculum.py#L2337) · [actor 中断](../src/mc_agent/harness/curriculum.py#L2968)
+
+- **实证。** 六槽 `duration_s=3600`、`max_episodes=12`，正式实跑 **1250.7–2904.7s**，全部在 12 集正常收官。Long3 OB1 还余 **1027.9s**，OB2 还余 **2349.3s**。7 集零 actor 请求已有库存验证，合计 69.93s 的已记备料步骤也耗墙钟。Long2 OB1 EP03 最后一轮只有 `[意图]` 且未验证，集内此前有 2 次实际工具。两类事件按各自结果单列。 [OB2 启动配置](../runs/l2_long3_20261122/nju_ob_2_bare/stdout.log#L3) · [OB2 正式终档](../runs/l2_long3_20261122/nju_ob_2_bare/wild-endurance-wild-20261122-123932.json#L59) · [上限分支](../src/mc_agent/harness/curriculum.py#L2069)
+- **最小修复与验收**。长测启动显式 `--max-episodes 0`，终档记录 `episode_cap` 或 `deadline`。验证配置 60 分钟、前 12 集较短时仍执行第 13 集，并实跑至墙钟截止。短对照保留显式集数上限；未验收纯文本收工单独验有界续作与清晰失败原因，已证实的备料短集继续保留实物账。
+- **已有配置正例。** r78 三个 `bare` 槽日志均为 `max_episodes=0`，正式时长 3600.1–3603.2s。该启动参数此前已跑满，场景和修订与 Long3 不同。 [r78 开槽](../runs/r78_bare_real_drop_60m/nju_movetest_01_bare/stdout.log#L3) · [r78 复核](../../s-triage/docs/D1-r11-triage.md#4ik-r78-裸装排除深回程超时归因21-条未知实为抢占)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-123 | P1 | 红树与采石宏两格零入包后提前收工，低位掉落提示触发实下梯 | Slice C（采集技能）| 状态: OPEN
+
+- **实证（L2 #1–#3 六个 `bare`）**。20 条零目标入包里有 5 条给出低位下梯指令。五条回执之后的第一条非只读工具均精确采用提示的方向、步数和向下动作。对应 **80.239s、6 步、13 格**，两次实际推进，另三次无步数；其余手动下梯缺这条归因。Long1 OB2 四条 `dy=-1` 的尝试均破 2 格但零入包，附近各有 4 个掉落坐标且最近点相同。首笔还记录过单格超时避让。 [Long1 低位提示](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-104231-751711.events.jsonl#L200) · [后续下梯](../runs/l2_long1_20261122/nju_ob_2_bare/20261122-104231-751711.events.jsonl#L222) · [Long3 同类](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-131700-717876.events.jsonl#L264)
+- **源码与验收。** 两格无目标增量后已经尝试拾取，背包仍无增才终止；`dy<=-2` 的回执生成器直接构造下梯。D1 用第三格仍可挖的同一离线夹具，仅改掉落 Y，同层拾取实增 1 并破至第三格；低 1 格停在 2 格；低 2 格也停并提示下梯。先复核安全可达面并验独立背包。普通石木低位且无现成安全通道时，跳过该落点并尝试下一可达目标。铁钻的可达掉落继续按价值与现场风险处理。 [两格阈值](../src/mc_agent/skills/library.py#L3390) · [下梯文案](../src/mc_agent/skills/library.py#L1149)
+- **架构共识（脚本流水线，零 LLM 往返，2026-11-22）**。不把常规挖矿/砍树的掉落拾取拆给大脑去调独立 `mc_skill_collect_drops`（避免每次 6.7s LLM 往返税），而是在脚本层做 **确定性 `dig → micro-collect` 流水线**：
+  1. **批量摊薄**：在 `_dig_target_blocks` / `harvest_logs` 中每连挖 2–3 格（或一棵树底部 3 节）后，脚本自动执行一次 `radius=4.5, |dy|<=1` 安全微拾取（贴近 `range=0.8` 吸包），不中断技能、不问 LLM；
+  2. **分价值策略**：高价值物（矿石、钻石、黑曜石、工作台/熔炉/箱子）确认安全可达即认真拾取；廉价物（圆石/石头/普通原木）滚入 `dy <= -2` 深坑或水坑时脚本直接跳过并切下一个平地目标；
+  3. **原子 `mc_dig` 尾钩**：`mc_tools.py` 中 `mc_dig(collect=true)` 挖非空气但背包无增量且 3.5m 同层存在对应掉落物时，顺手补一次 1s 内微拾取再返回；独立 `mc_skill_collect_drops` 专留给高价值集中扫地（烈焰棒/珍珠/残骸）与 `recover_death_drop` 捡尸。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-124 | P1 | `bare` 的原子挖掘 30/76 空挖，已确认空气仍发写请求 | Integrator / Slice C | 状态: OPEN
+
+- **D1 已校正 W20 HY3 EP07 的派发计量。** 逐集已完成的真实派发 12，另有 55 项明确跳过；最大重复从先前索引的 55 校正为 2。全波实派 1270，与 W20 正式门禁核对一致。 [D1 配对与复验](../../s-triage/docs/D1-r11-triage.md#4oy-跳过回执从逐集工具计数剔除)
+
+- **W20 HY3 EP07 回尸时模型集中派 `dig(collect=true)`。** 一个输出批次首个实派空挖后另外 55 个工具项 `previous_action_failed` 未启动，JSONL 为它们各写完成形回执。统计应配对 started/completed，55 个只记生成后取消。该场景有可走的同层掉落，实走与独立库存进包，空挖无需承担拾取。 [首个实派](../runs/l1_w20_20261122/hy_5e_3_bare_30m/20261122-230752-801687.events.jsonl#L1343) · [跳过回执](../runs/l1_w20_20261122/hy_5e_3_bare_30m/20261122-230752-801687.events.jsonl#L1345) · [批尾](../runs/l1_w20_20261122/hy_5e_3_bare_30m/20261122-230752-801687.events.jsonl#L1453)
+
+- **实证（L2 #1–#3 六个 `bare`）**。884 个 actor 请求，657 个完成、227 个失败或取消。端到端窗口合 **5753.882s（45.4% 实际墙钟）**。按 tool-call ID 配对，273 个指定原子工具分属 247 个完成请求，其窗口合 **1837.689s**，已含退避等待。`mc_dig` 76 次中 30 次空挖，7 次有同集同坐标旧原子挖记录（其中 2 次此前成功）。30 个空挖本身合 0.460s，其对应的 30 个模型请求窗口合 **210.941s**。Long3 OB1 EP03 最大一笔 86.421s 中有五次 429，最后仍对已失败的同一点挖空气。 [首个空挖](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-124638-586473.events.jsonl#L240) · [模型等待及退避](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-124638-586473.events.jsonl#L265) · [重复空挖](../runs/l2_long3_20261122/nju_ob_1_bare/20261122-124638-586473.events.jsonl#L313)
+- **源码与验收。** D1 用真实工具及模拟传输复验，目标返回明确 `air`／`cave_air`／`void_air` 后，仍发送 `/dig`。`_get_block_name` 也会把缺名称的回包默认成 `air`。改门禁时要识别明确方块名称，未知或失败读取保持原处理。首个明确空格即应无写派发并给重新扫描提示，合理原子挖和同格后来出现实块照常可用。 [读取回退](../src/mc_agent/harness/mc_tools.py#L428) · [挖掘派发](../src/mc_agent/harness/mc_tools.py#L1600)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-125 | P0 | 主世界 `overworld` 被跨维度错派 `minecraft:nether/find_fortress`，白烧 30 分钟在河里找下界要塞 | Integrator（课程调度）| 状态: FIXED（提交 `1baa294`，离线回归通过，待 W16 实机复测）
+
+- **`1baa294` 的待修回归，成就命名空间过宽。** D1 用真实 `select_next_target`、MockTransport 和一个明确已开工前沿的夹具，对照 `4af3392`／`1baa294`。主世界 `ride_strider_in_overworld_lava`（60 分）、`uneasy_alliance`（100 分）各自从可选变成 `free_explore_scoring`。`find_fortress` 在主世界也回探索，在下界则两版都可选，这是要塞修复的正向对照。静态课程与动态前沿按目标和开工上下文判断维度，留住这两个主世界阶段；另核同命名空间的其它跨维度目标，不以命名空间直接推断维度。 [静态门](../src/mc_agent/harness/curriculum.py#L1758) · [动态门](../src/mc_agent/harness/curriculum.py#L1821) · [项目内成就定义](advancements-1.21.11.md#L57)
+
+- **实证（L2 #1–#3 三个 `enchant_anvil`）**。正式目标 `find_fortress` 共 **5 集、2220.664s、0 验证、42 次斥候派发**。Long1 EP10/12 及 Long3 EP12 有明确 `overworld` 状态。其余两集缺独立维度字段，保留证据差异。 [Long1 主世界状态](../runs/l2_long1_20261122/hy_5e_3_enchant_anvil/20261122-105751-518144.events.jsonl#L395) · [Long3 主世界状态](../runs/l2_long3_20261122/hy_5e_4_enchant_anvil/20261122-130940-437937.events.jsonl#L55)
+- **根因、离线复现与验收。** 已有入下界历史成就、要塞在开放列表，固定同背包仅换 `status.dimension`，真实 `select_next_target` 在主世界和下界均选 `find_fortress`。已有课程表和动态前沿都检查成就前置，缺当前维度过滤。两入口同步按实际维度收敛并核对暂停后恢复。主世界已获历史入界成就时仍不派要塞，真穿门后可派发。 [静态课程候选](../src/mc_agent/harness/curriculum.py#L1729) · [动态前沿候选](../src/mc_agent/harness/curriculum.py#L1796)
+
+---
+
+<!-- Archived: 2026-11-23 RCON 微场景实机 PASS -->
+### BUG-129 | P1 | 村庄 `adventure/trade` 6/6 全 0 分（860s）：村民走动致 `mc_window_view:out_of_reach ×7` | Slice C（交易/窗口）| 状态: OPEN
+
+- **实证（L2 #1–#3 `village`）**。人在村庄内触发 6 集 `adventure/trade`（`L2#1` ×2、`L2#3` ×4，合计 **860s**）全部 `+0` 分，核心失败为 `mc_window_view:out_of_reach ×7` + `mc_move_to:path_not_found ×20`。
+- **最小修复与验收**。打开村民交易窗口前先确保贴近目标村民（`dist <= 2.5m`）且在 `out_of_reach` 时自动重新贴近一次再开窗完成原子交易，而非把窗口失联直接抛回给 LLM 反复空转。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-130 | P0 | `mc_skill_smelt` 显式传 `fuel_item="coal"` 缺煤时不自动降级包内木料燃料，触发 `missing_fuel` 逼迫 Bot 夜间从地下爬回地表送死 | Slice C（熔炼技能）| 状态: OPEN
+
+- **W19 HY8 终段复发无效燃料先投料。** EP21 开包三粗铁、一炉、一板。显式圆石在燃料槽拒绝时 `done` 已确认三粗铁入输入，炉未燃，下一笔误改燃料后报实包无粗铁。末槽收官无锭。验收覆盖失败前零投炉或明确回指同炉剩料。 [开包](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/20261122-222444-310728.events.jsonl#L19) · [部分派发](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/20261122-222444-310728.events.jsonl#L73) · [实包已无料](../runs/l1_w19_20261122/glm_hy_5e_8_bare_60m/20261122-222444-310728.events.jsonl#L85)
+
+- **W18 同步炉入口还会先投铁再发现显式燃料不合法。** HY1 EP02 传圆石作燃料，错误 `failed_op=1`，`done` 确认 3 粗铁已入，燃料与输出为空。EP03 下一集需手动取回 3，独立包盘点吻合。EP04 同样请求又留 7 粗铁，手动燃料操作实际只入 1 板，炉窗只证出 1 锭，其余仍在炉。同步显式分支按库存和默认热值选燃料，未走安全燃料验证。验收在任何投料前拒无效燃料或选合法替代，同时将部分成功 `done`、炉位与输入原料交接下一集。 [首炉部分执行](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-204307-074916.events.jsonl#L327) · [次集实退](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-205219-644712.events.jsonl#L66) · [又实际投 7](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-205526-458733.events.jsonl#L68) · [实际燃料转移](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-205526-458733.events.jsonl#L178) · [同步显式选择](../src/mc_agent/skills/library.py#L5212)
+
+- **D1 实入口离线复现，实机又多一轮。** 固定 HY1 的炉位、5 粗铁、5 木板与 192 圆石，两组只换显式燃料。MockTransport 返回已投 3 粗铁并拒圆石时，真实同步入口保留失败回执，炉输入仍 3；同一炉的木板正例三锭均实际入包。W18 EP04 和 EP05 随后各出现一次取产物已真成功、第二步投燃料却失败，独立包铁锭 1→2，炉内尚留 5 粗铁。新回执需同时说明哪一步失败、前一步已转移多少以及哪一炉仍有余料。 [EP04 只完成取锭](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-205526-458733.events.jsonl#L287) · [EP05 第三次圆石燃料](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-205828-292850.events.jsonl#L78) · [仍留五铁](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-205828-292850.events.jsonl#L161) · [独立包两锭](../runs/l1_w18_glm_20261122/glm_hy_5e_1_bare/20261122-205828-292850.events.jsonl#L184)
+
+- **Long2 OB1 EP05 的实物链。** DFS 从 Y40 到 Y24，实包 +3 粗铁。开挖前已扫到 1.4m 内地面粗铁 3，该片无新铁格证据，来源保留未知。显式 `fuel_item=coal` 后 `missing_fuel`，同一包还有 **4 粗铁、2 铁锭、铁镐、2 橡木板、8 原木**。四次上梯实际工具时长 **168.666s**、Y24→64。出洞后独立包确认铁镐仍在副手，392.022s 明确爆炸死亡，复活后才没有铁镐；死亡在首次外出砍木派发前。 [片前掉落](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L81) · [实包正差](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L140) · [假缺燃料](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L164) · [死前副手](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L348) · [复活后实包](../runs/l2_long2_20261122/nju_ob_1_bare/20261122-114740-678500.events.jsonl#L393)
+- **源码与验收。** 同步入口显式燃料无库存时未进入自动选择路径。C 用同库存离线确认省略参数后仅耗 2 橡木板、收 3 铁锭；D1 用现行异步选择器独立核同等替代。同步入口复用安全选择与保护名单，优先满足合法的指定燃料，不足时核算未受保护替代、确认真实耗用和出炉，回执附 `fuel_fallback`。木工具、烈焰棒、盾和被保护物品均沿现有禁烧规则。无合规燃料时保留结构化失败和当前层补料指引。 [同步选择](../src/mc_agent/skills/library.py#L5212) · [异步选择](../src/mc_agent/skills/library.py#L4724) · [燃料保护](../src/mc_agent/skills/inventory_manager.py#L157)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-131 | P0 | 无盾无甲无铁器的白板 `bare` 被课程直接派发 `minecraft:adventure/kill_a_mob`（+5 分）夜晚肉搏送死清零 | Integrator（课程调度）| 状态: FIXED（提交 `1baa294`，离线回归通过，待 W16 实机复测）
+
+- **验收边界仍待修。** D1 与 D2 均以真实 `1baa294` 调度固定主世界夜间、护甲值 0、无副手、唯一活跃目标为主动猎怪。石镐单独拦住。仅铁镐、石镐加未穿的皮靴、石镐加包内盾三组均派猎怪。当前条件只拦同时缺铁器和防护，包内护甲也计防护；与票内要求提前派发时铁器和防护均达标仍有差距。验收分开看已穿护甲、盾可装备和开打前实装备，自卫应对另统计。 [装备条件](../src/mc_agent/harness/curriculum.py#L1733) · [主动派课门](../src/mc_agent/harness/curriculum.py#L1755)
+
+- **实证与离线复现。** Long2 OB2 EP04 铁器未验证且进入冷却，EP05 派发 `kill_a_mob`。苦力怕攻击被守卫挡住，随后近敌处夜间、实测护甲 0、无副手，最终在 50.385s 见近战死亡回执，EP06 回石器。Long1 OB1 EP10 铁器超时冷却后也派出同课，后续持石剑而无盾，未验且无死亡记录。D1 固定 Long2 同类装备和夜晚，仅切铁器冷却，真实调度由铁器切到主动猎怪。 [近战遭遇](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114740-448213.events.jsonl#L269) · [明确死亡](../runs/l2_long2_20261122/nju_ob_2_bare/20261122-114740-448213.events.jsonl#L293) · [铁器冷却入口](../src/mc_agent/harness/curriculum.py#L1583)
+- **最小修复与验收**。在 `curriculum.py` 中为 `minecraft:adventure/kill_a_mob` 增加安全门槛：未拥有 `iron_pickaxe` 或（无 `shield` 且护甲为 0）时，禁止在 `bootstrap_iron_age` 完成前派发主动猎怪任务，避免为 5 分赌光整套前期装备。
+
+---
+
+<!-- Archived: 2026-11-23 RCON 微场景实机 PASS -->
+### BUG-134 | P0 | 主世界 `story/enter_the_nether` 与 `mc_skill_mine_dfs` 存在“找岩浆 vs 躲岩浆”机制悖论，单集白挖 21 分钟深板岩 | Integrator（课程）+ Slice C（黑曜石采集技能）| 状态: 部分修复（Integrator 课程剧本与岩浆 POI 已补，Slice C 黑曜石采集待续）
+
+- **实证（`L2#2_OB3` EP08 单集跑满 1800s = 30 分钟）**。全集调用 `mc_skill_mine_dfs` **24 次（1262s）**，全程在 `Y=-54` 挖 `cobbled_deepslate`/`tuff`，最终 `climb_progress×6`，0 次调 `mc_skill_build_portal`；根因在于造黑曜石需要主动靠近地下岩浆湖浇水，而 `mine_dfs` 的安全机制是遇岩浆即封堵绕开，两者目标正交冲突。 [L2#2 OB3 EP08](../runs/l2_long2_20261122/nju_ob_3_village/stdout.log)
+- **最小修复与验收**。主世界 `story/enter_the_nether` 在缺黑曜石时不应无限调用 `mine_dfs` 盲挖深板岩，而应先 `mc_find_blocks(types=["obsidian","lava"], radius=32)` 定位岩浆湖/现成黑曜石，走专用浇水成黑曜石 + `mc_skill_mine_blocks(["obsidian"], count=10)` 闭环，凑齐 10 块立即 `mc_skill_build_portal`。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-135 | P1 | 地下溶洞 `staircase:pillar_fallback_cooldown`（空 `message`）与 `mine_dfs:no_viable_collar_direction` 双向死锁 40 分钟 | Slice C（Staircase）+ Slice A（采矿）| 状态: OPEN
+
+- **实证（`L2#2_BRW` 60m）**。40s 秒通 `brew_potion` 后，Bot 掉入 `Y=30..39` 溶洞，随后触发 `mc_skill_staircase:pillar_fallback_cooldown ×16`（含 `direction=""` 与 `direction="north"`，且 `message=""` 为空！）及 `mc_skill_mine_dfs:no_viable_collar_direction ×11`，后 11 集（40 分钟）原地死锁。 [L2#2 BRW 日志](../runs/l2_long2_20261122/hy_5e_4_brewing_alchemy/stdout.log)
+- **最小修复与验收**。1）`pillar_fallback_cooldown` 必须返回清晰的非空 `message` 与可行的替代水平方向/脱困动作；2）`direction=""` 在 `staircase` 入口应自动选定最近可行方向而非空方向触发冷却；3）`no_viable_collar_direction` 应返回具体受阻原因与建议移动偏移点。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-136 | P1 | `mc_skill_craft_gear` 在下界合成频繁报 `no_window`/`need_crafting_table` 导致 `distract_piglin` 0/5 | Slice C（合成技能）| 状态: OPEN
+
+- **实证（L2 #1–#3 `nether_fortress` & `nether_bastion`）**。5 集 `nether/distract_piglin`（合计 851s）全部 0 分，核心失败为 `mc_skill_craft_gear:repeated_identical_failure_blocked ×4`、`no_window ×3`、`need_crafting_table ×3`（如 `L2#2_FORT` EP09 连调 6 次 `craft_gear` 全部 `no_window`）。
+- **最小修复与验收**。`craft_gear` 在下界窄桥/不平整地形放置工作台失败或打开窗口返回 `no_window` 时，自动遍历脚边 2 格内实心邻格重放或先走 1 步贴近已有工作台再开窗，禁止原位空转触发 `repeated_identical_failure_blocked`。
+
+---
+
+<!-- Archived: 2026-11-23 RCON 微场景实机 PASS -->
+### BUG-138 | P0 | 地下挖矿满包后 `mc_skill_craft_gear` 与 `mc_skill_smelt` 报 `inventory_full` 堵死铁套/钻石成型 | Slice C（背包清理 / 合成 / 熔炼）| 状态: OPEN
+
+- **实证（W16 `glm_hy_5e_1_bare_1200s` 20m & `nju_ob_1_bare`）**。`glm_hy_5e_1` 全程 0 死 0 取消、9 切片 `mine_dfs` 挖出 9 粗铁并出铁镐（20 分），但因背包塞满地下杂石（安山岩/花岗岩/闪长岩/凝灰岩/圆石），随后连续触发 **`mc_skill_craft_gear:inventory_full ×5` + `mc_skill_smelt:inventory_full ×2`**，模型被迫乱调 `mc_skill_container:bad_args ×7` + `no_window ×3` 浪费整段冲铁甲/摸钻窗口；同波 `nju_ob_1_bare` 亦触发 `craft_gear:inventory_full ×3`。 [W16 GLM H1](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_1_bare_1200s/stdout.log)
+- **最小修复与验收**。`craft_gear` 与 `smelt` 在执行前的 `_ensure_free_slots` 必须将过量低价值地下杂石（超出 1 组保留量的 `granite`/`diorite`/`andesite`/`tuff`/`dirt`/`gravel`/`cobbled_deepslate`/`cobblestone`）主动丢弃腾出至少 3 个空槽，确保背包满载时仍可顺畅烧铁与合成铁甲/盾/钻石靴；补离线满包杂石回归单测。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-139 | P0 | 无床无羊毛的 `bare` 在铁器冷却后于夜晚被连派 `adventure/sleep_in_bed`，地表送死清零 | Integrator（课程调度）| 状态: 部分修复（77c9b18 已合，床地标和配方门待复核）
+
+- **整合 `edccee9` 的离线门仍有两个边界。** D1 用实际 selector、WorldMemory 和唯一活跃夜间睡眠目标，无材料会拦，带床会派；实记同维 4m 白床但空包的分支会拦，3 羊毛无任何木板或木却会派。记忆使用实际 POI 查询，并查距离和接近条件；合成路径验同色羊毛、板和可用工作台。修前 W17 实轨与此离线回归各自保留，待新版实载核验。 [睡眠门](../src/mc_agent/harness/curriculum.py#L1749) · [地标查询](../src/mc_agent/harness/world_memory.py#L1059)
+
+- **W17 旧载后的裸装恢复轨迹。** EP04–05 实派睡眠课，之后 EP06–08 回石器。EP07 近敌致死后实入 5 木并恢复木镐，后因水下石点跳过、又被敌拦。同期没有重制石镐的回执，后续用 W17b 复验实际木石链和安全床门。 [EP07 死亡](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-201146-477670.events.jsonl#L37) · [装备木镐](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-201146-477670.events.jsonl#L121) · [采石被水挡](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/20261122-201146-477670.events.jsonl#L137)
+
+- **实证（Wave 17a `glm_hy_5e_1_bare`，载 `1baa294`）**。`BUG-131` 禁掉白板 `kill_a_mob` 后，`bootstrap_iron_age` 冷却期间课程在夜晚连派 2 集 `minecraft:adventure/sleep_in_bed(lim,+0)`，Bot 身上无床无羊毛且无已知村庄床坐标，夜晚地表乱转连死 5 次退回 `bootstrap_stone_age`。 [W17a GLM H1](../runs/l1_w17_glm_20261122/glm_hy_5e_1_bare/stdout.log)
+- **最小修复与验收**。`curriculum.py` 派发 `minecraft:adventure/sleep_in_bed` 必须满足：背包已有床、或背包有 `>=3` 同色羊毛、或 `WorldMemory` 记录有可达床/村庄坐标；否则禁止派发。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-140 | P1 | `mine_blocks:underwater_targets_skipped` 错误提示语教唆模型调 `staircase(down)`，与 `BUG-119` 禁令冲突 | Slice C（采集技能）| 状态: OPEN
+
+- **实证（W16 `glm_hy_5e_7_bare_3600s` EP04）**。`mc_skill_mine_blocks(["iron_ore","deepslate_iron_ore"])` 报 `underwater_targets_skipped`，其提示文案明确写着“请远离当前水域并在干燥地面用 `mc_skill_staircase(vertical='down'...)`”，诱使模型连调 4 次 `staircase(down)` 撞 `cave_or_drop_ahead ×3` + `fluid_or_bedrock ×1` 白耗 110s。 [W16 GLM H7](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_7_bare_3600s/stdout.log)
+- **最小修复与验收**。将 `library.py` 中 `underwater_targets_skipped` 的提示改为引导调 `mc_skill_mine_dfs(action='explore', ...)`（而非 `staircase(down)`），消除工具提示与课程规则自相矛盾。
+
+---
+
+<!-- Archived: 2026-11-23 RCON 微场景实机 PASS -->
+### BUG-142 | P1 | 山坡树干 `harvest_logs:no_targets_available ×48` 与 `unstick`/`flee` `unsafe_landing ×31` 双向卡死 | Slice C（砍树）+ Slice B（脱困）| 状态: OPEN
+
+- **W21 GLM HY7 已覆盖 C `da68a5c` 的拒走分支。** 60m EP02 L65 报 `log_approach.reason=unsafe_landing`、`moved=false`，0 破、0 木。扩大扫描半径被重复失败保护挡，随后改派找铁，首片到 Y43、铁零、煤三。正常安全坡实际靠近并收木的正例继续等匹配样本。 [拒走回执](../runs/l1_w21_v1321_20261123/glm_hy_5e_7_bare_60m/20261123-002554-468952.events.jsonl#L65) · [下一步铁 DFS](../runs/l1_w21_v1321_20261123/glm_hy_5e_7_bare_60m/20261123-002554-468952.events.jsonl#L99)
+
+- **实证（W16 14 只 `bare` 全样本）**。1）`harvest_logs:no_targets_available` 爆发 **48 次**（`glm_hy_5e_6` 单机 16 次，站 `y=61` 看山坡 `y=77` `dy=+16` 的树干只报错不走上坡，耗到天黑死 11 次）；2）救命技能自身拒绝执行：`mc_skill_unstick:unsafe_landing ×19`、`mc_skill_flee:unsafe_landing ×12`（`moved_dist=0.0`），把 Bot 钉在原位挨打。
+- **最小修复与验收**。1）`harvest_logs` 扫到高处山坡树干时内部先尝试 1 次水平/缓坡靠近最近树根再砍，而非原地干报错；2）`unstick`/`flee` 在无理想水平逃生点时必须有明确兜底（如就地垫脚/封口掩体），不能反复 `moved_dist=0.0` 拒动。
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-144 | P0 | `mine_dfs` 残存木镐触发无限石镐印钞机（单局连造 17–24 把石镐直接撑爆 36 格背包） | Slice A（采矿）+ Integrator | 状态: FIXED（W17b 七裸装槽实机复验）
+
+- **W17b 七个裸装正式终档。** 50 集原迹配对到 86 次 DFS 回执，其中 85 次无石镐正差；OB2 EP05 的一笔只多 1 把，入片前实包仅有 1 把。所有终包石镐为 0–2。四个裸装槽曾实制并装备铁镐，HY3／HY10 收官仍有。和上波最新动辄单集 +24、终包 26 的症状分开。 [OB2 仅一镐实包](../runs/l1_w17b_20261122/nju_ob_2_bare/20261122-204144-474614.events.jsonl#L217) · [单笔增量](../runs/l1_w17b_20261122/nju_ob_2_bare/20261122-204144-474614.events.jsonl#L263) · [旧 HY7 终包](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_7_bare_3600s/wild-endurance-wild-20261122-193358.json#L40)
+
+- **实证（W16 `glm_hy_5e_1_bare_1200s` EP03–06、`hy_5e_4_bare` EP07）**。`glm_hy_5e_1` 单局包内累积 **24 把不可堆叠 `stone_pickaxe`**（EP03 四笔 +20），`hy_5e_4` 单集净增 **+17 把石镐**，直接把 36 格背包撑满并触发 `BUG-138`（造炉/造箱/熔炼全线 `inventory_full` 死锁）。
+- **根因**。`mining_dfs.py:854` `_choose_pickaxe_for_tier(picks, required_tier=1)` 按 `tier` 升序永远优先选中残存的 `wooden_pickaxe`（`tier=1`），随后 `_should_recraft_burner_pickaxe`（`mining_dfs.py:4026`）判定 `tier != 2 -> True`，且 `_try_recraft_burner_pickaxe` 不检查已有 `stone_pickaxe` 数量，导致每挖一格石就印一把新石镐直到烧光木棍或塞满 36 格。
+- **修复与验收**。`feat/v2-integrated` 已修复：1）`_choose_pickaxe_for_tier` 在 `required_tier=1` 时优先选 `tier==2`（`stone_pickaxe`）而非残存 `wooden_pickaxe`；2）`_try_recraft_burner_pickaxe` 加 `stone_pickaxe >= 2` 硬上限；3）`tests/test_mining_dfs.py` 已补回归测试。
+
+- **W17b 实载首批混持复验。** 04:27:50Z 时新版 OB1、OB2 在实包各 2 石／1 木镐下井后，首四段共破 295 格，回执均无石镐正差。OB2 再降至 Y16 一段明确 `recrafted_picks=0`。同一时段旧载 W16 GLM HY7 EP13 的四切片净增 17 石镐，W17 GLM HY1 EP12 净增 6。待新版终档核全轮包差、真报废后的补镐及铁器结果。 [新版 OB1](../runs/l1_w17b_20261122/nju_ob_1_bare/20261122-202421-131109.events.jsonl#L201) · [新版 OB2](../runs/l1_w17b_20261122/nju_ob_2_bare/20261122-202216-558385.events.jsonl#L206) · [旧版 HY7](../runs/l1_w16_glm_bare_20261122/glm_hy_5e_7_bare_3600s/20261122-202105-798355.events.jsonl#L260) · [新版选镐](../src/mc_agent/skills/mining_dfs.py#L854)
+
+- **W17b 成品和耗损复验。** OB1 第三段实入 3 粗铁、重铸 0，实取 3 锭，装备铁镐时余 1 石镐。HY9 同样完成铁镐，首铁课末余 1 石镐。OB2 第 2 集回撤后独立库存石镐 0、木镐 1、空格 21，下一集备料补回 1 石镐。再下一集的 3 石镐可追到两次显式 actor 合成，和 DFS 自循环分账。旧 HY7 继续切到本集完结，五片报告的石镐正差合 24，正式终包 26。 [OB1 实产](../runs/l1_w17b_20261122/nju_ob_1_bare/20261122-202421-131109.events.jsonl#L238) · [HY9 真成品](../runs/l1_w17b_20261122/hy_5e_9_bare/20261122-202539-989982.events.jsonl#L297) · [OB2 消耗实包](../runs/l1_w17b_20261122/nju_ob_2_bare/20261122-202216-558385.events.jsonl#L334) · [再度显式合成](../runs/l1_w17b_20261122/nju_ob_2_bare/20261122-203210-564376.events.jsonl#L210)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-145 | P1 | `mc_attack` 无法核对命中或目标扣血，连续 9 轮 `hits>0, killed=false` 仍按成功放行 | Slice B（战斗）+ Slice C（工具）| 状态: OPEN
+
+- **实证（W16 `hy_5e_10_bare` EP03/04）**。9 次 `mc_attack(1997803)` 全部返回 `ok=true`、名义 `hits` 合计 41、全部 `killed=false`，该版 API 缺实际命中数和目标血量回读。`mc_tools.py:2122–2150` 只拦截 `hits==0 and not killed`，正数 `hits` 且未击杀被原样放行，连续九轮消耗了动作预算。
+- **最小修复与验收**。`mc_attack` 接入 PR #4 已合并的 `connected_hits` / `target_hp_delta` 回执语义，连续多次 `connected_hits==0` 或无击杀进展时标 `ok=False` 并触发改路/换动作提醒。Slice B 的候选 `6f532ef` 已针对宏近战和子皮层反击复验 26 项。W16 同一蜘蛛随后有一次真正击杀且实入线 2、蜘蛛眼 1，前 9 次的命中实数仍待证。 [后续击杀实物](../runs/l1_w16_p0_verify_20261122/hy_5e_10_bare/20261122-195255-199351.events.jsonl#L82)
+
+---
+
+<!-- Archived: 已关闭/已修复 -->
+### BUG-146 | P1 | `curriculum.py` 地下 Y45–Y60 白天仍派发地表 `scout_island`（高井位变体） | Integrator（课程）| 状态: FIXED（待实机复验）
+
+- **实证（W16 `hy_5e_11_bare` EP09）**。`curriculum.py:1607–1639` 两个白天 `scout_island` 入口仅在 `< Y52` 拦截，Bot 位于地下 `Y52–Y61` 矿洞/竖井内且尚未登顶时仍被派发地表 `scout_island`，导致地下反复找树/找地表空转。
+- **修复与验收**。`feat/v2-integrated` 已将 `island_recon_sweep` 高度门限提升至海平面 `Y >= 62.0`。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-147 | P1 | `mc_skill_smelt` 在 `count>=6` 正常烧铁时约 40s 截断报 `ok=False, error='partial_smelt'`，虽已出 4 锭却迫使模型重复投炉 | Slice C（熔炼技能）| 状态: OPEN
+
+- **W19 HY1 EP03 正例中重现两种炉账。** 同一 Y16 炉首投 6，62.90s 收 4 后报部分完成，复读炉已停火且输出 2，通过 `from=output` 实取两锭，六份全收。再投 8，52.73s 收 4、回执退原料 4，随后炉输入空、燃料 2 板，actor 又从空输入取料失败。最后把归包的 4 粗铁续投并真取 4。全链 14 粗铁闭合为盾消耗 1、胸甲消耗 8、末包 5 锭。验收区分已自动退回实包与留炉输出，阶段结束报告应明确推荐读炉、取货或续投。 [首批部分完成](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-213557-009114.events.jsonl#L69) · [复读和取货](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-213557-009114.events.jsonl#L98) · [第二批退料](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-213557-009114.events.jsonl#L145) · [炉口复读为空](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-213557-009114.events.jsonl#L159) · [终包与胸甲](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-213557-009114.events.jsonl#L207)
+
+- **区分时间上限、燃料缺口和炉内输出。** HY10 EP03 两次切片 53.23s 和 52.76s，各实取 4 锭，单独读包 8 锭。HY3 EP04 烧 6，62.13s 取 4，随后炉窗输入为空、仍在燃烧且有输出 2。HY9 EP03 烧 6 用木板 1，实取 1 后退料，下一试明确缺燃料，实际和前两槽的条件不同。验收需核实终包、炉内已出货与退回原料，分别返回可继续等待、缺燃料和可直接取产物。 [HY10 包](../runs/l1_w17b_20261122/hy_5e_10_bare/20261122-203444-696046.events.jsonl#L591) · [HY3 炉窗](../runs/l1_w17b_20261122/hy_5e_3_bare/20261122-203630-182766.events.jsonl#L229) · [HY9 缺燃料](../runs/l1_w17b_20261122/hy_5e_9_bare/20261122-203148-079465.events.jsonl#L224)
+
+- **实证。** Wave 17b 的 HY10、HY3 在有燃料时都复现了采够原料、实取四锭、结果仍为 `partial_smelt`。HY9 有单独的燃料限制实据，见上。需要分别记录熔炼是否真的结束、实际包增、剩余炉槽和耗时，供调用方决定继续取料或另行找燃料。
+- **最小修复与验收**。1）按 `min(requested_count, 8) * 11s + 15s`（在单集剩余预算内）自适应放宽单炉等待窗口，或当 `collected` 已满足关键阈值（如 `>=3` 铁锭且无燃料耗尽）时在返回值中显式标注 `enough_for_iron_pickaxe=True` 并避免无谓退料重烧。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-149 | P0 | `recover_death_drop` 从地表派深层尸袋，移动报成功却只到尸点上方 | Integrator（课程）| 状态: 部分修复（派课门已查随身，移动到达仍待核验）
+
+- **W20 HY3 是可达的跨层回尸正例。** EP05 死在 Y16，EP06 从重生 Y68 重做石镐。EP07 明传 Y16，24.22s 真实到同层并扫到铁镐、铁胸甲和锭，再走到尸点邻格。actor 结集 `answered`，课程未标客观验证。下一集首个独立包已有铁镐和两锭、胸槽已穿铁胸甲，三件进正式终包。验收保留这个已有石镐和实路的正例，单列物资回收是否兑现。 [到达同层](../runs/l1_w20_20261122/hy_5e_3_bare_30m/20261122-230752-801687.events.jsonl#L33) · [地上装备](../runs/l1_w20_20261122/hy_5e_3_bare_30m/20261122-230752-801687.events.jsonl#L55) · [跨集首包](../runs/l1_w20_20261122/hy_5e_3_bare_30m/20261122-231114-678064.events.jsonl#L14)
+
+- **W19 HY1 地上重制石镐后仍有错层回尸。** EP04 箭死在 Y14，EP05 重制石镐，EP06 回尸的两次三轴移动只到途中点且均明确 `partial_move=true`，两次真正贴近水平目标均以 `stalled` 返回，仍 Y69、距尸点 55m。将入参去掉 Y 后回报到达水平邻点，没证尸袋或铁镐入包。随身镐让派课分支放行，仍需给深层路线或可验证的三轴到达，保留合法 XZ 的普通步行。 [死亡](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-214320-396623.events.jsonl#L421) · [三轴仍差 55m](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-214748-427376.events.jsonl#L44) · [仅水平成功](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-214748-427376.events.jsonl#L102) · [导航入口](../src/mc_agent/harness/mc_tools.py#L1213)
+
+- **D1 复验随身库存改动 `90f0164`。** 05:09Z 试的是合入前的同一工作副本，使用 `bag_counts`。固定 HY9 坐标，空包无缓存选择石器，空包仅有缓存石镐也不再派深尸袋，实际随身石镐与近层空包均保留回尸。仅记忆箱的对照当前选择铁器，仍需验是否真实取得工具。 [随身判据](../src/mc_agent/harness/curriculum.py#L1522)
+
+- **D1 离线复现移动成功的另一层门。** 固定 HY9 明传 Y−11、range=2 和实机返回 Y77。真实 `McToolset.mc_move_to` 确把 Y−11 发给模拟服务，服务回成功后，工具原样放行三维距离 88m。模拟 `movement_not_confirmed` 自带 `within range` 时，实际状态 Y77 也被转成 `already_in_range=true`，并同时回报 88m。确到指定三轴和只给 XZ 的两个正对照通过。验收保留短航点和 XZ 调用，明确给 Y 且能读回三轴时用实测距离判到达，未到只记推进及垂差。 [现场成功回执](../runs/l1_w17b_20261122/hy_5e_9_bare/20261122-204414-623442.events.jsonl#L36) · [信任错误提示的入口](../src/mc_agent/harness/mc_tools.py#L1398) · [成功透传](../src/mc_agent/harness/mc_tools.py#L1506)
+
+- **D1 离线复验 `564b34f` 的剩余边界。** 固定 W17b HY9 死亡与重生三轴，空包且无缓存时回石器，有随身石镐时仍允许回尸。在同一空包仅加约 1.6m 内记忆箱中的 1 石镐，也派 `recover_death_drop`，`pre_ensure=()`，没有实际取镐动作。选择器的 `has_stone_or_better` 合并记忆箱库存，尸袋任务直接先走尸点。验收应按随身有效工具与真实安全路径判断，箱内有镐需先实取；保留同层可回尸正例和无镐回石器。 [混合库存](../src/mc_agent/harness/curriculum.py#L987) · [跨层门](../src/mc_agent/harness/curriculum.py#L1522) · [尸袋前置](../src/mc_agent/harness/curriculum.py#L1554)
+
+- **W17b 回尸正反对照。** HY9 EP05 实际只有一次直达调用，目标 Y−11、到 Y77，距尸垂直 88 格；一次扫物无实体后 13.35s 文本收尾。OB2 EP06 首段在 Y62.4，随后真降 Y29.9、Y28.9。独立包先从空恢复为石镐、铁锭、炉各 1 以及 192 圆石。应明确返回实际三轴距离与可行后续动作，保留有路径时的继续下降及拾取。 [HY9 实落点](../runs/l1_w17b_20261122/hy_5e_9_bare/20261122-204414-623442.events.jsonl#L36) · [OB2 实降](../runs/l1_w17b_20261122/nju_ob_2_bare/20261122-204842-261824.events.jsonl#L162) · [后续复读背包](../runs/l1_w17b_20261122/nju_ob_2_bare/20261122-205021-890891.events.jsonl#L16)
+
+- **实证（W16 `glm_hy_5e_8_bare` EP08、W17b `hy_5e_9_bare` EP05）**。`hy_5e_9_bare` 在 `shiny_gear` 下潜至 `Y=-11` 被僵尸击杀掉铁镐，重生回地表 `Y=68` 后课程派发 `recover_death_drop` 带着 `Y=-11` 坐标，Bot 裸装无镐寻路停在地表 `Y=77` 正上方干转一整集零找回（W16–W17b 累计 10+/10+ 全败）。
+- **最小修复与验收**。`curriculum.py` 派发 `recover_death_drop` 时增加高差与地下门控：当 `abs(cur_y - death_y) >= 18` 或 `death_y < 50` 且当前位于地表无镐时禁止派发，直接进入快速重建流程。
+
+- **W20 HY9 的同层尸袋也需先验回收价值。** EP01 独立库存空，生前六项工具没有成功取得物品，Y39 近战死亡后回 Y40；EP02 首发直接派 `recover_death_drop`，提示回收铁镐／钻石／护甲／盾牌。8.54s 内又一次近战死，期间无可回收装备的观测。旧跨层门本次没有触发条件。验收加入开局已知空包、死亡前无装备取得的低价值复现，保留确有掉装或能先安全观测到物资时的回收路径。 [空包](../runs/l1_w20_20261122/hy_5e_9_bare_60m/20261122-224343-191100.events.jsonl#L20) · [首死](../runs/l1_w20_20261122/hy_5e_9_bare_60m/20261122-224343-191100.events.jsonl#L262) · [派课与二次死亡](../runs/l1_w20_20261122/hy_5e_9_bare_60m/20261122-224510-938454.events.jsonl#L33) · [派课门](../src/mc_agent/harness/curriculum.py#L1496)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-150 | P1 | HY4 上游存在 `2 simultaneous requests` 组并发硬上限，7 并发测试会打爆 429 并导致整集 `runtime_error` | Integrator（调度/压测）| 状态: REOPENED（W21 本地两槽门已命中，上游组限终败四集）
+
+- **W21 补跑部分终档 6/12。** 上游正文明确组限的四个终败为 HY 两次、NJU 两次。OB3 第二次是 EP04 第八次请求尝试失败。五长槽和 HY3 的无终档退出原因待外层记录，独立于四笔有事件终结的请求。 [OB3 第二次终败](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-003906-182533.events.jsonl#L399)
+
+- **D1 离线核实别名与退避锁行为。** 固定 `8bb199b`，同一个合成 endpoint，给 `hy4` 和 `nju` 各设 2，真实 flock 同时取得四个互不冲突的文件锁。真实 `_chat_direct` 用合成 HTTP 429 重放八次，七次退避时同槽都仍锁，最终错误返回后才释放。在现场先核实际共享配额及别名映射，再验退避只占对应请求预算。 [分组输入](../src/mc_agent/harness/model.py#L583) · [取槽后 HTTP 与退避](../src/mc_agent/harness/model.py#L740) · [最终释放](../src/mc_agent/harness/model.py#L823)
+
+- **W21 补跑在途，08:35:15 UTC。** HY10 60m EP01、HY2 20m EP02、NJU OB3 20m EP01 均在第八次尝试收到上游 `2 simultaneous requests`，各耗 146.465／140.763／141.407s。HY3 EP01 的首次请求等待本地两槽 **114.941s**，到 HY10 终败后 66ms 取得名额。HY9 EP01 请求 6 先等独立 RPM 14.167s，再等本地两槽 **138.302s**，到 HY2 终败后约 2ms 取得名额。两笔拿到名额后仍遇 429。HY 与 NJU 原迹给出同一模型入口，运行参数为 `hy4` 和 `nju`；上游共享配额的具体身份未落盘。检查本地分组与实际上游配额的映射，并让等待退避的请求释放传输并发名额。验收用同配额的异 provider 别名和两个独立配额作对照，测真实在途峰、等待取消、持续退避及真实挖矿推进。 [HY10 最终错误](../runs/l1_w21_v1321_20261123/hy_5e_10_bare_60m/20261123-002516-255658.events.jsonl#L228) · [HY2 最终错误](../runs/l1_w21_v1321_20261123/hy_5e_2_bare_20m/20261123-002713-031547.events.jsonl#L16) · [NJU OB3 最终错误](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-002557-069299.events.jsonl#L294) · [HY3 取槽](../runs/l1_w21_v1321_20261123/hy_5e_3_bare_30m/20261123-002610-662188.events.jsonl#L9) · [HY9 取槽](../runs/l1_w21_v1321_20261123/hy_5e_9_bare_60m/20261123-002529-506615.events.jsonl#L219) · [本地分组与持锁范围](../src/mc_agent/harness/model.py#L583)
+
+- **W17b 终档区分普通退避和上游组限。** HY10 EP04 末请求实际耗时 140.19s，七次退避后第八次仍失败，只有末次错误正文明确组上限 2。全波正式硬 429 一集，先前重试覆盖面不能用末次响应正文外推。 [末请求到终败](../runs/l1_w17b_20261122/hy_5e_10_bare/20261122-204142-460126.events.jsonl#L134)
+
+- **实证（Wave 17b `hy_5e_10_bare` EP04 `shiny_gear`）**。该槽 18 分钟内 0 死出铁镐+盾+胸甲进入 `shiny_gear`，第 5 次请求连续 7 次 HTTP 429 报错 `Harness group concurrency limit: 2 simultaneous requests`，耗时 120s 后整集 `runtime_error` 中断。
+- **最小修复与验收**。压测排班中 HY4 并发控制在 `2–3` 槽（或引入跨进程共享并发信号量），避免同一 provider 组并发碰撞浪费有效轨迹。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-151 | P0 | 裸装井下首铁镐受工作台可达性和备料阻塞，W18 HY8 报 `need_crafting_table ×14` | Slice C（合成/熔炼）| 状态: OPEN
+
+- **W21 HY2 首镐缺的是木棍。** 第五片铁 DFS 实收三粗铁。EP04 备料先取二锭，actor 同炉真取第三锭。独立包证三锭、工作台一个、丛林板一个、木棍零，制棍被材料预检拒绝。炉用煤一。正式 20m 终包仍三锭、无铁镐。 [真取第三锭](../runs/l1_w21_v1321_20261123/hy_5e_2_bare_20m/20261123-003947-838655.events.jsonl#L209) · [制棍缺料](../runs/l1_w21_v1321_20261123/hy_5e_2_bare_20m/20261123-003947-838655.events.jsonl#L258) · [正式终包](../runs/l1_w21_v1321_20261123/hy_5e_2_bare_20m/wild-endurance-wild-20261123-002409.json)
+
+- **实证（W18 HY8、HY7）**。HY8 全程 0 死，EP03 实取 3 锭，EP03–09 累计 **14 次** `mc_skill_craft_gear:need_crafting_table`，首末报错相隔 983.92s，终包仍为 3 锭、7 粗铁、0 铁镐。第一次报错未找到工作台，随后 13 次均指向上方旧台。HY7 同波报告 `mc_skill_smelt:need_crafting_table ×2` 和 `mc_skill_craft_gear:need_crafting_table ×1`。 [HY8 首炉](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-204747-556952.events.jsonl#L171) · [HY8 终包](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/wild-endurance-wild-20261122-204046.json#L49)
+- **D1 实物对账。** HY8 首次制镐失败前，造炉回执的包已从携台 1 变为携台 0，只剩 1 丛林木板。首炉实取 3 锭后在 Y23 报缺台，随后独立包再次证实台 0、板 1。HY7 在 EP03 L109 曾携台 1，此后两次 DFS 和一次熔炼，L187 制镐发生在 Y13，提示中的旧台在 Y23，2.10s 后独立包为台 0、板 3、锭 3。DFS 中已见石镐 +1，携台离包的具体步骤待确认。HY7 后续已制成铁镐，可用于核对恢复链。 [HY8 造炉后包](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-204747-556952.events.jsonl#L88) · [HY8 失败后包](../runs/l1_w18_glm_20261122/glm_hy_5e_8_bare/20261122-204747-556952.events.jsonl#L206) · [HY7 上次携台](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-204902-652972.events.jsonl#L109) · [HY7 制镐错误](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-204902-652972.events.jsonl#L187) · [HY7 失败后包](../runs/l1_w18_glm_20261122/glm_hy_5e_7_bare/20261122-204902-652972.events.jsonl#L207)
+- **最小修复与验收。** 用旧台高差、同层近台但靠近失败、缺台与缺板三组独立用例。对前两组，有随身台或至少四块可用木板时，从实包核对就地新台和铁镐入包，旧台保留原位；对缺料组，按 BUG-052 核对造炉后和进井前实包，扣燃料后保留随身台或四板，已入井时验就近补料或可达回路。 [台处理](../src/mc_agent/skills/library.py#L4025) · [燃料选择](../src/mc_agent/skills/library.py#L5212)
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-153 | P1 | `mc_skill_craft_gear(wooden_pickaxe)` 仅持 2 原木（8 木板）时先烧光 6 板造工作台+木棍，余 2 板仍硬发合成请求报 `server placed no result` | Slice C（合成技能）| 状态: OPEN
+
+- **W20 已实载预算候选，两个先有棍的对照通过。** HY7 60m、OB3 20m 首集独立包均为四棍六板。木镐请求报需七板、尚差一板，返回仍是四棍六板。两槽随后各实拾一木，制木镐、取得圆石，再制石镐并客观验证。原票的空包仅拿两根原木直进合成的实机分支继续待样本。 [HY7 拒绝](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-224343-981068.events.jsonl#L85) · [HY7 成品](../runs/l1_w20_20261122/glm_hy_5e_7_bare_60m/20261122-224343-981068.events.jsonl#L146) · [OB3 拒绝](../runs/l1_w20_20261122/nju_ob_3_bare_20m/20261122-224507-700893.events.jsonl#L138) · [OB3 成品](../runs/l1_w20_20261122/nju_ob_3_bare_20m/20261122-224507-700893.events.jsonl#L345) · [预算先验](../src/mc_agent/skills/library.py#L4737)
+
+- **D1 W19 HY10 EP17 精确复现。** 箭死重生后独立包 36 空格，空包试制木镐被材料预检拒绝。随后只采两格、实入两原木，紧接制木镐 4.26s 返回服务器无产物，错误包剩四棍、两木板、零镐。后续才额外采得一木。支持从零八板应在首次造台与制棍前识别一板缺口，并保留已有台或棍的对照。 [空包](../runs/l1_w19_20261122/hy_5e_10_bare_60m/20261122-222122-303460.events.jsonl#L227) · [只收两木](../runs/l1_w19_20261122/hy_5e_10_bare_60m/20261122-222122-303460.events.jsonl#L296) · [失败时实际包](../runs/l1_w19_20261122/hy_5e_10_bare_60m/20261122-222122-303460.events.jsonl#L327) · [合成入口](../src/mc_agent/skills/library.py#L3794)
+
+- **实证（Wave 19 `glm_hy_5e_5_bare_20m:L29` 等共 6 次）**。调用 `mc_skill_craft_gear({"item":"wooden_pickaxe","count":1})` 返回 `error="missing_ingredients", message="could not craft wooden_pickaxe: server placed no result", inventory={"stick": 4, "oak_planks": 2}`。
+- **根因**。造 `crafting_table`（4 板）+ `stick`（2 板）+ `wooden_pickaxe`（3 板）总计需要 **9 块木板（至少 3 根原木）**；技能在总板数仅 8 块时没有前置核算总需求，先把 2 原木全消耗成台和棍，再拿剩下的 2 块木板硬发服务端合成包导致失败。
+- **最小修复与验收**。`craft_gear` 在自动拆解原木/合工作台/合木棍前先做总木板预算校验，若不足则明确返回缺 `1 log`（不白耗材料、不发注定失败的合成请求）。
+
+---
+
+<!-- Archived: 2026-11-23 RCON 微场景实机 PASS -->
+### BUG-154 | P1 | `mc_window_act` 从熔炉 `take` 省略 `from` 时序列化为 `"undefined"` 报 `bad_section` | Slice C（窗口工具）| 状态: OPEN
+
+- **W20 已载补丁，显式炉坐标仍复现。** HY10 60m EP02 用 `block="furnace"` 加 XYZ，发 `take iron_ingot ×2`，省略 `from` 时返回 `bad_section: section "undefined"`，同窗已确认有两锭。后续加 `from="output"`，真取两锭，次集独立包共三锭。真实工具先把带 XYZ 的目标变成仅 `pos`，再按 `target.block` 补 `output`，因此纯名称的修复未覆盖指定炉。现有夹具也明确期望坐标目标继续报错。验收覆盖已证实类型的坐标熔炉及带名称＋坐标，保留箱子与显式从输入／燃料槽取物。 [坐标调用失败](../runs/l1_w20_20261122/hy_5e_10_bare_60m/20261122-224754-901803.events.jsonl#L895) · [实取两锭](../runs/l1_w20_20261122/hy_5e_10_bare_60m/20261122-224754-901803.events.jsonl#L1022) · [按名称补槽](../src/mc_agent/harness/mc_tools.py#L2260) · [坐标目标](../src/mc_agent/harness/mc_tools.py#L3919) · [现有夹具](../tests/test_skills_and_providers.py#L3202)
+
+- **D1 原始回执。** OB2 EP11 已明确完成六锭，三次取货只给目标 `to=player`，零转移。BUG-090 同时记录部分熔炼如何交接炉位、状态和可直接派发的取货调用。HY1 对照给出 `from=output` 后真实取回两锭。 [首个错误请求](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-215350-771054.events.jsonl#L176) · [第三次零转移](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-215350-771054.events.jsonl#L358) · [取货正例](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-213557-009114.events.jsonl#L98)
+
+- **实证（Wave 19 `nju_ob_2_bare_30m:L698` 等共 3 次；W17b `hy_5e_10`、`hy_5e_3` 亦复现）**。调用 `mc_window_act({"block":"furnace","ops":[{"op":"take","item":"iron_ingot","count":4,"to":"player"}]})` 报错 `section "undefined" not in furnace; have: input, fuel, output`。
+- **最小修复与验收**。`mc_window_act` 对 `block="furnace"` 且 `op="take"` 缺省 `from` 时自动补全 `from="output"`（或在工具入参校验层给出明确参数纠偏而非传 `"undefined"` 给服务端）。
+
+---
+
+<!-- Archived: 2026-11-23 RCON 微场景实机 PASS -->
+### BUG-155 | P1 | `mc_move_to` 将范围内的原地回执改为失败，整格距离也可误提示已到 | Slice C（移动工具）+ Integrator | 状态: REOPENED（默认范围、精确零与部分推进）
+
+- **W21 OB3 实机复现默认范围差异。** 20m EP04 L304/L385 两次传 XZ `(290891,243980)` 且省略半径，实位水平距 **1.55m**。两次都被按 1m 判失败，实际默认 2m。第一笔后紧接解卡，零位移、零破格，回 `unsafe_landing`。 [首次误判](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-003906-182533.events.jsonl#L305) · [随后解卡](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-003906-182533.events.jsonl#L318) · [再次误判](../runs/l1_w21_v1321_20261123/nju_ob_3_bare_20m/20261123-003906-182533.events.jsonl#L386)
+
+- **W20 裸装及 `7f84599` 离线残余。** 正式 93 笔配对移动中，30 笔省略 `range`，7 笔被旧护栏写成范围 1.0m 内却原地失败。OB3 EP02 未传范围，目标 `[229645,68,237023]`，L399 报失败。同整格后续独立柱升的起点 `[229644.7,67,237023.5]`，距目标约 1.16m，柱升至 Y79。移动回执没有原始小数和精确时间点，该小数来自紧随其后的工具。当前整合用真实 actor 和替身传输复验，省略范围实际发 2.0，在距 1.58m 时外层仍按 1.0 报失败，显式传 2 时成功，距 2.55m 的失败对照成立。 [OB3 移动](../runs/l1_w20_20261122/nju_ob_3_bare_20m/20261122-224733-708174.events.jsonl#L399) · [后续柱升起点](../runs/l1_w20_20261122/nju_ob_3_bare_20m/20261122-224733-708174.events.jsonl#L415)
+- **精确零与部分推进。** 同一真实入口显式传 `range=0,allow_partial=true`，确认向下游传了零。原地距目标 0.30m、同格实移 0.11m 后仍距 0.19m 的部分推进，两者均被外层追加 `already_within_range=true`。真到位对照为 0.00m。W19/W20 的 213 次配对移动无显式零半径，精确零为离线复现。对齐默认值和实派归一化范围，保留显式零、部分推进和真实坐标各自的回执，补本组及原有三轴验收。 [外层的 1.0 和 falsy 回落](../src/mc_agent/harness/agent.py#L738) · [工具默认 2.0 与钳制](../src/mc_agent/harness/mc_tools.py#L1240) · [原通过夹具](../tests/test_v2_harness.py#L3788)
+
+- **实际下发高度也会不一致。** 同一真 actor 离线在 Y69、请求同站 XZ。省略 Y 和写 `y=0` 的精确下发目标一致，后者的占位高度已在工具中过滤。但外层分别报成功、距 69m 的失败。真正的 `y=14` 确实下发，并按 55m 拒绝。W20 六次 `y=0` 均有成功回执，其中四次明确是途中航点，现场无此原地分支实例。回执核对以实际下发的目标和半径为准。 [占位高度过滤](../src/mc_agent/harness/mc_tools.py#L1273) · [外层原始高度](../src/mc_agent/harness/agent.py#L746) · [HY8 实机下发意图与回执](../runs/l1_w20_20261122/glm_hy_5e_8_bare_60m/20261122-225441-358552.events.jsonl#L278)
+
+- **实证（W19 在途 22 次该状态，需逐笔核实距离）**。OB2 EP09 的 XZ 目标与回执所在整格同为 `186818,184370`，格内最大水平差小于 1.42m，`range=2` 仍报 `movement_not_confirmed`。HY1 EP06 的前一调用及下一次施工均见 `219427.5,69,152037.5`，水平距目标 `219425,152037` 约 2.55m。中间错误将位置取整后提示 2m 内，属于范围外的文案误报。护栏用整格算 XZ 且加 1.5m 选提示，验收应使用真实坐标和明确给出的 Y。 [OB2 同格](../runs/l1_w19_20261122/nju_ob_2_bare_30m/20261122-214642-037988.events.jsonl#L32) · [HY1 浮点实际位置](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-214748-427376.events.jsonl#L102) · [HY1 整格提示](../runs/l1_w19_20261122/glm_hy_5e_1_bare_20m/20261122-214748-427376.events.jsonl#L114) · [外层护栏](../src/mc_agent/harness/agent.py#L738)
+- **最小修复与验收**。当 `dist(pos_before, target) <= range` 时直接返回 `ok=True, already_within_range=True`（不再判 `movement_not_confirmed` 假失败）；仅当目标在 `range` 之外且未发生有效位移时才报 `movement_not_confirmed`。
+
+---
+
+<!-- Archived: 修复提交已合入 feat/v2-integrated，待长线观察如复现再重开 -->
+### BUG-158 | P0 | W21 三组十二槽在入场鉴权刷新遇 HTTP 502，全波零开局 | Integrator（启动鉴权）+ Slice D2（Fleet 收口）| 状态: OPEN
+
+- **W21 同目录第二次尝试已入场。** Watcher 发出 `WAVE REOPENED`。首轮 00:22:44/45 的十二份失败终档仍在，stdout 已被覆盖，故保留首轮证据链接到各终档的 `scene.error`。08:29:19 UTC 已审 11 份裸装文件，其中 HY7 和 HY2 已验证石器。Fleet 汇总候选 D2 `2556ad4` 待合；首轮的鉴权 502 根因仍待。 [新 actor 启动](../runs/l1_w21_v1321_20261123/glm_hy_5e_7_bare_60m/20261123-002428-596337.events.jsonl#L3) · [首轮持久化](../runs/l1_w21_v1321_20261123/glm_hy_5e_7_bare_60m/wild-endurance-wild-20261123-002244.json#L13)
+
+- **影响与实据。** `l1_w21_v1321_20261123` 的 GLM 5／HY 4／NJU 3 槽，12 个启动日志均在第 1 行报 `token refresh failed ... HTTP 502`，全数写 `curriculum_summary.status=not_ready`、0.0s、空集列表。九个裸装含五个 60m，全部未入场。未产生 actor 事件文件，进程 Traceback 为零。D1 验收识别 12/12 未入场并退出 1，29 个验收子项待暴露。 [GLM HY7 启动](../runs/l1_w21_v1321_20261123/glm_hy_5e_7_bare_60m/wild-endurance-wild-20261123-002244.json#L13) · [HY10 启动](../runs/l1_w21_v1321_20261123/hy_5e_10_bare_60m/wild-endurance-wild-20261123-002245.json#L13) · [NJU OB1 终档](../runs/l1_w21_v1321_20261123/nju_ob_1_bare_60m/wild-endurance-wild-20261123-002244.json#L13)
+- **定位。** 槽内初次 API 调用若收到认证错误，`BotSession.call` 调 runner 的再鉴权回调。回调对登录的非 200 立即抛出，本地启动层将其写为 `not_ready` 并正常结束该进程。现场只证明刷新返回 502，缓存为何需要刷新及上游为何返回 502 待集成侧日志。该阶段与 actor 的 HTTP 429／502 限速和 BUG-039 的死亡冷却分别计账。 [再鉴权调用](../src/mc_agent/bot.py#L169) · [刷新状态码分支](../scripts/l3_wild_endurance_runner.py#L3277) · [入场失败落盘](../scripts/l3_wild_endurance_runner.py#L3494)
+- **最小修复与验收。** 启动编排保留当前逐槽终档，并显式认出同一波全槽共用鉴权失败及非成功退出。汇总鉴权失败的首次时间、状态码和已尝试槽数，由具备该角色权限的控制器按现有单 Token 互斥约束恢复。用模拟传输覆盖短瞬态恢复、持续 502、单槽认证失败与正常并发，证明有限等待、原失败因和逐槽终档。任何可能已经签发新 token 的结果先走授权恢复路径，避免重复签发导致旧持有者被吊销。实机重跑以三组各自出现可验证入场与首个 actor 事件验收，行为门另用实际 episode。
+- **D1 离线复现。** 固定 `8bb199b`，真实就绪函数加 MockTransport，首个 status 401、模拟刷新 502。状态和刷新各请求一次即传播，合成凭证存储没写。真实终档 writer 持久化 `not_ready` 和 0 集。D2 已接收共享票。
