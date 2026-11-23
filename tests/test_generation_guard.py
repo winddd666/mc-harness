@@ -14352,11 +14352,12 @@ def test_unstick_canopy_branch_shares_the_tool_budget(monkeypatch):
     assert events[-1]["type"] == "guardian.recovery_budget_exceeded"
 
 
-@pytest.mark.parametrize("solid_exit", [True, False])
+@pytest.mark.parametrize("solid_exit", [True, False, "far_support_changed"])
 @pytest.mark.parametrize("after_step", ["unshielded", "blocking", "respawned"])
 def test_guardian_checks_support_before_unstick_moves(solid_exit, after_step):
     movements = []
     faces = []
+    far_floor_reads = 0
     death = {"t": 10}
 
     class LedgeBot:
@@ -14364,6 +14365,7 @@ def test_guardian_checks_support_before_unstick_moves(solid_exit, after_step):
             return self.call("status", method="GET")
 
         def call(self, action, body=None, **kwargs):
+            nonlocal far_floor_reads
             if action == "status":
                 return {
                     "pos": [0.5, 44, 0.5], "ready": True, "alive": True, "on_ground": True,
@@ -14372,6 +14374,10 @@ def test_guardian_checks_support_before_unstick_moves(solid_exit, after_step):
                 }
             if action == "get_block":
                 x, y, z = body["pos"]
+                if solid_exit == "far_support_changed" and (x, y, z) == (2, 43, 0):
+                    far_floor_reads += 1
+                    if far_floor_reads > 1:
+                        return {"name": "air"}
                 if y == 43 and (solid_exit or (x, z) == (0, 0)):
                     return {"name": "stone", "diggable": True}
                 return {"name": "air"}
@@ -14388,14 +14394,51 @@ def test_guardian_checks_support_before_unstick_moves(solid_exit, after_step):
     skills = MacroSkills(bot)
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None, skills=skills)
     result = json.loads(guard.run_tool_with_reflex("mc_skill_unstick", lambda: json.dumps(skills.unstick())))
-    assert result["ok"] is solid_exit
+    assert result["ok"] is bool(solid_exit)
     if solid_exit:
         step, = movements
-        assert step["ms"] == 350 and not step["jump"] and not step["sprint"]
+        assert step["ms"] == (150 if solid_exit == "far_support_changed" else 350)
+        assert not step["jump"] and not step["sprint"]
     else:
         assert result["error"]["code"] == "unsafe_landing" and result["requires_replan"] is True
         assert movements == []
     assert faces == ([44] if solid_exit and after_step == "blocking" else [])
+
+
+@pytest.mark.parametrize("terrain", ["level_short_exit", "unsupported_exit", "raised_exit", "full_exit"])
+def test_unstick_guard_keeps_a_verified_short_exit_with_a_lower_pulse(terrain):
+    origin = [112182.5, 64, 122770.5]
+    movements = []
+
+    class ShaftBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return {"pos": origin, "on_ground": True, "ready": True, "alive": True}
+            if action == "get_block":
+                x, y, z = body["pos"]
+                near = x == 112182 and z in (122769, 122770)
+                supported = y == 63 and (
+                    terrain == "full_exit" or (x, z) == (112182, 122770) or (near and terrain != "unsupported_exit")
+                )
+                upper_block = terrain == "raised_exit" and z == 122769 and y == 64
+                return {"name": "stone" if supported or upper_block else "air"}
+            if action == "control":
+                movements.append(body)
+            return {"ok": True}
+
+    bot = ShaftBot()
+    guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_unstick", lambda: json.dumps(bot.call(
+        "control", {"forward": True, "jump": False, "yaw": 0.0, "ms": 350, "stop_on": []},
+    ))))
+
+    assert result["ok"] is (terrain in {"level_short_exit", "full_exit"})
+    if result["ok"]:
+        step, = movements
+        assert step["ms"] == (150 if terrain == "level_short_exit" else 350)
+        assert step["sprint"] is False and step["jump"] is False
+    else:
+        assert not movements and result["error"]["code"] == "unsafe_landing"
 
 
 @pytest.mark.parametrize("episode_timeout", [False, True])

@@ -3992,11 +3992,22 @@ class GenerationGuard:
         ):
             raise _UnsafeUnstickExit
         self.combat_env.invalidate_block_cache()
-        route = self.combat_env.probe_retreat(pos, float(body["yaw"]), 2.2)
+        yaw = float(body["yaw"])
+        ms = min(int(body.get("ms") or 350), 350)
+        route = self.combat_env.probe_retreat(pos, yaw, 2.2)
         if route is None:
-            raise _UnsafeUnstickExit
+            foot_y = math.floor(float(pos[1]) + 0.05)
+            if (
+                status.get("on_ground") is not True or any(body.get(key) for key in ("back", "left", "right"))
+                or self.combat_env.probe_retreat(pos, yaw, 1.0) != (foot_y, False)
+            ):
+                raise _UnsafeUnstickExit
+            # A short walking pulse can stop on the supported space just ahead.
+            ms = min(ms, 150)
+            route = (foot_y, False)
+            self.events.emit("guardian.unstick_exit_shortened", pos=pos, yaw=yaw, ms=ms)
         _, needs_jump = route
-        return {**body, "sprint": False, "jump": needs_jump, "ms": min(int(body.get("ms") or 350), 350)}
+        return {**body, "sprint": False, "jump": needs_jump, "ms": ms}
 
     def _restore_unstick_shield_facing(self, before: dict[str, Any], call: Callable[..., dict[str, Any]]) -> None:
         name, distance, entity_id, _ = self._extract_hostile_info(before)
