@@ -2455,22 +2455,22 @@ def _install_bare_stone_guidance() -> None:
     key = "bootstrap_stone_age"
     playbook = cur.CURRICULUM_PLAYBOOKS[key]
     task = (
-        "先核对实包与当前站位。水中先找干地上岸；人在地下、缺镐又缺木时走已有安全通道返回可取木料的位置。"
-        "地表缺开局木料时用 mc_skill_harvest_logs 按缺口取 4~6 根原木，先合工作台、木棍和 wooden_pickaxe。"
-        "木镐已可用时开始找石，木料储备等有石斧再补。扫描 16 格内可达的露出 stone、cobblestone。"
-        "有可采露石时用 mc_skill_mine_blocks(block_types=['stone','cobblestone'], radius=16) 采实际入包的圆石。"
+        "先用 mc_inventory 核对圆石、木棍、木板和已有镐，用 mc_status 核对当前站位。"
+        "首把石镐只要 3 圆石、2 木棍与可用工作台。材料已齐就直接 mc_skill_craft_gear(item='stone_pickaxe', count=1, equip_slot='hand')。"
+        "已有可用木镐时直接用它采缺的圆石。只有缺圆石且没有可用镐才制作 wooden_pickaxe。"
+        "水中先找干地上岸；人在地下、缺镐又缺木时沿已有安全通道取木。地表只补首镐缺的木板、木棍或工作台。"
+        "缺圆石时扫描 16 格内可达的露出 stone、cobblestone。"
+        "有可采露石时用 mc_skill_mine_blocks(block_types=['stone','cobblestone'], count=<圆石缺口>, radius=16) 采入。"
         "砍木或采石若报 no_drops_collected 而 nearby_drops 有目标物，安全且可达时先调用一次 "
         "mc_skill_collect_drops 拾取并核对实包。仍未入包时换可达作业面。"
-        "16 格内无可达露石时，在当前干燥且有支撑的落脚点运行 mc_skill_staircase(vertical='down', steps=6, stop_on_ore=False)，"
+        "仍缺圆石且 16 格内无可达露石时，在干燥且有支撑的落脚点运行 mc_skill_staircase(vertical='down', steps=6, stop_on_ore=False)，"
         "穿过表土后停在露石处采圆石。先核对阶梯回执；缺支撑时用有支撑面的垫块或换一个安全方向，"
         "见水、岩浆或落差时换方向。保留可回走的阶梯。"
-        "从零备齐两把石镐和一座炉需要 14 圆石，已有的装备及圆石按实包扣除。"
-        "材料齐时先造炉，再用 mc_skill_craft_gear(item='stone_pickaxe', count=2) 合两把石镐。"
-        "多余圆石才用来合石斧。安全地表有多余木板时可留据点箱，铁器课用 mc_skill_mine_dfs 下到 Y=16。"
+        "首镐进包并装备后即完成石器准备。已有余料才就地补第二把石镐或熔炉，余下准备可在铁器课继续。"
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
-        playbook, title="Day 1 石器与石料准备", task=task,
-        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_skill_collect_drops"))),
+        playbook, title="Day 1 石器与石料准备", task=task, post_ensure_task=task,
+        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_inventory", "mc_status", "mc_skill_collect_drops"))),
     )
 
 
