@@ -5771,6 +5771,118 @@ def test_craft_gear_uses_a_local_table_without_removing_the_old_one(scene, table
         assert bag["iron_pickaxe"] == 1
 
 
+@pytest.mark.parametrize("scene", [
+    "far_lava_bridge", "place_no_effect", "place_uncertain", "reused_step", "replacement", "fresh_step",
+    "stalled", "partial", "owned", "worn", "missing_gold",
+])
+def test_nether_gold_boots_use_supported_workbench_or_equipped_pair(scene) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    pos = [0.5, 64.0, 0.5]
+    home_floor = 63
+    local = [0, 64, 1]
+    alternate = [-1, 64, 0]
+    table = list(local) if scene in {"reused_step", "replacement"} else [12, 84, 0]
+    added = None
+    bag = {"gold_ingot": 3 if scene == "missing_gold" else 20, "crafting_table": 1}
+    if scene == "owned":
+        bag["golden_boots"] = 1
+    armor = {"feet": {"name": "golden_boots"}} if scene == "worn" else {}
+    actions = []
+    craft_attempts = 0
+
+    def handle(request):
+        nonlocal added, pos, craft_attempts
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            result = {"items": [{"name": name, "count": count} for name, count in bag.items() if count], "armor": armor}
+        elif route == "status":
+            result = {"pos": pos, "health": 20, "dimension": "the_nether", "on_ground": True}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": table, "dist": math.dist(pos, table)}]}
+        elif route == "get_block":
+            block = body["pos"]
+            if block in (table, added):
+                name = "crafting_table"
+            elif block == [0, home_floor, -1]:
+                name = "lava"
+            else:
+                name = "nether_bricks" if block[1] == home_floor else "air"
+            result = {"name": name}
+        elif route == "place":
+            point = body["pos"]
+            actions.append((route, point))
+            assert point != [0, 64, -1] and bag["crafting_table"] == 1
+            if scene == "far_lava_bridge" and point == local:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "no_support"}})
+            if scene in {"place_no_effect", "place_uncertain"} and point == local:
+                if scene == "place_uncertain":
+                    bag["crafting_table"] -= 1
+                return httpx.Response(200, json={"ok": False, "error": {"code": "place_failed"}})
+            if scene == "replacement":
+                assert point != table and math.dist(pos, [point[0] + 0.5, point[1], point[2] + 0.5]) <= 2.0
+            else:
+                assert point == (alternate if scene in {"far_lava_bridge", "place_no_effect"} else local)
+            bag["crafting_table"] -= 1
+            added = point
+            result = {"pos": point}
+        elif route == "move_to":
+            actions.append((route, body))
+            assert body["range"] == 0.4 and body["timeout"] == 1500 and body["stop_on"] == ["hurt", "death"]
+            if scene != "stalled":
+                pos = [body["x"], body["y"], body["z"]]
+            result = {"pos": pos}
+        elif route == "craft":
+            actions.append((route, body))
+            assert body == {"item": "golden_boots", "count": 1}
+            craft_attempts += 1
+            before_window = scene in {"reused_step", "fresh_step", "stalled", "partial"} and craft_attempts == 1
+            if before_window or (scene == "replacement" and craft_attempts <= 2):
+                error = {"code": "no_window", "table": added or table}
+                if scene == "partial":
+                    error["gained"] = {"golden_boots": 1}
+                return httpx.Response(200, json={"ok": False, "error": error})
+            assert added is not None or scene == "reused_step"
+            bag["gold_ingot"] -= 4
+            bag["golden_boots"] = 1
+            result = {"crafted": "golden_boots", "gained": 1}
+        elif route == "equip":
+            actions.append((route, body))
+            assert body == {"item": "golden_boots", "slot": "feet"}
+            assert bag.pop("golden_boots") == 1
+            armor["feet"] = {"name": "golden_boots"}
+            result = {}
+        else:
+            raise AssertionError(route)  # Recovery must never dig the original table or its platform.
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_craft_gear("golden_boots", equip_slot="feet" if scene == "owned" else None))
+
+    expected = {
+        "far_lava_bridge": ["place", "place", "craft", "equip"],
+        "place_no_effect": ["place", "place", "craft", "equip"], "place_uncertain": ["place"],
+        "reused_step": ["craft", "move_to", "craft", "equip"],
+        "replacement": ["craft", "move_to", "craft", "place", "craft", "equip"],
+        "fresh_step": ["place", "craft", "move_to", "craft", "equip"],
+        "stalled": ["place", "craft", "move_to"], "partial": ["place", "craft"],
+        "owned": ["equip"], "worn": [], "missing_gold": [],
+    }
+    assert [route for route, _ in actions] == expected[scene]
+    if scene in {"stalled", "partial", "missing_gold", "place_uncertain"}:
+        assert not result["ok"] and result["requires_replan"]
+        if scene == "missing_gold":
+            assert result["missing_materials"] == {"gold_ingot": 1}
+        elif scene == "place_uncertain":
+            assert result["error"] == "workbench_placement_unconfirmed" and bag["gold_ingot"] == 20
+        else:
+            assert result["error"] == "no_window" and bag["gold_ingot"] == 20
+    else:
+        assert result["ok"] and result["equipped_slot"] == "feet" and armor["feet"]["name"] == "golden_boots"
+        assert bag["gold_ingot"] == (20 if scene in {"owned", "worn"} else 16)
+
+
 @pytest.mark.parametrize("placement", ["new", "reused", "rejected", "timed_out", "unreleased", "surface"])
 def test_craft_gear_clears_its_own_table_from_a_narrow_mine(monkeypatch, placement) -> None:
     from mc_agent.harness.mc_tools import McToolset

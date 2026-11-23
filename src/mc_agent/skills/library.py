@@ -206,6 +206,7 @@ TABLE_RECIPES: set[str] = {
     "iron_chestplate",
     "iron_leggings",
     "iron_boots",
+    "golden_boots",
     "diamond_helmet",
     "diamond_chestplate",
     "diamond_leggings",
@@ -232,6 +233,7 @@ TABLE_RECIPES: set[str] = {
     "hay_block",
     *{k for k, v in RECIPES_1_21.items() if v.get("table_3x3")},
 }
+_WORKBENCH_OPEN_ERRORS = frozenset({"path_not_found", "need_crafting_table", "out_of_reach", "no_window"})
 
 DEFAULT_EQUIP_SLOTS: dict[str, str] = {
     "shield": "off-hand",
@@ -239,6 +241,7 @@ DEFAULT_EQUIP_SLOTS: dict[str, str] = {
     "iron_chestplate": "torso",
     "iron_leggings": "legs",
     "iron_boots": "feet",
+    "golden_boots": "feet",
     "diamond_helmet": "head",
     "diamond_chestplate": "torso",
     "diamond_leggings": "legs",
@@ -946,6 +949,7 @@ _CRAFT_SLOT_INPUTS: dict[str, dict[str, int]] = {
     "iron_chestplate": {"iron_ingot": 8},
     "iron_leggings": {"iron_ingot": 7},
     "iron_boots": {"iron_ingot": 4},
+    "golden_boots": {"gold_ingot": 4},
     "diamond_helmet": {"diamond": 5},
     "diamond_chestplate": {"diamond": 8},
     "diamond_leggings": {"diamond": 7},
@@ -3316,6 +3320,7 @@ class MacroSkills:
             "iron_axe": counts.get("iron_ingot", 0) >= 3 and sticks >= 2,
             "iron_sword": counts.get("iron_ingot", 0) >= 2 and sticks >= 1,
             "iron_shovel": counts.get("iron_ingot", 0) >= 1 and sticks >= 2,
+            "golden_boots": counts.get("gold_ingot", 0) >= 4,
             "diamond_pickaxe": counts.get("diamond", 0) >= 3 and sticks >= 2,
             "diamond_sword": counts.get("diamond", 0) >= 2 and sticks >= 1,
         }
@@ -3336,6 +3341,125 @@ class MacroSkills:
         else:
             self._record_utility_in_ledger("crafting_table", pos)
 
+    def _place_nether_workbench(
+        self, status: dict[str, Any], side: list[int] | None, narrow_lane: bool,
+        temporary_tables: list[list[int]] | None,
+    ) -> dict[str, Any]:
+        from .combat_env import HAZARD_BLOCK_TYPES, _hitbox_columns, _is_solid_ground
+
+        origin = status.get("pos")
+        if (not origin or status.get("on_ground") is not True or status.get("alive") is False
+                or status.get("in_water") or status.get("in_lava")):
+            return self._no_safe_utility_position()
+        px, py, pz = map(math.floor, origin[:3])
+        occupied = _hitbox_columns(origin[0], origin[2])
+        air = {"air", "cave_air", "void_air"}
+        cache: dict[tuple[int, int, int], str] = {}
+
+        def name(x: int, y: int, z: int) -> str:
+            return _cached_block_name(self.bot, x, y, z, cache)
+
+        if narrow_lane:
+            candidates = [side] if side else []
+        else:
+            offsets = (
+                (0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (-1, 1), (1, -1), (1, 1), (0, -2), (0, 2), (-2, 0), (2, 0),
+            )
+            candidates = [[px + dx, py + dy, pz + dz] for dy in (0, -1, 1) for dx, dz in offsets]
+        before_count = None
+        for pos in candidates:
+            x, y, z = pos
+            if (x, z) in occupied or (self.geofence and self.geofence.check_point(x + 0.5, z + 0.5, action="mc_place")):
+                continue
+            floor = name(x, y - 1, z)
+            if floor == "unknown" or floor in HAZARD_BLOCK_TYPES or not _is_solid_ground(floor):
+                continue
+            if name(x, y, z) not in air or name(x, y + 1, z) not in air:
+                continue
+            if before_count is None:
+                before_count = _inventory_counts(self.bot).get("crafting_table", 0)
+            try:
+                placed = self.bot.call("place", {"item": "crafting_table", "pos": pos})
+            except ApiError as err:
+                if err.code in {"no_support", "blocked_by_self", "occupied"}:
+                    continue
+                if err.code != "place_failed":
+                    raise
+                observed = _cached_block_name(self.bot, x, y, z)
+                if observed == "crafting_table":
+                    placed = {"pos": pos}
+                elif observed in air and before_count and _inventory_counts(self.bot).get("crafting_table", 0) == before_count:
+                    continue
+                else:
+                    return {
+                        "ok": False, "error": "workbench_placement_unconfirmed", "requires_replan": True,
+                        "pos": pos, "message": "放置未确认，请先核对工作台坐标和背包。",
+                    }
+            actual = placed.get("pos") or pos
+            if actual != pos or _cached_block_name(self.bot, x, y, z) != "crafting_table":
+                return {
+                    "ok": False, "error": "workbench_placement_unconfirmed", "requires_replan": True,
+                    "pos": actual, "message": "工作台放置回执未与方块位置对上，请先核对现场和背包。",
+                }
+            self._remember_crafting_table_placement(actual, temporary_tables)
+            return {"ok": True, "reused": False, "pos": pos, "dimension": "the_nether"}
+        return self._no_safe_utility_position()
+
+    def _step_to_nether_workbench(self, table: Any) -> bool:
+        from .combat_env import CombatEnv
+
+        status = self.bot.status()
+        origin = status.get("pos")
+        if (
+            not isinstance(table, (list, tuple)) or len(table) != 3 or not origin
+            or status.get("on_ground") is not True or status.get("alive") is False
+            or status.get("in_water") or status.get("in_lava")
+            or normalize_dimension(status.get("dimension")) != "the_nether"
+        ):
+            return False
+        x, y, z = map(int, table)
+        if math.dist(origin[:3], (x + 0.5, y + 0.5, z + 0.5)) > 4.0:
+            return False
+        if _cached_block_name(self.bot, x, y, z) != "crafting_table":
+            return False
+
+        terrain = CombatEnv(self.bot, geofence=self.geofence)
+        landings = [
+            (x + dx + 0.5, z + dz + 0.5) for dx in (-1, 0, 1) for dz in (-1, 0, 1) if dx or dz
+        ]
+        landings.sort(key=lambda p: math.hypot(p[0] - origin[0], p[1] - origin[2]))
+        for tx, tz in landings:
+            distance = math.hypot(tx - origin[0], tz - origin[2])
+            if not 0.5 <= distance <= 2.0:
+                continue
+            route = terrain.probe_retreat(origin, _yaw_toward(origin[0], origin[2], tx, tz), distance)
+            if route is None or abs(route[0] - y) > 1:
+                continue
+            destination = (tx, route[0], tz)
+            if not terrain.has_los(destination, (x + 0.5, y, z + 0.5), dst_height=0.85)["clear"]:
+                continue
+            try:
+                moved = self.bot.call("move_to", {
+                    "x": tx, "y": route[0], "z": tz, "range": 0.4, "timeout": 1500, "stop_on": ["hurt", "death"],
+                }, timeout_s=2.0)
+            except ApiError as err:
+                if err.code in {"no_path", "path_not_found", "out_of_reach"}:
+                    return False
+                raise
+            if moved.get("interrupted_by"):
+                raise ApiError("interrupted", "接近工作台时移动中断。")
+            after = self.bot.status()
+            reached = after.get("pos")
+            if after.get("alive") is False or after.get("last_death") != status.get("last_death"):
+                raise ApiError("interrupted", "接近工作台时存活状态发生变化。")
+            return bool(
+                reached and math.dist(reached[:3], destination) <= 0.6 and after.get("on_ground") is True
+                and not after.get("in_water") and not after.get("in_lava")
+                and normalize_dimension(after.get("dimension")) == "the_nether"
+                and _cached_block_name(self.bot, x, y, z) == "crafting_table"
+            )
+        return False
+
     def ensure_crafting_table(
         self,
         *,
@@ -3351,6 +3475,7 @@ class MacroSkills:
             st = self.bot.status()
         px, py, pz = [int(math.floor(v)) for v in (st.get("pos") or [0, 64, 0])]
         cur_hp = float(st.get("health") if isinstance(st.get("health"), (int, float)) else 20.0)
+        dim = normalize_dimension(st.get("dimension"))
 
         if not force_recarve:
             found = self.bot.call("find_blocks", {"radius": 8, "types": ["crafting_table"], "limit": 5})
@@ -3365,7 +3490,11 @@ class MacroSkills:
                 nearest = min(blocks, key=lambda b: float(b.get("dist", 999)))
                 pos = nearest.get("pos")
                 self._record_utility_in_ledger("crafting_table", pos)
-                if float(nearest.get("dist", 99)) > 3.2 and pos:
+                if dim == "the_nether":
+                    center = [coord + 0.5 for coord in pos]
+                    if math.dist((st.get("pos") or [px, py, pz])[:3], center) <= 3.2 or self._step_to_nether_workbench(pos):
+                        return {"ok": True, "reused": True, "pos": pos, "dimension": dim}
+                elif float(nearest.get("dist", 99)) > 3.2 and pos:
                     try:
                         self.bot.call("move_to", {"x": pos[0], "y": pos[1], "z": pos[2], "range": 2.0})
                         status_after_move = self.bot.status()
@@ -3433,7 +3562,10 @@ class MacroSkills:
                                 pass
 
                 for cand_pos in distant_candidates[:2]:
-                    if self._navigate_to_distant_table(cand_pos, cur_hp=cur_hp):
+                    if dim == "the_nether":
+                        if self._step_to_nether_workbench(cand_pos):
+                            return {"ok": True, "reused": True, "pos": cand_pos, "dimension": dim}
+                    elif self._navigate_to_distant_table(cand_pos, cur_hp=cur_hp):
                         return {"ok": True, "reused": True, "pos": cand_pos}
 
                 if wood_shortage is not None:
@@ -3447,6 +3579,8 @@ class MacroSkills:
                         if dy_table >= 8
                         else "无需回地表砍树，请先调 mc_skill_mine_dfs(action='return_collar') 或 mc_move_to 靠近该工作台后再合成。"
                     )
+                    if dim == "the_nether":
+                        approach_msg = "请先确认干燥、有支撑的近处站位，再接近旧台或补足 4 块木板就地制作。"
                     return {
                         "ok": False,
                         "error": "need_crafting_table",
@@ -3469,7 +3603,6 @@ class MacroSkills:
                         ),
                     }
 
-                dim = normalize_dimension(st.get("dimension"))
                 biome = str(st.get("biome") or "")
                 wood_targets = list(NETHER_STEM_TYPES) if dim == "the_nether" else list(LOG_TYPES)
                 base_err: dict[str, Any] = {
@@ -3520,10 +3653,18 @@ class MacroSkills:
             except ApiError as err:
                 return {"ok": False, "error": err.code, "requires_replan": True, "message": err.message, **err.context}
 
+        if dim == "the_nether":
+            st = self.bot.status()
+            if normalize_dimension(st.get("dimension")) != dim:
+                return self._no_safe_utility_position()
+            if st.get("pos"):
+                py = math.floor(st["pos"][1])
         # Leave time to clear a newly placed underground table after crafting.
         if temporary_tables is not None:
             self._reserve_crafting_table_cleanup(py)
         side, narrow_lane = self._underground_utility_site(st)
+        if dim == "the_nether":
+            return self._place_nether_workbench(st, side, narrow_lane, temporary_tables)
         if narrow_lane:
             if side is None:
                 return self._no_safe_utility_position()
@@ -4657,7 +4798,9 @@ class MacroSkills:
         if result.get("ok"):
             equip_item = resolve_item_alias(str(result.get("crafted") or item))
             already_owned = result.get("already_owned") is True
-            slot = equip_slot or (None if already_owned else DEFAULT_EQUIP_SLOTS.get(equip_item))
+            slot = equip_slot
+            if not slot and (not already_owned or equip_item == "golden_boots"):
+                slot = DEFAULT_EQUIP_SLOTS.get(equip_item)
             result["equipped_slot"] = None
             blocked = next((row["error"] for row in cleanup if row.get("error") in interruptions), None)
             if slot:
@@ -4748,10 +4891,32 @@ class MacroSkills:
             **(plan or {}),
         }
 
+    def _recover_nether_craft(
+        self, item: str, count: int, table: dict[str, Any], error: ApiError,
+        temporary_tables: list[list[int]], reserved_planks: int,
+    ) -> dict[str, Any]:
+        if any(error.context.get(key) for key in ("done", "gained", "crafted")):
+            raise error
+        if self._step_to_nether_workbench(table.get("pos") or error.context.get("table")):
+            try:
+                return self._safe_craft(item, count)
+            except ApiError as err:
+                if err.code not in _WORKBENCH_OPEN_ERRORS or any(err.context.get(key) for key in ("done", "gained", "crafted")):
+                    raise
+                error = err
+        if not table.get("reused"):
+            raise error
+        replacement = self.ensure_crafting_table(
+            force_recarve=True, target_item=item, temporary_tables=temporary_tables, reserved_planks=reserved_planks,
+        )
+        return self._safe_craft(item, count) if replacement.get("ok") else replacement
+
     def _craft_gear(self, item: str, count: int, temporary_tables: list[list[int]]) -> dict[str, Any]:
         item = _canonical_plank_recipe(resolve_item_alias(item))
         count = max(1, min(64, count))
         inv_raw, initial = _inventory_snapshot_and_counts(self.bot)
+        if item == "golden_boots" and count == 1 and initial.get(item, 0) > 0:
+            return {"ok": True, "already_owned": True, "item": item, "owned_count": initial[item], "gained": 0}
         if item in {"planks", "any_planks"} or (
             item == "oak_planks" and not any(initial.get(log, 0) > 0 for log in _PLANK_LOG_SOURCES[item])
         ):
@@ -4884,26 +5049,32 @@ class MacroSkills:
             if item in TABLE_RECIPES and (
                 "windowOpen" in err.message
                 or "server placed no result" in err.message
-                or err.code in ("path_not_found", "need_crafting_table", "out_of_reach", "no_window")
+                or err.code in _WORKBENCH_OPEN_ERRORS
             ):
                 try:
                     if "server placed no result" in err.message:
                         self._ensure_free_slots(min_free=6, station_materials=station_materials)
-                    if table_res and table_res.get("reused"):
-                        new_table = self.ensure_crafting_table(
-                            force_recarve=True, target_item=item, temporary_tables=temporary_tables,
-                            reserved_planks=planks_needed if item == "wooden_pickaxe" else 0,
-                        )
-                        if not new_table.get("ok"):
-                            return new_table
-                    craft_res = self._safe_craft(item, count)
+                    reserve = planks_needed if item == "wooden_pickaxe" else 0
+                    if table_res and table_res.get("dimension") == "the_nether" and err.code in _WORKBENCH_OPEN_ERRORS:
+                        craft_res = self._recover_nether_craft(item, count, table_res, err, temporary_tables, reserve)
+                        if craft_res.get("ok") is False:
+                            return craft_res
+                    else:
+                        if table_res and table_res.get("reused"):
+                            new_table = self.ensure_crafting_table(
+                                force_recarve=True, target_item=item, temporary_tables=temporary_tables, reserved_planks=reserve,
+                            )
+                            if not new_table.get("ok"):
+                                return new_table
+                        craft_res = self._safe_craft(item, count)
                 except ApiError as retry_err:
                     if retry_err.code == "missing_ingredients" and "server placed no result" in retry_err.message:
                         return self._classify_craft_no_result(item, count, prepared, retry_err.message)
+                    nether_workbench = table_res and table_res.get("dimension") == "the_nether"
                     return {
                         "ok": False,
                         "error": retry_err.code,
-                        "requires_replan": retry_err.code == "inventory_full",
+                        "requires_replan": retry_err.code == "inventory_full" or bool(nether_workbench),
                         "message": retry_err.message,
                         **retry_err.context,
                     }
