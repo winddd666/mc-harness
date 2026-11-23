@@ -998,7 +998,9 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
         "how_to": (
             "在下界确认脚下有支撑，持钻石镐或下界合金镐，调用 "
             "mc_skill_mine_dfs(action='explore', target='ancient_debris', target_y=15, goal_count=1, max_duration_s=90)。"
+            "场景入场的短效火抗只保护开局。长程下探按常态岩浆风险规划，留出有支撑的干燥退路。"
             "沿同一可用井续挖，遇流体、落差或井耗尽时按回执走已有安全回路，换已确认干燥的入口。"
+            "出岩浆后若仍着火或低血，先停采，沿已确认的安全通路退到实体掩护下。状态恢复后再续挖。"
             "上梯可用于撤离，短横向通道只用于脱险或清障。每片核对实际入包 ancient_debris 和官方进度。"
         ),
     },
