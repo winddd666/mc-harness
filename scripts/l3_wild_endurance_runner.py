@@ -2413,6 +2413,7 @@ def _install_bare_iron_guidance() -> None:
         "石器课若只做了第一把石镐，先在已露出的石层补第二把，需要炉子时留 8 圆石。"
         "有 HUD 或记忆证实的近处储物箱，才去取备用铁镐、铁锭。"
         "先核对实包的 iron_ingot、raw_iron、iron_block 和燃料。首把铁镐只需 3 铁锭、2 木棍和工作台。"
+        "备料刚熔炼过但未给炉坐标时，可用 mc_find_blocks(types=['furnace'], radius=8) 查当前附近可安全接近的熔炉。"
         "有实际坐标的近处可用熔炉时，用 mc_window_view(x=..., y=..., z=...) 读产物和进度。"
         "铁锭就绪后对同一炉调用 mc_window_act(x=..., y=..., z=..., ops=[{'op':'take','from':'output'}])，"
         "核对实包，炉里同批原料若仍在烧，优先在安全处等它烧完，不另开井。"
