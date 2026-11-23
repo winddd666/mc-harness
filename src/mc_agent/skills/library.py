@@ -999,6 +999,14 @@ def craft_material_shortage(item: str, count: int, counts: dict[str, int]) -> di
     }
 
 
+def _reserved_craft_materials(item: str, count: int) -> dict[str, int]:
+    plan = craft_material_shortage(item, count, {}) or {}
+    materials = dict(plan.get("required_materials") or {})
+    if "cobblestone" in materials and (item.startswith("stone_") or item == "furnace"):
+        materials["cobbled_deepslate"] = materials["cobblestone"]
+    return materials
+
+
 def explain_material_craft_error(item: str, count: int, error: dict[str, Any]) -> dict[str, Any]:
     enriched = explain_craft_error(item, count, error)
     if error.get("code") != "missing_ingredients" or not isinstance(error.get("inventory"), dict):
@@ -1608,6 +1616,7 @@ class MacroSkills:
         self._temporary_furnaces: set[tuple[str, tuple[int, ...]]] = set()
         self._unfinished_portal_frames: dict[str, tuple[int, int, int]] = {}
         self._pending_furnace_takes: dict[tuple[str, tuple[int, ...], str], tuple[int, int]] = {}
+        self._smelt_inventory_reserve: dict[str, int] = {}
         self._placed_storage: dict[tuple[str, tuple[int, ...]], str] = {}
         self._dfs_storage_reports: list[dict[str, Any]] | None = None
         self._mining_dfs: Any = None
@@ -2259,8 +2268,13 @@ class MacroSkills:
         inv_snapshot: dict[str, Any] | None = None,
         *,
         turn_away_yaw: float | None = None,
+        station_materials: dict[str, int] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Drop low-value clutter deterministically when inventory is nearly full (< min_free empty slots)."""
+        if self._smelt_inventory_reserve:
+            station_materials = _merge_counts(dict(station_materials or {}), self._smelt_inventory_reserve)
+        station_min_free = min(3, min_free) if station_materials is not None else 0
+        materials = station_materials or {}
         inv = inv_snapshot if isinstance(inv_snapshot, dict) else self.bot.inventory()
         if not isinstance(inv, dict):
             return {}, []
@@ -2287,8 +2301,11 @@ class MacroSkills:
         dropped: list[dict[str, Any]] = []
         drop_ops = 0
         turned_away = False
-        for _pass_idx in range(2):
+        for pass_idx in range(2):
             empty_now = _compute_empty_slots(inv)
+            # Preserve ordinary retention unless the workstation still has fewer than three slots.
+            compact = pass_idx == 1 and empty_now < station_min_free
+            slot_goal = station_min_free if compact else min_free
             rows = [
                 r
                 for r in (inv.get("items") or [])
@@ -2313,17 +2330,17 @@ class MacroSkills:
             plan_specs = _inventory_retention_plan(per_item_counts)
             est_free = empty_now
             made_drop = False
-            for name, keep in plan_specs:
-                is_capped = (
-                    name in _TRASH_TIER4_COBBLE
-                    or name in _TRASH_TIER_NETHER
-                    or name in _TRASH_TIER3_DIRT
-                )
+            for name, regular_keep in plan_specs:
+                keep = min(regular_keep, 64) if compact else regular_keep
+                reserved = materials.get(name, 0)
+                if reserved:
+                    keep = max(keep, 64, reserved)
+                is_capped = keep >= regular_keep and name in _MINING_RETENTION_CAPS
                 total = per_item_counts.get(name, 0)
-                if drop_ops >= max_drop_ops or (est_free >= min_free and not (is_capped and total > keep)):
+                if drop_ops >= max_drop_ops or (est_free >= slot_goal and not (is_capped and total > keep)):
                     if drop_ops >= max_drop_ops:
                         break
-                    if est_free >= min_free and not over_cap:
+                    if est_free >= slot_goal and not over_cap:
                         break
                     continue
                 excess = total - keep
@@ -2337,7 +2354,7 @@ class MacroSkills:
                 target_drop = (
                     excess
                     if (keep == 0 or is_capped)
-                    else min(excess, max(0, min_free - est_free) * 64)
+                    else min(excess, max(0, slot_goal - est_free) * 64)
                 )
                 if keep > 0 and target_drop < smallest_slot:
                     continue
@@ -2345,7 +2362,7 @@ class MacroSkills:
                 while (
                     remaining > 0
                     and drop_ops < max_drop_ops
-                    and (est_free < min_free or (is_capped and total > keep))
+                    and (est_free < slot_goal or (is_capped and total > keep))
                 ):
                     if turn_away_yaw is not None and not turned_away:
                         turned_away = True
@@ -2371,6 +2388,8 @@ class MacroSkills:
                         est_free += len(slot_list) - slots_now
                         slot_list = [64] * slots_now
             if not made_drop:
+                if pass_idx == 0 and empty_now < station_min_free:
+                    continue
                 break
             inv = self.bot.inventory()
             if not isinstance(inv, dict):
@@ -2660,7 +2679,9 @@ class MacroSkills:
     ) -> dict[str, Any]:
         """Auto-clear clutter if full, fail fast when still un-fittable at empty_slots=0, else craft."""
         item = _canonical_plank_recipe(item)
-        inv_now, dropped = self._ensure_free_slots(min_free=2, inv_snapshot=inv_snapshot)
+        inv_now, dropped = self._ensure_free_slots(
+            min_free=3, inv_snapshot=inv_snapshot, station_materials=_reserved_craft_materials(item, count),
+        )
         if _compute_empty_slots(inv_now) == 0 and not _can_fit_item_in_inventory(inv_now, item, count):
             raise ApiError(
                 code="inventory_full",
@@ -4735,7 +4756,10 @@ class MacroSkills:
                 return table_res
             inv_raw = None  # Preparing a table can change the inventory.
 
-        inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
+        station_materials = _reserved_craft_materials(item, count)
+        inv_raw, pre_dropped = self._ensure_free_slots(
+            min_free=5, inv_snapshot=inv_raw, station_materials=station_materials,
+        )
         # Only pre-craft sticks/planks up front if we might need them; let server check exact 3x3 items.
         try:
             prepared = self._ensure_planks_and_sticks(planks_needed, sticks_needed)
@@ -4819,7 +4843,7 @@ class MacroSkills:
             ):
                 try:
                     if "server placed no result" in err.message:
-                        self._ensure_free_slots(min_free=6)
+                        self._ensure_free_slots(min_free=6, station_materials=station_materials)
                     if table_res and table_res.get("reused"):
                         new_table = self.ensure_crafting_table(
                             force_recarve=True, target_item=item, temporary_tables=temporary_tables,
@@ -6285,6 +6309,7 @@ class MacroSkills:
         scoped = copy(self)
         scoped.bot = session
         scoped.world_memory = self._get_world_memory()
+        scoped._smelt_inventory_reserve = {input_item: max(1, count)}
         try:
             result = scoped._smelt_items(input_item, count, fuel_item, session)
         except (_SkillDeadline, httpx.TimeoutException):
@@ -6620,7 +6645,7 @@ class MacroSkills:
             o for o in ((view.get("sections") or {}).get("output") or []) if int(o.get("count") or 0) > 0
         ]
         if outputs_to_take:
-            inv_take, take_dropped = self._ensure_free_slots(min_free=2)
+            inv_take, take_dropped = self._ensure_free_slots(min_free=3)
             if take_dropped:
                 pre_dropped.extend(take_dropped)
             for out_item in outputs_to_take:

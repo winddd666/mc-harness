@@ -6263,6 +6263,113 @@ def test_free_slots_enforces_retention_cap_even_with_empty_slots(item, initial, 
     assert all(map(lambda d: d["item"] == item, dropped))
 
 
+@pytest.mark.parametrize("task", ["iron_boots", "furnaces", "raw_iron", "sand", "sand_new_furnace"])
+def test_full_station_inventory_uses_excess_blocks_without_spending_reserved_inputs(monkeypatch, task) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    constructor = task in {"iron_boots", "furnaces"}
+    item = {"furnaces": "furnace", "sand_new_furnace": "sand"}.get(task, task)
+    output = {"raw_iron": "iron_ingot", "sand": "glass"}.get(item, item)
+    bag = {"cobblestone": 192, "cobbled_deepslate": 192, "netherrack": 128, "dirt": 64}
+    bag.update({"sand": 64, "coal": 3} if item == "sand" else {"raw_iron": 8, "coal": 3})
+    if task == "iron_boots":
+        bag["iron_ingot"] = 8
+    filler_count = 36 - sum(math.ceil(count / 64) for count in bag.values())
+    filler = [{"name": "iron_pickaxe", "count": 1} for _ in range(filler_count)]
+    drops, writes = [], []
+    loaded = 0
+    placed = task != "sand_new_furnace"
+    armor = {}
+
+    def empty_slots():
+        return 36 - len(filler) - sum(math.ceil(count / 64) for count in bag.values())
+
+    def handle(request):
+        nonlocal loaded, placed
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "inventory":
+            rows = [
+                {"name": name, "count": min(64, rest)}
+                for name, count in bag.items() for rest in range(count, 0, -64)
+            ]
+            result = {"items": filler + rows, "empty_slots": empty_slots(), "armor": armor}
+        elif route == "status":
+            result = {"pos": [0.5, 44.0, 0.5], "dimension": "overworld", "health": 20, "food": 20}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": [1, 44, 0], "dist": 1}] if placed or body["types"] != ["furnace"] else []}
+        elif route == "drop":
+            drops.append(body)
+            bag[body["item"]] -= body["count"]
+            result = {}
+        elif route == "craft":
+            if empty_slots() < 3:
+                return httpx.Response(200, json={"ok": False, "error": {"code": "inventory_full"}})
+            writes.append(body)
+            count = body["count"]
+            crafted = body["item"]
+            material, per = ("cobblestone", 8) if crafted == "furnace" else ("iron_ingot", 4)
+            assert bag[material] >= count * per
+            bag[material] -= count * per
+            bag[crafted] = count
+            result = {"crafted": crafted, "gained": count}
+        elif route == "equip":
+            assert body["item"] == "iron_boots"
+            armor[body["slot"]] = {"name": body["item"]}
+            bag.pop("iron_boots")
+            result = {}
+        elif route == "place":
+            assert task == "sand_new_furnace" and body["item"] == "furnace"
+            assert bag.pop("furnace") == 1
+            placed = True
+            result = {"pos": [1, 44, 0]}
+        elif route == "get_block":
+            assert task == "sand_new_furnace" and placed
+            result = {"name": "furnace", "properties": {"lit": True}}
+        elif route == "act":
+            ops = body["ops"]
+            writes.extend(ops)
+            if ops[0]["op"] == "put":
+                assert empty_slots() >= 3
+                assert ops[0]["item"] == item and ops[0]["count"] == 3
+                for op in ops:
+                    bag[op["item"]] -= op["count"]
+                    assert bag[op["item"]] >= 0
+                loaded = 3
+                result = {}
+            else:
+                assert ops == [{"op": "take", "from": "output", "count": 3}]
+                bag[output] = loaded
+                result = {"done": [{"took": {output: loaded}}]}
+                loaded = 0
+        elif route == "view":
+            result = {"sections": {"input": [], "output": [{"name": output, "count": loaded}]}, "info": {"burning": False}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    assert empty_slots() == 0
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot)
+        result = json.loads(
+            tools.mc_skill_craft_gear(item, count=16 if task == "furnaces" else 1)
+            if constructor else tools.mc_skill_smelt(item, count=3, fuel_item="coal")
+        )
+    assert result["ok"] is True
+    if task == "iron_boots":
+        assert result["equipped_item"]["name"] == output
+    else:
+        assert bag[output] == (16 if task == "furnaces" else 3)
+    assert len(writes) == (1 if constructor else 4 if task == "sand_new_furnace" else 3)
+    assert sum(drop["count"] for drop in drops) == 192
+    assert all(drop["item"] in {"cobblestone", "cobbled_deepslate", "netherrack"} for drop in drops)
+    if item == "sand":
+        assert bag["sand"] == 61
+
+
 def test_mine_dfs_triggers_retention_cleanup() -> None:
     from mc_agent.harness.mc_tools import McToolset
 
