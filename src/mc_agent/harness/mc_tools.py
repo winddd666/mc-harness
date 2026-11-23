@@ -2836,7 +2836,7 @@ class McToolset:
         candidates: list[str] = ["north", "east", "south", "west"]
         try:
             probed = (
-                skills._probe_viable_up_stair_dirs(bx, by, bz)
+                skills._probe_viable_up_stair_dirs(bx, by, bz, require_filler_face=True)
                 if vertical == "up"
                 else skills._probe_viable_down_stair_dirs(bx, by, bz)
             )

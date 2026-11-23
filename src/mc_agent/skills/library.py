@@ -2796,6 +2796,7 @@ class MacroSkills:
         probe_cache: dict[tuple[int, int, int], str] | None = None,
         exclude_dirs: set[str] | None = None,
         inv_counts: dict[str, int] | None = None,
+        require_filler_face: bool = False,
     ) -> list[str]:
         """Probe which 4 cardinal directions can safely perform dig_staircase(vertical='up')."""
         dirs = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
@@ -2812,6 +2813,7 @@ class MacroSkills:
             "poppy",
             "oak_sapling",
         }
+        no_support = non_solid | {"unknown", "nether_portal", "end_portal", "end_gateway", "barrier"}
         has_filler = any(
             counts.get(c, 0) >= 1
             for c in STAIR_FILLER_BLOCKS
@@ -2854,11 +2856,19 @@ class MacroSkills:
                 if _non_air_has_adj_fluid([(nx, by + 1, nz), (nx, by + 2, nz)]):
                     continue
                 step_sup = self._probe_cached_block((nx, by, nz), cache)
-                if step_sup in fluid_or_bedrock:
+                if step_sup in fluid_or_bedrock or step_sup == "unknown":
                     continue
                 is_non_solid = step_sup in non_solid or step_sup.endswith(("_leaves", "_sapling", "_carpet", "_banner"))
                 if is_non_solid and not has_filler:
                     continue
+                if is_non_solid and require_filler_face:
+                    # The space above the filler is dug out before placement.
+                    faces = ((nx, by - 1, nz), (nx + 1, by, nz), (nx - 1, by, nz), (nx, by, nz + 1), (nx, by, nz - 1))
+                    if not any(
+                        name not in no_support and not name.endswith(("_leaves", "_sapling", "_carpet", "_banner"))
+                        for name in (self._probe_cached_block(cell, cache) for cell in faces)
+                    ):
+                        continue
                 viable_up.append(odir)
             except ApiError:
                 continue
@@ -8310,7 +8320,7 @@ class MacroSkills:
                     cands = (
                         self._probe_viable_down_stair_dirs(px, py, pz)
                         if v_key == "down"
-                        else self._probe_viable_up_stair_dirs(px, py, pz)
+                        else self._probe_viable_up_stair_dirs(px, py, pz, require_filler_face=True)
                     )
                     if cands:
                         chosen_dir = cands[0]
@@ -8809,6 +8819,22 @@ class MacroSkills:
                     stop_reason = "fluid_or_bedrock"
                     break
 
+                column = (normalize_dimension(st.get("dimension")), bx, bz)
+                pillar_count, pillar_expiry = self._pillar_fallbacks.get(column, (0, 0.0))
+                face_cells = (
+                    (nx, by - 1, nz), (nx + 1, by, nz), (nx - 1, by, nz),
+                    (nx, by, nz + 1), (nx, by, nz - 1),
+                )
+                retry_after = math.ceil(pillar_expiry - time.monotonic())
+                if (
+                    pillar_count >= 2 and retry_after > 0
+                    and _is_non_solid_support(_block_name([nx, by, nz]))
+                    and not any(not _is_non_solid_support(_block_name(cell)) for cell in face_cells)
+                ):
+                    stop_reason = "pillar_fallback_cooldown"
+                    last_error = {"code": stop_reason, "pos": [bx, by, bz], "retry_after_s": retry_after}
+                    break
+
                 dig_failed = False
                 for dpos in up_targets:
                     uname = _block_name(dpos)
@@ -8838,15 +8864,10 @@ class MacroSkills:
                     # BUG-024: in a self-dug 1x1 shaft the step cell can have
                     # no solid face at all; place would always answer no_support.
                     # One safe pillar step is the only way to keep climbing.
-                    face_cells = (
-                        (nx, by - 1, nz), (nx + 1, by, nz), (nx - 1, by, nz),
-                        (nx, by, nz + 1), (nx, by, nz - 1), (nx, by + 1, nz),
-                    )
                     has_place_face = any(
-                        not _is_non_solid_support(_block_name(cell)) for cell in face_cells
+                        not _is_non_solid_support(_block_name(cell)) for cell in (*face_cells, (nx, by + 1, nz))
                     )
                     if not has_place_face:
-                        column = (normalize_dimension(st.get("dimension")), bx, bz)
                         now = time.monotonic()
                         for key, (_, expiry) in list(self._pillar_fallbacks.items()):
                             if expiry <= now:
@@ -8978,8 +8999,6 @@ class MacroSkills:
                 out_stair["hint"] = "同一站位已两次自动垫高。请用 mc_move_to 或 mc_skill_unstick 换到有支撑的站位，再规划阶梯。"
             else:
                 out_stair["hint"] = "目标台阶没有可放置面，已垫高一格。请从新高度检查有支撑的横向路线。"
-        if stop_reason == "pillar_fallback_cooldown":
-            out_stair["hint"] = "该柱的自动垫高仍在冷却。请用 mc_move_to 或 mc_skill_unstick 换到有支撑的站位。"
         if stop_reason == "dig_cell_avoided":
             out_stair["hint"] = (
                 "该格刚发生 dig 超时（同一格已临时避开 30s），本次未再挖掘。"
@@ -8988,6 +9007,39 @@ class MacroSkills:
             )
         end_pos = st_end.get("pos") or pos_before
         ebx, eby, ebz = math.floor(float(end_pos[0])), math.floor(float(end_pos[1])), math.floor(float(end_pos[2]))
+        if stop_reason == "pillar_fallback_cooldown":
+            from .combat_env import CombatEnv
+
+            retry_after = last_error["retry_after_s"]
+            reason = f"当前列缺少台阶放置面，自动垫高还需冷却约 {retry_after} 秒。"
+            recovery = "请沿已知的实心通道换站位，或调用 mc_skill_unstick 检查安全落脚点。"
+            try:
+                up_dirs = self._probe_viable_up_stair_dirs(
+                    ebx, eby, ebz, exclude_dirs={d_key}, require_filler_face=True,
+                )
+                if self.geofence:
+                    up_dirs = [
+                        direction for direction in up_dirs
+                        if self.geofence.check_ray(end_pos[0], end_pos[2], direction, 1, action="mc_skill_staircase") is None
+                    ]
+                out_stair["viable_up_directions"] = up_dirs
+                if up_dirs:
+                    recovery = f"可先调 mc_skill_staircase(direction='{up_dirs[0]}', vertical='up', steps=1)。"
+                else:
+                    terrain = CombatEnv(self.bot, geofence=self.geofence)
+                    for ox, oz in dirs.values():
+                        x, z = ebx + ox + 0.5, ebz + oz + 0.5
+                        yaw = _yaw_toward(end_pos[0], end_pos[2], x, z)
+                        route = terrain.probe_retreat(end_pos, yaw, math.hypot(x - end_pos[0], z - end_pos[2]))
+                        if route is not None:
+                            y, _ = route
+                            out_stair["recovery_move"] = {"x": x, "y": y, "z": z, "range": 0.3}
+                            recovery = f"可先调 mc_move_to(x={x}, y={y}, z={z}, range=0.3) 转移到有支撑的临近落脚点。"
+                            break
+            except (ApiError, _StairDeadline):
+                pass
+            out_stair["message"] = out_stair["hint"] = reason + recovery
+            out_stair["last_error"]["message"] = out_stair["message"]
         if stop_reason in {"cave_or_drop_ahead", "fluid_or_bedrock", "dig_failed", "undiggable_block", "movement_not_confirmed", "missing_step_support"}:
             reason_label = (
                 f"{stop_reason}:{last_error['code']}"

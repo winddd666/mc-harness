@@ -2752,8 +2752,64 @@ def test_staircase_up_falls_back_to_pillar_when_step_has_no_face(monkeypatch) ->
     assert blocked["stop_reason"] == "pillar_fallback_cooldown"
     assert blocked["steps_done"] == 0
     assert blocked["requires_replan"] is True
+    assert "120 秒" in blocked["message"] and "mc_skill_unstick" in blocked["message"]
+    assert blocked["last_error"]["message"] == blocked["message"]
     assert expired["stop_reason"] == "pillar_fallback"
     assert expired["requires_replan"] is False
+
+
+@pytest.mark.parametrize("scene", ["auto_east", "explicit_north", "horizontal_exit"])
+def test_pillar_cooldown_uses_a_probed_stair_or_safe_lateral_exit(monkeypatch, scene) -> None:
+    from mc_agent.harness.geofence import VoidGeofence
+    from mc_agent.harness.mc_tools import McToolset
+
+    monkeypatch.setattr(time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    position = [0.5, 30.0, 0.5]
+    blocks = {(0, 29, 0): "stone", (0, 31, -1): "stone"}
+    if scene == "horizontal_exit":
+        blocks[(1, 29, 0)] = "stone"
+    else:
+        blocks[(1, 30, 0)] = "stone"
+    writes = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": list(position), "dimension": "overworld", "on_ground": True, "health": 20}
+        elif route == "inventory":
+            result = {"items": [] if scene == "horizontal_exit" else [{"name": "cobblestone", "count": 4}]}
+        elif route == "get_block":
+            result = {"name": blocks.get(tuple(body["pos"]), "air")}
+        elif route == "move_to" and scene == "auto_east":
+            writes.append(route)
+            position[:] = [body["x"], body["y"], body["z"]]
+            result = {"pos": list(position)}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot, geofence=VoidGeofence(radius=10))
+        tools.skills._pillar_fallbacks[("overworld", 0, 0)] = (2, 100.0)
+        direction = "" if scene == "auto_east" else "north"
+        result = json.loads(tools.mc_skill_staircase(direction=direction, vertical="up", steps=1, stop_on_ore=False))
+
+    if scene == "auto_east":
+        assert result["ok"] and result["direction"] == "east" and result["steps_done"] == 1
+        assert writes == ["move_to"] and position == [1.5, 31, 0.5]
+    else:
+        assert not result["ok"] and result["stop_reason"] == "pillar_fallback_cooldown"
+        assert result["steps_done"] == result["dug_count"] == 0 and not writes
+        assert "100 秒" in result["message"]
+        if scene == "horizontal_exit":
+            assert result["viable_up_directions"] == []
+            assert result["recovery_move"] == {"x": 1.5, "y": 30, "z": 0.5, "range": 0.3}
+            assert "mc_move_to" in result["message"]
+        else:
+            assert result["viable_up_directions"] == ["east"]
+            assert "direction='east'" in result["message"] and "recovery_move" not in result
 
 
 def test_staircase_up_retries_transient_place_failed() -> None:
