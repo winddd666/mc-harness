@@ -29,6 +29,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -594,25 +595,52 @@ def _probe_inventory_count(inventory: object, item: str) -> int | None:
     )
 
 
+def _run_artifact_stamp(path: pathlib.Path) -> str:
+    match = re.search(r"(\d{8}-\d{6})(?:-\d{6})?\.(?:events\.)?jsonl?$", path.name)
+    return match[1] if match else ""
+
+
 def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     """Parse one fleet bot directory (summary + raw events) into a normalized row."""
     name = bd.name
     squad = name.split("_")[0]
 
-    summaries = sorted(bd.glob("wild-endurance-*.json"))
+    terminal = max(bd.glob("wild-endurance-*.json"), key=lambda path: (_run_artifact_stamp(path), path.name), default=None)
+    progress_files = sorted(bd.glob("curriculum-*.json"))
+    event_files = sorted(bd.glob("*.events.jsonl"))
     summary: dict[str, Any] = {}
-    if summaries:
+    if terminal is not None:
         try:
-            summary = json.loads(summaries[-1].read_text(encoding="utf-8"))
-        except Exception:
-            summary = {}
-    if not summary:
-        cur = sorted(bd.glob("curriculum-*.json"))
-        if cur:
-            try:
-                summary = json.loads(cur[-1].read_text(encoding="utf-8"))
-            except Exception:
-                summary = {}
+            loaded = json.loads(terminal.read_text(encoding="utf-8"))
+            summary = loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):
+            pass
+        stamp = _run_artifact_stamp(terminal)
+        curriculum = summary.get("curriculum_summary")
+        status_from_summary = curriculum.get("status") if isinstance(curriculum, dict) else summary.get("status")
+        if stamp and status_from_summary == "not_ready":
+            # A failed startup writes a terminal summary before starting any
+            # episode. Later traces in this slot belong to a new attempt.
+            new_events = [path for path in event_files if _run_artifact_stamp(path) > stamp]
+            new_progress = [path for path in progress_files if _run_artifact_stamp(path) > stamp]
+            if new_events or new_progress:
+                terminal, summary = None, {}
+                event_files, progress_files = new_events, new_progress
+        if stamp and terminal is not None and summary:
+            # A later completed retry replaces earlier attempts in the row's
+            # lifecycle and tool totals. Untimestamped legacy logs are kept.
+            event_files = [
+                path for path in event_files
+                if not (event_stamp := _run_artifact_stamp(path)) or event_stamp >= stamp
+            ]
+        if not summary:
+            terminal = None
+    if not summary and progress_files:
+        try:
+            loaded = json.loads(progress_files[-1].read_text(encoding="utf-8"))
+            summary = loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):
+            pass
 
     cs = summary.get("curriculum_summary")
     if not isinstance(cs, dict) or not cs:
@@ -653,7 +681,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     event_preemptions = 0
     has_events = False
 
-    for evf in sorted(bd.glob("*.events.jsonl")):
+    for evf in event_files:
         call_start: dict[str, tuple[float, str]] = {}
         guardian_preemptions = 0
         preemption_receipts = 0
@@ -743,14 +771,14 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         # Guardian emits both a dedicated event and the resulting tool receipt.
         event_preemptions += max(guardian_preemptions, preemption_receipts)
 
-    if summaries:
+    if terminal is not None:
         status = str(cs.get("status") or "done")
-    elif has_events:
+    elif has_events or summary:
         status = "incomplete"
     else:
         status = "empty"
     crash_tail = _read_crash_tail(bd)
-    if crash_tail and not summaries:
+    if crash_tail and terminal is None:
         status = "crash"
     score = int(score_value) if score_value is not None and status != "not_ready" else None
 
@@ -783,7 +811,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         baseline_points = baseline_points_for_stage(stage) or baseline_raw
     elif isinstance(baseline_raw, int):
         baseline_points = baseline_raw
-    elif stage == "brewing_alchemy" and summaries and summary.get("spawn") is not None:
+    elif stage == "brewing_alchemy" and terminal is not None and summary.get("spawn") is not None:
         # Finished summaries before P2-32 predate removal of the 30-point Nether travel grant.
         baseline_points = 50
     else:
