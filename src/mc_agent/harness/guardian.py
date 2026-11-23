@@ -4578,8 +4578,8 @@ class GenerationGuard:
                 "observed_life": (status.get("dimension"), status.get("last_death")),
             }
 
-        def terrain_hit_near_distant_creeper(name: str, distance: float, call: Callable[..., dict[str, Any]]) -> bool:
-            if name != "creeper" or distance <= 4.5:
+        def terrain_hit_near_distant_melee(name: str, distance: float, call: Callable[..., dict[str, Any]]) -> bool:
+            if distance <= 4.5 or (name != "creeper" and name not in PRE_HURT_MELEE_MOBS):
                 return False
             event = self._fresh_tool_hurt_event(call) or {}
             return str(event.get("source") or "").strip().lower() in {"fall", "stalagmite", "falling_stalactite"}
@@ -4600,7 +4600,7 @@ class GenerationGuard:
             if terrain is not None or terrain_only:
                 return terrain
             name, dist, entity_id, pos = self._extract_hostile_info(status)
-            if name and dist <= max_enemy_distance and not terrain_hit_near_distant_creeper(name, dist, actor_call):
+            if name and dist <= max_enemy_distance and not terrain_hit_near_distant_melee(name, dist, actor_call):
                 return {
                     "source": "tool_interrupted_hurt", "primary_entity_id": entity_id, "primary_type": name,
                     "primary_pos": pos, "distance": dist,
@@ -4738,7 +4738,7 @@ class GenerationGuard:
                         and bool(nh_name)
                         and nh_dist <= 16.0
                     )
-                    if hp_dropped and not in_lava_now and not st.get("in_water") and terrain_hit_near_distant_creeper(
+                    if hp_dropped and not in_lava_now and not st.get("in_water") and terrain_hit_near_distant_melee(
                         nh_name, nh_dist, orig_call,
                     ):
                         hp_dropped = False

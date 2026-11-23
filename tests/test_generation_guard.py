@@ -1391,22 +1391,26 @@ def test_tool_hurt_does_not_treat_distant_creeper_as_melee_attacker(monkeypatch,
     assert retreat_targets == [(expected_target, expected_target is not None)]
 
 
-@pytest.mark.parametrize("source, distance, preempt", [
-    ("fall", 10.3, False), ("stalagmite", 7.8, False), ("stalagmite", 3.9, True),
-    ("entity_explosion", 9.9, True), (None, 10.3, True),
+@pytest.mark.parametrize("mob, source, distance, preempt", [
+    ("creeper", "fall", 10.3, False), ("creeper", "stalagmite", 7.8, False),
+    ("creeper", "stalagmite", 3.9, True), ("creeper", "entity_explosion", 9.9, True),
+    ("creeper", None, 10.3, True),
+    ("spider", "fall", 12.1, False), ("spider", "fall", 2.7, True),
+    ("spider", "mob_attack", 12.1, True), ("spider", None, 12.1, True),
 ])
-def test_terrain_interruption_does_not_attribute_hurt_to_a_distant_creeper(monkeypatch, source, distance, preempt):
+def test_terrain_interruption_does_not_attribute_hurt_to_a_distant_melee_mob(monkeypatch, mob, source, distance, preempt):
     status = {
-        "pos": [-7028.9, 69, 5757.3], "health": 19, "ready": True, "alive": True, "on_ground": True,
-        "nearest_hostile": {"id": 42, "name": "creeper", "dist": distance},
+        "pos": [144434.3, 76, 82445], "health": 19, "ready": True, "alive": True, "on_ground": True,
+        "nearest_hostile": {"id": 1980720, "name": mob, "dist": distance},
     }
+    endpoint, tool = ("dig", "mc_skill_harvest_logs") if mob == "spider" else ("move_to", "mc_move_to")
     triggers = []
 
     class CaveBot:
         def call(self, action, body=None, **kwargs):
             if action == "status":
                 return dict(status)
-            if action == "move_to":
+            if action == endpoint:
                 return {"interrupted_by": "hurt"}
             if action == "events":
                 events = [{"seq": 1, "type": "hurt", "source": source}] if source else []
@@ -1415,16 +1419,17 @@ def test_terrain_interruption_does_not_attribute_hurt_to_a_distant_creeper(monke
 
     def combat(trigger):
         triggers.append(trigger)
-        return {"handled": True, "mode": "creeper_evade", "status_after": dict(status)}
+        mode = "creeper_evade" if mob == "creeper" else "cover_or_flee"
+        return {"handled": True, "mode": mode, "status_after": dict(status)}
 
     bot = CaveBot()
     guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(guard, "_run_subcortical_combat", combat)
-    result = json.loads(guard.run_tool_with_reflex("mc_move_to", lambda: json.dumps(bot.call("move_to"))))
+    result = json.loads(guard.run_tool_with_reflex(tool, lambda: json.dumps(bot.call(endpoint))))
 
     assert bool(triggers) is preempt
     if preempt:
-        assert result["reflex_mode"] == "creeper_evade"
+        assert result["reflex_mode"] == ("creeper_evade" if mob == "creeper" else "cover_or_flee")
     else:
         assert result == {"interrupted_by": "hurt"}
 
@@ -1471,14 +1476,15 @@ def test_interrupted_harvest_receipt_reports_the_dispatched_work_target(monkeypa
         assert receipt["preemption_threat"] == event["preemption_threat"] == {"id": shooter["id"], "name": shooter["name"]}
 
 
-def test_watched_movement_ignores_confirmed_stalagmite_damage_near_a_distant_creeper(monkeypatch):
+@pytest.mark.parametrize("mob, source, distance", [("creeper", "stalagmite", 8.8), ("spider", "fall", 12.1)])
+def test_watched_movement_ignores_confirmed_terrain_damage_near_a_distant_melee_mob(monkeypatch, mob, source, distance):
     import threading
 
     baseline = threading.Event()
     damaged = threading.Event()
     read_hurt = threading.Event()
     status = {"pos": [0.5, 68, 0.5], "health": 20, "ready": True, "alive": True, "on_ground": True,
-              "nearest_hostile": {"id": 42, "name": "creeper", "dist": 8.8}}
+              "nearest_hostile": {"id": 42, "name": mob, "dist": distance}}
     stops = []
 
     class CaveBot:
@@ -1496,7 +1502,7 @@ def test_watched_movement_ignores_confirmed_stalagmite_damage_near_a_distant_cre
                 return {"moved": True}
             if action == "events" and damaged.is_set():
                 read_hurt.set()
-                return {"events": [{"seq": 1, "type": "hurt", "source": "stalagmite"}]}
+                return {"events": [{"seq": 1, "type": "hurt", "source": source}]}
             if action == "stop":
                 stops.append(action)
             return {"ok": True}
