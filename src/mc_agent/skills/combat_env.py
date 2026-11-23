@@ -3897,13 +3897,22 @@ class SubcorticalInstinctController:
             target = hostiles[0]
             pos = target.get("pos")
             if (
-                target.get("id") == target_id and target.get("alive") is not False
-                and (not visible or target.get("blocked_by_wall") is False)
-                and isinstance(pos, (list, tuple)) and len(pos) >= 3
-                and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
+                target.get("id") != target_id or target.get("alive") is False
+                or not isinstance(pos, (list, tuple)) or len(pos) < 3
+                or not all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in pos[:3])
             ):
-                return pos
-            return None
+                return None
+            occluded = target.get("blocked_by_wall")
+            if visible and occluded is not False:
+                if occluded is True:
+                    return None
+                env.invalidate_block_cache()
+                try:
+                    if not env.has_los(current["pos"], pos, deadline=time.monotonic() + 0.45)["clear"]:
+                        return None
+                except _TerrainProbeExpired:
+                    return None
+            return pos
 
         current = env._safe_status({"ready": False})
         if not env._on_same_footing(before, current):

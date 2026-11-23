@@ -4185,6 +4185,7 @@ def test_cornered_unshielded_bot_strikes_once_only_against_a_close_lone_melee_mo
 
 @pytest.mark.parametrize("terrain", [
     "verified", "no_support", "incomplete", "second_hostile", "enemy_moved", "knockback", "retreat_ok",
+    "missing_wall_flag_clear", "missing_wall_flag_blocked", "missing_wall_flag_unloaded", "reported_wall",
 ])
 def test_unarmed_bot_builds_supported_cover_when_a_close_zombie_blocks_retreat(monkeypatch, terrain):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
@@ -4215,9 +4216,20 @@ def test_unarmed_bot_builds_supported_cover_when_a_close_zombie_blocks_retreat(m
                     return {"entities": [zombie, {"id": 854151, "name": "skeleton", "dist": 3.1}]}
                 if terrain == "enemy_moved" and scans >= 3:
                     return {"entities": [{**zombie, "pos": [309346.5, 19, 301948.1]}]}
+                if scans == 2 and terrain.startswith("missing_wall_flag"):
+                    observed = dict(zombie)
+                    del observed["blocked_by_wall"]
+                    return {"entities": [observed]}
+                if scans == 2 and terrain == "reported_wall":
+                    return {"entities": [{**zombie, "blocked_by_wall": True}]}
                 return {"entities": [zombie]}
             if action == "get_block":
                 cell = tuple(body["pos"])
+                if cell == (309347, 20, 301950):
+                    if terrain == "missing_wall_flag_unloaded":
+                        return {}
+                    if terrain == "missing_wall_flag_blocked":
+                        return {"name": "stone"}
                 floor = cell[1] == 18 and (terrain != "no_support" or cell[0] == 309346)
                 return {"name": blocks.get(cell, "stone" if floor else "air")}
             if action == "place":
@@ -4244,14 +4256,14 @@ def test_unarmed_bot_builds_supported_cover_when_a_close_zombie_blocks_retreat(m
     })
 
     expected_placements = [(309347, 19, 301950), (309347, 20, 301950)]
-    if terrain in {"verified", "incomplete", "enemy_moved"}:
+    if terrain in {"verified", "incomplete", "enemy_moved", "missing_wall_flag_clear"}:
         assert attempts == expected_placements
     elif terrain == "knockback":
         assert attempts == expected_placements[:1]
     else:
         assert attempts == []
-    assert (result["mode"] == "placed_cover") is (terrain == "verified")
-    if terrain == "verified":
+    assert (result["mode"] == "placed_cover") is (terrain in {"verified", "missing_wall_flag_clear"})
+    if terrain in {"verified", "missing_wall_flag_clear"}:
         assert result["actions"][-1]["action"] == "place_melee_cover"
         assert result["actions"][-1]["placed"] == 2
 
