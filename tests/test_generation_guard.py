@@ -17294,9 +17294,15 @@ def test_combat_timeout_without_contact_reaches_repeat_guard(monkeypatch, reques
     ("auto", "bow", "missing_bot_footing", "unsafe_landing"),
     ("auto", "bow", "wall", "blocked_by_wall"),
     ("auto", "bow", "blocked_then_visible", "shoot"),
+    ("auto", "bow", "unknown_clear", "shoot"),
+    ("auto", "bow", "unknown_blocked", "blocked_by_wall"),
+    ("auto", "bow", "unknown_alternate", "shoot"),
+    ("auto", "bow", "unknown_unloaded", "combat_visibility_unconfirmed"),
     ("auto", "bow", "target_lost", "shoot"),
+    ("auto", "bow", "wall_after_shot", "shoot"),
     ("auto", "bow", "respawn", "combat_position_changed"),
     ("auto", "bow", "shot_unconfirmed", "shoot_unconfirmed"),
+    ("auto", "bow", "empty_shot_receipt", "shoot_unconfirmed"),
 ])
 def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected):
     from mc_agent.harness.mc_tools import McToolset
@@ -17309,6 +17315,8 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
         "pos": [3526.5, 69, -3802.4] if scene in {"supported", "missing_target_footing"}
         else [3525.5, 70.5, -3802.4] if scene == "high_nearby" else [3543.5, 62.7, -3790.5],
     }
+    if scene.startswith("unknown_") or scene == "wall_after_shot":
+        target.pop("blocked_by_wall")
     items = [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}]
     if gear in {"bow", "crossbow", "empty_bow"}:
         items.append({"name": "crossbow" if gear == "crossbow" else "bow", "count": 1})
@@ -17331,21 +17339,31 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
                 entities.insert(0, {
                     "id": 1136219, "name": "blaze", "pos": [3531.8, 55, -3801.8], "blocked_by_wall": True,
                 })
+            if scene == "unknown_alternate":
+                entities.insert(0, {"id": 1136219, "name": "blaze", "pos": [3531.5, 69, -3802.4]})
             if scene == "target_lost" and writes:
                 entities = [{**target, "id": 1133883}]
             data = {"entities": entities}
         elif endpoint == "inventory":
             data = {"items": items}
         elif endpoint == "get_block":
-            x = body["pos"][0]
+            x, y, z = body["pos"]
             unsupported = (scene == "missing_bot_footing" and x == 3524) or (
                 scene == "missing_target_footing" and x == 3526
             )
             data = {"name": "air" if unsupported else "nether_bricks"}
+            unknown_ray = scene.startswith("unknown_") or (scene == "wall_after_shot" and not writes)
+            if unknown_ray and (x, y, z) != (3524, 68, -3803):
+                if scene == "unknown_unloaded":
+                    data = {}
+                elif scene != "unknown_blocked" and not (scene == "unknown_alternate" and x == 3528 and z == -3803):
+                    data = {"name": "air"}
         elif endpoint in {"shoot", "attack"}:
             writes.append((endpoint, body))
             if endpoint == "shoot":
                 data = {"fired": scene != "shot_unconfirmed"}
+                if scene == "empty_shot_receipt":
+                    data["projectiles"] = []
                 if len(writes) == 2:
                     data.update(target_health_before=4, target_health_after=0)
             else:
@@ -17359,9 +17377,10 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
         reply = json.loads(toolset.mc_skill_combat(mode=mode, target_name=" Minecraft:Blaze ", max_time_s=6))
 
     expected_calls = [expected] if expected in {"shoot", "attack"} else []
-    if scene in {"respawn", "shot_unconfirmed"}:
+    if scene in {"respawn", "shot_unconfirmed", "empty_shot_receipt"}:
         expected_calls = ["shoot"]
-    if expected == "shoot" and scene != "target_lost":
+    stopped_after_one = scene in {"target_lost", "wall_after_shot"}
+    if expected == "shoot" and not stopped_after_one:
         expected_calls.append("shoot")
     assert [endpoint for endpoint, _ in writes] == expected_calls
     assert all(body["entity_id"] == target["id"] for _, body in writes)
@@ -17371,10 +17390,50 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
     elif expected == "shoot":
         assert all(body["weapon"] == gear for _, body in writes)
         assert reply["ok"] and reply["result"]["shots"] == len(writes)
-        assert reply["result"]["killed"] is (scene != "target_lost")
-        assert reply["result"]["hits_landed"] == int(scene != "target_lost")
+        assert reply["result"]["killed"] is (not stopped_after_one)
+        assert reply["result"]["hits_landed"] == int(not stopped_after_one)
+        if scene == "wall_after_shot":
+            assert reply["result"]["end_reason"] == "blocked_by_wall"
     else:
         assert not reply["ok"] and reply["requires_replan"] and reply["error"]["code"] == expected
+
+
+@pytest.mark.parametrize("feedback, confirmed", [
+    ({"projectiles": []}, False),
+    ({"projectiles": [], "used": {"arrow": 1}}, True),
+    ({"projectiles": [{"id": 2026194, "name": "arrow"}]}, True),
+    ({}, True),
+])
+def test_guarded_shoot_requires_evidence_when_release_telemetry_is_available(feedback, confirmed):
+    from mc_agent.harness.mc_tools import McToolset
+
+    shot = {"fired": True, "weapon": "bow", "target": [-3570, 66, 1401.6], "dist": 7.37, **feedback}
+    calls = []
+
+    def handle(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        calls.append(endpoint)
+        if endpoint == "shoot":
+            assert json.loads(request.content)["entity_id"] == 2023374
+            result = shot
+        elif endpoint == "status":
+            result = {"blocking": True, "ready": True, "alive": True}
+        else:
+            pytest.fail(f"unexpected shot endpoint: {endpoint}")
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(handle)) as bot:
+        toolset = McToolset(bot)
+        guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+        raw = guard.run_tool_with_reflex("mc_shoot", lambda: toolset.mc_shoot(weapon="bow", entity_id=2023374))
+
+    result = json.loads(raw)
+    assert result["ok"] is confirmed and result["result"] == shot
+    if confirmed:
+        assert calls == ["shoot"]
+    else:
+        assert calls == ["shoot", "status"] and result["requires_replan"]
+        assert result["error"]["code"] == "shoot_unconfirmed" and "举盾" in result["error"]["message"]
 
 
 @pytest.mark.parametrize("case", [

@@ -17,7 +17,7 @@ from ..bot import BotSession
 from ..errors import ApiError as McApiError, AuthError, BotNotReadyError, DeathLoopCooldownError
 from ..harness.geofence import VoidGeofence
 from . import combat_v1
-from .combat_env import CombatEnv, _TerrainProbeExpired
+from .combat_env import CombatEnv, _TerrainProbeExpired, shot_release_confirmed
 
 VALID_COMBAT_MODES = frozenset(
     {
@@ -219,24 +219,54 @@ def _blaze_error(
     return {**result, "error": {"code": code, "message": message}}
 
 
+def _blaze_visible(
+    env: CombatEnv, pos: tuple[float, float, float], target: dict[str, Any], deadline: float,
+) -> bool | None:
+    target_pos = _combat_position(target.get("pos"))
+    if target_pos is None:
+        return None
+    blocked = target.get("blocked_by_wall")
+    if isinstance(blocked, bool):
+        return not blocked
+    try:
+        return env.has_los(pos, target_pos, deadline=deadline)["clear"]
+    except _TerrainProbeExpired:
+        return None
+
+
 def _fight_nether_blaze(
     adapter: BotSessionCombatAdapter,
     env: CombatEnv,
     status: dict[str, Any],
-    target: dict[str, Any] | None,
+    entities: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Engage from verified footing without chasing a blaze off a bridge."""
-    target_id = target.get("id") if target else None
-    result: dict[str, Any] = {"target_id": target_id, "killed": False}
-    if type(target_id) is not int:
+    candidates = [entity for entity in entities if (
+        str(entity.get("name") or "").removeprefix("minecraft:") == "blaze" and type(entity.get("id")) is int
+    )]
+    result: dict[str, Any] = {"target_id": candidates[0]["id"] if candidates else None, "killed": False}
+    if not candidates:
         return _blaze_error(result, "no_target", "未观察到可交战的烈焰人，请从掩体后重新扫描。")
-    target_pos = _combat_position(target.get("pos"))
     pos = _combat_position(status.get("pos"))
     life = (status.get("dimension"), status.get("last_death"))
-    if pos is None or target_pos is None:
+    candidates = [entity for entity in candidates if _combat_position(entity.get("pos")) is not None]
+    if pos is None or not candidates:
         return _blaze_error(result, "combat_position_unconfirmed", "烈焰人或脚下站位未确认，请复查敌情和站位。")
-    if target.get("blocked_by_wall") is True:
+    sight_deadline = time.monotonic() + 0.9
+    incomplete_sight = False
+    for target in sorted(candidates, key=lambda entity: entity.get("blocked_by_wall") is not False):
+        visible = _blaze_visible(env, pos, target, sight_deadline)
+        if visible is True:
+            break
+        incomplete_sight = incomplete_sight or visible is None
+    else:
+        if incomplete_sight:
+            return _blaze_error(result, "combat_visibility_unconfirmed", "未确认到烈焰人的视线，请从安全掩体重新观察。")
         return _blaze_error(result, "blocked_by_wall", "烈焰人被挡住，请等它进入视野或从已确认安全的掩体接战。")
+
+    target_id = target["id"]
+    target_pos = target["pos"]
+    result["target_id"] = target_id
 
     inventory = adapter.call("inventory", method="GET", timeout=0.8)
     counts, _, _ = env._inventory_counts_and_shield(inventory)
@@ -287,8 +317,14 @@ def _fight_nether_blaze(
         if shot_index:
             entities = adapter.call("get_entities", {"radius": 32, "types": ["blaze"]}, timeout=0.6).get("entities") or []
             live = next((entry for entry in entities if isinstance(entry, dict) and entry.get("id") == target_id), None)
-            if live is None or live.get("blocked_by_wall") is True:
-                result["end_reason"] = "target_missing" if live is None else "blocked_by_wall"
+            if live is None:
+                result["end_reason"] = "target_missing"
+                break
+            if not isinstance(live.get("blocked_by_wall"), bool):
+                env.invalidate_block_cache()
+            visible = _blaze_visible(env, pos, live, time.monotonic() + 0.6)
+            if visible is not True:
+                result["end_reason"] = "blocked_by_wall" if visible is False else "combat_visibility_unconfirmed"
                 break
         if not can_fight_from_here(adapter.call("status", method="GET", timeout=0.6)):
             return _blaze_error(result, "combat_position_changed", "射击前站位或生命已变化，请复查。")
@@ -305,7 +341,7 @@ def _fight_nether_blaze(
         except combat_v1.ApiError as error:
             return _blaze_error(result, error.code, error.message)
         shots.append(shot)
-        if shot.get("fired") is not True:
+        if not shot_release_confirmed(shot):
             return _blaze_error(result, "shoot_unconfirmed", "未确认射出箭矢，请复查弓、弹药和视线。")
         result["shots"] += 1
         before, after = shot.get("target_health_before"), shot.get("target_health_after")
@@ -390,13 +426,7 @@ def run_combat_skill(
                 if str(status.get("dimension") or "").removeprefix("minecraft:") in {"the_nether", "nether"}:
                     stationary_blaze = True
                     resolved_target = "blaze"
-                    if target is not None and target.get("blocked_by_wall") is True:
-                        target = next((entity for entity in entities if (
-                            str(entity.get("name") or "").removeprefix("minecraft:") == "blaze"
-                            and type(entity.get("id")) is int and _combat_position(entity.get("pos")) is not None
-                            and entity.get("blocked_by_wall") is False
-                        )), target)
-                    raw = _fight_nether_blaze(adapter, CombatEnv(bot, geofence=geofence), status, target)
+                    raw = _fight_nether_blaze(adapter, CombatEnv(bot, geofence=geofence), status, entities)
                     receipt = {
                         "ok": "error" not in raw, "mode": resolved_mode, "target_name": resolved_target,
                         "elapsed_s": round(time.monotonic() - started, 2), "result": raw,

@@ -45,6 +45,7 @@ from ..skills.combat_env import (
     _TerrainProbeExpired,
     aim_yaw_pitch,
     footing_blocks,
+    shot_release_confirmed,
     melee_clear_for_projectile_cover,
     ranged_retreat_positions,
     retreat_made_progress,
@@ -6081,6 +6082,26 @@ class GenerationGuard:
             **({"status_after": {key: status[key] for key in status_fields if key in status}} if status else {}),
         }
 
+    def _confirm_shoot_feedback(self, raw: str) -> str:
+        try:
+            receipt = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if not isinstance(receipt, dict) or receipt.get("ok") is not True:
+            return raw
+        shot = receipt.get("result")
+        if not isinstance(shot, dict) or "fired" not in shot or shot_release_confirmed(shot):
+            return raw
+        message = "未确认射出投射物或耗用弹药，请复查武器、弹药和当前射位。"
+        try:
+            status = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
+        except (ApiError, httpx.HTTPError):
+            status = {}
+        if isinstance(status, dict) and status.get("blocking") is True:
+            message += "当前仍在举盾，先确认实体掩护，在掩护内解除举盾后再试。"
+        receipt.update(ok=False, requires_replan=True, error={"code": "shoot_unconfirmed", "message": message})
+        return json.dumps(receipt, ensure_ascii=False)
+
     def run_tool_with_reflex(self, tool_name: str, invoke_fn: Callable[[], str]) -> str:
         """Wrap an exclusive tool invocation with mid-execution subcortical preemption."""
         is_attack = tool_name == "mc_attack"
@@ -6089,6 +6110,8 @@ class GenerationGuard:
             if receipt is not None:
                 return receipt
         is_flee = tool_name == "mc_skill_flee"
+        if tool_name == "mc_shoot" and not self._in_reflex:
+            return self._confirm_shoot_feedback(invoke_fn())
         if (tool_name in NON_PREEMPTABLE_TOOLS and not (is_flee or is_attack)) or self._in_reflex:
             return invoke_fn()
         is_unstick = tool_name == "mc_skill_unstick"
