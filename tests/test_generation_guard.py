@@ -8026,7 +8026,8 @@ def test_typed_magic_checks_the_nearby_witch_before_treating_it_as_environmental
 
 
 @pytest.mark.parametrize("ground", ["safe", "lava_drop", "slow_probe", "slow_control"])
-def test_bunker_rejection_keeps_an_armed_witch_retreat_on_verified_ground(monkeypatch, ground):
+@pytest.mark.parametrize("bunker_reason", ["unsafe_floor", "no_roof_block"])
+def test_bunker_rejection_keeps_an_armed_witch_retreat_on_verified_ground(monkeypatch, ground, bunker_reason):
     from mc_agent.skills.combat_env import yaw_to_unit_xz
 
     clock = [1000.0]
@@ -8081,14 +8082,14 @@ def test_bunker_rejection_keeps_an_armed_witch_retreat_on_verified_ground(monkey
     guard = GenerationGuard(LedgeBot(), EventSink(lambda _: None), checkpoint=lambda: None)
     monkeypatch.setattr(guard.combat_env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
     monkeypatch.setattr(MacroSkills, "dig_safety_bunker", lambda *_args, **_kwargs: {
-        "ok": False, "reason": "unsafe_floor", "floor_pos": [17029, 83, 29985], "floor_block": "lava",
+        "ok": False, "reason": bunker_reason, "floor_pos": [17029, 83, 29985], "floor_block": "lava",
     })
     monkeypatch.setattr(MacroSkills, "defend_or_flee", lambda *_args, **_kwargs: pytest.fail("unchecked retreat"))
 
     incident = guard.poll()
 
     bunker, retreat = incident["actions"]
-    assert bunker["result"]["reason"] == "unsafe_floor"
+    assert bunker["result"]["reason"] == bunker_reason
     assert retreat["action"] == "combat_or_flee" and retreat["ok"] is (ground == "safe")
     if ground.startswith("slow_"):
         assert retreat["result"] == {"ok": False, "reason": "time_budget", "partial": True}
@@ -10799,6 +10800,71 @@ def test_knockback_waits_briefly_for_ground_before_retreat(monkeypatch, landing,
     assert clock[0] <= 1000.45
     if landing == "respawned":
         assert retreat["respawned"] is True
+
+
+@pytest.mark.parametrize("landing", ["late_ground", "airborne", "respawned", "water", "has_roof", "offhand_roof"])
+def test_bug152_retreat_waits_for_landing_and_skips_missing_roof(monkeypatch, landing):
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.harness.guardian.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.harness.guardian.time.sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    zombie = {"id": 2199410, "name": "zombie", "dist": 1.2, "pos": [209589.5, 63, 222063.7]}
+    status = {
+        "pos": [209588.3, 63, 222063.7], "health": 4.166666, "food": 19, "ready": True, "alive": True,
+        "on_ground": True, "dimension": "overworld", "last_death": {"t": 1}, "nearest_hostile": zombie,
+    }
+    attempts = []
+    has_roof = landing in {"has_roof", "offhand_roof"}
+
+    class FieldBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                if status["on_ground"] is False and clock[0] >= 1000.35:
+                    if landing == "late_ground" or has_roof:
+                        status.update(pos=[209588.3, 63, 222063.7], on_ground=True)
+                    elif landing == "respawned":
+                        status.update(pos=[209598.5, 65.1, 222067.5], health=20, last_death={"t": 2})
+                    elif landing == "water":
+                        status.update(in_water=True, submerged=True)
+                return dict(status)
+            if action == "events":
+                event = {"seq": 1, "type": "hurt", "source": "mob_attack", "source_entity": zombie}
+                return {"events": [] if kwargs["params"]["since"] else [event]}
+            if action == "inventory":
+                if not attempts:
+                    status.update(pos=[209588.3, 63.2, 222063.7], on_ground=False)
+                roof = {"name": "dirt", "count": 1}
+                return {
+                    "items": [roof] if landing == "has_roof" else [],
+                    "offhand": roof if landing == "offhand_roof" else None,
+                }
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 63 else "air"}
+            if action == "move_to" or action == "control" and body.get("forward"):
+                assert status["on_ground"] is True and not status.get("in_water")
+                assert status["last_death"] == {"t": 1}
+                attempts.append("retreat")
+                status.update(pos=[209584.9, 63, 222063.7], nearest_hostile=None)
+            return {"ok": True}
+
+    def bunker(_skills, *, urgent):
+        assert urgent
+        attempts.append("bunker")
+        return {"ok": False, "reason": "not_grounded"}
+
+    monkeypatch.setattr(MacroSkills, "dig_safety_bunker", bunker)
+    guard = GenerationGuard(FieldBot(), EventSink(lambda _: None), checkpoint=lambda: None)
+    monkeypatch.setattr(guard, "_inside_own_shaft", lambda: False)
+    if landing == "water":
+        monkeypatch.setattr(guard.combat_env, "escape_deep_water_to_shore", lambda *_a, **_kw: {"ok": False, "in_water": True})
+    incident = guard.poll()
+    retreat = next(action["result"] for action in incident["actions"] if action["action"] == "combat_or_flee")
+
+    if landing == "late_ground" or has_roof:
+        assert "retreat" in attempts and retreat["ok"]
+    else:
+        assert attempts == [] and not retreat["ok"]
+    assert ("bunker" in attempts) is has_roof
+    assert clock[0] <= 1000.65
 
 
 @pytest.mark.parametrize("primary_name, primary_distance", [("zombie", 0.8), ("creeper", 3.8), ("creeper", 2.1)])

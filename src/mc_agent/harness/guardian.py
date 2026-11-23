@@ -51,7 +51,7 @@ from ..skills.combat_env import (
     ranged_retreat_positions,
     retreat_made_progress,
 )
-from ..skills.library import MacroSkills, best_melee_weapon_in_inv, ray_wall_blocker
+from ..skills.library import MacroSkills, _inventory_counts_from_raw, best_melee_weapon_in_inv, ray_wall_blocker
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear, water_oxygen_below
 
 # Hurt sources that mean "my body is embedded in a block", not "something is attacking me".
@@ -1199,13 +1199,12 @@ class GenerationGuard:
                 return {"ok": False, "mode": "natural_cover", "reason": "no_safe_natural_cover"}
             critical_knockback = (
                 dimension == "overworld" and unshielded
-                and status.get("on_ground") is False and not status.get("on_fire")
+                and not status.get("on_fire")
                 and isinstance(health, (int, float)) and 0 < health <= 6.0
                 and (
-                    (ranged and prefer_cover)
+                    (ranged and prefer_cover and status.get("on_ground") is False)
                     or (
-                        not ranged and recent_melee and health <= 4.0
-                        and nh_name in PRE_HURT_MELEE_MOBS and nh_distance <= 3.5
+                        not ranged and recent_melee and nh_name in PRE_HURT_MELEE_MOBS and nh_distance <= 3.5
                     )
                 )
             )
@@ -3328,16 +3327,32 @@ class GenerationGuard:
                         )
                     )
                     bunker = None
-                    if not indirect_magic and not exposed_to_lethal_melee and (can_surface_night_bunker or not melee_or_airborne):
-                        bunker = self._try_emergency_bunker(status)
+                    # Every urgent roof material is also a tactical filler. An inconclusive
+                    # inventory snapshot still goes through the macro's own check.
+                    no_bunker_material = (
+                        dimension == "overworld" and 0 < hp_val <= 6.0
+                        and (self.skills is None or isinstance(self.skills, MacroSkills))
+                        and isinstance(inv.get("items"), list)
+                        and self.combat_env._pick_filler_block(_inventory_counts_from_raw(inv)) is None
+                    )
+                    try_bunker = not indirect_magic and not exposed_to_lethal_melee and (
+                        can_surface_night_bunker or not melee_or_airborne
+                    )
+                    if try_bunker:
+                        if no_bunker_material:
+                            self.events.emit("guardian.emergency_bunker_skipped", reason="no_roof_block", pos=status.get("pos"))
+                        else:
+                            bunker = self._try_emergency_bunker(status)
                     if bunker is not None:
                         actions.append(bunker)
                     bunker_result = (bunker or {}).get("result") or {}
                     if self._bunker_life_unavailable(bunker):
                         reasons.append("death_or_connection_changed")
                     elif not (bunker and bunker["ok"]):
-                        unsafe_footing = bunker_result.get("reason") in {"unsafe_floor", "unsafe_open_side"} or (
-                            self._blocked_bunker is not None and self._blocked_bunker[0] == self._bunker_site(status)
+                        unsafe_footing = (
+                            (try_bunker and no_bunker_material)
+                            or bunker_result.get("reason") in {"unsafe_floor", "unsafe_open_side", "no_roof_block"}
+                            or (self._blocked_bunker is not None and self._blocked_bunker[0] == self._bunker_site(status))
                         )
                         cf = self._action(
                             "combat_or_flee",
@@ -3418,6 +3433,7 @@ class GenerationGuard:
                     )
                     retry_bunker_after_landing = (
                         dimension == "overworld" and melee_retreat and not (has_shield or has_melee_weapon)
+                        and not no_bunker_material
                         and cf_result.get("reason") == "no_safe_retreat" and not cf_result.get("respawned")
                         and (
                             bunker_result.get("reason") == "not_grounded"
