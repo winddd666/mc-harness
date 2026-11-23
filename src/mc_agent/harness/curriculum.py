@@ -490,7 +490,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
             "4) 穿好钻石靴后在主控允许的 150s 顺采窗口内可在同井顺采额外至多 5 颗钻石备钻镐与附魔台。"
         ),
         post_ensure_task=(
-            "铁镐与备用石镐已齐备：直接持续调用 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=4) 深潜采钻"
+            "铁镐与备用石镐已齐备：直接持续调用 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=4, max_duration_s=90) 深潜采钻"
             "（注意从地表/中层下探至 Y=-54 约需连续 10~12 次 explore 时间片，到达 Y=-54 后继续调 explore 会自动展开鱼骨支巷，严禁在深层调 reset 或 climb_out！）；"
             "一旦包内凑满首 4 颗 diamond，立即就地调 mc_skill_craft_gear('diamond_boots', equip_slot='feet') 穿戴锁住 75 分。"
         ),
@@ -504,7 +504,7 @@ CURRICULUM_PLAYBOOKS: dict[str, CurriculumTarget] = {
         budget_class="deep",
         pre_ensure=(("iron_pickaxe", 1),),
         task=(
-            "持有 iron_pickaxe 调 mc_skill_mine_dfs(target='diamond', target_y=-54, goal_count=4) 寻找并挖掘 diamond_ore，确保钻石真实入包解锁 story/mine_diamond。"
+            "持有 iron_pickaxe 调 mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, goal_count=4, max_duration_s=90) 寻找并挖掘 diamond_ore，确保钻石真实入包解锁 story/mine_diamond。"
         ),
         advancement_id="minecraft:story/mine_diamond",
     ),
@@ -1698,6 +1698,7 @@ def select_next_target(
         and not is_dusk_or_night
         and world_memory is not None
         and cur_dim == "overworld"
+        and (origin_pos is None or float(origin_pos[1]) >= 58.0)
         and not has_village_known
         and not _is_cooled("day2_village_search")
     ):
@@ -2836,7 +2837,8 @@ class CurriculumSupervisor:
                                 preempted_by_key=pkey,
                             )
 
-            if target.key == "island_recon_sweep" and report.get("status") not in {"paused", "paused_for_world_job"}:
+            if target.key == "island_recon_sweep" and report.get("status") in {"answered", "goal_satisfied"}:
+                # BUG-102: only mark recon completed on clean completion, not on mid-sweep limit_reached/timeout
                 self.recon_completed = True
             if target.key == "day2_village_search" and report.get("status") not in {"paused", "paused_for_world_job"}:
                 # Allow full Day 2 daytime village search (up to 3 episodes across different sectors);
@@ -2880,6 +2882,17 @@ class CurriculumSupervisor:
             score_after, breakdown = score_completed_advancements(completed_after)
             bag_after_counts = total_owned_counts(inv_after) if isinstance(inv_after, dict) else {}
             objective_verified = base_playbook.is_objectively_satisfied(completed_after, bag_after_counts)
+            if not objective_verified and target.key == "day2_village_search":
+                # BUG-084: objective completion predicate for day2_village_search via WorldMemory village/bed evidence
+                wm_after = self.toolset.world_memory
+                has_villager_or_poi = bool(wm_after.habitats.get(("overworld", "villager"))) or any(
+                    e.dim == "overworld"
+                    and e.name in {"bell", "hay_block", "lectern", "composter", "fletching_table"}
+                    for e in wm_after.pois.values()
+                )
+                has_bed_mem = bool(getattr(wm_after, "bed_positions", None))
+                if has_villager_or_poi or has_bed_mem:
+                    objective_verified = True
 
             material_progress = (
                 objective_verified
