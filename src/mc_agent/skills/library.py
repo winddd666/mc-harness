@@ -5503,7 +5503,7 @@ class MacroSkills:
 
     @staticmethod
     def _first_iron_pick_fuel_stock(
-        counts: dict[str, int], input_item: str, smelt_n: int,
+        counts: dict[str, int], input_item: str, smelt_n: int, *, preserve_short_stock: bool = False,
     ) -> tuple[dict[str, int] | None, int | None]:
         pick_tier = _best_pickaxe_in_inv(counts)[1]
         output = SMELT_OUTPUTS.get(input_item)
@@ -5514,10 +5514,11 @@ class MacroSkills:
         reserved_planks = (0 if counts.get("crafting_table", 0) else 4) + 2 * _stick_craft_batches(2, sticks)
         input_reserved = smelt_n if preparing_charcoal else 0
         spare_planks = _plank_equivalent(counts) - reserved_planks - 4 * input_reserved
-        if spare_planks < 0:
+        if spare_planks < 0 and not preserve_short_stock:
             if preparing_charcoal:
                 return None, reserved_planks
             return counts, None  # Furnace selection cannot preserve an already missing recipe.
+        spare_planks = max(0, spare_planks)
         spendable = dict(counts, stick=max(0, sticks - 2))
         for item, amount in counts.items():
             if item in _PLANK_SOURCE_LOGS:
@@ -6241,14 +6242,17 @@ class MacroSkills:
             rows = sections.get(slot)
             if isinstance(rows, list):
                 observed[slot] = sum(int(row.get("count") or 0) for row in rows if isinstance(row, dict))
+                if slot == "input" and len(rows) == 1 and isinstance(rows[0], dict):
+                    input_item = _clean_block(rows[0].get("name"))
+                    if input_item:
+                        observed["input_item"] = input_item
         burning = (window.get("info") or {}).get("burning")
         if isinstance(burning, bool):
             observed["burning"] = burning
         if observed:
             progress["last_furnace_observation"] = {**observed, "phase": phase}
 
-    @staticmethod
-    def _partial_smelt(progress: dict[str, Any]) -> dict[str, Any]:
+    def _partial_smelt(self, progress: dict[str, Any], session: _SkillBudgetSession | None = None) -> dict[str, Any]:
         furnace = progress.get("last_furnace_observation") or {}
         guidance = MacroSkills._furnace_collection_guidance(progress.get("furnace_pos"))
         state = "check_furnace"
@@ -6258,7 +6262,25 @@ class MacroSkills:
         elif furnace.get("input", 0) > 0:
             if furnace.get("burning") is False and furnace.get("fuel") == 0:
                 state = "needs_fuel"
-                guidance["message"] = "原炉仍有原料，最近一次炉窗显示停火且燃料槽空。复读原炉后只补 fuel 槽，再取成品。"
+                refill = self._plan_furnace_refill(progress, furnace, session)
+                if refill is None:
+                    guidance["message"] = (
+                        "原炉仍有原料，最近一次炉窗显示停火且燃料槽空。"
+                        "复读原炉，确认可用燃料足够烧完余料后只补 fuel 槽。"
+                        "若不足，请先补煤或额外木料，保留首把铁镐所需材料。"
+                        "已有成品可先取，随后在 output 再有成品时取货。"
+                    )
+                else:
+                    item, count = refill
+                    target = guidance["next_actions"][0]["arguments"]
+                    guidance["next_actions"].insert(1, {
+                        "name": "mc_window_act",
+                        "arguments": {**target, "ops": [{"op": "put", "item": item, "count": count, "to": "fuel"}]},
+                    })
+                    guidance["message"] = (
+                        f"先复读原炉。仅在仍停火、燃料槽空且原料仍为 {furnace['input_item']} ×{furnace['input']} 时，"
+                        f"用第二个调用只补 fuel 槽（{item} ×{count}）。确认 output 有成品时再执行取货。"
+                    )
             elif furnace.get("burning") is True:
                 state = "processing"
                 guidance["message"] = "原炉最近仍在烧剩余原料。可先做其它动作，之后复读并从 output 槽取成品。"
@@ -6277,6 +6299,31 @@ class MacroSkills:
             "furnace_state": state,
             **guidance,
         }
+
+    def _plan_furnace_refill(
+        self, progress: dict[str, Any], furnace: dict[str, Any], session: _SkillBudgetSession | None,
+    ) -> tuple[str, int] | None:
+        input_item = progress.get("input")
+        if (
+            session is None or progress.get("furnace_pos") is None
+            or not input_item or furnace.get("input_item") != input_item
+        ):
+            return None
+        budget = min(1.0, session.deadline - time.monotonic())
+        read = _SkillBudgetSession(session, budget, single_attempt=True)
+        try:
+            inventory = read.call("inventory", method="GET")
+        except (_SkillDeadline, ApiError, httpx.HTTPError):
+            return None
+        counts = _inventory_counts_from_raw(inventory)
+        spendable, _ = self._first_iron_pick_fuel_stock(counts, input_item, 0, preserve_short_stock=True)
+        # The rest of this batch is already in the furnace, outside the inventory snapshot.
+        remaining = furnace["input"]
+        one_slot = {item: min(count, 64) for item, count in (spendable or {}).items()}
+        item, count, per_item = self._choose_smelt_fuel(
+            smelt_n=remaining, fuel_item=(progress.get("fuel") or {}).get("item"), counts=one_slot, input_item="",
+        )
+        return (item, count) if item and count * per_item >= remaining else None
 
     @staticmethod
     def _missing_smelt_fuel(
@@ -6526,7 +6573,7 @@ class MacroSkills:
             session.progress["auto_dropped"] = pre_dropped
         expected = SMELT_OUTPUTS.get(_clean_block(input_item))
         if sum(row["count"] for row in collected if expected is None or row["name"] == expected) < smelt_n:
-            return self._partial_smelt(session.progress)
+            return self._partial_smelt(session.progress, session)
         if furnace_pos is not None and dim is not None:
             cleanup = self._reclaim_empty_temporary_furnace(session, furnace_pos, dim)
             if cleanup:

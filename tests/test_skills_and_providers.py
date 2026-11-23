@@ -4020,15 +4020,19 @@ def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, epi
     assert operations[-1] == {"op": "take", "from": "output", "count": 2}
 
 
-@pytest.mark.parametrize("state,ready,taken,after", [
-    ("processing", 4, 4, (2, 1, 0, True)),
-    ("output_ready", 4, 4, (0, 0, 2, False)),
-    ("needs_fuel", 1, 1, (5, 0, 0, False)),
-    ("check_furnace", 2, 2, None),
-    ("output_ready", 4, 0, (2, 1, 4, True)),
+@pytest.mark.parametrize("state,ready,taken,after,stock,refill", [
+    ("processing", 4, 4, (2, 1, 0, True), {}, None),
+    ("output_ready", 4, 4, (0, 0, 2, False), {}, None),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), {"stick": 6, "crafting_table": 1}, ("stick", 4)),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), {"stick": 3, "crafting_table": 1}, None),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), {"stick": 5}, None),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), {"coal": 1, "stick": 2}, ("coal", 1)),
+    ("needs_fuel", 1, 1, (2, 0, 0, False), None, None),
+    ("check_furnace", 2, 2, None, {}, None),
+    ("output_ready", 4, 0, (2, 1, 4, True), {}, None),
 ])
 def test_partial_iron_smelt_reports_last_furnace_state_and_confirmed_pick_material(
-    monkeypatch, state, ready, taken, after,
+    monkeypatch, state, ready, taken, after, stock, refill,
 ) -> None:
     from mc_agent.harness.mc_tools import McToolset
 
@@ -4037,7 +4041,8 @@ def test_partial_iron_smelt_reports_last_furnace_state_and_confirmed_pick_materi
     monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
     furnace = [219410, 16, 152022]
     fuel = "oak_planks" if state == "needs_fuel" else "coal"
-    bag = {"raw_iron": 6, fuel: 1}
+    load_count = 3 if state == "needs_fuel" else 6
+    bag = {"raw_iron": load_count, fuel: 1}
     writes = []
 
     def window(input_count, fuel_count, output_count, burning):
@@ -4056,6 +4061,8 @@ def test_partial_iron_smelt_reports_last_furnace_state_and_confirmed_pick_materi
         route = request.url.path.rsplit("/", 1)[-1]
         body = json.loads(request.content) if request.content else {}
         if route == "inventory":
+            if len(writes) == 2 and stock is None:
+                raise httpx.ReadTimeout("offline refill inventory unavailable", request=request)
             result = {"items": [{"name": item, "count": n} for item, n in bag.items() if n]}
         elif route == "status":
             result = {"pos": [219409.5, 16.0, 152022.5], "health": 20, "food": 20}
@@ -4064,13 +4071,13 @@ def test_partial_iron_smelt_reports_last_furnace_state_and_confirmed_pick_materi
         elif route == "view":
             assert body["target"] == {"pos": furnace}
             before_burning = None if after is None else state != "needs_fuel"
-            result = window(6 - ready, int(before_burning is True), ready, before_burning)
+            result = window(load_count - ready, int(before_burning is True), ready, before_burning)
         elif route == "act":
             assert body["target"] == {"pos": furnace}
             writes.append(body["ops"])
             if body["ops"][0]["op"] == "put":
                 assert body["ops"] == [
-                    {"op": "put", "item": "raw_iron", "count": 6, "to": "input"},
+                    {"op": "put", "item": "raw_iron", "count": load_count, "to": "input"},
                     {"op": "put", "item": fuel, "count": 1, "to": "fuel"},
                 ]
                 bag["raw_iron"] = bag[fuel] = 0
@@ -4078,6 +4085,7 @@ def test_partial_iron_smelt_reports_last_furnace_state_and_confirmed_pick_materi
             else:
                 assert body["ops"] == [{"op": "take", "from": "output", "count": ready}]
                 bag["iron_ingot"] = taken
+                bag.update(stock or {})
                 result = {"done": [{"took": {"iron_ingot": taken}}] if taken else []}
                 if after is not None:
                     result["window"] = window(*after)
@@ -4088,8 +4096,8 @@ def test_partial_iron_smelt_reports_last_furnace_state_and_confirmed_pick_materi
     with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
         tools = McToolset(bot)
         tools._episode_deadline_mono = 14.0
-        result = json.loads(tools.mc_skill_smelt("raw_iron", count=6, fuel_item=fuel))
-        assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": 6 - taken}
+        result = json.loads(tools.mc_skill_smelt("raw_iron", count=load_count, fuel_item=fuel))
+        assert tools.world_memory.get_in_conversion_counts() == {"iron_ingot": load_count - taken}
 
     assert result["error"] == "partial_smelt" and result["furnace_state"] == state
     assert result["elapsed_s"] == round(clock[0], 2) <= 10
@@ -4101,12 +4109,27 @@ def test_partial_iron_smelt_reports_last_furnace_state_and_confirmed_pick_materi
     if after is not None:
         assert result["last_furnace_observation"] == {
             **dict(zip(("input", "fuel", "output", "burning"), after)), "phase": "after_take",
+            **({"input_item": "raw_iron"} if after[0] else {}),
         }
     else:
         assert result["last_furnace_observation"]["phase"] == "before_take"
-    if state == "needs_fuel":
-        assert "只补 fuel" in result["message"]
-    assert result["next_actions"][1]["arguments"]["ops"] == [{"op": "take", "from": "output"}]
+    target = {"block": "furnace", "x": furnace[0], "y": furnace[1], "z": furnace[2]}
+    expected_actions = [{"name": "mc_window_view", "arguments": target}]
+    if refill:
+        item, count = refill
+        expected_actions.append({
+            "name": "mc_window_act",
+            "arguments": {**target, "ops": [{"op": "put", "item": item, "count": count, "to": "fuel"}]},
+        })
+        assert "仍停火、燃料槽空且原料仍为 raw_iron ×2" in result["message"]
+    elif state == "needs_fuel":
+        assert "燃料足够烧完余料" in result["message"]
+        assert "先补煤或额外木料" in result["message"]
+    expected_actions.append({
+        "name": "mc_window_act", "arguments": {**target, "ops": [{"op": "take", "from": "output"}]},
+    })
+    assert result["next_actions"] == expected_actions
+    assert all(bag[item] == count for item, count in (stock or {}).items())
 
 
 @pytest.mark.parametrize("receipt", ["confirmed", "unconfirmed", "partial_error"])
