@@ -386,6 +386,77 @@ def test_harvest_logs_prefers_low_trunk_over_closer_canopy() -> None:
     assert result["target_gained"] == {"oak_log": 1}
 
 
+@pytest.mark.parametrize("terrain", ["slope", "far_hill", "water", "unconfirmed", "hurt", "lost_receipt"])
+def test_harvest_logs_tries_one_supported_approach_to_elevated_logs(terrain) -> None:
+    standing = [0.6, 64.0, 0.5]
+    log = [21, 80, 0] if terrain == "far_hill" else [4, 68, 0]
+    moves = []
+    scans = []
+    digs = []
+    stops = []
+    wood = 0
+
+    def handler(request):
+        nonlocal wood
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": standing, "on_ground": True, "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": "oak_log", "count": wood}] if wood else []}
+        elif route == "find_blocks":
+            scans.append(standing.copy())
+            result = {"blocks": [{"pos": log, "name": "oak_log"}]}
+        elif route == "get_block":
+            x, y, _ = body["pos"]
+            if terrain == "water" and x != 0:
+                name = "water"
+            else:
+                name = "dirt" if y <= (63 if x == 0 else 64) else "air"
+            result = {"name": name}
+        elif route == "move_to":
+            moves.append(body)
+            if terrain == "lost_receipt":
+                raise httpx.RemoteProtocolError("movement receipt lost", request=request)
+            destination = [body["x"], body["y"], body["z"]]
+            if terrain != "unconfirmed":
+                standing[:] = destination
+            result = {"pos": destination}
+            if terrain == "hurt":
+                result["interrupted_by"] = "hurt"
+        elif route == "stop":
+            stops.append(body)
+            result = {"stopped": True, "released": True}
+        elif route == "dig":
+            digs.append(body["pos"])
+            assert math.dist(standing, log) <= 4.0
+            wood += 1
+            result = {"dug": "oak_log", "gained": {"oak_log": 1}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).harvest_logs(target_logs=1, radius=16)
+
+    assert len(moves) == (0 if terrain == "water" else 1)
+    if moves:
+        assert moves[0]["y"] == 65
+        assert moves[0]["stop_on"] == ["hurt", "death"]
+        assert moves[0]["timeout"] < 3000
+    assert len(stops) == (1 if terrain == "lost_receipt" else 0)
+    assert len(scans) == (2 if terrain in {"slope", "far_hill"} else 1)
+    assert result["log_approach"]["moved"] is (terrain in {"slope", "far_hill"})
+    if terrain == "slope":
+        assert digs == [log]
+        assert result["ok"] is True
+        assert result["target_gained"] == {"oak_log": 1}
+    else:
+        assert digs == []
+        assert result["ok"] is False
+        assert result["stop_reason"] == ("approach_interrupted" if terrain == "hurt" else "unreachable_targets")
+
+
 @pytest.mark.parametrize("actor", [False, True])
 def test_harvest_logs_budget_covers_setup_and_preserves_partial_dig(monkeypatch, actor) -> None:
     from mc_agent.harness.mc_tools import McToolset

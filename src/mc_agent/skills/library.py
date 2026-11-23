@@ -4075,7 +4075,9 @@ class MacroSkills:
                 "stop_reason": "time_budget",
                 "message": "本轮采集已到时间预算。请按 gained 核对入包产物，再换近处可达目标或减少数量。",
             }
-        if cleanup_inventory and result.get("stop_reason") not in {"time_budget", "pickup_interrupted"}:
+        if cleanup_inventory and result.get("stop_reason") not in {
+            "time_budget", "pickup_interrupted", "approach_interrupted",
+        }:
             try:
                 _, cleaned = scoped._ensure_free_slots(min_free=3)
             except _SkillDeadline:
@@ -4136,6 +4138,61 @@ class MacroSkills:
         pos = moved.get("pos") or self.bot.status().get("pos")
         return column if isinstance(pos, list) and len(pos) == 3 and reachable(pos) else [target]
 
+    def _approach_elevated_log(
+        self, session: _SkillBudgetSession, before: dict[str, Any], log: list[int],
+    ) -> dict[str, Any]:
+        """Take one verified step toward a high log without digging a route."""
+        from .combat_env import CombatEnv, aim_yaw_pitch, yaw_to_unit_xz
+
+        origin = before["pos"]
+        result = {"log": log, "pos_before": origin, "moved": False}
+
+        def safe_stance(state: dict[str, Any]) -> bool:
+            return (
+                state.get("pos") is not None and state.get("on_ground") is True
+                and state.get("ready") is not False and state.get("alive") is not False
+                and not state.get("in_water") and not state.get("in_lava")
+                and state.get("dimension") == before.get("dimension")
+                and state.get("last_death") == before.get("last_death")
+            )
+
+        if not safe_stance(before) or before.get("busy"):
+            return {**result, "reason": "unsafe_stance"}
+        log_center = [log[0] + 0.5, log[1], log[2] + 0.5]
+        yaw, _ = aim_yaw_pitch(origin, log_center)
+        distance = math.hypot(log_center[0] - origin[0], log_center[2] - origin[2])
+        probe = _SkillBudgetSession(session, min(4.0, session._remaining()), single_attempt=True)
+        terrain = CombatEnv(probe, geofence=self.geofence)
+        for stride in (min(2.5, distance - 0.75), 1.25):
+            if stride < 1.0 or stride > distance - 0.75:
+                continue
+            for angle in (0, -35, 35):
+                if probe.timed_out or probe.deadline <= time.monotonic() or session._remaining() <= 2.5:
+                    return {**result, "reason": "insufficient_time"}
+                heading = yaw + math.radians(angle)
+                route = terrain.probe_retreat(origin, heading, stride)
+                if route is None or route[0] < math.floor(origin[1] + 0.05):
+                    continue
+                ux, uz = yaw_to_unit_xz(heading)
+                x, z = origin[0] + ux * stride, origin[2] + uz * stride
+                current = session.status()
+                if not safe_stance(current) or current.get("busy") or math.dist(current["pos"], origin) > 0.2:
+                    return {**result, "reason": "stance_changed", "interrupted": True}
+                hop = _SkillBudgetSession(session, min(4.5, session._remaining()), single_attempt=True)
+                error = self._scout_move(hop, x, z, y=route[0], seconds=2.5, range_m=0.25)
+                if error and error not in SURFACE_SCOUT_PATH_ERRORS:
+                    return {**result, "reason": error, "interrupted": True}
+                after = session.status()
+                if not safe_stance(after):
+                    return {**result, "reason": "stance_changed", "interrupted": True}
+                pos = after["pos"]
+                moved = (
+                    math.dist(pos, [x, route[0], z]) <= 0.55
+                    and math.dist(pos, log_center) < math.dist(origin, log_center) - 0.4
+                )
+                return {**result, "pos_after": pos, "moved": moved, **({} if moved else {"reason": error or "move_not_confirmed"})}
+        return {**result, "reason": "unsafe_landing"}
+
     def _dig_target_blocks(
         self,
         *,
@@ -4148,6 +4205,7 @@ class MacroSkills:
         inv_before: dict[str, int] | None = None,
         avoid_water: bool = False,
         auto_dropped_names: set[str] | frozenset[str] | None = None,
+        approach_elevated_logs: bool = False,
     ) -> dict[str, Any]:
         """Shared candidate scan, vertical reachability ranking, blacklist handling, and drop rescue."""
         expected_drops = _expected_drops_for_blocks(block_types)
@@ -4206,6 +4264,7 @@ class MacroSkills:
         deadline_hit = False
         consecutive_failures = 0
         unreachable_targets = False
+        log_approach: dict[str, Any] | None = None
         trunk_queue: list[dict[str, Any]] = []
         try:
             dig_call_params = inspect.signature(self.bot.call).parameters
@@ -4242,6 +4301,17 @@ class MacroSkills:
                 standing = st.get("pos") or [0, 64, 0]
                 bot_y = float(standing[1])
                 feet_y = math.floor(bot_y)
+                if (
+                    approach_elevated_logs and session is not None and st.get("pos")
+                    and normalize_dimension(st.get("dimension")) == "overworld"
+                    and all(b["pos"][1] > bot_y + above_tol and math.dist(standing, b["pos"]) > 4.0 for b in candidates)
+                ):
+                    if dug_count == 0 and log_approach is None:
+                        nearest = min(candidates, key=lambda b: math.dist(standing, b["pos"]))
+                        log_approach = self._approach_elevated_log(session, st, nearest["pos"])
+                        if log_approach["moved"]:
+                            continue
+                    break
                 candidates.sort(
                     key=lambda b: (
                         (
@@ -4513,6 +4583,18 @@ class MacroSkills:
             out["message"] = (
                 "已连续 4 次未能挖到选中的原木。请用 mc_move_to 换到附近树干旁或更换站位，再采集低处原木。"
             )
+        if log_approach is not None:
+            out["log_approach"] = log_approach
+            if dug_count == 0:
+                interrupted = log_approach.get("interrupted")
+                out.update(
+                    error="interrupted" if interrupted else "unreachable_targets",
+                    stop_reason="approach_interrupted" if interrupted else "unreachable_targets",
+                    message=(
+                        "接近高处原木时动作被中断，请先确认当前站位。"
+                        if interrupted else "高处原木仍不可达。请换到有支撑的较高站位，或寻找低处树干。"
+                    ),
+                )
         if pickup_interrupted:
             out.update(ok=False, stop_reason="pickup_interrupted", requires_replan=True)
             out["pickup"] = last_drop_scan
@@ -4585,6 +4667,7 @@ class MacroSkills:
             above_tol=3.5,
             inv_before=counts,
             auto_dropped_names=auto_dropped_names or None,
+            approach_elevated_logs=True,
         )
         if res.get("error") == "protected_region":
             return res
@@ -4606,13 +4689,14 @@ class MacroSkills:
                     above_tol=3.5,
                     inv_before=counts,
                     auto_dropped_names=auto_dropped_names or None,
+                    approach_elevated_logs=True,
                 )
                 if retry_res.get("error") == "protected_region":
                     return retry_res
                 res = retry_res
 
         if (
-            res.get("stop_reason") not in {"time_budget", "unreachable_targets"}
+            res.get("stop_reason") not in {"time_budget", "unreachable_targets", "approach_interrupted"}
             and int(res.get("dug_count") or 0) == 0
             and self.temporary_avoidance
         ):
