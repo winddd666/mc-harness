@@ -40,7 +40,9 @@ from ..skills.library import (
     _best_pickaxe_in_inv,
     _can_fit_item_in_inventory,
     _compute_empty_slots,
+    _expected_drops_for_blocks,
     _inventory_counts,
+    _merge_counts,
     _normalize_drop_name,
     best_melee_weapon_in_inv,
     explain_material_craft_error,
@@ -1671,6 +1673,13 @@ class McToolset:
                     [x, y, z], dim=self._last_dimension, block_name=bname or None
                 )
                 self.world_memory.remove_poi([x, y, z], dim=self._last_dimension)
+                if collect:
+                    pickup = self._collect_after_atomic_dig(parsed_dig.get("result"), bname, session)
+                    if pickup is not None:
+                        parsed_dig["pickup_after_dig"] = pickup
+                        if pickup.get("stop_confirmed") is False:
+                            parsed_dig["requires_replan"] = True
+                        raw_dig = json.dumps(parsed_dig, ensure_ascii=False)
             elif isinstance(parsed_dig, dict) and parsed_dig.get("ok") is False:
                 err = parsed_dig.get("error") if isinstance(parsed_dig.get("error"), dict) else {}
                 if err.get("code") == "timeout":
@@ -1690,6 +1699,25 @@ class McToolset:
         except Exception:
             pass
         return raw_dig
+
+    def _collect_after_atomic_dig(
+        self, result: Any, block_name: str, session: _SkillBudgetSession | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(result, dict) or not result.get("dug"):
+            return None
+        dug = result["dug"] if isinstance(result["dug"], str) else block_name
+        expected = _expected_drops_for_blocks([dug])
+        gained = result.get("gained") or {}
+        if not expected or any(_normalize_drop_name(item) in expected and amount > 0 for item, amount in gained.items()):
+            return None
+        picker = copy(self.skills) if session is not None else self.skills
+        if session is not None:
+            picker.bot = session
+        pickup = picker._collect_target_drops(expected, 3.5, 1, max_duration_s=1.0, single_attempt=True, dig_pickup=True)
+        if pickup["gained"]:
+            result["gained"] = _merge_counts(dict(gained), pickup["gained"])
+        self.update_block_pos(pickup.get("pos_after"))
+        return pickup if pickup["attempts"] or pickup.get("error") else None
 
     def _check_dimension_physics(self, item: str | None) -> str | None:
         if not item:

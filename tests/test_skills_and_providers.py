@@ -293,6 +293,8 @@ def test_mine_blocks_out_of_reach_ranking_and_drop_collection() -> None:
                     "result": {"entities": [{"id": 9001, "type": "item", "item": "cobblestonex1", "pos": [3.0, 100.0, 0.0]}]},
                 },
             )
+        if path == "/get_block":
+            return httpx.Response(200, json={"ok": True, "result": {"name": "stone" if body["pos"][1] < 100 else "air"}})
         if path == "/move_to":
             moved_to.append(body)
             cobble += 1
@@ -309,7 +311,8 @@ def test_mine_blocks_out_of_reach_ranking_and_drop_collection() -> None:
     assert dug_positions == [[2, 100, 0], [3, 100, 0]]
     assert (2, 100, 0) not in skills.protected_positions
     assert skills.temporary_avoidance[(2, 100, 0)]["reason"] == "out_of_reach"
-    assert moved_to and moved_to[0]["entity_id"] == 9001
+    assert moved_to and [moved_to[0][axis] for axis in ("x", "y", "z")] == [3.0, 100, 0.0]
+    assert moved_to[0]["range"] == 0.8
 
 
 def test_harvest_logs_stops_after_four_unreachable_targets(monkeypatch) -> None:
@@ -523,7 +526,8 @@ def test_harvest_logs_chops_one_column_and_collects_at_the_end(monkeypatch, time
                 clock[0] += request.extensions["timeout"]["read"]
                 raise httpx.ReadTimeout("slow second trunk", request=request)
             clock[0] += 1.0
-            result = {"dug": "oak_log", "gained": {"oak_log": 4} if body["collect"] else {}}
+            collected = 3 if len(digs) == 3 else 1
+            result = {"dug": "oak_log", "gained": {"oak_log": collected} if body["collect"] else {}}
         elif route == "stop":
             result = {"stopped": True, "released": True}
         else:
@@ -536,7 +540,7 @@ def test_harvest_logs_chops_one_column_and_collects_at_the_end(monkeypatch, time
         )
 
     assert [d["pos"] for d in digs[:4]] == trunk
-    assert [d["collect"] for d in digs[:4]] == [False, False, False, True]
+    assert [d["collect"] for d in digs[:4]] == [False, False, True, True]
     assert len(moves) == 1
     assert [moves[0]["x"], moves[0]["z"]] == [5.5, 0.5]
     assert len(scans) == 1 + timeout_after_column
@@ -583,9 +587,87 @@ def test_harvest_logs_checks_inventory_when_cuts_outnumber_reported_pickups(actu
     if actual_logs == 2:
         assert result["error"] == "partial_collection"
         assert result["partial_progress"] is True
-        assert pickup_scans == 1
+        assert pickup_scans == 2
     else:
         assert pickup_scans == 0
+
+
+@pytest.mark.parametrize("terrain", ["same_level", "one_below", "pit", "water", "no_alternative"])
+def test_common_mining_batches_skip_unsafe_drops_and_try_a_reachable_face(monkeypatch, terrain) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    position = [0.5, 64.0, 0.5]
+    first_cells = [[1, 64, 0], [2, 64, 0]]
+    lower_cell = [0, 63, 0]
+    replacement = [0, 64, 2]
+    drops, moves, digs, scans = [], [], [], []
+    cobble = 0
+
+    def handle(request):
+        nonlocal cobble
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": list(position), "dimension": "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": "stone_pickaxe", "count": 1}, {"name": "cobblestone", "count": cobble}]}
+        elif route == "equip":
+            result = {}
+        elif route == "find_blocks":
+            alternatives = []
+            if len(digs) >= 2 and terrain != "no_alternative":
+                alternatives = [replacement] if terrain in {"same_level", "one_below"} else [lower_cell, replacement]
+            cells = first_cells[len(digs):] if len(digs) < 2 or terrain in {"same_level", "one_below"} else first_cells
+            result = {"blocks": [
+                {"name": "stone", "pos": pos, "dist": float(index + 1) if pos != lower_cell else 0.2}
+                for index, pos in enumerate([*cells, *alternatives])
+            ]}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            floor_y = 62 if terrain == "one_below" and x >= 1 else 63
+            result = {"name": "water" if terrain == "water" and x >= 1 and y == 64 else "stone" if y <= floor_y else "air"}
+        elif route == "dig":
+            digs.append(body["pos"])
+            if len(digs) == 2:
+                drop_y = 63.0 if terrain == "one_below" else 62.0 if terrain in {"pit", "no_alternative"} else 64.0
+                drop_x = 1.72 if terrain == "one_below" else 1.5
+                drops.append({"id": 4, "item": "cobblestonex2", "pos": [drop_x, drop_y, 0.5]})
+            cobble += int(len(digs) == 3)
+            result = {"dug": "stone", "gained": {"cobblestone": 1} if len(digs) == 3 else {}}
+        elif route == "get_entities":
+            scans.append((len(digs), body))
+            result = {"entities": list(drops)}
+        elif route == "move_to":
+            assert body["range"] == 0.8
+            moves.append([body["x"], body["y"], body["z"]])
+            position[:] = moves[-1]
+            drops.clear()
+            cobble += 2
+            result = {"pos": list(position)}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        result = json.loads(McToolset(bot).mc_skill_mine_blocks(["stone"], count=3, radius=8))
+    assert scans[0] == (2, {"radius": 5, "types": ["item"]})
+    if terrain in {"same_level", "one_below"}:
+        assert moves == ([[1.72, 63, 0.5]] if terrain == "one_below" else [[1.5, 64, 0.5]])
+        assert result["target_gained"] == {"cobblestone": 3}
+    else:
+        assert moves == []
+        assert result["target_gained"] == ({"cobblestone": 1} if terrain != "no_alternative" else {})
+    if terrain == "no_alternative":
+        assert digs == first_cells
+        assert result["error"] == "no_drops_collected"
+        assert "改采同层" in result["approach_hint"]
+        assert "mc_skill_staircase" not in result["message"]
+    else:
+        assert digs == [*first_cells, replacement]
+        assert result["ok"] is True
 
 
 def test_mine_blocks_with_wooden_pick_skips_only_unmineable_types() -> None:
@@ -7040,6 +7122,79 @@ def test_mc_dig_skips_only_confirmed_air_and_rechecks_same_position(block_read, 
         calls.clear()
         assert json.loads(toolset.mc_dig(*pos))["ok"] is True
         assert calls == ["get_block", "dig"]
+
+
+@pytest.mark.parametrize("case", [
+    "picked_up", "native", "collect_false", "wrong_item", "too_far", "pit", "move_timeout", "status_timeout", "inventory_timeout",
+])
+def test_mc_dig_only_adds_a_bounded_pickup_after_confirmed_break(monkeypatch, case) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [20.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    pos = [0.5, 64.0, 0.5]
+    target = [1, 65, 0]
+    drop = [4.1 if case == "too_far" else 1.5, 62.0 if case == "pit" else 64.0, 0.5]
+    calls, picked = [], 0
+
+    def handle(request):
+        nonlocal picked
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        if case == f"{route}_timeout" and route in {"status", "inventory"}:
+            clock[0] += sum(request.extensions["timeout"].values())
+            raise httpx.ReadTimeout("offline pickup read timed out", request=request)
+        if route == "get_block":
+            name = "oak_log" if len(calls) == 1 else "stone" if body["pos"][1] < 64 else "air"
+            result = {"name": name}
+        elif route == "dig":
+            assert body == {"pos": target, "collect": case != "collect_false"}
+            result = {"dug": "oak_log", "gained": {"oak_log": 1} if case == "native" else {"dirt": 1}}
+        elif route == "status":
+            result = {"pos": list(pos), "dimension": "overworld"}
+        elif route == "get_entities":
+            assert body == {"radius": 4, "types": ["item"]}
+            item = "spruce_log" if case == "wrong_item" else "oak_log"
+            result = {"entities": [{"id": 8, "item": item, "pos": drop}]}
+        elif route == "inventory":
+            result = {"items": [{"name": "oak_log", "count": picked + 2}]}
+        elif route == "move_to":
+            assert [body["x"], body["y"], body["z"]] == drop and body["range"] == 0.8
+            assert 50 <= body["timeout"] < 1000
+            if case == "move_timeout":
+                clock[0] += sum(request.extensions["timeout"].values())
+                raise httpx.ReadTimeout("offline short pickup timed out", request=request)
+            pos[:] = drop
+            picked += 1
+            result = {"pos": list(pos)}
+        elif route == "stop":
+            result = {"released": False}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        tools = McToolset(bot)
+        tools._episode_deadline_mono = 35.0
+        result = json.loads(tools.mc_dig(*target, collect=case != "collect_false"))
+    assert result["ok"] is True and result["result"]["dug"] == "oak_log"
+    assert calls.count("dig") == 1 and clock[0] <= 21.0
+    if case == "picked_up":
+        assert calls.count("move_to") == 1 and picked == 1
+        assert result["result"]["gained"] == {"oak_log": 1, "dirt": 1}
+    elif case == "move_timeout":
+        assert calls.count("move_to") == calls.count("stop") == 1
+        assert result["pickup_after_dig"]["stop_confirmed"] is False
+        assert result["requires_replan"] is True
+        assert result["result"]["gained"] == {"dirt": 1}
+    elif case in {"status_timeout", "inventory_timeout"}:
+        assert "move_to" not in calls and "stop" not in calls
+        assert result["pickup_after_dig"]["error"]["code"] == "pickup_time_budget"
+    else:
+        assert "move_to" not in calls
+        assert ("get_entities" not in calls) is (case in {"native", "collect_false"})
 
 
 def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:

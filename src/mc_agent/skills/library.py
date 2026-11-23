@@ -857,6 +857,11 @@ _TRASH_TIER4_COBBLE: tuple[str, ...] = (
 )
 
 _TRASH_TIER_NETHER: tuple[str, ...] = ("netherrack",)
+_COMMON_GATHER_DROPS = frozenset({
+    *LOG_TYPES, *NETHER_STEM_TYPES, "stone", "deepslate", "grass_block", "flint",
+    *_TRASH_TIER2_DECOR_STONES, *_TRASH_TIER2_LOOSE_BLOCKS, *_TRASH_TIER3_DIRT,
+    *_TRASH_TIER4_COBBLE, *_TRASH_TIER_NETHER,
+})
 _MINING_RETENTION_CAPS = {
     **dict.fromkeys(_TRASH_TIER3_DIRT, 64),
     **dict.fromkeys(_TRASH_TIER_NETHER, 128),
@@ -1200,12 +1205,16 @@ def _summarize_uncollected_drops(
     bot_pos: list[float] | None,
     attempts: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
+    *,
+    gathering: bool = False,
 ) -> dict[str, Any] | None:
     """Build directional recovery guidance for ground items that were skipped or stopped out of reach."""
     candidates: list[dict[str, Any]] = []
     for row in skipped:
         pos = row.get("item_pos")
-        if row.get("reason") == "height_difference" and isinstance(pos, list) and len(pos) >= 3:
+        reason = row.get("reason")
+        summarize = reason == "height_difference" or (gathering and reason == "unsafe_route")
+        if summarize and isinstance(pos, list) and len(pos) >= 3:
             candidates.append(row)
     for row in attempts:
         pos = row.get("item_pos")
@@ -1241,7 +1250,12 @@ def _summarize_uncollected_drops(
     tx, ty, tz = (round(float(v), 1) for v in best["item_pos"][:3])
     dx, dy, dz = tx - cx, ty - cy, tz - cz
     bearing = cardinal_bearing(dx, dz)
-    if dy <= -2.0:
+    if gathering and _normalize_drop_name(best.get("item")) in _COMMON_GATHER_DROPS:
+        approach_hint = (
+            f"未能沿安全短路径捡到 {best.get('item')} [{tx},{ty},{tz}]（高度差 {dy:+.1f} 格）。"
+            "请放弃这堆掉落物，改采同层、近处且有支撑的目标。"
+        )
+    elif dy <= -2.0:
         steps_down = min(10, max(3, int(abs(dy) + 1)))
         approach_hint = (
             f"地面掉落物 {best.get('item')} 掉落在下方低处 [{tx},{ty},{tz}](相对朝向={bearing}, dy={dy:+.1f})；"
@@ -1409,13 +1423,12 @@ class _SkillBudgetSession:
         return remaining
 
     @staticmethod
-    def _retry_timeout(remaining: float, read_cap: float) -> httpx.Timeout:
-        # BotSession can retry a protocol failure once with the same timeout
-        # after a 150 ms pause. Reserve both attempts and their request phases.
-        per_attempt = (remaining - 0.15) / 2
+    def _retry_timeout(remaining: float, read_cap: float, *, single_attempt: bool = False) -> httpx.Timeout:
+        # Reserve the request phases and, when enabled, the retry after a 150 ms pause.
+        per_attempt = remaining if single_attempt else (remaining - 0.15) / 2
         if per_attempt <= 0:
             raise _SkillDeadline()
-        phase = min(0.25, per_attempt / 4)
+        phase = min(0.25, per_attempt / (12 if single_attempt else 4))
         return httpx.Timeout(min(read_cap, per_attempt - 3 * phase), pool=phase, connect=phase, write=phase)
 
     @staticmethod
@@ -1514,7 +1527,7 @@ class _SkillBudgetSession:
                     timeout_s=timeout, **kwargs,
                 )
             elif getattr(call, "__func__", None) is BotSession.call:
-                request_timeout = self._retry_timeout(deadline - time.monotonic(), timeout)
+                request_timeout = self._retry_timeout(deadline - time.monotonic(), timeout, single_attempt=single_attempt)
                 kwargs["allow_reauth"] = False
                 if single_attempt:
                     call = self._single_attempt_call(call)
@@ -3610,8 +3623,8 @@ class MacroSkills:
         return {"attempts": attempts, "skipped": skipped}
 
     def _collect_target_drops(
-        self, target_items: set[str] | frozenset[str], radius: int, max_pickups: int, *,
-        max_duration_s: float = 6.0, single_attempt: bool = False,
+        self, target_items: set[str] | frozenset[str], radius: float, max_pickups: int, *,
+        max_duration_s: float = 6.0, single_attempt: bool = False, dig_pickup: bool = False,
     ) -> dict[str, Any]:
         """Attempt each nearby target on a verified short route and retain unresolved positions."""
         from .combat_env import CombatEnv
@@ -3632,20 +3645,27 @@ class MacroSkills:
                 del self._drop_retry_after[key]
         handled: set[int] = set()
 
+        def read(path: str) -> dict[str, Any]:
+            if dig_pickup and isinstance(self.bot, _SkillBudgetSession):
+                return session.call(path, method="GET")
+            return getattr(session, path)()
+
         def scan() -> dict[int, dict[str, Any]]:
-            entities = session.call("get_entities", {"radius": min(radius, 6), "types": ["item"]})
+            entities = session.call("get_entities", {"radius": min(math.ceil(radius), 6), "types": ["item"]})
             return {
                 e["id"]: e for e in entities.get("entities") or []
                 if isinstance(e.get("id"), int) and isinstance(e.get("pos"), list) and len(e["pos"]) >= 3
             }
 
         try:
-            status = session.status()
+            status = read("status")
             entities = scan()
-            while entities and len(handled) < max_pickups:
+            while entities and len(attempts if dig_pickup else handled) < max_pickups:
                 origin = status.get("pos")
                 if not origin or status.get("in_water") or status.get("in_lava"):
                     break
+                if dig_pickup:
+                    result["pos_after"] = origin
                 pending = []
                 for entity_id, ent in entities.items():
                     if entity_id in handled:
@@ -3670,10 +3690,10 @@ class MacroSkills:
                 reason = None
                 if key in self._drop_retry_after:
                     reason = "retry_cooldown"
-                elif abs(dy) > 1.25:
+                elif abs(dy) > (1.0 if dig_pickup else 1.25):
                     row["height_difference"] = dy
                     reason = "height_difference"
-                elif math.dist(origin[:3], pos) > 4.5:
+                elif math.dist(origin[:3], pos) > min(4.5, radius):
                     reason = "outside_short_pickup_range"
                 else:
                     yaw = _yaw_toward(origin[0], origin[2], pos[0], pos[2])
@@ -3687,28 +3707,50 @@ class MacroSkills:
                     continue
 
                 attempts.append(row)
-                before = _inventory_counts(session)
+                before = _inventory_counts_from_raw(read("inventory"))
                 remaining = session.deadline - time.monotonic()
-                if remaining < 0.5:
+                if remaining < (0.35 if dig_pickup else 0.5):
                     raise _SkillDeadline()
-                move_s = min(1.6, remaining - 0.35)
+                move_s = min(1.6, remaining - (0.15 if dig_pickup else 0.35))
+                moved: dict[str, Any] = {}
                 try:
-                    session.call("move_to", {
-                        "x": pos[0], "y": route[0], "z": pos[2], "range": 0.25,
+                    moved = session.call("move_to", {
+                        "x": pos[0], "y": route[0], "z": pos[2], "range": 0.8 if dig_pickup else 0.25,
                         "timeout": int(move_s * 1000), "stop_on": ["hurt", "death"],
                     }, timeout_s=move_s + 0.2)
+                    if dig_pickup and moved.get("interrupted_by"):
+                        result["error"] = {"code": "interrupted", "message": "拾取途中移动被中断。"}
+                        break
                 except ApiError as err:
                     row["approach_error"] = {"code": err.code, "message": err.message}
                     if err.code in _PICKUP_INTERRUPTION_CODES:
                         result["error"] = row["approach_error"]
                         break
-                time.sleep(min(0.2, max(0.0, session.deadline - time.monotonic())))
-                status = session.status()
-                entities = scan()
-                visible = entities.get(entity_id)
-                after = _inventory_counts(session)
+                time.sleep(min(0.05 if dig_pickup else 0.2, max(0.0, session.deadline - time.monotonic())))
+                if dig_pickup:
+                    row["pos"] = moved.get("pos") or origin
+                    result["pos_after"] = row["pos"]
+                    visible = None
+                else:
+                    status = session.status()
+                    entities = scan()
+                    visible = entities.get(entity_id)
+                    row["pos"] = status.get("pos")
+                after = _inventory_counts_from_raw(read("inventory"))
                 gain = max(0, after.get(item, 0) - before.get(item, 0))
-                row["pos"] = status.get("pos")
+                row["pickup_inventory_gain"] = gain
+                if gain:
+                    gained[item] = gained.get(item, 0) + gain
+                    result["pos_after"] = row["pos"]
+                if dig_pickup:
+                    if not gain:
+                        row["reason"] = "pickup_unconfirmed"
+                        self._drop_retry_after[key] = time.monotonic() + 20.0
+                    if len(attempts) >= max_pickups:
+                        break
+                    status = read("status")
+                    entities = scan()
+                    continue
                 if visible is not None:
                     row["item_pos"] = visible["pos"][:3]
                 if row["pos"]:
@@ -3717,10 +3759,6 @@ class MacroSkills:
                 suffix = label.rsplit("x", 1)[-1]
                 stack_count = int(suffix) if suffix.isdigit() else 1
                 row["picked_up"] = min(gain, stack_count) if visible is None else 0
-                row["pickup_inventory_gain"] = gain
-                if gain:
-                    gained[item] = gained.get(item, 0) + gain
-                    result["pos_after"] = row["pos"]
                 if not row["picked_up"]:
                     row["reason"] = "target_still_visible" if visible is not None else "pickup_unconfirmed"
                     self._drop_retry_after[key] = time.monotonic() + 20.0
@@ -3830,7 +3868,7 @@ class MacroSkills:
                 "stop_reason": "time_budget",
                 "message": "本轮采集已到时间预算。请按 gained 核对入包产物，再换近处可达目标或减少数量。",
             }
-        if cleanup_inventory and result.get("stop_reason") != "time_budget":
+        if cleanup_inventory and result.get("stop_reason") not in {"time_budget", "pickup_interrupted"}:
             try:
                 _, cleaned = scoped._ensure_free_slots(min_free=3)
             except _SkillDeadline:
@@ -3907,6 +3945,8 @@ class MacroSkills:
         """Shared candidate scan, vertical reachability ranking, blacklist handling, and drop rescue."""
         expected_drops = _expected_drops_for_blocks(block_types)
         harvesting_logs = all(name in LOG_TYPES or name in NETHER_STEM_TYPES for name in block_types)
+        common_gather = bool(expected_drops) and expected_drops <= _COMMON_GATHER_DROPS
+        batch_size = 3 if harvesting_logs else 2
 
         def _target_gain_sum(gain_map: dict[str, int]) -> int:
             return sum(
@@ -3931,6 +3971,31 @@ class MacroSkills:
         mine_deadline = session.deadline if session else time.monotonic() + 45.0
         if session:
             session.progress.update(requested_count=count, dug_count=0, gained=gained)
+        batch_start_dug = batch_start_gain = 0
+        broken_positions: set[tuple[int, int, int]] = set()
+        prefer_reachable = False
+        pickup_interrupted = False
+
+        def collect_common_batch() -> None:
+            nonlocal last_drop_scan, last_bot_pos, pickup_interrupted, prefer_reachable
+            batch_count = dug_count - batch_start_dug
+            if _target_gain_sum(gained) - batch_start_gain >= batch_count:
+                return
+            _merge_confirmed_inventory_gain()
+            if _target_gain_sum(gained) - batch_start_gain >= batch_count:
+                return
+            last_drop_scan = self._collect_target_drops(
+                expected_drops, 4.5, 2, max_duration_s=min(3.0, mine_deadline - time.monotonic()),
+                single_attempt=True, dig_pickup=True,
+            )
+            last_bot_pos = last_drop_scan.get("pos_after") or last_bot_pos
+            _merge_counts(gained, last_drop_scan["gained"])
+            if last_drop_scan["attempts"]:
+                trunk_queue.clear()
+            error = last_drop_scan.get("error") or {}
+            pickup_interrupted = last_drop_scan.get("stop_confirmed") is False or error.get("code") in _PICKUP_INTERRUPTION_CODES
+            prefer_reachable = _target_gain_sum(gained) == batch_start_gain
+
         deadline_hit = False
         consecutive_failures = 0
         unreachable_targets = False
@@ -3984,6 +4049,10 @@ class MacroSkills:
                 target = None
                 for cand in candidates:
                     cpos = tuple(cand["pos"])
+                    if prefer_reachable and (
+                        cpos in broken_positions or not feet_y <= cpos[1] <= feet_y + 1 or math.dist(standing, cpos) > 4.0
+                    ):
+                        continue
                     if avoid_water and float(cand["pos"][1]) < bot_y - 0.5 and self._is_water_covered(cpos):
                         self._avoid_temporarily(cpos, "water_covered", 30.0)
                         water_skipped += 1
@@ -4006,13 +4075,16 @@ class MacroSkills:
             # still leaves the total bounded by mine_deadline.
             per_dig = max(15.0, min(30.0, remaining / max(1, count - dug_count)))
             try:
-                dig_body = {"pos": list(pos), "collect": not trunk_queue}
+                batch_end = common_gather and dug_count + 1 - batch_start_dug >= batch_size
+                dig_body = {"pos": list(pos), "collect": not trunk_queue or batch_end}
                 res = (
                     self.bot.call("dig", dig_body, timeout_s=min(remaining, per_dig))
                     if dig_supports_timeout
                     else self.bot.call("dig", dig_body)
                 )
                 dug_count += 1
+                if common_gather:
+                    broken_positions.add(pos)
                 consecutive_failures = 0
                 if session:
                     session.progress["dug_count"] = dug_count
@@ -4022,8 +4094,12 @@ class MacroSkills:
                     esc = self.escape_water()
                     if esc.get("in_water"):
                         break
-                # Guard against repeatedly digging blocks whose expected target drops fall out of reach
-                if not trunk_queue and dug_count >= 2 and _target_gain_sum(gained) == 0:
+                if batch_end:
+                    collect_common_batch()
+                    if pickup_interrupted:
+                        break
+                    batch_start_dug, batch_start_gain = dug_count, _target_gain_sum(gained)
+                elif not common_gather and not trunk_queue and dug_count >= 2 and _target_gain_sum(gained) == 0:
                     last_bot_pos = self.bot.status().get("pos") if harvesting_logs else st.get("pos")
                     last_drop_scan = self._collect_nearby_items(
                         bot_y=float(last_bot_pos[1]) if last_bot_pos else bot_y,
@@ -4109,7 +4185,9 @@ class MacroSkills:
                     **self._avoidance_summary(),
                 }
 
-        if not (deadline_hit or unreachable_targets) and dug_count > 0 and _target_gain_sum(gained) == 0:
+        if common_gather and not (deadline_hit or unreachable_targets or pickup_interrupted) and dug_count > batch_start_dug:
+            collect_common_batch()
+        if not (common_gather or deadline_hit or unreachable_targets) and dug_count > 0 and _target_gain_sum(gained) == 0:
             if last_drop_scan is None:
                 st = self.bot.status()
                 last_bot_pos = st.get("pos")
@@ -4123,7 +4201,7 @@ class MacroSkills:
                 )
             _merge_confirmed_inventory_gain()
         if (
-            harvesting_logs and dug_count >= count
+            not common_gather and harvesting_logs and dug_count >= count
             and 0 < _target_gain_sum(gained) < count
             and not deadline_hit and inv_before is not None
             and mine_deadline - time.monotonic() > 2.0
@@ -4187,6 +4265,7 @@ class MacroSkills:
                 last_bot_pos,
                 (last_drop_scan or {}).get("attempts") or [],
                 (last_drop_scan or {}).get("skipped") or [],
+                gathering=True,
             )
             inc_note = (
                 f"（途中仅误吸无关杂物 {incidental_gained}，目标预期产物 {sorted(expected_drops)} 均未入包）"
@@ -4227,6 +4306,10 @@ class MacroSkills:
             out["message"] = (
                 "已连续 4 次未能挖到选中的原木。请用 mc_move_to 换到附近树干旁或更换站位，再采集低处原木。"
             )
+        if pickup_interrupted:
+            out.update(ok=False, stop_reason="pickup_interrupted", requires_replan=True)
+            out["pickup"] = last_drop_scan
+            out["message"] = "拾取动作被中断。请先复核当前位置和背包。"
         if deadline_hit:
             out["stop_reason"] = "time_budget"
             out["requires_replan"] = True
@@ -4870,7 +4953,7 @@ class MacroSkills:
             avoid_water=True,
             auto_dropped_names=auto_dropped_names or None,
         )
-        if res.get("error") == "protected_region" or res.get("stop_reason") in {"time_budget", "unreachable_targets"}:
+        if res.get("error") == "protected_region" or res.get("stop_reason") in {"time_budget", "unreachable_targets", "pickup_interrupted"}:
             return {**res, **skipped}
 
         if (
