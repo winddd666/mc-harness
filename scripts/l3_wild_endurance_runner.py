@@ -259,6 +259,16 @@ def _berry_bush_clear_landing(bot: Any, pos: tuple[float, float, float]) -> bool
     return True
 
 
+def _has_mangrove_support(bot: Any, pos: tuple[float, float, float]) -> bool:
+    x, y, z = map(math.floor, pos)
+    try:
+        block = bot.call("get_block", {"x": x, "y": y - 1, "z": z}, timeout_s=2.0, allow_reauth=False)
+    except Exception:
+        return False
+    name = str((block or {}).get("name") or "").removeprefix("minecraft:")
+    return name in {"mangrove_log", "stripped_mangrove_log", "mangrove_leaves", "mangrove_roots", "muddy_mangrove_roots"}
+
+
 def _dry_wild_slot(start_idx: int) -> tuple[int, int]:
     ring, slot_idx = divmod(int(start_idx), len(CANDIDATE_SITES))
     # The layout spans 22,000 blocks per axis. Leave space for both local search areas
@@ -304,6 +314,9 @@ def select_dry_isolated_wild_site(
             rejected["landing_unconfirmed"] += 1
             continue
         biome = str(st.get("biome") or "").lower()
+        if biome.removeprefix("minecraft:") == "mangrove_swamp":
+            rejected["mangrove_swamp"] += 1
+            continue
         # Skip pure ocean spawns so we land on a true terrestrial island/continent
         if "ocean" in biome or ("river" in biome and pos[1] <= 63.0):
             rejected["water_biome"] += 1
@@ -321,13 +334,15 @@ def select_dry_isolated_wild_site(
                     "acacia_log",
                     "jungle_log",
                     "cherry_log",
-                    "mangrove_log",
                 ],
                 "limit": 3,
             },
         )
         if not (fb or {}).get("blocks"):
             rejected["no_logs"] += 1
+            continue
+        if not biome and _has_mangrove_support(bot, pos):
+            rejected["mangrove_support"] += 1
             continue
         if not _berry_bush_clear_landing(bot, pos):
             rejected["berry_bush_clearance"] += 1
@@ -1415,6 +1430,9 @@ def _select_bare_reserve(bot: Any, bot_name: str, scene: SceneAnchor, site_index
         pos = _dry_overworld_position(status)
         if confirmed is None or pos is None or not _berry_bush_clear_landing(bot, pos):
             continue
+        biome = str(status.get("biome") or "").lower().removeprefix("minecraft:")
+        if biome == "mangrove_swamp" or (not biome and _has_mangrove_support(bot, pos)):
+            continue
         reserve = dataclasses.replace(scene, x=pos[0], y=pos[1], z=pos[2])
         print(f"[Scene] {bot_name} bare reserve pos={pos}", flush=True)
         return reserve
@@ -2332,6 +2350,8 @@ def _install_bare_stone_guidance() -> None:
         "地表缺开局木料时用 mc_skill_harvest_logs 按缺口取 4~6 根原木，先合工作台、木棍和 wooden_pickaxe。"
         "木镐已可用时开始找石，木料储备等有石斧再补。扫描 16 格内可达的露出 stone、cobblestone。"
         "有可采露石时用 mc_skill_mine_blocks(block_types=['stone','cobblestone'], radius=16) 采实际入包的圆石。"
+        "砍木或采石若报 no_drops_collected 而 nearby_drops 有目标物，安全且可达时先调用一次 "
+        "mc_skill_collect_drops 拾取并核对实包。仍未入包时换可达作业面。"
         "16 格内无可达露石时，在当前干燥且有支撑的落脚点运行 mc_skill_staircase(vertical='down', steps=6, stop_on_ore=False)，"
         "穿过表土后停在露石处采圆石。先核对阶梯回执；缺支撑时用有支撑面的垫块或换一个安全方向，"
         "见水、岩浆或落差时换方向。保留可回走的阶梯。"
@@ -2341,6 +2361,7 @@ def _install_bare_stone_guidance() -> None:
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
         playbook, title="Day 1 石器与石料准备", task=task,
+        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_skill_collect_drops"))),
     )
 
 
@@ -2362,6 +2383,8 @@ def _install_bare_iron_guidance() -> None:
         "mc_skill_mine_dfs(action='explore', target='iron', target_y=16, max_duration_s=90)，"
         "goal_count 只填 3 减去当前铁锭和粗铁后的正数缺口。每片结束重查实包，"
         "即使 ok=false 或 movement_not_confirmed 也核对 gained.raw_iron。"
+        "采集若报 no_drops_collected 且 nearby_drops 有目标物，安全且可达时先调用一次 "
+        "mc_skill_collect_drops 并核对实包。未入包就换作业面。"
         "铁原料齐后为取货和制镐留足本集时间。铁锭还不足时，先找安全站位并核对燃料。"
         "缺燃料先补燃料，再调用 mc_skill_smelt，input_item 填 raw_iron，count 填所缺铁锭数。"
         "实包到 3 锭后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，查询手持物确认铁镐。"
@@ -2369,6 +2392,7 @@ def _install_bare_iron_guidance() -> None:
     )
     cur.CURRICULUM_PLAYBOOKS[key] = dataclasses.replace(
         playbook, title="Day 1 铁层发育，先合成并装备铁镐", task=task, post_ensure_task=task,
+        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_skill_collect_drops"))),
     )
 
 
