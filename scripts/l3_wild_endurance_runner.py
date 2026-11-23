@@ -83,6 +83,7 @@ BARE_LANDING_BLOCKS = frozenset({
 WILD_START_LOG_TYPES = ("oak_log", "birch_log", "spruce_log", "dark_oak_log", "acacia_log", "jungle_log", "cherry_log")
 BARE_START_LOG_RADIUS = 16.0
 BARE_START_WOOD_PROBE_S = 3.0
+BARE_SPAWN_DEATH_RADIUS = 4.0
 BARE_DISCARD_ITEMS = frozenset({"andesite", "diorite", "dirt", "granite", "gravel", "tuff"})
 
 CANDIDATE_SITES: list[tuple[int, int]] = [
@@ -1909,8 +1910,9 @@ class SceneWatchdog(threading.Thread):
         self.scene = scene
         self._return_site = scene
         self._bare_reserve = bare_reserve
-        self._last_home_death_ms = 0.0
+        self._last_home_death = (0.0, False)
         self._contested_home_until_ms = 0.0
+        self._contested_spawn_until_ms = 0.0
         self.interval_s = interval_s
         self.near_container = near_container
         self.fence_repair = fence_repair
@@ -2035,25 +2037,34 @@ class SceneWatchdog(threading.Thread):
         outside_fence_confirmed = self._outside_fence_ticks >= 2
         suspected_death = dead_signal and (new_status_death if has_death_stamp else not self._returned_while_dead)
         home = self._return_site.x, self._return_site.y, self._return_site.z
+        home_dist = (
+            math.dist(tuple(float(value) for value in pos[:3]), home)
+            if isinstance(pos, (list, tuple)) and len(pos) >= 3 else math.inf
+        )
         if self._bare_reserve is not None and new_status_death and dim_matches and st.get("dimension"):
             death_pos = last_death.get("pos")
+            last_home_ms, last_at_spawn = self._last_home_death
             if (
-                death_ms > self._last_home_death_ms
+                death_ms > last_home_ms
                 and isinstance(death_pos, (list, tuple)) and len(death_pos) >= 3
                 and all(isinstance(value, (int, float)) and math.isfinite(value) for value in death_pos[:3])
-                and math.dist(death_pos[:3], home) <= 20.0
             ):
-                if death_ms - self._last_home_death_ms <= 120_000:
-                    self._contested_home_until_ms = death_ms + 60_000
-                self._last_home_death_ms = death_ms
+                death_distance = math.dist(death_pos[:3], home)
+                if death_distance <= 20.0:
+                    at_spawn = death_distance <= BARE_SPAWN_DEATH_RADIUS
+                    if death_ms - last_home_ms <= 120_000:
+                        self._contested_home_until_ms = death_ms + 60_000
+                        if last_at_spawn and at_spawn:
+                            self._contested_spawn_until_ms = self._contested_home_until_ms
+                    self._last_home_death = death_ms, at_spawn
         nearest = st.get("nearest_hostile") or {}
         hostile_dist = nearest.get("dist") if isinstance(nearest, dict) else None
+        close_hostile = isinstance(hostile_dist, (int, float)) and 0 <= hostile_dist <= 8.0
+        repeated_spawn_deaths = wall_ms < self._contested_spawn_until_ms and home_dist <= BARE_SPAWN_DEATH_RADIUS
         contested_home = (
             self._bare_reserve is not None and wall_ms < self._contested_home_until_ms
             and ready and not dead_signal and dim_matches and bool(st.get("dimension"))
-            and isinstance(pos, (list, tuple)) and len(pos) >= 3
-            and math.dist(tuple(float(value) for value in pos[:3]), home) <= 20.0
-            and isinstance(hostile_dist, (int, float)) and 0 <= hostile_dist <= 8.0
+            and home_dist <= 20.0 and (close_hostile or repeated_spawn_deaths)
         )
         self._ticks += 1
         if self._ticks % 15 == 0:  # ~2 min at the default 8s interval
@@ -2132,9 +2143,14 @@ class SceneWatchdog(threading.Thread):
             self._outside_fence_ticks = 0
             if return_site is not self._return_site:
                 self._bare_reserve, self._return_site = self._return_site, return_site
-                self._last_home_death_ms = 0.0
+                self._last_home_death = (0.0, False)
                 self._contested_home_until_ms = 0.0
-                print(f"[Scene] {self.bot_name} switched to verified bare reserve after nearby deaths", flush=True)
+                self._contested_spawn_until_ms = 0.0
+                print(
+                    f"[Scene] {self.bot_name} switched to verified bare reserve after nearby deaths "
+                    f"repeated_spawn_deaths={repeated_spawn_deaths}",
+                    flush=True,
+                )
             if suspected_death:
                 self._death_handled_at = now
                 self._death_handled_wall_ms = max(
