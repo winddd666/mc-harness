@@ -3200,7 +3200,7 @@ def main() -> int:
     parser.add_argument("--model", type=str, default=None, help="LLM model override (e.g. glm-5.3)")
     parser.add_argument("--runs-subdir", type=str, default="", help="Optional subdirectory under runs/ for multi-bot isolation")
     parser.add_argument("--duration-s", type=float, default=1800.0, help="Wall-clock budget for this wild run")
-    parser.add_argument("--max-episodes", type=int, default=12, help="Episode cap (0 runs to the wall-clock deadline)")
+    parser.add_argument("--max-episodes", type=int, default=0, help="Episode cap (0 runs to the wall-clock deadline)")
     parser.add_argument("--site-index", type=int, default=0)
     parser.add_argument(
         "--stage",
