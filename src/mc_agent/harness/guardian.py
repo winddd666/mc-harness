@@ -1312,6 +1312,7 @@ class GenerationGuard:
 
     def _cornered_wither_skeleton_response(
         self, before: dict[str, Any], counts: dict[str, int], target_id: int,
+        *, landing: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         controller = self.combat_slot.controller
         weapon = best_melee_weapon_in_inv(counts)
@@ -1337,7 +1338,8 @@ class GenerationGuard:
             )
 
         try:
-            landing = self.bot.call("status", method="GET", timeout_s=0.35)
+            if landing is None:
+                landing = self.bot.call("status", method="GET", timeout_s=0.35)
             if not landing.get("pos") or not has_opening(landing):
                 return []
             sighting = self.bot.call("get_entities", {"radius": 6, "types": ["hostile"]}, timeout_s=0.35)
@@ -3345,6 +3347,17 @@ class GenerationGuard:
                         else:
                             self._consecutive_flees = 0
                     cf_result = (cf or {}).get("result") or {}
+                    wither_cornered = (
+                        dimension == "the_nether" and nh_name == "wither_skeleton" and nh_id is not None
+                        and already_blocking and has_melee_weapon
+                        and (
+                            hurt_src == "mob_attack"
+                            or (hurt_src in {"", "wither"} and now - self._last_melee_hurt_at < 4.0)
+                        )
+                        and (not isinstance(threat.get("id"), int) or threat["id"] == nh_id)
+                        and not (cf_result.get("ok") or cf_result.get("respawned"))
+                        and cf_result.get("moved_dist") == 0.0
+                    )
                     piglin_hurt = dimension == "the_nether" and nh_name == "piglin" and hurt_src == "mob_attack"
                     if (
                         not has_shield and has_melee_weapon and hurt_src in MELEE_HURT_SOURCES
@@ -3355,17 +3368,7 @@ class GenerationGuard:
                         strike = self._try_cornered_melee_strike(status, attacker, counts, hurt_source=hurt_src)
                         if strike is not None:
                             actions.append(strike)
-                    elif (
-                        dimension == "the_nether" and nh_name == "wither_skeleton" and nh_id is not None
-                        and already_blocking and has_melee_weapon and 0 < hp_val <= 6.0
-                        and (
-                            hurt_src == "mob_attack"
-                            or (hurt_src in {"", "wither"} and now - self._last_melee_hurt_at < 4.0)
-                        )
-                        and (not isinstance(threat.get("id"), int) or threat["id"] == nh_id)
-                        and not cf_result.get("ok") and not cf_result.get("respawned")
-                        and cf_result.get("reason") == "no_safe_retreat" and cf_result.get("moved_dist") == 0.0
-                    ):
+                    elif wither_cornered and 0 < hp_val <= 6.0 and cf_result.get("reason") == "no_safe_retreat":
                         actions.extend(self._cornered_wither_skeleton_response(status, counts, nh_id))
                     melee_retreat = cf_result.get("mode") == "flee"
                     enderman_name, _, enderman_id, _ = self._extract_hostile_info({"nearest_hostile": threat})
@@ -3427,16 +3430,20 @@ class GenerationGuard:
                         )
                         if shore is not None:
                             actions.append(shore)
+                    dry_airborne_retreat = (
+                        landing is not None and cf_result.get("on_ground") is False
+                        and cf_result.get("moved_dist") == 0.0
+                        and not (cf_result.get("in_water") or cf_result.get("in_lava"))
+                    )
+                    wither_after_knockback = wither_cornered and dry_airborne_retreat
                     retry_after_knockback = (
                         dimension == "overworld" and not (has_shield or has_melee_weapon or recent_ranged_hurt)
-                        and landing is not None and landing.get("ready") is True
+                        and dry_airborne_retreat and landing.get("ready") is True
                         and not (landing.get("busy") or landing.get("on_fire"))
-                        and cf_result.get("on_ground") is False and cf_result.get("moved_dist") == 0.0
-                        and not (cf_result.get("in_water") or cf_result.get("in_lava"))
                         and nh_id is not None and (landing.get("nearest_hostile") or {}).get("id") == nh_id
                         and not (landing.get("nearest_hostile") or {}).get("blocked_by_wall")
                     )
-                    if shore is None and melee_after_retreat and (
+                    if shore is None and (melee_after_retreat or wither_after_knockback) and (
                         face_after_melee_retreat or check_critical_surface_landing
                         or check_unraised_shield or shield_when_cornered or follow_unarmed_retreat
                         or retry_bunker_after_landing or retry_after_knockback
@@ -3470,10 +3477,13 @@ class GenerationGuard:
                             if landing.get("blocking") and (
                                 face_after_melee_retreat or (check_critical_surface_landing and current_hp <= 4.0)
                             ):
-                                actions.append(self._action(
+                                face = self._action(
                                     "face_attacker_after_retreat",
                                     lambda: self.bot.call("look", {"entity_id": target_id}, timeout_s=0.9),
-                                ))
+                                )
+                                actions.append(face)
+                                if wither_after_knockback and target_id == nh_id and face.get("ok"):
+                                    actions.extend(self._cornered_wither_skeleton_response(status, counts, nh_id, landing=landing))
                             elif shield_when_cornered:
                                 self._equip_and_raise_shield_for_water(
                                     landing, actions, inv=inv, attacker={"id": target_id},

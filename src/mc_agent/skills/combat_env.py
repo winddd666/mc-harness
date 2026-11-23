@@ -1901,6 +1901,10 @@ class CombatEnv:
             if bank in stalled_shores_near(swim_pos):
                 actions.append("lava_shore_path_stalled")
             elif shore_d <= 6.5:
+                # The swim can leave the bot with only a few ticks of health.
+                critical_shore = critical_in_nether(st)
+                if critical_shore:
+                    actions.append("lava_shore_critical_budget")
                 # Keep the attempted bank if the recovery deadline interrupts the status recheck.
                 self._stalled_lava_shores[bank] = (tuple(swim_pos[:3]), time.monotonic())
                 try:
@@ -1912,18 +1916,24 @@ class CombatEnv:
                             "z": lava_shore_target[2],
                             # Keep the entire hitbox on the confirmed bank tile.
                             "range": 0.15,
-                            "timeout": 1200,
+                            "timeout": 500 if critical_shore else 1200,
                             "stop_on": ["death"],
                         },
-                        timeout_s=2.0,
+                        timeout_s=0.8 if critical_shore else 2.0,
                         allow_reauth=False,
                     )
                     actions.append("lava_move_to_shore")
                 except (ApiError, httpx.HTTPError) as err:
                     actions.append("lava_move_to_shore_timeout" if isinstance(err, httpx.HTTPError) else "lava_move_to_shore_err")
-                    self._best_effort_stop(timeout_s=0.5)
+                    self._best_effort_stop(timeout_s=0.25 if critical_shore else 0.5)
                 self.invalidate_block_cache()
-                st = self._safe_status(st)
+                if critical_shore:
+                    observed = self._safe_status(timeout_s=0.25)
+                    if not observed:
+                        return {**_lava_result(st), "ok": False, "reason": "lava_status_unavailable"}
+                    st = observed
+                else:
+                    st = self._safe_status(st)
                 if _should_exit_lava(st):
                     return _lava_result(st)
                 end = st.get("pos") or swim_pos
@@ -1949,7 +1959,7 @@ class CombatEnv:
                     raise _TerrainProbeExpired
                 return self.bot.call(action, body, timeout_s=min(timeout_s, remaining), allow_reauth=False, **kwargs)
 
-            bridge_probe_budget = 0.25 if critical_nether_lava else 0.6
+            bridge_probe_budget = 0.25 if critical_in_nether(st) else 0.6
             probe_until = min(bridge_deadline - 0.8, time.monotonic() + bridge_probe_budget)
             try:
                 if st.get("on_ground") is False and _is_passable(self._get_block_name(bx, by - 1, bz, deadline=probe_until)):
