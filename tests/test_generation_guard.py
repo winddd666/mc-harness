@@ -4416,6 +4416,70 @@ def test_combat_attacks_reserve_time_for_final_status_and_release(monkeypatch, r
     assert outcome["status_after"]["health"] == 20
 
 
+@pytest.mark.parametrize("scene", ["melee", "shield_rush", "respawn"])
+def test_bug145_empty_attack_receipt_stops_a_reactive_attack_sequence(monkeypatch, scene):
+    ranged = scene != "melee"
+    mob = "skeleton" if ranged else "zombie"
+    enemy = {"id": 42, "name": mob, "pos": [2.5, 64, 0.5], "dist": 2.0}
+    shield = {"name": "shield", "count": 1} if ranged else None
+    sword = {"name": "iron_sword", "count": 1}
+    status = {
+        "pos": [0.5, 64, 0.5], "dimension": "overworld", "health": 20, "food": 20,
+        "on_ground": True, "ready": True, "alive": True, "nearest_hostile": enemy,
+        "held": sword, "offhand": shield, "blocking": False,
+    }
+    attacks = []
+    retreats = []
+
+    def mock_api(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint == "attack":
+            attacks.append(json.loads(request.content))
+            if scene == "respawn":
+                status.update(last_death={"t": 1}, pos=[100.5, 64, 0.5])
+            return httpx.Response(200, json={"ok": True})
+        if endpoint == "status":
+            result = status
+        elif endpoint == "inventory":
+            result = {"items": [sword], "held": sword, "offhand": shield}
+        elif endpoint == "get_entities":
+            result = {"entities": [enemy]}
+        elif endpoint == "posture":
+            status["blocking"] = bool(json.loads(request.content).get("shield"))
+            result = {"blocking": status["blocking"]}
+        else:
+            assert endpoint in {"stop", "control", "look"}
+            result = {}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    def flee(threat, **_kwargs):
+        retreats.append(threat)
+        return {"ok": True, "mode": "flee", "moved_dist": 5.0}
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(mock_api)) as bot:
+        guard = GenerationGuard(bot, EventSink(lambda _: None), checkpoint=lambda: None)
+        monkeypatch.setattr(guard.combat_env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+        monkeypatch.setattr(guard.combat_env, "chase_to_range", lambda *_args, **_kwargs: {"ok": True})
+        monkeypatch.setattr(guard.combat_env, "flee", flee)
+        outcome = guard._run_subcortical_combat({
+            "source": "pre_hurt_ranged" if ranged else "pre_hurt_melee", "primary_type": mob,
+            "primary_entity_id": enemy["id"], "distance": 2.0,
+        })
+
+    attack, = attacks
+    assert attack["entity_id"] == enemy["id"] and attack["feedback"] is True
+    name = "shield_rush_attack" if ranged else "melee_attack"
+    attempt, = [action for action in outcome["actions"] if action["action"] == name]
+    assert attempt["ok"] is False and attempt["killed"] is False
+    assert attempt["code"] == "attack_hit_unconfirmed"
+    if scene == "respawn":
+        assert not outcome["handled"] and not outcome["latched_guard"] and not retreats
+    elif ranged:
+        assert outcome["latched_guard"] and outcome["status_after"]["blocking"] and not retreats
+    else:
+        assert retreats == [enemy["pos"]]
+
+
 @pytest.mark.parametrize("latest_scan", ["blocked", "empty", "different_target", "timeout"])
 def test_counterattack_uses_latest_confirmed_target_sighting(latest_scan):
     from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv

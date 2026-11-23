@@ -5028,21 +5028,22 @@ class SubcorticalInstinctController:
                     )
                     hits = atk.get("hits")
                     contacted = attack_feedback_hits(atk)
+                    killed = bool(atk.get("killed"))
                     actions.append({
                         "action": "melee_attack", "weapon": weapon, "entity_id": eff_id,
-                        "ok": bool(atk.get("killed")) or contacted != 0, "killed": bool(atk.get("killed")),
+                        "ok": killed or bool(contacted), "killed": killed,
+                        **({"code": "attack_hit_unconfirmed"} if not killed and contacted is None else {}),
                         **({"hits": hits} if isinstance(hits, (int, float)) and math.isfinite(hits) else {}),
                         **({"connected_hits": atk["connected_hits"]} if "connected_hits" in atk else {}),
                         **({"chase": False} if attack_body.get("chase") is False else {}),
                         **({"hit_log": atk["hit_log"]} if isinstance(atk.get("hit_log"), list) else {}),
                     })
-                    if atk.get("killed"):
-                        killed = True
+                    if killed:
                         break
                     if vulnerable_counter and atk.get("interrupted_by") == "hurt":
                         retreat_action = "low_hp_abort_flee"
                         break
-                    if contacted == 0:
+                    if not contacted:
                         retreat_action = "unreachable_flee"
                         break
                 except ApiError as err:
@@ -5156,10 +5157,27 @@ class SubcorticalInstinctController:
                             )
                             contacted = attack_feedback_hits(atk_r)
                             killed_r = bool(atk_r.get("killed"))
-                            actions.append({"action": "shield_rush_attack", "ok": killed_r or contacted != 0, "killed": killed_r})
+                            actions.append({
+                                "action": "shield_rush_attack", "ok": killed_r or bool(contacted), "killed": killed_r,
+                                **({"code": "attack_hit_unconfirmed"} if not killed_r and contacted is None else {}),
+                            })
                             if killed_r or contacted == 0:
                                 break
                             st_rk = env.bot.status()
+                            if contacted is None:
+                                nearest = st_rk.get("nearest_hostile")
+                                offhand = st_rk.get("offhand")
+                                if (
+                                    not self._combat_life_lost(st, st_rk) and st_rk.get("on_ground") is True
+                                    and not any(st_rk.get(key) for key in ("in_water", "in_lava", "busy"))
+                                    and isinstance(offhand, dict) and _clean_block_name(offhand.get("name")) == "shield"
+                                    and isinstance(nearest, dict) and nearest.get("id") == mob_id
+                                    and not nearest.get("blocked_by_wall") and self._entity_dist(st_rk.get("pos"), nearest) <= 5.0
+                                    and time.monotonic() + 0.7 < deadline
+                                ):
+                                    latched_guard = self._latch_shield_at_threat(env, int(mob_id))
+                                    actions.append({"action": "guard_after_unconfirmed_attack", "ok": latched_guard})
+                                break
                             if st_rk.get("alive") is False or float(st_rk.get("health") or 20.0) <= 10.0:
                                 break
                 except ApiError as err:
