@@ -21188,6 +21188,60 @@ def test_water_escape_changes_bank_after_dry_airborne_lip_attempt(monkeypatch, r
     assert ("shore_lip_stalled" in second["actions"]) is (reentry == "stalled")
 
 
+@pytest.mark.parametrize("approach", ["below_bank", "beside_bank"])
+def test_w21_water_escape_distinguishes_reaching_the_bank_column_from_landing(approach):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    bank = [261034.5, 63.0, 253597.5]
+    alternative = [261037.5, 63.0, 253597.5]
+    floors = {(int(x), 62, int(z)) for x, _, z in (bank, alternative)}
+    status = {
+        "pos": [261034.5, 62.0, 253589.5], "in_water": True, "on_ground": False, "submerged": False,
+        "last_death": {"t": 1}, "dimension": "overworld", "alive": True, "ready": True,
+    }
+    moves = []
+    hops = []
+
+    class BankBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "find_blocks":
+                return {"blocks": [{"name": "grass_block", "pos": floor} for floor in sorted(floors)]}
+            if action == "get_block":
+                return {"name": "grass_block" if tuple(body["pos"]) in floors else "air"}
+            if action == "move_to":
+                target = [body[key] for key in ("x", "y", "z")]
+                moves.append(target)
+                if target == alternative:
+                    status.update(pos=alternative, in_water=False, on_ground=True)
+                else:
+                    x = bank[0] if approach == "below_bank" else bank[0] + 0.8
+                    status.update(pos=[x, 62.0, bank[2]])
+            if action == "control" and body.get("forward"):
+                hops.append(body["ms"])
+                if approach == "beside_bank":
+                    status.update(pos=bank, in_water=False, on_ground=True)
+            return {"ok": True}
+
+    env = CombatEnv(BankBot())
+    first = env.escape_deep_water_to_shore()
+    assert first["shore_target"] == bank
+    if approach == "beside_bank":
+        assert hops == [450]
+        assert first["ok"] is True and first["pos_after"] == bank
+    else:
+        assert hops == []
+        assert first["ok"] is False and first["in_water"] is True
+        assert "shore_lip_directly_below" in first["actions"]
+        second = env.escape_deep_water_to_shore()
+        assert second["ok"] is True and second["pos_after"] == alternative
+        assert moves == [bank, alternative]
+
+
 @pytest.mark.parametrize("terrain", ["step", "deep_drop", "lava", "low_ceiling"])
 def test_grounded_retreat_can_step_down_one_verified_block_in_a_tunnel(terrain):
     from mc_agent.skills.combat_env import CombatEnv

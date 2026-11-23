@@ -3702,16 +3702,20 @@ class CombatEnv:
             ):
                 lip_height = float(shore_target[1]) - float(mid_pos[1])
                 lip_distance = math.hypot(shore_target[0] - mid_pos[0], shore_target[2] - mid_pos[2])
-                lip_ms = 1150 if lip_height > 0.05 else 850
-                shallow_lip = 0.6 < lip_distance <= 1.8 and 0.0 <= lip_height <= 1.25
-                # A failed short hop can leave the bot pressed against the same low bank.
-                sustained_climb = (
-                    shallow_lip and retrying_bank and not (has_threat or shield_target_id is not None or sneak_on_magma)
-                )
-                if shallow_lip and not sustained_climb:
-                    # A full swim pulse can carry the bot across a shallow one-block bank.
-                    lip_ms = 450
-                hop_to_shore(mid_pos, ms=lip_ms, sprint=not sustained_climb)
+                if lip_distance <= 0.3 and lip_height >= 0.75:
+                    # The path ended below the bank, with no useful heading for a forward jump.
+                    actions.append("shore_lip_directly_below")
+                else:
+                    shallow_lip = 0.6 < lip_distance <= 1.8 and 0.0 <= lip_height <= 1.25
+                    # A failed short hop can leave the bot pressed against the same low bank.
+                    sustained_climb = (
+                        shallow_lip and retrying_bank and not (has_threat or shield_target_id is not None or sneak_on_magma)
+                    )
+                    if shallow_lip and not sustained_climb:
+                        lip_ms = 450
+                    else:
+                        lip_ms = 1150 if lip_height > 0.05 else 850
+                    hop_to_shore(mid_pos, ms=lip_ms, sprint=not sustained_climb)
         else:
             st_mid = self._safe_status(st0)
             interruption = interrupted_water_escape(st_mid)
@@ -3858,18 +3862,22 @@ class CombatEnv:
         elif observed_end_pos and shore_target is not None and life == (st_end.get("dimension"), st_end.get("last_death")):
             tried_lip = "shore_lip_jump" in actions
             lip_height = shore_target[1] - pos_end[1]
-            near_lip = math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2]) <= 2.5
+            lip_distance = math.hypot(shore_target[0] - pos_end[0], shore_target[2] - pos_end[2])
             stalled_below_lip = (
-                tried_lip and near_lip and lip_height >= (1.75 if still_wet else 0.5)
+                tried_lip and lip_distance <= 2.5 and lip_height >= (1.75 if still_wet else 0.5)
                 and (still_wet or "shore_landing" in actions)
+            )
+            directly_below = (
+                still_wet and "shore_lip_directly_below" in actions and lip_distance <= 0.6 and lip_height >= 0.75
             )
             no_approach = still_wet and (tried_lip or shore_path_unreachable) and (
                 math.dist(search_pos[:3], shore_target) - math.dist(pos_end[:3], shore_target) < 0.5
             )
-            if stalled_below_lip or no_approach:
+            if stalled_below_lip or directly_below or no_approach:
                 self._stalled_water_shores[tuple(shore_target)] = (tuple(pos_end[:3]), life, time.monotonic())
         if (
             still_wet and not retrying_bank and shore_target is not None and "shore_lip_jump" in actions
+            and "shore_lip_directly_below" not in actions
             and life == (st_end.get("dimension"), st_end.get("last_death"))
             and shore_bank_in_reach(pos_end, shore_target)
         ):
