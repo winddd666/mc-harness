@@ -209,9 +209,9 @@ def test_bug047_mine_dfs_clamps_to_55s_and_episode_deadline(monkeypatch: pytest.
         )
         monkeypatch.setattr(ts.skills, "_ensure_free_slots", lambda min_free=3: (True, []))
 
-        # 1) Unbounded episode caps 90s request to 55s.
-        json.loads(ts.mc_skill_mine_dfs(target="ancient_debris", max_duration_s=90.0))
-        assert seen_budgets[-1] == 55.0
+        # 1) Unbounded episode caps oversized request to 90s.
+        json.loads(ts.mc_skill_mine_dfs(target="ancient_debris", max_duration_s=150.0))
+        assert seen_budgets[-1] == 90.0
 
         # 2) Tight episode deadline (20s remaining) clamps to 16s (reserve 4s).
         ts.rebind_runtime_hooks(episode_deadline_mono=1020.0)
@@ -3511,6 +3511,276 @@ def test_v1314_control_wait_and_shoot_charge_passthrough() -> None:
     assert control_calls == [{"forward": True, "ms": 400, "wait": False}, {"wait": False}]
     shoot_calls = [body for path, body in recorded if path == "/shoot"]
     assert shoot_calls == [{"weapon": "bow", "entity_id": 1, "charge_ms": 1000}]
+
+
+def test_curriculum_two_stone_picks_and_late_grind_husbandry_demoted() -> None:
+    """bootstrap_iron_age ensures 2 stone pickaxes; rare 80m-island achievements stay at tier=3."""
+    from mc_agent.harness.curriculum import CURRICULUM_PLAYBOOKS, select_next_target
+
+    assert ("stone_pickaxe", 2) in CURRICULUM_PLAYBOOKS["bootstrap_iron_age"].pre_ensure
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"pos": [0.5, 70.0, 0.5], "dimension": "minecraft:overworld", "time_of_day": 2000, "in_water": False, "alive": True}},
+            )
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": [{"name": "iron_pickaxe", "count": 1}]}})
+        if path == "/advancements":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "advancements": [
+                            {"id": "minecraft:story/root", "status": "completed"},
+                            {"id": "minecraft:story/mine_stone", "status": "completed"},
+                            {"id": "minecraft:story/upgrade_tools", "status": "completed"},
+                            {"id": "minecraft:story/smelt_iron", "status": "completed"},
+                            {"id": "minecraft:story/iron_tools", "status": "completed"},
+                            {"id": "minecraft:husbandry/root", "status": "completed"},
+                            {"id": "minecraft:husbandry/obtain_sniffer_egg", "status": "not_started"},
+                            {"id": "minecraft:husbandry/allay_deliver_item_to_player", "status": "not_started"},
+                            {"id": "minecraft:husbandry/ride_a_boat_with_a_goat", "status": "not_started"},
+                            {"id": "minecraft:husbandry/breed_an_animal", "status": "not_started"},
+                        ]
+                    },
+                },
+            )
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot_c:
+        picked, _ = select_next_target(
+            bot_c,
+            cooldowns={"minecraft:story/shiny_gear": 999999.0},
+            now=1.0,
+            enable_island_recon=False,
+        )
+    assert picked is not None
+    assert picked.key == "minecraft:husbandry/make_a_sign_glow"
+    assert picked.key not in {
+        "minecraft:husbandry/obtain_sniffer_egg",
+        "minecraft:husbandry/allay_deliver_item_to_player",
+        "minecraft:husbandry/ride_a_boat_with_a_goat",
+    }
+
+
+def test_curriculum_death_drop_recovery_and_dusk_surface_filter() -> None:
+    """Daytime safe death drop triggers micro recover_death_drop; dusk/night skips daytime surface chores."""
+    from mc_agent.harness.curriculum import select_next_target
+    from mc_agent.harness.world_memory import WorldMemory
+
+    state = {"tod": 2000, "is_day": True, "inv": []}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "pos": [10.5, 68.0, 10.5],
+                        "dimension": "minecraft:overworld",
+                        "time_of_day": state["tod"],
+                        "is_day": state["is_day"],
+                        "in_water": False,
+                        "alive": True,
+                    },
+                },
+            )
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": list(state["inv"])}})
+        if path == "/advancements":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "advancements": [
+                            {"id": "minecraft:story/root", "status": "completed"},
+                            {"id": "minecraft:story/mine_stone", "status": "completed"},
+                            {"id": "minecraft:story/upgrade_tools", "status": "completed"},
+                            {"id": "minecraft:story/smelt_iron", "status": "completed"},
+                            {"id": "minecraft:story/iron_tools", "status": "completed"},
+                            {"id": "minecraft:husbandry/root", "status": "completed"},
+                            {"id": "minecraft:husbandry/breed_an_animal", "status": "not_started"},
+                            {"id": "minecraft:husbandry/plant_seed", "status": "not_started"},
+                            {"id": "minecraft:story/shiny_gear", "status": "not_started"},
+                        ]
+                    },
+                },
+            )
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    wm = WorldMemory()
+    wm.last_death = {"dim": "overworld", "pos": [30, 66, 20], "t": 100.0}
+
+    with BotSession("tok", bot_username="Bot", transport=httpx.MockTransport(handler)) as bot_c:
+        # 1) Daytime + recent (<260s) + close + high-value run -> recover_death_drop (short budget)
+        t1, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
+        assert t1.key == "recover_death_drop"
+        assert t1.budget_class == "short"
+
+        # 1b) BUG-149: Deep diamond-layer death (y=-54) with naked surface respawn (y=64, gap>=18, no pickaxe)
+        # must NOT waste an episode on recover_death_drop -> goes straight to bootstrap_stone_age
+        wm.last_death = {"dim": "overworld", "pos": [100, -54, 40], "t": 100.0}
+        t1b, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
+        assert t1b.key == "bootstrap_stone_age"
+
+        # 1c) Deep death when bot already holds a stone_pickaxe still allows recover_death_drop
+        state["inv"] = [{"name": "stone_pickaxe", "count": 1}]
+        t1c, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
+        assert t1c.key == "recover_death_drop"
+        assert t1c.budget_class == "short"
+        state["inv"] = []
+
+        # 2) Nighttime surface death -> must NOT run naked into night surface to recover corpse
+        wm.last_death = {"dim": "overworld", "pos": [30, 66, 20], "t": 100.0}
+        state["tod"] = 12000
+        state["is_day"] = False
+        t2, _ = select_next_target(bot_c, world_memory=wm, now=150.0, enable_island_recon=False)
+        assert t2.key == "bootstrap_stone_age"
+
+        # 3) Dusk/night with iron_pickaxe -> skips daytime surface chores (breed_an_animal/plant_seed)
+        state["inv"] = [{"name": "iron_pickaxe", "count": 1}, {"name": "shield", "count": 1}]
+        t3, _ = select_next_target(
+            bot_c,
+            world_memory=wm,
+            now=150.0,
+            enable_island_recon=False,
+            recon_done=True,
+        )
+        assert t3.key not in {"minecraft:husbandry/breed_an_animal", "minecraft:husbandry/plant_seed"}
+
+
+def test_bug118_125_131_curriculum_dimension_bare_kill_and_night_prep() -> None:
+    """Regression for BUG-118 (day1_night_iron_prep), BUG-125 (overworld nether/*), BUG-131 (naked kill_a_mob)."""
+    state: dict[str, Any] = {
+        "dim": "overworld",
+        "pos": [0.5, 64.0, 0.5],
+        "is_day": False,
+        "tod": 14000,
+        "armor_points": 0,
+        "inv": [{"name": "diamond_pickaxe", "count": 1}, {"name": "shield", "count": 1}],
+        "completed": [
+            "minecraft:story/mine_stone",
+            "minecraft:story/upgrade_tools",
+            "minecraft:story/smelt_iron",
+            "minecraft:story/iron_tools",
+            "minecraft:story/obtain_armor",
+            "minecraft:story/mine_diamond",
+            "minecraft:story/shiny_gear",
+            "minecraft:story/form_obsidian",
+            "minecraft:story/enter_the_nether",
+            "minecraft:story/enchant_item",
+            "minecraft:story/deflect_arrow",
+            "minecraft:adventure/kill_a_mob",
+        ],
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {
+                "ready": True, "alive": True, "dimension": state["dim"], "pos": state["pos"],
+                "health": 20.0, "food": 20, "is_day": state["is_day"], "time_of_day": state["tod"],
+                "armor_points": state["armor_points"],
+            }})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": state["inv"]}})
+        if path == "/advancements":
+            advs = [{"id": a, "status": "completed"} for a in state["completed"]]
+            advs.extend([
+                {"id": "minecraft:nether/root", "status": "completed"},
+                {"id": "minecraft:adventure/root", "status": "completed"},
+                {"id": "minecraft:nether/find_fortress", "status": "not_started"},
+                {"id": "minecraft:nether/obtain_ancient_debris", "status": "not_started"},
+                {"id": "minecraft:adventure/kill_a_mob", "status": "not_started"},
+            ])
+            return httpx.Response(200, json={"ok": True, "result": {"ready": True, "advancements": advs}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("tok", bot_username="CurP0", transport=httpx.MockTransport(handler)) as bot_c:
+        # BUG-125: in overworld, nether/find_fortress must NOT be selected even if enter_the_nether is completed
+        t_overworld, _ = select_next_target(bot_c, enable_island_recon=False, recon_done=True)
+        assert not t_overworld.key.startswith("minecraft:nether/"), f"unexpected nether target in overworld: {t_overworld.key}"
+
+        # In the_nether, nether/find_fortress IS eligible and prioritized
+        state["dim"] = "the_nether"
+        t_nether, _ = select_next_target(bot_c, enable_island_recon=False, recon_done=True)
+        assert t_nether.key == "minecraft:nether/find_fortress"
+
+        # BUG-131: naked bare without iron_pickaxe/shield/armor must NOT be assigned kill_a_mob when iron is cooled
+        state["dim"] = "overworld"
+        state["inv"] = [{"name": "stone_pickaxe", "count": 1}]
+        state["completed"] = ["minecraft:story/mine_stone", "minecraft:story/upgrade_tools"]
+        t_bare, _ = select_next_target(
+            bot_c,
+            cooldowns={"bootstrap_iron_age": 9999.0},
+            now=100.0,
+            enable_island_recon=False,
+            recon_done=True,
+        )
+        assert t_bare.key != "minecraft:adventure/kill_a_mob"
+
+        # BUG-118: day1_night_iron_prep must NOT tell bot to chop 12 logs on night surface or force fuel_item='coal'
+        from mc_agent.harness.world_memory import WorldMemory
+        state["inv"] = [{"name": "iron_pickaxe", "count": 1}, {"name": "raw_iron", "count": 3}]
+        state["completed"] = ["minecraft:story/mine_stone", "minecraft:story/upgrade_tools", "minecraft:story/smelt_iron", "minecraft:story/iron_tools"]
+        t_n1, _ = select_next_target(
+            bot_c,
+            world_memory=WorldMemory(),
+            now=100.0,
+            enable_island_recon=True,
+            recon_done=True,
+        )
+        assert t_n1.key == "day1_night_iron_prep"
+        assert "12 根原木" not in t_n1.task
+        assert "严禁调 mc_skill_staircase(up)" in t_n1.task
+
+        # BUG-139: nighttime without bed, >=3 wool, or known bed/village must NOT dispatch adventure/sleep_in_bed
+        state["dim"] = "overworld"
+        state["is_day"] = False
+        state["tod"] = 14000
+        state["inv"] = [{"name": "iron_pickaxe", "count": 1}, {"name": "white_wool", "count": 2}]
+        state["completed"] = [
+            "minecraft:story/mine_stone",
+            "minecraft:story/upgrade_tools",
+            "minecraft:story/smelt_iron",
+            "minecraft:story/iron_tools",
+            "minecraft:story/obtain_armor",
+            "minecraft:story/mine_diamond",
+            "minecraft:story/shiny_gear",
+            "minecraft:story/form_obsidian",
+            "minecraft:story/enter_the_nether",
+            "minecraft:story/enchant_item",
+            "minecraft:story/deflect_arrow",
+            "minecraft:adventure/kill_a_mob",
+        ]
+        t_no_bed, _ = select_next_target(
+            bot_c,
+            world_memory=WorldMemory(),
+            now=100.0,
+            enable_island_recon=False,
+            recon_done=True,
+        )
+        assert t_no_bed.key != "minecraft:adventure/sleep_in_bed"
+
+        # With >=3 wool at night, sleep_in_bed IS allowed
+        state["inv"] = [{"name": "iron_pickaxe", "count": 1}, {"name": "white_wool", "count": 3}]
+        t_has_wool, _ = select_next_target(
+            bot_c,
+            world_memory=WorldMemory(),
+            now=100.0,
+            enable_island_recon=False,
+            recon_done=True,
+        )
+        assert t_has_wool.key == "minecraft:adventure/sleep_in_bed"
+
+
 
 
 

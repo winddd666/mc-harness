@@ -45,7 +45,7 @@ RECIPES_1_21: dict[str, dict[str, Any]] = {
         "yield_count": 4,
         "ingredients": {"oak_log": 1},
         "keywords": ["木板", "planks", "木材"],
-        "notes": "任意 *_log 均可 1->4 合为对应 *_planks（2x2 即可）。",
+        "notes": "2x2 合成，1 份橡木原木或同家族去皮木材可合出 4 块橡木木板。",
     },
     "stick": {
         "id": "stick",
@@ -373,7 +373,12 @@ RECIPES_1_21: dict[str, dict[str, Any]] = {
         "yield_count": 1,
         "ingredients": {"iron_ingot": 1, "chiseled_stone_bricks": 8},
         "keywords": ["磁石", "lodestone", "use_lodestone", "天涯共此石", "指南针"],
-        "notes": "1.21.11 新配方仅需 1 iron_ingot + 8 chiseled_stone_bricks（不再需要下界合金锭）；放下后持 compass 调 mc_interact(x,y,z,item='compass') 解锁 adventure/use_lodestone(15分)。",
+        "notes": (
+            "1.21.11 配方为 1 iron_ingot + 8 chiseled_stone_bricks。做磁石前先核对 stone 和已有石砖类材料。"
+            "从头合成用 12 块 stone，库存达到 12 块就转做石砖。若熔炼只取回部分产物，先用 mc_window_view 查看原炉，"
+            "用 mc_window_act 取出剩余成品，再查背包并按实际缺口补烧圆石。已有石砖、石砖台阶或錾制石砖时用它们抵扣用量。"
+            "放下磁石后持 compass 调 mc_interact(x,y,z,item='compass') 解锁 adventure/use_lodestone（15分）。"
+        ),
     },
     "compass": {
         "id": "compass",
@@ -429,7 +434,11 @@ RECIPES_1_21: dict[str, dict[str, Any]] = {
         "yield_count": 1,
         "ingredients": {"diamond": 4},
         "keywords": ["钻石靴", "diamond_boots", "shiny_gear", "闪亮盔甲"],
-        "notes": "仅需 4 颗钻石的最省钻石护甲，合成并穿戴即可解锁 story/shiny_gear(60分)。",
+        "notes": (
+            "钻石靴用工作台和 4 颗钻石。采钻时每个时间片后查背包总量，包含开集已有和刚入包的钻石。"
+            "总量达到 4 颗就暂停挖钻，即使本次 mine_dfs 的 goal_met 仍为 false。"
+            "站位安全时调用 mc_skill_craft_gear(item='diamond_boots', equip_slot='feet')，核对合成和穿戴回执，完成 story/shiny_gear（60分）。"
+        ),
     },
     "golden_apple": {
         "id": "golden_apple",
@@ -587,7 +596,11 @@ ORES_1_21: dict[str, dict[str, Any]] = {
         "min_pickaxe": "stone_pickaxe",
         "drop": "raw_iron",
         "keywords": ["铁矿", "铁", "iron", "raw_iron", "deepslate_iron_ore"],
-        "tip": "mc_find_blocks 仅扫暴露在空气中的方块！若地表山崖没看到，下探天然洞窟/水谷裂谷或斜向挖阶梯至 Y=16~48 附近。",
+        "tip": (
+            "mc_find_blocks 仅扫暴露矿块。若地表山崖没看到，可沿干燥洞道或分段挖阶梯下探至 Y=16–48。"
+            "铁器开局缺铁且尚无铁镐时，到 Y=16 就停用向下阶梯，持石镐用 mc_skill_mine_dfs(target='iron', target_y=16) 水平找矿。"
+            "若已低于 Y=16 且附近无可采铁矿，沿确认可走的路线返回该层再找。"
+        ),
     },
     "lapis_ore": {
         "id": "lapis_ore",
@@ -702,11 +715,39 @@ MOBS_AND_MECHANICS: dict[str, dict[str, Any]] = {
         "keywords": ["craft_gear", "no_recipe", "missing_ingredients", "合成", "配方", "wheat_seeds", "server_recipe_rejected"],
         "rule": "craft_gear 只适用于 RECIPES_1_21 里登记过的可合成物（工具/盾牌/石砖/床等）；wheat_seeds、皮革、线之类没有工作台配方，调用必然 no_recipe。缺料时看 error.missing/missing_ingredients 补对应原料（如石镐 3 圆石 + 2 木棍），不要同一配方连续重试超过 2 次。",
     },
+    "wood_family_planks": {
+        "id": "wood_family_planks",
+        "category": "game_mechanic",
+        "keywords": ["去皮原木", "菌柄", "木板配方", "stripped", "stripped_spruce_planks", "wood planks"],
+        "rule": (
+            "普通和去皮的原木、木块、下界菌柄及 hyphae 都按木材家族合成，1 份原料出 4 块同家族木板，2x2 即可。"
+            "成品 ID 只用家族名加 _planks。spruce_log 和 stripped_spruce_log 都合成 spruce_planks；"
+            "crimson_stem 和 stripped_crimson_stem 都合成 crimson_planks；warped_stem 和 stripped_warped_stem 都合成 warped_planks。"
+            "做工作台或木棍时，可直接计入已有的任何家族木板。"
+        ),
+    },
+    "iron_block_unpacking": {
+        "id": "iron_block_unpacking",
+        "category": "game_mechanic",
+        "keywords": ["铁块", "铁锭", "iron_block", "iron_ingot", "打火石", "flint_and_steel", "iron_pickaxe"],
+        "rule": (
+            "缺铁锭时先查背包。1 个 iron_block 在 2x2 背包合成可拆成 9 个 iron_ingot。"
+            "例如持有铁块且缺 1~9 锭时，调用 mc_craft(item='iron_ingot', count=9)，再用 mc_inventory 核对实际入包。"
+            "按剩余缺口补打火石或铁镐的原料。打火石还需 1 燧石，铁镐还需 2 木棍和工作台。"
+            "现有铁锭与可拆铁块不足时，再查已有 raw_iron、燃料和熔炉，最后才找矿。"
+        ),
+    },
     "place_support_rules": {
         "id": "place_support_rules",
         "category": "api_mechanic",
         "keywords": ["place", "no_support", "blocked_by_self", "place_failed", "放置", "垫脚", "甘蔗"],
-        "rule": "mc_place 前先确认目标格下方有实体支撑、目标格本身为空气且不与自身碰撞箱重叠；若目标格是 sugar_cane/草丛/雪层等可替换方块，先用 mc_skill_mine_blocks 清空再放；blocked_by_self 时先侧移 1 格。",
+        "rule": (
+            "mc_place 的 x、y、z 必须是实测目标格的绝对世界坐标。没有目标坐标时，先用 mc_status 确认当前位置，"
+            "再查附近方块确定目标格；不要把 (0,0,0) 或相对偏移当占位参数。"
+            "放置前确认目标格下方有实体支撑、目标格本身为空气且不与自身碰撞箱重叠；"
+            "若目标格是 sugar_cane/草丛/雪层等可替换方块，先用 mc_skill_mine_blocks 清空再放；"
+            "blocked_by_self 时先侧移 1 格。"
+        ),
     },
     "attack_reach": {
         "id": "attack_reach",
@@ -803,11 +844,18 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:story/smelt_iron": {
         "difficulty": "easy",
-        "how_to": "石镐挖iron_ore得raw_iron，熔炉烧成iron_ingot并取出。",
+        "how_to": (
+            "将 iron_ingot 收入背包后查进度。优先把已有 iron_block 用 mc_craft(item='iron_ingot', count=9) 拆成 9 铁锭，"
+            "或在熔炉烧已有 raw_iron 并取出。两种来源都缺时，用石镐采 iron_ore 获得粗铁。"
+        ),
     },
     "minecraft:story/iron_tools": {
         "difficulty": "easy",
-        "how_to": "3铁锭+2木棍在工作台合iron_pickaxe。",
+        "how_to": (
+            "铁镐要 3 铁锭、2 木棍和工作台。缺锭时优先把已有 iron_block 拆成 9 铁锭；只有粗铁时，"
+            "用 mc_skill_smelt(input_item='raw_iron', count=3) 按缺口熔炼，核对铁锭已从炉里取出。"
+            "材料齐后调用 mc_skill_craft_gear(item='iron_pickaxe', equip_slot='hand')，并查看手持物确认已装备。"
+        ),
     },
     "minecraft:story/obtain_armor": {
         "difficulty": "easy",
@@ -827,7 +875,7 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:story/shiny_gear": {
         "difficulty": "medium",
-        "how_to": "获取至少 1 颗 diamond，优先打造 diamond_pickaxe/任意钻石护甲。",
+        "how_to": RECIPES_1_21["diamond_boots"]["notes"],
     },
     "minecraft:story/enchant_item": {
         "difficulty": "hard",
@@ -947,7 +995,12 @@ ADVANCEMENT_PLAYBOOKS: dict[str, dict[str, Any]] = {
     },
     "minecraft:nether/obtain_ancient_debris": {
         "difficulty": "hard",
-        "how_to": "用钻石镐在下界 Y8-22 挖 ancient_debris（远古残骸）；钻石/钻石矿只存在于主世界，下界不会生成，切勿在下界找钻石。床或TNT炸开更快。",
+        "how_to": (
+            "在下界确认脚下有支撑，持钻石镐或下界合金镐，调用 "
+            "mc_skill_mine_dfs(action='explore', target='ancient_debris', target_y=15, goal_count=1, max_duration_s=90)。"
+            "沿同一可用井续挖，遇流体、落差或井耗尽时按回执走已有安全回路，换已确认干燥的入口。"
+            "上梯可用于撤离，短横向通道只用于脱险或清障。每片核对实际入包 ancient_debris 和官方进度。"
+        ),
     },
     "minecraft:nether/ride_strider_in_overworld_lava": {
         "difficulty": "hard",

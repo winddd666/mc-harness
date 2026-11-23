@@ -382,7 +382,7 @@ def test_d2_d3_d4_objective_bootstrap_no_blind_dfs_and_stale_chest_self_heal(tmp
     world = _Phase2World()
     # Bot died earlier AFTER unlocking `story/iron_tools`, now only holds `stone_pickaxe`!
     world.completed_advs.add("minecraft:story/iron_tools")
-    world.add_item("stone_pickaxe", 1)
+    world.add_item("stone_pickaxe", 2)
 
     pb_iron = CURRICULUM_PLAYBOOKS["bootstrap_iron_age"]
     assert pb_iron.is_objectively_satisfied(world.completed_advs, {"stone_pickaxe": 1}) is False
@@ -1132,7 +1132,7 @@ def test_v2_wild_findings_reconnect_submerged_wall_recon_coords_and_no_copper_de
         assert skills._is_water_covered((6399, 58, -6428)) is True
 
         # 3) `island_recon_sweep` interpolates concrete coordinates around `(6406, -6430)` and uses 0 extra tools
-        world.add_item("stone_pickaxe", 1)
+        world.add_item("iron_pickaxe", 1)
         wm = WorldMemory()
         recon_t, _ = select_next_target(bot, world_memory=wm, enable_island_recon=True, recon_done=False)
         assert recon_t.key == "island_recon_sweep"
