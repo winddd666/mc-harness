@@ -3649,6 +3649,92 @@ def test_curriculum_death_drop_recovery_and_dusk_surface_filter() -> None:
         assert t3.key not in {"minecraft:husbandry/breed_an_animal", "minecraft:husbandry/plant_seed"}
 
 
+def test_bug118_125_131_curriculum_dimension_bare_kill_and_night_prep() -> None:
+    """Regression for BUG-118 (day1_night_iron_prep), BUG-125 (overworld nether/*), BUG-131 (naked kill_a_mob)."""
+    state: dict[str, Any] = {
+        "dim": "overworld",
+        "pos": [0.5, 64.0, 0.5],
+        "is_day": False,
+        "tod": 14000,
+        "armor_points": 0,
+        "inv": [{"name": "diamond_pickaxe", "count": 1}, {"name": "shield", "count": 1}],
+        "completed": [
+            "minecraft:story/mine_stone",
+            "minecraft:story/upgrade_tools",
+            "minecraft:story/smelt_iron",
+            "minecraft:story/iron_tools",
+            "minecraft:story/obtain_armor",
+            "minecraft:story/mine_diamond",
+            "minecraft:story/shiny_gear",
+            "minecraft:story/form_obsidian",
+            "minecraft:story/enter_the_nether",
+            "minecraft:story/enchant_item",
+            "minecraft:story/deflect_arrow",
+            "minecraft:adventure/kill_a_mob",
+        ],
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {
+                "ready": True, "alive": True, "dimension": state["dim"], "pos": state["pos"],
+                "health": 20.0, "food": 20, "is_day": state["is_day"], "time_of_day": state["tod"],
+                "armor_points": state["armor_points"],
+            }})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": state["inv"]}})
+        if path == "/advancements":
+            advs = [{"id": a, "status": "completed"} for a in state["completed"]]
+            advs.extend([
+                {"id": "minecraft:nether/root", "status": "completed"},
+                {"id": "minecraft:adventure/root", "status": "completed"},
+                {"id": "minecraft:nether/find_fortress", "status": "not_started"},
+                {"id": "minecraft:nether/obtain_ancient_debris", "status": "not_started"},
+                {"id": "minecraft:adventure/kill_a_mob", "status": "not_started"},
+            ])
+            return httpx.Response(200, json={"ok": True, "result": {"ready": True, "advancements": advs}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("tok", bot_username="CurP0", transport=httpx.MockTransport(handler)) as bot_c:
+        # BUG-125: in overworld, nether/find_fortress must NOT be selected even if enter_the_nether is completed
+        t_overworld, _ = select_next_target(bot_c, enable_island_recon=False, recon_done=True)
+        assert not t_overworld.key.startswith("minecraft:nether/"), f"unexpected nether target in overworld: {t_overworld.key}"
+
+        # In the_nether, nether/find_fortress IS eligible and prioritized
+        state["dim"] = "the_nether"
+        t_nether, _ = select_next_target(bot_c, enable_island_recon=False, recon_done=True)
+        assert t_nether.key == "minecraft:nether/find_fortress"
+
+        # BUG-131: naked bare without iron_pickaxe/shield/armor must NOT be assigned kill_a_mob when iron is cooled
+        state["dim"] = "overworld"
+        state["inv"] = [{"name": "stone_pickaxe", "count": 1}]
+        state["completed"] = ["minecraft:story/mine_stone", "minecraft:story/upgrade_tools"]
+        t_bare, _ = select_next_target(
+            bot_c,
+            cooldowns={"bootstrap_iron_age": 9999.0},
+            now=100.0,
+            enable_island_recon=False,
+            recon_done=True,
+        )
+        assert t_bare.key != "minecraft:adventure/kill_a_mob"
+
+        # BUG-118: day1_night_iron_prep must NOT tell bot to chop 12 logs on night surface or force fuel_item='coal'
+        from mc_agent.harness.world_memory import WorldMemory
+        state["inv"] = [{"name": "iron_pickaxe", "count": 1}, {"name": "raw_iron", "count": 3}]
+        state["completed"] = ["minecraft:story/mine_stone", "minecraft:story/upgrade_tools", "minecraft:story/smelt_iron", "minecraft:story/iron_tools"]
+        t_n1, _ = select_next_target(
+            bot_c,
+            world_memory=WorldMemory(),
+            now=100.0,
+            enable_island_recon=True,
+            recon_done=True,
+        )
+        assert t_n1.key == "day1_night_iron_prep"
+        assert "12 根原木" not in t_n1.task
+        assert "严禁调 mc_skill_staircase(up)" in t_n1.task
+
+
 
 
 

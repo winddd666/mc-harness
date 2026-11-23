@@ -1443,6 +1443,7 @@ def select_next_target(
     is_day_now = True
     time_of_day: int | None = None
     has_hostile_now = False
+    armor_points_now = 0
     try:
         st = bot.status()
         if isinstance(st.get("pos"), (list, tuple)) and len(st["pos"]) >= 3:
@@ -1455,6 +1456,9 @@ def select_next_target(
             time_of_day = int(raw_tod) % 24000
         nh_s = st.get("nearest_hostile")
         has_hostile_now = isinstance(nh_s, dict) and bool(nh_s.get("name"))
+        raw_armor = st.get("armor_points")
+        if isinstance(raw_armor, (int, float)):
+            armor_points_now = int(raw_armor)
     except Exception:
         pass
     is_dusk_or_night = (not is_day_now) or (time_of_day is not None and 11000 <= time_of_day < 23200)
@@ -1704,9 +1708,10 @@ def select_next_target(
             pre_ensure=(),
             advancement_id="minecraft:story/obtain_armor" if "minecraft:story/obtain_armor" not in completed else None,
             task=(
-                "[Day 1 铁层安稳过夜：天黑且尚未经历 Day 2 白天探村，第 1 晚绝不冒险下 Y=-54 挖钻或回地表送死！"
-                "请安心在 Y=16 铁/煤层凑足铁锭与煤炭，合成 shield（副手盾）与 1 件铁甲（iron_chestplate/iron_boots）及备用铁镐，等天亮立刻出井探村！]\n"
-                + CURRICULUM_PLAYBOOKS["bootstrap_iron_age"].task
+                "[Day 1 铁层安稳过夜：天黑且尚未经历 Day 2 白天探村，第 1 晚严禁调 mc_skill_staircase(up) 或 climb_out 爬回夜晚地表砍树送死，也不急于下 Y=-54！]\n"
+                "1) 直接在当前地下调 mc_skill_mine_dfs(action='explore', target='iron', target_y=16, goal_count=6, max_duration_s=90) 凑足铁矿与沿途煤炭；\n"
+                "2) 调 mc_skill_smelt(input_item='raw_iron', count=...) 熔炼铁锭（不要强传 fuel_item='coal'，无煤时让熔炼自动使用包内木板/原木作燃料）；\n"
+                "3) 优先合出 shield（副手盾）与 1 件铁甲（iron_chestplate/iron_boots）及备用铁镐，成型后即收工等待天亮。"
             ),
         )
         candidates.append(((0, 0, -85, "day1_night_iron_prep"), pb_n1))
@@ -1725,6 +1730,14 @@ def select_next_target(
         "minecraft:adventure/trade",
     })
     is_deep_underground = cur_dim == "overworld" and origin_pos is not None and float(origin_pos[1]) < 48.0
+    has_melee_safety = (
+        counts.get("shield", 0) >= 1
+        or armor_points_now > 0
+        or any(
+            k.endswith(("_helmet", "_chestplate", "_leggings", "_boots")) and v > 0
+            for k, v in counts.items()
+        )
+    )
 
     for key, pb in CURRICULUM_PLAYBOOKS.items():
         if key.startswith("bootstrap_"):
@@ -1739,7 +1752,13 @@ def select_next_target(
             continue
         if leash_active and key == "minecraft:adventure/kill_a_mob" and is_day_now and not has_hostile_now:
             continue
+        if key == "minecraft:adventure/kill_a_mob" and cur_dim == "overworld" and not has_iron_or_better and not has_melee_safety:
+            continue
         adv_id = pb.advancement_id or key
+        if adv_id.startswith("minecraft:nether/") and adv_id != "minecraft:nether/brew_potion" and cur_dim != "the_nether":
+            continue
+        if adv_id.startswith("minecraft:end/") and cur_dim != "the_end":
+            continue
         if adv_id in completed or adv_id in _UNSUPPORTED_API_ADVANCEMENTS or _is_cooled(key):
             continue
         is_unlocked = adv_id in frontier_by_id or (
@@ -1798,6 +1817,10 @@ def select_next_target(
         adv_id = str(row.get("id") or "")
         pts = RULES_ADVANCEMENT_POINTS.get(adv_id, 0)
         if pts <= 0 or adv_id in completed or adv_id in CURRICULUM_PLAYBOOKS or _is_cooled(adv_id):
+            continue
+        if adv_id.startswith("minecraft:nether/") and adv_id != "minecraft:nether/brew_potion" and cur_dim != "the_nether":
+            continue
+        if adv_id.startswith("minecraft:end/") and cur_dim != "the_end":
             continue
         if not _can_attempt_target(adv_id, counts, has_iron_or_better=has_iron_or_better):
             continue
