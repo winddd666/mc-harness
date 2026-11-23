@@ -364,13 +364,13 @@ def ranged_retreat_positions(
     return positions
 
 
-def melee_clear_for_projectile_cover(entities: Sequence[dict[str, Any]]) -> bool:
+def melee_clear_for_projectile_cover(entities: Sequence[dict[str, Any]], *, max_distance: float = 5.5) -> bool:
     return not any(
         isinstance(entity, dict)
         and str(entity.get("name") or "").removeprefix("minecraft:") in PRE_HURT_MELEE_MOBS | {"creeper"}
         and (
             not isinstance(entity.get("dist"), (int, float))
-            or not math.isfinite(entity["dist"]) or entity["dist"] <= 5.5
+            or not math.isfinite(entity["dist"]) or entity["dist"] <= max_distance
         )
         for entity in entities
     )

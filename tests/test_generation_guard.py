@@ -17625,6 +17625,85 @@ def test_nether_blaze_combat_engages_without_chasing(mode, gear, scene, expected
         assert not reply["ok"] and reply["requires_replan"] and reply["error"]["code"] == expected
 
 
+@pytest.mark.parametrize(("scene", "expected"), [
+    ("clear", "shoot"), ("wall", "blocked_by_wall"), ("close_piglin", "rush"),
+    ("closing_piglin", "combat_melee_pressure"), ("shield", "shield_blocking_shot"),
+    ("no_blaze", "rush"), ("named_piglin", "rush"), ("no_ammo", "blaze_requires_ranged"),
+])
+def test_nether_auto_combat_reaches_stationary_blaze_from_a_mixed_sighting(monkeypatch, scene, expected):
+    from mc_agent.harness.mc_tools import McToolset
+    from mc_agent.skills import combat_v1
+
+    # W17b HY11 EP02 actor sighting. The terrain and later snapshots are controlled here.
+    origin = [0.5, 70, 3607.5]
+    piglin = {"id": 2080288, "name": "piglin", "pos": [-3.9, 68, 3609.4], "dist": 4.6, "blocked_by_wall": True}
+    other_piglin = {"id": 2080714, "name": "piglin", "pos": [-4.6, 68, 3610], "dist": 5.4, "blocked_by_wall": False}
+    blaze = {"id": 2095792, "name": "blaze", "pos": [5.8, 74, 3586.5], "dist": 22.6}
+    close_piglin = {**other_piglin, "pos": [2.5, 70, 3607.5], "dist": 2.0}
+    writes = []
+    rushes = []
+    status_reads = 0
+
+    def rush(_adapter, *, target_name, max_time_s):
+        rushes.append(target_name)
+        return {"killed": True}
+
+    monkeypatch.setattr(combat_v1, "action_rush", rush)
+
+    def handle(request):
+        nonlocal status_reads
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if endpoint == "status":
+            status_reads += 1
+            closes = scene == "close_piglin" or (scene == "closing_piglin" and status_reads > 1)
+            result = {
+                "dimension": "the_nether", "pos": origin, "alive": True, "ready": True, "on_ground": True,
+                "nearest_hostile": close_piglin if closes else piglin, "blocking": scene == "shield",
+            }
+        elif endpoint == "get_entities":
+            entities = [piglin, close_piglin if scene == "close_piglin" else other_piglin]
+            if scene != "no_blaze":
+                entities.append(blaze)
+            result = {"entities": entities}
+        elif endpoint == "inventory":
+            items = [{"name": "shield", "count": 1}, {"name": "bow", "count": 1}]
+            if scene != "no_ammo":
+                items.append({"name": "arrow", "count": 2})
+            result = {"items": items}
+        elif endpoint == "get_block":
+            x, y, z = body["pos"]
+            wall = scene == "wall" and z == 3604
+            result = {"name": "nether_bricks" if wall or (x, y, z) == (0, 69, 3607) else "air"}
+        elif endpoint == "shoot":
+            writes.append((endpoint, body))
+            result = {"fired": True, "used": {"arrow": 1}, "killed": True}
+        elif endpoint in {"stop", "posture"}:
+            writes.append((endpoint, body))
+            result = {}
+        else:
+            pytest.fail(f"Unexpected tactical combat endpoint: {endpoint}")
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(handle)) as bot:
+        reply = json.loads(McToolset(bot).mc_skill_combat(
+            mode="auto", target_name="piglin" if scene == "named_piglin" else None, max_time_s=15,
+        ))
+
+    if expected == "rush":
+        assert reply["ok"] and rushes == ["piglin"]
+        assert [endpoint for endpoint, _ in writes] == ["stop", "posture"]
+    elif expected == "shoot":
+        assert not rushes and reply["ok"] and reply["result"]["killed"]
+        assert reply["target_name"] == "blaze"
+        assert writes == [("shoot", {
+            "weapon": "bow", "entity_id": blaze["id"], "charge_ms": 1000, "stop_on": ["hurt", "death"],
+        })]
+    else:
+        assert not rushes and not writes
+        assert not reply["ok"] and reply["requires_replan"] and reply["error"]["code"] == expected
+
+
 @pytest.mark.parametrize("feedback, confirmed", [
     ({"projectiles": []}, False),
     ({"projectiles": [], "used": {"arrow": 1}}, True),
