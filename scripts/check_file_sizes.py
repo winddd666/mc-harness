@@ -24,7 +24,6 @@ LEGACY_CEILINGS: dict[str, int] = {
     "src/mc_agent/skills/mining_dfs.py": 9000,
     "src/mc_agent/harness/guardian.py": 7600,
     "src/mc_agent/skills/combat_env.py": 6000,
-    "tests/test_v2_harness.py": 4300,
     "src/mc_agent/harness/mc_tools.py": 4150,
     "scripts/l3_wild_endurance_runner.py": 4000,
     "src/mc_agent/harness/curriculum.py": 3250,
