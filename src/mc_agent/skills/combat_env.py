@@ -17,7 +17,7 @@ from typing import Any, Callable, Collection, Literal, Protocol, Sequence, Typed
 import httpx
 
 from ..errors import ApiError
-from .safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
+from .safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear, water_oxygen_below
 
 AIR_LIKE_BLOCKS: frozenset[str] = frozenset(
     {
@@ -271,21 +271,7 @@ def _is_lava_block(name: str) -> bool:
 
 
 def _water_requires_surface(status: dict[str, Any], *, oxygen_bubbles: float) -> bool:
-    if not status.get("in_water"):
-        return False
-    submerged = status.get("submerged")
-    if submerged:
-        return True
-    oxygen = status.get("oxygen")
-    if type(oxygen) not in (int, float) or not math.isfinite(oxygen):
-        return False
-    if oxygen <= 0:
-        return True
-    # An exposed head can keep a low positive reading until the meter refills.
-    if submerged is False:
-        return False
-    bubbles = oxygen if oxygen <= 20 else oxygen / 15
-    return bubbles < oxygen_bubbles
+    return bool(status.get("in_water") and (status.get("submerged") or water_oxygen_below(status, oxygen_bubbles)))
 
 
 def _hitbox_columns(px: float, pz: float) -> list[tuple[int, int]]:
@@ -1375,20 +1361,32 @@ class CombatEnv:
         unconfirmed = {"ok": False, "reason": "pursuit_unconfirmed"}
 
         def nearby(status: dict[str, Any]) -> bool:
-            nearest = status.get("nearest_hostile")
-            distance = nearest.get("dist") if isinstance(nearest, dict) else None
             health = status.get("health")
-            return (
+            if not (
                 status.get("ready") is True and status.get("alive") is not False
                 and isinstance(health, (int, float)) and health > 0
                 and not any(status.get(key) for key in ("in_water", "in_lava", "submerged", "busy"))
                 and all(status.get(key) == before.get(key) for key in ("last_death", "dimension"))
-                and isinstance(nearest, dict) and nearest.get("id") == target_id
+            ):
+                return False
+            nearest = status.get("nearest_hostile")
+            if nearest is None or nearest == {}:
+                # A missing nearest-hostile sample does not rule out the attributed pursuer.
+                # Only try the bounded entity scan if the landed bot can still raise its shield.
+                offhand = status.get("offhand")
+                return (
+                    health <= 4.0 and status.get("on_ground") is True and status.get("blocking") is False
+                    and isinstance(offhand, dict) and _clean_block_name(offhand.get("name")) == "shield"
+                )
+            distance = nearest.get("dist") if isinstance(nearest, dict) else None
+            return (
+                isinstance(nearest, dict) and nearest.get("id") == target_id
                 and _clean_block_name(nearest.get("name")) == "enderman" and not nearest.get("blocked_by_wall")
                 and isinstance(distance, (int, float)) and 0 <= distance <= 3.5
             )
 
-        if not nearby(self._safe_status(timeout_s=0.25)):
+        initial = self._safe_status(timeout_s=0.25)
+        if not nearby(initial):
             return unconfirmed
         try:
             entities = self.bot.call(
@@ -1419,9 +1417,11 @@ class CombatEnv:
             shield = self.bot.call(
                 "posture", {"shield": True, "sneak": False, "jump": False}, timeout_s=0.3, allow_reauth=False,
             )
+            nearest_missing = not (initial.get("nearest_hostile") and current.get("nearest_hostile"))
             return {
                 "ok": shield.get("blocking") is True, "entity_id": target_id, "distance": distance,
                 "threat_remaining": True,
+                **({"nearest_hostile_missing": True} if nearest_missing else {}),
             }
         except (ApiError, httpx.HTTPError):
             return unconfirmed

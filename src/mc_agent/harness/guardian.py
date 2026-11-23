@@ -50,7 +50,7 @@ from ..skills.combat_env import (
     retreat_made_progress,
 )
 from ..skills.library import MacroSkills, best_melee_weapon_in_inv, ray_wall_blocker
-from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear
+from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear, water_oxygen_below
 
 # Hurt sources that mean "my body is embedded in a block", not "something is attacking me".
 IN_WALL_HURT_SOURCES = frozenset({"in_wall", "suffocation", "cramming", "inside_block"})
@@ -658,14 +658,16 @@ class GenerationGuard:
 
     def _settle_dry_landing(
         self, before: dict[str, Any], after: dict[str, Any], bot: _GuardSession, *, deadline: float,
+        checks: int = 2, can_wait: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any]:
-        for _ in range(2):
+        for _ in range(checks):
             if (
                 after.get("on_ground") is not False
                 or any(after.get(key) for key in ("in_water", "in_lava", "submerged"))
                 or after.get("alive") is False or after.get("ready") is False
                 or any(after.get(key) != before.get(key) for key in ("last_death", "dimension"))
                 or deadline - time.monotonic() < 0.35
+                or (can_wait is not None and not can_wait(after))
             ):
                 break
             time.sleep(0.1)
@@ -674,6 +676,39 @@ class GenerationGuard:
             except (ApiError, httpx.HTTPError):
                 break
         return after
+
+    def _settle_mining_shore_jump(
+        self, before: dict[str, Any], after: dict[str, Any], shore: dict[str, Any],
+    ) -> dict[str, Any]:
+        bank = shore.get("pos_after")
+        actions = shore.get("actions")
+        if not (
+            shore.get("ok") is True and shore.get("in_water") is False
+            and isinstance(actions, list) and "shore_lip_jump" in actions
+            and after.get("in_water") is False and after.get("on_ground") is False
+            and isinstance(bank, (list, tuple)) and len(bank) >= 3
+            and all(type(coord) in (int, float) and math.isfinite(coord) for coord in bank[:3])
+        ):
+            return after
+
+        starting_health = after.get("health")
+
+        def can_wait(status: dict[str, Any]) -> bool:
+            name, distance, _, _ = self._extract_hostile_info(status)
+            health, pos = status.get("health"), status.get("pos")
+            return (
+                status.get("ready") is True and isinstance(health, (int, float))
+                and health > self.WATER_SHORE_MAX_HP and health == starting_health
+                and not (status.get("busy") or status.get("on_fire"))
+                and (not name or distance > 8.0)
+                and isinstance(pos, (list, tuple)) and len(pos) >= 3
+                and all(type(coord) in (int, float) and math.isfinite(coord) for coord in pos[:3])
+                and math.dist(bank[:3], pos[:3]) <= 1.5
+            )
+
+        return self._settle_dry_landing(
+            before, after, self.bot, deadline=time.monotonic() + 0.95, checks=6, can_wait=can_wait,
+        )
 
     @staticmethod
     def _nether_fast_fall(status: dict[str, Any]) -> bool:
@@ -849,6 +884,17 @@ class GenerationGuard:
             return False
 
     def _escape_water_for_combat(self, before: dict[str, Any]) -> dict[str, Any]:
+        health = before.get("health")
+        deadline = self.bot.active_deadline
+        if (
+            deadline is not None and before.get("in_water") is True
+            and isinstance(health, (int, float)) and 0 < health <= 10.0
+        ):
+            # Leave time for a directed shore attempt if a short ascent does not reach dry ground.
+            budget_s = min(self.COMBAT_WATER_ESCAPE_BUDGET_S, deadline - time.monotonic() - 2.0)
+            if budget_s <= 0.25:
+                return {"ok": False, "reason": "time_budget", "in_water": True}
+            return self._escape_water(before, budget_s=budget_s)
         with self.bot.pause_deadline("escape_water"):
             return self._escape_water(before)
 
@@ -872,15 +918,6 @@ class GenerationGuard:
         return (
             isinstance(health, (int, float)) and health <= self.WATER_SHORE_MAX_HP
             and (status.get("on_ground") is False or bool(status.get("submerged")))
-        )
-
-    @staticmethod
-    def _water_oxygen_below(status: dict[str, Any], threshold: float) -> bool:
-        oxygen = status.get("oxygen")
-        # Positive low readings can reflect a different scale or lag an exposed head.
-        return (
-            isinstance(oxygen, (int, float)) and oxygen < threshold
-            and (status.get("submerged") is not False or oxygen <= 0)
         )
 
     def _has_close_melee_in_water(self, status: dict[str, Any], *, include_wading: bool = False) -> bool:
@@ -2198,8 +2235,8 @@ class GenerationGuard:
             and self._needs_hot_floor_stance(status, now)
         )
         oxygen = status.get("oxygen")
-        low_oxygen = self._water_oxygen_below(status, 240)
-        critical_drowning = self._water_oxygen_below(status, 150)
+        low_oxygen = water_oxygen_below(status, 16)
+        critical_drowning = water_oxygen_below(status, 10)
         drowning = in_water and (
             (isinstance(oxygen, (int, float)) and oxygen <= 0)
             or any(str(h.get("source") or "").strip().lower() == "drown" for h in hurts)
@@ -5206,6 +5243,7 @@ class GenerationGuard:
                 observed_life is not None and observed_life != (st_pre.get("dimension"), st_pre.get("last_death"))
             )
             tool_water_threat = trigger.get("source") == "tool_water_threat"
+            shore_jump_settled = False
             fall_start_pos = None
             falling_summary = f"执行 {interrupted_name} 途中快速下坠，尚未确认落点，请待落地后重新规划"
             if tool_water_threat and not life_unavailable and st_pre.get("in_water") is False:
@@ -5381,7 +5419,7 @@ class GenerationGuard:
                 )
                 underwater_danger = bool(st_pre.get("in_water")) and (
                     bool(st_pre.get("submerged"))
-                    or self._water_oxygen_below(st_pre, 180)
+                    or water_oxygen_below(st_pre, 12)
                     or drowning_pre
                     or trigger.get("primary_type") == "drowned"
                     or tool_water_threat
@@ -5496,6 +5534,19 @@ class GenerationGuard:
                         st_after = self.bot.status()
                     except (ApiError, httpx.HTTPError):
                         st_after = st_pre
+                    water_observation = trigger.get("water_observation") or {}
+                    if (
+                        mining_water_pre and tool_water_threat and not esc_pre_respawned
+                        and trigger.get("action_released") is True
+                        and water_observation.get("reason") == "sustained_submersion"
+                    ):
+                        settled = self._settle_mining_shore_jump(st_pre, st_after, shore_result)
+                        shore_jump_settled = (
+                            settled is not st_after and self._same_life(st_pre, settled)
+                            and settled.get("in_water") is False and settled.get("on_ground") is True
+                            and not (settled.get("submerged") or settled.get("in_lava"))
+                        )
+                        st_after = settled
                     life_unavailable = esc_pre_respawned or life_changed(st_after)
                     if life_unavailable:
                         self._last_water_escape_at = float("-inf")
@@ -5636,7 +5687,7 @@ class GenerationGuard:
                             and (self._custom_combat_registered or outcome.get("mode") not in {"water_surface", "water_surface_abort"})
                             and (
                                 close_drowned_after_reflex or st_after.get("submerged")
-                                or self._water_oxygen_below(st_after, 180)
+                                or water_oxygen_below(st_after, 12)
                                 or time.monotonic() < self._no_water_until
                             )
                         ):
@@ -5720,7 +5771,7 @@ class GenerationGuard:
                 {"hurt_source": trigger["hurt_source"]}
                 if interrupted_name == "mc_skill_combat" and trigger.get("hurt_source") else {}
             )
-            work_observation: dict[str, Any] = {}
+            work_observation: dict[str, Any] = {"shore_landing_confirmed_after_jump": True} if shore_jump_settled else {}
             if (
                 interrupted_name in MINING_WATER_WATCH_TOOLS and tool_water_threat and outcome.get("mode") == "water_surface"
                 and trigger.get("action_released") is True
@@ -6287,7 +6338,7 @@ class GenerationGuard:
             or drowning
             or nearby_water_threat
             or bool(hurts)
-            or self._water_oxygen_below(status, 270)
+            or water_oxygen_below(status, 18)
         )
 
         boundary_trigger: ThreatTrigger | None = None
