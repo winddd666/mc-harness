@@ -523,7 +523,7 @@ class BotRow:
     status: str
     score: int | None
     episodes_done: int
-    elapsed_s: float
+    elapsed_s: float | None
     deaths: int
     guardian_incidents: int
     preemptions: int
@@ -533,6 +533,7 @@ class BotRow:
     top_tools: list[tuple[str, int, int]]
     top_errors: list[tuple[str, int]]
     slow_calls: list[tuple[float, str, str]]
+    stop_reason: str = ""
     crash_tail: str = ""
     scene_stage: str = ""
     scene_ok: bool | None = None
@@ -661,7 +662,8 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     episodes = cs.get("episodes") or summary.get("episodes") or []
     recorded_scores = (cs.get("final_score"), summary.get("final_score"), cs.get("current_score"))
     score_value = next((value for value in recorded_scores if value not in (None, "")), None)
-    elapsed_s = float(cs.get("elapsed_s") or 0.0)
+    elapsed_raw = cs.get("elapsed_s")
+    elapsed_s = float(elapsed_raw) if elapsed_raw not in (None, "") else None
     gained: list[str] = []
     for ep in episodes:
         gained.extend(ep.get("gained_advancements") or [])
@@ -780,6 +782,9 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
     crash_tail = _read_crash_tail(bd)
     if crash_tail and terminal is None:
         status = "crash"
+    reason = cs.get("stop_reason")
+    stop_reasons = {"completed": ("deadline", "episode_cap"), "interrupted": ("interrupted",)}
+    stop_reason = reason if reason in stop_reasons.get(status, ()) else ""
     score = int(score_value) if score_value is not None and status != "not_ready" else None
 
     slow_calls.sort(reverse=True)
@@ -824,6 +829,7 @@ def triage_bot_dir(bd: pathlib.Path) -> BotRow:
         score=score,
         episodes_done=len(episodes),
         elapsed_s=elapsed_s,
+        stop_reason=stop_reason,
         deaths=lifecycle.deaths,
         guardian_incidents=guardian_incidents,
         preemptions=max(preemptions, event_preemptions),
@@ -935,15 +941,16 @@ def _write_markdown(
         "",
         "## 1. 各路成绩总览（baseline = 场景 loadout 预授分，earned = 实机净增分）",
         "",
-        "| Squad | Bot | Stage | Status | Score | Baseline | Earned | Eps | Deaths | ID-less deaths | Respawn/spawn | Connection changes | Mixed guardian | Guard | Preempt | 429 Failures | 429 Retries | Gained |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Squad | Bot | Stage | Status | Stop reason | Elapsed (s) | Score | Baseline | Earned | Eps | Deaths | ID-less deaths | Respawn/spawn | Connection changes | Mixed guardian | Guard | Preempt | 429 Failures | 429 Retries | Gained |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in sorted(rows, key=lambda x: (x.squad, x.name)):
         g = ", ".join(r.gained_short[:4])
         score = r.score if r.score is not None else "—"
         earned = r.earned_points if r.earned_points is not None else "—"
+        elapsed = f"{r.elapsed_s:.1f}" if r.elapsed_s is not None else "—"
         lines.append(
-            f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {score} | "
+            f"| {r.squad} | `{r.name}` | {r.stage} | {r.status} | {r.stop_reason or '—'} | {elapsed} | {score} | "
             f"{int(r.baseline_points or 0)} | {earned} | {r.episodes_done} | "
             f"{r.deaths} | {r.death_receipts} | {r.respawns} | {r.connection_changes} | "
             f"{r.mixed_guardian_incidents} | {r.guardian_incidents} | {r.preemptions} | "
@@ -1142,6 +1149,8 @@ def cmd_triage(wave: str, markdown: str | bool | None = None, runs_root: pathlib
             f"connection_changes={r.connection_changes} guard_mixed={r.mixed_guardian_incidents} "
             f"guard={r.guardian_incidents:2d} preempt={r.preemptions:2d} "
             f"429_failed={r.http_429:2d} 429_retries={r.http_429_retries:2d} gained=[{','.join(r.gained_short[:4])}]"
+            + (f" stop={r.stop_reason}" if r.stop_reason else "")
+            + (f" elapsed={r.elapsed_s:.1f}s" if r.elapsed_s is not None else "")
             + (" scene=BAD" if r.scene_ok is False else "")
             + (f" wd={r.scene_ticks}skips={r.scene_preempt_skips}" if r.scene_ticks is not None else "")
         )

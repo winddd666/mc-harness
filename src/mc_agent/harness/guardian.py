@@ -1340,6 +1340,19 @@ class GenerationGuard:
 
         return self._action("cornered_melee_strike", strike)
 
+    def _disengage_critical_melee(
+        self, controller: SubcorticalInstinctController, landing: dict[str, Any], target_id: int,
+    ) -> dict[str, Any]:
+        try:
+            with self.bot.limit_until(time.monotonic() + 2.2):
+                retreat, _ = controller.ranked_melee_retreat(
+                    self.combat_env, landing, target_id, critical=True, verify_melee_clearance=True,
+                )
+                return {"entity_id": target_id, **retreat}
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return {"ok": False, "reason": "time_budget", "entity_id": target_id}
+
     def _cornered_wither_skeleton_response(
         self, before: dict[str, Any], counts: dict[str, int], target_id: int,
         *, landing: dict[str, Any] | None = None,
@@ -3175,7 +3188,13 @@ class GenerationGuard:
                                         self._mark_ranged_engagement(time.monotonic(), attacker=att_obj, in_cover=True)
                             stalled_under_arrows = (
                                 not has_shield and hurt_src == "arrow" and 0 < hp_val <= LOW_HP_BUNKER_MAX
-                                and cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
+                                and (
+                                    cf_result.get("reason") in {"no_safe_retreat", "unsafe_landing"}
+                                    or (
+                                        not cf.get("ok")
+                                        and retreat_made_progress(False, moved_dist, cf_result.get("reason"))
+                                    )
+                                )
                             )
                             stalled_under_trident = (
                                 hurt_src == "trident" and source_name in {"", "drowned"}
@@ -3333,8 +3352,13 @@ class GenerationGuard:
                     )
                     bunker_grounded = status.get("on_ground") is True and nh_name != "creeper"
                     inside_shaft = bunker_grounded and hp_val <= LOW_HP_BUNKER_MAX and self._inside_own_shaft()
+                    uses_default_bunker = self.skills is None or isinstance(self.skills, MacroSkills)
                     exposed_to_lethal_melee = (
-                        dimension == "the_nether" and 0 < hp_val <= 4.0 and not inside_shaft
+                        (
+                            dimension == "the_nether"
+                            or (dimension == "overworld" and uses_default_bunker and not has_shield and not already_blocking)
+                        )
+                        and 0 < hp_val <= 4.0 and not inside_shaft
                         and (hurt_src in MELEE_HURT_SOURCES or now - self._last_melee_hurt_at < 4.0)
                         and (
                             (nh_name in PRE_HURT_MELEE_MOBS and 0 <= nh_dist <= 3.5 and not nearest.get("blocked_by_wall"))
@@ -3356,7 +3380,7 @@ class GenerationGuard:
                     # inventory snapshot still goes through the macro's own check.
                     no_bunker_material = (
                         dimension == "overworld" and 0 < hp_val <= 6.0
-                        and (self.skills is None or isinstance(self.skills, MacroSkills))
+                        and uses_default_bunker
                         and isinstance(inv.get("items"), list)
                         and self.combat_env._pick_filler_block(_inventory_counts_from_raw(inv)) is None
                     )
@@ -3375,7 +3399,7 @@ class GenerationGuard:
                         reasons.append("death_or_connection_changed")
                     elif not (bunker and bunker["ok"]):
                         unsafe_footing = (
-                            (try_bunker and no_bunker_material)
+                            exposed_to_lethal_melee or (try_bunker and no_bunker_material)
                             or bunker_result.get("reason") in {"unsafe_floor", "unsafe_open_side", "no_roof_block"}
                             or (self._blocked_bunker is not None and self._blocked_bunker[0] == self._bunker_site(status))
                         )
@@ -3544,18 +3568,35 @@ class GenerationGuard:
                                     if self._bunker_life_unavailable(late_bunker):
                                         reasons.append("death_or_connection_changed")
                             elif (follow_unarmed_retreat or retry_after_knockback) and landing.get("pos"):
-                                if target_pos is None:
-                                    target_pos = self._find_hostile_position(target_id, mob, timeout_s=0.6)
-                                if (
-                                    target_pos and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
+                                controller = self.combat_slot.controller
+                                near_target = target_pos is None or (
+                                    len(target_pos) >= 3
+                                    and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
                                     and math.dist(landing["pos"][:3], target_pos[:3]) <= 3.5
+                                )
+                                if (
+                                    follow_unarmed_retreat and dimension == "overworld"
+                                    and hurt_src == "mob_attack" and target_id == nh_id and current_hp <= 4.0
+                                    and landing.get("ready") is True and not any(landing.get(key) for key in ("busy", "on_fire"))
+                                    and near_target and isinstance(controller, SubcorticalInstinctController)
                                 ):
                                     actions.append(self._action(
                                         "followup_melee_retreat",
-                                        lambda: self.combat_env.step_away_from_melee(
-                                            landing, target_pos, deadline=time.monotonic() + 1.5, target_id=target_id,
-                                        ),
+                                        lambda: self._disengage_critical_melee(controller, landing, target_id),
                                     ))
+                                else:
+                                    if target_pos is None:
+                                        target_pos = self._find_hostile_position(target_id, mob, timeout_s=0.6)
+                                    if (
+                                        target_pos and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
+                                        and math.dist(landing["pos"][:3], target_pos[:3]) <= 3.5
+                                    ):
+                                        actions.append(self._action(
+                                            "followup_melee_retreat",
+                                            lambda: self.combat_env.step_away_from_melee(
+                                                landing, target_pos, deadline=time.monotonic() + 1.5, target_id=target_id,
+                                            ),
+                                        ))
 
                 if blaze_burn_only and held_cover is None and cf and not cf.get("ok"):
                     retreat = cf.get("result") or {}

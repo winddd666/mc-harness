@@ -80,6 +80,9 @@ BARE_LANDING_BLOCKS = frozenset({
     "granite", "grass_block", "moss_block", "mycelium", "podzol", "rooted_dirt", "snow_block", "stone",
     "terracotta", "tuff",
 })
+WILD_START_LOG_TYPES = ("oak_log", "birch_log", "spruce_log", "dark_oak_log", "acacia_log", "jungle_log", "cherry_log")
+BARE_START_LOG_RADIUS = 16.0
+BARE_START_WOOD_PROBE_S = 3.0
 BARE_DISCARD_ITEMS = frozenset({"andesite", "diorite", "dirt", "granite", "gravel", "tuff"})
 
 CANDIDATE_SITES: list[tuple[int, int]] = [
@@ -309,6 +312,103 @@ def _bare_spawn_prefix(x: int, y: int, z: int) -> str:
     )
 
 
+def _bare_wood_step(
+    env: Any, current: tuple[int, int, int], dx: int, dz: int, deadline: float,
+) -> tuple[int, int, int] | None:
+    """Read a cardinal step that can be walked or jumped without any tool or block."""
+    from mc_agent.skills.combat_env import HAZARD_BLOCK_TYPES, _is_passable
+
+    x, y, z = current
+    nx, nz = x + dx, z + dz
+
+    def read(bx: int, by: int, bz: int) -> str:
+        return env._get_block_name(bx, by, bz, deadline=deadline)
+
+    def clear(block: str) -> bool:
+        return _is_passable(block) and block not in HAZARD_BLOCK_TYPES
+
+    floor, feet, head = (read(nx, y + height, nz) for height in (-1, 0, 1))
+    if clear(feet) and clear(head):
+        if floor in BARE_LANDING_BLOCKS:
+            return nx, y, nz
+        if clear(floor) and read(nx, y - 2, nz) in BARE_LANDING_BLOCKS:
+            return nx, y - 1, nz
+    if feet in BARE_LANDING_BLOCKS and clear(head):
+        if all(clear(read(bx, y + height, bz)) for bx, bz in ((x, z), (nx, nz)) for height in (2, 3)):
+            return nx, y + 1, nz
+    return None
+
+
+def _bare_log_has_walkable_approach(
+    env: Any, pos: tuple[float, float, float], log: tuple[float, float, float], deadline: float,
+) -> bool:
+    """Check a short path to a stand next to an exposed trunk face."""
+    current = tuple(map(math.floor, pos))
+    lx, ly, lz = map(math.floor, log)
+    max_steps = abs(lx - current[0]) + abs(lz - current[2])
+    for _ in range(max_steps + 1):
+        x, y, z = current
+        dx, dz = lx - x, lz - z
+        if abs(dx) + abs(dz) == 1 and y <= ly <= y + 1:
+            return True
+        if dx == dz == 0:
+            return ly == y + 2
+        # Try the dominant axis first, with the other as a local detour.
+        axes = sorted(((dx, 0), (0, dz)), key=lambda step: abs(step[0]) + abs(step[1]), reverse=True)
+        for ax, az in axes:
+            if ax or az:
+                next_pos = _bare_wood_step(env, current, (ax > 0) - (ax < 0), (az > 0) - (az < 0), deadline)
+                if next_pos is not None:
+                    current = next_pos
+                    break
+        else:
+            return False
+    return False
+
+
+def _bare_start_wood(
+    bot: Any, pos: tuple[float, float, float],
+) -> tuple[str | None, float | None, tuple[int, int, int] | None]:
+    """Report the rejection reason, log height delta, and proven starter log if any."""
+    from mc_agent.skills.combat_env import CombatEnv, _TerrainProbeExpired
+
+    deadline = time.monotonic() + BARE_START_WOOD_PROBE_S
+    try:
+        report = bot.call(
+            "find_blocks", {"types": list(WILD_START_LOG_TYPES), "radius": 48, "limit": 12},
+            timeout_s=2.0, allow_reauth=False,
+        )
+    except Exception:
+        return "bare_wood_probe_unconfirmed", None, None
+    rows = report.get("blocks") if isinstance(report, dict) else None
+    if not isinstance(rows, list):
+        return "bare_wood_probe_unconfirmed", None, None
+    logs = []
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("name") or "").removeprefix("minecraft:") not in WILD_START_LOG_TYPES:
+            continue
+        xyz = row.get("pos")
+        if isinstance(xyz, (list, tuple)) and len(xyz) == 3 and all(isinstance(v, (int, float)) and math.isfinite(v) for v in xyz):
+            logs.append((xyz[0] + 0.5, float(xyz[1]), xyz[2] + 0.5))
+    if not logs:
+        return "no_logs", None, None
+    logs.sort(key=lambda log: math.dist(pos, log))
+    nearest_dy = logs[0][1] - pos[1]
+    nearby = [log for log in logs if math.dist(pos, log) <= BARE_START_LOG_RADIUS]
+    if not nearby:
+        return "bare_wood_outside_near_range", nearest_dy, None
+    env = CombatEnv(bot)
+    try:
+        for log in nearby:
+            if _bare_log_has_walkable_approach(env, pos, log, deadline):
+                log_cell = tuple(map(math.floor, log))
+                if env._get_block_name(*log_cell, deadline=deadline) in WILD_START_LOG_TYPES:
+                    return None, log[1] - pos[1], log_cell
+    except _TerrainProbeExpired:
+        return "bare_wood_probe_unconfirmed", nearest_dy, None
+    return "bare_wood_unreachable", nearest_dy, None
+
+
 def _dry_wild_slot(start_idx: int) -> tuple[int, int]:
     ring, slot_idx = divmod(int(start_idx), len(CANDIDATE_SITES))
     # The layout spans 22,000 blocks per axis. Leave space for both local search areas
@@ -370,26 +470,19 @@ def select_dry_isolated_wild_site(
             if isinstance(distance, (float, int)) and 0 <= distance <= 2.0:
                 rejected["occupied_bare_landing"] += 1
                 continue
-        # Ensure tree logs exist within 48m so bare-hand bootstrap isn't on a barren sandbar
-        fb = bot.call(
-            "find_blocks",
-            {
-                "radius": 48,
-                "types": [
-                    "oak_log",
-                    "birch_log",
-                    "spruce_log",
-                    "dark_oak_log",
-                    "acacia_log",
-                    "jungle_log",
-                    "cherry_log",
-                ],
-                "limit": 3,
-            },
-        )
-        if not (fb or {}).get("blocks"):
-            rejected["no_logs"] += 1
-            continue
+        wood_note = ""
+        if stable_bare_floor:
+            wood_rejection, wood_dy, wood_pos = _bare_start_wood(bot, pos)
+            if wood_rejection:
+                rejected[wood_rejection] += 1
+                print(f"[Scene] {bot_name} bare start rejected pos={pos} reason={wood_rejection} log_dy={wood_dy}", flush=True)
+                continue
+            wood_note = f" starter_log={wood_pos} log_dy={wood_dy}"
+        else:
+            fb = bot.call("find_blocks", {"radius": 48, "types": list(WILD_START_LOG_TYPES), "limit": 3})
+            if not (fb or {}).get("blocks"):
+                rejected["no_logs"] += 1
+                continue
         if not biome and _has_mangrove_support(bot, pos):
             rejected["mangrove_support"] += 1
             continue
@@ -402,7 +495,7 @@ def select_dry_isolated_wild_site(
             continue
         print(
             f"[Scene] {bot_name} dry site slot={start_idx} assigned=({x},{z}) picked=({cx},{cz}) "
-            f"region={region_idx} rejected={dict(rejected)}",
+            f"region={region_idx} rejected={dict(rejected)}{wood_note}",
             flush=True,
         )
         return (*pos, biome)
@@ -2245,7 +2338,12 @@ def _try_bare_entry_at_reserve(bot: Any, bot_name: str, reserve: SceneAnchor, *,
         near_reserve = math.dist(pos, target) <= 2.0
         if not near_reserve or not _bare_reserve_is_clear(bot, reserve, list(pos)):
             return None
+        wood_rejection, wood_dy, wood_pos = _bare_start_wood(bot, target)
+        if wood_rejection:
+            print(f"[Scene] {bot_name} bare reserve entry rejected reason={wood_rejection} log_dy={wood_dy}", flush=True)
+            return None
         if _reset_and_verify_scene(bot, bot_name, reserve, set_day=set_day):
+            print(f"[Scene] {bot_name} bare reserve starter_log={wood_pos} log_dy={wood_dy}", flush=True)
             return str(status.get("biome") or "")
     except Exception as exc:
         print(f"[Scene] {bot_name} reserve entry failed: {exc}", flush=True)
@@ -2508,8 +2606,9 @@ def _install_bare_stone_guidance() -> None:
         "凑齐 4 块木板就地做工作台。确认能使用工作台后再重试合成镐。"
         "缺圆石时扫描 16 格内可达的露出 stone、cobblestone。"
         "有可采露石时用 mc_skill_mine_blocks(block_types=['stone','cobblestone'], count=<圆石缺口>, radius=16) 采入。"
-        "砍木或采石若报 no_drops_collected 而 nearby_drops 有目标物，安全且可达时先调用一次 "
-        "mc_skill_collect_drops 拾取并核对实包。仍未入包时换可达作业面。"
+        "砍木或采石若报 no_drops_collected，而 nearby_drops 确认 6 格内有安全可达的目标，"
+        "用 mc_skill_collect_drops(radius=6, item_types=['cobblestone']) 拾圆石，原木则按回执中的实际物品 ID 过滤。"
+        "核对实包，未入包时换可达作业面。"
         "仍缺圆石且 16 格内无可达露石时，在干燥且有支撑的落脚点运行 mc_skill_staircase(vertical='down', steps=6, stop_on_ore=False)，"
         "穿过表土后停在露石处采圆石。先核对阶梯回执；缺支撑时用有支撑面的垫块或换一个安全方向，"
         "见水、岩浆或落差时换方向。保留可回走的阶梯。"
@@ -2551,8 +2650,8 @@ def _install_bare_iron_guidance() -> None:
         "mc_skill_mine_dfs(action='explore', target='iron', target_y=16, max_duration_s=90)，"
         "goal_count 只填 3 减去当前铁锭和粗铁后的正数缺口。每片结束重查实包，"
         "即使 ok=false 或 movement_not_confirmed 也核对 gained.raw_iron。"
-        "采集若报 no_drops_collected 且 nearby_drops 有目标物，安全且可达时先调用一次 "
-        "mc_skill_collect_drops 并核对实包。低位掉落仅沿已有安全通道拾取，未入包就换作业面。"
+        "采铁若报 no_drops_collected，而 nearby_drops 确认 6 格内有沿已有安全通道可达的粗铁，"
+        "用 mc_skill_collect_drops(radius=6, item_types=['raw_iron']) 拾取并核对实包。未入包就换作业面。"
         "铁原料齐后为取货和制镐留足本集时间。铁锭还不足时，先找安全站位并核对燃料。"
         "背包已满时，在安全处先查空槽。有已知安全箱就存明确多余的物品；否则可用 mc_drop 处理无需留用的普通杂料。"
         "保留镐、炉台、铁料、木料和燃料，核实已腾出整槽再继续熔炼与合成。"

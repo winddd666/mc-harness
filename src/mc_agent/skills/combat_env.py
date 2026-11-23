@@ -2465,6 +2465,7 @@ class CombatEnv:
         use_nearest_hostile: bool = True,
         min_threat_distance: float | None = None,
         allow_second_leg: bool = True,
+        expected_life: tuple[Any, Any] | None = None,
     ) -> dict[str, Any]:
         """Disengage from `threat_pos` along verified ground or seal a carved shaft."""
         def respawned_since(before: dict[str, Any], after: dict[str, Any]) -> bool:
@@ -2500,6 +2501,8 @@ class CombatEnv:
             return sample
 
         st0 = self.bot.status()
+        if expected_life is not None and (st0.get("dimension"), st0.get("last_death")) != expected_life:
+            return {"ok": False, "mode": "respawned", "respawned": True, "moved_dist": 0.0, "pos_after": st0.get("pos")}
         entered_water = False
         if (
             wait_for_ground and st0.get("pos") and st0.get("on_ground") is False
@@ -2678,6 +2681,18 @@ class CombatEnv:
         pulse_ms = 450 if urgent else 350
         if short_step:
             pulse_ms = 300 if short_climb else 220
+        if expected_life is not None:
+            current = self._safe_status(timeout_s=0.2)
+            if respawned_since(st0, current):
+                return {"ok": False, "mode": "respawned", "respawned": True, "moved_dist": 0.0, "pos_after": current.get("pos")}
+            point = current.get("pos")
+            if (
+                (current.get("dimension"), current.get("last_death")) != expected_life
+                or current.get("ready") is not True or current.get("on_ground") is not True
+                or any(current.get(key) for key in ("in_lava", "in_water", "submerged"))
+                or not point or math.dist(point[:3], pos0[:3]) > 0.3
+            ):
+                return {"ok": False, "mode": "flee", "reason": "retreat_position_changed", "moved_dist": 0.0}
         try:
             self.bot.call("look", {"yaw": chosen_yaw, "pitch": 0.0})
             self.bot.call(
@@ -3857,6 +3872,72 @@ class SubcorticalInstinctController:
                 positions.append(pos)
         return positions
 
+    def ranked_melee_retreat(
+        self, env: CombatEnv, status: dict[str, Any], target_id: int, *,
+        critical: bool, verify_melee_clearance: bool = False, live_hostiles: list[dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        hostiles = self._find_live_hostiles(env, radius=12, timeout_s=0.35) if live_hostiles is None else live_hostiles
+        target = next((entity for entity in hostiles if entity.get("id") == target_id), {})
+        point, target_pos = status.get("pos"), target.get("pos")
+        if not point or not (
+            target.get("alive") is not False and target.get("blocked_by_wall") is not True
+            and isinstance(target_pos, (list, tuple)) and len(target_pos) >= 3
+            and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in target_pos[:3])
+        ):
+            return {"ok": False, "reason": "melee_pursuer_unconfirmed"}, status
+        start_dist = self._entity_dist(point, target)
+        if verify_melee_clearance and (
+            _clean_block_name(target.get("name")) not in PRE_HURT_MELEE_MOBS or not 0 <= start_dist <= 3.5
+        ):
+            return {"ok": False, "reason": "melee_pursuer_unconfirmed"}, status
+        if critical and any(
+            _clean_block_name(entity.get("name")) == "creeper" and self._entity_dist(point, entity) <= 5.5
+            for entity in hostiles
+        ):
+            return {"ok": False, "reason": "creeper_still_close"}, status
+
+        exposed = [entity for entity in hostiles if not entity.get("blocked_by_wall")]
+        guarded = hostiles if critical else [entity for entity in hostiles if entity.get("blocked_by_wall")]
+        shooters = [position for _, position in ranged_retreat_positions(point, exposed, max_distance=12.0)]
+        life = (status.get("dimension"), status.get("last_death"))
+        retreat = env.flee(
+            target_pos, distance=4.5 if critical else 8.5, urgent=True, wait_for_ground=True, allow_shaft_seal=False,
+            other_shooters=shooters, primary_melee=bool(shooters),
+            occluded_shooters=[position for _, position in ranged_retreat_positions(point, guarded, max_distance=12.0)],
+            other_melee=self._other_melee_positions(hostiles, target_id),
+            **({
+                "other_creepers": self._other_creeper_positions(hostiles, target_id, include_occluded=True),
+                "keep_blast_clearance": True, "allow_second_leg": False,
+            } if critical else {}),
+            **({"expected_life": life} if verify_melee_clearance else {}),
+        )
+        after = env._safe_status(status)
+        if critical and retreat.get("ok"):
+            nearest = after.get("nearest_hostile")
+            nearest = nearest if isinstance(nearest, dict) else {}
+            target_after = nearest if nearest.get("id") == target_id else target
+            if (
+                not after.get("pos") or after.get("on_ground") is not True
+                or after.get("ready") is False or after.get("alive") is False
+                or after.get("in_water") or after.get("in_lava")
+                or (after.get("dimension"), after.get("last_death")) != life
+                or self._entity_dist(after.get("pos"), target_after) <= start_dist
+                or (_clean_block_name(nearest.get("name")) == "creeper" and self._entity_dist(after.get("pos"), nearest) <= 5.5)
+            ):
+                retreat.update(ok=False, reason="melee_clearance_unconfirmed")
+            if verify_melee_clearance:
+                distance_after = nearest.get("dist") if nearest.get("id") == target_id else None
+                if isinstance(distance_after, (int, float)) and math.isfinite(distance_after) and distance_after >= 0:
+                    retreat.update(
+                        target_distance_before=start_dist, target_distance_after=distance_after,
+                        target_in_melee_range=distance_after <= 3.5,
+                    )
+                    if distance_after <= 3.5:
+                        retreat.update(ok=False, reason="melee_still_close")
+                else:
+                    retreat.update(ok=False, reason="melee_clearance_unconfirmed")
+        return retreat, after
+
     def _equip_best_weapon_and_shield(
         self,
         env: CombatEnv,
@@ -3897,9 +3978,10 @@ class SubcorticalInstinctController:
 
     def _cover_after_projectile_stall(
         self, env: CombatEnv, before: dict[str, Any], shooter_id: int, *, deadline: float,
-        max_health: float | None,
+        max_health: float | None, landing: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        landing = env._safe_status({"ready": False}, timeout_s=0.3)
+        if landing is None:
+            landing = env._safe_status({"ready": False}, timeout_s=0.3)
         health = landing.get("health")
         pos = landing.get("pos")
         if (
@@ -4835,7 +4917,22 @@ class SubcorticalInstinctController:
                         flee_ok and not sealed and trigger.get("source") == "pre_hurt_ranged"
                         and isinstance(moved, (int, float)) and 0 < moved < 2.0
                     )
+                    short_landing = None
+                    natural_cover = None
                     if (
+                        short_ranged_retreat and not fl.get("respawned") and not has_shield
+                        and mob_name in RANGED_MOBS and isinstance(mob_id, int) and mob_id == trig_id
+                        and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+                        and time.monotonic() + 2.0 < deadline
+                    ):
+                        short_landing = env._safe_status({"ready": False})
+                    short_landing_hp = (short_landing or {}).get("health")
+                    if isinstance(short_landing_hp, (int, float)) and 0 < short_landing_hp <= 4.0:
+                        natural_cover = self._cover_after_projectile_stall(
+                            env, st, mob_id, deadline=min(deadline - 0.7, time.monotonic() + 2.25),
+                            max_health=4.0, landing=short_landing,
+                        )
+                    elif (
                         (stalled_under_arrows or short_ranged_retreat) and not fl.get("respawned")
                         and not has_shield and mob_name in RANGED_MOBS
                         and str(st.get("dimension") or "").removeprefix("minecraft:") == "overworld"
@@ -4849,7 +4946,7 @@ class SubcorticalInstinctController:
                     ):
                         cover_after_retreat = stalled_under_arrows
                         if short_ranged_retreat:
-                            landing = env._safe_status({"ready": False})
+                            landing = short_landing if short_landing is not None else env._safe_status({"ready": False})
                             landing_hp = landing.get("health")
                             nearest = landing.get("nearest_hostile")
                             close_melee = (
@@ -4863,17 +4960,16 @@ class SubcorticalInstinctController:
                                 and landing.get("last_death") == st.get("last_death") and landing.get("dimension") == st.get("dimension")
                                 and not close_melee and time.monotonic() + 2.0 < deadline
                             )
-                        natural_cover = None
                         if cover_after_retreat:
                             natural_cover = env.seek_natural_cover(
                                 mob_pos, other_shooters=other_shooters, allow_stationary=short_ranged_retreat,
                                 verify_live_shooters=True,
                             )
-                        if natural_cover is not None:
-                            actions.append({"action": "natural_cover", **natural_cover})
-                            if natural_cover.get("ok"):
-                                mode = "natural_cover"
-                                self._recent_flee_streak = 0
+                    if natural_cover is not None:
+                        actions.append({"action": "natural_cover", **natural_cover})
+                        if natural_cover.get("ok"):
+                            mode = "natural_cover"
+                            self._recent_flee_streak = 0
                     check_ranged_guard = flee_ok and fl.get("mode") == "flee" and mob_name in RANGED_MOBS
                     check_melee_guard = flee_ok and (sealed or fl.get("mode") == "flee") and mob_name in PRE_HURT_MELEE_MOBS
                     if (
@@ -4996,14 +5092,24 @@ class SubcorticalInstinctController:
                 for action in actions
             )
         )
-        ranked_followup = night_pursuit or critical_creeper_pursuit
+        critical_melee_pursuit = (
+            mode == "cover_or_flee" and enclosure == "surface"
+            and str(st_post.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+            and trigger.get("source") == "pre_hurt_melee" and mob_name in PRE_HURT_MELEE_MOBS
+            and isinstance(mob_id, int) and mob_id == trig_id and 0 < mob_dist <= 3.5
+            and isinstance(retreat_hp, (int, float)) and 0 < retreat_hp <= 4.0 and not st_post.get("on_fire")
+            and isinstance(nh_post, dict) and nh_post.get("id") == mob_id
+            and any(a["ok"] and isinstance(a.get("moved"), (int, float)) and a["moved"] >= 1.5 for a in retreats)
+        )
+        critical_followup = critical_creeper_pursuit or critical_melee_pursuit
+        ranked_followup = night_pursuit or critical_followup
         followup_budget, movement_budget = (1.5, 0.8)
         followup_range = 0.0
         if night_pursuit:
             followup_range = 8.0
             followup_budget, movement_budget = (4.1, 3.5)
-        elif critical_creeper_pursuit:
-            followup_range = 5.5
+        elif critical_followup:
+            followup_range = 5.5 if critical_creeper_pursuit else 3.5
             followup_budget, movement_budget = (2.2, 1.5)
         elif isinstance(retreat_hp, (int, float)) and 0.0 < retreat_hp <= 12.0:
             followup_range = 3.5 if retreat_hp <= 10.0 else 1.5
@@ -5035,7 +5141,7 @@ class SubcorticalInstinctController:
             live_hostiles = self._find_live_hostiles(env, radius=12 if ranked_followup else 5, timeout_s=0.6)
             target = next((entity for entity in live_hostiles if entity.get("id") == target_id), {})
             target_pos = target.get("pos")
-            renewed_blast_threat = critical_creeper_pursuit and any(
+            renewed_blast_threat = critical_followup and any(
                 _clean_block_name(entity.get("name")) == "creeper" and self._entity_dist(st_post.get("pos"), entity) <= 5.5
                 for entity in live_hostiles
             )
@@ -5049,56 +5155,18 @@ class SubcorticalInstinctController:
                 and start_dist <= followup_range
             ):
                 if ranked_followup:
-                    exposed_hostiles = [entity for entity in live_hostiles if not entity.get("blocked_by_wall")]
-                    # With only a few HP left, avoid moving into close fire from any known shooter.
-                    guarded_hostiles = live_hostiles if critical_creeper_pursuit else [
-                        entity for entity in live_hostiles if entity.get("blocked_by_wall")
-                    ]
-                    shooters = [
-                        shooter_pos for _, shooter_pos in ranged_retreat_positions(
-                            st_post["pos"], exposed_hostiles, max_distance=12.0,
-                        )
-                    ]
-                    creeper_constraints = {
-                        "other_creepers": self._other_creeper_positions(live_hostiles, target_id, include_occluded=True),
-                        "keep_blast_clearance": True, "allow_second_leg": False,
-                    } if critical_creeper_pursuit else {}
-                    retreat = env.flee(
-                        target_pos, distance=4.5 if critical_creeper_pursuit else 8.5,
-                        urgent=True, wait_for_ground=True, allow_shaft_seal=False,
-                        other_shooters=shooters, primary_melee=bool(shooters),
-                        occluded_shooters=[
-                            point for _, point in ranged_retreat_positions(
-                                st_post["pos"], guarded_hostiles, max_distance=12.0,
-                            )
-                        ],
-                        other_melee=self._other_melee_positions(live_hostiles, target_id),
-                        **creeper_constraints,
+                    retreat, st_post = self.ranked_melee_retreat(
+                        env, st_post, target_id, critical=critical_followup,
+                        verify_melee_clearance=critical_melee_pursuit, live_hostiles=live_hostiles,
                     )
-                    step = {"action": "followup_melee_retreat", "entity_id": target_id, **retreat}
+                    retreat = {"entity_id": target_id, **retreat}
                 else:
                     retreat = env.step_away_from_melee(
                         st_post, target_pos, deadline=min(deadline, time.monotonic() + 1.5), target_id=target_id,
                     )
-                    step = {"action": "followup_melee_retreat", **retreat}
-                st_post = env._safe_status(st_post)
+                    st_post = env._safe_status(st_post)
                 nh_post = st_post.get("nearest_hostile")
-                if critical_creeper_pursuit and step.get("ok"):
-                    nearest = nh_post if isinstance(nh_post, dict) else {}
-                    target_after = nearest if nearest.get("id") == target_id else target
-                    if (
-                        not st_post.get("pos") or st_post.get("on_ground") is not True
-                        or st_post.get("ready") is False or st_post.get("alive") is False
-                        or st_post.get("in_water") or st_post.get("in_lava")
-                        or any(st_post.get(key) != st.get(key) for key in ("dimension", "last_death"))
-                        or self._entity_dist(st_post["pos"], target_after) <= start_dist
-                        or (
-                            _clean_block_name(nearest.get("name")) == "creeper"
-                            and self._entity_dist(st_post["pos"], nearest) <= 5.5
-                        )
-                    ):
-                        step.update(ok=False, reason="melee_clearance_unconfirmed")
-                actions.append(step)
+                actions.append({"action": "followup_melee_retreat", **retreat})
         if mode == "creeper_evade" and (
             st_post.get("alive") is False
             or any(st_post.get(key) != st.get(key) for key in ("last_death", "dimension"))
