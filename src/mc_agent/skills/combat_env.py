@@ -3395,14 +3395,31 @@ class CombatEnv:
         # The surge can change both the shoreline height and the bot's horizontal position.
         search_pos = search_status.get("pos") or pos0
         shore_x, shore_y, shore_z = map(float, search_pos[:3])
+        low_air = (
+            surface_first and search_status.get("in_water") and search_status.get("submerged") is True
+            and water_oxygen_below(search_status, 5)
+        )
+        urgent_escape = under_attack or low_air
         by = math.floor(shore_y + 0.05)
         now = time.monotonic()
         self._stalled_water_shores = {
             bank: (rim, bank_life, at) for bank, (rim, bank_life, at) in self._stalled_water_shores.items()
             if bank_life == life and now - at < 30.0
         }
+
+        def stalled_from_here(bank: Sequence[float], rim: Sequence[float]) -> bool:
+            high_lip = bank[1] - rim[1] >= 1.75
+            height = bank[1] - shore_y
+            if high_lip and height <= 1.25:
+                return False
+            if math.dist(search_pos[:3], rim) <= 2.5:
+                return True
+            # A swim that drifts along the same side does not make a high lip easier to climb.
+            same_side = (shore_x - bank[0]) * (rim[0] - bank[0]) + (shore_z - bank[2]) * (rim[2] - bank[2]) > 0
+            return high_lip and height >= 1.75 and same_side and math.hypot(shore_x - rim[0], shore_z - rim[2]) <= 8.0
+
         stalled_shores = {
-            bank for bank, (rim, _, _) in self._stalled_water_shores.items() if math.dist(search_pos[:3], rim) <= 2.5
+            bank for bank, (rim, _, _) in self._stalled_water_shores.items() if stalled_from_here(bank, rim)
         }
         if stalled_shores:
             actions.append("shore_lip_stalled")
@@ -3486,7 +3503,7 @@ class CombatEnv:
         shore_path_unreachable = False
         if shore_target is not None:
             shore_dist = math.hypot(shore_target[0] - shore_x, shore_target[2] - shore_z)
-            limit_pathfinder_wait = under_attack or ((has_threat or shield_target_id is not None) and shore_dist <= 5.0)
+            limit_pathfinder_wait = urgent_escape or ((has_threat or shield_target_id is not None) and shore_dist <= 5.0)
 
             def hop_to_shore(position: Sequence[float], *, ms: int, sprint: bool) -> None:
                 try:
@@ -3612,15 +3629,15 @@ class CombatEnv:
                             "y": max(63.0, py + 1.0) if py >= 61.0 else py + 1.0,
                             "z": target_z,
                             "range": 1.5,
-                            "timeout": 1000 if under_attack else 2800,
+                            "timeout": 1000 if urgent_escape else 2800,
                             "stop_on": ["death"],
                         },
-                        **({"timeout_s": 1.5, "allow_reauth": False} if under_attack else {}),
+                        **({"timeout_s": 1.5, "allow_reauth": False} if urgent_escape else {}),
                     )
                     actions.append("surface_retreat_move")
                 except (ApiError, httpx.HTTPError) as err:
                     if isinstance(err, httpx.HTTPError):
-                        self._best_effort_stop(timeout_s=0.35 if under_attack else None)
+                        self._best_effort_stop(timeout_s=0.35 if urgent_escape else None)
                 st_mid = self._safe_status(st_mid)
                 interruption = interrupted_water_escape(st_mid)
                 if interruption is not None:

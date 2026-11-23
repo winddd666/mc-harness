@@ -14731,8 +14731,8 @@ def test_shore_escape_hops_onto_a_verified_adjacent_bank_before_pathing(hop_resu
 
 
 @pytest.mark.parametrize("bank_found", [True, False])
-@pytest.mark.parametrize("under_attack", [False, True])
-def test_w20_water_pursuit_bounds_pathfinder_even_without_nearby_bank(monkeypatch, bank_found, under_attack):
+@pytest.mark.parametrize("pressure", ["none", "melee", "drowning"])
+def test_w20_water_escape_bounds_pathfinder_even_without_nearby_bank(monkeypatch, bank_found, pressure):
     from mc_agent.skills.combat_env import CombatEnv
 
     bank = [233456.5, 65, 246404.5]
@@ -14740,6 +14740,8 @@ def test_w20_water_pursuit_bounds_pathfinder_even_without_nearby_bank(monkeypatc
         "pos": [233452.7, 62.2, 246400.7], "health": 2.17, "in_water": True, "submerged": False,
         "on_ground": False, "alive": True, "ready": True, "dimension": "overworld", "last_death": {"t": 1},
     }
+    if pressure == "drowning":
+        status.update(submerged=True, oxygen=4)
     commands = []
 
     class PoolBot:
@@ -14762,9 +14764,9 @@ def test_w20_water_pursuit_bounds_pathfinder_even_without_nearby_bank(monkeypatc
 
     env = CombatEnv(PoolBot())
     monkeypatch.setattr(env, "_find_walkable_shore_target", lambda *_a, **_kw: bank if bank_found else None)
-    result = env.escape_deep_water_to_shore(under_attack=under_attack)
+    result = env.escape_deep_water_to_shore(under_attack=pressure == "melee", surface_first=pressure == "drowning")
 
-    if under_attack:
+    if pressure != "none":
         server_ms, transport_s, stop_s = (1800, 2.4, 0.5) if bank_found else (1000, 1.5, 0.35)
         assert commands[:2] == [("move", server_ms, transport_s), ("stop", stop_s)]
     else:
@@ -14908,6 +14910,57 @@ def test_water_escape_retries_a_different_bank_after_stalling_below_a_high_lip(m
     expected_bank = [11296.5, 63.0, 11023.5] if same_life else first["shore_target"]
     assert second["ok"] is same_life
     assert targets == [first["shore_target"], expected_bank]
+
+
+@pytest.mark.parametrize("reentry", ["same_approach", "higher", "other_side", "new_life", "expired"])
+def test_w20_drowning_does_not_reselect_the_same_high_bank_after_drifting(monkeypatch, reentry):
+    from mc_agent.skills.combat_env import CombatEnv
+
+    clock = [1000.0]
+    monkeypatch.setattr("mc_agent.skills.combat_env.time.monotonic", lambda: clock[0])
+    high_bank = [241023.5, 18.0, 193551.5]
+    alternative = [241024.5, 17.0, 193560.5]
+    status = {
+        "pos": [241023.5, 14.7, 193551.5], "dimension": "overworld", "last_death": {"t": 1},
+        "in_water": True, "submerged": True, "oxygen": 17, "on_ground": False, "alive": True, "ready": True,
+    }
+    targets = []
+
+    class CaveBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "get_block":
+                return {"name": "water"}
+            if action == "move_to":
+                bank = [body[axis] for axis in ("x", "y", "z")]
+                targets.append(bank)
+                if len(targets) == 1:
+                    status["pos"] = [241023.5, 15.2, 193553.5]
+                else:
+                    status.update(pos=bank, in_water=False, submerged=False, on_ground=True)
+            return {"ok": True}
+
+    env = CombatEnv(CaveBot())
+    monkeypatch.setattr(env, "_find_walkable_shore_target", lambda _pos, *, excluded_shores, **_kw: (
+        alternative if tuple(high_bank) in excluded_shores else high_bank
+    ))
+    first = env.escape_deep_water_to_shore(surface_first=True)
+    assert first["shore_target"] == high_bank and first["in_water"] is True
+
+    y, z = {"higher": (17.0, 193554.5), "other_side": (16.2, 193549.5)}.get(reentry, (16.2, 193559.4))
+    status.update(pos=[241023.5, y, z], oxygen=4)
+    if reentry == "new_life":
+        status["last_death"] = {"t": 2}
+    clock[0] += 31.0 if reentry == "expired" else 8.0
+    second = env.escape_deep_water_to_shore(surface_first=True)
+
+    expected = alternative if reentry == "same_approach" else high_bank
+    assert targets == [high_bank, expected]
+    assert second["shore_target"] == expected and second["ok"] is True
 
 
 def test_water_boundary_avoids_a_shore_path_that_crosses_a_creeper(monkeypatch):
