@@ -4091,6 +4091,48 @@ def test_bug042_150_cross_process_slot_gate_and_bug088_lodestone_threshold(tmp_p
     assert "仅缺 3 个" in pb_part.task
 
 
+def test_bug030_051_084_102_shiny_gear_duration_underground_village_gate_and_recon_completion() -> None:
+    """Regression for BUG-030 (shiny_gear post_ensure_task specifies max_duration_s=90),
+    BUG-051 (day2_village_search blocked underground at Y<58), and BUG-084/102."""
+    from mc_agent.harness.curriculum import CURRICULUM_PLAYBOOKS, select_next_target
+    from mc_agent.harness.world_memory import WorldMemory
+
+    # BUG-030: shiny_gear post_ensure_task & mine_diamond task specify max_duration_s=90
+    assert "max_duration_s=90" in (CURRICULUM_PLAYBOOKS["minecraft:story/shiny_gear"].post_ensure_task or "")
+    assert "max_duration_s=90" in CURRICULUM_PLAYBOOKS["minecraft:story/mine_diamond"].task
+
+    # BUG-051: bot underground at Y=10 after shiny_gear must NOT be dispatched day2_village_search
+    state = {"pos": [0.5, 10.0, 0.5]}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path.removeprefix("/api/v1")
+        if path == "/status":
+            return httpx.Response(200, json={"ok": True, "result": {
+                "ready": True, "alive": True, "dimension": "overworld",
+                "pos": list(state["pos"]), "health": 20.0, "food": 20, "is_day": True, "time_of_day": 2000,
+            }})
+        if path == "/inventory":
+            return httpx.Response(200, json={"ok": True, "result": {"items": [
+                {"name": "iron_pickaxe", "count": 1}, {"name": "diamond_boots", "count": 1},
+            ]}})
+        if path == "/advancements":
+            return httpx.Response(200, json={"ok": True, "result": {"ready": True, "advancements": [
+                {"id": "minecraft:story/mine_stone", "status": "completed"},
+                {"id": "minecraft:story/upgrade_tools", "status": "completed"},
+                {"id": "minecraft:story/smelt_iron", "status": "completed"},
+                {"id": "minecraft:story/iron_tools", "status": "completed"},
+                {"id": "minecraft:story/shiny_gear", "status": "completed"},
+            ]}})
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    with BotSession("tok", bot_username="Bug051", transport=httpx.MockTransport(handler)) as bot_u:
+        t_ug, _ = select_next_target(bot_u, world_memory=WorldMemory(), enable_island_recon=True, recon_done=True)
+        assert t_ug.key != "day2_village_search"
+        state["pos"] = [0.5, 65.0, 0.5]
+        t_surf, _ = select_next_target(bot_u, world_memory=WorldMemory(), enable_island_recon=True, recon_done=True)
+        assert t_surf.key == "day2_village_search"
+
+
 
 
 
