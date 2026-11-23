@@ -7335,6 +7335,72 @@ def test_unstick_reports_failure_when_still_in_water() -> None:
     assert "deadline_hit" not in result
 
 
+@pytest.mark.parametrize("terrain", ["layers", "deep_drop", "unknown", "lava", "no_landing", "timeout"])
+def test_unstick_descends_canopy_only_with_confirmed_support(monkeypatch, terrain) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("mc_agent.skills.library.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("mc_agent.skills.library.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    standing = [0.5, 71.0, 0.5]
+    blocks = {70: "spruce_leaves", 63: "dirt"}
+    if terrain in {"layers", "no_landing", "timeout"}:
+        blocks.update({y: "spruce_leaves" for y in range(65, 70)})
+        blocks[64] = "spruce_log"
+    if terrain in {"unknown", "lava"}:
+        blocks[68] = "dirt"
+    if terrain == "lava":
+        blocks[69] = "lava"
+    digs = []
+    stops = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            result = {"pos": standing, "on_ground": True, "alive": True, "ready": True, "dimension": "overworld"}
+        elif route == "get_block":
+            x, y, z = body["pos"]
+            name = blocks.get(y, "air") if (x, z) == (0, 0) else "air"
+            result = {"name": name, "diggable": name.endswith(("_leaves", "_log"))}
+            if terrain == "unknown" and (x, y, z) == (0, 69, 0):
+                result = {}
+        elif route == "dig":
+            x, y, z = body["pos"]
+            digs.append((x, y, z))
+            assert y == int(standing[1]) - 1
+            if terrain == "timeout":
+                clock[0] += float(request.extensions["timeout"]["read"])
+                raise httpx.ReadTimeout("slow canopy dig", request=request)
+            removed = blocks.pop(y)
+            if terrain != "no_landing":
+                standing[1] = max(blocks) + 1.0
+            result = {"dug": removed}
+        elif route == "stop":
+            stops.append(body)
+            result = {"stopped": True, "released": True}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).unstick(max_duration_s=10)
+
+    if terrain == "layers":
+        assert digs == [(0, y, 0) for y in range(70, 63, -1)]
+        assert result["ok"] is True
+        assert result["descended_canopy"] is True
+        assert result["pos_after"] == [0.5, 64.0, 0.5]
+    else:
+        assert result["ok"] is False
+        assert result["requires_replan"] is True
+        assert len(digs) == (1 if terrain in {"no_landing", "timeout"} else 0)
+        if terrain == "no_landing":
+            assert result["error"]["code"] == "descent_not_confirmed"
+    assert len(stops) == (1 if terrain == "timeout" else 0)
+    if terrain == "timeout":
+        assert result["deadline_hit"] is True
+        assert result["elapsed_s"] <= 10
+
+
 @pytest.mark.parametrize("north_has_support", [True, False])
 def test_unstick_uses_another_direction_when_east_has_no_landing(north_has_support) -> None:
     from mc_agent.harness.mc_tools import McToolset

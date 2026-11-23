@@ -7731,81 +7731,86 @@ class MacroSkills:
         }
 
     def descend_canopy(self) -> dict[str, Any]:
-        """当站在高处树冠(*_leaves)上方时，安全向下清理树叶/原木直到落地，防止直接边缘跳落摔伤。"""
+        """Remove one canopy block at a time after confirming support below it."""
+        from .combat_env import HAZARD_BLOCK_TYPES, _is_solid_ground
+
+        def read_block(x: int, y: int, z: int) -> tuple[str, bool]:
+            block = self.bot.call("get_block", {"pos": [x, y, z]})
+            name = block.get("name") or block.get("block") or ""
+            return str(name).removeprefix("minecraft:"), bool(block.get("diggable"))
+
         st = self.bot.status()
-        pos_before = st.get("pos") or [0.0, 64.0, 0.0]
-        bx, by, bz = (
-            math.floor(float(pos_before[0])),
-            math.floor(float(pos_before[1])),
-            math.floor(float(pos_before[2])),
-        )
+        pos_before = st.get("pos")
+        if (
+            not isinstance(pos_before, (tuple, list)) or len(pos_before) < 3
+            or st.get("on_ground") is False or st.get("alive") is False or st.get("ready") is False
+            or st.get("in_water") or st.get("in_lava")
+        ):
+            return {"ok": False, "on_canopy": False}
+        bx, by, bz = (math.floor(float(p)) for p in pos_before[:3])
         try:
-            below_name, _ = self._block_info([bx, by - 1, bz])
+            under, diggable = read_block(bx, by - 1, bz)
         except ApiError:
             return {"ok": False, "on_canopy": False}
-        if not below_name.endswith("_leaves"):
-            return {"ok": False, "on_canopy": False, "below": below_name}
+        if not under.endswith("_leaves"):
+            return {"ok": False, "on_canopy": False, "below": under}
 
-        air_set = {"air", "cave_air", "void_air"}
-        fluids = {"water", "lava", "flowing_water", "flowing_lava"}
         dug: list[dict[str, Any]] = []
-        # 确认下方 2..16 格中存在空气或树干（即使站在树干列上方也能安全向下挖开下树）且不直接落入岩浆
-        has_tree_or_air = False
-        for dy in range(2, 16):
-            try:
-                bn, _ = self._block_info([bx, by - dy, bz])
-            except ApiError:
-                break
-            if bn in {"lava", "flowing_lava"}:
-                return {"ok": False, "on_canopy": True, "reason": "lava_below"}
-            if bn in air_set or bn.endswith(("_log", "_stem")):
-                has_tree_or_air = True
-                break
-        if not has_tree_or_air:
-            return {"ok": False, "on_canopy": False, "below": below_name}
-
+        result: dict[str, Any] = {
+            "ok": False, "on_canopy": True, "dug": dug, "pos_before": pos_before, "pos_after": pos_before,
+        }
+        if isinstance(self.bot, _SkillBudgetSession):
+            self.bot.progress["canopy"] = result
         for _ in range(10):
-            cur = self.bot.status()
-            p = cur.get("pos") or pos_before
-            cx, cy, cz = math.floor(float(p[0])), math.floor(float(p[1])), math.floor(float(p[2]))
-            try:
-                under, diggable = self._block_info([cx, cy - 1, cz])
-            except ApiError:
+            if not diggable or not under.endswith(("_leaves", "_log")):
                 break
-            if not (under.endswith("_leaves") or under.endswith("_log")) or not diggable:
-                break
-            # 若脚下仅 1 层树叶下方就是 >5 格深的悬空落差，先探明下方落差，避免一脚摔重伤
-            drop_air = 0
-            unsafe_drop = False
-            for d in range(2, 9):
+            landing_y = None
+            for floor_y in range(by - 2, by - 7, -1):
                 try:
-                    bname, _ = self._block_info([cx, cy - d, cz])
+                    block, _ = read_block(bx, floor_y, bz)
                 except ApiError:
                     break
-                if bname in {"lava", "flowing_lava"}:
-                    unsafe_drop = True
+                if not block or block == "unknown" or block in HAZARD_BLOCK_TYPES:
                     break
-                if bname in air_set or bname.endswith("_leaves"):
-                    drop_air += 1
-                else:
+                # Leaves are solid. Land on the next layer before removing it.
+                if _is_solid_ground(block):
+                    landing_y = floor_y + 1
                     break
-            if unsafe_drop or drop_air >= 5:
+            if landing_y is None:
+                result["reason"] = "unsafe_drop"
                 break
+            target = [bx, by - 1, bz]
             try:
-                self.bot.call("dig", {"pos": [cx, cy - 1, cz], "collect": True, "stop_on": ["hurt", "death"]})
-                dug.append({"pos": [cx, cy - 1, cz], "block": under})
-                time.sleep(0.25)
+                self.bot.call("dig", {"pos": target, "collect": True, "stop_on": ["hurt", "death"]})
             except ApiError:
                 break
-
-        st_after = self.bot.status()
-        return {
-            "ok": bool(dug),
-            "on_canopy": True,
-            "dug": dug,
-            "pos_before": pos_before,
-            "pos_after": st_after.get("pos") or pos_before,
-        }
+            dug.append({"pos": target, "block": under})
+            for _ in range(3):
+                time.sleep(0.25)
+                after = self.bot.status()
+                pos = after.get("pos")
+                if pos:
+                    result["pos_after"] = pos
+                if (
+                    not pos or after.get("alive") is False or after.get("ready") is False
+                    or after.get("dimension") != st.get("dimension") or after.get("last_death") != st.get("last_death")
+                    or after.get("in_water") or after.get("in_lava")
+                    or (math.floor(pos[0]), math.floor(pos[2])) != (bx, bz)
+                ):
+                    result.update(ok=False, reason="descent_interrupted")
+                    return result
+                if abs(float(pos[1]) - landing_y) <= 0.2 and after.get("on_ground") is not False:
+                    break
+            else:
+                result.update(ok=False, reason="descent_not_confirmed")
+                break
+            result["ok"] = True
+            by = landing_y
+            try:
+                under, diggable = read_block(bx, by - 1, bz)
+            except ApiError:
+                break
+        return result
 
     def unstick(self, *, max_duration_s: float = 45.0) -> dict[str, Any]:
         """Clear blocks overlapping the bot's 0.6x1.8 floor()-aligned hitbox and step out of pits/corners, canopy, or water.
@@ -7931,16 +7936,33 @@ class MacroSkills:
                 }
             return _finish(result)
 
-        canopy = self.descend_canopy()
-        if canopy.get("on_canopy") and canopy.get("dug"):
-            return _finish({
-                "ok": True,
-                "descended_canopy": True,
+        canopy_session = _SkillBudgetSession(self.bot, deadline - time.monotonic(), single_attempt=True)
+        scoped = copy(self)
+        scoped.bot = canopy_session
+        try:
+            canopy = scoped.descend_canopy()
+        except (_SkillDeadline, httpx.TimeoutException):
+            canopy = canopy_session.progress.get("canopy") or {}
+            timed_out = True
+        if timed_out or (canopy.get("on_canopy") and canopy.get("dug")):
+            descended = canopy.get("ok") is True and not timed_out
+            result = {
+                "ok": descended,
+                "descended_canopy": descended,
                 "foot_block_before": [bx, by, bz],
                 "pos_before": pos_before,
                 "pos_after": canopy.get("pos_after", pos_before),
                 "dug": canopy.get("dug", []),
-            })
+            }
+            if not descended and not timed_out:
+                result.update(
+                    requires_replan=True,
+                    error={
+                        "code": canopy.get("reason") or "canopy_descent_unconfirmed",
+                        "message": "树冠下撤未确认安全落脚。请先核对当前站位，再选择有支撑的路线。",
+                    },
+                )
+            return _finish(result)
 
         skip_names = {"air", "cave_air", "void_air", "water", "lava", "bedrock"}
         dug: list[dict[str, Any]] = []
