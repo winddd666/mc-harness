@@ -3315,6 +3315,77 @@ def test_smelt_checks_fuel_and_pending_batch_before_preparing_furnace(requested_
     assert "取出的成品为 0" in result["message"]
 
 
+@pytest.mark.parametrize("requested,stock,protected,expected", [
+    ("coal", {"oak_planks": 2}, (), ("oak_planks", 2)),
+    ("cobblestone", {"cobblestone": 64, "oak_planks": 5}, (), ("oak_planks", 2)),
+    ("minecraft:charcoal", {"coal": 1, "charcoal": 1}, (), ("charcoal", 1)),
+    ("wooden_pickaxe", {"wooden_pickaxe": 1, "shield": 1, "blaze_rod": 1}, (), None),
+    ("oak_planks", {"oak_planks": 5, "oak_log": 1}, ("oak_planks",), None),
+])
+def test_sync_smelt_validates_fuel_before_load(requested, stock, protected, expected) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+    from mc_agent.skills.inventory_manager import InventoryManager
+
+    bag = {"raw_iron": 3, **stock}
+    furnace = [1, 64, 0]
+    calls = []
+    ready = 0
+
+    def handler(request):
+        nonlocal ready
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        calls.append(route)
+        if route == "inventory":
+            result = {"items": [{"name": name, "count": count} for name, count in bag.items() if count]}
+        elif route == "find_blocks":
+            result = {"blocks": [{"pos": furnace, "dist": 1.0}]}
+        elif route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"}
+        elif route == "view":
+            result = {"sections": {"input": [], "output": [{"name": "iron_ingot", "count": ready}]}}
+        elif route == "act":
+            assert body["target"]["pos"] == furnace
+            if body["ops"][0]["op"] == "put":
+                fuel, fuel_count = expected
+                assert body["ops"] == [
+                    {"op": "put", "item": "raw_iron", "count": 3, "to": "input"},
+                    {"op": "put", "item": fuel, "count": fuel_count, "to": "fuel"},
+                ]
+                bag["raw_iron"] -= 3
+                bag[fuel] -= fuel_count
+                ready = 3
+                result = {}
+            else:
+                assert body["ops"] == [{"op": "take", "from": "output", "count": 3}]
+                bag["iron_ingot"] = ready
+                result = {"done": [{"took": {"iron_ingot": ready}}]}
+                ready = 0
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        tools = McToolset(bot)
+        tools.skills.inventory_manager = inventory = InventoryManager(bot)
+        with inventory.protect(protected):
+            outcome = json.loads(tools.mc_skill_smelt("raw_iron", count=3, fuel_item=requested))
+
+    if expected is None:
+        assert outcome["error"] == "missing_fuel" and outcome["collected"] == []
+        assert calls == ["inventory"] and bag == {"raw_iron": 3, **stock}
+    else:
+        fuel, fuel_count = expected
+        assert outcome["ok"] is True
+        assert outcome["collected"] == [{"name": "iron_ingot", "count": 3}]
+        assert bag == {**stock, "raw_iron": 0, "iron_ingot": 3, fuel: stock[fuel] - fuel_count}
+        requested = requested.removeprefix("minecraft:")
+        if fuel == requested:
+            assert "fuel_fallback" not in outcome
+        else:
+            assert outcome["fuel_fallback"] == {"requested": requested, "selected": fuel}
+
+
 @pytest.mark.parametrize("episode_budget,cap", [(None, 55.0), (14.0, 10.0)])
 def test_skill_smelt_collects_partial_output_within_tool_budget(monkeypatch, episode_budget, cap) -> None:
     from mc_agent.harness.mc_tools import McToolset
@@ -3417,6 +3488,7 @@ def test_skill_smelt_recovers_tracked_output_before_mining(monkeypatch, fuel_put
         ]
         if fuel_put_failed:
             assert result["error"]["code"] == "section_full"
+            assert result["error"]["furnace_pos"] == furnace
             assert takes == []
             return
         assert result["error"] == "partial_smelt"

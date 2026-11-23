@@ -5374,17 +5374,24 @@ class MacroSkills:
 
     # ---- L2 Smelt-Split: non-blocking multi-furnace start/collect ----
 
-    def _safe_fuel_counts(self) -> dict[str, int]:
-        from .inventory_manager import is_safe_fuel
-
-        counts = _inventory_counts(self.bot)
-        protected = set()
+    def _protected_smelt_fuels(self) -> set[str]:
         if self.inventory_manager is not None:
             try:
-                protected = set(self.inventory_manager.active_protected())
+                return set(self.inventory_manager.active_protected())
             except (AttributeError, TypeError):
-                protected = set()
-        return {name: cnt for name, cnt in counts.items() if cnt > 0 and is_safe_fuel(name, protected)}
+                pass
+        return set()
+
+    def _smelt_fuel_log(self, counts: dict[str, int], input_item: str) -> str | None:
+        from .inventory_manager import is_safe_fuel
+
+        protected = self._protected_smelt_fuels()
+        return next((
+            log for log in LOG_TYPES
+            if counts.get(log, 0) > int(log == input_item)
+            and is_safe_fuel(log, protected)
+            and is_safe_fuel(_log_to_planks_name(log), protected)
+        ), None)
 
     def _choose_smelt_fuel(
         self,
@@ -5396,12 +5403,7 @@ class MacroSkills:
     ) -> tuple[str | None, int, float]:
         from .inventory_manager import SUPPORTED_FUELS, is_safe_fuel
 
-        protected = set()
-        if self.inventory_manager is not None:
-            try:
-                protected = set(self.inventory_manager.active_protected())
-            except (AttributeError, TypeError):
-                protected = set()
+        protected = self._protected_smelt_fuels()
         order = ["coal", "charcoal", "coal_block", "dried_kelp_block", "stick", "bamboo"]
         order += [n for n in SUPPORTED_FUELS if n not in order and n.endswith("_planks")]
         if fuel_item:
@@ -6092,11 +6094,12 @@ class MacroSkills:
         inv_raw, counts = _inventory_snapshot_and_counts(self.bot)
         if counts.get(input_item, 0) < 1:
             return {"ok": False, "error": "missing_ingredients", "message": f"背包没有 {input_item}。"}
-        fuel_sources = (
-            fuel_item or "", "coal", "charcoal", *LOG_TYPES,
-            *(name for name in counts if name.endswith("_planks")),
+        fuel_item = _clean_block(fuel_item) or None
+        smelt_n = min(max(1, count), counts[input_item])
+        chosen_fuel, _, _ = self._choose_smelt_fuel(
+            smelt_n=smelt_n, fuel_item=fuel_item, counts=counts, input_item=input_item,
         )
-        if not any(counts.get(name, 0) > int(name == input_item) for name in fuel_sources):
+        if chosen_fuel is None and self._smelt_fuel_log(counts, input_item) is None:
             return self._nearby_pending_sync_smelt_batch(input_item) or self._missing_smelt_fuel(input_item, counts)
         inv_raw, pre_dropped = self._ensure_free_slots(min_free=5, inv_snapshot=inv_raw)
         if pre_dropped:
@@ -6169,56 +6172,33 @@ class MacroSkills:
                 "message": f"准备熔炉后背包已没有 {input_item}，请补足原料再烧制。",
             }
 
-        # Pick fuel & calculate exact fuel count, reserving smelt_n items if fuel matches input_item.
-        chosen_fuel = fuel_item
-        fuel_count = 0
-        if chosen_fuel:
-            per_fuel = 8.0 if chosen_fuel in ("coal", "charcoal") else 1.5
-            avail_fuel = counts.get(chosen_fuel, 0) - (smelt_n if chosen_fuel == input_item else 0)
-            fuel_count = min(max(0, avail_fuel), math.ceil(smelt_n / per_fuel))
-        else:
-            for cand, per_fuel in (
-                ("coal", 8.0),
-                ("charcoal", 8.0),
-                *((p, 1.5) for p in sorted(counts) if p.endswith("_planks")),
-                *((l, 1.5) for l in LOG_TYPES),
-            ):
-                avail_fuel = counts.get(cand, 0) - (smelt_n if cand == input_item else 0)
-                if avail_fuel <= 0:
-                    continue
-                if cand in LOG_TYPES:
-                    plank = _log_to_planks_name(cand)
-                    try:
-                        self._safe_craft(plank, 4)
-                        counts = _inventory_counts(self.bot)
-                        if counts.get(plank, 0) > 0:
-                            chosen_fuel = plank
-                            fuel_count = min(counts[plank], math.ceil(smelt_n / 1.5))
-                            break
-                    except ApiError:
-                        pass
-                chosen_fuel = cand
-                fuel_count = min(avail_fuel, math.ceil(smelt_n / per_fuel))
-                break
-            if (not chosen_fuel or fuel_count < 1) and input_item in LOG_TYPES and counts.get(input_item, 0) >= 2:
-                # Convert 1 log into 4 planks for furnace fuel (smelts up to 6 items) while keeping >=1 log to smelt.
-                if smelt_n >= counts.get(input_item, 0):
-                    smelt_n = counts[input_item] - 1
-                plank = _log_to_planks_name(input_item)
+        chosen_fuel, fuel_count, _ = self._choose_smelt_fuel(
+            smelt_n=smelt_n, fuel_item=fuel_item, counts=counts, input_item=input_item,
+        )
+        if chosen_fuel is None:
+            log = self._smelt_fuel_log(counts, input_item)
+            if log is not None:
+                preferred_fuel = fuel_item
                 try:
-                    self._safe_craft(plank, 4)
-                    counts = _inventory_counts(self.bot)
-                except ApiError:
-                    pass
-                if counts.get(plank, 0) > 0:
-                    chosen_fuel = plank
-                    fuel_count = min(counts[plank], math.ceil(smelt_n / 1.5))
+                    self._safe_craft(_log_to_planks_name(log), 4)
+                except ApiError as err:
+                    if err.code in _PICKUP_INTERRUPTION_CODES:
+                        raise
+                    preferred_fuel = log
+                counts = _inventory_counts(self.bot)
+                smelt_n = min(smelt_n, counts.get(input_item, 0))
+                if smelt_n > 0:
+                    chosen_fuel, fuel_count, _ = self._choose_smelt_fuel(
+                        smelt_n=smelt_n, fuel_item=preferred_fuel, counts=counts, input_item=input_item,
+                    )
 
         if not chosen_fuel or fuel_count < 1:
             return self._missing_smelt_fuel(input_item, counts, furnace_pos)
 
         collected: list[dict[str, Any]] = []
         session.progress.update(furnace_pos=furnace_pos, input=input_item, requested_count=smelt_n, collected=collected)
+        if fuel_item and chosen_fuel != fuel_item:
+            session.progress["fuel_fallback"] = {"requested": fuel_item, "selected": chosen_fuel}
         load_ops = [
             {"op": "put", "item": input_item, "count": smelt_n, "to": "input"},
             {"op": "put", "item": chosen_fuel, "count": fuel_count, "to": "fuel"},
@@ -6247,6 +6227,8 @@ class MacroSkills:
         except ApiError as exc:
             # Fuel placement can fail after the input transfer already committed.
             self._record_sync_furnace_load(furnace_pos, dim, input_item, exc.context, 0)
+            if exc.context.get("done") and furnace_pos is not None:
+                exc.context.setdefault("furnace_pos", furnace_pos)
             raise
         self._record_sync_furnace_load(furnace_pos, dim, input_item, load_result, smelt_n)
 
