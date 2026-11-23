@@ -77,8 +77,10 @@ KNOWN_STAGES: tuple[str, ...] = (
 
 
 def _stage_from_dirname(name: str) -> str:
+    prefix, _, duration = name.rpartition("_")
+    name_without_duration = prefix if duration.endswith("s") and duration[:-1].isdigit() else name
     for stage in KNOWN_STAGES:  # longest first so nether_fortress wins over nether
-        if name.endswith("_" + stage):
+        if name_without_duration.endswith("_" + stage):
             return stage
     return name.split("_")[-1] if name.count("_") >= 2 else "?"
 

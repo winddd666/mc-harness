@@ -1443,14 +1443,25 @@ def compute_stage_baseline(stage: str) -> dict[str, Any]:
     if stage not in NETHER_STAGES:
         roots.append("minecraft:end/root")
     ids.extend(roots)
-    points = 0
-    breakdown: dict[str, int] = {}
     try:
         from mc_agent.harness.curriculum import score_completed_advancements
 
         points, breakdown = score_completed_advancements(set(ids))
-    except Exception:
-        pass
+    except ModuleNotFoundError:
+        # Offline plans and triage can run with system Python. Read the same
+        # literal score table without importing the harness's HTTP dependencies.
+        import ast
+
+        source = WT_ROOT / "src/mc_agent/harness/curriculum.py"
+        module = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        table_node = next(
+            node.value for node in module.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+            and node.target.id == "RULES_ADVANCEMENT_POINTS" and node.value is not None
+        )
+        table = ast.literal_eval(table_node)
+        breakdown = {adv_id: table[adv_id] for adv_id in sorted(set(ids)) if table.get(adv_id, 0) > 0}
+        points = sum(breakdown.values())
     return {
         "points": int(points),
         "advancements": sorted(set(ids)),
