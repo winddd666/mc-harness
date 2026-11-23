@@ -4562,6 +4562,7 @@ class GenerationGuard:
         mining_landing_error: _MiningLandingDenied | None = None
         mining_landing_retry_at = 0.0
         mining_support_changed = False
+        mining_forward_waypoint: list[float] | None = None
         blocked_collar_approaches: set[tuple[float, float]] = set()
         watch_terrain_damage = check_support_dig or watch_mining_water
         watch_low_oxygen = watch_mining_water or check_unstick_exit
@@ -4982,7 +4983,7 @@ class GenerationGuard:
             mining_landing_error = None
 
         def _wrapped_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
-            nonlocal attack_target_id, mining_support_changed
+            nonlocal attack_target_id, mining_support_changed, mining_forward_waypoint
             clean_path = str(path or "").lstrip("/")
             is_actor_thread = threading.get_ident() == actor_thread_id
             is_readonly_poll = (
@@ -5044,11 +5045,13 @@ class GenerationGuard:
                 return observed
             if check_mining_landing and isinstance(body, dict):
                 if clean_path == "move_to":
+                    mining_forward_waypoint = None
                     target = [body.get(axis) for axis in ("x", "y", "z")]
                     x, y, z = target
                     if all(type(coord) in (int, float) and math.isfinite(coord) for coord in (x, z)):
                         if body.get("range") in (0.3, 0.35) and type(y) in (int, float) and math.isfinite(y):
                             verify_mining_approach(target)
+                            mining_forward_waypoint = target
                         elif y is None and body.get("range") in (1.0, 1.2, 1.4):
                             try:
                                 self._verify_mining_collar_approach(target)
@@ -5061,14 +5064,25 @@ class GenerationGuard:
                             blocked_collar_approaches.discard((x, z))
                             if pending_trigger:
                                 raise ReflexPreempted(pending_trigger[0])
-                elif clean_path == "control" and body.get("forward") and mining_landing_error is not None:
-                    # DFS can fall back to a forward pulse after a failed move_to. Keep
-                    # the waypoint blocked until a new approach or a repair is verified.
-                    if not mining_support_changed:
-                        raise _MiningLandingDenied(
-                            mining_landing_error.code, mining_landing_error.message, context=mining_landing_error.context,
-                        )
-                    verify_mining_approach(mining_landing_error.context["target"])
+                elif clean_path == "control" and body.get("forward"):
+                    if mining_landing_error is not None:
+                        # Keep a rejected waypoint blocked until a repair is verified.
+                        if not mining_support_changed:
+                            raise _MiningLandingDenied(
+                                mining_landing_error.code, mining_landing_error.message, context=mining_landing_error.context,
+                            )
+                        mining_forward_waypoint = mining_landing_error.context["target"]
+                        verify_mining_approach(mining_forward_waypoint)
+                    if mining_forward_waypoint is not None:
+                        hazard = self._mining_fallback_hazard(body)
+                        if pending_trigger:
+                            raise ReflexPreempted(pending_trigger[0])
+                        if hazard:
+                            context = {"target": mining_forward_waypoint, "hazard": hazard}
+                            self.events.emit("guardian.mining_fallback_blocked", **context)
+                            raise _MiningLandingDenied(
+                                "unsafe_landing", "短跑可能越过采矿落点进入危险地形，请改用有支撑的路线。", context=context,
+                            )
             if (
                 check_combat_step and clean_path == "control" and isinstance(body, dict)
                 and body.get("forward") and body.get("wait") is False
@@ -5917,6 +5931,33 @@ class GenerationGuard:
         raise _MiningLandingDenied(
             "mining_footing_unavailable", "暂时无法确认采矿落点，请从有支撑的地点改道。", context={"target": target},
         )
+
+    def _mining_fallback_hazard(self, body: dict[str, Any]) -> str | None:
+        ms = body.get("ms")
+        if type(ms) is not int or ms <= 0 or any(body.get(key) for key in ("back", "left", "right")):
+            return None
+        deadline = time.monotonic() + 0.65
+        bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=deadline)
+        try:
+            status = bot.call("status", method="GET", timeout_s=0.25, allow_reauth=False)
+            if not isinstance(status, dict):
+                return None
+            pos, yaw = status.get("pos"), body.get("yaw", status.get("yaw"))
+            if (
+                status.get("ready") is not True or status.get("alive") is False or status.get("on_ground") is not True
+                or status.get("in_water") or status.get("in_lava")
+                or not isinstance(pos, (list, tuple)) or len(pos) < 3
+                or not all(type(coord) in (int, float) and math.isfinite(coord) for coord in pos[:3])
+                or type(yaw) not in (int, float) or not math.isfinite(yaw)
+            ):
+                return None
+            # The input lasts past the intended waypoint if the pathfinder did not move.
+            speed = 5.8 if body.get("sprint") or body.get("jump") else 4.4
+            travel = ms / 1000 * speed + 0.45
+            ray = CombatEnv(bot, geofence=self.geofence).probe_ray(pos, yaw, dist=travel, deadline=deadline)
+        except (ApiError, httpx.HTTPError, _RecoveryBudgetExceeded, _TerrainProbeExpired):
+            return None
+        return ray["hazard"] if ray["hazard"] in {"cliff", "lava", "geofence"} else None
 
     def _gathering_reentry_enemy(self, target: Sequence[float], call: Callable[..., dict[str, Any]]) -> int | None:
         site = self._mining_melee_site
