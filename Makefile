@@ -15,7 +15,7 @@ test:
 	fi
 
 test-fast:
-	$(PYTEST) tests/test_v2_harness.py tests/test_skills_and_providers.py tests/test_mining_dfs.py -q
+	$(PYTEST) tests/test_v2_harness.py tests/skills tests/mining -q
 
 size-check:
 	$(PYTHON) scripts/check_file_sizes.py

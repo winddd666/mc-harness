@@ -15,8 +15,6 @@ DEFAULT_MAX_LINES = 800
 LEGACY_CEILINGS: dict[str, int] = {
     "src/mc_agent/skills/library.py": 11300,
     "src/mc_agent/skills/mining_dfs.py": 9000,
-    "tests/test_skills_and_providers.py": 8600,
-    "tests/test_mining_dfs.py": 7900,
     "src/mc_agent/harness/guardian.py": 7600,
     "src/mc_agent/skills/combat_env.py": 6000,
     "tests/test_v2_harness.py": 4300,
