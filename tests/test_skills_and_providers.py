@@ -1200,6 +1200,31 @@ def test_kb_lookup_jit_hints_and_path_not_found_recovery() -> None:
     assert "how_to" in mine_stone
 
 
+@pytest.mark.parametrize("roof,reason", [(None, "no_roof_block"), ("oak_log", "no_roof_block"), ("dirt", "unsafe_floor"), ("oak_planks", "unsafe_floor")])
+def test_urgent_bunker_requires_ready_roof_material_before_probing(roof, reason) -> None:
+    routes = []
+
+    def handler(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        routes.append(route)
+        if route == "inventory":
+            result = {"items": [{"name": roof, "count": 1}] if roof else []}
+        elif route == "status":
+            result = {"pos": [0.5, 64.0, 0.5], "health": 4, "on_ground": True}
+        elif route == "get_block":
+            assert json.loads(request.content)["pos"] == [0, 60, 0]
+            result = {"name": "air"}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handler)) as bot:
+        result = MacroSkills(bot).dig_safety_bunker(urgent=True)
+
+    assert result["ok"] is False and result["reason"] == reason
+    assert routes == (["inventory"] if reason == "no_roof_block" else ["inventory", "status", "get_block"])
+
+
 def test_dig_safety_bunker_and_registration() -> None:
     from mc_agent.harness.mc_tools import McToolset
 

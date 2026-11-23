@@ -7329,6 +7329,21 @@ class MacroSkills:
 
     def dig_safety_bunker(self, *, urgent: bool = False) -> dict[str, Any]:
         """Dig a 1x3 vertical shaft under the bot and seal the top to block night mobs."""
+        roof_candidates = ("dirt", "cobblestone", "cobbled_deepslate", "andesite", "diorite", "granite")
+
+        def _pick_roof_item(inv: dict[str, int]) -> str | None:
+            for cand in roof_candidates:
+                if inv.get(cand, 0) >= 1:
+                    return cand
+            for name, cnt in sorted(inv.items()):
+                if cnt >= 1 and name.endswith("_planks"):
+                    return name
+            return None
+
+        counts = _inventory_counts(self.bot) if urgent else None
+        if counts is not None and _pick_roof_item(counts) is None:
+            return {"ok": False, "reason": "no_roof_block"}
+
         st = self.bot.status()
         pos = st.get("pos") or [0.0, 64.0, 0.0]
         bx, by, bz = math.floor(float(pos[0])), math.floor(float(pos[1])), math.floor(float(pos[2]))
@@ -7375,22 +7390,10 @@ class MacroSkills:
                     if name in non_solid_floor:
                         return {"ok": False, "reason": "unsafe_open_side", "block_pos": neighbor, "block": name}
 
-        roof_candidates = ("dirt", "cobblestone", "cobbled_deepslate", "andesite", "diorite", "granite")
-
-        def _pick_roof_item(inv: dict[str, int]) -> str | None:
-            for cand in roof_candidates:
-                if inv.get(cand, 0) >= 1:
-                    return cand
-            for name, cnt in sorted(inv.items()):
-                if cnt >= 1 and name.endswith("_planks"):
-                    return name
-            return None
-
-        counts = _inventory_counts(self.bot)
+        if counts is None:
+            counts = _inventory_counts(self.bot)
         crafted_planks: str | None = None
         if _pick_roof_item(counts) is None:
-            if urgent:
-                return {"ok": False, "reason": "no_roof_block"}
             for log_name in (*LOG_TYPES, *NETHER_STEM_TYPES):
                 if counts.get(log_name, 0) >= 1:
                     planks_name = _log_to_planks_name(log_name)
@@ -7406,9 +7409,8 @@ class MacroSkills:
                         }
                     counts = _inventory_counts(self.bot)
                     break
-
-        if _pick_roof_item(counts) is None:
-            return {"ok": False, "reason": "no_roof_block"}
+            if _pick_roof_item(counts) is None:
+                return {"ok": False, "reason": "no_roof_block"}
 
         # A bot straddling the edge remains supported by its neighbor when
         # the nominal foot block is dug. Center it before opening the shaft.
