@@ -176,6 +176,10 @@ class _UnsafeCreeperAttack(BaseException):
     """Prevent an explicit melee chase toward a confirmed creeper."""
 
 
+class _UnsafeCreeperMove(BaseException):
+    """Unwind a movement request whose goal would approach a confirmed creeper."""
+
+
 class _UnsafeDig(BaseException):
     """Unwind a dig that would expose the bot to an unsafe drop or fluid."""
 
@@ -4487,6 +4491,45 @@ class GenerationGuard:
             raise _UnsafeCombatStep
         return {**body, "ms": min(body["ms"], 250)}
 
+    def _creeper_at_move_goal(
+        self, body: dict[str, Any], status: dict[str, Any], call: Callable[..., dict[str, Any]],
+    ) -> int | None:
+        arrival_range = body.get("range")
+        origin = status.get("pos")
+        name, distance, entity_id, creeper_pos = self._extract_hostile_info(status)
+        if (
+            type(arrival_range) not in (int, float) or not 0 < arrival_range <= 5.5
+            or status.get("ready") is not True or status.get("alive") is False
+            or name != "creeper" or entity_id is None or not 0 <= distance <= 16.0
+            or status["nearest_hostile"].get("alive") is False or status["nearest_hostile"].get("blocked_by_wall") is True
+        ):
+            return None
+        if body.get("entity_id") == entity_id:
+            return entity_id
+        x, y, z = (body.get(axis) for axis in ("x", "y", "z"))
+        if (
+            body.get("entity_id") is not None
+            or not isinstance(origin, (list, tuple)) or len(origin) < 3
+            or not all(type(coord) in (int, float) and math.isfinite(coord) for coord in (*origin[:3], x, z))
+            or (y is not None and (type(y) not in (int, float) or not math.isfinite(y)))
+        ):
+            return None
+        if creeper_pos is None:
+            scout = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=time.monotonic() + 0.5, call_override=call)
+            live = self._find_hostile(entity_id, "creeper", session=scout, timeout_s=0.3, require_position=True)
+            if (
+                live is None or live.get("alive") is False or live.get("blocked_by_wall") is True
+                or str(live.get("name") or "").removeprefix("minecraft:") != "creeper"
+            ):
+                return None
+            creeper_pos = live["pos"]
+        if not all(type(coord) in (int, float) and math.isfinite(coord) for coord in creeper_pos[:3]):
+            return None
+        separation = math.dist((x, origin[1] if y is None else y, z), creeper_pos[:3])
+        if separation <= 1.5 and separation + arrival_range <= 5.5 and separation < math.dist(origin[:3], creeper_pos[:3]):
+            return entity_id
+        return None
+
     def _verify_attack_approach(self, entity_id: Any, call: Callable[..., dict[str, Any]]) -> None:
         if not isinstance(entity_id, int):
             return
@@ -4577,6 +4620,7 @@ class GenerationGuard:
         watch_scout_water: bool = False,
         watch_mining_water: bool = False,
         watch_move_water: bool = True,
+        check_move_creeper: bool = False,
         check_flee_exit: bool = False,
         watch_attack_emergency: bool = False,
         check_combat_step: bool = False,
@@ -4618,6 +4662,7 @@ class GenerationGuard:
         actor_thread_id = threading.get_ident()
         pending_trigger: list[ThreatTrigger] = []
         unstick_start: dict[str, Any] = {}
+        move_start: tuple[float, dict[str, Any]] | None = None
         mining_landing_error: _MiningLandingDenied | None = None
         mining_landing_retry_at = 0.0
         mining_support_changed = False
@@ -5042,7 +5087,7 @@ class GenerationGuard:
             mining_landing_error = None
 
         def _wrapped_call(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
-            nonlocal attack_target_id, mining_support_changed, mining_forward_waypoint
+            nonlocal attack_target_id, mining_support_changed, mining_forward_waypoint, move_start
             clean_path = str(path or "").lstrip("/")
             is_actor_thread = threading.get_ident() == actor_thread_id
             is_readonly_poll = (
@@ -5101,7 +5146,17 @@ class GenerationGuard:
                     raise ReflexPreempted(pending_trigger[0])
                 if check_unstick_exit and clean_path == "status" and not unstick_start and isinstance(observed, dict):
                     unstick_start.update(observed)
+                if check_move_creeper and clean_path == "status" and isinstance(observed, dict):
+                    move_start = (time.monotonic(), observed)
                 return observed
+            if check_move_creeper and clean_path == "move_to" and isinstance(body, dict) and move_start is not None:
+                observed_at, observed = move_start
+                if time.monotonic() - observed_at <= 1.0:
+                    creeper = self._creeper_at_move_goal(body, observed, actor_call)
+                    if pending_trigger:
+                        raise ReflexPreempted(pending_trigger[0])
+                    if creeper is not None:
+                        raise _UnsafeCreeperMove(creeper)
             if check_mining_landing and isinstance(body, dict):
                 if clean_path == "move_to":
                     mining_forward_waypoint = None
@@ -6237,6 +6292,7 @@ class GenerationGuard:
                 watch_scout_water=tool_name == "mc_skill_scout_surface",
                 watch_mining_water=tool_name in MINING_WATER_WATCH_TOOLS,
                 watch_move_water=tool_name == "mc_move_to",
+                check_move_creeper=tool_name == "mc_move_to",
                 check_flee_exit=is_flee,
                 watch_attack_emergency=is_attack,
                 check_combat_step=tool_name == "mc_skill_combat",
@@ -6264,6 +6320,17 @@ class GenerationGuard:
                 "error": {
                     "code": "unsafe_creeper_attack", "entity_id": entity_id,
                     "message": "目标是苦力怕。请拉开距离后远程攻击，或改走安全路线。",
+                },
+            }, ensure_ascii=False)
+        except _UnsafeCreeperMove as error:
+            entity_id = error.args[0]
+            self.events.emit("guardian.creeper_move_blocked", entity_id=entity_id)
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {
+                    "code": "unsafe_creeper_move", "entity_id": entity_id,
+                    "message": "移动目标在苦力怕爆炸警戒范围内，请改到远离它的落脚点。",
                 },
             }, ensure_ascii=False)
         except _UnsafeDig as error:

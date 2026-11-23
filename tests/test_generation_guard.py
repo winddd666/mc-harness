@@ -17654,6 +17654,74 @@ def test_close_creeper_preempts_movement_that_ignores_ordinary_hurt(monkeypatch,
     assert calls == ["move_to", "stop", "creeper_evade"]
 
 
+@pytest.mark.parametrize("request_kind", [
+    "mixed", "coordinates", "entity", "retreat", "wide_range", "other_floor", "behind_wall", "other_entity", "missing_fix",
+])
+def test_w19_move_rejects_a_confirmed_creeper_destination_before_dispatch(request_kind):
+    from mc_agent.harness.mc_tools import McToolset
+
+    origin = [210790.5, 99, 151019.8]
+    creeper = {"name": "creeper", "id": 2197772, "pos": [210799.1, 99, 151015.3], "dist": 9.7}
+    target = {"x": 210799, "y": 99, "z": 151015}
+    move_args = {**target, "entity_id": creeper["id"], "range": 2.5}
+    if request_kind == "coordinates":
+        move_args.pop("entity_id")
+    elif request_kind == "entity":
+        move_args = {"entity_id": creeper["id"], "range": 2.5}
+    elif request_kind == "retreat":
+        move_args.update(x=210781, z=151023)
+    elif request_kind == "wide_range":
+        move_args["range"] = 8
+    elif request_kind == "other_floor":
+        move_args["y"] = 104
+    elif request_kind == "other_entity":
+        move_args = {"entity_id": 2197773, "range": 2.5}
+
+    nearest = {key: value for key, value in creeper.items() if key != "pos"}
+    if request_kind == "behind_wall":
+        creeper["blocked_by_wall"] = True
+    status = {"pos": origin, "health": 20, "ready": True, "alive": True, "on_ground": True, "nearest_hostile": nearest}
+    reads = []
+    writes = []
+    events = []
+
+    def handle(request):
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        if endpoint == "status":
+            reads.append(endpoint)
+            result = status
+        elif endpoint == "get_entities":
+            reads.append(endpoint)
+            result = {"entities": [] if request_kind == "missing_fix" else [creeper]}
+        elif endpoint == "move_to":
+            writes.append(json.loads(request.content))
+            result = {"pos": origin}
+        else:
+            pytest.fail(f"Unexpected movement endpoint: {endpoint}")
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("cached", bot_username="Bot", transport=httpx.MockTransport(handle)) as bot:
+        toolset = McToolset(bot)
+        guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None)
+        result = json.loads(guard.run_tool_with_reflex("mc_move_to", lambda: toolset.mc_move_to(**move_args)))
+
+    blocked = request_kind in {"mixed", "coordinates", "entity"}
+    assert len(writes) == int(not blocked)
+    assert result["ok"] is not blocked
+    assert reads.count("status") == 1
+    denials = [event for event in events if event["type"] == "guardian.creeper_move_blocked"]
+    if blocked:
+        assert result["requires_replan"] and result["error"]["code"] == "unsafe_creeper_move"
+        assert result["error"]["entity_id"] == creeper["id"]
+        assert len(denials) == 1 and denials[0]["entity_id"] == creeper["id"]
+    else:
+        assert denials == []
+        if request_kind in {"retreat", "wide_range", "other_floor", "behind_wall", "missing_fix"}:
+            assert "entity_id" not in writes[0]
+        else:
+            assert writes[0]["entity_id"] == 2197773
+
+
 @pytest.mark.parametrize("terrain", ["netherrack", "drop", "lava"])
 def test_nether_combat_checks_footing_before_issuing_a_chase_pulse(terrain):
     moves = []
