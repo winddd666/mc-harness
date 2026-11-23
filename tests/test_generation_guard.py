@@ -16839,6 +16839,60 @@ def test_explicit_flee_checks_support_before_each_motion(action, solid_exit, dim
         assert movements == []
 
 
+@pytest.mark.parametrize("terrain", ["short", "unsupported", "lava", "new_life"])
+def test_w20_hy10_flee_checks_a_short_supported_prefix_before_rejecting_the_exit(terrain):
+    origin = [228965.5, 63, 228625.5]
+    status = {
+        "pos": origin, "health": 11, "dimension": "overworld", "last_death": {"t": 1},
+        "ready": True, "alive": True, "on_ground": True,
+    }
+    writes = []
+    events = []
+
+    class RidgeBot:
+        def status(self):
+            return self.call("status", method="GET")
+
+        def call(self, name, body=None, **_kwargs):
+            if name == "status":
+                return dict(status)
+            if name == "get_entities":
+                return {"entities": []}
+            if name == "get_block":
+                _, y, z = body["pos"]
+                if z <= 228623 and terrain == "new_life":
+                    status.update(last_death={"t": 2}, pos=[228975.5, 68, 228640.5])
+                if terrain == "lava" and y == 63 and z == 228624:
+                    return {"name": "lava"}
+                edge = 228625 if terrain == "unsupported" else 228622
+                return {"name": "stone" if y == 62 and z >= edge else "air"}
+            if name == "control" and body.get("forward"):
+                assert body["yaw"] == pytest.approx(0.0)
+                writes.append((name, body))
+                status["pos"] = [origin[0], 63, origin[2] - 0.7]
+            if name == "move_to":
+                writes.append((name, body))
+                status["pos"] = [body["x"], body["y"], body["z"]]
+            return {"ok": True}
+
+    bot = RidgeBot()
+    skills = MacroSkills(bot)
+    guard = GenerationGuard(bot, EventSink(events.append), checkpoint=lambda: None, skills=skills)
+    result = json.loads(guard.run_tool_with_reflex("mc_skill_flee", lambda: json.dumps(skills.flee_hostiles(distance=30))))
+
+    assert result["ok"] is (terrain == "short")
+    if terrain == "short":
+        (action, pulse), (navigation, target) = writes
+        assert action == "control" and navigation == "move_to"
+        assert pulse["ms"] <= 220 and not pulse["sprint"] and not pulse["jump"]
+        assert target["y"] == 63 and target["z"] == pytest.approx(228623.15)
+        assert result["pos_after"] == status["pos"] and result["moved_dist"] == pytest.approx(2.4)
+        assert [event["action"] for event in events if event["type"] == "guardian.flee_exit_shortened"] == ["control", "move_to"]
+    else:
+        assert not writes
+        assert result["error"]["code"] == ("respawned" if terrain == "new_life" else "unsafe_landing")
+
+
 @pytest.mark.parametrize("landing", ["respawned", "airborne", "water"])
 def test_blocked_flee_preserves_the_checked_retreat_observation(monkeypatch, landing):
     from mc_agent.skills.combat_env import CombatEnv

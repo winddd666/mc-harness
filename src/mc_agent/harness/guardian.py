@@ -50,6 +50,7 @@ from ..skills.combat_env import (
     melee_clear_for_projectile_cover,
     ranged_retreat_positions,
     retreat_made_progress,
+    yaw_to_unit_xz,
 )
 from ..skills.library import MacroSkills, _inventory_counts_from_raw, best_melee_weapon_in_inv, ray_wall_blocker
 from ..skills.safety import SAFE_FOOD_PRIORITY, auto_equip_survival_gear, water_oxygen_below
@@ -4274,20 +4275,67 @@ class GenerationGuard:
         probe_bot = _GuardSession(self.raw_bot, self.bot.checkpoint, deadline=probe_deadline)
         probe_env = CombatEnv(probe_bot, geofence=self.geofence)
 
-        def probe(yaw: float, distance: float) -> tuple[int, bool]:
+        def probe(yaw: float, distance: float) -> tuple[int, bool] | None:
             try:
                 route = probe_env.probe_retreat(pos, yaw, distance)
             except _RecoveryBudgetExceeded:
                 if deadline is not None and time.monotonic() >= deadline:
                     raise
                 route = None
-            if route is None:
-                raise _UnsafeFleeExit
             return route
 
+        def short_route(yaw: float, lengths: tuple[float, ...]) -> tuple[float, int] | None:
+            if (
+                not lengths or time.monotonic() >= probe_deadline
+                or status.get("on_ground") is not True or status.get("ready") is not True
+                or any(status.get(key) for key in ("busy", "in_water", "submerged", "in_lava"))
+            ):
+                return None
+            name, enemy_distance, entity_id, enemy_pos = self._extract_hostile_info(status)
+            if name and enemy_distance <= (12.0 if name in RANGED_MOBS else 6.0):
+                if enemy_pos is None and entity_id is not None:
+                    enemy_pos = self._find_hostile_position(entity_id, name, timeout_s=0.25, session=probe_bot)
+                ux, uz = yaw_to_unit_xz(yaw)
+                if not enemy_pos or (enemy_pos[0] - pos[0]) * ux + (enemy_pos[2] - pos[2]) * uz > 0.05:
+                    return None
+            foot_y = math.floor(pos[1] + 0.05)
+            length = next((length for length in lengths if probe(yaw, length) == (foot_y, False)), None)
+            if length is None:
+                return None
+            try:
+                if not probe_env.has_safe_footing(pos, deadline=probe_deadline):
+                    return None
+                current = probe_env._safe_status(timeout_s=0.25)
+            except (_RecoveryBudgetExceeded, _TerrainProbeExpired):
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise _RecoveryBudgetExceeded from None
+                return None
+            point = current.get("pos")
+            if current.get("alive") is False or (point and any(
+                current.get(key) != status.get(key) for key in ("last_death", "dimension")
+            )):
+                raise _UnsafeFleeExit("respawned", point)
+            if (
+                not self._same_life(status, current) or current.get("on_ground") is not True
+                or any(current.get(key) for key in ("busy", "in_water", "submerged", "in_lava"))
+                or not point or math.dist(point[:3], pos[:3]) > 0.2
+            ):
+                return None
+            self.events.emit("guardian.flee_exit_shortened", action=action, pos=point, yaw=yaw, distance=length)
+            return length, foot_y
+
         if action == "control":
-            _, needs_jump = probe(float(body["yaw"]), 3.5)
-            return {**body, "jump": needs_jump, "ms": min(int(body.get("ms") or 450), 450)}
+            yaw = float(body["yaw"])
+            route = probe(yaw, 3.5)
+            duration = min(int(body.get("ms") or 450), 450)
+            if route is not None:
+                return {**body, "jump": route[1], "ms": duration}
+            if (
+                not body.get("sprint") or any(body.get(key) for key in ("back", "left", "right"))
+                or short_route(yaw, (1.65,)) is None
+            ):
+                raise _UnsafeFleeExit
+            return {**body, "sprint": False, "jump": False, "ms": min(duration, 220)}
 
         x, _, z = map(float, pos[:3])
         dx, dz = float(body["x"]) - x, float(body["z"]) - z
@@ -4296,9 +4344,18 @@ class GenerationGuard:
             return body
         distance = min(6.0, desired_distance)
         yaw = math.atan2(-dx, -dz)
-        landing_y, _ = probe(yaw, distance)
+        route = probe(yaw, distance)
+        allowed_range = 1.0
+        if route is None:
+            shortened = short_route(yaw, tuple(length for length in (3.5, 1.65) if length < distance))
+            if shortened is None:
+                raise _UnsafeFleeExit
+            distance, landing_y = shortened
+            allowed_range = 0.6
+        else:
+            landing_y = route[0]
         fraction = distance / desired_distance
-        return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": 1.0}
+        return {**body, "x": x + dx * fraction, "y": landing_y, "z": z + dz * fraction, "range": allowed_range}
 
     def _retreat_after_unsafe_exit(self, deadline: float | None, *, allow_cover: bool = False) -> dict[str, Any] | None:
         now = time.monotonic()
@@ -6694,8 +6751,13 @@ class GenerationGuard:
                 "requires_replan": True,
                 "error": {"code": "unsafe_landing", "message": message},
             }, ensure_ascii=False)
-        except (_UnsafeFleeExit, _UnsafeUnstickExit):
+        except (_UnsafeFleeExit, _UnsafeUnstickExit) as error:
             self.events.emit("guardian.flee_exit_blocked" if is_flee else "guardian.unstick_exit_blocked", tool=tool_name)
+            if isinstance(error, _UnsafeFleeExit) and error.args and error.args[0] == "respawned":
+                return json.dumps({
+                    "ok": False, "mode": "respawned", "respawned": True, "requires_replan": True,
+                    "pos_after": error.args[1], "error": {"code": "respawned", "message": "撤退核验期间角色已换命，请按最新位置重新规划。"},
+                }, ensure_ascii=False)
             recovery = self._retreat_after_unsafe_exit(deadline, allow_cover=is_flee)
             if recovery is not None and (recovery.get("respawned") or recovery.get("reason") != "unsafe_landing"):
                 return json.dumps(recovery, ensure_ascii=False)
