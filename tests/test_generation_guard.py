@@ -11474,6 +11474,79 @@ def test_healthy_unarmed_bot_follows_up_short_retreat_when_the_attacker_gains_gr
     assert any(a["action"] == "followup_melee_retreat" for a in outcome["actions"]) is expected
 
 
+@pytest.mark.parametrize("landing", ["cleared", "pursued", "unsupported", "respawned"])
+def test_w19_critical_melee_pursuit_uses_checked_disengagement(monkeypatch, landing):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv, yaw_to_unit_xz
+
+    after_first = [184017.0, 112, 189172.1]
+    zombie = {"id": 2273757, "name": "zombie_villager", "dist": 3.0, "pos": [184022.5, 112, 189172.1]}
+    pursuing = {**zombie, "dist": 2.5, "pos": [184019.5, 112, 189172.1]}
+    status = {
+        "pos": [184019.5, 112, 189172.1], "dimension": "overworld", "last_death": {"t": 1},
+        "health": 5.2, "ready": True, "alive": True, "on_ground": True, "is_day": False,
+        "nearest_hostile": zombie, "yaw": 0.0,
+    }
+    pulses = []
+
+    class FieldBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return self.status()
+            if action == "inventory":
+                return {"items": []}
+            if action == "get_entities":
+                return {"entities": [status["nearest_hostile"]]}
+            if action == "get_block":
+                return {"name": "stone" if body["pos"][1] < 112 and landing != "unsupported" else "air"}
+            if action == "look" and "yaw" in body:
+                status["yaw"] = body["yaw"]
+            if action == "control" and body.get("forward"):
+                pulses.append(body)
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                assert dx < -0.9 and abs(dz) < 0.1
+                moved = 2.3 if body.get("sprint") else 0.71
+                status.update(pos=[after_first[0] + dx * moved, 112, after_first[2] + dz * moved])
+                distance = 2.6 if landing == "pursued" else 2.5 + moved
+                status["nearest_hostile"] = {"id": zombie["id"], "name": zombie["name"], "dist": distance}
+                if landing == "respawned":
+                    status.update(last_death={"t": 2}, ready=False)
+            return {"ok": True}
+
+    env = CombatEnv(FieldBot())
+    verified_flee = env.flee
+    flee_calls = []
+
+    def retreat(pos, **kwargs):
+        flee_calls.append(pos)
+        if len(flee_calls) == 1:
+            status.update(pos=after_first, health=2.18, nearest_hostile=pursuing)
+            return {"ok": True, "mode": "flee", "moved_dist": 2.47, "pos_after": after_first}
+        return verified_flee(pos, **kwargs)
+
+    monkeypatch.setattr(env, "arena_snapshot", lambda _pos: {"enclosure": "surface"})
+    monkeypatch.setattr(env, "flee", retreat)
+    outcome = CombatControllerSlot().handle(env, {
+        "source": "pre_hurt_melee", "primary_entity_id": zombie["id"], "primary_type": zombie["name"], "distance": 3.0,
+    })
+
+    followup, = [action for action in outcome["actions"] if action["action"] == "followup_melee_retreat"]
+    assert flee_calls == [zombie["pos"], pursuing["pos"]]
+    if landing == "unsupported":
+        assert not pulses and followup["reason"] == "no_safe_retreat"
+    else:
+        assert len(pulses) == 1 and pulses[0]["sprint"] is True
+    assert followup["ok"] is (landing == "cleared")
+    if landing in {"cleared", "pursued"}:
+        assert followup["target_in_melee_range"] is (landing == "pursued")
+    if landing == "pursued":
+        assert followup["reason"] == "melee_still_close"
+    if landing == "respawned":
+        assert followup["respawned"] is True
+
+
 @pytest.mark.parametrize("pursuit", [
     "clear", "visible_shooter", "occluded_shooter", "corner_shooter", "slow_corner_shooter", "drifted_into_fire",
     "blocked", "lava", "out_of_range", "respawned", "time_budget",

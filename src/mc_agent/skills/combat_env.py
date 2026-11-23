@@ -4996,14 +4996,24 @@ class SubcorticalInstinctController:
                 for action in actions
             )
         )
-        ranked_followup = night_pursuit or critical_creeper_pursuit
+        critical_melee_pursuit = (
+            mode == "cover_or_flee" and enclosure == "surface"
+            and str(st_post.get("dimension") or "").removeprefix("minecraft:") == "overworld"
+            and trigger.get("source") == "pre_hurt_melee" and mob_name in PRE_HURT_MELEE_MOBS
+            and isinstance(mob_id, int) and mob_id == trig_id and 0 < mob_dist <= 3.5
+            and isinstance(retreat_hp, (int, float)) and 0 < retreat_hp <= 4.0 and not st_post.get("on_fire")
+            and isinstance(nh_post, dict) and nh_post.get("id") == mob_id
+            and any(a["ok"] and isinstance(a.get("moved"), (int, float)) and a["moved"] >= 1.5 for a in retreats)
+        )
+        critical_followup = critical_creeper_pursuit or critical_melee_pursuit
+        ranked_followup = night_pursuit or critical_followup
         followup_budget, movement_budget = (1.5, 0.8)
         followup_range = 0.0
         if night_pursuit:
             followup_range = 8.0
             followup_budget, movement_budget = (4.1, 3.5)
-        elif critical_creeper_pursuit:
-            followup_range = 5.5
+        elif critical_followup:
+            followup_range = 5.5 if critical_creeper_pursuit else 3.5
             followup_budget, movement_budget = (2.2, 1.5)
         elif isinstance(retreat_hp, (int, float)) and 0.0 < retreat_hp <= 12.0:
             followup_range = 3.5 if retreat_hp <= 10.0 else 1.5
@@ -5035,7 +5045,7 @@ class SubcorticalInstinctController:
             live_hostiles = self._find_live_hostiles(env, radius=12 if ranked_followup else 5, timeout_s=0.6)
             target = next((entity for entity in live_hostiles if entity.get("id") == target_id), {})
             target_pos = target.get("pos")
-            renewed_blast_threat = critical_creeper_pursuit and any(
+            renewed_blast_threat = critical_followup and any(
                 _clean_block_name(entity.get("name")) == "creeper" and self._entity_dist(st_post.get("pos"), entity) <= 5.5
                 for entity in live_hostiles
             )
@@ -5051,7 +5061,7 @@ class SubcorticalInstinctController:
                 if ranked_followup:
                     exposed_hostiles = [entity for entity in live_hostiles if not entity.get("blocked_by_wall")]
                     # With only a few HP left, avoid moving into close fire from any known shooter.
-                    guarded_hostiles = live_hostiles if critical_creeper_pursuit else [
+                    guarded_hostiles = live_hostiles if critical_followup else [
                         entity for entity in live_hostiles if entity.get("blocked_by_wall")
                     ]
                     shooters = [
@@ -5062,9 +5072,9 @@ class SubcorticalInstinctController:
                     creeper_constraints = {
                         "other_creepers": self._other_creeper_positions(live_hostiles, target_id, include_occluded=True),
                         "keep_blast_clearance": True, "allow_second_leg": False,
-                    } if critical_creeper_pursuit else {}
+                    } if critical_followup else {}
                     retreat = env.flee(
-                        target_pos, distance=4.5 if critical_creeper_pursuit else 8.5,
+                        target_pos, distance=4.5 if critical_followup else 8.5,
                         urgent=True, wait_for_ground=True, allow_shaft_seal=False,
                         other_shooters=shooters, primary_melee=bool(shooters),
                         occluded_shooters=[
@@ -5083,7 +5093,7 @@ class SubcorticalInstinctController:
                     step = {"action": "followup_melee_retreat", **retreat}
                 st_post = env._safe_status(st_post)
                 nh_post = st_post.get("nearest_hostile")
-                if critical_creeper_pursuit and step.get("ok"):
+                if critical_followup and step.get("ok"):
                     nearest = nh_post if isinstance(nh_post, dict) else {}
                     target_after = nearest if nearest.get("id") == target_id else target
                     if (
@@ -5098,6 +5108,17 @@ class SubcorticalInstinctController:
                         )
                     ):
                         step.update(ok=False, reason="melee_clearance_unconfirmed")
+                    if critical_melee_pursuit:
+                        distance_after = nearest.get("dist") if nearest.get("id") == target_id else None
+                        if isinstance(distance_after, (int, float)) and math.isfinite(distance_after) and distance_after >= 0:
+                            step.update(
+                                target_distance_before=start_dist, target_distance_after=distance_after,
+                                target_in_melee_range=distance_after <= 3.5,
+                            )
+                            if distance_after <= 3.5:
+                                step.update(ok=False, reason="melee_still_close")
+                        else:
+                            step.update(ok=False, reason="melee_clearance_unconfirmed")
                 actions.append(step)
         if mode == "creeper_evade" and (
             st_post.get("alive") is False
