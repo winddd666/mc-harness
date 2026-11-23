@@ -12354,6 +12354,80 @@ def test_w20_creeper_still_near_after_released_woodcutting_retreat(monkeypatch, 
         assert followup["respawned"] is True
 
 
+@pytest.mark.parametrize("scene", [
+    "covered", "no_support", "side_gap", "second_creeper", "placement_unconfirmed", "new_life", "target_moved", "target_missing",
+])
+def test_w21_hy10_creeper_stall_can_place_supported_cover_in_place(scene):
+    from mc_agent.skills.combat_env import CombatControllerSlot, CombatEnv
+
+    origin = [256017.5, 109, 266793.1]
+    target = {"id": 2443833, "name": "creeper", "pos": [256020.1, 109, 266793.65], "dist": 2.66}
+    if scene == "side_gap":
+        target["pos"][2] = origin[2]
+    status = {
+        "pos": origin, "health": 20, "dimension": "overworld", "last_death": {"t": 1}, "food": 20,
+        "ready": True, "alive": True, "on_ground": True, "nearest_hostile": target,
+    }
+    blocks = {}
+    placements = []
+
+    class SlopeBot:
+        def status(self):
+            return dict(status)
+
+        def call(self, name, body=None, **_kwargs):
+            if name == "status":
+                return self.status()
+            if name == "inventory":
+                return {"items": [{"name": "oak_planks", "count": 3}, {"name": "acacia_log", "count": 2}]}
+            if name == "find_blocks":
+                return {"blocks": []}
+            if name == "get_entities":
+                if len(placements) == 2 and scene == "target_missing":
+                    return {"entities": []}
+                if scene == "second_creeper":
+                    extra = {"id": 2443834, "name": "creeper", "pos": [256017.5, 109, 266798.5], "dist": 5.4}
+                    return {"entities": [target, extra]}
+                return {"entities": [target]}
+            if name == "get_block":
+                cell = tuple(body["pos"])
+                support = cell[1] == 108 and (
+                    (cell[0] == 256017 and cell[2] in {266792, 266793})
+                    or (cell[0] == 256018 and cell[2] == 266793 and scene != "no_support")
+                )
+                return {"name": blocks.get(cell, "stone" if support else "air")}
+            if name == "place":
+                cell = tuple(body["pos"])
+                assert body["item"] == "oak_planks"
+                placements.append(cell)
+                if scene != "placement_unconfirmed":
+                    blocks[cell] = body["item"]
+                if scene == "new_life":
+                    status.update(pos=[256016.5, 117.1, 266801.5], last_death={"t": 2})
+                if len(placements) == 2 and scene == "target_moved":
+                    target["pos"] = [256017.5, 109, 266795.6]
+                return {"ok": True}
+            if name in {"move_to", "attack", "dig"} or (name == "control" and body.get("forward")):
+                pytest.fail(f"Unexpected {name} during stationary blast cover")
+            return {"ok": True}
+
+    outcome = CombatControllerSlot().handle(CombatEnv(SlopeBot()), {
+        "source": "pre_hurt_creeper", "primary_type": "creeper", "primary_entity_id": target["id"], "distance": 2.66,
+    })
+
+    first, *remaining = outcome["actions"]
+    assert first["action"] == "retreat_from_creeper" and first["reason"] == "no_safe_retreat" and first["moved"] == 0.0
+    if scene in {"no_support", "side_gap", "second_creeper"}:
+        assert not placements and all(not step["ok"] for step in remaining)
+        return
+    cover, = remaining
+    assert cover["action"] == "place_blast_cover" and cover["ok"] is (scene == "covered")
+    column = [(256018, 109, 266793), (256018, 110, 266793)]
+    partial = scene in {"new_life", "placement_unconfirmed"}
+    assert placements == (column[:1] if partial else column)
+    assert cover["placed"] == (0 if scene == "placement_unconfirmed" else len(placements))
+
+
 @pytest.mark.parametrize("after_first", [
     "close", "pursued", "scan_unavailable", "first_scan_unavailable", "first_scan_empty", "clear", "respawned",
 ])

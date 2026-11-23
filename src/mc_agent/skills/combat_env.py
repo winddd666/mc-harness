@@ -302,6 +302,10 @@ def _is_los_transparent(name: str) -> bool:
     return False
 
 
+def _is_full_cover_block(name: str) -> bool:
+    return name in SAFE_TACTICAL_FILLERS or name.endswith(("_planks", "_log"))
+
+
 def _is_lava_block(name: str) -> bool:
     return name in {"lava", "flowing_lava"}
 
@@ -568,6 +572,7 @@ class CombatEnv:
         src_eye: float = 1.62,
         dst_height: float = 1.0,
         deadline: float | None = None,
+        planned_cover: Collection[tuple[int, int, int]] = (),
     ) -> dict[str, Any]:
         """Check voxel line-of-sight between `src_pos` and `dst_pos`.
 
@@ -606,7 +611,7 @@ class CombatEnv:
             if voxel in seen_voxels:
                 continue
             seen_voxels.add(voxel)
-            bname = self._get_block_name(*voxel, **probe_kwargs)
+            bname = "stone" if voxel in planned_cover else self._get_block_name(*voxel, **probe_kwargs)
             if not _is_los_transparent(bname):
                 bdist = round(total_dist * frac, 2)
                 return {
@@ -2275,6 +2280,23 @@ class CombatEnv:
         probe_kwargs = {"deadline": deadline} if deadline is not None else {}
         return all(self._blocks_shot(sample, threat_pos, **probe_kwargs) for sample in samples)
 
+    def _creeper_cover_blocks_exposure(
+        self, pos: Sequence[float], threat: Sequence[float], column: Collection[tuple[int, int, int]], *,
+        deadline: float | None, planned_cover: Collection[tuple[int, int, int]] = (),
+    ) -> bool:
+        # Check the near-ground source against the feet, body and head across the hitbox.
+        offsets = (-0.29, 0, 0.29)
+        for dx in offsets:
+            for dz in offsets:
+                for height in (0.1, 0.9, 1.7):
+                    blocker = self.has_los(
+                        threat, [pos[0] + dx, pos[1], pos[2] + dz], src_eye=0.1, dst_height=height,
+                        deadline=deadline, planned_cover=planned_cover,
+                    )["blocker"]
+                    if not blocker or tuple(blocker["pos"]) not in column or not _is_full_cover_block(blocker["name"]):
+                        return False
+        return True
+
     def arrow_cover_material(self, counts: dict[str, int]) -> str | None:
         # Prefer a stack that can finish a two-block wall before relying on an existing partial column.
         for minimum in (2, 1):
@@ -2299,14 +2321,18 @@ class CombatEnv:
         )
 
     def _place_stationary_cover(
-        self, before: dict[str, Any], threat: Sequence[float], counts: dict[str, int], *, melee: bool = False,
+        self, before: dict[str, Any], threat: Sequence[float], counts: dict[str, int], *,
+        melee: bool = False, creeper_id: int | None = None, deadline: float | None = None,
     ) -> dict[str, Any]:
         """Build close cover on a supported column without leaving the current footing."""
         origin = before["pos"]
         filler = self.arrow_cover_material(counts)
         failed = {"ok": False, "mode": "placed_cover", "placed": 0, "placement_attempts": 0}
         distance = math.hypot(threat[0] - origin[0], threat[2] - origin[2])
-        in_range = 1.8 <= distance <= 3.5 and abs(threat[1] - origin[1]) < 0.8 if melee else distance > 3.5
+        blast = creeper_id is not None
+        in_range = distance > 3.5
+        if melee or blast:
+            in_range = (1.6 if blast else 1.8) <= distance <= 3.5 and abs(threat[1] - origin[1]) < 0.8
         if filler is None or not in_range:
             return failed
 
@@ -2315,10 +2341,11 @@ class CombatEnv:
         y = math.floor(origin[1] + 0.05)
         occupied = _hitbox_columns(origin[0], origin[2])
         self.invalidate_block_cache()
-        if melee:
+        probe_kwargs = {"deadline": deadline} if deadline is not None else {}
+        if melee or blast:
             occupied.extend(_hitbox_columns(threat[0], threat[2]))
             try:
-                if not self.has_safe_footing(origin, require_observation=True):
+                if not self.has_safe_footing(origin, require_observation=True, **probe_kwargs):
                     return failed
             except _TerrainProbeExpired:
                 return failed
@@ -2326,23 +2353,30 @@ class CombatEnv:
             (math.floor(origin[0] + dx * distance), math.floor(origin[2] + dz * distance))
             for distance in (0.65, 1.1, 1.55, 2.0)
         )
+        action = "place_melee_cover" if melee else "place_arrow_cover"
+        if blast:
+            action = "place_blast_cover"
         for x, z in columns:
-            action = "place_melee_cover" if melee else "place_arrow_cover"
             if (x, z) in occupied or not self._point_allowed(x + 0.5, z + 0.5, action=action):
                 continue
             # A supported column within reach keeps the place endpoint from pathfinding.
-            floor = self._get_block_name(x, y - 1, z, strict=True)
+            floor = self._get_block_name(x, y - 1, z, strict=True, **probe_kwargs)
             if not floor or floor in HAZARD_BLOCK_TYPES or not _is_solid_ground(floor):
                 continue
             cells = [(x, y, z), (x, y + 1, z)]
-            blocks = [self._get_block_name(*cell, strict=True) for cell in cells]
+            blocks = [self._get_block_name(*cell, strict=True, **probe_kwargs) for cell in cells]
             if any(not block or block in HAZARD_BLOCK_TYPES or (
                 block not in AIR_LIKE_BLOCKS and _is_los_transparent(block)
             ) for block in blocks):
                 continue
             to_place = [cell for cell, block in zip(cells, blocks) if block in AIR_LIKE_BLOCKS]
-            if to_place and len(to_place) <= counts[filler]:
-                break
+            if not to_place or len(to_place) > counts[filler]:
+                continue
+            if blast and not self._creeper_cover_blocks_exposure(
+                origin, threat, cells, deadline=deadline, planned_cover=to_place,
+            ):
+                continue
+            break
         else:
             return failed
 
@@ -2350,9 +2384,15 @@ class CombatEnv:
         placement_attempts = 0
         placement_timed_out = False
         for cell in to_place:
+            if deadline is not None and time.monotonic() + 0.65 >= deadline:
+                break
             current = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
             if not self._on_same_footing(before, current):
                 break
+            if blast:
+                nearest = current.get("nearest_hostile")
+                if _combat_status_unavailable(current) or not isinstance(nearest, dict) or nearest.get("id") != creeper_id:
+                    break
             placement_attempts += 1
             try:
                 self.bot.call("place", {"item": filler, "pos": list(cell)}, timeout_s=0.65, allow_reauth=False)
@@ -2372,12 +2412,20 @@ class CombatEnv:
 
         after = self.bot.call("status", method="GET", timeout_s=0.35, allow_reauth=False)
         confirmed = (
-            placed > 0 and (not melee or placed == len(to_place)) and self._on_same_footing(before, after)
-            and self._blocks_shot(after["pos"], threat)
+            placed > 0 and (not (melee or blast) or placed == len(to_place)) and self._on_same_footing(before, after)
         )
+        if confirmed:
+            try:
+                confirmed = (
+                    self._creeper_cover_blocks_exposure(after["pos"], threat, cells, deadline=deadline) if blast
+                    else self._blocks_shot(after["pos"], threat)
+                )
+            except _TerrainProbeExpired:
+                confirmed = False
         result = {
             "ok": confirmed, "mode": "placed_cover", "placed": placed, "placement_attempts": placement_attempts,
             "pos_after": after.get("pos"),
+            **({"cover_cells": cells} if blast else {}),
         }
         if placement_timed_out:
             result["placement_timed_out"] = True
@@ -4072,6 +4120,35 @@ class SubcorticalInstinctController:
             return {"ok": False, "reason": "creeper_still_close", "creeper_distance": distance}
         return unconfirmed if scan is None else {"ok": True}
 
+    def _place_creeper_cover(
+        self, env: CombatEnv, status: dict[str, Any], creeper_id: int, threat: Sequence[float],
+        counts: dict[str, int], *, deadline: float,
+    ) -> dict[str, Any]:
+        unconfirmed = {"ok": False, "reason": "blast_cover_unconfirmed"}
+        try:
+            cover = env._place_stationary_cover(status, threat, counts, creeper_id=creeper_id, deadline=deadline)
+        except _TerrainProbeExpired:
+            return unconfirmed
+        if not cover.get("ok"):
+            return cover
+        hostiles = self._scan_live_hostiles(env, radius=8, timeout_s=0.3)
+        settled = env._safe_status({"ready": False}, timeout_s=0.25)
+        current = hostiles[0] if hostiles and len(hostiles) == 1 else {}
+        current_pos = current.get("pos")
+        if (
+            not env._on_same_footing(status, settled) or current.get("id") != creeper_id
+            or _clean_block_name(current.get("name")) != "creeper" or current.get("alive") is False
+            or not isinstance(current_pos, (list, tuple)) or len(current_pos) < 3
+            or not all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in current_pos[:3])
+        ):
+            return {**cover, **unconfirmed}
+        env.invalidate_block_cache()
+        try:
+            confirmed = env._creeper_cover_blocks_exposure(settled["pos"], current_pos, cover["cover_cells"], deadline=deadline)
+        except _TerrainProbeExpired:
+            confirmed = False
+        return cover if confirmed else {**cover, **unconfirmed}
+
     @staticmethod
     def _other_melee_positions(hostiles: Sequence[dict[str, Any]], target_id: int | None) -> list[Sequence[float]]:
         positions = []
@@ -4778,6 +4855,23 @@ class SubcorticalInstinctController:
                             env, st, released_creeper_id, extended_clearance=extended_clearance,
                         ))
                     actions.append({"action": "creeper_followup_retreat", **followup})
+                elif (
+                    creeper_warning and not has_shield and snap["enclosure"] != "carved_shaft"
+                    and retreat_reason == "no_safe_retreat" and flee_res.get("moved_dist") == 0.0
+                    and can_continue and not _combat_status_unavailable(st_chk)
+                    and st_chk.get("on_ground") is True and st_chk.get("alive") is True and st_chk.get("ready") is True
+                    and not any(st_chk.get(key) for key in ("busy", "in_water", "in_lava", "submerged", "on_fire"))
+                    and len(post_h) == 1 and scanned_creeper is not None and scanned_creeper.get("id") == mob_id == trig_id
+                    and scanned_creeper.get("alive") is not False and isinstance(mob_id, int)
+                    and close_dist is not None and 1.6 <= close_dist <= 3.5
+                    and isinstance(close_pos, (list, tuple)) and len(close_pos) >= 3
+                    and all(isinstance(coord, (int, float)) and math.isfinite(coord) for coord in close_pos[:3])
+                    and env.arrow_cover_material(counts) is not None and time.monotonic() + 0.9 < deadline
+                ):
+                    cover = self._place_creeper_cover(
+                        env, st_chk, mob_id, close_pos, counts, deadline=min(deadline, time.monotonic() + 1.9),
+                    )
+                    actions.append({"action": "place_blast_cover", **cover})
                 if (
                     (not retreat_ok or not clearance_confirmed)
                     and can_continue
@@ -5510,6 +5604,7 @@ class SubcorticalInstinctController:
             for action in actions:
                 if action["action"] in {
                     "retreat_from_creeper", "creeper_followup_retreat", "creeper_intruded_flee", "followup_melee_retreat",
+                    "place_blast_cover",
                 }:
                     action.update(ok=False, respawned=True)
         if (
