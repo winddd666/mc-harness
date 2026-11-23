@@ -5891,6 +5891,29 @@ class GenerationGuard:
                 raise
             except Exception:
                 pass
+            mode_now = outcome.get("mode")
+            extra_directive = ""
+            # BUG-095: if guardian timed out with a close hostile, force immediate flee directive.
+            if mode_now == "network_timeout":
+                nh = st_after.get("nearest_hostile")
+                if isinstance(nh, dict) and float(nh.get("dist", 99.0)) <= 4.5:
+                    extra_directive = (
+                        f"【紧急保命】贴脸遇怪({nh.get('name')} d={nh.get('dist')}m)且小脑超时，"
+                        "下一轮必须立刻调 mc_skill_flee 或封路撤退，严禁继续挖矿或 reset！"
+                    )
+            # BUG-098: detect repeated underground water_surface preemption loops.
+            if mode_now == "water_surface":
+                now_ws = time.monotonic()
+                ws_hist = getattr(self, "_water_surface_hits", [])
+                ws_hist = [t for t in ws_hist if now_ws - t <= 60.0]
+                ws_hist.append(now_ws)
+                self._water_surface_hits = ws_hist
+                pos_after = st_after.get("pos")
+                if len(ws_hist) >= 2 and isinstance(pos_after, (list, tuple)) and len(pos_after) >= 2 and float(pos_after[1]) < 55.0:
+                    extra_directive = (
+                        f"【地下连续遇水×{len(ws_hist)}】60s 内已多次触发上浮抢占，"
+                        "禁止原地重复调 mine_dfs/unstick/mine_blocks，请立刻向干燥方向 mc_move_to 或平推 8+ 格彻底远离当前水袋！"
+                    )
             stop_reason = trigger.get("source") or "guardian_preempted"
             water_observation = trigger.get("water_observation")
             wet_pos = (water_observation or {}).get("pos")
@@ -5949,8 +5972,8 @@ class GenerationGuard:
                 "interrupted_tool": interrupted_name,
                 "error": {"code": "guardian_preempted", "message": summary},
                 "stop_reason": stop_reason,
-                "reflex_mode": outcome.get("mode"),
-                "message": f"[小脑本能抢占接管] {summary}（原工具未自动重放，请基于当前最新状态决策下一步）。",
+                "reflex_mode": mode_now,
+                "message": f"[小脑本能抢占接管] {summary}（原工具未自动重放，请基于当前最新状态决策下一步）。{extra_directive}",
                 "status_after": {
                     k: st_after.get(k)
                     for k in ("pos", "health", "food", "in_water", "on_ground", "is_day", "nearest_hostile")

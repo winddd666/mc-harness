@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from copy import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import math
 import re
@@ -28,6 +28,7 @@ from ..skills.library import (
     BLOCK_MIN_PICKAXE_TIER,
     LOG_TYPES,
     NETHER_STEM_TYPES,
+    SURFACE_SCOUT_DIRECTIONS,
     TABLE_RECIPES,
     VILLAGE_LANDMARK_BLOCKS,
     VILLAGE_SURVEY_CLUTTER,
@@ -148,6 +149,16 @@ _PASSABLE_SIGHT_BLOCKS: set[str] = {
 }
 
 
+@dataclass(frozen=True)
+class _FailedMoveWaypoint:
+    dimension: str
+    origin: tuple[float, ...]
+    x: float
+    z: float
+    range_m: float
+    expires_at: float
+
+
 class McToolset:
     def __init__(
         self,
@@ -173,10 +184,12 @@ class McToolset:
         self._last_dimension: str = "overworld"
         self._last_biome: str = ""
         self._entity_observations: dict[int, dict[str, Any]] = {}
-        self._entity_observed_mono: float = 0.0
+        self._entity_observed_mono: float | None = None
         self._entity_observed_dimension: str = "overworld"
+        self._status_hostile_id: int | None = None
         self._geofence_blocked_count: int = 0
         self._path_not_found_targets: list[tuple[float, float]] = []
+        self._last_failed_waypoint: _FailedMoveWaypoint | None = None
         self._empty_max_scans: dict[tuple[str, tuple[str, ...]], tuple[int, tuple[float, float] | None]] = {}
         self.geofence = geofence if geofence is not None else VoidGeofence.from_env()
         self.world_memory = (
@@ -186,6 +199,8 @@ class McToolset:
         )
         self.skills = MacroSkills(bot, geofence=self.geofence)
         self.skills.world_memory = self.world_memory
+        self._ender_eye_throws: list[tuple[float, float, float, float]] = []
+        self._triangulated_stronghold_xz: list[int] | None = None
 
     def rebind_runtime_hooks(
         self,
@@ -207,6 +222,7 @@ class McToolset:
         self._episode_deadline_mono = episode_deadline_mono
         self._geofence_blocked_count = 0
         self._path_not_found_targets.clear()
+        self._last_failed_waypoint = None
         self._empty_max_scans.clear()
 
     def _annotate_scan_ceiling(
@@ -332,7 +348,10 @@ class McToolset:
 
     def _update_status_cache(self, st: dict[str, Any]) -> None:
         pos = st.get("pos")
+        hostile = st.get("nearest_hostile")
+        hostile_id = hostile.get("id") if isinstance(hostile, dict) else None
         with self._state_lock:
+            self._status_hostile_id = hostile_id if type(hostile_id) is int else None
             self._in_water = bool(st.get("in_water") or st.get("submerged"))
             if st.get("dimension"):
                 self._last_dimension = normalize_dimension(st.get("dimension"))
@@ -964,9 +983,10 @@ class McToolset:
             ents = (res_ent or {}).get("entities") or []
             dim_ent, pos_ent, _ = self._cached_env(fetch_if_missing=False)
             if isinstance(parsed, dict) and parsed.get("ok") is True:
-                self._entity_observations = {int(ent["id"]): ent for ent in ents if isinstance(ent, dict) and isinstance(ent.get("id"), int)}
-                self._entity_observed_mono = time.monotonic()
-                self._entity_observed_dimension = dim_ent
+                with self._state_lock:
+                    self._entity_observations = {int(ent["id"]): ent for ent in ents if isinstance(ent, dict) and isinstance(ent.get("id"), int)}
+                    self._entity_observed_mono = time.monotonic()
+                    self._entity_observed_dimension = dim_ent
             if ents:
                 self.world_memory.observe_entities(ents, dim=dim_ent)
             elif types and isinstance(res_ent, dict) and pos_ent is not None:
@@ -1200,9 +1220,11 @@ class McToolset:
         ignore_hurt: bool = False,
     ) -> str:
         range = max(0.2, min(16.0, float(range)))
+        budgeted = self._episode_deadline_mono is not None
         payload: dict[str, Any] = {"range": range}
         geofence_clamped_info: dict[str, Any] | None = None
         if x is not None and z is not None:
+            entity_id = None
             orig_x, orig_z = float(x), float(z)
             clamped = self.geofence.clamped_move_target(orig_x, orig_z)
             if clamped is not None:
@@ -1296,8 +1318,7 @@ class McToolset:
         waypoint = None
         # Budgeted episodes return after one hop so the actor can reassess terrain.
         if (
-            self._episode_deadline_mono is not None
-            and entity_id is None and x is not None and z is not None
+            budgeted and x is not None and z is not None
             and isinstance(origin_pos, (list, tuple)) and len(origin_pos) >= 3
             and all(isinstance(origin_pos[i], (int, float)) and math.isfinite(origin_pos[i]) for i in (0, 2))
         ):
@@ -1310,6 +1331,25 @@ class McToolset:
                     return self._record_geofence_block(blocked)
                 payload["x"], payload["z"] = waypoint
                 payload.pop("y", None)
+
+        failed = self._last_failed_waypoint
+        if (
+            budgeted and waypoint is None and failed is not None and x is not None and z is not None
+            and "y" not in payload and isinstance(origin_pos, (list, tuple))
+            and tuple(origin_pos[:3]) == failed.origin and self._last_dimension == failed.dimension
+            and time.monotonic() < failed.expires_at
+            and math.hypot(float(x) - failed.x, float(z) - failed.z) + range <= failed.range_m
+            and math.floor(float(x)) == math.floor(failed.x) and math.floor(float(z)) == math.floor(failed.z)
+        ):
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "error": {
+                    "code": "move_route_cooldown",
+                    "message": "当前站位刚尝试过这个航点，缩小范围仍在同一失败目标内。请先换方向或换站位。",
+                },
+                **(geofence_clamped_info or {}),
+            }, ensure_ascii=False)
 
         raw = self._call_json("move_to", payload, timeout_s=eff_move_timeout)
         try:
@@ -1327,7 +1367,10 @@ class McToolset:
         except (ValueError, ApiError, httpx.HTTPError):
             pass
         if waypoint is not None:
-            return self._move_waypoint_receipt(raw, waypoint, [float(x), float(z)], geofence_clamped_info)
+            return self._move_waypoint_receipt(
+                raw, waypoint, [float(x), float(z)], geofence_clamped_info,
+                origin=tuple(origin_pos[:3]), range_m=range,
+            )
         if x is not None and z is not None:
             try:
                 parsed = json.loads(raw)
@@ -1342,13 +1385,16 @@ class McToolset:
                         f"动作锁仍被 {err_obj.get('action') or '其他动作'} 占用，move_to 未执行；"
                         "请先脱困或等待 1~2 秒后重试，不要连续提交同一路径。"
                     )
-                    raw = json.dumps(parsed, ensure_ascii=False)
+                    if geofence_clamped_info is not None:
+                        parsed.update(geofence_clamped_info)
+                    return json.dumps(parsed, ensure_ascii=False)
                 st_mv: dict[str, Any] | None = None
-                try:
-                    st_mv = self.bot.status()
-                    self._update_status_cache(st_mv)
-                except Exception:
-                    pass
+                if not (budgeted and err_code == "move_timeout"):
+                    try:
+                        st_mv = self.bot.call("status", method="GET", timeout_s=1.0) if budgeted else self.bot.status()
+                        self._update_status_cache(st_mv)
+                    except Exception:
+                        pass
                 if err_code == "movement_not_confirmed":
                     pos_now = st_mv.get("pos") if isinstance(st_mv, dict) else None
                     err_msg = str(err_obj.get("message") or "")
@@ -1384,9 +1430,9 @@ class McToolset:
                             },
                             ensure_ascii=False,
                         )
-                dim_m, cur_p, _ = self._cached_env(fetch_if_missing=True)
+                dim_m, cur_p, _ = self._cached_env(fetch_if_missing=not budgeted)
                 dist_m = math.hypot(float(x) - cur_p[0], float(z) - cur_p[2]) if cur_p is not None else 0.0
-                if dist_m > 36.0 and err_code in {"path_not_found", "no_path", "timeout", "action_timeout", "stalled"}:
+                if not budgeted and dist_m > 36.0 and err_code in {"path_not_found", "no_path", "timeout", "action_timeout", "stalled"}:
                     try:
                         seg_res = self.skills.navigate_segmented(
                             float(x),
@@ -1410,13 +1456,7 @@ class McToolset:
                         if edim == dim_m and abs(ex - tx_i) <= 1 and abs(ez - tz_i) <= 1 and (y is None or abs(ey - math.floor(float(y))) <= 2):
                             self.world_memory.mark_unreachable((ex, ey, ez), dim=dim_m, reason=err_code, cooldown_s=300.0)
                     # BUG-058: guide short-range dig_toward and escalate repeated path_not_found to requires_replan
-                    with self._state_lock:
-                        near_hits = 1 + sum(
-                            1 for (px_f, pz_f) in self._path_not_found_targets
-                            if math.hypot(tx_f - px_f, tz_f - pz_f) <= 8.0
-                        )
-                        self._path_not_found_targets.append((tx_f, tz_f))
-                        total_hits = len(self._path_not_found_targets)
+                    total_hits, near_hits = self._record_move_path_failure(tx_f, tz_f)
                     parsed["path_not_found_count"] = total_hits
                     if cur_p is not None and dist_m <= 12.0:
                         parsed["suggested"] = {
@@ -1474,9 +1514,21 @@ class McToolset:
                 pass
         return out_raw
 
+    def _record_move_path_failure(self, x: float, z: float) -> tuple[int, int]:
+        with self._state_lock:
+            near_hits = 1 + sum(
+                math.hypot(x - previous_x, z - previous_z) <= 8.0
+                for previous_x, previous_z in self._path_not_found_targets
+            )
+            self._path_not_found_targets.append((x, z))
+            return len(self._path_not_found_targets), near_hits
+
     def _move_waypoint_receipt(
-        self, raw: str, waypoint: list[float], target: list[float], geofence_info: dict[str, Any] | None
+        self, raw: str, waypoint: list[float], target: list[float], geofence_info: dict[str, Any] | None,
+        *, origin: tuple[float, ...], range_m: float,
     ) -> str:
+        dimension = self._last_dimension
+        self._last_failed_waypoint = None
         receipt = json.loads(raw)
         result = receipt.get("result") or {}
         error = receipt.get("error") or {}
@@ -1493,6 +1545,18 @@ class McToolset:
         remaining = None
         if isinstance(pos, (list, tuple)) and len(pos) >= 3:
             remaining = round(math.hypot(target[0] - float(pos[0]), target[1] - float(pos[2])), 1)
+        hint = "本次执行途中航点。请根据当前位置和剩余距离继续分段移动或换方向。"
+        if receipt.get("ok") is False and error.get("code") in {"path_not_found", "no_path"}:
+            if isinstance(pos, (list, tuple)) and tuple(pos[:3]) == origin and self._last_dimension == dimension:
+                self._last_failed_waypoint = _FailedMoveWaypoint(
+                    dimension, origin, waypoint[0], waypoint[1], range_m, time.monotonic() + 5.0,
+                )
+            total_hits, near_hits = self._record_move_path_failure(*target)
+            receipt["path_not_found_count"] = total_hits
+            hint = (
+                f"途中航点无可达路径，本集已遇到 {total_hits} 次无路（近邻目标重复 {near_hits} 次）。"
+                "请根据当前位置选择其他方向的可达落脚点，再接近最终目标。"
+            )
         receipt["result"] = {
             **result,
             "partial_move": True,
@@ -1500,7 +1564,7 @@ class McToolset:
             "target_xz": target,
             "pos": pos,
             "remaining_dist": remaining,
-            "hint": "本次执行途中航点。请根据当前位置和剩余距离继续分段移动或换方向。",
+            "hint": hint,
         }
         if geofence_info:
             receipt.update(geofence_info)
@@ -1887,7 +1951,120 @@ class McToolset:
             payload["target"] = {"pos": [x, y, z]}
         if ms is not None:
             payload["ms"] = max(50, min(10000, int(ms)))
-        return self._call_json("use_item", payload)
+        raw = self._call_json("use_item", payload)
+        if resolve_item_alias(item) != "ender_eye":
+            return raw
+
+        receipt = json.loads(raw)
+        result = receipt.get("result")
+        if receipt.get("ok") is not True or not isinstance(result, dict) or result.get("thrown") is not True:
+            return raw
+
+        vector = result.get("eye_vector")
+        direction = None
+        ux = uz = 0.0
+        has_valid_vec = False
+        if isinstance(vector, list) and len(vector) == 2 and all(
+            type(value) in (int, float) and -math.inf < value < math.inf for value in vector
+        ):
+            dx, dz = float(vector[0]), float(vector[1])
+            norm = math.hypot(dx, dz)
+            if norm > 1e-6:
+                ux, uz = dx / norm, dz / norm
+                has_valid_vec = True
+                sector = math.floor((math.atan2(uz, ux) + math.pi / 8) / (math.pi / 4))
+                direction = SURFACE_SCOUT_DIRECTIONS[sector % len(SURFACE_SCOUT_DIRECTIONS)]
+        result["scout_direction"] = direction
+        # 0-LLM two-eye stronghold triangulation
+        origin_x = origin_y = origin_z = None
+        try:
+            st = self.bot.status()
+            pos = st.get("pos") if isinstance(st, dict) else None
+            if isinstance(pos, list) and len(pos) >= 3:
+                origin_x, origin_y, origin_z = float(pos[0]), float(pos[1]), float(pos[2])
+        except Exception:
+            pass
+        landed = result.get("landed_at")
+        if origin_x is None and isinstance(landed, list) and len(landed) >= 3:
+            origin_x, origin_y, origin_z = float(landed[0]), float(landed[1]), float(landed[2])
+
+        eye_went_down = (
+            origin_y is not None
+            and isinstance(landed, list)
+            and len(landed) >= 2
+            and float(landed[1]) <= origin_y - 2.0
+        )
+        if eye_went_down:
+            result["eye_went_down"] = True
+
+        triangulated_xz: list[int] | None = None
+        triangulated_dist: float | None = None
+        triangulated_dir: str | None = None
+        if has_valid_vec and origin_x is not None and origin_z is not None:
+            throws = getattr(self, "_ender_eye_throws", None)
+            if not isinstance(throws, list):
+                throws = []
+                self._ender_eye_throws = throws
+            # Solve best intersection against prior throws with sufficient baseline (>=25m) and non-collinear angle
+            best_det = 0.0
+            for px, pz, pvx, pvz in throws:
+                baseline = math.hypot(origin_x - px, origin_z - pz)
+                if baseline < 25.0:
+                    continue
+                det = pvz * ux - pvx * uz
+                if abs(det) < 0.06 or abs(det) <= best_det:
+                    continue
+                t1 = ((origin_z - pz) * ux - (origin_x - px) * uz) / det
+                t2 = ((origin_z - pz) * pvx - (origin_x - px) * pvz) / det
+                if t1 <= 0.0 or t2 <= 0.0:
+                    continue
+                tx = origin_x + t2 * ux
+                tz = origin_z + t2 * uz
+                dist = math.hypot(tx - origin_x, tz - origin_z)
+                if dist > 3000.0:
+                    continue
+                best_det = abs(det)
+                triangulated_xz = [round(tx), round(tz)]
+                triangulated_dist = round(dist, 1)
+                t_sec = math.floor((math.atan2(tz - origin_z, tx - origin_x) + math.pi / 8) / (math.pi / 4))
+                triangulated_dir = SURFACE_SCOUT_DIRECTIONS[t_sec % len(SURFACE_SCOUT_DIRECTIONS)]
+            # Keep bounded history of recent throws
+            if not throws or math.hypot(origin_x - throws[-1][0], origin_z - throws[-1][1]) >= 8.0:
+                throws.append((origin_x, origin_z, ux, uz))
+                if len(throws) > 12:
+                    del throws[:-12]
+
+        if eye_went_down:
+            result["scout_hint"] = (
+                "末影之眼已向下钻地！要塞就在脚下附近，立即停止掷眼并连续调用 "
+                "mc_skill_staircase(vertical='down', steps=16) 下挖至 Y=10~-10 寻找 stone_bricks / end_portal_frame！"
+            )
+        elif triangulated_xz is not None and triangulated_dist is not None:
+            self._triangulated_stronghold_xz = list(triangulated_xz)
+            result["triangulated_stronghold_xz"] = triangulated_xz
+            result["triangulated_distance"] = triangulated_dist
+            result["triangulated_direction"] = triangulated_dir
+            result["scout_hint"] = (
+                f"【两眼三角定位成功！】要塞估算坐标为 {triangulated_xz}（距当前约 {triangulated_dist}m，方向 '{triangulated_dir}'）。"
+                f"请直接朝 '{triangulated_dir}' 前往该坐标上方（无需中途再掷眼！），抵达后垂直阶梯下挖至 Y=10~-10 寻找 stone_bricks / end_portal_frame！"
+            )
+        elif direction and origin_x is not None and origin_z is not None:
+            perp_x, perp_z = -uz, ux
+            p_sec = math.floor((math.atan2(perp_z, perp_x) + math.pi / 8) / (math.pi / 4))
+            perp_dir = SURFACE_SCOUT_DIRECTIONS[p_sec % len(SURFACE_SCOUT_DIRECTIONS)]
+            suggested_xz = [round(origin_x + perp_x * 75.0), round(origin_z + perp_z * 75.0)]
+            result["suggested_second_throw_direction"] = perp_dir
+            result["suggested_second_throw_xz"] = suggested_xz
+            result["scout_hint"] = (
+                f"已记录第 1 颗末影之眼射线（主方向 '{direction}'）。推荐先沿垂直方向 '{perp_dir}' 侧移 60~80 格（约 {suggested_xz}）"
+                f"再掷第 2 颗眼，系统将自动三角定位算出要塞精确坐标；也可直接调用 mc_skill_scout_surface(direction='{direction}', track_ender_eye=True)。"
+            )
+        else:
+            result["scout_hint"] = (
+                f"可直接调用 mc_skill_scout_surface(direction='{direction}', track_ender_eye=True)。位移后请重新测向。"
+                if direction else "本次掷眼没有获得有效的水平向量。请在开阔处重新测向后再决定方向。"
+            )
+        return json.dumps(receipt, ensure_ascii=False)
 
     def mc_attack(
         self,
@@ -1896,19 +2073,29 @@ class McToolset:
         interval_ms: int | None = None,
         timeout_ms: int = 20000,
     ) -> str:
-        seen = self._entity_observations.get(entity_id)
-        if (seen is not None and time.monotonic() - self._entity_observed_mono <= 3.0
-                and self._entity_observed_dimension == self._last_dimension
-                and isinstance(seen.get("dist"), (int, float)) and seen["dist"] > 32.0):
+        with self._state_lock:
+            seen = self._entity_observations.get(entity_id)
+            seen_at = self._entity_observed_mono
+            observed_context = seen_at is not None or self._status_hostile_id == entity_id
+            current_dimension = self._entity_observed_dimension == self._last_dimension
+        distance = seen.get("dist") if seen is not None else None
+        if observed_context and (
+            seen_at is None or time.monotonic() - seen_at > 3.0 or not current_dimension
+            or not isinstance(distance, (int, float)) or distance > 32.0
+        ):
             try:
                 live = self.bot.call("get_entities", {"radius": 64}, timeout_s=2.0).get("entities") or []
                 target = next((ent for ent in live if isinstance(ent, dict) and ent.get("id") == entity_id), None)
                 if target is None or (isinstance(target.get("dist"), (int, float)) and target["dist"] > 32.0):
+                    message = (
+                        "目标仍超出近战追击范围。请确认安全路线并靠近，或换附近目标。"
+                        if target else f"实体 {entity_id} 已不可见。请重新调 mc_get_entities 获取最新 id 和位置。"
+                    )
                     return json.dumps({
                         "ok": False, "requires_replan": True,
                         "error": {"code": "target_out_of_reach" if target else "target_not_visible", "entity_id": entity_id,
                                   "dist": target.get("dist") if target else None,
-                                  "message": "目标已超出近战追击范围或不再可见；请放弃空挥，先确认安全路线并靠近目标，或选择附近目标。"},
+                                  "message": message},
                     }, ensure_ascii=False)
             except (ApiError, httpx.HTTPError):
                 pass
@@ -1932,7 +2119,7 @@ class McToolset:
             payload["max_hits"] = max(1, min(100, int(max_hits)))
         if interval_ms is not None:
             payload["interval_ms"] = max(50, min(5000, int(interval_ms)))
-        raw = self._call_json("attack", payload)
+        raw = self._annotate_stale_entity(self._call_json("attack", payload), entity_id)
         try:
             parsed = json.loads(raw)
         except ValueError:
@@ -2472,12 +2659,12 @@ class McToolset:
     def mc_skill_stabilize(self) -> str:
         return self._run_skill(lambda: check_and_stabilize(self.bot))
 
-    def _cleanup_inventory_after(self, res: Any) -> Any:
+    def _cleanup_inventory_after(self, res: Any, *, skills: MacroSkills | None = None) -> Any:
         """BUG-029: enforce retention caps after every mining-style skill."""
         if not isinstance(res, dict):
             return res
         try:
-            _, cleaned = self.skills._ensure_free_slots(min_free=3)
+            _, cleaned = (skills if skills is not None else self.skills)._ensure_free_slots(min_free=3)
         except Exception:
             cleaned = []
         if cleaned:
@@ -2489,9 +2676,17 @@ class McToolset:
     def mc_skill_harvest_logs(self, target_logs: int = 4, radius: int = 32) -> str:
         target_logs = max(1, min(32, int(target_logs)))
         radius = max(4, min(64, int(radius)))
+        budget_s, deadline_imminent = self._clamp_tool_budget(45.0, max_s=45.0)
+        if deadline_imminent:
+            return json.dumps({
+                "ok": False,
+                "requires_replan": True,
+                "stop_reason": "episode_deadline_imminent",
+                "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过采木。"},
+            }, ensure_ascii=False)
         return self._run_skill(
-            lambda: self._cleanup_inventory_after(
-                self.skills.harvest_logs(target_logs=target_logs, radius=radius)
+            lambda: self.skills.harvest_logs(
+                target_logs=target_logs, radius=radius, max_duration_s=budget_s, cleanup_inventory=True,
             )
         )
 
@@ -2501,6 +2696,7 @@ class McToolset:
         target_types: list[str] | None = None,
         max_duration_s: float | str = 45.0,
         step_dist: float | str = 28.0,
+        track_ender_eye: bool = False,
     ) -> str:
         try:
             if any(isinstance(v, bool) for v in (max_duration_s, step_dist)):
@@ -2526,6 +2722,7 @@ class McToolset:
         return self._run_skill(
             lambda: self.skills.scout_surface(
                 direction=direction, target_types=target_types, max_duration_s=budget_s, step_dist=step,
+                track_ender_eye=track_ender_eye,
             )
         )
 
@@ -2565,11 +2762,22 @@ class McToolset:
     def mc_skill_mine_blocks(self, block_types: list[str], count: int = 3, radius: int = 32) -> str:
         count = max(1, min(32, int(count)))
         radius = max(4, min(64, int(radius)))
-        return self._run_skill(
-            lambda: self._cleanup_inventory_after(
-                self.skills.mine_blocks(block_types=block_types, count=count, radius=radius, skip_unmineable=True)
+
+        def mine() -> dict[str, Any]:
+            budget_s, deadline_imminent = self._clamp_tool_budget(45.0, max_s=45.0)
+            if deadline_imminent:
+                return {
+                    "ok": False,
+                    "stop_reason": "episode_deadline_imminent",
+                    "requires_replan": True,
+                    "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过采矿。"},
+                }
+            return self.skills.mine_blocks(
+                block_types=block_types, count=count, radius=radius, max_duration_s=budget_s,
+                skip_unmineable=True, cleanup_inventory=True,
             )
-        )
+
+        return self._run_skill(mine)
 
     def mc_skill_smelt(self, input_item: str, count: int = 1, fuel_item: str | None = None) -> str:
         count = max(1, min(64, int(count)))
@@ -2645,7 +2853,7 @@ class McToolset:
             return None
         try:
             st = (status or self.bot.status)()
-        except _StairDeadline:
+        except (_StairDeadline, _SkillDeadline):
             raise
         except Exception:
             return None
@@ -2801,14 +3009,46 @@ class McToolset:
     def mc_skill_tunnel(self, direction: str = "north", steps: int = 4, stop_on_ore: bool = True) -> str:
         direction = str(direction).strip().lower()
         steps = max(1, min(8, int(steps)))
-        blocked = self._check_direction_geofence(direction, steps, "mc_skill_tunnel")
-        if blocked is not None:
-            return blocked
-        return self._run_skill(
-            lambda: self._cleanup_inventory_after(
-                self.skills.dig_level_tunnel(direction, steps, stop_on_ore)
-            )
-        )
+
+        def tunnel() -> dict[str, Any]:
+            budget_s, deadline_imminent = self._clamp_tool_budget(35.0, max_s=35.0)
+            if deadline_imminent:
+                return {
+                    "ok": False, "requires_replan": True, "steps_done": 0,
+                    "stop_reason": "episode_deadline_imminent",
+                    "error": {"code": "episode_deadline_imminent", "message": "本集剩余时间不足，已跳过隧道施工。"},
+                }
+            session = None
+            skills = self.skills
+            if self._episode_deadline_mono is not None:
+                session = _SkillBudgetSession(self.bot, budget_s)
+                skills = copy(self.skills)
+                skills.bot = session
+            try:
+                blocked = self._check_direction_geofence(direction, steps, "mc_skill_tunnel", status=skills.bot.status)
+                if blocked is not None:
+                    return json.loads(blocked)
+                result = (
+                    skills.dig_level_tunnel(direction, steps, stop_on_ore, deadline=session.deadline)
+                    if session is not None else skills.dig_level_tunnel(direction, steps, stop_on_ore)
+                )
+            except (_SkillDeadline, httpx.TimeoutException):
+                if session is None:
+                    raise
+                return {
+                    "ok": False, "requires_replan": True, "stop_reason": "time_slice",
+                    "stop_confirmed": session.stop_pending(),
+                    "error": {"code": "time_slice", "message": "隧道预算已用尽。请先核对位置和背包，再重新规划。"},
+                }
+            if session is None or (not session.timed_out and result.get("stop_reason") != "time_slice"):
+                self._cleanup_inventory_after(result, skills=skills)
+                if session is not None and session.timed_out:
+                    result["cleanup_deadline_hit"] = True
+            if session is not None and session.timed_out:
+                session.stop_pending()
+            return result
+
+        return self._run_skill(tunnel)
 
     def mc_skill_mine_dfs(
         self,
@@ -2828,7 +3068,7 @@ class McToolset:
                 eff_target_y = -54
 
         eff_duration_s, deadline_imminent = self._clamp_tool_budget(
-            max_duration_s, max_s=55.0, min_s=20.0, reserve_s=4.0
+            max_duration_s, max_s=90.0, min_s=20.0, reserve_s=4.0
         )
         if deadline_imminent:
             return json.dumps(
@@ -3322,6 +3562,7 @@ class McToolset:
                         ),
                         "max_duration_s": _ScoutNumberParameter("本次预算秒数，默认45，最多50", kind="scout_number", required=False),
                         "step_dist": _ScoutNumberParameter("每段距离主世界28至32格（默认28），下界16至20格（默认20）", kind="scout_number", required=False),
+                        "track_ender_eye": Parameter("追眼时传 true，并使用掷眼回执的明确方向。宽绕或上岸后停下重新测向", kind="boolean", required=False),
                     },
                     handler=self.mc_skill_scout_surface,
                     concurrency="exclusive",
