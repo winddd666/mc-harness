@@ -71,6 +71,7 @@ ENTER_END = "minecraft:story/enter_the_end"
 ENTER_NETHER = "minecraft:story/enter_the_nether"
 IRON_TOOLS = "minecraft:story/iron_tools"
 SMELT_IRON = "minecraft:story/smelt_iron"
+SHINY_GEAR = "minecraft:story/shiny_gear"
 DISTRACT_PIGLIN = "minecraft:nether/distract_piglin"
 OBTAIN_BLAZE_ROD = "minecraft:nether/obtain_blaze_rod"
 OBTAIN_ANCIENT_DEBRIS = "minecraft:nether/obtain_ancient_debris"
@@ -2921,6 +2922,90 @@ def _install_dfs_course_guard(
     actor.run_mc_agent = run_with_descent_guard
 
 
+def _install_bare_diamond_guard(toolset: Any) -> None:
+    """Reserve the first four diamonds for boots during the bare course."""
+    from mc_agent.harness import agent as actor
+    from mc_agent.harness import curriculum as cur
+    from mc_agent.skills import total_owned_counts
+
+    playbook = cur.CURRICULUM_PLAYBOOKS[SHINY_GEAR]
+    boots_first = (
+        "开集及每次钻石 DFS 后用 mc_inventory 核对散钻。已带钻石靴就先在安全位置用 "
+        "mc_equip(item='diamond_boots', slot='feet') 穿上。包中够 4 钻时先在安全处用 "
+        "mc_skill_craft_gear(item='diamond_boots', equip_slot='feet')，复核脚槽和成就。"
+        "缺工作台时在安全位置用现有木板合成工作台，或沿已确认通道返回可用工作台。"
+    )
+    task = (
+        boots_first
+        + "钻石靴尚未完成且散钻不足 4 颗时，确认手持铁镐或更高等级镐。补矿使用 "
+          "mc_skill_mine_dfs(action='explore', target='diamond', target_y=-54, max_duration_s=90)，"
+          "goal_count 填 4 减实包散钻数。下潜和探巷都沿相邻 DFS 切片继续，撤离时走已确认的干燥路线。"
+          "确认穿靴成就后，按主控允许的 150 秒窗口在同井顺采至多 5 颗。"
+    )
+    cur.CURRICULUM_PLAYBOOKS[SHINY_GEAR] = dataclasses.replace(
+        playbook, task=task, post_ensure_task=task,
+        extra_tools=tuple(dict.fromkeys((*playbook.extra_tools, "mc_inventory", "mc_equip", "mc_craft", "mc_advancements"))),
+    )
+    run_agent = actor.run_mc_agent
+
+    def run_with_diamond_guard(*args: Any, **kwargs: Any) -> dict:
+        if kwargs.get("toolset") is not toolset or kwargs.get("target_advancement") != SHINY_GEAR:
+            return run_agent(*args, **kwargs)
+        mine_dfs = toolset.mc_skill_mine_dfs
+        boots_verified = False
+
+        def guarded_diamond_dfs(
+            target: str = "iron", goal_count: int = 6, target_y: int | None = None,
+            action: str = "explore", max_duration_s: float = 32.0,
+        ) -> str:
+            nonlocal boots_verified
+            ore = str(target or "").strip().lower().removeprefix("minecraft:")
+            if (
+                not boots_verified and str(action or "").strip().lower() == "explore"
+                and ore in {"diamond", "diamond_ore", "deepslate_diamond_ore"}
+            ):
+                try:
+                    inventory = toolset.bot.inventory()
+                    counts = (
+                        total_owned_counts(inventory)
+                        if isinstance(inventory.get("items"), list) and inventory.get("ready") is not False
+                        else None
+                    )
+                except Exception:
+                    counts = None
+                if counts is not None:
+                    deficit = 4 - counts.get("diamond", 0)
+                    has_boots = counts.get("diamond_boots", 0) > 0
+                    if deficit > 0 and not has_boots:
+                        goal_count = max(1, min(int(goal_count), deficit))
+                    else:
+                        try:
+                            progress = toolset.bot.advancements(status="completed")
+                            boots_verified = any(
+                                isinstance(row, dict) and row.get("status") == "completed"
+                                and row.get("id") in {SHINY_GEAR, "story/shiny_gear"}
+                                for row in progress.get("advancements") or ()
+                            )
+                        except Exception:
+                            boots_verified = False
+                        if not boots_verified:
+                            return json.dumps({
+                                "ok": False, "requires_replan": True, "gained": {},
+                                "stop_reason": "shiny_gear_boots_pending",
+                                "diamond_count": counts.get("diamond", 0), "boots_owned": has_boots,
+                                "error": {"code": "shiny_gear_boots_pending", "message": boots_first},
+                            }, ensure_ascii=False)
+            return mine_dfs(target=target, goal_count=goal_count, target_y=target_y, action=action, max_duration_s=max_duration_s)
+
+        toolset.mc_skill_mine_dfs = guarded_diamond_dfs
+        try:
+            return run_agent(*args, **kwargs)
+        finally:
+            toolset.mc_skill_mine_dfs = mine_dfs
+
+    actor.run_mc_agent = run_with_diamond_guard
+
+
 def _install_fortress_blaze_guidance() -> None:
     from mc_agent.harness import curriculum as cur
 
@@ -3618,6 +3703,7 @@ def _run_live(args: argparse.Namespace) -> int:
             _install_bare_iron_guidance()
             _install_dfs_course_guard(toolset, IRON_TOOLS, "iron", 16)
             _install_dfs_course_guard(toolset, SMELT_IRON, "iron", 16)
+            _install_bare_diamond_guard(toolset)
         if args.stage in {"midgame", "village"}:
             _install_wild_portal_guidance()
         if args.stage in NETHER_STAGES:
