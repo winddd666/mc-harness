@@ -1468,12 +1468,12 @@ def _bare_reserve_is_clear(bot: Any, reserve: SceneAnchor, origin: list[float]) 
 
 
 def _scene_geofence_cls(base_cls: Any) -> Any:
-    """Build a `VoidGeofence` subclass that adds the `contains(x, y, z)` predicate.
+    """Build a `VoidGeofence` subclass with scene-specific directional feedback.
 
     r16 crash: `AttributeError: 'VoidGeofence' object has no attribute 'contains'`
     (ds_ds_1_bare / glm_glm_5_midgame / hy4_hy_6_nether_bastion call it via skills/combat_env.py).
     `VoidGeofence` is a frozen slots dataclass, so we subclass it (keeping dataclass semantics for
-    `dataclasses.replace`) rather than patching Slice B's file. Remove once upstream adds `contains`.
+    `dataclasses.replace`) rather than patching Slice B's file.
     """
 
     class SceneGeofence(base_cls):  # type: ignore[misc, valid-type]
@@ -1485,6 +1485,37 @@ def _scene_geofence_cls(base_cls: Any) -> Any:
             if not self.enabled:
                 return True
             return self.distance_from_center(float(x), float(z)) <= self.safe_radius
+
+        def check_ray(
+            self, start_x: float, start_z: float, direction: str, steps: int, *, action: str = "tunnel"
+        ) -> dict[str, Any] | None:
+            blocked = super().check_ray(start_x, start_z, direction, steps, action=action)
+            if blocked is None:
+                return None
+            self._add_inward_hint(blocked["error"], start_x, start_z, steps)
+            return blocked
+
+        def _add_inward_hint(self, error: dict[str, Any], start_x: float, start_z: float, steps: int) -> None:
+            # The same block-center origin is used by VoidGeofence.check_ray.
+            x = math.floor(start_x) + 0.5
+            z = math.floor(start_z) + 0.5
+            dx, dz = self.center_x - x, self.center_z - z
+            step_count = max(1, int(steps))
+            if dx == 0 and dz == 0:
+                return
+            if abs(dx) >= abs(dz):
+                inward = "east" if dx > 0 else "west"
+                x += math.copysign(step_count, dx)
+            else:
+                inward = "south" if dz > 0 else "north"
+                z += math.copysign(step_count, dz)
+            endpoint_inside = self.distance_from_center(x, z) <= self.safe_radius
+            error["inward_direction"] = inward
+            error["inward_endpoint_inside"] = endpoint_inside
+            if endpoint_inside:
+                error["message"] += f" 从当前位置朝 {inward} 的同长度终点在围栏内，请先确认脚下和路线安全。"
+            else:
+                error["message"] += f" 从当前位置朝 {inward} 指向中心，但同长度终点仍在围栏外，请勿重复尝试该步数。"
 
     return SceneGeofence
 
@@ -1989,11 +2020,13 @@ def _reassert_scene_geofence(
     except Exception:
         return False
     rebuilt = gf
-    if drift > limit:
+    if drift > limit or not hasattr(gf, "_add_inward_hint"):
         try:
-            if hasattr(gf, "contains"):
+            if hasattr(gf, "_add_inward_hint"):
                 rebuilt = dataclasses.replace(gf, center_x=x, center_z=z)
             else:
+                if drift <= limit:
+                    x, z = gf.center_x, gf.center_z
                 rebuilt = _scene_geofence_cls(type(gf))(center_x=x, center_z=z, radius=gf.radius, margin=gf.margin)
         except Exception as exc:
             print(f"[Scene] geofence rebuild failed: {exc}", flush=True)
@@ -2005,7 +2038,7 @@ def _reassert_scene_geofence(
         if owner is not None and getattr(owner, "geofence", None) is not rebuilt:
             owner.geofence = rebuilt
             updated = True
-    if rebuilt is not gf:
+    if rebuilt is not gf and drift > limit:
         print(
             f"[Scene] geofence drift {drift:.0f}m -> rebuilt in {dim} at ({x:.1f}, {z:.1f})",
             flush=True,
