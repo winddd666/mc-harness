@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feat/v2-integrated]
+  pull_request:
+
+jobs:
+  offline-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: File-size ratchet check
+        run: uv run python scripts/check_file_sizes.py
+
+      - name: Syntax compile check
+        run: uv run python -m compileall -q src scripts
+
+      - name: Lint (ruff)
+        run: uv run ruff check src tests scripts
+        continue-on-error: true
+
+      - name: Offline unit & regression tests
+        run: uv run pytest -n auto -m "not live" -q

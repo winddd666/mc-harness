@@ -24,9 +24,26 @@ packages = ["src/mc_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = [".", "src"]
+markers = [
+    "unit: fast pure-memory unit tests",
+    "regression: historical bug regression fixtures",
+    "slow: long-running offline tests",
+    "live: requires live Minecraft server and RCON (excluded from default CI)",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["runs", "backups", ".state*", "experiments"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "pytest-xdist>=3.6.0",
+    "ruff>=0.8.0",
 ]
