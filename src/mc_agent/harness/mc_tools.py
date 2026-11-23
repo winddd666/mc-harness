@@ -2348,6 +2348,15 @@ class McToolset:
             )
         )
 
+    def mc_skill_cast_obsidian(self, x: int, y: int, z: int) -> str:
+        budget, deadline_imminent = self._clamp_tool_budget(15.0, max_s=15.0)
+        if deadline_imminent:
+            return json.dumps({
+                "ok": False, "requires_replan": True,
+                "error": "episode_deadline_imminent", "message": "本集剩余时间不足，浇铸尚未开始。",
+            }, ensure_ascii=False)
+        return self._run_skill(lambda: self.skills.cast_obsidian(x, y, z, max_duration_s=budget))
+
     def mc_skill_build_portal(self, enter: bool = True, wait_s: float = 8.0) -> str:
         def build() -> dict[str, Any]:
             budget, deadline_imminent = self._clamp_tool_budget(55.0)
@@ -3427,6 +3436,17 @@ class McToolset:
                     concurrency="exclusive",
                 ),
                 Tool(
+                    name="mc_skill_cast_obsidian",
+                    description="在主世界从干燥边缘将已定位的静止岩浆源浇铸成黑曜石，回收水桶并核对是否可安全采集。",
+                    parameters={
+                        "x": Parameter("岩浆源 X", kind="integer"),
+                        "y": Parameter("岩浆源 Y", kind="integer"),
+                        "z": Parameter("岩浆源 Z", kind="integer"),
+                    },
+                    handler=self.mc_skill_cast_obsidian,
+                    concurrency="exclusive",
+                ),
+                Tool(
                     name="mc_skill_build_portal",
                     description="搭建或补完附近已开工的黑曜石下界传送门。新框需 10 格黑曜石，续建只需补缺格，点火需打火石。",
                     parameters={
@@ -3792,6 +3812,8 @@ class McToolset:
             allowed = set(COMPACT_CORE_TOOLS)
             if extra_tools:
                 allowed.update(str(t) for t in extra_tools)
+            if "mc_skill_build_portal" in allowed:
+                allowed.add("mc_skill_cast_obsidian")
             return ToolRegistry([_compactify_tool(tool) for tool in all_tools if tool.name in allowed])
         return ToolRegistry(all_tools)
 
@@ -3817,6 +3839,7 @@ _COMPACT_TOOL_DESC: dict[str, str] = {
     "mc_window_view": "看容器或交易窗",
     "mc_window_act": "操作容器/炉/附魔/交易",
     "mc_skill_container": "容器批量存取",
+    "mc_skill_cast_obsidian": "主世界指定岩浆源浇铸黑曜石、回收水桶",
     "mc_skill_build_portal": "一键搭建并进入下界传送门",
     "mc_skill_enchant": "附魔台单次连招",
     "mc_skill_trade": "村民按选项交易",

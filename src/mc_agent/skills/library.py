@@ -14,7 +14,7 @@ from typing import Any, Callable
 import httpx
 
 from ..bot import BotSession
-from ..errors import ApiError
+from ..errors import ApiError, AuthError, DeathLoopCooldownError
 from ..kb import RECIPES_1_21, assess_world_target, normalize_dimension, resolve_item_alias
 from .safety import check_and_stabilize
 from .crafting import material_shortage, explain_craft_error
@@ -10180,6 +10180,161 @@ class MacroSkills:
 
         resolver = PhysicalPrerequisiteResolver(self, geofence=geofence, stop_check=stop_check)
         return resolver.ensure_items(targets, max_duration_s=max_duration_s, equip_slots=equip_slots)
+
+    def cast_obsidian(
+        self, x: int, y: int, z: int, *, max_duration_s: float = 15.0,
+    ) -> dict[str, Any]:
+        """Cool a reachable lava source from dry footing and recover the placed water."""
+        session = _SkillBudgetSession(self.bot, max_duration_s, single_attempt=True)
+        scoped = copy(self)
+        scoped.bot = session
+        try:
+            return scoped._cast_obsidian((x, y, z), session)
+        except (AuthError, DeathLoopCooldownError):
+            raise
+        except (_SkillDeadline, httpx.TimeoutException):
+            return {
+                **session.progress, "ok": False, "requires_replan": True,
+                "error": "obsidian_cast_time_budget", "stop_confirmed": session.stop_pending(),
+                "message": "浇铸预算已用尽。请核对岩浆格、浇水格与背包，再决定是否继续。",
+            }
+        except (ApiError, httpx.HTTPError) as err:
+            return {
+                **session.progress, "ok": False, "requires_replan": True,
+                "error": getattr(err, "code", type(err).__name__), "message": str(err),
+            }
+
+    def _cast_obsidian(self, target: tuple[int, int, int], session: _SkillBudgetSession) -> dict[str, Any]:
+        from .combat_env import CombatEnv
+
+        air = {"air", "cave_air", "void_air"}
+        fluids = {"lava", "flowing_lava", "water", "flowing_water"}
+        rocks = {*SHAFT_SEAL_BLOCKS, "stone", "deepslate", "blackstone", "basalt", "obsidian", "bedrock", "sandstone"}
+        neighbors = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        x, y, z = target
+        progress = session.progress
+        progress.update(lava_pos=list(target), phase="preflight")
+
+        def fail(code: str, message: str) -> dict[str, Any]:
+            return {**progress, "ok": False, "requires_replan": True, "error": code, "message": message}
+
+        def read(pos: tuple[int, int, int]) -> tuple[str, Any]:
+            block = session.call("get_block", {"pos": list(pos)})
+            return _clean_block(block.get("name") or block.get("block")), (block.get("properties") or {}).get("level")
+
+        def permitted(pos: tuple[int, int, int]) -> bool:
+            return self.geofence is None or not self.geofence.check_point(pos[0] + 0.5, pos[2] + 0.5, action="mc_skill_cast_obsidian")
+
+        status = session.status()
+        if not status.get("dimension") or normalize_dimension(status["dimension"]) != "overworld":
+            return fail("obsidian_cast_requires_overworld", "请在主世界从岩浆旁的干燥实体平台浇铸。")
+        origin = status.get("pos")
+        if (
+            not isinstance(origin, (list, tuple)) or len(origin) < 3
+            or not all(type(v) in (int, float) and math.isfinite(v) for v in origin[:3])
+            or status.get("on_ground") is not True or status.get("alive") is False
+            or status.get("in_water") or status.get("in_lava")
+        ):
+            return fail("unsafe_cast_footing", "请站稳在干燥、有支撑的岩浆边缘。")
+
+        def same_station(*, dry: bool) -> bool:
+            current = session.status()
+            pos = current.get("pos")
+            return (
+                isinstance(pos, (list, tuple)) and len(pos) >= 3
+                and all(type(v) in (int, float) and math.isfinite(v) for v in pos[:3])
+                and math.dist(pos[:3], origin[:3]) <= 0.3
+                and current.get("dimension") is not None and normalize_dimension(current["dimension"]) == "overworld"
+                and current.get("last_death") == status.get("last_death")
+                and current.get("alive") is not False and current.get("on_ground") is True
+                and not current.get("in_lava") and (not dry or not current.get("in_water"))
+            )
+
+        feet = tuple(math.floor(coord) for coord in origin[:3])
+        eye = [origin[0], origin[1] + 1.62, origin[2]]
+        surface = [x + 0.5, y + 1.0, z + 0.5]
+        if y >= feet[1] or math.dist(eye, surface) > 4.0 or feet[::2] == target[::2]:
+            return fail("obsidian_cast_out_of_reach", "请从 4 格内的侧边平台对准下方可见岩浆源。")
+        if not permitted(target) or not permitted(feet):
+            return fail("void_geofence_blocked", "浇铸目标和站位都需要在围栏内。")
+        if read((feet[0], feet[1] - 1, feet[2]))[0] not in rocks:
+            return fail("unsafe_cast_footing", "脚下支撑未确认，请换到实体石质平台。")
+
+        original, lava_level = read(target)
+        if original != "obsidian" and (
+            original != "lava" or str(lava_level) != "0" or read((x, y + 1, z))[0] not in air
+        ):
+            return fail("obsidian_cast_requires_exposed_source", "请选择上方空旷且状态为 level=0 的岩浆源。")
+        counts = _inventory_counts(session)
+        if _best_pickaxe_in_inv(counts)[1] < PICKAXE_TIERS["diamond_pickaxe"]:
+            return fail("tool_tier_insufficient", "请先准备钻石镐或下界合金镐，才能收取黑曜石。")
+
+        if original != "obsidian":
+            if counts.get("water_bucket", 0) < 1:
+                return fail("missing_water_bucket", "请先用桶盛静止水源。")
+
+            terrain = CombatEnv(session, geofence=self.geofence)
+            for dx, dz in neighbors:
+                support = (x + dx, y, z + dz)
+                water = (support[0], y + 1, support[2])
+                top = [support[0] + 0.5, y + 0.99, support[2] + 0.5]
+                # The pour must reach a separate top face without stepping toward the lava.
+                if support[::2] == feet[::2] or not permitted(support) or math.dist(eye, top) > 3.5:
+                    continue
+                if read(support)[0] in rocks and read(water)[0] in air and terrain.has_los(origin, top, dst_height=0)["clear"]:
+                    break
+            else:
+                return fail("no_safe_water_support", "岩浆源旁没有可从当前位置点击的干燥实体顶面。请换一个岩浆源或站位。")
+            if not same_station(dry=True):
+                return fail("unsafe_cast_footing", "探查时站位已变化。请重新站稳并确认目标。")
+
+            progress.update(phase="pour_water", water_pos=list(water), support_pos=list(support))
+            session.call("interact", {"pos": list(support), "item": "water_bucket"}, timeout_s=3.0)
+            progress["phase"] = "verify_cast"
+            placed = False
+            for _ in range(5):
+                water_name, level = read(water)
+                placed = water_name == "water" and str(level) == "0"
+                progress["obsidian_confirmed"] = read(target)[0] == "obsidian"
+                if placed and progress["obsidian_confirmed"]:
+                    break
+                time.sleep(min(0.25, max(0.0, session.deadline - time.monotonic())))
+            if not placed:
+                return fail("water_placement_unconfirmed", "未在预期位置确认新水源。请先检查实际落水位置和桶，避免重复浇水。")
+
+            before_scoop = _inventory_counts(session)
+            if before_scoop.get("bucket", 0) < 1 or not same_station(dry=False):
+                return fail("water_recovery_deferred", "已确认水源坐标。请站稳并确认手上有空桶后再回收。")
+            water_name, level = read(water)
+            if water_name != "water" or str(level) != "0":
+                return fail("water_recovery_unconfirmed", "水源已变化，请检查原位和水桶。")
+            progress["phase"] = "recover_water"
+            session.call("interact", {"pos": list(water), "item": "bucket"}, timeout_s=3.0)
+            progress["water_recovered"] = False
+            for _ in range(3):
+                water_name, level = read(water)
+                if (water_name != "water" or str(level) != "0") and _inventory_counts(session).get("water_bucket", 0) > before_scoop.get("water_bucket", 0):
+                    progress["water_recovered"] = True
+                    break
+                time.sleep(min(0.2, max(0.0, session.deadline - time.monotonic())))
+            if not progress["water_recovered"]:
+                return fail("water_recovery_unconfirmed", "水桶未确认回包，请重新观察原位和背包。")
+
+        progress["phase"] = "check_mining_face"
+        progress["obsidian_confirmed"] = read(target)[0] == "obsidian"
+        if not progress["obsidian_confirmed"]:
+            return fail("obsidian_conversion_unconfirmed", "目标格未确认变成黑曜石。请换可见的静止岩浆源。")
+        exposed = read((x, y + 1, z))[0] in air and read((x, y + 2, z))[0] in air and read((x, y - 1, z))[0] in rocks
+        nearby_fluid = exposed and any(read((x + dx, y, z + dz))[0] in fluids | {""} for dx, dz in neighbors)
+        if not exposed or nearby_fluid or not same_station(dry=True):
+            return {
+                **progress, "ok": True, "mine_ready": False, "requires_replan": True,
+                "message": "黑曜石已确认。请等残水退去，核实底部支撑并封住相邻岩浆后再采集。",
+            }
+        return {
+            **progress, "ok": True, "mine_ready": True,
+            "next_actions": [{"name": "mc_skill_mine_blocks", "arguments": {"block_types": ["obsidian"], "count": 1, "radius": 4}}],
+        }
 
     def build_nether_portal(
         self, *, enter: bool = True, wait_s: float = 10.0, max_duration_s: float | None = None,

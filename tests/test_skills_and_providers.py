@@ -7357,6 +7357,116 @@ def test_mc_dig_timeout_temporarily_avoids_same_cell() -> None:
     assert toolset.skills.temporary_avoidance[(1000, 64, 1000)]["reason"] == "dig_timeout"
 
 
+@pytest.mark.parametrize("case,expected_error", [
+    ("cast_and_collect", None), ("already_obsidian", None), ("adjacent_lava", None),
+    ("flowing", "obsidian_cast_requires_exposed_source"),
+    ("nether", "obsidian_cast_requires_overworld"),
+    ("no_diamond_pick", "tool_tier_insufficient"),
+    ("unsupported", "no_safe_water_support"),
+    ("pour_unconfirmed", "water_placement_unconfirmed"),
+    ("drifted", "water_recovery_deferred"),
+    ("scoop_unconfirmed", "water_recovery_unconfirmed"),
+    ("not_converted", "obsidian_conversion_unconfirmed"),
+    ("pour_timeout", "obsidian_cast_time_budget"),
+])
+def test_obsidian_cast_confirms_source_recovers_water_and_hands_off_to_mining(monkeypatch, case, expected_error) -> None:
+    from mc_agent.harness.mc_tools import McToolset
+
+    clock = [10.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    lava, bank, water = (2, 64, 0), (1, 64, 0), (1, 65, 0)
+    pos = [0.5, 66.0, 0.5]
+    blocks = {lava: "obsidian" if case == "already_obsidian" else "lava", (0, 65, 0): "stone", (2, 63, 0): "stone"}
+    if case != "unsupported":
+        blocks[bank] = "stone"
+    if case == "adjacent_lava":
+        blocks[(3, 64, 0)] = "lava"
+    bag = {"water_bucket": 1, "iron_pickaxe" if case == "no_diamond_pick" else "diamond_pickaxe": 1}
+    actions = []
+
+    def handle(request):
+        route = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else {}
+        if route == "status":
+            current = [1.0, 66.0, 0.5] if case == "drifted" and water in blocks else pos
+            result = {"pos": current, "on_ground": True, "dimension": "the_nether" if case == "nether" else "overworld"}
+        elif route == "inventory":
+            result = {"items": [{"name": name, "count": count} for name, count in bag.items() if count]}
+        elif route == "get_block":
+            target = tuple(body["pos"])
+            name = blocks.get(target, "air")
+            result = {"name": name, "properties": {"level": 3 if case == "flowing" else 0} if name in {"water", "lava"} else {}}
+        elif route == "interact":
+            actions.append((route, body))
+            if body["item"] == "water_bucket":
+                assert tuple(body["pos"]) == bank
+                if case == "pour_timeout":
+                    clock[0] += sum(request.extensions["timeout"].values())
+                    raise httpx.ReadTimeout("offline pour reply lost", request=request)
+                if case != "pour_unconfirmed":
+                    bag["water_bucket"], bag["bucket"] = 0, 1
+                    if case != "not_converted":
+                        blocks[lava] = "obsidian"
+                    blocks[water] = "water"
+            else:
+                assert body == {"pos": list(water), "item": "bucket"} and blocks[water] == "water"
+                if case != "scoop_unconfirmed":
+                    del blocks[water]
+                    bag["water_bucket"], bag["bucket"] = 1, 0
+            result = {"changed": True}
+        elif route == "stop":
+            actions.append((route, body))
+            result = {"released": False}
+        elif route == "equip":
+            assert body == {"item": "diamond_pickaxe", "slot": "hand"}
+            result = {}
+        elif route == "find_blocks":
+            result = {"blocks": [{"name": "obsidian", "pos": list(lava), "dist": 2.9}]} if blocks[lava] == "obsidian" else {"blocks": []}
+        elif route == "dig":
+            actions.append((route, body))
+            assert case in {"cast_and_collect", "already_obsidian"} and tuple(body["pos"]) == lava
+            assert blocks.pop(lava) == "obsidian" and water not in blocks
+            bag["obsidian"] = 1
+            result = {"dug": "obsidian", "gained": {"obsidian": 1}}
+        else:
+            raise AssertionError(route)
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    with BotSession("offline", transport=httpx.MockTransport(handle)) as bot:
+        registry = McToolset(bot).registry(profile="compact", extra_tools=("mc_skill_build_portal",))
+        call = {"name": "mc_skill_cast_obsidian", "arguments": json.dumps(dict(zip("xyz", lava)))}
+        reply = json.loads(registry.execute({"function": call}))
+        assert reply["ok"] is (expected_error is None)
+        if expected_error is not None:
+            assert reply["error"] == expected_error
+        elif case == "adjacent_lava":
+            assert reply["obsidian_confirmed"] and reply["water_recovered"]
+            assert not reply["mine_ready"] and "next_actions" not in reply
+        else:
+            assert reply["mine_ready"] and reply["obsidian_confirmed"]
+            assert reply.get("water_recovered", False) is (case == "cast_and_collect")
+            action, = reply["next_actions"]
+            action["arguments"] = json.dumps(action["arguments"])
+            collected = json.loads(registry.execute({"function": action}))
+            assert collected["ok"] and collected["target_gained"] == {"obsidian": 1} and bag["obsidian"] == 1
+
+    verbs = [route for route, _ in actions]
+    if case in {"cast_and_collect", "adjacent_lava", "not_converted"}:
+        assert verbs[:2] == ["interact", "interact"] and bag["water_bucket"] == 1
+    elif case == "already_obsidian":
+        assert verbs == ["dig"]
+    elif case in {"pour_unconfirmed", "drifted"}:
+        assert verbs == ["interact"]
+    elif case == "scoop_unconfirmed":
+        assert verbs == ["interact", "interact"] and not reply["water_recovered"]
+    elif case == "pour_timeout":
+        assert verbs == ["interact", "stop"] and reply["stop_confirmed"] is False
+    else:
+        assert not actions
+    assert clock[0] <= 25.0
+
+
 def test_bucket_interact_rejects_flowing_fluid_before_no_effect_roundtrip() -> None:
     """r13: bucket right-clicks on flowing lava repeated interact_no_effect."""
     from mc_agent.harness.mc_tools import McToolset
