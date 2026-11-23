@@ -2606,6 +2606,7 @@ class CombatEnv:
         avoid_blast: bool = False,
         keep_blast_clearance: bool = False,
         use_nearest_hostile: bool = True,
+        away_only: bool = False,
         min_threat_distance: float | None = None,
         allow_second_leg: bool = True,
         expected_life: tuple[Any, Any] | None = None,
@@ -2691,7 +2692,8 @@ class CombatEnv:
         self.invalidate_block_cache()
         short_step = False
         disengage_range = min(float(distance), 8.5) if min_threat_distance is None else min_threat_distance
-        yaws = [pref_yaw + math.radians(angle) for angle in (0, 35, -35, 70, -70, 110, -110, 150, -150, 180)]
+        angles = (0, 35, -35, 70, -70) if away_only else (0, 35, -35, 70, -70, 110, -110, 150, -150, 180)
+        yaws = [pref_yaw + math.radians(angle) for angle in angles]
         covered_shooters = [(shooter, min(6.0, math.dist(pos0[:3], shooter[:3]))) for shooter in occluded_shooters]
 
         def avoids_uncovering_close_fire(point: Sequence[float], deadline: float) -> bool:
@@ -3977,9 +3979,21 @@ class CombatEnv:
                     sealed_positions.append(lpos)
             if sealed_positions:
                 self.invalidate_block_cache()
+        unsealed_lava = None
+        if staircase_lava_target is not None and staircase_lava_target in exposed_lava and staircase_lava_target[1] >= by:
+            self.invalidate_block_cache()
+            try:
+                remaining = self._get_block_name(*staircase_lava_target, strict=True, deadline=time.monotonic() + 0.35)
+            except _TerrainProbeExpired:
+                remaining = ""
+            if not _is_full_cover_block(remaining) and staircase_lava_target in sealed_positions:
+                sealed_positions.remove(staircase_lava_target)
+            if _is_lava_block(remaining):
+                unsealed_lava = staircase_lava_target
         return {
             "ok": True, "near_lava": True, "sneak": sneaking,
             "sealed": len(sealed_positions), "sealed_positions": sealed_positions,
+            **({"unsealed_lava_target": unsealed_lava} if unsealed_lava is not None else {}),
         }
 
 

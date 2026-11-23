@@ -5799,6 +5799,8 @@ def test_tool_boundary_checks_the_staircase_lava_blocker(case):
                 return {"items": [{"name": "basalt", "count": 4}]}
             if action == "get_block":
                 cell = body["pos"]
+                if cell in placements and not (cell == blocker and case == "refused"):
+                    return {"name": "basalt"}
                 lava = cell == lava_below or (cell == blocker and case != "dry")
                 return {"name": "lava" if lava else "air"}
             if action == "place":
@@ -5821,6 +5823,66 @@ def test_tool_boundary_checks_the_staircase_lava_blocker(case):
     assert placements == expected_placements
     completed = next(event for event in events.events if event["type"] == "guardian.action.completed")
     assert completed["result"]["sealed_positions"] == (expected_placements[1:] if case == "refused" else expected_placements)
+
+
+@pytest.mark.parametrize("scene", ["sealed", "unsealed", "still_trapped", "read_unavailable"])
+def test_bug132_staircase_edge_checks_that_the_lava_seal_actually_blocks_the_source(scene):
+    from mc_agent.skills.combat_env import yaw_to_unit_xz
+
+    origin = [1503.4, 66, 1417.5]
+    source = [1502, 66, 1418]
+    status = {
+        "pos": origin, "dimension": "the_nether", "last_death": {"t": 1},
+        "health": 20, "food": 20, "ready": True, "alive": True, "on_ground": True, "in_lava": False,
+    }
+    placements = []
+    moves = []
+
+    class NetherBot:
+        def call(self, action, body=None, **kwargs):
+            if action == "status":
+                return dict(status)
+            if action == "events":
+                return {"events": []}
+            if action == "inventory":
+                return {"items": [{"name": "basalt", "count": 4}]}
+            if action == "get_block":
+                cell = body["pos"]
+                if cell == source:
+                    if placements and scene == "read_unavailable":
+                        raise httpx.ReadTimeout("seal observation timed out")
+                    return {"name": "basalt" if placements and scene == "sealed" else "lava"}
+                return {"name": "netherrack" if cell[1] < 66 and scene != "still_trapped" else "air"}
+            if action == "place":
+                placements.append(body["pos"])
+            if action == "look":
+                status["yaw"] = body["yaw"]
+            if action == "control":
+                moves.append(body)
+                dx, dz = yaw_to_unit_xz(status["yaw"])
+                status["pos"] = [origin[0] + 2.0 * dx, 66, origin[2] + 2.0 * dz]
+            return {"ok": True}
+
+    events = EventSink(lambda _: None)
+    guard = GenerationGuard(NetherBot(), events, checkpoint=lambda: None)
+    result = json.dumps({
+        "ok": False, "stop_reason": "fluid_or_bedrock", "direction": "south", "vertical": "down",
+        "pos_after": origin,
+        "blocker": {"block": "lava", "pos": source, "relation": "adjacent_fluid", "target": [1503, 66, 1418]},
+    })
+
+    note = guard.stabilize_after_tools([result])
+
+    assert placements == [source]
+    seal = next(e["result"] for e in events.events if e["type"] == "guardian.action.completed"
+                and e["action"] == "boundary_guard_lava_edge")
+    assert seal["sealed_positions"] == ([source] if scene == "sealed" else [])
+    assert (seal.get("unsealed_lava_target") == source) is (scene in {"unsealed", "still_trapped"})
+    assert len(moves) == int(scene == "unsealed")
+    if scene == "unsealed":
+        source_position = [source[0] + 0.5, 66, source[2] + 0.5]
+        assert math.dist(status["pos"], source_position) > math.dist(origin, source_position)
+        assert "已撤离未封住的岩浆" in note
 
 
 @pytest.mark.parametrize("submerged", [True, False])

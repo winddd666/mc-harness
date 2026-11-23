@@ -653,6 +653,23 @@ class GenerationGuard:
             self._stop_after_recovery_timeout()
             return {"ok": False, "reason": "time_budget"}
 
+    def _back_off_unsealed_lava(self, status: dict[str, Any], source: list[int]) -> dict[str, Any]:
+        deadline = time.monotonic() + 2.5
+        source_pos = [source[0] + 0.5, source[1], source[2] + 0.5]
+        try:
+            with self.bot.limit_until(deadline):
+                retreat = self.combat_env.flee(
+                    source_pos, distance=3.5, wait_for_ground=True, away_only=True,
+                    allow_shaft_seal=False, allow_second_leg=False, use_nearest_hostile=False,
+                    expected_life=(status.get("dimension"), status.get("last_death")), terrain_deadline=deadline - 0.7,
+                )
+        except _RecoveryBudgetExceeded:
+            self._stop_after_recovery_timeout()
+            return {"ok": False, "reason": "time_budget"}
+        if retreat.get("ok") and math.dist(retreat["pos_after"][:3], source_pos) <= math.dist(status["pos"][:3], source_pos):
+            return {**retreat, "ok": False, "reason": "lava_clearance_unconfirmed"}
+        return retreat
+
     def _douse_after_lava(
         self, before: dict[str, Any], *, after: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
@@ -7104,6 +7121,16 @@ class GenerationGuard:
                 if edge_res.get("near_lava"):
                     notes.append("岩浆边潜行封边" if edge_res.get("sealed") else "岩浆边强制潜行")
                     landing = self.combat_env._safe_status()
+                    unsealed = edge_res.get("unsealed_lava_target")
+                    if (
+                        unsealed is not None and boundary_trigger is None and self._extract_hostile_info(landing)[1] > 6.0
+                        and self.combat_env._on_same_footing(status, landing)
+                    ):
+                        retreat = self._action(
+                            "boundary_retreat_from_lava_edge", lambda: self._back_off_unsealed_lava(landing, unsealed),
+                        )
+                        notes.append("已撤离未封住的岩浆" if retreat["ok"] else "岩浆仍未封住，撤离尚未确认")
+                        landing = self.combat_env._safe_status()
                     if (
                         landing.get("in_lava") and landing.get("ready") is True and landing.get("alive") is not False
                         and all(landing.get(key) == status.get(key) for key in ("last_death", "dimension"))
